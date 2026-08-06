@@ -72,17 +72,24 @@ async function fetchGithub()
     };
 }
 
+// npm publishes a day's counts partway through the following day, so which
+// seven-day window a run sees depends on when it runs. A run before the roll
+// reads the same window yesterday's row read and every package repeats its
+// previous number, which is indistinguishable from a day nobody downloaded
+// anything. The window travels with the row so the two can be told apart.
 async function fetchNpm(names)
 {
     const downloads = {};
+    let window = null;
     for (const name of names)
     {
         const encoded = name.replace('/', '%2F');
         const d = await getJson(`https://api.npmjs.org/downloads/point/last-week/${encoded}`)
             .catch(() => ({ downloads: null }));
         downloads[name] = d.downloads ?? 0;
+        if (d.start && d.end) window = { start: d.start, end: d.end };
     }
-    return downloads;
+    return { downloads, window };
 }
 
 // PostHog: one project (513406) receives events from several products, so the
@@ -234,9 +241,15 @@ function printView(rows)
     line('external issues (all time)', curr.github.externalIssues, prev?.github.externalIssues);
     line('external PRs (all time)', curr.github.externalPRs, prev?.github.externalPRs);
     console.log('');
+    const window = curr.npmWindow;
+    line('npm window', window ? `${window.start}..${window.end}` : '—');
     for (const [name, n] of Object.entries(curr.npm))
     {
         line(`npm ${name} /wk`, n, prev?.npm[name]);
+    }
+    if (window && prev?.npmWindow && prev.npmWindow.end === window.end)
+    {
+        console.log('  ^ same window as the previous row: these counts repeat, they did not stand still');
     }
     console.log('');
     line('PostHog LLM referrals', curr.manual.posthogLlmReferrals, prev?.manual.posthogLlmReferrals);
@@ -276,10 +289,12 @@ if (manual.gscImpressions === null || manual.gscClicks === null)
     sitemapLastRead = gsc.sitemapLastRead;
 }
 
+const npm = await fetchNpm(packageNames());
 const row = {
     date: new Date().toISOString().slice(0, 10),
     github: await fetchGithub(),
-    npm: await fetchNpm(packageNames()),
+    npm: npm.downloads,
+    npmWindow: npm.window,
     manual,
     sitemapLastRead,
 };
