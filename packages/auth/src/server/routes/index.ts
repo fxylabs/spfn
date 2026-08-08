@@ -51,6 +51,7 @@ import {
     updateUserRole,
 } from './admin';
 import { requestAccountDeletion, cancelAccountDeletion } from './deletion';
+import { issueOpsToken, listOpsTokens, revokeOpsToken } from './ops-tokens';
 
 /**
  * Main auth router
@@ -115,6 +116,10 @@ export const mainAuthRouter = defineRouter({
     updateAdminRole,
     deleteAdminRole,
     updateUserRole,
+    // Ops token routes (admin only)
+    issueOpsToken,
+    listOpsTokens,
+    revokeOpsToken,
 });
 
 // For backward compatibility
