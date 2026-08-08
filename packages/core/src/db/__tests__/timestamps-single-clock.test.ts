@@ -38,7 +38,7 @@ const CREATE_TABLE = `
  * postgres-js opens no socket until a query runs, and `.toSQL()` never runs one,
  * so the SQL-shape test needs no database.
  */
-const offline = drizzle(postgres('postgresql://unused:unused@127.0.0.1:1/unused'));
+const offline = drizzle({ client: postgres('postgresql://unused:unused@127.0.0.1:1/unused') });
 
 describe('timestamps() — one clock writes both columns', () =>
 {

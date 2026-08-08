@@ -358,7 +358,7 @@ export function getDatabase<TDatabase extends DrizzleDatabase = DefaultDatabase>
  * // Set custom database instances (testing)
  * const writeClient = postgres('postgresql://primary:5432/mydb');
  * const readClient = postgres('postgresql://replica:5432/mydb');
- * setDatabase(drizzle(writeClient), drizzle(readClient));
+ * setDatabase(drizzle({ client: writeClient }), drizzle({ client: readClient }));
  *
  * // Clear instances (not recommended - use closeDatabase() instead)
  * setDatabase(undefined, undefined);
