@@ -62,6 +62,7 @@ describe('built-in health endpoint', () =>
         const body: any = await res.json();
 
         expect(warn).toHaveBeenCalledWith(expect.stringContaining('GET /health'));
+        expect(warn).toHaveBeenCalledWith(expect.stringContaining('appHealth'));
         expect(body.status).not.toBe('from-app');
     });
 

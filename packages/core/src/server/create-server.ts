@@ -338,10 +338,12 @@ function warnOnShadowedRoutes(routes: RegisteredRoute[], config?: ServerConfig):
 
     if (shadowed.length > 0)
     {
+        const names = shadowed.map(r => r.name).join(', ');
+
         serverLogger.warn(
-            `⚠️  GET ${healthCheck.path} is served by the built-in health check, so the app route on `
-            + 'that path never runs. Move the route to another path, or turn the built-in endpoint '
-            + 'off with .healthCheck({ enabled: false }).',
+            `⚠️  ${names} never runs: GET ${healthCheck.path} is served by the built-in health `
+            + 'check, which is registered before app routes. Move the route to another path, or '
+            + 'turn the built-in endpoint off with .healthCheck({ enabled: false }).',
         );
     }
 }

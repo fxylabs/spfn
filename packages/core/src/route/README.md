@@ -444,7 +444,7 @@ the package's own typed client (`authApi`, `cmsApi`) instead of `api`.
 ```typescript
 import { authRouter } from '@spfn/auth/server';
 
-export const appRouter = defineRouter({ getRoot, getHealth })
+export const appRouter = defineRouter({ getRoot, getStatus })
     .packages([authRouter]);
 // api.getRoot.call({})    — app route
 // authApi.login.call({})  — package route
@@ -459,7 +459,7 @@ route opts out with `.skip(...)`. The router carries them, and route registratio
 with server-config middleware — each one attaching **once** per route.
 
 ```typescript
-export const appRouter = defineRouter({ getRoot, getHealth })
+export const appRouter = defineRouter({ getRoot, getStatus })
     .packages([authRouter])
     .use([loggingMiddleware]);
 ```
@@ -524,8 +524,8 @@ route.get('/api').use([rateLimiter(100, 60_000)]).handler(...);
 ### Skipping & auto-skip
 
 ```typescript
-route.get('/health').skip(['auth']).handler(...);   // skip a specific server-level middleware
-route.get('/health').skip('*').handler(...);          // skip ALL server-level middleware
+route.get('/status').skip(['auth']).handler(...);   // skip a specific server-level middleware
+route.get('/status').skip('*').handler(...);          // skip ALL server-level middleware
 ```
 
 `.skip(...)` only affects **server-level named middleware** — middleware added via `.use()`

@@ -19,6 +19,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+#### @spfn/core
+
+- **DB 없는 서버의 health가 더 이상 503을 답하지 않음** — `.infrastructure({ database: false })`로 끈 구성 요소를 health 상세 응답이 `disabled`로 보고하고 전체 상태를 낮추지 않는다. 그 전에는 의도적으로 없는 DB가 `not_initialized`로 실패에 세어져, DB를 쓰지 않는 서버의 readiness probe가 영영 통과하지 못했다. `redis`도 같다.
+  - 응답 문자열이 바뀐다: 껐을 때 `not_initialized` → `disabled`. health 페이로드를 문자열로 판정하는 곳이 있으면 확인 필요.
+- **내장 health 경로와 겹치는 앱 라우트를 부팅 시 경고** — 내장 health 엔드포인트는 앱 라우트보다 먼저 등록되므로 같은 경로의 앱 라우트는 실행되지 않는다. 이제 라우트 이름과 경로를 지목해 경고한다. 조용히 가려지는 탓에 examples 01·02·03이 실행되지 않는 `/health` 라우트를 배포하고 있었다(제거함).
+- `ServerConfig.infrastructure`의 `@default true if DATABASE_URL exists` 주석이 실제 동작과 달랐다. 자격증명을 살피지 않고 항상 초기화하므로 DB를 쓰지 않는 서버는 `false`를 선언해야 한다(issue #119).
+
 #### spfn (CLI)
 
 - 스캐폴드 example 템플릿 결함 제거: `getExample`의 테스트용 헤더 강제 validation·디버그 로그, root 응답의 미등록 `/teams` 참조.

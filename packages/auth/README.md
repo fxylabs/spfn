@@ -78,10 +78,10 @@ applied globally via `.use()`. Public routes opt out per-route with `.skip(['aut
 ```typescript
 import { defineRouter } from '@spfn/core/route';
 import { authRouter, authenticate } from '@spfn/auth/server';
-import { getHealth } from './routes/health';
+import { getStatus } from './routes/status';
 
 export const appRouter = defineRouter({
-    getHealth,
+    getStatus,
     // ...your routes
 })
     .packages([authRouter])   // mounts /_auth/* and exposes routes on authApi

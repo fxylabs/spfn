@@ -94,7 +94,7 @@ export type NamedMiddlewareFactory<TName extends string = string, TArgs extends 
  *   .build();
  *
  * // routes.ts - skip by name
- * export const publicRoute = route.get('/health')
+ * export const publicRoute = route.get('/status')
  *   .skip(['auth'])  // ✅ Type-safe! Autocomplete!
  *   .handler(async (c) => c.success({ status: 'ok' }));
  *
