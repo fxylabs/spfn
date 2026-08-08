@@ -8,9 +8,12 @@
  * not an administrator gets 403 on every attempt, and every attempt left a
  * registered key behind until the server's 90-day expiry removed it.
  *
- * `@spfn/auth/crypto` is stubbed here because this file is about the lifecycle,
- * not the signing — the real key pair, login and signature are walked
- * end to end by `@spfn/auth`'s ops-token route tests.
+ * The signing is stubbed at `ops/auth-crypto.js` because this file is about the
+ * lifecycle, not the signature — the real key pair, login and signature are
+ * walked end to end by `@spfn/auth`'s ops-token route tests. Stubbing the local
+ * loader rather than `@spfn/auth/crypto` also keeps the test honest about the
+ * dependency: the CLI does not depend on that package, so it is not there to
+ * stub.
  *
  * The assertions are about ORDER, not merely about the revoke happening. A test
  * has to replace `process.exit` with something it can observe, and anything
@@ -27,15 +30,17 @@ vi.mock('prompts', () => ({
     default: vi.fn(async () => ({ email: 'admin@test.com', password: 'a password' })),
 }));
 
-vi.mock('@spfn/auth/crypto', () => ({
-    generateKeyPair: () => ({
-        publicKey: 'public',
-        privateKey: 'private',
-        keyId: 'ephemeral-key',
-        fingerprint: 'fingerprint',
-        algorithm: 'ES256',
+vi.mock('../ops/auth-crypto.js', () => ({
+    loadAuthCrypto: async () => ({
+        generateKeyPair: () => ({
+            publicKey: 'public',
+            privateKey: 'private',
+            keyId: 'ephemeral-key',
+            fingerprint: 'fingerprint',
+            algorithm: 'ES256',
+        }),
+        generateClientToken: () => 'signed-jwt',
     }),
-    generateClientToken: () => 'signed-jwt',
 }));
 
 import { adminRequest, withAdminSession } from '../ops/admin-session.js';

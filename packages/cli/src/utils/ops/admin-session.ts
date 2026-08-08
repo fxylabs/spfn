@@ -16,57 +16,7 @@
 
 import prompts from 'prompts';
 import chalk from 'chalk';
-
-/**
- * The release that added the `@spfn/auth/crypto` entry point. Kept beside the
- * `@spfn/auth` peer range in this package's `package.json` — the range names
- * the same floor, and the message below tells an operator which one they need.
- */
-const CRYPTO_ENTRY_SINCE = '0.3.0-beta.2';
-
-/**
- * `@spfn/auth` is loaded on demand: ops tokens live in its schema, but an app
- * that does not use it still uses the rest of the CLI, so a missing package is
- * a message about this one command rather than an import error at startup.
- *
- * The failure is read rather than assumed, because three different things fail
- * here and each needs a different action: the package can be absent, it can be
- * installed but older than the release that exposes `crypto`, or it can throw
- * while loading. Calling all three "not installed" sends an operator to
- * install what they already have.
- */
-async function loadCrypto()
-{
-    try
-    {
-        return await import('@spfn/auth/crypto');
-    }
-    catch (err)
-    {
-        const code = (err as { code?: string }).code;
-
-        if (code === 'ERR_MODULE_NOT_FOUND' || code === 'MODULE_NOT_FOUND')
-        {
-            throw new Error(
-                'This project does not have @spfn/auth installed, and ops tokens live in its schema — '
-                + 'so this app has none to issue, list or revoke.\n'
-                + '   An app that uses the ops surface installs @spfn/auth for opsTokenAuth; add it there.\n'
-                + '   Invoking commands with a token you already hold (spfn ops list / call) does not need it.',
-            );
-        }
-
-        if (code === 'ERR_PACKAGE_PATH_NOT_EXPORTED')
-        {
-            throw new Error(
-                `This project's @spfn/auth is older than ${CRYPTO_ENTRY_SINCE}, the release that exposes `
-                + '@spfn/auth/crypto — the request signing this command authenticates with.\n'
-                + `   Update it: pnpm add @spfn/auth@'>=${CRYPTO_ENTRY_SINCE} <0.4.0'`,
-            );
-        }
-
-        throw err;
-    }
-}
+import { loadAuthCrypto } from './auth-crypto.js';
 
 export interface AdminSession
 {
@@ -123,7 +73,7 @@ export async function openAdminSession(appUrl: string): Promise<AdminSession>
     // Anything that can refuse the command is checked before a credential is
     // asked for. Being told the package is missing after typing a password is
     // the wrong order.
-    const { generateKeyPair, generateClientToken } = await loadCrypto();
+    const { generateKeyPair, generateClientToken } = await loadAuthCrypto();
     assertInteractive('Signing in as an administrator');
 
     const answers = await prompts([

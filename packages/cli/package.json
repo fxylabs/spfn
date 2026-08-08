@@ -91,7 +91,6 @@
   },
   "devDependencies": {
     "@electric-sql/pglite": "^0.5.4",
-    "@spfn/auth": "workspace:*",
     "@spfn/core": "workspace:*",
     "@types/fs-extra": "^11.0.4",
     "@types/node": "^20.11.0",
