@@ -287,13 +287,26 @@ When there is no `app.ts`, `createServer` builds the app in this **fixed order**
 
 ## Infrastructure, jobs, events, websockets, workflows
 
-**DB/Redis** auto-init during step 4 when their env vars exist. Disable selectively:
+**DB/Redis** initialize during step 4 unless turned off. The env vars are **not** sniffed
+first, and the two behave differently when their env var is missing:
+
+| | env var absent |
+|---|---|
+| Database | **boot fails** — `No database configuration found` |
+| Redis | boots in disabled mode, logged, no cache |
+
+So a server that uses no database must say so. Leaving `DATABASE_URL` unset is not how you
+declare it:
 
 ```typescript
 defineServerConfig()
-    .infrastructure({ database: false, redis: true })
+    .infrastructure({ database: false })   // a server with no database declares it
     .build();
 ```
+
+The asymmetry is deliberate. A missing cache costs speed; a missing database means every
+request that touches data fails, and failing at boot beats failing on the first query.
+A component turned off here reports `disabled` to the health endpoint and never degrades it.
 
 To use an externally owned PostgreSQL Drizzle driver such as PGlite, pass a provider. This
 replaces environment-based postgres.js initialization; graceful shutdown invokes `close`

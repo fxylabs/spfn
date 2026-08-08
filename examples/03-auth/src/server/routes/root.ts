@@ -16,7 +16,6 @@ export const getRoot = route.get('/')
             endpoints: {
                 health: '/health',
                 examples: '/examples',
-                teams: '/teams',
             },
             message: 'Welcome to SPFN! Visit /examples for usage examples.',
         };
