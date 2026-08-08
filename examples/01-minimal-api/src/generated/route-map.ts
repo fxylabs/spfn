@@ -13,7 +13,6 @@ export interface RouteInfo
 }
 
 export const routeMap: Record<string, RouteInfo> = {
-    getHealth: { method: 'GET', path: '/health' },
     getGreeting: { method: 'GET', path: '/greeting' },
 };
 

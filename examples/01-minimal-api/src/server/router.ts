@@ -8,11 +8,11 @@
  */
 
 import { defineRouter } from '@spfn/core/route';
-import { getHealth } from './routes/health';
 import { getGreeting } from './routes/greeting';
 
+// One route. `GET /health` is not here on purpose: the server serves it itself,
+// and an app route on that path would be shadowed by it.
 export const appRouter = defineRouter({
-    getHealth,
     getGreeting,
 });
 

@@ -395,8 +395,16 @@ the server's shutdown sequence — application code uses the four methods above.
 - **Basic** (`detailed: false`, the production default): `{ status, timestamp }`, 200.
 - **Detailed** (`detailed: true`, the dev default): adds
   `services.{database,redis}.status` — `connected` / `error` / `not_initialized` /
-  `unknown`. Any DB `error`/`not_initialized` or Redis `error` ⇒ `status: 'degraded'` and
-  HTTP **503**. Also adds `migrations` (below).
+  `disabled` / `unknown`. Any DB `error`/`not_initialized` or Redis `error` ⇒
+  `status: 'degraded'` and HTTP **503**. Also adds `migrations` (below).
+
+A component turned off with `.infrastructure({ database: false })` reports `disabled`
+and never degrades health — otherwise a server that legitimately has no database would
+answer 503 forever and no readiness probe would ever let it into rotation.
+
+> The endpoint is registered **before** app routes, so an app route on the same path
+> never runs. The server logs a warning naming the path when it sees one. Give the route
+> another path, or turn the built-in endpoint off with `.healthCheck({ enabled: false })`.
 
 ```typescript
 defineServerConfig()

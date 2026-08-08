@@ -298,18 +298,51 @@ function applyOutboundFetch(config?: ServerConfig): void
     setDefaultSafeFetchPolicy(policy);
 }
 
-function registerHealthCheckEndpoint(app: Hono, config?: ServerConfig): void
+function resolveHealthCheck(config?: ServerConfig): { enabled: boolean; path: string; detailed: boolean }
 {
     const healthCheckConfig = config?.healthCheck ?? {};
-    const healthCheckEnabled = healthCheckConfig.enabled !== false;
-    const healthCheckPath = healthCheckConfig.path ?? '/health';
-    const healthCheckDetailed = healthCheckConfig.detailed
-        ?? process.env.NODE_ENV === 'development';
 
-    if (healthCheckEnabled)
+    return {
+        enabled: healthCheckConfig.enabled !== false,
+        path: healthCheckConfig.path ?? '/health',
+        detailed: healthCheckConfig.detailed ?? process.env.NODE_ENV === 'development',
+    };
+}
+
+function registerHealthCheckEndpoint(app: Hono, config?: ServerConfig): void
+{
+    const { enabled, path, detailed } = resolveHealthCheck(config);
+
+    if (enabled)
     {
-        app.get(healthCheckPath, createHealthCheckHandler(healthCheckDetailed));
-        serverLogger.debug(`Health check endpoint enabled at ${healthCheckPath}`);
+        app.get(path, createHealthCheckHandler(detailed, config?.infrastructure));
+        serverLogger.debug(`Health check endpoint enabled at ${path}`);
+    }
+}
+
+/**
+ * The built-in health endpoint is registered before app routes, so Hono answers
+ * it first and an app route on the same path never runs. Silent shadowing is
+ * how examples/01-minimal-api ended up shipping a route nobody could reach.
+ */
+function warnOnShadowedRoutes(routes: RegisteredRoute[], config?: ServerConfig): void
+{
+    const healthCheck = resolveHealthCheck(config);
+
+    if (!healthCheck.enabled)
+    {
+        return;
+    }
+
+    const shadowed = routes.filter(r => r.method === 'GET' && r.path === healthCheck.path);
+
+    if (shadowed.length > 0)
+    {
+        serverLogger.warn(
+            `⚠️  GET ${healthCheck.path} is served by the built-in health check, so the app route on `
+            + 'that path never runs. Move the route to another path, or turn the built-in endpoint '
+            + 'off with .healthCheck({ enabled: false }).',
+        );
     }
 }
 
@@ -330,6 +363,7 @@ async function loadAppRoutes(app: Hono, config?: ServerConfig): Promise<void>
     {
         const routes = registerRoutes(app, config.routes, config.middlewares);
         logRegisteredRoutes(routes, debug);
+        warnOnShadowedRoutes(routes, config);
     }
     else if (debug)
     {

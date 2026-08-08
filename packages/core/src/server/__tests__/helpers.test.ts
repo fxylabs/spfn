@@ -498,7 +498,59 @@ describe('Server Helpers', () =>
             expect(data.status).toBe('degraded'); // from the uninitialized database, not migrations
         });
 
-        it('should return timestamp in ISO format', async () => 
+        it('should answer 200 when the database is declared disabled', async () =>
+        {
+            resetMigrationSnapshot();
+
+            const handler = createHealthCheckHandler(true, { database: false });
+            const app = new Hono();
+
+            app.get('/health', handler);
+
+            const res = await app.fetch(new Request('http://localhost/health'));
+            const data: any = await res.json();
+
+            expect(res.status).toBe(200);
+            expect(data.status).toBe('ok');
+            expect(data.services.database.status).toBe('disabled');
+            expect(data.services.database.error).toBeUndefined();
+        });
+
+        it('should report a disabled redis without degrading health', async () =>
+        {
+            resetMigrationSnapshot();
+
+            const handler = createHealthCheckHandler(true, { database: false, redis: false });
+            const app = new Hono();
+
+            app.get('/health', handler);
+
+            const res = await app.fetch(new Request('http://localhost/health'));
+            const data: any = await res.json();
+
+            expect(res.status).toBe(200);
+            expect(data.services.redis.status).toBe('disabled');
+            expect(data.services.redis.error).toBeUndefined();
+        });
+
+        it('should still degrade when the database is expected but missing', async () =>
+        {
+            resetMigrationSnapshot();
+
+            const handler = createHealthCheckHandler(true, { redis: false });
+            const app = new Hono();
+
+            app.get('/health', handler);
+
+            const res = await app.fetch(new Request('http://localhost/health'));
+            const data: any = await res.json();
+
+            expect(res.status).toBe(503);
+            expect(data.status).toBe('degraded');
+            expect(data.services.database.status).toBe('not_initialized');
+        });
+
+        it('should return timestamp in ISO format', async () =>
         {
             const handler = createHealthCheckHandler(false);
             const app = new Hono();

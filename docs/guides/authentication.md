@@ -153,12 +153,12 @@ This is the **critical step** that most setups miss. You need three things:
 // src/server/router.ts
 import { defineRouter } from '@spfn/core/route';
 import { authRouter, authenticate } from '@spfn/auth/server';
-import { getHealth } from './routes/health';
+import { getStatus } from './routes/status';
 import { listProducts, getProduct } from './routes/products';
 import { createOrder } from './routes/orders';
 
 export const appRouter = defineRouter({
-    getHealth,
+    getStatus,
     listProducts,
     getProduct,
     createOrder,
@@ -176,10 +176,10 @@ export type AppRouter = typeof appRouter;
 Routes that don't require authentication must explicitly skip the global `authenticate` middleware:
 
 ```typescript
-// src/server/routes/health.ts
+// src/server/routes/status.ts
 import { route } from '@spfn/core/route';
 
-export const getHealth = route.get('/health')
+export const getStatus = route.get('/status')
     .skip(['auth'])  // ← Public route, no auth required
     .handler(async (c) =>
     {
@@ -1091,7 +1091,7 @@ export const { GET, POST } = createRpcProxy({ router: appRouter });
 You applied `authenticate` globally but forgot to `.skip(['auth'])` on public routes. Add `.skip(['auth'])` to routes that don't require authentication:
 
 ```typescript
-export const getHealth = route.get('/health')
+export const getStatus = route.get('/status')
     .skip(['auth'])
     .handler(async (c) => ({ status: 'ok' }));
 ```

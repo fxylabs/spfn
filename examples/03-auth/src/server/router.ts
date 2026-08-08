@@ -11,14 +11,12 @@
 import { defineRouter } from '@spfn/core/route';
 import { authRouter, authenticate } from '@spfn/auth/server';
 import { getRoot } from './routes/root';
-import { getHealth } from './routes/health';
 import { getMe } from './routes/me';
 import { listExamples, getExample, createExample, updateExample, deleteExample } from './routes/examples';
 import { opsRouter } from './routes/ops';
 
 export const appRouter = defineRouter({
     getRoot,
-    getHealth,
     getMe,
     listExamples,
     getExample,

@@ -6,7 +6,6 @@
 
 import { defineRouter } from '@spfn/core/route';
 import { getRoot } from './routes/root';
-import { getHealth } from './routes/health';
 import { listExamples, getExample, createExample, updateExample, deleteExample } from './routes/examples';
 
 /**
@@ -17,7 +16,6 @@ import { listExamples, getExample, createExample, updateExample, deleteExample }
  */
 export const appRouter = defineRouter({
     getRoot,
-    getHealth,
     listExamples,
     getExample,
     createExample,

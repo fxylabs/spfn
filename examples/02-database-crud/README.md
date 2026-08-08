@@ -101,7 +101,7 @@ src/
     ├── entities/example.entity.ts         # Drizzle table + types
     ├── entities/config.ts                 # barrel drizzle-kit reads to find every table
     ├── repositories/example.repository.ts # BaseRepository data access
-    ├── routes/                            # route definitions (examples, health, root)
+    ├── routes/                            # route definitions (examples, root)
     └── router.ts                          # defineRouter — the API contract
 ```
 

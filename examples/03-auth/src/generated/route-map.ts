@@ -14,7 +14,6 @@ export interface RouteInfo
 
 export const routeMap: Record<string, RouteInfo> = {
     getRoot: { method: 'GET', path: '/' },
-    getHealth: { method: 'GET', path: '/health' },
     getMe: { method: 'GET', path: '/me' },
     listExamples: { method: 'GET', path: '/examples' },
     getExample: { method: 'GET', path: '/examples/:id' },

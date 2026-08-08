@@ -10,6 +10,7 @@ Start here to understand the core request path before adding persistence (see
 | --- | --- |
 | `src/server/routes/greeting.ts` | A route: `route.get(path).input({...}).handler(...)` with TypeBox validation |
 | `src/server/router.ts` | `defineRouter({...})` — composes routes; its type is the client contract |
+| `src/server/server.config.ts` | `.infrastructure({ database: false })` — a server with no database must say so, or boot fails asking for `DATABASE_URL` |
 | `src/app/api/rpc/[routeName]/route.ts` | `createRpcProxy({ routeMap })` — forwards browser calls to the API server |
 | `src/lib/api-client.ts` | `createApi<AppRouter>()` — one fully typed client |
 | `src/app/page.tsx` | A Server Component that actually calls `api.getGreeting.call(...)` |
@@ -37,6 +38,10 @@ unset. Set `SPFN_API_URL` in a `.env.local` only if you move the API server.
 
 Open `http://localhost:3790` and you'll see the live JSON returned by the `greeting`
 route. Try the API directly too: `curl 'http://localhost:8790/greeting?name=You'`.
+
+`GET /health` answers as well, and it is not one of the app's routes — the server
+serves it itself. That is why the app defines only `greeting`: a route registered on
+`/health` would be shadowed by the built-in endpoint.
 
 ## Next step
 

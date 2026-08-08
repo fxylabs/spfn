@@ -540,18 +540,24 @@ export interface ServerConfig
     /**
      * Infrastructure initialization control
      * Controls automatic initialization of database and Redis
-     * @default Both enabled if credentials exist
+     *
+     * Both are initialized unless set to `false` — the credentials are not
+     * sniffed. A server that needs no database must say so, otherwise boot
+     * fails with `No database configuration found`. A component set to `false`
+     * is reported as `disabled` by the health endpoint and never degrades it.
+     *
+     * @default Both enabled
      */
     infrastructure?: {
         /**
          * Enable/disable automatic database initialization
-         * @default true if DATABASE_URL exists
+         * @default true
          */
         database?: boolean;
 
         /**
          * Enable/disable automatic Redis initialization
-         * @default true if REDIS_URL exists
+         * @default true
          */
         redis?: boolean;
     };

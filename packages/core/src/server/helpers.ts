@@ -7,6 +7,7 @@ import { env } from '@spfn/core/config';
 import { getMigrationSnapshot } from './migration-gate';
 import { getShutdownManager } from './shutdown-manager';
 import type { NamedMiddleware, Router } from '@spfn/core/route';
+import type { ServerConfig } from './types';
 
 // ============================================================================
 // Types
@@ -116,7 +117,16 @@ async function readMigrationHealth(): Promise<MigrationHealth>
     };
 }
 
-export function createHealthCheckHandler(detailed: boolean): Handler
+/**
+ * A component the server was told not to initialize is reported as `disabled`
+ * and never counts as an error. Without this a server declaring
+ * `.infrastructure({ database: false })` answers 503 forever, so a readiness
+ * probe never lets it into rotation.
+ */
+export function createHealthCheckHandler(
+    detailed: boolean,
+    infrastructure?: ServerConfig['infrastructure'],
+): Handler
 {
     return async (c) =>
     {
@@ -137,33 +147,45 @@ export function createHealthCheckHandler(detailed: boolean): Handler
 
         if (detailed)
         {
+            const databaseDisabled = infrastructure?.database === false;
+            const redisDisabled = infrastructure?.redis === false;
+
             let dbStatus: string = 'unknown';
             let dbError: string | undefined;
 
-            // Try to get database instance
-            try
+            if (databaseDisabled)
             {
-                const db = getDatabase();
+                dbStatus = 'disabled';
+            }
+            else
+            {
+                // Try to get database instance
                 try
                 {
-                    await db.execute('SELECT 1');
-                    dbStatus = 'connected';
+                    const db = getDatabase();
+                    try
+                    {
+                        await db.execute('SELECT 1');
+                        dbStatus = 'connected';
+                    }
+                    catch (error)
+                    {
+                        dbStatus = 'error';
+                        dbError = error instanceof Error ? error.message : String(error);
+                    }
                 }
                 catch (error)
                 {
-                    dbStatus = 'error';
-                    dbError = error instanceof Error ? error.message : String(error);
+                    // Database not initialized
+                    dbStatus = 'not_initialized';
+                    dbError = 'Database not available';
                 }
             }
-            catch (error)
-            {
-                // Database not initialized
-                dbStatus = 'not_initialized';
-                dbError = 'Database not available';
-            }
 
-            const redis = getCache();
-            let redisStatus: string = redis ? 'unknown' : 'not_initialized';
+            const redis = redisDisabled ? null : getCache();
+            let redisStatus: string = redisDisabled
+                ? 'disabled'
+                : (redis ? 'unknown' : 'not_initialized');
             let redisError: string | undefined;
             if (redis)
             {
