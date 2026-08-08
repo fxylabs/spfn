@@ -436,10 +436,11 @@ SPFN authenticates a request with a JWT the client signs itself, so the CLI gene
 pair for the command, signs the one call it needs, and revokes the key before the command
 ends — on the failing path as much as the succeeding one. Nothing is written to disk.
 
-These three commands need `@spfn/auth` **0.3.0-beta.2 or later** installed: the ops token
-lives in its schema, and the signing comes from its `@spfn/auth/crypto` entry point, which
-that release added. A missing package and one too old to carry the entry point are told
-apart, so the message names the thing to do.
+These three commands need `@spfn/auth` **0.3.0-beta.2 or later** installed in the app: the
+ops token lives in its schema, and the signing comes from its `@spfn/auth/crypto` entry
+point, which that release added. The CLI does not depend on the package in any form — it
+loads it from the app at run time, and tells a missing package apart from one too old to
+carry the entry point, so the message names the thing to do.
 
 ---
 

@@ -3,19 +3,30 @@
  *
  * SPFN authenticates a request with a JWT the client signs itself, and the two
  * functions below are the client's half of that. They live in `@spfn/auth`,
- * which the CLI does not depend on: an app that does not use auth still uses
- * the rest of the CLI, so the package is an **optional peer** resolved at run
- * time from whatever the app has installed.
+ * which the CLI does not depend on in any form: an app that does not use auth
+ * still uses the rest of the CLI, so the package is resolved at run time from
+ * whatever the app has installed, and the version it must be is enforced by the
+ * message `loadAuthCrypto` raises rather than by a declared range.
  *
- * That is why the contract is declared here rather than imported. A workspace
- * dependency on `@spfn/auth` would say the opposite of the design — and it
- * would close a cycle, since `@spfn/auth` depends on this CLI for its own
- * codegen, which stops turbo from building or testing the repo at all.
+ * The contract is declared here rather than imported, for three reasons that
+ * each rule out a dependency of their own:
  *
- * The import specifier is held in a variable so the compiler does not try to
- * resolve a package that is deliberately absent. The shape below is what is
- * being promised in exchange; it must keep matching `@spfn/auth/crypto`, and
- * the integration tests in that package walk the real functions end to end.
+ * - A workspace dependency closes a cycle — `@spfn/auth` depends on this CLI
+ *   for its own codegen — and turbo then refuses to run any task, so the repo
+ *   cannot be built or tested at all.
+ * - A `peerDependencies` entry, even an optional one, is auto-installed by
+ *   pnpm and lands in the lockfile as a **registry** version of a workspace
+ *   package. The publish workflows install with `--frozen-lockfile` from public
+ *   npmjs, so the lockfile would demand a version that only reaches npmjs
+ *   *through those same workflows* — a deadlock on every future `@spfn/auth`
+ *   release, not a one-off.
+ * - Importing the types would need the package present at compile time, which
+ *   is the thing being avoided.
+ *
+ * So the import specifier is held in a variable, keeping the compiler from
+ * resolving a package that is deliberately absent. The shape below is what is
+ * promised in exchange; it must keep matching `@spfn/auth/crypto`, and the
+ * integration tests in that package walk the real functions end to end.
  */
 
 /** A client key pair. Both halves are base64-encoded DER. */
@@ -40,9 +51,9 @@ export interface AuthCrypto
 }
 
 /**
- * The release that added the `@spfn/auth/crypto` entry point. Kept beside the
- * `@spfn/auth` peer range in this package's `package.json` — the range names
- * the same floor, and the message below tells an operator which one they need.
+ * The release that added the `@spfn/auth/crypto` entry point. This is where the
+ * requirement is stated and enforced — nothing declares it as a dependency
+ * range — so it is also what the READMEs quote.
  */
 const CRYPTO_ENTRY_SINCE = '0.3.0-beta.2';
 

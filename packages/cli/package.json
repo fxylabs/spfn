@@ -58,14 +58,10 @@
     "node": ">=20.0.0"
   },
   "peerDependencies": {
-    "@spfn/auth": ">=0.3.0-beta.2 <0.4.0",
     "@spfn/core": ">=0.3.0-beta.1 <0.4.0",
     "typescript": "^5.3.0"
   },
   "peerDependenciesMeta": {
-    "@spfn/auth": {
-      "optional": true
-    },
     "typescript": {
       "optional": true
     }

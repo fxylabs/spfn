@@ -327,9 +327,6 @@ importers:
 
   packages/cli:
     dependencies:
-      '@spfn/auth':
-        specifier: '>=0.3.0-beta.2 <0.4.0'
-        version: 0.3.0-beta.2(@spfn/core@packages+core)(@spfn/notification@0.2.0-beta.1(@aws-sdk/client-sesv2@3.1024.0)(@aws-sdk/client-sns@3.943.0)(@spfn/core@packages+core)(drizzle-orm@1.0.0-rc.4(@electric-sql/pglite@0.5.4)(@sinclair/typebox@0.34.41)(@types/pg@8.15.6)(pg@8.16.3)(postgres@3.4.7)(zod@4.4.3)))(drizzle-orm@1.0.0-rc.4(@electric-sql/pglite@0.5.4)(@sinclair/typebox@0.34.41)(@types/pg@8.15.6)(pg@8.16.3)(postgres@3.4.7)(zod@4.4.3))(next@16.3.0(@types/node@20.19.25))
       chalk:
         specifier: ^5.6.2
         version: 5.6.2
@@ -3095,30 +3092,6 @@ packages:
   '@smithy/uuid@1.1.2':
     resolution: {integrity: sha512-O/IEdcCUKkubz60tFbGA7ceITTAJsty+lBjNoorP4Z6XRqaFb/OjQjZODophEcuq68nKm6/0r+6/lLQ+XVpk8g==}
     engines: {node: '>=18.0.0'}
-
-  '@spfn/auth@0.3.0-beta.2':
-    resolution: {integrity: sha512-6GakuM1KsdokvLpg7EMiY9pciBg5MoXJihv5MVn8xFKkWA6OhYrg5ExlMcPjJ/KtsyCZ0wY2naRYuk495L7hdw==, tarball: https://git.superfunction.xyz/api/packages/superfunction/npm/%40spfn%2Fauth/-/0.3.0-beta.2/auth-0.3.0-beta.2.tgz}
-    peerDependencies:
-      '@spfn/core': '>=0.3.0-beta.1 <0.4.0'
-      '@spfn/notification': '>=0.2.0-beta.1 <0.3.0'
-      drizzle-orm: 1.0.0-rc.4
-      next: ^16.2.11
-    peerDependenciesMeta:
-      next:
-        optional: true
-
-  '@spfn/notification@0.2.0-beta.1':
-    resolution: {integrity: sha512-GraouRErbdzjvpuN20a7Pc7r0twiFTbjWpW0n8MzaJqxPEcvBVGVcQ8oZHBzcVQmWsUZfZ37PtEFDXdXrSiruw==, tarball: https://git.superfunction.xyz/api/packages/superfunction/npm/%40spfn%2Fnotification/-/0.2.0-beta.1/notification-0.2.0-beta.1.tgz}
-    peerDependencies:
-      '@aws-sdk/client-sesv2': ^3.0.0
-      '@aws-sdk/client-sns': ^3.0.0
-      '@spfn/core': '>=0.3.0-beta.1 <0.4.0'
-      drizzle-orm: 1.0.0-rc.4
-    peerDependenciesMeta:
-      '@aws-sdk/client-sesv2':
-        optional: true
-      '@aws-sdk/client-sns':
-        optional: true
 
   '@standard-schema/spec@1.0.0':
     resolution: {integrity: sha512-m2bOd0f2RT9k8QJx1JN85cZYyH1RqFBdlwtkSlf4tBDYLCiiZnv1fIIwacK6cqwXavOydf0NPToMQgpKq+dVlA==}
@@ -8884,26 +8857,6 @@ snapshots:
   '@smithy/uuid@1.1.2':
     dependencies:
       tslib: 2.8.1
-
-  '@spfn/auth@0.3.0-beta.2(@spfn/core@packages+core)(@spfn/notification@0.2.0-beta.1(@aws-sdk/client-sesv2@3.1024.0)(@aws-sdk/client-sns@3.943.0)(@spfn/core@packages+core)(drizzle-orm@1.0.0-rc.4(@electric-sql/pglite@0.5.4)(@sinclair/typebox@0.34.41)(@types/pg@8.15.6)(pg@8.16.3)(postgres@3.4.7)(zod@4.4.3)))(drizzle-orm@1.0.0-rc.4(@electric-sql/pglite@0.5.4)(@sinclair/typebox@0.34.41)(@types/pg@8.15.6)(pg@8.16.3)(postgres@3.4.7)(zod@4.4.3))(next@16.3.0(@types/node@20.19.25))':
-    dependencies:
-      '@node-rs/bcrypt': 1.10.7
-      '@spfn/core': link:packages/core
-      '@spfn/notification': 0.2.0-beta.1(@aws-sdk/client-sesv2@3.1024.0)(@aws-sdk/client-sns@3.943.0)(@spfn/core@packages+core)(drizzle-orm@1.0.0-rc.4(@electric-sql/pglite@0.5.4)(@sinclair/typebox@0.34.41)(@types/pg@8.15.6)(pg@8.16.3)(postgres@3.4.7)(zod@4.4.3))
-      drizzle-orm: 1.0.0-rc.4(@electric-sql/pglite@0.5.4)(@sinclair/typebox@0.34.41)(@types/pg@8.15.6)(pg@8.16.3)(postgres@3.4.7)(zod@4.4.3)
-      jose: 6.1.0
-      jsonwebtoken: 9.0.2
-      postgres: 3.4.7
-    optionalDependencies:
-      next: 16.3.0(@babel/core@7.28.5)(@types/node@20.19.25)(babel-plugin-react-compiler@1.0.0)(react-dom@19.2.3(react@19.2.3))(react@19.2.3)
-
-  '@spfn/notification@0.2.0-beta.1(@aws-sdk/client-sesv2@3.1024.0)(@aws-sdk/client-sns@3.943.0)(@spfn/core@packages+core)(drizzle-orm@1.0.0-rc.4(@electric-sql/pglite@0.5.4)(@sinclair/typebox@0.34.41)(@types/pg@8.15.6)(pg@8.16.3)(postgres@3.4.7)(zod@4.4.3))':
-    dependencies:
-      '@spfn/core': link:packages/core
-      drizzle-orm: 1.0.0-rc.4(@electric-sql/pglite@0.5.4)(@sinclair/typebox@0.34.41)(@types/pg@8.15.6)(pg@8.16.3)(postgres@3.4.7)(zod@4.4.3)
-    optionalDependencies:
-      '@aws-sdk/client-sesv2': 3.1024.0
-      '@aws-sdk/client-sns': 3.943.0
 
   '@standard-schema/spec@1.0.0': {}
 
