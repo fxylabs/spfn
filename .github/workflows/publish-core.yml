@@ -64,18 +64,50 @@ jobs:
             echo "tag=latest" >> $GITHUB_OUTPUT
           fi
 
-      - name: Check if version already published
+      # The trigger is `packages/core/package.json` changing, which is not the same
+      # thing as a release. An edit made for any other reason — removing a peer
+      # entry, fixing a script — publishes whatever version happens to sit in the
+      # file, because the npmjs check below only asks whether that version is
+      # already out there, and an unreleased one is not. So ask the question that
+      # actually decides it first: did the version field move?
+      - name: Check whether the version moved
+        id: bump
+        if: ${{ github.event_name == 'push' }}
+        run: |
+          BEFORE="${{ github.event.before }}"
+          if [[ -z "$BEFORE" || "$BEFORE" =~ ^0+$ ]]; then
+            BEFORE="HEAD^"
+          fi
+
+          PREVIOUS=$(git show "$BEFORE:packages/core/package.json" 2>/dev/null \
+            | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).version" 2>/dev/null || true)
+
+          if [[ "$PREVIOUS" == "${{ steps.pkg.outputs.version }}" ]]; then
+            echo "moved=false" >> $GITHUB_OUTPUT
+          else
+            echo "moved=true" >> $GITHUB_OUTPUT
+            echo "::notice::Version moved ${PREVIOUS:-(none)} -> ${{ steps.pkg.outputs.version }}"
+          fi
+
+      # workflow_dispatch is exempt from the version check: re-running it is the
+      # documented way to backfill a version that is already committed.
+      - name: Decide whether to publish
         id: check-npm
         run: |
-          if npm view @spfn/core@${{ steps.pkg.outputs.version }} version 2>/dev/null; then
-            echo "exists=true" >> $GITHUB_OUTPUT
+          if [[ "${{ steps.bump.outputs.moved }}" == "false" ]]; then
+            echo "skip=true" >> $GITHUB_OUTPUT
+            echo "reason=the version did not change" >> $GITHUB_OUTPUT
+            echo "::notice::packages/core/package.json changed but @spfn/core stayed at ${{ steps.pkg.outputs.version }} — not publishing"
+          elif npm view @spfn/core@${{ steps.pkg.outputs.version }} version 2>/dev/null; then
+            echo "skip=true" >> $GITHUB_OUTPUT
+            echo "reason=already published" >> $GITHUB_OUTPUT
             echo "::notice::Version ${{ steps.pkg.outputs.version }} already published, skipping"
           else
-            echo "exists=false" >> $GITHUB_OUTPUT
+            echo "skip=false" >> $GITHUB_OUTPUT
           fi
 
       - name: Check if tag exists
-        if: ${{ inputs.create_tag && steps.check-npm.outputs.exists == 'false' }}
+        if: ${{ inputs.create_tag && steps.check-npm.outputs.skip == 'false' }}
         run: |
           TAG="@spfn/core@${{ steps.pkg.outputs.version }}"
           if git rev-parse "$TAG" >/dev/null 2>&1; then
@@ -84,11 +116,11 @@ jobs:
           fi
 
       - name: Build @spfn/core
-        if: ${{ steps.check-npm.outputs.exists == 'false' }}
+        if: ${{ steps.check-npm.outputs.skip == 'false' }}
         run: pnpm --filter @spfn/core build
 
       - name: Create git tag
-        if: ${{ inputs.create_tag && steps.check-npm.outputs.exists == 'false' }}
+        if: ${{ inputs.create_tag && steps.check-npm.outputs.skip == 'false' }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
@@ -96,14 +128,14 @@ jobs:
           git push origin "@spfn/core@${{ steps.pkg.outputs.version }}"
 
       - name: Publish @spfn/core to npm
-        if: ${{ !inputs.dry_run && steps.check-npm.outputs.exists == 'false' }}
+        if: ${{ !inputs.dry_run && steps.check-npm.outputs.skip == 'false' }}
         working-directory: packages/core
         run: npm publish --access public --tag ${{ steps.pkg.outputs.tag }} --provenance
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Sync latest tag
-        if: ${{ !inputs.dry_run && (steps.check-npm.outputs.exists == 'false' || github.event_name == 'workflow_dispatch') }}
+        if: ${{ !inputs.dry_run && (steps.check-npm.outputs.skip == 'false' || github.event_name == 'workflow_dispatch') }}
         run: npm dist-tag add @spfn/core@${{ steps.pkg.outputs.version }} latest
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
@@ -124,8 +156,8 @@ jobs:
 
       - name: Summary
         run: |
-          if [[ "${{ steps.check-npm.outputs.exists }}" == "true" ]]; then
-            echo "## Skipped @spfn/core (already published)" >> $GITHUB_STEP_SUMMARY
+          if [[ "${{ steps.check-npm.outputs.skip }}" == "true" ]]; then
+            echo "## Skipped @spfn/core (${{ steps.check-npm.outputs.reason }})" >> $GITHUB_STEP_SUMMARY
           else
             echo "## Published @spfn/core" >> $GITHUB_STEP_SUMMARY
           fi
@@ -135,4 +167,4 @@ jobs:
           echo "| Version | \`${{ steps.pkg.outputs.version }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| npm tag | \`${{ steps.pkg.outputs.tag }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| git tag | ${{ inputs.create_tag && format('`@spfn/core@{0}`', steps.pkg.outputs.version) || 'skipped' }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Already published | ${{ steps.check-npm.outputs.exists }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Skipped | ${{ steps.check-npm.outputs.skip }}${{ steps.check-npm.outputs.reason && format(' ({0})', steps.check-npm.outputs.reason) || '' }} |" >> $GITHUB_STEP_SUMMARY

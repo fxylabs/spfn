@@ -77,6 +77,12 @@ curl -s https://registry.npmjs.org/@spfn%2Fauth
 
 - 트리거: `packages/<pkg>/package.json` 변경이 GitHub 의 `main` 에 push 될 때.
   origin 은 Gitea 이고 GitHub 은 미러라, Gitea 에 push 하면 미러를 타고 돌아간다.
+- **파일이 바뀌었다고 배포하지는 않는다.** 워크플로우는 push 이전 커밋의
+  `version` 과 지금의 `version` 을 비교해서, 값이 실제로 움직였을 때만 배포한다.
+  peer 선언을 걷어내거나 script 를 고치느라 같은 파일을 건드려도 릴리스가 나가지
+  않는다 — `0.3.0-beta.1` 이 그렇게 나갔고, 그때는 이 비교가 없었다.
+  `npm view` 가드는 뒤에 그대로 남아 있어 재배포를 막는다.
+  workflow_dispatch 는 이 비교를 건너뛴다. 이미 커밋된 버전을 백필하는 경로이기 때문이다.
 - dist-tag 는 버전 문자열에서 뽑는다 — `-alpha` → `alpha`, `-beta` → `beta`,
   그 외 → `latest`.
 - publish 후 `latest` dist-tag 를 그 버전으로 동기화한다. workflow_dispatch 로
