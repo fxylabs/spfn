@@ -1,3 +1,10 @@
+# Agent instruction files — the self CLI rewrites their managed block from this
+# project's own conventions, which are internal operating rules and do not belong
+# in a public repository. What an agent must follow lives in CONTRIBUTING.md,
+# which stays tracked and is what the README points an agent at.
+/AGENTS.md
+/CLAUDE.md
+
 # Dependencies
 node_modules
 .pnp

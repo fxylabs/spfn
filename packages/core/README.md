@@ -369,11 +369,10 @@ path: `spfn build && spfn start`, or the generated Docker files.
 Put the contract in a file and let the agent read it, instead of describing the
 architecture again in every prompt.
 
-An SPFN repository ships an `AGENTS.md` stating what the repo is, the commands, the
+The SPFN repository states it in `CONTRIBUTING.md`: what the repo is, the commands, the
 vertical-slice pattern, and the rules that are not negotiable — never hand-edit generated
-files, migrations come from the schema. Tool-specific files (`CLAUDE.md`,
-`.cursorrules`) point at it in one line rather than duplicating it, so they cannot drift
-apart. Projects created by `spfn create` get the same arrangement.
+files, migrations come from the schema. One file answers to people and agents alike, so
+there is no second copy to drift apart from the first.
 
 Each module README under `src/` is written for the same reader. When an agent is working
 on database code, `src/db/README.md` is the page to give it.

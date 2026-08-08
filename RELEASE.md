@@ -6,8 +6,7 @@
 > registry via the `publish:*` scripts, and automatically to public npmjs via the
 > per-package GitHub Actions workflows, which fire on a `packages/<pkg>/package.json`
 > version change landing on `main`. See **[.github/PUBLISHING.md](./.github/PUBLISHING.md)**
-> and the *Publishing* section of [AGENTS.md](./AGENTS.md) for the real process. The steps
-> below are kept for historical reference only.
+> for the real process. The steps below are kept for historical reference only.
 
 Release guide for @spfn/core, @spfn/auth, @spfn/cms, and spfn CLI packages.
 

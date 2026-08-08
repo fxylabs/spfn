@@ -52,7 +52,7 @@ function declaredFloor()
 
 function proseFiles()
 {
-    const files = ['README.md', 'AGENTS.md', 'site/pages/docs.md'];
+    const files = ['README.md', 'CONTRIBUTING.md', 'site/pages/docs.md'];
 
     for (const group of ['packages', 'examples'])
     {

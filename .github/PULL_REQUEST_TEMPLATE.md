@@ -1,6 +1,6 @@
 <!--
 Thanks for contributing to SPFN! Keep PRs focused on one concern.
-See CONTRIBUTING.md and AGENTS.md for the full workflow.
+See CONTRIBUTING.md for the full workflow.
 -->
 
 ## Summary

@@ -79,7 +79,7 @@ SPFN_MCP_API_KEY=replace-with-a-random-operator-key
 // .env.example — committed reference, derived from the two templates above so its
 // key list never drifts from what init actually generates. Documentation only:
 // real values go in .env.local / .env.server (gitignored). Because it is committed,
-// concrete DB credentials are replaced with placeholders (AGENTS.md hard rule #4).
+// concrete DB credentials are replaced with placeholders (CONTRIBUTING.md hard rule #4).
 function envExampleTemplate(mode: ScaffoldMode): string
 {
     return withPlaceholderCreds(`# Example environment — committed reference for the variables SPFN uses.
@@ -152,7 +152,7 @@ function randomSecret(encoding: 'base64' | 'base64url'): string
 
 /**
  * Replace concrete DB credentials with a placeholder, for any example file that
- * may be committed (AGENTS.md hard rule #4: committed *.example carry placeholders).
+ * may be committed (CONTRIBUTING.md hard rule #4: committed *.example carry placeholders).
  */
 function withPlaceholderCreds(text: string): string
 {

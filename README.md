@@ -269,13 +269,14 @@ Generated files are output, not editing targets.
 
 ## How do I point Claude Code, Cursor, or Copilot at this project?
 
-This repository ships [AGENTS.md](./AGENTS.md) — the contract an AI coding agent is
-expected to follow here: what the repo is, the commands, the vertical-slice pattern, and
-the hard rules (never hand-edit generated files, migrations come from the schema).
+Point it at [CONTRIBUTING.md](./CONTRIBUTING.md). That file is the contract an AI coding
+agent is expected to follow here: what the repo is, the commands, the vertical-slice
+pattern, and the hard rules (never hand-edit generated files, migrations come from the
+schema).
 
-Tool-specific files point at it rather than duplicating it, so `CLAUDE.md` and
-`.cursorrules` stay one line long and never drift out of sync. Projects scaffolded by
-`spfn create` get the same arrangement.
+One file answers to people and agents alike, so there is no second copy of the rules to
+drift out of sync. Each package's own `README.md` carries the authoritative detail for
+that package — an agent changing `@spfn/auth` reads `packages/auth/README.md` as well.
 
 Pointing an agent at a file like this is worth more than a long prompt describing a new
 architecture for every feature.
@@ -415,7 +416,7 @@ directory, the RPC proxy route, Docker files, and the codegen config, and update
 
 **My agent keeps inventing new folder structures. Does this actually fix that?**
 It removes the decision. There is one place for entities, repositories, routes and the
-router, and `AGENTS.md` states it. An agent that reads the file has nothing left to
+router, and `CONTRIBUTING.md` states it. An agent that reads the file has nothing left to
 invent. It does not stop an agent from writing bad logic inside a slice — that is the
 line between the drift this removes and the drift it does not, set out in
 [architecture drift](https://superfunction.xyz/architecture-drift).
@@ -445,8 +446,8 @@ client needs no codegen — it infers from `AppRouter`.
 It is built for the opposite case. `spfn create --mode full` hands you a working,
 authenticated, deployable app before you write a line — you are not assembling sessions,
 OAuth, migrations and a data layer yourself, and you are not choosing an architecture.
-The shape is fixed and written down in `AGENTS.md`, so your coding agent fills it in
-instead of asking you to design it.
+The shape is fixed and written down in `CONTRIBUTING.md`, so your coding agent fills it
+in instead of asking you to design it.
 
 What SPFN removes is the architecture and the solved problems. What it does not remove is
 the infrastructure: you still need a PostgreSQL database, and a setup step with real
@@ -464,16 +465,15 @@ PostgreSQL 14 or later. Redis is optional and only needed by some features.
 - [Prototype to Production](https://superfunction.xyz/docs/prototype-to-production) — the whole loop, scaffold to MCP operations
 - [Full-stack tutorial](https://superfunction.xyz/docs/tutorial) — from `spfn create` to auth-guarded pages
 - [Examples](./examples/README.md) — a step-by-step ladder, start at `01-minimal-api`
-- [AGENTS.md](./AGENTS.md) — the contract for AI coding agents in this repo
+- [CONTRIBUTING.md](./CONTRIBUTING.md) — setup, the SPFN pattern, the hard rules, and the contract for AI coding agents
 
 ---
 
 ## Contributing
 
 Contributions are welcome. See [CONTRIBUTING.md](./CONTRIBUTING.md) for setup, the
-development workflow, and the PR checklist — and [AGENTS.md](./AGENTS.md) if you work
-with an AI coding agent. By participating you agree to our
-[Code of Conduct](./CODE_OF_CONDUCT.md).
+development workflow, the PR checklist, and the rules an AI coding agent is expected to
+follow. By participating you agree to our [Code of Conduct](./CODE_OF_CONDUCT.md).
 
 Found a security issue? Please report it privately — see [SECURITY.md](./SECURITY.md).
 
