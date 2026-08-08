@@ -33,7 +33,7 @@ export interface Router<TRoutes extends Record<string, RouteDef<any, any, any> |
      *
      * export const appRouter = defineRouter({
      *     getRoot,
-     *     getHealth,
+     *     getStatus,
      * })
      * .packages([authRouter, cmsAppRouter]);
      *
@@ -55,7 +55,7 @@ export interface Router<TRoutes extends Record<string, RouteDef<any, any, any> |
      *
      * export const appRouter = defineRouter({
      *     getRoot,
-     *     getHealth,
+     *     getStatus,
      * })
      * .packages([authRouter])
      * .use([authMiddleware, loggingMiddleware]);
@@ -179,21 +179,21 @@ function assertContractVersion(version: string): void
  * // Basic usage
  * export const appRouter = defineRouter({
  *     getRoot,
- *     getHealth,
+ *     getStatus,
  *     listExamples,
  * });
  *
  * // With package routers (type-hidden)
  * export const appRouter = defineRouter({
  *     getRoot,
- *     getHealth,
+ *     getStatus,
  * })
  * .packages([authRouter, cmsAppRouter]);
  *
  * // With global middlewares
  * export const appRouter = defineRouter({
  *     getRoot,
- *     getHealth,
+ *     getStatus,
  * })
  * .packages([authRouter])
  * .use([authMiddleware, loggingMiddleware]);

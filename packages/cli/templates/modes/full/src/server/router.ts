@@ -8,7 +8,6 @@ import { authRouter, authenticate } from '@spfn/auth/server';
 import { defineRouter } from '@spfn/core/route';
 import { mcpRouter } from './mcp';
 import { getRoot } from './routes/root';
-import { getHealth } from './routes/health';
 import {
     listExamples,
     getExample,
@@ -19,7 +18,6 @@ import {
 
 export const appRouter = defineRouter({
     getRoot,
-    getHealth,
     listExamples,
     getExample,
     createExample,
