@@ -863,15 +863,33 @@ export const opsRouter = createOpsRouter({
 `opsRoute` comes from `@spfn/core` **0.3.0-beta.2** onwards; before that release an ops
 route spelled its own `/_ops/` prefix with `route`.
 
-Issue and manage tokens where database access already exists — a deployed app carries **no
-token-creation endpoint**:
+Issue and manage tokens against the running app, signed in as an administrator. The CLI
+prompts for the administrator's email and password, so nothing here needs database access:
 
 ```bash
-spfn ops token issue --name laptop --scopes 'waitlist:read'   # secret printed once
+spfn ops token issue --name laptop --scopes 'waitlist:read' --app https://api.example.com
 spfn ops token issue --name laptop --scopes '*' --to-keychain --app https://api.example.com
-spfn ops token list
-spfn ops token revoke 3
+spfn ops token list --app https://api.example.com
+spfn ops token revoke 3 --app https://api.example.com
 ```
+
+Behind those commands are three admin-only routes, mounted with the rest of the auth
+router:
+
+| Route | What it does |
+| --- | --- |
+| `POST /_auth/ops-tokens` | Issue. The secret is in this answer and nowhere else. |
+| `GET /_auth/ops-tokens` | List. Only hashes were stored, so no secret can be returned. |
+| `DELETE /_auth/ops-tokens/:id` | Revoke. Permanent, and effective immediately. |
+
+Each requires `authenticate` plus `requireRole('admin', 'superadmin')`. The administrator
+seeded from `SPFN_AUTH_ADMIN_*` (see [Admin seeding](#admin-seeding))
+signs in with a password, so this works in an app whose end users only sign in socially.
+
+SPFN authenticates a request with a JWT the client signs itself, so the CLI generates a key
+pair, hands the public half over at login, signs the one call it needs, and revokes the key
+on the way out. `@spfn/auth/crypto` exports the two functions that take part
+(`generateKeyPair`, `generateClientToken`) without pulling in the auth server.
 
 Verification refuses uniformly: an expired, revoked, or never-issued token all answer the
 same 401, so whether a presented secret ever existed is not inferable. A valid token

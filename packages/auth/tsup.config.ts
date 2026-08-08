@@ -8,6 +8,7 @@ export default defineConfig({
         client: 'src/client.ts',
         'client-proof': 'src/server/client-proof/index.ts',
         config: 'src/config/index.ts',
+        crypto: 'src/crypto.ts',
         errors: 'src/errors/index.ts',
         'nextjs/api': 'src/nextjs/api.ts',
         'nextjs/server': 'src/nextjs/server.ts',

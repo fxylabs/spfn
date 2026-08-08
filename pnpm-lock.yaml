@@ -377,6 +377,9 @@ importers:
       '@electric-sql/pglite':
         specifier: ^0.5.4
         version: 0.5.4
+      '@spfn/auth':
+        specifier: workspace:*
+        version: link:../auth
       '@spfn/core':
         specifier: workspace:*
         version: link:../core

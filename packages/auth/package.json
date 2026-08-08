@@ -27,6 +27,11 @@
       "import": "./dist/config.js",
       "require": "./dist/config.js"
     },
+    "./crypto": {
+      "types": "./dist/crypto.d.ts",
+      "import": "./dist/crypto.js",
+      "require": "./dist/crypto.js"
+    },
     "./errors": {
       "types": "./dist/errors.d.ts",
       "import": "./dist/errors.js",

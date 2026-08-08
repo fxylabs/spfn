@@ -58,10 +58,14 @@
     "node": ">=20.0.0"
   },
   "peerDependencies": {
+    "@spfn/auth": ">=0.3.0-beta.1 <0.4.0",
     "@spfn/core": ">=0.3.0-beta.1 <0.4.0",
     "typescript": "^5.3.0"
   },
   "peerDependenciesMeta": {
+    "@spfn/auth": {
+      "optional": true
+    },
     "typescript": {
       "optional": true
     }
@@ -87,6 +91,7 @@
   },
   "devDependencies": {
     "@electric-sql/pglite": "^0.5.4",
+    "@spfn/auth": "workspace:*",
     "@spfn/core": "workspace:*",
     "@types/fs-extra": "^11.0.4",
     "@types/node": "^20.11.0",

@@ -445,10 +445,10 @@ spfn ops call listSignups --describe                  # print its usage (--json 
 ```
 
 Authentication is an ops token from [`@spfn/auth`](../auth/README.md#ops-tokens-spfn-ops):
-scoped, revocable, hash-stored, issued with `spfn ops token issue` where database access
-already exists — a deployed app has no token-creation endpoint. On macOS the CLI keeps the
-token in the keychain (`spfn ops token store`), and resolution order is `--token` →
-`SPFN_OPS_TOKEN` → keychain.
+scoped, revocable, hash-stored, issued with `spfn ops token issue` against the running app
+— the CLI signs in as an administrator, so issuance needs no database access. On macOS the
+CLI keeps the token in the keychain (`spfn ops token store`), and resolution order is
+`--token` → `SPFN_OPS_TOKEN` → keychain.
 
 ---
 
