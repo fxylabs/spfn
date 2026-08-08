@@ -5,7 +5,6 @@ on:
     branches: [main, master]
     paths:
       - 'packages/migrate/package.json'
-      - '.github/workflows/publish-migrate.yml'
   workflow_dispatch:
     inputs:
       create_tag:
@@ -136,12 +135,6 @@ jobs:
         if: ${{ !inputs.dry_run && steps.check-npm.outputs.skip == 'false' }}
         working-directory: packages/migrate
         run: npm publish --access public --tag ${{ steps.pkg.outputs.tag }} --provenance
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-
-      - name: Ensure public access
-        if: ${{ !inputs.dry_run }}
-        run: npm access set status=public @spfn/migrate
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
