@@ -850,12 +850,11 @@ stored, and the secret is shown exactly once at issuance.
 
 ```typescript
 // src/server/ops.ts — the app develops its own ops as routes
-import { route } from '@spfn/core/route';
-import { createOpsRouter } from '@spfn/core/ops';
+import { createOpsRouter, opsRoute } from '@spfn/core/ops';
 import { opsTokenAuth, requireOpsScope } from '@spfn/auth/server';
 
 export const opsRouter = createOpsRouter({
-    listSignups: route.get('/_ops/signups')
+    listSignups: opsRoute.get('/signups')
         .use([requireOpsScope('waitlist:read')])
         .handler(async () => signupsRepository.list()),
 }, { auth: opsTokenAuth });

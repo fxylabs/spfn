@@ -1,10 +1,11 @@
 /**
  * Ops Routes: the CLI-first operations surface
  *
- * Operations are developed exactly like features — as routes — and mounted
- * through createOpsRouter, which enforces the /_ops/ prefix, injects
- * opsTokenAuth into every route, and serves GET /_ops/_manifest for the
- * `spfn ops` CLI to discover commands from.
+ * Operations are developed exactly like features — as routes — built with
+ * `opsRoute`, which applies the /_ops namespace so each definition carries
+ * only the path this app owns. createOpsRouter injects opsTokenAuth into
+ * every route and serves GET /_ops/_manifest for the `spfn ops` CLI to
+ * discover commands from.
  *
  * Try it against a running server:
  *
@@ -13,8 +14,7 @@
  *   spfn ops call countExamples --app http://localhost:8790 --token <token>
  */
 
-import { route } from '@spfn/core/route';
-import { createOpsRouter } from '@spfn/core/ops';
+import { createOpsRouter, opsRoute } from '@spfn/core/ops';
 import { opsTokenAuth, requireOpsScope } from '@spfn/auth/server';
 import { Type } from '@sinclair/typebox';
 import { ExampleRepository } from '../repositories/example.repository';
@@ -24,7 +24,7 @@ const exampleRepo = new ExampleRepository();
 /**
  * GET /_ops/examples/count - how many examples exist
  */
-const countExamples = route.get('/_ops/examples/count')
+const countExamples = opsRoute.get('/examples/count')
     .use([requireOpsScope('example:read')])
     .handler(async () =>
     {
@@ -34,7 +34,7 @@ const countExamples = route.get('/_ops/examples/count')
 /**
  * GET /_ops/examples - recent examples, ops view
  */
-const listRecentExamples = route.get('/_ops/examples')
+const listRecentExamples = opsRoute.get('/examples')
     .use([requireOpsScope('example:read')])
     .input({
         query: Type.Object({

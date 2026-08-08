@@ -20,8 +20,8 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 import { Hono } from 'hono';
 import { Type } from '@sinclair/typebox';
 
-import { createOpsRouter } from '@spfn/core/ops';
-import { registerRoutes, route } from '@spfn/core/route';
+import { createOpsRouter, opsRoute } from '@spfn/core/ops';
+import { registerRoutes } from '@spfn/core/route';
 
 import { opsTokenAuth, requireOpsScope } from '@/server/middleware/ops-token-auth';
 import {
@@ -37,10 +37,10 @@ const dbAvailable = await isDatabaseAvailable();
 function buildOpsApp(): Hono
 {
     const opsRouter = createOpsRouter({
-        listSignups: route.get('/_ops/signups')
+        listSignups: opsRoute.get('/signups')
             .use([requireOpsScope('waitlist:read')])
             .handler(async () => ({ items: ['a'] })),
-        exportSignups: route.post('/_ops/signups/export')
+        exportSignups: opsRoute.post('/signups/export')
             .use([requireOpsScope('waitlist:read', 'waitlist:export')])
             .input({ body: Type.Object({ format: Type.String() }) })
             .handler(async (c) => ({ format: (await c.data()).body.format })),

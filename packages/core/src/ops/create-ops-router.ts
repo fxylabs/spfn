@@ -5,13 +5,17 @@
  * its own ops as ordinary routes — domain operations only that app can name —
  * and this factory turns them into a mountable package router that:
  *
- * - enforces the `/_ops/` path prefix, so the surface is recognizable and an
- *   ops route can never shadow an app route;
+ * - requires every route to come from `opsRoute`, which applies the `/_ops`
+ *   namespace, so the surface is recognizable and an ops route can never
+ *   shadow an app route;
  * - injects the given auth middleware into every route, the manifest
  *   included, so an unauthenticated ops surface cannot be created by
  *   accident — there is no opt-out;
  * - serves `GET /_ops/_manifest`, the self-description the `spfn ops` CLI
- *   discovers commands from.
+ *   discovers commands from, registered first so no app route takes its URL.
+ *
+ * What the path looks like after the namespace is the app's business, decided
+ * when the ops route is written — this factory does not audit its shape.
  *
  * The auth middleware itself lives with the app's auth stack (`@spfn/auth`
  * ships `opsTokenAuth`); core owns only the structure, so the ops surface has
@@ -19,11 +23,11 @@
  *
  * @example
  * ```ts
- * import { createOpsRouter } from '@spfn/core/ops';
+ * import { createOpsRouter, opsRoute } from '@spfn/core/ops';
  * import { opsTokenAuth, requireOpsScope } from '@spfn/auth/server';
  *
  * export const opsRouter = createOpsRouter({
- *     listSignups: route.get('/_ops/signups')
+ *     listSignups: opsRoute.get('/signups')            // GET /_ops/signups
  *         .use([requireOpsScope('waitlist:read')])
  *         .handler(async () => signupsRepository.list()),
  * }, { auth: opsTokenAuth });
@@ -86,43 +90,18 @@ function assertOpsRoute(name: string, def: RouteDef<any>): void
     {
         throw new OpsRouterError(
             `Ops route "${name}" is at "${def.path}", outside "${OPS_PATH_PREFIX}". `
-            + 'Every ops route lives under the prefix so the surface stays recognizable '
-            + 'and can never shadow an app route.',
+            + 'Build ops routes with `opsRoute` rather than `route` — it applies the namespace, '
+            + 'so the path a definition carries is only the part the app owns.',
         );
     }
 
-    if (shadowsManifestPath(def.path))
+    if (def.path === OPS_MANIFEST_PATH)
     {
         throw new OpsRouterError(
-            `Ops route "${name}" is at "${def.path}", which answers "${OPS_MANIFEST_PATH}" — `
-            + 'reserved for the manifest. The manifest route is merged in last, so this route would '
-            + 'answer it instead and the CLI would stop resolving every command for the whole app.',
+            `Ops route "${name}" claims "${OPS_MANIFEST_PATH}", which is reserved for the manifest. `
+            + 'The manifest is registered first, so this route would never answer.',
         );
     }
-}
-
-/**
- * Would a request for the manifest path be answered by this route? A literal
- * clash is the obvious case, but `/_ops/:tenant` matches `/_ops/_manifest`
- * just as well, and Hono answers with the first route registered — the app's,
- * since the manifest is merged in last.
- */
-function shadowsManifestPath(path: string): boolean
-{
-    const pattern = path
-        .split('/')
-        .map((segment) =>
-        {
-            if (segment.startsWith(':') || segment === '*')
-            {
-                return '[^/]+';
-            }
-
-            return segment.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-        })
-        .join('/');
-
-    return new RegExp(`^${pattern}$`).test(OPS_MANIFEST_PATH);
 }
 
 /**
@@ -258,8 +237,12 @@ export function createOpsRouter<TRoutes extends Record<string, RouteDef<any, any
         .use([options.auth])
         .handler(async () => manifest);
 
+    // The manifest is registered first, so no app route can answer its path.
+    // A route pattern that happens to cover `/_ops/_manifest` — `/_ops/:name`,
+    // say — is then only a route the app never reaches through that one URL,
+    // not a surface-wide outage where the CLI cannot discover any command.
     return defineRouter({
-        ...secured,
         [OPS_MANIFEST_NAME]: manifestRoute,
+        ...secured,
     } as Record<string, RouteDef<any>>);
 }

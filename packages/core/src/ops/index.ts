@@ -15,6 +15,11 @@ export {
 } from './create-ops-router';
 
 export {
+    opsRoute,
+    OPS_PATH_ROOT,
+} from './ops-route';
+
+export {
     collectOpsCommands,
     OpsRouterError,
     type OpsCommand,

@@ -15,6 +15,7 @@ import { route, type RouteDef } from '../../route/route-builder';
 import { defineRouter } from '../../route/router';
 import { createOpsRouter, OPS_MANIFEST_PATH } from '../create-ops-router';
 import type { OpsManifest } from '../manifest';
+import { opsRoute } from '../ops-route';
 
 const testAuth = defineMiddleware('opsTokenAuth', async (_c, next) =>
 {
@@ -23,10 +24,33 @@ const testAuth = defineMiddleware('opsTokenAuth', async (_c, next) =>
 
 function listSignupsRoute()
 {
-    return route.get('/_ops/signups')
+    return opsRoute.get('/signups')
         .input({ query: Type.Object({ limit: Type.Optional(Type.Number()) }) })
         .handler(async () => ({ items: [] }));
 }
+
+describe('opsRoute', () =>
+{
+    it('applies the /_ops namespace so a definition carries only the app\'s part', () =>
+    {
+        const def = opsRoute.get('/examples/count').handler(async () => ({}));
+
+        expect(def.method).toBe('GET');
+        expect(def.path).toBe('/_ops/examples/count');
+    });
+
+    it('leaves the path after the namespace to the app, parameters included', () =>
+    {
+        expect(opsRoute.post('/tenants/:id/reindex').handler(async () => ({})).path)
+            .toBe('/_ops/tenants/:id/reindex');
+    });
+
+    it('refuses a path that is not appendable', () =>
+    {
+        expect(() => opsRoute.get('examples')).toThrow(/must start with "\/"/);
+        expect(() => opsRoute.get('/')).toThrow(/names no command/);
+    });
+});
 
 describe('createOpsRouter', () =>
 {
@@ -36,21 +60,21 @@ describe('createOpsRouter', () =>
             .toThrow(/requires an auth middleware/);
     });
 
-    it('refuses a route outside the /_ops/ prefix', () =>
+    it('refuses a route built with `route` instead of `opsRoute`', () =>
     {
         const stray = route.get('/signups').handler(async () => ({}));
 
         expect(() => createOpsRouter({ stray }, { auth: testAuth }))
-            .toThrow(/outside "\/_ops\/"/);
+            .toThrow(/Build ops routes with `opsRoute`/);
     });
 
     it('refuses a route claiming the manifest path or name', () =>
     {
-        const clash = route.get(OPS_MANIFEST_PATH).handler(async () => ({}));
+        const clash = opsRoute.get('/_manifest').handler(async () => ({}));
         expect(() => createOpsRouter({ clash }, { auth: testAuth }))
             .toThrow(/reserved for the manifest/);
 
-        const named = route.get('/_ops/other').handler(async () => ({}));
+        const named = opsRoute.get('/other').handler(async () => ({}));
         expect(() => createOpsRouter({ getOpsManifest: named }, { auth: testAuth }))
             .toThrow(/reserved for the manifest route/);
     });
@@ -58,7 +82,7 @@ describe('createOpsRouter', () =>
     it('refuses a nested router claiming the manifest name', () =>
     {
         const nested = defineRouter({
-            getStats: route.get('/_ops/stats').handler(async () => ({})),
+            getStats: opsRoute.get('/stats').handler(async () => ({})),
         });
 
         expect(() => createOpsRouter({ getOpsManifest: nested }, { auth: testAuth }))
@@ -68,10 +92,10 @@ describe('createOpsRouter', () =>
     it('refuses two routes sharing a command name across nested routers', () =>
     {
         const first = defineRouter({
-            listUsers: route.get('/_ops/admin/users').handler(async () => ({})),
+            listUsers: opsRoute.get('/admin/users').handler(async () => ({})),
         });
         const second = defineRouter({
-            listUsers: route.get('/_ops/support/users').handler(async () => ({})),
+            listUsers: opsRoute.get('/support/users').handler(async () => ({})),
         });
 
         expect(() => createOpsRouter({ first, second }, { auth: testAuth }))
@@ -87,7 +111,7 @@ describe('createOpsRouter', () =>
 
         const opsRouter = createOpsRouter({
             admin: defineRouter({
-                getStats: route.get('/_ops/stats').handler(async () => ({})),
+                getStats: opsRoute.get('/stats').handler(async () => ({})),
             }).use([requireScope]),
         }, { auth: testAuth });
 
@@ -115,7 +139,7 @@ describe('createOpsRouter', () =>
 
         const opsRouter = createOpsRouter({
             admin: defineRouter({
-                getStats: route.get('/_ops/stats').handler(async () => ({ ok: true })),
+                getStats: opsRoute.get('/stats').handler(async () => ({ ok: true })),
             }).use([requireScope]),
         }, { auth });
 
@@ -130,37 +154,31 @@ describe('createOpsRouter', () =>
         expect(calls).toEqual(['auth', 'guard sees token']);
     });
 
-    it('refuses a route whose path pattern would answer the manifest path', () =>
+    it('registers the manifest first, so no app route can answer its path', async () =>
     {
-        const byParam = route.get('/_ops/:tenant').handler(async () => ({}));
-        expect(() => createOpsRouter({ byParam }, { auth: testAuth }))
-            .toThrow(/reserved for the manifest/);
+        const opsRouter = createOpsRouter({
+            byName: opsRoute.get('/:name').handler(async () => ({ appRoute: true })),
+        }, { auth: testAuth });
 
-        const byWildcard = route.get('/_ops/*').handler(async () => ({}));
-        expect(() => createOpsRouter({ byWildcard }, { auth: testAuth }))
-            .toThrow(/reserved for the manifest/);
+        expect(Object.keys(opsRouter.routes)[0]).toBe('getOpsManifest');
 
-        const deeper = route.get('/_ops/:tenant/signups').handler(async () => ({}));
-        expect(() => createOpsRouter({ deeper }, { auth: testAuth })).not.toThrow();
-    });
+        const app = new Hono();
+        registerRoutes(app, defineRouter({
+            ping: route.get('/ping').handler(async () => ({})),
+        }).packages([opsRouter]));
 
-    it('refuses two commands sharing one method and path', () =>
-    {
-        const listSignups = route.get('/_ops/signups').handler(async () => ({}));
-        const listSignupsV2 = route.get('/_ops/signups').handler(async () => ({}));
+        const manifest = await (await app.request(OPS_MANIFEST_PATH)).json() as OpsManifest;
+        expect(manifest.manifestVersion).toBe(1);
 
-        expect(() => createOpsRouter({ listSignups, listSignupsV2 }, { auth: testAuth }))
-            .toThrow(/both at "GET \/_ops\/signups"/);
-
-        const sameName = route.post('/_ops/signups').handler(async () => ({}));
-        expect(() => createOpsRouter({ listSignups, createSignup: sameName }, { auth: testAuth }))
-            .not.toThrow();
+        // The pattern route still answers its own URLs.
+        const own = await (await app.request('/_ops/anything-else')).json() as { appRoute: boolean };
+        expect(own.appRoute).toBe(true);
     });
 
     it('refuses a nested router mounting package routers', () =>
     {
         const nested = defineRouter({
-            getStats: route.get('/_ops/stats').handler(async () => ({})),
+            getStats: opsRoute.get('/stats').handler(async () => ({})),
         }).packages([defineRouter({
             unchecked: route.get('/anywhere').handler(async () => ({})),
         })]);
@@ -174,7 +192,7 @@ describe('createOpsRouter', () =>
         const opsRouter = createOpsRouter({
             listSignups: listSignupsRoute(),
             nested: defineRouter({
-                getStats: route.get('/_ops/stats').handler(async () => ({})),
+                getStats: opsRoute.get('/stats').handler(async () => ({})),
             }),
         }, { auth: testAuth });
 
@@ -201,7 +219,7 @@ describe('createOpsRouter', () =>
         const opsRouter = createOpsRouter({
             listSignups: listSignupsRoute(),
             nested: defineRouter({
-                getStats: route.get('/_ops/stats/:metric')
+                getStats: opsRoute.get('/stats/:metric')
                     .input({ params: Type.Object({ metric: Type.String() }) })
                     .handler(async () => ({})),
             }),

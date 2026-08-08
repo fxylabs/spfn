@@ -388,12 +388,11 @@ vertical slice whose path lives under `/_ops/`.
 ```typescript
 // src/server/ops.ts
 import { Type } from '@sinclair/typebox';
-import { route } from '@spfn/core/route';
-import { createOpsRouter } from '@spfn/core/ops';
+import { createOpsRouter, opsRoute } from '@spfn/core/ops';
 import { opsTokenAuth, requireOpsScope } from '@spfn/auth/server';
 
 export const opsRouter = createOpsRouter({
-    listSignups: route.get('/_ops/signups')
+    listSignups: opsRoute.get('/signups')                    // GET /_ops/signups
         .use([requireOpsScope('waitlist:read')])
         .input({ query: Type.Object({ limit: Type.Optional(Type.Number()) }) })
         .handler(async (c) => signupsRepository.list((await c.data()).query.limit)),
@@ -403,19 +402,35 @@ export const opsRouter = createOpsRouter({
 export const appRouter = defineRouter({ ... }).packages([opsRouter]);
 ```
 
-`createOpsRouter` refuses a route outside `/_ops/`, injects the auth middleware into every
-route (there is no unauthenticated variant), and serves `GET /_ops/_manifest` — the
-self-description the CLI reads, with each command's TypeBox schemas as JSON Schema:
+`opsRoute` is `route` with the `/_ops` namespace applied, so a definition carries only the
+path this app owns — what that path looks like, how it nests, which segments are
+parameters are the app's decisions. `createOpsRouter` injects the auth middleware into
+every route (there is no unauthenticated variant) and serves `GET /_ops/_manifest` — the
+self-description the CLI reads, with each command's TypeBox schemas as JSON Schema. The
+manifest is registered first, so no app route can take its URL.
 
 Routes may be grouped in nested `defineRouter`s, and a group's own `.use()` middlewares
-apply to its routes — always after the injected auth, so a group-wide `requireOpsScope`
-reads a request that has already been authenticated. Four things are refused when the
-surface is defined, rather than discovered in production: two routes sharing a command
-name (the manifest flattens nested groups into one list, so the CLI could not tell them
-apart), two commands sharing one method and path (only the first registered would ever
-answer), any route that would answer `/_ops/_manifest` — `/_ops/:tenant` included — and a
-group mounting `.packages()` (those routes register without the prefix check or the auth
-injection). The command name `getOpsManifest` is reserved.
+apply to its routes — always after the injected auth, so a group-wide guard reads a
+request that has already been authenticated. A group-level middleware must be a named one;
+wrap a factory to give it a name:
+
+```typescript
+const requireAdmin = defineMiddleware('opsAdminScope', requireOpsScope('admin:read'));
+
+export const opsRouter = createOpsRouter({
+    admin: defineRouter({ getStats, reindex }).use([requireAdmin]),
+}, { auth: opsTokenAuth });
+```
+
+Note that a group's `.use()` middleware carries its `skips` into every route in the group,
+suppressing that server-level middleware there.
+
+Three things are refused when the surface is defined, rather than discovered in
+production: a route built with `route` instead of `opsRoute` (it would carry no
+namespace), two routes sharing a command name (the manifest flattens nested groups into
+one list, so the CLI could not tell them apart), and a group mounting `.packages()` (those
+routes register with neither the namespace nor the auth injection). The command name
+`getOpsManifest` and the path `/_ops/_manifest` are reserved.
 
 ```bash
 spfn ops list --app https://api.example.com          # discover commands

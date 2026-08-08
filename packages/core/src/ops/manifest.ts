@@ -107,7 +107,7 @@ export function collectOpsCommands(
 ): OpsCommand[]
 {
     const commands: OpsCommand[] = [];
-    visit(routes, commands, new Map<string, string>(), new Map<string, string>());
+    visit(routes, commands, new Map<string, string>());
     commands.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
 
     return commands;
@@ -117,14 +117,13 @@ function visit(
     routes: Record<string, RouteDef<any> | Router<any>>,
     commands: OpsCommand[],
     claimed: Map<string, string>,
-    addressed: Map<string, string>,
 ): void
 {
     for (const [name, entry] of Object.entries(routes))
     {
         if (isRouter(entry))
         {
-            visit(entry.routes, commands, claimed, addressed);
+            visit(entry.routes, commands, claimed);
             continue;
         }
 
@@ -134,7 +133,6 @@ function visit(
         }
 
         assertUnclaimedName(name, entry.path, claimed);
-        assertUnclaimedAddress(name, entry.method, entry.path, addressed);
 
         commands.push({
             name,
@@ -164,32 +162,4 @@ function assertUnclaimedName(name: string, path: string, claimed: Map<string, st
     }
 
     claimed.set(name, path);
-}
-
-/**
- * Two commands under one method and path fail the same way a duplicate name
- * does, one step later: both are announced, both are invokable, and both
- * reach whichever route was registered first. The operator sees two commands
- * and gets one behaviour, with nothing saying which. Refuse it at definition
- * time as well.
- */
-function assertUnclaimedAddress(
-    name: string,
-    method: string,
-    path: string,
-    addressed: Map<string, string>,
-): void
-{
-    const address = `${method} ${path}`;
-    const existing = addressed.get(address);
-    if (existing !== undefined)
-    {
-        throw new OpsRouterError(
-            `Ops routes "${existing}" and "${name}" are both at "${address}". `
-            + 'Only the first registered answers, so one of the two commands would silently '
-            + 'invoke the other — give each command its own method and path.',
-        );
-    }
-
-    addressed.set(address, name);
 }
