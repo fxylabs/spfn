@@ -29,8 +29,10 @@ async function loadCrypto()
     catch
     {
         throw new Error(
-            'Ops tokens need @spfn/auth, which this project does not have installed. '
-            + 'Add it, or present an existing token with --token / SPFN_OPS_TOKEN.',
+            'This project does not have @spfn/auth installed, and ops tokens live in its schema — '
+            + 'so this app has none to issue, list or revoke.\n'
+            + '   An app that uses the ops surface installs @spfn/auth for opsTokenAuth; add it there.\n'
+            + '   Invoking commands with a token you already hold (spfn ops list / call) does not need it.',
         );
     }
 }
@@ -70,8 +72,29 @@ async function postJson(appUrl: string, path: string, body: unknown, authorizati
  * The password is read with a hidden prompt and is never echoed, logged, or
  * kept after the request that carries it.
  */
+/**
+ * `prompts` ends the process with status 0 when it cannot read — a closed
+ * stdin, a pipe, a CI step. Signing in would then do nothing and report
+ * success, so the absence of a terminal is refused before anything starts.
+ */
+export function assertInteractive(what: string): void
+{
+    if (!process.stdin.isTTY)
+    {
+        console.error(chalk.red(`❌ ${what} needs a terminal to ask for credentials, and this run has none.`));
+        console.error(chalk.gray('   Run it from a terminal. Issuance is an operator act, not a pipeline step.'));
+        process.exit(1);
+    }
+}
+
 export async function openAdminSession(appUrl: string): Promise<AdminSession>
 {
+    // Anything that can refuse the command is checked before a credential is
+    // asked for. Being told the package is missing after typing a password is
+    // the wrong order.
+    const { generateKeyPair, generateClientToken } = await loadCrypto();
+    assertInteractive('Signing in as an administrator');
+
     const answers = await prompts([
         { type: 'text', name: 'email', message: `Administrator email for ${new URL(appUrl).host}` },
         { type: 'password', name: 'password', message: 'Password' },
@@ -82,7 +105,6 @@ export async function openAdminSession(appUrl: string): Promise<AdminSession>
         throw new Error('Sign-in cancelled.');
     }
 
-    const { generateKeyPair, generateClientToken } = await loadCrypto();
     const keyPair = generateKeyPair('ES256');
 
     await postJson(appUrl, '/_auth/login', {

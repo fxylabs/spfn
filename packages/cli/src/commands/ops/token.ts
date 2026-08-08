@@ -15,7 +15,7 @@ import chalk from 'chalk';
 import prompts from 'prompts';
 import { appAccount, resolveAppUrl } from './resolve.js';
 import { deleteOpsToken, keychainSupported, storeOpsToken } from '../../utils/ops/keychain.js';
-import { adminRequest, closeAdminSession, openAdminSession } from '../../utils/ops/admin-session.js';
+import { adminRequest, assertInteractive, closeAdminSession, openAdminSession } from '../../utils/ops/admin-session.js';
 
 interface OpsTokenSummary
 {
@@ -219,6 +219,8 @@ async function storeToken(options: { app?: string }): Promise<void>
     }
 
     const appUrl = resolveAppUrl(options);
+    assertInteractive('Storing a token');
+
     const { token } = await prompts({
         type: 'password',
         name: 'token',

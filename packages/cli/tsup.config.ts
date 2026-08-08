@@ -14,7 +14,13 @@ export default defineConfig({
     splitting: false,
     target: 'es2022',
     outDir: 'dist',
-    external: ['tsup', 'tsx', 'drizzle-kit', 'drizzle-orm', 'postgres', 'dotenv', '@spfn/core', '@napi-rs/keyring'],
+    // `@spfn/auth` is an optional peer, loaded at run time by `spfn ops token`.
+    // Bundling it would defeat that — the CLI must resolve whatever the app has,
+    // or fail with the message the loader raises when the app has none.
+    external: [
+        'tsup', 'tsx', 'drizzle-kit', 'drizzle-orm', 'postgres', 'dotenv',
+        '@spfn/core', '@spfn/auth', '@napi-rs/keyring',
+    ],
     noExternal: [],
     define: {
         '__CLI_VERSION__': JSON.stringify(packageJson.version),
