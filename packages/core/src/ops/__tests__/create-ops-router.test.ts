@@ -6,11 +6,13 @@
  */
 
 import { Type } from '@sinclair/typebox';
+import { Hono } from 'hono';
 import { describe, expect, it } from 'vitest';
 
 import { defineMiddleware } from '../../route/define-middleware';
+import { registerRoutes } from '../../route/register-routes';
 import { route, type RouteDef } from '../../route/route-builder';
-import { defineRouter, type Router } from '../../route/router';
+import { defineRouter } from '../../route/router';
 import { createOpsRouter, OPS_MANIFEST_PATH } from '../create-ops-router';
 import type { OpsManifest } from '../manifest';
 
@@ -76,7 +78,7 @@ describe('createOpsRouter', () =>
             .toThrow(/Two ops routes are named "listUsers"/);
     });
 
-    it('keeps a nested router\'s own middlewares, so a scope guard cannot be lost', () =>
+    it('keeps a nested router\'s own middlewares, behind auth, so a scope guard cannot be lost', () =>
     {
         const requireScope = defineMiddleware('requireOpsScope', async (_c, next) =>
         {
@@ -89,8 +91,70 @@ describe('createOpsRouter', () =>
             }).use([requireScope]),
         }, { auth: testAuth });
 
-        const nested = opsRouter.routes.admin as Router<any>;
-        expect(nested._globalMiddlewares).toContain(requireScope);
+        const nested = opsRouter.routes.admin as { routes: Record<string, RouteDef<any>>; _globalMiddlewares: unknown[] };
+        expect(nested.routes.getStats.middlewares).toEqual([testAuth, requireScope]);
+        expect(nested._globalMiddlewares).toHaveLength(0);
+    });
+
+    it('runs auth before a nested router\'s guard, so the guard sees the token', async () =>
+    {
+        const calls: string[] = [];
+
+        const auth = defineMiddleware('opsTokenAuth', async (c, next) =>
+        {
+            calls.push('auth');
+            (c as any).set('opsToken', { scopes: ['stats:read'] });
+            await next();
+        }, { skips: ['auth'] });
+
+        const requireScope = defineMiddleware('requireOpsScope', async (c, next) =>
+        {
+            calls.push((c as any).get('opsToken') ? 'guard sees token' : 'guard sees nothing');
+            await next();
+        });
+
+        const opsRouter = createOpsRouter({
+            admin: defineRouter({
+                getStats: route.get('/_ops/stats').handler(async () => ({ ok: true })),
+            }).use([requireScope]),
+        }, { auth });
+
+        const app = new Hono();
+        registerRoutes(app, defineRouter({
+            ping: route.get('/ping').handler(async () => ({})),
+        }).packages([opsRouter]));
+
+        const response = await app.request('/_ops/stats');
+
+        expect(response.status).toBe(200);
+        expect(calls).toEqual(['auth', 'guard sees token']);
+    });
+
+    it('refuses a route whose path pattern would answer the manifest path', () =>
+    {
+        const byParam = route.get('/_ops/:tenant').handler(async () => ({}));
+        expect(() => createOpsRouter({ byParam }, { auth: testAuth }))
+            .toThrow(/reserved for the manifest/);
+
+        const byWildcard = route.get('/_ops/*').handler(async () => ({}));
+        expect(() => createOpsRouter({ byWildcard }, { auth: testAuth }))
+            .toThrow(/reserved for the manifest/);
+
+        const deeper = route.get('/_ops/:tenant/signups').handler(async () => ({}));
+        expect(() => createOpsRouter({ deeper }, { auth: testAuth })).not.toThrow();
+    });
+
+    it('refuses two commands sharing one method and path', () =>
+    {
+        const listSignups = route.get('/_ops/signups').handler(async () => ({}));
+        const listSignupsV2 = route.get('/_ops/signups').handler(async () => ({}));
+
+        expect(() => createOpsRouter({ listSignups, listSignupsV2 }, { auth: testAuth }))
+            .toThrow(/both at "GET \/_ops\/signups"/);
+
+        const sameName = route.post('/_ops/signups').handler(async () => ({}));
+        expect(() => createOpsRouter({ listSignups, createSignup: sameName }, { auth: testAuth }))
+            .not.toThrow();
     });
 
     it('refuses a nested router mounting package routers', () =>

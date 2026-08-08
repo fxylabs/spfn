@@ -91,12 +91,38 @@ function assertOpsRoute(name: string, def: RouteDef<any>): void
         );
     }
 
-    if (def.path === OPS_MANIFEST_PATH)
+    if (shadowsManifestPath(def.path))
     {
         throw new OpsRouterError(
-            `Ops route "${name}" claims "${OPS_MANIFEST_PATH}", which is reserved for the manifest.`,
+            `Ops route "${name}" is at "${def.path}", which answers "${OPS_MANIFEST_PATH}" — `
+            + 'reserved for the manifest. The manifest route is merged in last, so this route would '
+            + 'answer it instead and the CLI would stop resolving every command for the whole app.',
         );
     }
+}
+
+/**
+ * Would a request for the manifest path be answered by this route? A literal
+ * clash is the obvious case, but `/_ops/:tenant` matches `/_ops/_manifest`
+ * just as well, and Hono answers with the first route registered — the app's,
+ * since the manifest is merged in last.
+ */
+function shadowsManifestPath(path: string): boolean
+{
+    const pattern = path
+        .split('/')
+        .map((segment) =>
+        {
+            if (segment.startsWith(':') || segment === '*')
+            {
+                return '[^/]+';
+            }
+
+            return segment.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        })
+        .join('/');
+
+    return new RegExp(`^${pattern}$`).test(OPS_MANIFEST_PATH);
 }
 
 /**
@@ -122,11 +148,21 @@ function assertOpsName(name: string): void
  * a `requireOpsScope` guard among them — leaving those routes reachable by
  * any valid ops token.
  *
+ * Those middlewares are handed down to the routes rather than left on the
+ * rebuilt router. Router-level middlewares are registered ahead of every
+ * route-level one, so a guard left in place would run before the auth that
+ * was injected per route — reading a request no one had authenticated yet.
+ *
  * `.packages()` is refused rather than carried: package routes are registered
  * without passing through this factory, so they would join the ops surface
  * with neither the prefix check nor the auth injection.
  */
-function rebuildNestedRouter(name: string, router: Router<any>, auth: NamedMiddleware<string>): Router<any>
+function rebuildNestedRouter(
+    name: string,
+    router: Router<any>,
+    auth: NamedMiddleware<string>,
+    inherited: ReadonlyArray<NamedMiddleware<string>>,
+): Router<any>
 {
     if (router._packageRouters?.length > 0)
     {
@@ -136,14 +172,11 @@ function rebuildNestedRouter(name: string, router: Router<any>, auth: NamedMiddl
         );
     }
 
-    let rebuilt = defineRouter(
-        secureRoutes(router.routes, auth) as Record<string, RouteDef<any>>,
-    );
+    const handedDown = [...inherited, ...(router._globalMiddlewares ?? [])];
 
-    if (router._globalMiddlewares?.length > 0)
-    {
-        rebuilt = rebuilt.use(router._globalMiddlewares);
-    }
+    let rebuilt = defineRouter(
+        secureRoutes(router.routes, auth, handedDown) as Record<string, RouteDef<any>>,
+    );
 
     if (router._contractVersion)
     {
@@ -154,15 +187,17 @@ function rebuildNestedRouter(name: string, router: Router<any>, auth: NamedMiddl
 }
 
 /**
- * Validate every route and hand back a copy with the auth middleware
- * prepended. Route-level injection (rather than router-level `.use`) makes
+ * Validate every route and hand back a copy carrying, in order, the auth
+ * middleware, the middlewares its enclosing routers declared with `.use()`,
+ * and its own. Route-level injection (rather than router-level `.use`) makes
  * the middleware's `skips` declaration effective, so `opsTokenAuth` can
  * auto-skip a server-level `auth` middleware exactly as `oneTimeTokenAuth`
- * does.
+ * does — and it is what puts auth ahead of every group guard.
  */
 function secureRoutes(
     routes: Record<string, RouteDef<any> | Router<any>>,
     auth: NamedMiddleware<string>,
+    inherited: ReadonlyArray<NamedMiddleware<string>> = [],
 ): Record<string, RouteDef<any> | Router<any>>
 {
     const secured: Record<string, RouteDef<any> | Router<any>> = {};
@@ -173,7 +208,7 @@ function secureRoutes(
 
         if (isRouter(entry))
         {
-            secured[name] = rebuildNestedRouter(name, entry, auth);
+            secured[name] = rebuildNestedRouter(name, entry, auth, inherited);
             continue;
         }
 
@@ -185,7 +220,7 @@ function secureRoutes(
         assertOpsRoute(name, entry);
         secured[name] = {
             ...entry,
-            middlewares: [auth, ...(entry.middlewares ?? [])],
+            middlewares: [auth, ...inherited, ...(entry.middlewares ?? [])],
         };
     }
 

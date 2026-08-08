@@ -408,11 +408,14 @@ route (there is no unauthenticated variant), and serves `GET /_ops/_manifest` �
 self-description the CLI reads, with each command's TypeBox schemas as JSON Schema:
 
 Routes may be grouped in nested `defineRouter`s, and a group's own `.use()` middlewares
-apply to its routes as usual. Three things are refused when the surface is defined, rather
-than discovered in production: two routes sharing a command name (the manifest flattens
-nested groups into one list, so the CLI could not tell them apart), the reserved name
-`getOpsManifest`, and a group mounting `.packages()` (those routes register without the
-prefix check or the auth injection).
+apply to its routes — always after the injected auth, so a group-wide `requireOpsScope`
+reads a request that has already been authenticated. Four things are refused when the
+surface is defined, rather than discovered in production: two routes sharing a command
+name (the manifest flattens nested groups into one list, so the CLI could not tell them
+apart), two commands sharing one method and path (only the first registered would ever
+answer), any route that would answer `/_ops/_manifest` — `/_ops/:tenant` included — and a
+group mounting `.packages()` (those routes register without the prefix check or the auth
+injection). The command name `getOpsManifest` is reserved.
 
 ```bash
 spfn ops list --app https://api.example.com          # discover commands
