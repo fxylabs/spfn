@@ -404,10 +404,16 @@ export const appRouter = defineRouter({ ... }).packages([opsRouter]);
 
 `opsRoute` is `route` with the `/_ops` namespace applied, so a definition carries only the
 path this app owns — what that path looks like, how it nests, which segments are
-parameters are the app's decisions. `createOpsRouter` injects the auth middleware into
-every route (there is no unauthenticated variant) and serves `GET /_ops/_manifest` — the
-self-description the CLI reads, with each command's TypeBox schemas as JSON Schema. The
-manifest is registered first, so no app route can take its URL.
+parameters are the app's decisions. It exists from `@spfn/core` **0.3.0-beta.2**.
+`createOpsRouter` injects the auth middleware into every route (there is no
+unauthenticated variant) and serves `GET /_ops/_manifest` — the self-description the CLI
+reads, with each command's TypeBox schemas as JSON Schema.
+
+The manifest is registered ahead of the ops routes, so none of them can take its URL even
+when one is a pattern like `/_ops/:name`. That ordering does not reach outside the ops
+router: routes an app declares in its own router are registered before any package router,
+so a pattern there that covers `/_ops/_manifest` — a `/*` catch-all, say — shadows the
+manifest, exactly as it shadows every other package route.
 
 Routes may be grouped in nested `defineRouter`s, and a group's own `.use()` middlewares
 apply to its routes — always after the injected auth, so a group-wide guard reads a

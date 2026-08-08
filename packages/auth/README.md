@@ -860,6 +860,9 @@ export const opsRouter = createOpsRouter({
 }, { auth: opsTokenAuth });
 ```
 
+`opsRoute` comes from `@spfn/core` **0.3.0-beta.2** onwards; before that release an ops
+route spelled its own `/_ops/` prefix with `route`.
+
 Issue and manage tokens where database access already exists — a deployed app carries **no
 token-creation endpoint**:
 

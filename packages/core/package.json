@@ -1,6 +1,6 @@
 {
     "name": "@spfn/core",
-    "version": "0.3.0-beta.1",
+    "version": "0.3.0-beta.2",
     "description": "Full-stack TypeScript backend for Next.js: file-based typed routes, Drizzle entities and repositories, PostgreSQL transactions and a generated end-to-end client, in one fixed vertical slice per feature",
     "type": "module",
     "exports": {

@@ -106,9 +106,10 @@ function assertOpsRoute(name: string, def: RouteDef<any>): void
 
 /**
  * The reserved name is checked for every entry, route and nested router
- * alike: the manifest route is merged in last, so an entry under this name
- * would be overwritten rather than refused — its routes would still be
- * announced by the manifest and answer 404 when invoked.
+ * alike, because the merge cannot refuse a duplicate key on its own. The
+ * manifest is merged in first and the app's entries spread over it, so an
+ * entry under this name would replace the manifest — the ops surface would
+ * then announce nothing and the CLI would discover no commands at all.
  */
 function assertOpsName(name: string): void
 {
@@ -237,10 +238,16 @@ export function createOpsRouter<TRoutes extends Record<string, RouteDef<any, any
         .use([options.auth])
         .handler(async () => manifest);
 
-    // The manifest is registered first, so no app route can answer its path.
+    // The manifest goes first, so no route in this object can answer its path.
     // A route pattern that happens to cover `/_ops/_manifest` — `/_ops/:name`,
     // say — is then only a route the app never reaches through that one URL,
     // not a surface-wide outage where the CLI cannot discover any command.
+    //
+    // The ordering reaches no further than this object. `registerRoutes`
+    // registers a router's own routes before its package routers, so a pattern
+    // the app declares in its own router still shadows the manifest — as it
+    // shadows every other package route, which is a property of where the app
+    // put that pattern rather than of this factory.
     return defineRouter({
         [OPS_MANIFEST_NAME]: manifestRoute,
         ...secured,
