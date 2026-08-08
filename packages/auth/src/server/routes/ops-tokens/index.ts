@@ -29,6 +29,22 @@ import {
 } from '../../services/ops-token.service';
 import type { OpsToken } from '../../entities/ops-tokens';
 
+/**
+ * The longest expiry issuance accepts, about a century in days.
+ *
+ * A day count becomes a date by arithmetic, and a large enough count overflows
+ * the range a date can hold: `Date.now() + 1e11 days` is not a far-off date but
+ * an invalid one, and an invalid date reaches the database as a value the
+ * driver refuses — a 500 where the caller asked for something the route should
+ * simply have declined. The bound is declared in the schema so the refusal is a
+ * validation message, and checked again below because the overflow is a
+ * property of the product, not of either operand.
+ *
+ * The `spfn` CLI carries the same number so `--expires-days` can refuse before
+ * a request is sent.
+ */
+const MAX_EXPIRY_DAYS = 36500;
+
 /** What a token looks like to an operator. Never carries the secret. */
 function toSummary(record: OpsToken)
 {
@@ -55,8 +71,11 @@ export const issueOpsToken = route.post('/_auth/ops-tokens')
                 minItems: 1,
                 description: "Scopes the token grants ('*' grants all)",
             }),
-            expiresInDays: Type.Optional(Type.Union([Type.Number({ exclusiveMinimum: 0 }), Type.Null()], {
-                description: 'Days until expiry; null issues a non-expiring token',
+            expiresInDays: Type.Optional(Type.Union([
+                Type.Number({ exclusiveMinimum: 0, maximum: MAX_EXPIRY_DAYS }),
+                Type.Null(),
+            ], {
+                description: `Days until expiry, up to ${MAX_EXPIRY_DAYS}; null issues a non-expiring token`,
             })),
         }),
     })
@@ -66,14 +85,16 @@ export const issueOpsToken = route.post('/_auth/ops-tokens')
         const { body } = await c.data();
 
         const expiresInDays = body.expiresInDays ?? null;
-        if (expiresInDays !== null && !Number.isFinite(expiresInDays))
-        {
-            throw new BadRequestError({ message: 'expiresInDays takes a positive number of days, or null.' });
-        }
-
         const expiresAt = expiresInDays === null
             ? null
             : new Date(Date.now() + expiresInDays * 24 * 60 * 60 * 1000);
+
+        if (expiresAt && Number.isNaN(expiresAt.getTime()))
+        {
+            throw new BadRequestError({
+                message: `expiresInDays takes 1 to ${MAX_EXPIRY_DAYS} days, or null for no expiry.`,
+            });
+        }
 
         const { token, record } = await issueOpsTokenService(body.name, body.scopes, expiresAt);
 

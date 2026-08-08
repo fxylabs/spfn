@@ -15,7 +15,7 @@ import chalk from 'chalk';
 import prompts from 'prompts';
 import { appAccount, resolveAppUrl } from './resolve.js';
 import { deleteOpsToken, keychainSupported, storeOpsToken } from '../../utils/ops/keychain.js';
-import { adminRequest, assertInteractive, closeAdminSession, openAdminSession } from '../../utils/ops/admin-session.js';
+import { adminRequest, assertInteractive, withAdminSession } from '../../utils/ops/admin-session.js';
 
 interface OpsTokenSummary
 {
@@ -26,6 +26,19 @@ interface OpsTokenSummary
     revokedAt: string | null;
     lastUsedAt: string | null;
 }
+
+/**
+ * The longest expiry that can be asked for, about a century in days.
+ *
+ * There is an upper bound at all because a day count is turned into a date by
+ * arithmetic, and a large enough count overflows the range a date can hold —
+ * `Date.now() + 1e11 days` is not a far-off date, it is an invalid one, which
+ * reaches the database as a value it refuses rather than as a refusal an
+ * operator can read. The server enforces the same bound; this one puts the
+ * message in the terminal before a request is sent. It matches the bound in
+ * `@spfn/auth`'s issuance route.
+ */
+const MAX_EXPIRY_DAYS = 36500;
 
 /**
  * The secret exists in the clear only between issuance and delivery, so
@@ -41,9 +54,11 @@ function resolveExpiryDays(options: { expiry: boolean; expiresDays: string }): n
     }
 
     const days = Number(options.expiresDays);
-    if (!Number.isFinite(days) || days <= 0)
+    if (!Number.isFinite(days) || days <= 0 || days > MAX_EXPIRY_DAYS)
     {
-        console.error(chalk.red(`❌ --expires-days takes a positive number of days, got "${options.expiresDays}".`));
+        console.error(chalk.red(
+            `❌ --expires-days takes 1 to ${MAX_EXPIRY_DAYS} days, got "${options.expiresDays}".`,
+        ));
         console.error(chalk.gray('   Pass --no-expiry for a non-expiring token.'));
         process.exit(1);
     }
@@ -67,12 +82,6 @@ function resolveKeychainAccount(options: { toKeychain?: boolean; app?: string },
     return appAccount(appUrl);
 }
 
-function abort(err: unknown): never
-{
-    console.error(chalk.red(`❌ ${err instanceof Error ? err.message : String(err)}`));
-    process.exit(1);
-}
-
 async function issueToken(options: {
     name: string;
     scopes: string;
@@ -93,9 +102,7 @@ async function issueToken(options: {
     const expiresInDays = resolveExpiryDays(options);
     const keychainAccount = resolveKeychainAccount(options, appUrl);
 
-    const session = await openAdminSession(appUrl).catch(abort);
-
-    try
+    await withAdminSession(appUrl, async (session) =>
     {
         const answer = await adminRequest(appUrl, 'POST', '/_auth/ops-tokens', session, {
             name: options.name,
@@ -130,23 +137,13 @@ async function issueToken(options: {
         console.log('');
         console.log(chalk.bold('   Shown once, never stored — copy it now:'));
         console.log(`   ${answer.token}`);
-    }
-    catch (err)
-    {
-        abort(err);
-    }
-    finally
-    {
-        await closeAdminSession(appUrl, session);
-    }
+    });
 }
 
 async function listTokens(options: { app?: string }): Promise<void>
 {
     const appUrl = resolveAppUrl(options);
-    const session = await openAdminSession(appUrl).catch(abort);
-
-    try
+    await withAdminSession(appUrl, async (session) =>
     {
         const answer = await adminRequest(appUrl, 'GET', '/_auth/ops-tokens', session);
         const records = answer.opsTokens as OpsTokenSummary[];
@@ -170,15 +167,7 @@ async function listTokens(options: { app?: string }): Promise<void>
                 + ` | expires: ${record.expiresAt ?? 'never'}`
                 + ` | last used: ${record.lastUsedAt ?? 'never'}`));
         }
-    }
-    catch (err)
-    {
-        abort(err);
-    }
-    finally
-    {
-        await closeAdminSession(appUrl, session);
-    }
+    });
 }
 
 async function revokeToken(id: string, options: { app?: string }): Promise<void>
@@ -191,23 +180,14 @@ async function revokeToken(id: string, options: { app?: string }): Promise<void>
     }
 
     const appUrl = resolveAppUrl(options);
-    const session = await openAdminSession(appUrl).catch(abort);
 
-    try
+    await withAdminSession(appUrl, async (session) =>
     {
         const answer = await adminRequest(appUrl, 'DELETE', `/_auth/ops-tokens/${tokenId}`, session);
         const record = answer.opsToken as OpsTokenSummary;
 
         console.log(chalk.green(`✅ Revoked ops token #${record.id} ("${record.name}")`));
-    }
-    catch (err)
-    {
-        abort(err);
-    }
-    finally
-    {
-        await closeAdminSession(appUrl, session);
-    }
+    });
 }
 
 async function storeToken(options: { app?: string }): Promise<void>

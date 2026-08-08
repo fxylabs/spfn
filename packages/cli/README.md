@@ -428,10 +428,18 @@ an administrator's email and password first — no database access. Only the tok
 hash is ever stored, so the secret exists in the clear once, in the issuance answer;
 `--to-keychain` delivers it without printing it.
 
+`--expires-days` takes 1 to 36500 days (about a century), or `--no-expiry` for a token that
+never expires. The upper bound is there because a day count becomes a date by arithmetic,
+and a big enough count produces an invalid date rather than a distant one.
+
 SPFN authenticates a request with a JWT the client signs itself, so the CLI generates a key
-pair for the command, signs the one call it needs, and revokes the key on the way out.
-Nothing is written to disk. These three commands need `@spfn/auth` installed — the ops
-token lives in its schema — and say so if it is missing.
+pair for the command, signs the one call it needs, and revokes the key before the command
+ends — on the failing path as much as the succeeding one. Nothing is written to disk.
+
+These three commands need `@spfn/auth` **0.3.0-beta.2 or later** installed: the ops token
+lives in its schema, and the signing comes from its `@spfn/auth/crypto` entry point, which
+that release added. A missing package and one too old to carry the entry point are told
+apart, so the message names the thing to do.
 
 ---
 

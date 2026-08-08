@@ -886,10 +886,17 @@ Each requires `authenticate` plus `requireRole('admin', 'superadmin')`. The admi
 seeded from `SPFN_AUTH_ADMIN_*` (see [Admin seeding](#admin-seeding))
 signs in with a password, so this works in an app whose end users only sign in socially.
 
+Issuance takes `expiresInDays` from 1 to 36500 (about a century), or `null` for a token that
+never expires. There is an upper bound because a day count becomes a date by arithmetic, and
+a big enough count produces an invalid date rather than a distant one — a refusal the route
+should answer with a message, not with whatever the driver says about a value it cannot store.
+
 SPFN authenticates a request with a JWT the client signs itself, so the CLI generates a key
 pair, hands the public half over at login, signs the one call it needs, and revokes the key
-on the way out. `@spfn/auth/crypto` exports the two functions that take part
-(`generateKeyPair`, `generateClientToken`) without pulling in the auth server.
+before the command ends — on the failing path as much as the succeeding one.
+`@spfn/auth/crypto` exports the two functions that take part (`generateKeyPair`,
+`generateClientToken`) without pulling in the auth server; it exists from **0.3.0-beta.2**,
+which is the floor the `spfn` CLI declares for this package.
 
 Verification refuses uniformly: an expired, revoked, or never-issued token all answer the
 same 401, so whether a presented secret ever existed is not inferable. A valid token

@@ -209,6 +209,33 @@ describe.skipIf(!dbAvailable)('Ops token routes', () =>
 
             expect((await issue(authorization, { name: 'n', scopes: [] })).status).toBe(400);
         });
+
+        /**
+         * A day count becomes a date by arithmetic, so a big enough count
+         * produces an invalid date rather than a distant one — and an invalid
+         * date reaches the driver as a value it refuses, turning a bad request
+         * into a 500. Both the largest accepted count and the first refused one
+         * are pinned, because a bound is only a bound if both sides hold.
+         */
+        it('refuses an expiry too large to be a date, and accepts the bound itself', async () =>
+        {
+            const authorization = await signIn('admin@test.com');
+
+            expect((await issue(authorization, {
+                name: 'overflow', scopes: ['*'], expiresInDays: 1e11,
+            })).status).toBe(400);
+
+            expect((await issue(authorization, {
+                name: 'just-over', scopes: ['*'], expiresInDays: 36501,
+            })).status).toBe(400);
+
+            const atBound = await issue(authorization, {
+                name: 'century', scopes: ['*'], expiresInDays: 36500,
+            });
+            expect(atBound.status).toBe(200);
+            expect(new Date((await atBound.json()).opsToken.expiresAt).getTime())
+                .toBeGreaterThan(Date.now());
+        });
     });
 
     describe('revocation', () =>
