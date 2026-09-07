@@ -10,6 +10,7 @@ import {
     ForbiddenError,
     ConflictError,
     NotFoundError,
+    HttpError,
 } from '@spfn/core/errors';
 
 /**
@@ -611,5 +612,163 @@ export class InsufficientRoleError extends ForbiddenError
             details: { requiredRoles, ...data.details },
         });
         this.name = 'InsufficientRoleError';
+    }
+}
+
+/**
+ * Passkey Challenge Error (401)
+ *
+ * Thrown when the challenge a WebAuthn ceremony presents is unknown, expired,
+ * already spent, minted for the other ceremony, or minted for another account.
+ *
+ * One error for all five, on purpose. Telling a caller which applies tells them
+ * whether a challenge they did not mint exists and what it was for, and the
+ * remedy is the same in every case: start the ceremony again.
+ */
+export class PasskeyChallengeError extends UnauthorizedError
+{
+    constructor(data: { message?: string; details?: Record<string, any> } = {})
+    {
+        super({
+            message: data.message || 'This passkey challenge is no longer valid. Try again.',
+            details: data.details,
+        });
+        this.name = 'PasskeyChallengeError';
+    }
+}
+
+/**
+ * Passkey Verification Error (401)
+ *
+ * Thrown when an assertion or attestation does not verify: wrong origin, wrong
+ * rpId, a bad signature, a regressed signature counter — or, on login, a
+ * credential that is unknown or has been revoked.
+ *
+ * Those last two share this error with the cryptographic failures deliberately.
+ * A distinct "no such passkey" would answer, to anyone holding a credential id,
+ * whether it is enrolled here — and a revoked credential answering differently
+ * from an unknown one would say the account once had it.
+ */
+export class PasskeyVerificationError extends UnauthorizedError
+{
+    constructor(data: { message?: string; details?: Record<string, any> } = {})
+    {
+        super({
+            message: data.message || 'Passkey verification failed.',
+            details: data.details,
+        });
+        this.name = 'PasskeyVerificationError';
+    }
+}
+
+/**
+ * Passkey Not Found Error (404)
+ *
+ * Thrown when a management operation names a passkey the caller does not own,
+ * or one already revoked. Every lookup is owner-scoped, so the answer is only
+ * ever "not yours" and says nothing about other accounts.
+ */
+export class PasskeyNotFoundError extends NotFoundError
+{
+    constructor(data: { message?: string; details?: Record<string, any> } = {})
+    {
+        super({
+            message: data.message || 'Passkey not found',
+            details: data.details,
+        });
+        this.name = 'PasskeyNotFoundError';
+    }
+}
+
+/**
+ * Passkey Already Registered Error (409)
+ *
+ * Thrown when the credential presented for enrollment is already on file for
+ * some account — including one that revoked it. A credential id is reserved for
+ * good once used, so this is also the answer to re-enrolling one's own revoked
+ * passkey.
+ */
+export class PasskeyAlreadyRegisteredError extends ConflictError
+{
+    constructor(data: { message?: string; details?: Record<string, any> } = {})
+    {
+        super({
+            message: data.message || 'This passkey is already registered',
+            details: data.details,
+        });
+        this.name = 'PasskeyAlreadyRegisteredError';
+    }
+}
+
+/**
+ * Recent Authentication Required Error (403)
+ *
+ * Thrown when enrolling or revoking a passkey from a session that proved itself
+ * too long ago and carried no password. Clients branch on `code` to know to
+ * prompt for the password rather than to show a generic refusal, so the code is
+ * a stable field rather than a message they would have to match on.
+ */
+export class RecentAuthenticationRequiredError extends ForbiddenError
+{
+    readonly code = 'RECENT_AUTH_REQUIRED';
+
+    constructor(data: { message?: string; details?: Record<string, any> } = {})
+    {
+        super({
+            message: data.message || 'Confirm it is you before changing passkeys. Sign in again or send your current password.',
+            details: data.details,
+        });
+        this.name = 'RecentAuthenticationRequiredError';
+    }
+}
+
+/**
+ * Last Recovery Credential Error (409)
+ *
+ * Thrown when revoking a passkey would leave the account with no way back in:
+ * no other live passkey, no password, and no linked social account. There is no
+ * password reset in this package, so that state is not recoverable by support
+ * either — the refusal is the only thing standing between the owner and a
+ * locked account.
+ *
+ * Clients branch on `code` to offer "set a password first" instead of a generic
+ * refusal.
+ */
+export class LastRecoveryCredentialError extends ConflictError
+{
+    readonly code = 'LAST_RECOVERY_CREDENTIAL';
+
+    constructor(data: { message?: string; details?: Record<string, any> } = {})
+    {
+        super({
+            message: data.message
+                || 'This is the only way you can sign in. Set a password or link a social account before removing it.',
+            details: data.details,
+        });
+        this.name = 'LastRecoveryCredentialError';
+    }
+}
+
+/**
+ * Passkey Config Error (500)
+ *
+ * Thrown at boot when the passkey relying-party configuration cannot be honoured
+ * — an origin that is not https outside localhost, an origin off the rpId, an
+ * unsupported user-verification value.
+ *
+ * A refusal at boot rather than at the first ceremony: every one of these makes
+ * every passkey operation fail, and the drift is between environments, so the
+ * deploy that introduces it is where it has to surface.
+ */
+export class PasskeyConfigError extends HttpError
+{
+    constructor(data: { message: string; details?: Record<string, any> })
+    {
+        super({
+            message: data.message,
+            statusCode: 500,
+            details: data.details,
+        });
+        this.name = 'PasskeyConfigError';
     }
 }

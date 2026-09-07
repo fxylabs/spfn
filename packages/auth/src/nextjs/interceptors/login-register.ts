@@ -16,6 +16,15 @@ import { cookieSecure } from './cookie-options';
 import { pushCsrfCookie } from './csrf';
 
 /**
+ * The sign-in paths that replace a key the browser already holds.
+ *
+ * Register, invitation-accept and signup/password create the account, so there
+ * is nothing to rotate; the two sign-ins can each arrive at a browser that is
+ * already carrying a session key.
+ */
+const ROTATING_SIGN_IN_PATHS = new Set(['/_auth/login', '/_auth/passkeys/login/verify']);
+
+/**
  * Login, Register, and Invitation-Accept Interceptor
  *
  * Request: Generates key pair and adds publicKey to request body
@@ -23,7 +32,7 @@ import { pushCsrfCookie } from './csrf';
  */
 export const loginRegisterInterceptor: InterceptorRule =
     {
-        pathPattern: /^\/_auth\/(login|register|invitations\/accept|signup\/password)$/,
+        pathPattern: /^\/_auth\/(login|register|invitations\/accept|signup\/password|passkeys\/login\/verify)$/,
         method: 'POST',
 
         request: async (ctx, next) =>
@@ -49,8 +58,11 @@ export const loginRegisterInterceptor: InterceptorRule =
             ctx.body.algorithm = keyPair.algorithm;
             ctx.body.keySize = Buffer.from(keyPair.publicKey, 'base64').length;
 
-            // Add oldKeyId for login (key rotation)
-            if (ctx.path === '/_auth/login' && oldKeyId)
+            // Add oldKeyId for a sign-in (key rotation). Both sign-in paths:
+            // a passkey assertion starts a session exactly as a password login
+            // does, so the key the browser was already carrying has to be
+            // retired by the same request that replaces it.
+            if (ROTATING_SIGN_IN_PATHS.has(ctx.path) && oldKeyId)
             {
                 ctx.body.oldKeyId = oldKeyId;
             }

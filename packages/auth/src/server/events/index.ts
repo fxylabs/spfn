@@ -25,19 +25,24 @@ export const AuthProviderSchema = Type.Union([
 /**
  * Login provider type
  *
- * AuthProviderSchema + `'device'`, which is how a device-code login names itself:
- * the account was proven on another device that was already signed in, so no
- * credential was presented here and none of the values above describes it.
+ * AuthProviderSchema + `'device'` and `'passkey'`.
  *
- * A separate union rather than a widened AuthProviderSchema. `'device'` is not a
- * way to register — a device-code request can only ever be approved by an
- * existing account — and it is not something a provider can unlink, so the two
- * events that mean those things must not start accepting it.
+ * `'device'` is how a device-code login names itself: the account was proven on
+ * another device that was already signed in, so no credential was presented here
+ * and none of the values above describes it. `'passkey'` is a WebAuthn assertion
+ * — a credential of the account, but not one of the sign-up channels.
+ *
+ * A separate union rather than a widened AuthProviderSchema. Neither is a way to
+ * register — a device-code request can only ever be approved by an existing
+ * account, and a passkey has to be enrolled from a session that already exists —
+ * and neither is something a provider can unlink, so the two events that mean
+ * those things must not start accepting them.
  */
 export const AuthLoginProviderSchema = Type.Union([
     Type.Literal('email'),
     Type.Literal('phone'),
     Type.Literal('device'),
+    Type.Literal('passkey'),
     ...SOCIAL_PROVIDERS.map(p => Type.Literal(p)),
 ]);
 
@@ -88,6 +93,51 @@ export const authRegisterEvent = defineEvent(
         email: Type.Optional(Type.String()),
         phone: Type.Optional(Type.String()),
         metadata: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
+    }),
+);
+
+/**
+ * auth.passkey.enrolled — a WebAuthn credential was added to an account
+ *
+ * 발행 시점:
+ * - finishPasskeyEnrollmentService()가 커밋된 직후
+ *
+ * A new way into the account, added from a session that already existed. Apps
+ * subscribe to tell the owner about it — the same notice a new device login
+ * deserves, since that is what this becomes.
+ *
+ * @example
+ * ```typescript
+ * passkeyEnrolledEvent.subscribe(async (payload) => {
+ *     await notifyOwner(payload.userId, 'A passkey was added to your account');
+ * });
+ * ```
+ */
+export const passkeyEnrolledEvent = defineEvent(
+    'auth.passkey.enrolled',
+    Type.Object({
+        userId: Type.String(),
+        passkeyId: Type.String(),
+        label: Type.Optional(Type.String()),
+    }),
+);
+
+/**
+ * auth.passkey.revoked — a WebAuthn credential was retired
+ *
+ * 발행 시점:
+ * - revokePasskeyService()가 커밋된 직후
+ *
+ * `reason` is why the row was retired, not who asked: `'user'` is the only value
+ * the package emits today, and it exists so a later automatic revocation is
+ * distinguishable to a subscriber that already ships.
+ */
+export const passkeyRevokedEvent = defineEvent(
+    'auth.passkey.revoked',
+    Type.Object({
+        userId: Type.String(),
+        passkeyId: Type.String(),
+        reason: Type.String(),
     }),
 );
 
@@ -236,6 +286,8 @@ export const oauthUnlinkedEvent = defineEvent(
  * Auth event payload types
  */
 export type AuthLoginPayload = typeof authLoginEvent._payload;
+export type PasskeyEnrolledPayload = typeof passkeyEnrolledEvent._payload;
+export type PasskeyRevokedPayload = typeof passkeyRevokedEvent._payload;
 export type AuthRegisterPayload = typeof authRegisterEvent._payload;
 export type InvitationCreatedPayload = typeof invitationCreatedEvent._payload;
 export type InvitationAcceptedPayload = typeof invitationAcceptedEvent._payload;

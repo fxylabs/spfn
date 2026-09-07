@@ -72,6 +72,30 @@ export type {
     DeviceAuthApprovedResult,
 } from './device-auth.service';
 
+// Passkey Service (WebAuthn)
+export {
+    startPasskeyEnrollmentService,
+    finishPasskeyEnrollmentService,
+    startPasskeyLoginService,
+    finishPasskeyLoginService,
+    listPasskeysService,
+    renamePasskeyService,
+    revokePasskeyService,
+    assertRecentAuthentication,
+    assertNotLastRecoveryCredential,
+} from './passkey.service';
+
+export type {
+    StartPasskeyEnrollmentParams,
+    FinishPasskeyEnrollmentParams,
+    FinishPasskeyEnrollmentResult,
+    FinishPasskeyLoginParams,
+    RecentAuthenticationParams,
+    RenamePasskeyParams,
+    RevokePasskeyParams,
+    PasskeySummary,
+} from './passkey.service';
+
 // Key Service
 export {
     registerPublicKeyService,

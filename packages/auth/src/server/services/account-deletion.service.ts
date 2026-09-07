@@ -26,6 +26,7 @@ import {
 import {
     usersRepository,
     keysRepository,
+    passkeysRepository,
     deviceAuthorizationsRepository,
     socialAccountsRepository,
     userProfilesRepository,
@@ -470,6 +471,10 @@ async function anonymizeUser(user: User): Promise<void>
 
     await socialAccountsRepository.deleteAllByUserId(user.id);
     await keysRepository.deleteAllByUserId(user.id);
+    // Passkeys go with the other credentials: an anonymized row keeping one
+    // would leave a credential that still names this account to an
+    // authenticator, and reserve its credential id for a user nobody can be.
+    await passkeysRepository.deleteAllByUserId(user.id);
     await userProfilesRepository.updateByUserId(user.id, {
         displayName: null,
         firstName: null,

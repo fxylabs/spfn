@@ -5,6 +5,7 @@
  */
 
 import { env } from '@spfn/auth/config';
+import { PasskeyConfigError } from '@spfn/auth/errors';
 
 import type { SocialProvider } from '../types';
 import { normalizeOptionalEmail } from '../helpers/email';
@@ -398,4 +399,272 @@ export function getCsrfMode(): CsrfMode
 export function getCsrfExemptPaths(): string[]
 {
     return globalConfig.csrf?.exemptPaths ?? [];
+}
+
+// ============================================================================
+// Passkeys (WebAuthn)
+// ============================================================================
+
+/**
+ * The relying party this deployment presents to authenticators, resolved.
+ *
+ * `rpId` is the domain a credential is bound to and can never change without
+ * orphaning every passkey already enrolled under it. `origins` is the closed set
+ * of pages allowed to run a ceremony for that rpId.
+ */
+export interface PasskeyConfig
+{
+    /** Domain credentials are bound to — a registrable domain, no protocol, no port. */
+    rpId: string;
+    /** Name shown by the authenticator's own prompt. */
+    rpName: string;
+    /** Full origins allowed to run a ceremony, e.g. `https://app.example.com`. */
+    origins: string[];
+    userVerification: PasskeyUserVerification;
+    challengeTtlMs: number;
+    recentAuthMs: number;
+}
+
+/**
+ * How hard the authenticator must work to prove the person is present.
+ *
+ * `discouraged` is not offered: a passkey here is the whole credential, so an
+ * assertion that skipped user verification would sign someone in on possession
+ * of an unlocked device alone.
+ */
+export type PasskeyUserVerification = 'preferred' | 'required';
+
+const PASSKEY_USER_VERIFICATIONS: PasskeyUserVerification[] = ['preferred', 'required'];
+
+type PasskeyEnvSource = Record<string, string | undefined>;
+
+const DEFAULT_CHALLENGE_TTL_SECONDS = 300;
+const DEFAULT_RECENT_AUTH_MINUTES = 10;
+
+/**
+ * Every variable this resolution reads, with the one schema default filled in.
+ *
+ * `SPFN_APP_URL` defaults to `http://localhost:3000` in the validated `env`
+ * proxy rather than in `process.env`, so reading the raw environment alone would
+ * refuse boot for an app that simply never set it.
+ */
+function passkeyEnvSource(): PasskeyEnvSource
+{
+    return { ...process.env, SPFN_APP_URL: process.env.SPFN_APP_URL || env.SPFN_APP_URL };
+}
+
+/**
+ * The app URL every default here is derived from — the same resolution the OAuth
+ * callbacks use, so passkeys and OAuth cannot disagree about where the app is.
+ */
+function passkeyAppUrl(env: PasskeyEnvSource): URL
+{
+    const configured = env.NEXT_PUBLIC_SPFN_APP_URL || env.SPFN_APP_URL;
+
+    if (!configured)
+    {
+        throw new PasskeyConfigError({
+            message: 'Passkeys need a relying party ID. Set SPFN_AUTH_PASSKEY_RP_ID, or set '
+                + 'NEXT_PUBLIC_SPFN_APP_URL / SPFN_APP_URL to the app origin it should be derived from.',
+        });
+    }
+
+    try
+    {
+        return new URL(configured);
+    }
+    catch
+    {
+        throw new PasskeyConfigError({
+            message: `Passkeys cannot derive a relying party ID: "${configured}" is not a URL. `
+                + 'Fix NEXT_PUBLIC_SPFN_APP_URL / SPFN_APP_URL, or set SPFN_AUTH_PASSKEY_RP_ID explicitly.',
+        });
+    }
+}
+
+/**
+ * `localhost` is the one host a browser treats as a secure context over plain
+ * http, so it is the one host allowed an `http://` origin here.
+ */
+function isLocalhost(hostname: string): boolean
+{
+    return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '[::1]';
+}
+
+/** Whether a ceremony run on this host may claim credentials bound to `rpId`. */
+function isUnderRpId(hostname: string, rpId: string): boolean
+{
+    return hostname === rpId || hostname.endsWith(`.${rpId}`);
+}
+
+/**
+ * One configured origin, checked against the two rules a browser will enforce
+ * anyway — better to refuse at boot than to have every ceremony fail with an
+ * error that names the browser rather than the env value.
+ */
+function assertOriginServesRpId(origin: string, rpId: string): void
+{
+    let url: URL;
+
+    try
+    {
+        url = new URL(origin);
+    }
+    catch
+    {
+        throw new PasskeyConfigError({
+            message: `SPFN_AUTH_PASSKEY_ORIGINS contains "${origin}", which is not a URL. `
+                + 'List full origins, e.g. https://app.example.com.',
+        });
+    }
+
+    if (url.protocol !== 'https:' && !isLocalhost(url.hostname))
+    {
+        throw new PasskeyConfigError({
+            message: `Passkey origin "${origin}" is not https. WebAuthn runs only in a secure context, `
+                + 'and localhost is the only host a browser treats as one over plain http.',
+        });
+    }
+
+    if (!isUnderRpId(url.hostname, rpId))
+    {
+        throw new PasskeyConfigError({
+            message: `Passkey origin "${origin}" is not on relying party ID "${rpId}". `
+                + 'Each origin must be that host or a subdomain of it, or the browser refuses the ceremony.',
+        });
+    }
+}
+
+function resolveUserVerification(env: PasskeyEnvSource): PasskeyUserVerification
+{
+    const configured = env.SPFN_AUTH_PASSKEY_USER_VERIFICATION;
+
+    if (!configured)
+    {
+        return 'preferred';
+    }
+
+    const normalized = configured.trim().toLowerCase() as PasskeyUserVerification;
+
+    if (!PASSKEY_USER_VERIFICATIONS.includes(normalized))
+    {
+        throw new PasskeyConfigError({
+            message: `SPFN_AUTH_PASSKEY_USER_VERIFICATION is "${configured}" — expected preferred or required. `
+                + 'A passkey is the whole credential here, so an assertion that skipped user verification '
+                + 'would sign someone in on an unlocked device alone.',
+        });
+    }
+
+    return normalized;
+}
+
+/** A positive number of the given unit, or the default when unset. */
+function resolvePositiveNumber(env: PasskeyEnvSource, variable: string, fallback: number): number
+{
+    const configured = env[variable];
+
+    if (!configured)
+    {
+        return fallback;
+    }
+
+    const parsed = Number(configured);
+
+    if (!Number.isFinite(parsed) || parsed <= 0)
+    {
+        throw new PasskeyConfigError({
+            message: `${variable} is "${configured}" — expected a positive number.`,
+        });
+    }
+
+    return parsed;
+}
+
+/**
+ * Resolve the passkey configuration, refusing anything a ceremony would fail on.
+ *
+ * Zero-config for a one-origin app: rpId is the app URL's host and the single
+ * origin is the app URL's origin. An app on several hosts sets
+ * `SPFN_AUTH_PASSKEY_RP_ID` to the registrable domain they share and lists them
+ * in `SPFN_AUTH_PASSKEY_ORIGINS`.
+ *
+ * @param env - Environment to read; defaults to `process.env`.
+ * @throws PasskeyConfigError when the configuration cannot be honoured.
+ */
+export function getPasskeyConfig(env: PasskeyEnvSource = passkeyEnvSource()): PasskeyConfig
+{
+    const rpId = env.SPFN_AUTH_PASSKEY_RP_ID?.trim() || passkeyAppUrl(env).hostname;
+    const configuredOrigins = env.SPFN_AUTH_PASSKEY_ORIGINS
+        ?.split(',')
+        .map(origin => origin.trim())
+        .filter(Boolean);
+    const origins = configuredOrigins?.length ? configuredOrigins : [passkeyAppUrl(env).origin];
+
+    for (const origin of origins)
+    {
+        assertOriginServesRpId(origin, rpId);
+    }
+
+    return {
+        rpId,
+        rpName: env.SPFN_AUTH_PASSKEY_RP_NAME?.trim() || rpId,
+        origins,
+        userVerification: resolveUserVerification(env),
+        challengeTtlMs: resolvePositiveNumber(
+            env, 'SPFN_AUTH_PASSKEY_CHALLENGE_TTL_SECONDS', DEFAULT_CHALLENGE_TTL_SECONDS,
+        ) * 1000,
+        recentAuthMs: resolvePositiveNumber(
+            env, 'SPFN_AUTH_PASSKEY_RECENT_AUTH_MINUTES', DEFAULT_RECENT_AUTH_MINUTES,
+        ) * 60_000,
+    };
+}
+
+/** The variables whose presence means an operator configured passkeys on purpose. */
+const PASSKEY_VARS = [
+    'SPFN_AUTH_PASSKEY_RP_ID',
+    'SPFN_AUTH_PASSKEY_RP_NAME',
+    'SPFN_AUTH_PASSKEY_ORIGINS',
+    'SPFN_AUTH_PASSKEY_USER_VERIFICATION',
+    'SPFN_AUTH_PASSKEY_CHALLENGE_TTL_SECONDS',
+    'SPFN_AUTH_PASSKEY_RECENT_AUTH_MINUTES',
+];
+
+/**
+ * Refuse boot on a passkey configuration no ceremony could satisfy.
+ *
+ * Resolution is the check: everything `getPasskeyConfig` refuses would otherwise
+ * surface as the browser rejecting every ceremony, long after the deploy that
+ * introduced the drift.
+ *
+ * The refusal is reserved for a configuration an operator actually wrote, which
+ * is the posture `assertOAuthRedirectUris` already takes for the same reason. An
+ * app that set no passkey variable at all can still resolve to something
+ * unusable — `SPFN_APP_URL=http://192.168.1.5:3000` for mobile development, say,
+ * which is neither https nor localhost — and refusing to start over a feature
+ * nobody asked for would take that app down to fix something it does not use.
+ * It is reported instead, once, and the first ceremony (if there ever is one)
+ * fails with the same message.
+ *
+ * @throws PasskeyConfigError when a passkey variable is set and cannot be honoured
+ */
+export function assertPasskeyConfig(env: PasskeyEnvSource = passkeyEnvSource()): void
+{
+    if (PASSKEY_VARS.some(variable => env[variable]))
+    {
+        getPasskeyConfig(env);
+
+        return;
+    }
+
+    try
+    {
+        getPasskeyConfig(env);
+    }
+    catch (error)
+    {
+        authLogger.service.info(
+            'Passkeys cannot be served with the configuration derived from the app URL, and no '
+            + `SPFN_AUTH_PASSKEY_* variable is set, so boot continues. ${(error as Error).message}`,
+        );
+    }
 }

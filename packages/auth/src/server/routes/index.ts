@@ -28,6 +28,15 @@ import {
     issueOneTimeToken,
 } from './auth';
 import {
+    passkeyRegisterOptions,
+    passkeyRegisterVerify,
+    passkeyLoginOptions,
+    passkeyLoginVerify,
+    listPasskeys,
+    renamePasskey,
+    revokePasskey,
+} from './auth/passkeys';
+import {
     getInvitation,
     acceptInvitation,
     createInvitation,
@@ -89,6 +98,14 @@ export const mainAuthRouter = defineRouter({
     getDeviceAuthInfo,
     approveDeviceAuth,
     denyDeviceAuth,
+    // Passkey routes (WebAuthn)
+    passkeyRegisterOptions,
+    passkeyRegisterVerify,
+    passkeyLoginOptions,
+    passkeyLoginVerify,
+    listPasskeys,
+    renamePasskey,
+    revokePasskey,
     logout,
     rotateKey,
     listKeys,

@@ -1,0 +1,4275 @@
+{
+  "version": "8",
+  "dialect": "postgres",
+  "id": "9cd5d62c-fdb6-41cd-ba19-a677da071e88",
+  "prevIds": [
+    "f7953bdd-2d8c-489d-80cc-a84e855d22bc"
+  ],
+  "ddl": [
+    {
+      "name": "spfn_auth",
+      "entityType": "schemas"
+    },
+    {
+      "isRlsEnabled": false,
+      "name": "users",
+      "entityType": "tables",
+      "schema": "spfn_auth"
+    },
+    {
+      "isRlsEnabled": false,
+      "name": "user_profiles",
+      "entityType": "tables",
+      "schema": "spfn_auth"
+    },
+    {
+      "isRlsEnabled": false,
+      "name": "user_public_keys",
+      "entityType": "tables",
+      "schema": "spfn_auth"
+    },
+    {
+      "isRlsEnabled": false,
+      "name": "user_social_accounts",
+      "entityType": "tables",
+      "schema": "spfn_auth"
+    },
+    {
+      "isRlsEnabled": false,
+      "name": "verification_codes",
+      "entityType": "tables",
+      "schema": "spfn_auth"
+    },
+    {
+      "isRlsEnabled": false,
+      "name": "signup_link_tokens",
+      "entityType": "tables",
+      "schema": "spfn_auth"
+    },
+    {
+      "isRlsEnabled": false,
+      "name": "passkeys",
+      "entityType": "tables",
+      "schema": "spfn_auth"
+    },
+    {
+      "isRlsEnabled": false,
+      "name": "webauthn_challenges",
+      "entityType": "tables",
+      "schema": "spfn_auth"
+    },
+    {
+      "isRlsEnabled": false,
+      "name": "device_authorizations",
+      "entityType": "tables",
+      "schema": "spfn_auth"
+    },
+    {
+      "isRlsEnabled": false,
+      "name": "user_invitations",
+      "entityType": "tables",
+      "schema": "spfn_auth"
+    },
+    {
+      "isRlsEnabled": false,
+      "name": "account_deletion_requests",
+      "entityType": "tables",
+      "schema": "spfn_auth"
+    },
+    {
+      "isRlsEnabled": false,
+      "name": "roles",
+      "entityType": "tables",
+      "schema": "spfn_auth"
+    },
+    {
+      "isRlsEnabled": false,
+      "name": "permissions",
+      "entityType": "tables",
+      "schema": "spfn_auth"
+    },
+    {
+      "isRlsEnabled": false,
+      "name": "role_permissions",
+      "entityType": "tables",
+      "schema": "spfn_auth"
+    },
+    {
+      "isRlsEnabled": false,
+      "name": "user_permissions",
+      "entityType": "tables",
+      "schema": "spfn_auth"
+    },
+    {
+      "isRlsEnabled": false,
+      "name": "auth_metadata",
+      "entityType": "tables",
+      "schema": "spfn_auth"
+    },
+    {
+      "isRlsEnabled": false,
+      "name": "ops_tokens",
+      "entityType": "tables",
+      "schema": "spfn_auth"
+    },
+    {
+      "type": "bigserial",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "id",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "users"
+    },
+    {
+      "type": "uuid",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": "gen_random_uuid()",
+      "generated": null,
+      "identity": null,
+      "name": "public_id",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "users"
+    },
+    {
+      "type": "text",
+      "typeSchema": null,
+      "notNull": false,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "email",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "users"
+    },
+    {
+      "type": "text",
+      "typeSchema": null,
+      "notNull": false,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "phone",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "users"
+    },
+    {
+      "type": "text",
+      "typeSchema": null,
+      "notNull": false,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "username",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "users"
+    },
+    {
+      "type": "text",
+      "typeSchema": null,
+      "notNull": false,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "password_hash",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "users"
+    },
+    {
+      "type": "boolean",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": "false",
+      "generated": null,
+      "identity": null,
+      "name": "password_change_required",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "users"
+    },
+    {
+      "type": "bigint",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "role_id",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "users"
+    },
+    {
+      "type": "text",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": "'active'",
+      "generated": null,
+      "identity": null,
+      "name": "status",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "users"
+    },
+    {
+      "type": "timestamp with time zone",
+      "typeSchema": null,
+      "notNull": false,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "email_verified_at",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "users"
+    },
+    {
+      "type": "timestamp with time zone",
+      "typeSchema": null,
+      "notNull": false,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "phone_verified_at",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "users"
+    },
+    {
+      "type": "timestamp with time zone",
+      "typeSchema": null,
+      "notNull": false,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "last_login_at",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "users"
+    },
+    {
+      "type": "timestamp with time zone",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": "now()",
+      "generated": null,
+      "identity": null,
+      "name": "created_at",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "users"
+    },
+    {
+      "type": "timestamp with time zone",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": "now()",
+      "generated": null,
+      "identity": null,
+      "name": "updated_at",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "users"
+    },
+    {
+      "type": "timestamp with time zone",
+      "typeSchema": null,
+      "notNull": false,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "deleted_at",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "users"
+    },
+    {
+      "type": "text",
+      "typeSchema": null,
+      "notNull": false,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "deleted_by",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "users"
+    },
+    {
+      "type": "bigserial",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "id",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "user_profiles"
+    },
+    {
+      "type": "bigint",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "user_id",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "user_profiles"
+    },
+    {
+      "type": "text",
+      "typeSchema": null,
+      "notNull": false,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "display_name",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "user_profiles"
+    },
+    {
+      "type": "text",
+      "typeSchema": null,
+      "notNull": false,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "first_name",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "user_profiles"
+    },
+    {
+      "type": "text",
+      "typeSchema": null,
+      "notNull": false,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "last_name",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "user_profiles"
+    },
+    {
+      "type": "text",
+      "typeSchema": null,
+      "notNull": false,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "avatar_url",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "user_profiles"
+    },
+    {
+      "type": "text",
+      "typeSchema": null,
+      "notNull": false,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "bio",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "user_profiles"
+    },
+    {
+      "type": "text",
+      "typeSchema": null,
+      "notNull": false,
+      "dimensions": 0,
+      "default": "'en'",
+      "generated": null,
+      "identity": null,
+      "name": "locale",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "user_profiles"
+    },
+    {
+      "type": "text",
+      "typeSchema": null,
+      "notNull": false,
+      "dimensions": 0,
+      "default": "'UTC'",
+      "generated": null,
+      "identity": null,
+      "name": "timezone",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "user_profiles"
+    },
+    {
+      "type": "text",
+      "typeSchema": null,
+      "notNull": false,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "date_of_birth",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "user_profiles"
+    },
+    {
+      "type": "text",
+      "typeSchema": null,
+      "notNull": false,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "gender",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "user_profiles"
+    },
+    {
+      "type": "text",
+      "typeSchema": null,
+      "notNull": false,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "website",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "user_profiles"
+    },
+    {
+      "type": "text",
+      "typeSchema": null,
+      "notNull": false,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "location",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "user_profiles"
+    },
+    {
+      "type": "text",
+      "typeSchema": null,
+      "notNull": false,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "company",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "user_profiles"
+    },
+    {
+      "type": "text",
+      "typeSchema": null,
+      "notNull": false,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "job_title",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "user_profiles"
+    },
+    {
+      "type": "jsonb",
+      "typeSchema": null,
+      "notNull": false,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "metadata",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "user_profiles"
+    },
+    {
+      "type": "timestamp with time zone",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": "now()",
+      "generated": null,
+      "identity": null,
+      "name": "created_at",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "user_profiles"
+    },
+    {
+      "type": "timestamp with time zone",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": "now()",
+      "generated": null,
+      "identity": null,
+      "name": "updated_at",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "user_profiles"
+    },
+    {
+      "type": "bigserial",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "id",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "user_public_keys"
+    },
+    {
+      "type": "bigint",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "user_id",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "user_public_keys"
+    },
+    {
+      "type": "text",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "key_id",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "user_public_keys"
+    },
+    {
+      "type": "text",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "public_key",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "user_public_keys"
+    },
+    {
+      "type": "text",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": "'ES256'",
+      "generated": null,
+      "identity": null,
+      "name": "algorithm",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "user_public_keys"
+    },
+    {
+      "type": "text",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "fingerprint",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "user_public_keys"
+    },
+    {
+      "type": "text",
+      "typeSchema": null,
+      "notNull": false,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "device_name",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "user_public_keys"
+    },
+    {
+      "type": "text",
+      "typeSchema": null,
+      "notNull": false,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "platform",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "user_public_keys"
+    },
+    {
+      "type": "text",
+      "typeSchema": null,
+      "notNull": false,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "client_kind",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "user_public_keys"
+    },
+    {
+      "type": "text",
+      "typeSchema": null,
+      "notNull": false,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "client_version",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "user_public_keys"
+    },
+    {
+      "type": "text",
+      "typeSchema": null,
+      "notNull": false,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "client_contract_version",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "user_public_keys"
+    },
+    {
+      "type": "timestamp with time zone",
+      "typeSchema": null,
+      "notNull": false,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "client_seen_at",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "user_public_keys"
+    },
+    {
+      "type": "boolean",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": "true",
+      "generated": null,
+      "identity": null,
+      "name": "is_active",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "user_public_keys"
+    },
+    {
+      "type": "timestamp with time zone",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": "now()",
+      "generated": null,
+      "identity": null,
+      "name": "created_at",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "user_public_keys"
+    },
+    {
+      "type": "timestamp with time zone",
+      "typeSchema": null,
+      "notNull": false,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "last_used_at",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "user_public_keys"
+    },
+    {
+      "type": "timestamp with time zone",
+      "typeSchema": null,
+      "notNull": false,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "expires_at",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "user_public_keys"
+    },
+    {
+      "type": "timestamp with time zone",
+      "typeSchema": null,
+      "notNull": false,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "revoked_at",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "user_public_keys"
+    },
+    {
+      "type": "text",
+      "typeSchema": null,
+      "notNull": false,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "revoked_reason",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "user_public_keys"
+    },
+    {
+      "type": "bigserial",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "id",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "user_social_accounts"
+    },
+    {
+      "type": "bigint",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "user_id",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "user_social_accounts"
+    },
+    {
+      "type": "text",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "provider",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "user_social_accounts"
+    },
+    {
+      "type": "text",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "provider_user_id",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "user_social_accounts"
+    },
+    {
+      "type": "text",
+      "typeSchema": null,
+      "notNull": false,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "provider_email",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "user_social_accounts"
+    },
+    {
+      "type": "text",
+      "typeSchema": null,
+      "notNull": false,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "access_token",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "user_social_accounts"
+    },
+    {
+      "type": "text",
+      "typeSchema": null,
+      "notNull": false,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "refresh_token",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "user_social_accounts"
+    },
+    {
+      "type": "timestamp with time zone",
+      "typeSchema": null,
+      "notNull": false,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "token_expires_at",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "user_social_accounts"
+    },
+    {
+      "type": "timestamp with time zone",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": "now()",
+      "generated": null,
+      "identity": null,
+      "name": "created_at",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "user_social_accounts"
+    },
+    {
+      "type": "timestamp with time zone",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": "now()",
+      "generated": null,
+      "identity": null,
+      "name": "updated_at",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "user_social_accounts"
+    },
+    {
+      "type": "bigserial",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "id",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "verification_codes"
+    },
+    {
+      "type": "text",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "target",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "verification_codes"
+    },
+    {
+      "type": "text",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "target_type",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "verification_codes"
+    },
+    {
+      "type": "text",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "code",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "verification_codes"
+    },
+    {
+      "type": "text",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "purpose",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "verification_codes"
+    },
+    {
+      "type": "timestamp with time zone",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "expires_at",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "verification_codes"
+    },
+    {
+      "type": "timestamp with time zone",
+      "typeSchema": null,
+      "notNull": false,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "used_at",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "verification_codes"
+    },
+    {
+      "type": "integer",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": "0",
+      "generated": null,
+      "identity": null,
+      "name": "attempts",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "verification_codes"
+    },
+    {
+      "type": "timestamp with time zone",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": "now()",
+      "generated": null,
+      "identity": null,
+      "name": "created_at",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "verification_codes"
+    },
+    {
+      "type": "timestamp with time zone",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": "now()",
+      "generated": null,
+      "identity": null,
+      "name": "updated_at",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "verification_codes"
+    },
+    {
+      "type": "bigserial",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "id",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "signup_link_tokens"
+    },
+    {
+      "type": "text",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "email",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "signup_link_tokens"
+    },
+    {
+      "type": "text",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "token_hash",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "signup_link_tokens"
+    },
+    {
+      "type": "text",
+      "typeSchema": null,
+      "notNull": false,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "return_path",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "signup_link_tokens"
+    },
+    {
+      "type": "timestamp with time zone",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "expires_at",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "signup_link_tokens"
+    },
+    {
+      "type": "timestamp with time zone",
+      "typeSchema": null,
+      "notNull": false,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "consumed_at",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "signup_link_tokens"
+    },
+    {
+      "type": "timestamp with time zone",
+      "typeSchema": null,
+      "notNull": false,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "superseded_at",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "signup_link_tokens"
+    },
+    {
+      "type": "text",
+      "typeSchema": null,
+      "notNull": false,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "setup_secret_hash",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "signup_link_tokens"
+    },
+    {
+      "type": "timestamp with time zone",
+      "typeSchema": null,
+      "notNull": false,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "setup_expires_at",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "signup_link_tokens"
+    },
+    {
+      "type": "timestamp with time zone",
+      "typeSchema": null,
+      "notNull": false,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "completed_at",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "signup_link_tokens"
+    },
+    {
+      "type": "timestamp with time zone",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": "now()",
+      "generated": null,
+      "identity": null,
+      "name": "created_at",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "signup_link_tokens"
+    },
+    {
+      "type": "timestamp with time zone",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": "now()",
+      "generated": null,
+      "identity": null,
+      "name": "updated_at",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "signup_link_tokens"
+    },
+    {
+      "type": "bigserial",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "id",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "passkeys"
+    },
+    {
+      "type": "bigint",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "user_id",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "passkeys"
+    },
+    {
+      "type": "text",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "credential_id",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "passkeys"
+    },
+    {
+      "type": "text",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "public_key",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "passkeys"
+    },
+    {
+      "type": "integer",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": "0",
+      "generated": null,
+      "identity": null,
+      "name": "counter",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "passkeys"
+    },
+    {
+      "type": "text",
+      "typeSchema": null,
+      "notNull": false,
+      "dimensions": 1,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "transports",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "passkeys"
+    },
+    {
+      "type": "text",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "device_type",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "passkeys"
+    },
+    {
+      "type": "boolean",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": "false",
+      "generated": null,
+      "identity": null,
+      "name": "backed_up",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "passkeys"
+    },
+    {
+      "type": "text",
+      "typeSchema": null,
+      "notNull": false,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "aaguid",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "passkeys"
+    },
+    {
+      "type": "text",
+      "typeSchema": null,
+      "notNull": false,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "label",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "passkeys"
+    },
+    {
+      "type": "timestamp with time zone",
+      "typeSchema": null,
+      "notNull": false,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "last_used_at",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "passkeys"
+    },
+    {
+      "type": "timestamp with time zone",
+      "typeSchema": null,
+      "notNull": false,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "revoked_at",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "passkeys"
+    },
+    {
+      "type": "text",
+      "typeSchema": null,
+      "notNull": false,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "revoked_reason",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "passkeys"
+    },
+    {
+      "type": "timestamp with time zone",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": "now()",
+      "generated": null,
+      "identity": null,
+      "name": "created_at",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "passkeys"
+    },
+    {
+      "type": "timestamp with time zone",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": "now()",
+      "generated": null,
+      "identity": null,
+      "name": "updated_at",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "passkeys"
+    },
+    {
+      "type": "bigserial",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "id",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "webauthn_challenges"
+    },
+    {
+      "type": "text",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "challenge_hash",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "webauthn_challenges"
+    },
+    {
+      "type": "text",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "kind",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "webauthn_challenges"
+    },
+    {
+      "type": "bigint",
+      "typeSchema": null,
+      "notNull": false,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "user_id",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "webauthn_challenges"
+    },
+    {
+      "type": "timestamp with time zone",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "expires_at",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "webauthn_challenges"
+    },
+    {
+      "type": "timestamp with time zone",
+      "typeSchema": null,
+      "notNull": false,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "consumed_at",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "webauthn_challenges"
+    },
+    {
+      "type": "timestamp with time zone",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": "now()",
+      "generated": null,
+      "identity": null,
+      "name": "created_at",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "webauthn_challenges"
+    },
+    {
+      "type": "bigserial",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "id",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "device_authorizations"
+    },
+    {
+      "type": "text",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "device_code_hash",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "device_authorizations"
+    },
+    {
+      "type": "text",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "user_code",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "device_authorizations"
+    },
+    {
+      "type": "text",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "public_key",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "device_authorizations"
+    },
+    {
+      "type": "text",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "key_id",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "device_authorizations"
+    },
+    {
+      "type": "text",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "fingerprint",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "device_authorizations"
+    },
+    {
+      "type": "text",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": "'ES256'",
+      "generated": null,
+      "identity": null,
+      "name": "algorithm",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "device_authorizations"
+    },
+    {
+      "type": "text",
+      "typeSchema": null,
+      "notNull": false,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "device_name",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "device_authorizations"
+    },
+    {
+      "type": "text",
+      "typeSchema": null,
+      "notNull": false,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "platform",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "device_authorizations"
+    },
+    {
+      "type": "text",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": "'pending'",
+      "generated": null,
+      "identity": null,
+      "name": "status",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "device_authorizations"
+    },
+    {
+      "type": "bigint",
+      "typeSchema": null,
+      "notNull": false,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "user_id",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "device_authorizations"
+    },
+    {
+      "type": "timestamp with time zone",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "expires_at",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "device_authorizations"
+    },
+    {
+      "type": "timestamp with time zone",
+      "typeSchema": null,
+      "notNull": false,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "approved_at",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "device_authorizations"
+    },
+    {
+      "type": "timestamp with time zone",
+      "typeSchema": null,
+      "notNull": false,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "consumed_at",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "device_authorizations"
+    },
+    {
+      "type": "timestamp with time zone",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": "now()",
+      "generated": null,
+      "identity": null,
+      "name": "created_at",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "device_authorizations"
+    },
+    {
+      "type": "timestamp with time zone",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": "now()",
+      "generated": null,
+      "identity": null,
+      "name": "updated_at",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "device_authorizations"
+    },
+    {
+      "type": "bigserial",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "id",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "user_invitations"
+    },
+    {
+      "type": "text",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "email",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "user_invitations"
+    },
+    {
+      "type": "text",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "token",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "user_invitations"
+    },
+    {
+      "type": "bigint",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "role_id",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "user_invitations"
+    },
+    {
+      "type": "bigint",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "invited_by_id",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "user_invitations"
+    },
+    {
+      "type": "text",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": "'pending'",
+      "generated": null,
+      "identity": null,
+      "name": "status",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "user_invitations"
+    },
+    {
+      "type": "timestamp with time zone",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "expires_at",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "user_invitations"
+    },
+    {
+      "type": "timestamp with time zone",
+      "typeSchema": null,
+      "notNull": false,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "accepted_at",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "user_invitations"
+    },
+    {
+      "type": "timestamp with time zone",
+      "typeSchema": null,
+      "notNull": false,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "cancelled_at",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "user_invitations"
+    },
+    {
+      "type": "jsonb",
+      "typeSchema": null,
+      "notNull": false,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "metadata",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "user_invitations"
+    },
+    {
+      "type": "timestamp with time zone",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": "now()",
+      "generated": null,
+      "identity": null,
+      "name": "created_at",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "user_invitations"
+    },
+    {
+      "type": "timestamp with time zone",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": "now()",
+      "generated": null,
+      "identity": null,
+      "name": "updated_at",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "user_invitations"
+    },
+    {
+      "type": "bigserial",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "id",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "account_deletion_requests"
+    },
+    {
+      "type": "bigint",
+      "typeSchema": null,
+      "notNull": false,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "user_id",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "account_deletion_requests"
+    },
+    {
+      "type": "text",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "user_public_id",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "account_deletion_requests"
+    },
+    {
+      "type": "timestamp with time zone",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": "now()",
+      "generated": null,
+      "identity": null,
+      "name": "requested_at",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "account_deletion_requests"
+    },
+    {
+      "type": "timestamp with time zone",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "purge_scheduled_at",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "account_deletion_requests"
+    },
+    {
+      "type": "text",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": "'pending'",
+      "generated": null,
+      "identity": null,
+      "name": "status",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "account_deletion_requests"
+    },
+    {
+      "type": "text",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": "'self'",
+      "generated": null,
+      "identity": null,
+      "name": "requested_by",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "account_deletion_requests"
+    },
+    {
+      "type": "text",
+      "typeSchema": null,
+      "notNull": false,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "reason",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "account_deletion_requests"
+    },
+    {
+      "type": "timestamp with time zone",
+      "typeSchema": null,
+      "notNull": false,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "cancelled_at",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "account_deletion_requests"
+    },
+    {
+      "type": "timestamp with time zone",
+      "typeSchema": null,
+      "notNull": false,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "completed_at",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "account_deletion_requests"
+    },
+    {
+      "type": "text",
+      "typeSchema": null,
+      "notNull": false,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "purge_strategy",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "account_deletion_requests"
+    },
+    {
+      "type": "timestamp with time zone",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": "now()",
+      "generated": null,
+      "identity": null,
+      "name": "created_at",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "account_deletion_requests"
+    },
+    {
+      "type": "timestamp with time zone",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": "now()",
+      "generated": null,
+      "identity": null,
+      "name": "updated_at",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "account_deletion_requests"
+    },
+    {
+      "type": "bigserial",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "id",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "roles"
+    },
+    {
+      "type": "text",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "name",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "roles"
+    },
+    {
+      "type": "text",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "display_name",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "roles"
+    },
+    {
+      "type": "text",
+      "typeSchema": null,
+      "notNull": false,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "description",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "roles"
+    },
+    {
+      "type": "boolean",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": "false",
+      "generated": null,
+      "identity": null,
+      "name": "is_builtin",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "roles"
+    },
+    {
+      "type": "boolean",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": "false",
+      "generated": null,
+      "identity": null,
+      "name": "is_system",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "roles"
+    },
+    {
+      "type": "boolean",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": "true",
+      "generated": null,
+      "identity": null,
+      "name": "is_active",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "roles"
+    },
+    {
+      "type": "integer",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": "10",
+      "generated": null,
+      "identity": null,
+      "name": "priority",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "roles"
+    },
+    {
+      "type": "timestamp with time zone",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": "now()",
+      "generated": null,
+      "identity": null,
+      "name": "created_at",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "roles"
+    },
+    {
+      "type": "timestamp with time zone",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": "now()",
+      "generated": null,
+      "identity": null,
+      "name": "updated_at",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "roles"
+    },
+    {
+      "type": "bigserial",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "id",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "permissions"
+    },
+    {
+      "type": "text",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "name",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "permissions"
+    },
+    {
+      "type": "text",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "display_name",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "permissions"
+    },
+    {
+      "type": "text",
+      "typeSchema": null,
+      "notNull": false,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "description",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "permissions"
+    },
+    {
+      "type": "text",
+      "typeSchema": null,
+      "notNull": false,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "category",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "permissions"
+    },
+    {
+      "type": "boolean",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": "false",
+      "generated": null,
+      "identity": null,
+      "name": "is_builtin",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "permissions"
+    },
+    {
+      "type": "boolean",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": "false",
+      "generated": null,
+      "identity": null,
+      "name": "is_system",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "permissions"
+    },
+    {
+      "type": "boolean",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": "true",
+      "generated": null,
+      "identity": null,
+      "name": "is_active",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "permissions"
+    },
+    {
+      "type": "jsonb",
+      "typeSchema": null,
+      "notNull": false,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "metadata",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "permissions"
+    },
+    {
+      "type": "timestamp with time zone",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": "now()",
+      "generated": null,
+      "identity": null,
+      "name": "created_at",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "permissions"
+    },
+    {
+      "type": "timestamp with time zone",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": "now()",
+      "generated": null,
+      "identity": null,
+      "name": "updated_at",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "permissions"
+    },
+    {
+      "type": "bigserial",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "id",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "role_permissions"
+    },
+    {
+      "type": "bigint",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "role_id",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "role_permissions"
+    },
+    {
+      "type": "bigint",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "permission_id",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "role_permissions"
+    },
+    {
+      "type": "timestamp with time zone",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": "now()",
+      "generated": null,
+      "identity": null,
+      "name": "created_at",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "role_permissions"
+    },
+    {
+      "type": "timestamp with time zone",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": "now()",
+      "generated": null,
+      "identity": null,
+      "name": "updated_at",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "role_permissions"
+    },
+    {
+      "type": "bigserial",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "id",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "user_permissions"
+    },
+    {
+      "type": "bigint",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "user_id",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "user_permissions"
+    },
+    {
+      "type": "bigint",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "permission_id",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "user_permissions"
+    },
+    {
+      "type": "boolean",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": "true",
+      "generated": null,
+      "identity": null,
+      "name": "granted",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "user_permissions"
+    },
+    {
+      "type": "text",
+      "typeSchema": null,
+      "notNull": false,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "reason",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "user_permissions"
+    },
+    {
+      "type": "timestamp with time zone",
+      "typeSchema": null,
+      "notNull": false,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "expires_at",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "user_permissions"
+    },
+    {
+      "type": "timestamp with time zone",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": "now()",
+      "generated": null,
+      "identity": null,
+      "name": "created_at",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "user_permissions"
+    },
+    {
+      "type": "timestamp with time zone",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": "now()",
+      "generated": null,
+      "identity": null,
+      "name": "updated_at",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "user_permissions"
+    },
+    {
+      "type": "text",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "key",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "auth_metadata"
+    },
+    {
+      "type": "text",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "value",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "auth_metadata"
+    },
+    {
+      "type": "timestamp with time zone",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": "now()",
+      "generated": null,
+      "identity": null,
+      "name": "updated_at",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "auth_metadata"
+    },
+    {
+      "type": "bigserial",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "id",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "ops_tokens"
+    },
+    {
+      "type": "text",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "name",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "ops_tokens"
+    },
+    {
+      "type": "text",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "token_hash",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "ops_tokens"
+    },
+    {
+      "type": "text",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 1,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "scopes",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "ops_tokens"
+    },
+    {
+      "type": "timestamp with time zone",
+      "typeSchema": null,
+      "notNull": false,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "expires_at",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "ops_tokens"
+    },
+    {
+      "type": "timestamp with time zone",
+      "typeSchema": null,
+      "notNull": false,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "revoked_at",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "ops_tokens"
+    },
+    {
+      "type": "timestamp with time zone",
+      "typeSchema": null,
+      "notNull": false,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "last_used_at",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "ops_tokens"
+    },
+    {
+      "type": "timestamp with time zone",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": "now()",
+      "generated": null,
+      "identity": null,
+      "name": "created_at",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "ops_tokens"
+    },
+    {
+      "type": "timestamp with time zone",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": "now()",
+      "generated": null,
+      "identity": null,
+      "name": "updated_at",
+      "entityType": "columns",
+      "schema": "spfn_auth",
+      "table": "ops_tokens"
+    },
+    {
+      "nameExplicit": true,
+      "columns": [
+        {
+          "value": "public_id",
+          "isExpression": false,
+          "asc": true,
+          "nullsFirst": false,
+          "opclass": null
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "with": "",
+      "method": "btree",
+      "concurrently": false,
+      "name": "users_public_id_idx",
+      "entityType": "indexes",
+      "schema": "spfn_auth",
+      "table": "users"
+    },
+    {
+      "nameExplicit": true,
+      "columns": [
+        {
+          "value": "email",
+          "isExpression": false,
+          "asc": true,
+          "nullsFirst": false,
+          "opclass": null
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "with": "",
+      "method": "btree",
+      "concurrently": false,
+      "name": "users_email_idx",
+      "entityType": "indexes",
+      "schema": "spfn_auth",
+      "table": "users"
+    },
+    {
+      "nameExplicit": true,
+      "columns": [
+        {
+          "value": "phone",
+          "isExpression": false,
+          "asc": true,
+          "nullsFirst": false,
+          "opclass": null
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "with": "",
+      "method": "btree",
+      "concurrently": false,
+      "name": "users_phone_idx",
+      "entityType": "indexes",
+      "schema": "spfn_auth",
+      "table": "users"
+    },
+    {
+      "nameExplicit": true,
+      "columns": [
+        {
+          "value": "username",
+          "isExpression": false,
+          "asc": true,
+          "nullsFirst": false,
+          "opclass": null
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "with": "",
+      "method": "btree",
+      "concurrently": false,
+      "name": "users_username_idx",
+      "entityType": "indexes",
+      "schema": "spfn_auth",
+      "table": "users"
+    },
+    {
+      "nameExplicit": true,
+      "columns": [
+        {
+          "value": "status",
+          "isExpression": false,
+          "asc": true,
+          "nullsFirst": false,
+          "opclass": null
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "with": "",
+      "method": "btree",
+      "concurrently": false,
+      "name": "users_status_idx",
+      "entityType": "indexes",
+      "schema": "spfn_auth",
+      "table": "users"
+    },
+    {
+      "nameExplicit": true,
+      "columns": [
+        {
+          "value": "role_id",
+          "isExpression": false,
+          "asc": true,
+          "nullsFirst": false,
+          "opclass": null
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "with": "",
+      "method": "btree",
+      "concurrently": false,
+      "name": "users_role_id_idx",
+      "entityType": "indexes",
+      "schema": "spfn_auth",
+      "table": "users"
+    },
+    {
+      "nameExplicit": true,
+      "columns": [
+        {
+          "value": "user_id",
+          "isExpression": false,
+          "asc": true,
+          "nullsFirst": false,
+          "opclass": null
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "with": "",
+      "method": "btree",
+      "concurrently": false,
+      "name": "user_profiles_user_id_idx",
+      "entityType": "indexes",
+      "schema": "spfn_auth",
+      "table": "user_profiles"
+    },
+    {
+      "nameExplicit": true,
+      "columns": [
+        {
+          "value": "display_name",
+          "isExpression": false,
+          "asc": true,
+          "nullsFirst": false,
+          "opclass": null
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "with": "",
+      "method": "btree",
+      "concurrently": false,
+      "name": "user_profiles_display_name_idx",
+      "entityType": "indexes",
+      "schema": "spfn_auth",
+      "table": "user_profiles"
+    },
+    {
+      "nameExplicit": true,
+      "columns": [
+        {
+          "value": "locale",
+          "isExpression": false,
+          "asc": true,
+          "nullsFirst": false,
+          "opclass": null
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "with": "",
+      "method": "btree",
+      "concurrently": false,
+      "name": "user_profiles_locale_idx",
+      "entityType": "indexes",
+      "schema": "spfn_auth",
+      "table": "user_profiles"
+    },
+    {
+      "nameExplicit": true,
+      "columns": [
+        {
+          "value": "user_id",
+          "isExpression": false,
+          "asc": true,
+          "nullsFirst": false,
+          "opclass": null
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "with": "",
+      "method": "btree",
+      "concurrently": false,
+      "name": "user_public_keys_user_id_idx",
+      "entityType": "indexes",
+      "schema": "spfn_auth",
+      "table": "user_public_keys"
+    },
+    {
+      "nameExplicit": true,
+      "columns": [
+        {
+          "value": "key_id",
+          "isExpression": false,
+          "asc": true,
+          "nullsFirst": false,
+          "opclass": null
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "with": "",
+      "method": "btree",
+      "concurrently": false,
+      "name": "user_public_keys_key_id_idx",
+      "entityType": "indexes",
+      "schema": "spfn_auth",
+      "table": "user_public_keys"
+    },
+    {
+      "nameExplicit": true,
+      "columns": [
+        {
+          "value": "is_active",
+          "isExpression": false,
+          "asc": true,
+          "nullsFirst": false,
+          "opclass": null
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "with": "",
+      "method": "btree",
+      "concurrently": false,
+      "name": "user_public_keys_active_idx",
+      "entityType": "indexes",
+      "schema": "spfn_auth",
+      "table": "user_public_keys"
+    },
+    {
+      "nameExplicit": true,
+      "columns": [
+        {
+          "value": "fingerprint",
+          "isExpression": false,
+          "asc": true,
+          "nullsFirst": false,
+          "opclass": null
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "with": "",
+      "method": "btree",
+      "concurrently": false,
+      "name": "user_public_keys_fingerprint_idx",
+      "entityType": "indexes",
+      "schema": "spfn_auth",
+      "table": "user_public_keys"
+    },
+    {
+      "nameExplicit": true,
+      "columns": [
+        {
+          "value": "user_id",
+          "isExpression": false,
+          "asc": true,
+          "nullsFirst": false,
+          "opclass": null
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "with": "",
+      "method": "btree",
+      "concurrently": false,
+      "name": "user_social_accounts_user_id_idx",
+      "entityType": "indexes",
+      "schema": "spfn_auth",
+      "table": "user_social_accounts"
+    },
+    {
+      "nameExplicit": true,
+      "columns": [
+        {
+          "value": "provider",
+          "isExpression": false,
+          "asc": true,
+          "nullsFirst": false,
+          "opclass": null
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "with": "",
+      "method": "btree",
+      "concurrently": false,
+      "name": "user_social_accounts_provider_idx",
+      "entityType": "indexes",
+      "schema": "spfn_auth",
+      "table": "user_social_accounts"
+    },
+    {
+      "nameExplicit": true,
+      "columns": [
+        {
+          "value": "provider",
+          "isExpression": false,
+          "asc": true,
+          "nullsFirst": false,
+          "opclass": null
+        },
+        {
+          "value": "provider_user_id",
+          "isExpression": false,
+          "asc": true,
+          "nullsFirst": false,
+          "opclass": null
+        }
+      ],
+      "isUnique": true,
+      "where": null,
+      "with": "",
+      "method": "btree",
+      "concurrently": false,
+      "name": "provider_user_unique_idx",
+      "entityType": "indexes",
+      "schema": "spfn_auth",
+      "table": "user_social_accounts"
+    },
+    {
+      "nameExplicit": true,
+      "columns": [
+        {
+          "value": "target",
+          "isExpression": false,
+          "asc": true,
+          "nullsFirst": false,
+          "opclass": null
+        },
+        {
+          "value": "purpose",
+          "isExpression": false,
+          "asc": true,
+          "nullsFirst": false,
+          "opclass": null
+        },
+        {
+          "value": "expires_at",
+          "isExpression": false,
+          "asc": true,
+          "nullsFirst": false,
+          "opclass": null
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "with": "",
+      "method": "btree",
+      "concurrently": false,
+      "name": "target_purpose_idx",
+      "entityType": "indexes",
+      "schema": "spfn_auth",
+      "table": "verification_codes"
+    },
+    {
+      "nameExplicit": true,
+      "columns": [
+        {
+          "value": "token_hash",
+          "isExpression": false,
+          "asc": true,
+          "nullsFirst": false,
+          "opclass": null
+        }
+      ],
+      "isUnique": true,
+      "where": null,
+      "with": "",
+      "method": "btree",
+      "concurrently": false,
+      "name": "signup_link_token_hash_idx",
+      "entityType": "indexes",
+      "schema": "spfn_auth",
+      "table": "signup_link_tokens"
+    },
+    {
+      "nameExplicit": true,
+      "columns": [
+        {
+          "value": "setup_secret_hash",
+          "isExpression": false,
+          "asc": true,
+          "nullsFirst": false,
+          "opclass": null
+        }
+      ],
+      "isUnique": true,
+      "where": null,
+      "with": "",
+      "method": "btree",
+      "concurrently": false,
+      "name": "signup_link_setup_secret_hash_idx",
+      "entityType": "indexes",
+      "schema": "spfn_auth",
+      "table": "signup_link_tokens"
+    },
+    {
+      "nameExplicit": true,
+      "columns": [
+        {
+          "value": "email",
+          "isExpression": false,
+          "asc": true,
+          "nullsFirst": false,
+          "opclass": null
+        },
+        {
+          "value": "expires_at",
+          "isExpression": false,
+          "asc": true,
+          "nullsFirst": false,
+          "opclass": null
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "with": "",
+      "method": "btree",
+      "concurrently": false,
+      "name": "signup_link_email_idx",
+      "entityType": "indexes",
+      "schema": "spfn_auth",
+      "table": "signup_link_tokens"
+    },
+    {
+      "nameExplicit": true,
+      "columns": [
+        {
+          "value": "user_id",
+          "isExpression": false,
+          "asc": true,
+          "nullsFirst": false,
+          "opclass": null
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "with": "",
+      "method": "btree",
+      "concurrently": false,
+      "name": "passkeys_user_id_idx",
+      "entityType": "indexes",
+      "schema": "spfn_auth",
+      "table": "passkeys"
+    },
+    {
+      "nameExplicit": true,
+      "columns": [
+        {
+          "value": "challenge_hash",
+          "isExpression": false,
+          "asc": true,
+          "nullsFirst": false,
+          "opclass": null
+        }
+      ],
+      "isUnique": true,
+      "where": null,
+      "with": "",
+      "method": "btree",
+      "concurrently": false,
+      "name": "webauthn_challenge_hash_idx",
+      "entityType": "indexes",
+      "schema": "spfn_auth",
+      "table": "webauthn_challenges"
+    },
+    {
+      "nameExplicit": true,
+      "columns": [
+        {
+          "value": "expires_at",
+          "isExpression": false,
+          "asc": true,
+          "nullsFirst": false,
+          "opclass": null
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "with": "",
+      "method": "btree",
+      "concurrently": false,
+      "name": "webauthn_challenges_expires_at_idx",
+      "entityType": "indexes",
+      "schema": "spfn_auth",
+      "table": "webauthn_challenges"
+    },
+    {
+      "nameExplicit": true,
+      "columns": [
+        {
+          "value": "user_code",
+          "isExpression": false,
+          "asc": true,
+          "nullsFirst": false,
+          "opclass": null
+        }
+      ],
+      "isUnique": true,
+      "where": null,
+      "with": "",
+      "method": "btree",
+      "concurrently": false,
+      "name": "device_authorization_user_code_idx",
+      "entityType": "indexes",
+      "schema": "spfn_auth",
+      "table": "device_authorizations"
+    },
+    {
+      "nameExplicit": true,
+      "columns": [
+        {
+          "value": "token",
+          "isExpression": false,
+          "asc": true,
+          "nullsFirst": false,
+          "opclass": null
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "with": "",
+      "method": "btree",
+      "concurrently": false,
+      "name": "invitations_token_idx",
+      "entityType": "indexes",
+      "schema": "spfn_auth",
+      "table": "user_invitations"
+    },
+    {
+      "nameExplicit": true,
+      "columns": [
+        {
+          "value": "email",
+          "isExpression": false,
+          "asc": true,
+          "nullsFirst": false,
+          "opclass": null
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "with": "",
+      "method": "btree",
+      "concurrently": false,
+      "name": "invitations_email_idx",
+      "entityType": "indexes",
+      "schema": "spfn_auth",
+      "table": "user_invitations"
+    },
+    {
+      "nameExplicit": true,
+      "columns": [
+        {
+          "value": "status",
+          "isExpression": false,
+          "asc": true,
+          "nullsFirst": false,
+          "opclass": null
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "with": "",
+      "method": "btree",
+      "concurrently": false,
+      "name": "invitations_status_idx",
+      "entityType": "indexes",
+      "schema": "spfn_auth",
+      "table": "user_invitations"
+    },
+    {
+      "nameExplicit": true,
+      "columns": [
+        {
+          "value": "invited_by_id",
+          "isExpression": false,
+          "asc": true,
+          "nullsFirst": false,
+          "opclass": null
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "with": "",
+      "method": "btree",
+      "concurrently": false,
+      "name": "invitations_invited_by_idx",
+      "entityType": "indexes",
+      "schema": "spfn_auth",
+      "table": "user_invitations"
+    },
+    {
+      "nameExplicit": true,
+      "columns": [
+        {
+          "value": "expires_at",
+          "isExpression": false,
+          "asc": true,
+          "nullsFirst": false,
+          "opclass": null
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "with": "",
+      "method": "btree",
+      "concurrently": false,
+      "name": "invitations_expires_at_idx",
+      "entityType": "indexes",
+      "schema": "spfn_auth",
+      "table": "user_invitations"
+    },
+    {
+      "nameExplicit": true,
+      "columns": [
+        {
+          "value": "role_id",
+          "isExpression": false,
+          "asc": true,
+          "nullsFirst": false,
+          "opclass": null
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "with": "",
+      "method": "btree",
+      "concurrently": false,
+      "name": "invitations_role_id_idx",
+      "entityType": "indexes",
+      "schema": "spfn_auth",
+      "table": "user_invitations"
+    },
+    {
+      "nameExplicit": true,
+      "columns": [
+        {
+          "value": "user_id",
+          "isExpression": false,
+          "asc": true,
+          "nullsFirst": false,
+          "opclass": null
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "with": "",
+      "method": "btree",
+      "concurrently": false,
+      "name": "account_deletion_requests_user_id_idx",
+      "entityType": "indexes",
+      "schema": "spfn_auth",
+      "table": "account_deletion_requests"
+    },
+    {
+      "nameExplicit": true,
+      "columns": [
+        {
+          "value": "status",
+          "isExpression": false,
+          "asc": true,
+          "nullsFirst": false,
+          "opclass": null
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "with": "",
+      "method": "btree",
+      "concurrently": false,
+      "name": "account_deletion_requests_status_idx",
+      "entityType": "indexes",
+      "schema": "spfn_auth",
+      "table": "account_deletion_requests"
+    },
+    {
+      "nameExplicit": true,
+      "columns": [
+        {
+          "value": "purge_scheduled_at",
+          "isExpression": false,
+          "asc": true,
+          "nullsFirst": false,
+          "opclass": null
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "with": "",
+      "method": "btree",
+      "concurrently": false,
+      "name": "account_deletion_requests_purge_scheduled_at_idx",
+      "entityType": "indexes",
+      "schema": "spfn_auth",
+      "table": "account_deletion_requests"
+    },
+    {
+      "nameExplicit": true,
+      "columns": [
+        {
+          "value": "user_public_id",
+          "isExpression": false,
+          "asc": true,
+          "nullsFirst": false,
+          "opclass": null
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "with": "",
+      "method": "btree",
+      "concurrently": false,
+      "name": "account_deletion_requests_user_public_id_idx",
+      "entityType": "indexes",
+      "schema": "spfn_auth",
+      "table": "account_deletion_requests"
+    },
+    {
+      "nameExplicit": true,
+      "columns": [
+        {
+          "value": "user_id",
+          "isExpression": false,
+          "asc": true,
+          "nullsFirst": false,
+          "opclass": null
+        }
+      ],
+      "isUnique": true,
+      "where": "\"status\" = 'pending'",
+      "with": "",
+      "method": "btree",
+      "concurrently": false,
+      "name": "account_deletion_requests_user_pending_unique_idx",
+      "entityType": "indexes",
+      "schema": "spfn_auth",
+      "table": "account_deletion_requests"
+    },
+    {
+      "nameExplicit": true,
+      "columns": [
+        {
+          "value": "name",
+          "isExpression": false,
+          "asc": true,
+          "nullsFirst": false,
+          "opclass": null
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "with": "",
+      "method": "btree",
+      "concurrently": false,
+      "name": "roles_name_idx",
+      "entityType": "indexes",
+      "schema": "spfn_auth",
+      "table": "roles"
+    },
+    {
+      "nameExplicit": true,
+      "columns": [
+        {
+          "value": "is_system",
+          "isExpression": false,
+          "asc": true,
+          "nullsFirst": false,
+          "opclass": null
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "with": "",
+      "method": "btree",
+      "concurrently": false,
+      "name": "roles_is_system_idx",
+      "entityType": "indexes",
+      "schema": "spfn_auth",
+      "table": "roles"
+    },
+    {
+      "nameExplicit": true,
+      "columns": [
+        {
+          "value": "is_active",
+          "isExpression": false,
+          "asc": true,
+          "nullsFirst": false,
+          "opclass": null
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "with": "",
+      "method": "btree",
+      "concurrently": false,
+      "name": "roles_is_active_idx",
+      "entityType": "indexes",
+      "schema": "spfn_auth",
+      "table": "roles"
+    },
+    {
+      "nameExplicit": true,
+      "columns": [
+        {
+          "value": "is_builtin",
+          "isExpression": false,
+          "asc": true,
+          "nullsFirst": false,
+          "opclass": null
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "with": "",
+      "method": "btree",
+      "concurrently": false,
+      "name": "roles_is_builtin_idx",
+      "entityType": "indexes",
+      "schema": "spfn_auth",
+      "table": "roles"
+    },
+    {
+      "nameExplicit": true,
+      "columns": [
+        {
+          "value": "priority",
+          "isExpression": false,
+          "asc": true,
+          "nullsFirst": false,
+          "opclass": null
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "with": "",
+      "method": "btree",
+      "concurrently": false,
+      "name": "roles_priority_idx",
+      "entityType": "indexes",
+      "schema": "spfn_auth",
+      "table": "roles"
+    },
+    {
+      "nameExplicit": true,
+      "columns": [
+        {
+          "value": "name",
+          "isExpression": false,
+          "asc": true,
+          "nullsFirst": false,
+          "opclass": null
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "with": "",
+      "method": "btree",
+      "concurrently": false,
+      "name": "permissions_name_idx",
+      "entityType": "indexes",
+      "schema": "spfn_auth",
+      "table": "permissions"
+    },
+    {
+      "nameExplicit": true,
+      "columns": [
+        {
+          "value": "category",
+          "isExpression": false,
+          "asc": true,
+          "nullsFirst": false,
+          "opclass": null
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "with": "",
+      "method": "btree",
+      "concurrently": false,
+      "name": "permissions_category_idx",
+      "entityType": "indexes",
+      "schema": "spfn_auth",
+      "table": "permissions"
+    },
+    {
+      "nameExplicit": true,
+      "columns": [
+        {
+          "value": "is_system",
+          "isExpression": false,
+          "asc": true,
+          "nullsFirst": false,
+          "opclass": null
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "with": "",
+      "method": "btree",
+      "concurrently": false,
+      "name": "permissions_is_system_idx",
+      "entityType": "indexes",
+      "schema": "spfn_auth",
+      "table": "permissions"
+    },
+    {
+      "nameExplicit": true,
+      "columns": [
+        {
+          "value": "is_active",
+          "isExpression": false,
+          "asc": true,
+          "nullsFirst": false,
+          "opclass": null
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "with": "",
+      "method": "btree",
+      "concurrently": false,
+      "name": "permissions_is_active_idx",
+      "entityType": "indexes",
+      "schema": "spfn_auth",
+      "table": "permissions"
+    },
+    {
+      "nameExplicit": true,
+      "columns": [
+        {
+          "value": "is_builtin",
+          "isExpression": false,
+          "asc": true,
+          "nullsFirst": false,
+          "opclass": null
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "with": "",
+      "method": "btree",
+      "concurrently": false,
+      "name": "permissions_is_builtin_idx",
+      "entityType": "indexes",
+      "schema": "spfn_auth",
+      "table": "permissions"
+    },
+    {
+      "nameExplicit": true,
+      "columns": [
+        {
+          "value": "role_id",
+          "isExpression": false,
+          "asc": true,
+          "nullsFirst": false,
+          "opclass": null
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "with": "",
+      "method": "btree",
+      "concurrently": false,
+      "name": "role_permissions_role_id_idx",
+      "entityType": "indexes",
+      "schema": "spfn_auth",
+      "table": "role_permissions"
+    },
+    {
+      "nameExplicit": true,
+      "columns": [
+        {
+          "value": "permission_id",
+          "isExpression": false,
+          "asc": true,
+          "nullsFirst": false,
+          "opclass": null
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "with": "",
+      "method": "btree",
+      "concurrently": false,
+      "name": "role_permissions_permission_id_idx",
+      "entityType": "indexes",
+      "schema": "spfn_auth",
+      "table": "role_permissions"
+    },
+    {
+      "nameExplicit": true,
+      "columns": [
+        {
+          "value": "user_id",
+          "isExpression": false,
+          "asc": true,
+          "nullsFirst": false,
+          "opclass": null
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "with": "",
+      "method": "btree",
+      "concurrently": false,
+      "name": "user_permissions_user_id_idx",
+      "entityType": "indexes",
+      "schema": "spfn_auth",
+      "table": "user_permissions"
+    },
+    {
+      "nameExplicit": true,
+      "columns": [
+        {
+          "value": "permission_id",
+          "isExpression": false,
+          "asc": true,
+          "nullsFirst": false,
+          "opclass": null
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "with": "",
+      "method": "btree",
+      "concurrently": false,
+      "name": "user_permissions_permission_id_idx",
+      "entityType": "indexes",
+      "schema": "spfn_auth",
+      "table": "user_permissions"
+    },
+    {
+      "nameExplicit": true,
+      "columns": [
+        {
+          "value": "expires_at",
+          "isExpression": false,
+          "asc": true,
+          "nullsFirst": false,
+          "opclass": null
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "with": "",
+      "method": "btree",
+      "concurrently": false,
+      "name": "user_permissions_expires_at_idx",
+      "entityType": "indexes",
+      "schema": "spfn_auth",
+      "table": "user_permissions"
+    },
+    {
+      "nameExplicit": false,
+      "columns": [
+        "role_id"
+      ],
+      "schemaTo": "spfn_auth",
+      "tableTo": "roles",
+      "columnsTo": [
+        "id"
+      ],
+      "onUpdate": "NO ACTION",
+      "onDelete": "CASCADE",
+      "name": "users_role_id_roles_id_fk",
+      "entityType": "fks",
+      "schema": "spfn_auth",
+      "table": "users"
+    },
+    {
+      "nameExplicit": false,
+      "columns": [
+        "user_id"
+      ],
+      "schemaTo": "spfn_auth",
+      "tableTo": "users",
+      "columnsTo": [
+        "id"
+      ],
+      "onUpdate": "NO ACTION",
+      "onDelete": "CASCADE",
+      "name": "user_profiles_user_id_users_id_fk",
+      "entityType": "fks",
+      "schema": "spfn_auth",
+      "table": "user_profiles"
+    },
+    {
+      "nameExplicit": false,
+      "columns": [
+        "user_id"
+      ],
+      "schemaTo": "spfn_auth",
+      "tableTo": "users",
+      "columnsTo": [
+        "id"
+      ],
+      "onUpdate": "NO ACTION",
+      "onDelete": "CASCADE",
+      "name": "user_public_keys_user_id_users_id_fk",
+      "entityType": "fks",
+      "schema": "spfn_auth",
+      "table": "user_public_keys"
+    },
+    {
+      "nameExplicit": false,
+      "columns": [
+        "user_id"
+      ],
+      "schemaTo": "spfn_auth",
+      "tableTo": "users",
+      "columnsTo": [
+        "id"
+      ],
+      "onUpdate": "NO ACTION",
+      "onDelete": "CASCADE",
+      "name": "user_social_accounts_user_id_users_id_fk",
+      "entityType": "fks",
+      "schema": "spfn_auth",
+      "table": "user_social_accounts"
+    },
+    {
+      "nameExplicit": false,
+      "columns": [
+        "user_id"
+      ],
+      "schemaTo": "spfn_auth",
+      "tableTo": "users",
+      "columnsTo": [
+        "id"
+      ],
+      "onUpdate": "NO ACTION",
+      "onDelete": "CASCADE",
+      "name": "passkeys_user_id_users_id_fkey",
+      "entityType": "fks",
+      "schema": "spfn_auth",
+      "table": "passkeys"
+    },
+    {
+      "nameExplicit": false,
+      "columns": [
+        "user_id"
+      ],
+      "schemaTo": "spfn_auth",
+      "tableTo": "users",
+      "columnsTo": [
+        "id"
+      ],
+      "onUpdate": "NO ACTION",
+      "onDelete": "CASCADE",
+      "name": "webauthn_challenges_user_id_users_id_fkey",
+      "entityType": "fks",
+      "schema": "spfn_auth",
+      "table": "webauthn_challenges"
+    },
+    {
+      "nameExplicit": false,
+      "columns": [
+        "user_id"
+      ],
+      "schemaTo": "spfn_auth",
+      "tableTo": "users",
+      "columnsTo": [
+        "id"
+      ],
+      "onUpdate": "NO ACTION",
+      "onDelete": "CASCADE",
+      "name": "device_authorizations_user_id_users_id_fkey",
+      "entityType": "fks",
+      "schema": "spfn_auth",
+      "table": "device_authorizations"
+    },
+    {
+      "nameExplicit": false,
+      "columns": [
+        "role_id"
+      ],
+      "schemaTo": "spfn_auth",
+      "tableTo": "roles",
+      "columnsTo": [
+        "id"
+      ],
+      "onUpdate": "NO ACTION",
+      "onDelete": "CASCADE",
+      "name": "user_invitations_role_id_roles_id_fk",
+      "entityType": "fks",
+      "schema": "spfn_auth",
+      "table": "user_invitations"
+    },
+    {
+      "nameExplicit": false,
+      "columns": [
+        "invited_by_id"
+      ],
+      "schemaTo": "spfn_auth",
+      "tableTo": "users",
+      "columnsTo": [
+        "id"
+      ],
+      "onUpdate": "NO ACTION",
+      "onDelete": "CASCADE",
+      "name": "user_invitations_invited_by_id_users_id_fk",
+      "entityType": "fks",
+      "schema": "spfn_auth",
+      "table": "user_invitations"
+    },
+    {
+      "nameExplicit": false,
+      "columns": [
+        "user_id"
+      ],
+      "schemaTo": "spfn_auth",
+      "tableTo": "users",
+      "columnsTo": [
+        "id"
+      ],
+      "onUpdate": "NO ACTION",
+      "onDelete": "SET NULL",
+      "name": "account_deletion_requests_user_id_users_id_fk",
+      "entityType": "fks",
+      "schema": "spfn_auth",
+      "table": "account_deletion_requests"
+    },
+    {
+      "nameExplicit": false,
+      "columns": [
+        "role_id"
+      ],
+      "schemaTo": "spfn_auth",
+      "tableTo": "roles",
+      "columnsTo": [
+        "id"
+      ],
+      "onUpdate": "NO ACTION",
+      "onDelete": "CASCADE",
+      "name": "role_permissions_role_id_roles_id_fk",
+      "entityType": "fks",
+      "schema": "spfn_auth",
+      "table": "role_permissions"
+    },
+    {
+      "nameExplicit": false,
+      "columns": [
+        "permission_id"
+      ],
+      "schemaTo": "spfn_auth",
+      "tableTo": "permissions",
+      "columnsTo": [
+        "id"
+      ],
+      "onUpdate": "NO ACTION",
+      "onDelete": "CASCADE",
+      "name": "role_permissions_permission_id_permissions_id_fk",
+      "entityType": "fks",
+      "schema": "spfn_auth",
+      "table": "role_permissions"
+    },
+    {
+      "nameExplicit": false,
+      "columns": [
+        "user_id"
+      ],
+      "schemaTo": "spfn_auth",
+      "tableTo": "users",
+      "columnsTo": [
+        "id"
+      ],
+      "onUpdate": "NO ACTION",
+      "onDelete": "CASCADE",
+      "name": "user_permissions_user_id_users_id_fk",
+      "entityType": "fks",
+      "schema": "spfn_auth",
+      "table": "user_permissions"
+    },
+    {
+      "nameExplicit": false,
+      "columns": [
+        "permission_id"
+      ],
+      "schemaTo": "spfn_auth",
+      "tableTo": "permissions",
+      "columnsTo": [
+        "id"
+      ],
+      "onUpdate": "NO ACTION",
+      "onDelete": "CASCADE",
+      "name": "user_permissions_permission_id_permissions_id_fk",
+      "entityType": "fks",
+      "schema": "spfn_auth",
+      "table": "user_permissions"
+    },
+    {
+      "columns": [
+        "id"
+      ],
+      "nameExplicit": false,
+      "name": "users_pkey",
+      "schema": "spfn_auth",
+      "table": "users",
+      "entityType": "pks"
+    },
+    {
+      "columns": [
+        "id"
+      ],
+      "nameExplicit": false,
+      "name": "user_profiles_pkey",
+      "schema": "spfn_auth",
+      "table": "user_profiles",
+      "entityType": "pks"
+    },
+    {
+      "columns": [
+        "id"
+      ],
+      "nameExplicit": false,
+      "name": "user_public_keys_pkey",
+      "schema": "spfn_auth",
+      "table": "user_public_keys",
+      "entityType": "pks"
+    },
+    {
+      "columns": [
+        "id"
+      ],
+      "nameExplicit": false,
+      "name": "user_social_accounts_pkey",
+      "schema": "spfn_auth",
+      "table": "user_social_accounts",
+      "entityType": "pks"
+    },
+    {
+      "columns": [
+        "id"
+      ],
+      "nameExplicit": false,
+      "name": "verification_codes_pkey",
+      "schema": "spfn_auth",
+      "table": "verification_codes",
+      "entityType": "pks"
+    },
+    {
+      "columns": [
+        "id"
+      ],
+      "nameExplicit": false,
+      "name": "signup_link_tokens_pkey",
+      "schema": "spfn_auth",
+      "table": "signup_link_tokens",
+      "entityType": "pks"
+    },
+    {
+      "columns": [
+        "id"
+      ],
+      "nameExplicit": false,
+      "name": "passkeys_pkey",
+      "schema": "spfn_auth",
+      "table": "passkeys",
+      "entityType": "pks"
+    },
+    {
+      "columns": [
+        "id"
+      ],
+      "nameExplicit": false,
+      "name": "webauthn_challenges_pkey",
+      "schema": "spfn_auth",
+      "table": "webauthn_challenges",
+      "entityType": "pks"
+    },
+    {
+      "columns": [
+        "id"
+      ],
+      "nameExplicit": false,
+      "name": "device_authorizations_pkey",
+      "schema": "spfn_auth",
+      "table": "device_authorizations",
+      "entityType": "pks"
+    },
+    {
+      "columns": [
+        "id"
+      ],
+      "nameExplicit": false,
+      "name": "user_invitations_pkey",
+      "schema": "spfn_auth",
+      "table": "user_invitations",
+      "entityType": "pks"
+    },
+    {
+      "columns": [
+        "id"
+      ],
+      "nameExplicit": false,
+      "name": "account_deletion_requests_pkey",
+      "schema": "spfn_auth",
+      "table": "account_deletion_requests",
+      "entityType": "pks"
+    },
+    {
+      "columns": [
+        "id"
+      ],
+      "nameExplicit": false,
+      "name": "roles_pkey",
+      "schema": "spfn_auth",
+      "table": "roles",
+      "entityType": "pks"
+    },
+    {
+      "columns": [
+        "id"
+      ],
+      "nameExplicit": false,
+      "name": "permissions_pkey",
+      "schema": "spfn_auth",
+      "table": "permissions",
+      "entityType": "pks"
+    },
+    {
+      "columns": [
+        "id"
+      ],
+      "nameExplicit": false,
+      "name": "role_permissions_pkey",
+      "schema": "spfn_auth",
+      "table": "role_permissions",
+      "entityType": "pks"
+    },
+    {
+      "columns": [
+        "id"
+      ],
+      "nameExplicit": false,
+      "name": "user_permissions_pkey",
+      "schema": "spfn_auth",
+      "table": "user_permissions",
+      "entityType": "pks"
+    },
+    {
+      "columns": [
+        "key"
+      ],
+      "nameExplicit": false,
+      "name": "auth_metadata_pkey",
+      "schema": "spfn_auth",
+      "table": "auth_metadata",
+      "entityType": "pks"
+    },
+    {
+      "columns": [
+        "id"
+      ],
+      "nameExplicit": false,
+      "name": "ops_tokens_pkey",
+      "schema": "spfn_auth",
+      "table": "ops_tokens",
+      "entityType": "pks"
+    },
+    {
+      "nameExplicit": true,
+      "columns": [
+        "role_id",
+        "permission_id"
+      ],
+      "nullsNotDistinct": false,
+      "name": "role_permissions_unique",
+      "entityType": "uniques",
+      "schema": "spfn_auth",
+      "table": "role_permissions"
+    },
+    {
+      "nameExplicit": true,
+      "columns": [
+        "user_id",
+        "permission_id"
+      ],
+      "nullsNotDistinct": false,
+      "name": "user_permissions_unique",
+      "entityType": "uniques",
+      "schema": "spfn_auth",
+      "table": "user_permissions"
+    },
+    {
+      "nameExplicit": false,
+      "columns": [
+        "public_id"
+      ],
+      "nullsNotDistinct": false,
+      "name": "users_public_id_unique",
+      "schema": "spfn_auth",
+      "table": "users",
+      "entityType": "uniques"
+    },
+    {
+      "nameExplicit": false,
+      "columns": [
+        "email"
+      ],
+      "nullsNotDistinct": false,
+      "name": "users_email_unique",
+      "schema": "spfn_auth",
+      "table": "users",
+      "entityType": "uniques"
+    },
+    {
+      "nameExplicit": false,
+      "columns": [
+        "phone"
+      ],
+      "nullsNotDistinct": false,
+      "name": "users_phone_unique",
+      "schema": "spfn_auth",
+      "table": "users",
+      "entityType": "uniques"
+    },
+    {
+      "nameExplicit": false,
+      "columns": [
+        "username"
+      ],
+      "nullsNotDistinct": false,
+      "name": "users_username_unique",
+      "schema": "spfn_auth",
+      "table": "users",
+      "entityType": "uniques"
+    },
+    {
+      "nameExplicit": false,
+      "columns": [
+        "user_id"
+      ],
+      "nullsNotDistinct": false,
+      "name": "user_profiles_user_id_unique",
+      "schema": "spfn_auth",
+      "table": "user_profiles",
+      "entityType": "uniques"
+    },
+    {
+      "nameExplicit": false,
+      "columns": [
+        "key_id"
+      ],
+      "nullsNotDistinct": false,
+      "name": "user_public_keys_key_id_unique",
+      "schema": "spfn_auth",
+      "table": "user_public_keys",
+      "entityType": "uniques"
+    },
+    {
+      "nameExplicit": false,
+      "columns": [
+        "credential_id"
+      ],
+      "nullsNotDistinct": false,
+      "name": "passkeys_credential_id_key",
+      "schema": "spfn_auth",
+      "table": "passkeys",
+      "entityType": "uniques"
+    },
+    {
+      "nameExplicit": false,
+      "columns": [
+        "device_code_hash"
+      ],
+      "nullsNotDistinct": false,
+      "name": "device_authorizations_device_code_hash_key",
+      "schema": "spfn_auth",
+      "table": "device_authorizations",
+      "entityType": "uniques"
+    },
+    {
+      "nameExplicit": false,
+      "columns": [
+        "token"
+      ],
+      "nullsNotDistinct": false,
+      "name": "user_invitations_token_unique",
+      "schema": "spfn_auth",
+      "table": "user_invitations",
+      "entityType": "uniques"
+    },
+    {
+      "nameExplicit": false,
+      "columns": [
+        "name"
+      ],
+      "nullsNotDistinct": false,
+      "name": "roles_name_unique",
+      "schema": "spfn_auth",
+      "table": "roles",
+      "entityType": "uniques"
+    },
+    {
+      "nameExplicit": false,
+      "columns": [
+        "name"
+      ],
+      "nullsNotDistinct": false,
+      "name": "permissions_name_unique",
+      "schema": "spfn_auth",
+      "table": "permissions",
+      "entityType": "uniques"
+    },
+    {
+      "nameExplicit": false,
+      "columns": [
+        "token_hash"
+      ],
+      "nullsNotDistinct": false,
+      "name": "ops_tokens_token_hash_key",
+      "schema": "spfn_auth",
+      "table": "ops_tokens",
+      "entityType": "uniques"
+    },
+    {
+      "value": "\"attempts\" >= 0 AND \"attempts\" <= 10",
+      "name": "attempts_limit_check",
+      "entityType": "checks",
+      "schema": "spfn_auth",
+      "table": "verification_codes"
+    }
+  ],
+  "renames": []
+}

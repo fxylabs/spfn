@@ -18,7 +18,7 @@ import {
     BUILTIN_ROLE_PERMISSIONS,
 } from '../rbac';
 import type { AuthInitOptions, RoleConfig, PermissionConfig } from '../rbac';
-import { configureAuth } from '../lib/config';
+import { assertPasskeyConfig, configureAuth } from '../lib/config';
 import { authLogger } from '../logger';
 import type { RoleEntity } from '../entities/roles';
 import type { PermissionEntity } from '../entities/permissions';
@@ -114,6 +114,11 @@ function collectMappings(options: AuthInitOptions): Record<string, string[]>
 export async function initializeAuth(options: AuthInitOptions = {}): Promise<void>
 {
     authLogger.service.info('🔐 Initializing RBAC system...');
+
+    // Before anything is written: a passkey configuration no ceremony could
+    // satisfy makes every passkey operation fail, and the drift is between
+    // environments, so the deploy that introduces it is where it has to surface.
+    assertPasskeyConfig();
 
     // Configure global auth settings
     if (options.sessionTtl !== undefined)

@@ -29,6 +29,11 @@ through a typed `authApi` client. Requires `@spfn/core`; Next.js is an optional 
 pnpm add @spfn/auth drizzle-orm@1.0.0-rc.4
 ```
 
+`@simplewebauthn/server` and `@simplewebauthn/browser` come along as dependencies —
+[passkeys](#passkeys-webauthn) need them, and standards conformance is the whole risk there.
+The browser half is bundled into the `./client` entry rather than marked external, so nothing
+in your app has to know about it.
+
 ## Import paths
 
 Entry points (from `package.json` `exports`). Picking the wrong one breaks the build —
@@ -158,6 +163,9 @@ real secret values out of band, never commit them.
 | `SPFN_AUTH_RESERVED_USERNAMES` / `_USERNAME_MIN_LENGTH` / `_USERNAME_MAX_LENGTH` | `.env.server` | — | username rules |
 | `SPFN_AUTH_SIGNUP_LINK_TTL_MINUTES` / `_SETUP_TTL_MINUTES` | `.env.server` | — | defaults `30` / `15` — see [Verified-email signup](#verified-email-signup) |
 | `SPFN_AUTH_SIGNUP_CONFIRM_PATH` | `.env.server` | — | default `/signup/confirm`; the page in your app the emailed link opens |
+| `SPFN_AUTH_PASSKEY_RP_ID` / `_RP_NAME` / `_ORIGINS` | `.env.server` | — | relying party for passkeys; defaults derive from `{NEXT_PUBLIC_SPFN_APP_URL\|\|SPFN_APP_URL}` and are **checked at boot** — see [Passkeys](#passkeys-webauthn) |
+| `SPFN_AUTH_PASSKEY_USER_VERIFICATION` | `.env.server` | — | `preferred` (default) or `required`; `discouraged` refuses boot |
+| `SPFN_AUTH_PASSKEY_CHALLENGE_TTL_SECONDS` / `_RECENT_AUTH_MINUTES` | `.env.server` | — | defaults `300` / `10` — see [Passkeys](#passkeys-webauthn) |
 | `NEXT_PUBLIC_SPFN_API_URL` / `NEXT_PUBLIC_SPFN_APP_URL` | `.env.local` | — | browser-facing URLs for OAuth redirects |
 
 Read validated values via `import { env } from '@spfn/auth/config'` (a proxy validated at
@@ -191,6 +199,13 @@ routes use `.skip(['auth'])`; the rest require `Authorization: Bearer <client-si
 | `getDeviceAuthInfo` | POST `/_auth/device/info` | yes | what device is asking, so the approval screen can show it |
 | `approveDeviceAuth` | POST `/_auth/device/approve` | yes | let the waiting device in |
 | `denyDeviceAuth` | POST `/_auth/device/deny` | yes | refuse it |
+| `passkeyRegisterOptions` | POST `/_auth/passkeys/register/options` | yes | begin enrolling a passkey — see [Passkeys](#passkeys-webauthn) |
+| `passkeyRegisterVerify` | POST `/_auth/passkeys/register/verify` | yes | verify the attestation and keep the credential |
+| `passkeyLoginOptions` | POST `/_auth/passkeys/login/options` | public | begin a passkey sign-in; takes no identifier |
+| `passkeyLoginVerify` | POST `/_auth/passkeys/login/verify` | public | verify the assertion; answers exactly as `login` |
+| `listPasskeys` | POST `/_auth/passkeys/list` | yes | the caller's enrolled passkeys |
+| `renamePasskey` | POST `/_auth/passkeys/rename` | yes | rename one |
+| `revokePasskey` | POST `/_auth/passkeys/revoke` | yes | retire one (refused if it is the last way in) |
 | `logout` | POST `/_auth/logout` | yes | revoke current key |
 | `rotateKey` | POST `/_auth/keys/rotate` | yes | rotate public key before 90-day expiry |
 | `listKeys` | POST `/_auth/keys/list` | yes | the caller's registered devices — see [Registered devices](#registered-devices-key-management) |
@@ -390,6 +405,10 @@ not run out.
 
 ### Registered devices (key management)
 
+A [passkey](#passkeys-webauthn) is **not** one of these keys: it is a credential that proves
+identity at sign-in, after which an ordinary device key is registered exactly as a password
+login registers one.
+
 Keys are per-device, so a login never revokes the previous key and they accumulate on purpose.
 `listKeys` / `revokeKey` / `revokeAllKeys` are what let the account owner see what accumulated and
 cut off anything they no longer recognise.
@@ -470,6 +489,276 @@ once revoked. A client that logs out, rotates, or is revoked must generate a **f
 is still active is the one
 exception: it stays a no-op success, so repeated logins from the same device keep working, and an
 expired-but-active key has its expiry extended by the sign-in that proved the identity again.
+
+### Passkeys (WebAuthn)
+
+A passkey is an **optional additional credential** on an account, alongside a password and a
+linked social account rather than in place of either. Enroll one from a session that already
+exists; sign in with it afterwards without typing an identifier at all.
+
+```
+enroll   → register/options (session)  → the browser mints a credential → register/verify
+sign in  → login/options    (public)   → the browser picks a credential → login/verify
+manage   → list / rename / revoke
+```
+
+**A passkey is not a device key.** The assertion proves *who* is asking; the device key the
+Next.js proxy registers right after it is what every later request is signed with, exactly as
+after a password login. Nothing in clientProofV1, in the JWT path, or in
+[Registered devices](#registered-devices-key-management) changes because a session started
+this way — a passkey sign-in produces the same `LoginResult` and the same key row as `login`.
+
+#### Setup
+
+```bash
+# .env.server — nothing is required; these are the overrides
+SPFN_AUTH_PASSKEY_RP_ID=example.com
+SPFN_AUTH_PASSKEY_ORIGINS=https://app.example.com,https://admin.example.com
+```
+
+With neither set, the relying party is derived from `{NEXT_PUBLIC_SPFN_APP_URL || SPFN_APP_URL}`:
+its host becomes the rpId and its origin becomes the single allowed origin. That is the whole
+configuration for a one-origin app.
+
+| Var | File | Notes |
+|-----|------|-------|
+| `SPFN_AUTH_PASSKEY_RP_ID` | `.env.server` | domain credentials are bound to — no protocol, no port. Default: the app URL's host. **Changing it orphans every passkey already enrolled** |
+| `SPFN_AUTH_PASSKEY_RP_NAME` | `.env.server` | name the authenticator's own prompt shows. Default: the rpId |
+| `SPFN_AUTH_PASSKEY_ORIGINS` | `.env.server` | comma-separated full origins allowed to run a ceremony. Default: the app URL's origin |
+| `SPFN_AUTH_PASSKEY_USER_VERIFICATION` | `.env.server` | `preferred` (default) or `required`. `discouraged` refuses boot |
+| `SPFN_AUTH_PASSKEY_CHALLENGE_TTL_SECONDS` | `.env.server` | default `300` — one ceremony at the authenticator, not an abandoned tab |
+| `SPFN_AUTH_PASSKEY_RECENT_AUTH_MINUTES` | `.env.server` | default `10` — see [the recent-authentication gate](#the-recent-authentication-gate) |
+
+Two rules on those origins, **checked at boot** and refused with `PasskeyConfigError`:
+
+- each origin must be `https`, and `localhost` is the one host a browser treats as a secure
+  context over plain `http` — so `http://localhost:3000` is legal and `http://app.example.com`
+  is not;
+- each origin's host must be the rpId or a subdomain of it, because the browser will refuse
+  the ceremony otherwise.
+
+The check runs at `initializeAuth`, deliberately: every one of these values makes *every*
+passkey operation fail, the drift is between environments, and the deploy that introduces it
+is where it has to surface — not the first sign-in after it.
+
+**Boot is only refused for a configuration you wrote.** If no `SPFN_AUTH_PASSKEY_*` variable
+is set, the derived relying party can still be unusable — `SPFN_APP_URL=http://192.168.1.5:3000`
+so a phone on the same network can reach your laptop, say, which is neither https nor
+localhost. Refusing to start over a feature nobody asked for would take that app down to fix
+something it does not use, so it is logged once instead and only a ceremony fails. Set any
+passkey variable and the same configuration refuses to start. This is the posture
+[the OAuth callback origin check](#oauth-callback-origin-web-app-host--rewrite) already takes.
+
+#### Enrolling, from a Next.js client component
+
+```tsx
+'use client';
+import { authApi } from '@spfn/auth';
+import { enrollPasskey, isPasskeySupported } from '@spfn/auth/client';
+
+async function addPasskey()
+{
+    const result = await enrollPasskey(authApi, { label: 'MacBook Touch ID' });
+
+    if (!result.ok)
+    {
+        // 'unsupported' | 'cancelled' | 'error' — 'cancelled' is not an error to show
+        return result.reason === 'cancelled' ? undefined : showError(result.reason);
+    }
+
+    showAdded(result.passkeyId, result.label);
+}
+```
+
+`isPasskeySupported()` is what decides whether to render the button at all.
+
+#### Signing in, with conditional UI
+
+The passkey appears in the browser's ordinary autofill dropdown. That needs an input whose
+`autocomplete` ends in `webauthn`, and a `signInWithPasskey` call started **when the form
+renders**, not on a click:
+
+```tsx
+'use client';
+import { useEffect } from 'react';
+import { authApi } from '@spfn/auth';
+import { isConditionalMediationAvailable, signInWithPasskey } from '@spfn/auth/client';
+
+export function SignInForm()
+{
+    useEffect(() =>
+    {
+        void (async () =>
+        {
+            if (!await isConditionalMediationAvailable()) return;
+
+            const result = await signInWithPasskey(authApi, { conditional: true });
+            if (result.ok) router.replace('/');
+        })();
+    }, []);
+
+    return (
+        <form>
+            <input name="email" autoComplete="username webauthn" />
+            <input name="password" type="password" autoComplete="current-password" />
+        </form>
+    );
+}
+```
+
+Where conditional mediation is missing, render a visible "Sign in with a passkey" button that
+calls `signInWithPasskey(authApi)` instead.
+
+Both helpers answer with a discriminated union and **never throw a cancellation**: a person
+who dismisses the system sheet raises `NotAllowedError`, and so does a person whose
+authenticator had nothing to offer — neither is an application error, and code that has to
+tell them apart by re-reading `error.name` gets it wrong once and shows a red banner to
+someone who simply changed their mind.
+
+| result | meaning |
+|--------|---------|
+| `{ ok: true, ... }` | signed in / enrolled; the rest of the object is the server's answer |
+| `{ ok: false, reason: 'unsupported' }` | this browser has no WebAuthn; nothing was sent to the server |
+| `{ ok: false, reason: 'cancelled' }` | the person dismissed the enrollment prompt |
+| `{ ok: false, reason: 'no-credential' }` | sign-in: the authenticator offered nothing, or the person dismissed it |
+| `{ ok: false, reason: 'error', error }` | anything else, with the original error attached |
+
+#### The recent-authentication gate
+
+Adding a credential is adding a way in, and removing one can lock an account. Both are refused
+unless the caller has recently proved themselves, in one of two ways:
+
+- **the device key this request is signed with was registered within
+  `SPFN_AUTH_PASSKEY_RECENT_AUTH_MINUTES`** — that is when this device last presented a
+  credential, and it needs no new state; or
+- **the body carries `currentPassword`** and it verifies.
+
+Otherwise: **403 with `code: 'RECENT_AUTH_REQUIRED'`**. Branch on that code to prompt for the
+password and retry — it is a stable field, not a message to match on.
+
+An account with no password stored **cannot** satisfy the gate with a password, however
+plausible the value; it has to sign in again. The comparison still runs, against a dummy hash,
+so "no password on file" costs exactly what "wrong password" costs — otherwise response time
+becomes an oracle for which accounts are OAuth-only.
+
+#### Managing passkeys
+
+```typescript
+const { passkeys } = await authApi.listPasskeys.call({ body: {} });
+// → [{ passkeyId, label, deviceType, backedUp, transports, createdAt, lastUsedAt }]
+
+await authApi.renamePasskey.call({ body: { passkeyId, label: 'Old iPhone' } });
+await authApi.revokePasskey.call({ body: { passkeyId } });
+```
+
+- **Neither `credentialId` nor the public key is ever returned.** They are what an
+  authenticator is addressed by; the list exists to let someone recognise a credential and
+  point at it, which the label, the device type and the last-used moment do.
+- **`deviceType` is `singleDevice` or `multiDevice`**, and `backedUp` says whether a
+  multi-device credential actually has been. "This one only exists on that phone" is what the
+  owner needs before revoking the other entry.
+- **Revocation is soft, and the credential id stays reserved for good.** A credential someone
+  cut off can never be enrolled again — not on another account, and not on the same one
+  (`PasskeyAlreadyRegisteredError`, 409). Re-enrolling means a fresh credential.
+- **A passkey id you do not own answers 404.** Every lookup is owner-scoped, so the answer is
+  only ever "not yours".
+- **Renaming has no recent-authentication gate**: a label is display only and nothing is
+  authorized by it.
+
+#### Recovery — read this before shipping a passkey-only sign-up
+
+**There is no password reset in `@spfn/auth` today.** The ways back into an account are: a
+live passkey, a password, or a linked social account. Nothing else — support cannot restore an
+account that has none of the three.
+
+That is why **revoking the last live passkey is refused (409, `code:
+'LAST_RECOVERY_CREDENTIAL'`) when the account has no password and no linked social account.**
+The refusal is not paternalism; it is the absence of an undo. Branch on that code to offer
+"set a password first" or "link an account first".
+
+The same fact should shape your sign-up: an account created without a password and given one
+passkey has exactly one way in, and losing the device loses the account. Ask for a password or
+a social link before, or shortly after, the passkey.
+
+#### How the ceremonies are kept honest
+
+- **Discoverable credentials only** (`residentKey: 'required'`). `login/options` takes an empty
+  body — `additionalProperties: false`, so an `email` field is a 400 rather than something
+  quietly ignored — and always answers with an empty `allowCredentials`. There is no input
+  that could make its answer differ by whether an account exists.
+- **A revoked credential and one that was never here answer identically** on `login/verify`.
+  Anything else would say whether this account once had it.
+- **Challenges are one-time database rows**, spent by a single conditional `UPDATE`. Two
+  verifies arriving with the same challenge produce one winner and one refusal, across
+  instances. A challenge is bound to its ceremony (`registration` / `authentication`) and, for
+  enrollment, to the account that minted it.
+- **A refusal leaves the challenge live.** Spending happens inside the transaction that writes
+  what it authorizes, so a failure rolls it back and the ceremony is retryable; only a success
+  is unrepeatable.
+- **A signature counter that goes backwards refuses the sign-in and leaves the row alone.** It
+  is the signal a cloned authenticator would produce — but a synced passkey reports 0 forever
+  and a restored device can hit it, so auto-revoking would lock people out on a false
+  positive. The refusal is logged at `warn` with the passkey id; a human decides what it meant.
+- **Attestation is `none`.** Verifying an attestation statement would tell us which
+  authenticator model was used and nothing about who is holding it.
+
+#### Errors
+
+| error | status | `code` | when |
+|-------|--------|--------|------|
+| `PasskeyChallengeError` | 401 | — | the challenge is unknown, expired, already spent, of the other ceremony, or of another account |
+| `PasskeyVerificationError` | 401 | — | origin, rpId, signature or counter — and, on sign-in, an unknown or revoked credential |
+| `PasskeyNotFoundError` | 404 | — | a passkey the caller does not own, or one already revoked |
+| `PasskeyAlreadyRegisteredError` | 409 | — | that credential is on file for some account, revoked ones included |
+| `RecentAuthenticationRequiredError` | 403 | `RECENT_AUTH_REQUIRED` | the session proved itself too long ago and carried no password |
+| `LastRecoveryCredentialError` | 409 | `LAST_RECOVERY_CREDENTIAL` | revoking it would leave no way back in |
+| `PasskeyConfigError` | boot | — | an origin off the rpId or not https, or an unsupported user-verification value |
+
+#### Events
+
+`passkeyEnrolledEvent` (`auth.passkey.enrolled`: `userId`, `passkeyId`, `label?`) and
+`passkeyRevokedEvent` (`auth.passkey.revoked`: `userId`, `passkeyId`, `reason`) fire after
+commit. `authLoginEvent.provider` gains `'passkey'`. Subscribe to the first to tell the owner
+a new way into their account appeared — which is what it is.
+
+#### The case table
+
+The behaviour above is asserted row by row in
+`src/__tests__/integration/passkeys.test.ts`; each `it` is named for its row.
+
+| row | situation | outcome |
+|-----|-----------|---------|
+| E1 | fresh session, no passkeys | 200, empty `excludeCredentials` |
+| E2 | session key 11 min old, no password | 403 `RECENT_AUTH_REQUIRED` |
+| E3 / E4 | 11 min old, correct / wrong password | 200 / 403 — byte-identical to E2 |
+| E5 | no password on the account, 11 min old | 403; a password can never speak for it |
+| E6 | valid attestation | 200; row written, challenge spent, event emitted |
+| E7 / E8 | challenge replayed / expired | 401; one row, no row |
+| E9 / E10 | another account's / the other ceremony's challenge | 401 |
+| E11 | credential already on some account | 409 |
+| E12 / E13 | wrong origin / wrong rpId | 401 |
+| E14 | two live passkeys | both listed in `excludeCredentials` |
+| E15 | label empty or over 64 chars | 400; challenge stays live |
+| E16 | two concurrent verifies, one challenge | one 200, one 401, one row |
+| L1 / L2 | empty options body / an `email` in it | 200 with empty `allowCredentials` / 400 |
+| L3 | valid assertion | 200, same answer as `login`; counter and device key move |
+| L4 / L5 | revoked / unknown credential | 401, byte-identical |
+| L6 / L7 / L8 | challenge spent / expired / wrong kind | 401; no device key |
+| L9 / L17 | bad signature / wrong origin | 401; counter unmoved |
+| L10 | counter went backwards | 401; row untouched, warn logged, not revoked |
+| L11 | synced passkey reporting 0 both times | 200 |
+| L12 / L13 | disabled / pending deletion | 403, the same errors password login gives |
+| L14 | device-key fields missing (proxy bypassed) | 400; challenge stays live |
+| L15 | an old session key named in the body | it is revoked as the new one is registered |
+| L16 | two concurrent verifies, one assertion | one 200, one 401, one device key |
+| M1 | 2 live + 1 revoked | 2 entries, no credential id, no public key |
+| M2 / M9 | someone else's / an already revoked passkey | 404 |
+| M3 / M4 | rename / revoke on a recent session | 200; revoke emits its event |
+| M5 | revoke on an 11-minute-old session | 403 `RECENT_AUTH_REQUIRED` |
+| M6 / M7 / M8 | last passkey, no password: alone / with a social account / with a second passkey | 409 / 200 / 200 |
+| M10 | re-enrolling a revoked credential | 409 |
+
+Configuration rows C1–C6 are in `src/__tests__/unit/passkey-config.test.ts`.
 
 ### Writing protected routes (route DSL)
 
@@ -1125,16 +1414,21 @@ authRegisterEvent.subscribe(async ({ userId, email, provider, metadata }) =>
 });
 ```
 
-`authLoginEvent`'s `provider` is `'email'`, `'phone'`, a social provider, or `'device'` — the
-last one being a [device-code login](#device-code-login), where the account was proven on
-another device that was already signed in and no credential was presented here.
-`authRegisterEvent` does not accept `'device'`: a device-code request can only ever be
-approved by an account that already exists, so it is never a signup.
+`authLoginEvent`'s `provider` is `'email'`, `'phone'`, a social provider, `'device'` or
+`'passkey'`. `'device'` is a [device-code login](#device-code-login), where the account was
+proven on another device that was already signed in and no credential was presented here;
+`'passkey'` is a [WebAuthn assertion](#passkeys-webauthn). `authRegisterEvent` accepts
+neither: a device-code request can only ever be approved by an account that already exists,
+and a passkey has to be enrolled from a session that already exists, so neither is a signup.
+
+`passkeyEnrolledEvent` (`auth.passkey.enrolled`) and `passkeyRevokedEvent`
+(`auth.passkey.revoked`) fire after commit when a passkey is added or retired.
 
 Payload types: `AuthLoginPayload`, `AuthRegisterPayload`, `InvitationCreatedPayload`,
 `InvitationAcceptedPayload`, `AuthDeletionRequestedPayload`, `AuthDeletionCancelledPayload`,
 `AuthDeletionCompletedPayload`, `OAuthUnlinkedPayload` (`auth.oauth.unlinked` — provider-side
-disconnect, see the OAuth unlink-notify section). These events also bind to `@spfn/core/job`
+disconnect, see the OAuth unlink-notify section), `PasskeyEnrolledPayload`,
+`PasskeyRevokedPayload`. These events also bind to `@spfn/core/job`
 jobs via `.on(event)`.
 
 ## Registration gate (`beforeRegister`)

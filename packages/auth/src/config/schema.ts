@@ -279,6 +279,60 @@ export const authEnvSchema = defineEnvSchema({
     },
 
     // ============================================================================
+    // Passkeys (WebAuthn)
+    // ============================================================================
+    SPFN_AUTH_PASSKEY_RP_ID: {
+        ...envString({
+            description: 'Domain passkeys are bound to — a registrable domain with no protocol and no port. Defaults to the host of {NEXT_PUBLIC_SPFN_APP_URL || SPFN_APP_URL}. Set it explicitly when the app is served from several hosts that share a domain; every origin below must be that host or a subdomain of it. Changing it orphans every passkey already enrolled.',
+            required: false,
+            examples: ['example.com', 'app.example.com', 'localhost'],
+        }),
+    },
+
+    SPFN_AUTH_PASSKEY_RP_NAME: {
+        ...envString({
+            description: "Name the authenticator's own prompt shows the user. Defaults to the relying party ID.",
+            required: false,
+            examples: ['Acme', 'Acme Staging'],
+        }),
+    },
+
+    SPFN_AUTH_PASSKEY_ORIGINS: {
+        ...envString({
+            description: 'Comma-separated full origins allowed to run a passkey ceremony. Defaults to the origin of {NEXT_PUBLIC_SPFN_APP_URL || SPFN_APP_URL}. Each must be https (http only for localhost) and must be the relying party ID or a subdomain of it. Checked at boot: a value that breaks either rule refuses to start, because it would otherwise surface as the browser refusing every ceremony.',
+            required: false,
+            examples: ['https://app.example.com', 'https://app.example.com,https://admin.example.com', 'http://localhost:3000'],
+        }),
+    },
+
+    SPFN_AUTH_PASSKEY_USER_VERIFICATION: {
+        ...envString({
+            description: "How hard the authenticator must prove the person is present: 'preferred' or 'required'. 'discouraged' is refused at boot — a passkey is the whole credential here, so an assertion that skipped user verification would sign someone in on an unlocked device alone.",
+            default: 'preferred',
+            required: false,
+            examples: ['preferred', 'required'],
+        }),
+    },
+
+    SPFN_AUTH_PASSKEY_CHALLENGE_TTL_SECONDS: {
+        ...envNumber({
+            description: 'How long the challenge minted by a passkey options call stays presentable. One ceremony at the authenticator, not an abandoned tab.',
+            default: 300,
+            required: false,
+            examples: [120, 300, 600],
+        }),
+    },
+
+    SPFN_AUTH_PASSKEY_RECENT_AUTH_MINUTES: {
+        ...envNumber({
+            description: 'How recently the calling device key must have been registered for enrolling or revoking a passkey to go through without the current password. Older than this and the request needs `currentPassword`; an account with no password has to sign in again.',
+            default: 10,
+            required: false,
+            examples: [5, 10, 30],
+        }),
+    },
+
+    // ============================================================================
     // API Configuration
     // ============================================================================
     SPFN_API_URL: {

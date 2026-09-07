@@ -17,6 +17,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 const {
     usersRepository,
     keysRepository,
+    passkeysRepository,
     deviceAuthorizationsRepository,
     socialAccountsRepository,
     userProfilesRepository,
@@ -37,6 +38,9 @@ const {
     },
     keysRepository: {
         revokeAllActiveByUserId: vi.fn(async () => []),
+        deleteAllByUserId: vi.fn(async () => 0),
+    },
+    passkeysRepository: {
         deleteAllByUserId: vi.fn(async () => 0),
     },
     deviceAuthorizationsRepository: {
@@ -69,6 +73,7 @@ const {
 vi.mock('../../server/repositories', () => ({
     usersRepository,
     keysRepository,
+    passkeysRepository,
     deviceAuthorizationsRepository,
     socialAccountsRepository,
     userProfilesRepository,
@@ -468,6 +473,9 @@ describe('account-deletion.service', () =>
             );
             expect(socialAccountsRepository.deleteAllByUserId).toHaveBeenCalledWith(user.id);
             expect(keysRepository.deleteAllByUserId).toHaveBeenCalledWith(user.id);
+            // Passkeys go with the other credentials — an anonymized row must
+            // not keep one that still names this account to an authenticator.
+            expect(passkeysRepository.deleteAllByUserId).toHaveBeenCalledWith(user.id);
             expect(verificationCodesRepository.deleteByTarget).toHaveBeenCalledWith(user.email);
             expect(accountDeletionRequestsRepository.markCompleted).toHaveBeenCalledWith(5, 'anonymize');
         });

@@ -38,6 +38,13 @@ import {
     VerificationTokenTargetMismatchError,
     InsufficientPermissionsError,
     InsufficientRoleError,
+    PasskeyChallengeError,
+    PasskeyVerificationError,
+    PasskeyNotFoundError,
+    PasskeyAlreadyRegisteredError,
+    RecentAuthenticationRequiredError,
+    LastRecoveryCredentialError,
+    PasskeyConfigError,
 } from './auth-errors';
 
 export {
@@ -74,6 +81,13 @@ export {
     VerificationTokenTargetMismatchError,
     InsufficientPermissionsError,
     InsufficientRoleError,
+    PasskeyChallengeError,
+    PasskeyVerificationError,
+    PasskeyNotFoundError,
+    PasskeyAlreadyRegisteredError,
+    RecentAuthenticationRequiredError,
+    LastRecoveryCredentialError,
+    PasskeyConfigError,
 } from './auth-errors';
 
 export const authErrorRegistry = new ErrorRegistry();
@@ -111,6 +125,13 @@ authErrorRegistry.append([
     VerificationTokenTargetMismatchError,
     InsufficientPermissionsError,
     InsufficientRoleError,
+    PasskeyChallengeError,
+    PasskeyVerificationError,
+    PasskeyNotFoundError,
+    PasskeyAlreadyRegisteredError,
+    RecentAuthenticationRequiredError,
+    LastRecoveryCredentialError,
+    PasskeyConfigError,
 ]);
 
 export * as AuthError from './auth-errors';
