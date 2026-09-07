@@ -15,51 +15,18 @@
  * is a second entry point to the same account creation, not a replacement.
  */
 
-import crypto from 'crypto';
 import { env } from '@spfn/auth/config';
 import { InvalidSignupLinkError, InvalidSignupSetupSessionError } from '@spfn/auth/errors';
-import { sendEmail } from '@spfn/notification/server';
 import { authLogger } from '../logger';
 import { signupLinkTokensRepository, usersRepository } from '../repositories';
 import type { SignupLinkToken } from '../entities/signup-link-tokens';
+import { hashCredential, mintCredential } from '../lib/link-credentials';
+import { deliverLinkMail } from '../lib/link-mail-delivery';
+import { issueSignupLink } from './link-mail.service';
 import { noticeAccountExistsOnce } from './verification.service';
 import { createVerifiedAccount } from './auth.service';
 import type { RegisterResult } from './auth.service';
 import type { KeyAlgorithmType, KeyPlatformType } from '../types';
-
-/**
- * Bytes of entropy in the link token and the setup secret.
- *
- * 32 bytes is why neither credential carries an attempt counter the way a
- * six-digit code does: there is nothing to brute force. Rate limits here bound
- * request volume and mail sending, not guessing.
- */
-const CREDENTIAL_BYTES = 32;
-
-/**
- * Mint a bearer credential and the value stored for it.
- *
- * The secret is returned once, to be emailed or set as a cookie, and is then
- * unrecoverable — only `hash` reaches the database.
- */
-function mintCredential(): { secret: string; hash: string }
-{
-    const secret = crypto.randomBytes(CREDENTIAL_BYTES).toString('base64url');
-
-    return { secret, hash: hashCredential(secret) };
-}
-
-/**
- * Hash a presented credential the same way it was stored.
- *
- * SHA-256 without a salt or a work factor, deliberately: the input is 32 random
- * bytes rather than a human-chosen secret, so there is no dictionary to slow
- * down, and lookup has to be a plain equality match on an indexed column.
- */
-function hashCredential(secret: string): string
-{
-    return crypto.createHash('sha256').update(secret).digest('base64url');
-}
 
 /**
  * Whether a return path can be handed back to the browser.
@@ -91,38 +58,6 @@ export function isSafeReturnPath(returnPath: string): boolean
     return !/^\/[^/?#]*:/.test(returnPath);
 }
 
-/**
- * Absolute URL of the app page the confirmation link opens.
- */
-function buildConfirmUrl(token: string): string
-{
-    const appUrl = (env.NEXT_PUBLIC_SPFN_APP_URL || env.SPFN_APP_URL || '').replace(/\/$/, '');
-    const path = env.SPFN_AUTH_SIGNUP_CONFIRM_PATH || '/signup/confirm';
-
-    return `${appUrl}${path}?token=${encodeURIComponent(token)}`;
-}
-
-async function sendSignupLinkEmail(
-    email: string,
-    confirmUrl: string,
-    expiresInMinutes: number,
-): Promise<void>
-{
-    const result = await sendEmail({
-        to: email,
-        template: 'signup-link',
-        data: { confirmUrl, expiresInMinutes },
-    });
-
-    if (!result.success)
-    {
-        authLogger.email.error('Failed to send signup link email', {
-            email,
-            error: result.error,
-        });
-    }
-}
-
 export interface RequestSignupLinkParams
 {
     email: string;
@@ -145,6 +80,10 @@ export interface RequestSignupLinkResult
  * Requesting again is how a resend works: every live link for the address is
  * superseded first, so the newest link is the only one that opens, and any setup
  * session already opened from an older link dies with it.
+ *
+ * Neither branch sends mail: both hand it to `auth.link-mail`, so the answer
+ * costs the same database work whichever one ran. With no pg-boss initialised
+ * the mail still goes out on this request — see `lib/link-mail-delivery.ts`.
  */
 export async function requestSignupLinkService(
     params: RequestSignupLinkParams,
@@ -152,8 +91,7 @@ export async function requestSignupLinkService(
 {
     const email = params.email.trim();
     const returnPath = params.returnPath;
-    const ttlMinutes = env.SPFN_AUTH_SIGNUP_LINK_TTL_MINUTES ?? 30;
-    const expiresAt = new Date(Date.now() + ttlMinutes * 60_000);
+    const expiresAt = new Date(Date.now() + (env.SPFN_AUTH_SIGNUP_LINK_TTL_MINUTES ?? 30) * 60_000);
 
     const existingUser = await usersRepository.findByEmail(email);
 
@@ -168,16 +106,15 @@ export async function requestSignupLinkService(
 
     await signupLinkTokensRepository.supersedeLiveForEmail(email);
 
-    const { secret, hash } = mintCredential();
-
-    await signupLinkTokensRepository.create({
+    // The row is written without a token: minting belongs to whoever sends the
+    // mail, and until then a hash-less row matches no lookup.
+    const row = await signupLinkTokensRepository.createPending({
         email,
-        tokenHash: hash,
         returnPath: returnPath ?? null,
         expiresAt,
     });
 
-    await sendSignupLinkEmail(email, buildConfirmUrl(secret), ttlMinutes);
+    await deliverLinkMail({ kind: 'signup-link', rowId: row.id }, () => issueSignupLink(row.id));
 
     return { success: true, expiresAt: expiresAt.toISOString() };
 }

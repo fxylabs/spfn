@@ -39,7 +39,12 @@ export const passwordResetTokens = authSchema.table('password_reset_tokens',
 
         // SHA-256 of the emailed token, base64url
         // The token itself (32 random bytes) is never stored
-        tokenHash: text('token_hash').notNull(),
+        //
+        // Null until the link is issued. The request writes the row and the
+        // `auth.link-mail` job mints the token, so a row exists for a moment
+        // with no credential on it; a null never matches a lookup by hash, so a
+        // pending row cannot be confirmed. See server/jobs/link-mail.ts.
+        tokenHash: text('token_hash'),
 
         // Relative path to return the user to after the reset completes
         // Validated as a relative path on the way in; never an absolute URL

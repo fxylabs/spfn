@@ -14,7 +14,7 @@
 import { signupLinkTokens } from '../entities/signup-link-tokens';
 import type { NewSignupLinkToken, SignupLinkToken } from '../entities/signup-link-tokens';
 import { BaseRepository } from '@spfn/core/db';
-import { eq, and, isNull } from 'drizzle-orm';
+import { eq, and, gt, isNull } from 'drizzle-orm';
 
 export class SignupLinkTokensRepository extends BaseRepository
 {
@@ -30,6 +30,58 @@ export class SignupLinkTokensRepository extends BaseRepository
             .returning();
 
         return result[0];
+    }
+
+    /**
+     * Create a signup link row that has no token yet.
+     *
+     * The link is minted by the `auth.link-mail` job, not by the request, so the
+     * row starts without a hash and `issue` writes one. Both delivery modes take
+     * this path, which is what keeps "a hash lands only through `issue`" true.
+     *
+     * Write primary.
+     */
+    async createPending(data: {
+        email: string;
+        returnPath: string | null;
+        expiresAt: Date;
+    }): Promise<SignupLinkToken>
+    {
+        const result = await this.db
+            .insert(signupLinkTokens)
+            .values(data)
+            .returning();
+
+        return result[0];
+    }
+
+    /**
+     * Write the token hash onto a pending row, but only if the link may still be
+     * delivered: not consumed, not superseded, not completed, not expired.
+     *
+     * One statement rather than a read and a write, so a row superseded by a
+     * newer request between the two never receives a credential — the worker
+     * simply finds nothing to issue and sends no mail.
+     *
+     * @returns the issued row, or null if the row is no longer deliverable
+     */
+    async issue(id: number, tokenHash: string): Promise<SignupLinkToken | null>
+    {
+        const result = await this.db
+            .update(signupLinkTokens)
+            .set({ tokenHash })
+            .where(
+                and(
+                    eq(signupLinkTokens.id, id),
+                    isNull(signupLinkTokens.consumedAt),
+                    isNull(signupLinkTokens.supersededAt),
+                    isNull(signupLinkTokens.completedAt),
+                    gt(signupLinkTokens.expiresAt, new Date()),
+                ),
+            )
+            .returning();
+
+        return result[0] ?? null;
     }
 
     /**

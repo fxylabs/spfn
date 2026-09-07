@@ -26,12 +26,10 @@
  * needed for.
  */
 
-import crypto from 'crypto';
 import { env } from '@spfn/auth/config';
 import { PasswordResetLinkError, PasswordResetSessionError } from '@spfn/auth/errors';
 import { ValidationError } from '@spfn/core/errors';
 import { onAfterCommit } from '@spfn/core/db';
-import { sendEmail } from '@spfn/notification/server';
 import { authLogger } from '../logger';
 import {
     deviceAuthorizationsRepository,
@@ -41,77 +39,14 @@ import {
 } from '../repositories';
 import type { PasswordResetToken } from '../entities/password-reset-tokens';
 import { hashPassword, normalizeEmail } from '../helpers';
+import { hashCredential, mintCredential } from '../lib/link-credentials';
+import { deliverLinkMail } from '../lib/link-mail-delivery';
 import { authPasswordResetEvent } from '../events';
+import { issuePasswordResetLink } from './link-mail.service';
 import { registerPublicKeyService } from './key.service';
 import { updateLastLoginService } from './user.service';
 import type { RegisterResult } from './auth.service';
 import type { KeyAlgorithmType, KeyPlatformType } from '../types';
-
-/**
- * Bytes of entropy in the link token and the setup secret.
- *
- * The same 32 bytes the signup link uses, for the same reason: there is nothing
- * to brute force, so neither credential carries an attempt counter and the rate
- * limits bound request volume and mail sending rather than guessing.
- */
-const CREDENTIAL_BYTES = 32;
-
-/**
- * Mint a bearer credential and the value stored for it.
- *
- * The secret is returned once, to be emailed or set as a cookie, and is then
- * unrecoverable — only `hash` reaches the database.
- */
-function mintCredential(): { secret: string; hash: string }
-{
-    const secret = crypto.randomBytes(CREDENTIAL_BYTES).toString('base64url');
-
-    return { secret, hash: hashCredential(secret) };
-}
-
-/**
- * Hash a presented credential the same way it was stored.
- *
- * SHA-256 without a salt or a work factor, deliberately: the input is 32 random
- * bytes rather than a human-chosen secret, so there is no dictionary to slow
- * down, and lookup has to be a plain equality match on an indexed column.
- */
-function hashCredential(secret: string): string
-{
-    return crypto.createHash('sha256').update(secret).digest('base64url');
-}
-
-/**
- * Absolute URL of the app page the reset link opens.
- */
-function buildConfirmUrl(token: string): string
-{
-    const appUrl = (env.NEXT_PUBLIC_SPFN_APP_URL || env.SPFN_APP_URL || '').replace(/\/$/, '');
-    const path = env.SPFN_AUTH_PASSWORD_RESET_CONFIRM_PATH || '/password/reset';
-
-    return `${appUrl}${path}?token=${encodeURIComponent(token)}`;
-}
-
-async function sendPasswordResetEmail(
-    email: string,
-    confirmUrl: string,
-    expiresInMinutes: number,
-): Promise<void>
-{
-    const result = await sendEmail({
-        to: email,
-        template: 'password-reset',
-        data: { confirmUrl, expiresInMinutes },
-    });
-
-    if (!result.success)
-    {
-        authLogger.email.error('Failed to send password reset email', {
-            email,
-            error: result.error,
-        });
-    }
-}
 
 /**
  * The account behind a row, if a reset may still land on it.
@@ -166,17 +101,21 @@ export interface RequestPasswordResetResult
  * Requesting again is how a resend works: every live link for the account is
  * superseded first, so the newest link is the only one that opens, and any setup
  * session already opened from an older link dies with it.
+ *
+ * The eligible branch does not send the mail either — it hands it to
+ * `auth.link-mail` — so the two branches differ by a few database writes and not
+ * by a mail provider's round trip. With no pg-boss initialised the mail still
+ * goes out on this request; see `lib/link-mail-delivery.ts`.
  */
 export async function requestPasswordResetService(
     params: RequestPasswordResetParams,
 ): Promise<RequestPasswordResetResult>
 {
     const email = normalizeEmail(params.email);
-    const ttlMinutes = env.SPFN_AUTH_PASSWORD_RESET_LINK_TTL_MINUTES ?? 30;
 
     // Computed before the branch and used by both, so the value cannot vary with
     // whether a row exists to expire.
-    const expiresAt = new Date(Date.now() + ttlMinutes * 60_000);
+    const expiresAt = new Date(Date.now() + (env.SPFN_AUTH_PASSWORD_RESET_LINK_TTL_MINUTES ?? 30) * 60_000);
     const uniformResponse = { success: true, expiresAt: expiresAt.toISOString() };
 
     // Unconditional: every branch pays for the lookup, and no branch returns
@@ -192,17 +131,16 @@ export async function requestPasswordResetService(
 
     await passwordResetTokensRepository.supersedeAllLiveByUserId(user.id);
 
-    const { secret, hash } = mintCredential();
-
-    await passwordResetTokensRepository.create({
+    // The row is written without a token: minting belongs to whoever sends the
+    // mail, and until then a hash-less row matches no lookup.
+    const row = await passwordResetTokensRepository.createPending({
         userId: user.id,
         email: user.email!,
-        tokenHash: hash,
         returnPath: params.returnPath ?? null,
         expiresAt,
     });
 
-    await sendPasswordResetEmail(user.email!, buildConfirmUrl(secret), ttlMinutes);
+    await deliverLinkMail({ kind: 'password-reset', rowId: row.id }, () => issuePasswordResetLink(row.id));
 
     return uniformResponse;
 }

@@ -38,6 +38,59 @@ export class PasswordResetTokensRepository extends BaseRepository
     }
 
     /**
+     * Create a reset link row that has no token yet.
+     *
+     * The link is minted by the `auth.link-mail` job, not by the request, so the
+     * row starts without a hash and `issue` writes one. Both delivery modes take
+     * this path, which is what keeps "a hash lands only through `issue`" true.
+     *
+     * Write primary.
+     */
+    async createPending(data: {
+        userId: number;
+        email: string;
+        returnPath: string | null;
+        expiresAt: Date;
+    }): Promise<PasswordResetToken>
+    {
+        const result = await this.db
+            .insert(passwordResetTokens)
+            .values(data)
+            .returning();
+
+        return result[0];
+    }
+
+    /**
+     * Write the token hash onto a pending row, but only if the link may still be
+     * delivered: not consumed, not superseded, not completed, not expired.
+     *
+     * One statement rather than a read and a write, so a row superseded by a
+     * newer request between the two never receives a credential — the worker
+     * simply finds nothing to issue and sends no mail.
+     *
+     * @returns the issued row, or null if the row is no longer deliverable
+     */
+    async issue(id: number, tokenHash: string): Promise<PasswordResetToken | null>
+    {
+        const result = await this.db
+            .update(passwordResetTokens)
+            .set({ tokenHash })
+            .where(
+                and(
+                    eq(passwordResetTokens.id, id),
+                    isNull(passwordResetTokens.consumedAt),
+                    isNull(passwordResetTokens.supersededAt),
+                    isNull(passwordResetTokens.completedAt),
+                    gt(passwordResetTokens.expiresAt, new Date()),
+                ),
+            )
+            .returning();
+
+        return result[0] ?? null;
+    }
+
+    /**
      * Find a link that can still be exchanged for a setup session: unconsumed,
      * not superseded, not completed, not expired.
      *

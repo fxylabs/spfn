@@ -12,6 +12,7 @@ import {
     envString,
     envNumber,
     envBoolean,
+    envEnum,
     createSecureSecretParser,
     createPasswordParser,
 } from '@spfn/core/env';
@@ -305,6 +306,18 @@ export const authEnvSchema = defineEnvSchema({
             default: '/password/reset',
             required: false,
             examples: ['/password/reset', '/auth/reset', '/forgot/new-password'],
+        }),
+    },
+
+    // ============================================================================
+    // Link mail delivery
+    // ============================================================================
+    SPFN_AUTH_LINK_MAIL_DELIVERY: {
+        ...envEnum(['auto', 'inline', 'queued'] as const, {
+            description: 'Who sends signup-link, password-reset and account-exists mail. \'auto\' (default) queues it on auth.link-mail when pg-boss is initialised and sends it on the request path when it is not; \'queued\' always queues and surfaces an enqueue failure; \'inline\' always sends on the request path, which makes how long the request took reveal whether the address has an account.',
+            default: 'auto',
+            required: false,
+            examples: ['auto', 'inline', 'queued'],
         }),
     },
 

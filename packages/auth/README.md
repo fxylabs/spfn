@@ -165,6 +165,7 @@ real secret values out of band, never commit them.
 | `SPFN_AUTH_SIGNUP_CONFIRM_PATH` | `.env.server` | — | default `/signup/confirm`; the page in your app the emailed link opens |
 | `SPFN_AUTH_PASSWORD_RESET_LINK_TTL_MINUTES` / `_SETUP_TTL_MINUTES` | `.env.server` | — | defaults `30` / `15` — see [Password reset](#password-reset-verified-email) |
 | `SPFN_AUTH_PASSWORD_RESET_CONFIRM_PATH` | `.env.server` | — | default `/password/reset`; the page in your app the emailed link opens |
+| `SPFN_AUTH_LINK_MAIL_DELIVERY` | `.env.server` | — | `auto` (default) \| `inline` \| `queued`; who sends signup-link, reset and account-exists mail — see [Link mail delivery](#link-mail-delivery) |
 | `SPFN_AUTH_PASSKEY_RP_ID` / `_RP_NAME` / `_ORIGINS` | `.env.server` | — | relying party for passkeys; defaults derive from `{NEXT_PUBLIC_SPFN_APP_URL\|\|SPFN_APP_URL}` and are **checked at boot** — see [Passkeys](#passkeys-webauthn) |
 | `SPFN_AUTH_PASSKEY_USER_VERIFICATION` | `.env.server` | — | `preferred` (default) or `required`; `discouraged` refuses boot |
 | `SPFN_AUTH_PASSKEY_CHALLENGE_TTL_SECONDS` / `_RECENT_AUTH_MINUTES` | `.env.server` | — | defaults `300` / `10` — see [Passkeys](#passkeys-webauthn) |
@@ -266,6 +267,10 @@ Calling it again is how a resend works: it invalidates the previous link and any
 session opened from it. `returnPath` must be a path inside your app — absolute URLs,
 `//host`, and `..` are refused, so the link cannot become an open redirect.
 
+The mail leaves through the `auth.link-mail` job when pg-boss is initialised — register
+`authJobRouter` — so neither branch of this endpoint waits on a mail provider; see
+[Link mail delivery](#link-mail-delivery).
+
 **2 — the page the link opens.** The email points at a page in *your* app
 (`SPFN_AUTH_SIGNUP_CONFIRM_PATH`, default `/signup/confirm`), not at an API route. That page
 reads the token from the query string and posts it:
@@ -345,6 +350,10 @@ await authApi.requestPasswordReset.call({
 Calling it again is how a resend works: it invalidates the previous link and any setup
 session opened from it. `returnPath` must be a path inside your app — absolute URLs,
 `//host`, and `..` are refused, so the link cannot become an open redirect.
+
+The mail leaves through the `auth.link-mail` job when pg-boss is initialised — register
+`authJobRouter` — so an address with an account and one without cost the same; see
+[Link mail delivery](#link-mail-delivery).
 
 **2 — the page the link opens.** The email points at a page in *your* app
 (`SPFN_AUTH_PASSWORD_RESET_CONFIRM_PATH`, default `/password/reset`), not at an API route.
@@ -2179,7 +2188,7 @@ export default defineServerConfig()
             },
         },
     }))
-    .jobs(authJobRouter)   // registers the daily (04:00 UTC) purge sweep
+    .jobs(authJobRouter)   // the daily (04:00 UTC) purge sweep, and auth.link-mail
     .routes(appRouter)
     .build();
 ```
@@ -2216,15 +2225,68 @@ is fixed at module-import time, which happens before `createAuthLifecycle()` run
 `createAuthLifecycle()` call, and register that instead:
 
 ```typescript
-import { createAuthDeletionJobRouter } from '@spfn/auth/server';
+import { createAuthJobRouter } from '@spfn/auth/server';
 
 // ... after .lifecycle(createAuthLifecycle({ deletion: { purgeCron: '0 3 * * *' } }))
-.jobs(createAuthDeletionJobRouter({ purgeCron: '0 3 * * *' }))
+.jobs(createAuthJobRouter({ purgeCron: '0 3 * * *' }))
 ```
 
-Register **only one** of `authJobRouter` / `createAuthDeletionJobRouter(...)` — both build a job
-named `auth.deletion.purge`, so registering both (e.g. the static export *and* a custom-cron
-router) double-registers the same job name against pg-boss instead of overriding it.
+Register **only one** of `authJobRouter` / `createAuthJobRouter(...)` — both build the same job
+names, so registering both (e.g. the static export *and* a custom-cron router) double-registers
+each name against pg-boss instead of overriding it.
+
+`createAuthDeletionJobRouter` is the former name of `createAuthJobRouter` and still works, with
+the same argument and the same result. It is deprecated because the router has carried more than
+the deletion purge since `auth.link-mail` joined it.
+
+### Link mail delivery
+
+`auth.link-mail` is the second job on the router, and the reason to register the router even in
+an app that never deletes an account.
+
+**What it queues, and why only a row id.** Three mails leave through it: the verified-email
+signup link, the password reset link, and the "you already have an account" notice the signup
+request answers a known address with. The payload is `{ kind, rowId }` — or `{ kind, target,
+targetType }` for the notice — and never the token, the URL or the rendered mail.
+`@spfn/notification` can queue a send of its own, but its payload carries the *rendered* mail,
+which for these three templates would leave the link token in plaintext in `pgboss.job` until
+archive. So the queue carries a reference and the worker mints the credential moments before
+sending it: the plaintext exists in the mail and nowhere else.
+
+**What that buys.** The request writes its row with `token_hash` null and answers. Both branches
+of both endpoints now cost the same database work, so how long a request took no longer says
+whether the address has an account — the mail was the only asymmetry left. A pending row is not
+confirmable: a null hash matches no lookup, and the worker's `issue` refuses a row that was
+superseded, consumed, completed or expired in the meantime, in the same statement that would
+write the hash. A failed send throws so pg-boss retries, and the retry re-mints, which is why a
+token from a failed attempt stops working.
+
+**The three modes** — `SPFN_AUTH_LINK_MAIL_DELIVERY`:
+
+| mode | behaviour |
+|------|-----------|
+| `auto` (default) | queue when pg-boss is initialised, send on the request when it is not — an app with no jobs keeps working exactly as before |
+| `queued` | always queue; an enqueue failure surfaces as a failed request rather than becoming an inline send |
+| `inline` | always send on the request — today's behaviour, and the timing signal that comes with it |
+
+**When the provider refuses on the request path** — `inline`, `auto` with no pg-boss, or the
+fallback below — the failure is logged and the request still answers as if the mail had gone out,
+because an answer that depended on the mail provider would be an account-existence oracle during
+an outage; the user asks again, and only the job path retries.
+
+**The fallback warning.** In `auto`, an app that initialised pg-boss but never registered this
+router has no `auth.link-mail` queue, so the enqueue fails. Losing the mail there would be silent,
+so that request sends inline instead and the log says once per process:
+
+```
+Queue auth.link-mail does not exist, so this link mail was sent on the request path.
+Register the auth job router — .jobs(authJobRouter) — or set SPFN_AUTH_LINK_MAIL_DELIVERY='inline'.
+```
+
+The fix is in the message: register the router, or say `inline` if sending on the request is what
+you want. Only a missing queue falls back — every other enqueue failure, a database outage above
+all, surfaces, because falling back on those would hide the outage behind mail that still gets
+through.
 
 ## FAQ
 
@@ -2335,8 +2397,10 @@ duplicated into a second privileged row holding the configured password.
   '@spfn/notification/server'`). Wire verification-code / invitation emails through its events.
 - **`authJobRouter` isn't registered for you.** `createAuthLifecycle()`'s `afterInfrastructure`
   hook runs *before* `@spfn/core` initializes pg-boss and registers jobs, so the lifecycle has no
-  opportunity to auto-register the account-deletion purge job. Call `.jobs(authJobRouter)`
-  yourself — see [Account Deletion & Recovery](#account-deletion--recovery).
+  opportunity to auto-register the jobs. Call `.jobs(authJobRouter)` yourself — see
+  [Account Deletion & Recovery](#account-deletion--recovery). An app that initialises pg-boss and
+  skips this keeps sending link mail, but on the request path, with a warning naming the router —
+  see [Link mail delivery](#link-mail-delivery).
 - **`USER_STATUSES` gained `pending_deletion` / `deleted`.** Any code with a `switch(user.status)`
   or an exhaustive status union must handle both — `enumText` is plain `text` with no DB `CHECK`,
   so nothing enforces this at the database layer.

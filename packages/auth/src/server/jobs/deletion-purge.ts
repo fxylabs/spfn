@@ -26,11 +26,12 @@
  * statements). So the static `authJobRouter` export below always uses the default
  * cron — `deletion.purgeCron` passed to `createAuthLifecycle()` cannot reach it.
  * To use a custom cron, build the router yourself, after calling
- * `createAuthLifecycle()`, with `createAuthDeletionJobRouter({ purgeCron })` and
- * register that instead of the static export.
+ * `createAuthLifecycle()`, with `createAuthJobRouter({ purgeCron })` and register
+ * that instead of the static export. The router itself lives in `./index.ts`,
+ * which also carries `auth.link-mail`.
  */
 
-import { job, defineJobRouter } from '@spfn/core/job';
+import { job } from '@spfn/core/job';
 import { sweepDuePurges } from '../services/account-deletion.service';
 import { authLogger } from '../logger';
 import { DEFAULT_DELETION_PURGE_CRON } from '../lib/deletion-config';
@@ -55,22 +56,3 @@ export function createAuthDeletionPurgeJob(cronExpression: string = DEFAULT_DELE
             }
         });
 }
-
-/**
- * Build a job router containing only the deletion purge job, with a given cron.
- * Use this (after calling `createAuthLifecycle({ deletion: { purgeCron } })`) when
- * you need a non-default schedule — see the module doc comment above for why the
- * static `authJobRouter` export can't pick up `deletion.purgeCron` automatically.
- */
-export function createAuthDeletionJobRouter(options?: { purgeCron?: string })
-{
-    return defineJobRouter({
-        deletionPurge: createAuthDeletionPurgeJob(options?.purgeCron),
-    });
-}
-
-/**
- * Default job router — the default cron (`0 4 * * *`). Register with
- * `.jobs(authJobRouter)` in `server.config.ts`.
- */
-export const authJobRouter = createAuthDeletionJobRouter();

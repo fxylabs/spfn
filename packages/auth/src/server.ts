@@ -85,9 +85,17 @@ export type { AuthLifecycleOptions, AuthLifecycleConfig } from './server/lifecyc
 /**
  * Register with `.jobs(authJobRouter)` in `server.config.ts` — job registration
  * is not automatic (see `server/jobs/deletion-purge.ts` for why). For a non-default
- * `deletion.purgeCron`, use `createAuthDeletionJobRouter({ purgeCron })` instead.
+ * `deletion.purgeCron`, use `createAuthJobRouter({ purgeCron })` instead. The
+ * router carries the deletion purge sweep and `auth.link-mail`, which is how the
+ * two link flows send their mail off the request path; register only one router.
  */
-export { authJobRouter, createAuthDeletionJobRouter, createAuthDeletionPurgeJob } from './server/jobs';
+export {
+    authJobRouter,
+    createAuthJobRouter,
+    createAuthDeletionJobRouter,
+    createAuthDeletionPurgeJob,
+    linkMailJob,
+} from './server/jobs';
 
 // ============================================================================
 // Events

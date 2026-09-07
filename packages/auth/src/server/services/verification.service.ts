@@ -12,6 +12,8 @@ import { sendEmail, sendSMS } from '@spfn/notification/server';
 import { authLogger } from '../logger';
 import { normalizeEmail } from '../helpers/email';
 import { verificationCodesRepository, usersRepository } from '../repositories';
+import { deliverLinkMail } from '../lib/link-mail-delivery';
+import { sendAccountExistsNotice } from './link-mail.service';
 import type { VerificationTargetType, VerificationPurpose } from '../routes/schema';
 
 /**
@@ -316,26 +318,6 @@ async function accountExistsForTarget(
 }
 
 /**
- * Notify the owner that someone tried to sign up with their (already-registered)
- * address — instead of sending a usable signup code. UX hint + security tripwire.
- */
-async function sendAccountExistsNotice(
-    target: string,
-    targetType: VerificationTargetType,
-): Promise<void>
-{
-    const result = targetType === 'email'
-        ? await sendEmail({ to: target, template: 'account-exists', data: {} })
-        : await sendSMS({ to: target, template: 'account-exists', data: {} });
-
-    if (!result.success)
-    {
-        const log = targetType === 'email' ? authLogger.email : authLogger.sms;
-        log.error('Failed to send account-exists notice', { target, error: result.error });
-    }
-}
-
-/**
  * Tell the owner that someone tried to sign up with their address, at most once
  * per dedupe window.
  *
@@ -348,6 +330,11 @@ async function sendAccountExistsNotice(
  * The window is kept as an undelivered marker row in `verification_codes`: the
  * code it carries is never sent and is unusable, since registration refuses an
  * existing account regardless. Only its timestamp matters.
+ *
+ * Only the bookkeeping runs here. The notice itself leaves through
+ * `auth.link-mail`, so the signup branch that finds an account costs the same as
+ * the one that does not — the mail is what used to make the two distinguishable
+ * by how long they took.
  *
  * @param target - Email address or E.164 phone number
  * @param targetType - Type of target (email or phone)
@@ -375,7 +362,10 @@ export async function noticeAccountExistsOnce(
         attempts: 0,
     });
 
-    await sendAccountExistsNotice(target, targetType);
+    await deliverLinkMail(
+        { kind: 'account-exists', target, targetType },
+        () => sendAccountExistsNotice(target, targetType),
+    );
 }
 
 export interface SendVerificationCodeParams
