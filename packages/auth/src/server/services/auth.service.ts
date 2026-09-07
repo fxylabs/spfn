@@ -196,9 +196,17 @@ export async function createVerifiedAccount(
     }
 
     // Create user
+    //
+    // `emailVerifiedAt` is stamped here because both entry points proved the
+    // address before arriving: the six-digit-code path verified a code sent to
+    // it, the link path confirmed a link sent to it. It went unstamped for a
+    // long time, which left password accounts indistinguishable from accounts
+    // whose provider reported the address unverified — and made every predicate
+    // written against the column wrong about them.
     const newUser = await usersRepository.create({
         email: email || null,
         phone: phone || null,
+        emailVerifiedAt: email ? new Date() : null,
         passwordHash,
         passwordChangeRequired: false,
         roleId: userRole.id,

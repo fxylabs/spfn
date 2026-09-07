@@ -59,6 +59,11 @@ export const COOKIE_NAMES = {
     {
         return `spfn_signup_setup${getCookieSuffix()}`;
     },
+    /** Password-setup session for a password reset — temporary, single-purpose */
+    get PASSWORD_RESET_SETUP()
+    {
+        return `spfn_password_reset_setup${getCookieSuffix()}`;
+    },
     /** CSRF token — the only cookie here the browser can read */
     get CSRF()
     {

@@ -163,6 +163,8 @@ real secret values out of band, never commit them.
 | `SPFN_AUTH_RESERVED_USERNAMES` / `_USERNAME_MIN_LENGTH` / `_USERNAME_MAX_LENGTH` | `.env.server` | — | username rules |
 | `SPFN_AUTH_SIGNUP_LINK_TTL_MINUTES` / `_SETUP_TTL_MINUTES` | `.env.server` | — | defaults `30` / `15` — see [Verified-email signup](#verified-email-signup) |
 | `SPFN_AUTH_SIGNUP_CONFIRM_PATH` | `.env.server` | — | default `/signup/confirm`; the page in your app the emailed link opens |
+| `SPFN_AUTH_PASSWORD_RESET_LINK_TTL_MINUTES` / `_SETUP_TTL_MINUTES` | `.env.server` | — | defaults `30` / `15` — see [Password reset](#password-reset-verified-email) |
+| `SPFN_AUTH_PASSWORD_RESET_CONFIRM_PATH` | `.env.server` | — | default `/password/reset`; the page in your app the emailed link opens |
 | `SPFN_AUTH_PASSKEY_RP_ID` / `_RP_NAME` / `_ORIGINS` | `.env.server` | — | relying party for passkeys; defaults derive from `{NEXT_PUBLIC_SPFN_APP_URL\|\|SPFN_APP_URL}` and are **checked at boot** — see [Passkeys](#passkeys-webauthn) |
 | `SPFN_AUTH_PASSKEY_USER_VERIFICATION` | `.env.server` | — | `preferred` (default) or `required`; `discouraged` refuses boot |
 | `SPFN_AUTH_PASSKEY_CHALLENGE_TTL_SECONDS` / `_RECENT_AUTH_MINUTES` | `.env.server` | — | defaults `300` / `10` — see [Passkeys](#passkeys-webauthn) |
@@ -193,6 +195,9 @@ routes use `.skip(['auth'])`; the rest require `Authorization: Bearer <client-si
 | `requestSignupLink` | POST `/_auth/signup/email` | public | email a one-time signup confirmation link — see [Verified-email signup](#verified-email-signup) |
 | `confirmSignupLink` | POST `/_auth/signup/email/confirm` | public | exchange the link for a password-setup session |
 | `completeSignup` | POST `/_auth/signup/password` | setup session | set the password, which creates the account and signs in |
+| `requestPasswordReset` | POST `/_auth/password/reset` | public | email a one-time password reset link — see [Password reset](#password-reset-verified-email) |
+| `confirmPasswordReset` | POST `/_auth/password/reset/confirm` | public | exchange the link for a password-setup session |
+| `completePasswordReset` | POST `/_auth/password/reset/complete` | setup session | set the new password, sign every other device out, sign this one in |
 | `login` | POST `/_auth/login` | public | password login + new session key |
 | `startDeviceAuth` | POST `/_auth/device/start` | public | begin a device-code login — see [Device-code login](#device-code-login) |
 | `pollDeviceAuth` | POST `/_auth/device/poll` | public | ask whether the request was answered; the approved answer *is* the login |
@@ -308,6 +313,95 @@ override it there to change the copy.
 **What is stored.** Only SHA-256 hashes of the link token and the setup secret, in
 `spfn_auth.signup_link_tokens`. Neither credential is recoverable from the database, and
 both are one-time: a link opens one setup session, and a setup session sets one password.
+
+### Password reset (verified email)
+
+The way back into an account whose password is gone, using the address the account already
+proved. Same three steps as the signup above, and the same posture on the two credentials.
+
+```
+request  → a one-time link is emailed
+confirm  → the link becomes a short-lived, HttpOnly password-setup session
+complete → the new password is written, every other device is signed out, this one is signed in
+```
+
+**Who can reset.** An `active` account whose `emailVerifiedAt` is set **or** that already has
+a password. The second half is what makes the rule work on accounts created before the
+column was stamped: both register paths proved the address at signup. An OAuth-only account
+whose provider reported the address unverified has neither and is excluded — for it, a reset
+would be a way in built on an address nobody proved.
+
+**1 — request the link.** The response is identical for every input — same status, same two
+fields, same `expiresAt` arithmetic — and mail goes only to an account that can be reset, so
+neither the answer nor the mailbox reveals whether an address has an account here.
+
+```typescript
+await authApi.requestPasswordReset.call({
+    body: { email: 'user@example.com', returnPath: '/account' },   // returnPath optional
+});
+// → { success: true, expiresAt }
+```
+
+Calling it again is how a resend works: it invalidates the previous link and any setup
+session opened from it. `returnPath` must be a path inside your app — absolute URLs,
+`//host`, and `..` are refused, so the link cannot become an open redirect.
+
+**2 — the page the link opens.** The email points at a page in *your* app
+(`SPFN_AUTH_PASSWORD_RESET_CONFIRM_PATH`, default `/password/reset`), not at an API route.
+That page reads the token from the query string and posts it:
+
+```typescript
+'use client';
+
+const token = useSearchParams().get('token');
+
+const { email, returnPath } = await authApi.confirmPasswordReset.call({ body: { token } });
+
+// Drop the token from the URL so it does not linger in history or a Referer header.
+window.history.replaceState({}, '', window.location.pathname);
+```
+
+The setup session comes back as an HttpOnly cookie — the proxy interceptor moves it there
+and strips it from the response body, so page script never holds it. It is a cookie of its
+own, not the signup one, so neither secret is ever accepted by the other flow. Serve this
+page with `Referrer-Policy: no-referrer`.
+
+**3 — set the new password.** The setup cookie authorizes it; the device keypair is injected
+by the interceptor exactly as it is for `login`.
+
+```typescript
+await authApi.completePasswordReset.call({ body: { password } });
+// → { userId, publicId, email }  + session cookie, same as login
+```
+
+**Every other device is signed out.** Completing a reset denies every pending device
+authorization and revokes every active key, exactly as `changePassword` does — whoever was
+signed in on the old password, including the person the reset was needed for, has to sign in
+again. The browser that performed the reset is signed in on a fresh key registered after the
+revocation, so it does not have to retype the new password. `emailVerifiedAt` is stamped if
+it was not already, `passwordChangeRequired` is cleared, and `auth.password.reset` is emitted
+after commit.
+
+The new hash, the revocations, the new device key and the completion mark commit together. A
+password that fails the strength policy leaves the session usable, so the user retypes rather
+than requesting a fresh email.
+
+**Settings.**
+
+| Variable | Default | Meaning |
+|----------|---------|---------|
+| `SPFN_AUTH_PASSWORD_RESET_LINK_TTL_MINUTES` | `30` | how long the emailed link works |
+| `SPFN_AUTH_PASSWORD_RESET_SETUP_TTL_MINUTES` | `15` | how long the password-setup session works |
+| `SPFN_AUTH_PASSWORD_RESET_CONFIRM_PATH` | `/password/reset` | the page in your app the link opens |
+
+The link URL is built on `NEXT_PUBLIC_SPFN_APP_URL || SPFN_APP_URL`, the same resolution the
+signup link uses. Delivery uses the `password-reset` template in `@spfn/notification` —
+override it there to change the copy.
+
+**What is stored.** Only SHA-256 hashes of the link token and the setup secret, in
+`spfn_auth.password_reset_tokens`. Neither credential is recoverable from the database, and
+both are one-time: a link opens one setup session, and a setup session sets one password.
+A separate table from `signup_link_tokens`, so a signup secret can never address a reset row.
 
 ### Device-code login
 
@@ -667,18 +761,20 @@ await authApi.revokePasskey.call({ body: { passkeyId } });
 
 #### Recovery — read this before shipping a passkey-only sign-up
 
-**There is no password reset in `@spfn/auth` today.** The ways back into an account are: a
-live passkey, a password, or a linked social account. Nothing else — support cannot restore an
-account that has none of the three.
+The ways back into an account are: a live passkey, a password, a linked social account, or a
+verified email address — the last one because [Password reset](#password-reset-verified-email)
+can always give such an account a password back. Nothing else; support cannot restore an
+account that has none of the four.
 
 That is why **revoking the last live passkey is refused (409, `code:
-'LAST_RECOVERY_CREDENTIAL'`) when the account has no password and no linked social account.**
-The refusal is not paternalism; it is the absence of an undo. Branch on that code to offer
-"set a password first" or "link an account first".
+'LAST_RECOVERY_CREDENTIAL'`) when the account has no password, no linked social account and no
+verified email.** A phone-only account is the case that reaches it. The refusal is not
+paternalism; it is the absence of an undo. Branch on that code to offer "set a password
+first", "link an account first", or "confirm your email address first".
 
-The same fact should shape your sign-up: an account created without a password and given one
-passkey has exactly one way in, and losing the device loses the account. Ask for a password or
-a social link before, or shortly after, the passkey.
+The same fact should shape your sign-up: an account created without a password, without an
+email and given one passkey has exactly one way in, and losing the device loses the account.
+Ask for a password, an address, or a social link before, or shortly after, the passkey.
 
 #### How the ceremonies are kept honest
 
@@ -757,6 +853,8 @@ The behaviour above is asserted row by row in
 | M5 | revoke on an 11-minute-old session | 403 `RECENT_AUTH_REQUIRED` |
 | M6 / M7 / M8 | last passkey, no password: alone / with a social account / with a second passkey | 409 / 200 / 200 |
 | M10 | re-enrolling a revoked credential | 409 |
+| K1 / K4 | two concurrent revokes: 2 passkeys and nothing else / 1 passkey and a password | 200 + 409 / 200 + 404 |
+| K2 / K3 | last passkey, no password: with a verified email / phone-only | 200 / 409 |
 
 Configuration rows C1–C6 are in `src/__tests__/unit/passkey-config.test.ts`.
 
@@ -1424,7 +1522,12 @@ and a passkey has to be enrolled from a session that already exists, so neither 
 `passkeyEnrolledEvent` (`auth.passkey.enrolled`) and `passkeyRevokedEvent`
 (`auth.passkey.revoked`) fire after commit when a passkey is added or retired.
 
-Payload types: `AuthLoginPayload`, `AuthRegisterPayload`, `InvitationCreatedPayload`,
+`authPasswordResetEvent` (`auth.password.reset`: `userId`, `email`) fires after commit when a
+[password reset](#password-reset-verified-email) completes. Distinct from a password
+*change*, which is made from a session that already proved itself: this one is made by
+whoever opened a link in a mailbox, so it is the notice to send the owner.
+
+Payload types: `AuthLoginPayload`, `AuthRegisterPayload`, `AuthPasswordResetPayload`, `InvitationCreatedPayload`,
 `InvitationAcceptedPayload`, `AuthDeletionRequestedPayload`, `AuthDeletionCancelledPayload`,
 `AuthDeletionCompletedPayload`, `OAuthUnlinkedPayload` (`auth.oauth.unlinked` — provider-side
 disconnect, see the OAuth unlink-notify section), `PasskeyEnrolledPayload`,
@@ -2139,6 +2242,15 @@ callback 404s — including in local dev. An explicit `SPFN_AUTH_<PROVIDER>_REDI
 wrong origin or path no longer gets that far: it fails at boot with a message naming the
 variable. Details in
 [OAuth callback origin](#oauth-callback-origin-web-app-host--rewrite).
+
+**I forgot my password.**
+Send the address to `requestPasswordReset` and open the link that arrives. Any `active`
+account whose email is verified — or that already has a password, which covers every account
+created before the column was stamped — can be reset that way. See
+[Password reset](#password-reset-verified-email). Completing it signs every other device out,
+so it is also the answer to "someone else knows my password". An account with neither a
+verified address nor a password (OAuth-only, provider said unverified) cannot be reset by
+email; it signs in through its provider.
 
 **Does the server hold my users' private keys?**
 No. The client generates an ES256/RS256 keypair, sends only the public key on register or

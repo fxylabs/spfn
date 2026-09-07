@@ -56,6 +56,28 @@ export class UsersRepository extends BaseRepository
     }
 
     /**
+     * Take a row lock on a user, so callers that read-then-decide serialise.
+     *
+     * `SELECT id ... FOR UPDATE` and nothing else: the value is never used, the
+     * lock is. A caller that counts an account's remaining credentials and then
+     * removes one has a read-modify-write between two statements, and two such
+     * callers racing both read the pre-removal count. Locking the owner row
+     * first makes the second one wait for the first to commit, so it counts
+     * what is actually left.
+     *
+     * Only meaningful inside a transaction — the lock is released at commit.
+     * Write primary.
+     */
+    async lockById(id: number): Promise<void>
+    {
+        await this.db
+            .select({ id: users.id })
+            .from(users)
+            .where(eq(users.id, id))
+            .for('update');
+    }
+
+    /**
      * 이메일로 사용자 조회
      * Read replica 사용
      */

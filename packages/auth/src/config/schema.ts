@@ -279,6 +279,36 @@ export const authEnvSchema = defineEnvSchema({
     },
 
     // ============================================================================
+    // Password reset (verified email)
+    // ============================================================================
+    SPFN_AUTH_PASSWORD_RESET_LINK_TTL_MINUTES: {
+        ...envNumber({
+            description: 'How long an emailed password reset link stays valid. Long enough to survive a mail delay, short enough that a link left in an inbox stops working.',
+            default: 30,
+            required: false,
+            examples: [15, 30, 60],
+        }),
+    },
+
+    SPFN_AUTH_PASSWORD_RESET_SETUP_TTL_MINUTES: {
+        ...envNumber({
+            description: 'How long the password-setup session opened by a reset link stays valid. Covers one sitting at the new-password form, not an abandoned tab.',
+            default: 15,
+            required: false,
+            examples: [10, 15, 30],
+        }),
+    },
+
+    SPFN_AUTH_PASSWORD_RESET_CONFIRM_PATH: {
+        ...envString({
+            description: 'App page the emailed reset link opens, as a path on {NEXT_PUBLIC_SPFN_APP_URL || SPFN_APP_URL}. The page reads the token from the query string and posts it to /_auth/password/reset/confirm; it is a page in your app, not an API route.',
+            default: '/password/reset',
+            required: false,
+            examples: ['/password/reset', '/auth/reset', '/forgot/new-password'],
+        }),
+    },
+
+    // ============================================================================
     // Passkeys (WebAuthn)
     // ============================================================================
     SPFN_AUTH_PASSKEY_RP_ID: {

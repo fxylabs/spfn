@@ -9,6 +9,7 @@ export * from './users.repository';
 export * from './keys.repository';
 export * from './verification-codes.repository';
 export * from './signup-link-tokens.repository';
+export * from './password-reset-tokens.repository';
 export * from './passkeys.repository';
 export * from './webauthn-challenges.repository';
 export * from './device-authorizations.repository';

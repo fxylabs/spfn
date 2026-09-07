@@ -283,12 +283,39 @@ export const oauthUnlinkedEvent = defineEvent(
 );
 
 /**
+ * auth.password.reset — an account's password was replaced through a reset link
+ *
+ * 발행 시점:
+ * - completePasswordResetService()가 커밋된 직후
+ *
+ * Distinct from a password *change*, which is made from a session that already
+ * proved itself. This one is made by whoever opened a link in a mailbox, so it
+ * is the event an app hangs a "your password was reset" notice on — and the
+ * signal to look at, if the owner says they did not ask for it.
+ *
+ * @example
+ * ```typescript
+ * authPasswordResetEvent.subscribe(async (payload) => {
+ *     await notifyOwner(payload.userId, 'Your password was reset');
+ * });
+ * ```
+ */
+export const authPasswordResetEvent = defineEvent(
+    'auth.password.reset',
+    Type.Object({
+        userId: Type.String(),
+        email: Type.String(),
+    }),
+);
+
+/**
  * Auth event payload types
  */
 export type AuthLoginPayload = typeof authLoginEvent._payload;
 export type PasskeyEnrolledPayload = typeof passkeyEnrolledEvent._payload;
 export type PasskeyRevokedPayload = typeof passkeyRevokedEvent._payload;
 export type AuthRegisterPayload = typeof authRegisterEvent._payload;
+export type AuthPasswordResetPayload = typeof authPasswordResetEvent._payload;
 export type InvitationCreatedPayload = typeof invitationCreatedEvent._payload;
 export type InvitationAcceptedPayload = typeof invitationAcceptedEvent._payload;
 export type AuthDeletionRequestedPayload = typeof authDeletionRequestedEvent._payload;

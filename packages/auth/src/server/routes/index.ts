@@ -28,6 +28,11 @@ import {
     issueOneTimeToken,
 } from './auth';
 import {
+    requestPasswordReset,
+    confirmPasswordReset,
+    completePasswordReset,
+} from './auth/password-reset';
+import {
     passkeyRegisterOptions,
     passkeyRegisterVerify,
     passkeyLoginOptions,
@@ -91,6 +96,10 @@ export const mainAuthRouter = defineRouter({
     requestSignupLink,
     confirmSignupLink,
     completeSignup,
+    // Password reset routes
+    requestPasswordReset,
+    confirmPasswordReset,
+    completePasswordReset,
     login,
     // Device-code login routes
     startDeviceAuth,

@@ -17,9 +17,10 @@
  * arriving with the same challenge therefore produce one winner and one refusal,
  * across instances, rather than both reading it as live.
  *
- * There is no password reset in this package. That is why revoking the last
- * thing an account can sign in with is refused (D6) rather than warned about:
- * nobody, support included, could undo it.
+ * Revoking the last thing an account can sign in with is refused (D6) rather
+ * than warned about, because that state has no undo. A verified email address
+ * counts as one of those things: the password reset flow can always give such an
+ * account a password back.
  */
 
 import crypto from 'crypto';
@@ -253,10 +254,14 @@ export async function assertRecentAuthentication(params: RecentAuthenticationPar
 /**
  * Refuse to remove the only thing an account can sign in with (D6).
  *
- * The recovery paths that exist today are: another live passkey, a password, a
- * linked social account. No password reset exists in this package, so an account
- * left with none of the three is locked out for good — the refusal is not
- * paternalism, it is the absence of an undo.
+ * The recovery paths are: another live passkey, a password, a linked social
+ * account, and a verified email address. The last one is new — a password reset
+ * now exists in this package, and an account that can be reset by email can
+ * always get a password back, so the refusal has nothing left to protect.
+ *
+ * What remains refused is the account with none of the four: no other passkey,
+ * no password, no social account, and no verified email — a phone-only account
+ * among them. Nobody, support included, could undo that state.
  *
  * @throws LastRecoveryCredentialError
  */
@@ -272,6 +277,11 @@ export async function assertNotLastRecoveryCredential(userId: number): Promise<v
     const user = await usersRepository.findById(userId);
 
     if (user?.passwordHash)
+    {
+        return;
+    }
+
+    if (user?.emailVerifiedAt)
     {
         return;
     }
@@ -693,6 +703,13 @@ export interface RevokePasskeyParams
  * laptop should not be able to strip the account's credentials; and on the
  * last-recovery-credential guard, because there is no undo for the state that
  * would leave.
+ *
+ * The owner row is locked before the guard runs, and the route's
+ * `Transactional()` is what holds that lock to commit. Without it the guard is a
+ * read-modify-write with a gap: an owner with two passkeys and nothing else who
+ * fires two revokes at once has both count two live credentials, both pass, and
+ * both revoke — the exact state the guard exists to refuse. Locking makes the
+ * second revoke count one.
  */
 export async function revokePasskeyService(params: RevokePasskeyParams): Promise<{ passkeyId: string }>
 {
@@ -705,6 +722,7 @@ export async function revokePasskeyService(params: RevokePasskeyParams): Promise
         throw new PasskeyNotFoundError();
     }
 
+    await usersRepository.lockById(params.userId);
     await assertNotLastRecoveryCredential(params.userId);
 
     const revoked = await passkeysRepository.revokeByIdAndUserId(passkey.id, params.userId, 'Revoked by user');

@@ -231,8 +231,9 @@ export const renamePasskey = route.post('/_auth/passkeys/rename')
 /**
  * POST /_auth/passkeys/revoke - Retire one passkey
  *
- * Refused when it is the only thing the account can sign in with: no password
- * reset exists here, so that state has no undo.
+ * Refused when it is the only thing the account can sign in with — no other
+ * passkey, no password, no social account, no verified email to reset by — so
+ * that state has no undo.
  */
 export const revokePasskey = route.post('/_auth/passkeys/revoke')
     .input({

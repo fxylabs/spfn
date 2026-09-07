@@ -24,7 +24,7 @@ export {
 export { render, registerFilter } from './renderer';
 
 // Built-in templates
-import { verificationCodeTemplate, welcomeTemplate, accountExistsTemplate, signupLinkTemplate } from './builtin';
+import { verificationCodeTemplate, welcomeTemplate, accountExistsTemplate, signupLinkTemplate, passwordResetTemplate } from './builtin';
 import { registerTemplate } from './registry';
 
 /**
@@ -36,4 +36,5 @@ export function registerBuiltinTemplates(): void
     registerTemplate(welcomeTemplate);
     registerTemplate(accountExistsTemplate);
     registerTemplate(signupLinkTemplate);
+    registerTemplate(passwordResetTemplate);
 }

@@ -50,6 +50,21 @@ export type {
     CompleteSignupParams,
 } from './signup-link.service';
 
+// Password Reset Service
+export {
+    requestPasswordResetService,
+    confirmPasswordResetService,
+    completePasswordResetService,
+} from './password-reset.service';
+
+export type {
+    RequestPasswordResetParams,
+    RequestPasswordResetResult,
+    ConfirmPasswordResetParams,
+    ConfirmPasswordResetResult,
+    CompletePasswordResetParams,
+} from './password-reset.service';
+
 // Device-code Login Service
 export {
     startDeviceAuthService,

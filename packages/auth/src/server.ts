@@ -96,6 +96,7 @@ export { authJobRouter, createAuthDeletionJobRouter, createAuthDeletionPurgeJob 
 export {
     authLoginEvent,
     authRegisterEvent,
+    authPasswordResetEvent,
     invitationCreatedEvent,
     invitationAcceptedEvent,
     authDeletionRequestedEvent,
@@ -108,6 +109,7 @@ export {
 export type {
     AuthLoginPayload,
     AuthRegisterPayload,
+    AuthPasswordResetPayload,
     InvitationCreatedPayload,
     InvitationAcceptedPayload,
     AuthDeletionRequestedPayload,

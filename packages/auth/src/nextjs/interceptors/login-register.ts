@@ -32,7 +32,7 @@ const ROTATING_SIGN_IN_PATHS = new Set(['/_auth/login', '/_auth/passkeys/login/v
  */
 export const loginRegisterInterceptor: InterceptorRule =
     {
-        pathPattern: /^\/_auth\/(login|register|invitations\/accept|signup\/password|passkeys\/login\/verify)$/,
+        pathPattern: /^\/_auth\/(login|register|invitations\/accept|signup\/password|password\/reset\/complete|passkeys\/login\/verify)$/,
         method: 'POST',
 
         request: async (ctx, next) =>

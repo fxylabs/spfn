@@ -484,6 +484,52 @@ export class InvalidSignupSetupSessionError extends UnauthorizedError
 }
 
 /**
+ * Password Reset Link Error (401)
+ *
+ * Thrown when an emailed password reset link is unknown, expired, already
+ * consumed, superseded by a newer request, or belongs to an account that is no
+ * longer active.
+ *
+ * One error for every one of those, on purpose. Distinguishing "expired" from
+ * "unknown" tells a caller holding a random token whether it named a real
+ * pending reset, which is exactly the enumeration the request step avoids. The
+ * specific reason is logged.
+ */
+export class PasswordResetLinkError extends UnauthorizedError
+{
+    constructor(data: { message?: string; details?: Record<string, any> } = {})
+    {
+        super({
+            message: data.message || 'This password reset link is no longer valid. Request a new one.',
+            details: data.details,
+        });
+        this.name = 'PasswordResetLinkError';
+    }
+}
+
+/**
+ * Password Reset Session Error (401)
+ *
+ * Thrown when the password-setup session backing a reset is missing, unknown,
+ * expired, superseded or already used.
+ *
+ * One error for every one of those, for the same reason the link error is one
+ * error: which of them applies tells a caller whether an account is mid-reset,
+ * and that is the enumeration the request step is careful not to leak.
+ */
+export class PasswordResetSessionError extends UnauthorizedError
+{
+    constructor(data: { message?: string; details?: Record<string, any> } = {})
+    {
+        super({
+            message: data.message || 'Password reset session is invalid or has expired. Request a new link.',
+            details: data.details,
+        });
+        this.name = 'PasswordResetSessionError';
+    }
+}
+
+/**
  * Unverified Email Link Error (400)
  *
  * Thrown when a social identity carries an email that already belongs to an

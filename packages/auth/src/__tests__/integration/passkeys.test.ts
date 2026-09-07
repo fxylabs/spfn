@@ -95,12 +95,12 @@ describe.skipIf(!dbAvailable)('Passkeys (WebAuthn)', () =>
             roleId: userRole!.id,
             emailVerifiedAt: new Date(),
         });
-        // No passwordHash: the OAuth-only account rows (E5, M6, M7) need an
-        // account a password can never speak for.
+        // No passwordHash and no verified email: the OAuth-only account rows
+        // (E5, M6, M7, M8, K1) need an account that none of the recovery
+        // credentials can speak for, and a verified email is now one of them.
         await db.insert(users).values({
             email: 'social@test.com',
             roleId: userRole!.id,
-            emailVerifiedAt: new Date(),
         });
     });
 
@@ -995,6 +995,82 @@ describe.skipIf(!dbAvailable)('Passkeys (WebAuthn)', () =>
 
             expect((await revoke(session, passkeyId)).status).toBe(200);
             expect((await revoke(session, passkeyId)).status).toBe(404);
+        });
+
+        it('row K2: a verified email is a way back in, so the last passkey may go', async () =>
+        {
+            const session = await sessionWithoutPassword('social@test.com');
+            const { passkeyId } = await enrolled(session);
+
+            await getTestDb().update(users)
+                .set({ emailVerifiedAt: new Date() })
+                .where(eq(users.email, 'social@test.com'));
+
+            expect((await revoke(session, passkeyId)).status).toBe(200);
+            expect((await passkeyRows('social@test.com'))[0].revokedAt).not.toBeNull();
+        });
+
+        it('row K3: a phone-only account has nothing to reset by, so its last passkey stays', async () =>
+        {
+            const userRole = await getRoleByName('user');
+            await getTestDb().insert(users).values({
+                phone: '+821099998888',
+                roleId: userRole!.id,
+            });
+
+            const [phoneOnly] = await getTestDb().select().from(users)
+                .where(eq(users.phone, '+821099998888')).limit(1);
+            const keyPair = generateKeyPair('ES256');
+            await getTestDb().insert(userPublicKeys).values({
+                userId: phoneOnly.id,
+                keyId: keyPair.keyId,
+                publicKey: keyPair.publicKey,
+                fingerprint: keyPair.fingerprint,
+                algorithm: 'ES256',
+            });
+            const session = {
+                authorization: `Bearer ${generateClientToken({ keyId: keyPair.keyId }, keyPair.privateKey, 'ES256', { expiresIn: '5m' })}`,
+                keyId: keyPair.keyId,
+            };
+            const { passkeyId } = await enrolled(session);
+
+            const response = await revoke(session, passkeyId);
+
+            expect(response.status).toBe(409);
+            expect((await response.json()).code).toBe('LAST_RECOVERY_CREDENTIAL');
+        });
+
+        it('row K1: two concurrent revokes cannot strip the last credential between them', async () =>
+        {
+            const session = await sessionWithoutPassword('social@test.com');
+            const first = await enrolled(session);
+            const second = await enrolled(session);
+
+            // Fired without awaiting between them: both requests read two live
+            // passkeys unless the owner row serialises them.
+            const responses = await Promise.all([
+                revoke(session, first.passkeyId),
+                revoke(session, second.passkeyId),
+            ]);
+
+            expect(responses.map(response => response.status).sort()).toEqual([200, 409]);
+
+            const live = (await passkeyRows('social@test.com')).filter(row => row.revokedAt === null);
+            expect(live).toHaveLength(1);
+        });
+
+        it('row K4: two concurrent revokes of one passkey give one 200 and one 404', async () =>
+        {
+            const session = await signIn('owner@test.com');
+            const { passkeyId } = await enrolled(session);
+
+            const responses = await Promise.all([
+                revoke(session, passkeyId),
+                revoke(session, passkeyId),
+            ]);
+
+            expect(responses.map(response => response.status).sort()).toEqual([200, 404]);
+            expect((await passkeyRows('owner@test.com'))[0].revokedAt).not.toBeNull();
         });
 
         it('row M10: a revoked credential cannot be enrolled again, not even by its owner', async () =>
