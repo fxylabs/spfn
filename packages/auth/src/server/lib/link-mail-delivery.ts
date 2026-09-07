@@ -84,14 +84,9 @@ function isMissingQueueError(error: unknown): boolean
  */
 async function enqueueLinkMail(payload: LinkMailPayload): Promise<unknown>
 {
-    // `JobDef['send']` is a conditional type on the payload, and a payload that is
-    // a union distributes it into three call signatures TypeScript will not let a
-    // caller choose between. There is one job and one payload type; this says so.
-    const send = linkMailJob.send as (input: LinkMailPayload) => Promise<string | null>;
-
     try
     {
-        await send(payload);
+        await linkMailJob.send(payload);
 
         return null;
     }

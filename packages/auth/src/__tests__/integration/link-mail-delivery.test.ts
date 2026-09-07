@@ -70,11 +70,6 @@ const { authLogger } = await import('@/server/logger');
 linkMailJob.send = (async (payload: LinkMailPayload) =>
     await boss.send(linkMailJob.name, payload)) as typeof linkMailJob.send;
 
-// `JobDef['run']` is a conditional type on the payload, and a payload that is a
-// union distributes it into three call signatures TypeScript will not let a
-// caller choose between. There is one job and one payload type.
-const runLinkMail = linkMailJob.run as (payload: LinkMailPayload) => Promise<void>;
-
 const dbAvailable = await isDatabaseAvailable();
 
 const JSON_HEADERS = { 'Content-Type': 'application/json' };
@@ -147,7 +142,7 @@ describe.skipIf(!dbAvailable)('Link mail delivery', () =>
 
         for (const payload of payloads)
         {
-            await runLinkMail(payload);
+            await linkMailJob.run(payload);
         }
     }
 
@@ -398,7 +393,7 @@ describe.skipIf(!dbAvailable)('Link mail delivery', () =>
             await post('/_auth/password/reset', { email: 'w3@example.com' });
 
             const [supersededJob] = enqueued();
-            await runLinkMail(supersededJob);
+            await linkMailJob.run(supersededJob);
 
             const rows = await resetRows('w3@example.com');
             expect(rows[0].tokenHash).toBeNull();
@@ -428,10 +423,10 @@ describe.skipIf(!dbAvailable)('Link mail delivery', () =>
             const [payload] = enqueued();
 
             sendEmail.mockResolvedValueOnce({ success: false, error: 'provider refused' });
-            await expect(runLinkMail(payload)).rejects.toThrow('password-reset row');
+            await expect(linkMailJob.run(payload)).rejects.toThrow('password-reset row');
 
             const firstToken = emailedToken('password-reset');
-            await runLinkMail(payload);
+            await linkMailJob.run(payload);
             const secondToken = emailedToken('password-reset');
 
             expect(sendEmail).toHaveBeenCalledTimes(2);
@@ -444,7 +439,7 @@ describe.skipIf(!dbAvailable)('Link mail delivery', () =>
 
         it('row W6: an account-exists payload sends the owner notice once', async () =>
         {
-            await runLinkMail({ kind: 'account-exists', target: 'w6@example.com', targetType: 'email' });
+            await linkMailJob.run({ kind: 'account-exists', target: 'w6@example.com', targetType: 'email' });
 
             expect(templatesSent()).toEqual(['account-exists']);
             expect(sendEmail.mock.calls[0][0].to).toBe('w6@example.com');
@@ -452,14 +447,20 @@ describe.skipIf(!dbAvailable)('Link mail delivery', () =>
 
         it('row W7: an unknown kind is refused and sends nothing', async () =>
         {
-            await expect(runLinkMail({ kind: 'welcome' } as unknown as LinkMailPayload))
+            // The cast is the case: this payload is deliberately not one the
+            // schema describes, and `run` now types the union properly, so the
+            // only way to hand the worker an invalid one is to say so.
+            await expect(linkMailJob.run({ kind: 'welcome' } as unknown as LinkMailPayload))
                 .rejects.toThrow('unknown payload kind');
             expect(sendEmail).not.toHaveBeenCalled();
         });
 
         it('row W7: a link payload with no rowId is refused and sends nothing', async () =>
         {
-            await expect(runLinkMail({ kind: 'signup-link' } as unknown as LinkMailPayload))
+            // The cast is the case: this payload is deliberately not one the
+            // schema describes, and `run` now types the union properly, so the
+            // only way to hand the worker an invalid one is to say so.
+            await expect(linkMailJob.run({ kind: 'signup-link' } as unknown as LinkMailPayload))
                 .rejects.toThrow('carries no rowId');
             expect(sendEmail).not.toHaveBeenCalled();
         });
@@ -634,7 +635,7 @@ describe.skipIf(!dbAvailable)('Link mail delivery', () =>
 
             sendEmail.mockResolvedValue({ success: false, error: 'provider refused' });
 
-            await expect(runLinkMail(payload)).rejects.toThrow('password-reset row');
+            await expect(linkMailJob.run(payload)).rejects.toThrow('password-reset row');
         });
 
         it('row D12: inline mode, a provider outage answers eligible and ineligible alike', async () =>

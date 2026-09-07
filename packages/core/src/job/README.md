@@ -140,6 +140,10 @@ const typedJob = job('typed')
 const noInput = job('simple').handler(async () => { await db.cleanup(); });
 ```
 
+A `Type.Union([...])` input is supported: `send`, `run`, `sendBatch` and the handler are
+typed on the whole union, so each member is accepted and a non-member is rejected — no cast
+and no per-member overload.
+
 ### Cron — scheduled
 
 ```typescript

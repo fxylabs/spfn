@@ -140,8 +140,17 @@ export interface JobSendOptions
 
 /**
  * Job handler function type
+ *
+ * The check is wrapped in a tuple — `[TInput] extends [void]`, not
+ * `TInput extends void` — to stop the conditional from distributing. A bare
+ * type parameter in the check position makes the conditional distributive, so a
+ * union input `A | B | C` is evaluated per member and the results are unioned
+ * into three function types whose parameters intersect to `never`: no caller
+ * can then pass any member. The tuple makes the union one opaque type, which is
+ * what a handler taking `A | B | C` needs. The same wrap is on `send`, `run`
+ * and `sendBatch` below, for the same reason. Do not "simplify" it away.
  */
-export type JobHandler<TInput, TOutput = void> = TInput extends void
+export type JobHandler<TInput, TOutput = void> = [TInput] extends [void]
     ? () => Promise<TOutput>
     : (input: TInput) => Promise<TOutput>;
 
@@ -211,14 +220,14 @@ export interface JobDef<TInput = void, TOutput = void>
     /**
      * Send job to queue (returns immediately, executes in background)
      */
-    send: TInput extends void
+    send: [TInput] extends [void]
         ? (options?: JobSendOptions) => Promise<string | null>
         : (input: TInput, options?: JobSendOptions) => Promise<string | null>;
 
     /**
      * Run job synchronously (for testing/debugging)
      */
-    run: TInput extends void
+    run: [TInput] extends [void]
         ? () => Promise<TOutput>
         : (input: TInput) => Promise<TOutput>;
 
@@ -227,7 +236,7 @@ export interface JobDef<TInput = void, TOutput = void>
      * Much faster than calling send() in a loop.
      * Only available for jobs with input schema.
      */
-    sendBatch: TInput extends void
+    sendBatch: [TInput] extends [void]
         ? (options?: JobSendOptions) => Promise<void>
         : (inputs: TInput[], options?: JobSendOptions) => Promise<void>;
 
