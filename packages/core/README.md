@@ -43,7 +43,7 @@ Next.js owns the frontend, Drizzle owns the SQL, and your services own the rules
 
 ```bash
 pnpm add @spfn/core@beta drizzle-orm@1.0.0-rc.4 postgres pg
-# optional peer: next ^16.2.11   (only for the Next.js bridge)
+# optional peer: next ^16.3.3   (only for the Next.js bridge)
 ```
 
 Node `>=20.0.0`. ESM only.

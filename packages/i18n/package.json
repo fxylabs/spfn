@@ -1,6 +1,6 @@
 {
     "name": "@spfn/i18n",
-    "version": "0.2.0-beta.4",
+    "version": "0.2.0-beta.5",
     "description": "Small, content-agnostic internationalization runtime for SPFN and React applications.",
     "type": "module",
     "sideEffects": false,
@@ -74,7 +74,7 @@
         "node": ">=20.0.0"
     },
     "peerDependencies": {
-        "next": "^16.2.11",
+        "next": "^16.3.3",
         "react": "^18.0.0 || ^19.0.0"
     },
     "peerDependenciesMeta": {
@@ -89,7 +89,7 @@
         "@types/react": "^19.0.0",
         "@types/react-dom": "^19.0.0",
         "madge": "^8.0.0",
-        "next": "^16.2.11",
+        "next": "^16.3.3",
         "react": "^19.2.1",
         "react-dom": "^19.2.1",
         "tsup": "^8.5.0",

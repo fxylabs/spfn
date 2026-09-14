@@ -21,7 +21,7 @@ Underneath: asymmetric client-signed JWTs (ES256/RS256), OTP verification, OAuth
 through a pluggable provider registry (Google, GitHub, Kakao and Naver built in), session
 cookies for Next.js, and runtime RBAC. Routes mount under `/_auth/*` and are reached
 through a typed `authApi` client. Requires `@spfn/core`; Next.js is an optional peer
-(`^16.2.11`).
+(`^16.3.3`).
 
 ## Install
 

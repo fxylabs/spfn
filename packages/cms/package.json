@@ -1,6 +1,6 @@
 {
   "name": "@spfn/cms",
-    "version": "0.3.0-beta.1",
+    "version": "0.3.0-beta.2",
   "description": "SPFN CMS - Content Management System with type-safe labels and Next.js integration",
   "type": "module",
   "main": "./dist/index.js",
@@ -89,7 +89,7 @@
     "@spfn/core": ">=0.3.0-beta.1 <0.4.0",
     "@spfn/auth": ">=0.3.0-beta.1 <0.4.0",
     "drizzle-orm": ">=1.0.0-rc.4 <2",
-    "next": "^16.2.11",
+    "next": "^16.3.3",
     "react": "^19.2.1"
   },
   "dependencies": {

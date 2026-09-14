@@ -7,7 +7,7 @@
 - Author: Codex package implementation session
 - Reviewer: Luna independent reviewer
 - Reviewed at: 2026-08-25
-- Supported reader and path: A Next.js user integrating locale-prefixed pages with `@spfn/i18n`; Next.js `^16.2.11`, configured locale tuples, and application-declared localized paths
+- Supported reader and path: A Next.js user integrating locale-prefixed pages with `@spfn/i18n`; Next.js `^16.3.3`, configured locale tuples, and application-declared localized paths
 - Verdict: ready
 
 ## Review scope
@@ -16,7 +16,7 @@ The required outcome is that a reader can place the two package imports, predict
 
 ## Claims and evidence
 
-- The installation command `pnpm add next@^16.2.11` matches the package peer dependency and the supported Next.js 16.x line (`packages/i18n/README.md:21-24`, `packages/i18n/package.json:64-67`).
+- The installation command `pnpm add next@^16.3.3` matches the package peer dependency and the supported Next.js 16.x line (`packages/i18n/README.md:21-24`, `packages/i18n/package.json:64-67`).
 - The routing example imports `defineI18nRouting` from `@spfn/i18n/routing` and `createLocaleProxy` from `@spfn/i18n/next`, matching the package exports and source modules.
 - The `as-needed` example correctly describes `/` as an internal `/en` rewrite, direct `/en` as a 308 redirect to `/`, and `/ko` as public. Query preservation is covered by the implementation tests.
 - The README explicitly keeps locale detection, validation, catalogs, layouts, static params, and the proxy matcher in the consuming application. It does not claim automatic discovery or localization of every route.

@@ -20,10 +20,10 @@ Install React only when using the client entry point:
 pnpm add react
 ```
 
-Install Next.js 16.2.11 or later in the 16.x line when using the Next.js entry point:
+Install Next.js 16.3.3 or later in the 16.x line when using the Next.js entry point:
 
 ```bash
-pnpm add next@^16.2.11
+pnpm add next@^16.3.3
 ```
 
 ## Catalogs

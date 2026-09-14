@@ -17,8 +17,8 @@ import { fileURLToPath } from 'node:url';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 
-// A requirement reads as a range (`^16.2.11`), a floor (`16.2.11+`) or a bound
-// ("16.2.11 or later"). A bare number is not a requirement — the paragraph explaining
+// A requirement reads as a range (`^16.3.3`), a floor (`16.3.3+`) or a bound
+// ("16.3.3 or later"). A bare number is not a requirement — the paragraph explaining
 // why 15.0.5 and 15.1.9 are insufficient must not trip this. The lookbehind and the
 // two-digit major keep port numbers out: "Next.js :3790 + SPFN API" is not a version.
 const REQUIREMENT =

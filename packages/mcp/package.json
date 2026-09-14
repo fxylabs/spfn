@@ -1,6 +1,6 @@
 {
     "name": "@spfn/mcp",
-    "version": "0.3.0-beta.1",
+    "version": "0.3.0-beta.2",
     "description": "Official-SDK-based Model Context Protocol adapter for SPFN applications.",
     "type": "module",
     "sideEffects": false,
@@ -83,7 +83,7 @@
     "devDependencies": {
         "@spfn/core": "workspace:*",
         "@types/node": "^20.11.0",
-        "hono": "^4.12.34",
+        "hono": "^4.13.5",
         "madge": "^8.0.0",
         "tsup": "^8.5.0",
         "typescript": "^5.9.3",

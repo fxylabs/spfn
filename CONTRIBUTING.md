@@ -71,11 +71,12 @@ pnpm db:generate        # drizzle-kit generate — create a migration from schem
 
 A published `peerDependencies` range is what an adopter resolves against, so a range
 that still admits a vulnerable release ships that vulnerability to every app installing
-the package. `@spfn/*` packages that couple to Next.js require `^16.2.11` — the floor
-that clears both CVE-2025-66478 (remote code execution through React Server Components)
-and the Server Components denial of service. Next.js 15 is not supported: its patches
-landed per minor line (15.0.5, 15.1.9, 15.2.6, …), so no single caret range can express
-"patched".
+the package. `@spfn/*` packages that couple to Next.js require `^16.3.3` — the floor
+that clears GHSA-p293-qw3h-jr36 and GHSA-2xp9-vwfh-vxw4 (remote code execution through a
+Windows-hosted server and through image optimization), and, further back, CVE-2025-66478
+(remote code execution through React Server Components) and the Server Components denial
+of service. Next.js 15 is not supported: its patches landed per minor line (15.0.5,
+15.1.9, 15.2.6, …), so no single caret range can express "patched".
 
 Prose says the floor too, and prose drifts. `pnpm check:versions` compares every
 `packages/*/package.json` peer range against every README, `docs/` page and the site's

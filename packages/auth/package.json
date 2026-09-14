@@ -1,6 +1,6 @@
 {
   "name": "@spfn/auth",
-  "version": "0.3.0-beta.15",
+  "version": "0.3.0-beta.16",
   "type": "module",
   "description": "Authentication for a Next.js full-stack app: sessions, social login, OAuth, RBAC and admin roles, without assembling an auth stack yourself",
   "author": "Ray Im <rayim@fxy.global>",
@@ -135,9 +135,9 @@
     "@vitest/coverage-v8": "^4.0.6",
     "drizzle-kit": "1.0.0-rc.4",
     "drizzle-orm": "1.0.0-rc.4",
-    "hono": "^4.12.34",
+    "hono": "^4.13.5",
     "madge": "^8.0.0",
-    "next": "^16.2.11",
+    "next": "^16.3.3",
     "spfn": "workspace:*",
     "tsup": "^8.5.0",
     "tsx": "^4.20.6",
@@ -148,7 +148,7 @@
     "@spfn/core": ">=0.3.0-beta.8 <0.4.0",
     "@spfn/notification": ">=0.2.0-beta.5 <0.3.0",
     "drizzle-orm": ">=1.0.0-rc.4 <2",
-    "next": "^16.2.11"
+    "next": "^16.3.3"
   },
   "peerDependenciesMeta": {
     "next": {

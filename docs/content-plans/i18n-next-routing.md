@@ -31,7 +31,7 @@ After the section, a reader can place the two imports, predict `/`, `/en` and `/
 
 - Required behavior: explain the two package entry points, the `as-needed` example, query preservation, metadata output and application-owned boundaries.
 - Touched production surface: the Next.js routing section and Next.js installation note in `packages/i18n/README.md`.
-- Supported inputs: Next.js `^16.2.11`, configured locale tuples, and pathnames explicitly accepted by `isLocalizedPath`.
+- Supported inputs: Next.js `^16.3.3`, configured locale tuples, and pathnames explicitly accepted by `isLocalizedPath`.
 - Trust boundary: public path construction and NextRequest rewrite/redirect behavior for the declared paths.
 - Explicit exclusions: Accept-Language and cookie detection, catalog loading, `[locale]/layout.tsx` implementation, matcher generation, application copy, SEO strategy beyond canonical/hreflang consistency.
 - Stop condition: the commands and ownership boundary are unambiguous, match tested behavior, and an independent reviewer finds no material comprehension or claim error.
