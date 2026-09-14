@@ -11,6 +11,8 @@ export {
     createApi,
     ApiError,
     CSRF_HEADER,
+    csrfHeaderValue,
+    documentCookieEntries,
 } from './client';
 
 export type {

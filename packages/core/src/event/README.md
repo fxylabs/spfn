@@ -414,7 +414,12 @@ client.subscribe({
 
 `AuthSSEClientConfig` = `Omit<SSEClientConfig, 'acquireToken'>` plus `rpcBaseUrl` (default
 `/api/rpc`). It requires `eventRouteMap` merged into your RPC proxy so `eventsToken`
-resolves to `POST /events/token`:
+resolves to `POST /events/token`. That token request is a cookie-authenticated POST
+through the proxy, so `@spfn/auth`'s CSRF rule applies to it: the client mirrors the
+readable `spfn_csrf` cookie family into the `x-spfn-csrf` header, the way the api
+client does, so the stream opens under `SPFN_AUTH_CSRF=enforce` too. A custom
+`acquireToken` passed to `createSSEClient` has to send that header itself
+(`csrfHeaderValue` and `documentCookieEntries` from `@spfn/core/nextjs` build it).
 
 ```typescript
 // app/api/rpc/[routeName]/route.ts

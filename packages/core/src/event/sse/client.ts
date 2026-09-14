@@ -35,6 +35,7 @@
  */
 
 import type { EventRouterDef, InferEventNames } from '../router';
+import { CSRF_HEADER, csrfHeaderValue, documentCookieEntries } from '../../nextjs/client/csrf';
 import type {
     SSEClientConfig,
     SSESubscribeOptions,
@@ -462,9 +463,30 @@ export interface AuthSSEClientConfig extends Omit<SSEClientConfig, 'acquireToken
 }
 
 /**
+ * Headers of the one-time token request.
+ *
+ * The token route is a cookie-authenticated POST through the RPC proxy, so the
+ * @spfn/auth CSRF rule applies to it exactly as to any other mutation: the
+ * readable `spfn_csrf` cookie family is mirrored into `x-spfn-csrf`, the way
+ * the api client does. Without the header, `SPFN_AUTH_CSRF=enforce` refuses
+ * the request and the stream never opens.
+ *
+ * @internal Exported for tests
+ */
+export function tokenRequestHeaders(cookies: Iterable<[string, string]> = documentCookieEntries()): Record<string, string>
+{
+    const csrf = csrfHeaderValue(cookies);
+
+    return csrf === undefined
+        ? { 'Content-Type': 'application/json' }
+        : { 'Content-Type': 'application/json', [CSRF_HEADER]: csrf };
+}
+
+/**
  * Create SSE client with built-in token authentication
  *
- * Acquires one-time SSE tokens via RPC proxy automatically.
+ * Acquires one-time SSE tokens via RPC proxy automatically, sending the
+ * `x-spfn-csrf` header whenever a `spfn_csrf` cookie is present.
  * Requires eventRouteMap to be merged into RPC proxy config.
  *
  * @example
@@ -495,7 +517,7 @@ export function createAuthSSEClient<TRouter extends EventRouterDef<any>>(
             const res = await fetch(`${rpcBaseUrl}/eventsToken`, {
                 method: 'POST',
                 credentials: 'include',
-                headers: { 'Content-Type': 'application/json' },
+                headers: tokenRequestHeaders(),
                 body: JSON.stringify({}),
             });
 
