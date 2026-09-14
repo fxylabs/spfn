@@ -232,7 +232,7 @@ export const coreEnvSchema = defineEnvSchema({
     // ========================================================================
 
     DRIZZLE_SCHEMA_PATH: envString({
-        description: 'Path to Drizzle schema configuration',
+        description: 'Entity registry file spfn db push/generate/studio load when src/server/entities/ holds no entity file, or when the registry exports a table no file there defines',
         required: false,
         default: './src/server/entities/config.ts',
         examples: ['./src/db/schema.ts', './src/server/entities/config.ts'],

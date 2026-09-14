@@ -99,7 +99,7 @@ src/
 │   └── api-client.ts                      # type-safe client (createApi<AppRouter>)
 └── server/
     ├── entities/example.entity.ts         # Drizzle table + types
-    ├── entities/config.ts                 # barrel drizzle-kit reads to find every table
+    ├── entities/config.ts                 # entity registry, read when the folder holds no entity file
     ├── repositories/example.repository.ts # BaseRepository data access
     ├── routes/                            # route definitions (examples, root)
     └── router.ts                          # defineRouter — the API contract

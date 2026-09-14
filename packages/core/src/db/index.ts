@@ -38,8 +38,8 @@ export type {
 } from './manager';
 
 // Drizzle Config Generator
-export { getDrizzleConfig, detectDialect, generateDrizzleConfigFile } from './manager/config-generator';
-export type { DrizzleConfigOptions } from './manager/config-generator';
+export { getDrizzleConfig, detectDialect, generateDrizzleConfigFile, renderDrizzleConfig } from './manager/config-generator';
+export type { DrizzleConfigOptions, RenderableDrizzleConfig } from './manager/config-generator';
 
 // Schema Helpers
 export * from './schema';

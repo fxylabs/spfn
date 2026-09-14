@@ -35,6 +35,7 @@ dbCommand
     .description('Push schema changes to database (safe mode by default)')
     .option('--force', 'Apply all changes including destructive ones')
     .option('--dry-run', 'Show changes without applying')
+    .option('--schema <path>', 'Schema entry: file, directory or glob (default: drizzle.config.ts, else the src/server/entities scan, else its config.ts registry)')
     .action((options) => dbPush(options));
 
 dbCommand

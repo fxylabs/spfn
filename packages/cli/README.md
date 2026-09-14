@@ -289,6 +289,74 @@ loaded `.env` chain.
 > `db push` is for development. For production, use `db generate` + `db migrate` to keep
 > migration history.
 
+**Which files are the schema.** `db push`, `db generate` and `db studio` resolve the
+project schema in the same order:
+
+1. `db push --schema <path>`: a file, a directory or a glob.
+2. `./drizzle.config.ts`, when the project has one: its `schema` entry, and for `db push`
+   a non-empty `schemaFilter`.
+3. Every entity file under `src/server/entities/`, barrel files (`index.*`, `config.*`)
+   excluded.
+4. The registry — `src/server/entities/config.ts`, or the file `DRIZZLE_SCHEMA_PATH`
+   names — loaded alone, in two cases: the scan finds no entity file (the folder holds
+   only the registry and the tables live elsewhere), or the registry exports a table,
+   enum, view or sequence none of the scanned files define while the folder defines
+   nothing the registry lacks (the tables moved out and a re-exported file was left
+   behind). The command says which and names the objects. A registry whose objects
+   are all among the scanned files (the scaffold) changes nothing. When each side
+   defines objects the other lacks, no choice keeps every table, so the command stops
+   and names both sets: re-export the folder's entities from the registry, move the
+   leftover files out, or name the schema in `drizzle.config.ts`.
+
+An entry named through 1–2 is expanded the way drizzle-kit expands it and nothing is
+filtered: a file is loaded as-is, a directory is read one level deep, a glob uses glob
+syntax (`**`, `*`, `?`, `{a,b}`, `[…]`) with parentheses taken literally, so
+`src/server/(workspace)/entities/*.ts` works, and a directory the glob matches is read
+one level deep. Symlinks are followed (a link cycle ends where a directory was already
+visited); a walk skips dot-directories like drizzle-kit's glob does. The accepted
+extensions are drizzle-kit's (`.ts .mts .cts .tsx .js .mjs .cjs .jsx`). Two deliberate
+differences: declaration files (`.d.ts`, `.d.mts`, `.d.cts`) are skipped, and a walk
+never enters `node_modules`, so a `**` pattern cannot pull a dependency's file into
+the schema. A registry loaded as-is (2 or 4) contributes only what it exports:
+re-export with `export *` so a `pgEnum` or `pgSchema` defined next to a table comes
+along. `db push` diffs the PostgreSQL schemas the declared `schemaFilter` names (else
+`public`) plus every schema the loaded modules name — tables, `pgSchema()` objects,
+enums, views, sequences; `--schema` replaces the files but keeps that declared filter.
+
+**A function package's own schema is never the project's.** An installed package that
+ships migrations (`@spfn/auth` → `spfn_auth`) creates and alters its own tables when
+`db push` or `db migrate` runs its migrations, so the project never diffs or generates
+them. Whichever files are loaded, `db push` drops the objects living in such a schema
+from the diff and leaves that schema out of the filter it derives — a registry that
+re-exports one package table for a relation no longer proposes `DROP TABLE` for the
+package tables it does not re-export. A `schemaFilter` declared in `drizzle.config.ts`
+still stands verbatim; naming a package schema there is the user's own choice. Schemas
+the project itself owns (`pgSchema('billing')`) are unaffected: they are created and
+diffed as before.
+
+`db generate` cannot be filtered the same way — drizzle-kit loads the schema files
+itself and its `generate` reads no `schemaFilter` — so it stops instead when the files
+it would read reach a package's objects:
+
+```
+❌ The schema read from entity registry ./src/server/entities/config.ts reaches
+   users (@spfn/mockfn), which the package migrates itself. …
+```
+
+Keep package re-exports out of the registry: a relation can `import` the package's
+table and reference it without re-exporting it.
+
+Earlier releases gave `db push` the folder scan alone, so a project whose tables lived
+outside `src/server/entities/` and were re-exported from the registry pushed nothing
+(`No schema files found`), and a project with a `drizzle.config.ts` had `db push` and
+`db generate` reading different files. `db push` prints which source it used, exits 1
+when a path named through 1–2 has no schema files, and exits 1 when `drizzle.config.ts`
+cannot be loaded rather than pushing something `db generate` would not read. One
+consequence for code calling `getDrizzleConfig({ schema, expandGlobs: true })`
+directly: an explicit glob is no longer barrel-filtered, so a glob that matches both a
+barrel and the files it re-exports now makes drizzle-kit report a duplicate table, as
+it would for the same glob in a hand-written `drizzle.config.ts`.
+
 **A server refuses to start while migrations are pending.** Bumping `@spfn/auth` and
 skipping `db migrate` used to boot fine, pass the health check, and then fail every
 request that touched a new column as an opaque 500. `spfn dev` and `spfn start` now

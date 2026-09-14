@@ -3,9 +3,18 @@ import prompts from 'prompts';
 import '@spfn/core/config';
 import { loadEnv } from '@spfn/core/server';
 import { sql } from 'drizzle-orm';
-import { getTableConfig } from 'drizzle-orm/pg-core';
 
-import { validateDatabasePrerequisites, loadSchemaImports, createPushConnection } from './utils/drizzle.js';
+import {
+    validateDatabasePrerequisites,
+    loadSchemaImports,
+    createPushConnection,
+    resolvePushSchemaSource,
+    resolvePushSchemaFilter,
+    resolveSchemaFiles,
+    withoutFunctionPackageObjects,
+    type ResolvedSchema,
+    type SchemaSource,
+} from './utils/drizzle.js';
 import { classifyStatements } from './utils/sql-classifier.js';
 import { displayClassifiedStatements, displayDryRunSummary, displayApplySummary } from './utils/push-display.js';
 import {
@@ -68,61 +77,97 @@ export async function applyStatements(
 }
 
 /**
+ * Resolve the schema source, ending the command when drizzle.config.ts cannot be
+ * loaded: falling back silently would push a different schema than generate reads.
+ */
+async function loadSchemaSourceOrExit(explicit?: string): Promise<SchemaSource | undefined>
+{
+    try
+    {
+        return await resolvePushSchemaSource(explicit);
+    }
+    catch (error)
+    {
+        console.error(chalk.red(`❌ Could not load drizzle.config.ts: ${error instanceof Error ? error.message : String(error)}`));
+        console.log(chalk.yellow('💡 Fix the config, or name the schema directly: spfn db push --schema <path>'));
+        process.exit(1);
+    }
+}
+
+/**
+ * Resolve the files to load, ending the command when the folder and the registry
+ * each define objects the other lacks: no choice would keep every table.
+ */
+async function resolveSchemaFilesOrExit(config: Parameters<typeof resolveSchemaFiles>[0]): Promise<ResolvedSchema>
+{
+    try
+    {
+        return await resolveSchemaFiles(config);
+    }
+    catch (error)
+    {
+        console.error(chalk.red(`❌ ${error instanceof Error ? error.message : String(error)}`));
+        process.exit(1);
+    }
+}
+
+/**
  * Push schema changes to database with safe-mode protection.
  *
  * - Default: auto-applies safe + warning, prompts for destructive
  * - --force: applies everything without prompting
  * - --dry-run: shows classified SQL without applying
+ * - --schema: schema entry point; otherwise drizzle.config.ts (schema + schemaFilter),
+ *   then core's default: the entities folder scan, or its config.ts registry
+ *   (DRIZZLE_SCHEMA_PATH) when the folder holds no entity file or exports a table
+ *   the folder does not define — as `db generate` reads it. A named source
+ *   (--schema, drizzle.config.ts) with no files exits 1.
+ *
+ * Whichever files are read, objects in a schema a function package owns stay out
+ * of the diff: the package's own migrations carry them (step 11).
  */
-export async function dbPush(options: { force?: boolean; dryRun?: boolean } = {}): Promise<void>
+export async function dbPush(options: { force?: boolean; dryRun?: boolean; schema?: string } = {}): Promise<void>
 {
     // 1. Prerequisites
     validateDatabasePrerequisites();
     loadEnv();
 
     // 2. Get drizzle config (schema file list + schemaFilter)
+    const source = await loadSchemaSourceOrExit(options.schema);
     const { getDrizzleConfig } = await import('@spfn/core/db');
     const config = getDrizzleConfig({
         cwd: process.cwd(),
+        schema: source?.schema,
         expandGlobs: true,
-        autoDetectSchemas: true,
         disablePackageDiscovery: true,
     });
+    const resolved = await resolveSchemaFilesOrExit(config);
+    const label = source?.label ?? resolved.source;
 
-    const schemaFiles = Array.isArray(config.schema) ? config.schema : [config.schema];
-
-    if (schemaFiles.length === 0)
+    if (resolved.files.length === 0)
     {
-        console.log(chalk.yellow('No schema files found.'));
+        if (source)
+        {
+            console.error(chalk.red(`❌ No schema files found at ${label}: ${String(source.schema)}`));
+            process.exit(1);
+        }
+
+        console.log(chalk.yellow(`No schema files found (${label}).`));
 
         return;
     }
 
-    console.log(chalk.dim(`Found ${schemaFiles.length} schema file(s)\n`));
+    console.log(chalk.dim(`Schema from ${label}: ${resolved.files.length} file(s)`));
+    if (resolved.note) console.log(chalk.yellow(`ℹ️  ${resolved.note}`));
+    console.log();
 
-    // 3. Load schema imports
-    const imports = await loadSchemaImports(schemaFiles);
+    // 3. Load schema imports, less the objects a function package owns: a
+    //    registry re-exports one of its tables for a relation, but the package's
+    //    own migrations (step 11) create and alter it.
+    const imports = withoutFunctionPackageObjects(resolved.imports ?? await loadSchemaImports(resolved.files));
 
-    // 3.5 Detect schemas from loaded table objects.
-    //     config.schemaFilter misses schemas from re-exported packages
-    //     (e.g., @spfn/ai entities re-exported in consumer project).
-    const detectedSchemas = new Set<string>(config.schemaFilter ?? ['public']);
-    for (const value of Object.values(imports))
-    {
-        try
-        {
-            const cfg = getTableConfig(value as any);
-            if (cfg.schema)
-            {
-                detectedSchemas.add(cfg.schema);
-            }
-        }
-        catch
-        {
-            // Not a drizzle table — skip
-        }
-    }
-    const schemaFilter = Array.from(detectedSchemas);
+    // 3.5 Which PostgreSQL schemas to diff (see resolvePushSchemaFilter)
+    const schemaFilter = resolvePushSchemaFilter(source?.schemaFilter, imports);
 
     // 3.7 Preflight: parse function package migrations before touching the DB,
     //     so an incompatible package fails without applying the project schema.

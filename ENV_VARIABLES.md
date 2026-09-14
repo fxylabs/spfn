@@ -108,7 +108,7 @@ Verified against the source on 2026-08-05. The authoritative definition is
 - **Type**: `string`
 - **Required**: No
 - **Default**: `./src/server/entities/config.ts`
-- **Description**: Path to the Drizzle schema barrel that drizzle-kit reads
+- **Description**: Entity registry file that `spfn db push` / `db generate` / `db studio` load when `src/server/entities/` holds no entity file, or when the registry exports a table no file there defines
 - **Location**: `packages/core/src/config/schema.ts:224`
 
 ### `DRIZZLE_OUT_DIR`

@@ -2,6 +2,27 @@
 
 Define your Drizzle ORM entities here. These are your database table schemas.
 
+## Which files are the schema
+
+Every `.ts` file in this folder is part of the schema that `spfn db push`, `db generate`
+and `db studio` work with; barrel files (`index.ts`, `config.ts`) are skipped. Nothing
+needs registering while the entity files live here.
+
+`config.ts` is the entity registry. It is loaded alone, and only what it exports is the
+schema, when the tables live elsewhere: this folder holds no entity file, or the
+registry exports a table no file here defines. If a file here defines a table the
+registry does not export at the same time, the command stops and names both, since
+neither alone would be the whole schema. Re-export with `export *` so a `pgEnum` or
+`pgSchema` defined next to a table comes along:
+
+```typescript
+// src/server/entities/config.ts
+export * from '../(workspace)/entities/example.entity';
+```
+
+`DRIZZLE_SCHEMA_PATH` names a different registry file. To name the schema outright, add
+a `drizzle.config.ts` (read before the folder scan) or pass `spfn db push --schema <path>`.
+
 ## Defining Entities
 
 Create entity files using Drizzle ORM's `pgTable` for the public schema:

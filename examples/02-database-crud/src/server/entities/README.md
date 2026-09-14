@@ -7,7 +7,7 @@ Define your Drizzle ORM entities here. These are your database table schemas.
 | File | Role |
 | --- | --- |
 | `example.entity.ts` | The `examples` table this app's repository and routes use |
-| `config.ts` | Barrel that re-exports every table — this is the path drizzle-kit reads (`DRIZZLE_SCHEMA_PATH`, default `./src/server/entities/config.ts`) |
+| `config.ts` | Entity registry — read only when this folder holds no entity file (see below) |
 
 `example.entity.ts` uses SPFN's column helpers rather than hand-written columns —
 prefer these in new entities so every table gets the same primary key and timestamps:
@@ -28,7 +28,26 @@ export type Example = typeof examples.$inferSelect;
 export type NewExample = typeof examples.$inferInsert;
 ```
 
-Add every new table to `config.ts`, or drizzle-kit will not see it.
+## Which files are the schema
+
+Every `.ts` file in this folder is part of the schema that `spfn db push`, `db generate`
+and `db studio` work with; barrel files (`index.ts`, `config.ts`) are skipped. Nothing
+needs registering while the entity files live here.
+
+`config.ts` is the entity registry. It is loaded alone, and only what it exports is the
+schema, when the tables live elsewhere: this folder holds no entity file, or the
+registry exports a table no file here defines. If a file here defines a table the
+registry does not export at the same time, the command stops and names both, since
+neither alone would be the whole schema. Re-export with `export *` so a `pgEnum` or
+`pgSchema` defined next to a table comes along:
+
+```typescript
+// src/server/entities/config.ts
+export * from '../(workspace)/entities/example.entity';
+```
+
+`DRIZZLE_SCHEMA_PATH` names a different registry file. To name the schema outright, add
+a `drizzle.config.ts` (read before the folder scan) or pass `spfn db push --schema <path>`.
 
 ## Defining Entities
 

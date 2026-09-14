@@ -55,7 +55,7 @@ Everything re-exported from `@spfn/core/db` (`src/db/index.ts`):
 `setDatabaseProvider`, `closeDatabase`,
 `getDatabaseInfo`, `forceReconnectDatabase`, `createDatabaseConnection`, `checkConnection`,
 `reportDatabaseError`, `isConnectionLevelError`, `resetConnectionErrorCounter`,
-`getDrizzleConfig`, `detectDialect`, `generateDrizzleConfigFile`
+`getDrizzleConfig`, `detectDialect`, `generateDrizzleConfigFile`, `renderDrizzleConfig` (0.3.0-beta.9: `getDrizzleConfig` returns `schemaSource` and `schemaRegistry`; the `autoDetectSchemas` option is gone — the CLI derives PostgreSQL schemas from the loaded modules, and a hand-written config passes `schemaFilter` itself)
 Types: `DatabaseClients`, `DatabaseInitOptions`, `DatabaseOptions`, `DatabaseProvider`,
 `DatabaseTransaction`, `DefaultDatabase`, `DrizzleDatabase`, `PoolConfig`, `RetryConfig`,
 `DrizzleConfigOptions`

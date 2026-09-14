@@ -2,7 +2,7 @@ import chalk from 'chalk';
 import { existsSync, writeFileSync, unlinkSync } from 'fs';
 import { spawn } from 'child_process';
 import { findAvailablePort } from './utils/database.js';
-import { shouldRelaxDbTls } from './utils/drizzle.js';
+import { shouldRelaxDbTls, generateTempConfigOrExit } from './utils/drizzle.js';
 
 import { env } from '@spfn/core/config';
 
@@ -50,16 +50,7 @@ export async function dbStudio(requestedPort?: number): Promise<void>
                 process.exit(1);
             }
 
-            // Generate temporary config
-            const { generateDrizzleConfigFile } = await import('@spfn/core/db');
-            const configContent = generateDrizzleConfigFile({
-                cwd: process.cwd(),
-                disablePackageDiscovery: true,
-                expandGlobs: true,  // Expand glob patterns for Studio compatibility
-            });
-
-            writeFileSync(tempConfigPath, configContent);
-            console.log(chalk.dim('Using auto-generated Drizzle config\n'));
+            writeFileSync(tempConfigPath, await generateTempConfigOrExit({ reconcile: true }));
         }
 
         // Spawn drizzle-kit studio process

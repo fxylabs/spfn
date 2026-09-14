@@ -256,11 +256,21 @@ column helpers above work identically inside `schema.table`.
   column literally named `emailVerified`.
 - **`enumText` is plain text + CHECK, not a PG enum type.** Adding values requires no
   migration; renaming/removing the column still does.
-- **Exported tables must be reachable by drizzle-kit to land in migrations.** Re-export
-  every entity (e.g. `src/server/entities/index.ts → export * from './users'`) and point
-  drizzle config at it; an unexported table generates no migration.
+- **Exported tables must be reachable by drizzle-kit to land in migrations.** Entity
+  files under `src/server/entities/` are found by the folder scan; tables kept elsewhere
+  must be re-exported from the registry (`src/server/entities/config.ts → export * from
+  '../(workspace)/entities/users'`), which `spfn db push`, `db generate` and `db studio`
+  read when the folder holds no entity file. A table nothing reaches generates no migration.
 - **When using `createSchema`, all tables in that package must use `schema.table(...)`.**
   Mixing `pgTable(...)` puts that table in the default `public` schema.
+- **Do not re-export an installed function package's tables from the project registry.**
+  A package that ships migrations (`@spfn/auth` → `spfn_auth`) owns its schema: it creates
+  and alters those tables itself. `spfn db push` leaves them out of the project's diff, and
+  `spfn db generate` refuses outright — the schema files it reads become a project migration,
+  and a migration that recreates a package's table cannot run on a fresh database and
+  collides with the package's own. A relation needs no re-export: `import { users } from
+  '@spfn/auth/entities'` and reference it from your own table. Only re-export what the
+  project itself defines.
 
 ---
 
@@ -307,7 +317,7 @@ export type NewPost = typeof posts.$inferInsert;
 ```
 
 ```typescript
-// src/server/entities/index.ts — must re-export so drizzle-kit sees every table
+// src/server/entities/config.ts — the registry; must re-export so drizzle-kit sees every table
 export * from './users';
 export * from './posts';
 export * from './relations';

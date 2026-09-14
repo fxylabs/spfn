@@ -3,8 +3,9 @@
  * Automatically generates drizzle.config.ts from environment variables
  */
 
-import { existsSync, readdirSync, readFileSync, statSync } from 'fs';
-import { join, dirname, basename } from 'path';
+import { existsSync, readdirSync, readFileSync, realpathSync, lstatSync, statSync, type Stats } from 'fs';
+import { join, relative } from 'path';
+import mm from 'micromatch';
 import { env } from '@spfn/core/config';
 import { toPosixPath } from './path-utils';
 
@@ -30,10 +31,24 @@ const BARREL_FILE_PATTERNS = [
 ];
 
 /**
- * Supported file extensions for schema files
- * Only these extensions will be included in schema discovery
+ * Folder scan used by default
  */
-const SUPPORTED_EXTENSIONS = ['.ts', '.js', '.mjs'];
+const DEFAULT_ENTITY_GLOB = './src/server/entities/**/*.ts';
+
+/**
+ * Supported file extensions for schema files — the set drizzle-kit's own
+ * file preparation accepts. Declaration files (.d.ts, .d.mts, .d.cts) are not schemas.
+ */
+const SUPPORTED_EXTENSIONS = ['.ts', '.mts', '.cts', '.tsx', '.js', '.mjs', '.cjs', '.jsx'];
+const DECLARATION_PATTERN = /\.d\.[mc]?ts$/;
+
+/**
+ * Directories a walk never enters. drizzle-kit's glob runs with its default
+ * `dot: false`, so dot-directories (.git, .next) are skipped there too;
+ * node_modules is skipped on purpose so a `**` pattern cannot pull a
+ * dependency's file into the project schema.
+ */
+const SKIPPED_DIRECTORIES = /^(\.|node_modules$)/;
 
 // ============================================================================
 // Helper Functions (Private)
@@ -78,8 +93,7 @@ function isAbsolutePath(path: string): boolean
  */
 function hasSupportedExtension(filePath: string): boolean
 {
-    // Exclude .d.ts files (TypeScript declaration files - not actual schemas)
-    if (filePath.endsWith('.d.ts')) return false;
+    if (DECLARATION_PATTERN.test(filePath)) return false;
 
     return SUPPORTED_EXTENSIONS.some(ext => filePath.endsWith(ext));
 }
@@ -97,109 +111,231 @@ function filterBarrelFiles(files: string[]): string[]
 }
 
 /**
- * Scan directory recursively for files
+ * stat (following symlinks) that answers undefined for anything it cannot
+ * stat — a dangling symlink, a permission error — instead of throwing
  *
- * @param dir - Directory to scan
- * @param extension - Optional file extension filter
- * @returns Array of file paths
  * @internal
  */
-function scanDirectoryRecursive(dir: string, extension?: string): string[]
+function safeStat(path: string): Stats | undefined
 {
-    const files: string[] = [];
-
-    if (!existsSync(dir)) return files;
-
     try
     {
-        const entries = readdirSync(dir);
-
-        for (const entry of entries)
-        {
-            const fullPath = join(dir, entry);
-
-            try
-            {
-                const stat = statSync(fullPath);
-
-                if (stat.isDirectory())
-                {
-                    files.push(...scanDirectoryRecursive(fullPath, extension));
-                }
-                else if (stat.isFile())
-                {
-                    // Check if file matches extension AND has supported extension
-                    if ((!extension || fullPath.endsWith(extension)) && hasSupportedExtension(fullPath))
-                    {
-                        files.push(fullPath);
-                    }
-                }
-            }
-            catch (error: unknown)
-            {
-                // Skip files we can't stat (permission denied, etc.)
-                // Silent skip is intentional - we don't want to fail on restricted files
-            }
-        }
+        return statSync(path);
     }
-    catch (error: unknown)
+    catch
     {
-        // Skip directories we can't read (permission denied, etc.)
-        // Silent skip is intentional - we don't want to fail on restricted directories
+        return undefined;
     }
-
-    return files;
 }
 
 /**
- * Scan directory (single level) for files matching pattern
+ * Directory entries, or none for a directory that cannot be read
  *
- * @param dir - Directory to scan
- * @param filePattern - File pattern to match (e.g., "*.js")
- * @returns Array of file paths
  * @internal
  */
-function scanDirectorySingleLevel(dir: string, filePattern: string): string[]
+function safeReaddir(dir: string): string[]
 {
-    const files: string[] = [];
-
-    if (!existsSync(dir)) return files;
-
     try
     {
-        const entries = readdirSync(dir);
+        return readdirSync(dir);
+    }
+    catch
+    {
+        return [];
+    }
+}
 
-        for (const entry of entries)
+/**
+ * A directory tree walk: supported files and the directories seen, at most
+ * `maxDepth` levels down (1 = the directory itself). Symlinks are followed
+ * the way drizzle-kit's glob follows them: a symlinked directory is read one
+ * level deep and not descended further, so two paths to one directory both
+ * appear and a link cycle ends. A directory already on the current path
+ * (by real path) is not entered again.
+ *
+ * @internal
+ */
+interface Walk
+{
+    files: string[];
+    directories: string[];
+}
+
+function walkDirectory(dir: string, maxDepth: number, ancestors: Set<string> = new Set()): Walk
+{
+    const walk: Walk = { files: [], directories: [] };
+
+    if (maxDepth < 1 || !safeStat(dir)?.isDirectory()) return walk;
+
+    const realDir = realpathSafe(dir);
+
+    if (ancestors.has(realDir)) return walk;
+
+    const chain = new Set(ancestors).add(realDir);
+
+    for (const entry of safeReaddir(dir))
+    {
+        const path = join(dir, entry);
+        const stat = safeStat(path);
+
+        if (stat?.isFile() && hasSupportedExtension(path))
         {
-            const fullPath = join(dir, entry);
+            walk.files.push(path);
+        }
+        else if (stat?.isDirectory() && !SKIPPED_DIRECTORIES.test(entry))
+        {
+            walk.directories.push(path);
 
-            try
-            {
-                const stat = statSync(fullPath);
+            const isLink = isSymlink(path);
+            const child = walkDirectory(path, isLink ? Math.min(maxDepth - 1, 1) : maxDepth - 1, chain);
 
-                if (stat.isFile())
-                {
-                    // Simple pattern matching (*.js matches foo.js) AND check supported extensions
-                    if ((filePattern === '*' ||
-                        (filePattern.startsWith('*.') && entry.endsWith(filePattern.slice(1)))) &&
-                        hasSupportedExtension(fullPath))
-                    {
-                        files.push(fullPath);
-                    }
-                }
-            }
-            catch (error: unknown)
-            {
-                // Skip files we can't stat
-            }
+            for (const file of child.files) walk.files.push(file);
+            for (const sub of child.directories) walk.directories.push(sub);
         }
     }
-    catch (error: unknown)
+
+    return walk;
+}
+
+function isSymlink(path: string): boolean
+{
+    try
     {
-        // Skip directories we can't read
+        return lstatSync(path).isSymbolicLink();
+    }
+    catch
+    {
+        return false;
+    }
+}
+
+function realpathSafe(path: string): string
+{
+    try
+    {
+        return realpathSync(path);
+    }
+    catch
+    {
+        return path;
+    }
+}
+
+/**
+ * Supported files under a directory, at most `maxDepth` levels down
+ *
+ * @internal
+ */
+function scanDirectory(dir: string, maxDepth: number): string[]
+{
+    return walkDirectory(dir, maxDepth).files;
+}
+
+/**
+ * A schema entry relative to cwd in POSIX form, with parentheses escaped so
+ * micromatch reads them as path characters, the way drizzle-kit's glob does
+ *
+ * @internal
+ */
+function toRelativePattern(entry: string, cwd: string): string
+{
+    return toPosixPath(isAbsolutePath(entry) ? relative(cwd, entry) : entry)
+        .replace(/^\.\//, '')
+        .replace(/[()]/g, '\\$&');
+}
+
+/**
+ * Expand a glob the way drizzle-kit's `glob` does: `**`, `*`, `?`, `{a,b}`
+ * and `[…]` are glob syntax, parentheses are literal, a matched directory
+ * is read one level deep. Matching is done on paths relative to cwd so the
+ * project's own directory names never enter the pattern, and the walk goes
+ * only as deep as the pattern can match.
+ *
+ * @internal
+ */
+function expandGlob(pattern: string, cwd: string): string[]
+{
+    const scan = mm.scan(pattern);
+    const depth = scan.isGlobstar || scan.glob.includes('**') ? Infinity : scan.glob.split('/').length;
+    const base = join(cwd, scan.base.replace(/\\([()])/g, '$1'));
+    const matches = mm.matcher(pattern);
+    const matched = (path: string): boolean => matches(toPosixPath(relative(cwd, path)));
+    const walk = walkDirectory(base, depth);
+
+    // A directory the glob matches is read one level deep, and a file reached
+    // both ways counts once, as in drizzle-kit
+    return Array.from(new Set([...walk.files.filter(matched), ...walk.directories.filter(matched).flatMap(dir => scanDirectory(dir, 1))]));
+}
+
+/**
+ * Expand one schema entry to the files drizzle-kit loads from it: a glob to
+ * its matches, a directory to the files directly inside it, a file to itself.
+ * Nothing is filtered — a barrel named explicitly is the entry point exactly
+ * as drizzle-kit reads it from a drizzle.config.ts.
+ *
+ * @internal
+ */
+function expandSchemaEntry(entry: string, cwd: string): string[]
+{
+    const pattern = toRelativePattern(entry, cwd);
+
+    if (mm.scan(pattern).isGlob)
+    {
+        return expandGlob(pattern, cwd);
     }
 
-    return files;
+    const path = isAbsolutePath(entry) ? entry : join(cwd, entry);
+    const stat = safeStat(path);
+
+    if (!stat) return [];
+
+    // A directory entry is read one level deep, the way drizzle-kit reads it
+    return stat.isDirectory() ? scanDirectory(path, 1) : [path];
+}
+
+/**
+ * Schema selection: the entries, where they came from, the files when the
+ * selection already had to expand them, and the registry left aside
+ *
+ * @internal
+ */
+interface SchemaSelection
+{
+    schemas: string[];
+    source: string;
+    files?: string[];
+    registry?: string;
+}
+
+/**
+ * Default schema when none is given: the entities folder scan, barrels
+ * excluded. When the scan finds no entity file — the folder holds only the
+ * registry and the tables live elsewhere — the registry named by env
+ * `DRIZZLE_SCHEMA_PATH` (default `src/server/entities/config.ts`) is loaded
+ * alone. When both exist, the scan is chosen here and the registry is
+ * reported alongside, so a caller that can load modules may check whether
+ * the registry exports a table the scanned files do not.
+ *
+ * @internal
+ */
+function selectDefaultSchema(cwd: string): SchemaSelection
+{
+    const registry = env.DRIZZLE_SCHEMA_PATH;
+    const registryFile = isAbsolutePath(registry) ? registry : join(cwd, registry);
+    const registryExists = safeStat(registryFile)?.isFile() === true;
+    const scanned = filterBarrelFiles(expandSchemaEntry(DEFAULT_ENTITY_GLOB, cwd));
+
+    if (scanned.length === 0 && registryExists)
+    {
+        return { schemas: [registry], source: `entity registry ${registry}` };
+    }
+
+    return {
+        schemas: [DEFAULT_ENTITY_GLOB],
+        source: `${DEFAULT_ENTITY_GLOB} scan`,
+        files: scanned,
+        registry: registryExists ? registry : undefined,
+    };
 }
 
 // ============================================================================
@@ -211,7 +347,7 @@ export interface DrizzleConfigOptions
     /** Database connection URL (defaults to process.env.DATABASE_URL) */
     databaseUrl?: string;
 
-    /** Schema files glob pattern or array of patterns (defaults to './src/server/entities/\*\*\/*.ts') */
+    /** Schema entry file(s), directories or glob pattern(s). Default: './src/server/entities/\*\*\/*.ts', or the registry `DRIZZLE_SCHEMA_PATH` (./src/server/entities/config.ts) when that scan finds no entity file; `schemaRegistry` reports the registry when both exist */
     schema?: string | string[];
 
     /** Migration output directory (defaults to './src/server/drizzle') */
@@ -235,98 +371,8 @@ export interface DrizzleConfigOptions
     /** PostgreSQL schema filter for push/introspect commands */
     schemaFilter?: string[];
 
-    /** Auto-detect PostgreSQL schemas from entity files (requires expandGlobs: true) */
-    autoDetectSchemas?: boolean;
-
     /** Migration prefix strategy (default: 'timestamp') */
     migrationPrefix?: 'index' | 'timestamp' | 'unix' | 'none';
-}
-
-/**
- * Detect PostgreSQL schemas from entity files
- * Scans files for pgSchema('...') or createSchema('...') patterns
- *
- * @param files - Array of file paths to scan
- * @returns Array of schema names (always includes 'public')
- * @internal
- */
-function detectSchemasFromFiles(files: string[]): string[]
-{
-    const schemas = new Set<string>(['public']);
-
-    // Patterns to match:
-    // - pgSchema('schema_name')
-    // - pgSchema("schema_name")
-    // - createSchema('@scope/name') -> converted to schema name
-    const pgSchemaPattern = /pgSchema\s*\(\s*['"]([^'"]+)['"]\s*\)/g;
-    const createSchemaPattern = /createSchema\s*\(\s*['"]([^'"]+)['"]\s*\)/g;
-
-    for (const filePath of files)
-    {
-        try
-        {
-            const content = readFileSync(filePath, 'utf-8');
-
-            // Find pgSchema patterns
-            let match;
-            while ((match = pgSchemaPattern.exec(content)) !== null)
-            {
-                schemas.add(match[1]);
-            }
-
-            // Find createSchema patterns and convert to schema name
-            while ((match = createSchemaPattern.exec(content)) !== null)
-            {
-                const packageName = match[1];
-                // Convert package name to schema name (e.g., '@spfn/ai' -> 'spfn_ai')
-                const schemaName = packageName
-                    .replace(/@/g, '')
-                    .replace(/\//g, '_')
-                    .replace(/-/g, '_');
-                schemas.add(schemaName);
-            }
-        }
-        catch
-        {
-            // Skip files we can't read
-        }
-    }
-
-    return Array.from(schemas);
-}
-
-/**
- * Expand glob patterns to actual file paths
- * Handles patterns like:
- * - ./dist/entities/*.js → [./dist/entities/foo.js, ./dist/entities/bar.js]
- * - ./dist/entities/**\/*.js → recursively finds all .js files
- *
- * @param pattern - Glob pattern or file path
- * @returns Array of expanded file paths
- */
-function expandGlobPattern(pattern: string): string[]
-{
-    // If pattern doesn't contain wildcards, return as-is
-    if (!pattern.includes('*'))
-    {
-        return existsSync(pattern) ? [pattern] : [];
-    }
-
-    // Handle /**/* pattern (recursive)
-    if (pattern.includes('**'))
-    {
-        const [baseDir, ...rest] = pattern.split('**');
-        const extension = rest.join('').replace(/[\/\\]\*\./g, '').trim();
-        const dir = baseDir.trim() || '.';
-
-        return scanDirectoryRecursive(dir, extension || undefined);
-    }
-
-    // Handle /* pattern (single level)
-    const dir = dirname(pattern);
-    const filePattern = basename(pattern);
-
-    return scanDirectorySingleLevel(dir, filePattern);
 }
 
 /**
@@ -389,13 +435,9 @@ function discoverPackageSchemas(cwd: string): string[]
                     const absolutePath = join(pkgPath, schema);
 
                     // Expand glob patterns to actual file lists
-                    // This prevents drizzle-kit from hanging on glob patterns
-                    const expandedFiles = expandGlobPattern(absolutePath);
-
-                    // Filter out index files (they are re-exports, not schema definitions)
-                    const schemaFiles = filterBarrelFiles(expandedFiles);
-
-                    schemas.push(...schemaFiles);
+                    // This prevents drizzle-kit from hanging on glob patterns.
+                    // A package's barrel re-exports its entity files: drop it.
+                    schemas.push(...filterBarrelFiles(expandSchemaEntry(absolutePath, pkgPath)));
                 }
             }
         }
@@ -524,6 +566,8 @@ export function getDrizzleConfig(options: DrizzleConfigOptions = {})
 
         return {
             schema,
+            schemaSource: `package ${options.packageFilter}`,
+            schemaRegistry: undefined as string | undefined,
             out,
             dialect,
             dbCredentials: getDbCredentials(dialect, databaseUrl),
@@ -533,57 +577,34 @@ export function getDrizzleConfig(options: DrizzleConfigOptions = {})
         };
     }
 
-    // Default: merge user schemas and all package schemas
-    const userSchema = options.schema ?? './src/server/entities/**/*.ts';  // Support nested folders
-    const userSchemas = Array.isArray(userSchema) ? userSchema : [userSchema];
+    // The user's schema, or the default selection; then package schemas
+    const cwd = options.cwd ?? process.cwd();
+    const selection: SchemaSelection = options.schema
+        ? { schemas: Array.isArray(options.schema) ? options.schema : [options.schema], source: 'schema option' }
+        : selectDefaultSchema(cwd);
+    const schemaSource = selection.source;
+    const schemaRegistry = selection.registry;
 
     // Discover package schemas unless disabled
     const packageSchemas = options.disablePackageDiscovery
         ? []
-        : discoverPackageSchemas(options.cwd ?? process.cwd());
+        : discoverPackageSchemas(cwd);
 
-    // Merge user schemas and package schemas
-    let allSchemas = [...userSchemas, ...packageSchemas];
-
-    // Expand glob patterns if requested (useful for Drizzle Studio and schema detection)
-    const cwd = options.cwd ?? process.cwd();
-    let expandedFiles: string[] = [];
-    if (options.expandGlobs)
-    {
-        for (const schema of allSchemas)
-        {
-            // Convert relative path to absolute path based on cwd
-            const absoluteSchema = isAbsolutePath(schema) ? schema : join(cwd, schema);
-            const expanded = expandGlobPattern(absoluteSchema);
-
-            // Filter out index files (they are re-exports, not schema definitions)
-            const filtered = filterBarrelFiles(expanded);
-
-            expandedFiles.push(...filtered);
-        }
-        allSchemas = expandedFiles;
-    }
+    // Expand to the files drizzle-kit loads (useful for Drizzle Studio); package
+    // schemas are already files
+    const allSchemas = options.expandGlobs
+        ? [...(selection.files ?? selection.schemas.flatMap(entry => expandSchemaEntry(entry, cwd))), ...packageSchemas]
+        : [...selection.schemas, ...packageSchemas];
 
     const schema = allSchemas.length === 1 ? allSchemas[0] : allSchemas;
 
-    // Determine schemaFilter for PostgreSQL
-    let schemaFilter: string[] | undefined;
-    if (dialect === 'postgresql')
-    {
-        if (options.schemaFilter)
-        {
-            // Use explicitly provided schemaFilter
-            schemaFilter = options.schemaFilter;
-        }
-        else if (options.autoDetectSchemas && expandedFiles.length > 0)
-        {
-            // Auto-detect schemas from files (already absolute paths from expandGlobs)
-            schemaFilter = detectSchemasFromFiles(expandedFiles);
-        }
-    }
+    // PostgreSQL schemaFilter is taken as given; the CLI derives one from the loaded modules
+    const schemaFilter = dialect === 'postgresql' ? options.schemaFilter : undefined;
 
     return {
         schema,
+        schemaSource,
+        schemaRegistry,
         out,
         dialect,
         dbCredentials: getDbCredentials(dialect, databaseUrl),
@@ -617,15 +638,27 @@ function getDbCredentials(dialect: string, url: string)
 }
 
 /**
- * Generate drizzle.config.ts file content
- *
- * @param options - Configuration options
- * @returns File content as string
+ * The schema fields a rendered drizzle.config.ts needs
  */
-export function generateDrizzleConfigFile(options: DrizzleConfigOptions = {}): string
+export interface RenderableDrizzleConfig
 {
-    const config = getDrizzleConfig(options);
-    const cwd = options.cwd ?? process.cwd();
+    schema: string | string[];
+    out: string;
+    dialect: string;
+    dbCredentials: Record<string, unknown>;
+    schemaFilter?: string[];
+    migrations?: Record<string, unknown>;
+}
+
+/**
+ * Render an already-resolved config as drizzle.config.ts source, schema
+ * paths made absolute for Drizzle Studio
+ *
+ * @param config - Result of getDrizzleConfig, possibly with the schema replaced
+ * @param cwd - Base for relative schema paths (default: process.cwd())
+ */
+export function renderDrizzleConfig(config: RenderableDrizzleConfig, cwd: string = process.cwd()): string
+{
 
     // Convert schema paths to absolute paths for Drizzle Studio compatibility
     const normalizeSchemaPath = (schemaPath: string): string =>
@@ -664,4 +697,15 @@ export default defineConfig({
     dbCredentials: ${JSON.stringify(config.dbCredentials, null, 4)},${schemaFilterLine}${migrationsLine}
 });
 `;
+}
+
+/**
+ * Generate drizzle.config.ts source from options: resolve the config, then render it
+ *
+ * @param options - Configuration options (see getDrizzleConfig)
+ * @returns drizzle.config.ts source
+ */
+export function generateDrizzleConfigFile(options: DrizzleConfigOptions = {}): string
+{
+    return renderDrizzleConfig(getDrizzleConfig(options), options.cwd ?? process.cwd());
 }
