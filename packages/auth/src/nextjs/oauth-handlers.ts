@@ -12,6 +12,7 @@ import { COOKIE_NAMES, getSessionTtl } from '../server/lib/config';
 import { env } from '@spfn/core/config';
 import { logger } from '@spfn/core/logger';
 import { unsealPendingSession } from './session-helpers';
+import { isSafeReturnPath } from '../lib/return-path';
 
 export interface OAuthCallbackOptions
 {
@@ -26,6 +27,19 @@ export interface OAuthCallbackOptions
      * @default '/auth/error'
      */
     errorRedirectUrl?: string;
+}
+
+/**
+ * The query's `returnUrl`, or the handler's default when it would leave the app.
+ *
+ * `new URL('https://evil.example.com', request.url)` resolves to the absolute URL,
+ * not to a path under the app, so an unchecked value here redirects the browser
+ * off-origin after a successful login. Only the destination is replaced — the
+ * login stands and the session cookies are still set.
+ */
+function safeReturnUrl(requested: string | null, defaultRedirect: string): string
+{
+    return requested && isSafeReturnPath(requested) ? requested : defaultRedirect;
 }
 
 /**
@@ -54,7 +68,7 @@ export function createOAuthCallbackHandler(options?: OAuthCallbackOptions)
         const searchParams = request.nextUrl.searchParams;
         const userId = searchParams.get('userId');
         const keyId = searchParams.get('keyId');
-        const returnUrl = searchParams.get('returnUrl') || defaultRedirect;
+        const returnUrl = safeReturnUrl(searchParams.get('returnUrl'), defaultRedirect);
         const error = searchParams.get('error');
 
         // Handle error from backend

@@ -30,6 +30,7 @@ import {
     type PendingSessionData,
 } from '../../nextjs/session-helpers';
 import { oauthUrlInterceptor } from '../../nextjs/interceptors/oauth';
+import { errorRegistry, ValidationError } from '@spfn/core/errors';
 
 /**
  * 테스트용 mock provider 생성 헬퍼
@@ -561,6 +562,118 @@ describe('OAuth Interceptor Logic', () =>
             birthDate: '2000-01-01',
             termsAgreed: true,
         });
+    });
+
+    /**
+     * Drives the seam the way the proxy does: whatever the caller posted as the
+     * body, and nothing else. The interceptor is the only layer that ever sees
+     * the caller's returnUrl — after it, every layer sees sealed state.
+     */
+    async function startWith(returnUrl: unknown)
+    {
+        const ctx = {
+            path: '/_auth/oauth/google/url',
+            body: { returnUrl },
+            metadata: {},
+        } as unknown as RequestInterceptorContext;
+        const next = vi.fn(async () => undefined);
+
+        await oauthUrlInterceptor.request?.(ctx, next);
+
+        return { ctx, next };
+    }
+
+    it.each([
+        ['https://evil.com', 'absolute URL'],
+        ['//evil.com', 'protocol-relative host'],
+        ['/a/../b', 'traversal'],
+        ['/\\evil.com', 'backslash a browser may normalize to a slash'],
+        ['\\\\evil.com', 'backslash pair'],
+        ['/..//evil.com', 'traversal ahead of a host'],
+        ['/./../evil', 'traversal spelled with a dot segment'],
+        ['javascript:alert(1)', 'a javascript URL'],
+        ['/javascript:x', 'protocol prefix in the first segment'],
+        ['/a\r\nLocation: https://evil.com', 'raw CR/LF'],
+        [' //evil.com', 'leading space ahead of a host'],
+        ['/\t/evil.com', 'tab a URL parser strips, leaving //evil.com'],
+        ['http:/evil.com', 'single-slash absolute URL'],
+        ['/evil.com:443', 'host:port read as an authority'],
+    ])('refuses to seal a returnUrl that leaves the app: %j (%s)', async (returnUrl) =>
+    {
+        const { ctx, next } = await startWith(returnUrl);
+
+        // Refused before the seal: no state to follow, and the backend is never called.
+        expect(ctx.abort).toMatchObject({ status: 400, body: { __type: 'ValidationError' } });
+        expect(ctx.body.state).toBeUndefined();
+        expect(next).not.toHaveBeenCalled();
+        // Nothing to put in a cookie either: the response interceptor sets the
+        // pending-session cookie off this, and a refusal never runs it anyway.
+        expect(ctx.metadata.pendingSession).toBeUndefined();
+        expect(ctx.metadata.oauthCsrf).toBeUndefined();
+    });
+
+    /**
+     * The body is JSON from the browser, so `returnUrl` is not a string just
+     * because the backend route's schema says it is — the schema runs one hop
+     * later. Refused here, rather than thrown out of the rule as a 500.
+     */
+    it.each<[unknown, string]>([
+        [123, 'a number'],
+        [{}, 'an object'],
+        [[], 'an array'],
+        [true, 'a boolean'],
+    ])('refuses a non-string returnUrl: %j (%s)', async (returnUrl) =>
+    {
+        const { ctx, next } = await startWith(returnUrl);
+
+        expect(ctx.abort).toMatchObject({ status: 400, body: { __type: 'ValidationError' } });
+        expect(ctx.body.state).toBeUndefined();
+        expect(next).not.toHaveBeenCalled();
+    });
+
+    it.each<[string | undefined | null, string]>([
+        [undefined, 'absent'],
+        [null, 'null'],
+        ['', 'empty'],
+    ])('seals the app root when returnUrl is %j (%s)', async (returnUrl) =>
+    {
+        const { ctx, next } = await startWith(returnUrl);
+
+        expect(ctx.abort).toBeUndefined();
+        expect(next).toHaveBeenCalledOnce();
+        expect((await verifyOAuthState(ctx.body.state)).returnUrl).toBe('/');
+    });
+
+    /**
+     * The refusal is a response body, so what matters to a caller is the error it
+     * restores to. The typed client deserializes by `__type` through the core
+     * registry (packages/core/src/nextjs/client/helpers.ts), which is why the
+     * abort body carries that field rather than only the envelope.
+     */
+    it('the refusal restores to a ValidationError in the typed client', async () =>
+    {
+        const { ctx } = await startWith('https://evil.com');
+        const restored = errorRegistry.deserialize(ctx.abort!.body as { __type: string });
+
+        expect(restored).toBeInstanceOf(ValidationError);
+        expect(restored).toMatchObject({ statusCode: 400, message: expect.stringContaining('returnUrl') });
+        expect(ctx.abort!.status).toBe(400);
+    });
+
+    it('seals a safe returnUrl and lets the request through', async () =>
+    {
+        const ctx = {
+            path: '/_auth/oauth/google/url',
+            body: { returnUrl: '/dashboard' },
+            metadata: {},
+        } as unknown as RequestInterceptorContext;
+        const next = vi.fn(async () => undefined);
+
+        await oauthUrlInterceptor.request?.(ctx, next);
+
+        expect(ctx.abort).toBeUndefined();
+        expect(next).toHaveBeenCalledOnce();
+        expect((await verifyOAuthState(ctx.body.state)).returnUrl).toBe('/dashboard');
     });
 
     it('pending session should preserve key info for finalization', async () =>

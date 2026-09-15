@@ -17,6 +17,7 @@ import {
 
 import { usersRepository, socialAccountsRepository } from '../repositories';
 import { authLogger } from '../logger';
+import { isSafeReturnPath } from '../../lib/return-path';
 import { runBeforeRegister } from '../lib/config';
 import { type SocialProvider, type KeyAlgorithmType } from '../types';
 import {
@@ -244,7 +245,11 @@ export async function oauthCallbackService(
     const redirectUrl = buildRedirectUrl(callbackUrl, {
         userId: String(userId),
         keyId: stateData.keyId,
-        returnUrl: stateData.returnUrl,
+        // Defence in depth: the state is sealed, so this value was already checked
+        // where it was sealed. Checking it again costs one comparison and keeps a
+        // destination that leaves the app out of the callback URL no matter which
+        // seam sealed it.
+        returnUrl: isSafeReturnPath(stateData.returnUrl) ? stateData.returnUrl : '/',
         isNewUser: String(isNewUser),
     });
 

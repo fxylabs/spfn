@@ -29,34 +29,11 @@ import type { RegisterResult } from './auth.service';
 import type { KeyAlgorithmType, KeyPlatformType } from '../types';
 
 /**
- * Whether a return path can be handed back to the browser.
- *
- * Only a path within the app is allowed. The rejected shapes are the ones that
- * turn a return path into an open redirect: an absolute URL, a protocol-relative
- * `//host` that a browser reads as another origin, a backslash that some
- * browsers normalize into a slash, and any `..` traversal.
+ * Re-exported so the existing import path keeps working. The rule itself moved to
+ * `src/lib/return-path.ts`, which imports nothing — the OAuth callback component
+ * runs in the browser and needs the same check without any server code behind it.
  */
-export function isSafeReturnPath(returnPath: string): boolean
-{
-    if (!returnPath.startsWith('/'))
-    {
-        return false;
-    }
-
-    if (returnPath.startsWith('//') || returnPath.includes('\\'))
-    {
-        return false;
-    }
-
-    if (returnPath.includes('..'))
-    {
-        return false;
-    }
-
-    // A path cannot carry a protocol prefix; `/\thttps:` and friends are caught
-    // above, this catches `/foo:bar` forms that some parsers read as an authority.
-    return !/^\/[^/?#]*:/.test(returnPath);
-}
+export { isSafeReturnPath } from '../../lib/return-path';
 
 export interface RequestSignupLinkParams
 {

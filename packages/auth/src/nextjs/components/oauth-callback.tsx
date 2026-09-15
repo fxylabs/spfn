@@ -15,6 +15,21 @@
 
 import { useEffect, useState } from 'react';
 
+import { isSafeReturnPath } from '../../lib/return-path';
+
+/**
+ * The destination to navigate to, or `/` when the value would leave the app.
+ *
+ * Both the query parameter and the value echoed by `oauthFinalize` pass through
+ * here. A callback URL is something a user can be handed, so neither is trusted
+ * to be a path inside the app — without this an absolute URL in `?returnUrl=`
+ * would make a genuine login end on someone else's origin.
+ */
+function toSafePath(value: string | null | undefined): string
+{
+    return value && isSafeReturnPath(value) ? value : '/';
+}
+
 export interface OAuthCallbackProps
 {
     /**
@@ -64,7 +79,7 @@ export function OAuthCallback({
                 const params = new URLSearchParams(window.location.search);
                 const userId = params.get('userId');
                 const keyId = params.get('keyId');
-                const returnUrl = params.get('returnUrl') || '/';
+                const returnUrl = toSafePath(params.get('returnUrl'));
                 const errorParam = params.get('error');
 
                 // Handle error from backend
@@ -105,7 +120,7 @@ export function OAuthCallback({
                 onSuccess?.(userId);
 
                 // Redirect to returnUrl
-                window.location.href = data.returnUrl || returnUrl;
+                window.location.href = toSafePath(data.returnUrl || returnUrl);
             }
             catch (err)
             {

@@ -949,6 +949,16 @@ Both convenience URL APIs seal `metadata` into the encrypted OAuth state. On a n
 signup, the callback passes it to `beforeRegister` and `authRegisterEvent`; existing-account
 logins do not run the registration hook.
 
+`returnUrl` must be a path inside your app — absolute URLs, `//host`, `..`, a backslash, and a
+tab/CR/LF (which a URL parser strips, turning `/<tab>/host` into `//host`) are refused, so a
+real login cannot become an open redirect. The start seams answer an unsafe value with a 400
+`ValidationError`; the seams that already hold a logged-in user replace the destination instead
+of failing the login — `OAuthCallback` navigates to `/` and `createOAuthCallbackHandler`
+redirects to its `defaultRedirectUrl` (`/` unless you pass one). The rule is exported as
+`isSafeReturnPath` from `@spfn/auth/server`, `@spfn/auth/nextjs/server`, and
+`@spfn/auth/nextjs/client` for apps that validate a destination before calling
+`getGoogleOAuthUrl`.
+
 Built-in OAuth routes: `POST /_auth/oauth/google/url`, `GET /_auth/oauth/google` (redirect),
 `GET /_auth/oauth/google/callback`, `POST /_auth/oauth/finalize`, `GET /_auth/oauth/providers`,
 plus the provider-generic `POST /_auth/oauth/start`. `getGoogleAccessToken(userId)` returns a

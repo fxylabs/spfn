@@ -5,15 +5,46 @@
  * 2. oauthFinalizeInterceptor: OAuth 완료 시 pending session에서 세션 저장
  */
 
-import type { InterceptorRule, ResponseInterceptorContext } from '@spfn/core/nextjs/server';
+import type { InterceptorRule, ProxyAbort, ResponseInterceptorContext } from '@spfn/core/nextjs/server';
 import { generateKeyPair } from '../../server/lib/crypto';
 import { createOAuthState, generateOAuthNonce } from '../../server/lib/oauth/state';
 import { sealSession } from '../../server/lib/session';
 import { COOKIE_NAMES, getSessionTtl } from '../../server/lib/config';
 import { authLogger } from '../../server/logger';
+import { isSafeReturnPath } from '../../lib/return-path';
 import { sealPendingSession, unsealPendingSession } from '../session-helpers';
 import { cookieSecure } from './cookie-options';
 import { pushCsrfCookie } from './csrf';
+
+const UNSAFE_RETURN_URL_MESSAGE = 'returnUrl must be a relative path within the app';
+
+/**
+ * Refuse an OAuth start whose `returnUrl` would leave the app.
+ *
+ * This is where the value has to be checked: the interceptor seals it into the
+ * encrypted state, and every layer after this one — the backend `/url` routes,
+ * the provider, the callback — sees only the sealed state and cannot recover
+ * what the caller asked for. An unchecked value comes back as a redirect after
+ * a real login, which is what turns a forgotten screen into an open redirect.
+ *
+ * Refused the same way the signup-link route refuses `returnPath`: 400 carrying
+ * a ValidationError, so the typed client restores the same error class whether
+ * the refusal came from here or from the backend.
+ */
+function refuseUnsafeReturnUrl(): ProxyAbort
+{
+    return {
+        status: 400,
+        body: {
+            __type: 'ValidationError',
+            message: UNSAFE_RETURN_URL_MESSAGE,
+            error: {
+                code: 'ValidationError',
+                message: UNSAFE_RETURN_URL_MESSAGE,
+            },
+        },
+    };
+}
 
 /**
  * OAuth URL Interceptor
@@ -30,6 +61,20 @@ export const oauthUrlInterceptor: InterceptorRule = {
         const provider = ctx.path.split('/')[3]; // google, github, etc.
         const returnUrl = ctx.body?.returnUrl || '/';
         const metadata = ctx.body?.metadata as Record<string, unknown> | undefined;
+
+        // `ctx.body` is whatever the caller posted, so the value reaching the rule
+        // is not a string just because the route's schema says it is — the schema
+        // runs at the backend, one hop after this. A non-string is refused here
+        // rather than left to throw out of `isSafeReturnPath` as a 500.
+        if (typeof returnUrl !== 'string' || !isSafeReturnPath(returnUrl))
+        {
+            authLogger.interceptor.oauth?.warn?.('OAuth start refused: returnUrl is not a path within the app', {
+                provider,
+            });
+            ctx.abort = refuseUnsafeReturnUrl();
+
+            return;
+        }
 
         // 키쌍 생성
         const keyPair = generateKeyPair('ES256');

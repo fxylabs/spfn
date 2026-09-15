@@ -27,6 +27,7 @@ import {
     buildOAuthErrorUrl,
     getEnabledOAuthProviders,
     requireEnabledProvider,
+    isSafeReturnPath,
 } from '../../services';
 import { isGoogleOAuthEnabled, getGoogleAuthUrl, getOAuthProvider, UnlinkNotifyRejection } from '../../lib/oauth';
 import { generateOAuthNonce } from '../../lib/oauth/state';
@@ -178,6 +179,13 @@ export const oauthStart = route.post('/_auth/oauth/start')
     {
         const { body } = await c.data();
 
+        // Sealed into the state here and followed after login, so it is held to
+        // the same rule as the signup link's returnPath.
+        if (!isSafeReturnPath(body.returnUrl))
+        {
+            throw new ValidationError({ message: 'returnUrl must be a relative path within the app' });
+        }
+
         // CSRF: bind the flow to this browser via a cookie matched at the callback.
         const nonce = generateOAuthNonce();
         setCookie(c.raw, COOKIE_NAMES.OAUTH_CSRF, nonce, {
@@ -272,6 +280,17 @@ export const oauthFinalize = route.post('/_auth/oauth/finalize')
     .handler(async (c) =>
     {
         const { body } = await c.data();
+
+        // Echoed back to the callback page, which navigates to it. Refused here
+        // rather than echoed and left to the page, the same way the signup-link
+        // route refuses a returnPath that would leave the app. An empty value is
+        // an absent one — the response below already answers it with '/', and a
+        // callback page that forwards `?returnUrl=` verbatim sends exactly that
+        // on a login that has always worked.
+        if (body.returnUrl && !isSafeReturnPath(body.returnUrl))
+        {
+            throw new ValidationError({ message: 'returnUrl must be a relative path within the app' });
+        }
 
         // 인터셉터가 세션을 저장함 — userId, keyId를 반환해야 인터셉터가 처리 가능.
         //

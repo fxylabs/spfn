@@ -32,3 +32,7 @@ export {
     createOAuthCallbackHandler,
     type OAuthCallbackOptions,
 } from './oauth-handlers';
+
+// The rule every return destination is held to — validate before calling
+// getGoogleOAuthUrl rather than writing a second rule per screen.
+export { isSafeReturnPath } from '../lib/return-path';

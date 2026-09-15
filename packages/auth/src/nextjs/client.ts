@@ -12,3 +12,7 @@
  */
 
 export { OAuthCallback, type OAuthCallbackProps } from './components';
+
+// The rule OAuthCallback applies before it navigates. Exported here too so a
+// page that builds its own `returnUrl` validates it with the same function.
+export { isSafeReturnPath } from '../lib/return-path';
