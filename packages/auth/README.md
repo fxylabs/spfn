@@ -621,8 +621,32 @@ const short = await createRevokeAllLink(userId, { ttlMinutes: 10 });
 
 **The link opens a page in your app** (`SPFN_AUTH_REVOKE_ALL_CONFIRM_PATH`, default
 `/account/revoke-all`), not an API route — the same shape the signup and reset links use. That page
-reads the token out of the query string and makes two calls: one to render, one when the owner
-presses the button.
+ships with the package: mount it in one route file and you are done.
+
+```typescript
+// app/account/revoke-all/route.ts
+import { createRevokeAllPageHandlers } from '@spfn/auth/nextjs/server';
+
+export const { GET, POST } = createRevokeAllPageHandlers();
+```
+
+`GET` reads the token out of the query string, calls `confirmRevokeAllLink` and draws the expiry,
+the device count and one button; `POST` calls `consumeRevokeAllLink` and reports the count it
+signed out. Every answer carries `Cache-Control: no-store` and
+`Content-Security-Policy: frame-ancestors 'none'`, the token appears in a hidden field and the API
+body and nowhere else, and every 404 is the same screen with no reason on it. Pass
+`render: (view: RevokeAllPageView) => string` to own the body at all three stages
+(`confirm` / `done` / `invalid`) while the handler keeps the status, the headers and the fields.
+
+- **There is no session on this page, so the CSRF token is not derived from one.** `GET` mints 32
+  random bytes, sets them in a cookie scoped to the page's own path (`HttpOnly`, `Secure` in
+  production, `SameSite=Strict`, 15 minutes) and mirrors them into the form; `POST` compares the
+  two before calling the API and expires the cookie afterwards. A custom `render` must echo
+  `view.fields` and `view.csrfToken` back as hidden inputs, or the form it draws cannot be
+  submitted.
+
+**An app that wants its own page** can call the two endpoints directly instead — they are public,
+and this is what the handlers above do:
 
 ```typescript
 'use client';

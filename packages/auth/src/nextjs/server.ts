@@ -51,6 +51,15 @@ export {
     type OAuth2ConsentView,
 } from './oauth2-authorize-handlers';
 
+// The sign-out-everywhere page — the mailed link opens a page in the app, and
+// the page has no session to lean on, which is the whole point of the link
+export {
+    createRevokeAllPageHandlers,
+    type RevokeAllPageHandlerOptions,
+    type RevokeAllPageHandlers,
+    type RevokeAllPageView,
+} from './revoke-all-page-handlers';
+
 // The rule every return destination is held to — validate before calling
 // getGoogleOAuthUrl rather than writing a second rule per screen.
 export { isSafeReturnPath } from '../lib/return-path';
