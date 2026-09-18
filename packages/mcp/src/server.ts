@@ -27,6 +27,14 @@ type RuntimeState<Auth, Ctx> = {
 };
 
 const RUNTIME_STATE_KEY = 'spfn.runtime';
+const RESOURCE_METADATA_PATH = '/.well-known/oauth-protected-resource';
+
+type ResourceMetadata = {
+    resource: string;
+    authorization_servers: string[];
+    scopes_supported?: string[];
+    bearer_methods_supported: string[];
+};
 
 export function createMcpRoute<Auth extends McpAuth, Ctx>(
     config: McpRouteConfig<Auth, Ctx>,
@@ -68,7 +76,63 @@ export function createMcpHttpRoute<Auth extends McpAuth, Ctx>(
         mcpPost: route.post('/mcp').skip('*').handler(handle),
         mcpGet: route.get('/mcp').skip('*').handler(handle),
         mcpDelete: route.delete('/mcp').skip('*').handler(handle),
+        ...metadataRoutes(config, resource),
     });
+}
+
+/**
+ * The unauthenticated protected resource metadata document (RFC 9728).
+ *
+ * Served at the root path and, when the resource has a path of its own, at the
+ * path-aware alias the 401 challenge points a client to. Both answer the same bytes.
+ */
+function metadataRoutes<Auth extends McpAuth, Ctx>(
+    config: McpHttpRouteConfig<Auth, Ctx>,
+    resource: string,
+): Record<string, RouteDef>
+{
+    const body = JSON.stringify(resourceMetadata(config, resource));
+    const respond = () => new Response(body, {
+        headers: { 'content-type': 'application/json' },
+    });
+    const suffix = resourcePath(resource);
+    const routes: Record<string, RouteDef> = {
+        mcpResourceMetadata: route.get(RESOURCE_METADATA_PATH).skip('*').handler(respond),
+    };
+
+    if (suffix)
+    {
+        routes.mcpResourceMetadataForPath = route
+            .get(`${RESOURCE_METADATA_PATH}${suffix}`)
+            .skip('*')
+            .handler(respond);
+    }
+
+    return routes;
+}
+
+function resourceMetadata<Auth extends McpAuth, Ctx>(
+    config: McpHttpRouteConfig<Auth, Ctx>,
+    resource: string,
+): ResourceMetadata
+{
+    return {
+        resource,
+        authorization_servers: config.authorizationServers ?? [new URL(config.appUrl).origin],
+        ...(config.scopesSupported ? { scopes_supported: config.scopesSupported } : {}),
+        bearer_methods_supported: ['header'],
+    };
+}
+
+/**
+ * The resource's own path, with no trailing slash.
+ *
+ * Empty when the resource is a bare origin, which is the one case with no path-aware
+ * metadata document to serve.
+ */
+function resourcePath(resource: string): string
+{
+    return new URL(resource).pathname.replace(/\/$/, '');
 }
 
 function resolveResource<Auth extends McpAuth, Ctx>(config: McpHttpRouteConfig<Auth, Ctx>): string
@@ -97,13 +161,13 @@ async function handleRequest<Auth extends McpAuth, Ctx>(
     const bearer = bearerToken(request.headers.get('authorization'));
     if (!bearer)
     {
-        return challenge(config);
+        return challenge(config, resource, false);
     }
 
     const auth = await validateAuth(config, bearer, resource);
     if (!auth)
     {
-        return challenge(config);
+        return challenge(config, resource, true);
     }
 
     const requestId = randomUUID();
@@ -153,7 +217,7 @@ async function validateAuth<Auth extends McpAuth, Ctx>(
     config: McpHttpRouteConfig<Auth, Ctx>,
     token: string,
     resource: string,
-): Promise<Auth | undefined>
+): Promise<Auth | null | undefined>
 {
     try
     {
@@ -165,20 +229,35 @@ async function validateAuth<Auth extends McpAuth, Ctx>(
     }
 }
 
-function challenge<Auth extends McpAuth, Ctx>(config: McpHttpRouteConfig<Auth, Ctx>): Response
+/**
+ * The RFC 9728 challenge.
+ *
+ * `rejectedBearer` distinguishes a token the client should replace from an absent one it
+ * should go and obtain: RFC 6750 §3 marks the former with `error="invalid_token"`.
+ */
+function challenge<Auth extends McpAuth, Ctx>(
+    config: McpHttpRouteConfig<Auth, Ctx>,
+    resource: string,
+    rejectedBearer: boolean,
+): Response
 {
-    const metadataUrl = config.resourceMetadataUrl
-        ?? `${config.appUrl.replace(/\/$/, '')}/.well-known/oauth-protected-resource`;
+    const metadataUrl = config.resourceMetadataUrl ?? defaultMetadataUrl(resource);
+    const error = rejectedBearer ? 'error="invalid_token", ' : '';
 
     return Response.json(
         { jsonrpc: '2.0', id: null, error: { code: -32001, message: 'Unauthorized' } },
         {
             status: 401,
             headers: {
-                'WWW-Authenticate': `Bearer resource_metadata="${metadataUrl}"`,
+                'WWW-Authenticate': `Bearer ${error}resource_metadata="${metadataUrl}"`,
             },
         },
     );
+}
+
+function defaultMetadataUrl(resource: string): string
+{
+    return `${new URL(resource).origin}${RESOURCE_METADATA_PATH}${resourcePath(resource)}`;
 }
 
 function toAuthInfo<Auth, Ctx>(

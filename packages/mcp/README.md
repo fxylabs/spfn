@@ -105,6 +105,7 @@ The same dispatcher can be passed to `createMcpHttpRoute` and `serveMcpStdio`. T
 
 ```ts
 import { createMcpRoute, McpError } from '@spfn/mcp/server';
+import { verifyAccessToken } from '@spfn/auth/server';
 import type { McpAuth, McpTool } from '@spfn/mcp';
 
 type Auth = McpAuth & {
@@ -142,15 +143,7 @@ export const mcpRouter = createMcpRoute<Auth, Context>({
         name: 'example-app',
         version: '1.0.0',
     },
-    validateToken: async (token, resource) => {
-        const claims = await verifyAccessToken(token, resource);
-        return {
-            clientId: claims.clientId,
-            scopes: claims.scopes,
-            expiresAt: claims.expiresAt,
-            userId: claims.userId,
-        };
-    },
+    validateToken: verifyAccessToken,
     resolveContext: async auth => {
         const user = await findUser(auth.userId);
         if (!user) {
@@ -173,9 +166,69 @@ export const appRouter = defineRouter({
 }).packages([mcpRouter]);
 ```
 
+`verifyAccessToken` returns `null` when it refuses the token — expired, revoked, or
+issued for another resource. `validateToken` may signal a refusal that way or by
+throwing; the adapter treats `null`, `undefined`, and a thrown error identically.
+`@spfn/auth` `0.3.0-beta.19` ships the authorization server that issues these tokens —
+see its README section
+[Authorization server for MCP clients](../auth/README.md#authorization-server-for-mcp-clients).
+
 The adapter registers `POST`, `GET`, and `DELETE` handlers at `/mcp` and skips SPFN's
 session middleware. `validateToken` is therefore the authentication boundary and must
 validate the token audience against the supplied `resource` value.
+
+### Discovery
+
+The router also serves the RFC 9728 protected resource metadata document, unauthenticated,
+at two paths:
+
+- `GET /.well-known/oauth-protected-resource`
+- `GET /.well-known/oauth-protected-resource/mcp` — the path-aware form, whose suffix is
+  the path of the resolved `resource`. A `resource` of `https://app.example.com/tools` is
+  published at `/.well-known/oauth-protected-resource/tools` instead.
+
+Both answer the same bytes:
+
+```json
+{
+    "resource": "https://app.example.com/mcp",
+    "authorization_servers": ["https://app.example.com"],
+    "bearer_methods_supported": ["header"]
+}
+```
+
+`authorization_servers` defaults to the origin of `appUrl` — the issuer `@spfn/auth`
+publishes on the API origin. Override it when the authorization server is deployed
+separately, and add `scopes_supported` when the server defines scopes:
+
+```ts
+authorizationServers: ['https://id.example.com'],
+scopesSupported: ['mcp'],
+```
+
+These are package routes like `/mcp` itself, so they are relative to wherever the router
+is mounted. An application served under a base path publishes them under that base path,
+where an MCP client looking at the origin root will not find them; terminate the base path
+at the proxy, or set `resourceMetadataUrl` to the URL the client can actually reach.
+
+### The 401 challenge
+
+A request without a bearer token gets the plain challenge, pointing at the path-aware
+metadata document:
+
+```
+WWW-Authenticate: Bearer resource_metadata="https://app.example.com/.well-known/oauth-protected-resource/mcp"
+```
+
+A request whose bearer token `validateToken` refused gets `error="invalid_token"`
+(RFC 6750 §3) as well:
+
+```
+WWW-Authenticate: Bearer error="invalid_token", resource_metadata="https://app.example.com/.well-known/oauth-protected-resource/mcp"
+```
+
+The parameter is what lets a client tell the two apart: refresh the token it already has,
+or go and authorize for one. `resourceMetadataUrl` overrides the URL in both.
 
 To reuse an existing dispatcher, use the explicit HTTP adapter:
 
