@@ -191,3 +191,124 @@ export async function signInWithPasskey(
 
     return { ok: true, ...session };
 }
+
+export interface RenewSessionValue
+{
+    /** The new device key the session now runs on. */
+    keyId: string;
+}
+
+/**
+ * Renew a bound session key with a passkey assertion.
+ *
+ * What an app calls when a request came back `SessionRenewalRequiredError`: the
+ * session's short-lived key has run out and one WebAuthn ceremony puts a new one
+ * in the cookie. The person sees the system prompt, not a sign-in form.
+ *
+ * The body is `{ response }` and nothing else. The expiring key's id lives in an
+ * HttpOnly cookie that page script cannot read, and the new key pair is the
+ * Next.js proxy's to generate — both are injected there, exactly as they are for
+ * `signInWithPasskey`. Nothing here handles a private key.
+ *
+ * Refusals from the server are rejected promises rather than results, on the same
+ * rule the rest of this file follows: a `SessionRenewalRefusedError` means the
+ * server declined — the key is past its grace, or was revoked — and the app's
+ * answer is to send the person to sign in, which is not the same as the ceremony
+ * failing.
+ */
+export async function renewSession(api: AuthApi): Promise<PasskeyResult<RenewSessionValue>>
+{
+    if (!isPasskeySupported())
+    {
+        return { ok: false, reason: 'unsupported' };
+    }
+
+    const optionsJSON = await api.sessionRenewOptions.call({
+        body: {},
+    }) as PublicKeyCredentialRequestOptionsJSON;
+
+    let response: AuthenticationResponseJSON;
+
+    try
+    {
+        response = await startAuthentication({ optionsJSON });
+    }
+    catch (error)
+    {
+        return { ok: false, reason: failureReason(error, 'no-credential'), error };
+    }
+
+    const renewed = await api.sessionRenewVerify.call({
+        body: { response },
+    }) as { keyId?: string };
+
+    return { ok: true, keyId: renewed.keyId ?? '' };
+}
+
+/** What a successful disable answers with — the mode the account is now in. */
+export interface DisableSessionBindingValue
+{
+    mode: 'none';
+}
+
+export interface DisableSessionBindingOptions
+{
+    /**
+     * The account password, for a browser with no passkey to hand.
+     *
+     * Send it, or let the ceremony run — one of the two is required. Key age is
+     * deliberately not accepted: a session cookie copied in the minutes after a
+     * sign-in carries exactly that, and it must not be able to switch the
+     * protection off.
+     */
+    currentPassword?: string;
+}
+
+/**
+ * Turn session binding off for this account.
+ *
+ * With `currentPassword` this is one call. Without it, the passkey ceremony runs
+ * first and the assertion is what proves ownership — the same ceremony renewal
+ * uses, for the same reason.
+ *
+ * Turning binding *on* needs no ceremony and no helper: it is
+ * `api.setSessionBinding.call({ body: { mode: 'passkey' } })`. Leaving is the
+ * privileged direction here, which is the reverse of the usual posture and is
+ * the whole reason this helper exists.
+ */
+export async function disableSessionBinding(
+    api: AuthApi,
+    options: DisableSessionBindingOptions = {},
+): Promise<PasskeyResult<DisableSessionBindingValue>>
+{
+    if (options.currentPassword)
+    {
+        await api.setSessionBinding.call({ body: { mode: 'none', currentPassword: options.currentPassword } });
+
+        return { ok: true, mode: 'none' };
+    }
+
+    if (!isPasskeySupported())
+    {
+        return { ok: false, reason: 'unsupported' };
+    }
+
+    const optionsJSON = await api.sessionBindingDisableOptions.call({
+        body: {},
+    }) as PublicKeyCredentialRequestOptionsJSON;
+
+    let response: AuthenticationResponseJSON;
+
+    try
+    {
+        response = await startAuthentication({ optionsJSON });
+    }
+    catch (error)
+    {
+        return { ok: false, reason: failureReason(error, 'no-credential'), error };
+    }
+
+    await api.setSessionBinding.call({ body: { mode: 'none', response } });
+
+    return { ok: true, mode: 'none' };
+}

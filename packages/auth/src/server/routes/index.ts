@@ -48,6 +48,7 @@ import {
     getSessionBinding,
     sessionBindingDisableOptions,
 } from './auth/session-binding';
+import { sessionRenewOptions, sessionRenewVerify } from './auth/session-renew';
 import {
     passkeyRegisterOptions,
     passkeyRegisterVerify,
@@ -163,6 +164,9 @@ export const mainAuthRouter = defineRouter({
     setSessionBinding,
     getSessionBinding,
     sessionBindingDisableOptions,
+    // Session renewal routes (#97) — public, like the sign-in paths
+    sessionRenewOptions,
+    sessionRenewVerify,
     // One-Time Token routes
     issueOneTimeToken,
     // Account deletion routes

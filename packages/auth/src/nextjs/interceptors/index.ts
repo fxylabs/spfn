@@ -27,6 +27,7 @@ import { oauthUrlInterceptor, oauthFinalizeInterceptor } from './oauth';
 import { signupLinkInterceptor } from './signup-link';
 import { passwordResetInterceptor } from './password-reset';
 import { sessionBindingInterceptor } from './session-binding';
+import { sessionRenewInterceptor } from './session-renew';
 
 /**
  * All auth interceptors
@@ -34,16 +35,18 @@ import { sessionBindingInterceptor } from './session-binding';
  * Execution order:
  * 1. signupLinkInterceptor - Handles verified-email signup (setup secret ↔ HttpOnly cookie)
  * 2. passwordResetInterceptor - Handles password reset (setup secret ↔ HttpOnly cookie)
- * 3. loginRegisterInterceptor - Handles login/register/signup password/reset complete (key generation + session save)
- * 4. keyRotationInterceptor - Handles key rotation (new key generation + session update)
- * 5. oauthUrlInterceptor - Handles OAuth URL requests (key generation + state injection + pending session)
- * 6. oauthFinalizeInterceptor - Handles OAuth finalize (pending session → full session)
- * 7. generalAuthInterceptor - Handles all authenticated requests (session validation + JWT injection + session renewal)
- * 8. sessionBindingInterceptor - Re-seals the session cookie when the binding setting changes
+ * 3. sessionRenewInterceptor - Injects the expiring key id into both renewal calls
+ * 4. loginRegisterInterceptor - Handles login/register/signup password/reset complete/session renew (key generation + session save)
+ * 5. keyRotationInterceptor - Handles key rotation (new key generation + session update)
+ * 6. oauthUrlInterceptor - Handles OAuth URL requests (key generation + state injection + pending session)
+ * 7. oauthFinalizeInterceptor - Handles OAuth finalize (pending session → full session)
+ * 8. generalAuthInterceptor - Handles all authenticated requests (session validation + JWT injection + session renewal)
+ * 9. sessionBindingInterceptor - Re-seals the session cookie when the binding setting changes
  */
 export const authInterceptors = [
     signupLinkInterceptor,
     passwordResetInterceptor,
+    sessionRenewInterceptor,
     loginRegisterInterceptor,
     keyRotationInterceptor,
     oauthUrlInterceptor,
@@ -59,6 +62,7 @@ export { oauthUrlInterceptor, oauthFinalizeInterceptor } from './oauth';
 export { signupLinkInterceptor } from './signup-link';
 export { passwordResetInterceptor } from './password-reset';
 export { sessionBindingInterceptor, bindingSessionFields } from './session-binding';
+export { sessionRenewInterceptor, SESSION_RENEW_PATH_PATTERN } from './session-renew';
 
 // Deprecated: use generalAuthInterceptor instead
 export { generalAuthInterceptor as authenticationInterceptor };

@@ -401,3 +401,15 @@ export type {
     SessionBindingParams,
     DisableSessionBindingParams,
 } from './session-binding.service';
+
+// Session renewal (#97) — the public two-step ceremony a bound session runs when
+// its key has run out.
+export {
+    startSessionRenewService,
+    finishSessionRenewService,
+} from './session-renew.service';
+
+export type {
+    StartSessionRenewParams,
+    FinishSessionRenewParams,
+} from './session-renew.service';

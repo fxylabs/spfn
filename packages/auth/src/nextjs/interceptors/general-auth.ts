@@ -7,13 +7,16 @@
  * - Expired session cleanup
  */
 
-import type { InterceptorRule } from '@spfn/core/nextjs/server';
-import { unsealSession, sealSession, shouldRefreshSession } from '../../server/lib/session';
+import type { InterceptorRule, RequestInterceptorContext } from '@spfn/core/nextjs/server';
+import { SessionRenewalRequiredError } from '@spfn/auth/errors';
+import { unsealSession, sealSession, shouldRefreshSession, type SessionData } from '../../server/lib/session';
 import { generateClientToken } from '../../server/lib/crypto';
 import { getSessionTtl, COOKIE_NAMES } from '../../server/lib/config';
 import { authLogger } from '../../server/logger';
 import { cookieSecure } from './cookie-options';
 import { refuseInvalidCsrf, pushCsrfCookie, pushCsrfCookieIfStale, pushCsrfCookieRemoval } from './csrf';
+import { refusalEnvelope } from './error-envelope';
+import { SESSION_RENEW_PATH_PATTERN } from './session-renew';
 
 /**
  * Check if path requires authentication
@@ -27,9 +30,58 @@ function requiresAuth(path: string): boolean
         /^\/_auth\/codes$/,           // Send verification code
         /^\/_auth\/codes\/verify$/,   // Verify code
         /^\/_auth\/exists$/,           // Check account exists
+        // Renewing a bound session key, which is what a browser does once the key
+        // in its cookie has run out. Behind this filter the branch below would
+        // refuse the very request that repairs the session, before the backend
+        // ever saw it. `binding/disable/options` is deliberately not here: that
+        // one is asked for by a session that still works.
+        SESSION_RENEW_PATH_PATTERN,
     ];
 
     return !publicPaths.some((pattern) => pattern.test(path));
+}
+
+/**
+ * Whether a bound session's key has already run out.
+ *
+ * Unbound sessions answer false at the first term and nothing further happens to
+ * them — no branch below this line runs for a session that carries no `binding`,
+ * which is what keeps every account that did not opt in on exactly today's path.
+ */
+function boundKeyExpired(session: SessionData): boolean
+{
+    return session.binding === 'passkey'
+        && typeof session.keyExpiresAt === 'number'
+        && Date.now() > session.keyExpiresAt;
+}
+
+/**
+ * Refuse a bound session whose key has run out, without calling the backend.
+ *
+ * The cookies are kept. That is the difference between this refusal and every
+ * other 401 the proxy passes on: the session is not finished, it is waiting for
+ * one WebAuthn ceremony, and clearing the jar would take away the key id the
+ * renewal is addressed by and turn a biometric prompt into a sign-in.
+ */
+function refuseAsNeedingRenewal(ctx: RequestInterceptorContext): void
+{
+    authLogger.interceptor.general.debug('Bound session key expired — answering renewal-required', {
+        path: ctx.path,
+    });
+
+    ctx.abort = refusalEnvelope(new SessionRenewalRequiredError());
+}
+
+/**
+ * Whether a backend 401 is the one that says the device key has expired.
+ *
+ * Read off `__type`, which is what the error envelope classifies by; the string
+ * is the class name, and it is compared rather than imported because the body
+ * here is JSON off the wire rather than an error instance.
+ */
+function isKeyExpiredRefusal(body: unknown): boolean
+{
+    return (body as { __type?: unknown } | null)?.__type === 'KeyExpiredError';
 }
 
 /**
@@ -104,6 +156,17 @@ export const generalAuthInterceptor: InterceptorRule =
                     return;
                 }
 
+                // A bound session whose key has run out is answered here rather
+                // than forwarded: the backend would refuse it, and the response
+                // branch below would read that refusal as "signed out" and empty
+                // the cookie jar.
+                if (boundKeyExpired(session))
+                {
+                    refuseAsNeedingRenewal(ctx);
+
+                    return;
+                }
+
                 // Check if session should be refreshed (within 24h of expiry)
                 const needsRefresh = await shouldRefreshSession(sessionCookie, 24);
 
@@ -137,6 +200,7 @@ export const generalAuthInterceptor: InterceptorRule =
                 ctx.metadata.userId = session.userId;
                 ctx.metadata.keyId = session.keyId;
                 ctx.metadata.sessionValid = true;
+                ctx.metadata.sessionBound = session.binding === 'passkey';
             }
             catch (error)
             {
@@ -169,8 +233,32 @@ export const generalAuthInterceptor: InterceptorRule =
 
         response: async (ctx, next) =>
         {
-        // Backend returned 401 with a valid session — server rejected it
-            if (ctx.response.status === 401 && ctx.metadata.sessionValid)
+        // A bound session the backend refused as expired — a clock skew between
+        // the cookie's copy of the expiry and the key row's. Same answer as the
+        // request-side branch, and for the same reason: the session is renewable,
+        // so the cookies stay.
+            if (ctx.response.status === 401
+                && ctx.metadata.sessionValid
+                && ctx.metadata.sessionBound
+                && isKeyExpiredRefusal(ctx.response.body))
+            {
+                ctx.response.body = refusalEnvelope(new SessionRenewalRequiredError()).body;
+
+                await next();
+
+                return;
+            }
+
+            // Backend returned 401 with a valid session — server rejected it.
+            //
+            // Never on the renewal paths. They are public, so `sessionValid` is
+            // unset there and this branch cannot fire anyway; the explicit skip
+            // is what keeps that true if the filter above ever changes, because a
+            // refused renewal that emptied the cookie jar would destroy the
+            // session the person was in the middle of repairing.
+            if (ctx.response.status === 401
+                && ctx.metadata.sessionValid
+                && !SESSION_RENEW_PATH_PATTERN.test(ctx.path))
             {
                 authLogger.interceptor.general.warn('Backend returned 401, clearing session');
 
@@ -224,7 +312,12 @@ export const generalAuthInterceptor: InterceptorRule =
                     const sessionData = ctx.metadata.sessionData;
                     const ttl = getSessionTtl();
 
-                    // Re-encrypt session with new TTL
+                    // Re-encrypt session with new TTL. The object is the one
+                    // unsealed on the way in, so a bound session's `binding`,
+                    // `keyExpiresAt` and `uaFamily` survive the refresh — this is
+                    // the one sealing site that carries them for free, and the
+                    // reason it must go on re-sealing the whole object rather
+                    // than rebuilding the four-field literal.
                     const sealed = await sealSession(sessionData, ttl);
 
                     // Update session cookie

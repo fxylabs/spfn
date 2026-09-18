@@ -827,6 +827,60 @@ export class LastRecoveryCredentialError extends ConflictError
 }
 
 /**
+ * Session Renewal Required Error (401)
+ *
+ * Minted by the Next.js proxy, not by the backend: a bound session whose key has
+ * run out, on a request the proxy therefore does not forward. The browser's
+ * answer is to run the passkey ceremony `renewSession()` wraps and retry, which
+ * is the one thing a copied cookie cannot do.
+ *
+ * Registered here so the proxy's 401 arrives as this class rather than as a bare
+ * `ApiError` — the refusal is one an app branches on, and `err instanceof` is
+ * how every other branch in this package is written.
+ */
+export class SessionRenewalRequiredError extends UnauthorizedError
+{
+    readonly code = 'SESSION_RENEWAL_REQUIRED';
+
+    constructor(data: { message?: string; details?: Record<string, any> } = {})
+    {
+        super({
+            message: data.message || 'This session needs renewing. Confirm with your passkey to continue.',
+            details: data.details,
+        });
+        this.name = 'SessionRenewalRequiredError';
+    }
+}
+
+/**
+ * Session Renewal Refused Error (401)
+ *
+ * The one answer `session/renew/options` and `session/renew/verify` give to every
+ * refusal: a key id that names nothing, someone else's key, an unbound key, a
+ * revoked key, a key past its renewal grace, an inactive account, a spent
+ * challenge, an assertion that did not verify, a passkey belonging to another
+ * account.
+ *
+ * One answer on purpose. The routes are public — they have to be, since the
+ * session they repair is the one that stopped working — and a refusal that
+ * varied would tell an unauthenticated caller whether a key id is live, which is
+ * exactly what the cookie-copying adversary holds and would want confirmed.
+ */
+export class SessionRenewalRefusedError extends UnauthorizedError
+{
+    readonly code = 'SESSION_RENEWAL_REFUSED';
+
+    constructor(data: { message?: string; details?: Record<string, any> } = {})
+    {
+        super({
+            message: data.message || 'This session cannot be renewed. Sign in again.',
+            details: data.details,
+        });
+        this.name = 'SessionRenewalRefusedError';
+    }
+}
+
+/**
  * Session Binding Unavailable Error (400)
  *
  * Thrown when an account asks to bind its session on a deployment where the

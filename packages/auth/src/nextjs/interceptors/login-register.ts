@@ -5,6 +5,13 @@
  * for login, register, and invitation-accept endpoints.
  * (Invitation acceptance creates the user account + key pair and
  * logs the new user in, so it follows the same key/session flow.)
+ *
+ * `session/renew/verify` is on the list too (#97). Renewing a bound session key
+ * needs exactly what a sign-in needs — a fresh pair generated here, the public
+ * half in the body, the private half sealed into the cookie — so it is served by
+ * this interceptor rather than by a second copy of it. The expiring key travels
+ * under its own name, `expiredKeyId`, injected by `sessionRenewInterceptor`;
+ * `keyId` below means the new key on that path exactly as it does on every other.
  */
 
 import type { InterceptorRule } from '@spfn/core/nextjs/server';
@@ -33,7 +40,7 @@ const ROTATING_SIGN_IN_PATHS = new Set(['/_auth/login', '/_auth/passkeys/login/v
  */
 export const loginRegisterInterceptor: InterceptorRule =
     {
-        pathPattern: /^\/_auth\/(login|register|invitations\/accept|signup\/password|password\/reset\/complete|passkeys\/login\/verify)$/,
+        pathPattern: /^\/_auth\/(login|register|invitations\/accept|signup\/password|password\/reset\/complete|passkeys\/login\/verify|session\/renew\/verify)$/,
         method: 'POST',
 
         request: async (ctx, next) =>
