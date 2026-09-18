@@ -474,6 +474,17 @@ export class KeysRepository extends BaseRepository
             ${ip ?? null}::text IS NOT NULL
             AND ${userPublicKeys.lastSeenIp} IS DISTINCT FROM ${ip ?? null}::text
         )`;
+        // One write per window for a client whose address keeps moving. Without
+        // this the `ipChanged` term below is true on every request from a phone
+        // flipping between cellular and wifi, or from anything behind a CGNAT
+        // egress pool — an UPDATE per request on the hot authenticated path, and a
+        // concurrent-use stamp restamped every time, so the owner's device list
+        // shows a permanently-lit "two places at once" for a device that never
+        // left their hand.
+        const notStampedThisWindow = sql`(
+            ${userPublicKeys.concurrentUseAt} IS NULL
+            OR ${userPublicKeys.concurrentUseAt} < ${this.concurrentUseSince(now)}
+        )`;
         const identityChanged = identity
             ? sql`(
                 ${userPublicKeys.clientKind} IS DISTINCT FROM ${identity.kind}
@@ -488,7 +499,13 @@ export class KeysRepository extends BaseRepository
                 lastUsedAt: now,
                 lastSeenIp: ip ?? null,
                 lastSeenAt: now,
+                // `last_seen_ip IS NOT NULL` is the second observation this needs:
+                // a request whose address did not resolve stores NULL and stamps
+                // `last_seen_at`, so without it the next ordinary request would
+                // read as an address change and raise the signal from one device
+                // that never moved.
                 concurrentUseAt: sql`CASE WHEN ${ipChanged}
+                    AND ${userPublicKeys.lastSeenIp} IS NOT NULL
                     AND ${userPublicKeys.lastSeenAt} > ${this.concurrentUseSince(now)}
                     THEN ${nowParam} ELSE ${userPublicKeys.concurrentUseAt} END`,
                 ...(identity
@@ -502,7 +519,7 @@ export class KeysRepository extends BaseRepository
             })
             .where(and(
                 eq(userPublicKeys.id, id),
-                or(lastUsedIsStale, identityChanged, ipChanged),
+                or(lastUsedIsStale, identityChanged, sql`(${ipChanged} AND ${notStampedThisWindow})`),
             ));
     }
 

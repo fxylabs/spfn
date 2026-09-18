@@ -67,3 +67,26 @@ export function deviceProvenance(c: Context): DeviceProvenance
         webProxy: (c.get('clientType') as ClientType | undefined) === 'web',
     };
 }
+
+/**
+ * The client address, but only where `proxy-guard` attested the request.
+ *
+ * The one rule, in the one place the three authenticated paths read it from:
+ * `authenticate`, `optionalAuth` and the clientProofV1 profile all record what
+ * they see into `last_seen_ip`, and that column is compared — it raises the
+ * concurrent-use signal an account owner is shown and notified on.
+ *
+ * Everywhere else in this module the address is display material and spoofing it
+ * only defaces the spoofer's own device list. Here it is not: `getClientIp` falls
+ * back to `x-forwarded-for` on a request nothing verified, so a caller alternating
+ * that header on their own key could raise "your session was used from two places
+ * at once" whenever they liked — on a deployment where the design says the signal
+ * never fires at all. Absent the attestation this answers null, which the
+ * statement stores and compares as "no observation".
+ */
+export function attestedClientIp(c: Context): string | null
+{
+    const provenance = deviceProvenance(c);
+
+    return provenance.webProxy ? provenance.ip ?? null : null;
+}

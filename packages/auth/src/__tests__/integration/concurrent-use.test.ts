@@ -15,6 +15,12 @@
  * That never reaches the column — it is stored as NULL and compared as "no
  * observation", which is the difference between "this key was in two places" and
  * "we could not tell where this key was".
+ *
+ * Every row that means to be seen from an address is sent as the trusted proxy,
+ * because that is the only request whose address is written at all: without
+ * proxy-guard's attestation the address is a header anybody can set, and a signal
+ * a caller can raise on their own key is not a signal. The rows without the
+ * attestation are here too, and they assert the nothing that happens.
  */
 
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
@@ -43,6 +49,8 @@ const ADDRESS_B = '198.51.100.20';
 /** Where the key was registered — the one address `listKeys` may show. */
 const REGISTERED_FROM = '192.0.2.30';
 const MINUTE_MS = 60_000;
+/** Header the test middleware reads instead of running proxy-guard for real. */
+const CLIENT_TYPE_HEADER = 'x-test-client-type';
 
 interface Session
 {
@@ -60,6 +68,17 @@ describe.skipIf(!dbAvailable)('the concurrent-use signal (case table 6f)', () =>
         process.env.SPFN_AUTH_SESSION_SECRET = 'test-secret-key-for-testing-only-min-32-chars';
 
         app = new Hono();
+        app.use('*', async (c, next) =>
+        {
+            const declared = c.req.header(CLIENT_TYPE_HEADER);
+
+            if (declared)
+            {
+                c.set('clientType', declared);
+            }
+
+            await next();
+        });
         // A route behind optionalAuth, so the row about it asks the middleware
         // that actually serves those routes rather than a stand-in.
         app.get('/_test/optional', optionalAuth.handler, async (c) => c.json({ signedIn: Boolean(c.get('auth')) }));
@@ -96,18 +115,21 @@ describe.skipIf(!dbAvailable)('the concurrent-use signal (case table 6f)', () =>
     /**
      * An authenticated request from `address`.
      *
-     * `x-forwarded-for` is what `getClientIp` falls back to where proxy-guard has
-     * not tagged the request, which is the arrangement of this whole file: it is
-     * the simplest way to choose the address a request resolves to. Passing null
-     * sends no forwarding header at all, which is the row where nothing resolves.
+     * `x-forwarded-for` is what `getClientIp` reads, and the test middleware's
+     * `clientType: 'web'` is what says the request came through the proxy — the
+     * two together are what a real bound web request looks like. Passing null for
+     * the address sends no forwarding header at all, which is the row where
+     * nothing resolves; passing `proxied: false` sends the header without the
+     * attestation, which is the row where the address is not written.
      */
-    function request(path: string, session: Session, address: string | null, method = 'POST')
+    function request(path: string, session: Session, address: string | null, method = 'POST', proxied = true)
     {
         return app.request(path, {
             method,
             headers: {
                 ...JSON_HEADERS,
                 Authorization: session.authorization,
+                ...(proxied ? { [CLIENT_TYPE_HEADER]: 'web' } : {}),
                 ...(address ? { 'x-forwarded-for': address } : {}),
             },
             ...(method === 'GET' ? {} : { body: '{}' }),
@@ -115,9 +137,9 @@ describe.skipIf(!dbAvailable)('the concurrent-use signal (case table 6f)', () =>
     }
 
     /** One authenticated call, from `address`, whose only purpose is to be seen. */
-    async function seenFrom(session: Session, address: string | null): Promise<void>
+    async function seenFrom(session: Session, address: string | null, proxied = true): Promise<void>
     {
-        const response = await request('/_auth/keys/list', session, address);
+        const response = await request('/_auth/keys/list', session, address, 'POST', proxied);
 
         expect(response.status).toBe(200);
 
@@ -137,7 +159,7 @@ describe.skipIf(!dbAvailable)('the concurrent-use signal (case table 6f)', () =>
         const keyPair = generateKeyPair('ES256');
         const response = await app.request('/_auth/login', {
             method: 'POST',
-            headers: { ...JSON_HEADERS, 'x-forwarded-for': address },
+            headers: { ...JSON_HEADERS, [CLIENT_TYPE_HEADER]: 'web', 'x-forwarded-for': address },
             body: JSON.stringify({
                 email: 'owner@test.com',
                 password: PASSWORD,
@@ -247,20 +269,63 @@ describe.skipIf(!dbAvailable)('the concurrent-use signal (case table 6f)', () =>
         expect(key.concurrentUseAt).toBeNull();
     });
 
-    it('a deployment without proxy-guard: every web request carries one address, so the signal never fires', async () =>
+    it('a request whose address did not resolve, then one from A inside the window: nothing moves', async () =>
     {
-        // Without proxy-guard the backend sees the Next.js server's address for
-        // every browser, whichever browser it was. Two sightings, two continents,
-        // one address — and nothing to notice.
+        // The row the one before it stops short of. The unresolved request stored
+        // NULL and stamped `last_seen_at`, so the next real address differs from
+        // what is on the row — and that is not two places, it is one observation
+        // and one absence of one.
         const session = await signIn();
-        const nextJsServer = '10.0.0.5';
+        await sightedAt(session.keyId, 2 * MINUTE_MS, ADDRESS_A);
 
-        await sightedAt(session.keyId, 2 * MINUTE_MS, nextJsServer);
-        await seenFrom(session, nextJsServer);
-        await sightedAt(session.keyId, 2 * MINUTE_MS, nextJsServer);
-        await seenFrom(session, nextJsServer);
+        await seenFrom(session, null);
+        await seenFrom(session, ADDRESS_A);
 
-        expect((await keyRow(session.keyId)).concurrentUseAt).toBeNull();
+        const key = await keyRow(session.keyId);
+        expect(key.lastSeenIp).toBe(ADDRESS_A);
+        expect(key.concurrentUseAt).toBeNull();
+    });
+
+    it('a client whose address alternates A, B, A, B: one UPDATE and one stamp for the whole window', async () =>
+    {
+        // A phone flipping between cellular and wifi, or anything behind a CGNAT
+        // egress pool. Every request looks like an address change, and without a
+        // bound on the term that would be a write per request on the hot path and
+        // a stamp restamped each time.
+        const session = await signIn();
+        await sightedAt(session.keyId, 2 * MINUTE_MS, ADDRESS_A);
+
+        await seenFrom(session, ADDRESS_B);
+        const first = await keyRow(session.keyId);
+        expect(first.concurrentUseAt).not.toBeNull();
+
+        for (const address of [ADDRESS_A, ADDRESS_B, ADDRESS_A, ADDRESS_B])
+        {
+            await seenFrom(session, address);
+        }
+
+        const after = await keyRow(session.keyId);
+        expect(after.lastUsedAt!.getTime()).toBe(first.lastUsedAt!.getTime());
+        expect(after.lastSeenIp).toBe(ADDRESS_B);
+        expect(after.concurrentUseAt!.getTime()).toBe(first.concurrentUseAt!.getTime());
+    });
+
+    it('a deployment without proxy-guard: two different forwarded addresses, and neither is written or compared', async () =>
+    {
+        // The header is the caller's to write when nothing attested the request,
+        // so it is not read at all: two addresses a minute apart raise nothing,
+        // and the row keeps the last address a trusted request put there.
+        const session = await signIn();
+        await sightedAt(session.keyId, 10_000, ADDRESS_A);
+        const before = await keyRow(session.keyId);
+
+        await seenFrom(session, ADDRESS_B, false);
+        await seenFrom(session, '192.0.2.99', false);
+
+        const key = await keyRow(session.keyId);
+        expect(key.lastSeenIp).toBe(ADDRESS_A);
+        expect(key.lastUsedAt!.getTime()).toBe(before.lastUsedAt!.getTime());
+        expect(key.concurrentUseAt).toBeNull();
     });
 
     it('two requests at once from A and B: whichever wins, the value is the same moment either way', async () =>

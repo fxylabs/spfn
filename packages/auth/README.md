@@ -1248,9 +1248,15 @@ comparison is coarse on purpose — five families, `edge` / `chrome` / `firefox`
 **The concurrent-use signal.** `listKeys` rows carry `concurrentUseAtMillis` — the last time one
 key was seen from two client addresses inside `SPFN_AUTH_CONCURRENT_USE_WINDOW_MS`. It is a signal
 for a device list to show and notify on, never a refusal: addresses change legitimately, several
-times an hour for a phone. The addresses behind it are not exposed. It is meaningful only where
-proxy-guard is configured — without it every web request carries the Next.js server's own address,
-so two browsers on two continents share one and the signal never fires.
+times an hour for a phone. The addresses behind it are not exposed.
+
+Only an address `proxy-guard` attested is recorded or compared. Without that attestation
+`x-forwarded-for` is whatever the caller typed, and a caller who could alternate it on their own key
+could raise "used from two places at once" whenever they liked; a request with no attested address
+counts as no observation, which is also why one of them never makes the *next* request look like a
+move. Where proxy-guard is not configured the signal simply never fires. One key writes at most one
+address change per window, so a phone flipping between cellular and wifi costs one row update rather
+than one per request.
 
 **Unbound accounts are unchanged.** Every response, every cookie and every query count is what it
 was: nothing above applies to an account that did not opt in, and a sign-in that answers without
