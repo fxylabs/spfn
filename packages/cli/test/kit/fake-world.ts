@@ -30,6 +30,8 @@ export const FAKE_CATALOG_URL = `${FAKE_RELEASE_STORE_URL}/catalog`;
 export const FAKE_LICENSE_KEY = 'spfnl_fixture_key_0001';
 export const FAKE_CLI_VERSION = '0.3.0-beta.5';
 export const FAKE_KIT_PACKAGE = '@superfunction/landing-kit';
+/** How long the fixture's setup descriptor stays valid, in seconds. */
+const DESCRIPTOR_LIFETIME_SECONDS = 31 * 24 * 60 * 60;
 
 export interface FakeReleaseSpec
 {
@@ -195,6 +197,8 @@ export class FakeKitWorld
     private readonly publicKeyDer: string;
     private readonly keyId = 'fixture-key-1';
     private clockSeconds: number;
+    private readonly descriptorIssuedAt: string;
+    private readonly descriptorExpiresAt: string;
     private commitCounter = 0;
     private sessionCounter = 0;
     private registryRefusals = 0;
@@ -212,6 +216,8 @@ export class FakeKitWorld
         this.catalogUrl = `${this.releaseStoreUrl}/catalog`;
         this.registryUrl = options.registryUrl ?? 'https://packages.superfunction.xyz/npm/';
         this.clockSeconds = Date.parse(options.now ?? '2026-08-17T00:00:00Z') / 1000;
+        this.descriptorIssuedAt = instantOf(this.clockSeconds);
+        this.descriptorExpiresAt = instantOf(this.clockSeconds + DESCRIPTOR_LIFETIME_SECONDS);
 
         for (const spec of options.releases ?? [defaultRelease()])
         {
@@ -270,7 +276,7 @@ export class FakeKitWorld
 
     now(): string
     {
-        return new Date(this.clockSeconds * 1000).toISOString().replace(/\.\d{3}Z$/, 'Z');
+        return instantOf(this.clockSeconds);
     }
 
     /** The signed setup response the allowlisted origin serves. */
@@ -287,8 +293,8 @@ export class FakeKitWorld
             descriptorId: 'landing-kit-setup-2026-08',
             productId: 'landing-kit',
             productKind: 'kit',
-            issuedAt: '2026-08-17T00:00:00Z',
-            expiresAt: '2026-09-17T00:00:00Z',
+            issuedAt: this.descriptorIssuedAt,
+            expiresAt: this.descriptorExpiresAt,
             setupUrl: this.setupUrl,
             displayName: 'Landing Kit',
             supportUrl: 'https://superfunction.xyz/support/landing-kit',
@@ -930,6 +936,12 @@ export class FakeKitWorld
             },
         };
     }
+}
+
+/** The instant shape every document of the fake world carries: no millis. */
+function instantOf(epochSeconds: number): string
+{
+    return new Date(epochSeconds * 1000).toISOString().replace(/\.\d{3}Z$/, 'Z');
 }
 
 function defaultRelease(): FakeReleaseSpec

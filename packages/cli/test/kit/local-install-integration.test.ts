@@ -125,6 +125,15 @@ function isolatedNpmEnv(): Record<string, string>
     };
 }
 
+/**
+ * The real clock, in the instant shape the Kit documents use.
+ *
+ * One definition for the whole suite: the fake world is seeded from it at
+ * construction and the adapters read it afterwards, so the descriptor the
+ * world issues is never dated ahead of the install that resolves it.
+ */
+const now = (): string => new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
+
 /** Published addresses resolved onto the fixture; the registry is loopback. */
 const mappedFetch = (url: string, init?: RequestInit): Promise<Response> => fetch(
     url.replace(CONTROL_PLANE_URL, fixture.origin).replace(PACKAGES_URL, fixture.origin),
@@ -212,6 +221,7 @@ function publish(lockfile: string): void
         kitId: KIT_ID,
         releaseStoreUrl: `${PACKAGES_URL}/kits/${KIT_ID}`,
         registryUrl: fixture.registryUrl,
+        now: now(),
         releases: [{
             version: KIT.version,
             sequence: 1,
@@ -232,7 +242,6 @@ function publish(lockfile: string): void
 
 function adaptersFor(projectDir: string, database: DatabasePort): KitAdapters
 {
-    const now = (): string => new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
     const local = createKitLocalPorts({
         packageManager: {
             registryUrl: fixture.registryUrl,
