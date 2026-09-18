@@ -8,15 +8,17 @@
 
 import { defineJobRouter } from '@spfn/core/job';
 import { createAuthDeletionPurgeJob } from './deletion-purge';
+import { createOAuth2ClientPurgeJob } from './oauth2-client-purge';
 import { linkMailJob } from './link-mail';
 
 export { createAuthDeletionPurgeJob } from './deletion-purge';
+export { createOAuth2ClientPurgeJob, DEFAULT_OAUTH2_CLIENT_PURGE_CRON } from './oauth2-client-purge';
 export { linkMailJob, linkMailPayloadSchema } from './link-mail';
 export type { LinkMailPayload } from './link-mail';
 
 /**
- * Build the auth job router: the account-deletion purge sweep and the link-mail
- * sender.
+ * Build the auth job router: the account-deletion purge sweep, the OAuth 2.1
+ * stale-client sweep, and the link-mail sender.
  *
  * The cron is a parameter because `job(...).cron(expression)` bakes the string in
  * at module-import time, which always happens before `createAuthLifecycle()` runs
@@ -25,11 +27,13 @@ export type { LinkMailPayload } from './link-mail';
  * after that call, when the schedule is not the default.
  *
  * @param options.purgeCron - Deletion purge schedule; defaults to daily at 04:00
+ * @param options.oauth2ClientPurgeCron - Stale OAuth client sweep; defaults to daily at 05:00
  */
-export function createAuthJobRouter(options?: { purgeCron?: string })
+export function createAuthJobRouter(options?: { purgeCron?: string; oauth2ClientPurgeCron?: string })
 {
     return defineJobRouter({
         deletionPurge: createAuthDeletionPurgeJob(options?.purgeCron),
+        oauth2ClientPurge: createOAuth2ClientPurgeJob(options?.oauth2ClientPurgeCron),
         linkMail: linkMailJob,
     });
 }

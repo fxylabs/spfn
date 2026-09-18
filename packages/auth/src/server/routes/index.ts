@@ -74,6 +74,14 @@ import {
 } from './admin';
 import { requestAccountDeletion, cancelAccountDeletion } from './deletion';
 import { issueOpsToken, listOpsTokens, revokeOpsToken } from './ops-tokens';
+import {
+    registerOAuth2Client,
+    listOAuth2Grants,
+    revokeOAuth2Grant,
+    oauth2AuthorizationServerMetadata,
+} from './oauth2';
+import { getOAuth2Authorize, createOAuth2AuthorizationCode } from './oauth2/authorize';
+import { oauth2Token, oauth2Revoke } from './oauth2/token';
 
 /**
  * Main auth router
@@ -86,6 +94,7 @@ import { issueOpsToken, listOpsTokens, revokeOpsToken } from './ops-tokens';
  * - Users: /_auth/users/*
  * - Deletion: /_auth/deletion/request, /_auth/deletion/cancel
  * - Admin: /_auth/admin/* (superadmin only)
+ * - OAuth 2.1 authorization server: /_auth/oauth2/*, /.well-known/oauth-authorization-server
  */
 export const mainAuthRouter = defineRouter({
     // Auth routes
@@ -164,6 +173,16 @@ export const mainAuthRouter = defineRouter({
     issueOpsToken,
     listOpsTokens,
     revokeOpsToken,
+    // OAuth 2.1 authorization server routes (MCP clients).
+    // Answer 404 unless the app passed `authorizationServer` to createAuthLifecycle().
+    registerOAuth2Client,
+    getOAuth2Authorize,
+    createOAuth2AuthorizationCode,
+    oauth2Token,
+    oauth2Revoke,
+    listOAuth2Grants,
+    revokeOAuth2Grant,
+    oauth2AuthorizationServerMetadata,
 });
 
 // For backward compatibility

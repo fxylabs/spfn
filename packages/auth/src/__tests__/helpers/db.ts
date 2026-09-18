@@ -134,6 +134,10 @@ export async function clearTables(db: ReturnType<typeof drizzle>)
     await db.execute(sql`TRUNCATE TABLE spfn_auth.device_authorizations CASCADE`);
     await db.execute(sql`TRUNCATE TABLE spfn_auth.auth_metadata CASCADE`);
     await db.execute(sql`TRUNCATE TABLE spfn_auth.ops_tokens CASCADE`);
+    await db.execute(sql`TRUNCATE TABLE spfn_auth.oauth2_tokens CASCADE`);
+    await db.execute(sql`TRUNCATE TABLE spfn_auth.oauth2_authorization_codes CASCADE`);
+    await db.execute(sql`TRUNCATE TABLE spfn_auth.oauth2_grants CASCADE`);
+    await db.execute(sql`TRUNCATE TABLE spfn_auth.oauth2_clients CASCADE`);
 }
 
 /**

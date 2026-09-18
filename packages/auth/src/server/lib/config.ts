@@ -399,11 +399,32 @@ export function getCsrfMode(): CsrfMode
 }
 
 /**
+ * Backend paths this package exempts on its own behalf.
+ *
+ * All three are endpoints an OAuth client on somebody's laptop calls directly:
+ * no cookie, no session, no `x-spfn-csrf` header, and no browser anywhere in
+ * the request. The proxy's check already declines to run on them — it fires only
+ * after a session cookie has been unsealed, and there is none — so this list
+ * changes no outcome today. It is here so that an application which routes them
+ * through the proxy while a user happens to be signed in gets a token endpoint
+ * that works rather than a 403 nothing in the logs explains.
+ *
+ * `/_auth/oauth2/authorize` is deliberately absent. That one IS a
+ * cookie-session mutation, posted by the consent form on the web app, and it is
+ * exactly what the check exists to protect.
+ */
+const PACKAGE_CSRF_EXEMPT_PATHS = [
+    '/_auth/oauth2/register',
+    '/_auth/oauth2/token',
+    '/_auth/oauth2/revoke',
+];
+
+/**
  * Get the paths exempted from the CSRF check (exact match, backend route paths)
  */
 export function getCsrfExemptPaths(): string[]
 {
-    return globalConfig.csrf?.exemptPaths ?? [];
+    return [...PACKAGE_CSRF_EXEMPT_PATHS, ...(globalConfig.csrf?.exemptPaths ?? [])];
 }
 
 // ============================================================================

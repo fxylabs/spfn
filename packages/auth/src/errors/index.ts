@@ -47,6 +47,10 @@ import {
     RecentAuthenticationRequiredError,
     LastRecoveryCredentialError,
     PasskeyConfigError,
+    OAuth2UnknownClientError,
+    OAuth2RedirectUriMismatchError,
+    OAuth2AuthorizeRedirectError,
+    OAuth2GrantNotFoundError,
 } from './auth-errors';
 
 export {
@@ -92,6 +96,10 @@ export {
     RecentAuthenticationRequiredError,
     LastRecoveryCredentialError,
     PasskeyConfigError,
+    OAuth2UnknownClientError,
+    OAuth2RedirectUriMismatchError,
+    OAuth2AuthorizeRedirectError,
+    OAuth2GrantNotFoundError,
 } from './auth-errors';
 
 export const authErrorRegistry = new ErrorRegistry();
@@ -138,6 +146,10 @@ authErrorRegistry.append([
     RecentAuthenticationRequiredError,
     LastRecoveryCredentialError,
     PasskeyConfigError,
+    OAuth2UnknownClientError,
+    OAuth2RedirectUriMismatchError,
+    OAuth2AuthorizeRedirectError,
+    OAuth2GrantNotFoundError,
 ]);
 
 export * as AuthError from './auth-errors';

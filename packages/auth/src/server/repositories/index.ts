@@ -23,3 +23,7 @@ export * from './social-accounts.repository';
 export * from './auth-metadata.repository';
 export * from './account-deletion-requests.repository';
 export * from './ops-tokens.repository';
+export * from './oauth2-clients.repository';
+export * from './oauth2-grants.repository';
+export * from './oauth2-authorization-codes.repository';
+export * from './oauth2-tokens.repository';

@@ -27,6 +27,13 @@ export * from './permissions';
 export * from './role-permissions';
 export * from './user-permissions';
 
+// OAuth 2.1 authorization server entities (the server we run, not the social
+// login clients we are on the other side of — see oauth2-clients.ts)
+export * from './oauth2-clients';
+export * from './oauth2-grants';
+export * from './oauth2-authorization-codes';
+export * from './oauth2-tokens';
+
 // System entities
 export * from './auth-metadata';
 export * from './ops-tokens';

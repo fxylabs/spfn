@@ -15,6 +15,11 @@ import { initOneTimeTokenManager } from './lib/one-time-token';
 import { configureDeletion } from './lib/deletion-config';
 import { configureDeviceAuth } from './lib/device-auth-config';
 import { assertOAuthRedirectUris } from './lib/oauth/redirect-uri-check';
+import {
+    assertAuthorizationServerIssuer,
+    configureAuthorizationServer,
+    type AuthorizationServerOptions,
+} from './lib/oauth2/config';
 
 /**
  * Auth lifecycle configuration
@@ -238,6 +243,34 @@ export interface AuthLifecycleOptions extends AuthInitOptions
          */
         intervalMs?: number;
     };
+
+    /**
+     * OAuth 2.1 authorization server for MCP clients
+     *
+     * Opt-in, and the opt-in is this block. Without it `/_auth/oauth2/*` and
+     * `/.well-known/oauth-authorization-server` answer 404, the boot check does
+     * not run, and the application boots exactly as it did before this feature
+     * existed. With it, Claude Code and Codex can register themselves, send the
+     * account owner to a consent screen, and hold a token against `/mcp`.
+     *
+     * `scopes` is the one thing with no default: the names are the
+     * application's own vocabulary, they are published in the metadata document
+     * and shown on the consent screen, and there is nothing to derive them from.
+     *
+     * @example
+     * ```typescript
+     * createAuthLifecycle({
+     *     authorizationServer: {
+     *         scopes: {
+     *             'mcp:read': 'Read your projects and tasks',
+     *             'mcp:write': 'Create and edit your tasks',
+     *         },
+     *         defaultScopes: ['mcp:read'],
+     *     },
+     * })
+     * ```
+     */
+    authorizationServer?: AuthorizationServerOptions;
 }
 
 export function createAuthLifecycle(options: AuthLifecycleOptions = {}): AuthLifecycleConfig
@@ -254,12 +287,20 @@ export function createAuthLifecycle(options: AuthLifecycleOptions = {}): AuthLif
     // and rules out a first request that is served under the defaults.
     configureDeviceAuth(options.deviceAuth);
 
+    // Same again, and it is also what decides whether the authorization server
+    // exists at all: every route under /_auth/oauth2/* reads this and answers
+    // 404 on null. Registration of those routes happens at module-import time,
+    // before this call, so "registered only when configured" is not available —
+    // see routes/oauth2/http.ts.
+    configureAuthorizationServer(options.authorizationServer);
+
     return {
         /**
          * Initialize auth system after database is ready
          *
          * Performs:
-         * 0. Refuses boot on an OAuth redirect URI override off the web app origin
+         * 0. Refuses boot on an OAuth redirect URI override off the web app origin,
+         *    or on an authorization server issuer no client could use
          * 1. Ensures admin account exists (creates if missing)
          * 2. Initializes RBAC system with built-in + custom roles/permissions
          * 3. Initializes one-time token manager
@@ -274,6 +315,14 @@ export function createAuthLifecycle(options: AuthLifecycleOptions = {}): AuthLif
             // A throw here propagates out of initializeInfrastructure(), before
             // startHttpServer(), so the process exits without ever listening.
             assertOAuthRedirectUris();
+
+            // Here and not beside configureAuthorizationServer above, for the
+            // reason written one line up: a throw from the constructor is
+            // swallowed by loadAndMergeConfig() and leaves the server listening
+            // without routes, while a throw here propagates out of
+            // initializeInfrastructure() and the process exits without ever
+            // listening. Silent when no authorization server is configured.
+            assertAuthorizationServerIssuer();
 
             await initializeAuth(options);
             // Before any account is looked up: the repository folds addresses to

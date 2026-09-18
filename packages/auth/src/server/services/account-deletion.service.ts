@@ -38,6 +38,7 @@ import type { AccountDeletionRequest } from '../entities/account-deletion-reques
 import type { AccountDeletionRequestedBy, PurgeStrategy } from '../types';
 import { verifyPassword, getDummyPasswordHash } from '../helpers';
 import { validateVerificationToken } from './verification.service';
+import { revokeAllOAuth2GrantsForUser } from './oauth2-grant.service';
 import { getDeletionConfig } from '../lib/deletion-config';
 import { authLogger } from '../logger';
 import {
@@ -311,6 +312,12 @@ export async function requestAccountDeletionService(
     // cancelling the deletion later would restore an account with a signing key
     // nothing in the deletion path ever saw.
     await deviceAuthorizationsRepository.denyAllActiveByUserId(user.id);
+
+    // A grant the user gave a CLI carries a refresh token, so a client holding
+    // one signs itself back in within the hour — which is exactly the client a
+    // global revocation is aimed at. Revoked alongside the device codes, and for
+    // the reason they are.
+    await revokeAllOAuth2GrantsForUser(user.id);
 
     // Deferred to after commit: event subscribers and the outbound email must not
     // observe (or be triggered by) a request that ultimately rolls back, and an

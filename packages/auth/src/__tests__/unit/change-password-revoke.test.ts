@@ -13,6 +13,7 @@ const {
     deviceAuthorizationsRepository,
     verifyPassword,
     hashPassword,
+    revokeAllOAuth2GrantsForUser,
 } = vi.hoisted(() => ({
     usersRepository: {
         findById: vi.fn(),
@@ -26,6 +27,7 @@ const {
     },
     verifyPassword: vi.fn(async () => true),
     hashPassword: vi.fn(async () => 'new-hash'),
+    revokeAllOAuth2GrantsForUser: vi.fn(async () => undefined),
 }));
 
 vi.mock('../../server/repositories', () => ({
@@ -34,6 +36,7 @@ vi.mock('../../server/repositories', () => ({
     deviceAuthorizationsRepository,
 }));
 vi.mock('../../server/helpers', () => ({ hashPassword, verifyPassword }));
+vi.mock('../../server/services/oauth2-grant.service', () => ({ revokeAllOAuth2GrantsForUser }));
 
 import { changePasswordService } from '../../server/services/auth.service';
 
@@ -68,5 +71,8 @@ describe('changePasswordService — session revocation', () =>
         });
 
         expect(deviceAuthorizationsRepository.denyAllActiveByUserId).toHaveBeenCalledWith(7);
+
+        // And the OAuth grants, for the same reason one step further out.
+        expect(revokeAllOAuth2GrantsForUser).toHaveBeenCalledWith(7);
     });
 });
