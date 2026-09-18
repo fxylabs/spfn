@@ -8,7 +8,12 @@
  */
 
 import { Storage, type Bucket } from '@google-cloud/storage';
-import { DEFAULT_EXPIRES_IN, MAX_FILE_SIZE, StorageObjectNotFoundError } from '../shared/index';
+import {
+    DEFAULT_EXPIRES_IN,
+    MAX_FILE_SIZE,
+    StorageObjectNotFoundError,
+    StorageVersionNotFoundError,
+} from '../shared/index';
 import { deleteManyIndividually } from './delete-many';
 import { isPublicKey } from './keys';
 import { assertKeyPrefix, assertObjectKey, resolveMaxKeys } from './object-key';
@@ -24,13 +29,16 @@ import type {
     PresignedUrlParams,
     PublicUploadParams,
     PresignedUrlResult,
+    StorageCopyOptions,
     StorageListOptions,
     StorageListResult,
     StorageObject,
+    StorageObjectStat,
 } from '../shared/index';
 
 export class GcsStorageProvider implements IStorageProvider
 {
+    readonly providerKind = 'gcs' as const;
     private storage: Storage;
     private publicBucket: Bucket;
     private privateBucket: Bucket;
@@ -127,15 +135,40 @@ export class GcsStorageProvider implements IStorageProvider
         );
     }
 
-    /** 서버사이드 rewrite. `public/` 규칙상 원본과 대상이 다른 버킷일 수 있어 대상 File을 넘긴다. */
-    async copy(from: string, to: string): Promise<void>
+    /**
+     * 서버사이드 rewrite. `public/` 규칙상 원본과 대상이 다른 버킷일 수 있어 대상 File을 넘긴다.
+     * `sourceVersionId`는 generation으로 스코프한다 — 그 generation이 없으면 404다.
+     */
+    async copy(from: string, to: string, options: StorageCopyOptions = {}): Promise<void>
     {
         assertObjectKey(from);
         assertObjectKey(to);
-        await this.resolveBucket(from).file(from).copy(this.resolveBucket(to).file(to)).catch((error: unknown) =>
+        const versionId = options.sourceVersionId;
+        const bucket = this.resolveBucket(from);
+        const source = versionId === undefined ? bucket.file(from) : bucket.file(from, { generation: versionId });
+        await source.copy(this.resolveBucket(to).file(to)).catch((error: unknown) =>
         {
-            throw isGcsNotFound(error) ? new StorageObjectNotFoundError(from) : error;
+            if (!isGcsNotFound(error))
+            {
+                throw error;
+            }
+
+            throw versionId === undefined
+                ? new StorageObjectNotFoundError(from)
+                : new StorageVersionNotFoundError(from, versionId);
         });
+    }
+
+    /** `getMetadata`는 generation·etag·md5Hash를 함께 준다 — 추가 호출이 없다. */
+    async stat(key: string): Promise<StorageObjectStat>
+    {
+        assertObjectKey(key);
+        const [metadata] = await this.resolveBucket(key).file(key).getMetadata().catch((error: unknown) =>
+        {
+            throw isGcsNotFound(error) ? new StorageObjectNotFoundError(key) : error;
+        });
+
+        return toStorageObject(key, metadata);
     }
 
     async list(prefix: string, options: StorageListOptions = {}): Promise<StorageListResult>
@@ -210,15 +243,38 @@ export class GcsStorageProvider implements IStorageProvider
 
 const TEMP_KEY_PREFIX = 'tmp/';
 
-function toStorageObject(key: string, metadata: { size?: string | number; updated?: string }): StorageObject
+interface GcsObjectMetadata
+{
+    size?: string | number;
+    updated?: string;
+    etag?: string;
+    generation?: string | number;
+    md5Hash?: string;
+}
+
+/**
+ * generation은 typings상 `string | number`라 언제나 `String()`으로 맞춘다 — list 경로와 stat
+ * 경로가 다른 타입을 쓰면 `already-current` 비교가 조용히 빗나간다.
+ */
+function toStorageObject(key: string, metadata: GcsObjectMetadata): StorageObject
 {
     const updated = metadata.updated;
+    const contentHash = hexMd5(metadata.md5Hash);
 
     return {
         key,
         size: Number(metadata.size ?? 0),
         ...(updated ? { lastModified: new Date(updated) } : {}),
+        ...(metadata.etag ? { etag: metadata.etag } : {}),
+        ...(metadata.generation === undefined ? {} : { versionId: String(metadata.generation) }),
+        ...(contentHash ? { contentHash } : {}),
     };
+}
+
+/** composite 객체와 XML multipart 업로드에는 md5Hash가 없다 — crc32c는 기록하지 않는다. */
+function hexMd5(md5Hash?: string): string | undefined
+{
+    return md5Hash ? Buffer.from(md5Hash, 'base64').toString('hex') : undefined;
 }
 
 function isGcsNotFound(error: unknown): boolean

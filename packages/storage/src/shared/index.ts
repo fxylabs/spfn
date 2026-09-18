@@ -241,6 +241,8 @@ export interface StorageServiceOptions
 
 export interface IStorageProvider
 {
+    /** 구현체의 정체. provider 위에서 도는 코드(snapshot/restore)가 provider를 import하지 않고 분기한다. */
+    readonly providerKind: 'gcs' | 's3' | 'local';
     /**
      * presigned PUT URL. temp=true면 임시 업로드로 표시 — S3는 `lifecycle=temp` 태그,
      * GCS는 `tmp/<key>` prefix에 서명. 고아는 버킷 lifecycle 규칙이 정리(README 참고).
@@ -266,8 +268,15 @@ export interface IStorageProvider
     /**
      * 서버사이드 복사 — 바이트가 애플리케이션을 거치지 않는다. 원본이 없으면
      * StorageObjectNotFoundError, 대상이 이미 있으면 덮어쓴다. 원본은 남는다.
+     * `sourceVersionId`를 주면 그 버전을 원본으로 삼고, 그 버전이 없으면(객체 자체가
+     * 없는 경우 포함) StorageVersionNotFoundError로 거부한다.
      */
-    copy(from: string, to: string): Promise<void>;
+    copy(from: string, to: string, options?: StorageCopyOptions): Promise<void>;
+    /**
+     * 객체 한 건의 메타데이터. 객체가 없으면 StorageObjectNotFoundError.
+     * `versionId`는 버전 관리가 켜진 버킷에서만, `contentHash`는 provider가 아는 경우에만 실린다.
+     */
+    stat(key: string): Promise<StorageObjectStat>;
     /**
      * `<prefix>/` 아래 객체를 한 페이지씩 나열한다. 경로 경계로만 매칭하므로
      * `list('gen/req-1')`은 `gen/req-10/...`을 절대 포함하지 않는다.

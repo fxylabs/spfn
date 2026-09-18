@@ -10,12 +10,18 @@ import {
     DeleteObjectsCommand,
     DeleteObjectTaggingCommand,
     GetObjectCommand,
+    HeadObjectCommand,
     ListObjectsV2Command,
     PutObjectCommand,
     S3Client,
 } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
-import { DEFAULT_EXPIRES_IN, MAX_FILE_SIZE, StorageObjectNotFoundError } from '../shared/index';
+import {
+    DEFAULT_EXPIRES_IN,
+    MAX_FILE_SIZE,
+    StorageObjectNotFoundError,
+    StorageVersionNotFoundError,
+} from '../shared/index';
 import { errorMessage } from './delete-many';
 import { assertKeyPrefix, assertObjectKey, resolveMaxKeys } from './object-key';
 import { deleteEveryListedObject } from './prefix-delete';
@@ -30,14 +36,17 @@ import type {
     PublicUploadParams,
     PresignedUrlResult,
     S3ProviderConfig,
+    StorageCopyOptions,
     StorageListOptions,
     StorageListResult,
+    StorageObjectStat,
 } from '../shared/index';
 
 const MAX_DELETE_OBJECTS = 1000;
 
 export class S3StorageProvider implements IStorageProvider
 {
+    readonly providerKind = 's3' as const;
     private client: S3Client;
     private bucket: string;
     private publicBaseUrl: string;
@@ -134,20 +143,45 @@ export class S3StorageProvider implements IStorageProvider
         return await this.getObjectBody(key) as unknown as Readable;
     }
 
-    async copy(from: string, to: string): Promise<void>
+    async copy(from: string, to: string, options: StorageCopyOptions = {}): Promise<void>
     {
         assertObjectKey(from);
         assertObjectKey(to);
+        const versionId = options.sourceVersionId;
         await this.client
             .send(new CopyObjectCommand({
                 Bucket: this.bucket,
-                CopySource: encodeCopySource(this.bucket, from),
+                CopySource: copySourceFor(this.bucket, from, versionId),
                 Key: to,
             }))
             .catch((error: unknown) =>
             {
-                throw isS3NotFound(error) ? new StorageObjectNotFoundError(from) : error;
+                throw copyFailure(error, from, versionId);
             });
+    }
+
+    /** `HeadObject`는 버전 관리가 켜진 버킷에서만 `VersionId`를 싣는다 — 그 외에는 미정의로 남는다. */
+    async stat(key: string): Promise<StorageObjectStat>
+    {
+        assertObjectKey(key);
+        const head = await this.client
+            .send(new HeadObjectCommand({ Bucket: this.bucket, Key: key }))
+            .catch((error: unknown) =>
+            {
+                throw isS3NotFound(error) ? new StorageObjectNotFoundError(key) : error;
+            });
+        const etag = normalizeEtag(head.ETag);
+        const contentHash = contentHashFromEtag(etag);
+        const versionId = liveVersionId(head.VersionId);
+
+        return {
+            key,
+            size: head.ContentLength ?? 0,
+            ...(head.LastModified ? { lastModified: head.LastModified } : {}),
+            ...(etag ? { etag } : {}),
+            ...(contentHash ? { contentHash } : {}),
+            ...(versionId ? { versionId } : {}),
+        };
     }
 
     async list(prefix: string, options: StorageListOptions = {}): Promise<StorageListResult>
@@ -163,11 +197,17 @@ export class S3StorageProvider implements IStorageProvider
         return {
             objects: (page.Contents ?? [])
                 .filter(item => typeof item.Key === 'string')
-                .map(item => ({
-                    key: item.Key as string,
-                    size: item.Size ?? 0,
-                    ...(item.LastModified ? { lastModified: item.LastModified } : {}),
-                })),
+                .map(item =>
+                {
+                    const etag = normalizeEtag(item.ETag);
+
+                    return {
+                        key: item.Key as string,
+                        size: item.Size ?? 0,
+                        ...(item.LastModified ? { lastModified: item.LastModified } : {}),
+                        ...(etag ? { etag } : {}),
+                    };
+                }),
             ...(page.IsTruncated && page.NextContinuationToken ? { cursor: page.NextContinuationToken } : {}),
         };
     }
@@ -292,6 +332,56 @@ function formatS3Error(code?: string, message?: string): string
 function encodeCopySource(bucket: string, key: string): string
 {
     return `${bucket}/${key}`.split('/').map(encodeURIComponent).join('/');
+}
+
+/**
+ * `?versionId=`는 세그먼트 인코딩 **뒤에** 붙인다 — 먼저 붙이면 구분자 `?`까지 `%3F`가 되어
+ * 버전이 아니라 키의 일부로 읽힌다(키에 든 `?`는 이미 `%3F`라 구분이 모호하지 않다).
+ */
+function copySourceFor(bucket: string, key: string, versionId?: string): string
+{
+    const source = encodeCopySource(bucket, key);
+
+    return versionId === undefined ? source : `${source}?versionId=${encodeURIComponent(versionId)}`;
+}
+
+/** 버전을 지정한 복사의 실패는 버전 부재로 접는다 — 버전 관리가 꺼진 버킷의 400도 같은 뜻이다. */
+function copyFailure(error: unknown, from: string, versionId?: string): unknown
+{
+    if (versionId === undefined)
+    {
+        return isS3NotFound(error) ? new StorageObjectNotFoundError(from) : error;
+    }
+
+    return isMissingVersion(error) ? new StorageVersionNotFoundError(from, versionId) : error;
+}
+
+function isMissingVersion(error: unknown): boolean
+{
+    const name = (error as { name?: string } | null)?.name;
+
+    return isS3NotFound(error) || name === 'NoSuchVersion' || name === 'InvalidArgument';
+}
+
+/** ETag는 따옴표로 감싸여 온다. 값 자체는 provider가 준 그대로 둔다. */
+function normalizeEtag(etag?: string): string | undefined
+{
+    return etag ? etag.replace(/^"|"$/g, '') : undefined;
+}
+
+/** multipart ETag(`…-N`)는 MD5가 아니다 — 콘텐츠 해시로 기록하지 않는다. */
+function contentHashFromEtag(etag?: string): string | undefined
+{
+    return etag !== undefined && /^[\da-f]{32}$/i.test(etag) ? etag.toLowerCase() : undefined;
+}
+
+/**
+ * `"null"` 버전은 버전 관리가 정지된 사이에 쓰였거나 버전 관리 이전부터 있던 객체다.
+ * 덮어쓰기로 사라지므로 복원 대상으로 삼지 않는다.
+ */
+function liveVersionId(versionId?: string): string | undefined
+{
+    return versionId === undefined || versionId === 'null' ? undefined : versionId;
 }
 
 /** SDK 오류는 name과 HTTP 상태 둘 중 하나로만 404를 알릴 때가 있어 양쪽을 본다. */
