@@ -8,6 +8,7 @@ import { type KeyAlgorithmType, type KeyPlatformType } from '../types';
 import { assertKeyMatchesAlgorithm, verifyKeyFingerprint } from '../helpers/jwt';
 import { KEY_TTL_DAYS } from '../lib/key-policy';
 import { InvalidKeyFingerprintError, KeyIdAlreadyRegisteredError } from '@spfn/auth/errors';
+import { ValidationError } from '@spfn/core/errors';
 import { deviceAuthorizationsRepository, keysRepository } from '../repositories';
 import { revokeAllOAuth2GrantsForUser } from './oauth2-grant.service';
 import { emitDeviceRegistered } from './device-registration.service';
@@ -74,8 +75,17 @@ export interface RevokeKeyParams
 export interface RevokeAllKeysParams
 {
     userId: number;
-    /** The key the request itself is signed with — spared unless includeCurrent. */
-    currentKeyId: string;
+    /**
+     * The key the request itself is signed with — spared unless includeCurrent.
+     *
+     * Optional because the two branches have different needs and always did: the
+     * sparing branch has to know what to spare, and the `includeCurrent` branch
+     * never reads it. The signed revoke-all link is the caller with no current
+     * key to name — it arrives with no session at all — and requiring a value it
+     * would have to invent is how a claim about a device that made no request
+     * gets into a result.
+     */
+    currentKeyId?: string;
     /** true signs the caller out too. Default false: "my other devices". */
     includeCurrent?: boolean;
     reason: string;
@@ -371,9 +381,14 @@ export async function revokeAllKeysService(
 {
     const { userId, currentKeyId, includeCurrent = false, reason } = params;
 
-    const revoked = includeCurrent
-        ? await keysRepository.revokeAllActiveByUserId(userId, reason)
-        : await keysRepository.revokeAllActiveByUserIdExcept(userId, currentKeyId, reason);
+    if (!includeCurrent && !currentKeyId)
+    {
+        throw new ValidationError({ message: 'currentKeyId is required unless includeCurrent is set' });
+    }
+
+    const revoked = !includeCurrent && currentKeyId
+        ? await keysRepository.revokeAllActiveByUserIdExcept(userId, currentKeyId, reason)
+        : await keysRepository.revokeAllActiveByUserId(userId, reason);
 
     await deviceAuthorizationsRepository.denyAllActiveByUserId(userId);
 

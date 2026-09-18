@@ -310,6 +310,27 @@ export const authEnvSchema = defineEnvSchema({
     },
 
     // ============================================================================
+    // Signed sign-out-everywhere link
+    // ============================================================================
+    SPFN_AUTH_REVOKE_ALL_LINK_TTL_MINUTES: {
+        ...envNumber({
+            description: 'How long a signed sign-out-everywhere link stays valid. The same default as the other two link flows: long enough to survive a mail delay, short enough that a link left in an inbox stops working — and this one signs every device out.',
+            default: 30,
+            required: false,
+            examples: [15, 30, 60],
+        }),
+    },
+
+    SPFN_AUTH_REVOKE_ALL_CONFIRM_PATH: {
+        ...envString({
+            description: 'App page the sign-out-everywhere link opens, as a path on {NEXT_PUBLIC_SPFN_APP_URL || SPFN_APP_URL}. The page reads the token from the query string and posts it to /_auth/keys/revoke-all/confirm to describe the link, then to /_auth/keys/revoke-all/consume when the owner confirms; it is a page in your app, not an API route.',
+            default: '/account/revoke-all',
+            required: false,
+            examples: ['/account/revoke-all', '/security/sign-out-everywhere'],
+        }),
+    },
+
+    // ============================================================================
     // Link mail delivery
     // ============================================================================
     SPFN_AUTH_LINK_MAIL_DELIVERY: {

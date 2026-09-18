@@ -32,6 +32,7 @@ import {
     confirmPasswordReset,
     completePasswordReset,
 } from './auth/password-reset';
+import { confirmRevokeAllLink, consumeRevokeAllLink } from './auth/revoke-all-link';
 import {
     passkeyRegisterOptions,
     passkeyRegisterVerify,
@@ -129,6 +130,9 @@ export const mainAuthRouter = defineRouter({
     listKeys,
     revokeKey,
     revokeAllKeys,
+    // Signed sign-out-everywhere link routes
+    confirmRevokeAllLink,
+    consumeRevokeAllLink,
     changePassword,
     getAuthSession,
     // One-Time Token routes

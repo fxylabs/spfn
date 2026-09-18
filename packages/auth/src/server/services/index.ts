@@ -65,6 +65,20 @@ export type {
     CompletePasswordResetParams,
 } from './password-reset.service';
 
+// Signed sign-out-everywhere link
+export {
+    createRevokeAllLink,
+    describeRevokeAllLink,
+    consumeRevokeAllLink,
+    purgeRevokeAllTokensService,
+} from './revoke-all-link.service';
+
+export type {
+    CreateRevokeAllLinkOptions,
+    RevokeAllLink,
+    RevokeAllLinkDescription,
+} from './revoke-all-link.service';
+
 // Device-code Login Service
 export {
     startDeviceAuthService,

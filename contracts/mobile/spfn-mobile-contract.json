@@ -63,7 +63,7 @@
     "denyResponseRule": "deny answers 204 with an empty body and therefore declares no responseType, the way core.time declares no requestType"
   },
   "restOperations": {
-    "appliesTo": "every operation whose path starts with /_auth",
+    "appliesTo": "every operation whose path starts with /_auth. The server also answers two /_auth routes that are not operations of this contract and are not reachable from a generated client — the sign-out-everywhere link confirm and consume, which a browser posts to from a page in the app with no session and no proof",
     "requestBody": "plain JSON of the request type, validated server-side; canonical-JSON encoding is required only when the call is proven (the proof binds the canonical bytes)",
     "responseBody": "the response type as plain JSON, with no envelope around it. An operation that declares no responseType answers 204 with an empty body and there is nothing to decode",
     "errorEnvelope": "the same {\"error\":{\"code\",\"message\",\"requestId\"}} envelope every operation uses, carried alongside the SPFN web fields (__type and the error class's own public fields) in one body: the web client restores an error class from __type while a generated client reads error.code and ignores the rest. The codes are the server error class names listed under errors with surface \"rest\", not the six clientProofV1 refusal codes — those reach only proven calls",

@@ -1069,7 +1069,11 @@ export function buildMobileContractBundle(): MobileContractBundle
                 + 'declares no requestType',
         },
         restOperations: {
-            appliesTo: 'every operation whose path starts with /_auth',
+            appliesTo:
+                'every operation whose path starts with /_auth. The server also answers two /_auth routes that '
+                + 'are not operations of this contract and are not reachable from a generated client — the '
+                + 'sign-out-everywhere link confirm and consume, which a browser posts to from a page in the app '
+                + 'with no session and no proof',
             requestBody:
                 'plain JSON of the request type, validated server-side; canonical-JSON encoding is required only '
                 + 'when the call is proven (the proof binds the canonical bytes)',
