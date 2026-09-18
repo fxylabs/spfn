@@ -357,6 +357,27 @@ describe.skipIf(!dbAvailable)('session binding (case tables 6a, 6b, 6g)', () =>
             expect(Math.abs(key.expiresAt!.getTime() - (Date.now() + KEY_TTL_DAYS * DAY_MS))).toBeLessThan(60_000);
         });
 
+        it('two devices, binding turned off on one: the other device\'s key is unbound and 90-day, and it keeps working past its old bound expiry', async () =>
+        {
+            // The disable rewrites every active key, not just the caller's. The
+            // second device's cookie still says `binding: 'passkey'` with the old
+            // expiry, and that is now a stale hint the proxy decides nothing by —
+            // the row it is really running on is an ordinary 90-day one.
+            const { session: first } = await boundSession();
+            const second = await signIn();
+
+            expect((await keyRow(second.keyId)).binding).toBe('passkey');
+
+            expect((await post('/_auth/session/binding', { mode: 'none', currentPassword: PASSWORD }, first)).status).toBe(200);
+
+            const key = await keyRow(second.keyId);
+            expect(key.binding).toBe('none');
+            expect(Math.abs(key.expiresAt!.getTime() - (Date.now() + KEY_TTL_DAYS * DAY_MS))).toBeLessThan(60_000);
+
+            // Past the moment the old cookie believes the key ran out.
+            expect((await post('/_auth/keys/list', {}, second)).status).toBe(200);
+        });
+
         it('on, { mode: none, response } with an assertion: 200, the same result', async () =>
         {
             const { session, authenticator } = await boundSession();

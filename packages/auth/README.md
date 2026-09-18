@@ -1173,10 +1173,20 @@ posture: `assertRecentAuthentication` is satisfied by the age of the device key 
 with, and a cookie copied in the ten minutes after a sign-in carries exactly that — so leaving
 `'passkey'` mode asks for a passkey assertion or the account password, never key age alone.
 
-**The renewal page.** Once the key has run out, the proxy answers every request 401
-`SessionRenewalRequiredError` without calling the backend, and keeps the cookies: the session is
+**The renewal page.** Once the key has run out, the backend refuses with `KeyExpiredError`, the
+proxy turns that into 401 `SessionRenewalRequiredError` and keeps the cookies: the session is
 waiting on one prompt, not finished. A client component calls `renewSession(api)`, which runs the
 ceremony and gets a new bound key sealed into the cookie.
+
+The proxy never refuses on the cookie's own copy of the expiry. `keyExpiresAt` inside the cookie is
+a hint written at the last seal; the key row is the fact, and only a request that reached the
+backend can read it. That matters on the second device: turning binding **off** rewrites every
+active key to an ordinary 90-day one, but only the browser that asked gets a re-sealed cookie, so
+another device keeps a cookie that says `passkey` with an expiry that no longer applies. Because
+nothing is decided from that hint, its next request is forwarded, the backend sees an ordinary key
+and answers 200 — no renewal prompt for a session that does not need one. What that device does
+keep until it signs in again is its sealed `uaFamily`, so the user-agent family check below goes on
+applying to it.
 
 > **Renewal is bound to the expiring key's own signature.** `session/renew/options` and
 > `session/renew/verify` are not public: they take the ordinary bearer JWT the proxy signs with the

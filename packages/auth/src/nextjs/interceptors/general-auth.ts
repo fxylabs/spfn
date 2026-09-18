@@ -37,23 +37,6 @@ function requiresAuth(path: string): boolean
 }
 
 /**
- * Whether a path is signed as usual but tolerates a key that has already expired.
- *
- * The two renewal paths, and only them. They are not public — the backend reads
- * the key being renewed off the JWT this layer signs, so a request that arrived
- * without one is refused there — but they are the one place where a bound
- * session whose key has run out must still be forwarded rather than answered
- * here, because that request is what repairs it.
- *
- * `binding/disable/options` is deliberately not one of them: that is asked for by
- * a session that still works.
- */
-function toleratesExpiredKey(path: string): boolean
-{
-    return SESSION_RENEW_PATH_PATTERN.test(path);
-}
-
-/**
  * Whether a bound session arrived from a different browser than it was sealed in.
  *
  * Three terms, and each one is a rule.
@@ -83,10 +66,11 @@ function contextChanged(session: SessionData, userAgent: string | null): boolean
 /**
  * Refuse a bound session presented from another browser, and empty the jar.
  *
- * The opposite of the renewal refusal below it: this session is not waiting for a
- * prompt, it is one whose cookie is somewhere it was never sealed. The three
- * cookies go with the refusal, which is the only moment a refused request can
- * touch them.
+ * The opposite of the renewal refusal the response phase mints: this session is
+ * not waiting for a prompt, it is one whose cookie is somewhere it was never
+ * sealed. The three cookies go with the refusal, which is the only moment a
+ * refused request can touch them — and it is the one check this layer makes
+ * alone, because the backend never sees the browser's `user-agent`.
  */
 function refuseAsContextChanged(ctx: RequestInterceptorContext): void
 {
@@ -103,37 +87,6 @@ function refuseAsContextChanged(ctx: RequestInterceptorContext): void
     ];
 
     ctx.abort = refusalEnvelope(new SessionContextChangedError(), cleared);
-}
-
-/**
- * Whether a bound session's key has already run out.
- *
- * Unbound sessions answer false at the first term and nothing further happens to
- * them — no branch below this line runs for a session that carries no `binding`,
- * which is what keeps every account that did not opt in on exactly today's path.
- */
-function boundKeyExpired(session: SessionData): boolean
-{
-    return session.binding === 'passkey'
-        && typeof session.keyExpiresAt === 'number'
-        && Date.now() > session.keyExpiresAt;
-}
-
-/**
- * Refuse a bound session whose key has run out, without calling the backend.
- *
- * The cookies are kept. That is the difference between this refusal and every
- * other 401 the proxy passes on: the session is not finished, it is waiting for
- * one WebAuthn ceremony, and clearing the jar would take away the key id the
- * renewal is addressed by and turn a biometric prompt into a sign-in.
- */
-function refuseAsNeedingRenewal(ctx: RequestInterceptorContext): void
-{
-    authLogger.interceptor.general.debug('Bound session key expired — answering renewal-required', {
-        path: ctx.path,
-    });
-
-    ctx.abort = refusalEnvelope(new SessionRenewalRequiredError());
 }
 
 /**
@@ -235,17 +188,6 @@ export const generalAuthInterceptor: InterceptorRule =
                     return;
                 }
 
-                // A bound session whose key has run out is answered here rather
-                // than forwarded: the backend would refuse it, and the response
-                // branch below would read that refusal as "signed out" and empty
-                // the cookie jar.
-                if (boundKeyExpired(session) && !toleratesExpiredKey(ctx.path))
-                {
-                    refuseAsNeedingRenewal(ctx);
-
-                    return;
-                }
-
                 // Check if session should be refreshed (within 24h of expiry)
                 const needsRefresh = await shouldRefreshSession(sessionCookie, 24);
 
@@ -312,10 +254,12 @@ export const generalAuthInterceptor: InterceptorRule =
 
         response: async (ctx, next) =>
         {
-        // A bound session the backend refused as expired — a clock skew between
-        // the cookie's copy of the expiry and the key row's. Same answer as the
-        // request-side branch, and for the same reason: the session is renewable,
-        // so the cookies stay.
+        // A bound session the backend refused as expired. This is the only place
+        // the renewal prompt is minted, and deliberately so: the cookie's copy of
+        // the expiry is a hint, the key row is the fact, and a proxy that refused
+        // on the hint alone would strand a session whose key was made long-lived
+        // again on another device. The cookies stay — the session is renewable,
+        // not finished.
             if (ctx.response.status === 401
                 && ctx.metadata.sessionValid
                 && ctx.metadata.sessionBound

@@ -103,21 +103,24 @@ describe('the proxy and a bound session (case table 6c)', () =>
         vi.restoreAllMocks();
     });
 
-    it('bound, keyExpiresAt is past, an ordinary route: 401 SessionRenewalRequiredError envelope, backend not called, cookies kept', async () =>
+    it('bound, keyExpiresAt is past, an ordinary route: forwarded to the backend all the same, signed, cookies kept', async () =>
     {
-        const { sealed } = await sealedSession({ binding: 'passkey', keyExpiresAt: Date.now() - 1_000 });
+        // The cookie's copy of the expiry decides nothing. It is a hint written at
+        // the last seal, and the key row is the fact — so the request goes to the
+        // backend and the answer comes back from there.
+        const { sealed, keyId } = await sealedSession({ binding: 'passkey', keyExpiresAt: Date.now() - 1_000 });
         const ctx = requestContext('/_auth/users/me', new Map([[COOKIE_NAMES.SESSION, sealed]]), CHROME);
         const forwarded = vi.fn(next);
 
         await generalAuthInterceptor.request?.(ctx, forwarded);
 
-        expect(forwarded).not.toHaveBeenCalled();
-        expect(ctx.abort?.status).toBe(401);
-        expect((ctx.abort?.body as { __type: string }).__type).toBe('SessionRenewalRequiredError');
-        expect(ctx.abort?.setCookies).toEqual([]);
+        expect(forwarded).toHaveBeenCalledOnce();
+        expect(ctx.abort).toBeUndefined();
+        expect(ctx.headers['X-Key-Id']).toBe(keyId);
+        expect(ctx.metadata.sessionBound).toBe(true);
     });
 
-    it('bound, not yet expired, backend answers 401 KeyExpiredError (clock skew): same envelope, cookies kept', async () =>
+    it('bound, the backend answers 401 KeyExpiredError: the SessionRenewalRequiredError envelope, cookies kept', async () =>
     {
         const ctx = responseContext('/_auth/users/me', 401, { __type: 'KeyExpiredError', message: 'Public key has expired' }, {
             metadata: { sessionValid: true, sessionBound: true },
@@ -125,8 +128,34 @@ describe('the proxy and a bound session (case table 6c)', () =>
 
         await generalAuthInterceptor.response?.(ctx, next);
 
-        expect((ctx.response.body as { __type: string }).__type).toBe('SessionRenewalRequiredError');
+        expect(ctx.response.body).toMatchObject({
+            __type: 'SessionRenewalRequiredError',
+            error: { code: 'SessionRenewalRequiredError' },
+        });
         expect(ctx.setCookies.filter(cookie => cookie.value === '')).toEqual([]);
+    });
+
+    it('binding turned off on another device: this device\'s stale bound cookie crosses its old expiry and the backend still answers 200', async () =>
+    {
+        // Disabling rewrites every active key to 90-day and unbound, but only the
+        // device that asked gets a re-sealed cookie. The other one keeps
+        // `binding: 'passkey'` and an expiry that no longer applies — and because
+        // nothing is decided here, its request is forwarded and the backend, which
+        // reads the row, answers it normally. No renewal prompt for a session that
+        // does not need one.
+        const { sealed } = await sealedSession({ binding: 'passkey', keyExpiresAt: Date.now() - 1_000, uaFamily: 'chrome' });
+        const ctx = requestContext('/_auth/users/me', new Map([[COOKIE_NAMES.SESSION, sealed]]), CHROME);
+        const forwarded = vi.fn(next);
+
+        await generalAuthInterceptor.request?.(ctx, forwarded);
+        expect(forwarded).toHaveBeenCalledOnce();
+
+        const answered = responseContext('/_auth/users/me', 200, { ok: true }, { metadata: ctx.metadata });
+        await generalAuthInterceptor.response?.(answered, next);
+
+        expect(answered.response.status).toBe(200);
+        expect(answered.response.body).toEqual({ ok: true });
+        expect(answered.setCookies.filter(cookie => cookie.value === '')).toEqual([]);
     });
 
     it('bound, expired, POST session/renew/options: signed and passed to the backend, cookies kept', async () =>
