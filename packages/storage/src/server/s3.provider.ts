@@ -1,5 +1,5 @@
 /**
- * S3 / S3-호환 프로바이더 (AWS S3 · Cloudflare R2 · MinIO · Wasabi).
+ * S3 / S3-호환 프로바이더 (AWS S3 · Cloudflare R2 · Wasabi · SeaweedFS).
  * R2 등은 `S3_ENDPOINT`만 추가하면 동작(S3 API 호환).
  * temp 업로드는 `lifecycle=temp` 태그 → finalizeObject로 제거. 고아 정리는 버킷 lifecycle 규칙(인프라).
  */

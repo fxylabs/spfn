@@ -1,9 +1,9 @@
 /**
- * S3 호환(MinIO·R2·AWS S3·GCS interoperability) 실버킷 계약 — opt-in.
+ * S3 호환(SeaweedFS·R2·AWS S3·GCS interoperability) 실버킷 계약 — opt-in.
  *
  * 아래 env가 전부 있을 때만 돈다. 실제로 객체를 쓰고 지우므로 검증 전용 버킷을 쓴다.
- * 로컬 MinIO 예:
- *   STORAGE_CONTRACT_S3_ENDPOINT=http://127.0.0.1:9000 \
+ * 로컬 SeaweedFS(`weed server -s3`) 예:
+ *   STORAGE_CONTRACT_S3_ENDPOINT=http://127.0.0.1:8333 \
  *   STORAGE_CONTRACT_S3_BUCKET=spfn-storage-contract \
  *   STORAGE_CONTRACT_S3_ACCESS_KEY_ID=... STORAGE_CONTRACT_S3_SECRET_ACCESS_KEY=... pnpm test
  */

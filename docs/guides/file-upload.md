@@ -236,8 +236,8 @@ export const uploadImage = route.post('/images')
 
 ### `@spfn/storage` (recommended)
 
-SPFN ships provider-agnostic object storage — S3-compatible services (S3, R2, MinIO,
-Wasabi), Google Cloud Storage, and the local filesystem behind one interface. Prefer it
+SPFN ships provider-agnostic object storage — S3-compatible services (S3, R2, Wasabi,
+SeaweedFS), Google Cloud Storage, and the local filesystem behind one interface. Prefer it
 over calling a provider SDK directly: every object operation validates its key before it
 reaches the provider (rejecting `..` segments, leading `/`, backslashes, control
 characters and URLs), so a key built from user input cannot escape its prefix.
@@ -288,7 +288,7 @@ Three constraints decide whether this is safe:
 | Constraint | Behaviour |
 |---|---|
 | `contentLength` (exact size) | Signed on **both** S3-compatible and GCS. A mismatched size fails. |
-| `maxBytes` (upper bound) | Enforced on **GCS only**. A presigned PUT cannot sign a size range, so S3, R2, MinIO and Wasabi **ignore it silently**. |
+| `maxBytes` (upper bound) | Enforced on **GCS only**. A presigned PUT cannot sign a size range, so S3, R2 and Wasabi **ignore it silently**. |
 | Local filesystem provider | Presigned upload is **not supported** — `getUploadUrl()` throws. Use the direct `upload()` path in local dev. |
 
 A client can declare one size and send another, so a server-side check of a
