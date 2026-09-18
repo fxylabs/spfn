@@ -2,9 +2,14 @@
  * @spfn/auth - OAuth 2.1 revocation (design #93 v2, §3 and RFC 7009)
  *
  * The design gives this endpoint one line — "알 수 없는 토큰도 200" — and every
- * answer it gives is that same 200 with an empty body. So no test here asserts a
- * response: what each one asserts is the state left behind, which is the only
- * place the endpoint's behaviour is visible.
+ * answer it gives is that same 200 with an empty body, save one. So the rows
+ * below assert the state left behind rather than the response, which is the only
+ * place the endpoint's behaviour is otherwise visible.
+ *
+ * The exception is a request with no `client_id`: RFC 7009 §2.1 has the client
+ * authenticate as RFC 6749 §2.3 describes, and a public client does that by
+ * sending its id, so a request carrying none is malformed rather than a
+ * revocation that found nothing.
  *
  * Two of those states are the point. A refresh token takes its grant and every
  * token under it; an access token goes alone, because a client discarding one it
@@ -167,11 +172,17 @@ describe.skipIf(!dbAvailable)('OAuth2 revoke (RFC 7009)', () =>
         expect(await verifyAccessToken(accessToken, TEST_RESOURCE)).not.toBeNull();
     });
 
-    it('no client_id at all → 200, and the token is revoked', async () =>
+    it('no client_id at all → 400 invalid_request, and nothing is revoked', async () =>
     {
         const response = await revoke({ token: accessToken });
+        const body = await response.json() as { error?: string };
 
-        expect(response.status).toBe(200);
-        expect(await verifyAccessToken(accessToken, TEST_RESOURCE)).toBeNull();
+        // The one answer here that is not 200. RFC 7009 §2.1 has the client
+        // authenticate as RFC 6749 §2.3 describes, and a public client does that
+        // by sending `client_id` — a request with none has not said who it is.
+        expect(response.status).toBe(400);
+        expect(body.error).toBe('invalid_request');
+        expect(await verifyAccessToken(accessToken, TEST_RESOURCE)).not.toBeNull();
+        expect(await grantIsLive()).toBe(true);
     });
 });

@@ -2070,7 +2070,7 @@ the consent screen, and there is nothing to derive them from.
 | `GET /_auth/oauth2/authorize` | API | `authenticate` | What the consent screen should say. Records nothing |
 | `POST /_auth/oauth2/authorize` | API | `authenticate` | The decision. Mints the code |
 | `POST /_auth/oauth2/token` | API | public, IP rate limited | `authorization_code` and `refresh_token` |
-| `POST /_auth/oauth2/revoke` | API | public (RFC 7009) | 200 for an unknown token as surely as for a real one |
+| `POST /_auth/oauth2/revoke` | API | public (RFC 7009) | `client_id` required; 200 for an unknown token as surely as for a real one |
 | `GET /_auth/oauth2/grants` · `DELETE /_auth/oauth2/grants/:id` | API | `authenticate` | What the user has connected, and the button that disconnects it |
 | `GET /oauth/authorize` · `POST /oauth/authorize` | web | session | The consent screen itself — see the note at the end |
 

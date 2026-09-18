@@ -65,6 +65,12 @@ export const oauth2Token = route.post('/_auth/oauth2/token')
  * somewhere is real. A body without a `token` field is the same 200 — there is
  * nothing to report about a revocation that was never asked for, and so is a
  * `client_id` that is not the token's.
+ *
+ * `client_id` itself is required, and its absence is the one answer here that is
+ * not 200: RFC 7009 §2.1 has the client authenticate as RFC 6749 §2.3 describes,
+ * and a public client with `token_endpoint_auth_method: none` does that by
+ * sending its `client_id` (§2.3.1). A request carrying none has not said who it
+ * is, which is a malformed request and not a revocation that found nothing.
  */
 export const oauth2Revoke = route.post('/_auth/oauth2/revoke')
     .use([rateLimitPolicy('auth-oauth2-revoke', { limit: 60, windowMs: 60_000 })])
@@ -74,6 +80,12 @@ export const oauth2Revoke = route.post('/_auth/oauth2/revoke')
         requireAuthorizationServer();
 
         const body = await readOAuth2Body(c.raw);
+
+        if (!body.client_id)
+        {
+            return oauth2ErrorResponse(c.raw, 400, 'invalid_request',
+                'client_id is required. A public client identifies itself with it (RFC 6749 §2.3.1).');
+        }
 
         await revokeOAuth2TokenService(body.token ?? '', body.client_id);
 

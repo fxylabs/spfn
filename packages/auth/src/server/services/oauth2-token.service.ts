@@ -475,11 +475,15 @@ async function revokeGrantAndTokens(grantId: number, reason: string): Promise<vo
  * does not stop anybody who holds the token from revoking it — what it stops is
  * one client tearing down another's connection by presenting a value it came
  * across, which is the only thing a public client's id can be asked to mean.
+ * Which is also why it is required and not optional: RFC 7009 §2.1 has the
+ * client authenticate per RFC 6749 §2.3, and §2.3.1 says a public client with no
+ * credentials identifies itself with `client_id`. The route refuses a request
+ * that carries none before this is called.
  *
  * @param token - The value to revoke, access or refresh
- * @param clientId - Checked against the token's client when the caller sent one
+ * @param clientId - Checked against the token's client
  */
-export async function revokeOAuth2TokenService(token: string, clientId?: string): Promise<void>
+export async function revokeOAuth2TokenService(token: string, clientId: string): Promise<void>
 {
     if (!token)
     {
@@ -494,7 +498,7 @@ export async function revokeOAuth2TokenService(token: string, clientId?: string)
         return;
     }
 
-    if (clientId && !await issuedToClient(record.grant, clientId))
+    if (!await issuedToClient(record.grant, clientId))
     {
         return;
     }
