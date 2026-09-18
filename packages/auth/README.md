@@ -173,6 +173,10 @@ real secret values out of band, never commit them.
 | `SPFN_AUTH_PASSKEY_CHALLENGE_TTL_SECONDS` / `_RECENT_AUTH_MINUTES` | `.env.server` | — | defaults `300` / `10` — see [Passkeys](#passkeys-webauthn) |
 | `SPFN_AUTH_MFA_ISSUER` | `.env.server` | — | name the authenticator app files the account under; defaults to the passkey relying-party name, then the app URL host — see [Second factor](#second-factor-mfa) |
 | `SPFN_AUTH_MFA_STEP_UP_MINUTES` | `.env.server` | — | default `10`; how recently an enrolled account's device must have proved its second factor for a sensitive change — see [Second factor](#second-factor-mfa) |
+| `SPFN_AUTH_BOUND_KEY_TTL_HOURS` | `.env.server` | — | default `24`; how long a passkey-bound session key lives — see [Session binding](#session-binding) |
+| `SPFN_AUTH_BOUND_KEY_RENEW_GRACE_HOURS` | `.env.server` | — | default `168`; how long past expiry a bound key may still be renewed. Past it, sign in again |
+| `SPFN_AUTH_CONCURRENT_USE_WINDOW_MS` | `.env.server` | — | default `300000`; how close two sightings from two addresses must be to raise `concurrentUseAtMillis` |
+| `SPFN_AUTH_SESSION_RENEW_PATH` | `.env.local` | — | default `/auth/renew`; the page `RequireAuth` sends a bound session whose key ran out |
 | `NEXT_PUBLIC_SPFN_API_URL` / `NEXT_PUBLIC_SPFN_APP_URL` | `.env.local` | — | browser-facing URLs for OAuth redirects |
 
 Read validated values via `import { env } from '@spfn/auth/config'` (a proxy validated at
@@ -229,6 +233,11 @@ routes use `.skip(['auth'])`; the rest require `Authorization: Bearer <client-si
 | `listKeys` | POST `/_auth/keys/list` | yes | the caller's registered devices — see [Registered devices](#registered-devices-key-management) |
 | `revokeKey` | POST `/_auth/keys/revoke` | yes | sign one device out |
 | `revokeAllKeys` | POST `/_auth/keys/revoke-all` | yes | sign every device out (spares the caller by default) |
+| `setSessionBinding` | POST `/_auth/session/binding` | yes | turn session binding on or off — see [Session binding](#session-binding) |
+| `getSessionBinding` | GET `/_auth/session/binding` | yes | whether it is on, and when this session's key expires |
+| `sessionBindingDisableOptions` | POST `/_auth/session/binding/disable/options` | yes | the challenge that proves it is you before turning it off |
+| `sessionRenewOptions` | POST `/_auth/session/renew/options` | public | begin renewing a bound session key |
+| `sessionRenewVerify` | POST `/_auth/session/renew/verify` | public | verify the assertion; answers exactly as `login` |
 | `changePassword` | PUT `/_auth/password` | yes | change password |
 | `getAuthSession` | GET `/_auth/session` | yes | current session/user |
 | `issueOneTimeToken` | POST | yes | short-lived token (e.g. SSE handshake) |
@@ -533,7 +542,7 @@ cut off anything they no longer recognise.
 const { keys } = await authApi.listKeys.call({ body: {} });
 // → [{ keyId, deviceName?, platform?, algorithm, fingerprintPrefix, createdAtMillis,
 //      lastUsedAtMillis?, expiresAtMillis?, isExpired, isActive, revokedAtMillis?,
-//      registeredIp?, registeredUserAgent? }]
+//      registeredIp?, registeredUserAgent?, binding?, concurrentUseAtMillis? }]
 
 await authApi.listKeys.call({ body: { includeRevoked: true } });   // also what was cut off
 ```
@@ -602,6 +611,14 @@ Rotation carries the replaced key's label over unless the client sends a new one
   registered before the columns existed; the literal string `unknown` is never stored. They are
   unauthenticated display material, spoofable on any request that does not come through a verified
   proxy, so render them and decide nothing by them. Mobile contract 0.11.0.
+- **`binding` says the key is tied to a passkey**, and is absent on every key that is not — which
+  is every key on an account that did not turn [session binding](#session-binding) on. A bound key
+  expires in hours and only a passkey assertion renews it.
+- **`concurrentUseAtMillis` is when this key was last seen from two addresses at once**, inside
+  `SPFN_AUTH_CONCURRENT_USE_WINDOW_MS`. Absent when that has never been observed, which is the
+  ordinary state. A signal to show, never a refusal — addresses change legitimately — and the
+  addresses themselves are never returned. Meaningful only where proxy-guard is configured. Mobile
+  contract 0.12.0.
 
 All three are in the mobile contract (0.4.1) as `auth.keys.list` / `auth.keys.revoke` /
 `auth.keys.revokeAll`, so a generated mobile client reaches them the same way it reaches key
@@ -1112,6 +1129,118 @@ account gets from `login`, `changePassword`, `keys/revoke-all` and `passkeys/rev
 `auth.mfa.sweep` runs daily at 07:00 and deletes enrolments still unconfirmed after 24 hours.
 It is carried by `authJobRouter` beside the other sweeps; pass `mfaSweepCron` to
 `createAuthJobRouter()` to move it. A confirmed enrolment is never touched.
+
+### Session binding
+
+A web session's signing key is sealed **inside** the session cookie. That is what makes the
+cookie a credential rather than a pointer to one — and it means a copy of the cookie *is* that
+device. A browser profile copied off a laptop, a value pasted out of DevTools, a jar read by
+malware: the copy signs exactly as the original does, registers no new key, raises no new-device
+notice, and keeps working until the key is revoked or the session runs out. HttpOnly and
+`SameSite=Lax` stop page script and cross-site posts; they do nothing about a copy made on the
+machine.
+
+Session binding is the opt-in that closes that window. An account that has a platform passkey may
+turn it on; from then on a web session runs on a key that expires in **hours** instead of ninety
+days, and only a fresh WebAuthn assertion can put a new one in the cookie. The copy cannot produce
+the assertion, so it stops working at the first renewal.
+
+```typescript
+// Turn it on. Needs a live passkey and a recently-proved session.
+await authApi.setSessionBinding.call({ body: { mode: 'passkey' } });
+// → { mode: 'passkey', keyExpiresAtMillis }
+
+await authApi.getSessionBinding.call();          // → { mode, keyExpiresAtMillis? }
+
+// Turn it off. A fresh credential is required — see below.
+import { disableSessionBinding } from '@spfn/auth/client';
+await disableSessionBinding(api);                             // runs the passkey ceremony
+await disableSessionBinding(api, { currentPassword: '…' });   // or the account password
+```
+
+> **It needs a deployment where the backend can recognise the Next.js proxy.** A key is bound only
+> on a request `proxy-guard` tagged `clientType: 'web'`, because that is the only signal the
+> backend has that a request came through the proxy that holds the session cookie — and nothing
+> else can run the renewal. Without proxy-guard configured, `setSessionBinding` answers 400
+> `SessionBindingUnavailableError` rather than turning on a switch that would protect nothing.
+
+**What a copied cookie can and cannot do.** Before the bound key expires, a copy is
+indistinguishable from the original by anything the server sees — that is the honest statement, and
+the user-agent family check below is the only thing standing in front of it. After the key
+expires, the copy has nothing: renewal needs the passkey, and the account's own browser is the one
+holding it. Turning binding *off* is the privileged direction here, the reverse of the usual
+posture: `assertRecentAuthentication` is satisfied by the age of the device key a request is signed
+with, and a cookie copied in the ten minutes after a sign-in carries exactly that — so leaving
+`'passkey'` mode asks for a passkey assertion or the account password, never key age alone.
+
+**The renewal page.** Once the key has run out, the proxy answers every request 401
+`SessionRenewalRequiredError` without calling the backend, and keeps the cookies: the session is
+waiting on one prompt, not finished. A client component calls `renewSession(api)`, which runs the
+ceremony and gets a new bound key sealed into the cookie.
+
+```tsx
+'use client';
+import { renewSession } from '@spfn/auth/client';
+import { authApi } from '@spfn/auth';
+
+export function RenewSession({ returnTo }: { returnTo: string })
+{
+    return <button onClick={async () =>
+    {
+        const result = await renewSession(authApi);
+
+        if (result.ok)
+        {
+            location.href = returnTo;
+        }
+    }}>Confirm it's you</button>;
+}
+```
+
+A server-rendered page cannot run a WebAuthn ceremony, so `RequireAuth` sends it there instead of
+to the sign-in page:
+
+```tsx
+<RequireAuth renewalPath="/auth/renew">
+  <DashboardContent />
+</RequireAuth>
+```
+
+`renewalPath` defaults to `SPFN_AUTH_SESSION_RENEW_PATH`, and that to `/auth/renew`.
+`getAuthSessionData()` answers a third state, `'renewal-required'`, for apps writing their own
+guard.
+
+**The user-agent family check.** Independently of expiry, a bound session presented from a
+different browser family is refused 401 `SessionContextChangedError` and its three cookies are
+cleared. Browsers do not share cookie jars, so that move cannot happen without a copy. The
+comparison is coarse on purpose — five families, `edge` / `chrome` / `firefox` / `safari` /
+`other`, and **no desktop/mobile axis** — so a version bump, a user-agent reduction and Android's
+"Request desktop site" are all the same browser.
+
+- **Chrome on iOS and Safari on iOS are different families.** They are different cookie jars, so a
+  session moving between them moved by being copied. An in-app `SFSafariViewController` shares
+  Safari's jar and carries no badge of its own, so it reads as `safari` and passes.
+- **A request with no `user-agent` is no signal, not a different family.** A server component's
+  `api.` call reaches the proxy as Node `fetch` and carries none; refusing those would refuse every
+  server-rendered page view.
+- **Unbound accounts are neither checked nor logged.** The check exists for sessions that asked
+  for it.
+
+**The concurrent-use signal.** `listKeys` rows carry `concurrentUseAtMillis` — the last time one
+key was seen from two client addresses inside `SPFN_AUTH_CONCURRENT_USE_WINDOW_MS`. It is a signal
+for a device list to show and notify on, never a refusal: addresses change legitimately, several
+times an hour for a phone. The addresses behind it are not exposed. It is meaningful only where
+proxy-guard is configured — without it every web request carries the Next.js server's own address,
+so two browsers on two continents share one and the signal never fires.
+
+**Unbound accounts are unchanged.** Every response, every cookie and every query count is what it
+was: nothing above applies to an account that did not opt in, and a sign-in that answers without
+the two binding fields seals exactly the session it always did — which is also what an app calling
+`saveSession()` by hand gets.
+
+Contract 0.12.0. `KeySummary.binding`, `KeySummary.concurrentUseAtMillis`,
+`LoginResponse.sessionBinding` and `LoginResponse.keyExpiresAtMillis` are all optional and absent
+for an account that did not opt in.
 
 ### Writing protected routes (route DSL)
 

@@ -7,7 +7,7 @@
 
 import { Type, Static } from '@sinclair/typebox';
 import { EMAIL_PATTERN, PHONE_PATTERN } from '@spfn/auth';
-import { KEY_DEVICE_NAME_MAX_LENGTH, KEY_PLATFORM } from '../types';
+import { KEY_DEVICE_NAME_MAX_LENGTH, KEY_PLATFORM, SESSION_BINDINGS } from '../types';
 
 // ============================================================================
 // Basic Schemas
@@ -125,6 +125,14 @@ export const DeviceAuthPollResponseSchema = Type.Union([
         email: Type.Optional(Type.String()),
         phone: Type.Optional(Type.String()),
         passwordChangeRequired: Type.Boolean(),
+        // The approved branch is a `LoginResult` spread whole, so it carries the
+        // binding fields a sign-in can carry (#97). In practice it never does: a
+        // waiting device polls the backend directly, and a key is bound only on a
+        // request that reached it through the trusted Next.js proxy. Declared
+        // anyway, because the branch is whatever the login answered and the two
+        // must not be able to drift apart.
+        sessionBinding: Type.Optional(Type.Union(SESSION_BINDINGS.map(mode => Type.Literal(mode)))),
+        keyExpiresAtMillis: Type.Optional(Type.Integer()),
     }),
 ], {
     description: 'Pending, or the login the approval produced',

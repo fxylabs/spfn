@@ -23,7 +23,7 @@ import {
 } from '@spfn/core/server';
 
 import { KEY_TTL_DAYS } from '../lib/key-policy';
-import { KEY_ALGORITHM, KEY_PLATFORM } from '../types';
+import { KEY_ALGORITHM, KEY_PLATFORM, SESSION_BINDINGS } from '../types';
 import { CLIENT_PROOF_CONTENT_TYPE, CLIENT_PROOF_HEADERS } from './admission';
 import {
     AUTH_SURFACE_OPERATIONS,
@@ -238,20 +238,46 @@ import { CLIENT_IDENTITY_HEADERS, CLIENT_KINDS, SERVER_CONTRACT_HEADERS } from '
  * them. A field is absent rather than carrying a placeholder when the
  * registering request resolved neither — the literal string `unknown` is never
  * stored.
+ *
+ * 0.12.0 carries session binding (#97): the opt-in that gives a web session a
+ * key which expires in hours and can only be renewed by a fresh WebAuthn
+ * assertion, so a copied session cookie stops working at the first renewal.
+ *
+ * Four additions, every one of them optional. `KeySummary` gains `binding` — the
+ * new `KeyBinding` enum, declared beside `KeyPlatform` and read from the server's
+ * own list — and `concurrentUseAtMillis`, the moment one key was last seen from
+ * two client addresses inside a short window. `LoginResponse` gains
+ * `sessionBinding` and `keyExpiresAtMillis`, which are how the sign-in tells the
+ * Next.js proxy that the key it just registered is a short-lived one; a native
+ * client reads them or ignores them, since a native sign-in never produces a
+ * bound key.
+ *
+ * Optional throughout, and absent rather than defaulted: a response from an
+ * account that did not opt in is byte-identical to the one 0.11.x answered, so
+ * nothing a consumer generated against 0.11.x reads changes shape. It is a minor
+ * rather than a patch because these are new declared fields and a new enum on the
+ * mobile contract, which is what this contract carries in the minor under 0.x;
+ * the range moves with it, since the floor is mechanically the current minor's
+ * `.0`.
+ *
+ * `concurrentUseAtMillis` is a signal and never a refusal — addresses change
+ * legitimately — and the addresses behind it are not on this surface at all. It
+ * is meaningful only where the deployment runs the proxy signature guard;
+ * without it every web request carries one address and the field never appears.
  */
-export const CONTRACT_VERSION = '0.11.0';
+export const CONTRACT_VERSION = '0.12.0';
 export const CONTRACT_MAJOR = 0;
 export const CONTRACT_NAME = 'spfn-mobile-contract';
 
 /**
- * Under 0.x the minor carries breaking changes, so the range stops at 0.11.0.
+ * Under 0.x the minor carries breaking changes, so the range stops at 0.12.0.
  *
- * 0.11.0 moves the floor because the minor is where this contract puts a surface
- * addition, and the floor is that minor's `.0` — not because a 0.10.x consumer
- * could not read the two fields `KeySummary` gained, which it would simply not
+ * 0.12.0 moves the floor because the minor is where this contract puts a surface
+ * addition, and the floor is that minor's `.0` — not because a 0.11.x consumer
+ * could not read the fields session binding added, which it would simply not
  * know about. A patch leaves the floor where it is; 0.10.1 did.
  */
-export const CONTRACT_SUPPORTED_RANGE = '>=0.11.0 <0.12.0';
+export const CONTRACT_SUPPORTED_RANGE = '>=0.12.0 <0.13.0';
 
 /** What spfn-mobile's validator expects an upstream-exported bundle to name. */
 export const EXPORT_ORIGIN = 'spfn-primitives-ci-export';
@@ -334,6 +360,7 @@ type ReferencedTypeName =
     | 'KeySummary'
     | 'KeyAlgorithm'
     | 'KeyPlatform'
+    | 'KeyBinding'
     | 'DeviceAuthPollStatus';
 
 type ElementTypeName = ScalarTypeName | DecimalTypeName | ReferencedTypeName;
@@ -544,6 +571,8 @@ export const CONTRACT_TYPES: readonly TypeDeclaration[] = [
             optional('email', 'string'),
             optional('phone', 'string'),
             required('passwordChangeRequired', 'boolean'),
+            optional('sessionBinding', 'KeyBinding'),
+            optional('keyExpiresAtMillis', 'integer'),
         ],
     },
     {
@@ -604,6 +633,8 @@ export const CONTRACT_TYPES: readonly TypeDeclaration[] = [
             optional('revokedAtMillis', 'integer'),
             optional('registeredIp', 'string'),
             optional('registeredUserAgent', 'string'),
+            optional('binding', 'KeyBinding'),
+            optional('concurrentUseAtMillis', 'integer'),
         ],
     },
     {
@@ -684,6 +715,8 @@ export const CONTRACT_TYPES: readonly TypeDeclaration[] = [
             optional('email', 'string'),
             optional('phone', 'string'),
             optional('passwordChangeRequired', 'boolean'),
+            optional('sessionBinding', 'KeyBinding'),
+            optional('keyExpiresAtMillis', 'integer'),
         ],
     },
     /**
@@ -731,6 +764,11 @@ export const CONTRACT_TYPES: readonly TypeDeclaration[] = [
  * and every column that stores one is bounded by it, so exporting it as `string`
  * described a wider server than the one that is here.
  *
+ * `KeyBinding` is read from the same kind of list: the two values a key's
+ * binding and an account's session-binding setting can hold. It is one list
+ * because a key is bound exactly when its owner asked for it, and the column and
+ * the setting must not be able to drift apart.
+ *
  * `DeviceAuthPollStatus` has no such list to read: the two answers are literal
  * types in the poll route's response schema and in `PollDeviceAuthResult`, and
  * neither is a runtime value. It is declared here and held to the route's own
@@ -739,6 +777,7 @@ export const CONTRACT_TYPES: readonly TypeDeclaration[] = [
 export const CONTRACT_ENUMS: readonly EnumDeclaration[] = [
     { name: 'KeyAlgorithm', values: [...KEY_ALGORITHM] },
     { name: 'KeyPlatform', values: [...KEY_PLATFORM] },
+    { name: 'KeyBinding', values: [...SESSION_BINDINGS] },
     { name: 'DeviceAuthPollStatus', values: ['pending', 'approved'] },
 ];
 

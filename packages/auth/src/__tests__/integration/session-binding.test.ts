@@ -609,6 +609,33 @@ describe.skipIf(!dbAvailable)('session binding (case tables 6a, 6b, 6g)', () =>
             }
         });
 
+        it('the contract: the four optional fields, the KeyBinding enum, and the bundle at 0.12.0', async () =>
+        {
+            const { buildMobileContractBundle, CONTRACT_SUPPORTED_RANGE, CONTRACT_VERSION } =
+                await import('@/server/client-proof/contract-bundle');
+            const bundle = buildMobileContractBundle() as {
+                types: { name: string; fields: { name: string; type: string; optional: boolean }[] }[];
+                enums: { name: string; values: string[] }[];
+            };
+            const fieldsOf = (name: string) => bundle.types.find(type => type.name === name)!.fields;
+
+            expect(CONTRACT_VERSION).toBe('0.12.0');
+            expect(CONTRACT_SUPPORTED_RANGE).toBe('>=0.12.0 <0.13.0');
+            expect(bundle.enums).toContainEqual({ name: 'KeyBinding', values: ['none', 'passkey'] });
+
+            // Optional throughout: a consumer generated against 0.11.x reads
+            // nothing whose shape changed.
+            expect(fieldsOf('KeySummary')).toEqual(expect.arrayContaining([
+                { name: 'binding', type: 'KeyBinding', optional: true },
+                { name: 'concurrentUseAtMillis', type: 'integer', optional: true },
+            ]));
+            expect(fieldsOf('LoginResponse')).toEqual(expect.arrayContaining([
+                { name: 'sessionBinding', type: 'KeyBinding', optional: true },
+                { name: 'keyExpiresAtMillis', type: 'integer', optional: true },
+            ]));
+            expect(fieldsOf('KeySummary').every(field => field.name !== 'lastSeenIp')).toBe(true);
+        });
+
         it('an unbound account: authenticate reads the key once and writes last-used once, as it did before', async () =>
         {
             // The instance `authenticate` holds, which it imports through the
