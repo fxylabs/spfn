@@ -2150,11 +2150,51 @@ requiring a throw. `expiresAt` is seconds since the epoch, like every other OAut
   for the resource it names. It is not a user session and is not accepted by ordinary API
   routes.
 
-The consent screen itself — `createOAuth2AuthorizeHandlers({ loginPath })`, which renders
-`GET /oauth/authorize` and handles its POST — ships in the next release. Until then the API
-side above is complete and a handler can be written against it: `GET /_auth/oauth2/authorize`
-returns `{ clientName, redirectHost, scopes, resource }` to draw, and
-`POST /_auth/oauth2/authorize` takes the decision and returns the code to redirect with.
+### The consent screen
+
+The screen itself is one route file on the web app, at the path published as
+`authorization_endpoint`:
+
+```typescript
+// app/oauth/authorize/route.ts
+import { createOAuth2AuthorizeHandlers } from '@spfn/auth/nextjs/server';
+
+export const { GET, POST } = createOAuth2AuthorizeHandlers({ loginPath: '/login' });
+```
+
+`GET` asks `GET /_auth/oauth2/authorize` what the request is and draws it; `POST` checks the
+form's own CSRF token, sends the decision to `POST /_auth/oauth2/authorize`, and redirects the
+browser back to the waiting CLI. Neither decides anything — the API validates the request from
+scratch both times, because the form between the two calls is in the user's browser.
+
+| Option | What it is |
+| --- | --- |
+| `loginPath` | Where a visitor with no session goes. The handler appends `?returnUrl=` pointing at this request's own path and query, so signing in lands back on the screen with its parameters intact. The value is held to `isSafeReturnPath` like every other return destination in this package, and a refusal is a 400 screen rather than a redirect |
+| `render?` | `(view: OAuth2ConsentView) => string`, replacing the default body. Status, headers and the field set stay the handler's |
+
+Every answer carries `Cache-Control: no-store`, and every page also carries
+`Content-Type: text/html; charset=utf-8` and `Content-Security-Policy: frame-ancestors 'none'`
+— a consent screen that can be framed is a consent screen that can be clickjacked.
+
+- **The two refusal kinds become the two answers.** `unknown_client` and
+  `redirect_uri_mismatch` are shown on a 400 screen with no `Location` at all. Every other
+  refusal — `invalid_request`, `invalid_target`, `invalid_scope`, `access_denied` — is a 302 to
+  the redirect URI **the API returned**, carrying `error=` and the `state` verbatim. The
+  `redirect_uri` in the request is forwarded to the API and never built into a `Location`: the
+  API's value is the one that matched a registration, which is the whole difference between a
+  redirect and an open redirect.
+- **The POST carries its own CSRF token.** The page puts the readable CSRF cookie in a hidden
+  `csrf` field and the POST refuses, before calling the API at all, unless the field matches
+  the cookie. The handler's server-side call to the API mints the CSRF header itself and would
+  always pass, so the form's token is the only check that means anything here.
+- **`render` owns the body and nothing else.** `OAuth2ConsentView` carries `clientName`,
+  `redirectHost`, `scopes`, `resource`, the `fields` to echo as hidden inputs, and the
+  `csrfToken`, all raw — put every one of them through the exported `escapeHtml`. `clientName`
+  arrives from unauthenticated dynamic registration, and a renderer that drops `fields` or
+  `csrfToken` produces a form the API refuses.
+
+The end-to-end path — lifecycle config, this route, `/mcp`, and connecting from Claude Code
+and Codex — is [docs/guides/mcp-clients.md](../../docs/guides/mcp-clients.md).
 
 ## Machine principals (`registerMachineVerifier`)
 

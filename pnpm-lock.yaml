@@ -287,6 +287,9 @@ importers:
       '@spfn/core':
         specifier: workspace:*
         version: link:../core
+      '@spfn/mcp':
+        specifier: workspace:*
+        version: link:../mcp
       '@spfn/notification':
         specifier: workspace:*
         version: link:../notification
