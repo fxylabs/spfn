@@ -25,4 +25,7 @@ afterAll(async () =>
 registerStorageProviderContract('local', {
     createProvider: () => new LocalStorageProvider({ dir: storageRoot }),
     root: 'contract',
+    providerKind: 'local',
+    // 로컬 파일시스템에는 객체 버전이 없다 — 버전 행은 돌지 않고 성능 저하 행이 이 경로를 덮는다.
+    versioning: false,
 });

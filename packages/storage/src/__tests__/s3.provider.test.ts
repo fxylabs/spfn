@@ -3,12 +3,13 @@ import {
     CopyObjectCommand,
     DeleteObjectCommand,
     DeleteObjectsCommand,
+    HeadObjectCommand,
     ListObjectsV2Command,
     S3Client,
 } from '@aws-sdk/client-s3';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { S3StorageProvider } from '../server/s3.provider';
-import { StorageObjectNotFoundError } from '../shared/index';
+import { StorageObjectNotFoundError, StorageVersionNotFoundError } from '../shared/index';
 
 describe('S3StorageProvider deletion', () =>
 {
@@ -280,6 +281,146 @@ describe('S3StorageProvider prefix listing and cleanup', () =>
 
         await expect(provider.deletePrefix('')).rejects.toThrow('Invalid storage prefix');
         expect(send).not.toHaveBeenCalled();
+    });
+});
+
+describe('S3StorageProvider stat', () =>
+{
+    afterEach(() =>
+    {
+        vi.restoreAllMocks();
+    });
+
+    it('maps HeadObject to the stat contract, dropping the ETag quotes', async () =>
+    {
+        vi.spyOn(S3Client.prototype, 'send').mockResolvedValue({
+            ContentLength: 3,
+            LastModified: new Date('2026-07-27T00:00:00Z'),
+            ETag: '"9a0364b9e99bb480dd25e1f0284c8555"',
+            VersionId: 'v-1',
+        } as never);
+        const provider = new S3StorageProvider({ bucket: 'assets' });
+
+        expect(await provider.stat('gen/req-1/a.png')).toEqual({
+            key: 'gen/req-1/a.png',
+            size: 3,
+            lastModified: new Date('2026-07-27T00:00:00Z'),
+            etag: '9a0364b9e99bb480dd25e1f0284c8555',
+            contentHash: '9a0364b9e99bb480dd25e1f0284c8555',
+            versionId: 'v-1',
+        });
+    });
+
+    it('leaves contentHash undefined for a multipart ETag (5a: S3 multipart ETag …-N)', async () =>
+    {
+        vi.spyOn(S3Client.prototype, 'send').mockResolvedValue({
+            ContentLength: 8388608,
+            ETag: '"9a0364b9e99bb480dd25e1f0284c8555-3"',
+            VersionId: 'v-1',
+        } as never);
+        const provider = new S3StorageProvider({ bucket: 'assets' });
+
+        const stat = await provider.stat('gen/req-1/big.bin');
+
+        expect(stat.contentHash).toBeUndefined();
+        expect(stat.etag).toBe('9a0364b9e99bb480dd25e1f0284c8555-3');
+        expect(stat.versionId).toBe('v-1');
+    });
+
+    it('drops the "null" version id (5d: 버전 관리 이전 객체)', async () =>
+    {
+        vi.spyOn(S3Client.prototype, 'send').mockResolvedValue({ ContentLength: 1, VersionId: 'null' } as never);
+        const provider = new S3StorageProvider({ bucket: 'assets' });
+
+        expect((await provider.stat('gen/req-1/old.png')).versionId).toBeUndefined();
+    });
+
+    it('rejects a missing object with the not-found contract error (5a: 없는 객체)', async () =>
+    {
+        vi.spyOn(S3Client.prototype, 'send').mockRejectedValue(namedError('NotFound') as never);
+        const provider = new S3StorageProvider({ bucket: 'assets' });
+
+        await expect(provider.stat('gen/missing.png')).rejects.toBeInstanceOf(StorageObjectNotFoundError);
+    });
+
+    it('uses HeadObject, never a version listing', async () =>
+    {
+        const send = vi.spyOn(S3Client.prototype, 'send').mockResolvedValue({ ContentLength: 1 } as never);
+        const provider = new S3StorageProvider({ bucket: 'assets' });
+
+        await provider.stat('gen/req-1/a.png');
+
+        expect(send.mock.calls[0]?.[0]).toBeInstanceOf(HeadObjectCommand);
+    });
+});
+
+describe('S3StorageProvider versioned copy', () =>
+{
+    afterEach(() =>
+    {
+        vi.restoreAllMocks();
+    });
+
+    it('appends ?versionId= after segment encoding (5b: req 1/a+b?c#d.png + versionId)', async () =>
+    {
+        const send = vi.spyOn(S3Client.prototype, 'send').mockResolvedValue({} as never);
+        const provider = new S3StorageProvider({ bucket: 'assets' });
+
+        await provider.copy('gen/req 1/a+b?c#d.png', 'confirmed/asset.png', { sourceVersionId: 'v 1/2' });
+
+        const command = send.mock.calls[0]?.[0] as CopyObjectCommand;
+        expect(command.input.CopySource).toBe('assets/gen/req%201/a%2Bb%3Fc%23d.png?versionId=v%201%2F2');
+    });
+
+    it('keeps the unversioned CopySource unchanged (5b: 옵션 없음 — 회귀)', async () =>
+    {
+        const send = vi.spyOn(S3Client.prototype, 'send').mockResolvedValue({} as never);
+        const provider = new S3StorageProvider({ bucket: 'assets' });
+
+        await provider.copy('gen/req-1/a.png', 'confirmed/asset.png');
+
+        expect((send.mock.calls[0]?.[0] as CopyObjectCommand).input.CopySource).toBe('assets/gen/req-1/a.png');
+    });
+
+    it('folds NoSuchVersion, 404 and InvalidArgument into the version error (5b: 존재하지 않는 versionId)', async () =>
+    {
+        const provider = new S3StorageProvider({ bucket: 'assets' });
+        for (const error of [namedError('NoSuchVersion'), statusError(404), namedError('InvalidArgument')])
+        {
+            vi.spyOn(S3Client.prototype, 'send').mockRejectedValue(error as never);
+
+            await expect(provider.copy('gen/a.png', 'confirmed/a.png', { sourceVersionId: 'v-1' }))
+                .rejects.toBeInstanceOf(StorageVersionNotFoundError);
+        }
+    });
+
+    it('propagates an unrelated failure of a versioned copy', async () =>
+    {
+        vi.spyOn(S3Client.prototype, 'send').mockRejectedValue(statusError(403) as never);
+        const provider = new S3StorageProvider({ bucket: 'assets' });
+
+        await expect(provider.copy('gen/a.png', 'confirmed/a.png', { sourceVersionId: 'v-1' }))
+            .rejects.not.toBeInstanceOf(StorageVersionNotFoundError);
+    });
+});
+
+describe('S3StorageProvider list metadata', () =>
+{
+    afterEach(() =>
+    {
+        vi.restoreAllMocks();
+    });
+
+    it('carries the ETag and never a version id (ListObjectsV2 does not return one)', async () =>
+    {
+        vi.spyOn(S3Client.prototype, 'send').mockResolvedValue({
+            Contents: [{ Key: 'gen/req-1/a.png', Size: 3, ETag: '"abc"' }],
+        } as never);
+        const provider = new S3StorageProvider({ bucket: 'assets' });
+
+        const [object] = (await provider.list('gen/req-1')).objects;
+
+        expect(object).toEqual({ key: 'gen/req-1/a.png', size: 3, etag: 'abc' });
     });
 });
 
