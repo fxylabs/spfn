@@ -173,6 +173,18 @@ function main()
         }
         catch
         {
+            // Two main pushes minutes apart run this pipeline twice at once, and
+            // both see the version missing before either publishes: the second
+            // `npm publish` answers E409 for a version the first one just put
+            // there. Ask the registry again — if the version is there now, the
+            // outcome this run wanted has happened and it is not a failure.
+            if (registryVersion(pkg.name, pkg.version, pkg))
+            {
+                console.log(`${pkg.name}@${pkg.version} reached the registry from a concurrent run — nothing left to do`);
+                publishedInThisRun.add(`${pkg.name}@${pkg.version}`);
+                continue;
+            }
+
             failed.push(`${pkg.name}@${pkg.version}`);
         }
     }
