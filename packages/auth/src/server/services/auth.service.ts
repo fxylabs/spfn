@@ -16,6 +16,7 @@ import {
 } from '@spfn/auth/errors';
 
 import { usersRepository, keysRepository, deviceAuthorizationsRepository } from '../repositories';
+import { revokeAllOAuth2GrantsForUser } from './oauth2-grant.service';
 import { runBeforeRegister } from '../lib/config';
 import { type KeyAlgorithmType, type KeyPlatformType } from '../types';
 import { hashPassword, verifyPassword, getDummyPasswordHash, normalizeEmail } from '../helpers';
@@ -403,6 +404,12 @@ export async function changePasswordService(
     // still signed in, which the user can see and revoke; losing them the other
     // way round leaves a live approval that hands out a key nothing revoked.
     await deviceAuthorizationsRepository.denyAllActiveByUserId(userId);
+
+    // A grant the user gave a CLI carries a refresh token, so a client holding
+    // one signs itself back in within the hour — which is exactly the client a
+    // global revocation is aimed at. Revoked alongside the device codes, and for
+    // the reason they are.
+    await revokeAllOAuth2GrantsForUser(userId);
 
     // Revoke all existing sessions on password change (incident-response intent:
     // "change password" should log the user out everywhere). authenticate verifies

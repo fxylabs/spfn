@@ -818,3 +818,96 @@ export class PasskeyConfigError extends HttpError
         this.name = 'PasskeyConfigError';
     }
 }
+
+/**
+ * OAuth2 Unknown Client Error (400)
+ *
+ * Thrown by the API authorize endpoints when `client_id` names no registered
+ * client. One of the two refusals that must NOT be turned into a redirect: with
+ * no client there is no registered redirect URI, so the only place left to send
+ * the error is the one the request supplied — which is exactly the open redirect
+ * this rule exists to close. The consent screen shows it instead.
+ */
+export class OAuth2UnknownClientError extends ValidationError
+{
+    constructor(data: { message?: string; details?: Record<string, any> } = {})
+    {
+        super({
+            message: data.message || 'Unknown OAuth client',
+            details: { error: 'unknown_client', ...data.details },
+        });
+        this.name = 'OAuth2UnknownClientError';
+    }
+}
+
+/**
+ * OAuth2 Redirect URI Mismatch Error (400)
+ *
+ * Thrown when `redirect_uri` is not one the client registered. The second
+ * non-redirectable refusal, for the same reason as the first: redirecting the
+ * error to an unregistered URI is the attack.
+ */
+export class OAuth2RedirectUriMismatchError extends ValidationError
+{
+    constructor(data: { message?: string; details?: Record<string, any> } = {})
+    {
+        super({
+            message: data.message || 'redirect_uri does not match a registered URI for this client',
+            details: { error: 'redirect_uri_mismatch', ...data.details },
+        });
+        this.name = 'OAuth2RedirectUriMismatchError';
+    }
+}
+
+/**
+ * OAuth2 Authorize Redirect Error (400)
+ *
+ * Every other authorize-time refusal — `invalid_request`, `invalid_scope`,
+ * `invalid_target`, `access_denied`. The client and its redirect URI are both
+ * known by the time these are decided, so RFC 6749 §4.1.2.1 says the error goes
+ * back to the client as query parameters on that URI rather than to the person.
+ *
+ * The API cannot perform that redirect — it is answering the web app's consent
+ * handler, not the browser — so it carries the pieces in `details` and the
+ * handler builds the 302. `redirectUri` is the registered-and-matched value, not
+ * the raw parameter, which is what makes it safe to send somebody to.
+ */
+export class OAuth2AuthorizeRedirectError extends ValidationError
+{
+    constructor(data: {
+        error: string;
+        redirectUri: string;
+        state?: string;
+        message?: string;
+        details?: Record<string, any>;
+    })
+    {
+        super({
+            message: data.message || `OAuth authorize request refused: ${data.error}`,
+            details: {
+                error: data.error,
+                redirectUri: data.redirectUri,
+                state: data.state,
+                ...data.details,
+            },
+        });
+        this.name = 'OAuth2AuthorizeRedirectError';
+    }
+}
+
+/**
+ * OAuth2 Grant Not Found Error (404)
+ *
+ * Thrown by `DELETE /_auth/oauth2/grants/:id` when the caller owns no live grant
+ * of that id. A grant belonging to somebody else answers the same way as one
+ * that never existed — the id is a number in a URL, and telling the two apart
+ * would let anyone count other people's connected clients.
+ */
+export class OAuth2GrantNotFoundError extends NotFoundError
+{
+    constructor(data: { message?: string; details?: Record<string, any> } = {})
+    {
+        super({ message: data.message || 'No such connected application', details: data.details });
+        this.name = 'OAuth2GrantNotFoundError';
+    }
+}

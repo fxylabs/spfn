@@ -284,3 +284,63 @@ export type {
     VerifiedOpsToken,
     IssuedOpsToken,
 } from './ops-token.service';
+
+// =============================================================================
+// OAuth 2.1 authorization server (the server we run, for MCP clients)
+// =============================================================================
+// `oauth2` throughout: `oauth` next door is the social-login client this package
+// is on the other side of. Nothing is shared between them.
+
+export {
+    registerOAuth2ClientService,
+    purgeStaleOAuth2ClientsService,
+    MAX_UNGRANTED_CLIENTS_PER_IP,
+    STALE_CLIENT_MAX_AGE_MS,
+    SUPPORTED_GRANT_TYPES,
+    SUPPORTED_RESPONSE_TYPES,
+} from './oauth2-client.service';
+
+export type {
+    OAuth2RegisterRequest,
+    OAuth2RegisteredClient,
+    OAuth2RegisterRefusal,
+    OAuth2RegisterResult,
+} from './oauth2-client.service';
+
+export {
+    describeOAuth2AuthorizeRequestService,
+    approveOAuth2AuthorizeService,
+    denyOAuth2AuthorizeService,
+} from './oauth2-authorize.service';
+
+export type {
+    OAuth2AuthorizeParams,
+    OAuth2ConsentView,
+    OAuth2ScopeDescription,
+    OAuth2AuthorizationCodeIssued,
+} from './oauth2-authorize.service';
+
+export {
+    oauth2TokenService,
+    revokeOAuth2TokenService,
+} from './oauth2-token.service';
+
+export type {
+    OAuth2TokenRequest,
+    OAuth2TokenResponse,
+    OAuth2TokenRefusal,
+    OAuth2TokenResult,
+} from './oauth2-token.service';
+
+export {
+    listOAuth2GrantsService,
+    revokeOAuth2GrantService,
+    revokeAllOAuth2GrantsForUser,
+} from './oauth2-grant.service';
+
+export type { OAuth2GrantSummary } from './oauth2-grant.service';
+
+// The one export an application wires up by hand — `@spfn/mcp`'s
+// `validateToken`. Exported from the same entry as `isOpsToken`.
+export { verifyAccessToken } from './oauth2-access-token.service';
+export type { VerifiedOAuth2AccessToken } from './oauth2-access-token.service';

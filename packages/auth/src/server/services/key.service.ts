@@ -9,6 +9,7 @@ import { assertKeyMatchesAlgorithm, verifyKeyFingerprint } from '../helpers/jwt'
 import { KEY_TTL_DAYS } from '../lib/key-policy';
 import { InvalidKeyFingerprintError, KeyIdAlreadyRegisteredError } from '@spfn/auth/errors';
 import { deviceAuthorizationsRepository, keysRepository } from '../repositories';
+import { revokeAllOAuth2GrantsForUser } from './oauth2-grant.service';
 
 export interface RegisterPublicKeyParams
 {
@@ -332,6 +333,12 @@ export async function revokeAllKeysService(
         : await keysRepository.revokeAllActiveByUserIdExcept(userId, currentKeyId, reason);
 
     await deviceAuthorizationsRepository.denyAllActiveByUserId(userId);
+
+    // A grant the user gave a CLI carries a refresh token, so a client holding
+    // one signs itself back in within the hour — which is exactly the client a
+    // global revocation is aimed at. Revoked alongside the device codes, and for
+    // the reason they are.
+    await revokeAllOAuth2GrantsForUser(userId);
 
     return { revokedCount: revoked.length, currentKeyRevoked: includeCurrent };
 }

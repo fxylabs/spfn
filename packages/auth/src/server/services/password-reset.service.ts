@@ -43,6 +43,7 @@ import { hashCredential, mintCredential } from '../lib/link-credentials';
 import { deliverLinkMail } from '../lib/link-mail-delivery';
 import { authPasswordResetEvent } from '../events';
 import { issuePasswordResetLink } from './link-mail.service';
+import { revokeAllOAuth2GrantsForUser } from './oauth2-grant.service';
 import { registerPublicKeyService } from './key.service';
 import { updateLastLoginService } from './user.service';
 import type { RegisterResult } from './auth.service';
@@ -248,6 +249,12 @@ async function replaceCredentials(
     });
 
     await deviceAuthorizationsRepository.denyAllActiveByUserId(user.id);
+
+    // A grant the user gave a CLI carries a refresh token, so a client holding
+    // one signs itself back in within the hour — which is exactly the client a
+    // global revocation is aimed at. Revoked alongside the device codes, and for
+    // the reason they are.
+    await revokeAllOAuth2GrantsForUser(user.id);
     await keysRepository.revokeAllActiveByUserId(user.id, 'Revoked by password reset');
 
     await registerPublicKeyService({
