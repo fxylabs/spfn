@@ -25,6 +25,7 @@ export * from './config';
 // which this package uses elsewhere.
 export { CSRF_HEADER, deriveCsrfToken, matchesCsrfToken } from './csrf';
 export * from './oauth';
+export * from './oauth2';
 export * from './one-time-token';
 export * from './deletion-config';
 export * from './device-auth-config';
