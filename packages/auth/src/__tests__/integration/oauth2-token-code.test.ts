@@ -192,6 +192,15 @@ describe.skipIf(!dbAvailable)('OAuth2 token, authorization_code (8c)', () =>
             expect(body.error).toBe('invalid_grant');
         }
     });
+    it('a code_verifier of a legal length carrying a forbidden character → 400 invalid_grant', async () =>
+    {
+        // RFC 7636 §4.1 draws a verifier from the unreserved set; `!` is not in
+        // it. Fifty characters, so this is the character rule and not the bounds.
+        const { response, body } = await exchange({ code_verifier: `!${'a'.repeat(49)}` });
+
+        expect(response.status).toBe(400);
+        expect(body.error).toBe('invalid_grant');
+    });
 
     it('a fresh code presented by another client → 400 invalid_grant', async () =>
     {
@@ -210,7 +219,7 @@ describe.skipIf(!dbAvailable)('OAuth2 token, authorization_code (8c)', () =>
         expect(body.error).toBe('invalid_grant');
     });
 
-    it('a code older than its 60 seconds → 400 invalid_grant', async () =>
+    it('a code older than its 60 seconds → 400 invalid_grant, the grant left alone', async () =>
     {
         const code = await freshCode();
 
@@ -225,6 +234,15 @@ describe.skipIf(!dbAvailable)('OAuth2 token, authorization_code (8c)', () =>
 
         expect(response.status).toBe(400);
         expect(body.error).toBe('invalid_grant');
+
+        // The one path that reaches `consume` on an unspent row and loses, and
+        // the one a change hoisting the expiry decision above the `usedAt` test
+        // would turn into the replay branch. An expired code costs nothing.
+        const grants = await getTestDb().select().from(oauth2Grants);
+        const codes = await getTestDb().select().from(oauth2AuthorizationCodes);
+
+        expect(grants.every(grant => grant.revokedAt === null)).toBe(true);
+        expect(codes.every(row => row.usedAt === null)).toBe(true);
     });
 
     it('a code presented a second time → 400 invalid_grant, and every token of that grant is revoked', async () =>

@@ -171,6 +171,22 @@ describe.skipIf(!dbAvailable)('OAuth2 register (8a)', () =>
         }
     });
 
+    it('a body that is not JSON → 400 invalid_client_metadata', async () =>
+    {
+        // RFC 7591 §3.1 says a registration request is `application/json`. A body
+        // that is not reads as no metadata at all, which is refused on the field
+        // it is missing — the same answer an empty object earns, and not a 500.
+        const response = await app.request('/_auth/oauth2/register', {
+            method: 'POST',
+            headers: { 'Content-Type': 'text/plain', 'x-forwarded-for': '198.51.100.7' },
+            body: 'client_name=nobody',
+        });
+        const body = await response.json() as RegistrationBody;
+
+        expect(response.status).toBe(400);
+        expect(body.error).toBe('invalid_client_metadata');
+    });
+
     it('an empty redirect_uris array → 400 invalid_client_metadata', async () =>
     {
         const { status, body } = await register({ client_name: NAME, redirect_uris: [] });

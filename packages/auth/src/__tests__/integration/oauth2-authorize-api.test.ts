@@ -222,6 +222,22 @@ describe.skipIf(!dbAvailable)('OAuth2 authorize, API side (8b)', () =>
         expect(refusal.redirectUri).toBe('http://127.0.0.1:7777/callback');
     });
 
+    it('signed in, a 43-character code_challenge carrying a non-base64url character → invalid_request', async () =>
+    {
+        // The right length and the wrong alphabet: `+` is base64's, not
+        // base64url's, so this is padded-alphabet output and not the S256
+        // transform's. The length rule alone would let it through.
+        const response = await describeAuthorize(app, authorization, {
+            client_id: clientId,
+            code_challenge: `+${'a'.repeat(42)}`,
+        });
+        const refusal = refusalOf(await response.json() as Envelope);
+
+        expect(response.status).toBe(400);
+        expect(refusal.error).toBe('invalid_request');
+        expect(refusal.redirectUri).toBe('http://127.0.0.1:7777/callback');
+    });
+
     /** Every spelling of a dot segment that `new URL` resolves away before matching. */
     const DOT_SEGMENT_SPELLINGS = [
         'http://127.0.0.1:5/x/../cb',

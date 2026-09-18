@@ -212,10 +212,15 @@ function boundToRequest(
  *
  * A row that was already used when this call read it is a replay by the client
  * the code belongs to — the first exchange produced tokens, so somebody else
- * holds them — and the grant dies for it. A row that was unused a moment ago
- * and will not spend now is either past its sixty seconds or was won by a
- * request racing this one, which is an ordinary client retry; both are refused
- * and neither costs the grant.
+ * holds them — and the grant dies for it. That includes a client's own retry
+ * after a socket timeout: it arrives seconds later, reads a `usedAt` the winning
+ * exchange already committed, and is revoked. It has to be. A retry that late is
+ * a second presentation of a spent code and nothing in it distinguishes it from
+ * a stolen one, which is the 8c row `사용됨 | 일치 | 일치 | 일치`.
+ *
+ * The benign branch is narrower: a request whose READ found the row unused and
+ * whose `consume` then lost the race to the winner, or one whose sixty seconds
+ * had passed. Neither is spent here and neither costs the grant.
  */
 async function spendBoundCode(
     request: OAuth2TokenRequest,
