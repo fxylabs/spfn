@@ -127,6 +127,7 @@
   },
   "devDependencies": {
     "@spfn/core": "workspace:*",
+    "@spfn/mcp": "workspace:*",
     "@spfn/notification": "workspace:*",
     "@types/jsonwebtoken": "^9.0.6",
     "@types/node": "^20.11.0",
