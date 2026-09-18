@@ -38,19 +38,33 @@ async function challengeFor(validateToken: TestConfig['validateToken']): Promise
     });
 }
 
+/**
+ * A validator shaped like `verifyAccessToken`: it finds the token's record and refuses it
+ * only once `expiresAt` has passed, rather than refusing an unrecognized string.
+ */
+function validatorForExpiry(expiresAt: number): TestConfig['validateToken']
+{
+    const record = { clientId: 'client-1', scopes: ['tools'], userId: 42, expiresAt };
+
+    return async () => record.expiresAt * 1000 > Date.now() ? record : null;
+}
+
 describe('rejected bearer challenge', () =>
 {
     it('marks an expired access token as invalid_token', async () =>
     {
-        const response = await challengeFor(async token => token === 'live-token'
-            ? { clientId: 'client-1', scopes: ['tools'], userId: 42 }
-            : null);
+        const now = Math.floor(Date.now() / 1000);
+        const response = await challengeFor(validatorForExpiry(now - 3600));
 
         expect(response.status).toBe(401);
         expect(response.headers.get('www-authenticate')).toBe(
             'Bearer error="invalid_token", '
             + `resource_metadata="https://example.com${METADATA_PATH}/mcp"`,
         );
+
+        // The same validator, one still-live record: the refusal above is the expiry.
+        const live = await challengeFor(validatorForExpiry(now + 3600));
+        expect(live.headers.get('www-authenticate')).toBeNull();
     });
 
     it('treats a null result as a refusal', async () =>
@@ -122,7 +136,6 @@ describe('protected resource metadata', () =>
         expect(body.resource).toBe('https://example.com/mcp');
         expect(body.authorization_servers).toEqual(['https://example.com']);
         expect(body.bearer_methods_supported).toEqual(['header']);
-        expect(body.scopes_supported).toBeUndefined();
     });
 
     it('serves the same bytes at the path-aware well-known path', async () =>

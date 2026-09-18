@@ -103,13 +103,27 @@ The same dispatcher can be passed to `createMcpHttpRoute` and `serveMcpStdio`. T
 
 ## Remote Streamable HTTP
 
+The route takes two things from the authorization server: the function that verifies its
+access tokens, and the scope names it issues. The scope names are the object the
+application already hands `createAuthLifecycle`, so keep them in one place rather than
+retyping them here:
+
+```ts
+// src/server/auth-scopes.ts — passed to createAuthLifecycle({ authorizationServer: { scopes } })
+export const scopes = {
+    'mcp:read': 'Read your data',
+    'mcp:write': 'Act on your behalf',
+};
+```
+
 ```ts
 import { createMcpRoute, McpError } from '@spfn/mcp/server';
 import { verifyAccessToken } from '@spfn/auth/server';
 import type { McpAuth, McpTool } from '@spfn/mcp';
+import { scopes } from './auth-scopes';
 
 type Auth = McpAuth & {
-    userId: number;
+    userId: string;
 };
 
 type Context = {
@@ -144,8 +158,9 @@ export const mcpRouter = createMcpRoute<Auth, Context>({
         version: '1.0.0',
     },
     validateToken: verifyAccessToken,
+    scopesSupported: Object.keys(scopes),
     resolveContext: async auth => {
-        const user = await findUser(auth.userId);
+        const user = await findUser(Number(auth.userId));
         if (!user) {
             throw new McpError(-32002, 'User not found', 403);
         }
@@ -165,6 +180,12 @@ export const appRouter = defineRouter({
     // Application routes
 }).packages([mcpRouter]);
 ```
+
+`verifyAccessToken` returns `userId` as a **string** — it is the token's subject claim,
+not your user table's column type — so `Auth` declares `userId: string` and
+`resolveContext` converts it at the one place the application's own numeric id is needed.
+An application whose user ids are already strings drops the `Number(...)` and keeps the id
+a string end to end.
 
 `verifyAccessToken` returns `null` when it refuses the token — expired, revoked, or
 issued for another resource. `validateToken` may signal a refusal that way or by
@@ -193,17 +214,21 @@ Both answer the same bytes:
 {
     "resource": "https://app.example.com/mcp",
     "authorization_servers": ["https://app.example.com"],
+    "scopes_supported": ["mcp:read", "mcp:write"],
     "bearer_methods_supported": ["header"]
 }
 ```
 
+`scopes_supported` is the list a client picks the `scope` it asks the authorization server
+for from (RFC 9728 §2), which is why the wiring above publishes `Object.keys(scopes)`
+rather than leaving the field out.
+
 `authorization_servers` defaults to the origin of `appUrl` — the issuer `@spfn/auth`
 publishes on the API origin. Override it when the authorization server is deployed
-separately, and add `scopes_supported` when the server defines scopes:
+separately:
 
 ```ts
 authorizationServers: ['https://id.example.com'],
-scopesSupported: ['mcp'],
 ```
 
 These are package routes like `/mcp` itself, so they are relative to wherever the router
