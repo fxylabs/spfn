@@ -39,7 +39,22 @@ export interface RegisterParams
     deviceName?: string;
     platform?: KeyPlatformType;
     metadata?: Record<string, unknown>;
+    /** Client address of the request, from `deviceProvenance` at the route. */
+    ip?: string;
+    /** `user-agent` of the request, already truncated at the route. */
+    userAgent?: string;
 }
+
+/**
+ * What `createVerifiedAccount` needs once ownership has been proven.
+ *
+ * `channel` is the one field the two entry points do not share: both arrive
+ * here having proved the address, one with a six-digit code and one with an
+ * emailed link, and the device event has to be able to say which.
+ */
+export type CreateVerifiedAccountParams = Omit<RegisterParams, 'verificationToken'> & {
+    channel: 'register' | 'signup-link';
+};
 
 export interface RegisterResult
 {
@@ -61,6 +76,10 @@ export interface LoginParams
     algorithm?: KeyAlgorithmType;
     deviceName?: string;
     platform?: KeyPlatformType;
+    /** Client address of the request, from `deviceProvenance` at the route. */
+    ip?: string;
+    /** `user-agent` of the request, already truncated at the route. */
+    userAgent?: string;
 }
 
 export interface LoginResult
@@ -136,7 +155,7 @@ export async function registerService(
         throw new VerificationTokenTargetMismatchError();
     }
 
-    return await createVerifiedAccount({ ...params, phone });
+    return await createVerifiedAccount({ ...params, phone, channel: 'register' });
 }
 
 /**
@@ -158,7 +177,7 @@ export async function registerService(
  * together or not at all.
  */
 export async function createVerifiedAccount(
-    params: Omit<RegisterParams, 'verificationToken'>,
+    params: CreateVerifiedAccountParams,
 ): Promise<RegisterResult>
 {
     const { email, phone, password, publicKey, keyId, fingerprint, algorithm, metadata } = params;
@@ -223,6 +242,9 @@ export async function createVerifiedAccount(
         algorithm,
         deviceName: params.deviceName,
         platform: params.platform,
+        channel: params.channel,
+        ip: params.ip,
+        userAgent: params.userAgent,
     });
 
     const result = {
@@ -289,14 +311,25 @@ export async function loginService(
         throw new AccountDisabledError({ status: user.status });
     }
 
-    // Revoke old key if provided
+    // Revoke old key if provided.
+    //
+    // The boolean matters: `oldKeyId` is a client-supplied field, and
+    // `revokeKeyService` answers false for a key that is not this user's or was
+    // already revoked. Treating such a value as a rotation would let a stolen
+    // password register a device with the owner's notice suppressed, which is
+    // exactly what the device event exists to prevent — so only a revocation
+    // that happened makes this a replacement.
+    let replacesKeyId: string | undefined;
+
     if (oldKeyId)
     {
-        await revokeKeyService({
+        const revoked = await revokeKeyService({
             userId: user.id,
             keyId: oldKeyId,
             reason: 'Replaced by new key on login',
         });
+
+        replacesKeyId = revoked ? oldKeyId : undefined;
     }
 
     // Register new public key
@@ -308,6 +341,10 @@ export async function loginService(
         algorithm,
         deviceName: params.deviceName,
         platform: params.platform,
+        channel: 'password',
+        ip: params.ip,
+        userAgent: params.userAgent,
+        replacesKeyId,
     });
 
     // Update last login

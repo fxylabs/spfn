@@ -219,21 +219,39 @@ import { CLIENT_IDENTITY_HEADERS, CLIENT_KINDS, SERVER_CONTRACT_HEADERS } from '
  * list is open (`unlistedCodes` says so), so a consumer generated against
  * 0.10.0 already decodes an unlisted code and nothing it generates changes
  * shape. The supported range does not move.
+ * 0.11.0 adds `registeredIp` and `registeredUserAgent` to `KeySummary`: what the
+ * request that registered a key said about where it came from, captured once and
+ * never updated. They are there so a device list can say "this one appeared from
+ * there", which is what makes an entry the owner does not recognise recognisable
+ * — the same reason `auth.device.registered` now announces a new key at all.
+ *
+ * Additive optional fields, the way 0.4.1's key management was, so nothing a
+ * consumer generated against 0.10.x reads changes shape. It is a minor rather
+ * than a patch because the pair are new declared fields on a type in the mobile
+ * contract, and under 0.x this contract carries a surface addition of that kind
+ * in the minor; the range moves with it, since the range's floor is mechanically
+ * the current minor's `.0`.
+ *
+ * Both values are unauthenticated and display-only. `getClientIp` is spoofable
+ * on a request that is not proxy-verified and a `user-agent` is whatever the
+ * caller typed, so a generated client should render them and decide nothing by
+ * them. A field is absent rather than carrying a placeholder when the
+ * registering request resolved neither — the literal string `unknown` is never
+ * stored.
  */
-export const CONTRACT_VERSION = '0.10.1';
+export const CONTRACT_VERSION = '0.11.0';
 export const CONTRACT_MAJOR = 0;
 export const CONTRACT_NAME = 'spfn-mobile-contract';
 
 /**
- * Under 0.x the minor carries breaking changes, so the range stops at 0.10.0.
+ * Under 0.x the minor carries breaking changes, so the range stops at 0.11.0.
  *
- * 0.10.0 moves the floor because it adds an operation with no response body. A
- * consumer generated against 0.9.x requires responseType on every operation and
- * would have to guess what auth.device.deny answers with, so it is refused
- * CONTRACT_UNSUPPORTED. Adding the device operations alone would have been a
- * patch, as 0.4.1's key operations were.
+ * 0.11.0 moves the floor because the minor is where this contract puts a surface
+ * addition, and the floor is that minor's `.0` — not because a 0.10.x consumer
+ * could not read the two fields `KeySummary` gained, which it would simply not
+ * know about. A patch leaves the floor where it is; 0.10.1 did.
  */
-export const CONTRACT_SUPPORTED_RANGE = '>=0.10.0 <0.11.0';
+export const CONTRACT_SUPPORTED_RANGE = '>=0.11.0 <0.12.0';
 
 /** What spfn-mobile's validator expects an upstream-exported bundle to name. */
 export const EXPORT_ORIGIN = 'spfn-primitives-ci-export';
@@ -584,6 +602,8 @@ export const CONTRACT_TYPES: readonly TypeDeclaration[] = [
             required('isExpired', 'boolean'),
             required('isActive', 'boolean'),
             optional('revokedAtMillis', 'integer'),
+            optional('registeredIp', 'string'),
+            optional('registeredUserAgent', 'string'),
         ],
     },
     {

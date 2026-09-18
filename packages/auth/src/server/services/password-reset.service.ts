@@ -218,6 +218,10 @@ export interface CompletePasswordResetParams
     algorithm?: KeyAlgorithmType;
     deviceName?: string;
     platform?: KeyPlatformType;
+    /** Client address of the request, from `deviceProvenance` at the route. */
+    ip?: string;
+    /** `user-agent` of the request, already truncated at the route. */
+    userAgent?: string;
 }
 
 /**
@@ -265,6 +269,9 @@ async function replaceCredentials(
         algorithm: params.algorithm,
         deviceName: params.deviceName,
         platform: params.platform,
+        channel: 'password-reset',
+        ip: params.ip,
+        userAgent: params.userAgent,
     });
 
     await updateLastLoginService(user.id);

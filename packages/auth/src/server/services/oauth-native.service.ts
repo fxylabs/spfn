@@ -45,6 +45,11 @@ export interface OAuthNativeParams
      * id_token이 담은 정보만으로 신원을 정규화한다.
      */
     accessToken?: string;
+    /** Client address of the request, from `deviceProvenance` at the route. */
+    ip?: string;
+    /** `user-agent` of the request, already truncated at the route. */
+    userAgent?: string;
+
     /** Apple은 첫 로그인에만 이름을 별도로 주므로 클라이언트가 전달할 수 있다. */
     profile?: { name?: string };
     metadata?: Record<string, unknown>;
@@ -167,6 +172,9 @@ async function persistNativeLogin(
             algorithm: params.algorithm,
             deviceName: params.deviceName,
             platform: params.platform,
+            channel: 'oauth-native',
+            ip: params.ip,
+            userAgent: params.userAgent,
         });
 
         await updateLastLoginService(userId);

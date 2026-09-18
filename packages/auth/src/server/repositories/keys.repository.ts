@@ -100,6 +100,8 @@ export class KeysRepository extends BaseRepository
                 lastUsedAt: userPublicKeys.lastUsedAt,
                 expiresAt: userPublicKeys.expiresAt,
                 revokedAt: userPublicKeys.revokedAt,
+                registeredIp: userPublicKeys.registeredIp,
+                registeredUserAgent: userPublicKeys.registeredUserAgent,
             })
             .from(userPublicKeys)
             .where(

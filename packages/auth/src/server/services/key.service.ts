@@ -10,6 +10,8 @@ import { KEY_TTL_DAYS } from '../lib/key-policy';
 import { InvalidKeyFingerprintError, KeyIdAlreadyRegisteredError } from '@spfn/auth/errors';
 import { deviceAuthorizationsRepository, keysRepository } from '../repositories';
 import { revokeAllOAuth2GrantsForUser } from './oauth2-grant.service';
+import { emitDeviceRegistered } from './device-registration.service';
+import type { DeviceRegistrationChannel } from '../events';
 
 export interface RegisterPublicKeyParams
 {
@@ -21,6 +23,26 @@ export interface RegisterPublicKeyParams
     /** Device label for the key list. Display only — nothing is authorized by it. */
     deviceName?: string;
     platform?: KeyPlatformType;
+    /**
+     * Which door this device came through. Required, so that a registration path
+     * added later has to say what it is rather than inherit an answer.
+     */
+    channel: DeviceRegistrationChannel;
+    /** Client address of the registering request, absent when none resolved. */
+    ip?: string;
+    /** `user-agent` of the registering request, already truncated. */
+    userAgent?: string;
+    /**
+     * The key this one replaces on the same device, when a revocation actually
+     * happened. Its presence is what makes this a rotation rather than a new
+     * device, so no event is announced for it.
+     *
+     * Only ever set from a `revokeKeyService` that returned true: an `oldKeyId`
+     * naming somebody else's key, an already-revoked key or nothing at all
+     * revokes nothing, and treating that as a rotation would be a way to
+     * register a device with the owner's notice switched off.
+     */
+    replacesKeyId?: string;
 }
 
 export interface RotateKeyParams
@@ -92,6 +114,15 @@ export interface KeySummary
     isActive: boolean;
     /** When it was revoked, for the "what did I cut off, and when" reading. */
     revokedAtMillis?: number;
+    /**
+     * Client address the key was registered from, absent when none was resolved
+     * or the key predates the column. Registration only — it does not move when
+     * the device authenticates from somewhere else, which is what makes it
+     * useful for recognising a device that was never yours.
+     */
+    registeredIp?: string;
+    /** `user-agent` of the registering request, on the same terms as above. */
+    registeredUserAgent?: string;
 }
 
 export interface ListKeysParams
@@ -189,7 +220,7 @@ export async function registerPublicKeyService(
     assertKeyMatchesAlgorithm(publicKey, algorithm);
 
     // Store public key (90 days expiry)
-    await keysRepository.create({
+    const row = await keysRepository.create({
         userId,
         keyId,
         publicKey,
@@ -197,9 +228,19 @@ export async function registerPublicKeyService(
         fingerprint,
         deviceName,
         platform,
+        registeredIp: params.ip ?? null,
+        registeredUserAgent: params.userAgent ?? null,
         isActive: true,
         expiresAt: getKeyExpiryDate(),
     });
+
+    // A rotation replaces a device that is already signed in, so it is not the
+    // arrival this event exists to announce. Every other return above is an
+    // early return or a throw, so a row written here is always a new device.
+    if (!params.replacesKeyId)
+    {
+        emitDeviceRegistered(row, params.channel);
+    }
 }
 
 /**
@@ -301,6 +342,8 @@ export async function listKeysService(params: ListKeysParams): Promise<KeySummar
         isExpired: isExpired(row.expiresAt),
         isActive: row.isActive,
         revokedAtMillis: row.revokedAt?.getTime(),
+        registeredIp: row.registeredIp ?? undefined,
+        registeredUserAgent: row.registeredUserAgent ?? undefined,
     }));
 }
 

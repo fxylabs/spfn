@@ -4,8 +4,8 @@
   "originStatement": "Generated from the route and contract definitions in SPFN primitives (packages/auth/src/server/client-proof) and published from that repository. This file is generated output: edit the source modules and re-export, never this file.",
   "contractName": "spfn-mobile-contract",
   "contractMajor": 0,
-  "contractVersion": "0.10.1",
-  "supportedRange": ">=0.10.0 <0.11.0",
+  "contractVersion": "0.11.0",
+  "supportedRange": ">=0.11.0 <0.12.0",
   "exporterVersion": "@spfn/auth/contract-bundle@6.0.0",
   "authProfiles": { "allowed": ["clientProofV1"], "unknownProfilePolicy": "reject", "mixingWithinSession": "prohibited" },
   "operationAuthClasses": {
@@ -311,7 +311,9 @@
         { "name": "expiresAtMillis", "type": "integer", "optional": true },
         { "name": "isExpired", "type": "boolean", "optional": false },
         { "name": "isActive", "type": "boolean", "optional": false },
-        { "name": "revokedAtMillis", "type": "integer", "optional": true }
+        { "name": "revokedAtMillis", "type": "integer", "optional": true },
+        { "name": "registeredIp", "type": "string", "optional": true },
+        { "name": "registeredUserAgent", "type": "string", "optional": true }
       ]
     },
     {
