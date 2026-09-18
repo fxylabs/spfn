@@ -40,6 +40,8 @@ export async function getStorageService(options: StorageServiceOptions = {}): Pr
 
 export * from './keys';
 export { assertKeyPrefix, assertObjectKey } from './object-key';
+export { parseManifest, restoreManifest, serializeManifest, snapshotPrefix } from './snapshot-restore';
+export type { RestoreOptions, SnapshotOptions } from './snapshot-restore';
 export type {
     DeleteManyResult,
     GcsProviderConfig,

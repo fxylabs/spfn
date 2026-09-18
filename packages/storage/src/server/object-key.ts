@@ -25,6 +25,15 @@ export function assertKeyPrefix(prefix: string): void
     assertValid('prefix', prefix);
 }
 
+/** 개수·동시성처럼 양의 정수만 뜻이 있는 옵션의 공통 판정. */
+export function assertPositiveInteger(label: string, value: number): void
+{
+    if (!Number.isInteger(value) || value <= 0)
+    {
+        throw new StorageKeyError(`Invalid ${label}: must be a positive integer, got ${value}`);
+    }
+}
+
 /** `list`의 페이지 크기. 미지정이면 1,000. */
 export function resolveMaxKeys(maxKeys?: number): number
 {
@@ -32,10 +41,7 @@ export function resolveMaxKeys(maxKeys?: number): number
     {
         return DEFAULT_MAX_KEYS;
     }
-    if (!Number.isInteger(maxKeys) || maxKeys <= 0)
-    {
-        throw new StorageKeyError(`Invalid maxKeys: must be a positive integer, got ${maxKeys}`);
-    }
+    assertPositiveInteger('maxKeys', maxKeys);
 
     return maxKeys;
 }
