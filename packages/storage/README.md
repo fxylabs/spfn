@@ -112,7 +112,7 @@ file descriptor or HTTP connection stays open. `download(key)` still returns a
 
 ### Provider notes
 
-- **S3, R2, MinIO, Wasabi:** `CopyObject` with a per-segment URL-encoded
+- **S3, R2, Wasabi, SeaweedFS:** `CopyObject` with a per-segment URL-encoded
   `CopySource` — the SDK does not encode it, and keys containing `?`, `#`, `+`, or a
   space fail with `NoSuchKey` otherwise. `deletePrefix` deletes **key by key** rather
   than with `DeleteObjects`, because the GCS interoperability endpoint does not
@@ -196,7 +196,7 @@ them. Enforcement by provider:
 
 - **GCS:** both `maxBytes` (`x-goog-content-length-range: 0,max`) and `contentLength`
   (exact range) are signed. Uploads outside the range are rejected with HTTP 400.
-- **S3, R2, MinIO, Wasabi:** presigned PUT cannot sign a size *range*, so `maxBytes`
+- **S3, R2, Wasabi, SeaweedFS:** presigned PUT cannot sign a size *range*, so `maxBytes`
   is **not enforceable and is ignored**. `contentLength` is signed (`Content-Length`
   becomes a signed header) and a mismatched size fails the signature check. If you
   only know an upper bound and must enforce it on S3, use a presigned POST policy
@@ -212,7 +212,7 @@ them. Enforcement by provider:
 owning flow never completes (the client uploads but the confirming API call never
 arrives) do not accumulate forever. `finalizeObject(key)` confirms the upload.
 
-- **S3, R2, MinIO, Wasabi:** the object is tagged `lifecycle=temp`; `finalizeObject`
+- **S3, R2, Wasabi, SeaweedFS:** the object is tagged `lifecycle=temp`; `finalizeObject`
   removes the tag. Configure a bucket lifecycle rule that expires objects with that
   tag after e.g. 1 day. Temp objects are readable at their final key before
   finalization.
@@ -348,7 +348,7 @@ the same key validation as every other operation.
 
 - **GCS:** `file.delete({ ignoreNotFound: true })`. Public keys (`public/*`) use the
   public bucket and all other keys use the private bucket.
-- **S3, R2, MinIO, Wasabi:** `DeleteObject` for one key and `DeleteObjects` for a
+- **S3, R2, Wasabi, SeaweedFS:** `DeleteObject` for one key and `DeleteObjects` for a
   batch. S3 delete markers make missing-key deletion idempotent. `deletePrefix` is
   the exception and never batches — see the provider notes above.
 - **Local:** `unlink` below `LOCAL_STORAGE_DIR`. Lexical traversal, absolute paths,
@@ -367,11 +367,13 @@ against it; set only some and the suite **fails** rather than skipping quietly, 
 typo cannot hide a whole backend:
 
 ```bash
-# S3-compatible (MinIO shown; the same variables cover R2, AWS S3, and GCS interop)
-docker run -d -p 9000:9000 -e MINIO_ROOT_USER=... -e MINIO_ROOT_PASSWORD=... \
-    minio/minio server /data
+# S3-compatible (SeaweedFS shown; the same variables cover R2, AWS S3, and GCS interop).
+# Open-source MinIO is archived and its binaries are no longer served, so it is not
+# a local option any more. `weed server -s3` speaks S3 on :8333 and supports bucket
+# versioning; create the bucket with the AWS SDK or `aws s3api create-bucket`.
+weed server -s3 -dir=/tmp/seaweedfs
 
-STORAGE_CONTRACT_S3_ENDPOINT=http://127.0.0.1:9000 \
+STORAGE_CONTRACT_S3_ENDPOINT=http://127.0.0.1:8333 \
 STORAGE_CONTRACT_S3_BUCKET=spfn-storage-contract \
 STORAGE_CONTRACT_S3_ACCESS_KEY_ID=... \
 STORAGE_CONTRACT_S3_SECRET_ACCESS_KEY=... \

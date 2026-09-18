@@ -6,7 +6,7 @@
 <title>@spfn/storage — object storage over GCS, S3-compatible services and local disk · Superfunction</title>
 <meta name="description" content="Provider-agnostic object storage for SPFN — presigned uploads with signed size limits, temp uploads with finalize, idempotent deletion across GCS, S3-compatible services, and local disk.">
 <meta property="og:title" content="@spfn/storage — files, handled">
-<meta property="og:description" content="One interface over GCS, S3, R2, MinIO, Wasabi, and local disk — size-signed presigned uploads, temp uploads with finalize, idempotent single and batch deletion.">
+<meta property="og:description" content="One interface over GCS, S3, R2, Wasabi, and local disk — size-signed presigned uploads, temp uploads with finalize, idempotent single and batch deletion.">
 <meta property="og:image" content="https://superfunction.xyz/og.png">
 <meta property="og:url" content="https://superfunction.xyz/functions/storage">
 <meta property="og:type" content="website">
@@ -160,7 +160,7 @@
             <h2 class="sec-title">Six backends.<br>One <em>interface.</em></h2>
             <p class="premise-copy">Every provider does storage its own way — GCS signs size ranges, S3
                can't; S3 tags temp objects, GCS moves them; local disk supports no presigning at all.
-               <code>@spfn/storage</code> puts one service in front of GCS, S3, R2, MinIO, Wasabi, and
+               <code>@spfn/storage</code> puts one service in front of GCS, S3, R2, Wasabi, and
                the local filesystem, and documents exactly what each backend enforces instead of papering
                over the differences. Your app holds the keys in its own schema; the package handles the
                objects and nothing else.</p>
@@ -204,7 +204,7 @@
             <div class="mod-grid">
                 <a class="mod" href="/docs/packages/storage#provider-behavior">
                     <div class="mname">providers</div>
-                    <p>GCS, S3, R2, MinIO, Wasabi, and local disk behind one service.</p>
+                    <p>GCS, S3, R2, Wasabi, and local disk behind one service.</p>
                 </a>
                 <a class="mod" href="/docs/packages/storage#presigned-upload-size-limits">
                     <div class="mname">size-signed uploads</div>

@@ -81,7 +81,7 @@ await storage.finalizeObject(`private/attachments/${attachmentId}.webp`);
 
 **Size is signed, with an honest caveat per provider.** On GCS both an upper bound
 (`maxBytes`) and an exact `contentLength` are signed, and an upload outside the range is
-rejected with a 400. On S3, R2, MinIO and Wasabi a presigned PUT cannot sign a size
+rejected with a 400. On S3, R2 and Wasabi a presigned PUT cannot sign a size
 *range*, so `maxBytes` is not enforceable there and the package ignores it; `contentLength`
 is signed and a mismatch fails the signature. If you only have an upper bound on S3, that
 needs a presigned POST policy, which this package does not provide.
