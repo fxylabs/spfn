@@ -28,6 +28,7 @@ const {
     validateVerificationToken,
     sendEmail,
     runInTransaction,
+    revokeAllOAuth2GrantsForUser,
 } = vi.hoisted(() => ({
     usersRepository: {
         findById: vi.fn(),
@@ -68,6 +69,7 @@ const {
     validateVerificationToken: vi.fn(),
     sendEmail: vi.fn(async () => ({ success: true })),
     runInTransaction: vi.fn(async (fn: () => Promise<unknown>) => fn()),
+    revokeAllOAuth2GrantsForUser: vi.fn(async () => undefined),
 }));
 
 vi.mock('../../server/repositories', () => ({
@@ -83,6 +85,7 @@ vi.mock('../../server/repositories', () => ({
 
 vi.mock('../../server/helpers', () => ({ verifyPassword, getDummyPasswordHash }));
 vi.mock('../../server/services/verification.service', () => ({ validateVerificationToken }));
+vi.mock('../../server/services/oauth2-grant.service', () => ({ revokeAllOAuth2GrantsForUser }));
 vi.mock('@spfn/notification/server', () => ({ sendEmail }));
 vi.mock('@spfn/core/db', async (importOriginal) =>
 {
@@ -171,6 +174,11 @@ describe('account-deletion.service', () =>
             // deletion later would restore an account holding a signing
             // credential the deletion path never saw.
             expect(deviceAuthorizationsRepository.denyAllActiveByUserId).toHaveBeenCalledWith(user.id);
+
+            // And the OAuth grants, for the same reason one step further out: a
+            // grant carries a refresh token, so a CLI holding one would sign
+            // itself back in during the grace period.
+            expect(revokeAllOAuth2GrantsForUser).toHaveBeenCalledWith(user.id);
 
             expect(result.requestId).toBe(99);
 

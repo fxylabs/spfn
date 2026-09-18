@@ -9,7 +9,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { createHash, generateKeyPairSync } from 'node:crypto';
 
-const { keysRepository, deviceAuthorizationsRepository } = vi.hoisted(() => ({
+const { keysRepository, deviceAuthorizationsRepository, revokeAllOAuth2GrantsForUser } = vi.hoisted(() => ({
     keysRepository: {
         listForUser: vi.fn(),
         revokeByKeyIdAndUserId: vi.fn(),
@@ -22,9 +22,11 @@ const { keysRepository, deviceAuthorizationsRepository } = vi.hoisted(() => ({
     deviceAuthorizationsRepository: {
         denyAllActiveByUserId: vi.fn(async () => []),
     },
+    revokeAllOAuth2GrantsForUser: vi.fn(async () => undefined),
 }));
 
 vi.mock('../../server/repositories', () => ({ keysRepository, deviceAuthorizationsRepository }));
+vi.mock('../../server/services/oauth2-grant.service', () => ({ revokeAllOAuth2GrantsForUser }));
 
 import {
     listKeysService,
@@ -285,6 +287,11 @@ describe('revoking every key', () =>
 
         expect(deviceAuthorizationsRepository.denyAllActiveByUserId).toHaveBeenCalledTimes(2);
         expect(deviceAuthorizationsRepository.denyAllActiveByUserId).toHaveBeenCalledWith(1);
+
+        // And the OAuth grants, one step further out: a grant carries a refresh
+        // token, so a CLI holding one would sign itself back in within the hour.
+        expect(revokeAllOAuth2GrantsForUser).toHaveBeenCalledTimes(2);
+        expect(revokeAllOAuth2GrantsForUser).toHaveBeenCalledWith(1);
     });
 
     it('counts keys, not device codes — a code nobody collected was never a session', async () =>

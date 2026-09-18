@@ -227,6 +227,7 @@ routes use `.skip(['auth'])`; the rest require `Authorization: Bearer <client-si
 | `cancelAccountDeletion` | POST `/_auth/deletion/cancel` | public | cancel a pending deletion (credential-based recovery) |
 | `listRoles` / `createAdminRole` / `updateAdminRole` / `deleteAdminRole` / `updateUserRole` | — | superadmin | admin RBAC management |
 | OAuth routes | — | — | see OAuth section |
+| `registerOAuth2Client` / `getOAuth2Authorize` / `createOAuth2AuthorizationCode` / `oauth2Token` / `oauth2Revoke` / `listOAuth2Grants` / `revokeOAuth2Grant` | `/_auth/oauth2/*` | mixed | OAuth 2.1 authorization server for MCP clients — see [Authorization server for MCP clients](#authorization-server-for-mcp-clients). 404 unless configured |
 
 There is deliberately **no account-existence endpoint**. `POST /_auth/exists` was removed
 because it answered "does this account exist" directly, which is user enumeration; the
@@ -2021,6 +2022,135 @@ x-acme-service-token: <the app's own credential>
   & {})`. The built-in names keep their autocomplete and a registered profile names its own scheme.
   The field stays informational: downstream permission and tenant code takes one principal shape and
   never branches on how it was produced.
+
+## Authorization server for MCP clients
+
+Let Claude Code and Codex connect to your app's `/mcp` endpoint as the user, over the flow
+they already speak: OAuth 2.1 with dynamic client registration and PKCE.
+
+```console
+$ claude mcp add --transport http acme https://api.acme.com/mcp
+$ claude
+> /mcp
+```
+
+Between those two lines the CLI discovers `/.well-known/oauth-authorization-server`, registers
+itself, opens a browser at your consent screen, catches the redirect on a loopback port, and
+exchanges the code for a token. Nobody pastes anything.
+
+The feature is opt-in and the opt-in is one block:
+
+```typescript
+createAuthLifecycle({
+    authorizationServer: {
+        scopes: {
+            'mcp:read': 'Read your projects and tasks',
+            'mcp:write': 'Create and edit your tasks',
+        },
+        defaultScopes: ['mcp:read'],      // what a request with no `scope` asks for. default: all of them
+        // issuer: 'https://api.acme.com',           // default: SPFN_API_URL
+        // authorizeUrl: 'https://acme.com/oauth/authorize',  // default: {app url}/oauth/authorize
+        // allowedRedirectOrigins: [],    // https origins a client may register. loopback needs no entry
+        // accessTokenTtlMs: 8 * 60 * 60 * 1000,     // default 8 hours
+        // refreshTokenTtlMs: 30 * 24 * 60 * 60 * 1000,   // default 30 days
+        // codeTtlMs: 60 * 1000,          // default 60 seconds
+    },
+})
+```
+
+Without that block every endpoint below answers 404 and nothing else changes — including the
+boot check, which does not run. `scopes` is the one setting with no default: the names are
+your application's vocabulary, they are published in the metadata document and read aloud on
+the consent screen, and there is nothing to derive them from.
+
+| Endpoint | Host | Auth | What it is |
+| --- | --- | --- | --- |
+| `GET /.well-known/oauth-authorization-server` | API | public | RFC 8414 discovery — the first request any client makes |
+| `POST /_auth/oauth2/register` | API | public, IP rate limited | RFC 7591 dynamic registration. Public clients only |
+| `GET /_auth/oauth2/authorize` | API | `authenticate` | What the consent screen should say. Records nothing |
+| `POST /_auth/oauth2/authorize` | API | `authenticate` | The decision. Mints the code |
+| `POST /_auth/oauth2/token` | API | public, IP rate limited | `authorization_code` and `refresh_token` |
+| `POST /_auth/oauth2/revoke` | API | public (RFC 7009) | 200 for an unknown token as surely as for a real one |
+| `GET /_auth/oauth2/grants` · `DELETE /_auth/oauth2/grants/:id` | API | `authenticate` | What the user has connected, and the button that disconnects it |
+| `GET /oauth/authorize` · `POST /oauth/authorize` | web | session | The consent screen itself — see the note at the end |
+
+Two lines wire it to `@spfn/mcp`:
+
+```typescript
+import { verifyAccessToken } from '@spfn/auth/server';
+
+export const mcp = createMcpRoute({ validateToken: verifyAccessToken, tools: [...] });
+```
+
+`verifyAccessToken(token, resource)` answers `{ clientId, scopes, expiresAt, userId }` or
+`null`, and `null` is a refusal — `@spfn/mcp` ≥ 0.3.0-beta.3 accepts it as one rather than
+requiring a throw. `expiresAt` is seconds since the epoch, like every other OAuth field here.
+
+- **Only loopback and origins you allowed.** A client may register `http://localhost:*`,
+  `http://127.0.0.1:*` or `http://[::1]:*` — a CLI cannot know which port the OS will hand it,
+  so the **port** is the one thing allowed to vary. Nothing else does: host, path and query
+  must match the registration exactly, a fragment is refused at registration and at request,
+  and plain `http` anywhere else is refused outright. An `https` redirect URI has to be on an
+  origin listed in `allowedRedirectOrigins`.
+- **Those three spellings are three registrations.** `localhost`, `127.0.0.1` and `[::1]` do
+  not stand in for one another — they resolve differently on a machine with a split-horizon
+  resolver, and a client answered on a host it did not register is a client something
+  redirected. IPv6 is the one place spelling is folded: `http://[0:0:0:0:0:0:0:1]:5/cb` and
+  `http://[::1]:5/cb` are the same registration, because both sides are read through
+  `new URL(...).hostname`.
+- **An unknown client or a mismatched redirect URI is shown, never redirected.** There is no
+  vetted URI to send that error to, and sending it to the one the request supplied is the open
+  redirect the whole rule exists to close. Every other authorize-time error —
+  `invalid_request`, `invalid_scope`, `invalid_target`, `access_denied` — goes back to the
+  client on its registered URI, which is the only form the waiting CLI can read.
+- **PKCE S256, and nothing else.** No `plain`, and no request without a challenge. The code
+  arrives on a loopback port that any process on the machine could have been listening on.
+- **`resource` is required** (RFC 8707) and the token is only good against it. A token your
+  user approved for your MCP server cannot be replayed against a neighbouring deployment that
+  shares this authorization server.
+- **A code is spent by the statement that reads it**, so of two exchanges arriving together
+  exactly one gets tokens — and **presenting a code twice revokes the grant**, because by then
+  somebody else may hold what the first exchange produced.
+- **Refresh tokens rotate, and a rotated one is marked rather than deleted.** Presenting it
+  again revokes the grant, which kills the replacement as well as the replayed token: both
+  hang off the grant and there is no telling which holder is the thief. A refresh may ask for
+  a **subset** of the granted scopes and never for more; narrowing applies to that request and
+  leaves the user's consent record as they gave it.
+- **Every code and refresh failure is one `invalid_grant`, word for word.** Unknown, expired,
+  spent, wrong verifier, another client's. The endpoint is public, and an error that told
+  those apart would answer the question somebody holding a stolen value is asking.
+- **Token endpoint errors are RFC 6749 §5.2, not the SPFN envelope** —
+  `{ "error": "invalid_grant", "error_description": "..." }`, status 400,
+  `Cache-Control: no-store`. The client reading it is an OAuth library that knows those two
+  field names and nothing about this framework. Registration refusals are RFC 7591 §3.2.2 the
+  same way (`invalid_redirect_uri`, `invalid_client_metadata`).
+- **Nothing but a hash is stored.** Codes and tokens are `spfn_at_<64 hex>` /
+  `spfn_rt_<64 hex>` / 43 url-safe characters, and the value exists in the clear exactly once,
+  in the response that issues it. It is never logged and never put in an event.
+- **A global revocation reaches the grants.** `revoke-all`, a password change, a completed
+  password reset and a deletion request each revoke every grant the account has — so a CLI
+  holding a refresh token through "sign me out everywhere" cannot be back within the hour,
+  which is exactly the client that call was aimed at. The user's own
+  `DELETE /_auth/oauth2/grants/:id` does the same for one client, immediately.
+- **The issuer is checked at boot.** It must be an absolute URL with no path — the metadata
+  document is served at an origin's root and nowhere else — and it must be `https`, or `http`
+  on `localhost` / `127.0.0.1` / `[::1]` for development. Anything else refuses to start with
+  a message naming `SPFN_API_URL` or `authorizationServer.issuer`, whichever the value came
+  from. An application with no `authorizationServer` block never reaches this check.
+- **Unapproved client rows are swept.** Registration is unauthenticated by necessity, so
+  `auth.oauth2.client-purge` (in `authJobRouter`, daily at 05:00) deletes clients older than a
+  day that no user ever approved. One with a grant against it is never touched. Registration
+  is also capped per IP two ways — a burst rate limit, and a cap on how many unapproved
+  clients one address may have standing, which a rate limit cannot express.
+- **`/mcp` tokens are not sessions.** An access token issued here authorizes the MCP surface
+  for the resource it names. It is not a user session and is not accepted by ordinary API
+  routes.
+
+The consent screen itself — `createOAuth2AuthorizeHandlers({ loginPath })`, which renders
+`GET /oauth/authorize` and handles its POST — ships in the next release. Until then the API
+side above is complete and a handler can be written against it: `GET /_auth/oauth2/authorize`
+returns `{ clientName, redirectHost, scopes, resource }` to draw, and
+`POST /_auth/oauth2/authorize` takes the decision and returns the code to redirect with.
 
 ## Machine principals (`registerMachineVerifier`)
 
