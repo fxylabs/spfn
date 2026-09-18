@@ -40,7 +40,7 @@ export async function getAuthSessionData(): Promise<AuthSessionState>
     }
     catch (error)
     {
-        if (error instanceof SessionRenewalRequiredError)
+        if (isRenewalRequired(error))
         {
             authLogger.middleware.debug('Auth session needs renewing');
 
@@ -51,6 +51,22 @@ export async function getAuthSessionData(): Promise<AuthSessionState>
 
         return null;
     }
+}
+
+/**
+ * Whether a refusal is the renewal-required one.
+ *
+ * Matched by name as well as by class. `@spfn/auth/errors` can resolve to two
+ * module instances at once — the package entry and the source tree — under a
+ * test runner and in dev, and `instanceof` across them is false; core's own
+ * `isSerializableError` duck-types for exactly that reason. Getting this wrong
+ * fails in the direction that redirects someone to a sign-in page they do not
+ * need, which is the failure this whole branch exists to remove.
+ */
+function isRenewalRequired(error: unknown): boolean
+{
+    return error instanceof SessionRenewalRequiredError
+        || (error as { name?: unknown } | null)?.name === 'SessionRenewalRequiredError';
 }
 
 /** The session itself, or null for either of the two non-session states. */

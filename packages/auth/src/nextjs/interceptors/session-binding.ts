@@ -113,25 +113,35 @@ export const sessionBindingInterceptor: InterceptorRule =
         },
     };
 
-/** The session as it should now read, given what the route answered. */
+/**
+ * The session as it should now read, given what the route answered.
+ *
+ * The binding route speaks its own vocabulary — `{ mode, keyExpiresAtMillis }`,
+ * which is what a settings screen reads — so its answer is translated into the
+ * sign-in vocabulary the shared helper takes rather than the helper being taught
+ * a second shape.
+ */
 function applyBinding(
     session: SessionData,
-    body: BindingResponseFields | null | undefined,
+    body: { mode?: unknown; keyExpiresAtMillis?: unknown } | null | undefined,
     requestHeaders: Record<string, string>,
 ): SessionData
 {
     const { binding, keyExpiresAt, uaFamily: sealedFamily, ...unbound } = session;
 
-    if (body?.sessionBinding !== 'passkey')
+    if (body?.mode !== 'passkey')
     {
         return unbound;
     }
 
-    // The family the session already carried wins over the family of this
-    // request: re-deriving it would silently re-anchor the check to whatever
-    // browser turned the setting on, and this response is not a sign-in.
-    const fields = bindingSessionFields(body, requestHeaders['user-agent']);
+    const fields = bindingSessionFields(
+        { sessionBinding: body.mode, keyExpiresAtMillis: body.keyExpiresAtMillis },
+        requestHeaders['user-agent'],
+    );
 
+    // The family the session already carried wins over this request's: a session
+    // that moved browsers between being sealed and being bound must not have the
+    // check silently re-anchored to where it ended up. This is not a sign-in.
     return { ...unbound, ...fields, ...(sealedFamily ? { uaFamily: sealedFamily } : {}) };
 }
 

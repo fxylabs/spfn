@@ -1,0 +1,443 @@
+/**
+ * @spfn/auth - the proxy half of session binding (design #97 v2, case table 6c)
+ *
+ * One `it` per row, driving the interceptors directly with a hand-built context —
+ * the way `oauth-callback-handler.test.ts` drives the callback handler and the
+ * other interceptor suites drive theirs. No database and no backend: what these
+ * rows are about is what the Next.js proxy does with a sealed cookie before and
+ * after the backend is (or is not) called.
+ *
+ * The cookie is real throughout. Every session here is produced by `sealSession`
+ * and read back by `unsealSession`, so a row that says "the two fields survive"
+ * is asserting what is actually in the JWE rather than what a stub agreed to.
+ */
+
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import type { RequestInterceptorContext, ResponseInterceptorContext } from '@spfn/core/nextjs/server';
+import type { SetCookie } from '@spfn/core/nextjs';
+
+import { generalAuthInterceptor } from '../../nextjs/interceptors/general-auth';
+import { loginRegisterInterceptor } from '../../nextjs/interceptors/login-register';
+import { keyRotationInterceptor } from '../../nextjs/interceptors/key-rotation';
+import { oauthFinalizeInterceptor } from '../../nextjs/interceptors/oauth';
+import { sessionBindingInterceptor } from '../../nextjs/interceptors/session-binding';
+import { sessionRenewInterceptor } from '../../nextjs/interceptors/session-renew';
+import { sealPendingSession } from '../../nextjs/session-helpers';
+import { sealSession, unsealSession, type SessionData } from '../../server/lib/session';
+import { generateKeyPair } from '../../server/lib/crypto';
+import { COOKIE_NAMES } from '../../server/lib/config';
+import { authErrorRegistry, SessionContextChangedError, SessionRenewalRequiredError } from '../../errors';
+
+const SECRET = 'test-secret-with-at-least-32-characters-for-security-testing';
+const CHROME = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36';
+const FIREFOX = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:133.0) Gecko/20100101 Firefox/133.0';
+
+const BOUND = { sessionBinding: 'passkey', keyExpiresAtMillis: Date.now() + 3_600_000 };
+
+/** A session as a sign-in would have sealed it. */
+async function sealedSession(overrides: Partial<SessionData> = {}): Promise<{ sealed: string; keyId: string }>
+{
+    const keyPair = generateKeyPair('ES256');
+    const sealed = await sealSession({
+        userId: '7',
+        privateKey: keyPair.privateKey,
+        keyId: keyPair.keyId,
+        algorithm: keyPair.algorithm,
+        ...overrides,
+    } as SessionData, 3600);
+
+    return { sealed, keyId: keyPair.keyId };
+}
+
+/** The session cookie a response queued, unsealed. */
+async function queuedSession(setCookies: SetCookie[]): Promise<SessionData>
+{
+    const cookie = [...setCookies].reverse().find(entry => entry.name === COOKIE_NAMES.SESSION && entry.value);
+
+    return await unsealSession(cookie!.value);
+}
+
+function requestContext(path: string, cookies: Map<string, string>, userAgent?: string): RequestInterceptorContext
+{
+    return {
+        path,
+        method: 'GET',
+        headers: {} as Record<string, string>,
+        body: undefined,
+        cookies,
+        request: { headers: new Headers(userAgent ? { 'user-agent': userAgent } : {}) },
+        metadata: {} as Record<string, unknown>,
+    } as unknown as RequestInterceptorContext;
+}
+
+function responseContext(
+    path: string,
+    status: number,
+    body: unknown,
+    options: { cookies?: Map<string, string>; metadata?: Record<string, unknown>; userAgent?: string } = {},
+): ResponseInterceptorContext
+{
+    return {
+        path,
+        method: 'POST',
+        request: { headers: options.userAgent ? { 'user-agent': options.userAgent } : {}, body: {} },
+        response: { ok: status < 400, status, statusText: '', headers: new Headers(), body },
+        cookies: options.cookies ?? new Map(),
+        setCookies: [] as SetCookie[],
+        metadata: options.metadata ?? {},
+    } as unknown as ResponseInterceptorContext;
+}
+
+const next = async (): Promise<void> => undefined;
+
+describe('the proxy and a bound session (case table 6c)', () =>
+{
+    beforeEach(() =>
+    {
+        vi.stubEnv('SPFN_AUTH_SESSION_SECRET', SECRET);
+    });
+
+    afterEach(() =>
+    {
+        vi.unstubAllEnvs();
+        vi.restoreAllMocks();
+    });
+
+    it('bound, keyExpiresAt is past, an ordinary route: 401 SessionRenewalRequiredError envelope, backend not called, cookies kept', async () =>
+    {
+        const { sealed } = await sealedSession({ binding: 'passkey', keyExpiresAt: Date.now() - 1_000 });
+        const ctx = requestContext('/_auth/users/me', new Map([[COOKIE_NAMES.SESSION, sealed]]), CHROME);
+        const forwarded = vi.fn(next);
+
+        await generalAuthInterceptor.request?.(ctx, forwarded);
+
+        expect(forwarded).not.toHaveBeenCalled();
+        expect(ctx.abort?.status).toBe(401);
+        expect((ctx.abort?.body as { __type: string }).__type).toBe('SessionRenewalRequiredError');
+        expect(ctx.abort?.setCookies).toEqual([]);
+    });
+
+    it('bound, not yet expired, backend answers 401 KeyExpiredError (clock skew): same envelope, cookies kept', async () =>
+    {
+        const ctx = responseContext('/_auth/users/me', 401, { __type: 'KeyExpiredError', message: 'Public key has expired' }, {
+            metadata: { sessionValid: true, sessionBound: true },
+        });
+
+        await generalAuthInterceptor.response?.(ctx, next);
+
+        expect((ctx.response.body as { __type: string }).__type).toBe('SessionRenewalRequiredError');
+        expect(ctx.setCookies.filter(cookie => cookie.value === '')).toEqual([]);
+    });
+
+    it('bound, expired, POST session/renew/options: passed to the backend, cookies kept', async () =>
+    {
+        const { sealed } = await sealedSession({ binding: 'passkey', keyExpiresAt: Date.now() - 1_000 });
+        const ctx = requestContext('/_auth/session/renew/options', new Map([[COOKIE_NAMES.SESSION, sealed]]), CHROME);
+        const forwarded = vi.fn(next);
+
+        await generalAuthInterceptor.request?.(ctx, forwarded);
+
+        expect(forwarded).toHaveBeenCalledOnce();
+        expect(ctx.abort).toBeUndefined();
+    });
+
+    it('bound, expired, session/renew/verify answers 401 (signature mismatch): 401 passed through, cookies KEPT', async () =>
+    {
+        // `sessionValid` is set for the belt-and-braces case: the renewal paths
+        // are public, so the request phase never sets it — but if that filter ever
+        // changed, a refused renewal must still not empty the jar.
+        const ctx = responseContext('/_auth/session/renew/verify', 401, { __type: 'SessionRenewalRefusedError', message: 'no' }, {
+            metadata: { sessionValid: true },
+        });
+
+        await generalAuthInterceptor.response?.(ctx, next);
+
+        expect(ctx.setCookies.filter(cookie => cookie.value === '')).toEqual([]);
+    });
+
+    it('bound, the user-agent family does not match: 401 SessionContextChangedError envelope, the three cookies cleared', async () =>
+    {
+        const { sealed } = await sealedSession({ binding: 'passkey', keyExpiresAt: Date.now() + 3_600_000, uaFamily: 'chrome' });
+        const ctx = requestContext('/_auth/users/me', new Map([[COOKIE_NAMES.SESSION, sealed]]), FIREFOX);
+
+        await generalAuthInterceptor.request?.(ctx, next);
+
+        expect((ctx.abort?.body as { __type: string }).__type).toBe('SessionContextChangedError');
+        expect(ctx.abort?.setCookies?.map(cookie => cookie.name)).toEqual([
+            COOKIE_NAMES.SESSION,
+            COOKIE_NAMES.SESSION_KEY_ID,
+            COOKIE_NAMES.CSRF,
+        ]);
+    });
+
+    it('bound, no user-agent (a server component calling the RPC proxy): passed through, cookies kept', async () =>
+    {
+        const { sealed } = await sealedSession({ binding: 'passkey', keyExpiresAt: Date.now() + 3_600_000, uaFamily: 'chrome' });
+        const ctx = requestContext('/_auth/users/me', new Map([[COOKIE_NAMES.SESSION, sealed]]));
+        const forwarded = vi.fn(next);
+
+        await generalAuthInterceptor.request?.(ctx, forwarded);
+
+        expect(forwarded).toHaveBeenCalledOnce();
+        expect(ctx.abort).toBeUndefined();
+    });
+
+    it('unbound, the user-agent family does not match: passed through, and nothing is logged', async () =>
+    {
+        const { authLogger } = await import('../../server/logger');
+        const warn = vi.spyOn(authLogger.interceptor.general, 'warn').mockImplementation(() => undefined);
+        const { sealed } = await sealedSession({ uaFamily: 'chrome' });
+        const ctx = requestContext('/_auth/users/me', new Map([[COOKIE_NAMES.SESSION, sealed]]), FIREFOX);
+
+        await generalAuthInterceptor.request?.(ctx, next);
+
+        expect(ctx.abort).toBeUndefined();
+        expect(warn).not.toHaveBeenCalled();
+    });
+
+    it('bound, backend answers some other 401: 401 passed through and the cookies are cleared', async () =>
+    {
+        const ctx = responseContext('/_auth/users/me', 401, { __type: 'InvalidTokenError', message: 'no' }, {
+            metadata: { sessionValid: true, sessionBound: true },
+        });
+
+        await generalAuthInterceptor.response?.(ctx, next);
+
+        expect(ctx.setCookies.filter(cookie => cookie.value === '').map(cookie => cookie.name)).toEqual([
+            COOKIE_NAMES.SESSION,
+            COOKIE_NAMES.SESSION_KEY_ID,
+            COOKIE_NAMES.CSRF,
+        ]);
+    });
+
+    it('unbound, backend answers 401 KeyExpiredError: 401 passed through and the cookies are cleared, exactly as today', async () =>
+    {
+        const ctx = responseContext('/_auth/users/me', 401, { __type: 'KeyExpiredError', message: 'Public key has expired' }, {
+            metadata: { sessionValid: true },
+        });
+
+        await generalAuthInterceptor.response?.(ctx, next);
+
+        expect((ctx.response.body as { __type: string }).__type).toBe('KeyExpiredError');
+        expect(ctx.setCookies.filter(cookie => cookie.value === '').map(cookie => cookie.name)).toEqual([
+            COOKIE_NAMES.SESSION,
+            COOKIE_NAMES.SESSION_KEY_ID,
+            COOKIE_NAMES.CSRF,
+        ]);
+    });
+
+    it('a sign-in response without the two fields: the session is sealed unbound', async () =>
+    {
+        const ctx = responseContext('/_auth/login', 200, { userId: '7' }, {
+            metadata: { privateKey: 'k', keyId: 'key-1', algorithm: 'ES256' },
+            userAgent: CHROME,
+        });
+
+        await loginRegisterInterceptor.response?.(ctx, next);
+
+        const session = await queuedSession(ctx.setCookies);
+        expect(session.binding).toBeUndefined();
+        expect(session.keyExpiresAt).toBeUndefined();
+        expect(session.uaFamily).toBeUndefined();
+    });
+
+    it('a sign-in response with the two fields: the session carries binding, keyExpiresAt and the inbound family', async () =>
+    {
+        const ctx = responseContext('/_auth/login', 200, { userId: '7', ...BOUND }, {
+            metadata: { privateKey: 'k', keyId: 'key-1', algorithm: 'ES256' },
+            userAgent: CHROME,
+        });
+
+        await loginRegisterInterceptor.response?.(ctx, next);
+
+        expect(await queuedSession(ctx.setCookies)).toMatchObject({
+            binding: 'passkey',
+            keyExpiresAt: BOUND.keyExpiresAtMillis,
+            uaFamily: 'chrome',
+        });
+    });
+
+    it('bound, keys/rotate answers 200: the new cookie inherits both fields and the family', async () =>
+    {
+        const { sealed } = await sealedSession({
+            binding: 'passkey',
+            keyExpiresAt: BOUND.keyExpiresAtMillis,
+            uaFamily: 'chrome',
+        });
+        const request = requestContext('/_auth/keys/rotate', new Map([[COOKIE_NAMES.SESSION, sealed]]));
+        await keyRotationInterceptor.request?.(request, next);
+
+        const ctx = responseContext('/_auth/keys/rotate', 200, { success: true }, { metadata: request.metadata });
+        await keyRotationInterceptor.response?.(ctx, next);
+
+        expect(await queuedSession(ctx.setCookies)).toMatchObject({
+            binding: 'passkey',
+            keyExpiresAt: BOUND.keyExpiresAtMillis,
+            uaFamily: 'chrome',
+        });
+    });
+
+    it('bound, the OAuth finalize interceptor: the sealed session carries both fields', async () =>
+    {
+        const keyPair = generateKeyPair('ES256');
+        const pending = await sealPendingSession({
+            privateKey: keyPair.privateKey,
+            keyId: keyPair.keyId,
+            algorithm: keyPair.algorithm,
+        });
+        const ctx = responseContext('/_auth/oauth/finalize', 200, { userId: '7', keyId: keyPair.keyId, ...BOUND }, {
+            cookies: new Map([[COOKIE_NAMES.OAUTH_PENDING, pending]]),
+            userAgent: CHROME,
+        });
+
+        await oauthFinalizeInterceptor.response?.(ctx, next);
+
+        expect(await queuedSession(ctx.setCookies)).toMatchObject({
+            binding: 'passkey',
+            keyExpiresAt: BOUND.keyExpiresAtMillis,
+            uaFamily: 'chrome',
+        });
+    });
+
+    it('bound, shouldRefreshSession fires: the re-seal preserves all three fields', async () =>
+    {
+        const { sealed } = await sealedSession({
+            binding: 'passkey',
+            keyExpiresAt: BOUND.keyExpiresAtMillis,
+            uaFamily: 'chrome',
+        });
+        const session = await unsealSession(sealed);
+        const ctx = responseContext('/_auth/users/me', 200, { ok: true }, {
+            metadata: { refreshSession: true, sessionData: session, sessionValid: true, keyId: session.keyId },
+        });
+
+        await generalAuthInterceptor.response?.(ctx, next);
+
+        expect(await queuedSession(ctx.setCookies)).toMatchObject({
+            binding: 'passkey',
+            keyExpiresAt: BOUND.keyExpiresAtMillis,
+            uaFamily: 'chrome',
+        });
+    });
+
+    it('session/binding answers 200 with mode passkey: the cookie is re-sealed with both fields', async () =>
+    {
+        const { sealed } = await sealedSession();
+        const ctx = responseContext('/_auth/session/binding', 200, { mode: 'passkey', keyExpiresAtMillis: BOUND.keyExpiresAtMillis }, {
+            cookies: new Map([[COOKIE_NAMES.SESSION, sealed]]),
+            userAgent: CHROME,
+        });
+
+        await sessionBindingInterceptor.response?.(ctx, next);
+
+        expect(await queuedSession(ctx.setCookies)).toMatchObject({
+            binding: 'passkey',
+            keyExpiresAt: BOUND.keyExpiresAtMillis,
+            uaFamily: 'chrome',
+        });
+    });
+
+    it('session/binding answers 200 with mode none: the cookie is re-sealed with the fields removed', async () =>
+    {
+        const { sealed } = await sealedSession({
+            binding: 'passkey',
+            keyExpiresAt: BOUND.keyExpiresAtMillis,
+            uaFamily: 'chrome',
+        });
+        const ctx = responseContext('/_auth/session/binding', 200, { mode: 'none' }, {
+            cookies: new Map([[COOKIE_NAMES.SESSION, sealed]]),
+            userAgent: CHROME,
+        });
+
+        await sessionBindingInterceptor.response?.(ctx, next);
+
+        const session = await queuedSession(ctx.setCookies);
+        expect(session.binding).toBeUndefined();
+        expect(session.keyExpiresAt).toBeUndefined();
+        expect(session.uaFamily).toBeUndefined();
+    });
+
+    it('a 401 the proxy minted: the body carries __type and error.code, and the client restores the class', () =>
+    {
+        const bodies = [new SessionRenewalRequiredError(), new SessionContextChangedError()]
+            .map(error => ({ ...error.toJSON(), error: { code: error.name, message: error.message, requestId: 'x' } }));
+
+        for (const body of bodies)
+        {
+            expect(body).toMatchObject({ __type: expect.any(String), error: { code: body.__type } });
+            expect(authErrorRegistry.deserialize(body as never)).toBeInstanceOf(Error);
+        }
+
+        expect(authErrorRegistry.deserialize(bodies[0] as never)).toBeInstanceOf(SessionRenewalRequiredError);
+        expect(authErrorRegistry.deserialize(bodies[1] as never)).toBeInstanceOf(SessionContextChangedError);
+    });
+});
+
+describe('the renewal request shape the proxy builds (case table 6d, browser rows)', () =>
+{
+    it('injects expiredKeyId from the HttpOnly key-id cookie into both renewal calls', async () =>
+    {
+        for (const path of ['/_auth/session/renew/options', '/_auth/session/renew/verify'])
+        {
+            const ctx = requestContext(path, new Map([[COOKIE_NAMES.SESSION_KEY_ID, 'key-from-cookie']]));
+            ctx.body = { response: { id: 'credential' } };
+
+            await sessionRenewInterceptor.request?.(ctx, next);
+
+            expect(ctx.body).toEqual({ response: { id: 'credential' }, expiredKeyId: 'key-from-cookie' });
+        }
+    });
+
+    it('matches only the two renewal paths, so nothing else is handed a key id', () =>
+    {
+        const pattern = sessionRenewInterceptor.pathPattern as RegExp;
+
+        expect(pattern.test('/_auth/session/renew/options')).toBe(true);
+        expect(pattern.test('/_auth/session/renew/verify')).toBe(true);
+        expect(pattern.test('/_auth/session/binding')).toBe(false);
+        expect(pattern.test('/_auth/login')).toBe(false);
+    });
+
+    it('puts renew/verify on the login interceptor\'s list, so the proxy mints the key pair and seals the session', () =>
+    {
+        const pattern = loginRegisterInterceptor.pathPattern as RegExp;
+
+        expect(pattern.test('/_auth/session/renew/verify')).toBe(true);
+        expect(pattern.test('/_auth/session/renew/options')).toBe(false);
+    });
+});
+
+describe('a server component rendering a bound session that needs renewing (case table 6c)', () =>
+{
+    afterEach(() =>
+    {
+        vi.resetModules();
+        vi.restoreAllMocks();
+    });
+
+    it('getAuthSessionData answers renewal-required rather than null, so the guard does not read it as signed out', async () =>
+    {
+        vi.doMock('@spfn/auth', () => ({
+            authApi: {
+                getAuthSession: { call: async () => Promise.reject(new SessionRenewalRequiredError()) },
+            },
+        }));
+
+        const { getAuthSessionData, RENEWAL_REQUIRED } = await import('../../nextjs/guards/auth-utils');
+
+        expect(await getAuthSessionData()).toBe(RENEWAL_REQUIRED);
+    });
+
+    it('getAuthSessionData still answers null for an ordinary refusal', async () =>
+    {
+        vi.doMock('@spfn/auth', () => ({
+            authApi: {
+                getAuthSession: { call: async () => Promise.reject(new Error('Unauthorized')) },
+            },
+        }));
+
+        const { getAuthSessionData } = await import('../../nextjs/guards/auth-utils');
+
+        expect(await getAuthSessionData()).toBeNull();
+    });
+});
