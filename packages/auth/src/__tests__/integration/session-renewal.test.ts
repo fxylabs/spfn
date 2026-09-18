@@ -415,6 +415,41 @@ describe.skipIf(!dbAvailable)('renewing a bound session key (case table 6d)', ()
         expect((await keyRow(subject.keyId)).isActive).toBe(true);
     });
 
+    it('the identical assertion presented to verify a second time: 401, and nothing moves', async () =>
+    {
+        // The replay itself, byte for byte — same challenge, same clientDataJSON,
+        // same signature — rather than a later call that happens to fail for
+        // another reason. The challenge row is spent by the first verify, and that
+        // is what has to refuse the second.
+        const subject = await bound();
+        await expireKey(subject.keyId, 1_000);
+        const authorization = bearer(subject.keyId, subject.privateKey);
+        const started = await renewOptions(authorization);
+        const pair = freshPair();
+        const body = {
+            response: subject.authenticator.assert({
+                challenge: (await started.json()).challenge,
+                origin: ORIGIN,
+                rpId: RP_ID,
+                counter: 50,
+            }),
+            publicKey: pair.publicKey,
+            keyId: pair.keyId,
+            fingerprint: pair.fingerprint,
+            algorithm: pair.algorithm,
+        };
+
+        expect((await post('/_auth/session/renew/verify', body, authorization)).status).toBe(200);
+
+        // Replayed by the key the renewal just replaced, which is what a copy of
+        // the cookie would hold, and by the live replacement — neither gets in.
+        await expectOneRefusal(await post('/_auth/session/renew/verify', body, authorization));
+        await expectOneRefusal(await post('/_auth/session/renew/verify', body, bearer(pair.keyId, pair.privateKey)));
+
+        expect((await keyRow(pair.keyId)).isActive).toBe(true);
+        expect((await keyRow(subject.keyId)).isActive).toBe(false);
+    });
+
     it('a challenge presented twice, and one older than its TTL: 401 both times', async () =>
     {
         const subject = await bound();
@@ -579,18 +614,38 @@ describe.skipIf(!dbAvailable)('renewing a bound session key (case table 6d)', ()
         expect((await keyRow(pair.keyId)).algorithm).toBe('ES256');
     });
 
-    it('the eleventh options call in a minute from one address: 429', async () =>
+    it('the eleventh call in a minute from one address: 429, on options and on verify alike', async () =>
     {
+        // Both routes share one policy and one address key, so the eleventh call
+        // is refused whichever of the two it is — and the limiter runs ahead of
+        // the credential check, so a flood costs a counter rather than a key
+        // lookup and a signature verification each.
         const subject = await bound();
-        const answers: number[] = [];
+        const authorization = bearer(subject.keyId, subject.privateKey);
+        const optionsAnswers: number[] = [];
 
         for (let attempt = 0; attempt < 11; attempt += 1)
         {
-            answers.push((await renewOptions(bearer(subject.keyId, subject.privateKey), '198.51.100.40')).status);
+            optionsAnswers.push((await renewOptions(authorization, '198.51.100.40')).status);
         }
 
-        expect(answers.slice(0, 10).every(status => status === 200)).toBe(true);
-        expect(answers[10]).toBe(429);
+        expect(optionsAnswers.slice(0, 10).every(status => status === 200)).toBe(true);
+        expect(optionsAnswers[10]).toBe(429);
+
+        resetMemoryRateLimitStore();
+        const verifyAnswers: number[] = [];
+
+        for (let attempt = 0; attempt < 11; attempt += 1)
+        {
+            const answered = await post('/_auth/session/renew/verify', {
+                response: {},
+                ...freshPair(),
+            }, authorization, '198.51.100.41');
+            verifyAnswers.push(answered.status);
+        }
+
+        expect(verifyAnswers.slice(0, 10).every(status => status === 401)).toBe(true);
+        expect(verifyAnswers[10]).toBe(429);
     });
 
     it('a renewal spends its challenge row, so the ceremony cannot be replayed', async () =>

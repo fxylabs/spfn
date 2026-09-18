@@ -26,6 +26,7 @@ import { sealPendingSession } from '../../nextjs/session-helpers';
 import { sealSession, unsealSession, type SessionData } from '../../server/lib/session';
 import { generateKeyPair } from '../../server/lib/crypto';
 import { COOKIE_NAMES } from '../../server/lib/config';
+import { refusalEnvelope } from '../../nextjs/interceptors/error-envelope';
 import { authErrorRegistry, SessionContextChangedError, SessionRenewalRequiredError, SessionResealFailedError } from '../../errors';
 
 const SECRET = 'test-secret-with-at-least-32-characters-for-security-testing';
@@ -183,6 +184,8 @@ describe('the proxy and a bound session (case table 6c)', () =>
 
         await generalAuthInterceptor.response?.(ctx, next);
 
+        expect(ctx.response.status).toBe(401);
+        expect((ctx.response.body as { __type: string }).__type).toBe('SessionRenewalRefusedError');
         expect(ctx.setCookies.filter(cookie => cookie.value === '')).toEqual([]);
     });
 
@@ -193,6 +196,7 @@ describe('the proxy and a bound session (case table 6c)', () =>
 
         await generalAuthInterceptor.request?.(ctx, next);
 
+        expect(ctx.abort?.status).toBe(401);
         expect((ctx.abort?.body as { __type: string }).__type).toBe('SessionContextChangedError');
         expect(ctx.abort?.setCookies?.map(cookie => cookie.name)).toEqual([
             COOKIE_NAMES.SESSION,
@@ -234,6 +238,8 @@ describe('the proxy and a bound session (case table 6c)', () =>
 
         await generalAuthInterceptor.response?.(ctx, next);
 
+        expect(ctx.response.status).toBe(401);
+        expect((ctx.response.body as { __type: string }).__type).toBe('InvalidTokenError');
         expect(ctx.setCookies.filter(cookie => cookie.value === '').map(cookie => cookie.name)).toEqual([
             COOKIE_NAMES.SESSION,
             COOKIE_NAMES.SESSION_KEY_ID,
@@ -249,6 +255,7 @@ describe('the proxy and a bound session (case table 6c)', () =>
 
         await generalAuthInterceptor.response?.(ctx, next);
 
+        expect(ctx.response.status).toBe(401);
         expect((ctx.response.body as { __type: string }).__type).toBe('KeyExpiredError');
         expect(ctx.setCookies.filter(cookie => cookie.value === '').map(cookie => cookie.name)).toEqual([
             COOKIE_NAMES.SESSION,
@@ -301,11 +308,22 @@ describe('the proxy and a bound session (case table 6c)', () =>
         const ctx = responseContext('/_auth/keys/rotate', 200, { success: true }, { metadata: request.metadata });
         await keyRotationInterceptor.response?.(ctx, next);
 
-        expect(await queuedSession(ctx.setCookies)).toMatchObject({
+        // The whole Set-Cookie set, not only the JWE: the key-id cookie has to
+        // name the *new* key — it is what the renewal and CSRF paths key on — and
+        // the session cookie has to carry the private half of that same pair.
+        const session = await queuedSession(ctx.setCookies);
+        expect(session).toMatchObject({
             binding: 'passkey',
             keyExpiresAt: BOUND.keyExpiresAtMillis,
             uaFamily: 'chrome',
         });
+        expect(session.keyId).toBe(ctx.metadata.newKeyId);
+        expect(session.privateKey).toBe(ctx.metadata.newPrivateKey);
+
+        const names = ctx.setCookies.map(cookie => cookie.name);
+        expect(names).toContain(COOKIE_NAMES.SESSION_KEY_ID);
+        expect(names).toContain(COOKIE_NAMES.CSRF);
+        expect(ctx.setCookies.find(cookie => cookie.name === COOKIE_NAMES.SESSION_KEY_ID)!.value).toBe(session.keyId);
     });
 
     it('bound, the OAuth finalize interceptor: the sealed session carries both fields', async () =>
@@ -353,7 +371,7 @@ describe('the proxy and a bound session (case table 6c)', () =>
 
     it('session/binding answers 200 with mode passkey: the cookie is re-sealed with both fields', async () =>
     {
-        const { sealed } = await sealedSession();
+        const { sealed, keyId } = await sealedSession();
         const ctx = responseContext('/_auth/session/binding', 200, { mode: 'passkey', keyExpiresAtMillis: BOUND.keyExpiresAtMillis }, {
             cookies: new Map([[COOKIE_NAMES.SESSION, sealed]]),
             userAgent: CHROME,
@@ -361,11 +379,17 @@ describe('the proxy and a bound session (case table 6c)', () =>
 
         await sessionBindingInterceptor.response?.(ctx, next);
 
-        expect(await queuedSession(ctx.setCookies)).toMatchObject({
-            binding: 'passkey',
-            keyExpiresAt: BOUND.keyExpiresAtMillis,
-            uaFamily: 'chrome',
-        });
+        const session = await queuedSession(ctx.setCookies);
+        expect(session.binding).toBe('passkey');
+        expect(session.keyExpiresAt).toBe(BOUND.keyExpiresAtMillis);
+        expect(session.uaFamily).toBe('chrome');
+        expect(session.keyId).toBe(keyId);
+        expect(ctx.setCookies.map(cookie => cookie.name)).toEqual([
+            COOKIE_NAMES.SESSION,
+            COOKIE_NAMES.SESSION_KEY_ID,
+            COOKIE_NAMES.CSRF,
+        ]);
+        expect(ctx.setCookies.find(cookie => cookie.name === COOKIE_NAMES.SESSION_KEY_ID)!.value).toBe(keyId);
     });
 
     it('bound, password/reset/complete: the cookie the reset seals carries all three fields', async () =>
@@ -417,7 +441,7 @@ describe('the proxy and a bound session (case table 6c)', () =>
 
     it('session/binding answers 200 with mode none: the cookie is re-sealed with the fields removed', async () =>
     {
-        const { sealed } = await sealedSession({
+        const { sealed, keyId } = await sealedSession({
             binding: 'passkey',
             keyExpiresAt: BOUND.keyExpiresAtMillis,
             uaFamily: 'chrome',
@@ -433,21 +457,52 @@ describe('the proxy and a bound session (case table 6c)', () =>
         expect(session.binding).toBeUndefined();
         expect(session.keyExpiresAt).toBeUndefined();
         expect(session.uaFamily).toBeUndefined();
+        expect(session.keyId).toBe(keyId);
+        expect(ctx.setCookies.map(cookie => cookie.name)).toEqual([
+            COOKIE_NAMES.SESSION,
+            COOKIE_NAMES.SESSION_KEY_ID,
+            COOKIE_NAMES.CSRF,
+        ]);
     });
 
-    it('a 401 the proxy minted: the body carries __type and error.code, and the client restores the class', () =>
+    it('a refusal the proxy minted: the body refusalEnvelope actually produces carries __type, error.code and a requestId, and the client restores the class', () =>
     {
-        const bodies = [new SessionRenewalRequiredError(), new SessionContextChangedError(), new SessionResealFailedError()]
-            .map(error => ({ ...error.toJSON(), error: { code: error.name, message: error.message, requestId: 'x' } }));
+        // The production helper, not a hand-built copy of what it is believed to
+        // do: it is the thing that sets `error.code` from `__type` and mints the
+        // request id, and a test that rebuilt the body would agree with itself
+        // while the helper drifted.
+        const refusals = [
+            [new SessionRenewalRequiredError(), SessionRenewalRequiredError, 401],
+            [new SessionContextChangedError(), SessionContextChangedError, 401],
+            [new SessionResealFailedError(), SessionResealFailedError, 500],
+        ] as const;
 
-        for (const body of bodies)
+        for (const [error, expected, status] of refusals)
         {
-            expect(body).toMatchObject({ __type: expect.any(String), error: { code: body.__type } });
-            expect(authErrorRegistry.deserialize(body as never)).toBeInstanceOf(Error);
-        }
+            const refusal = refusalEnvelope(error);
+            const body = refusal.body as { __type: string; message: string; error: { code: string; requestId: string } };
 
-        expect(authErrorRegistry.deserialize(bodies[0] as never)).toBeInstanceOf(SessionRenewalRequiredError);
-        expect(authErrorRegistry.deserialize(bodies[1] as never)).toBeInstanceOf(SessionContextChangedError);
+            expect(refusal.status).toBe(status);
+            expect(refusal.setCookies).toEqual([]);
+            expect(body.__type).toBe(expected.name);
+            expect(body.error.code).toBe(body.__type);
+            expect(body.error.requestId).toMatch(/^[0-9a-f]{32}$/);
+            expect(authErrorRegistry.deserialize(body as never)).toBeInstanceOf(expected);
+        }
+    });
+
+    it('the refusal a request-phase branch aborts with is that same body', async () =>
+    {
+        const { sealed } = await sealedSession({ binding: 'passkey', keyExpiresAt: Date.now() + 3_600_000, uaFamily: 'chrome' });
+        const ctx = requestContext('/_auth/users/me', new Map([[COOKIE_NAMES.SESSION, sealed]]), FIREFOX);
+
+        await generalAuthInterceptor.request?.(ctx, next);
+
+        const body = ctx.abort!.body as { __type: string; error: { code: string; requestId: string } };
+        expect(ctx.abort!.status).toBe(401);
+        expect(body.error.code).toBe('SessionContextChangedError');
+        expect(body.error.requestId).toMatch(/^[0-9a-f]{32}$/);
+        expect(authErrorRegistry.deserialize(body as never)).toBeInstanceOf(SessionContextChangedError);
     });
 });
 
@@ -533,4 +588,100 @@ describe('a server component rendering a bound session that needs renewing (case
 
         expect(await getAuthSessionData()).toBeNull();
     });
+
+    it('RequireAuth sends that session to the renewal path, not to the sign-in page', async () =>
+    {
+        // The half a person actually experiences. `getAuthSessionData` answering
+        // the sentinel is worth nothing if the guard still redirects to
+        // `redirectTo` — and that is the failure this whole branch exists to
+        // remove, since the cookies are intact and a password is not what is
+        // being asked for.
+        const { redirect, redirected } = redirectSpy();
+
+        stubJsxRuntime();
+        vi.doMock('next/navigation', () => ({ redirect }));
+        vi.doMock('../../nextjs/session-helpers', () => ({ getSession: async () => ({ userId: '7' }) }));
+        vi.doMock('@spfn/auth', () => ({
+            authApi: {
+                getAuthSession: { call: async () => Promise.reject(new SessionRenewalRequiredError()) },
+            },
+        }));
+
+        const { RequireAuth } = await import('../../nextjs/guards/require-auth');
+
+        await expect(RequireAuth({ children: null, redirectTo: '/auth/login', renewalPath: '/account/renew' }))
+            .rejects.toThrow('redirected');
+
+        expect(redirected).toEqual(['/account/renew']);
+    });
+
+    it('RequireAuth with no renewalPath uses the configured default rather than the sign-in page', async () =>
+    {
+        vi.stubEnv('SPFN_AUTH_SESSION_RENEW_PATH', '/renew-here');
+        const { redirect, redirected } = redirectSpy();
+
+        stubJsxRuntime();
+        vi.doMock('next/navigation', () => ({ redirect }));
+        vi.doMock('../../nextjs/session-helpers', () => ({ getSession: async () => ({ userId: '7' }) }));
+        vi.doMock('@spfn/auth', () => ({
+            authApi: {
+                getAuthSession: { call: async () => Promise.reject(new SessionRenewalRequiredError()) },
+            },
+        }));
+
+        const { RequireAuth } = await import('../../nextjs/guards/require-auth');
+
+        await expect(RequireAuth({ children: null })).rejects.toThrow('redirected');
+
+        expect(redirected).toEqual(['/renew-here']);
+        vi.unstubAllEnvs();
+    });
+
+    it('RequireAuth still sends a session that is simply gone to the sign-in page', async () =>
+    {
+        const { redirect, redirected } = redirectSpy();
+
+        stubJsxRuntime();
+        vi.doMock('next/navigation', () => ({ redirect }));
+        vi.doMock('../../nextjs/session-helpers', () => ({ getSession: async () => null }));
+
+        const { RequireAuth } = await import('../../nextjs/guards/require-auth');
+
+        await expect(RequireAuth({ children: null, redirectTo: '/auth/login', renewalPath: '/account/renew' }))
+            .rejects.toThrow('redirected');
+
+        expect(redirected).toEqual(['/auth/login']);
+    });
 });
+
+/**
+ * Next's `redirect` throws to unwind the render, and the guard relies on that —
+ * the code after it assumes it never returns. The stand-in throws too, so a guard
+ * that stopped depending on it would fail here rather than silently render.
+ */
+function stubJsxRuntime(): void
+{
+    // `react` is not a dependency of this package — the guards are compiled for a
+    // host app that brings it — so importing a .tsx file here needs the runtime
+    // its JSX compiles against. Every row below asserts a redirect, which throws
+    // before any element is built, so the stub is never actually called.
+    const runtime = { jsx: () => null, jsxs: () => null, jsxDEV: () => null, Fragment: Symbol('Fragment') };
+
+    vi.doMock('react/jsx-dev-runtime', () => runtime);
+    vi.doMock('react/jsx-runtime', () => runtime);
+}
+
+function redirectSpy(): { redirect: (path: string) => never; redirected: string[] }
+{
+    const redirected: string[] = [];
+
+    return {
+        redirect: (path: string) =>
+        {
+            redirected.push(path);
+
+            throw new Error('redirected');
+        },
+        redirected,
+    };
+}

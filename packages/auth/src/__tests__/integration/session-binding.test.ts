@@ -391,7 +391,10 @@ describe.skipIf(!dbAvailable)('session binding (case tables 6a, 6b, 6g)', () =>
 
             expect(response.status).toBe(200);
             expect((await userRow()).sessionBinding).toBe('none');
-            expect((await keyRow(session.keyId)).binding).toBe('none');
+
+            const key = await keyRow(session.keyId);
+            expect(key.binding).toBe('none');
+            expect(Math.abs(key.expiresAt!.getTime() - (Date.now() + KEY_TTL_DAYS * DAY_MS))).toBeLessThan(60_000);
         });
 
         it('on, asked from a key that is not itself bound: { mode: passkey } with no keyExpiresAtMillis', async () =>
@@ -513,14 +516,43 @@ describe.skipIf(!dbAvailable)('session binding (case tables 6a, 6b, 6g)', () =>
             expect((await keyRow(session.keyId)).expiresAt!.getTime()).toBe(expiry);
         });
 
-        it('unbound: everything answers exactly as it does today', async () =>
+        it('unbound: everything answers exactly as it does today, sign-in body and listKeys row alike', async () =>
         {
-            const session = await signIn();
-            const key = await keyRow(session.keyId);
+            const keyPair = generateKeyPair('ES256');
+            const login = await post('/_auth/login', {
+                email: 'owner@test.com',
+                password: PASSWORD,
+                publicKey: keyPair.publicKey,
+                keyId: keyPair.keyId,
+                fingerprint: keyPair.fingerprint,
+                algorithm: keyPair.algorithm,
+            });
+            const body = await login.json();
+            const session = {
+                authorization: `Bearer ${generateClientToken({ keyId: keyPair.keyId }, keyPair.privateKey, 'ES256', { expiresIn: '5m' })}`,
+                keyId: keyPair.keyId,
+                privateKey: keyPair.privateKey,
+            };
 
+            // Absence, field by field: this is the shape a 0.11.x client parses,
+            // and a sign-in that started naming the default would change it.
+            expect(login.status).toBe(200);
+            expect(body.sessionBinding).toBeUndefined();
+            expect(body.keyExpiresAtMillis).toBeUndefined();
+
+            const key = await keyRow(session.keyId);
             expect(key.binding).toBe('none');
             expect(Math.abs(key.expiresAt!.getTime() - (Date.now() + KEY_TTL_DAYS * DAY_MS))).toBeLessThan(60_000);
-            expect((await post('/_auth/keys/list', {}, session)).status).toBe(200);
+
+            const listed = await post('/_auth/keys/list', {}, session);
+            const entry = (await listed.json()).keys.find((row: { keyId: string }) => row.keyId === session.keyId);
+
+            expect(listed.status).toBe(200);
+            // Absent rather than `'none'` — the same rule the sign-in body follows,
+            // so a row for an account that did not opt in has the fields it had.
+            expect(entry.binding).toBeUndefined();
+            expect(entry.concurrentUseAtMillis).toBeUndefined();
+            expect(entry).not.toHaveProperty('lastSeenIp');
         });
 
         it('a bound account signing in with a non-web clientType: binding=none and 90 days, even when the body declares platform web', async () =>
@@ -671,11 +703,30 @@ describe.skipIf(!dbAvailable)('session binding (case tables 6a, 6b, 6g)', () =>
                 { name: 'sessionBinding', type: 'KeyBinding', optional: true },
                 { name: 'keyExpiresAtMillis', type: 'integer', optional: true },
             ]));
+            // An approved device-auth poll *is* the login the approval produced,
+            // so it carries the same two fields — and they are optional there for
+            // the additional reason that the pending branch carries neither.
+            expect(fieldsOf('PollDeviceAuthResponse')).toEqual(expect.arrayContaining([
+                { name: 'sessionBinding', type: 'KeyBinding', optional: true },
+                { name: 'keyExpiresAtMillis', type: 'integer', optional: true },
+            ]));
             expect(fieldsOf('KeySummary').every(field => field.name !== 'lastSeenIp')).toBe(true);
+            // Every field this change added is optional on every type that took
+            // one, which is what makes 0.11.x consumers read nothing new.
+            for (const type of ['KeySummary', 'LoginResponse', 'PollDeviceAuthResponse'])
+            {
+                const added = fieldsOf(type).filter(field =>
+                    ['binding', 'concurrentUseAtMillis', 'sessionBinding', 'keyExpiresAtMillis'].includes(field.name));
+
+                expect(added.every(field => field.optional)).toBe(true);
+            }
         });
 
-        it('an unbound account: authenticate reads the key once and writes last-used once, as it did before', async () =>
+        it('an unbound account: authenticate makes one key-repository read and one last-used write, as it did before', async () =>
         {
+            // Repository calls, not queries: `resolveAuthenticatedUser`'s own reads
+            // are outside this count, and always were. What the row pins is that
+            // the binding work added neither a lookup nor a write to the hot path.
             // The instance `authenticate` holds, which it imports through the
             // package entry rather than from the source tree.
             const { keysRepository } = await import('@spfn/auth/server');

@@ -10,7 +10,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { enrollPasskey, isConditionalMediationAvailable, isPasskeySupported, signInWithPasskey } from '@/client/passkeys';
+import { enrollPasskey, isConditionalMediationAvailable, isPasskeySupported, renewSession, signInWithPasskey } from '@/client/passkeys';
 import type { AuthApi } from '@/client/passkeys';
 
 const REGISTRATION_OPTIONS = {
@@ -259,6 +259,67 @@ describe('browser passkey helpers', () =>
             get.mockRejectedValue(failure);
 
             expect(await signInWithPasskey(apiStub())).toMatchObject({ ok: false, reason: 'error' });
+        });
+    });
+
+    describe('renewSession', () =>
+    {
+        /** The two calls a renewal makes, with the verify answering as the route does. */
+        function renewApi(verified: Record<string, unknown>)
+        {
+            return apiStub({
+                sessionRenewOptions: { call: vi.fn().mockResolvedValue(AUTHENTICATION_OPTIONS) },
+                sessionRenewVerify: { call: vi.fn().mockResolvedValue(verified) },
+            });
+        }
+
+        function assertionCredential(): void
+        {
+            get.mockResolvedValue(credentialStub({
+                authenticatorData: new Uint8Array([8]).buffer,
+                signature: new Uint8Array([9]).buffer,
+                userHandle: new Uint8Array([10]).buffer,
+            }));
+        }
+
+        it('answers the id of the key the renewal registered, which is the only way an app can learn it', async () =>
+        {
+            // The pair is minted in the Next.js proxy and the private half never
+            // leaves the cookie, so the route's answer is the app's only source
+            // for the id. It used to be read off a field the response never had.
+            assertionCredential();
+
+            const result = await renewSession(renewApi({ userId: '3', publicId: 'pub-3', keyId: 'new-key-7' }));
+
+            expect(result).toEqual({ ok: true, keyId: 'new-key-7' });
+        });
+
+        it('sends the assertion and nothing else: the expiring key is named by the credential the proxy signs with', async () =>
+        {
+            assertionCredential();
+            const api = renewApi({ keyId: 'new-key-7' });
+
+            await renewSession(api);
+
+            expect((api.sessionRenewOptions.call as ReturnType<typeof vi.fn>).mock.calls[0][0]).toEqual({ body: {} });
+            expect(Object.keys((api.sessionRenewVerify.call as ReturnType<typeof vi.fn>).mock.calls[0][0].body))
+                .toEqual(['response']);
+        });
+
+        it('a person who dismisses the system sheet is not an application error', async () =>
+        {
+            get.mockRejectedValue(notAllowed());
+
+            expect(await renewSession(renewApi({ keyId: 'x' }))).toMatchObject({ ok: false, reason: 'no-credential' });
+        });
+
+        it('a browser with no WebAuthn at all: answered before the server is asked', async () =>
+        {
+            stubBrowser({ supported: false });
+            const api = renewApi({ keyId: 'x' });
+
+            expect(await renewSession(api)).toEqual({ ok: false, reason: 'unsupported' });
+            expect(api.sessionRenewOptions.call).not.toHaveBeenCalled();
         });
     });
 });

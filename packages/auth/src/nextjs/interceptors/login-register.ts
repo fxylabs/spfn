@@ -9,9 +9,9 @@
  * `session/renew/verify` is on the list too (#97). Renewing a bound session key
  * needs exactly what a sign-in needs — a fresh pair generated here, the public
  * half in the body, the private half sealed into the cookie — so it is served by
- * this interceptor rather than by a second copy of it. The expiring key travels
- * under its own name, `expiredKeyId`, injected by `sessionRenewInterceptor`;
- * `keyId` below means the new key on that path exactly as it does on every other.
+ * this interceptor rather than by a second copy of it. `keyId` below means the
+ * new key on that path exactly as it does on every other; the key being replaced
+ * is not in the body at all, it is the one `general-auth` signs the request with.
  */
 
 import type { InterceptorRule } from '@spfn/core/nextjs/server';

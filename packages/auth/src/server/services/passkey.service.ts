@@ -443,9 +443,9 @@ export async function verifyRenewalAssertionService(
  * The half of the check that is the credential rather than the nonce.
  *
  * The credential's owner must be the account the challenge was minted for. That
- * is the condition §5.3 asks for: `expiredKeyId` is unauthenticated input, so
- * without it somebody could point a renewal at a stranger's key and finish it
- * with their own passkey.
+ * is the condition §5.3 asks for, and it holds the line a layer deeper than the
+ * renewal middleware does: even a caller who somehow reached this step for a key
+ * that is not theirs cannot finish the ceremony with their own passkey.
  */
 async function assertionMatchesLivePasskey(
     userId: number,
