@@ -54,6 +54,7 @@ import { registerPublicKeyService, DEFAULT_KEY_ALGORITHM, KEY_FINGERPRINT_PREFIX
 import { updateLastLoginService } from './user.service';
 import { getPendingDeletionInfo } from './account-deletion.service';
 import type { LoginResult } from './auth.service';
+import { mfaEnrolledForUser } from './mfa.service';
 import { authLoginEvent } from '../events';
 
 export interface StartDeviceAuthParams
@@ -498,11 +499,14 @@ async function completeDeviceLogin(
     // event emitted from inside it would announce a sign-in that a rollback then
     // erased — the key would not exist and the subscriber would already have
     // acted on it.
+    const mfaEnrolled = await mfaEnrolledForUser(Number(result.userId));
+
     onAfterCommit(() => authLoginEvent.emit({
         userId: result.userId,
         provider: 'device',
         email: result.email,
         phone: result.phone,
+        mfaEnrolled,
     }));
 
     return result;

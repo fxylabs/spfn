@@ -28,8 +28,14 @@ import { authSchema } from './schema';
  * presented to `login/verify` or the other way round — the two ceremonies
  * authorize very different things, and only the kind tells them apart once the
  * value itself is just 32 random bytes.
+ *
+ * `'mfa'` is the third: a step-up assertion, minted for an identified account
+ * and spent by `POST /_auth/mfa/step-up`. It buys the same separation in the
+ * direction that matters most — an assertion collected as a second factor is
+ * not a sign-in, and `passkeys/login/verify` refuses it for exactly the reason
+ * the column exists.
  */
-export const WEBAUTHN_CHALLENGE_KINDS = ['registration', 'authentication'] as const;
+export const WEBAUTHN_CHALLENGE_KINDS = ['registration', 'authentication', 'mfa'] as const;
 
 export type WebAuthnChallengeKind = typeof WEBAUTHN_CHALLENGE_KINDS[number];
 
@@ -45,7 +51,8 @@ export const webauthnChallenges = authSchema.table('webauthn_challenges',
 
         // The account the ceremony is for, or null for a discoverable login —
         // where nobody has been identified yet and naming an account would be
-        // the enumeration surface the whole flow is shaped to avoid (D3).
+        // the enumeration surface the whole flow is shaped to avoid (D3). An
+        // `'mfa'` challenge always names one: the caller is already signed in.
         //
         // Nullable, so `foreignKey()` (which is notNull by construction) does
         // not apply; the cascade is still declared, so destroying an account

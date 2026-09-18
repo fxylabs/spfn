@@ -12,6 +12,7 @@ import { ValidationError } from '@spfn/core/errors';
 import { deviceAuthorizationsRepository, keysRepository } from '../repositories';
 import { revokeAllOAuth2GrantsForUser } from './oauth2-grant.service';
 import { emitDeviceRegistered } from './device-registration.service';
+import { assertStepUp, carryStepUpVerification } from './mfa.service';
 import type { DeviceRegistrationChannel } from '../events';
 
 export interface RegisterPublicKeyParams
@@ -249,8 +250,16 @@ export async function registerPublicKeyService(
     // early return or a throw, so a row written here is always a new device.
     if (!params.replacesKeyId)
     {
-        emitDeviceRegistered(row, params.channel);
+        await emitDeviceRegistered(row, params.channel);
+
+        return;
     }
+
+    // The same device under a new key id, so its second-factor verification
+    // comes with it. Done here rather than at each login path because this is
+    // the one place every `oldKeyId` rotation passes through; without it the
+    // step-up window would expire silently every time the web proxy rotated.
+    await carryStepUpVerification(userId, params.replacesKeyId, keyId);
 }
 
 /**
@@ -298,6 +307,10 @@ export async function rotateKeyService(
         isActive: true,
         expiresAt: getKeyExpiryDate(),
     });
+
+    // A rotation is already proof of the same device, so the second-factor
+    // verification follows the key rather than dying with it (#95).
+    await carryStepUpVerification(userId, oldKeyId, newKeyId);
 
     return {
         success: true,
@@ -387,6 +400,14 @@ export async function revokeAllKeysService(
     if (!includeCurrent && !currentKeyId)
     {
         throw new ValidationError({ message: 'currentKeyId is required unless includeCurrent is set' });
+    }
+
+    // Only when a device is making the call. The signed sign-out-everywhere
+    // link has no key to name and no session at all — it proved itself by a
+    // mailbox round trip, which is a credential this window cannot measure.
+    if (currentKeyId)
+    {
+        await assertStepUp({ userId, keyId: currentKeyId });
     }
 
     const revoked = !includeCurrent && currentKeyId

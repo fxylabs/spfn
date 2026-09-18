@@ -34,6 +34,16 @@ import {
 } from './auth/password-reset';
 import { confirmRevokeAllLink, consumeRevokeAllLink } from './auth/revoke-all-link';
 import {
+    mfaTotpEnroll,
+    mfaTotpConfirm,
+    mfaDisable,
+    mfaMarkPasskey,
+    mfaRegenerateRecoveryCodes,
+    mfaStatus,
+    mfaStepUp,
+    mfaStepUpOptions,
+} from './auth/mfa';
+import {
     passkeyRegisterOptions,
     passkeyRegisterVerify,
     passkeyLoginOptions,
@@ -125,6 +135,15 @@ export const mainAuthRouter = defineRouter({
     listPasskeys,
     renamePasskey,
     revokePasskey,
+    // Second factor routes (MFA)
+    mfaTotpEnroll,
+    mfaTotpConfirm,
+    mfaDisable,
+    mfaMarkPasskey,
+    mfaRegenerateRecoveryCodes,
+    mfaStatus,
+    mfaStepUp,
+    mfaStepUpOptions,
     logout,
     rotateKey,
     listKeys,

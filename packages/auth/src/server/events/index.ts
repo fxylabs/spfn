@@ -54,10 +54,16 @@ export const AuthLoginProviderSchema = Type.Union([
  * - OAuth 기존 사용자 로그인 시
  * - 기기 코드 승인이 소비되어 새 기기 키가 등록될 때 (provider: 'device')
  *
+ * `mfaEnrolled` is computed as the event is emitted (#95) and is the whole of
+ * the package's opinion about the second factor: it never blocks an account
+ * that has none, and this is the hook an app uses to offer enrolment at a first
+ * login. It says nothing about *which* factor and carries no secret.
+ *
  * @example
  * ```typescript
  * authLoginEvent.subscribe(async (payload) => {
  *     await analytics.trackLogin(payload.userId, payload.provider);
+ *     if (!payload.mfaEnrolled) await suggestSecondFactor(payload.userId);
  * });
  * ```
  */
@@ -68,6 +74,7 @@ export const authLoginEvent = defineEvent(
         provider: AuthLoginProviderSchema,
         email: Type.Optional(Type.String()),
         phone: Type.Optional(Type.String()),
+        mfaEnrolled: Type.Boolean(),
     }),
 );
 
@@ -116,6 +123,10 @@ export type DeviceRegistrationChannel = Static<typeof DeviceRegistrationChannelS
  * Neither the full fingerprint nor the public key is carried. The prefix is
  * enough to point at one entry of `listKeys`, which is what a notice needs.
  *
+ * `mfaEnrolled` is computed as the event is emitted (#95), so a notice about a
+ * new device can also be the moment an app offers a second factor to the
+ * accounts that have none.
+ *
  * @example
  * ```typescript
  * authDeviceRegisteredEvent.subscribe(async ({ userId, deviceName, ip, channel }) => {
@@ -136,6 +147,7 @@ export const authDeviceRegisteredEvent = defineEvent(
         userAgent: Type.Optional(Type.String()),
         createdAtMillis: Type.Number(),
         channel: DeviceRegistrationChannelSchema,
+        mfaEnrolled: Type.Boolean(),
     }),
 );
 

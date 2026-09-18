@@ -125,6 +125,33 @@ export type {
     PasskeySummary,
 } from './passkey.service';
 
+// Second Factor Service (MFA)
+export {
+    assertStepUp,
+    mfaEnrolledForUser,
+    carryStepUpVerification,
+    startTotpEnrolmentService,
+    confirmTotpEnrolmentService,
+    disableMfaService,
+    markPasskeySecondFactorService,
+    regenerateRecoveryCodesService,
+    mfaStatusService,
+    startStepUpService,
+    stepUpService,
+    verifySecondFactor,
+    sweepUnconfirmedMfaService,
+} from './mfa.service';
+
+export type {
+    AssertStepUpParams,
+    ConfirmTotpParams,
+    ConfirmTotpResult,
+    MarkPasskeyParams,
+    MfaStatus,
+    StepUpParams,
+    TotpEnrolmentResult,
+} from './mfa.service';
+
 // Key Service
 export {
     registerPublicKeyService,

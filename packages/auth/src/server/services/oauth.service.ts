@@ -34,6 +34,7 @@ import {
 import { registerPublicKeyService } from './key.service';
 import { updateLastLoginService } from './user.service';
 import { getPendingDeletionInfo } from './account-deletion.service';
+import { mfaEnrolledForUser } from './mfa.service';
 import { authLoginEvent, authRegisterEvent, oauthUnlinkedEvent } from '../events';
 
 export interface OAuthStartParams
@@ -278,7 +279,10 @@ export async function oauthCallbackService(
     }
     else
     {
-        await authLoginEvent.emit(eventPayload);
+        // `mfaEnrolled` is on the login event only: a brand-new account cannot
+        // have a second factor, and the register event is where an app decides
+        // what to offer a user it has just met.
+        await authLoginEvent.emit({ ...eventPayload, mfaEnrolled: await mfaEnrolledForUser(userId) });
     }
 
     return {

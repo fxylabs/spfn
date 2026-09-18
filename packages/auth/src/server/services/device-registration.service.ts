@@ -14,6 +14,7 @@ import { onAfterCommit } from '@spfn/core/db';
 
 import type { UserPublicKey } from '../entities/user-public-keys';
 import { authDeviceRegisteredEvent, type DeviceRegistrationChannel } from '../events';
+import { mfaEnrolledForUser } from './mfa.service';
 
 /**
  * How much of the fingerprint the event carries.
@@ -37,9 +38,20 @@ export const DEVICE_EVENT_FINGERPRINT_PREFIX_LENGTH = 12;
  *
  * @param row - The key row as it was written
  * @param channel - Which door the device came through
+ * @param mfaEnrolled - Read here rather than by the subscriber, so the notice
+ *     can say whether this account has a second factor yet (#95)
  */
-export function emitDeviceRegistered(row: UserPublicKey, channel: DeviceRegistrationChannel): void
+export async function emitDeviceRegistered(
+    row: UserPublicKey,
+    channel: DeviceRegistrationChannel,
+): Promise<void>
 {
+    // Read before the callback is queued, not inside it. The queue fires
+    // without awaiting, so an async callback would deliver a tick later than
+    // every consumer expects — and the value is the same either way, since the
+    // read runs in the transaction that wrote the key row.
+    const mfaEnrolled = await mfaEnrolledForUser(row.userId);
+
     onAfterCommit(() => authDeviceRegisteredEvent.emit({
         userId: String(row.userId),
         keyId: row.keyId,
@@ -51,5 +63,6 @@ export function emitDeviceRegistered(row: UserPublicKey, channel: DeviceRegistra
         userAgent: row.registeredUserAgent ?? undefined,
         createdAtMillis: row.createdAt.getTime(),
         channel,
+        mfaEnrolled,
     }));
 }

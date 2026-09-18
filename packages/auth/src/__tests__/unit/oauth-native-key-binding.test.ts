@@ -38,6 +38,10 @@ vi.mock('../../server/services/oauth.service', () => ({
 }));
 
 vi.mock('../../server/services/key.service', () => ({ registerPublicKeyService }));
+// The login event carries `mfaEnrolled` (#95); this suite is about the route's
+// own behaviour, so the lookup behind it is stubbed like every other service
+// this route reaches.
+vi.mock('../../server/services/mfa.service', () => ({ mfaEnrolledForUser: vi.fn(async () => false) }));
 vi.mock('../../server/services/user.service', () => ({ updateLastLoginService: vi.fn(async () => undefined) }));
 
 vi.mock('../../server/events', () => ({

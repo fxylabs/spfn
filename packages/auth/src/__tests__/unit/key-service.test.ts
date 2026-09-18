@@ -21,6 +21,14 @@ const { keysRepository } = vi.hoisted(() => ({
 }));
 
 vi.mock('../../server/repositories', () => ({ keysRepository }));
+// `key.service` now asks the second-factor service two questions — whether the
+// caller must step up, and whether a rotation carries a verification across.
+// Both have their own suites; here they only have to be reachable.
+vi.mock('../../server/services/mfa.service', () => ({
+    assertStepUp: vi.fn(async () => undefined),
+    carryStepUpVerification: vi.fn(async () => undefined),
+    mfaEnrolledForUser: vi.fn(async () => false),
+}));
 
 // fingerprint 검증은 이 테스트의 관심사가 아니다 — 충돌 판정만 본다. 알고리즘 검사는
 // 통과시킨다: 실제 키 자료를 쓰므로 진짜 구현이 그대로 돌아야 한다.

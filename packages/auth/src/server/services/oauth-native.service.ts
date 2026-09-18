@@ -24,6 +24,7 @@ import { getOAuthProvider, type NormalizedIdentity } from '../lib/oauth';
 import { createOrLinkUser, assertActiveForOAuthSession, backfillVerifiedEmail } from './oauth.service';
 import { registerPublicKeyService } from './key.service';
 import { updateLastLoginService } from './user.service';
+import { mfaEnrolledForUser } from './mfa.service';
 import { authLoginEvent, authRegisterEvent } from '../events';
 
 export interface OAuthNativeParams
@@ -185,7 +186,14 @@ async function persistNativeLogin(
             email: identity.email || undefined,
             metadata: params.metadata,
         };
-        onAfterCommit(() => (isNewUser ? authRegisterEvent : authLoginEvent).emit(eventPayload));
+        // `mfaEnrolled` is on the login event only — a brand-new account cannot
+        // have a second factor. Read before the callback is queued, so the
+        // callback stays synchronous and lands when consumers expect it to.
+        const mfaEnrolled = isNewUser ? false : await mfaEnrolledForUser(userId);
+
+        onAfterCommit(() => (isNewUser
+            ? authRegisterEvent.emit(eventPayload)
+            : authLoginEvent.emit({ ...eventPayload, mfaEnrolled })));
 
         return { userId: String(userId), keyId: params.keyId, isNewUser };
     }, { context: 'auth:oauth-native' });
