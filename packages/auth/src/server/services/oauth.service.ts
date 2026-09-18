@@ -19,7 +19,7 @@ import { usersRepository, socialAccountsRepository } from '../repositories';
 import { authLogger } from '../logger';
 import { isSafeReturnPath } from '../../lib/return-path';
 import { runBeforeRegister } from '../lib/config';
-import { type SocialProvider, type KeyAlgorithmType } from '../types';
+import { type SocialProvider, type KeyAlgorithmType, type SessionBindingType } from '../types';
 import {
     refreshAccessToken,
     createOAuthState,
@@ -32,6 +32,7 @@ import {
     type UnlinkNotification,
 } from '../lib/oauth';
 import { registerPublicKeyService } from './key.service';
+import { decideKeyBinding } from '../lib/key-policy';
 import { updateLastLoginService } from './user.service';
 import { getPendingDeletionInfo } from './account-deletion.service';
 import { mfaEnrolledForUser } from './mfa.service';
@@ -74,6 +75,8 @@ export interface OAuthCallbackParams
     ip?: string;
     /** `user-agent` of the callback request, already truncated at the route. */
     userAgent?: string;
+    /** Whether proxy-guard recognised the trusted Next.js proxy, from the same helper. */
+    webProxy?: boolean;
 }
 
 export interface OAuthCallbackResult
@@ -230,10 +233,15 @@ export async function oauthCallbackService(
     // 검사로 양쪽을 다 막는다.
     await assertActiveForOAuthSession(userId);
 
+    // Read once, here rather than at step 7 where it used to be: registering the
+    // key needs the account's session_binding setting, and the event payload
+    // below needs the same row. One query serves both.
+    const user = await usersRepository.findById(userId);
+
     // 4. state에서 추출한 publicKey 등록
     // No deviceName or platform: the sealed state the start step wrote carries
     // neither, so the event on this channel is the one that names no device.
-    await registerPublicKeyService({
+    const registered = await registerPublicKeyService({
         userId,
         keyId: stateData.keyId,
         publicKey: stateData.publicKey,
@@ -242,6 +250,7 @@ export async function oauthCallbackService(
         channel: 'oauth',
         ip: params.ip,
         userAgent: params.userAgent,
+        binding: decideKeyBinding(user?.sessionBinding ?? 'none', params.webProxy),
     });
 
     // 5. 마지막 로그인 시간 업데이트
@@ -261,10 +270,16 @@ export async function oauthCallbackService(
         // seam sealed it.
         returnUrl: isSafeReturnPath(stateData.returnUrl) ? stateData.returnUrl : '/',
         isNewUser: String(isNewUser),
+        // The callback page and `createOAuthCallbackHandler` are the two seams
+        // that seal a session out of this redirect, and neither calls a route
+        // that could tell them the key is bound. The two values ride the query
+        // for the same reason `userId` and `keyId` do — and, like those, nothing
+        // is authorized by them: the key row already expires when it says it
+        // does, whatever a tampered query claims the cookie should believe.
+        ...bindingRedirectParams(registered),
     });
 
     // 7. 이벤트 발행: 신규 사용자는 register, 기존 사용자는 login
-    const user = await usersRepository.findById(userId);
     const eventPayload = {
         userId: String(userId),
         provider,
@@ -470,6 +485,27 @@ export async function createOrLinkUser(
 /**
  * 리다이렉트 URL 생성
  */
+/**
+ * The two binding facts, as query parameters, or nothing.
+ *
+ * Absent for an unbound key, so the callback URL of every account that did not
+ * opt in is the one it has always been.
+ */
+function bindingRedirectParams(
+    registered: { binding: SessionBindingType; expiresAt: Date | null },
+): Record<string, string>
+{
+    if (registered.binding !== 'passkey' || !registered.expiresAt)
+    {
+        return {};
+    }
+
+    return {
+        sessionBinding: registered.binding,
+        keyExpiresAtMillis: String(registered.expiresAt.getTime()),
+    };
+}
+
 function buildRedirectUrl(
     baseUrl: string,
     params: Record<string, string>,

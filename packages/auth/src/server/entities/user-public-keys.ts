@@ -5,7 +5,7 @@
  * Supports key rotation and multi-key management per user
  */
 
-import { KEY_ALGORITHM, KEY_PLATFORM } from '../types';
+import { KEY_ALGORITHM, KEY_PLATFORM, SESSION_BINDINGS } from '../types';
 import { text, boolean, index } from 'drizzle-orm/pg-core';
 import { id, foreignKey, enumText, utcTimestamp } from '@spfn/core/db';
 import { CLIENT_KINDS } from '../client-proof/wire-headers';
@@ -72,6 +72,25 @@ export const userPublicKeys = authSchema.table(
         // Written once at registration, for the same reason and with the same
         // standing as registeredIp above
         registeredUserAgent: text('registered_user_agent'),
+
+        // Browser family the registering request's user-agent named — one of the
+        // five badges uaFamily() answers with, never the raw string
+        // null: the request sent no user-agent, or the key predates this column
+        // Written once at registration, like the two columns above. The proxy is
+        // what compares a family against a request (the browser's user-agent does
+        // not survive a server-component hop), so this is the displayable record
+        // of where the key came from rather than the value any check reads
+        registeredUaFamily: text('registered_ua_family'),
+
+        // Whether this key is bound to a passkey — decided by the server when the
+        // key was registered, from the owner's session_binding setting and
+        // whether the request came through the trusted Next.js proxy
+        // 'none' (default): a 90-day key, the behaviour that predates #97
+        // 'passkey': a short-lived key; only a fresh WebAuthn assertion renews it,
+        //   and a login that re-registers it does not extend its expiry
+        // Never read off a request body, and `platform` is not consulted: that
+        // field is display-only and a native client may declare any value it likes
+        binding: enumText('binding', SESSION_BINDINGS).notNull().default('none'),
 
         // What the client said about itself on the last request signed by this key.
         //

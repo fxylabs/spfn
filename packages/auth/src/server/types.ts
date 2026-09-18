@@ -35,6 +35,31 @@ export type KeyPlatformType = typeof KEY_PLATFORM[number];
 export const KEY_DEVICE_NAME_MAX_LENGTH = 64;
 
 /**
+ * Whether a session's device key is tied to something that cannot be copied out
+ * of the browser.
+ *
+ * `'none'` is every session this package issued before #97: a key that lives
+ * ninety days, sealed inside the cookie, so a copy of that cookie signs exactly
+ * as the original does for as long as the key lasts. `'passkey'` is the opt-in —
+ * a key that lives hours instead, which only a fresh WebAuthn assertion may
+ * replace, so the copy stops working at the first renewal.
+ *
+ * The same two values name the account setting (`users.session_binding`) and the
+ * fact recorded on one key row (`user_public_keys.binding`). They are one list
+ * because a key is bound exactly when the account that owns it asked for it, and
+ * a second vocabulary would only invite the two to drift.
+ *
+ * Server-decided, always. Nothing on a request body chooses it — see
+ * `registerPublicKeyService`.
+ */
+export const SESSION_BINDINGS = ['none', 'passkey'] as const;
+
+/**
+ * Session binding type derived from the const array
+ */
+export type SessionBindingType = typeof SESSION_BINDINGS[number];
+
+/**
  * Invitation status enum values
  * Single source of truth for all invitation statuses
  */

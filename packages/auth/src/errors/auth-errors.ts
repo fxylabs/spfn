@@ -5,6 +5,7 @@
  */
 
 import {
+    BadRequestError,
     ValidationError,
     UnauthorizedError,
     ForbiddenError,
@@ -822,6 +823,34 @@ export class LastRecoveryCredentialError extends ConflictError
             details: data.details,
         });
         this.name = 'LastRecoveryCredentialError';
+    }
+}
+
+/**
+ * Session Binding Unavailable Error (400)
+ *
+ * Thrown when an account asks to bind its session on a deployment where the
+ * backend cannot tell a request through the trusted Next.js proxy from a direct
+ * one — `proxy-guard` unconfigured, so `clientType` is never `'web'`.
+ *
+ * A configuration refusal rather than a security one, which is why it is a 400
+ * and why the message names what to set: with nothing to distinguish the proxy,
+ * every key would be registered unbound and the setting would be a switch that
+ * reports success and protects nothing.
+ */
+export class SessionBindingUnavailableError extends BadRequestError
+{
+    readonly code = 'SESSION_BINDING_UNAVAILABLE';
+
+    constructor(data: { message?: string; details?: Record<string, any> } = {})
+    {
+        super({
+            message: data.message
+                || 'Session binding needs a deployment where the backend can recognise the Next.js proxy. '
+                + 'Configure proxy-guard (SPFN_PROXY_SIGNATURE_KEYS) and try again.',
+            details: data.details,
+        });
+        this.name = 'SessionBindingUnavailableError';
     }
 }
 

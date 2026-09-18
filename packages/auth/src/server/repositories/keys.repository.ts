@@ -319,6 +319,56 @@ export class KeysRepository extends BaseRepository
     }
 
     /**
+     * Bind one live key to the account's passkey, and give it the short life
+     * that goes with it.
+     *
+     * Scoped by user and by `isActive`, like every other targeted update here, so
+     * the answer is "this call bound something" rather than "a row exists".
+     * Write primary 사용
+     */
+    async bindByKeyIdAndUserId(keyId: string, userId: number, expiresAt: Date)
+    {
+        const result = await this.db
+            .update(userPublicKeys)
+            .set({ binding: 'passkey', expiresAt })
+            .where(
+                and(
+                    eq(userPublicKeys.keyId, keyId),
+                    eq(userPublicKeys.userId, userId),
+                    eq(userPublicKeys.isActive, true),
+                ),
+            )
+            .returning();
+
+        return result[0] ?? null;
+    }
+
+    /**
+     * Return every one of a user's bound keys to an ordinary long-lived key.
+     *
+     * One statement, because turning the setting off has to leave no key behind:
+     * a row still marked `'passkey'` would keep expiring in hours with nothing
+     * left to renew it, and its owner has just said they do not want that.
+     * Write primary 사용
+     */
+    async unbindActiveByUserId(userId: number, expiresAt: Date): Promise<number>
+    {
+        const result = await this.db
+            .update(userPublicKeys)
+            .set({ binding: 'none', expiresAt })
+            .where(
+                and(
+                    eq(userPublicKeys.userId, userId),
+                    eq(userPublicKeys.isActive, true),
+                    eq(userPublicKeys.binding, 'passkey'),
+                ),
+            )
+            .returning();
+
+        return result.length;
+    }
+
+    /**
      * Key ID로 공개키 조회 — 활성 여부 무관 (clientProofV1 admission의 revocation 판정용)
      *
      * 폐기(isActive=false)·만료(expiresAt 경과)를 SESSION_REVOKED로, 미등록을

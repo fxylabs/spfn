@@ -44,6 +44,11 @@ import {
     mfaStepUpOptions,
 } from './auth/mfa';
 import {
+    setSessionBinding,
+    getSessionBinding,
+    sessionBindingDisableOptions,
+} from './auth/session-binding';
+import {
     passkeyRegisterOptions,
     passkeyRegisterVerify,
     passkeyLoginOptions,
@@ -154,6 +159,10 @@ export const mainAuthRouter = defineRouter({
     consumeRevokeAllLink,
     changePassword,
     getAuthSession,
+    // Session binding routes (#97)
+    setSessionBinding,
+    getSessionBinding,
+    sessionBindingDisableOptions,
     // One-Time Token routes
     issueOneTimeToken,
     // Account deletion routes

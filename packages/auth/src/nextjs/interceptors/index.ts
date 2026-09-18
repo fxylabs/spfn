@@ -15,6 +15,9 @@
  * 4. keyRotationInterceptor - Specific (key rotation only)
  * 5. oauthUrlInterceptor - OAuth URL generation (key generation + state injection)
  * 6. generalAuthInterceptor - General (all authenticated requests)
+ * 7. sessionBindingInterceptor - Last, so its re-sealed cookie wins over the
+ *    general one: response phases run in this order and the later write of a
+ *    cookie name is the one the browser keeps.
  */
 
 import { loginRegisterInterceptor } from './login-register';
@@ -23,6 +26,7 @@ import { keyRotationInterceptor } from './key-rotation';
 import { oauthUrlInterceptor, oauthFinalizeInterceptor } from './oauth';
 import { signupLinkInterceptor } from './signup-link';
 import { passwordResetInterceptor } from './password-reset';
+import { sessionBindingInterceptor } from './session-binding';
 
 /**
  * All auth interceptors
@@ -35,6 +39,7 @@ import { passwordResetInterceptor } from './password-reset';
  * 5. oauthUrlInterceptor - Handles OAuth URL requests (key generation + state injection + pending session)
  * 6. oauthFinalizeInterceptor - Handles OAuth finalize (pending session → full session)
  * 7. generalAuthInterceptor - Handles all authenticated requests (session validation + JWT injection + session renewal)
+ * 8. sessionBindingInterceptor - Re-seals the session cookie when the binding setting changes
  */
 export const authInterceptors = [
     signupLinkInterceptor,
@@ -44,6 +49,7 @@ export const authInterceptors = [
     oauthUrlInterceptor,
     oauthFinalizeInterceptor,
     generalAuthInterceptor,
+    sessionBindingInterceptor,
 ];
 
 export { loginRegisterInterceptor } from './login-register';
@@ -52,6 +58,7 @@ export { keyRotationInterceptor } from './key-rotation';
 export { oauthUrlInterceptor, oauthFinalizeInterceptor } from './oauth';
 export { signupLinkInterceptor } from './signup-link';
 export { passwordResetInterceptor } from './password-reset';
+export { sessionBindingInterceptor, bindingSessionFields } from './session-binding';
 
 // Deprecated: use generalAuthInterceptor instead
 export { generalAuthInterceptor as authenticationInterceptor };

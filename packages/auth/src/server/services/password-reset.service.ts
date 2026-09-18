@@ -45,9 +45,10 @@ import { authPasswordResetEvent } from '../events';
 import { issuePasswordResetLink } from './link-mail.service';
 import { revokeAllOAuth2GrantsForUser } from './oauth2-grant.service';
 import { registerPublicKeyService } from './key.service';
+import { decideKeyBinding } from '../lib/key-policy';
 import { updateLastLoginService } from './user.service';
 import type { RegisterResult } from './auth.service';
-import type { KeyAlgorithmType, KeyPlatformType } from '../types';
+import type { KeyAlgorithmType, KeyPlatformType, SessionBindingType } from '../types';
 
 /**
  * The account behind a row, if a reset may still land on it.
@@ -222,6 +223,8 @@ export interface CompletePasswordResetParams
     ip?: string;
     /** `user-agent` of the request, already truncated at the route. */
     userAgent?: string;
+    /** Whether proxy-guard recognised the trusted Next.js proxy, from the same helper. */
+    webProxy?: boolean;
 }
 
 /**
@@ -240,7 +243,7 @@ export interface CompletePasswordResetParams
  */
 async function replaceCredentials(
     row: PasswordResetToken,
-    user: { id: number; emailVerifiedAt: Date | null },
+    user: { id: number; emailVerifiedAt: Date | null; sessionBinding: SessionBindingType },
     params: CompletePasswordResetParams,
 ): Promise<void>
 {
@@ -272,6 +275,7 @@ async function replaceCredentials(
         channel: 'password-reset',
         ip: params.ip,
         userAgent: params.userAgent,
+        binding: decideKeyBinding(user.sessionBinding, params.webProxy),
     });
 
     await updateLastLoginService(user.id);

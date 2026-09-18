@@ -385,3 +385,19 @@ export type { OAuth2GrantSummary } from './oauth2-grant.service';
 // `validateToken`. Exported from the same entry as `isOpsToken`.
 export { verifyAccessToken } from './oauth2-access-token.service';
 export type { VerifiedOAuth2AccessToken } from './oauth2-access-token.service';
+
+// Session binding (#97) — the opt-in that gives a web session a short-lived key
+// only a passkey assertion can renew.
+export {
+    getSessionBindingService,
+    keySessionBindingService,
+    enableSessionBindingService,
+    disableSessionBindingService,
+    startSessionBindingDisableService,
+} from './session-binding.service';
+
+export type {
+    SessionBindingResult,
+    SessionBindingParams,
+    DisableSessionBindingParams,
+} from './session-binding.service';

@@ -14,6 +14,7 @@ import { getSessionTtl, COOKIE_NAMES } from '../../server/lib/config';
 import { authLogger } from '../../server/logger';
 import { cookieSecure } from './cookie-options';
 import { pushCsrfCookie } from './csrf';
+import { bindingSessionFields } from './session-binding';
 
 /**
  * The sign-in paths that replace a key the browser already holds.
@@ -104,13 +105,16 @@ export const loginRegisterInterceptor: InterceptorRule =
                 // Get session TTL (priority: runtime > global > env > default)
                 const ttl = getSessionTtl(ctx.metadata.remember);
 
-                // Encrypt session data
+                // Encrypt session data. The binding fields ride along when the
+                // sign-in said the account asked for a bound session; without
+                // them this is the same four-field literal it has always been.
                 const sessionData =
                     {
                         userId: userData.userId,
                         privateKey: ctx.metadata.privateKey,
                         keyId: ctx.metadata.keyId,
                         algorithm: ctx.metadata.algorithm,
+                        ...bindingSessionFields(userData, ctx.request.headers['user-agent']),
                     };
 
                 const sealed = await sealSession(sessionData, ttl);

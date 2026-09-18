@@ -50,6 +50,13 @@ export interface OAuthNativeParams
     ip?: string;
     /** `user-agent` of the request, already truncated at the route. */
     userAgent?: string;
+    /**
+     * Whether proxy-guard recognised the trusted Next.js proxy, from the same
+     * helper. Accepted because every registering route spreads the whole
+     * provenance, and read by nothing: a native sign-in never produces a bound
+     * key — see the note at the registration below.
+     */
+    webProxy?: boolean;
 
     /** Apple은 첫 로그인에만 이름을 별도로 주므로 클라이언트가 전달할 수 있다. */
     profile?: { name?: string };
@@ -165,6 +172,14 @@ async function persistNativeLogin(
         await assertActiveForOAuthSession(userId);
 
         // 공개키 등록 (같은 사용자의 활성 키 재등록만 무시 — 그 밖의 keyId 충돌은 409)
+        //
+        // No `binding`, so the key is an ordinary 90-day one even on an account
+        // that turned session binding on. This route exists for a native SDK
+        // holding a provider id_token: there is no session cookie for a copy to
+        // be made of and no browser to run the renewal ceremony in, and
+        // `clientType` on a request that reached the backend directly is never
+        // the web proxy the decision reads. The `platform` the client declares is
+        // not consulted, here or anywhere — see `decideKeyBinding`.
         await registerPublicKeyService({
             userId,
             keyId: params.keyId,

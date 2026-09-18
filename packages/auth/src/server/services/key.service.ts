@@ -4,9 +4,11 @@
  * Handles public key registration, rotation, and revocation
  */
 
-import { type KeyAlgorithmType, type KeyPlatformType } from '../types';
+import { type KeyAlgorithmType, type KeyPlatformType, type SessionBindingType } from '../types';
 import { assertKeyMatchesAlgorithm, verifyKeyFingerprint } from '../helpers/jwt';
 import { KEY_TTL_DAYS } from '../lib/key-policy';
+import { getBoundKeyTtlMs } from '../lib/config';
+import { uaFamily } from '../lib/ua-family';
 import { InvalidKeyFingerprintError, KeyIdAlreadyRegisteredError } from '@spfn/auth/errors';
 import { ValidationError } from '@spfn/core/errors';
 import { deviceAuthorizationsRepository, keysRepository } from '../repositories';
@@ -34,6 +36,18 @@ export interface RegisterPublicKeyParams
     ip?: string;
     /** `user-agent` of the registering request, already truncated. */
     userAgent?: string;
+    /**
+     * Whether this key is bound to a passkey, as the registering path decided.
+     *
+     * Decided by the caller from two facts it is the only one holding: the
+     * owner's `session_binding` setting, and whether `proxy-guard` recognised the
+     * request as coming through the trusted Next.js proxy (`decideKeyBinding`).
+     * Never read off a request body, and `platform` is not consulted — that field
+     * is display-only, usually absent on a proxy-made key, and a native client
+     * may declare `'web'` freely. Omitted means `'none'`, which is what every
+     * path that has no opinion gets.
+     */
+    binding?: SessionBindingType;
     /**
      * The key this one replaces on the same device, when a revocation actually
      * happened. Its presence is what makes this a rotation rather than a new
@@ -157,10 +171,35 @@ export const KEY_FINGERPRINT_PREFIX_LENGTH = 8;
 export const DEFAULT_KEY_ALGORITHM: KeyAlgorithmType = 'ES256';
 
 /**
- * Helper: Calculate key expiry date (KEY_TTL_DAYS from now)
+ * What a registration settled on, for the caller that has to tell the browser.
+ *
+ * The sign-in paths put these two into their `LoginResult`, the Next.js proxy
+ * copies them into the sealed cookie, and that is the whole carrier by which the
+ * proxy learns a session is bound and when its key runs out. Returned rather than
+ * looked up again: the row was just written (or just read), so a second query
+ * would be a second answer to a question already settled.
  */
-function getKeyExpiryDate(): Date
+export interface RegisteredKeyBinding
 {
+    binding: SessionBindingType;
+    /** null only for a key registered before expiry was stamped at all. */
+    expiresAt: Date | null;
+}
+
+/**
+ * Helper: Calculate key expiry date — hours for a bound key, KEY_TTL_DAYS otherwise
+ *
+ * The binding is the input because it is the whole difference: a bound key's
+ * short life is the protection, and the only thing allowed to give it a new one
+ * is a renewal carrying a fresh WebAuthn assertion.
+ */
+function getKeyExpiryDate(binding: SessionBindingType): Date
+{
+    if (binding === 'passkey')
+    {
+        return new Date(Date.now() + getBoundKeyTtlMs());
+    }
+
     const expiresAt = new Date();
     expiresAt.setDate(expiresAt.getDate() + KEY_TTL_DAYS);
 
@@ -189,28 +228,19 @@ function isExpired(expiresAt: Date | null): boolean
  */
 export async function registerPublicKeyService(
     params: RegisterPublicKeyParams,
-): Promise<void>
+): Promise<RegisteredKeyBinding>
 {
     const { userId, keyId, publicKey, fingerprint, algorithm = DEFAULT_KEY_ALGORITHM, deviceName, platform } = params;
+    const binding = params.binding ?? 'none';
 
     const existing = await keysRepository.findByKeyId(keyId);
     if (existing)
     {
         // 같은 사용자가 자기 활성 키를 다시 등록하는 것만 무시한다 — 한 기기에서
         // 반복 로그인할 때 걸리는 정상 경로다.
-        //
-        // 만료(expiresAt 경과)는 여기서 함께 본다. 만료로 isActive가 뒤집히지는 않으므로
-        // 그냥 무시하고 반환하면 로그인은 200인데 authenticate가 KeyExpiredError로 모든
-        // 요청을 막는다 — 로그인됐다고 믿는 채로 아무것도 안 되는 상태가 된다. 방금 로그인이
-        // 신원을 다시 증명했으니 만료만 연장한다.
         if (existing.userId === userId && existing.isActive)
         {
-            if (isExpired(existing.expiresAt))
-            {
-                await keysRepository.extendExpiry(keyId, userId, getKeyExpiryDate());
-            }
-
-            return;
+            return await reRegisterOwnActiveKey(existing, userId);
         }
 
         // 폐기된 자기 키 재사용과 남의 활성 키는 같은 에러로 답한다. 응답이 갈리면
@@ -230,7 +260,7 @@ export async function registerPublicKeyService(
     // at proof verification, after the caller believes it is enrolled.
     assertKeyMatchesAlgorithm(publicKey, algorithm);
 
-    // Store public key (90 days expiry)
+    // Store public key — hours for a bound key, 90 days otherwise
     const row = await keysRepository.create({
         userId,
         keyId,
@@ -239,27 +269,64 @@ export async function registerPublicKeyService(
         fingerprint,
         deviceName,
         platform,
+        binding,
         registeredIp: params.ip ?? null,
         registeredUserAgent: params.userAgent ?? null,
+        registeredUaFamily: params.userAgent ? uaFamily(params.userAgent) : null,
         isActive: true,
-        expiresAt: getKeyExpiryDate(),
+        expiresAt: getKeyExpiryDate(binding),
     });
 
     // A rotation replaces a device that is already signed in, so it is not the
     // arrival this event exists to announce. Every other return above is an
     // early return or a throw, so a row written here is always a new device.
-    if (!params.replacesKeyId)
+    //
+    // That same device under a new key id carries its second-factor verification
+    // across instead: this is the one place every `oldKeyId` rotation passes
+    // through, and without it the step-up window would expire silently every
+    // time the web proxy rotated.
+    if (params.replacesKeyId)
+    {
+        await carryStepUpVerification(userId, params.replacesKeyId, keyId);
+    }
+    else
     {
         await emitDeviceRegistered(row, params.channel);
-
-        return;
     }
 
-    // The same device under a new key id, so its second-factor verification
-    // comes with it. Done here rather than at each login path because this is
-    // the one place every `oldKeyId` rotation passes through; without it the
-    // step-up window would expire silently every time the web proxy rotated.
-    await carryStepUpVerification(userId, params.replacesKeyId, keyId);
+    return { binding, expiresAt: row.expiresAt };
+}
+
+/**
+ * The caller re-registering a key it already holds — a repeated login from one
+ * device, which is an ordinary path and stays a no-op success.
+ *
+ * Expiry is the one thing looked at. Nothing flips `isActive` when a TTL runs
+ * out, so returning quietly on an expired key would answer the login 200 while
+ * `authenticate` refuses every request it makes afterwards: signed in, and
+ * nothing works. The sign-in just proved the identity again, so the expiry moves.
+ *
+ * A bound key is the exception, and it is the feature. Its short life is what a
+ * copied cookie cannot outlast, and extending it on a login — a login a copied
+ * cookie can perform, since the password is what it asks for and not the
+ * credential binding exists to require — would hand back the ninety days this
+ * setting was turned on to withhold. It is left expired and `session/renew`,
+ * which needs a fresh WebAuthn assertion, is the only way to a live key.
+ */
+async function reRegisterOwnActiveKey(
+    existing: { keyId: string; binding: SessionBindingType; expiresAt: Date | null },
+    userId: number,
+): Promise<RegisteredKeyBinding>
+{
+    if (existing.binding !== 'passkey' && isExpired(existing.expiresAt))
+    {
+        const extended = getKeyExpiryDate('none');
+        await keysRepository.extendExpiry(existing.keyId, userId, extended);
+
+        return { binding: 'none', expiresAt: extended };
+    }
+
+    return { binding: existing.binding, expiresAt: existing.expiresAt };
 }
 
 /**
@@ -295,7 +362,16 @@ export async function rotateKeyService(
         'Replaced by key rotation',
     );
 
-    // Store new public key (90 days expiry)
+    // Store new public key. Rotation is a new key for the same device, so
+    // everything the row said about that device carries over: the label, the
+    // platform, where and what it registered from — and the binding, which is
+    // the owner's setting rather than anything this request chose.
+    //
+    // The expiry carries over too, verbatim, rather than being recomputed. A
+    // rotation is not a renewal: recomputing would hand a bound key another full
+    // window every time the browser rotated, which is a way to hold a bound
+    // session open forever without ever presenting the credential that binding
+    // exists to ask for. `session/renew` is the only path that moves it.
     await keysRepository.create({
         userId,
         keyId: newKeyId,
@@ -304,8 +380,12 @@ export async function rotateKeyService(
         fingerprint,
         deviceName: params.deviceName ?? replaced?.deviceName ?? undefined,
         platform: params.platform ?? replaced?.platform ?? undefined,
+        binding: replaced?.binding ?? 'none',
+        registeredIp: replaced?.registeredIp ?? null,
+        registeredUserAgent: replaced?.registeredUserAgent ?? null,
+        registeredUaFamily: replaced?.registeredUaFamily ?? null,
         isActive: true,
-        expiresAt: getKeyExpiryDate(),
+        expiresAt: replaced?.expiresAt ?? getKeyExpiryDate('none'),
     });
 
     // A rotation is already proof of the same device, so the second-factor

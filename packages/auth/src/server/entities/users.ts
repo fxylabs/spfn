@@ -12,7 +12,7 @@
  * - Email/phone verification
  */
 
-import { USER_STATUSES } from '../types';
+import { SESSION_BINDINGS, USER_STATUSES } from '../types';
 import { text, boolean, index, integer, uuid } from 'drizzle-orm/pg-core';
 import { id, timestamps, enumText, utcTimestamp, foreignKey, softDelete } from '@spfn/core/db';
 import { roles } from './roles';
@@ -78,6 +78,22 @@ export const users = authSchema.table('users',
         // it was issued against — a link is dead once any other path has already
         // signed every device out
         keyEpoch: integer('key_epoch').notNull().default(0),
+
+        // Whether this account's web sessions run on a key bound to a passkey
+        // 'none' (default): the key lives 90 days and a copy of the session
+        //   cookie signs with it for as long as it lasts — the behaviour every
+        //   account had before this column existed
+        // 'passkey': a web session started through the trusted Next.js proxy gets
+        //   a key that expires in hours, and only a fresh WebAuthn assertion can
+        //   put a new one in the cookie
+        // Opt-in, and only while the account has a live platform passkey to renew
+        // with. Leaving 'passkey' needs a fresh credential, never key age alone
+        sessionBinding: enumText('session_binding', SESSION_BINDINGS).notNull().default('none'),
+
+        // When the setting above last changed, so an account timeline can say
+        // when the protection was turned on or off
+        // null: never changed — the account has been on the default since it existed
+        sessionBindingChangedAt: utcTimestamp('session_binding_changed_at'),
 
         // Metadata
         // Last successful login timestamp

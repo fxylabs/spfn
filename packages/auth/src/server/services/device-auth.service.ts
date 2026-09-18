@@ -51,9 +51,10 @@ import {
     normalizeUserCode,
 } from '../lib/device-code';
 import { registerPublicKeyService, DEFAULT_KEY_ALGORITHM, KEY_FINGERPRINT_PREFIX_LENGTH } from './key.service';
+import { decideKeyBinding } from '../lib/key-policy';
 import { updateLastLoginService } from './user.service';
 import { getPendingDeletionInfo } from './account-deletion.service';
-import type { LoginResult } from './auth.service';
+import { loginBindingFields, type LoginResult } from './auth.service';
 import { mfaEnrolledForUser } from './mfa.service';
 import { authLoginEvent } from '../events';
 
@@ -122,6 +123,13 @@ export interface PollDeviceAuthParams
     ip?: string;
     /** `user-agent` of the request, already truncated at the route. */
     userAgent?: string;
+    /**
+     * Whether proxy-guard recognised the trusted Next.js proxy, from the same
+     * helper. A waiting device polls the backend itself, so this is false there
+     * and the key it collects is unbound — which is what a device with no browser
+     * to run a WebAuthn ceremony in needs.
+     */
+    webProxy?: boolean;
 }
 
 /** Nobody has answered yet. Not an error — the waiting device waits. */
@@ -472,7 +480,7 @@ async function completeDeviceLogin(
     // The provenance is the polling device's, not the approving one's: this is
     // the request that turns a parked key into a registered one, and the device
     // the owner sees in their list is the device that will be signing.
-    await registerPublicKeyService({
+    const registered = await registerPublicKeyService({
         userId: user.id,
         keyId: record.keyId,
         publicKey: record.publicKey,
@@ -483,6 +491,7 @@ async function completeDeviceLogin(
         channel: 'device-code',
         ip: provenance.ip,
         userAgent: provenance.userAgent,
+        binding: decideKeyBinding(user.sessionBinding, provenance.webProxy),
     });
 
     await updateLastLoginService(user.id);
@@ -493,6 +502,7 @@ async function completeDeviceLogin(
         email: user.email || undefined,
         phone: user.phone || undefined,
         passwordChangeRequired: user.passwordChangeRequired,
+        ...loginBindingFields(registered),
     };
 
     // After commit, not inline: the poll route is transactional, and a login

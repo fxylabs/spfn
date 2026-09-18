@@ -34,8 +34,15 @@ import { authSchema } from './schema';
  * direction that matters most — an assertion collected as a second factor is
  * not a sign-in, and `passkeys/login/verify` refuses it for exactly the reason
  * the column exists.
+ *
+ * `'renewal'` is the fourth: the assertion that renews a bound session key, and
+ * the one that lets an account leave `session_binding: 'passkey'`. It is its own
+ * kind rather than a reused `'authentication'` because that kind's challenge is
+ * minted for nobody in particular — a discoverable sign-in names no account —
+ * while a renewal challenge is bound to the account it was issued for, and
+ * spending one where the other was expected would cross those two rules.
  */
-export const WEBAUTHN_CHALLENGE_KINDS = ['registration', 'authentication', 'mfa'] as const;
+export const WEBAUTHN_CHALLENGE_KINDS = ['registration', 'authentication', 'mfa', 'renewal'] as const;
 
 export type WebAuthnChallengeKind = typeof WEBAUTHN_CHALLENGE_KINDS[number];
 

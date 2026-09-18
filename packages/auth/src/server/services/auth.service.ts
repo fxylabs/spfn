@@ -18,11 +18,12 @@ import {
 import { usersRepository, keysRepository, deviceAuthorizationsRepository } from '../repositories';
 import { revokeAllOAuth2GrantsForUser } from './oauth2-grant.service';
 import { runBeforeRegister } from '../lib/config';
-import { type KeyAlgorithmType, type KeyPlatformType } from '../types';
+import { type KeyAlgorithmType, type KeyPlatformType, type SessionBindingType } from '../types';
 import { hashPassword, verifyPassword, getDummyPasswordHash, normalizeEmail } from '../helpers';
 import { validateVerificationToken } from './verification.service';
 import { registerPublicKeyService, revokeKeyService } from './key.service';
 import { assertStepUp, mfaEnrolledForUser } from './mfa.service';
+import { decideKeyBinding } from '../lib/key-policy';
 import { updateLastLoginService } from './user.service';
 import { getPendingDeletionInfo } from './account-deletion.service';
 import { authLoginEvent, authRegisterEvent } from '../events';
@@ -44,6 +45,12 @@ export interface RegisterParams
     ip?: string;
     /** `user-agent` of the request, already truncated at the route. */
     userAgent?: string;
+    /**
+     * Whether proxy-guard recognised the trusted Next.js proxy, from the same
+     * helper. Carried for shape rather than effect: a brand-new account is on the
+     * default `session_binding: 'none'`, so its first key is never bound.
+     */
+    webProxy?: boolean;
 }
 
 /**
@@ -81,8 +88,21 @@ export interface LoginParams
     ip?: string;
     /** `user-agent` of the request, already truncated at the route. */
     userAgent?: string;
+    /** Whether proxy-guard recognised the trusted Next.js proxy, from the same helper. */
+    webProxy?: boolean;
 }
 
+/**
+ * What a sign-in answers with, on every path that starts a session.
+ *
+ * The last two fields are the carrier #97 needed. The Next.js proxy generated
+ * the device key and sealed the cookie, but only the backend knows whether the
+ * account asked for a bound session and when the key it just registered runs
+ * out — so the sign-in says it here and the interceptor copies both into
+ * `SessionData`. A response without them seals an unbound session, which is what
+ * every account that did not opt in gets and what every path predating this
+ * change keeps getting.
+ */
 export interface LoginResult
 {
     userId: string;
@@ -90,6 +110,30 @@ export interface LoginResult
     email?: string;
     phone?: string;
     passwordChangeRequired: boolean;
+    /** `'passkey'` when the key registered by this sign-in is bound. Absent otherwise. */
+    sessionBinding?: SessionBindingType;
+    /** Epoch milliseconds that key expires at. Only sent alongside `sessionBinding`. */
+    keyExpiresAtMillis?: number;
+}
+
+/**
+ * The two binding fields a `LoginResult` carries, or nothing.
+ *
+ * Nothing, and not `{ sessionBinding: 'none' }`: absence is how every consumer
+ * already reads "unbound", from the sealing interceptor to a generated mobile
+ * client, and a response that started naming the default would change the shape
+ * of every sign-in this package has ever answered.
+ */
+export function loginBindingFields(
+    registered: { binding: SessionBindingType; expiresAt: Date | null },
+): Pick<LoginResult, 'sessionBinding' | 'keyExpiresAtMillis'>
+{
+    if (registered.binding !== 'passkey' || !registered.expiresAt)
+    {
+        return {};
+    }
+
+    return { sessionBinding: 'passkey', keyExpiresAtMillis: registered.expiresAt.getTime() };
 }
 
 export interface LogoutParams
@@ -342,7 +386,7 @@ export async function loginService(
     }
 
     // Register new public key
-    await registerPublicKeyService({
+    const registered = await registerPublicKeyService({
         userId: user.id,
         keyId,
         publicKey,
@@ -353,18 +397,20 @@ export async function loginService(
         channel: 'password',
         ip: params.ip,
         userAgent: params.userAgent,
+        binding: decideKeyBinding(user.sessionBinding, params.webProxy),
         replacesKeyId,
     });
 
     // Update last login
     await updateLastLoginService(user.id);
 
-    const result = {
+    const result: LoginResult = {
         userId: String(user.id),
         publicId: user.publicId,
         email: user.email || undefined,
         phone: user.phone || undefined,
         passwordChangeRequired: user.passwordChangeRequired,
+        ...loginBindingFields(registered),
     };
 
     // Emit login event

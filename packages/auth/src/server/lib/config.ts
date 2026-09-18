@@ -8,6 +8,7 @@ import { env } from '@spfn/auth/config';
 import { PasskeyConfigError } from '@spfn/auth/errors';
 
 import type { SocialProvider } from '../types';
+import { BOUND_KEY_RENEW_GRACE_HOURS, BOUND_KEY_TTL_HOURS, CONCURRENT_USE_WINDOW_MS } from './key-policy';
 import { normalizeOptionalEmail } from '../helpers/email';
 import { authLogger } from '../logger';
 
@@ -426,6 +427,56 @@ export function getCsrfExemptPaths(): string[]
 {
     return [...PACKAGE_CSRF_EXEMPT_PATHS, ...(globalConfig.csrf?.exemptPaths ?? [])];
 }
+
+// ============================================================================
+// Session binding (#97)
+// ============================================================================
+
+/**
+ * How long a key bound to a passkey lives, in milliseconds.
+ *
+ * A positive override is honoured; anything else falls back to the policy
+ * constant. Nothing refuses boot over it — unlike the passkey relying party, a
+ * nonsensical value here does not make every ceremony fail, it just means the
+ * default applies.
+ */
+export function getBoundKeyTtlMs(): number
+{
+    return positiveOr(env.SPFN_AUTH_BOUND_KEY_TTL_HOURS, BOUND_KEY_TTL_HOURS) * 60 * 60 * 1000;
+}
+
+/** How long past expiry a bound key may still be renewed, in milliseconds. */
+export function getBoundKeyRenewGraceMs(): number
+{
+    return positiveOr(env.SPFN_AUTH_BOUND_KEY_RENEW_GRACE_HOURS, BOUND_KEY_RENEW_GRACE_HOURS) * 60 * 60 * 1000;
+}
+
+/** How close two sightings from two addresses must be to count as concurrent. */
+export function getConcurrentUseWindowMs(): number
+{
+    return positiveOr(env.SPFN_AUTH_CONCURRENT_USE_WINDOW_MS, CONCURRENT_USE_WINDOW_MS);
+}
+
+/**
+ * The page a bound session whose key expired is sent to.
+ *
+ * `RequireAuth` redirects here instead of to the sign-in page; the app renders a
+ * client component there that calls `renewSession(api)` and returns the person to
+ * where they were.
+ */
+export function getSessionRenewPath(): string
+{
+    return env.SPFN_AUTH_SESSION_RENEW_PATH?.trim() || DEFAULT_SESSION_RENEW_PATH;
+}
+
+/** The configured value when it is a usable positive number, the fallback otherwise. */
+function positiveOr(configured: number | undefined, fallback: number): number
+{
+    return Number.isFinite(configured) && (configured as number) > 0 ? configured as number : fallback;
+}
+
+/** Where the renewal ceremony lives when nothing says otherwise. */
+const DEFAULT_SESSION_RENEW_PATH = '/auth/renew';
 
 // ============================================================================
 // Passkeys (WebAuthn)
