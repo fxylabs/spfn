@@ -582,9 +582,18 @@ describe.skipIf(!dbAvailable)('session binding (case tables 6a, 6b, 6g)', () =>
             expect(rotated.registeredUaFamily).toBe('chrome');
         });
 
-        it('rotateKey on an unbound key: the provenance carries over and the key stays a 90-day one', async () =>
+        it('rotateKey on an unbound key: the provenance carries over and the ninety days start again', async () =>
         {
+            // The key being replaced is aged first, which is the whole of the row.
+            // Rotating a key registered seconds ago cannot tell "inherit the old
+            // expiry" from "compute a fresh ninety days" — both land on the same
+            // day — so the replaced key is moved to 30 days out and the assertion
+            // then means one of the two.
             const session = await signIn();
+            const aged = new Date(Date.now() + 30 * DAY_MS);
+            await getTestDb().update(userPublicKeys)
+                .set({ expiresAt: aged })
+                .where(eq(userPublicKeys.keyId, session.keyId));
             const before = await keyRow(session.keyId);
             const fresh = generateKeyPair('ES256');
 
@@ -598,8 +607,8 @@ describe.skipIf(!dbAvailable)('session binding (case tables 6a, 6b, 6g)', () =>
             const rotated = await keyRow(fresh.keyId);
             expect(rotated.binding).toBe('none');
             expect(rotated.registeredUaFamily).toBe(before.registeredUaFamily);
-            expect(rotated.expiresAt!.getTime()).toBe(before.expiresAt!.getTime());
-            expect(rotated.expiresAt!.getTime()).toBeGreaterThan(Date.now() + 89 * DAY_MS);
+            expect(rotated.expiresAt!.getTime()).not.toBe(before.expiresAt!.getTime());
+            expect(Math.abs(rotated.expiresAt!.getTime() - (Date.now() + KEY_TTL_DAYS * DAY_MS))).toBeLessThan(60_000);
         });
 
         it('an app calling saveSession() by hand: the fields are optional there, so it seals an unbound session', async () =>

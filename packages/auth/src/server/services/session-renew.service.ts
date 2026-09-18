@@ -69,6 +69,20 @@ export interface FinishSessionRenewParams extends StartSessionRenewParams
 }
 
 /**
+ * What a completed renewal answers: a sign-in result, plus the new key's id.
+ *
+ * The id is the one thing a renewal has that a sign-in does not need to say —
+ * `renewSession()` promises it to the app, which has no other way to learn it
+ * (the key pair is minted in the proxy and the private half never leaves the
+ * cookie). It is not a contract operation, so nothing generated reads it.
+ */
+export interface SessionRenewResult extends LoginResult
+{
+    /** The key this renewal registered, the one the session now signs with. */
+    keyId: string;
+}
+
+/**
  * Step 1 — the challenge the authenticator signs.
  *
  * `allowCredentials` is empty and the account lives only on the challenge row.
@@ -101,7 +115,7 @@ export async function startSessionRenewService(
  */
 export async function finishSessionRenewService(
     params: FinishSessionRenewParams,
-): Promise<LoginResult>
+): Promise<SessionRenewResult>
 {
     const { key, user } = await admitForRenewal(params.expiredKeyId);
 
@@ -140,6 +154,7 @@ export async function finishSessionRenewService(
     });
 
     return {
+        keyId: params.keyId,
         userId: String(user.id),
         publicId: user.publicId,
         email: user.email || undefined,

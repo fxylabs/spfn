@@ -389,11 +389,16 @@ export async function rotateKeyService(
     // platform, where and what it registered from — and the binding, which is
     // the owner's setting rather than anything this request chose.
     //
-    // The expiry carries over too, verbatim, rather than being recomputed. A
-    // rotation is not a renewal: recomputing would hand a bound key another full
+    // A *bound* key's expiry carries over verbatim, rather than being recomputed.
+    // A rotation is not a renewal: recomputing would hand a bound key another full
     // window every time the browser rotated, which is a way to hold a bound
     // session open forever without ever presenting the credential that binding
     // exists to ask for. `session/renew` is the only path that moves it.
+    //
+    // An unbound rotation resets the ninety days, exactly as it did before #97.
+    // Inheriting there would mean an app that rotates at every login — the
+    // documented reason `rotateKey` exists — rotating on day 89 into a key that
+    // expires tomorrow, and signing every one of its users out on day 91.
     await keysRepository.create({
         userId,
         keyId: newKeyId,
@@ -407,7 +412,7 @@ export async function rotateKeyService(
         registeredUserAgent: replaced?.registeredUserAgent ?? null,
         registeredUaFamily: replaced?.registeredUaFamily ?? null,
         isActive: true,
-        expiresAt: replaced?.expiresAt ?? getKeyExpiryDate('none'),
+        expiresAt: replaced?.binding === 'passkey' ? replaced.expiresAt : getKeyExpiryDate('none'),
     });
 
     // A rotation is already proof of the same device, so the second-factor

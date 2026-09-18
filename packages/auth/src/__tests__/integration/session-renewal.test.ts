@@ -288,6 +288,10 @@ describe.skipIf(!dbAvailable)('renewing a bound session key (case table 6d)', ()
         expect(verified!.status).toBe(200);
         const body = await verified!.json();
         expect(body.sessionBinding).toBe('passkey');
+        // The one field a renewal answers that a sign-in does not: the app has no
+        // other way to learn the new key's id, since the pair is minted in the
+        // proxy and the private half never leaves the cookie.
+        expect(body.keyId).toBe(pair!.keyId);
 
         const fresh = await keyRow(pair!.keyId);
         expect(fresh.binding).toBe('passkey');
@@ -545,6 +549,34 @@ describe.skipIf(!dbAvailable)('renewing a bound session key (case table 6d)', ()
         }, stolen));
 
         expect((await keyRow(owner.keyId)).isActive).toBe(true);
+    });
+
+    it('verify with no algorithm: the service default is used and the renewal completes', async () =>
+    {
+        // `algorithm` is optional on the service and in the design's verify body,
+        // and a direct caller that omits it must reach the default rather than a
+        // schema refusal.
+        const subject = await bound();
+        await expireKey(subject.keyId, 1_000);
+        const authorization = bearer(subject.keyId, subject.privateKey);
+        const started = await renewOptions(authorization);
+        const pair = freshPair();
+
+        const verified = await post('/_auth/session/renew/verify', {
+            response: subject.authenticator.assert({
+                challenge: (await started.json()).challenge,
+                origin: ORIGIN,
+                rpId: RP_ID,
+                counter: 40,
+            }),
+            publicKey: pair.publicKey,
+            keyId: pair.keyId,
+            fingerprint: pair.fingerprint,
+        }, authorization);
+
+        expect(verified.status).toBe(200);
+        expect((await verified.json()).keyId).toBe(pair.keyId);
+        expect((await keyRow(pair.keyId)).algorithm).toBe('ES256');
     });
 
     it('the eleventh options call in a minute from one address: 429', async () =>

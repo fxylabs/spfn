@@ -258,7 +258,10 @@ revisiting that decision.
 Auth uses **asymmetric, client-signed JWTs**: the client generates an ES256/RS256 keypair,
 sends the public key on register/login, signs request JWTs locally, and the server verifies
 with the stored public key (`keyId` carried in the JWT). The server never holds a private key.
-Keys expire after 90 days — rotate with `rotateKey`.
+Keys expire after 90 days — rotate with `rotateKey`, which starts the ninety days again. A key
+bound to a passkey is the one exception: it lives for hours and a rotation carries its expiry over
+rather than resetting it, because only `session/renew` may move that window — see
+[Session binding](#session-binding).
 
 ### Verified-email signup
 

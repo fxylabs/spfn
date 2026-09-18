@@ -240,9 +240,9 @@ export async function renewSession(api: AuthApi): Promise<PasskeyResult<RenewSes
 
     const renewed = await api.sessionRenewVerify.call({
         body: { response },
-    }) as { keyId?: string };
+    }) as { keyId: string };
 
-    return { ok: true, keyId: renewed.keyId ?? '' };
+    return { ok: true, keyId: renewed.keyId };
 }
 
 /** What a successful disable answers with — the mode the account is now in. */
