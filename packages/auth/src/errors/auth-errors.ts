@@ -12,6 +12,7 @@ import {
     ConflictError,
     NotFoundError,
     HttpError,
+    InternalServerError,
 } from '@spfn/core/errors';
 
 /**
@@ -932,6 +933,35 @@ export class SessionBindingUnavailableError extends BadRequestError
             details: data.details,
         });
         this.name = 'SessionBindingUnavailableError';
+    }
+}
+
+/**
+ * Session Reseal Failed Error (500)
+ *
+ * Minted by the Next.js proxy when a binding change committed on the backend but
+ * the session cookie could not be re-sealed to match it.
+ *
+ * Answered instead of the route's 200, which is the point: the setting has moved
+ * and the cookie has not, and the two disagreeing is the state the whole feature
+ * is built to avoid — a bound key with a cookie that says unbound is cleared as
+ * an ordinary expired session a day later, and an unbound key with a cookie that
+ * says bound asks for a renewal the backend will refuse. The three session
+ * cookies go with this refusal, so the repair is a sign-in, which mints a cookie
+ * that agrees with the row.
+ */
+export class SessionResealFailedError extends InternalServerError
+{
+    readonly code = 'SESSION_RESEAL_FAILED';
+
+    constructor(data: { message?: string; details?: Record<string, any> } = {})
+    {
+        super({
+            message: data.message
+                || 'The setting was changed but this session could not be updated. Sign in again.',
+            details: data.details,
+        });
+        this.name = 'SessionResealFailedError';
     }
 }
 

@@ -17,15 +17,21 @@
  * cookies — signing the person out on the day they turned the protection on,
  * which is the failure the feature exists to prevent. Turning it off has the
  * mirror problem: the cookie would keep an expiry that no longer applies.
+ *
+ * And it fails closed. A re-seal that did not happen is answered as a failure
+ * with the jar emptied, never as the 200 the route wanted to give — see
+ * `refuseAsUnsealable`.
  */
 
-import type { InterceptorRule } from '@spfn/core/nextjs/server';
+import type { InterceptorRule, ResponseInterceptorContext } from '@spfn/core/nextjs/server';
+import { SessionResealFailedError } from '@spfn/auth/errors';
 import { sealSession, unsealSession, type SessionData } from '../../server/lib/session';
 import { uaFamily } from '../../server/lib/ua-family';
 import { getSessionTtl, COOKIE_NAMES } from '../../server/lib/config';
 import { authLogger } from '../../server/logger';
 import { cookieSecure } from './cookie-options';
-import { pushCsrfCookie } from './csrf';
+import { pushCsrfCookie, pushCsrfCookieRemoval } from './csrf';
+import { refusalEnvelope } from './error-envelope';
 
 /** The binding half of a `LoginResult`, as it arrives on the wire. */
 export interface BindingResponseFields
@@ -102,16 +108,40 @@ export const sessionBindingInterceptor: InterceptorRule =
             }
             catch (error)
             {
-                // The setting is already written and the response already says so;
-                // a cookie that could not be re-sealed heals at the next refresh.
-                // Failing the request here would report failure for a change that
-                // happened.
                 authLogger.interceptor.general.error('Failed to re-seal the session after a binding change', error as Error);
+                refuseAsUnsealable(ctx);
             }
 
             await next();
         },
     };
+
+/**
+ * Answer the failure instead of the success the route already committed.
+ *
+ * The change is in the database and the cookie could not be made to agree with
+ * it, so answering 200 would hand the browser a session that contradicts the
+ * account: an enable whose cookie says unbound skips the user-agent check and is
+ * cleared as an ordinary expired session at the first short expiry, and a disable
+ * whose cookie still says bound asks for a renewal the backend now refuses. The
+ * three session cookies go with the refusal — signing in again is what produces a
+ * cookie that agrees — and the caller is told, rather than finding out a day later.
+ */
+function refuseAsUnsealable(ctx: ResponseInterceptorContext): void
+{
+    const refusal = refusalEnvelope(new SessionResealFailedError());
+
+    ctx.response.status = refusal.status;
+    ctx.response.ok = false;
+    ctx.response.body = refusal.body;
+
+    for (const name of [COOKIE_NAMES.SESSION, COOKIE_NAMES.SESSION_KEY_ID])
+    {
+        ctx.setCookies.push({ name, value: '', options: { maxAge: 0, path: '/' } });
+    }
+
+    pushCsrfCookieRemoval(ctx.setCookies);
+}
 
 /**
  * The session as it should now read, given what the route answered.

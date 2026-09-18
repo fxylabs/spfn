@@ -1258,6 +1258,12 @@ move. Where proxy-guard is not configured the signal simply never fires. One key
 address change per window, so a phone flipping between cellular and wifi costs one row update rather
 than one per request.
 
+**A binding change that cannot re-seal the cookie fails closed.** Turning binding on or off commits
+on the backend and then re-seals the session cookie in the proxy's response. If that re-seal cannot
+happen, the answer is 500 `SessionResealFailedError` with the three session cookies cleared, never
+the route's 200: a cookie that disagrees with the account is the state the feature exists to avoid,
+and signing in again is what produces one that agrees.
+
 **Unbound accounts are unchanged.** Every response, every cookie and every query count is what it
 was: nothing above applies to an account that did not opt in, and a sign-in that answers without
 the two binding fields seals exactly the session it always did — which is also what an app calling

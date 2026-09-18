@@ -47,7 +47,7 @@ import { revokeAllOAuth2GrantsForUser } from './oauth2-grant.service';
 import { registerPublicKeyService } from './key.service';
 import { decideKeyBinding } from '../lib/key-policy';
 import { updateLastLoginService } from './user.service';
-import type { RegisterResult } from './auth.service';
+import { loginBindingFields, type LoginBindingFields, type RegisterResult } from './auth.service';
 import type { KeyAlgorithmType, KeyPlatformType, SessionBindingType } from '../types';
 
 /**
@@ -240,12 +240,16 @@ export interface CompletePasswordResetParams
  * No `oldKeyId` is threaded through the way a login does. A login rotates one
  * key; this retires every one of them, the resetting browser's included, so
  * naming one would be a parameter nothing could change the outcome of.
+ *
+ * Answers what the registration answered, because the caller has to pass it on:
+ * this path decides the new key's binding exactly as a sign-in does, and the
+ * proxy seals the cookie from the body it gets back.
  */
 async function replaceCredentials(
     row: PasswordResetToken,
     user: { id: number; emailVerifiedAt: Date | null; sessionBinding: SessionBindingType },
     params: CompletePasswordResetParams,
-): Promise<void>
+): Promise<LoginBindingFields>
 {
     await usersRepository.updateById(user.id, {
         passwordHash: await hashPassword(params.password),
@@ -264,7 +268,7 @@ async function replaceCredentials(
     await revokeAllOAuth2GrantsForUser(user.id);
     await keysRepository.revokeAllActiveByUserId(user.id, 'Revoked by password reset');
 
-    await registerPublicKeyService({
+    const registered = await registerPublicKeyService({
         userId: user.id,
         keyId: params.keyId,
         publicKey: params.publicKey,
@@ -286,6 +290,8 @@ async function replaceCredentials(
 
         throw new PasswordResetSessionError();
     }
+
+    return loginBindingFields(registered);
 }
 
 /**
@@ -299,10 +305,17 @@ async function replaceCredentials(
  * A refusal that is the user's to fix — a password the policy rejects, a body
  * with no device key — leaves the setup session usable, so the fix is retyping
  * the password rather than asking for a fresh email.
+ *
+ * The answer carries the binding fields, like every other path that starts a
+ * session. A reset on an account that opted in registers a bound key — 24 hours,
+ * renewable only by a passkey — and this route is on the sealing interceptor's
+ * list, so a body that did not say so would have the proxy seal a cookie
+ * believing the session unbound: no user-agent check for the life of that key,
+ * and a sign-out a day later instead of the renewal prompt.
  */
 export async function completePasswordResetService(
     params: CompletePasswordResetParams,
-): Promise<RegisterResult>
+): Promise<RegisterResult & LoginBindingFields>
 {
     // Checked before anything is read or claimed. The device key is injected by
     // the proxy interceptor, so its absence means the request did not come
@@ -336,7 +349,7 @@ export async function completePasswordResetService(
         throw new PasswordResetSessionError();
     }
 
-    await replaceCredentials(row, user, params);
+    const binding = await replaceCredentials(row, user, params);
 
     onAfterCommit(() => authPasswordResetEvent.emit({
         userId: String(user.id),
@@ -348,5 +361,6 @@ export async function completePasswordResetService(
         publicId: user.publicId,
         email: user.email || undefined,
         phone: user.phone || undefined,
+        ...binding,
     };
 }

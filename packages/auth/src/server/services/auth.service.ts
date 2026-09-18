@@ -117,6 +117,15 @@ export interface LoginResult
 }
 
 /**
+ * The binding half of a sign-in answer, as a type.
+ *
+ * Named because more than one result carries it: a password reset registers a
+ * device key exactly as a sign-in does, so its answer has to say so too or the
+ * proxy seals a cookie that does not know the key it holds is short-lived.
+ */
+export type LoginBindingFields = Pick<LoginResult, 'sessionBinding' | 'keyExpiresAtMillis'>;
+
+/**
  * The two binding fields a `LoginResult` carries, or nothing.
  *
  * Nothing, and not `{ sessionBinding: 'none' }`: absence is how every consumer
@@ -126,7 +135,7 @@ export interface LoginResult
  */
 export function loginBindingFields(
     registered: { binding: SessionBindingType; expiresAt: Date | null },
-): Pick<LoginResult, 'sessionBinding' | 'keyExpiresAtMillis'>
+): LoginBindingFields
 {
     if (registered.binding !== 'passkey' || !registered.expiresAt)
     {

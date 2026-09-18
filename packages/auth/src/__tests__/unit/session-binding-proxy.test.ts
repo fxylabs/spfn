@@ -26,7 +26,7 @@ import { sealPendingSession } from '../../nextjs/session-helpers';
 import { sealSession, unsealSession, type SessionData } from '../../server/lib/session';
 import { generateKeyPair } from '../../server/lib/crypto';
 import { COOKIE_NAMES } from '../../server/lib/config';
-import { authErrorRegistry, SessionContextChangedError, SessionRenewalRequiredError } from '../../errors';
+import { authErrorRegistry, SessionContextChangedError, SessionRenewalRequiredError, SessionResealFailedError } from '../../errors';
 
 const SECRET = 'test-secret-with-at-least-32-characters-for-security-testing';
 const CHROME = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36';
@@ -368,6 +368,53 @@ describe('the proxy and a bound session (case table 6c)', () =>
         });
     });
 
+    it('bound, password/reset/complete: the cookie the reset seals carries all three fields', async () =>
+    {
+        // A reset is a sign-in for cookie purposes — same interceptor, same path
+        // list — and on a bound account it registers a 24-hour key. A cookie
+        // without the fields would skip the user-agent check for that key's whole
+        // life and be cleared rather than renewed when it ran out.
+        const ctx = responseContext('/_auth/password/reset/complete', 200, { userId: '7', ...BOUND }, {
+            metadata: { privateKey: 'k', keyId: 'key-1', algorithm: 'ES256' },
+            userAgent: CHROME,
+        });
+
+        await loginRegisterInterceptor.response?.(ctx, next);
+
+        expect(await queuedSession(ctx.setCookies)).toMatchObject({
+            binding: 'passkey',
+            keyExpiresAt: BOUND.keyExpiresAtMillis,
+            uaFamily: 'chrome',
+        });
+    });
+
+    it('session/binding answers 200 but the session cannot be re-sealed: 500, no 200 body, and the three cookies cleared', async () =>
+    {
+        // The setting is already committed and the cookie cannot be made to agree
+        // with it. Answering the route's 200 would leave the browser holding a
+        // session that contradicts the account — bound key with an unbound cookie,
+        // or the reverse — so the answer is the failure and the jar is emptied.
+        const ctx = responseContext('/_auth/session/binding', 200, { mode: 'passkey', keyExpiresAtMillis: BOUND.keyExpiresAtMillis }, {
+            cookies: new Map([[COOKIE_NAMES.SESSION, 'not-a-sealed-session']]),
+            userAgent: CHROME,
+        });
+
+        await sessionBindingInterceptor.response?.(ctx, next);
+
+        expect(ctx.response.status).toBe(500);
+        expect(ctx.response.ok).toBe(false);
+        expect(ctx.response.body).toMatchObject({
+            __type: 'SessionResealFailedError',
+            error: { code: 'SessionResealFailedError' },
+        });
+        expect(ctx.setCookies.map(cookie => cookie.name)).toEqual([
+            COOKIE_NAMES.SESSION,
+            COOKIE_NAMES.SESSION_KEY_ID,
+            COOKIE_NAMES.CSRF,
+        ]);
+        expect(ctx.setCookies.every(cookie => cookie.value === '')).toBe(true);
+    });
+
     it('session/binding answers 200 with mode none: the cookie is re-sealed with the fields removed', async () =>
     {
         const { sealed } = await sealedSession({
@@ -390,7 +437,7 @@ describe('the proxy and a bound session (case table 6c)', () =>
 
     it('a 401 the proxy minted: the body carries __type and error.code, and the client restores the class', () =>
     {
-        const bodies = [new SessionRenewalRequiredError(), new SessionContextChangedError()]
+        const bodies = [new SessionRenewalRequiredError(), new SessionContextChangedError(), new SessionResealFailedError()]
             .map(error => ({ ...error.toJSON(), error: { code: error.name, message: error.message, requestId: 'x' } }));
 
         for (const body of bodies)
