@@ -19,9 +19,11 @@ import { eq, sql } from 'drizzle-orm';
 import { setupTestDb, teardownTestDb, clearTables, getTestDb, isDatabaseAvailable } from '../helpers/db';
 import {
     configureTestAuthorizationServer,
+    createTestUser,
     mountAuthApp,
     registerClient,
     resetMemoryRateLimitStore,
+    TEST_RESOURCE,
 } from '../helpers/oauth2';
 import { MAX_UNGRANTED_CLIENTS_PER_IP } from '@/server/services/oauth2-client.service';
 import { oauth2Clients } from '@/server/entities';
@@ -29,11 +31,15 @@ import { oauth2Clients } from '@/server/entities';
 const dbAvailable = await isDatabaseAvailable();
 
 const { initializeAuth } = await import('@/server/services/rbac.service');
+const { getRoleByName } = await import('@/server/services/role.service');
 
 /** Client names are unique to this file: one fork runs every suite. */
 const NAME = 'register-suite-cli';
 
 const ALLOWED_HTTPS_ORIGIN = 'https://register-suite.example';
+
+/** An account to hang a grant off, for the row about re-registration. */
+const EMAIL = 'register-suite@test.com';
 
 interface RegistrationBody
 {
@@ -175,19 +181,37 @@ describe.skipIf(!dbAvailable)('OAuth2 register (8a)', () =>
         expect(body.error).toBe('invalid_client_metadata');
     });
 
-    it('registering again under the same client_name → 201 with a new client_id, the old row untouched', async () =>
+    it('registering again under the same client_name → 201 with a new client_id, the old row and its grant untouched', async () =>
     {
+        const { oauth2ClientsRepository, oauth2GrantsRepository } = await import('@/server/repositories');
         const first = await register({ client_name: NAME, redirect_uris: ['http://127.0.0.1:1/cb'] });
-        const second = await register({ client_name: NAME, redirect_uris: ['http://127.0.0.1:2/cb'] });
 
         expect(first.status).toBe(201);
+
+        // The half of the row a registration alone cannot show: somebody has
+        // approved the first client, and the second registration is a different
+        // CLI install rather than an amendment to that consent.
+        const original = await oauth2ClientsRepository.findByClientId(first.body.client_id!);
+        const userId = await createTestUser(EMAIL, (await getRoleByName('user'))!.id);
+        const granted = await oauth2GrantsRepository.upsert({
+            client: original!.id,
+            user: userId,
+            resource: TEST_RESOURCE,
+            scopes: ['mcp:read'],
+        });
+
+        const second = await register({ client_name: NAME, redirect_uris: ['http://127.0.0.1:2/cb'] });
+
         expect(second.status).toBe(201);
         expect(second.body.client_id).not.toBe(first.body.client_id);
+        expect((await oauth2ClientsRepository.findByClientId(first.body.client_id!))?.redirectUris)
+            .toEqual(['http://127.0.0.1:1/cb']);
 
-        const { oauth2ClientsRepository } = await import('@/server/repositories');
-        const original = await oauth2ClientsRepository.findByClientId(first.body.client_id!);
+        const live = await oauth2GrantsRepository.listActiveByUserId(userId);
 
-        expect(original?.redirectUris).toEqual(['http://127.0.0.1:1/cb']);
+        expect(live).toHaveLength(1);
+        expect(live[0]!.grant.id).toBe(granted.id);
+        expect(live[0]!.client.id).toBe(original!.id);
     });
 
     it('http://127.0.0.1/cb and http://localhost/cb together → 201, both stored as written', async () =>
@@ -214,23 +238,26 @@ describe.skipIf(!dbAvailable)('OAuth2 register (8a)', () =>
         expect(body.client_name).toBe(NAME);
     });
 
-    it('too many registrations from one IP → 429', async () =>
+    it('too many registrations from one IP → 429 from the rate limiter, in the application envelope', async () =>
     {
         const address = '198.51.100.240';
-        const statuses: number[] = [];
+        const answers: { status: number; body: RegistrationBody }[] = [];
 
         for (let attempt = 0; attempt < 12; attempt++)
         {
-            const { status } = await register({
+            answers.push(await register({
                 client_name: `${NAME}-burst-${attempt}`,
                 redirect_uris: [`http://127.0.0.1:${9000 + attempt}/cb`],
-            }, address);
-
-            statuses.push(status);
+            }, address));
         }
 
-        expect(statuses[0]).toBe(201);
-        expect(statuses.at(-1)).toBe(429);
+        // Two different bounds answer 429 on this route, and which one fired is
+        // legible from the body: this is the limiter in front of the route, so
+        // the request never reaches the service that speaks RFC 7591.
+        expect(answers.slice(0, 10).map(answer => answer.status)).toEqual(Array(10).fill(201));
+        expect(answers[10]!.status).toBe(429);
+        expect(answers[10]!.body.error_description).toBeUndefined();
+        expect(answers[10]!.body.error).not.toBe('invalid_client_metadata');
     });
 
     /**
@@ -262,6 +289,20 @@ describe.skipIf(!dbAvailable)('OAuth2 register (8a)', () =>
 
         expect(over.ok).toBe(false);
         expect(over.ok === false && over.status).toBe(429);
+
+        // The other bound, through the route this time, so the shape the
+        // client's OAuth library reads is asserted too. The limiter has seen
+        // nothing from this address — the twenty above went past it.
+        const refused = await register({
+            client_name: `${NAME}-standing-route`,
+            redirect_uris: ['http://127.0.0.1:8998/cb'],
+        }, address);
+
+        expect(refused.status).toBe(429);
+        expect(refused.body.error).toBe('invalid_client_metadata');
+        expect(refused.body.error_description)
+            .toBe(`This address has registered ${MAX_UNGRANTED_CLIENTS_PER_IP} clients in the last hour `
+                + 'that nobody has approved. Complete or abandon one of those, or try again later.');
     });
 
     it('twenty unapproved clients registered an hour ago → 201, the window has moved past them', async () =>

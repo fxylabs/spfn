@@ -183,7 +183,12 @@ describe.skipIf(!dbAvailable)('OAuth2 token, refresh_token (8d)', () =>
         const { response, body } = await refresh();
 
         expect(response.status).toBe(200);
+
+        const grants = await getTestDb().select().from(oauth2Grants).where(eq(oauth2Grants.user, userId));
+
+        expect(grants[0]!.resource).toBe(TEST_RESOURCE);
         expect(await verifyAccessToken(body.access_token!, TEST_RESOURCE)).not.toBeNull();
+        expect(await verifyAccessToken(body.access_token!, 'https://api.example.com/elsewhere')).toBeNull();
     });
 
     it('a live refresh token naming a different resource → 400 invalid_target', async () =>
@@ -207,7 +212,16 @@ describe.skipIf(!dbAvailable)('OAuth2 token, refresh_token (8d)', () =>
 
         // Both pairs are dead: the replayed one AND the one the rotation issued,
         // because there is no telling which of the two holders is the thief.
+        expect(await verifyAccessToken(accessToken, TEST_RESOURCE)).toBeNull();
         expect(await verifyAccessToken(rotated.body.access_token!, TEST_RESOURCE)).toBeNull();
+
+        // And the rows say so, which is what an operator reading this table
+        // sees: no live-looking token left under a dead grant.
+        const grants = await getTestDb().select().from(oauth2Grants).where(eq(oauth2Grants.user, userId));
+        const tokens = await getTestDb().select().from(oauth2Tokens);
+
+        expect(grants.every(grant => grant.revokedAt !== null)).toBe(true);
+        expect(tokens.every(token => token.revokedAt !== null)).toBe(true);
 
         refreshToken = rotated.body.refresh_token!;
 

@@ -147,7 +147,14 @@ describe.skipIf(!dbAvailable)('OAuth2 token, authorization_code (8c)', () =>
         const body = await response.json() as TokenBody;
 
         expect(response.status).toBe(200);
+
+        // Silence is not "good against everything": the grant's resource is
+        // what was stored, and it is the only one the token verifies for.
+        const grants = await getTestDb().select().from(oauth2Grants);
+
+        expect(grants[0]!.resource).toBe(TEST_RESOURCE);
         expect(await verifyAccessToken(body.access_token!, TEST_RESOURCE)).not.toBeNull();
+        expect(await verifyAccessToken(body.access_token!, 'https://api.example.com/other')).toBeNull();
     });
 
     it('a fresh code with a mismatched code_verifier → 400 invalid_grant, the code still spendable', async () =>
@@ -303,6 +310,10 @@ describe.skipIf(!dbAvailable)('OAuth2 token, authorization_code (8c)', () =>
         const spent = await exchange({}, spentCode);
 
         expect(unknown.response.status).toBe(400);
+        expect(unknown.body.error).toBe('invalid_grant');
+
+        // Identical bodies, not merely identical statuses: a caller holding a
+        // stolen code must not learn from the words which one it is holding.
         expect(unknown.body).toEqual(spent.body);
     });
 });
