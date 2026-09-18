@@ -100,13 +100,20 @@ function refuseRedirectOrigin(url: URL, uri: string, allowedRedirectOrigins: str
  * carry whatever a client's own logging, or a proxy in front of the listener,
  * is going to treat as the destination.
  *
+ * Both separators, and however many of them the authority was written with. The
+ * WHATWG parser reads `\` as a path separator for http and https, so `/x/..\cb`
+ * resolves to `/cb` exactly as `/x/../cb` does. It is as forgiving about the
+ * authority: `http:/x/../cb` carries one slash and `http:\\host\x\..\cb` two
+ * backslashes, and both parse. Splitting the authority off on `[/\\]{0,2}` and
+ * the rest on `[/\\]` covers every spelling of both.
+ *
  * `%2e` is the same segment percent-encoded, which `new URL` resolves too.
  */
 function hasDotSegment(uri: string): boolean
 {
-    const path = uri.replace(/^[^:]*:\/\/[^/?#]*/, '').split(/[?#]/)[0] ?? '';
+    const path = uri.replace(/^[^:]*:[/\\]{0,2}[^/\\?#]*/, '').split(/[?#]/)[0] ?? '';
 
-    return path.split('/').some(isDotSegment);
+    return path.split(/[/\\]/).some(isDotSegment);
 }
 
 function isDotSegment(segment: string): boolean

@@ -149,6 +149,28 @@ describe.skipIf(!dbAvailable)('OAuth2 register (8a)', () =>
         expect(body.error).toBe('invalid_redirect_uri');
     });
 
+    it('an allowed URI reaching a path through a dot segment → 400 invalid_redirect_uri', async () =>
+    {
+        // Every spelling `new URL` resolves away: `\` is a path separator for
+        // http and https, and the authority may be written with one separator or
+        // two. A registration that resolves is not the destination it names.
+        const spellings = [
+            'http://127.0.0.1:5/x/../cb',
+            'http://127.0.0.1:5/x/..\\cb',
+            'http:\\\\127.0.0.1:5\\x\\..\\cb',
+            'https://app.example/other/..\\cb',
+            `${ALLOWED_HTTPS_ORIGIN}/other/..\\cb`,
+        ];
+
+        for (const uri of spellings)
+        {
+            const { status, body } = await register({ client_name: NAME, redirect_uris: [uri] });
+
+            expect(status).toBe(400);
+            expect(body.error).toBe('invalid_redirect_uri');
+        }
+    });
+
     it('an empty redirect_uris array → 400 invalid_client_metadata', async () =>
     {
         const { status, body } = await register({ client_name: NAME, redirect_uris: [] });

@@ -222,18 +222,50 @@ describe.skipIf(!dbAvailable)('OAuth2 authorize, API side (8b)', () =>
         expect(refusal.redirectUri).toBe('http://127.0.0.1:7777/callback');
     });
 
-    it('signed in, a redirect_uri reaching the registered path through ".." → screen error, no redirect', async () =>
+    /** Every spelling of a dot segment that `new URL` resolves away before matching. */
+    const DOT_SEGMENT_SPELLINGS = [
+        'http://127.0.0.1:5/x/../cb',
+        'http://127.0.0.1:5/x/..\\cb',
+        'http:\\\\127.0.0.1:5\\x\\..\\cb',
+        'https://app.example/other/..\\cb',
+    ];
+
+    it('signed in, a redirect_uri reaching the registered path through a dot segment → screen error, no redirect', async () =>
     {
-        const registered = await clientWith(['http://127.0.0.1/cb'], 'dotsegment');
-        const response = await describeAuthorize(app, authorization, {
-            client_id: registered,
-            redirect_uri: 'http://127.0.0.1:5/x/../cb',
+        configureTestAuthorizationServer({
+            defaultScopes: ['mcp:read'],
+            allowedRedirectOrigins: ['https://app.example'],
         });
 
-        // `new URL(...).pathname` is `/cb` for both, and the port may vary on
-        // loopback — so without the raw-path rule this is a match.
-        expect(response.status).toBe(400);
-        expect(refusalOf(await response.json() as Envelope).error).toBe('redirect_uri_mismatch');
+        const registered = await clientWith(['http://127.0.0.1/cb', 'https://app.example/cb'], 'dotsegment');
+
+        // `new URL(...).pathname` is `/cb` for all four — the parser reads `\` as a
+        // path separator too, and is as forgiving about how the authority is
+        // written — and the port may vary on loopback. Without the raw-path rule
+        // every one of them matches a registration it is not.
+        for (const redirectUri of DOT_SEGMENT_SPELLINGS)
+        {
+            const response = await describeAuthorize(app, authorization, {
+                client_id: registered,
+                redirect_uri: redirectUri,
+            });
+
+            expect(response.status).toBe(400);
+            expect(refusalOf(await response.json() as Envelope).error).toBe('redirect_uri_mismatch');
+        }
+    });
+
+    it('signed in, a registered redirect_uri carrying a query → consent screen', async () =>
+    {
+        const withQuery = await clientWith(['http://127.0.0.1/cb?a=b'], 'query');
+        const response = await describeAuthorize(app, authorization, {
+            client_id: withQuery,
+            redirect_uri: 'http://127.0.0.1:5/cb?a=b',
+        });
+
+        // The rule refuses dot segments, not punctuation: a query is part of the
+        // registered value and matches when it is identical.
+        expect(response.status).toBe(200);
     });
 
     it('signed in, no resource → invalid_target on the registered redirect URI', async () =>
