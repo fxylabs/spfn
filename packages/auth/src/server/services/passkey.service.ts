@@ -23,8 +23,6 @@
  * account a password back.
  */
 
-import crypto from 'crypto';
-
 import { onAfterCommit, runInTransaction } from '@spfn/core/db';
 import { ValidationError } from '@spfn/core/errors';
 import {
@@ -39,6 +37,7 @@ import {
 } from '@spfn/auth/errors';
 import { authLogger } from '../logger';
 import { getPasskeyConfig } from '../lib/config';
+import { mintChallenge, presentedChallenge, spendChallenge } from './webauthn-challenge.service';
 import {
     buildAuthenticationOptions,
     buildRegistrationOptions,
@@ -56,7 +55,6 @@ import {
     passkeysRepository,
     socialAccountsRepository,
     usersRepository,
-    webauthnChallengesRepository,
 } from '../repositories';
 import type { Passkey, PasskeyDeviceType } from '../entities/passkeys';
 import type { WebAuthnChallengeKind } from '../entities/webauthn-challenges';
@@ -64,18 +62,11 @@ import type { User } from '../entities/users';
 import { getDummyPasswordHash, verifyPassword } from '../helpers';
 import type { KeyAlgorithmType, KeyPlatformType } from '../types';
 import { registerPublicKeyService, revokeKeyService } from './key.service';
+import { assertStepUp, mfaEnrolledForUser } from './mfa.service';
 import { updateLastLoginService } from './user.service';
 import { getPendingDeletionInfo } from './account-deletion.service';
 import { authLoginEvent, passkeyEnrolledEvent, passkeyRevokedEvent } from '../events';
 import type { LoginResult } from './auth.service';
-
-/**
- * Bytes of entropy in a challenge.
- *
- * The WebAuthn spec asks for at least 16; 32 matches every other nonce this
- * package mints and leaves no reason to think about the number again.
- */
-const CHALLENGE_BYTES = 32;
 
 /**
  * What is compared when the request carried no password at all.
@@ -120,36 +111,7 @@ function toSummary(row: Passkey): PasskeySummary
 }
 
 /**
- * Mint a challenge and park it, returning the value that goes on the wire.
- *
- * Only the SHA-256 reaches the row, so the stored form cannot be presented.
- */
-async function mintChallenge(kind: WebAuthnChallengeKind, userId: number | null): Promise<string>
-{
-    const challenge = crypto.randomBytes(CHALLENGE_BYTES).toString('base64url');
-
-    await webauthnChallengesRepository.create({
-        challengeHash: hashChallenge(challenge),
-        kind,
-        userId,
-        expiresAt: new Date(Date.now() + getPasskeyConfig().challengeTtlMs),
-    });
-
-    return challenge;
-}
-
-/** Hash a presented challenge the way it was stored. */
-function hashChallenge(challenge: string): string
-{
-    return crypto.createHash('sha256').update(challenge).digest('base64url');
-}
-
-/**
- * Spend the challenge this ceremony was started with.
- *
- * Unknown, expired, already spent, the other ceremony's kind, or another
- * account's — all one refusal, because the remedy is the same in every case and
- * naming which applies describes a challenge the caller did not mint.
+ * Spend a challenge, or refuse the ceremony.
  *
  * @throws PasskeyChallengeError
  */
@@ -159,49 +121,14 @@ async function consumeChallenge(
     userId: number | null,
 ): Promise<void>
 {
-    const spent = await webauthnChallengesRepository.consume(hashChallenge(challenge), kind);
-
-    if (!spent || spent.userId !== userId)
+    if (await spendChallenge(challenge, kind, userId))
     {
-        authLogger.service.warn('Passkey challenge refused', { kind, matched: Boolean(spent) });
-
-        throw new PasskeyChallengeError();
+        return;
     }
-}
 
-/**
- * The challenge the browser echoed back, read out of `clientDataJSON`.
- *
- * Read here rather than trusted from elsewhere in the body: this is the value
- * the authenticator actually signed over, and the library compares it against
- * what we say we expect. Taking it from anywhere else would let a caller point
- * us at a challenge row that has nothing to do with the assertion.
- */
-function presentedChallenge(clientDataJSON: string): string
-{
-    const decoded = parseJson(Buffer.from(clientDataJSON, 'base64url').toString('utf8')) as { challenge?: unknown };
+    authLogger.service.warn('Passkey challenge refused', { kind });
 
-    return typeof decoded?.challenge === 'string' ? decoded.challenge : '';
-}
-
-/**
- * `JSON.parse` that answers null instead of throwing.
- *
- * The body is whatever a caller sent, and a malformed `clientDataJSON` has to
- * come out as the ordinary refusal rather than as a 500: the empty challenge it
- * yields matches no row, which is exactly the answer an unusable ceremony
- * deserves.
- */
-function parseJson(text: string): Record<string, unknown> | null
-{
-    try
-    {
-        return JSON.parse(text) as Record<string, unknown>;
-    }
-    catch
-    {
-        return null;
-    }
+    throw new PasskeyChallengeError();
 }
 
 export interface RecentAuthenticationParams
@@ -325,6 +252,11 @@ export interface StartPasskeyEnrollmentParams
 /**
  * Step 1 of enrollment — options for `navigator.credentials.create()`.
  *
+ * An enrolled account steps up first, and every account then meets the
+ * recent-authentication rule this route has always had (#95). The order is what
+ * makes the two independent: `assertStepUp` is a no-op for an unenrolled
+ * account, so the answer such a caller gets is byte-for-byte today's.
+ *
  * `excludeCredentials` lists the caller's **live** passkeys only, so the
  * authenticator quietly refuses one already enrolled here. Revoked ones are left
  * out on purpose: they must not be re-enrolled either, and the check that
@@ -335,6 +267,7 @@ export async function startPasskeyEnrollmentService(
     params: StartPasskeyEnrollmentParams,
 ): Promise<PublicKeyCredentialCreationOptionsJSON>
 {
+    await assertStepUp(params);
     await assertRecentAuthentication(params);
 
     const user = await usersRepository.findById(params.userId);
@@ -548,11 +481,14 @@ async function startSession(user: User, params: FinishPasskeyLoginParams): Promi
         passwordChangeRequired: user.passwordChangeRequired,
     };
 
+    const mfaEnrolled = await mfaEnrolledForUser(user.id);
+
     onAfterCommit(() => authLoginEvent.emit({
         userId: result.userId,
         provider: 'passkey',
         email: result.email,
         phone: result.phone,
+        mfaEnrolled,
     }));
 
     return result;
@@ -715,8 +651,10 @@ export interface RevokePasskeyParams
 /**
  * Retire a passkey.
  *
- * Gated on recent authentication, because someone who walked up to an unlocked
- * laptop should not be able to strip the account's credentials; and on the
+ * Gated on the second factor for an enrolled account, and then — for every
+ * account, enrolled or not — on recent authentication, because someone who
+ * walked up to an unlocked laptop should not be able to strip the account's
+ * credentials; and on the
  * last-recovery-credential guard, because there is no undo for the state that
  * would leave.
  *
@@ -729,6 +667,7 @@ export interface RevokePasskeyParams
  */
 export async function revokePasskeyService(params: RevokePasskeyParams): Promise<{ passkeyId: string }>
 {
+    await assertStepUp(params);
     await assertRecentAuthentication(params);
 
     const passkey = await passkeysRepository.findLiveByIdAndUserId(Number(params.passkeyId), params.userId);

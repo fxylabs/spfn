@@ -14,6 +14,7 @@ const {
     verifyPassword,
     hashPassword,
     revokeAllOAuth2GrantsForUser,
+    assertStepUp,
 } = vi.hoisted(() => ({
     usersRepository: {
         findById: vi.fn(),
@@ -28,6 +29,7 @@ const {
     verifyPassword: vi.fn(async () => true),
     hashPassword: vi.fn(async () => 'new-hash'),
     revokeAllOAuth2GrantsForUser: vi.fn(async () => undefined),
+    assertStepUp: vi.fn(async () => undefined),
 }));
 
 vi.mock('../../server/repositories', () => ({
@@ -37,6 +39,9 @@ vi.mock('../../server/repositories', () => ({
 }));
 vi.mock('../../server/helpers', () => ({ hashPassword, verifyPassword }));
 vi.mock('../../server/services/oauth2-grant.service', () => ({ revokeAllOAuth2GrantsForUser }));
+// The second-factor gate has its own suites; here it only has to be reachable,
+// since this service now calls it before doing anything else.
+vi.mock('../../server/services/mfa.service', () => ({ assertStepUp }));
 
 import { changePasswordService } from '../../server/services/auth.service';
 
@@ -48,6 +53,7 @@ describe('changePasswordService — session revocation', () =>
     {
         await changePasswordService({
             userId: 7,
+            keyId: 'key-of-the-calling-device',
             currentPassword: 'old-password',
             newPassword: 'new-password',
             passwordHash: 'old-hash',
@@ -65,6 +71,7 @@ describe('changePasswordService — session revocation', () =>
         // other, which is the opposite of "log me out everywhere".
         await changePasswordService({
             userId: 7,
+            keyId: 'key-of-the-calling-device',
             currentPassword: 'old-password',
             newPassword: 'new-password',
             passwordHash: 'old-hash',

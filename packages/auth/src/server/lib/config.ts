@@ -694,3 +694,70 @@ export function assertPasskeyConfig(env: PasskeyEnvSource = passkeyEnvSource()):
         );
     }
 }
+
+// ============================================================================
+// Second factor (MFA)
+// ============================================================================
+
+/** What the second-factor routes read out of the environment. */
+export interface MfaConfig
+{
+    /** Name the authenticator app files the account under. */
+    issuer: string;
+    /** How long a device's step-up stays good for a sensitive change. */
+    stepUpWindowMs: number;
+}
+
+/** Fallback issuer, for an app that has set neither the MFA nor the passkey name. */
+const DEFAULT_MFA_ISSUER = 'SPFN';
+
+const DEFAULT_STEP_UP_MINUTES = 10;
+
+/**
+ * Resolve the second-factor configuration.
+ *
+ * Deliberately reads no passkey setting beyond `SPFN_AUTH_PASSKEY_RP_NAME`,
+ * and reads that as a plain string rather than through `getPasskeyConfig()`:
+ * an app with no passkeys configured at all must be able to enrol a TOTP and
+ * to step up, and `getPasskeyConfig()` refuses to resolve for such an app.
+ *
+ * Nothing here can fail the way the passkey config can, so there is no boot
+ * check to match: a bad step-up window falls back to the default rather than
+ * refusing to start, because the value it would refuse over is a number of
+ * minutes and the default is the safe one.
+ */
+export function getMfaConfig(): MfaConfig
+{
+    const configuredMinutes = Number(process.env.SPFN_AUTH_MFA_STEP_UP_MINUTES);
+    const minutes = Number.isFinite(configuredMinutes) && configuredMinutes > 0
+        ? configuredMinutes
+        : DEFAULT_STEP_UP_MINUTES;
+
+    return {
+        issuer: process.env.SPFN_AUTH_MFA_ISSUER?.trim()
+            || process.env.SPFN_AUTH_PASSKEY_RP_NAME?.trim()
+            || mfaIssuerFromAppUrl()
+            || DEFAULT_MFA_ISSUER,
+        stepUpWindowMs: minutes * 60_000,
+    };
+}
+
+/** The app URL's host, when there is one that parses. Display only. */
+function mfaIssuerFromAppUrl(): string | null
+{
+    const configured = process.env.NEXT_PUBLIC_SPFN_APP_URL || process.env.SPFN_APP_URL;
+
+    if (!configured)
+    {
+        return null;
+    }
+
+    try
+    {
+        return new URL(configured).hostname;
+    }
+    catch
+    {
+        return null;
+    }
+}

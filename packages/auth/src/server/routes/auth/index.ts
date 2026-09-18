@@ -600,9 +600,11 @@ export const changePassword = route.put('/_auth/password')
     {
         const { body } = await c.data();
         const user = getUser(c);
+        const { keyId } = getAuth(c);
 
         await changePasswordService({
             userId: user.id,
+            keyId,
             currentPassword: body.currentPassword,
             newPassword: body.newPassword,
             passwordHash: user.passwordHash || undefined,

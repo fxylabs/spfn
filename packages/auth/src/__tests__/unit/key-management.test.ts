@@ -27,6 +27,14 @@ const { keysRepository, deviceAuthorizationsRepository, revokeAllOAuth2GrantsFor
 
 vi.mock('../../server/repositories', () => ({ keysRepository, deviceAuthorizationsRepository }));
 vi.mock('../../server/services/oauth2-grant.service', () => ({ revokeAllOAuth2GrantsForUser }));
+// `key.service` now asks the second-factor service two questions — whether the
+// caller must step up, and whether a rotation carries a verification across.
+// Both have their own suites; here they only have to be reachable.
+vi.mock('../../server/services/mfa.service', () => ({
+    assertStepUp: vi.fn(async () => undefined),
+    carryStepUpVerification: vi.fn(async () => undefined),
+    mfaEnrolledForUser: vi.fn(async () => false),
+}));
 
 import {
     listKeysService,

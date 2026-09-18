@@ -158,6 +158,64 @@ export class PasskeysRepository extends BaseRepository
     }
 
     /**
+     * Mark or unmark a live credential as the owner's second factor.
+     *
+     * Owner-scoped and live-only, so somebody else's passkey and an already
+     * revoked one are both "no such row" — the same answer every other
+     * management statement here gives.
+     *
+     * @returns the updated row, or null if it is not theirs or already revoked
+     */
+    async markSecondFactorByIdAndUserId(id: number, userId: number, secondFactor: boolean): Promise<Passkey | null>
+    {
+        const result = await this.db
+            .update(passkeys)
+            .set({ secondFactor })
+            .where(and(
+                eq(passkeys.id, id),
+                eq(passkeys.userId, userId),
+                isNull(passkeys.revokedAt),
+            ))
+            .returning();
+
+        return result[0] ?? null;
+    }
+
+    /**
+     * The account's live credentials that satisfy a step-up.
+     *
+     * Used to check an assertion against the marked ones only: a passkey that
+     * signs the owner in is not a second factor until they say it is.
+     */
+    async listLiveSecondFactorByUserId(userId: number): Promise<Passkey[]>
+    {
+        return await this.readDb
+            .select()
+            .from(passkeys)
+            .where(and(
+                eq(passkeys.userId, userId),
+                eq(passkeys.secondFactor, true),
+                isNull(passkeys.revokedAt),
+            ))
+            .orderBy(desc(passkeys.createdAt));
+    }
+
+    /**
+     * Take the second-factor mark off every one of an account's credentials.
+     *
+     * What `mfa/disable` does to the passkey half of an enrolment. The
+     * credentials themselves are untouched — they still sign the owner in.
+     * Write primary.
+     */
+    async clearSecondFactorByUserId(userId: number): Promise<void>
+    {
+        await this.db
+            .update(passkeys)
+            .set({ secondFactor: false })
+            .where(eq(passkeys.userId, userId));
+    }
+
+    /**
      * Delete every passkey of an account (account destruction).
      * Write primary.
      *

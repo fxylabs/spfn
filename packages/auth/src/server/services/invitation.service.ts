@@ -303,7 +303,7 @@ export async function acceptInvitation(params: {
     // this transaction, so it cannot go through `registerPublicKeyService`. The
     // helper still defers to after the commit, so an invitation that fails later
     // announces nothing.
-    emitDeviceRegistered(key, 'invitation');
+    await emitDeviceRegistered(key, 'invitation');
 
     // Update invitation status
     await invitationsRepository.updateStatus(

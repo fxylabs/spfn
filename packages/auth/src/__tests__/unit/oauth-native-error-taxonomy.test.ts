@@ -41,6 +41,10 @@ vi.mock('../../server/services/oauth.service', () => ({
 }));
 
 vi.mock('../../server/services/key.service', () => ({ registerPublicKeyService }));
+// The login event carries `mfaEnrolled` (#95); this route's failure taxonomy is
+// what is under test, so the lookup behind it is stubbed like every other
+// service the route reaches.
+vi.mock('../../server/services/mfa.service', () => ({ mfaEnrolledForUser: vi.fn(async () => false) }));
 vi.mock('../../server/services/user.service', () => ({ updateLastLoginService: vi.fn(async () => undefined) }));
 
 vi.mock('../../server/events', () => ({

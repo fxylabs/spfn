@@ -397,6 +397,26 @@ export const authEnvSchema = defineEnvSchema({
     },
 
     // ============================================================================
+    // Second factor (MFA)
+    // ============================================================================
+    SPFN_AUTH_MFA_ISSUER: {
+        ...envString({
+            description: 'Name the authenticator app files this account under, carried in the otpauth:// URI. Defaults to the passkey relying-party name, then to the host of {NEXT_PUBLIC_SPFN_APP_URL || SPFN_APP_URL}. Changing it after people have enrolled only relabels the entry in their app; the codes keep working.',
+            required: false,
+            examples: ['Acme', 'Acme Staging'],
+        }),
+    },
+
+    SPFN_AUTH_MFA_STEP_UP_MINUTES: {
+        ...envNumber({
+            description: 'How recently an enrolled account must have proved its second factor on the calling device for a sensitive change (password change, sign out everywhere, disabling MFA, passkey management) to go through. Older than this and the request is 403 STEP_UP_REQUIRED until POST /_auth/mfa/step-up succeeds. Unenrolled accounts are unaffected.',
+            default: 10,
+            required: false,
+            examples: [5, 10, 30],
+        }),
+    },
+
+    // ============================================================================
     // API Configuration
     // ============================================================================
     SPFN_API_URL: {

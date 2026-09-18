@@ -77,6 +77,16 @@ export const passkeys = authSchema.table('passkeys',
         // Owner-facing name in the management list ("MacBook Touch ID").
         label: text('label'),
 
+        // The owner marked this credential as their second factor (#95).
+        //
+        // A flag rather than a second table, because it changes nothing about
+        // the credential: the same passkey still signs the owner in on its own,
+        // and this says only that an assertion from it also satisfies a step-up.
+        // Unmarking the last one is allowed and is independent of
+        // `assertNotLastRecoveryCredential` — removing a second-factor mark is
+        // not removing a way into the account.
+        secondFactor: boolean('second_factor').notNull().default(false),
+
         lastUsedAt: utcTimestamp('last_used_at'),
 
         // null = live. A timestamp retires the credential permanently; the row

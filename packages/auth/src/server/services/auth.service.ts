@@ -22,6 +22,7 @@ import { type KeyAlgorithmType, type KeyPlatformType } from '../types';
 import { hashPassword, verifyPassword, getDummyPasswordHash, normalizeEmail } from '../helpers';
 import { validateVerificationToken } from './verification.service';
 import { registerPublicKeyService, revokeKeyService } from './key.service';
+import { assertStepUp, mfaEnrolledForUser } from './mfa.service';
 import { updateLastLoginService } from './user.service';
 import { getPendingDeletionInfo } from './account-deletion.service';
 import { authLoginEvent, authRegisterEvent } from '../events';
@@ -100,6 +101,14 @@ export interface LogoutParams
 export interface ChangePasswordParams
 {
     userId: number;
+    /**
+     * The device key this request is signed with.
+     *
+     * Only read to measure the second-factor window of an enrolled account —
+     * an account with nothing enrolled is answered exactly as before, so this
+     * adds no refusal for anybody who has not opted in.
+     */
+    keyId: string;
     currentPassword?: string;
     newPassword: string;
     passwordHash?: string; // Optional: pass user's password hash to avoid re-fetch
@@ -364,6 +373,7 @@ export async function loginService(
         provider: email ? 'email' : 'phone',
         email: result.email,
         phone: result.phone,
+        mfaEnrolled: await mfaEnrolledForUser(user.id),
     });
 
     return result;
@@ -387,12 +397,19 @@ export async function logoutService(
 
 /**
  * Change user password
+ *
+ * An enrolled account steps up first (#95): a stolen session must not be able
+ * to take the account over by setting a new password. An unenrolled account is
+ * unaffected — including the OAuth-only account with no password and a key
+ * older than ten minutes, which still sets a first password and gets a 200.
  */
 export async function changePasswordService(
     params: ChangePasswordParams,
 ): Promise<void>
 {
     const { userId, currentPassword, newPassword, passwordHash: providedHash } = params;
+
+    await assertStepUp({ userId, keyId: params.keyId });
 
     // Get user's password hash (either provided or fetch from DB)
     let passwordHash: string | null;
