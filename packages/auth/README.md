@@ -135,7 +135,7 @@ real secret values out of band, never commit them.
 | `DATABASE_URL` | both | yes | Postgres connection |
 | `SPFN_AUTH_VERIFICATION_TOKEN_SECRET` | `.env.server` | yes | OTP / verification token signing |
 | `SPFN_AUTH_SESSION_SECRET` | `.env.local` | yes | ≥32 chars, AES-256 session cookie encryption (validated: entropy/unique-char checks) |
-| `SPFN_AUTH_TOKEN_ENCRYPTION_KEYS` | `.env.server` | web OAuth | OAuth token keyring: comma-separated `<keyId>:<base64-32-byte-key>` entries; first key is active |
+| `SPFN_AUTH_TOKEN_ENCRYPTION_KEYS` | `.env.server` | web OAuth, **MFA** | At-rest keyring: comma-separated `<keyId>:<base64-32-byte-key>` entries; first key is active. Required by any app offering a [second factor](#second-factor-mfa), social login or not |
 | `SPFN_API_URL` | `.env.local` | — | default `http://localhost:8790` |
 | `SPFN_AUTH_SESSION_TTL` | both | — | default `7d` (e.g. `7d`, `12h`, `45m`) |
 | `SPFN_AUTH_JWT_SECRET` / `SPFN_AUTH_JWT_EXPIRES_IN` | `.env.server` | — | legacy server-signed JWT mode only |
@@ -171,6 +171,8 @@ real secret values out of band, never commit them.
 | `SPFN_AUTH_PASSKEY_RP_ID` / `_RP_NAME` / `_ORIGINS` | `.env.server` | — | relying party for passkeys; defaults derive from `{NEXT_PUBLIC_SPFN_APP_URL\|\|SPFN_APP_URL}` and are **checked at boot** — see [Passkeys](#passkeys-webauthn) |
 | `SPFN_AUTH_PASSKEY_USER_VERIFICATION` | `.env.server` | — | `preferred` (default) or `required`; `discouraged` refuses boot |
 | `SPFN_AUTH_PASSKEY_CHALLENGE_TTL_SECONDS` / `_RECENT_AUTH_MINUTES` | `.env.server` | — | defaults `300` / `10` — see [Passkeys](#passkeys-webauthn) |
+| `SPFN_AUTH_MFA_ISSUER` | `.env.server` | — | name the authenticator app files the account under; defaults to the passkey relying-party name, then the app URL host — see [Second factor](#second-factor-mfa) |
+| `SPFN_AUTH_MFA_STEP_UP_MINUTES` | `.env.server` | — | default `10`; how recently an enrolled account's device must have proved its second factor for a sensitive change — see [Second factor](#second-factor-mfa) |
 | `NEXT_PUBLIC_SPFN_API_URL` / `NEXT_PUBLIC_SPFN_APP_URL` | `.env.local` | — | browser-facing URLs for OAuth redirects |
 
 Read validated values via `import { env } from '@spfn/auth/config'` (a proxy validated at
@@ -214,6 +216,14 @@ routes use `.skip(['auth'])`; the rest require `Authorization: Bearer <client-si
 | `listPasskeys` | POST `/_auth/passkeys/list` | yes | the caller's enrolled passkeys |
 | `renamePasskey` | POST `/_auth/passkeys/rename` | yes | rename one |
 | `revokePasskey` | POST `/_auth/passkeys/revoke` | yes | retire one (refused if it is the last way in) |
+| `mfaTotpEnroll` | POST `/_auth/mfa/totp/enroll` | yes | mint a TOTP secret — see [Second factor](#second-factor-mfa) |
+| `mfaTotpConfirm` | POST `/_auth/mfa/totp/confirm` | yes | spend the first code; answers the ten recovery codes |
+| `mfaDisable` | POST `/_auth/mfa/disable` | yes + step-up | remove the second factor (204 either way) |
+| `mfaMarkPasskey` | POST `/_auth/mfa/passkey/mark` | yes + step-up | mark or unmark a passkey as the second factor |
+| `mfaRegenerateRecoveryCodes` | POST `/_auth/mfa/recovery/regenerate` | yes + step-up | ten fresh codes; every earlier one stops verifying |
+| `mfaStatus` | GET `/_auth/mfa/status` | yes | `{ enrolled, methods, recoveryCodesRemaining }`; no secret |
+| `mfaStepUp` | POST `/_auth/mfa/step-up` | yes | re-prove the second factor on this device |
+| `mfaStepUpOptions` | POST `/_auth/mfa/step-up/options` | yes | options for a step-up by passkey |
 | `logout` | POST `/_auth/logout` | yes | revoke current key |
 | `rotateKey` | POST `/_auth/keys/rotate` | yes | rotate public key before 90-day expiry |
 | `listKeys` | POST `/_auth/keys/list` | yes | the caller's registered devices — see [Registered devices](#registered-devices-key-management) |
@@ -978,6 +988,131 @@ The behaviour above is asserted row by row in
 
 Configuration rows C1–C6 are in `src/__tests__/unit/passkey-config.test.ts`.
 
+### Second factor (MFA)
+
+Optional, and optional in the strong sense: an account that never enrols sees exactly the
+behaviour it saw before this existed, on every route. Nothing here blocks anybody — the
+package asks for a second factor only from people who asked it to.
+
+Two forms. A **TOTP** authenticator app (RFC 6238, SHA-1, 30-second steps, six digits, one
+step of drift), or a **passkey** the owner already enrolled through `/_auth/passkeys/*` and
+has marked as a second factor. Either one comes with ten single-use recovery codes.
+
+```
+enrol   → POST /_auth/mfa/totp/enroll      → { secret, otpauthUri }, shown once
+confirm → POST /_auth/mfa/totp/confirm     → { recoveryCodes }, ten of them, shown once
+        → or POST /_auth/mfa/passkey/mark  → an existing passkey becomes the second factor
+inspect → GET  /_auth/mfa/status           → { enrolled, methods, recoveryCodesRemaining }
+step up → POST /_auth/mfa/step-up          → 204, this device's window reopens
+remove  → POST /_auth/mfa/disable          → 204
+```
+
+#### Prerequisite: the encryption keyring
+
+A TOTP secret is encrypted at rest with **`SPFN_AUTH_TOKEN_ENCRYPTION_KEYS`** — the same
+keyring the OAuth tokens use, in the same `enc:v2:<keyId>:` frame, under its own additional
+authenticated data so a row cannot be moved between accounts. That variable is listed above
+as "web OAuth", and it is now also required by any app offering a second factor, **including
+an app with no social login at all**. `totp/enroll` answers a 500 configuration error while
+it is unset, and a key id dropped from the keyring answers the same way rather than the 401 a
+wrong code gets — an operator has to be able to tell a broken deploy from a person misreading
+their phone. A row written under a key that has since been retired is re-encrypted in place
+the next time its owner verifies, so a retired key drains as people use their second factor.
+
+#### Enrolling
+
+`totp/enroll` mints a 20-byte secret and returns it as RFC 4648 base32 (upper case, no
+padding) plus the `otpauth://` URI an authenticator app scans. Nothing is enrolled yet:
+calling it again replaces the pending secret, and a secret nobody confirms is swept away a day
+later by `auth.mfa.sweep`. `totp/confirm` spends the first code, which is what turns the
+enrolment into a second factor and issues the recovery codes.
+
+A submitted code has its spaces and dashes stripped, so `123 456` and `123-456` are the same
+code. Five wrong codes discard the pending secret — the sixth attempt says there is nothing to
+confirm, and a fresh `totp/enroll` is the remedy and what resets the counter. A **confirmed**
+enrolment is never discarded that way; `totp/enroll` on one is a 409, because replacing a
+working second factor is `disable` followed by a fresh enrolment, both step-up gated.
+
+The **same code cannot be spent twice**, which is what makes it single-use: the newest step
+the account has spent is remembered, and a code presented again inside its own thirty seconds
+is refused. That includes the legitimate case of a second device signing in during the same
+step — it gets a 401 with the same body as a wrong code, and the client should **retry on the
+next step** rather than treat it as a bad credential.
+
+#### Recovery codes
+
+Ten codes, format `xxxxx-xxxxx`, shown once at confirmation and once at each regeneration.
+They are stored as **password hashes** rather than as the unsalted SHA-256 the link flows use:
+a code a human transcribes is short enough that a leaked dump of unsalted hashes would fall to
+an offline sweep. `recovery/regenerate` raises the generation, so every code from before it
+stops verifying with the same body as one that never existed. `status` reports how many of the
+current generation are unspent, which is what an app warns on at two remaining.
+
+#### The step-up window
+
+For an **enrolled** account, four kinds of change ask for the second factor again:
+
+| route | what it changes |
+|-------|-----------------|
+| `PUT /_auth/password` | the password, and every other session with it |
+| `POST /_auth/keys/revoke-all` | every device |
+| `POST /_auth/mfa/disable`, `recovery/regenerate`, `passkey/mark`, `totp/enroll` | the second factor itself |
+| `POST /_auth/passkeys/register/options`, `passkeys/revoke` | the account's credentials |
+
+The rule is per **device key**: this device must have proved the second factor within
+`SPFN_AUTH_MFA_STEP_UP_MINUTES` (default 10). Otherwise the answer is **403
+`STEP_UP_REQUIRED`**, and the client sends the user to `POST /_auth/mfa/step-up` — a TOTP
+code, a recovery code, or an assertion from a marked passkey (options from
+`POST /_auth/mfa/step-up/options`) — and retries. 403 rather than 401 on purpose, and for the
+reason `RECENT_AUTH_REQUIRED` is: a 401 on an authenticated route is what a web client reads
+as "the session is gone", so it would sign the user out instead of asking for a code.
+
+A key **rotation carries the window across**, because rotating is already proof of the same
+device — otherwise the web proxy, which rotates at every login, would expire it constantly.
+
+The two passkey routes keep their own `RECENT_AUTH_REQUIRED` rule unchanged and run it after
+the step-up: the two guards are independent, and an unenrolled account meets exactly the rule
+it met before. Unmarking the last second-factor passkey is likewise independent of
+`LAST_RECOVERY_CREDENTIAL` — removing a mark is not removing a way into the account, so
+`passkey/mark false` succeeds where `passkeys/revoke` on the same credential is still refused.
+
+Two sign-ins deliberately produce a session with no verification of its own: a
+[device-code login](#device-code-login) and a passkey sign-in. Both are exempt at
+*registration* and both still step up for a sensitive change, which is what
+`POST /_auth/mfa/step-up` is for. Marking a passkey as a second factor is likewise not proving
+it, so the device that marks one steps up before it may change the second factor again.
+
+#### Telling people it exists
+
+`authLoginEvent` and `authDeviceRegisteredEvent` carry **`mfaEnrolled: boolean`**, computed as
+the event is emitted. That is the whole of the package's opinion: subscribe and offer
+enrolment at a first login or when a new device appears. Nothing is ever blocked on it.
+
+#### Errors
+
+| error | status | `code` | when |
+|-------|--------|--------|------|
+| `MfaVerificationFailedError` | 401 | — | a wrong or stale code, a spent step, a used / old-generation / foreign recovery code, or an assertion from an unmarked passkey |
+| `MfaNotEnrolledError` | 400 | — | `confirm` with no pending secret (the five-strike deletion included), or `regenerate` on an account with no second factor |
+| `StepUpRequiredError` | 403 | `STEP_UP_REQUIRED` | an enrolled account's device is outside the window |
+| `MfaAlreadyEnrolledError` | 409 | — | `totp/enroll` on a confirmed enrolment |
+| `MfaConfigError` | 500 | — | `SPFN_AUTH_TOKEN_ENCRYPTION_KEYS` unset, or a stored secret naming a key id no longer in it |
+
+None of these is a mobile-contract error: the enrolment routes are not contract operations.
+
+#### The case table
+
+Asserted row by row in `src/__tests__/integration/mfa-enrolment.test.ts` (enrolment) and
+`mfa-step-up.test.ts` (the window); each `it` is named for its row.
+`mfa-unenrolled-regression.test.ts` pins the status and the body shape an **unenrolled**
+account gets from `login`, `changePassword`, `keys/revoke-all` and `passkeys/revoke`.
+
+#### The sweep
+
+`auth.mfa.sweep` runs daily at 07:00 and deletes enrolments still unconfirmed after 24 hours.
+It is carried by `authJobRouter` beside the other sweeps; pass `mfaSweepCron` to
+`createAuthJobRouter()` to move it. A confirmed enrolment is never touched.
+
 ### Writing protected routes (route DSL)
 
 This is the current SPFN route DSL — `route.<method>().input().use().skip().handler()` registered
@@ -1689,6 +1824,11 @@ and not what it began on, so a stolen password used on a new machine was silent 
 Send it with a [sign-out-everywhere link](#the-sign-out-everywhere-link), which is the action the
 notice should offer.
 
+Both `authLoginEvent` and `authDeviceRegisteredEvent` carry `mfaEnrolled: boolean`, computed
+as the event is emitted. It is the hook an app uses to offer a [second
+factor](#second-factor-mfa) at a first login or when a new device appears; the package itself
+never blocks an account that has none.
+
 Key **rotation** is deliberately not announced — replacing the key of a device that is already
 signed in is not a new device, and a notice for it would teach the owner to ignore the ones that
 matter. A login that names an `oldKeyId` is only a rotation when that key was actually revoked: an
@@ -1700,7 +1840,8 @@ Payload types: `AuthLoginPayload`, `AuthRegisterPayload`, `AuthPasswordResetPayl
 `InvitationAcceptedPayload`, `AuthDeletionRequestedPayload`, `AuthDeletionCancelledPayload`,
 `AuthDeletionCompletedPayload`, `OAuthUnlinkedPayload` (`auth.oauth.unlinked` — provider-side
 disconnect, see the OAuth unlink-notify section), `PasskeyEnrolledPayload`,
-`PasskeyRevokedPayload`. These events also bind to `@spfn/core/job`
+`PasskeyRevokedPayload`. `AuthLoginPayload` and `AuthDeviceRegisteredPayload` both gained
+`mfaEnrolled` in 0.3.0-beta.23. These events also bind to `@spfn/core/job`
 jobs via `.on(event)`.
 
 ## Registration gate (`beforeRegister`)
