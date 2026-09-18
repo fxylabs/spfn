@@ -19,7 +19,7 @@
  */
 
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
-import { Hono } from 'hono';
+import type { Hono } from 'hono';
 import { and, desc, eq } from 'drizzle-orm';
 import { generateKeyPair as generateJoseKeyPair, SignJWT, createRemoteJWKSet } from 'jose';
 
@@ -94,6 +94,8 @@ describe.skipIf(!dbAvailable)('device-registered event (case table 7a)', () =>
         process.env.SPFN_APP_URL = 'https://app.example.com';
         process.env.SPFN_AUTH_PASSKEY_RP_ID = RP_ID;
         process.env.SPFN_AUTH_PASSKEY_ORIGINS = ORIGIN;
+        // The web callback stores the provider's tokens, which are encrypted at rest.
+        process.env.SPFN_AUTH_TOKEN_ENCRYPTION_KEYS = `v1:${Buffer.alloc(32, 7).toString('base64')}`;
 
         // The helper mounts `authenticate` as a server-level middleware, which the
         // rows driving an authenticated route (approve, rotate, enroll) need.
@@ -104,6 +106,7 @@ describe.skipIf(!dbAvailable)('device-registered event (case table 7a)', () =>
     {
         delete process.env.SPFN_AUTH_PASSKEY_RP_ID;
         delete process.env.SPFN_AUTH_PASSKEY_ORIGINS;
+        delete process.env.SPFN_AUTH_TOKEN_ENCRYPTION_KEYS;
         await teardownTestDb();
     });
 
@@ -269,11 +272,17 @@ describe.skipIf(!dbAvailable)('device-registered event (case table 7a)', () =>
         return new URL(call[0].data.confirmUrl).searchParams.get('token')!;
     }
 
-    /** A provider that answers a code exchange without leaving the process. */
+    /**
+     * A provider that answers a code exchange without leaving the process.
+     *
+     * Registered under `superself`, which no built-in provider occupies: the
+     * registry is a module singleton shared by every suite in this fork, so
+     * overriding `google` would take native sign-in's real verifier with it.
+     */
     function registerMockProvider(email: string | null, providerUserId: string)
     {
         registerOAuthProvider({
-            id: 'google',
+            id: 'superself',
             isEnabled: () => true,
             getAuthUrl: (state: string) => `https://mock.example.com/auth?state=${state}`,
             exchangeCodeForTokens: async () => ({ accessToken: 'a', refreshToken: 'r', expiresIn: 3600 }),
@@ -484,7 +493,7 @@ describe.skipIf(!dbAvailable)('device-registered event (case table 7a)', () =>
         const key = generateKeyPair('ES256');
         const nonce = generateOAuthNonce();
         const state = await createOAuthState({
-            provider: 'google',
+            provider: 'superself',
             returnUrl: '/',
             publicKey: key.publicKey,
             keyId: key.keyId,
@@ -494,7 +503,7 @@ describe.skipIf(!dbAvailable)('device-registered event (case table 7a)', () =>
         });
 
         await oauthCallbackService({
-            provider: 'google',
+            provider: 'superself',
             code: 'auth-code',
             state,
             expectedNonce: [nonce],
