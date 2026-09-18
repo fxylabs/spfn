@@ -23,7 +23,7 @@
  * not in `status`, not in an event, and not in a log line.
  */
 
-import { onAfterCommit } from '@spfn/core/db';
+import { onAfterCommit, runInTransaction } from '@spfn/core/db';
 import { ValidationError } from '@spfn/core/errors';
 import {
     MfaAlreadyEnrolledError,
@@ -189,6 +189,11 @@ export interface ConfirmTotpResult
  * reading the wrong entry in their app, and a fresh `enroll` is both the remedy
  * and what resets the counter. A confirmed row is never deleted this way.
  *
+ * The route deliberately runs this outside a transaction, so the counter
+ * survives the refusal that raised it; the success path opens its own, because
+ * the confirmation, the first verification and the recovery codes have to
+ * commit together or not at all.
+ *
  * @throws MfaNotEnrolledError | MfaVerificationFailedError
  */
 export async function confirmTotpEnrolmentService(params: ConfirmTotpParams): Promise<ConfirmTotpResult>
@@ -209,10 +214,13 @@ export async function confirmTotpEnrolmentService(params: ConfirmTotpParams): Pr
         throw new MfaVerificationFailedError();
     }
 
-    await mfaTotpRepository.confirm(params.userId, step);
-    await mfaVerificationsRepository.record(params.keyId, params.userId, 'totp');
+    return await runInTransaction(async () =>
+    {
+        await mfaTotpRepository.confirm(params.userId, step);
+        await mfaVerificationsRepository.record(params.keyId, params.userId, 'totp');
 
-    return { recoveryCodes: await issueRecoveryCodes(params.userId) };
+        return { recoveryCodes: await issueRecoveryCodes(params.userId) };
+    }, { context: 'auth:mfa-confirm' });
 }
 
 /**

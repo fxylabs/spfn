@@ -101,6 +101,13 @@ export const mfaTotpEnroll = route.post('/_auth/mfa/totp/enroll')
  * Not step-up gated: this *is* the step-up, and gating it would make enrolling
  * impossible for the account it is being enrolled on. Five wrong codes discard
  * the pending secret, and the sixth attempt says there is nothing to confirm.
+ *
+ * No `Transactional()`, which is the one route here without it. The
+ * failed-attempt counter has to survive the refusal that increments it, and a
+ * route-wide transaction would roll it back with the error — leaving a wrong
+ * code free. The service opens its own transaction for the success path, where
+ * the confirmation, the recovery codes and the first verification do have to
+ * commit together.
  */
 export const mfaTotpConfirm = route.post('/_auth/mfa/totp/confirm')
     .input({
@@ -108,7 +115,7 @@ export const mfaTotpConfirm = route.post('/_auth/mfa/totp/confirm')
             code: TotpCodeSchema,
         }),
     })
-    .use([rateLimitPolicy('auth-mfa-verify', VERIFY_LIMIT), Transactional()])
+    .use([rateLimitPolicy('auth-mfa-verify', VERIFY_LIMIT)])
     .handler(async (c) =>
     {
         const { body } = await c.data();
