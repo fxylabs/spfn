@@ -881,6 +881,33 @@ export class SessionRenewalRefusedError extends UnauthorizedError
 }
 
 /**
+ * Session Context Changed Error (401)
+ *
+ * Minted by the Next.js proxy: a bound session presented from a different
+ * browser family than the one it was sealed from. Browsers do not share cookie
+ * jars, so a session that moves between two of them moved because somebody
+ * copied it — this is the only defence that acts before the bound key runs out,
+ * and it is the reason the three session cookies are cleared with the refusal.
+ *
+ * Only for bound sessions, and only when the request carried a `user-agent` at
+ * all. An absent one is no signal rather than a different family: a server
+ * component calling the RPC proxy sends none.
+ */
+export class SessionContextChangedError extends UnauthorizedError
+{
+    readonly code = 'SESSION_CONTEXT_CHANGED';
+
+    constructor(data: { message?: string; details?: Record<string, any> } = {})
+    {
+        super({
+            message: data.message || 'This session was started in a different browser. Sign in again.',
+            details: data.details,
+        });
+        this.name = 'SessionContextChangedError';
+    }
+}
+
+/**
  * Session Binding Unavailable Error (400)
  *
  * Thrown when an account asks to bind its session on a deployment where the

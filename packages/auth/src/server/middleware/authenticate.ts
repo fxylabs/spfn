@@ -32,6 +32,7 @@ import {
 } from '@spfn/auth/errors';
 
 import { readContextClientIdentity } from '../client-proof/version-middleware';
+import { deviceProvenance } from '../lib/device-provenance';
 import { resolveAuthenticatedUser, runAuthProfile, type AuthContext } from './auth-profiles';
 import { matchesMachineDiscriminator } from './machine-principals';
 
@@ -220,7 +221,10 @@ export const authenticate = defineMiddleware('auth', async (c, next) =>
     // - Security audits
     // - Detecting inactive keys
     // - Key rotation reminders
-    keysRepository.updateLastUsedById(keyRecord.id, readContextClientIdentity(c))
+    // The client address joins the same statement — see updateLastUsedById. A
+    // failure here still never blocks the request: it is the audit trail and the
+    // concurrent-use signal, neither of which is worth a 500.
+    keysRepository.updateLastUsedById(keyRecord.id, readContextClientIdentity(c), deviceProvenance(c).ip ?? null)
         .catch((err: unknown) => authLogger.middleware.error('Failed to update lastUsedAt', err));
 
     // 8. Attach auth data to context
@@ -343,6 +347,11 @@ export const optionalAuth = defineMiddleware('optionalAuth', async (c, next) =>
             return undefined;
         }
 
+        // An expired key continues anonymously rather than refusing, and that
+        // includes a bound key past its window: this middleware's whole posture
+        // is that an unusable credential is the same as none, and a route that
+        // works signed-out must go on working. The renewal prompt belongs to the
+        // proxy and to the routes that do require a principal.
         if (keyRecord.expiresAt && new Date() > keyRecord.expiresAt)
         {
             await next();
@@ -370,7 +379,7 @@ export const optionalAuth = defineMiddleware('optionalAuth', async (c, next) =>
 
         const { user, role } = result;
 
-        keysRepository.updateLastUsedById(keyRecord.id, readContextClientIdentity(c))
+        keysRepository.updateLastUsedById(keyRecord.id, readContextClientIdentity(c), deviceProvenance(c).ip ?? null)
             .catch((err: unknown) => authLogger.middleware.error('Failed to update lastUsedAt', err));
 
         c.set('auth', {

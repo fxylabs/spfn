@@ -8,12 +8,13 @@
  */
 
 import type { InterceptorRule, RequestInterceptorContext } from '@spfn/core/nextjs/server';
-import { SessionRenewalRequiredError } from '@spfn/auth/errors';
+import { SessionContextChangedError, SessionRenewalRequiredError } from '@spfn/auth/errors';
 import { unsealSession, sealSession, shouldRefreshSession, type SessionData } from '../../server/lib/session';
 import { generateClientToken } from '../../server/lib/crypto';
 import { getSessionTtl, COOKIE_NAMES } from '../../server/lib/config';
 import { authLogger } from '../../server/logger';
 import { cookieSecure } from './cookie-options';
+import { uaFamily } from '../../server/lib/ua-family';
 import { refuseInvalidCsrf, pushCsrfCookie, pushCsrfCookieIfStale, pushCsrfCookieRemoval } from './csrf';
 import { refusalEnvelope } from './error-envelope';
 import { SESSION_RENEW_PATH_PATTERN } from './session-renew';
@@ -39,6 +40,58 @@ function requiresAuth(path: string): boolean
     ];
 
     return !publicPaths.some((pattern) => pattern.test(path));
+}
+
+/**
+ * Whether a bound session arrived from a different browser than it was sealed in.
+ *
+ * Three terms, and each one is a rule.
+ *
+ * Bound only. An unbound session is not checked and nothing is logged for it —
+ * the check would be a warn line per request for every account that did not opt
+ * in, which is the noisy half of a protection they did not ask for.
+ *
+ * A `user-agent` has to be present. Absent is no signal, not a different family:
+ * a server component's `api.` call reaches this proxy as Node `fetch` and the
+ * isomorphic client sets `Content-Type`, `Cookie` and the CSRF header and nothing
+ * else, so fail-closed on absence would refuse every server-rendered page view.
+ *
+ * And the comparison is between families rather than strings, so a version bump,
+ * a user-agent reduction, or "Request desktop site" on Android are all the same
+ * browser. What is left is a session presented from a different cookie jar, which
+ * is a thing that does not happen without a copy.
+ */
+function contextChanged(session: SessionData, userAgent: string | null): boolean
+{
+    return session.binding === 'passkey'
+        && Boolean(session.uaFamily)
+        && Boolean(userAgent)
+        && uaFamily(userAgent) !== session.uaFamily;
+}
+
+/**
+ * Refuse a bound session presented from another browser, and empty the jar.
+ *
+ * The opposite of the renewal refusal below it: this session is not waiting for a
+ * prompt, it is one whose cookie is somewhere it was never sealed. The three
+ * cookies go with the refusal, which is the only moment a refused request can
+ * touch them.
+ */
+function refuseAsContextChanged(ctx: RequestInterceptorContext): void
+{
+    authLogger.interceptor.general.warn('Bound session presented from a different browser family', {
+        path: ctx.path,
+        sealed: ctx.metadata.sealedUaFamily,
+        presented: ctx.metadata.presentedUaFamily,
+    });
+
+    const cleared = [
+        { name: COOKIE_NAMES.SESSION, value: '', options: { maxAge: 0, path: '/' } },
+        { name: COOKIE_NAMES.SESSION_KEY_ID, value: '', options: { maxAge: 0, path: '/' } },
+        { name: COOKIE_NAMES.CSRF, value: '', options: { maxAge: 0, path: '/' } },
+    ];
+
+    ctx.abort = refusalEnvelope(new SessionContextChangedError(), cleared);
 }
 
 /**
@@ -153,6 +206,21 @@ export const generalAuthInterceptor: InterceptorRule =
                 // lives here. Refusals stop before the backend is called.
                 if (await refuseInvalidCsrf(ctx, session.keyId))
                 {
+                    return;
+                }
+
+                // Context before expiry. A session whose cookie has moved to
+                // another browser is finished whether or not its key is still
+                // live, and answering it "renew with your passkey" would keep
+                // exactly the cookies that need to go.
+                const presented = ctx.request.headers.get('user-agent');
+
+                if (contextChanged(session, presented))
+                {
+                    ctx.metadata.sealedUaFamily = session.uaFamily;
+                    ctx.metadata.presentedUaFamily = uaFamily(presented);
+                    refuseAsContextChanged(ctx);
+
                     return;
                 }
 

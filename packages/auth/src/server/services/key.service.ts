@@ -148,6 +148,28 @@ export interface KeySummary
     registeredIp?: string;
     /** `user-agent` of the registering request, on the same terms as above. */
     registeredUserAgent?: string;
+    /**
+     * `'passkey'` when this key is bound to one, absent when it is not.
+     *
+     * Absent rather than `'none'`, so a deployment where nobody opted in answers
+     * exactly the list it always did, and so every consumer reads "unbound" the
+     * same way it reads it off a sign-in response.
+     */
+    binding?: SessionBindingType;
+    /**
+     * When this key was last seen from two client addresses inside the
+     * concurrent-use window, absent when that has never been observed.
+     *
+     * A signal for the owner, not a refusal: addresses change legitimately, so
+     * nothing is blocked by it and a device list that shows it is telling someone
+     * to look rather than telling them something happened. The addresses
+     * themselves are never returned.
+     *
+     * Only meaningful where proxy-guard is configured. Without it every web
+     * request carries the Next.js server's own address, so two browsers on two
+     * continents share one and this never fires.
+     */
+    concurrentUseAtMillis?: number;
 }
 
 export interface ListKeysParams
@@ -450,6 +472,8 @@ export async function listKeysService(params: ListKeysParams): Promise<KeySummar
         revokedAtMillis: row.revokedAt?.getTime(),
         registeredIp: row.registeredIp ?? undefined,
         registeredUserAgent: row.registeredUserAgent ?? undefined,
+        binding: row.binding === 'passkey' ? row.binding : undefined,
+        concurrentUseAtMillis: row.concurrentUseAt?.getTime(),
     }));
 }
 
