@@ -14,6 +14,7 @@
 
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 import type { Hono } from 'hono';
+import { eq, sql } from 'drizzle-orm';
 
 import { setupTestDb, teardownTestDb, clearTables, getTestDb, isDatabaseAvailable } from '../helpers/db';
 import {
@@ -23,6 +24,7 @@ import {
     resetMemoryRateLimitStore,
 } from '../helpers/oauth2';
 import { MAX_UNGRANTED_CLIENTS_PER_IP } from '@/server/services/oauth2-client.service';
+import { oauth2Clients } from '@/server/entities';
 
 const dbAvailable = await isDatabaseAvailable();
 
@@ -260,5 +262,61 @@ describe.skipIf(!dbAvailable)('OAuth2 register (8a)', () =>
 
         expect(over.ok).toBe(false);
         expect(over.ok === false && over.status).toBe(429);
+    });
+
+    it('twenty unapproved clients registered an hour ago → 201, the window has moved past them', async () =>
+    {
+        const { registerOAuth2ClientService } = await import('@/server/services/oauth2-client.service');
+        const address = '198.51.100.242';
+
+        for (let attempt = 0; attempt < MAX_UNGRANTED_CLIENTS_PER_IP; attempt++)
+        {
+            const result = await registerOAuth2ClientService({
+                client_name: `${NAME}-aged-${attempt}`,
+                redirect_uris: [`http://127.0.0.1:${7000 + attempt}/cb`],
+            }, address);
+
+            expect(result.ok).toBe(true);
+        }
+
+        // Age the whole standing population past the window, written by the
+        // database so the row is judged by the clock that stores it.
+        await getTestDb()
+            .update(oauth2Clients)
+            .set({ createdAt: sql`now() - interval '2 hours'` })
+            .where(eq(oauth2Clients.createdIp, address));
+
+        const { status, body } = await register({
+            client_name: `${NAME}-aged-now`,
+            redirect_uris: ['http://127.0.0.1:7999/cb'],
+        }, address);
+
+        expect(status).toBe(201);
+        expect(body.client_id).toMatch(/^spfn_client_[0-9a-f]{32}$/);
+    });
+
+    it('twenty-one registrations from one address at once → twenty rows, not twenty-one', async () =>
+    {
+        const { registerOAuth2ClientService } = await import('@/server/services/oauth2-client.service');
+        const address = '198.51.100.243';
+
+        // Every one of these counts before any of them has committed, which is
+        // what a count-then-insert cap cannot survive.
+        const results = await Promise.all(
+            Array.from({ length: MAX_UNGRANTED_CLIENTS_PER_IP + 1 }, (_unused, index) =>
+                registerOAuth2ClientService({
+                    client_name: `${NAME}-race-${index}`,
+                    redirect_uris: [`http://127.0.0.1:${6000 + index}/cb`],
+                }, address)),
+        );
+
+        expect(results.filter(result => result.ok)).toHaveLength(MAX_UNGRANTED_CLIENTS_PER_IP);
+
+        const rows = await getTestDb()
+            .select()
+            .from(oauth2Clients)
+            .where(eq(oauth2Clients.createdIp, address));
+
+        expect(rows).toHaveLength(MAX_UNGRANTED_CLIENTS_PER_IP);
     });
 });

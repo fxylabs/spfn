@@ -175,6 +175,17 @@ describe.skipIf(!dbAvailable)('OAuth2 token, authorization_code (8c)', () =>
         expect(body.error).toBe('invalid_grant');
     });
 
+    it('a code_verifier outside RFC 7636\'s 43 to 128 characters → 400 invalid_grant', async () =>
+    {
+        for (const outOfBounds of ['too-short-for-rfc-7636', 'a'.repeat(129)])
+        {
+            const { response, body } = await exchange({ code_verifier: outOfBounds });
+
+            expect(response.status).toBe(400);
+            expect(body.error).toBe('invalid_grant');
+        }
+    });
+
     it('a fresh code presented by another client → 400 invalid_grant', async () =>
     {
         const other = await registerLoopbackClient(app, `${NAME}-other`, [TEST_REDIRECT_URI]);

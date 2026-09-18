@@ -63,7 +63,8 @@ export const oauth2Token = route.post('/_auth/oauth2/token')
  * RFC 7009. Answers 200 for a token that was never issued as surely as for one
  * that was, so the endpoint cannot be used to ask whether a value found
  * somewhere is real. A body without a `token` field is the same 200 — there is
- * nothing to report about a revocation that was never asked for.
+ * nothing to report about a revocation that was never asked for, and so is a
+ * `client_id` that is not the token's.
  */
 export const oauth2Revoke = route.post('/_auth/oauth2/revoke')
     .use([rateLimitPolicy('auth-oauth2-revoke', { limit: 60, windowMs: 60_000 })])
@@ -74,7 +75,7 @@ export const oauth2Revoke = route.post('/_auth/oauth2/revoke')
 
         const body = await readOAuth2Body(c.raw);
 
-        await revokeOAuth2TokenService(body.token ?? '');
+        await revokeOAuth2TokenService(body.token ?? '', body.client_id);
 
         return oauth2JsonResponse(c.raw, 200, {});
     });

@@ -10,7 +10,10 @@
  * two things bound it. The route rate-limits by IP, and this service caps how
  * many clients one IP may have standing that nobody has approved — a rate limit
  * alone would let an IP accumulate rows forever at a slow enough pace, because a
- * row costs nothing to make and lives until a job sweeps it.
+ * row costs nothing to make and lives until a job sweeps it. The cap looks back
+ * an hour rather than over all time: it is a bound on how much junk one address
+ * may have standing at once, not a lifetime quota on how many CLIs somebody may
+ * ever connect.
  *
  * Every refusal here is RFC 7591 §3.2.2 shaped (`invalid_redirect_uri`,
  * `invalid_client_metadata`) rather than thrown, because the client reading it
@@ -21,8 +24,8 @@
 import { randomBytes } from 'node:crypto';
 
 import { oauth2ClientsRepository } from '../repositories/oauth2-clients.repository';
-import type { OAuth2Client } from '../entities/oauth2-clients';
-import { getAuthorizationServerConfig } from '../lib/oauth2/config';
+import type { NewOAuth2Client, OAuth2Client } from '../entities/oauth2-clients';
+import { getAuthorizationServerConfig, type AuthorizationServerConfig } from '../lib/oauth2/config';
 import { refuseRedirectUriRegistration } from '../lib/oauth2/redirect-uri';
 import { toEpochSeconds } from '../lib/oauth2/tokens';
 import { authLogger } from '../logger';
@@ -36,6 +39,17 @@ import { authLogger } from '../logger';
  * between two sweeps of the purge job.
  */
 export const MAX_UNGRANTED_CLIENTS_PER_IP = 20;
+
+/**
+ * How far back the cap looks.
+ *
+ * It bounds the standing population, so it has to expire faster than the purge
+ * job frees rows — that job sweeps once a day against a 24-hour threshold, which
+ * on its own holds a slot for up to two days. An hour is long enough that a
+ * burst is still a burst when the twentieth request arrives, and short enough
+ * that an office behind one address is not locked out until tomorrow.
+ */
+export const UNGRANTED_CLIENT_WINDOW_MS = 60 * 60 * 1000;
 
 /** How long a client nobody approved is kept before the purge job deletes it. */
 export const STALE_CLIENT_MAX_AGE_MS = 24 * 60 * 60 * 1000;
@@ -87,6 +101,18 @@ export type OAuth2RegisterResult =
 function refuse(status: 400 | 429, error: string, description: string): OAuth2RegisterRefusal
 {
     return { ok: false, status, error, description };
+}
+
+function requireConfig(): AuthorizationServerConfig
+{
+    const config = getAuthorizationServerConfig();
+
+    if (!config)
+    {
+        throw new Error('OAuth2 client service called with no authorization server configured.');
+    }
+
+    return config;
 }
 
 /** Every string in the array, or null when the value is not an array of strings. */
@@ -184,13 +210,7 @@ export async function registerOAuth2ClientService(
     clientIp: string | null,
 ): Promise<OAuth2RegisterResult>
 {
-    const config = getAuthorizationServerConfig();
-
-    if (!config)
-    {
-        throw new Error('registerOAuth2ClientService called with no authorization server configured.');
-    }
-
+    const config = requireConfig();
     const refusal = refuseRedirectUris(request.redirect_uris, config.allowedRedirectOrigins)
         ?? refuseDeclaredMetadata(request);
 
@@ -199,20 +219,12 @@ export async function registerOAuth2ClientService(
         return refusal;
     }
 
-    const overCap = await refuseOverStandingCap(clientIp);
+    const record = await createUnderStandingCap(newClientRow(request, clientIp), clientIp);
 
-    if (overCap)
+    if (!record)
     {
-        return overCap;
+        return refuse(429, 'invalid_client_metadata', OVER_STANDING_CAP_MESSAGE);
     }
-
-    const redirectUris = asStringArray(request.redirect_uris)!;
-    const record = await oauth2ClientsRepository.create({
-        clientId: `spfn_client_${randomBytes(16).toString('hex')}`,
-        clientName: clientNameOf(request.client_name, redirectUris[0]!),
-        redirectUris,
-        createdIp: clientIp,
-    });
 
     // Never the client_id, never a redirect URI: this line exists so an operator
     // can see registration happening, and neither value helps with that.
@@ -221,23 +233,48 @@ export async function registerOAuth2ClientService(
     return { ok: true, client: describeClient(record) };
 }
 
-async function refuseOverStandingCap(clientIp: string | null): Promise<OAuth2RegisterRefusal | null>
+const OVER_STANDING_CAP_MESSAGE =
+    `This address has registered ${MAX_UNGRANTED_CLIENTS_PER_IP} clients in the last hour that nobody `
+    + 'has approved. Complete or abandon one of those, or try again later.';
+
+/** The row to write, from metadata that has already been refused or accepted. */
+function newClientRow(request: OAuth2RegisterRequest, clientIp: string | null): NewOAuth2Client
+{
+    const redirectUris = asStringArray(request.redirect_uris)!;
+
+    return {
+        clientId: `spfn_client_${randomBytes(16).toString('hex')}`,
+        clientName: clientNameOf(request.client_name, redirectUris[0]!),
+        redirectUris,
+        createdIp: clientIp,
+    };
+}
+
+/**
+ * Write the row, under the cap when there is an address to hold against.
+ *
+ * `getClientIp` answers nothing on a deployment that presents none, and a cap
+ * on "no address" would be a single global quota that the first twenty
+ * registrations anywhere would exhaust. The route's rate limit is what bounds
+ * that case.
+ *
+ * @returns the registered client, or null when the address is at its cap
+ */
+async function createUnderStandingCap(
+    data: NewOAuth2Client,
+    clientIp: string | null,
+): Promise<OAuth2Client | null>
 {
     if (!clientIp)
     {
-        return null;
+        return await oauth2ClientsRepository.create(data);
     }
 
-    const standing = await oauth2ClientsRepository.countUngrantedByIp(clientIp);
-
-    if (standing < MAX_UNGRANTED_CLIENTS_PER_IP)
-    {
-        return null;
-    }
-
-    return refuse(429, 'invalid_client_metadata',
-        `This address already has ${MAX_UNGRANTED_CLIENTS_PER_IP} registered clients that nobody has `
-        + 'approved. Complete or abandon one of those — unapproved registrations are deleted after a day.');
+    return await oauth2ClientsRepository.createWithinStandingCap(data, {
+        ip: clientIp,
+        max: MAX_UNGRANTED_CLIENTS_PER_IP,
+        windowMs: UNGRANTED_CLIENT_WINDOW_MS,
+    });
 }
 
 /**

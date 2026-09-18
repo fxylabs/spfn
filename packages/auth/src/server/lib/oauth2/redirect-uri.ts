@@ -57,6 +57,18 @@ export function refuseRedirectUriRegistration(
             + 'that registered one would be waiting for something it can never be sent.';
     }
 
+    if (hasDotSegment(uri))
+    {
+        return `"${uri}" has a "." or ".." path segment. Those resolve away before a path is `
+            + 'compared, so the URI does not name one destination; register the path it resolves to.';
+    }
+
+    return refuseRedirectOrigin(url, uri, allowedRedirectOrigins);
+}
+
+/** Loopback http, or an https origin this application allows. Nothing else. */
+function refuseRedirectOrigin(url: URL, uri: string, allowedRedirectOrigins: string[]): string | null
+{
     if (url.protocol === 'http:')
     {
         return isLoopbackHostname(url.hostname)
@@ -78,12 +90,39 @@ export function refuseRedirectUriRegistration(
 }
 
 /**
+ * Whether the path, as written, carries a `.` or `..` segment.
+ *
+ * Read off the raw string and not the parsed URL, because parsing is what makes
+ * this necessary: `new URL('http://127.0.0.1:5/x/../cb').pathname` is `/cb`, so
+ * a URI that is not the registered one is compared as though it were. The port
+ * may vary on loopback and the path may not, and a dot segment is a way of
+ * writing any registered path at all — one that also lets the presented string
+ * carry whatever a client's own logging, or a proxy in front of the listener,
+ * is going to treat as the destination.
+ *
+ * `%2e` is the same segment percent-encoded, which `new URL` resolves too.
+ */
+function hasDotSegment(uri: string): boolean
+{
+    const path = uri.replace(/^[^:]*:\/\/[^/?#]*/, '').split(/[?#]/)[0] ?? '';
+
+    return path.split('/').some(isDotSegment);
+}
+
+function isDotSegment(segment: string): boolean
+{
+    const decoded = segment.replace(/%2e/gi, '.');
+
+    return decoded === '.' || decoded === '..';
+}
+
+/**
  * Whether a presented redirect URI is one of the registered ones.
  *
  * Host, path and query must be identical; the port may differ only when both
- * sides are loopback http. A presented URI carrying a fragment matches nothing —
- * registration already refuses one, so this is the request side of the same
- * rule.
+ * sides are loopback http. A presented URI carrying a fragment or a dot segment
+ * matches nothing — registration already refuses both, so this is the request
+ * side of the same two rules.
  */
 export function matchesRegisteredRedirectUri(presented: string, registered: string[]): boolean
 {
@@ -98,7 +137,7 @@ export function matchesRegisteredRedirectUri(presented: string, registered: stri
         return false;
     }
 
-    if (request.hash !== '')
+    if (request.hash !== '' || hasDotSegment(presented))
     {
         return false;
     }

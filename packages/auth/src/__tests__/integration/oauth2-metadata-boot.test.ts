@@ -8,7 +8,9 @@
  * The boot rows call the check directly with a configuration rather than
  * starting a server, which is what it is for — `createAuthLifecycle` resolves
  * the config synchronously and `afterInfrastructure` calls this, so a refusal
- * here is a process that exits before it ever listens.
+ * here is a process that exits before it ever listens. The same check is also
+ * where the accepted issuer is reduced to its origin, so the rows that boot go
+ * on to read the metadata document and assert what it publishes.
  *
  * The last two tests are not rows. They are the opt-in: an application that
  * passes no `authorizationServer` must boot exactly as it did before this
@@ -116,6 +118,43 @@ describe.skipIf(!dbAvailable)('OAuth2 metadata and boot check (8f)', () =>
 
         expect(() => assertAuthorizationServerIssuer())
             .toThrow(/SPFN_API_URL must be an origin with no path/);
+    });
+
+    it('an issuer written with a trailing slash → boots, and the document publishes the origin', async () =>
+    {
+        configureTestAuthorizationServer({ issuer: 'https://api.example.com/' });
+
+        expect(() => assertAuthorizationServerIssuer()).not.toThrow();
+
+        const document = await (await app.request(METADATA_PATH)).json() as Metadata;
+
+        // `@spfn/mcp` derives `authorization_servers` with `URL.origin`, which
+        // never carries the slash. RFC 8414 §3.3 has a client compare the two.
+        expect(document.issuer).toBe('https://api.example.com');
+        expect(document.token_endpoint).toBe('https://api.example.com/_auth/oauth2/token');
+    });
+
+    it('an issuer whose path is percent-encoded dot segments → boots, and the document publishes the origin', async () =>
+    {
+        // `new URL` resolves `%2e%2e` away, so this parses with pathname `/` and
+        // the path check has nothing to refuse. Canonicalising to the origin is
+        // what makes that safe: whatever the raw string said, the published
+        // issuer is the origin and nothing else.
+        configureTestAuthorizationServer({ issuer: 'https://api.example.com/%2e%2e' });
+
+        expect(() => assertAuthorizationServerIssuer()).not.toThrow();
+
+        const document = await (await app.request(METADATA_PATH)).json() as Metadata;
+
+        expect(document.issuer).toBe('https://api.example.com');
+    });
+
+    it('an issuer carrying credentials → boot refused, message names the source', () =>
+    {
+        configureAuthorizationServer({ issuer: 'https://u:p@api.example.com', scopes: TEST_SCOPES });
+
+        expect(() => assertAuthorizationServerIssuer())
+            .toThrow(/authorizationServer\.issuer must not carry a username or a password/);
     });
 
     it('an issuer that is neither https nor loopback http → boot refused', () =>

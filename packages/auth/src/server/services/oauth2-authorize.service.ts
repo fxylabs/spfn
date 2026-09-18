@@ -35,7 +35,11 @@ import type { OAuth2Client } from '../entities/oauth2-clients';
 import { getAuthorizationServerConfig, type AuthorizationServerConfig } from '../lib/oauth2/config';
 import { matchesRegisteredRedirectUri, redirectHostOf } from '../lib/oauth2/redirect-uri';
 import { normalizeResource } from '../lib/oauth2/resource';
-import { generateAuthorizationCode, hashOAuth2Secret } from '../lib/oauth2/tokens';
+import {
+    generateAuthorizationCode,
+    hashOAuth2Secret,
+    isPkceS256ChallengeShaped,
+} from '../lib/oauth2/tokens';
 
 /** An authorize request as the web handler forwards it, before anything is trusted. */
 export interface OAuth2AuthorizeParams
@@ -139,6 +143,40 @@ function resolveScopes(params: OAuth2AuthorizeParams, config: AuthorizationServe
     return requested.split(/\s+/);
 }
 
+const PKCE_REQUIRED_MESSAGE =
+    'code_challenge with code_challenge_method=S256 is required, and the challenge must be the 43 '
+    + 'base64url characters that transform produces. Neither plain PKCE nor a request without PKCE '
+    + 'is accepted, because a code intercepted on the loopback listener would otherwise be '
+    + 'exchangeable by whoever intercepted it.';
+
+const RESOURCE_REQUIRED_MESSAGE =
+    'resource is required and must be an absolute URI with no fragment (RFC 8707). A token issued '
+    + 'without a stated target is a token good against everything.';
+
+/**
+ * Refuse with an error the client's own redirect URI can carry.
+ *
+ * Every caller has already vetted `redirectUri` against the registration — that
+ * is what makes the error redirectable rather than a screen.
+ */
+function refuseRedirectable(
+    params: OAuth2AuthorizeParams,
+    redirectUri: string,
+    error: string,
+    message: string,
+): never
+{
+    throw new OAuth2AuthorizeRedirectError({ error, redirectUri, state: params.state, message });
+}
+
+/** S256 named, and a challenge that could have come out of S256. */
+function hasUsableS256Challenge(params: OAuth2AuthorizeParams): boolean
+{
+    return params.codeChallengeMethod === 'S256'
+        && !!params.codeChallenge
+        && isPkceS256ChallengeShaped(params.codeChallenge);
+}
+
 /**
  * Validate everything downstream of the redirect target, refusing with the
  * redirectable error each failure earns.
@@ -149,26 +187,16 @@ function assertRedirectableRules(
     config: AuthorizationServerConfig,
 ): { resource: string; scopes: string[]; codeChallenge: string }
 {
-    const refuse = (error: string, message: string): never =>
+    if (!hasUsableS256Challenge(params))
     {
-        throw new OAuth2AuthorizeRedirectError({ error, redirectUri, state: params.state, message });
-    };
-
-    if (!params.codeChallenge || params.codeChallengeMethod !== 'S256')
-    {
-        refuse('invalid_request',
-            'code_challenge with code_challenge_method=S256 is required. Neither plain PKCE nor a '
-            + 'request without PKCE is accepted, because a code intercepted on the loopback listener '
-            + 'would otherwise be exchangeable by whoever intercepted it.');
+        refuseRedirectable(params, redirectUri, 'invalid_request', PKCE_REQUIRED_MESSAGE);
     }
 
     const resource = params.resource ? normalizeResource(params.resource) : null;
 
     if (!resource)
     {
-        refuse('invalid_target',
-            'resource is required and must be an absolute URI with no fragment (RFC 8707). A token '
-            + 'issued without a stated target is a token good against everything.');
+        refuseRedirectable(params, redirectUri, 'invalid_target', RESOURCE_REQUIRED_MESSAGE);
     }
 
     const scopes = resolveScopes(params, config);
@@ -176,7 +204,7 @@ function assertRedirectableRules(
 
     if (unknown.length > 0)
     {
-        refuse('invalid_scope', `Unknown scope: ${unknown.join(', ')}.`);
+        refuseRedirectable(params, redirectUri, 'invalid_scope', `Unknown scope: ${unknown.join(', ')}.`);
     }
 
     return { resource: resource!, scopes, codeChallenge: params.codeChallenge! };
@@ -256,19 +284,22 @@ export async function approveOAuth2AuthorizeService(
 /**
  * The user said no.
  *
- * Still validated, and validated first: `access_denied` goes back to the client
- * on its redirect URI like any other redirectable error, so the URI has to be
- * one the client registered before anybody is sent to it. Nothing is recorded —
- * a refusal is not a grant with a flag on it.
+ * Validated first, and validated in full — the same `validate` the approval
+ * runs. `access_denied` goes back to the client on its redirect URI like any
+ * other redirectable error, so the URI has to be one the client registered
+ * before anybody is sent to it; and a request that was malformed was malformed
+ * whichever button was pressed, so answering `access_denied` to it would tell
+ * the waiting client the user refused when in fact it never asked properly.
+ * Nothing is recorded — a refusal is not a grant with a flag on it.
  */
 export async function denyOAuth2AuthorizeService(params: OAuth2AuthorizeParams): Promise<never>
 {
-    const { redirectUri } = await resolveRedirectTarget(params);
+    const validated = await validate(params);
 
     throw new OAuth2AuthorizeRedirectError({
         error: 'access_denied',
-        redirectUri,
-        state: params.state,
+        redirectUri: validated.redirectUri,
+        state: validated.state,
         message: 'The account owner refused this authorization request.',
     });
 }

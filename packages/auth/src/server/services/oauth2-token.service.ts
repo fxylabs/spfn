@@ -51,6 +51,7 @@ import {
     generateAccessToken,
     generateRefreshToken,
     hashOAuth2Secret,
+    isPkceVerifierShaped,
     pkceChallengeFor,
     sameOAuth2Hash,
     secondsUntil,
@@ -191,6 +192,11 @@ function boundToRequest(
 ): boolean
 {
     if (request.client_id !== client.clientId || request.redirect_uri !== record.redirectUri)
+    {
+        return false;
+    }
+
+    if (!isPkceVerifierShaped(request.code_verifier!))
     {
         return false;
     }
@@ -456,8 +462,17 @@ async function revokeGrantAndTokens(grantId: number, reason: string): Promise<vo
  * for eight more hours would be honouring half the request. An access token is
  * revoked alone — a client may be discarding one it no longer needs while still
  * holding the connection.
+ *
+ * A `client_id` that is not the token's is the same 200 and revokes nothing
+ * (RFC 7009 §2.1). The endpoint has no client authentication to lean on, so this
+ * does not stop anybody who holds the token from revoking it — what it stops is
+ * one client tearing down another's connection by presenting a value it came
+ * across, which is the only thing a public client's id can be asked to mean.
+ *
+ * @param token - The value to revoke, access or refresh
+ * @param clientId - Checked against the token's client when the caller sent one
  */
-export async function revokeOAuth2TokenService(token: string): Promise<void>
+export async function revokeOAuth2TokenService(token: string, clientId?: string): Promise<void>
 {
     if (!token)
     {
@@ -472,6 +487,11 @@ export async function revokeOAuth2TokenService(token: string): Promise<void>
         return;
     }
 
+    if (clientId && !await issuedToClient(record.grant, clientId))
+    {
+        return;
+    }
+
     if (record.kind === 'access')
     {
         await oauth2TokensRepository.revokeByTokenHash(tokenHash);
@@ -481,4 +501,12 @@ export async function revokeOAuth2TokenService(token: string): Promise<void>
 
     await oauth2GrantsRepository.revokeById(record.grant);
     await oauth2GrantsRepository.revokeTokensOfGrants([record.grant]);
+}
+
+/** Whether this grant's client is the one the caller claims to be. */
+async function issuedToClient(grantId: number, clientId: string): Promise<boolean>
+{
+    const pair = await oauth2GrantsRepository.findWithClientById(grantId);
+
+    return pair?.client.clientId === clientId;
 }

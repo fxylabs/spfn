@@ -207,6 +207,35 @@ describe.skipIf(!dbAvailable)('OAuth2 authorize, API side (8b)', () =>
         expect(refusal.redirectUri).toBe('http://127.0.0.1:7777/callback');
     });
 
+    it('signed in, a code_challenge that is not 43 base64url characters → invalid_request', async () =>
+    {
+        // The verifier in the challenge field is what a client sends when it
+        // means `plain` and says S256, and it is the wrong length for S256.
+        const response = await describeAuthorize(app, authorization, {
+            client_id: clientId,
+            code_challenge: pkcePair('short').verifier,
+        });
+        const refusal = refusalOf(await response.json() as Envelope);
+
+        expect(response.status).toBe(400);
+        expect(refusal.error).toBe('invalid_request');
+        expect(refusal.redirectUri).toBe('http://127.0.0.1:7777/callback');
+    });
+
+    it('signed in, a redirect_uri reaching the registered path through ".." → screen error, no redirect', async () =>
+    {
+        const registered = await clientWith(['http://127.0.0.1/cb'], 'dotsegment');
+        const response = await describeAuthorize(app, authorization, {
+            client_id: registered,
+            redirect_uri: 'http://127.0.0.1:5/x/../cb',
+        });
+
+        // `new URL(...).pathname` is `/cb` for both, and the port may vary on
+        // loopback — so without the raw-path rule this is a match.
+        expect(response.status).toBe(400);
+        expect(refusalOf(await response.json() as Envelope).error).toBe('redirect_uri_mismatch');
+    });
+
     it('signed in, no resource → invalid_target on the registered redirect URI', async () =>
     {
         const response = await describeAuthorize(app, authorization, {
@@ -284,6 +313,22 @@ describe.skipIf(!dbAvailable)('OAuth2 authorize, API side (8b)', () =>
         expect(refusal.error).toBe('access_denied');
         expect(refusal.redirectUri).toBe('http://127.0.0.1:7777/callback');
         expect(refusal.state).toBe('deny-state');
+    });
+
+    it('signed in, POST deny on a malformed request → the validation error, not access_denied', async () =>
+    {
+        const response = await decideAuthorize(app, authorization, {
+            client_id: clientId,
+            code_challenge_method: 'plain',
+            state: 'deny-state',
+            approve: false,
+        });
+        const refusal = refusalOf(await response.json() as Envelope);
+
+        // A request that never asked properly was not refused by the user, and
+        // telling the waiting client it was would be telling it something false.
+        expect(response.status).toBe(400);
+        expect(refusal.error).toBe('invalid_request');
     });
 
     it('an existing grant re-approved with wider scopes → one grant, scopes updated', async () =>

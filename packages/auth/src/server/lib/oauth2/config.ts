@@ -97,9 +97,10 @@ function resolveAuthorizeUrl(env: Record<string, string | undefined>): string
  * passed none. Called synchronously from `createAuthLifecycle()` for the reason
  * `configureDeviceAuth` is: nothing may serve a request under half a config.
  *
- * The issuer is NOT validated here — `assertAuthorizationServerIssuer` does
- * that, from `afterInfrastructure`, where a throw exits the process instead of
- * leaving a server listening without routes. See `lifecycle.ts`.
+ * The issuer is NOT validated or canonicalised here —
+ * `assertAuthorizationServerIssuer` does both, from `afterInfrastructure`, where
+ * a throw exits the process instead of leaving a server listening without
+ * routes. See `lifecycle.ts`.
  */
 export function configureAuthorizationServer(
     options?: AuthorizationServerOptions,
@@ -173,7 +174,8 @@ export function isLoopbackHostname(hostname: string): boolean
 }
 
 /**
- * Refuse boot on an issuer no client could use.
+ * Refuse boot on an issuer no client could use, and reduce the one that passes
+ * to the single form this server publishes.
  *
  * `.well-known/*` lives at an origin's root, so an issuer carrying a path has no
  * place to publish its metadata and every discovery request 404s. An issuer that
@@ -197,7 +199,7 @@ export function assertAuthorizationServerIssuer(): void
         return;
     }
 
-    assertIssuerUsable(resolved.issuer, resolved.issuerSource);
+    resolved.issuer = canonicalIssuer(resolved.issuer, resolved.issuerSource);
 
     authLogger.service.info(
         `OAuth 2.1 authorization server enabled. issuer=${resolved.issuer}, `
@@ -205,8 +207,18 @@ export function assertAuthorizationServerIssuer(): void
     );
 }
 
-/** The three things an issuer has to be, each with the refusal it earns. */
-function assertIssuerUsable(issuer: string, source: string): void
+/**
+ * The value an operator wrote, reduced to what the metadata document carries.
+ *
+ * `URL.origin` is the reduction: a trailing slash, a default port and a path the
+ * parser resolved away all disappear, and what is left is the exact string
+ * `@spfn/mcp` derives for `authorization_servers`. RFC 8414 §3.3 has a client
+ * compare the `issuer` it reads against the identifier it put in the well-known
+ * path, so two documents naming one server differently is a client that refuses
+ * the metadata — and `SPFN_API_URL` is written with a trailing slash as often as
+ * without one.
+ */
+function canonicalIssuer(issuer: string, source: string): string
 {
     let url: URL;
 
@@ -222,6 +234,26 @@ function assertIssuerUsable(issuer: string, source: string): void
         );
     }
 
+    assertIssuerIdentifiesOneOrigin(url, issuer, source);
+    assertIssuerTransportIsSafe(url, issuer, source);
+
+    return url.origin;
+}
+
+/** The two ways a URL names something other than exactly one origin. */
+function assertIssuerIdentifiesOneOrigin(url: URL, issuer: string, source: string): void
+{
+    // The value is not echoed here, alone among these messages: whatever stands
+    // where the password does is a password.
+    if (url.username !== '' || url.password !== '')
+    {
+        throw new Error(
+            `${source} must not carry a username or a password for the OAuth 2.1 authorization `
+            + 'server. Credentials in an issuer are dropped by every client that compares one, so '
+            + 'the identifier published in the metadata would not be the value configured here.',
+        );
+    }
+
     if (url.pathname !== '/' || url.search !== '' || url.hash !== '')
     {
         throw new Error(
@@ -230,7 +262,11 @@ function assertIssuerUsable(issuer: string, source: string): void
             + 'issuer carrying a path publishes its metadata nowhere a client will look.',
         );
     }
+}
 
+/** https, or http on a host a browser treats as a secure context anyway. */
+function assertIssuerTransportIsSafe(url: URL, issuer: string, source: string): void
+{
     if (url.protocol !== 'https:' && !(url.protocol === 'http:' && isLoopbackHostname(url.hostname)))
     {
         throw new Error(
