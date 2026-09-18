@@ -103,12 +103,27 @@ The same dispatcher can be passed to `createMcpHttpRoute` and `serveMcpStdio`. T
 
 ## Remote Streamable HTTP
 
+The route takes two things from the authorization server: the function that verifies its
+access tokens, and the scope names it issues. The scope names are the object the
+application already hands `createAuthLifecycle`, so keep them in one place rather than
+retyping them here:
+
+```ts
+// src/server/auth-scopes.ts — passed to createAuthLifecycle({ authorizationServer: { scopes } })
+export const scopes = {
+    'mcp:read': 'Read your data',
+    'mcp:write': 'Act on your behalf',
+};
+```
+
 ```ts
 import { createMcpRoute, McpError } from '@spfn/mcp/server';
+import { verifyAccessToken } from '@spfn/auth/server';
 import type { McpAuth, McpTool } from '@spfn/mcp';
+import { scopes } from './auth-scopes';
 
 type Auth = McpAuth & {
-    userId: number;
+    userId: string;
 };
 
 type Context = {
@@ -142,17 +157,10 @@ export const mcpRouter = createMcpRoute<Auth, Context>({
         name: 'example-app',
         version: '1.0.0',
     },
-    validateToken: async (token, resource) => {
-        const claims = await verifyAccessToken(token, resource);
-        return {
-            clientId: claims.clientId,
-            scopes: claims.scopes,
-            expiresAt: claims.expiresAt,
-            userId: claims.userId,
-        };
-    },
+    validateToken: verifyAccessToken,
+    scopesSupported: Object.keys(scopes),
     resolveContext: async auth => {
-        const user = await findUser(auth.userId);
+        const user = await findUser(Number(auth.userId));
         if (!user) {
             throw new McpError(-32002, 'User not found', 403);
         }
@@ -173,9 +181,79 @@ export const appRouter = defineRouter({
 }).packages([mcpRouter]);
 ```
 
+`verifyAccessToken` returns `userId` as a **string** — it is the token's subject claim,
+not your user table's column type — so `Auth` declares `userId: string` and
+`resolveContext` converts it at the one place the application's own numeric id is needed.
+An application whose user ids are already strings drops the `Number(...)` and keeps the id
+a string end to end.
+
+`verifyAccessToken` returns `null` when it refuses the token — expired, revoked, or
+issued for another resource. `validateToken` may signal a refusal that way or by
+throwing; the adapter treats `null`, `undefined`, and a thrown error identically.
+`@spfn/auth` `0.3.0-beta.19` ships the authorization server that issues these tokens —
+see its README section
+[Authorization server for MCP clients](../auth/README.md#authorization-server-for-mcp-clients).
+
 The adapter registers `POST`, `GET`, and `DELETE` handlers at `/mcp` and skips SPFN's
 session middleware. `validateToken` is therefore the authentication boundary and must
 validate the token audience against the supplied `resource` value.
+
+### Discovery
+
+The router also serves the RFC 9728 protected resource metadata document, unauthenticated,
+at two paths:
+
+- `GET /.well-known/oauth-protected-resource`
+- `GET /.well-known/oauth-protected-resource/mcp` — the path-aware form, whose suffix is
+  the path of the resolved `resource`. A `resource` of `https://app.example.com/tools` is
+  published at `/.well-known/oauth-protected-resource/tools` instead.
+
+Both answer the same bytes:
+
+```json
+{
+    "resource": "https://app.example.com/mcp",
+    "authorization_servers": ["https://app.example.com"],
+    "scopes_supported": ["mcp:read", "mcp:write"],
+    "bearer_methods_supported": ["header"]
+}
+```
+
+`scopes_supported` is the list a client picks the `scope` it asks the authorization server
+for from (RFC 9728 §2), which is why the wiring above publishes `Object.keys(scopes)`
+rather than leaving the field out.
+
+`authorization_servers` defaults to the origin of `appUrl` — the issuer `@spfn/auth`
+publishes on the API origin. Override it when the authorization server is deployed
+separately:
+
+```ts
+authorizationServers: ['https://id.example.com'],
+```
+
+These are package routes like `/mcp` itself, so they are relative to wherever the router
+is mounted. An application served under a base path publishes them under that base path,
+where an MCP client looking at the origin root will not find them; terminate the base path
+at the proxy, or set `resourceMetadataUrl` to the URL the client can actually reach.
+
+### The 401 challenge
+
+A request without a bearer token gets the plain challenge, pointing at the path-aware
+metadata document:
+
+```
+WWW-Authenticate: Bearer resource_metadata="https://app.example.com/.well-known/oauth-protected-resource/mcp"
+```
+
+A request whose bearer token `validateToken` refused gets `error="invalid_token"`
+(RFC 6750 §3) as well:
+
+```
+WWW-Authenticate: Bearer error="invalid_token", resource_metadata="https://app.example.com/.well-known/oauth-protected-resource/mcp"
+```
+
+The parameter is what lets a client tell the two apart: refresh the token it already has,
+or go and authorize for one. `resourceMetadataUrl` overrides the URL in both.
 
 To reuse an existing dispatcher, use the explicit HTTP adapter:
 

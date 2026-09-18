@@ -66,8 +66,10 @@ describe('createMcpRoute', () =>
 
         expect(response.status).toBe(401);
         expect(response.headers.get('www-authenticate')).toBe(
-            'Bearer resource_metadata="https://example.com/.well-known/oauth-protected-resource"',
+            'Bearer resource_metadata='
+            + '"https://example.com/.well-known/oauth-protected-resource/mcp"',
         );
+        expect(response.headers.get('www-authenticate')).not.toContain('error=');
     });
 
     it('mounts modern protocol discovery on the SPFN route', async () =>

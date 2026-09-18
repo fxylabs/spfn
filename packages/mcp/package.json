@@ -1,6 +1,6 @@
 {
     "name": "@spfn/mcp",
-    "version": "0.3.0-beta.2",
+    "version": "0.3.0-beta.3",
     "description": "Official-SDK-based Model Context Protocol adapter for SPFN applications.",
     "type": "module",
     "sideEffects": false,

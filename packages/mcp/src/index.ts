@@ -155,7 +155,16 @@ type McpHttpTransportConfig<Auth extends McpAuth, Ctx> = {
     appUrl: string;
     resource?: string | ((appUrl: string) => string);
     resourceMetadataUrl?: string;
-    validateToken: (token: string, resource: string) => Promise<Auth>;
+    authorizationServers?: string[];
+    scopesSupported?: string[];
+    /**
+     * Authenticate a bearer token for `resource`.
+     *
+     * A refusal may be expressed either way: return `null`/`undefined`, or throw. The
+     * adapter treats all three identically and answers `401` with
+     * `WWW-Authenticate: Bearer error="invalid_token", resource_metadata="..."`.
+     */
+    validateToken: (token: string, resource: string) => Promise<Auth | null | undefined>;
     resolveContext: (auth: Auth, request: McpRequestInfo) => Promise<Ctx>;
     security?: {
         allowedHosts?: string[];
