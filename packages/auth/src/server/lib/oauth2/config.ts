@@ -97,10 +97,13 @@ function resolveAuthorizeUrl(env: Record<string, string | undefined>): string
  * passed none. Called synchronously from `createAuthLifecycle()` for the reason
  * `configureDeviceAuth` is: nothing may serve a request under half a config.
  *
- * The issuer is NOT validated or canonicalised here —
- * `assertAuthorizationServerIssuer` does both, from `afterInfrastructure`, where
- * a throw exits the process instead of leaving a server listening without
- * routes. See `lifecycle.ts`.
+ * The issuer is reduced to the form this server publishes here, where every
+ * other default is resolved, so the config is publishable in exactly one state
+ * whether or not a lifecycle hook has run. It is not *validated* here: a value
+ * this cannot reduce is stored as the operator wrote it and refused by
+ * `assertAuthorizationServerIssuer` from `afterInfrastructure`, where a throw
+ * exits the process instead of leaving a server listening without routes. See
+ * `lifecycle.ts`.
  */
 export function configureAuthorizationServer(
     options?: AuthorizationServerOptions,
@@ -126,7 +129,7 @@ export function configureAuthorizationServer(
     }
 
     config = {
-        issuer: options.issuer ?? resolveIssuerSource(env).value ?? '',
+        issuer: canonicalIssuer(options.issuer ?? resolveIssuerSource(env).value ?? ''),
         issuerSource: options.issuer ? 'authorizationServer.issuer' : resolveIssuerSource(env).variable,
         authorizeUrl: options.authorizeUrl ?? resolveAuthorizeUrl(env),
         scopes: { ...options.scopes },
@@ -174,8 +177,7 @@ export function isLoopbackHostname(hostname: string): boolean
 }
 
 /**
- * Refuse boot on an issuer no client could use, and reduce the one that passes
- * to the single form this server publishes.
+ * Refuse boot on an issuer no client could use.
  *
  * `.well-known/*` lives at an origin's root, so an issuer carrying a path has no
  * place to publish its metadata and every discovery request 404s. An issuer that
@@ -183,6 +185,10 @@ export function isLoopbackHostname(hostname: string): boolean
  * clear. Both are configuration drift between environments, so the deploy that
  * introduces them is where they have to surface — the posture, the place and the
  * voice of `assertOAuthRedirectUris`, one door down.
+ *
+ * This only asserts. `configureAuthorizationServer` reduced the value it reads
+ * if it could, so anything reaching here that is not an origin is one the
+ * reduction deliberately left alone.
  *
  * Silent when no authorization server is configured: an application that does
  * not run one must boot exactly as it did before this feature existed.
@@ -199,7 +205,7 @@ export function assertAuthorizationServerIssuer(): void
         return;
     }
 
-    resolved.issuer = canonicalIssuer(resolved.issuer, resolved.issuerSource);
+    assertPublishableIssuer(resolved.issuer, resolved.issuerSource);
 
     authLogger.service.info(
         `OAuth 2.1 authorization server enabled. issuer=${resolved.issuer}, `
@@ -210,23 +216,49 @@ export function assertAuthorizationServerIssuer(): void
 /**
  * The value an operator wrote, reduced to what the metadata document carries.
  *
- * `URL.origin` is the reduction: a trailing slash, a default port and a path the
- * parser resolved away all disappear, and what is left is the exact string
- * `@spfn/mcp` derives for `authorization_servers`. RFC 8414 §3.3 has a client
- * compare the `issuer` it reads against the identifier it put in the well-known
- * path, so two documents naming one server differently is a client that refuses
- * the metadata — and `SPFN_API_URL` is written with a trailing slash as often as
- * without one.
+ * `URL.origin` is the reduction, and the raw string must already be that origin
+ * or that origin with a trailing slash for it to apply. Nothing else is reduced:
+ * the parser also resolves `/a/..` and `/%2e%2e` to `/`, and a path that
+ * disappeared while being read is not a path an operator wrote by accident.
+ * Those values are stored as written, for the boot check to refuse by name.
+ *
+ * RFC 8414 §3.3 has a client compare the `issuer` it reads against the
+ * identifier it put in the well-known path, so two documents naming one server
+ * differently is a client that refuses the metadata — and `SPFN_API_URL` is
+ * written with a trailing slash as often as without one.
  */
-function canonicalIssuer(issuer: string, source: string): string
+function canonicalIssuer(raw: string): string
 {
-    let url: URL;
+    const url = parseUrl(raw);
 
+    return url && isOriginOnly(raw, url) ? url.origin : raw;
+}
+
+/** Whether the operator wrote an origin, and nothing after it but a slash. */
+function isOriginOnly(raw: string, url: URL): boolean
+{
+    return raw === url.origin || raw === `${url.origin}/`;
+}
+
+/** `new URL`, answering null where it throws. */
+function parseUrl(value: string): URL | null
+{
     try
     {
-        url = new URL(issuer);
+        return new URL(value);
     }
     catch
+    {
+        return null;
+    }
+}
+
+/** The three ways an issuer is not an origin this server can publish under. */
+function assertPublishableIssuer(issuer: string, source: string): void
+{
+    const url = parseUrl(issuer);
+
+    if (!url)
     {
         throw new Error(
             `${source} must be an absolute URL for the OAuth 2.1 authorization server to issue tokens `
@@ -236,8 +268,6 @@ function canonicalIssuer(issuer: string, source: string): string
 
     assertIssuerIdentifiesOneOrigin(url, issuer, source);
     assertIssuerTransportIsSafe(url, issuer, source);
-
-    return url.origin;
 }
 
 /** The two ways a URL names something other than exactly one origin. */
@@ -254,7 +284,7 @@ function assertIssuerIdentifiesOneOrigin(url: URL, issuer: string, source: strin
         );
     }
 
-    if (url.pathname !== '/' || url.search !== '' || url.hash !== '')
+    if (!isOriginOnly(issuer, url))
     {
         throw new Error(
             `${source} must be an origin with no path for the OAuth 2.1 authorization server; it is `

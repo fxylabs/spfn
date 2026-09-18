@@ -2136,7 +2136,11 @@ requiring a throw. `expiresAt` is seconds since the epoch, like every other OAut
   document is served at an origin's root and nowhere else — and it must be `https`, or `http`
   on `localhost` / `127.0.0.1` / `[::1]` for development. Anything else refuses to start with
   a message naming `SPFN_API_URL` or `authorizationServer.issuer`, whichever the value came
-  from. An application with no `authorizationServer` block never reaches this check.
+  from. An application with no `authorizationServer` block never reaches this check. The one
+  value that is accepted and rewritten is a bare trailing slash: `https://api.acme.com/` is
+  stored as `https://api.acme.com`, the form `@spfn/mcp` derives, so the two documents naming
+  this server agree (RFC 8414 §3.3). That reduction happens where the config is resolved, not
+  in the boot check, so a document read without the lifecycle hook publishes the same issuer.
 - **Unapproved client rows are swept.** Registration is unauthenticated by necessity, so
   `auth.oauth2.client-purge` (in `authJobRouter`, daily at 05:00) deletes clients older than a
   day that no user ever approved. One with a grant against it is never touched. Registration

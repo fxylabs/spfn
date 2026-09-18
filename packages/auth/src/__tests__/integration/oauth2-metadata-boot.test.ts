@@ -2,15 +2,15 @@
  * @spfn/auth - AS metadata and the boot check (design #93 v2, case table 8f)
  *
  * The rows of 8f this package owns: the authorization server metadata document,
- * and the two issuers the boot check refuses. The protected-resource document
- * and the `/mcp` challenge are `@spfn/mcp`'s (PR B).
+ * and the issuers the boot check refuses. The protected-resource document and
+ * the `/mcp` challenge are `@spfn/mcp`'s (PR B).
  *
  * The boot rows call the check directly with a configuration rather than
  * starting a server, which is what it is for — `createAuthLifecycle` resolves
  * the config synchronously and `afterInfrastructure` calls this, so a refusal
- * here is a process that exits before it ever listens. The same check is also
- * where the accepted issuer is reduced to its origin, so the rows that boot go
- * on to read the metadata document and assert what it publishes.
+ * here is a process that exits before it ever listens. The reduction to an
+ * origin happens one step earlier, at `configureAuthorizationServer`, so the row
+ * that reads the metadata document reads it without asserting anything first.
  *
  * The last two tests are not rows. They are the opt-in: an application that
  * passes no `authorizationServer` must boot exactly as it did before this
@@ -120,33 +120,32 @@ describe.skipIf(!dbAvailable)('OAuth2 metadata and boot check (8f)', () =>
             .toThrow(/SPFN_API_URL must be an origin with no path/);
     });
 
-    it('an issuer written with a trailing slash → boots, and the document publishes the origin', async () =>
+    it('an issuer written with a trailing slash → the document publishes the origin, with no boot check', async () =>
     {
         configureTestAuthorizationServer({ issuer: 'https://api.example.com/' });
 
-        expect(() => assertAuthorizationServerIssuer()).not.toThrow();
-
+        // Read before anything asserts: the reduction happens where the config is
+        // resolved, so a harness that mounts the router without the lifecycle
+        // hook publishes the same document a booted server does.
         const document = await (await app.request(METADATA_PATH)).json() as Metadata;
 
         // `@spfn/mcp` derives `authorization_servers` with `URL.origin`, which
         // never carries the slash. RFC 8414 §3.3 has a client compare the two.
         expect(document.issuer).toBe('https://api.example.com');
         expect(document.token_endpoint).toBe('https://api.example.com/_auth/oauth2/token');
+        expect(() => assertAuthorizationServerIssuer()).not.toThrow();
     });
 
-    it('an issuer whose path is percent-encoded dot segments → boots, and the document publishes the origin', async () =>
+    it('an issuer whose path is percent-encoded dot segments → boot refused', () =>
     {
-        // `new URL` resolves `%2e%2e` away, so this parses with pathname `/` and
-        // the path check has nothing to refuse. Canonicalising to the origin is
-        // what makes that safe: whatever the raw string said, the published
-        // issuer is the origin and nothing else.
-        configureTestAuthorizationServer({ issuer: 'https://api.example.com/%2e%2e' });
+        // `new URL` resolves `%2e%2e` away, so the parsed pathname is `/` and a
+        // check reading it has nothing to refuse. The rule is written on the raw
+        // string instead: an origin, or that origin with a trailing slash, and
+        // nothing else is reduced or accepted.
+        configureAuthorizationServer({ issuer: 'https://api.example.com/%2e%2e', scopes: TEST_SCOPES });
 
-        expect(() => assertAuthorizationServerIssuer()).not.toThrow();
-
-        const document = await (await app.request(METADATA_PATH)).json() as Metadata;
-
-        expect(document.issuer).toBe('https://api.example.com');
+        expect(() => assertAuthorizationServerIssuer())
+            .toThrow(/authorizationServer\.issuer must be an origin with no path/);
     });
 
     it('an issuer carrying credentials → boot refused, message names the source', () =>
