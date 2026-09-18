@@ -165,6 +165,8 @@ real secret values out of band, never commit them.
 | `SPFN_AUTH_SIGNUP_CONFIRM_PATH` | `.env.server` | — | default `/signup/confirm`; the page in your app the emailed link opens |
 | `SPFN_AUTH_PASSWORD_RESET_LINK_TTL_MINUTES` / `_SETUP_TTL_MINUTES` | `.env.server` | — | defaults `30` / `15` — see [Password reset](#password-reset-verified-email) |
 | `SPFN_AUTH_PASSWORD_RESET_CONFIRM_PATH` | `.env.server` | — | default `/password/reset`; the page in your app the emailed link opens |
+| `SPFN_AUTH_REVOKE_ALL_LINK_TTL_MINUTES` | `.env.server` | — | default `30` — see [The sign-out-everywhere link](#the-sign-out-everywhere-link) |
+| `SPFN_AUTH_REVOKE_ALL_CONFIRM_PATH` | `.env.server` | — | default `/account/revoke-all`; the page in your app the link opens |
 | `SPFN_AUTH_LINK_MAIL_DELIVERY` | `.env.server` | — | `auto` (default) \| `inline` \| `queued`; who sends signup-link, reset and account-exists mail — see [Link mail delivery](#link-mail-delivery) |
 | `SPFN_AUTH_PASSKEY_RP_ID` / `_RP_NAME` / `_ORIGINS` | `.env.server` | — | relying party for passkeys; defaults derive from `{NEXT_PUBLIC_SPFN_APP_URL\|\|SPFN_APP_URL}` and are **checked at boot** — see [Passkeys](#passkeys-webauthn) |
 | `SPFN_AUTH_PASSKEY_USER_VERIFICATION` | `.env.server` | — | `preferred` (default) or `required`; `discouraged` refuses boot |
@@ -520,7 +522,8 @@ cut off anything they no longer recognise.
 ```typescript
 const { keys } = await authApi.listKeys.call({ body: {} });
 // → [{ keyId, deviceName?, platform?, algorithm, fingerprintPrefix, createdAtMillis,
-//      lastUsedAtMillis?, expiresAtMillis?, isExpired, isActive, revokedAtMillis? }]
+//      lastUsedAtMillis?, expiresAtMillis?, isExpired, isActive, revokedAtMillis?,
+//      registeredIp?, registeredUserAgent? }]
 
 await authApi.listKeys.call({ body: { includeRevoked: true } });   // also what was cut off
 ```
@@ -582,6 +585,14 @@ Every path that registers a key (`register`, `login`, `rotateKey`, native OAuth)
 only — nothing is authorized by them — and both are absent on keys registered before they existed.
 Rotation carries the replaced key's label over unless the client sends a new one.
 
+- **`registeredIp` and `registeredUserAgent` are where the device came from**, captured once from
+  the request that registered the key and never updated — a device that later signs requests from
+  another network still shows the address it appeared from, which is what makes an entry the owner
+  does not recognise recognisable. Both are absent when the request resolved neither and on keys
+  registered before the columns existed; the literal string `unknown` is never stored. They are
+  unauthenticated display material, spoofable on any request that does not come through a verified
+  proxy, so render them and decide nothing by them. Mobile contract 0.11.0.
+
 All three are in the mobile contract (0.4.1) as `auth.keys.list` / `auth.keys.revoke` /
 `auth.keys.revokeAll`, so a generated mobile client reaches them the same way it reaches key
 rotation.
@@ -593,6 +604,81 @@ once revoked. A client that logs out, rotates, or is revoked must generate a **f
 is still active is the one
 exception: it stays a no-op success, so repeated logins from the same device keep working, and an
 expired-but-active key has its expiry extended by the sign-in that proved the identity again.
+
+### The sign-out-everywhere link
+
+The key operations above all need a session, which is exactly what an owner who no longer trusts
+the device in front of them does not want to use. `createRevokeAllLink` mints a one-time link your
+app mails to the address the account has already proved; opening it signs every device out with no
+session at all.
+
+```typescript
+import { createRevokeAllLink } from '@spfn/auth/server';
+
+const { url, expiresAt } = await createRevokeAllLink(userId);          // default TTL 30 minutes
+const short = await createRevokeAllLink(userId, { ttlMinutes: 10 });
+```
+
+**The link opens a page in your app** (`SPFN_AUTH_REVOKE_ALL_CONFIRM_PATH`, default
+`/account/revoke-all`), not an API route — the same shape the signup and reset links use. That page
+reads the token out of the query string and makes two calls: one to render, one when the owner
+presses the button.
+
+```typescript
+'use client';
+
+const token = useSearchParams().get('token');
+
+// Describing the link changes nothing at all, so a mail scanner that prefetches
+// the page has not signed anybody out.
+const { expiresAt, activeKeyCount } = await authApi.confirmRevokeAllLink.call({ body: { token } });
+
+// The button.
+const { revokedCount } = await authApi.consumeRevokeAllLink.call({ body: { token } });
+```
+
+- **Every refusal is the same 404** (`RevokeAllLinkError`), with the same body: unknown, expired,
+  already spent, superseded by a newer link, issued against a key generation that has since moved,
+  or belonging to an account that is not active. Telling those apart would tell whoever holds a
+  random value that it named something real. 404 rather than the 401 the [password reset
+  link](#password-reset-verified-email) answers with, because there is no credential here to have
+  been wrong: the mailbox is the proof, and what arrives either names an outstanding link or names
+  nothing.
+- **The token travels in the request body, never in a path segment.** The request logger records
+  the path of every request, and so does whatever proxy sits in front of it.
+- **Your obligation, which this package cannot enforce:** the returned `url` carries the plaintext
+  token, because this flow sends no mail of its own. Do not log it, do not persist it, do not put
+  it in a job payload — hand it to the mail template and let it go. The package's other two links
+  are minted inside the worker that sends them precisely so no caller ever holds one; this one
+  cannot be.
+- **It is one-time and generation-bound.** Consuming it is a single statement, so two clicks
+  produce one sign-out and one 404. It also dies the moment anything else ends the account's key
+  generation — a completed password reset, a password change, a deletion request, or the
+  `revokeAllKeys` route in either mode.
+- **It does not change the password.** Send it alongside a password reset link: this one ends the
+  sessions, that one ends the credential that started them.
+- **Issuing again supersedes.** A second link retires the first, so asking twice does not leave a
+  spare capability in the mailbox.
+- **`ttlMinutes` must be a positive whole number.** Zero or negative is a `ValidationError` and
+  writes no row; an unknown `userId` is refused explicitly rather than surfacing as a foreign-key
+  500.
+- **Rate limited 10/minute per address** across both endpoints, on one counter — valid and invalid
+  tokens are not counted separately, which would be a way to tell them apart.
+- **Expired and spent rows are swept** by `auth.revoke-all-token-purge` (daily 06:00), part of
+  `authJobRouter`: a week after expiry, a day after being spent or superseded.
+
+**Settings.**
+
+| Variable | Default | Meaning |
+|----------|---------|---------|
+| `SPFN_AUTH_REVOKE_ALL_LINK_TTL_MINUTES` | `30` | how long the link works |
+| `SPFN_AUTH_REVOKE_ALL_CONFIRM_PATH` | `/account/revoke-all` | the page in your app the link opens |
+
+The link URL is built on `NEXT_PUBLIC_SPFN_APP_URL || SPFN_APP_URL`, the same resolution the other
+two links use. Only the SHA-256 of the token is stored, in `spfn_auth.key_revoke_all_tokens`.
+
+Neither route is in the mobile contract: both are answered for a browser on a page in your app,
+with no session and no client proof, and a generated mobile client has a session by definition.
 
 ### Passkeys (WebAuthn)
 
@@ -1545,7 +1631,7 @@ control, not authorization.
 analytics, onboarding, etc. Client-supplied `metadata` on register/OAuth flows is forwarded verbatim.
 
 ```typescript
-import { authLoginEvent, authRegisterEvent, invitationCreatedEvent, invitationAcceptedEvent } from '@spfn/auth/server';
+import { authLoginEvent, authRegisterEvent, authDeviceRegisteredEvent, invitationCreatedEvent, invitationAcceptedEvent } from '@spfn/auth/server';
 
 authRegisterEvent.subscribe(async ({ userId, email, provider, metadata }) =>
 {
@@ -1568,7 +1654,25 @@ and a passkey has to be enrolled from a session that already exists, so neither 
 *change*, which is made from a session that already proved itself: this one is made by
 whoever opened a link in a mailbox, so it is the notice to send the owner.
 
-Payload types: `AuthLoginPayload`, `AuthRegisterPayload`, `AuthPasswordResetPayload`, `InvitationCreatedPayload`,
+`authDeviceRegisteredEvent` (`auth.device.registered`) fires after commit whenever a device key is
+registered on an account, on every channel that registers one — `channel` says which: `register`,
+`signup-link`, `invitation`, `password`, `oauth`, `oauth-native`, `device-code`, `password-reset`
+or `passkey`. It carries `userId`, `keyId`, `algorithm`, a 12-character `fingerprintPrefix`,
+`createdAtMillis`, and whatever the registration knew about the device: `deviceName?`, `platform?`,
+`ip?` and `userAgent?` — the web OAuth callback has neither label, because the sealed state does
+not carry them. Subscribe to tell the owner a device was added: a login event says a session began
+and not what it began on, so a stolen password used on a new machine was silent until this event.
+Send it with a [sign-out-everywhere link](#the-sign-out-everywhere-link), which is the action the
+notice should offer.
+
+Key **rotation** is deliberately not announced — replacing the key of a device that is already
+signed in is not a new device, and a notice for it would teach the owner to ignore the ones that
+matter. A login that names an `oldKeyId` is only a rotation when that key was actually revoked: an
+`oldKeyId` naming somebody else's key, an already-revoked one or nothing at all registers a new
+device and fires the event. `ip` and `userAgent` are unauthenticated and display-only.
+
+Payload types: `AuthLoginPayload`, `AuthRegisterPayload`, `AuthPasswordResetPayload`,
+`AuthDeviceRegisteredPayload`, `InvitationCreatedPayload`,
 `InvitationAcceptedPayload`, `AuthDeletionRequestedPayload`, `AuthDeletionCancelledPayload`,
 `AuthDeletionCompletedPayload`, `OAuthUnlinkedPayload` (`auth.oauth.unlinked` — provider-side
 disconnect, see the OAuth unlink-notify section), `PasskeyEnrolledPayload`,
