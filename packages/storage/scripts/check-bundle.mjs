@@ -12,7 +12,14 @@ import * as sharedEntry from '../dist/shared/index.js';
 
 const failures = [];
 
-for (const name of ['StorageKeyError', 'StorageObjectNotFoundError'])
+const errorNames = [
+    'StorageKeyError',
+    'StorageManifestInvalidError',
+    'StorageObjectNotFoundError',
+    'StorageVersionNotFoundError',
+];
+
+for (const name of errorNames)
 {
     if (sharedEntry[name] !== serverEntry[name])
     {

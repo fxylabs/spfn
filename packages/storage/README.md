@@ -56,8 +56,8 @@ throws — so a dev setup on `local` needs the direct upload path instead.
 ## Server-side object operations
 
 Generation and staging pipelines need to move objects around without pulling bytes
-through the application. Four operations cover that, and every bundled provider
-implements all four:
+through the application. Five operations cover that, and every bundled provider
+implements all five:
 
 ```ts
 import { getStorageService, StorageObjectNotFoundError } from '@spfn/storage/server';
@@ -72,6 +72,9 @@ const stream = await storage.getStream('house-assets/house-id/asset-id.png');
 
 // Enumerate one page at a time.
 const { objects, cursor } = await storage.list('gen/req-1', { maxKeys: 100 });
+
+// Read one object's metadata — size, and the version id where the bucket has one.
+const { size, versionId } = await storage.stat('house-assets/house-id/asset-id.png');
 
 // Clean up the whole generation request.
 const { deleted, failed } = await storage.deletePrefix('gen/req-1');
@@ -118,6 +121,12 @@ file descriptor or HTTP connection stays open. `download(key)` still returns a
   `public/` rule puts source and destination in different ones. Unfinalized temp
   objects live under `tmp/<key>` and are **not** covered by `deletePrefix(prefix)`;
   the `tmp/` lifecycle rule removes those.
+- **GCS through the S3 interoperability endpoint:** the AWS SDK reads version ids
+  from `x-amz-version-id` only, and the interoperability endpoint returns
+  `x-goog-generation` instead, so `stat().versionId` is always `undefined` there even
+  on a bucket with Object Versioning on. Snapshots taken over interop carry no
+  versions and restore reports `no-version` for every entry — use the native GCS
+  provider when you need versioned snapshots.
 - **Local:** a filesystem cannot hold a file and a directory under the same name, so
   `a/b` and `a/b/c.png` cannot both exist — object stores allow both. Keep keys
   non-overlapping if you plan to switch providers. `deletePrefix` may leave empty
@@ -126,7 +135,7 @@ file descriptor or HTTP connection stays open. `download(key)` still returns a
 
 ## Key validation
 
-Every object operation — `upload`, `download`, `getStream`, `copy`, `delete`,
+Every object operation — `upload`, `download`, `getStream`, `copy`, `stat`, `delete`,
 `list`, `deletePrefix` — validates its key before it reaches the provider and throws
 `StorageKeyError` on a bad one. Rejected: empty strings, URLs, a leading `/`,
 backslashes, control characters, `.` or `..` segments, empty segments (`a//b`,
@@ -142,8 +151,8 @@ The presigned URL methods (`getUploadUrl`, `getPublicUploadUrl`, `getDownloadUrl
 
 ## Missing objects
 
-`download`, `getStream`, and `copy` (on a missing source) all reject with
-`StorageObjectNotFoundError` on every provider, so one check covers all three:
+`download`, `getStream`, `stat`, and `copy` (on a missing source) all reject with
+`StorageObjectNotFoundError` on every provider, so one check covers all four:
 
 ```ts
 catch (error)
@@ -161,6 +170,10 @@ The error carries the offending `key` and sets `code = 'ENOENT'`, so Node-style
 
 `delete` is the deliberate exception: it stays idempotent and treats a missing key as
 success. A failed `copy` does not create the destination.
+
+`StorageVersionNotFoundError` is a **separate** error and does not extend
+`StorageObjectNotFoundError`: the object is there, only the requested version is not,
+so a 404 handler should not swallow it.
 
 ## Presigned upload size limits
 
@@ -252,6 +265,84 @@ partially completed. An empty input returns empty `deleted` and `failed` arrays.
 Do not log object contents, signed URLs, or storage credentials when processing a
 failure. Treat returned error text as operational data with the same log-scrubbing
 policy used for provider exceptions.
+
+## Snapshots and object versions
+
+A generation pipeline that overwrites its own outputs needs a way back. Where the
+bucket keeps object versions, `snapshotPrefix` writes down which version was live at
+one moment and `restoreManifest` puts those versions back:
+
+```ts
+import {
+    parseManifest,
+    restoreManifest,
+    serializeManifest,
+    snapshotPrefix,
+} from '@spfn/storage/server';
+
+// Before a risky batch: record the live version of everything under the prefix.
+const manifest = await snapshotPrefix(storage, 'gen/req-1');
+await saveSomewhere(serializeManifest(manifest));   // storing it is your job
+
+// Afterwards, put the recorded versions back.
+const { restored, skipped, failed } = await restoreManifest(storage, parseManifest(json));
+```
+
+| API | Signature | Notes |
+|---|---|---|
+| `stat` | `(key) => Promise<StorageObjectStat>` | `{ key, size, lastModified?, etag?, contentHash?, versionId? }` |
+| `copy` | `(from, to, { sourceVersionId? }) => Promise<void>` | Without the option, exactly the old behaviour |
+| `snapshotPrefix` | `(storage, prefix, { concurrency?, maxKeys? }) => Promise<Manifest>` | `concurrency` defaults to 8; both must be positive integers |
+| `restoreManifest` | `(storage, manifest, { onto?, concurrency? }) => Promise<RestoreResult>` | `onto` restores under a different prefix |
+| `serializeManifest` / `parseManifest` | `Manifest` ↔ JSON | `parseManifest` keeps known fields only |
+
+`versionId` is always a string (a GCS generation is stringified). `contentHash` is
+informational on S3 and GCS — it is absent for composite and multipart objects, which
+have no MD5 — and is what the local provider compares instead of a version. `etag` is
+recorded but never compared: a GCS etag also moves on a metadata-only update.
+
+### What restore reports
+
+Restore does not stop at the first failure. Every entry lands in exactly one bucket of
+`RestoreResult`:
+
+- `restored` — the recorded version was copied back over the target key.
+- `skipped: 'already-current'` — the recorded version is already live, so nothing was
+  copied. Restoring an untouched snapshot copies nothing at all.
+- `skipped: 'no-version'` — the entry carries no version id (local, a bucket without
+  versioning, GCS over the S3 interoperability endpoint, or an S3 `"null"` version).
+- `skipped: 'version-missing'` — the version is gone, usually retired by a lifecycle
+  rule.
+- `failed` — the provider failed for some other reason. A **missing** target key is not
+  a failure: that is the case restore exists for.
+
+Everything that can be checked before any copy runs is checked before the first one:
+a manifest from a different provider, an `onto` that crosses the `public/` boundary,
+and every target key (`onto + key.slice(prefix.length)` — never a `replace`) through
+the same key validation as every other operation.
+
+### Operational caveats
+
+- **The bucket decides how far back you can go.** A manifest only names versions; it
+  cannot protect them. Noncurrent retention (S3 lifecycle, GCS Object Versioning rules)
+  is what keeps them alive, and nothing in this package extends it.
+- For objects that must survive a long time, set generous noncurrent retention or use
+  content-addressed keys — the key scheme is application policy.
+- **Restore writes a new version** of each object it touches. CDN caches are not
+  purged by it; issue your own purge.
+- A `SetStorageClass` lifecycle rule or GCS Autoclass changes the live generation of
+  every object it touches, so a restore after such a transition rewrites *everything*
+  and lands the objects back in the old storage class.
+- GCS through the S3 interoperability endpoint cannot snapshot versions at all — see
+  the provider notes above. Use the native GCS provider.
+- **Neither operation is atomic.** An object created while `snapshotPrefix` walks the
+  prefix may be missing from the manifest; one overwritten mid-walk is recorded at
+  whichever version its page saw. Restore copies entry by entry.
+- **A manifest grows with the object count.** Listing is page by page, but the entries
+  all stay in memory and then again in the serialized JSON. Split a very large prefix
+  into sub-prefixes and take one manifest each.
+- No API here enumerates, restores, or purges noncurrent or soft-deleted objects, and
+  `delete`/`deletePrefix` are unchanged.
 
 ## Provider behavior
 

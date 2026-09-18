@@ -40,24 +40,33 @@ export async function getStorageService(options: StorageServiceOptions = {}): Pr
 
 export * from './keys';
 export { assertKeyPrefix, assertObjectKey } from './object-key';
+export { parseManifest, restoreManifest, serializeManifest, snapshotPrefix } from './snapshot-restore';
+export type { RestoreOptions, SnapshotOptions } from './snapshot-restore';
 export type {
     DeleteManyResult,
     GcsProviderConfig,
     IStorageProvider,
     LocalProviderConfig,
+    Manifest,
+    ManifestEntry,
     PrefixDeleteResult,
     PresignedUrlParams,
     PublicUploadParams,
     PresignedUrlResult,
+    RestoreResult,
     S3ProviderConfig,
+    StorageCopyOptions,
     StorageListOptions,
     StorageListResult,
     StorageObject,
+    StorageObjectStat,
     StorageServiceOptions,
 } from '../shared/index';
 export {
     DEFAULT_EXPIRES_IN,
     MAX_FILE_SIZE,
     StorageKeyError,
+    StorageManifestInvalidError,
     StorageObjectNotFoundError,
+    StorageVersionNotFoundError,
 } from '../shared/index';

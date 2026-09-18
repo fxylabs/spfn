@@ -9,13 +9,14 @@
 import { randomUUID } from 'node:crypto';
 import { afterAll } from 'vitest';
 import { GcsStorageProvider } from '../server/gcs.provider';
-import { registerOptInStorageProviderContract } from './provider.contract';
+import { isVersioningDeclared, registerOptInStorageProviderContract } from './provider.contract';
 
 const ROOT = `spfn-storage-contract/${randomUUID()}`;
 
 registerOptInStorageProviderContract(
     'gcs',
     ['STORAGE_CONTRACT_GCS_PRIVATE_BUCKET', 'STORAGE_CONTRACT_GCS_PUBLIC_BUCKET'],
+    'STORAGE_CONTRACT_GCS_VERSIONED',
     () =>
     {
         const createProvider = (): GcsStorageProvider => new GcsStorageProvider({
@@ -35,6 +36,6 @@ registerOptInStorageProviderContract(
             await createProvider().deletePrefix(ROOT).catch(() => undefined);
         });
 
-        return { createProvider, root: ROOT };
+        return { createProvider, root: ROOT, providerKind: 'gcs', versioning: isVersioningDeclared('STORAGE_CONTRACT_GCS_VERSIONED') };
     },
 );

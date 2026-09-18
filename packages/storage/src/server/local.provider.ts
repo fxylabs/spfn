@@ -10,10 +10,18 @@
  * `a/b`와 `a/b/c.png`를 동시에 저장할 수 없다(S3·GCS는 가능). README 참고.
  */
 
+import { createHash } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import { copyFile, mkdir, readdir, readFile, realpath, stat, unlink, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve, sep } from 'node:path';
-import { DEFAULT_EXPIRES_IN, MAX_FILE_SIZE, StorageKeyError, StorageObjectNotFoundError } from '../shared/index';
+import { pipeline } from 'node:stream/promises';
+import {
+    DEFAULT_EXPIRES_IN,
+    MAX_FILE_SIZE,
+    StorageKeyError,
+    StorageObjectNotFoundError,
+    StorageVersionNotFoundError,
+} from '../shared/index';
 import { deleteManyIndividually } from './delete-many';
 import { assertKeyPrefix, assertObjectKey, compareKeys, resolveMaxKeys } from './object-key';
 import { awaitStreamStart } from './object-stream';
@@ -27,13 +35,16 @@ import type {
     PresignedUrlParams,
     PublicUploadParams,
     PresignedUrlResult,
+    StorageCopyOptions,
     StorageListOptions,
     StorageListResult,
     StorageObject,
+    StorageObjectStat,
 } from '../shared/index';
 
 export class LocalStorageProvider implements IStorageProvider
 {
+    readonly providerKind = 'local' as const;
     private baseDir: string;
     private baseUrl: string;
 
@@ -101,18 +112,42 @@ export class LocalStorageProvider implements IStorageProvider
         );
     }
 
-    /** 원본 부재를 raw ENOENT가 아니라 계약 오류로 통일한다 — 대상은 만들지 않는다. */
-    async copy(from: string, to: string): Promise<void>
+    /**
+     * 원본 부재를 raw ENOENT가 아니라 계약 오류로 통일한다 — 대상은 만들지 않는다.
+     * 로컬은 버전이 없어 `sourceVersionId`는 현재 파일의 contentHash로만 만족된다.
+     */
+    async copy(from: string, to: string, options: StorageCopyOptions = {}): Promise<void>
     {
         assertObjectKey(from);
         assertObjectKey(to);
         const source = this.pathFor(from);
         const found = await stat(source).catch(() => null);
+        const versionId = options.sourceVersionId;
         if (!found?.isFile())
         {
-            throw new StorageObjectNotFoundError(from);
+            throw versionId === undefined
+                ? new StorageObjectNotFoundError(from)
+                : new StorageVersionNotFoundError(from, versionId);
+        }
+        if (versionId !== undefined && versionId !== await sha256(source))
+        {
+            throw new StorageVersionNotFoundError(from, versionId);
         }
         await copyFile(source, await this.prepareTarget(to));
+    }
+
+    /** 버전이 없으므로 `versionId`는 싣지 않는다 — 대신 sha256을 `contentHash`로 준다. */
+    async stat(key: string): Promise<StorageObjectStat>
+    {
+        assertObjectKey(key);
+        const path = this.pathFor(key);
+        const found = await stat(path).catch(() => null);
+        if (!found?.isFile())
+        {
+            throw new StorageObjectNotFoundError(key);
+        }
+
+        return { key, size: found.size, lastModified: found.mtime, contentHash: await sha256(path) };
     }
 
     async list(prefix: string, options: StorageListOptions = {}): Promise<StorageListResult>
@@ -236,6 +271,15 @@ async function collectFiles(dir: string, keyPrefix: string, objects: StorageObje
             objects.push({ key, size: info.size, lastModified: info.mtime });
         }
     }
+}
+
+/** 파일 전체를 메모리에 올리지 않고 해시한다 — 스냅샷이 큰 객체를 훑기 때문이다. */
+async function sha256(path: string): Promise<string>
+{
+    const hash = createHash('sha256');
+    await pipeline(createReadStream(path), hash);
+
+    return hash.digest('hex');
 }
 
 function isWithin(root: string, candidate: string): boolean

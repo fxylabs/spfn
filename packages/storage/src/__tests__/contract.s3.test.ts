@@ -11,13 +11,14 @@
 import { randomUUID } from 'node:crypto';
 import { afterAll } from 'vitest';
 import { S3StorageProvider } from '../server/s3.provider';
-import { registerOptInStorageProviderContract } from './provider.contract';
+import { isVersioningDeclared, registerOptInStorageProviderContract } from './provider.contract';
 
 const ROOT = `spfn-storage-contract/${randomUUID()}`;
 
 registerOptInStorageProviderContract(
     's3-compatible',
     ['STORAGE_CONTRACT_S3_BUCKET', 'STORAGE_CONTRACT_S3_ACCESS_KEY_ID', 'STORAGE_CONTRACT_S3_SECRET_ACCESS_KEY'],
+    'STORAGE_CONTRACT_S3_VERSIONED',
     () =>
     {
         const createProvider = (): S3StorageProvider => new S3StorageProvider({
@@ -34,6 +35,6 @@ registerOptInStorageProviderContract(
             await createProvider().deletePrefix(ROOT).catch(() => undefined);
         });
 
-        return { createProvider, root: ROOT };
+        return { createProvider, root: ROOT, providerKind: 's3', versioning: isVersioningDeclared('STORAGE_CONTRACT_S3_VERSIONED') };
     },
 );

@@ -1,7 +1,7 @@
 import { Readable } from 'node:stream';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { GcsStorageProvider } from '../server/gcs.provider';
-import { StorageObjectNotFoundError } from '../shared/index';
+import { StorageObjectNotFoundError, StorageVersionNotFoundError } from '../shared/index';
 
 interface TestProviderInternals
 {
@@ -333,6 +333,101 @@ describe('GcsStorageProvider prefix listing and cleanup', () =>
 
         await expect(provider.deletePrefix('')).rejects.toThrow('Invalid storage prefix');
         expect(getFiles).not.toHaveBeenCalled();
+    });
+});
+
+describe('GcsStorageProvider stat and version metadata', () =>
+{
+    afterEach(() =>
+    {
+        vi.restoreAllMocks();
+    });
+
+    it('normalizes a numeric generation to a string versionId and md5Hash to hex', async () =>
+    {
+        const getMetadata = vi.fn().mockResolvedValue([{
+            size: '3',
+            updated: '2026-07-27T00:00:00.000Z',
+            etag: 'CJm',
+            generation: 1758153600000001,
+            md5Hash: 'mgNkuemftIDdJeHwKEyFVQ==',
+        }]);
+        const { provider } = providerWithFiles({ getMetadata });
+
+        expect(await provider.stat('gen/req-1/a.png')).toEqual({
+            key: 'gen/req-1/a.png',
+            size: 3,
+            lastModified: new Date('2026-07-27T00:00:00.000Z'),
+            etag: 'CJm',
+            versionId: '1758153600000001',
+            contentHash: '9a0364b9e99fb480dd25e1f0284c8555',
+        });
+    });
+
+    it('leaves contentHash undefined for a composite object (5a: GCS composite 객체)', async () =>
+    {
+        const getMetadata = vi.fn().mockResolvedValue([{ size: '9', generation: '17', componentCount: 2 }]);
+        const { provider } = providerWithFiles({ getMetadata });
+
+        const stat = await provider.stat('gen/req-1/composite.bin');
+
+        expect(stat.contentHash).toBeUndefined();
+        expect(stat).toMatchObject({ size: 9, versionId: '17' });
+    });
+
+    it('rejects a missing object with the not-found contract error (5a: 없는 객체)', async () =>
+    {
+        const getMetadata = vi.fn().mockRejectedValue(notFoundError());
+        const { provider } = providerWithFiles({ getMetadata });
+
+        await expect(provider.stat('gen/missing.png')).rejects.toBeInstanceOf(StorageObjectNotFoundError);
+    });
+
+    it('carries generation, etag and md5Hash through list', async () =>
+    {
+        const getFiles = vi.fn().mockResolvedValue([
+            [{
+                name: 'gen/req-1/a.png',
+                metadata: { size: '3', generation: 17, etag: 'CJm', md5Hash: 'mgNkuemftIDdJeHwKEyFVQ==' },
+            }],
+            null,
+        ]);
+        const provider = providerWithGetFiles(getFiles);
+
+        expect((await provider.list('gen/req-1')).objects).toEqual([{
+            key: 'gen/req-1/a.png',
+            size: 3,
+            etag: 'CJm',
+            versionId: '17',
+            contentHash: '9a0364b9e99fb480dd25e1f0284c8555',
+        }]);
+    });
+
+    it('asks getFiles for neither versions nor softDeleted (5c: noncurrent 존재 — getFiles query 단언)', async () =>
+    {
+        const getFiles = vi.fn().mockResolvedValue([[], null]);
+        const provider = providerWithGetFiles(getFiles);
+
+        await provider.list('gen/req-1', { maxKeys: 10 });
+
+        const query = getFiles.mock.calls[0]?.[0] as Record<string, unknown>;
+        expect(query).toEqual({ prefix: 'gen/req-1/', maxResults: 10, autoPaginate: false });
+        expect(query).not.toHaveProperty('versions');
+        expect(query).not.toHaveProperty('softDeleted');
+    });
+
+    it('scopes a versioned copy to the generation and folds a 404 into the version error', async () =>
+    {
+        const copy = vi.fn().mockResolvedValue([]);
+        const { provider, file } = providerWithFiles({ copy });
+
+        await provider.copy('gen/req-1/a.png', 'confirmed/a.png', { sourceVersionId: '17' });
+
+        expect(file).toHaveBeenNthCalledWith(1, 'gen/req-1/a.png', { generation: '17' });
+
+        const missing = providerWithFiles({ copy: vi.fn().mockRejectedValue(notFoundError()) });
+        await expect(missing.provider.copy('gen/req-1/a.png', 'confirmed/a.png', { sourceVersionId: '17' }))
+            .rejects.toBeInstanceOf(StorageVersionNotFoundError);
     });
 });
 
