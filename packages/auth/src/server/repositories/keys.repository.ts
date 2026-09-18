@@ -141,7 +141,13 @@ export class KeysRepository extends BaseRepository
     }
 
     /**
-     * 공개키 revoke (비활성화)
+     * 공개키 revoke (비활성화) — 아직 살아 있는 키만
+     *
+     * `isActive`가 조건에 있어야 반환값이 "이 호출이 무언가를 폐기했는가"를 뜻한다.
+     * 없으면 이미 폐기된 키를 다시 지목해도 행이 하나 돌아와, 호출자는 폐기가
+     * 일어났다고 읽는다. 로그인 경로가 그 값으로 "기기 교체인가 새 기기인가"를
+     * 가르므로, 죽은 키를 들이밀어 새 기기 알림을 끄는 길이 된다.
+     * 폐기 시각·사유도 덮어쓰지 않는다 — 처음 끊긴 순간이 답이다.
      * Write primary 사용
      */
     async revokeByKeyIdAndUserId(
@@ -161,6 +167,7 @@ export class KeysRepository extends BaseRepository
                 and(
                     eq(userPublicKeys.keyId, keyId),
                     eq(userPublicKeys.userId, userId),
+                    eq(userPublicKeys.isActive, true),
                 ),
             )
             .returning();

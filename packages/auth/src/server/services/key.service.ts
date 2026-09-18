@@ -308,10 +308,13 @@ export async function rotateKeyService(
 /**
  * Revoke a user's public key.
  *
- * Returns false when the key does not belong to this user, so a caller acting
- * on a key id from outside (the device list) can answer "not found" instead of
- * reporting a revocation that never happened. The repository already scopes the
- * update by userId, so someone else's key is never touched either way.
+ * Returns false when this call revoked nothing: the key belongs to somebody
+ * else, or it was already revoked, or there is no such key. A caller acting on
+ * a key id from outside (the device list) can therefore answer "not found"
+ * instead of reporting a revocation that never happened — and the login paths
+ * can tell a device replacement from a brand-new device, which is what decides
+ * whether the owner is told about it. The repository scopes the update by
+ * userId, so someone else's key is never touched either way.
  */
 export async function revokeKeyService(
     params: RevokeKeyParams,
