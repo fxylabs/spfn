@@ -1178,6 +1178,15 @@ with, and a cookie copied in the ten minutes after a sign-in carries exactly tha
 waiting on one prompt, not finished. A client component calls `renewSession(api)`, which runs the
 ceremony and gets a new bound key sealed into the cookie.
 
+> **Renewal is bound to the expiring key's own signature.** `session/renew/options` and
+> `session/renew/verify` are not public: they take the ordinary bearer JWT the proxy signs with the
+> private key in the session cookie, and the key being renewed is that JWT's `keyId` rather than
+> anything the body says. The one thing they do differently from every other route is admit a key
+> whose `expiresAt` has passed, while it is bound and inside its grace. So a caller who does not
+> hold the private half of a key gets the same `SessionRenewalRefusedError` whatever key id they
+> name — no credential, a wrong signature, an unbound key, a revoked key, one past its grace and an
+> inactive account are one answer with one body, and whether a key id is live never leaks.
+
 ```tsx
 'use client';
 import { renewSession } from '@spfn/auth/client';

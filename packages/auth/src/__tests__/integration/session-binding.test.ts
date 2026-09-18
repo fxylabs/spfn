@@ -71,6 +71,7 @@ interface Session
 {
     authorization: string;
     keyId: string;
+    privateKey: string;
 }
 
 describe.skipIf(!dbAvailable)('session binding (case tables 6a, 6b, 6g)', () =>
@@ -181,6 +182,7 @@ describe.skipIf(!dbAvailable)('session binding (case tables 6a, 6b, 6g)', () =>
         return {
             authorization: `Bearer ${generateClientToken({ keyId: keyPair.keyId }, keyPair.privateKey, 'ES256', { expiresIn: '5m' })}`,
             keyId: keyPair.keyId,
+            privateKey: keyPair.privateKey,
         };
     }
 
@@ -439,17 +441,22 @@ describe.skipIf(!dbAvailable)('session binding (case tables 6a, 6b, 6g)', () =>
             const { session, authenticator } = await boundSession();
             await expireKey(session.keyId, 1_000);
 
-            const options = await post('/_auth/session/renew/options', { expiredKeyId: session.keyId }, undefined, false);
+            // Signed by the expired key itself — which is what the proxy sends on
+            // these two paths, and the only thing that names the key being renewed.
+            const expiring = {
+                ...session,
+                authorization: `Bearer ${generateClientToken({ keyId: session.keyId }, session.privateKey, 'ES256', { expiresIn: '5m' })}`,
+            };
+            const options = await post('/_auth/session/renew/options', {}, expiring);
             const { challenge } = await options.json();
             const fresh = generateKeyPair('ES256');
             const verify = await post('/_auth/session/renew/verify', {
-                expiredKeyId: session.keyId,
                 response: authenticator.assert({ challenge, origin: ORIGIN, rpId: RP_ID, counter: 2 }),
                 publicKey: fresh.publicKey,
                 keyId: fresh.keyId,
                 fingerprint: fresh.fingerprint,
                 algorithm: fresh.algorithm,
-            }, undefined, false);
+            }, expiring);
 
             expect(verify.status).toBe(200);
 
@@ -460,6 +467,7 @@ describe.skipIf(!dbAvailable)('session binding (case tables 6a, 6b, 6g)', () =>
             const replacement = {
                 authorization: `Bearer ${generateClientToken({ keyId: fresh.keyId }, fresh.privateKey, 'ES256', { expiresIn: '5m' })}`,
                 keyId: fresh.keyId,
+                privateKey: fresh.privateKey,
             };
             expect((await post('/_auth/keys/list', {}, replacement)).status).toBe(200);
         });

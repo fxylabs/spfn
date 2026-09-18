@@ -1,46 +1,24 @@
 /**
- * Session Renewal Interceptor
+ * The two renewal paths, named once.
  *
- * One job: put the expiring key's id into the body of both renewal calls.
+ * There is no interceptor here any more, and the reason is the point of the
+ * file. Renewal used to be told which key to renew by a body field the proxy
+ * injected from the HttpOnly key-id cookie; now the backend reads it off the
+ * `keyId` of the bearer JWT the request is signed with
+ * (`authenticateForRenewal`), so there is nothing left to inject and nothing a
+ * direct caller can name that they do not already hold the private key for.
  *
- * The browser cannot do it. `COOKIE_NAMES.SESSION_KEY_ID` is HttpOnly at every
- * write site, so page script cannot read it, and the readable companion — the
- * CSRF cookie — carries the HMAC and deliberately not the key id. So
- * `renewSession()` sends `{ response }` and nothing else, exactly as
- * `signInWithPasskey()` does, and the value the route needs is injected here from
- * the cookie the browser is already sending.
+ * What the proxy still has to do for these two paths, `general-auth` does: they
+ * are authenticated paths like any other, so the session cookie is unsealed, the
+ * CSRF header checked, and a JWT signed with the private half of the expiring
+ * key — `generateClientToken` signs with the key material in the cookie and never
+ * consults the row's expiry, which is what makes an expired key still able to
+ * speak for itself. The one thing that path must not do is clear the jar when
+ * one of these answers 401, and the pattern below is how it knows.
  *
- * That also settles the enumeration question the renewal routes would otherwise
- * raise: through the proxy, a caller cannot choose which key id to renew. It
- * settles it for the ordinary path only — the routes are public and a caller
- * reaching them directly can send any value, which is why the service treats
- * `expiredKeyId` as unauthenticated input and answers one refusal to everything.
- *
- * The *new* key pair is not this file's business. `renew/verify` is on
- * `loginRegisterInterceptor`'s path list, so the pair is generated and the
- * session sealed there, under the field names every other sign-in path uses.
+ * `renew/verify` is also on `loginRegisterInterceptor`'s path list, which is
+ * where the *new* key pair is generated and the replacement session sealed.
  */
-
-import type { InterceptorRule } from '@spfn/core/nextjs/server';
-import { COOKIE_NAMES } from '../../server/lib/config';
 
 /** The two public renewal paths, as one pattern the proxy layers agree on. */
 export const SESSION_RENEW_PATH_PATTERN = /^\/_auth\/session\/renew\/(options|verify)$/;
-
-export const sessionRenewInterceptor: InterceptorRule =
-    {
-        pathPattern: SESSION_RENEW_PATH_PATTERN,
-        method: 'POST',
-
-        request: async (ctx, next) =>
-        {
-            const expiredKeyId = ctx.cookies.get(COOKIE_NAMES.SESSION_KEY_ID);
-
-            if (expiredKeyId)
-            {
-                ctx.body = { ...ctx.body, expiredKeyId };
-            }
-
-            await next();
-        },
-    };

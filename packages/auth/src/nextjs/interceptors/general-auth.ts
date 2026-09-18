@@ -31,15 +31,26 @@ function requiresAuth(path: string): boolean
         /^\/_auth\/codes$/,           // Send verification code
         /^\/_auth\/codes\/verify$/,   // Verify code
         /^\/_auth\/exists$/,           // Check account exists
-        // Renewing a bound session key, which is what a browser does once the key
-        // in its cookie has run out. Behind this filter the branch below would
-        // refuse the very request that repairs the session, before the backend
-        // ever saw it. `binding/disable/options` is deliberately not here: that
-        // one is asked for by a session that still works.
-        SESSION_RENEW_PATH_PATTERN,
     ];
 
     return !publicPaths.some((pattern) => pattern.test(path));
+}
+
+/**
+ * Whether a path is signed as usual but tolerates a key that has already expired.
+ *
+ * The two renewal paths, and only them. They are not public — the backend reads
+ * the key being renewed off the JWT this layer signs, so a request that arrived
+ * without one is refused there — but they are the one place where a bound
+ * session whose key has run out must still be forwarded rather than answered
+ * here, because that request is what repairs it.
+ *
+ * `binding/disable/options` is deliberately not one of them: that is asked for by
+ * a session that still works.
+ */
+function toleratesExpiredKey(path: string): boolean
+{
+    return SESSION_RENEW_PATH_PATTERN.test(path);
 }
 
 /**
@@ -228,7 +239,7 @@ export const generalAuthInterceptor: InterceptorRule =
                 // than forwarded: the backend would refuse it, and the response
                 // branch below would read that refusal as "signed out" and empty
                 // the cookie jar.
-                if (boundKeyExpired(session))
+                if (boundKeyExpired(session) && !toleratesExpiredKey(ctx.path))
                 {
                     refuseAsNeedingRenewal(ctx);
 
@@ -319,11 +330,10 @@ export const generalAuthInterceptor: InterceptorRule =
 
             // Backend returned 401 with a valid session — server rejected it.
             //
-            // Never on the renewal paths. They are public, so `sessionValid` is
-            // unset there and this branch cannot fire anyway; the explicit skip
-            // is what keeps that true if the filter above ever changes, because a
-            // refused renewal that emptied the cookie jar would destroy the
-            // session the person was in the middle of repairing.
+            // Never on the renewal paths. They are signed like any other path, so
+            // `sessionValid` is set there and this branch would otherwise fire on
+            // the refusal a renewal answers with — emptying the cookie jar, and
+            // with it the session the person was in the middle of repairing.
             if (ctx.response.status === 401
                 && ctx.metadata.sessionValid
                 && !SESSION_RENEW_PATH_PATTERN.test(ctx.path))

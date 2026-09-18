@@ -5,15 +5,18 @@
  * assertion, that the person who enrolled the passkey is still at the machine,
  * and get a new short-lived key sealed into the cookie.
  *
- * Both steps are public, because the session they repair is the one that stopped
- * working — there is no live credential left to authenticate with. That shapes
- * everything below.
+ * Neither step is public. The expiring key is named by `expiredKeyId`, and that
+ * value reaches the service from `authenticateForRenewal` — the `keyId` of a
+ * bearer JWT this very key signed — rather than from the request body, so a
+ * caller who does not hold the private half cannot name a key at all. The
+ * assertion still has to be signed by a passkey that key's owner enrolled: the
+ * signature proves the cookie, and the cookie is the thing that may have been
+ * copied.
  *
- * The expiring key is named by `expiredKeyId`, which the Next.js proxy injects
- * from the HttpOnly key-id cookie. It is treated as unauthenticated input all the
- * same: a caller reaching the route directly can send any value, so nothing is
- * decided by it beyond finding a row, and the assertion has to be signed by a
- * passkey that row's owner enrolled.
+ * The admission below is run again here all the same. The middleware and the
+ * service ask the same four questions of the row, and a service that trusted its
+ * caller to have asked them would be one refactor away from not being asked at
+ * all.
  *
  * Every refusal is the same refusal. A key that never existed, a stranger's key,
  * an unbound key, a revoked one, one past its grace, an inactive account, a spent
@@ -46,7 +49,7 @@ const RENEWAL_REVOCATION_REASON = 'Replaced by bound-session renewal';
 
 export interface StartSessionRenewParams
 {
-    /** The key that ran out, injected by the proxy from the key-id cookie. */
+    /** The key that ran out, read off the JWT the request was signed with. */
     expiredKeyId: string;
 }
 
@@ -57,7 +60,7 @@ export interface FinishSessionRenewParams extends StartSessionRenewParams
     /**
      * The new key pair, in the vocabulary the Next.js login interceptor already
      * writes: `renew/verify` is on that interceptor's path list, so these arrive
-     * exactly as they do on a login and the expiring key gets its own name.
+     * exactly as they do on a login.
      */
     keyId: string;
     publicKey: string;

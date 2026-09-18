@@ -21,7 +21,7 @@ import { loginRegisterInterceptor } from '../../nextjs/interceptors/login-regist
 import { keyRotationInterceptor } from '../../nextjs/interceptors/key-rotation';
 import { oauthFinalizeInterceptor } from '../../nextjs/interceptors/oauth';
 import { sessionBindingInterceptor } from '../../nextjs/interceptors/session-binding';
-import { sessionRenewInterceptor } from '../../nextjs/interceptors/session-renew';
+import { SESSION_RENEW_PATH_PATTERN } from '../../nextjs/interceptors/session-renew';
 import { sealPendingSession } from '../../nextjs/session-helpers';
 import { sealSession, unsealSession, type SessionData } from '../../server/lib/session';
 import { generateKeyPair } from '../../server/lib/crypto';
@@ -129,9 +129,9 @@ describe('the proxy and a bound session (case table 6c)', () =>
         expect(ctx.setCookies.filter(cookie => cookie.value === '')).toEqual([]);
     });
 
-    it('bound, expired, POST session/renew/options: passed to the backend, cookies kept', async () =>
+    it('bound, expired, POST session/renew/options: signed and passed to the backend, cookies kept', async () =>
     {
-        const { sealed } = await sealedSession({ binding: 'passkey', keyExpiresAt: Date.now() - 1_000 });
+        const { sealed, keyId } = await sealedSession({ binding: 'passkey', keyExpiresAt: Date.now() - 1_000 });
         const ctx = requestContext('/_auth/session/renew/options', new Map([[COOKIE_NAMES.SESSION, sealed]]), CHROME);
         const forwarded = vi.fn(next);
 
@@ -139,13 +139,15 @@ describe('the proxy and a bound session (case table 6c)', () =>
 
         expect(forwarded).toHaveBeenCalledOnce();
         expect(ctx.abort).toBeUndefined();
+        expect(ctx.headers['X-Key-Id']).toBe(keyId);
     });
 
     it('bound, expired, session/renew/verify answers 401 (signature mismatch): 401 passed through, cookies KEPT', async () =>
     {
-        // `sessionValid` is set for the belt-and-braces case: the renewal paths
-        // are public, so the request phase never sets it — but if that filter ever
-        // changed, a refused renewal must still not empty the jar.
+        // `sessionValid` is set because the request phase sets it: the renewal
+        // paths are signed like any other, so the "backend said 401" branch would
+        // fire on them without the explicit path skip — and a refused renewal that
+        // emptied the jar would destroy the session being repaired.
         const ctx = responseContext('/_auth/session/renew/verify', 401, { __type: 'SessionRenewalRefusedError', message: 'no' }, {
             metadata: { sessionValid: true },
         });
@@ -375,27 +377,42 @@ describe('the proxy and a bound session (case table 6c)', () =>
 
 describe('the renewal request shape the proxy builds (case table 6d, browser rows)', () =>
 {
-    it('injects expiredKeyId from the HttpOnly key-id cookie into both renewal calls', async () =>
+    beforeEach(() =>
+    {
+        vi.stubEnv('SPFN_AUTH_SESSION_SECRET', SECRET);
+    });
+
+    afterEach(() =>
+    {
+        vi.unstubAllEnvs();
+    });
+
+    it('signs both renewal calls with the expiring key, so the backend reads the key id off the JWT', async () =>
     {
         for (const path of ['/_auth/session/renew/options', '/_auth/session/renew/verify'])
         {
-            const ctx = requestContext(path, new Map([[COOKIE_NAMES.SESSION_KEY_ID, 'key-from-cookie']]));
-            ctx.body = { response: { id: 'credential' } };
+            const { sealed, keyId } = await sealedSession({ binding: 'passkey', keyExpiresAt: Date.now() - 1_000 });
+            const ctx = requestContext(path, new Map([[COOKIE_NAMES.SESSION, sealed]]), CHROME);
+            const forwarded = vi.fn(next);
 
-            await sessionRenewInterceptor.request?.(ctx, next);
+            await generalAuthInterceptor.request?.(ctx, forwarded);
 
-            expect(ctx.body).toEqual({ response: { id: 'credential' }, expiredKeyId: 'key-from-cookie' });
+            expect(forwarded).toHaveBeenCalledOnce();
+            expect(ctx.abort).toBeUndefined();
+            expect(ctx.headers['Authorization']).toMatch(/^Bearer \S+$/);
+            expect(ctx.headers['X-Key-Id']).toBe(keyId);
+            // The key id is nowhere in the body — there is no body field left for
+            // it, and a caller who could write one would gain nothing by it.
+            expect(ctx.body).toBeUndefined();
         }
     });
 
-    it('matches only the two renewal paths, so nothing else is handed a key id', () =>
+    it('matches only the two renewal paths, so nothing else tolerates an expired key', () =>
     {
-        const pattern = sessionRenewInterceptor.pathPattern as RegExp;
-
-        expect(pattern.test('/_auth/session/renew/options')).toBe(true);
-        expect(pattern.test('/_auth/session/renew/verify')).toBe(true);
-        expect(pattern.test('/_auth/session/binding')).toBe(false);
-        expect(pattern.test('/_auth/login')).toBe(false);
+        expect(SESSION_RENEW_PATH_PATTERN.test('/_auth/session/renew/options')).toBe(true);
+        expect(SESSION_RENEW_PATH_PATTERN.test('/_auth/session/renew/verify')).toBe(true);
+        expect(SESSION_RENEW_PATH_PATTERN.test('/_auth/session/binding')).toBe(false);
+        expect(SESSION_RENEW_PATH_PATTERN.test('/_auth/login')).toBe(false);
     });
 
     it('puts renew/verify on the login interceptor\'s list, so the proxy mints the key pair and seals the session', () =>

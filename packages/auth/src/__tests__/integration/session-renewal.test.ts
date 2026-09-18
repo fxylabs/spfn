@@ -5,18 +5,17 @@
  * authenticator, so the happy paths run the library's actual CBOR, COSE and
  * ECDSA verification rather than a stub that would agree with whatever we wrote.
  *
- * Both routes are public, so every request below is sent without an
- * `Authorization` header — which is the point of the table. `expiredKeyId` is
- * sent in the body because that is where the Next.js interceptor injects it from
- * the HttpOnly cookie; the rows about the injection itself are in
- * `unit/session-binding-proxy.test.ts`, and the row here is the other half: a
- * caller who reaches the route directly and names a key id of their choosing.
+ * Neither route is public, and that is the point of the table. The key a renewal
+ * acts on is the `keyId` of the bearer JWT the request is signed with, so every
+ * request below carries an `Authorization` header built from a private key — the
+ * expiring session's own, a stranger's, or one nobody registered — and no request
+ * names a key id in its body at all.
  *
  * The one thing every refusal row asserts is that it is the *same* refusal. A
- * live key, an unbound key, a stranger's key and a key that never existed have to
- * be indistinguishable, or the route answers "does this key id exist" to an
- * unauthenticated caller — and the cookie-copying adversary holds exactly one key
- * id and would want it confirmed.
+ * signature that did not verify, an unbound key, a revoked key, a key nobody
+ * registered and a key past its grace have to be indistinguishable, or the route
+ * answers "does this key id exist" to whoever asked — and the cookie-copying
+ * adversary holds exactly one key id and would want it confirmed.
  */
 
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
@@ -53,6 +52,7 @@ interface Session
 {
     authorization: string;
     keyId: string;
+    privateKey: string;
 }
 
 interface Bound extends Session
@@ -122,8 +122,8 @@ describe.skipIf(!dbAvailable)('renewing a bound session key (case table 6d)', ()
     // Driving the router
     // ========================================================================
 
-    /** A request through the trusted proxy, with or without a session. */
-    function post(path: string, body: unknown, session?: Session, ip = '203.0.113.7')
+    /** A request through the trusted proxy, with or without a credential. */
+    function post(path: string, body: unknown, authorization?: string, ip = '203.0.113.7')
     {
         return app.request(path, {
             method: 'POST',
@@ -132,10 +132,23 @@ describe.skipIf(!dbAvailable)('renewing a bound session key (case table 6d)', ()
                 'user-agent': CHROME,
                 'x-forwarded-for': ip,
                 [CLIENT_TYPE_HEADER]: 'web',
-                ...(session ? { Authorization: session.authorization } : {}),
+                ...(authorization ? { Authorization: authorization } : {}),
             },
             body: JSON.stringify(body),
         });
+    }
+
+    /**
+     * The `Authorization` the proxy builds: a JWT naming `keyId`, signed with
+     * `privateKey`.
+     *
+     * The two are separate arguments because the rows need them apart — naming
+     * someone else's key id is exactly what a caller can do, and signing it is
+     * exactly what they cannot.
+     */
+    function bearer(keyId: string, privateKey: string): string
+    {
+        return `Bearer ${generateClientToken({ keyId }, privateKey, 'ES256', { expiresIn: '5m' })}`;
     }
 
     async function signIn(email: string): Promise<Session>
@@ -153,8 +166,9 @@ describe.skipIf(!dbAvailable)('renewing a bound session key (case table 6d)', ()
         expect(response.status).toBe(200);
 
         return {
-            authorization: `Bearer ${generateClientToken({ keyId: keyPair.keyId }, keyPair.privateKey, 'ES256', { expiresIn: '5m' })}`,
+            authorization: bearer(keyPair.keyId, keyPair.privateKey),
             keyId: keyPair.keyId,
+            privateKey: keyPair.privateKey,
         };
     }
 
@@ -163,19 +177,19 @@ describe.skipIf(!dbAvailable)('renewing a bound session key (case table 6d)', ()
     {
         const session = await signIn(email);
         const authenticator = await FixtureAuthenticator.create();
-        const options = await post('/_auth/passkeys/register/options', {}, session);
+        const options = await post('/_auth/passkeys/register/options', {}, session.authorization);
         const verify = await post('/_auth/passkeys/register/verify', {
             response: authenticator.attest({ challenge: (await options.json()).challenge, origin: ORIGIN, rpId: RP_ID }),
-        }, session);
+        }, session.authorization);
 
         expect(verify.status).toBe(200);
-        expect((await post('/_auth/session/binding', { mode: 'passkey' }, session)).status).toBe(200);
+        expect((await post('/_auth/session/binding', { mode: 'passkey' }, session.authorization)).status).toBe(200);
 
         return { ...session, authenticator, email };
     }
 
-    const renewOptions = (expiredKeyId: string, ip?: string) =>
-        post('/_auth/session/renew/options', { expiredKeyId }, undefined, ip);
+    const renewOptions = (authorization?: string, ip?: string) =>
+        post('/_auth/session/renew/options', {}, authorization, ip);
 
     /** The new key pair the Next.js interceptor would have generated. */
     function freshPair()
@@ -191,14 +205,14 @@ describe.skipIf(!dbAvailable)('renewing a bound session key (case table 6d)', ()
         };
     }
 
-    /** A full renewal: options, assertion, verify. */
+    /** A full renewal: options, assertion, verify — both signed by the expiring key. */
     async function renew(
         subject: Bound,
-        options: { expiredKeyId?: string; authenticator?: FixtureAuthenticator; newKeyId?: string } = {},
+        options: { authenticator?: FixtureAuthenticator; newKeyId?: string } = {},
     )
     {
-        const expiredKeyId = options.expiredKeyId ?? subject.keyId;
-        const started = await renewOptions(expiredKeyId);
+        const authorization = bearer(subject.keyId, subject.privateKey);
+        const started = await renewOptions(authorization);
 
         if (started.status !== 200)
         {
@@ -208,7 +222,6 @@ describe.skipIf(!dbAvailable)('renewing a bound session key (case table 6d)', ()
         const issued = await started.json();
         const pair = freshPair();
         const verified = await post('/_auth/session/renew/verify', {
-            expiredKeyId,
             response: (options.authenticator ?? subject.authenticator).assert({
                 challenge: issued.challenge,
                 origin: ORIGIN,
@@ -219,7 +232,7 @@ describe.skipIf(!dbAvailable)('renewing a bound session key (case table 6d)', ()
             keyId: options.newKeyId ?? pair.keyId,
             fingerprint: pair.fingerprint,
             algorithm: pair.algorithm,
-        });
+        }, authorization);
 
         return { started, options: issued, verified, pair };
     }
@@ -301,37 +314,58 @@ describe.skipIf(!dbAvailable)('renewing a bound session key (case table 6d)', ()
     {
         const subject = await bound();
         await expireKey(subject.keyId, (BOUND_KEY_RENEW_GRACE_HOURS + 1) * HOUR_MS);
+        const authorization = bearer(subject.keyId, subject.privateKey);
 
-        await expectOneRefusal(await renewOptions(subject.keyId));
+        await expectOneRefusal(await renewOptions(authorization));
         await expectOneRefusal(await post('/_auth/session/renew/verify', {
-            expiredKeyId: subject.keyId,
             response: {},
             ...freshPair(),
-        }));
+        }, authorization));
     });
 
-    it('an unbound key, a revoked key, a key nobody registered and someone else\'s key: the same 401 body for all four', async () =>
+    it('no credential, a forged signature, an unbound key, a revoked key, a key nobody registered and one past its grace: the same 401 body for all six', async () =>
     {
-        const subject = await bound();
-        const unbound = await signIn('other@test.com');
+        const stranger = await bound('other@test.com');
+        const unbound = await signIn('owner@test.com');
+        const revoked = await bound();
+        const expired = await bound();
+        const nobody = generateKeyPair('ES256');
+
         await getTestDb().update(userPublicKeys)
             .set({ isActive: false })
-            .where(eq(userPublicKeys.keyId, subject.keyId));
+            .where(eq(userPublicKeys.keyId, revoked.keyId));
+        await expireKey(expired.keyId, (BOUND_KEY_RENEW_GRACE_HOURS + 1) * HOUR_MS);
+
+        const credentials = [
+            undefined,
+            // The stranger's key id — which a caller may well hold — signed with
+            // a key that is not it. This is the whole of what a third party can do.
+            bearer(stranger.keyId, unbound.privateKey),
+            bearer(unbound.keyId, unbound.privateKey),
+            bearer(revoked.keyId, revoked.privateKey),
+            bearer(nobody.keyId, nobody.privateKey),
+            bearer(expired.keyId, expired.privateKey),
+        ];
 
         const bodies: unknown[] = [];
 
-        for (const keyId of [unbound.keyId, subject.keyId, 'a-key-nobody-registered', unbound.keyId])
+        for (const authorization of credentials)
         {
-            const response = await renewOptions(keyId);
+            const response = await renewOptions(authorization);
             expect(response.status).toBe(401);
-            // Minus the request id, which is per-response by construction and is
-            // what a person reads out to support rather than anything about the key.
-            const body = await response.json() as { error: { requestId?: string } };
+            // Minus two fields that are not the wire answer. The request id is
+            // per-response by construction and is what a person reads out to
+            // support; the stack is attached only when `includeStack` is on, which
+            // `ErrorHandler` defaults to NODE_ENV !== 'production' — so it is in
+            // this test's responses and in no deployment's.
+            const body = await response.json() as { error: { requestId?: string }; stack?: string };
             delete body.error.requestId;
+            delete body.stack;
             bodies.push(body);
         }
 
         expect(new Set(bodies.map(body => JSON.stringify(body))).size).toBe(1);
+        expect(bodies[0]).toMatchObject({ __type: 'SessionRenewalRefusedError' });
     });
 
     it('the account is not active: 401', async () =>
@@ -340,28 +374,27 @@ describe.skipIf(!dbAvailable)('renewing a bound session key (case table 6d)', ()
         await expireKey(subject.keyId, 1_000);
         await getTestDb().update(users).set({ status: 'suspended' }).where(eq(users.email, subject.email));
 
-        await expectOneRefusal(await renewOptions(subject.keyId));
+        await expectOneRefusal(await renewOptions(bearer(subject.keyId, subject.privateKey)));
     });
 
     it('no assertion at all, and an assertion the passkey did not sign: 401, and nothing moves', async () =>
     {
         const subject = await bound();
         await expireKey(subject.keyId, 1_000);
-        const started = await renewOptions(subject.keyId);
+        const authorization = bearer(subject.keyId, subject.privateKey);
+        const started = await renewOptions(authorization);
         const { challenge } = await started.json();
         const impostor = await FixtureAuthenticator.create();
 
         await expectOneRefusal(await post('/_auth/session/renew/verify', {
-            expiredKeyId: subject.keyId,
             response: {},
             ...freshPair(),
-        }));
+        }, authorization));
 
         await expectOneRefusal(await post('/_auth/session/renew/verify', {
-            expiredKeyId: subject.keyId,
             response: impostor.assert({ challenge, origin: ORIGIN, rpId: RP_ID, counter: 2 }),
             ...freshPair(),
-        }));
+        }, authorization));
 
         expect((await keyRow(subject.keyId)).isActive).toBe(true);
     });
@@ -387,22 +420,22 @@ describe.skipIf(!dbAvailable)('renewing a bound session key (case table 6d)', ()
         expect(verified!.status).toBe(200);
 
         // The same ceremony replayed: the challenge row was spent by the verify
-        // above, and the new key is no longer the expiring one either.
-        await expectOneRefusal(await renewOptions(subject.keyId));
+        // above, and the old key is revoked, so its credential no longer admits.
+        await expectOneRefusal(await renewOptions(bearer(subject.keyId, subject.privateKey)));
 
         const stale = await bound('other@test.com');
         await expireKey(stale.keyId, 1_000);
-        const started = await renewOptions(stale.keyId);
+        const staleAuth = bearer(stale.keyId, stale.privateKey);
+        const started = await renewOptions(staleAuth);
         const { challenge } = await started.json();
         await getTestDb().update(webauthnChallenges)
             .set({ expiresAt: new Date(Date.now() - 1_000) })
             .where(eq(webauthnChallenges.kind, 'renewal'));
 
         await expectOneRefusal(await post('/_auth/session/renew/verify', {
-            expiredKeyId: stale.keyId,
             response: stale.authenticator.assert({ challenge, origin: ORIGIN, rpId: RP_ID, counter: 9 }),
             ...freshPair(),
-        }));
+        }, staleAuth));
     });
 
     it('two verifies at once: one 200 and one 401', async () =>
@@ -410,9 +443,10 @@ describe.skipIf(!dbAvailable)('renewing a bound session key (case table 6d)', ()
         const subject = await bound();
         await expireKey(subject.keyId, 1_000);
 
+        const authorization = bearer(subject.keyId, subject.privateKey);
         const ceremonies = await Promise.all([1, 2].map(async (index) =>
         {
-            const started = await renewOptions(subject.keyId);
+            const started = await renewOptions(authorization);
 
             return {
                 challenge: (await started.json()).challenge as string,
@@ -422,7 +456,6 @@ describe.skipIf(!dbAvailable)('renewing a bound session key (case table 6d)', ()
         }));
 
         const answers = await Promise.all(ceremonies.map(ceremony => post('/_auth/session/renew/verify', {
-            expiredKeyId: subject.keyId,
             response: subject.authenticator.assert({
                 challenge: ceremony.challenge,
                 origin: ORIGIN,
@@ -433,7 +466,7 @@ describe.skipIf(!dbAvailable)('renewing a bound session key (case table 6d)', ()
             keyId: ceremony.pair.keyId,
             fingerprint: ceremony.pair.fingerprint,
             algorithm: ceremony.pair.algorithm,
-        })));
+        }, authorization)));
 
         expect(answers.filter(answer => answer.status === 200)).toHaveLength(1);
         expect(answers.filter(answer => answer.status === 401)).toHaveLength(1);
@@ -460,7 +493,7 @@ describe.skipIf(!dbAvailable)('renewing a bound session key (case table 6d)', ()
             .set({ revokedAt: new Date() })
             .where(eq(passkeys.userId, (await userRow(subject.email)).id));
 
-        const started = await renewOptions(subject.keyId);
+        const started = await renewOptions(bearer(subject.keyId, subject.privateKey));
         expect(started.status).toBe(200);
         expect((await started.json()).allowCredentials).toEqual([]);
 
@@ -487,30 +520,31 @@ describe.skipIf(!dbAvailable)('renewing a bound session key (case table 6d)', ()
         expect((await userRow(subject.email)).lastLoginAt?.getTime()).toBe(before?.getTime());
     });
 
-    it('a direct caller naming a key id of their own choosing: the same 401 as an unknown one', async () =>
+    it('a cookie copied before the key expired: options 200, because the copy signs — and verify 401, because it cannot assert', async () =>
     {
-        const stranger = await bound('other@test.com');
-        await expireKey(stranger.keyId, 1_000);
-        const forged = await renewOptions(stranger.keyId);
+        // The whole threat model in one row. A copied session cookie carries the
+        // private key, so the thief's request is signed exactly as the owner's is
+        // and the options step cannot tell them apart. The ceremony is where they
+        // part: the passkey is on the owner's machine.
+        const owner = await bound();
+        await expireKey(owner.keyId, 1_000);
+        const stolen = bearer(owner.keyId, owner.privateKey);
 
-        // The key IS renewable — by its owner, with their passkey. What a forged
-        // `expiredKeyId` buys is the ceremony, and the ceremony is what the caller
-        // cannot complete: a different account's authenticator.
-        expect(forged.status).toBe(200);
+        const started = await renewOptions(stolen);
+        expect(started.status).toBe(200);
 
         const impostor = await FixtureAuthenticator.create();
         await expectOneRefusal(await post('/_auth/session/renew/verify', {
-            expiredKeyId: stranger.keyId,
             response: impostor.assert({
-                challenge: (await forged.json()).challenge,
+                challenge: (await started.json()).challenge,
                 origin: ORIGIN,
                 rpId: RP_ID,
                 counter: 30,
             }),
             ...freshPair(),
-        }));
+        }, stolen));
 
-        expect((await keyRow(stranger.keyId)).isActive).toBe(true);
+        expect((await keyRow(owner.keyId)).isActive).toBe(true);
     });
 
     it('the eleventh options call in a minute from one address: 429', async () =>
@@ -520,7 +554,7 @@ describe.skipIf(!dbAvailable)('renewing a bound session key (case table 6d)', ()
 
         for (let attempt = 0; attempt < 11; attempt += 1)
         {
-            answers.push((await renewOptions(subject.keyId, '198.51.100.40')).status);
+            answers.push((await renewOptions(bearer(subject.keyId, subject.privateKey), '198.51.100.40')).status);
         }
 
         expect(answers.slice(0, 10).every(status => status === 200)).toBe(true);
