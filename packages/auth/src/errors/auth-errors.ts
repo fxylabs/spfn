@@ -941,3 +941,120 @@ export class OAuth2GrantNotFoundError extends NotFoundError
         this.name = 'OAuth2GrantNotFoundError';
     }
 }
+
+/**
+ * MFA Already Enrolled Error (409)
+ *
+ * Thrown when `totp/enroll` is called on an account whose TOTP is already
+ * confirmed. Replacing a working second factor is `disable` followed by a fresh
+ * enrolment, both step-up gated — an enrol that quietly overwrote a confirmed
+ * secret would be a way to swap someone's authenticator for your own.
+ */
+export class MfaAlreadyEnrolledError extends ConflictError
+{
+    constructor(data: { message?: string; details?: Record<string, any> } = {})
+    {
+        super({
+            message: data.message || 'A second factor is already enrolled on this account',
+            details: data.details,
+        });
+        this.name = 'MfaAlreadyEnrolledError';
+    }
+}
+
+/**
+ * MFA Not Enrolled Error (400)
+ *
+ * Thrown when a call needs an enrolment that is not there: `totp/confirm` with
+ * no pending secret — including the row its own five failed attempts deleted —
+ * or `recovery/regenerate` on an account with no second factor. `disable` is
+ * deliberately not one of them; it answers 204 either way, because "make sure
+ * MFA is off" has already succeeded.
+ */
+export class MfaNotEnrolledError extends ValidationError
+{
+    constructor(data: { message?: string; details?: Record<string, any> } = {})
+    {
+        super({
+            message: data.message || 'No second-factor enrolment is in progress on this account',
+            details: data.details,
+        });
+        this.name = 'MfaNotEnrolledError';
+    }
+}
+
+/**
+ * MFA Verification Failed Error (401)
+ *
+ * Thrown when a submitted code does not verify: a wrong or stale TOTP, a code
+ * from a step already spent, a recovery code that is used, from an older
+ * generation or another account's, or an assertion from a passkey the owner
+ * never marked as a second factor.
+ *
+ * One body for all of them. Which one applies describes state the caller is
+ * guessing at, and the remedy — look at the authenticator again — is the same.
+ */
+export class MfaVerificationFailedError extends UnauthorizedError
+{
+    constructor(data: { message?: string; details?: Record<string, any> } = {})
+    {
+        super({
+            message: data.message || 'That code did not verify',
+            details: data.details,
+        });
+        this.name = 'MfaVerificationFailedError';
+    }
+}
+
+/**
+ * Step Up Required Error (403)
+ *
+ * Thrown when an enrolled account asks for a sensitive change from a device
+ * whose second factor was last verified longer ago than the step-up window. A
+ * stolen session alone therefore cannot change a password, sign every device
+ * out, or take the second factor off.
+ *
+ * 403 and not 401, on the same reasoning as `RecentAuthenticationRequiredError`,
+ * which it sits beside: a 401 on an authenticated route is what a web client
+ * reads as "the session is gone", so it would sign the user out instead of
+ * asking for a code. Clients branch on `code` to send the user to
+ * `POST /_auth/mfa/step-up` and retry.
+ */
+export class StepUpRequiredError extends ForbiddenError
+{
+    readonly code = 'STEP_UP_REQUIRED';
+
+    constructor(data: { message?: string; details?: Record<string, any> } = {})
+    {
+        super({
+            message: data.message || 'Confirm your second factor before making this change.',
+            details: data.details,
+        });
+        this.name = 'StepUpRequiredError';
+    }
+}
+
+/**
+ * MFA Config Error (500)
+ *
+ * Thrown when the at-rest keyring cannot serve a second factor:
+ * `SPFN_AUTH_TOKEN_ENCRYPTION_KEYS` is unset, or a stored secret names a key id
+ * that has been dropped from it.
+ *
+ * Deliberately not the 401 a wrong code gets. The two have nothing in common: a
+ * wrong code is one person looking at the wrong line of their authenticator,
+ * and a broken keyring is every enrolled user locked out at once by a deploy.
+ * An operator has to be able to tell them apart from the response alone.
+ */
+export class MfaConfigError extends HttpError
+{
+    constructor(data: { message: string; details?: Record<string, any> })
+    {
+        super({
+            message: data.message,
+            statusCode: 500,
+            details: data.details,
+        });
+        this.name = 'MfaConfigError';
+    }
+}

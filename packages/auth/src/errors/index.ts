@@ -52,6 +52,11 @@ import {
     OAuth2RedirectUriMismatchError,
     OAuth2AuthorizeRedirectError,
     OAuth2GrantNotFoundError,
+    MfaAlreadyEnrolledError,
+    MfaNotEnrolledError,
+    MfaVerificationFailedError,
+    StepUpRequiredError,
+    MfaConfigError,
 } from './auth-errors';
 
 export {
@@ -102,6 +107,11 @@ export {
     OAuth2RedirectUriMismatchError,
     OAuth2AuthorizeRedirectError,
     OAuth2GrantNotFoundError,
+    MfaAlreadyEnrolledError,
+    MfaNotEnrolledError,
+    MfaVerificationFailedError,
+    StepUpRequiredError,
+    MfaConfigError,
 } from './auth-errors';
 
 export const authErrorRegistry = new ErrorRegistry();
@@ -153,6 +163,11 @@ authErrorRegistry.append([
     OAuth2RedirectUriMismatchError,
     OAuth2AuthorizeRedirectError,
     OAuth2GrantNotFoundError,
+    MfaAlreadyEnrolledError,
+    MfaNotEnrolledError,
+    MfaVerificationFailedError,
+    StepUpRequiredError,
+    MfaConfigError,
 ]);
 
 export * as AuthError from './auth-errors';

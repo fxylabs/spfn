@@ -18,7 +18,15 @@ import { env } from '../../../config';
 import { type SocialProvider } from '../../types';
 
 const V1_PREFIX = 'enc:v1:';
-const V2_PREFIX = 'enc:v2:';
+
+/**
+ * Framing prefix of the current at-rest format: `enc:v2:<keyId>:<payload>`.
+ *
+ * Exported because the MFA secret cipher writes the same frame over the same
+ * keyring (`lib/mfa-cipher.ts`) — one format for everything this package
+ * encrypts at rest, rather than a second one nobody would remember to rotate.
+ */
+export const V2_PREFIX = 'enc:v2:';
 const ENCRYPTED_PREFIX = 'enc:';
 const IV_BYTES = 12;
 const TAG_BYTES = 16;
@@ -47,7 +55,7 @@ export interface OAuthTokenCipher
     decrypt(value: string, context: OAuthTokenContext): Promise<DecryptedOAuthToken>;
 }
 
-interface TokenEncryptionKey
+export interface TokenEncryptionKey
 {
     keyId: string;
     key: Buffer;
@@ -55,8 +63,15 @@ interface TokenEncryptionKey
 
 /**
  * Parse `<keyId>:<base64-encoded 32-byte key>` entries. The first entry is active.
+ *
+ * Empty when the variable is unset — whether that is a configuration error is
+ * the caller's to decide, and the two callers answer it differently: an OAuth
+ * token refuses outright, while an MFA secret raises `MfaConfigError` so the
+ * refusal cannot be mistaken for a wrong code.
+ *
+ * @throws Error when an entry is present but malformed
  */
-function getTokenKeys(): TokenEncryptionKey[]
+export function getEncryptionKeyring(): TokenEncryptionKey[]
 {
     const raw = env.SPFN_AUTH_TOKEN_ENCRYPTION_KEYS;
     if (!raw)
@@ -111,7 +126,7 @@ function getTokenKeys(): TokenEncryptionKey[]
 
 function requireTokenKeys(): TokenEncryptionKey[]
 {
-    const keys = getTokenKeys();
+    const keys = getEncryptionKeyring();
     if (keys.length === 0)
     {
         throw new Error(
