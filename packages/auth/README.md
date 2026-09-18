@@ -1311,6 +1311,27 @@ export default async function AdminPage()
 Also exported: `getAuthSessionData`, `getUserRole`, `getUserPermissions`, `hasAnyRole`,
 `hasAnyPermission`, the OAuth pending-session helpers, and `createOAuthCallbackHandler`.
 
+### Emptying the cookie jar from a route handler or middleware
+
+`clearSession()` works where `next/headers` is writable. The page that answers *the API
+refused your session* is usually a route handler or middleware holding a `NextResponse`
+instead — `clearSessionCookies(response)` expires the session, key-id, OAuth-pending and
+CSRF cookies on it and returns the same response, so the call chains:
+
+```typescript
+import { clearSessionCookies } from '@spfn/auth/nextjs/server';
+
+export function GET(request: NextRequest)
+{
+    return clearSessionCookies(NextResponse.redirect(new URL('/login', request.url)));
+}
+```
+
+Never spell the names in your app. They carry an `SPFN_PORT` suffix (`spfn_session_4001`),
+so two dev instances do not overwrite each other's cookies, and a hand-written copy of that
+rule clears the wrong cookie without failing. Read them from `sessionCookieNames()`, which
+returns `{ session, keyId, oauthPending, csrf }` at call time.
+
 ## CSRF protection
 
 Cookie-authenticated mutations carry a CSRF token by default. Nothing to write: the

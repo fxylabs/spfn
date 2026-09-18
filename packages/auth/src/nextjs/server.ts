@@ -27,6 +27,13 @@ export {
     type PendingSessionData,
 } from './session-helpers';
 
+// Cookie names — an app that empties the session jar must never spell them
+export {
+    sessionCookieNames,
+    clearSessionCookies,
+    type SessionCookieNames,
+} from './cookie-names';
+
 // OAuth handlers
 export {
     createOAuthCallbackHandler,
