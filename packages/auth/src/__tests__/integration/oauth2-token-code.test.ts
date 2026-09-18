@@ -6,11 +6,14 @@
  * under test: a caller holding a stolen code must not be able to tell it apart
  * from a caller holding a value that was never issued.
  *
- * Two rows carry more than a status. The concurrent pair is a real `Promise.all`
- * against Postgres, and it passes only because the code is spent by the
- * statement that reads it. The reuse row asserts that the tokens the first
- * exchange produced are dead afterwards, which is what revoking the grant is
- * for.
+ * Three rows carry more than a status. The concurrent pair is a real
+ * `Promise.all` against Postgres, and it passes only because the code is spent
+ * by the statement that reads it. The reuse row asserts that the tokens the
+ * first exchange produced are dead afterwards, which is what revoking the grant
+ * is for. Its mirror — a replay whose bindings do NOT match — asserts the
+ * opposite, and it is the one that says the revocation is a consequence of the
+ * real client presenting its code twice rather than of anyone presenting it at
+ * all.
  */
 
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
@@ -31,7 +34,7 @@ import {
     TEST_REDIRECT_URI,
     TEST_RESOURCE,
 } from '../helpers/oauth2';
-import { oauth2AuthorizationCodes, oauth2Tokens } from '@/server/entities';
+import { oauth2AuthorizationCodes, oauth2Grants, oauth2Tokens } from '@/server/entities';
 import { hashOAuth2Secret } from '@/server/lib/oauth2/tokens';
 import { verifyAccessToken } from '@/server/services/oauth2-access-token.service';
 
@@ -147,12 +150,20 @@ describe.skipIf(!dbAvailable)('OAuth2 token, authorization_code (8c)', () =>
         expect(await verifyAccessToken(body.access_token!, TEST_RESOURCE)).not.toBeNull();
     });
 
-    it('a fresh code with a mismatched code_verifier → 400 invalid_grant', async () =>
+    it('a fresh code with a mismatched code_verifier → 400 invalid_grant, the code still spendable', async () =>
     {
-        const { response, body } = await exchange({ code_verifier: pkcePair('wrong').verifier });
+        const code = await freshCode();
+        const refused = await exchange({ code_verifier: pkcePair('wrong').verifier }, code);
 
-        expect(response.status).toBe(400);
-        expect(body.error).toBe('invalid_grant');
+        expect(refused.response.status).toBe(400);
+        expect(refused.body.error).toBe('invalid_grant');
+
+        // The refusal proved nothing about who sent it, so it costs the real
+        // client nothing: the code is still there and the grant is still live.
+        const retry = await exchange({}, code);
+
+        expect(retry.response.status).toBe(200);
+        expect(await verifyAccessToken(retry.body.access_token!, TEST_RESOURCE)).not.toBeNull();
     });
 
     it('a fresh code with the verifier sent as a plain challenge → 400 invalid_grant', async () =>
@@ -218,15 +229,57 @@ describe.skipIf(!dbAvailable)('OAuth2 token, authorization_code (8c)', () =>
         const revoked = await getTestDb().select().from(oauth2Tokens);
 
         expect(revoked.every(token => token.revokedAt !== null)).toBe(true);
+
+        const grants = await getTestDb().select().from(oauth2Grants);
+
+        expect(grants.every(grant => grant.revokedAt !== null)).toBe(true);
     });
 
-    it('two requests presenting one code at the same time → exactly one 200', async () =>
+    it('a spent code replayed with a wrong verifier, another client or another redirect_uri → 400 invalid_grant, and the grant survives', async () =>
+    {
+        const code = await freshCode();
+        const issued = await exchange({}, code);
+
+        expect(issued.response.status).toBe(200);
+
+        const other = await registerLoopbackClient(app, `${NAME}-replayer`, [TEST_REDIRECT_URI]);
+
+        const replays: Record<string, string>[] = [
+            { code_verifier: pkcePair('wrong').verifier },
+            { client_id: other },
+            { redirect_uri: 'http://127.0.0.1:7777/elsewhere' },
+        ];
+
+        for (const overrides of replays)
+        {
+            const replay = await exchange(overrides, code);
+
+            expect(replay.response.status).toBe(400);
+            expect(replay.body.error).toBe('invalid_grant');
+        }
+
+        // None of the three showed it was the client this code was issued to,
+        // so none of them may take that client's connection down with it.
+        expect(await verifyAccessToken(issued.body.access_token!, TEST_RESOURCE)).not.toBeNull();
+
+        const grants = await getTestDb().select().from(oauth2Grants);
+
+        expect(grants.every(grant => grant.revokedAt === null)).toBe(true);
+    });
+
+    it('two requests presenting one code at the same time → exactly one 200, and its tokens live', async () =>
     {
         const code = await freshCode();
         const [left, right] = await Promise.all([exchange({}, code), exchange({}, code)]);
         const statuses = [left.response.status, right.response.status].sort();
 
         expect(statuses).toEqual([200, 400]);
+
+        // The loser is a client retrying a request it thought had timed out,
+        // not a thief: the winner keeps the pair it was just handed.
+        const winner = left.response.status === 200 ? left : right;
+
+        expect(await verifyAccessToken(winner.body.access_token!, TEST_RESOURCE)).not.toBeNull();
     });
 
     it('a code that was never issued → 400 invalid_grant, the same answer a spent one gets', async () =>

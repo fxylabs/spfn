@@ -12,6 +12,13 @@
  * stolen value is actually asking. `invalid_target` and `invalid_scope` are the
  * two exceptions, and both are decided from values the caller already knows.
  *
+ * Nothing is spent or revoked before the presenter has shown it is the client the
+ * credential belongs to. On the code path that means `client_id`, `redirect_uri`
+ * and the PKCE verifier are all checked against the row before the code is
+ * consumed — a caller that cannot satisfy them leaves the code unspent for the
+ * real client and the grant untouched, because it has proved nothing about
+ * itself and must therefore cost nobody anything.
+ *
  * Two replays are detected rather than merely refused, and both revoke the whole
  * grant:
  *
@@ -36,6 +43,8 @@ import {
 import { oauth2AuthorizationCodesRepository } from '../repositories/oauth2-authorization-codes.repository';
 import { oauth2TokensRepository } from '../repositories/oauth2-tokens.repository';
 import type { OAuth2Grant } from '../entities/oauth2-grants';
+import type { OAuth2Client } from '../entities/oauth2-clients';
+import type { OAuth2AuthorizationCode } from '../entities/oauth2-authorization-codes';
 import { getAuthorizationServerConfig, type AuthorizationServerConfig } from '../lib/oauth2/config';
 import { sameResource } from '../lib/oauth2/resource';
 import {
@@ -147,65 +156,75 @@ async function exchangeAuthorizationCode(request: OAuth2TokenRequest): Promise<O
             'authorization_code requires code, code_verifier, client_id and redirect_uri.');
     }
 
-    // The spend and the read are one statement, so two requests racing on one
-    // code produce one row and one null. Everything below judges the row this
-    // call won; the null is explained separately.
     const codeHash = hashOAuth2Secret(request.code);
-    const spent = await oauth2AuthorizationCodesRepository.consume(codeHash);
-
-    if (!spent)
-    {
-        return await refuseSpentOrUnknownCode(codeHash);
-    }
-
-    const pair = await oauth2GrantsRepository.findWithClientById(spent.grant);
-
-    if (!pair || pair.grant.revokedAt !== null)
-    {
-        return invalidGrant();
-    }
-
-    return await issueForCode(request, spent.redirectUri, spent.codeChallenge, pair);
-}
-
-/**
- * Explain a code the spending statement did not match.
- *
- * A row that is there and used is a replay, and the grant dies for it. Anything
- * else — expired, never issued — is refused with the same words, because telling
- * a caller that the code it presented was real is telling it something.
- */
-async function refuseSpentOrUnknownCode(codeHash: string): Promise<OAuth2TokenRefusal>
-{
     const record = await oauth2AuthorizationCodesRepository.findByCodeHash(codeHash);
 
-    if (record && sameOAuth2Hash(record.codeHash, codeHash) && record.usedAt !== null)
+    if (!record || !sameOAuth2Hash(record.codeHash, codeHash))
     {
-        await revokeGrantAndTokens(record.grant, 'authorization code presented twice');
+        return invalidGrant();
     }
 
-    return invalidGrant();
+    const pair = await oauth2GrantsRepository.findWithClientById(record.grant);
+
+    if (!pair || pair.grant.revokedAt !== null || !boundToRequest(request, record, pair.client))
+    {
+        return invalidGrant();
+    }
+
+    return await spendBoundCode(request, record, pair);
 }
 
 /**
- * The three things the exchange has to agree with the authorize request about,
- * then the tokens.
+ * The three things the code was bound to at the authorize request, checked
+ * before anything is spent or revoked.
+ *
+ * Nothing about this decision may depend on the code's state: a caller that
+ * cannot satisfy these has not shown it is the client the code was issued to,
+ * and until it has, its presentation must cost that client nothing — neither
+ * the code, which the real client is still on its way to exchange, nor the
+ * grant, which the replay path would otherwise revoke on anyone's say-so.
  */
-async function issueForCode(
+function boundToRequest(
     request: OAuth2TokenRequest,
-    boundRedirectUri: string,
-    codeChallenge: string,
-    pair: OAuth2GrantWithClient,
-): Promise<OAuth2TokenResult>
+    record: OAuth2AuthorizationCode,
+    client: OAuth2Client,
+): boolean
 {
-    if (request.client_id !== pair.client.clientId || request.redirect_uri !== boundRedirectUri)
+    if (request.client_id !== client.clientId || request.redirect_uri !== record.redirectUri)
     {
-        return invalidGrant();
+        return false;
     }
 
     // S256 only, so a client that sent its verifier as the challenge (`plain`)
     // hashes to something else here and is refused like any other mismatch.
-    if (!sameOAuth2Hash(pkceChallengeFor(request.code_verifier!), codeChallenge))
+    return sameOAuth2Hash(pkceChallengeFor(request.code_verifier!), record.codeChallenge);
+}
+
+/**
+ * Spend a code whose bindings agree, and answer for the two ways it may not be
+ * spendable.
+ *
+ * A row that was already used when this call read it is a replay by the client
+ * the code belongs to — the first exchange produced tokens, so somebody else
+ * holds them — and the grant dies for it. A row that was unused a moment ago
+ * and will not spend now is either past its sixty seconds or was won by a
+ * request racing this one, which is an ordinary client retry; both are refused
+ * and neither costs the grant.
+ */
+async function spendBoundCode(
+    request: OAuth2TokenRequest,
+    record: OAuth2AuthorizationCode,
+    pair: OAuth2GrantWithClient,
+): Promise<OAuth2TokenResult>
+{
+    if (record.usedAt !== null)
+    {
+        await revokeGrantAndTokens(record.grant, 'authorization code presented twice');
+
+        return invalidGrant();
+    }
+
+    if (!await oauth2AuthorizationCodesRepository.consume(record.codeHash))
     {
         return invalidGrant();
     }
