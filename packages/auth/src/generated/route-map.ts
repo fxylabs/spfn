@@ -36,6 +36,8 @@ export const routeMap: Record<string, RouteInfo> = {
     requestPasswordReset: { method: 'POST', path: '/_auth/password/reset' },
     confirmPasswordReset: { method: 'POST', path: '/_auth/password/reset/confirm' },
     completePasswordReset: { method: 'POST', path: '/_auth/password/reset/complete' },
+    confirmRevokeAllLink: { method: 'POST', path: '/_auth/keys/revoke-all/confirm' },
+    consumeRevokeAllLink: { method: 'POST', path: '/_auth/keys/revoke-all/consume' },
     passkeyRegisterOptions: { method: 'POST', path: '/_auth/passkeys/register/options' },
     passkeyRegisterVerify: { method: 'POST', path: '/_auth/passkeys/register/verify' },
     passkeyLoginOptions: { method: 'POST', path: '/_auth/passkeys/login/options' },
@@ -77,6 +79,14 @@ export const routeMap: Record<string, RouteInfo> = {
     issueOpsToken: { method: 'POST', path: '/_auth/ops-tokens' },
     listOpsTokens: { method: 'GET', path: '/_auth/ops-tokens' },
     revokeOpsToken: { method: 'DELETE', path: '/_auth/ops-tokens/:id' },
+    registerOAuth2Client: { method: 'POST', path: '/_auth/oauth2/register' },
+    listOAuth2Grants: { method: 'GET', path: '/_auth/oauth2/grants' },
+    revokeOAuth2Grant: { method: 'DELETE', path: '/_auth/oauth2/grants/:id' },
+    oauth2AuthorizationServerMetadata: { method: 'GET', path: '/.well-known/oauth-authorization-server' },
+    getOAuth2Authorize: { method: 'GET', path: '/_auth/oauth2/authorize' },
+    createOAuth2AuthorizationCode: { method: 'POST', path: '/_auth/oauth2/authorize' },
+    oauth2Token: { method: 'POST', path: '/_auth/oauth2/token' },
+    oauth2Revoke: { method: 'POST', path: '/_auth/oauth2/revoke' },
 };
 
 export type RouteMap = typeof routeMap;

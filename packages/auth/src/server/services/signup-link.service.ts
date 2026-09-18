@@ -209,6 +209,10 @@ export interface CompleteSignupParams
     deviceName?: string;
     platform?: KeyPlatformType;
     metadata?: Record<string, unknown>;
+    /** Client address of the request, from `deviceProvenance` at the route. */
+    ip?: string;
+    /** `user-agent` of the request, already truncated at the route. */
+    userAgent?: string;
 }
 
 /**
@@ -292,5 +296,8 @@ export async function completeSignupService(
         deviceName: params.deviceName,
         platform: params.platform,
         metadata: params.metadata,
+        ip: params.ip,
+        userAgent: params.userAgent,
+        channel: 'signup-link',
     });
 }

@@ -60,6 +60,19 @@ export const userPublicKeys = authSchema.table(
         // Used for: the same list, alongside deviceName
         platform: enumText('platform', KEY_PLATFORM),
 
+        // Client address the key was registered from, as getClientIp resolved it
+        // null: the request resolved no address, or the key predates this column
+        // Written once at registration and never updated — it answers "where did
+        // this device appear from", which a later request cannot change
+        // Display only, and spoofable on a request that is not proxy-verified
+        registeredIp: text('registered_ip'),
+
+        // user-agent header of the registering request, truncated to 512 chars
+        // null: the request sent none, or the key predates this column
+        // Written once at registration, for the same reason and with the same
+        // standing as registeredIp above
+        registeredUserAgent: text('registered_user_agent'),
+
         // What the client said about itself on the last request signed by this key.
         //
         // The three come from x-spfn-client-kind, x-spfn-client-version and

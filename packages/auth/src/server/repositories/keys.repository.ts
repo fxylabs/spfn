@@ -6,9 +6,10 @@
  */
 
 import { NewUserPublicKey, userPublicKeys } from '../entities/user-public-keys';
+import { users } from '../entities/users';
 import type { ClientIdentity } from '../client-proof/wire-version';
 import { BaseRepository } from '@spfn/core/db';
-import { eq, and, or, isNull, lt, ne, desc, sql } from 'drizzle-orm';
+import { eq, and, or, isNull, lt, desc, sql } from 'drizzle-orm';
 
 /**
  * Throttle window for lastUsedAt writes. The column is for audit / inactive-key
@@ -16,6 +17,18 @@ import { eq, and, or, isNull, lt, ne, desc, sql } from 'drizzle-orm';
  * lock / MVCC bloat) on every authenticated request.
  */
 const LAST_USED_THROTTLE_MS = 60_000;
+
+/**
+ * What a global revocation answers with.
+ *
+ * The key id and nothing else: every caller counts the rows or names them, and
+ * the statement that produces them revokes keys and moves the account's key
+ * generation at once, which a typed Drizzle update cannot express.
+ */
+export interface RevokedKey
+{
+    keyId: string;
+}
 
 /**
  * User Public Keys Repository 클래스
@@ -100,6 +113,8 @@ export class KeysRepository extends BaseRepository
                 lastUsedAt: userPublicKeys.lastUsedAt,
                 expiresAt: userPublicKeys.expiresAt,
                 revokedAt: userPublicKeys.revokedAt,
+                registeredIp: userPublicKeys.registeredIp,
+                registeredUserAgent: userPublicKeys.registeredUserAgent,
             })
             .from(userPublicKeys)
             .where(
@@ -126,7 +141,13 @@ export class KeysRepository extends BaseRepository
     }
 
     /**
-     * 공개키 revoke (비활성화)
+     * 공개키 revoke (비활성화) — 아직 살아 있는 키만
+     *
+     * `isActive`가 조건에 있어야 반환값이 "이 호출이 무언가를 폐기했는가"를 뜻한다.
+     * 없으면 이미 폐기된 키를 다시 지목해도 행이 하나 돌아와, 호출자는 폐기가
+     * 일어났다고 읽는다. 로그인 경로가 그 값으로 "기기 교체인가 새 기기인가"를
+     * 가르므로, 죽은 키를 들이밀어 새 기기 알림을 끄는 길이 된다.
+     * 폐기 시각·사유도 덮어쓰지 않는다 — 처음 끊긴 순간이 답이다.
      * Write primary 사용
      */
     async revokeByKeyIdAndUserId(
@@ -146,6 +167,7 @@ export class KeysRepository extends BaseRepository
                 and(
                     eq(userPublicKeys.keyId, keyId),
                     eq(userPublicKeys.userId, userId),
+                    eq(userPublicKeys.isActive, true),
                 ),
             )
             .returning();
@@ -154,54 +176,68 @@ export class KeysRepository extends BaseRepository
     }
 
     /**
-     * 사용자의 모든 활성 공개키 revoke (비활성화)
+     * 사용자의 모든 활성 공개키 revoke (비활성화) — 그리고 같은 문장에서 key_epoch +1
      *
      * 비번 변경 시 전체 세션 로그아웃에 사용. authenticate는 활성 키만 검증하므로,
      * revoke된 키로 서명한 기존 세션의 요청은 즉시 401이 된다.
      * Write primary 사용
      */
-    async revokeAllActiveByUserId(userId: number, reason: string)
+    async revokeAllActiveByUserId(userId: number, reason: string): Promise<RevokedKey[]>
     {
-        return await this.db
-            .update(userPublicKeys)
-            .set({
-                isActive: false,
-                revokedAt: new Date(),
-                revokedReason: reason,
-            })
-            .where(
-                and(
-                    eq(userPublicKeys.userId, userId),
-                    eq(userPublicKeys.isActive, true),
-                ),
-            )
-            .returning();
+        return await this.revokeActive(userId, reason);
     }
 
     /**
-     * 지정한 키 하나만 남기고 사용자의 활성 공개키를 전부 revoke
+     * 지정한 키 하나만 남기고 사용자의 활성 공개키를 전부 revoke — key_epoch도 +1
      *
      * "다른 기기 전부 로그아웃" — 요청을 보낸 기기는 살려 둔다. 남길 키를 별도 조회로
      * 확인하지 않고 조건에 담아, 그 사이에 다른 요청이 키를 바꾸는 경쟁을 만들지 않는다.
+     *
+     * 한 기기를 남기더라도 epoch는 오른다. 미소비 revoke-all 링크가 죽는 쪽이 보수적이고,
+     * 사용자가 "나머지 전부 로그아웃"을 이미 눌렀다면 메일함의 링크는 목적을 다했다.
      * Write primary 사용
      */
-    async revokeAllActiveByUserIdExcept(userId: number, keepKeyId: string, reason: string)
+    async revokeAllActiveByUserIdExcept(
+        userId: number,
+        keepKeyId: string,
+        reason: string,
+    ): Promise<RevokedKey[]>
     {
-        return await this.db
-            .update(userPublicKeys)
-            .set({
-                isActive: false,
-                revokedAt: new Date(),
-                revokedReason: reason,
-            })
-            .where(
-                and(
-                    eq(userPublicKeys.userId, userId),
-                    eq(userPublicKeys.isActive, true),
-                    ne(userPublicKeys.keyId, keepKeyId),
-                ),
+        return await this.revokeActive(userId, reason, keepKeyId);
+    }
+
+    /**
+     * The one statement behind both global revocations.
+     *
+     * The epoch bump is a data-modifying CTE on the same statement rather than a
+     * second call, so that no caller can revoke every key and forget to move the
+     * counter — and three of the four callers are services that never see the
+     * counter at all. It runs whether or not any key matched: an account with no
+     * active keys still had its generation ended, and an outstanding
+     * sign-out-everywhere link must die with it.
+     *
+     * Write primary 사용
+     */
+    private async revokeActive(userId: number, reason: string, keepKeyId?: string): Promise<RevokedKey[]>
+    {
+        const spare = keepKeyId ? sql` AND t.key_id <> ${keepKeyId}` : sql``;
+
+        const rows = await this.db.execute(sql`
+            WITH epoch_bump AS (
+                UPDATE ${users}
+                SET key_epoch = key_epoch + 1
+                WHERE id = ${userId}
             )
-            .returning();
+            UPDATE ${userPublicKeys} t
+            SET is_active = false,
+                revoked_at = now(),
+                revoked_reason = ${reason}
+            WHERE t.user_id = ${userId}
+              AND t.is_active = true${spare}
+            RETURNING t.key_id AS "keyId"
+        `);
+
+        return rows as unknown as RevokedKey[];
     }
 
     /**

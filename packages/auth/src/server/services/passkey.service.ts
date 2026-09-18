@@ -455,6 +455,10 @@ export interface FinishPasskeyLoginParams
     oldKeyId?: string;
     deviceName?: string;
     platform?: KeyPlatformType;
+    /** Client address of the request, from `deviceProvenance` at the route. */
+    ip?: string;
+    /** `user-agent` of the request, already truncated at the route. */
+    userAgent?: string;
 }
 
 /**
@@ -503,13 +507,21 @@ export async function finishPasskeyLoginService(params: FinishPasskeyLoginParams
  */
 async function startSession(user: User, params: FinishPasskeyLoginParams): Promise<LoginResult>
 {
+    // Only a revocation that happened makes this a replacement rather than a
+    // new device — the same rule `loginService` follows, and for the reason it
+    // does: `oldKeyId` comes from the caller, and one that names nothing
+    // revocable would otherwise switch the owner's notice off.
+    let replacesKeyId: string | undefined;
+
     if (params.oldKeyId)
     {
-        await revokeKeyService({
+        const revoked = await revokeKeyService({
             userId: user.id,
             keyId: params.oldKeyId,
             reason: 'Replaced by new key on passkey login',
         });
+
+        replacesKeyId = revoked ? params.oldKeyId : undefined;
     }
 
     await registerPublicKeyService({
@@ -520,6 +532,10 @@ async function startSession(user: User, params: FinishPasskeyLoginParams): Promi
         algorithm: params.algorithm,
         deviceName: params.deviceName,
         platform: params.platform,
+        channel: 'passkey',
+        ip: params.ip,
+        userAgent: params.userAgent,
+        replacesKeyId,
     });
 
     await updateLastLoginService(user.id);

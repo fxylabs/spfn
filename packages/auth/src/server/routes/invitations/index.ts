@@ -8,6 +8,7 @@ import { EMAIL_PATTERN, UUID_PATTERN } from '@spfn/auth';
 import { getAuth } from '../../helpers';
 import { authenticate, requirePermissions, requireRole } from '../../middleware';
 import { KEY_ALGORITHM } from '../../types';
+import { deviceProvenance } from '../../lib/device-provenance';
 import {
     getInvitationWithDetails,
     validateInvitation,
@@ -117,6 +118,7 @@ export const acceptInvitation = route.post('/_auth/invitations/accept')
             keyId: body.keyId,
             fingerprint: body.fingerprint,
             algorithm: body.algorithm,
+            ...deviceProvenance(c.raw),
         });
     });
 

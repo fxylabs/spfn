@@ -1342,19 +1342,18 @@ describe('declared proof rules match the implementation', () =>
         replayWindowMillis: number;
     };
 
-    it('the contract line is the revision that adds the key-algorithm refusal', () =>
+    it('the contract line is the revision that adds the key registration provenance', () =>
     {
-        expect(bundle.contractVersion).toBe('0.10.1');
+        expect(bundle.contractVersion).toBe('0.11.0');
     });
 
-    it('the supported range moves with the operation that answers no body', () =>
+    it('the supported range floor is the current minor, as the 0.x rule has it', () =>
     {
-        // A 0.9.x generator assumes every operation names a response type, and
-        // auth.device.deny names none, so reading it takes different generated
-        // code. That is breaking, and under 0.x the minor carries breaking, so
-        // the range moves with it. The device operations by themselves would
-        // have been a patch, the way 0.4.1's key operations were.
-        expect(bundle.supportedRange).toBe('>=0.10.0 <0.11.0');
+        // Under 0.x this contract carries a surface addition in the minor, and
+        // the range's floor is mechanically that minor's `.0`. 0.11.0 adds two
+        // optional fields to KeySummary, which no 0.10.x consumer reads; the
+        // floor moves because the minor did, not because anything broke.
+        expect(bundle.supportedRange).toBe('>=0.11.0 <0.12.0');
     });
 
     it('states the rule that binds a native id_token to the key it enrolls', () =>

@@ -41,6 +41,7 @@ import { deviceAuthorizationsRepository, usersRepository } from '../repositories
 import type { DeviceAuthorization, DeviceAuthStatus } from '../entities/device-authorizations';
 import { type KeyAlgorithmType, type KeyPlatformType } from '../types';
 import { getDeviceAuthConfig } from '../lib/device-auth-config';
+import type { DeviceProvenance } from '../lib/device-provenance';
 import { assertKeyMatchesAlgorithm, verifyKeyFingerprint } from '../helpers/jwt';
 import {
     formatUserCode,
@@ -116,6 +117,10 @@ export interface DenyDeviceAuthParams
 export interface PollDeviceAuthParams
 {
     deviceCode: string;
+    /** Client address of the request, from `deviceProvenance` at the route. */
+    ip?: string;
+    /** `user-agent` of the request, already truncated at the route. */
+    userAgent?: string;
 }
 
 /** Nobody has answered yet. Not an error — the waiting device waits. */
@@ -412,7 +417,7 @@ export async function pollDeviceAuthService(
         );
     }
 
-    return { status: 'approved', ...await completeDeviceLogin(consumed) };
+    return { status: 'approved', ...await completeDeviceLogin(consumed, params) };
 }
 
 /**
@@ -432,7 +437,10 @@ export async function pollDeviceAuthService(
  * would bring it back to life. Registering a key is registering a key, whichever
  * door it came through.
  */
-async function completeDeviceLogin(record: DeviceAuthorization): Promise<LoginResult>
+async function completeDeviceLogin(
+    record: DeviceAuthorization,
+    provenance: DeviceProvenance,
+): Promise<LoginResult>
 {
     if (record.userId === null)
     {
@@ -460,6 +468,9 @@ async function completeDeviceLogin(record: DeviceAuthorization): Promise<LoginRe
         throw new AccountDisabledError({ status: user.status });
     }
 
+    // The provenance is the polling device's, not the approving one's: this is
+    // the request that turns a parked key into a registered one, and the device
+    // the owner sees in their list is the device that will be signing.
     await registerPublicKeyService({
         userId: user.id,
         keyId: record.keyId,
@@ -468,6 +479,9 @@ async function completeDeviceLogin(record: DeviceAuthorization): Promise<LoginRe
         algorithm: record.algorithm,
         deviceName: record.deviceName ?? undefined,
         platform: record.platform ?? undefined,
+        channel: 'device-code',
+        ip: provenance.ip,
+        userAgent: provenance.userAgent,
     });
 
     await updateLastLoginService(user.id);

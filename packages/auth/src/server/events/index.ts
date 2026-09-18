@@ -7,7 +7,7 @@
  */
 
 import { defineEvent } from '@spfn/core/event';
-import { Type } from '@sinclair/typebox';
+import { Type, type Static } from '@sinclair/typebox';
 
 import { SOCIAL_PROVIDERS } from '../types';
 
@@ -68,6 +68,74 @@ export const authLoginEvent = defineEvent(
         provider: AuthLoginProviderSchema,
         email: Type.Optional(Type.String()),
         phone: Type.Optional(Type.String()),
+    }),
+);
+
+/**
+ * Where a device key was registered — the door the new device came through.
+ *
+ * Required on `RegisterPublicKeyParams` rather than optional with a default: a
+ * new *call site* for key registration must choose one, and a default would let
+ * it inherit somebody else's answer silently. `'register'` and `'signup-link'`
+ * both arrive at `createVerifiedAccount`, so the two name themselves there;
+ * `'invitation'` is the one path that stores a key without the key service.
+ */
+export const DeviceRegistrationChannelSchema = Type.Union([
+    Type.Literal('register'),
+    Type.Literal('signup-link'),
+    Type.Literal('invitation'),
+    Type.Literal('password'),
+    Type.Literal('oauth'),
+    Type.Literal('oauth-native'),
+    Type.Literal('device-code'),
+    Type.Literal('password-reset'),
+    Type.Literal('passkey'),
+]);
+
+/** The nine doors a device key is registered through. */
+export type DeviceRegistrationChannel = Static<typeof DeviceRegistrationChannelSchema>;
+
+/**
+ * auth.device.registered — a new device key was added to an account
+ *
+ * 발행 시점:
+ * - a key row was created for an account and the transaction that created it
+ *   committed, on every one of the nine channels above
+ *
+ * This is the notice an account owner needs and could not get before: a stolen
+ * password used to sign in on a new device was silent, because a login event
+ * says a session began and not what it began on. Rotation is deliberately not
+ * announced — replacing the key of a device that is already signed in is not a
+ * new device, and a notice for it would train the owner to ignore the ones that
+ * matter.
+ *
+ * `ip` and `userAgent` are what the registering request said about itself. Both
+ * are unauthenticated display material: nothing is decided by them, and a field
+ * is absent rather than carrying a placeholder when the request resolved none.
+ *
+ * Neither the full fingerprint nor the public key is carried. The prefix is
+ * enough to point at one entry of `listKeys`, which is what a notice needs.
+ *
+ * @example
+ * ```typescript
+ * authDeviceRegisteredEvent.subscribe(async ({ userId, deviceName, ip, channel }) => {
+ *     await notifyOwner(userId, `A new device signed in (${deviceName ?? channel})`);
+ * });
+ * ```
+ */
+export const authDeviceRegisteredEvent = defineEvent(
+    'auth.device.registered',
+    Type.Object({
+        userId: Type.String(),
+        keyId: Type.String(),
+        algorithm: Type.String(),
+        fingerprintPrefix: Type.String(),
+        deviceName: Type.Optional(Type.String()),
+        platform: Type.Optional(Type.String()),
+        ip: Type.Optional(Type.String()),
+        userAgent: Type.Optional(Type.String()),
+        createdAtMillis: Type.Number(),
+        channel: DeviceRegistrationChannelSchema,
     }),
 );
 
@@ -316,6 +384,7 @@ export type PasskeyEnrolledPayload = typeof passkeyEnrolledEvent._payload;
 export type PasskeyRevokedPayload = typeof passkeyRevokedEvent._payload;
 export type AuthRegisterPayload = typeof authRegisterEvent._payload;
 export type AuthPasswordResetPayload = typeof authPasswordResetEvent._payload;
+export type AuthDeviceRegisteredPayload = typeof authDeviceRegisteredEvent._payload;
 export type InvitationCreatedPayload = typeof invitationCreatedEvent._payload;
 export type InvitationAcceptedPayload = typeof invitationAcceptedEvent._payload;
 export type AuthDeletionRequestedPayload = typeof authDeletionRequestedEvent._payload;

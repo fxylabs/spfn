@@ -69,6 +69,10 @@ export interface OAuthCallbackParams
      * an empty array when absent; verification then fails closed.
      */
     expectedNonce: string | string[] | undefined;
+    /** Client address of the callback request, from `deviceProvenance` at the route. */
+    ip?: string;
+    /** `user-agent` of the callback request, already truncated at the route. */
+    userAgent?: string;
 }
 
 export interface OAuthCallbackResult
@@ -226,12 +230,17 @@ export async function oauthCallbackService(
     await assertActiveForOAuthSession(userId);
 
     // 4. state에서 추출한 publicKey 등록
+    // No deviceName or platform: the sealed state the start step wrote carries
+    // neither, so the event on this channel is the one that names no device.
     await registerPublicKeyService({
         userId,
         keyId: stateData.keyId,
         publicKey: stateData.publicKey,
         fingerprint: stateData.fingerprint,
         algorithm: stateData.algorithm,
+        channel: 'oauth',
+        ip: params.ip,
+        userAgent: params.userAgent,
     });
 
     // 5. 마지막 로그인 시간 업데이트

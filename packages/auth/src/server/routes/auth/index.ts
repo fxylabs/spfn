@@ -41,6 +41,7 @@ import { Transactional } from '@spfn/core/db';
 import { rateLimitPolicy } from '@spfn/core/middleware';
 import { byIpAndAccount, byIpAndTarget, byIpAndCaller } from '../../lib/rate-limit-keys';
 import { defineRouter, route } from '@spfn/core/route';
+import { deviceProvenance } from '../../lib/device-provenance';
 
 // NOTE: a POST /_auth/exists endpoint was removed deliberately — it answered
 // account existence directly (user enumeration). Existence is no longer exposed;
@@ -136,7 +137,7 @@ export const register = route.post('/_auth/register')
     {
         const { body } = await c.data();
 
-        return await registerService(body);
+        return await registerService({ ...body, ...deviceProvenance(c.raw) });
     });
 
 /**
@@ -233,7 +234,7 @@ export const completeSignup = route.post('/_auth/signup/password')
     {
         const { body } = await c.data();
 
-        return await completeSignupService(body);
+        return await completeSignupService({ ...body, ...deviceProvenance(c.raw) });
     });
 
 /**
@@ -272,7 +273,7 @@ export const login = route.post('/_auth/login')
     {
         const { body } = await c.data();
 
-        return await loginService(body);
+        return await loginService({ ...body, ...deviceProvenance(c.raw) });
     });
 
 // ===== Device-code login =====
@@ -342,7 +343,10 @@ export const pollDeviceAuth = route.post('/_auth/device/poll')
     {
         const { body } = await c.data();
 
-        return await pollDeviceAuthService(body);
+        // The polling device is the one being registered, so its address and
+        // user agent are what the owner's device list should carry — not the
+        // approving device's, which made a different request minutes ago.
+        return await pollDeviceAuthService({ ...body, ...deviceProvenance(c.raw) });
     });
 
 /**

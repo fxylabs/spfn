@@ -13,7 +13,7 @@
  */
 
 import { USER_STATUSES } from '../types';
-import { text, boolean, index, uuid } from 'drizzle-orm/pg-core';
+import { text, boolean, index, integer, uuid } from 'drizzle-orm/pg-core';
 import { id, timestamps, enumText, utcTimestamp, foreignKey, softDelete } from '@spfn/core/db';
 import { roles } from './roles';
 import { authSchema } from './schema';
@@ -70,6 +70,14 @@ export const users = authSchema.table('users',
 
         // Phone verification (via SMS OTP)
         phoneVerifiedAt: utcTimestamp('phone_verified_at'),
+
+        // Generation counter for this account's device keys
+        // Incremented in the same statement that revokes every active key, so no
+        // caller can revoke globally and forget to move it
+        // Used for: binding a signed sign-out-everywhere link to the generation
+        // it was issued against — a link is dead once any other path has already
+        // signed every device out
+        keyEpoch: integer('key_epoch').notNull().default(0),
 
         // Metadata
         // Last successful login timestamp

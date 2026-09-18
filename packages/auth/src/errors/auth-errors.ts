@@ -309,6 +309,36 @@ export class KeyNotFoundError extends NotFoundError
 }
 
 /**
+ * Revoke-All Link Error (404)
+ *
+ * Thrown when a signed sign-out-everywhere link cannot be acted on: unknown,
+ * expired, already spent, superseded by a newer one, issued against a key
+ * generation that has since moved, or belonging to an account that is not
+ * active.
+ *
+ * One error for every one of those, and the same body for each. Telling an
+ * expired link from an unknown one would tell whoever is holding a random value
+ * that it named a real outstanding link, and the sibling link flows refuse the
+ * same way for the same reason. The specific cause is logged.
+ *
+ * 404 rather than the 401 the password-reset link answers with: there is no
+ * credential here to have been wrong. The address the mail went to is the proof,
+ * and what the caller presented either names an outstanding link or names
+ * nothing.
+ */
+export class RevokeAllLinkError extends NotFoundError
+{
+    constructor(data: { message?: string; details?: Record<string, any> } = {})
+    {
+        super({
+            message: data.message || 'This sign-out link is no longer valid. Request a new one.',
+            details: data.details,
+        });
+        this.name = 'RevokeAllLinkError';
+    }
+}
+
+/**
  * Device Auth Not Found Error (404)
  *
  * Thrown when a device-code operation names a code the server cannot act on: one

@@ -16,6 +16,7 @@ import type { InvitationStatus, KeyAlgorithmType } from '../types';
 import { runBeforeRegister } from '../lib/config';
 import { assertKeyMatchesAlgorithm, hashPassword } from '../helpers';
 import { invitationCreatedEvent, invitationAcceptedEvent } from '../events';
+import { emitDeviceRegistered } from './device-registration.service';
 import { BadRequestError, NotFoundError, ConflictError } from '@spfn/core/errors';
 
 /**
@@ -231,6 +232,10 @@ export async function acceptInvitation(params: {
     keyId: string;
     fingerprint: string;
     algorithm: KeyAlgorithmType;
+    /** Client address of the request, from `deviceProvenance` at the route. */
+    ip?: string;
+    /** `user-agent` of the request, already truncated at the route. */
+    userAgent?: string;
 }) 
 {
     const { token, password, publicKey, keyId, fingerprint, algorithm } = params;
@@ -281,15 +286,24 @@ export async function acceptInvitation(params: {
     });
 
     // Create public key for asymmetric JWT
-    await keysRepository.create({
+    const key = await keysRepository.create({
         userId: newUser.id,
         keyId,
         publicKey,
         algorithm,
         fingerprint,
+        registeredIp: params.ip ?? null,
+        registeredUserAgent: params.userAgent ?? null,
         isActive: true,
         expiresAt: new Date(Date.now() + 90 * 24 * 60 * 60 * 1000), // 90 days
     });
+
+    // The second of the two emission points, and the reason there are two: the
+    // key above is written before the account it belongs to exists anywhere but
+    // this transaction, so it cannot go through `registerPublicKeyService`. The
+    // helper still defers to after the commit, so an invitation that fails later
+    // announces nothing.
+    emitDeviceRegistered(key, 'invitation');
 
     // Update invitation status
     await invitationsRepository.updateStatus(

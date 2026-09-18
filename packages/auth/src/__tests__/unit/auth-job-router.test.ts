@@ -26,18 +26,22 @@ describe('auth job router (case table R)', () =>
         expect(jobNamesOf(authJobRouter)).toEqual([
             'auth.deletion.purge',
             'auth.oauth2.client-purge',
+            'auth.revoke-all-token-purge',
             'auth.link-mail',
         ]);
     });
 
     it('row R1: the default router keeps the documented purge crons', () =>
     {
-        const [purge, clientPurge] = collectJobs(authJobRouter);
+        const [purge, clientPurge, revokeAllPurge] = collectJobs(authJobRouter);
 
         expect(purge.cronExpression).toBe('0 4 * * *');
         expect(purge.name).toBe('auth.deletion.purge');
         expect(clientPurge.cronExpression).toBe('0 5 * * *');
         expect(clientPurge.name).toBe('auth.oauth2.client-purge');
+        // An hour apart from the other two, so the three sweeps do not overlap.
+        expect(revokeAllPurge.cronExpression).toBe('0 6 * * *');
+        expect(revokeAllPurge.name).toBe('auth.revoke-all-token-purge');
     });
 
     it('row R2: the deprecated alias still takes purgeCron and still carries every job', () =>
@@ -47,6 +51,7 @@ describe('auth job router (case table R)', () =>
         expect(jobs.map((job) => job.name)).toEqual([
             'auth.deletion.purge',
             'auth.oauth2.client-purge',
+            'auth.revoke-all-token-purge',
             'auth.link-mail',
         ]);
         expect(jobs[0].cronExpression).toBe('0 3 * * *');
@@ -59,7 +64,7 @@ describe('auth job router (case table R)', () =>
 
     it('row R2: link mail is not a cron job — it runs when a request enqueues it', () =>
     {
-        const [, , linkMail] = collectJobs(createAuthJobRouter());
+        const [, , , linkMail] = collectJobs(createAuthJobRouter());
 
         expect(linkMail.name).toBe('auth.link-mail');
         expect(linkMail.cronExpression).toBeUndefined();

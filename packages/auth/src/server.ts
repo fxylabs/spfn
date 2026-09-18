@@ -94,6 +94,8 @@ export {
     createAuthJobRouter,
     createAuthDeletionJobRouter,
     createAuthDeletionPurgeJob,
+    createRevokeAllTokenPurgeJob,
+    DEFAULT_REVOKE_ALL_TOKEN_PURGE_CRON,
     linkMailJob,
 } from './server/jobs';
 
@@ -105,6 +107,7 @@ export {
     authLoginEvent,
     authRegisterEvent,
     authPasswordResetEvent,
+    authDeviceRegisteredEvent,
     invitationCreatedEvent,
     invitationAcceptedEvent,
     authDeletionRequestedEvent,
@@ -118,6 +121,8 @@ export type {
     AuthLoginPayload,
     AuthRegisterPayload,
     AuthPasswordResetPayload,
+    AuthDeviceRegisteredPayload,
+    DeviceRegistrationChannel,
     InvitationCreatedPayload,
     InvitationAcceptedPayload,
     AuthDeletionRequestedPayload,

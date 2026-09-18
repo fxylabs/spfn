@@ -49,6 +49,10 @@ function params(userId = OWNER_ID)
         publicKey: EC_KEY.publicKey,
         fingerprint: 'a'.repeat(64),
         algorithm: 'ES256' as const,
+        // Required since the device-registered event: a registration names the
+        // door it came through. These rows are about keyId collisions, so any
+        // channel does — 'password' is the one they stand in for.
+        channel: 'password' as const,
     };
 }
 
@@ -76,7 +80,7 @@ describe('registerPublicKeyService - keyId collisions', () =>
     beforeEach(() =>
     {
         vi.clearAllMocks();
-        keysRepository.create.mockResolvedValue(undefined as never);
+        keysRepository.create.mockResolvedValue(keyRow() as never);
     });
 
     it('registers the key when the keyId is unused', async () =>
@@ -200,7 +204,7 @@ describe('key type must match the declared algorithm', () =>
     {
         vi.clearAllMocks();
         keysRepository.findByKeyId.mockResolvedValue(null);
-        keysRepository.create.mockResolvedValue(undefined as never);
+        keysRepository.create.mockResolvedValue(keyRow() as never);
     });
 
     it('refuses to register an RSA key declared ES256', async () =>
@@ -211,6 +215,7 @@ describe('key type must match the declared algorithm', () =>
             publicKey: RSA_KEY.publicKey,
             fingerprint: 'a'.repeat(64),
             algorithm: 'ES256',
+            channel: 'password',
         });
 
         await expect(register).rejects.toBeInstanceOf(KeyAlgorithmMismatchError);
@@ -232,6 +237,7 @@ describe('key type must match the declared algorithm', () =>
             publicKey: RSA_KEY.publicKey,
             fingerprint: 'a'.repeat(64),
             algorithm: 'RS256',
+            channel: 'password',
         });
 
         expect(keysRepository.create).toHaveBeenCalledTimes(1);

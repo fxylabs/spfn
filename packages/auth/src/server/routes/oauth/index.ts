@@ -19,6 +19,7 @@ import { KEY_ALGORITHM, SOCIAL_PROVIDERS, type SocialProvider } from '../../type
 import { DeviceNameSchema, PlatformSchema } from '../schema';
 import { COOKIE_NAMES, matchOAuthCsrfCookies } from '../../lib/config';
 import { byIpAndIdToken } from '../../lib/rate-limit-keys';
+import { deviceProvenance } from '../../lib/device-provenance';
 import {
     oauthStartService,
     oauthCallbackService,
@@ -129,6 +130,7 @@ export const oauthGoogleCallback = route.get('/_auth/oauth/google/callback')
                 code: query.code,
                 state: query.state,
                 expectedNonce: csrfCookies.map(cookie => cookie.value),
+                ...deviceProvenance(c.raw),
             });
 
             return c.redirect(result.redirectUrl);
@@ -408,6 +410,7 @@ export const oauthProviderCallback = route.get('/_auth/oauth/:provider/callback'
                 code: query.code,
                 state: query.state,
                 expectedNonce: csrfCookies.map(cookie => cookie.value),
+                ...deviceProvenance(c.raw),
             });
 
             return c.redirect(result.redirectUrl);
@@ -528,7 +531,7 @@ export const oauthNative = route.post('/_auth/oauth/:provider/native')
     {
         const { params, body } = await c.data();
 
-        return await oauthNativeService({ provider: params.provider, ...body });
+        return await oauthNativeService({ provider: params.provider, ...body, ...deviceProvenance(c.raw) });
     });
 
 /**

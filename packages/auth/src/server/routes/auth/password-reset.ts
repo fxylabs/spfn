@@ -18,6 +18,7 @@ import { route } from '@spfn/core/route';
 import { EmailSchema, PasswordSchema, DeviceNameSchema, PlatformSchema } from '../schema';
 import { KEY_ALGORITHM } from '../../types';
 import { byIpAndAccount } from '../../lib/rate-limit-keys';
+import { deviceProvenance } from '../../lib/device-provenance';
 import {
     requestPasswordResetService,
     confirmPasswordResetService,
@@ -118,5 +119,5 @@ export const completePasswordReset = route.post('/_auth/password/reset/complete'
     {
         const { body } = await c.data();
 
-        return await completePasswordResetService(body);
+        return await completePasswordResetService({ ...body, ...deviceProvenance(c.raw) });
     });

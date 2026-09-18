@@ -18,6 +18,7 @@ import { route } from '@spfn/core/route';
 import { getAuth } from '../../helpers';
 import { KEY_ALGORITHM } from '../../types';
 import { byIpAndCaller } from '../../lib/rate-limit-keys';
+import { deviceProvenance } from '../../lib/device-provenance';
 import { PASSKEY_LABEL_MAX_LENGTH } from '../../entities/passkeys';
 import { DeviceNameSchema, PlatformSchema } from '../schema';
 import {
@@ -185,6 +186,7 @@ export const passkeyLoginVerify = route.post('/_auth/passkeys/login/verify')
 
         return await finishPasskeyLoginService({
             ...body,
+            ...deviceProvenance(c.raw),
             response: body.response as Parameters<typeof finishPasskeyLoginService>[0]['response'],
         });
     });

@@ -21,22 +21,9 @@
 import { env } from '@spfn/auth/config';
 import { sendEmail, sendSMS } from '@spfn/notification/server';
 import { authLogger } from '../logger';
-import { mintCredential } from '../lib/link-credentials';
+import { buildConfirmUrl, mintCredential } from '../lib/link-credentials';
 import { passwordResetTokensRepository, signupLinkTokensRepository } from '../repositories';
 import type { VerificationTargetType } from '../routes/schema';
-
-/**
- * Absolute URL of an app page a link opens.
- *
- * The page is in the app, not in this package — the token travels in its query
- * string and the page posts it back to the confirm route.
- */
-function buildConfirmUrl(path: string, token: string): string
-{
-    const appUrl = (env.NEXT_PUBLIC_SPFN_APP_URL || env.SPFN_APP_URL || '').replace(/\/$/, '');
-
-    return `${appUrl}${path}?token=${encodeURIComponent(token)}`;
-}
 
 /**
  * Mint the signup link for a pending row and mail it.
