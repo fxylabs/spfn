@@ -28,7 +28,7 @@ import {
     listOAuth2GrantsService,
     revokeOAuth2GrantService,
 } from '../../services/oauth2-grant.service';
-import { oauth2ErrorResponse, oauth2JsonResponse, readOAuth2Body, requireAuthorizationServer } from './http';
+import { oauth2ErrorResponse, oauth2JsonResponse, requireAuthorizationServer } from './http';
 
 /**
  * POST /_auth/oauth2/register
@@ -67,6 +67,11 @@ export const registerOAuth2Client = route.post('/_auth/oauth2/register')
 /**
  * The registration body, unvalidated.
  *
+ * JSON and nothing else: RFC 7591 §3.1 says a registration request is
+ * `application/json`, which is what makes this the one surface in the feature
+ * that does not go through `readOAuth2Body` — `redirect_uris` is an array, and
+ * the flat reader the form-encoded endpoints share would drop it.
+ *
  * Nothing is asserted about its shape here — the service refuses in RFC 7591's
  * own words, and a route input schema would refuse in the application's envelope
  * instead, which the client's OAuth library cannot read. A body that is not JSON
@@ -83,7 +88,7 @@ async function readRegistrationBody(c: Context): Promise<Record<string, unknown>
     }
     catch
     {
-        return await readOAuth2Body(c);
+        return {};
     }
 }
 

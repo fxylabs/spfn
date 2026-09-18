@@ -51,25 +51,6 @@ export class OAuth2GrantsRepository extends BaseRepository
         return result[0]!;
     }
 
-    /** The live consent for this triple, if the user ever gave one. */
-    async findActive(clientRowId: number, userId: number, resource: string): Promise<OAuth2Grant | null>
-    {
-        const result = await this.db
-            .select()
-            .from(oauth2Grants)
-            .where(
-                and(
-                    eq(oauth2Grants.client, clientRowId),
-                    eq(oauth2Grants.user, userId),
-                    eq(oauth2Grants.resource, resource),
-                    isNull(oauth2Grants.revokedAt),
-                ),
-            )
-            .limit(1);
-
-        return result[0] ?? null;
-    }
-
     /**
      * A grant and its client in one read — the shape the token and verification
      * paths need, since both have to check the client the caller claims and the

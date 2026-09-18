@@ -404,20 +404,9 @@ async function issueTokenPair(grant: OAuth2Grant, scopes: string[]): Promise<OAu
 
     await runInTransaction(async () =>
     {
-        await oauth2TokensRepository.create({
-            tokenHash: hashOAuth2Secret(accessToken),
-            kind: 'access',
-            grant: grant.id,
-            scopes,
-            expiresAt,
-        });
-        await oauth2TokensRepository.create({
-            tokenHash: hashOAuth2Secret(refreshToken),
-            kind: 'refresh',
-            grant: grant.id,
-            scopes,
-            expiresAt: new Date(Date.now() + config.refreshTokenTtlMs),
-        });
+        await storeToken(accessToken, 'access', grant.id, scopes, expiresAt);
+        await storeToken(refreshToken, 'refresh', grant.id, scopes,
+            new Date(Date.now() + config.refreshTokenTtlMs));
     });
 
     oauth2ClientsRepository.updateLastUsedById(grant.client)
@@ -430,6 +419,24 @@ async function issueTokenPair(grant: OAuth2Grant, scopes: string[]): Promise<OAu
         refresh_token: refreshToken,
         scope: scopes.join(' '),
     };
+}
+
+/** One token row. The value goes in hashed and is never stored otherwise. */
+async function storeToken(
+    token: string,
+    kind: 'access' | 'refresh',
+    grantId: number,
+    scopes: string[],
+    expiresAt: Date,
+): Promise<void>
+{
+    await oauth2TokensRepository.create({
+        tokenHash: hashOAuth2Secret(token),
+        kind,
+        grant: grantId,
+        scopes,
+        expiresAt,
+    });
 }
 
 /**
