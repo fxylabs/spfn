@@ -29,6 +29,7 @@
  */
 import type { Context } from 'hono';
 
+import { attestedClientIp } from '../lib/device-provenance';
 import {
     SerializableError,
     ServiceUnavailableError,
@@ -380,8 +381,10 @@ async function verifyClientProofProfile(c: Context): Promise<AuthContext>
     // 7. The same user-status path the Bearer scheme takes.
     const { user, role, locale } = await resolveAuthenticatedUser(keyRecord.userId);
 
-    // Fire-and-forget, as the Bearer path does.
-    keysRepository.updateLastUsedById(keyRecord.id, readContextClientIdentity(c))
+    // Fire-and-forget, as the Bearer path does — and with the address under the
+    // same rule, so this surface neither erases `last_seen_ip` on every throttle
+    // window nor writes one a proxy did not attest.
+    keysRepository.updateLastUsedById(keyRecord.id, readContextClientIdentity(c), attestedClientIp(c))
         .catch((err: unknown) => authLogger.middleware.error('Failed to update lastUsedAt', err));
 
     authLogger.middleware.info('API access', {

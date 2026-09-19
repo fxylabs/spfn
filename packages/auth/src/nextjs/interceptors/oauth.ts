@@ -15,6 +15,7 @@ import { isSafeReturnPath } from '../../lib/return-path';
 import { sealPendingSession, unsealPendingSession } from '../session-helpers';
 import { cookieSecure } from './cookie-options';
 import { pushCsrfCookie } from './csrf';
+import { bindingSessionFields } from './session-binding';
 
 const UNSAFE_RETURN_URL_MESSAGE = 'returnUrl must be a relative path within the app';
 
@@ -265,6 +266,7 @@ export const oauthFinalizeInterceptor: InterceptorRule = {
                 privateKey: pendingSession.privateKey,
                 keyId: pendingSession.keyId,
                 algorithm: pendingSession.algorithm,
+                ...bindingSessionFields(ctx.response.body, ctx.request.headers['user-agent']),
             }, ttl);
 
             // 세션 쿠키 설정

@@ -13,6 +13,7 @@ import { env } from '@spfn/core/config';
 import { logger } from '@spfn/core/logger';
 import { unsealPendingSession } from './session-helpers';
 import { isSafeReturnPath } from '../lib/return-path';
+import { bindingSessionFields } from './interceptors/session-binding';
 
 export interface OAuthCallbackOptions
 {
@@ -40,6 +41,26 @@ export interface OAuthCallbackOptions
 function safeReturnUrl(requested: string | null, defaultRedirect: string): string
 {
     return requested && isSafeReturnPath(requested) ? requested : defaultRedirect;
+}
+
+/**
+ * The two binding values the backend put on the callback URL, in the shape the
+ * sealing helper reads a sign-in response in.
+ *
+ * A malformed number comes out as `NaN`, which the helper's `typeof` check
+ * accepts — so it is filtered here instead, and a query that cannot be read
+ * seals an unbound session rather than one whose expiry is unusable.
+ */
+function bindingFromQuery(searchParams: URLSearchParams): { sessionBinding?: string; keyExpiresAtMillis?: number }
+{
+    const expiresAt = Number(searchParams.get('keyExpiresAtMillis'));
+
+    if (searchParams.get('sessionBinding') !== 'passkey' || !Number.isFinite(expiresAt))
+    {
+        return {};
+    }
+
+    return { sessionBinding: 'passkey', keyExpiresAtMillis: expiresAt };
 }
 
 /**
@@ -109,13 +130,22 @@ export function createOAuthCallbackHandler(options?: OAuthCallbackOptions)
                 throw new Error('Session mismatch. Please try again.');
             }
 
-            // Create full session
+            // Create full session.
+            //
+            // The binding fields ride the callback query, put there by the
+            // backend that registered the key: this handler runs before any
+            // route call, so the redirect is the only thing that can tell it the
+            // key is short-lived. Nothing is authorized by them — the key row
+            // expires when it says it does whatever the query claims — but a
+            // cookie that did not carry them would take the unbound branch at the
+            // first expiry and sign the person out instead of renewing.
             const ttl = getSessionTtl();
             const sessionToken = await sealSession({
                 userId,
                 privateKey: pendingSession.privateKey,
                 keyId: pendingSession.keyId,
                 algorithm: pendingSession.algorithm,
+                ...bindingSessionFields(bindingFromQuery(searchParams), request.headers.get('user-agent')),
             }, ttl);
 
             // Build redirect response

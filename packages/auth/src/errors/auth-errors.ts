@@ -5,12 +5,14 @@
  */
 
 import {
+    BadRequestError,
     ValidationError,
     UnauthorizedError,
     ForbiddenError,
     ConflictError,
     NotFoundError,
     HttpError,
+    InternalServerError,
 } from '@spfn/core/errors';
 
 /**
@@ -822,6 +824,144 @@ export class LastRecoveryCredentialError extends ConflictError
             details: data.details,
         });
         this.name = 'LastRecoveryCredentialError';
+    }
+}
+
+/**
+ * Session Renewal Required Error (401)
+ *
+ * Minted by the Next.js proxy, not by the backend: a bound session whose key has
+ * run out, on a request the proxy therefore does not forward. The browser's
+ * answer is to run the passkey ceremony `renewSession()` wraps and retry, which
+ * is the one thing a copied cookie cannot do.
+ *
+ * Registered here so the proxy's 401 arrives as this class rather than as a bare
+ * `ApiError` — the refusal is one an app branches on, and `err instanceof` is
+ * how every other branch in this package is written.
+ */
+export class SessionRenewalRequiredError extends UnauthorizedError
+{
+    readonly code = 'SESSION_RENEWAL_REQUIRED';
+
+    constructor(data: { message?: string; details?: Record<string, any> } = {})
+    {
+        super({
+            message: data.message || 'This session needs renewing. Confirm with your passkey to continue.',
+            details: data.details,
+        });
+        this.name = 'SessionRenewalRequiredError';
+    }
+}
+
+/**
+ * Session Renewal Refused Error (401)
+ *
+ * The one answer `session/renew/options` and `session/renew/verify` give to every
+ * refusal: a key id that names nothing, someone else's key, an unbound key, a
+ * revoked key, a key past its renewal grace, an inactive account, a spent
+ * challenge, an assertion that did not verify, a passkey belonging to another
+ * account.
+ *
+ * One answer on purpose. The routes are public — they have to be, since the
+ * session they repair is the one that stopped working — and a refusal that
+ * varied would tell an unauthenticated caller whether a key id is live, which is
+ * exactly what the cookie-copying adversary holds and would want confirmed.
+ */
+export class SessionRenewalRefusedError extends UnauthorizedError
+{
+    readonly code = 'SESSION_RENEWAL_REFUSED';
+
+    constructor(data: { message?: string; details?: Record<string, any> } = {})
+    {
+        super({
+            message: data.message || 'This session cannot be renewed. Sign in again.',
+            details: data.details,
+        });
+        this.name = 'SessionRenewalRefusedError';
+    }
+}
+
+/**
+ * Session Context Changed Error (401)
+ *
+ * Minted by the Next.js proxy: a bound session presented from a different
+ * browser family than the one it was sealed from. Browsers do not share cookie
+ * jars, so a session that moves between two of them moved because somebody
+ * copied it — this is the only defence that acts before the bound key runs out,
+ * and it is the reason the three session cookies are cleared with the refusal.
+ *
+ * Only for bound sessions, and only when the request carried a `user-agent` at
+ * all. An absent one is no signal rather than a different family: a server
+ * component calling the RPC proxy sends none.
+ */
+export class SessionContextChangedError extends UnauthorizedError
+{
+    readonly code = 'SESSION_CONTEXT_CHANGED';
+
+    constructor(data: { message?: string; details?: Record<string, any> } = {})
+    {
+        super({
+            message: data.message || 'This session was started in a different browser. Sign in again.',
+            details: data.details,
+        });
+        this.name = 'SessionContextChangedError';
+    }
+}
+
+/**
+ * Session Binding Unavailable Error (400)
+ *
+ * Thrown when an account asks to bind its session on a deployment where the
+ * backend cannot tell a request through the trusted Next.js proxy from a direct
+ * one — `proxy-guard` unconfigured, so `clientType` is never `'web'`.
+ *
+ * A configuration refusal rather than a security one, which is why it is a 400
+ * and why the message names what to set: with nothing to distinguish the proxy,
+ * every key would be registered unbound and the setting would be a switch that
+ * reports success and protects nothing.
+ */
+export class SessionBindingUnavailableError extends BadRequestError
+{
+    readonly code = 'SESSION_BINDING_UNAVAILABLE';
+
+    constructor(data: { message?: string; details?: Record<string, any> } = {})
+    {
+        super({
+            message: data.message
+                || 'Session binding needs a deployment where the backend can recognise the Next.js proxy. '
+                + 'Configure proxy-guard (SPFN_PROXY_SIGNATURE_KEYS) and try again.',
+            details: data.details,
+        });
+        this.name = 'SessionBindingUnavailableError';
+    }
+}
+
+/**
+ * Session Reseal Failed Error (500)
+ *
+ * Minted by the Next.js proxy when a binding change committed on the backend but
+ * the session cookie could not be re-sealed to match it.
+ *
+ * Answered instead of the route's 200, which is the point: the setting has moved
+ * and the cookie has not, and the two disagreeing is the state the whole feature
+ * is built to avoid — a bound key with a cookie that says unbound is cleared as
+ * an ordinary expired session a day later, and an unbound key with a cookie that
+ * says bound asks for a renewal the backend will refuse. The three session
+ * cookies go with this refusal, so the repair is a sign-in, which mints a cookie
+ * that agrees with the row.
+ */
+export class SessionResealFailedError extends InternalServerError
+{
+    readonly code = 'SESSION_RESEAL_FAILED';
+
+    constructor(data: { message?: string; details?: Record<string, any> } = {})
+    {
+        super({
+            message: data.message
+                || 'The setting was changed but this session could not be updated. Sign in again.',
+            details: data.details,
+        });
+        this.name = 'SessionResealFailedError';
     }
 }
 

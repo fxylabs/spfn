@@ -63,10 +63,11 @@ import { getDummyPasswordHash, verifyPassword } from '../helpers';
 import type { KeyAlgorithmType, KeyPlatformType } from '../types';
 import { registerPublicKeyService, revokeKeyService } from './key.service';
 import { assertStepUp, mfaEnrolledForUser } from './mfa.service';
+import { decideKeyBinding } from '../lib/key-policy';
 import { updateLastLoginService } from './user.service';
 import { getPendingDeletionInfo } from './account-deletion.service';
 import { authLoginEvent, passkeyEnrolledEvent, passkeyRevokedEvent } from '../events';
-import type { LoginResult } from './auth.service';
+import { loginBindingFields, type LoginResult } from './auth.service';
 
 /**
  * What is compared when the request carried no password at all.
@@ -378,6 +379,109 @@ export async function startPasskeyLoginService(): Promise<PublicKeyCredentialReq
     });
 }
 
+/**
+ * Step 1 of a renewal-grade ceremony — options for `navigator.credentials.get()`.
+ *
+ * Two flows need one: renewing a bound session key, and leaving
+ * `session_binding: 'passkey'`. Both ask the same question — "is the person who
+ * enrolled a passkey here, right now" — and both are answered by an assertion
+ * over a challenge this account owns.
+ *
+ * `allowCredentials` is empty, exactly as on the sign-in ceremony and for the
+ * same reason (D3): the renewal options route is public, a key id is not a
+ * secret the cookie-copying adversary lacks, and an answer that listed the
+ * account's credential ids would hand them a stable per-relying-party identifier
+ * list plus a live-or-not oracle on the key id. The challenge row is what carries
+ * the account, server-side, where nobody can read it.
+ */
+export async function startRenewalCeremonyService(
+    userId: number,
+): Promise<PublicKeyCredentialRequestOptionsJSON>
+{
+    return await buildAuthenticationOptions({
+        config: getPasskeyConfig(),
+        challenge: await mintChallenge('renewal', userId),
+    });
+}
+
+/**
+ * Step 2 — whether this assertion was signed by a live passkey of this account.
+ *
+ * Answers a boolean rather than throwing, because the two callers refuse in
+ * different vocabularies and neither wants this file's: the renewal route
+ * answers one `SessionRenewalRefusedError` to every refusal so that a live key,
+ * a stranger's key and a key that never existed are indistinguishable, and the
+ * binding route answers `RecentAuthenticationRequiredError` so the browser knows
+ * to ask for the password instead. A thrown `PasskeyVerificationError` would have
+ * to be caught and translated at both, and the catch is what would decide which
+ * refusals stay indistinguishable.
+ *
+ * Every refusal spends nothing it did not have to: the challenge is consumed by
+ * the same conditional UPDATE the other ceremonies use, so a replay of a
+ * successful assertion finds nothing to spend.
+ */
+export async function verifyRenewalAssertionService(
+    userId: number,
+    response: AuthenticationResponseJSON,
+): Promise<boolean>
+{
+    const challenge = response?.response?.clientDataJSON
+        ? presentedChallenge(response.response.clientDataJSON)
+        : '';
+
+    if (!await spendChallenge(challenge, 'renewal', userId))
+    {
+        authLogger.service.warn('Renewal challenge refused');
+
+        return false;
+    }
+
+    return await assertionMatchesLivePasskey(userId, response, challenge);
+}
+
+/**
+ * The half of the check that is the credential rather than the nonce.
+ *
+ * The credential's owner must be the account the challenge was minted for. That
+ * is the condition §5.3 asks for, and it holds the line a layer deeper than the
+ * renewal middleware does: even a caller who somehow reached this step for a key
+ * that is not theirs cannot finish the ceremony with their own passkey.
+ */
+async function assertionMatchesLivePasskey(
+    userId: number,
+    response: AuthenticationResponseJSON,
+    challenge: string,
+): Promise<boolean>
+{
+    const passkey = await passkeysRepository.findLiveByCredentialId(response.id);
+
+    if (!passkey || passkey.userId !== userId)
+    {
+        return false;
+    }
+
+    const outcome = await verifyAuthentication({
+        config: getPasskeyConfig(),
+        response,
+        expectedChallenge: challenge,
+        credential: {
+            credentialId: passkey.credentialId,
+            publicKey: passkey.publicKey,
+            counter: passkey.counter,
+            transports: passkey.transports,
+        },
+    });
+
+    if (!outcome.verified)
+    {
+        return false;
+    }
+
+    await passkeysRepository.recordUse(passkey.id, outcome.newCounter);
+
+    return true;
+}
+
 export interface FinishPasskeyLoginParams
 {
     response: AuthenticationResponseJSON;
@@ -392,6 +496,8 @@ export interface FinishPasskeyLoginParams
     ip?: string;
     /** `user-agent` of the request, already truncated at the route. */
     userAgent?: string;
+    /** Whether proxy-guard recognised the trusted Next.js proxy, from the same helper. */
+    webProxy?: boolean;
 }
 
 /**
@@ -457,7 +563,7 @@ async function startSession(user: User, params: FinishPasskeyLoginParams): Promi
         replacesKeyId = revoked ? params.oldKeyId : undefined;
     }
 
-    await registerPublicKeyService({
+    const registered = await registerPublicKeyService({
         userId: user.id,
         keyId: params.keyId,
         publicKey: params.publicKey,
@@ -468,6 +574,7 @@ async function startSession(user: User, params: FinishPasskeyLoginParams): Promi
         channel: 'passkey',
         ip: params.ip,
         userAgent: params.userAgent,
+        binding: decideKeyBinding(user.sessionBinding, params.webProxy),
         replacesKeyId,
     });
 
@@ -479,6 +586,7 @@ async function startSession(user: User, params: FinishPasskeyLoginParams): Promi
         email: user.email || undefined,
         phone: user.phone || undefined,
         passwordChangeRequired: user.passwordChangeRequired,
+        ...loginBindingFields(registered),
     };
 
     const mfaEnrolled = await mfaEnrolledForUser(user.id);

@@ -20,10 +20,11 @@
  * - Key revocation check (isActive flag)
  */
 
+import type { Context } from 'hono';
 import { defineMiddleware } from '@spfn/core/route';
 import { UnauthorizedError } from '@spfn/core/errors';
 
-import type { KeyAlgorithmType } from '@spfn/auth/server';
+import type { KeyAlgorithmType, User } from '@spfn/auth/server';
 import { verifyClientToken, decodeToken, authLogger, keysRepository, usersRepository, userProfilesRepository } from '@spfn/auth/server';
 import {
     InvalidTokenError,
@@ -31,7 +32,9 @@ import {
     KeyExpiredError,
 } from '@spfn/auth/errors';
 
+import type { UserPublicKey } from '../entities/user-public-keys';
 import { readContextClientIdentity } from '../client-proof/version-middleware';
+import { attestedClientIp } from '../lib/device-provenance';
 import { resolveAuthenticatedUser, runAuthProfile, type AuthContext } from './auth-profiles';
 import { matchesMachineDiscriminator } from './machine-principals';
 
@@ -63,6 +66,180 @@ declare module 'hono'
     {
         auth: AuthContext;
     }
+}
+
+/** Why a Bearer credential was not admitted, in the order the steps run. */
+export type BearerRefusal =
+    | 'absent'
+    | 'machine'
+    | 'undecodable'
+    | 'unknown'
+    | 'expired'
+    | 'token-expired'
+    | 'bad-signature'
+    | 'unverifiable';
+
+/** What a Bearer credential resolved to: the key row it named, or why not. */
+export type BearerOutcome = { key: UserPublicKey } | { refused: BearerRefusal };
+
+/**
+ * Admit the Bearer credential on this request, or say what stopped it.
+ *
+ * The one lookup-and-verify path every Bearer middleware takes — header, machine
+ * discriminator, decode, key row, expiry, signature — kept in one place because
+ * the order is itself a rule: a machine credential never reaches a decode, and a
+ * key row is found before its signature is checked so that an unknown key and a
+ * forged one cost the same work.
+ *
+ * It answers rather than throws, which is what lets two middlewares share it.
+ * `authenticate` turns each refusal into the error that step has always
+ * answered with; `authenticateForRenewal` turns every one of them into a single
+ * refusal, so a caller holding no private key cannot tell a live key id from a
+ * dead one. A shared step that threw would have to be unwound to get there.
+ *
+ * @param c - the Hono context of the request being authenticated
+ * @param admitsExpired - whether a key past its `expiresAt` may still be
+ *   admitted. Renewal is the only caller that says yes, and only for a bound key
+ *   inside its grace.
+ */
+export async function admitBearerKey(
+    c: Context,
+    admitsExpired: (key: UserPublicKey) => boolean,
+): Promise<BearerOutcome>
+{
+    const authHeader = c.req.header('Authorization');
+
+    if (!authHeader || !authHeader.startsWith('Bearer '))
+    {
+        return { refused: 'absent' };
+    }
+
+    const token = authHeader.substring(7); // Remove 'Bearer ' prefix
+
+    // A machine credential is refused before this path decodes it or looks a key
+    // up. Resolving a machine token to its owning user is what would make the
+    // machine's request indistinguishable from that user's own session (#79), so
+    // the user path never admits one. With no machine verifier registered this is
+    // two array-length checks and the flow below is unchanged.
+    if (matchesMachineDiscriminator(token))
+    {
+        // The wire answer says nothing; the log says what happened, so an
+        // operator can tell this apart from an ordinary malformed token.
+        authLogger.middleware.warn('Machine credential presented to the user path — refused', { path: c.req.path });
+
+        return { refused: 'machine' };
+    }
+
+    const decoded = decodeToken(token);
+
+    if (!decoded || !decoded.keyId)
+    {
+        return { refused: 'undecodable' };
+    }
+
+    // isActive = true is part of the lookup, so a revoked key is an unknown one.
+    const key = await keysRepository.findActiveByKeyId(decoded.keyId as string);
+
+    if (!key)
+    {
+        return { refused: 'unknown' };
+    }
+
+    if (key.expiresAt && new Date() > key.expiresAt && !admitsExpired(key))
+    {
+        return { refused: 'expired' };
+    }
+
+    return signatureOutcome(token, key);
+}
+
+/**
+ * The signature check, as an outcome rather than an exception.
+ *
+ * Three refusals rather than one because `authenticate` has always answered
+ * three different things here — a 15-minute token that ran out is not a forged
+ * one, and neither is a verifier that failed for a third reason.
+ */
+function signatureOutcome(token: string, key: UserPublicKey): BearerOutcome
+{
+    try
+    {
+        verifyClientToken(
+            token,
+            key.publicKey,
+            key.algorithm as KeyAlgorithmType, // entity.algorithm is always defined
+        );
+    }
+    catch (err)
+    {
+        const name = err instanceof Error ? err.name : '';
+
+        if (name === 'TokenExpiredError')
+        {
+            return { refused: 'token-expired' };
+        }
+
+        return { refused: name === 'JsonWebTokenError' ? 'bad-signature' : 'unverifiable' };
+    }
+
+    return { key };
+}
+
+/**
+ * The error `authenticate` answers each refusal with — unchanged, one per step.
+ *
+ * `machine` and `undecodable` deliberately share a message: on this middleware
+ * that makes the machine registry invisible (see INVALID_TOKEN_MESSAGE).
+ */
+function bearerRefusal(c: Context, refused: BearerRefusal): Error
+{
+    if (refused === 'absent')
+    {
+        authLogger.middleware.error('Missing or invalid authorization header. If using Next.js API routes, ensure you have imported \'@spfn/auth/nextjs/api\' in your API route handler (e.g., src/app/api/actions/[[...path]]/route.ts) to enable automatic authentication header forwarding from client to backend.', {
+            headers: c.req.header(),
+            path: c.req.path,
+        });
+
+        return new UnauthorizedError({ message: 'Authentication header missing or invalid: Bearer {token}' });
+    }
+
+    switch (refused)
+    {
+        case 'machine':
+        case 'undecodable':
+            return new UnauthorizedError({ message: INVALID_TOKEN_MESSAGE });
+        case 'unknown':
+            return new UnauthorizedError({ message: 'Invalid or revoked key' });
+        case 'expired':
+            return new KeyExpiredError();
+        case 'token-expired':
+            return new TokenExpiredError();
+        case 'bad-signature':
+            return new InvalidTokenError({ message: 'Invalid token signature' });
+        default:
+            return new UnauthorizedError({ message: 'Authentication failed' });
+    }
+}
+
+/**
+ * The principal a verified Bearer key resolves to.
+ *
+ * The one place the Bearer path builds an `AuthContext`, so that a middleware
+ * added beside `authenticate` cannot invent a second shape of it.
+ */
+export function bearerAuthContext(
+    keyId: string,
+    resolved: { user: User; role: string | null; locale: string },
+): AuthContext
+{
+    return {
+        user: resolved.user,
+        userId: String(resolved.user.id),
+        keyId,
+        role: resolved.role,
+        locale: resolved.locale,
+        scheme: 'bearer',
+    };
 }
 
 /**
@@ -115,104 +292,24 @@ export const authenticate = defineMiddleware('auth', async (c, next) =>
         return undefined;
     }
 
-    // Extract Authorization header
-    const authHeader = c.req.header('Authorization');
+    // 1.–4. The shared Bearer step: header, machine discriminator, decode, key
+    //        row, expiry, signature. No key past its `expiresAt` is admitted
+    //        here — `authenticateForRenewal` is the only caller that says
+    //        otherwise, and only for a bound key inside its renewal grace.
+    const outcome = await admitBearerKey(c, () => false);
 
-    // Validate Authorization header format
-    if (!authHeader || !authHeader.startsWith('Bearer '))
+    if ('refused' in outcome)
     {
-        authLogger.middleware.error('Missing or invalid authorization header. If using Next.js API routes, ensure you have imported \'@spfn/auth/nextjs/api\' in your API route handler (e.g., src/app/api/actions/[[...path]]/route.ts) to enable automatic authentication header forwarding from client to backend.', {
-            headers: c.req.header(),
-            path: c.req.path,
-        });
-
-        throw new UnauthorizedError({ message: 'Authentication header missing or invalid: Bearer {token}' });
+        throw bearerRefusal(c, outcome.refused);
     }
 
-    const token = authHeader.substring(7); // Remove 'Bearer ' prefix
-
-    // 0. A machine credential is refused here, before this path decodes it or
-    //    looks a key up. Resolving a machine token to its owning user is what
-    //    would make the machine's request indistinguishable from that user's
-    //    own session (#79), so the user path never admits one. With no machine
-    //    verifier registered this is two array-length checks and the flow below
-    //    is unchanged.
-    if (matchesMachineDiscriminator(token))
-    {
-        // The wire answer says nothing; the log says what happened, so an
-        // operator can tell this apart from an ordinary malformed token.
-        authLogger.middleware.warn('Machine credential presented to the user path — refused', { path: c.req.path });
-
-        throw new UnauthorizedError({ message: INVALID_TOKEN_MESSAGE });
-    }
-
-    // 1. Decode JWT to extract keyId (without verification)
-    // We need keyId to fetch the public key for verification
-    const decoded = decodeToken(token);
-
-    if (!decoded || !decoded.keyId)
-    {
-        throw new UnauthorizedError({ message: INVALID_TOKEN_MESSAGE });
-    }
-
-    const keyId = decoded.keyId as string;
-
-    // 2. Get public key from database
-    // Query conditions:
-    // - keyId matches (UUID)
-    // - isActive = true (not revoked)
-    const keyRecord = await keysRepository.findActiveByKeyId(keyId);
-
-    if (!keyRecord)
-    {
-        throw new UnauthorizedError({ message: 'Invalid or revoked key' });
-    }
-
-    // 3. Check key expiration
-    // Keys expire after 90 days by default
-    if (keyRecord.expiresAt && new Date() > keyRecord.expiresAt)
-    {
-        throw new KeyExpiredError();
-    }
-
-    // 4. Verify JWT signature with public key
-    // This validates:
-    // - Signature matches (client signed with private key)
-    // - Token not expired (15min default)
-    // - Issuer is 'spfn-client'
-    try
-    {
-        verifyClientToken(
-            token,
-            keyRecord.publicKey,
-            keyRecord.algorithm as KeyAlgorithmType, // entity.algorithm is always defined
-        );
-    }
-    catch (err)
-    {
-        // Handle JWT verification errors
-        if (err instanceof Error)
-        {
-            // Token expired (15min TTL)
-            if (err.name === 'TokenExpiredError')
-            {
-                throw new TokenExpiredError();
-            }
-
-            // Invalid signature
-            if (err.name === 'JsonWebTokenError')
-            {
-                throw new InvalidTokenError({ message: 'Invalid token signature' });
-            }
-        }
-
-        // Generic authentication failure
-        throw new UnauthorizedError({ message: 'Authentication failed' });
-    }
+    const keyRecord = outcome.key;
+    const keyId = keyRecord.keyId;
 
     // 5.–6. Load the user and apply the account-status rules — the shared
     // path every scheme takes (see resolveAuthenticatedUser).
-    const { user, role, locale } = await resolveAuthenticatedUser(keyRecord.userId);
+    const resolved = await resolveAuthenticatedUser(keyRecord.userId);
+    const { user } = resolved;
 
     // 7. Update last used timestamp (fire-and-forget)
     // Don't await to avoid blocking the request
@@ -220,19 +317,16 @@ export const authenticate = defineMiddleware('auth', async (c, next) =>
     // - Security audits
     // - Detecting inactive keys
     // - Key rotation reminders
-    keysRepository.updateLastUsedById(keyRecord.id, readContextClientIdentity(c))
+    // The client address joins the same statement — see updateLastUsedById — and
+    // only where proxy-guard attested it, see attestedClientIp. A failure here
+    // still never blocks the request: it is the audit trail and the concurrent-use
+    // signal, neither of which is worth a 500.
+    keysRepository.updateLastUsedById(keyRecord.id, readContextClientIdentity(c), attestedClientIp(c))
         .catch((err: unknown) => authLogger.middleware.error('Failed to update lastUsedAt', err));
 
     // 8. Attach auth data to context
     // Available in downstream route handlers via c.get('auth')
-    c.set('auth', {
-        user,
-        userId: String(user.id),
-        keyId,
-        role,
-        locale,
-        scheme: 'bearer',
-    });
+    c.set('auth', bearerAuthContext(keyId, resolved));
 
     // Log API access
     const method = c.req.method;
@@ -343,6 +437,11 @@ export const optionalAuth = defineMiddleware('optionalAuth', async (c, next) =>
             return undefined;
         }
 
+        // An expired key continues anonymously rather than refusing, and that
+        // includes a bound key past its window: this middleware's whole posture
+        // is that an unusable credential is the same as none, and a route that
+        // works signed-out must go on working. The renewal prompt belongs to the
+        // proxy and to the routes that do require a principal.
         if (keyRecord.expiresAt && new Date() > keyRecord.expiresAt)
         {
             await next();
@@ -370,7 +469,7 @@ export const optionalAuth = defineMiddleware('optionalAuth', async (c, next) =>
 
         const { user, role } = result;
 
-        keysRepository.updateLastUsedById(keyRecord.id, readContextClientIdentity(c))
+        keysRepository.updateLastUsedById(keyRecord.id, readContextClientIdentity(c), attestedClientIp(c))
             .catch((err: unknown) => authLogger.middleware.error('Failed to update lastUsedAt', err));
 
         c.set('auth', {

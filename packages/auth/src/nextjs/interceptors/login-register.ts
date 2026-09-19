@@ -5,6 +5,13 @@
  * for login, register, and invitation-accept endpoints.
  * (Invitation acceptance creates the user account + key pair and
  * logs the new user in, so it follows the same key/session flow.)
+ *
+ * `session/renew/verify` is on the list too (#97). Renewing a bound session key
+ * needs exactly what a sign-in needs — a fresh pair generated here, the public
+ * half in the body, the private half sealed into the cookie — so it is served by
+ * this interceptor rather than by a second copy of it. `keyId` below means the
+ * new key on that path exactly as it does on every other; the key being replaced
+ * is not in the body at all, it is the one `general-auth` signs the request with.
  */
 
 import type { InterceptorRule } from '@spfn/core/nextjs/server';
@@ -14,6 +21,7 @@ import { getSessionTtl, COOKIE_NAMES } from '../../server/lib/config';
 import { authLogger } from '../../server/logger';
 import { cookieSecure } from './cookie-options';
 import { pushCsrfCookie } from './csrf';
+import { bindingSessionFields } from './session-binding';
 
 /**
  * The sign-in paths that replace a key the browser already holds.
@@ -32,7 +40,7 @@ const ROTATING_SIGN_IN_PATHS = new Set(['/_auth/login', '/_auth/passkeys/login/v
  */
 export const loginRegisterInterceptor: InterceptorRule =
     {
-        pathPattern: /^\/_auth\/(login|register|invitations\/accept|signup\/password|password\/reset\/complete|passkeys\/login\/verify)$/,
+        pathPattern: /^\/_auth\/(login|register|invitations\/accept|signup\/password|password\/reset\/complete|passkeys\/login\/verify|session\/renew\/verify)$/,
         method: 'POST',
 
         request: async (ctx, next) =>
@@ -104,13 +112,16 @@ export const loginRegisterInterceptor: InterceptorRule =
                 // Get session TTL (priority: runtime > global > env > default)
                 const ttl = getSessionTtl(ctx.metadata.remember);
 
-                // Encrypt session data
+                // Encrypt session data. The binding fields ride along when the
+                // sign-in said the account asked for a bound session; without
+                // them this is the same four-field literal it has always been.
                 const sessionData =
                     {
                         userId: userData.userId,
                         privateKey: ctx.metadata.privateKey,
                         keyId: ctx.metadata.keyId,
                         algorithm: ctx.metadata.algorithm,
+                        ...bindingSessionFields(userData, ctx.request.headers['user-agent']),
                     };
 
                 const sealed = await sealSession(sessionData, ttl);

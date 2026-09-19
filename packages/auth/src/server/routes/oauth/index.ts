@@ -29,6 +29,7 @@ import {
     getEnabledOAuthProviders,
     requireEnabledProvider,
     isSafeReturnPath,
+    keySessionBindingService,
 } from '../../services';
 import { isGoogleOAuthEnabled, getGoogleAuthUrl, getOAuthProvider, UnlinkNotifyRejection } from '../../lib/oauth';
 import { generateOAuthNonce } from '../../lib/oauth/state';
@@ -308,11 +309,17 @@ export const oauthFinalize = route.post('/_auth/oauth/finalize')
         //      server-side in oauthCallbackService from the OAuth-verified identity.
         // A substituted userId therefore cannot grant another user's identity; it
         // only populates getSession().userId for client-side UI without a backend call.
+        //
+        // The two binding fields are read off the key row rather than echoed:
+        // this is the seam the Next.js interceptor seals a session from, and a
+        // caller allowed to state its own binding could ask for a cookie that
+        // believes a bound key is an ordinary one.
         return {
             success: true,
             userId: body.userId,
             keyId: body.keyId,
             returnUrl: body.returnUrl || '/',
+            ...await keySessionBindingService(body.keyId),
         };
     });
 

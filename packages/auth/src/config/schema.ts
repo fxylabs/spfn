@@ -417,6 +417,46 @@ export const authEnvSchema = defineEnvSchema({
     },
 
     // ============================================================================
+    // Session binding (#97)
+    // ============================================================================
+    SPFN_AUTH_BOUND_KEY_TTL_HOURS: {
+        ...envNumber({
+            description: 'How long a session key bound to a passkey lives. This is the window in which a copied session cookie is still indistinguishable from the original, so it is hours rather than days; past it the browser runs one WebAuthn ceremony and gets a new key. Only applies to accounts that turned session binding on.',
+            default: 24,
+            required: false,
+            examples: [8, 24, 72],
+        }),
+    },
+
+    SPFN_AUTH_BOUND_KEY_RENEW_GRACE_HOURS: {
+        ...envNumber({
+            description: 'How long after a bound key expires a passkey renewal is still offered. Past it the account signs in again. Open-ended grace would make an expired key a long-lived key with extra steps.',
+            default: 168,
+            required: false,
+            examples: [24, 168, 720],
+        }),
+    },
+
+    SPFN_AUTH_CONCURRENT_USE_WINDOW_MS: {
+        ...envNumber({
+            description: 'How far apart two sightings of one device key from two client addresses still count as concurrent use, surfaced as `concurrentUseAtMillis` on the key list. A signal for the owner to read, never a refusal — addresses change legitimately. Meaningful only where proxy-guard is configured, since without it every web request carries the Next.js server\'s address.',
+            default: 300000,
+            required: false,
+            examples: [60000, 300000, 900000],
+        }),
+    },
+
+    SPFN_AUTH_SESSION_RENEW_PATH: {
+        ...envString({
+            description: 'Page in your app that runs the renewal ceremony. `RequireAuth` redirects a bound session whose key expired here instead of to the sign-in page; the page calls `renewSession(api)` and returns the user to where they were. Override per guard with the `renewalPath` prop.',
+            default: '/auth/renew',
+            required: false,
+            nextjs: true, // Read by RequireAuth, which renders in the Next.js runtime
+            examples: ['/auth/renew', '/session/renew'],
+        }),
+    },
+
+    // ============================================================================
     // API Configuration
     // ============================================================================
     SPFN_API_URL: {

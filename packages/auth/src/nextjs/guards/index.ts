@@ -31,4 +31,5 @@ export type { RequireRoleProps } from './require-role';
 export { RequirePermission } from './require-permission';
 export type { RequirePermissionProps } from './require-permission';
 
-export { getAuthSessionData, getUserRole, getUserPermissions, hasAnyRole, hasAnyPermission } from './auth-utils';
+export { getAuthSessionData, getUserRole, getUserPermissions, hasAnyRole, hasAnyPermission, RENEWAL_REQUIRED } from './auth-utils';
+export type { AuthSessionData, AuthSessionState } from './auth-utils';

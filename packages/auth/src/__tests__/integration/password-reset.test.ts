@@ -57,6 +57,9 @@ const dbAvailable = await isDatabaseAvailable();
 const JSON_HEADERS = { 'Content-Type': 'application/json' };
 const PASSWORD = 'SecurePassword123!';
 const NEW_PASSWORD = 'BrandNewPassword456!';
+/** Header the test middleware reads instead of running proxy-guard for real. */
+const CLIENT_TYPE_HEADER = 'x-test-client-type';
+const HOUR_MS = 60 * 60 * 1000;
 
 describe.skipIf(!dbAvailable)('Password reset', () =>
 {
@@ -70,6 +73,20 @@ describe.skipIf(!dbAvailable)('Password reset', () =>
         process.env.SPFN_APP_URL = 'https://app.example.com';
 
         app = new Hono();
+        // What proxy-guard sets on a request that came through the trusted
+        // Next.js proxy. One row needs it: a bound account's reset registers a
+        // bound key only where the backend can recognise that proxy.
+        app.use('*', async (c, next) =>
+        {
+            const declared = c.req.header(CLIENT_TYPE_HEADER);
+
+            if (declared)
+            {
+                c.set('clientType', declared);
+            }
+
+            await next();
+        });
         registerRoutes(app, mainAuthRouter);
         app.onError(ErrorHandler());
     });
@@ -91,11 +108,11 @@ describe.skipIf(!dbAvailable)('Password reset', () =>
         vi.restoreAllMocks();
     });
 
-    function post(path: string, body: unknown)
+    function post(path: string, body: unknown, proxied = false)
     {
         return app.request(path, {
             method: 'POST',
-            headers: JSON_HEADERS,
+            headers: proxied ? { ...JSON_HEADERS, [CLIENT_TYPE_HEADER]: 'web' } : JSON_HEADERS,
             body: JSON.stringify(body),
         });
     }
@@ -448,6 +465,43 @@ describe.skipIf(!dbAvailable)('Password reset', () =>
 
             expect((await post('/_auth/password/reset/complete', completeBody(setupSecret))).status).toBe(200);
             expect((await login('p9@example.com', NEW_PASSWORD)).status).toBe(200);
+        });
+
+        it('row P10: a bound account resetting through the proxy: the answer carries the binding fields, and the new key is a short-lived bound one', async () =>
+        {
+            // The reset registers a device key exactly as a sign-in does, so on an
+            // account that opted in it registers a *bound* one — and the answer has
+            // to say so, because this route is on the sealing interceptor's list
+            // and a body without the fields seals a cookie that believes the
+            // session unbound for the whole of that key's life.
+            const user = await seedResettable('p10@example.com');
+            await getTestDb().update(users).set({ sessionBinding: 'passkey' }).where(eq(users.id, user.id));
+            const setupSecret = await openSetupSession('p10@example.com');
+            const body = completeBody(setupSecret);
+
+            const response = await post('/_auth/password/reset/complete', body, true);
+            const answered = await response.json();
+
+            expect(response.status).toBe(200);
+
+            const [key] = await getTestDb().select().from(userPublicKeys)
+                .where(eq(userPublicKeys.keyId, body.keyId as string)).limit(1);
+
+            expect(key.binding).toBe('passkey');
+            expect(answered.sessionBinding).toBe('passkey');
+            expect(answered.keyExpiresAtMillis).toBe(key.expiresAt!.getTime());
+            expect(Math.abs(key.expiresAt!.getTime() - (Date.now() + 24 * HOUR_MS))).toBeLessThan(60_000);
+        });
+
+        it('row P10: an unbound account resetting through the proxy answers exactly what it always did', async () =>
+        {
+            await seedResettable('p10-unbound@example.com');
+            const setupSecret = await openSetupSession('p10-unbound@example.com');
+
+            const answered = await (await post('/_auth/password/reset/complete', completeBody(setupSecret), true)).json();
+
+            expect(answered.sessionBinding).toBeUndefined();
+            expect(answered.keyExpiresAtMillis).toBeUndefined();
         });
     });
 

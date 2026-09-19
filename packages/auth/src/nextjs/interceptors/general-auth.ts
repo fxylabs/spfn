@@ -7,13 +7,17 @@
  * - Expired session cleanup
  */
 
-import type { InterceptorRule } from '@spfn/core/nextjs/server';
-import { unsealSession, sealSession, shouldRefreshSession } from '../../server/lib/session';
+import type { InterceptorRule, RequestInterceptorContext } from '@spfn/core/nextjs/server';
+import { SessionContextChangedError, SessionRenewalRequiredError } from '@spfn/auth/errors';
+import { unsealSession, sealSession, shouldRefreshSession, type SessionData } from '../../server/lib/session';
 import { generateClientToken } from '../../server/lib/crypto';
 import { getSessionTtl, COOKIE_NAMES } from '../../server/lib/config';
 import { authLogger } from '../../server/logger';
 import { cookieSecure } from './cookie-options';
+import { uaFamily } from '../../server/lib/ua-family';
 import { refuseInvalidCsrf, pushCsrfCookie, pushCsrfCookieIfStale, pushCsrfCookieRemoval } from './csrf';
+import { refusalEnvelope } from './error-envelope';
+import { SESSION_RENEW_PATH_PATTERN } from './session-renew';
 
 /**
  * Check if path requires authentication
@@ -30,6 +34,71 @@ function requiresAuth(path: string): boolean
     ];
 
     return !publicPaths.some((pattern) => pattern.test(path));
+}
+
+/**
+ * Whether a bound session arrived from a different browser than it was sealed in.
+ *
+ * Three terms, and each one is a rule.
+ *
+ * Bound only. An unbound session is not checked and nothing is logged for it —
+ * the check would be a warn line per request for every account that did not opt
+ * in, which is the noisy half of a protection they did not ask for.
+ *
+ * A `user-agent` has to be present. Absent is no signal, not a different family:
+ * a server component's `api.` call reaches this proxy as Node `fetch` and the
+ * isomorphic client sets `Content-Type`, `Cookie` and the CSRF header and nothing
+ * else, so fail-closed on absence would refuse every server-rendered page view.
+ *
+ * And the comparison is between families rather than strings, so a version bump,
+ * a user-agent reduction, or "Request desktop site" on Android are all the same
+ * browser. What is left is a session presented from a different cookie jar, which
+ * is a thing that does not happen without a copy.
+ */
+function contextChanged(session: SessionData, userAgent: string | null): boolean
+{
+    return session.binding === 'passkey'
+        && Boolean(session.uaFamily)
+        && Boolean(userAgent)
+        && uaFamily(userAgent) !== session.uaFamily;
+}
+
+/**
+ * Refuse a bound session presented from another browser, and empty the jar.
+ *
+ * The opposite of the renewal refusal the response phase mints: this session is
+ * not waiting for a prompt, it is one whose cookie is somewhere it was never
+ * sealed. The three cookies go with the refusal, which is the only moment a
+ * refused request can touch them — and it is the one check this layer makes
+ * alone, because the backend never sees the browser's `user-agent`.
+ */
+function refuseAsContextChanged(ctx: RequestInterceptorContext): void
+{
+    authLogger.interceptor.general.warn('Bound session presented from a different browser family', {
+        path: ctx.path,
+        sealed: ctx.metadata.sealedUaFamily,
+        presented: ctx.metadata.presentedUaFamily,
+    });
+
+    const cleared = [
+        { name: COOKIE_NAMES.SESSION, value: '', options: { maxAge: 0, path: '/' } },
+        { name: COOKIE_NAMES.SESSION_KEY_ID, value: '', options: { maxAge: 0, path: '/' } },
+        { name: COOKIE_NAMES.CSRF, value: '', options: { maxAge: 0, path: '/' } },
+    ];
+
+    ctx.abort = refusalEnvelope(new SessionContextChangedError(), cleared);
+}
+
+/**
+ * Whether a backend 401 is the one that says the device key has expired.
+ *
+ * Read off `__type`, which is what the error envelope classifies by; the string
+ * is the class name, and it is compared rather than imported because the body
+ * here is JSON off the wire rather than an error instance.
+ */
+function isKeyExpiredRefusal(body: unknown): boolean
+{
+    return (body as { __type?: unknown } | null)?.__type === 'KeyExpiredError';
 }
 
 /**
@@ -104,6 +173,21 @@ export const generalAuthInterceptor: InterceptorRule =
                     return;
                 }
 
+                // Context before expiry. A session whose cookie has moved to
+                // another browser is finished whether or not its key is still
+                // live, and answering it "renew with your passkey" would keep
+                // exactly the cookies that need to go.
+                const presented = ctx.request.headers.get('user-agent');
+
+                if (contextChanged(session, presented))
+                {
+                    ctx.metadata.sealedUaFamily = session.uaFamily;
+                    ctx.metadata.presentedUaFamily = uaFamily(presented);
+                    refuseAsContextChanged(ctx);
+
+                    return;
+                }
+
                 // Check if session should be refreshed (within 24h of expiry)
                 const needsRefresh = await shouldRefreshSession(sessionCookie, 24);
 
@@ -137,6 +221,7 @@ export const generalAuthInterceptor: InterceptorRule =
                 ctx.metadata.userId = session.userId;
                 ctx.metadata.keyId = session.keyId;
                 ctx.metadata.sessionValid = true;
+                ctx.metadata.sessionBound = session.binding === 'passkey';
             }
             catch (error)
             {
@@ -169,8 +254,33 @@ export const generalAuthInterceptor: InterceptorRule =
 
         response: async (ctx, next) =>
         {
-        // Backend returned 401 with a valid session — server rejected it
-            if (ctx.response.status === 401 && ctx.metadata.sessionValid)
+        // A bound session the backend refused as expired. This is the only place
+        // the renewal prompt is minted, and deliberately so: the cookie's copy of
+        // the expiry is a hint, the key row is the fact, and a proxy that refused
+        // on the hint alone would strand a session whose key was made long-lived
+        // again on another device. The cookies stay — the session is renewable,
+        // not finished.
+            if (ctx.response.status === 401
+                && ctx.metadata.sessionValid
+                && ctx.metadata.sessionBound
+                && isKeyExpiredRefusal(ctx.response.body))
+            {
+                ctx.response.body = refusalEnvelope(new SessionRenewalRequiredError()).body;
+
+                await next();
+
+                return;
+            }
+
+            // Backend returned 401 with a valid session — server rejected it.
+            //
+            // Never on the renewal paths. They are signed like any other path, so
+            // `sessionValid` is set there and this branch would otherwise fire on
+            // the refusal a renewal answers with — emptying the cookie jar, and
+            // with it the session the person was in the middle of repairing.
+            if (ctx.response.status === 401
+                && ctx.metadata.sessionValid
+                && !SESSION_RENEW_PATH_PATTERN.test(ctx.path))
             {
                 authLogger.interceptor.general.warn('Backend returned 401, clearing session');
 
@@ -224,7 +334,12 @@ export const generalAuthInterceptor: InterceptorRule =
                     const sessionData = ctx.metadata.sessionData;
                     const ttl = getSessionTtl();
 
-                    // Re-encrypt session with new TTL
+                    // Re-encrypt session with new TTL. The object is the one
+                    // unsealed on the way in, so a bound session's `binding`,
+                    // `keyExpiresAt` and `uaFamily` survive the refresh — this is
+                    // the one sealing site that carries them for free, and the
+                    // reason it must go on re-sealing the whole object rather
+                    // than rebuilding the four-field literal.
                     const sealed = await sealSession(sessionData, ttl);
 
                     // Update session cookie

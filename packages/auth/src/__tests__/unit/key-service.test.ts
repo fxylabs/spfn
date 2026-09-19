@@ -73,6 +73,7 @@ function keyRow(overrides: Record<string, unknown> = {})
         publicKey: EC_KEY.publicKey,
         algorithm: 'ES256',
         fingerprint: 'a'.repeat(64),
+        binding: 'none',
         isActive: true,
         createdAt: new Date(),
         lastUsedAt: null,
@@ -105,7 +106,7 @@ describe('registerPublicKeyService - keyId collisions', () =>
         // 한 기기에서 반복 로그인하는 정상 경로. 네이티브·웹 양쪽이 여기에 기댄다.
         keysRepository.findByKeyId.mockResolvedValue(keyRow());
 
-        await expect(registerPublicKeyService(params())).resolves.toBeUndefined();
+        await expect(registerPublicKeyService(params())).resolves.toMatchObject({ binding: 'none' });
 
         expect(keysRepository.create).not.toHaveBeenCalled();
     });
@@ -154,7 +155,7 @@ describe('registerPublicKeyService - keyId collisions', () =>
             expiresAt: new Date(Date.now() - 86_400_000),
         }));
 
-        await expect(registerPublicKeyService(params())).resolves.toBeUndefined();
+        await expect(registerPublicKeyService(params())).resolves.toMatchObject({ binding: 'none' });
 
         expect(keysRepository.extendExpiry).toHaveBeenCalledTimes(1);
         const [keyId, userId, expiresAt] = keysRepository.extendExpiry.mock.calls[0] as unknown as [string, number, Date];

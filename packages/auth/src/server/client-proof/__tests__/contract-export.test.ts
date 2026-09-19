@@ -36,6 +36,7 @@ import type { CanonicalValue } from '../canonical-json';
 import {
     BUNDLE_FILENAME,
     buildMobileContractBundle,
+    CONTRACT_ENUMS,
     CONTRACT_VERSION,
     PROVENANCE_FILENAME,
     renderMobileContractExport,
@@ -1022,6 +1023,20 @@ describe('the poll answer keeps a union inside a grammar that has none', () =>
             return declared;
         }
 
+        // An enum-valued property arrives as a union of literals. It is named by
+        // the declared enum holding exactly those values, so the route schema and
+        // the bundle cannot be transcribed apart. `status` is special-cased above
+        // only because its branch carries a single literal, not the whole set.
+        const literals = (property as { anyOf?: { const?: unknown }[] }).anyOf;
+        const values = literals?.map((entry) => entry.const);
+        const declaredEnum = values && CONTRACT_ENUMS.find((entry) =>
+            entry.values.length === values.length && entry.values.every((value) => values.includes(value)));
+
+        if (declaredEnum)
+        {
+            return declaredEnum.name;
+        }
+
         throw new Error(`the route answers ${name} as a ${declared}, which this grammar has no name for`);
     }
 
@@ -1342,18 +1357,18 @@ describe('declared proof rules match the implementation', () =>
         replayWindowMillis: number;
     };
 
-    it('the contract line is the revision that adds the key registration provenance', () =>
+    it('the contract line is the revision that adds session binding', () =>
     {
-        expect(bundle.contractVersion).toBe('0.11.0');
+        expect(bundle.contractVersion).toBe('0.12.0');
     });
 
     it('the supported range floor is the current minor, as the 0.x rule has it', () =>
     {
         // Under 0.x this contract carries a surface addition in the minor, and
-        // the range's floor is mechanically that minor's `.0`. 0.11.0 adds two
-        // optional fields to KeySummary, which no 0.10.x consumer reads; the
-        // floor moves because the minor did, not because anything broke.
-        expect(bundle.supportedRange).toBe('>=0.11.0 <0.12.0');
+        // the range's floor is mechanically that minor's `.0`. 0.12.0 adds four
+        // optional fields and one enum, none of which a 0.11.x consumer reads;
+        // the floor moves because the minor did, not because anything broke.
+        expect(bundle.supportedRange).toBe('>=0.12.0 <0.13.0');
     });
 
     it('states the rule that binds a native id_token to the key it enrolls', () =>

@@ -15,6 +15,18 @@ import { registerRoutes } from '@spfn/core/route';
 import { mainAuthRouter } from '@/server/routes';
 import { registerOAuthProvider, type OAuthProvider } from '@/server/lib/oauth';
 import { oauthUrlInterceptor } from '@/nextjs/interceptors/oauth';
+import { keySessionBindingService } from '@/server/services/session-binding.service';
+
+/**
+ * /_auth/oauth/finalize reads the binding facts off the key row, and this file
+ * mounts the router with no database behind it. The service is answered here so
+ * the finalize rows stay what they test — the returnUrl rule — while the row
+ * below states the binding answer it wants.
+ */
+vi.mock('@/server/services/session-binding.service', async (importActual) => ({
+    ...(await importActual<typeof import('@/server/services/session-binding.service')>()),
+    keySessionBindingService: vi.fn(async () => ({})),
+}));
 
 function mockProvider(id: OAuthProvider['id'], enabled = true): OAuthProvider
 {
@@ -171,6 +183,30 @@ describe(':provider OAuth routes', () =>
 
         expect(res.status).toBe(200);
         expect((await res.json()).returnUrl).toBe('/dashboard');
+    });
+
+    /**
+     * The finalize body is the only input the Next.js interceptor seals an OAuth
+     * session from, so a bound key has to reach it as both fields — the mode and
+     * the expiry the cookie is re-sealed with. Read off the key row, never echoed
+     * from the caller.
+     */
+    it('POST /_auth/oauth/finalize carries a bound key\'s binding fields', async () =>
+    {
+        const keyExpiresAtMillis = Date.UTC(2026, 0, 1);
+        vi.mocked(keySessionBindingService).mockResolvedValueOnce({
+            sessionBinding: 'passkey',
+            keyExpiresAtMillis,
+        });
+
+        const res = await app.request('/_auth/oauth/finalize', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ userId: '1', keyId: 'bound-key', returnUrl: '/dashboard' }),
+        });
+
+        expect(res.status).toBe(200);
+        expect(await res.json()).toMatchObject({ sessionBinding: 'passkey', keyExpiresAtMillis });
     });
 
     it('GET /_auth/oauth/providers 는 :provider start에 흡수되지 않는다 (static > param)', async () =>

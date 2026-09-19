@@ -5,7 +5,7 @@
  * Supports key rotation and multi-key management per user
  */
 
-import { KEY_ALGORITHM, KEY_PLATFORM } from '../types';
+import { KEY_ALGORITHM, KEY_PLATFORM, SESSION_BINDINGS } from '../types';
 import { text, boolean, index } from 'drizzle-orm/pg-core';
 import { id, foreignKey, enumText, utcTimestamp } from '@spfn/core/db';
 import { CLIENT_KINDS } from '../client-proof/wire-headers';
@@ -72,6 +72,61 @@ export const userPublicKeys = authSchema.table(
         // Written once at registration, for the same reason and with the same
         // standing as registeredIp above
         registeredUserAgent: text('registered_user_agent'),
+
+        // Browser family the registering request's user-agent named — one of the
+        // five badges uaFamily() answers with, never the raw string
+        // null: the request sent no user-agent, or the key predates this column
+        // Written once at registration, like the two columns above. The proxy is
+        // what compares a family against a request (the browser's user-agent does
+        // not survive a server-component hop), so this is the displayable record
+        // of where the key came from rather than the value any check reads
+        registeredUaFamily: text('registered_ua_family'),
+
+        // Client address this key was last seen signing from, as getClientIp
+        // resolved it on that request
+        // null: that request resolved no address, or the key predates this column
+        //
+        // Unlike registeredIp above, this MOVES: it is overwritten by the same
+        // throttled UPDATE that stamps lastUsedAt, so it is a new class of stored
+        // PII in this table — an address that follows the device around rather
+        // than one captured once. It exists for one purpose: to notice that one
+        // key was used from two addresses inside a short window, which is what
+        // concurrentUseAt records. Nothing else reads it and nothing is refused
+        // by it, because addresses change legitimately all the time.
+        //
+        // It is NOT exposed. `listKeys` returns concurrentUseAt and never this,
+        // so the account surface can say "this device was in two places at once"
+        // without publishing a trail of where. Retention is the row's: it holds
+        // only the most recent observation, is overwritten on the next one, and
+        // goes with the key when the key is deleted.
+        //
+        // The literal string 'unknown' is never stored — getClientIp's fallback
+        // becomes NULL, which reads as "no observation" everywhere it is compared.
+        lastSeenIp: text('last_seen_ip'),
+
+        // When lastSeenIp was written, which is the same moment lastUsedAt was
+        // The pair is what makes "within the window" answerable in one statement
+        lastSeenAt: utcTimestamp('last_seen_at'),
+
+        // The last time this key was seen from an address different from the one
+        // recorded, within SPFN_AUTH_CONCURRENT_USE_WINDOW_MS of the previous
+        // sighting
+        // null: never observed, which is the ordinary state for every key
+        // Surfaced on listKeys as concurrentUseAtMillis for the owner to act on.
+        // A signal, never a refusal — a phone moving between wifi and cellular
+        // does this several times an hour, and so does a laptop behind a pool of
+        // egress addresses
+        concurrentUseAt: utcTimestamp('concurrent_use_at'),
+
+        // Whether this key is bound to a passkey — decided by the server when the
+        // key was registered, from the owner's session_binding setting and
+        // whether the request came through the trusted Next.js proxy
+        // 'none' (default): a 90-day key, the behaviour that predates #97
+        // 'passkey': a short-lived key; only a fresh WebAuthn assertion renews it,
+        //   and a login that re-registers it does not extend its expiry
+        // Never read off a request body, and `platform` is not consulted: that
+        // field is display-only and a native client may declare any value it likes
+        binding: enumText('binding', SESSION_BINDINGS).notNull().default('none'),
 
         // What the client said about itself on the last request signed by this key.
         //

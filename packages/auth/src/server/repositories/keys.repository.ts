@@ -10,6 +10,7 @@ import { users } from '../entities/users';
 import type { ClientIdentity } from '../client-proof/wire-version';
 import { BaseRepository } from '@spfn/core/db';
 import { eq, and, or, isNull, lt, desc, sql } from 'drizzle-orm';
+import { getConcurrentUseWindowMs } from '../lib/config';
 
 /**
  * Throttle window for lastUsedAt writes. The column is for audit / inactive-key
@@ -97,6 +98,10 @@ export class KeysRepository extends BaseRepository
      *
      * `includeRevoked`는 이미 끊은 기기까지 보여준다 — "내가 언제 무엇을 끊었나"를
      * 확인하는 용도라, 폐기 시각과 사유를 함께 고른다.
+     *
+     * `lastSeenIp` is not selected, deliberately. The concurrent-use moment is
+     * what the owner acts on; the trail of addresses behind it is stored PII the
+     * account surface has no use for.
      * Read replica 사용
      */
     async listForUser(userId: number, includeRevoked = false)
@@ -115,6 +120,8 @@ export class KeysRepository extends BaseRepository
                 revokedAt: userPublicKeys.revokedAt,
                 registeredIp: userPublicKeys.registeredIp,
                 registeredUserAgent: userPublicKeys.registeredUserAgent,
+                binding: userPublicKeys.binding,
+                concurrentUseAt: userPublicKeys.concurrentUseAt,
             })
             .from(userPublicKeys)
             .where(
@@ -319,6 +326,56 @@ export class KeysRepository extends BaseRepository
     }
 
     /**
+     * Bind one live key to the account's passkey, and give it the short life
+     * that goes with it.
+     *
+     * Scoped by user and by `isActive`, like every other targeted update here, so
+     * the answer is "this call bound something" rather than "a row exists".
+     * Write primary 사용
+     */
+    async bindByKeyIdAndUserId(keyId: string, userId: number, expiresAt: Date)
+    {
+        const result = await this.db
+            .update(userPublicKeys)
+            .set({ binding: 'passkey', expiresAt })
+            .where(
+                and(
+                    eq(userPublicKeys.keyId, keyId),
+                    eq(userPublicKeys.userId, userId),
+                    eq(userPublicKeys.isActive, true),
+                ),
+            )
+            .returning();
+
+        return result[0] ?? null;
+    }
+
+    /**
+     * Return every one of a user's bound keys to an ordinary long-lived key.
+     *
+     * One statement, because turning the setting off has to leave no key behind:
+     * a row still marked `'passkey'` would keep expiring in hours with nothing
+     * left to renew it, and its owner has just said they do not want that.
+     * Write primary 사용
+     */
+    async unbindActiveByUserId(userId: number, expiresAt: Date): Promise<number>
+    {
+        const result = await this.db
+            .update(userPublicKeys)
+            .set({ binding: 'none', expiresAt })
+            .where(
+                and(
+                    eq(userPublicKeys.userId, userId),
+                    eq(userPublicKeys.isActive, true),
+                    eq(userPublicKeys.binding, 'passkey'),
+                ),
+            )
+            .returning();
+
+        return result.length;
+    }
+
+    /**
      * Key ID로 공개키 조회 — 활성 여부 무관 (clientProofV1 admission의 revocation 판정용)
      *
      * 폐기(isActive=false)·만료(expiresAt 경과)를 SESSION_REVOKED로, 미등록을
@@ -375,52 +432,110 @@ export class KeysRepository extends BaseRepository
      * `clientSeenAt` moves only when one of the three values differs from what is
      * stored, so it answers "since when has this device been on this release"
      * rather than "when was it last seen", which lastUsedAt already answers.
+     *
+     * `ip` is the client address this request resolved to, or null when none did.
+     * It joins this statement rather than getting one of its own: the rule the
+     * concurrent-use signal needs — write the address, and move
+     * `concurrentUseAt` when it differs from the stored one inside the window —
+     * is the rule already implemented here, and a second fire-and-forget write
+     * beside it would double the per-request write on the authenticated path. It
+     * is also why the comparison is a `CASE` over the stored value rather than a
+     * read followed by a write: the row comes off the read replica, and a
+     * replica-lagged address compared in application code both misses real
+     * switches and invents ones that did not happen.
      */
-    async updateLastUsedById(id: number, identity?: ClientIdentity | null): Promise<void>
+    async updateLastUsedById(
+        id: number,
+        identity?: ClientIdentity | null,
+        ip?: string | null,
+    ): Promise<void>
     {
-        const staleBefore = new Date(Date.now() - LAST_USED_THROTTLE_MS);
-        const lastUsedIsStale = or(
-            isNull(userPublicKeys.lastUsedAt),
-            lt(userPublicKeys.lastUsedAt, staleBefore),
-        );
-
-        if (!identity)
-        {
-            await this.db
-                .update(userPublicKeys)
-                .set({ lastUsedAt: new Date() })
-                .where(and(eq(userPublicKeys.id, id), lastUsedIsStale));
-
-            return;
-        }
-
-        // IS DISTINCT FROM rather than <>: every one of these columns is nullable
-        // for a key registered before they existed, and <> against NULL is NULL,
-        // which would make the first sighting look unchanged and never record it.
-        const identityChanged = sql`(
-            ${userPublicKeys.clientKind} IS DISTINCT FROM ${identity.kind}
-            OR ${userPublicKeys.clientVersion} IS DISTINCT FROM ${identity.version}
-            OR ${userPublicKeys.clientContractVersion} IS DISTINCT FROM ${identity.contractVersion}
-        )`;
         const now = new Date();
         // Sent as an ISO string with an explicit cast rather than as a Date: a
         // value bound inside a raw `sql` fragment skips the column's own mapper,
         // and postgres-js refuses a Date it was handed without one.
         const nowParam = sql`${now.toISOString()}::timestamptz`;
+        const staleBefore = new Date(Date.now() - LAST_USED_THROTTLE_MS);
+        const lastUsedIsStale = or(
+            isNull(userPublicKeys.lastUsedAt),
+            lt(userPublicKeys.lastUsedAt, staleBefore),
+        );
+        // IS DISTINCT FROM rather than <>: every one of these columns is nullable
+        // for a key registered before they existed, and <> against NULL is NULL,
+        // which would make the first sighting look unchanged and never record it.
+        //
+        // The `IS NOT NULL` on the incoming address is what keeps an unresolvable
+        // one out of the comparison entirely. `getClientIp` answers 'unknown' when
+        // nothing resolves and the caller turns that into null, so without this
+        // term every such request would read as an address change — a write per
+        // request on the hot path, and a concurrent-use signal raised by the
+        // absence of a signal.
+        const ipChanged = sql`(
+            ${ip ?? null}::text IS NOT NULL
+            AND ${userPublicKeys.lastSeenIp} IS DISTINCT FROM ${ip ?? null}::text
+        )`;
+        // One write per window for a client whose address keeps moving. Without
+        // this the `ipChanged` term below is true on every request from a phone
+        // flipping between cellular and wifi, or from anything behind a CGNAT
+        // egress pool — an UPDATE per request on the hot authenticated path, and a
+        // concurrent-use stamp restamped every time, so the owner's device list
+        // shows a permanently-lit "two places at once" for a device that never
+        // left their hand.
+        const notStampedThisWindow = sql`(
+            ${userPublicKeys.concurrentUseAt} IS NULL
+            OR ${userPublicKeys.concurrentUseAt} < ${this.concurrentUseSince(now)}
+        )`;
+        const identityChanged = identity
+            ? sql`(
+                ${userPublicKeys.clientKind} IS DISTINCT FROM ${identity.kind}
+                OR ${userPublicKeys.clientVersion} IS DISTINCT FROM ${identity.version}
+                OR ${userPublicKeys.clientContractVersion} IS DISTINCT FROM ${identity.contractVersion}
+            )`
+            : sql`false`;
 
         await this.db
             .update(userPublicKeys)
             .set({
                 lastUsedAt: now,
-                clientKind: identity.kind,
-                clientVersion: identity.version,
-                clientContractVersion: identity.contractVersion,
-                clientSeenAt: sql`CASE WHEN ${identityChanged} THEN ${nowParam} ELSE ${userPublicKeys.clientSeenAt} END`,
+                lastSeenIp: ip ?? null,
+                lastSeenAt: now,
+                // `last_seen_ip IS NOT NULL` is the second observation this needs:
+                // a request whose address did not resolve stores NULL and stamps
+                // `last_seen_at`, so without it the next ordinary request would
+                // read as an address change and raise the signal from one device
+                // that never moved.
+                concurrentUseAt: sql`CASE WHEN ${ipChanged}
+                    AND ${userPublicKeys.lastSeenIp} IS NOT NULL
+                    AND ${userPublicKeys.lastSeenAt} > ${this.concurrentUseSince(now)}
+                    THEN ${nowParam} ELSE ${userPublicKeys.concurrentUseAt} END`,
+                ...(identity
+                    ? {
+                        clientKind: identity.kind,
+                        clientVersion: identity.version,
+                        clientContractVersion: identity.contractVersion,
+                        clientSeenAt: sql`CASE WHEN ${identityChanged} THEN ${nowParam} ELSE ${userPublicKeys.clientSeenAt} END`,
+                    }
+                    : {}),
             })
             .where(and(
                 eq(userPublicKeys.id, id),
-                or(lastUsedIsStale, identityChanged),
+                or(lastUsedIsStale, identityChanged, sql`(${ipChanged} AND ${notStampedThisWindow})`),
             ));
+    }
+
+    /**
+     * The boundary a previous sighting has to be newer than to count as concurrent.
+     *
+     * Computed here rather than written as `now() - interval` so that the moment
+     * the row is stamped with and the moment the window is measured from are the
+     * same one — a statement that used the database clock for the boundary and
+     * ours for the value would disagree with itself by the round trip.
+     */
+    private concurrentUseSince(now: Date)
+    {
+        const since = new Date(now.getTime() - getConcurrentUseWindowMs());
+
+        return sql`${since.toISOString()}::timestamptz`;
     }
 }
 

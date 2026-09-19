@@ -3,6 +3,7 @@
  */
 
 export * from './authenticate';
+export { authenticateForRenewal, admitsForRenewal } from './authenticate-for-renewal';
 export {
     registerAuthProfile,
     selectAuthProfile,

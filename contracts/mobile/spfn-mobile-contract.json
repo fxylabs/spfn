@@ -4,8 +4,8 @@
   "originStatement": "Generated from the route and contract definitions in SPFN primitives (packages/auth/src/server/client-proof) and published from that repository. This file is generated output: edit the source modules and re-export, never this file.",
   "contractName": "spfn-mobile-contract",
   "contractMajor": 0,
-  "contractVersion": "0.11.0",
-  "supportedRange": ">=0.11.0 <0.12.0",
+  "contractVersion": "0.12.0",
+  "supportedRange": ">=0.12.0 <0.13.0",
   "exporterVersion": "@spfn/auth/contract-bundle@6.0.0",
   "authProfiles": { "allowed": ["clientProofV1"], "unknownProfilePolicy": "reject", "mixingWithinSession": "prohibited" },
   "operationAuthClasses": {
@@ -258,7 +258,9 @@
         { "name": "publicId", "type": "string", "optional": false },
         { "name": "email", "type": "string", "optional": true },
         { "name": "phone", "type": "string", "optional": true },
-        { "name": "passwordChangeRequired", "type": "boolean", "optional": false }
+        { "name": "passwordChangeRequired", "type": "boolean", "optional": false },
+        { "name": "sessionBinding", "type": "KeyBinding", "optional": true },
+        { "name": "keyExpiresAtMillis", "type": "integer", "optional": true }
       ]
     },
     {
@@ -313,7 +315,9 @@
         { "name": "isActive", "type": "boolean", "optional": false },
         { "name": "revokedAtMillis", "type": "integer", "optional": true },
         { "name": "registeredIp", "type": "string", "optional": true },
-        { "name": "registeredUserAgent", "type": "string", "optional": true }
+        { "name": "registeredUserAgent", "type": "string", "optional": true },
+        { "name": "binding", "type": "KeyBinding", "optional": true },
+        { "name": "concurrentUseAtMillis", "type": "integer", "optional": true }
       ]
     },
     {
@@ -372,7 +376,9 @@
         { "name": "publicId", "type": "string", "optional": true },
         { "name": "email", "type": "string", "optional": true },
         { "name": "phone", "type": "string", "optional": true },
-        { "name": "passwordChangeRequired", "type": "boolean", "optional": true }
+        { "name": "passwordChangeRequired", "type": "boolean", "optional": true },
+        { "name": "sessionBinding", "type": "KeyBinding", "optional": true },
+        { "name": "keyExpiresAtMillis", "type": "integer", "optional": true }
       ]
     },
     { "name": "DeviceAuthInfoRequest", "fields": [{ "name": "userCode", "type": "string", "optional": false }] },
@@ -395,6 +401,7 @@
   "enums": [
     { "name": "KeyAlgorithm", "values": ["ES256", "RS256"] },
     { "name": "KeyPlatform", "values": ["ios", "android", "web", "desktop"] },
+    { "name": "KeyBinding", "values": ["none", "passkey"] },
     { "name": "DeviceAuthPollStatus", "values": ["pending", "approved"] }
   ],
   "operations": [
