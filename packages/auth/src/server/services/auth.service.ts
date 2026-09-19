@@ -436,7 +436,22 @@ export async function loginService(
         userAgent: params.userAgent,
         binding: decideKeyBinding(user.sessionBinding, params.webProxy),
         replacesKeyId,
+        loginEvent: {
+            provider: email ? 'email' : 'phone',
+            email: user.email || undefined,
+            phone: user.phone || undefined,
+        },
     });
+
+    // An enrolled account on a device it has never seen gets a challenge instead
+    // of a session (#95). Nothing below this line runs: the sign-in has not
+    // happened yet, so `lastLoginAt` does not move and no login event is
+    // announced — an attacker holding only the password must not be able to
+    // produce either. Both happen at `POST /_auth/mfa/verify`.
+    if (registered.pending)
+    {
+        return { mfaRequired: true, challenge: registered.challenge };
+    }
 
     // Update last login
     await updateLastLoginService(user.id);

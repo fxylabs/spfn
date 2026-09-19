@@ -6,7 +6,7 @@
  */
 
 import { KEY_ALGORITHM, KEY_PLATFORM, SESSION_BINDINGS } from '../types';
-import { text, boolean, index } from 'drizzle-orm/pg-core';
+import { text, boolean, bigint, index } from 'drizzle-orm/pg-core';
 import { id, foreignKey, enumText, utcTimestamp } from '@spfn/core/db';
 import { CLIENT_KINDS } from '../client-proof/wire-headers';
 import { users } from './users';
@@ -154,6 +154,20 @@ export const userPublicKeys = authSchema.table(
         // false: Key is deactivated (cannot be used for verification)
         // Used for: soft key rotation, temporary key suspension
         isActive: boolean('is_active').notNull().default(true),
+
+        // The second-factor challenge gating this key, when it is pending (#95)
+        // null: the ordinary state — the key is whatever `is_active` says it is
+        // set: the key was registered inactive because the account has a second
+        //   factor and this device is new, and it stays that way until the
+        //   challenge is verified. `is_active` alone cannot say this, because a
+        //   revoked key is inactive too, and the two must not read alike:
+        //   `listKeys` hides a pending key in both modes and a global revocation
+        //   deletes it outright rather than revoking it
+        // NOT a foreign key, deliberately. `mfa_challenges.key_id` points back at
+        // this row, and a pair of constraints in a cycle leaves neither row
+        // writable first. The link that decides anything is that one; this column
+        // is what makes "is this row pending" a predicate on the keys table
+        pendingMfaChallengeId: bigint('pending_mfa_challenge_id', { mode: 'number' }),
 
         // Key creation timestamp
         // Automatically set on insertion

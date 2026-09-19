@@ -416,6 +416,15 @@ export const authEnvSchema = defineEnvSchema({
         }),
     },
 
+    SPFN_AUTH_MFA_CHALLENGE_TTL_MINUTES: {
+        ...envNumber({
+            description: 'How long a new-device second-factor challenge stays spendable. A sign-in on an enrolled account from a device it has never seen answers 202 with a challenge instead of a session, and the key it registered is inactive until POST /_auth/mfa/verify spends it. This is how long the person has to reach for their authenticator — and how long an attacker holding only the password has. The Next.js proxy seals its pending cookie for the same span.',
+            default: 10,
+            required: false,
+            examples: [5, 10, 15],
+        }),
+    },
+
     // ============================================================================
     // Session binding (#97)
     // ============================================================================

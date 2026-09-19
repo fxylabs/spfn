@@ -193,7 +193,14 @@ async function persistNativeLogin(
         // `clientType` on a request that reached the backend directly is never
         // the web proxy the decision reads. The `platform` the client declares is
         // not consulted, here or anywhere — see `decideKeyBinding`.
-        await registerPublicKeyService({
+        const eventPayload = {
+            userId: String(userId),
+            provider: params.provider,
+            email: identity.email || undefined,
+            metadata: params.metadata,
+        };
+
+        const registered = await registerPublicKeyService({
             userId,
             keyId: params.keyId,
             publicKey: params.publicKey,
@@ -204,16 +211,21 @@ async function persistNativeLogin(
             channel: 'oauth-native',
             ip: params.ip,
             userAgent: params.userAgent,
+            loginEvent: { provider: params.provider, email: identity.email || undefined, metadata: params.metadata },
         });
+
+        // An enrolled account on a device it has never seen answers a challenge
+        // instead of a key (#95). Nothing below runs: no `lastLoginAt`, no login
+        // event — both are what `POST /_auth/mfa/verify` is holding. A brand-new
+        // social account cannot reach this, having nothing enrolled to ask for,
+        // so `authRegisterEvent` still fires exactly as it did.
+        if (registered.pending)
+        {
+            return { mfaRequired: true, challenge: registered.challenge };
+        }
 
         await updateLastLoginService(userId);
 
-        const eventPayload = {
-            userId: String(userId),
-            provider: params.provider,
-            email: identity.email || undefined,
-            metadata: params.metadata,
-        };
         // `mfaEnrolled` is on the login event only — a brand-new account cannot
         // have a second factor. Read before the callback is queued, so the
         // callback stays synchronous and lands when consumers expect it to.

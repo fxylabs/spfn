@@ -61,7 +61,7 @@ import type { WebAuthnChallengeKind } from '../entities/webauthn-challenges';
 import type { User } from '../entities/users';
 import { getDummyPasswordHash, verifyPassword } from '../helpers';
 import type { KeyAlgorithmType, KeyPlatformType } from '../types';
-import { registerPublicKeyService, revokeKeyService } from './key.service';
+import { registerPublicKeyService, registeredBinding, revokeKeyService } from './key.service';
 import { assertStepUp, mfaEnrolledForUser } from './mfa.service';
 import { decideKeyBinding } from '../lib/key-policy';
 import { updateLastLoginService } from './user.service';
@@ -589,7 +589,7 @@ async function startSession(user: User, params: FinishPasskeyLoginParams): Promi
         email: user.email || undefined,
         phone: user.phone || undefined,
         passwordChangeRequired: user.passwordChangeRequired,
-        ...loginBindingFields(registered),
+        ...loginBindingFields(registeredBinding(registered)),
     };
 
     const mfaEnrolled = await mfaEnrolledForUser(user.id);

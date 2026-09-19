@@ -41,6 +41,7 @@ import { buildOtpauthUri, generateTotpSecret, verifyTotp } from '../lib/totp';
 import { buildAuthenticationOptions, verifyAuthentication } from '../lib/webauthn';
 import type { AuthenticationResponseJSON, PublicKeyCredentialRequestOptionsJSON } from '../lib/webauthn';
 import {
+    mfaChallengesRepository,
     mfaEnrolmentRepository,
     mfaRecoveryCodesRepository,
     mfaTotpRepository,
@@ -48,7 +49,10 @@ import {
     passkeysRepository,
     usersRepository,
 } from '../repositories';
+import { mintCredential } from '../lib/link-credentials';
+import type { MfaChallengeHandle } from './auth.service';
 import { MFA_CONFIRM_ATTEMPT_LIMIT } from '../entities/mfa-totp';
+import type { DeferredLoginEvent, MfaChallengeChannel } from '../entities/mfa-challenges';
 import type { MfaVerificationMethod } from '../entities/mfa-verifications';
 import { mintChallenge, presentedChallenge, spendChallenge } from './webauthn-challenge.service';
 
@@ -121,6 +125,104 @@ export async function assertStepUp(params: AssertStepUpParams): Promise<void>
 export function carryStepUpVerification(userId: number, fromKeyId: string, toKeyId: string): Promise<void>
 {
     return mfaVerificationsRepository.moveToKeyId(userId, fromKeyId, toKeyId);
+}
+
+// ============================================================================
+// New-device step-up (#95)
+// ============================================================================
+
+export interface OpenStepUpChallengeParams
+{
+    userId: number;
+    /** The inactive key this challenge would activate. */
+    keyId: string;
+    channel: MfaChallengeChannel;
+    /** The account's key generation right now — the challenge dies with it. */
+    keyEpoch: number;
+    /** The login announcement the 202 is holding back, when the channel has one. */
+    loginEvent?: DeferredLoginEvent;
+}
+
+/**
+ * Mint the challenge a stopped registration hands back.
+ *
+ * The secret is returned once and never stored: only its hash reaches the row,
+ * so a database dump does not yield a spendable challenge, and `verify` finds a
+ * row only for a caller who already had the secret. The row id is not in the
+ * answer at all — it is a sequence, and a sequence on an unauthenticated route
+ * is a thing an attacker walks.
+ */
+export async function openStepUpChallengeService(
+    params: OpenStepUpChallengeParams,
+): Promise<MfaChallengeHandle>
+{
+    const { secret, hash } = mintCredential();
+    const expiresAt = new Date(Date.now() + getMfaConfig().challengeTtlMs);
+
+    const row = await mfaChallengesRepository.create({
+        userId: params.userId,
+        challengeHash: hash,
+        keyId: params.keyId,
+        channel: params.channel,
+        keyEpoch: params.keyEpoch,
+        expiresAt,
+        loginEvent: params.loginEvent ?? null,
+    });
+
+    await mfaChallengesRepository.markKeyPending(params.keyId, row.id);
+
+    return { secret, expiresAtMillis: expiresAt.getTime() };
+}
+
+/**
+ * The challenge already outstanding for this key, re-secreted, or null.
+ *
+ * Registering the same keyId twice is an ordinary path, not a collision: a
+ * native client reuses its keyId, and an OAuth state replayed from the back
+ * button carries the one it was sealed with. Answering 409 there would refuse a
+ * caller for holding a key that is their own and is waiting on them.
+ *
+ * The row is reused rather than replaced, so the retry inherits the attempts
+ * already spent and the expiry already ticking — retrying is not a way around
+ * either. Only the secret is new, because the first one exists nowhere: the row
+ * holds its hash, and that is the property that keeps a database dump from
+ * yielding a spendable challenge.
+ */
+export async function resumeStepUpChallengeService(
+    userId: number,
+    keyId: string,
+): Promise<MfaChallengeHandle | null>
+{
+    const live = await mfaChallengesRepository.findLiveByKeyId(userId, keyId);
+
+    if (!live)
+    {
+        return null;
+    }
+
+    const { secret, hash } = mintCredential();
+
+    return await mfaChallengesRepository.resecret(live.id, hash)
+        ? { secret, expiresAtMillis: live.expiresAt.getTime() }
+        : null;
+}
+
+/**
+ * Drop expired and spent challenges, and the keys they were holding.
+ *
+ * A pending key is unusable by construction, but it is still a key row on an
+ * account nobody is watching, and its challenge is what the owner would be shown
+ * if anything ever listed it. Both go once the challenge can no longer do
+ * anything. A spent one is kept for the same span as an expired one, so a replay
+ * inside the window is answered "already verified" from a row rather than
+ * "unknown" from an absence — the same 401 either way, but the record survives
+ * long enough to be read in a log.
+ *
+ * @returns number of challenge rows deleted
+ */
+export async function sweepMfaChallengesService(): Promise<{ deleted: number }>
+{
+    return { deleted: await mfaChallengesRepository.sweepFinished(new Date()) };
 }
 
 export interface TotpEnrolmentResult

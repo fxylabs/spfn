@@ -28,6 +28,12 @@ vi.mock('../../server/services/mfa.service', () => ({
     assertStepUp: vi.fn(async () => undefined),
     carryStepUpVerification: vi.fn(async () => undefined),
     mfaEnrolledForUser: vi.fn(async () => false),
+    // Unenrolled throughout this file, so neither of the step-up seams should
+    // ever be reached. Stubbed as null-answering rather than left out, so a
+    // collision case that started resuming a challenge fails on the assertion
+    // rather than on a missing export.
+    openStepUpChallengeService: vi.fn(async () => null),
+    resumeStepUpChallengeService: vi.fn(async () => null),
 }));
 
 // fingerprint 검증은 이 테스트의 관심사가 아니다 — 충돌 판정만 본다. 알고리즘 검사는

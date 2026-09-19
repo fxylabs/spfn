@@ -44,10 +44,10 @@ import { deliverLinkMail } from '../lib/link-mail-delivery';
 import { authPasswordResetEvent } from '../events';
 import { issuePasswordResetLink } from './link-mail.service';
 import { revokeAllOAuth2GrantsForUser } from './oauth2-grant.service';
-import { registerPublicKeyService } from './key.service';
+import { registerPublicKeyService, type RegisterPublicKeyResult } from './key.service';
 import { decideKeyBinding } from '../lib/key-policy';
 import { updateLastLoginService } from './user.service';
-import { loginBindingFields, type LoginBindingFields, type LoginResult } from './auth.service';
+import { loginBindingFields, type LoginResult } from './auth.service';
 import type { KeyAlgorithmType, KeyPlatformType, SessionBindingType } from '../types';
 
 /**
@@ -243,13 +243,22 @@ export interface CompletePasswordResetParams
  *
  * Answers what the registration answered, because the caller has to pass it on:
  * this path decides the new key's binding exactly as a sign-in does, and the
- * proxy seals the cookie from the body it gets back.
+ * proxy seals the cookie from the body it gets back — or, on an enrolled
+ * account, the second-factor challenge that stands in for it.
+ *
+ * The revoke-all above runs either way, and so does the claim below. A stolen
+ * mailbox is a stolen first credential, so a reset on an enrolled account is
+ * stepped up (#95); but the password has genuinely changed and every key has
+ * genuinely gone by the time that is decided, which leaves a real state worth
+ * naming: signed out everywhere, reset not finished. Rolling either back would
+ * be worse — it would make an unfinished step-up a way to keep an old password
+ * alive, and a reset link reusable.
  */
 async function replaceCredentials(
     row: PasswordResetToken,
     user: { id: number; emailVerifiedAt: Date | null; sessionBinding: SessionBindingType },
     params: CompletePasswordResetParams,
-): Promise<LoginBindingFields>
+): Promise<RegisterPublicKeyResult>
 {
     await usersRepository.updateById(user.id, {
         passwordHash: await hashPassword(params.password),
@@ -282,8 +291,6 @@ async function replaceCredentials(
         binding: decideKeyBinding(user.sessionBinding, params.webProxy),
     });
 
-    await updateLastLoginService(user.id);
-
     if (!await passwordResetTokensRepository.complete(row.id))
     {
         authLogger.service.warn('Password reset session refused', { reason: 'lost the claim race' });
@@ -291,7 +298,7 @@ async function replaceCredentials(
         throw new PasswordResetSessionError();
     }
 
-    return loginBindingFields(registered);
+    return registered;
 }
 
 /**
@@ -349,12 +356,21 @@ export async function completePasswordResetService(
         throw new PasswordResetSessionError();
     }
 
-    const binding = await replaceCredentials(row, user, params);
+    const registered = await replaceCredentials(row, user, params);
 
+    // The reset happened whether or not a second factor is still to come: the
+    // password is new and every key is gone, which is what this event announces.
     onAfterCommit(() => authPasswordResetEvent.emit({
         userId: String(user.id),
         email: row.email,
     }));
+
+    if (registered.pending)
+    {
+        return { mfaRequired: true, challenge: registered.challenge };
+    }
+
+    await updateLastLoginService(user.id);
 
     return {
         mfaRequired: false,
@@ -362,6 +378,6 @@ export async function completePasswordResetService(
         publicId: user.publicId,
         email: user.email || undefined,
         phone: user.phone || undefined,
-        ...binding,
+        ...loginBindingFields(registered),
     };
 }

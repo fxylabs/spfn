@@ -21,7 +21,10 @@ const {
     socialAccountsRepository: {
         findByProviderAndProviderId: vi.fn(async () => null),
     },
-    registerPublicKeyService: vi.fn(async () => undefined),
+    // `{ pending: false }` is the answer a registration that was not stopped for
+    // a second factor gives (#95). This suite is about the nonce binding, which
+    // is checked before registration is reached at all.
+    registerPublicKeyService: vi.fn(async () => ({ pending: false, binding: 'none', expiresAt: null })),
 }));
 
 vi.mock('@spfn/core/db', () => ({

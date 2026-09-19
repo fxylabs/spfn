@@ -50,7 +50,12 @@ import {
     hashDeviceCode,
     normalizeUserCode,
 } from '../lib/device-code';
-import { registerPublicKeyService, DEFAULT_KEY_ALGORITHM, KEY_FINGERPRINT_PREFIX_LENGTH } from './key.service';
+import {
+    registerPublicKeyService,
+    registeredBinding,
+    DEFAULT_KEY_ALGORITHM,
+    KEY_FINGERPRINT_PREFIX_LENGTH,
+} from './key.service';
 import { decideKeyBinding } from '../lib/key-policy';
 import { updateLastLoginService } from './user.service';
 import { getPendingDeletionInfo } from './account-deletion.service';
@@ -521,7 +526,7 @@ async function completeDeviceLogin(
         email: user.email || undefined,
         phone: user.phone || undefined,
         passwordChangeRequired: user.passwordChangeRequired,
-        ...loginBindingFields(registered),
+        ...loginBindingFields(registeredBinding(registered)),
     };
 
     // After commit, not inline: the poll route is transactional, and a login

@@ -85,6 +85,15 @@ export interface OAuthCallbackResult
     userId: string;
     keyId: string;
     isNewUser: boolean;
+    /**
+     * The step-up challenge this callback is carrying, when it is carrying one.
+     *
+     * Present exactly when the redirect names `mfaChallenge` instead of
+     * `userId`/`keyId` (#95). Returned beside the URL so a caller that does not
+     * parse the query — a test, or an app mounting its own handler — can tell
+     * the two redirects apart.
+     */
+    mfaChallenge?: string;
 }
 
 /**
@@ -251,16 +260,44 @@ export async function oauthCallbackService(
         ip: params.ip,
         userAgent: params.userAgent,
         binding: decideKeyBinding(user?.sessionBinding ?? 'none', params.webProxy),
+        loginEvent: {
+            provider,
+            email: user?.email || undefined,
+            phone: user?.phone || undefined,
+            metadata: stateData.metadata,
+        },
     });
+
+    const appUrl = env.NEXT_PUBLIC_SPFN_APP_URL || env.SPFN_APP_URL;
+    const callbackPath = env.SPFN_AUTH_OAUTH_SUCCESS_URL || '/auth/callback';
+    const callbackUrl = callbackPath.startsWith('http') ? callbackPath : `${appUrl}${callbackPath}`;
+    const returnUrl = isSafeReturnPath(stateData.returnUrl) ? stateData.returnUrl : '/';
+
+    // An enrolled account on a new device is redirected with a challenge and
+    // nothing else (#95): no `userId`, no `keyId`, and neither the login event
+    // nor `lastLoginAt` below. A brand-new social account never reaches this —
+    // `createOrLinkUser` has just written the user row, so there is no second
+    // factor to ask for and `isNewUser` is answered exactly as it always was.
+    if (registered.pending)
+    {
+        return {
+            redirectUrl: buildRedirectUrl(callbackUrl, {
+                mfaChallenge: registered.challenge.secret,
+                returnUrl,
+                isNewUser: String(isNewUser),
+            }),
+            userId: String(userId),
+            keyId: stateData.keyId,
+            isNewUser,
+            mfaChallenge: registered.challenge.secret,
+        };
+    }
 
     // 5. 마지막 로그인 시간 업데이트
     await updateLastLoginService(userId);
 
     // 6. 리다이렉트 URL 생성 (OAuth 콜백 페이지로)
     // 콜백 페이지에서 oauthFinalize API를 호출하여 세션 저장
-    const appUrl = env.NEXT_PUBLIC_SPFN_APP_URL || env.SPFN_APP_URL;
-    const callbackPath = env.SPFN_AUTH_OAUTH_SUCCESS_URL || '/auth/callback';
-    const callbackUrl = callbackPath.startsWith('http') ? callbackPath : `${appUrl}${callbackPath}`;
     const redirectUrl = buildRedirectUrl(callbackUrl, {
         userId: String(userId),
         keyId: stateData.keyId,
@@ -268,7 +305,7 @@ export async function oauthCallbackService(
         // where it was sealed. Checking it again costs one comparison and keeps a
         // destination that leaves the app out of the callback URL no matter which
         // seam sealed it.
-        returnUrl: isSafeReturnPath(stateData.returnUrl) ? stateData.returnUrl : '/',
+        returnUrl,
         isNewUser: String(isNewUser),
         // The callback page and `createOAuthCallbackHandler` are the two seams
         // that seal a session out of this redirect, and neither calls a route
