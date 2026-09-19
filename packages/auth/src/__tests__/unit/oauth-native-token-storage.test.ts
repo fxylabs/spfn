@@ -18,7 +18,7 @@ const {
     socialAccountsRepository: {
         findByProviderAndProviderId: vi.fn(async () => null),
     },
-    registerPublicKeyService: vi.fn(async () => undefined),
+    registerPublicKeyService: vi.fn(async () => ({ pending: false, binding: 'none', expiresAt: null })),
 }));
 
 vi.mock('@spfn/core/db', () => ({
