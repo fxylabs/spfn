@@ -265,6 +265,33 @@ public bucket instead of the private one. On S3-compatible providers and local t
 single bucket, and `getPublicUrl()` just prepends the configured public base URL to any
 key — the prefix is a convention you must back with your own bucket policy.
 
+### Snapshots and object versions
+
+A pipeline that overwrites its own outputs needs a way back. A **snapshot** is a manifest
+over a prefix — it records which version of every object under that prefix was live at one
+moment — and restoring it copies those versions back:
+
+```typescript
+import { parseManifest, restoreManifest, serializeManifest, snapshotPrefix } from '@spfn/storage/server';
+
+const manifest = await snapshotPrefix(storage, 'gen/req-1');
+await saveSomewhere(serializeManifest(manifest));   // storing it is your job
+
+const { restored, skipped, failed } = await restoreManifest(storage, parseManifest(json));
+```
+
+It works where the bucket keeps versions: an S3-compatible bucket with Versioning on, or GCS
+through the **native** provider. Where it does not — the local provider, a bucket without
+versioning, and GCS over the S3 interoperability endpoint, which never surfaces a version id
+to the AWS SDK — the entry carries no version and restore reports `skipped: 'no-version'` for
+it. A manifest names versions and cannot protect them: noncurrent retention (S3 lifecycle
+rules, GCS Object Versioning) is what keeps them alive. Restore writes a **new** version of
+each object it touches and purges no CDN cache.
+
+See [Snapshots and object versions](../../packages/storage/README.md#snapshots-and-object-versions)
+in the `@spfn/storage` README for the full API, what restore reports entry by entry, and the
+operational caveats.
+
 ### Presigned upload (large files)
 
 For large files, don't route the bytes through your API process at all — sign an upload,

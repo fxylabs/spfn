@@ -11,6 +11,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+#### @spfn/auth
+
+- **BREAKING: a sign-in no longer always answers with a session** (#95). An account that has
+  enrolled a second factor and signs in from a device the account has never seen gets `202`
+  and a challenge instead; the device key that sign-in registered stays inactive until the
+  challenge is spent, so a phished password on its own no longer holds an account.
+  `LoginResult` therefore gains one **required** field, `mfaRequired`, and every field it
+  carried before is now optional. It is still **one** type rather than a union, because
+  `authApi.login` infers its result from that declaration and a union would turn every
+  `result.userId` in an app into a compile error with no narrowing available.
+    - **Migration**: narrow on the discriminant before reading anything else.
+
+      ```typescript
+      const result = await authApi.login.call({ body: { email, password } });
+
+      if (result.mfaRequired)
+      {
+          // No session yet. result.challenge is { secret, expiresAtMillis }.
+          router.push('/auth/mfa');
+
+          return;
+      }
+
+      console.log(result.userId); // string, from here on
+      ```
+
+      The same reshape applies to `authApi.oauthNative` (`OauthNativeResult`), to
+      `completePasswordReset`, and to the approved branch of `pollDeviceAuth` — which carries
+      `mfaRequired: false` and can never carry anything else, a device-code approval being a
+      second factor already. An account with no second factor still answers `200` with
+      `mfaRequired: false` and exactly the fields it always had, and an app on the Next.js
+      proxy changes nothing at all: `mfaVerifyInterceptor`, registered for you in
+      `authInterceptors`, handles the 202 and the pending cookie.
+    - Mobile contract **0.13.0**. Four channels stop on a new device — password, web OAuth,
+      `oauth-native` and password-reset. A device-code approval, a passkey sign-in, a key
+      rotation, a session renewal and any path that creates the account do not, because each
+      already carried a second proof or has nothing enrolled yet.
+- A `202` moves nothing else either: `authLoginEvent`, `authDeviceRegisteredEvent` and
+  `lastLoginAt` are held on the challenge row and fire together at `POST /_auth/mfa/verify`
+  with the original channel (#95). An app that mails "new device signed in" therefore sends
+  nothing for an attempt that never became a sign-in.
+
+#### @spfn/mcp
+
+- `validateToken` may refuse a bearer token by returning `null` or `undefined` as well as by
+  throwing; the adapter treats all three identically (#93). That is what lets
+  `@spfn/auth`'s `verifyAccessToken` be passed straight in, since it answers `null` for an
+  expired, revoked or wrong-resource token. `@spfn/mcp` 0.3.0-beta.3.
+
+#### @spfn/storage
+
+- The local S3-compatible example in the documentation is **SeaweedFS** (`weed server -s3`,
+  S3 on `:8333`, bucket versioning supported), not MinIO: open-source MinIO is archived and
+  its binaries are no longer served. The `STORAGE_CONTRACT_S3_*` variables and the provider
+  contract suite are unchanged — only the server you point them at.
+
 #### @spfn/core
 
 - **BREAKING: a nested `runInTransaction` / `Transactional()` call is now a `SAVEPOINT` on the
@@ -42,6 +98,185 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
       backend into subxid overflow.
 
 ### Added
+
+#### @spfn/auth
+
+- **An OAuth 2.1 authorization server, so Claude Code and Codex can connect to an app's `/mcp`
+  endpoint as the signed-in user** (#93). Dynamic client registration, PKCE and a consent
+  screen: the CLI discovers, registers itself, opens a browser and catches the redirect on a
+  loopback port, and nobody pastes a token. `@spfn/auth` 0.3.0-beta.19 and 0.3.0-beta.20.
+    - Opt in by naming the scopes — there is no default, because the names are the
+      application's own vocabulary: `createAuthLifecycle({ authorizationServer: { scopes,
+      defaultScopes?, issuer?, authorizeUrl?, allowedRedirectOrigins?, accessTokenTtlMs?,
+      refreshTokenTtlMs?, codeTtlMs? } })`. Without that block every endpoint below answers
+      404 and the boot check does not run, so an app that wants none of this changes nothing.
+    - New routes: `GET /.well-known/oauth-authorization-server` (RFC 8414),
+      `POST /_auth/oauth2/register` (RFC 7591, public clients only, IP rate limited),
+      `GET`/`POST /_auth/oauth2/authorize`, `POST /_auth/oauth2/token`,
+      `POST /_auth/oauth2/revoke` (RFC 7009), `GET /_auth/oauth2/grants` and
+      `DELETE /_auth/oauth2/grants/:id`.
+    - The consent screen is one route file on the web app, at the path published as
+      `authorization_endpoint` (default `{app url}/oauth/authorize`):
+      `export const { GET, POST } = createOAuth2AuthorizeHandlers({ loginPath: '/login' })`
+      from `@spfn/auth/nextjs/server`. `render` replaces the body; the handler keeps the
+      status, the headers, the hidden fields and the form's own CSRF token.
+    - `verifyAccessToken(token, resource)` — exported from `@spfn/auth/server` — is what you
+      hand `@spfn/mcp`'s `validateToken`. It answers `{ clientId, scopes, expiresAt, userId }`
+      or `null`, and an access token issued here is **not** a session: ordinary API routes do
+      not accept it.
+    - PKCE `S256` only, `resource` (RFC 8707) required and the token good against it alone,
+      refresh tokens rotate and a replayed one revokes the grant, every code and refresh
+      failure is one `invalid_grant`, and token-endpoint errors are RFC 6749 §5.2 rather than
+      the SPFN error envelope. `revoke-all`, a password change, a completed password reset
+      and a deletion request each revoke every grant the account has.
+    - New sweep `auth.oauth2.client-purge` (daily 05:00, in `authJobRouter`) deletes
+      unapproved client rows older than a day. The issuer is checked at boot — absolute, no
+      path, `https` (or `http` on loopback for development) — naming `SPFN_API_URL` or
+      `authorizationServer.issuer`, whichever it came from.
+    - End-to-end, including both CLIs: [docs/guides/mcp-clients.md](docs/guides/mcp-clients.md).
+- **A device-registered event and a signed sign-out-everywhere link** (#94), so an account
+  owner can be told a device was added and act on it without a session.
+  `@spfn/auth` 0.3.0-beta.21 and 0.3.0-beta.22.
+    - `authDeviceRegisteredEvent` (`auth.device.registered`) fires after commit on every
+      channel that registers a device key — `channel` is `register`, `signup-link`,
+      `invitation`, `password`, `oauth`, `oauth-native`, `device-code`, `password-reset` or
+      `passkey`. It carries `userId`, `keyId`, `algorithm`, a 12-character
+      `fingerprintPrefix`, `createdAtMillis`, `mfaEnrolled`, and whatever the registration
+      knew about the device (`deviceName?`, `platform?`, `ip?`, `userAgent?`). A login event
+      says a session began and not what it began on, so a stolen password used on a new
+      machine used to be silent. Key **rotation** is deliberately not announced.
+      Payload type `AuthDeviceRegisteredPayload`.
+    - `createRevokeAllLink(userId, { ttlMinutes? })` from `@spfn/auth/server` mints a
+      one-time link your app mails to the address the account already proved; opening it
+      signs every device out with no session at all. The returned `url` carries the plaintext
+      token — hand it to the mail template and do not log, persist or queue it.
+    - It opens a page in your app, not an API route. Mount the one that ships with the
+      package: `export const { GET, POST } = createRevokeAllPageHandlers()` from
+      `@spfn/auth/nextjs/server`. `GET` draws the expiry, the device count and one button;
+      `POST` reports how many devices it signed out. Both mint and check a path-scoped CSRF
+      cookie of their own, because there is no session here to derive one from.
+    - New public routes `POST /_auth/keys/revoke-all/confirm` and
+      `POST /_auth/keys/revoke-all/consume` — the token travels in the body, never in a path
+      segment, every refusal is the same 404, and both share one 10/minute rate-limit counter.
+      Neither is a mobile-contract operation.
+    - New settings: `SPFN_AUTH_REVOKE_ALL_LINK_TTL_MINUTES` (default `30`) and
+      `SPFN_AUTH_REVOKE_ALL_CONFIRM_PATH` (default `/account/revoke-all`). New sweep
+      `auth.revoke-all-token-purge` (daily 06:00) in `authJobRouter`.
+    - `listKeys` rows gain `registeredIp` and `registeredUserAgent`, captured once from the
+      request that registered the key and never updated — unauthenticated display material,
+      so render them and decide nothing by them. Mobile contract **0.11.0**.
+- **A second factor: TOTP, a passkey marked as the second factor, and ten recovery codes**
+  (#95). Optional in the strong sense — an account that never enrols meets exactly the
+  behaviour it met before, on every route. `@spfn/auth` 0.3.0-beta.23 and 0.3.0-beta.25.
+    - New routes `POST /_auth/mfa/totp/enroll`, `totp/confirm`, `disable`, `passkey/mark`,
+      `recovery/regenerate`, `step-up`, `step-up/options`, `GET /_auth/mfa/status`, and the
+      two public ones a sign-in finishes on, `POST /_auth/mfa/verify` and `verify/options`.
+    - **`SPFN_AUTH_TOKEN_ENCRYPTION_KEYS` is now required by any app offering a second
+      factor, including one with no social login at all** — it is the keyring a TOTP secret
+      is encrypted with at rest. Unset, `totp/enroll` answers a 500 configuration error
+      rather than the 401 a wrong code gets.
+    - For an **enrolled** account, four kinds of change ask for the second factor again on
+      the calling device within `SPFN_AUTH_MFA_STEP_UP_MINUTES` (default 10): the password,
+      `keys/revoke-all`, the second factor itself, and the account's passkeys. Otherwise the
+      answer is **403 `STEP_UP_REQUIRED`** — 403 and not 401, so a web client asks for a code
+      instead of reading it as a dead session. `assertStepUp({ userId, keyId })` is exported
+      from `@spfn/auth/server` for an application's own sensitive routes.
+    - Recovery codes are ten, `xxxxx-xxxxx`, shown once at confirmation and once at each
+      regeneration, stored as password hashes rather than unsalted digests, and
+      `recovery/regenerate` retires every earlier one. `status` reports how many are left.
+    - New settings: `SPFN_AUTH_MFA_ISSUER`, `SPFN_AUTH_MFA_STEP_UP_MINUTES` (`10`),
+      `SPFN_AUTH_MFA_CHALLENGE_TTL_MINUTES` (`10`) and `SPFN_AUTH_MFA_CONFIRM_PATH`
+      (`/auth/mfa`). New sweep `auth.mfa.sweep` (daily 07:00) in `authJobRouter`, which
+      deletes unconfirmed enrolments after 24 hours and the inactive keys expired challenges
+      were holding.
+    - From a browser: `completeMfaWithCode`, `completeMfaWithRecoveryCode` and
+      `completeMfaWithPasskey` from `@spfn/auth/client` finish the whole second half.
+      `authLoginEvent` and `authDeviceRegisteredEvent` carry `mfaEnrolled`, which is the hook
+      for offering enrolment; the package itself never blocks an account that has none.
+    - Mobile contract **0.13.0** carries the `auth.mfa.*` family; the enrolment routes are not
+      contract operations.
+- **Opt-in session binding, so a copied session cookie stops working** (#97). A web session's
+  signing key is sealed inside the cookie, which makes a copy of the cookie that device —
+  binding puts that session on a key that expires in hours and that only a fresh WebAuthn
+  assertion can replace. `@spfn/auth` 0.3.0-beta.24.
+    - `authApi.setSessionBinding.call({ body: { mode: 'passkey' } })` turns it on and
+      `getSessionBinding` reports `{ mode, keyExpiresAtMillis? }`; turning it **off** needs a
+      fresh credential, so `disableSessionBinding(api)` from `@spfn/auth/client` runs the
+      passkey ceremony or takes `{ currentPassword }`. New routes
+      `POST`/`GET /_auth/session/binding`, `POST /_auth/session/binding/disable/options`,
+      `POST /_auth/session/renew/options` and `POST /_auth/session/renew/verify`.
+    - **It needs a deployment where `proxy-guard` tags the request `clientType: 'web'`** —
+      that is the only signal the backend has that a request came through the proxy holding
+      the session cookie. Without it, `setSessionBinding` answers 400
+      `SessionBindingUnavailableError` rather than turning on a switch that protects nothing.
+    - New settings: `SPFN_AUTH_BOUND_KEY_TTL_HOURS` (default `24`),
+      `SPFN_AUTH_BOUND_KEY_RENEW_GRACE_HOURS` (default `168`, i.e. seven days past expiry a
+      bound key may still be renewed), `SPFN_AUTH_CONCURRENT_USE_WINDOW_MS` (default
+      `300000`) and `SPFN_AUTH_SESSION_RENEW_PATH` in `.env.local` (default `/auth/renew`).
+    - Once the key runs out the proxy answers 401 `SessionRenewalRequiredError` and **keeps
+      the cookies**: a client component calls `renewSession(api)` and the session continues.
+      `RequireAuth` takes `renewalPath` and sends a server-rendered page there instead of to
+      sign-in, because a server component cannot run a WebAuthn ceremony, and
+      `getAuthSessionData()` answers a third state, `'renewal-required'`, for a hand-written
+      guard.
+    - A bound session presented from a different browser family is refused 401
+      `SessionContextChangedError` and its cookies are cleared. The comparison is five
+      families (`edge` / `chrome` / `firefox` / `safari` / `other`) with no desktop/mobile
+      axis, so a version bump, a user-agent reduction and "Request desktop site" are all the
+      same browser; a request with no `user-agent` is no signal rather than a mismatch.
+    - `listKeys` rows gain `binding` and `concurrentUseAtMillis` — the last time one key was
+      seen from two attested addresses inside the concurrent-use window. A signal to show and
+      notify on, never a refusal, and the addresses themselves are never returned.
+      Mobile contract **0.12.0**; every new field is optional and absent for an account that
+      did not opt in.
+
+#### @spfn/storage
+
+- **Prefix snapshots over object versions, for a pipeline that overwrites its own outputs**
+  (#96). `snapshotPrefix(storage, prefix, { concurrency?, maxKeys? })` records which version
+  of every object under a prefix was live at one moment, and
+  `restoreManifest(storage, manifest, { onto?, concurrency? })` puts those versions back;
+  `serializeManifest` / `parseManifest` are the JSON round trip, and storing the manifest is
+  the application's job. `@spfn/storage` 0.3.0-beta.2.
+    - `stat(key)` now answers `{ key, size, lastModified?, etag?, contentHash?, versionId? }`
+      and `copy(from, to, { sourceVersionId? })` takes the version to copy — without the
+      option it is exactly the old behaviour.
+    - Restore does not stop at the first failure: every entry lands in `restored`, in
+      `skipped` with a reason (`already-current`, `no-version`, `version-missing`) or in
+      `failed`. A **missing** target key is not a failure — that is the case restore exists
+      for. Everything checkable runs before the first copy: a manifest from another provider,
+      an `onto` crossing the `public/` boundary, and every target key through the usual key
+      validation.
+    - **The bucket decides how far back you can go.** A manifest names versions and cannot
+      protect them; S3 lifecycle and GCS Object Versioning retention are what keep them
+      alive. Restore writes a **new** version of each object it touches and purges no CDN
+      cache. Neither operation is atomic, and a manifest grows with the object count — split
+      a very large prefix.
+    - **GCS through the S3 interoperability endpoint cannot snapshot versions at all**: the
+      AWS SDK reads `x-amz-version-id` and interop returns `x-goog-generation`, so every
+      entry restores as `no-version`. Use the native GCS provider where versioned snapshots
+      matter.
+- `getDownloadUrl(key, options)` signs the response's `Content-Disposition` and
+  `Content-Type` into the URL (#211) — the download side of a content-addressed layout,
+  where the object has no file name of its own and the name to save it under is known only
+  per download. Both values are part of the signature on S3-compatible providers and on GCS,
+  so a client cannot edit the query to change them; the local provider appends them as query
+  parameters and the app's own file route decides whether to honour them. The positional form
+  `getDownloadUrl(key, 900)` still means `expiresIn`. `@spfn/storage` 0.3.0-beta.3.
+
+#### @spfn/mcp
+
+- **The RFC 9728 protected resource metadata document**, served unauthenticated at
+  `GET /.well-known/oauth-protected-resource` and at the path-aware form whose suffix is the
+  resolved `resource` path (`/.well-known/oauth-protected-resource/mcp`) (#93). It publishes
+  `resource`, `authorization_servers`, `scopes_supported` and `bearer_methods_supported`;
+  `authorizationServers` defaults to the origin of `appUrl`, `scopesSupported` is the list a
+  client picks its `scope` from, and `resourceMetadataUrl` overrides the published URL for a
+  deployment served under a base path. `@spfn/mcp` 0.3.0-beta.3.
+- A rejected bearer token now gets `WWW-Authenticate: Bearer error="invalid_token",
+  resource_metadata="…"` (RFC 6750 §3) where a request with **no** token gets the plain
+  challenge (#93). That parameter is what lets a client tell the two apart: refresh the token
+  it holds, or go and authorize for one.
 
 #### @spfn/signing
 
