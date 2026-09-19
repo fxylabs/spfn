@@ -67,12 +67,24 @@ function responseContext(
 
 const next = async (): Promise<void> => undefined;
 
-/** The device key the proxy minted for a sign-in, as shared metadata holds it. */
+/** The device key the proxy minted for a sign-in. */
 function mintedKey(): Record<string, unknown>
 {
     const keyPair = generateKeyPair('ES256');
 
     return { privateKey: keyPair.privateKey, keyId: keyPair.keyId, algorithm: keyPair.algorithm };
+}
+
+/**
+ * That key as shared metadata holds it.
+ *
+ * `loginRegisterInterceptor` reserves the `new` names for the credentials it is
+ * installing: `generalAuthInterceptor` matches the same requests and writes the
+ * *inbound* session's `keyId`, so the two may not share a name (#99).
+ */
+function asMintedMetadata(key: Record<string, unknown>): Record<string, unknown>
+{
+    return { newPrivateKey: key.privateKey, newKeyId: key.keyId, newAlgorithm: key.algorithm };
 }
 
 /** What a sign-in that was stopped for a second factor answers with. */
@@ -114,7 +126,7 @@ describe('the proxy and a second-factor step-up (case table 6e)', () =>
     it('row: login 200 — today\'s behaviour, the session is sealed by loginRegisterInterceptor', async () =>
     {
         const key = mintedKey();
-        const ctx = responseContext('/_auth/login', 200, { userId: '7' }, { metadata: key });
+        const ctx = responseContext('/_auth/login', 200, { userId: '7' }, { metadata: asMintedMetadata(key) });
 
         await loginRegisterInterceptor.response?.(ctx, next);
         await mfaVerifyInterceptor.response?.(ctx, next);
@@ -126,7 +138,7 @@ describe('the proxy and a second-factor step-up (case table 6e)', () =>
     it('row: login 202 — loginRegisterInterceptor is untouched and seals nothing; mfaVerifyInterceptor bakes the pending cookie', async () =>
     {
         const key = mintedKey();
-        const ctx = responseContext('/_auth/login', 202, stepUpBody(), { metadata: key });
+        const ctx = responseContext('/_auth/login', 202, stepUpBody(), { metadata: asMintedMetadata(key) });
 
         // The existing non-200 early return is what leaves the body here to read.
         // Nothing in that rule changed for #95.
@@ -247,7 +259,7 @@ describe('the proxy and a second-factor step-up (case table 6e)', () =>
     it('row: an OAuth start in another tab while a 202 is outstanding — both pending cookies coexist', async () =>
     {
         const key = mintedKey();
-        const stepUp = responseContext('/_auth/login', 202, stepUpBody(), { metadata: key });
+        const stepUp = responseContext('/_auth/login', 202, stepUpBody(), { metadata: asMintedMetadata(key) });
 
         await mfaVerifyInterceptor.response?.(stepUp, next);
 
@@ -328,7 +340,7 @@ describe('the proxy and a second-factor step-up (case table 6e)', () =>
     it('row: password/reset/complete answers 202 — no session, the pending cookie instead', async () =>
     {
         const key = mintedKey();
-        const ctx = responseContext('/_auth/password/reset/complete', 202, stepUpBody(), { metadata: key });
+        const ctx = responseContext('/_auth/password/reset/complete', 202, stepUpBody(), { metadata: asMintedMetadata(key) });
 
         await loginRegisterInterceptor.response?.(ctx, next);
         await mfaVerifyInterceptor.response?.(ctx, next);

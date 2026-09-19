@@ -339,6 +339,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The Kit control-plane client is not part of this build yet, so `install`, `restore` and
   `update` report `CLI_CONTROL_PLANE_CLIENT_ABSENT` until it ships.
 
+### Fixed
+
+#### @spfn/auth
+
+- **A passkey-bound session renewal answered 200 and left the browser signed out** (#99).
+  `POST /_auth/session/renew/verify` matches two registered proxy rules:
+  `loginRegisterInterceptor` mints the replacement key pair, and `generalAuthInterceptor`
+  authenticates the request by signing it with the key that is expiring. Both wrote to the
+  one `metadata` object the proxy shares between a request and its response, and both called
+  their key `keyId` — so the id of the *retired* key was the last one written, and the
+  response phase sealed the **new** private key around it. The renewal succeeded, the cookie
+  it installed named a key that had just been revoked, and the next authenticated request was
+  a `401`. The replacement credentials now travel as `newPrivateKey` / `newKeyId` /
+  `newAlgorithm`, the names `keyRotationInterceptor` has always used. `@spfn/auth`
+  0.3.0-beta.26.
+    - Renewal is where it always bites, because that request is *defined* as one a live
+      session makes. But the collision was never renewal's alone: every path on the login
+      interceptor's list except `login` and `register` is an authenticated path as far as
+      `requiresAuth` is concerned, so `passkeys/login/verify`, `password/reset/complete`,
+      `signup/password` and `invitations/accept` sealed the wrong key id too whenever the
+      browser still had a session cookie in the jar.
+    - And the other half of it: `generalAuthInterceptor`'s near-expiry session refresh no
+      longer re-seals the **inbound** session on top of a replacement an earlier rule in the
+      same chain just installed. Response phases run in registration order, so that re-seal
+      was the last write of the session cookie and undid a renewal, a sign-in or a key
+      rotation that happened to land in the last day of the cookie's life.
+    - Nothing else changes: the renewal protocol, the backend's proof check and its key
+      retirement are untouched, and a refused verify still installs no session and clears no
+      cookie.
+
+
 ## [@spfn/core@0.3.0-beta.4, @spfn/auth@0.3.0-beta.4] - 2026-08-10
 
 ### Added

@@ -7,7 +7,7 @@
  * - Expired session cleanup
  */
 
-import type { InterceptorRule, RequestInterceptorContext } from '@spfn/core/nextjs/server';
+import type { InterceptorRule, RequestInterceptorContext, ResponseInterceptorContext } from '@spfn/core/nextjs/server';
 import { SessionContextChangedError, SessionRenewalRequiredError } from '@spfn/auth/errors';
 import { unsealSession, sealSession, shouldRefreshSession, type SessionData } from '../../server/lib/session';
 import { generateClientToken } from '../../server/lib/crypto';
@@ -107,6 +107,12 @@ function refuseAsContextChanged(ctx: RequestInterceptorContext): void
 function isKeyExpiredRefusal(body: unknown): boolean
 {
     return (body as { __type?: unknown } | null)?.__type === 'KeyExpiredError';
+}
+
+/** Whether an earlier rule in this response chain already queued a session cookie. */
+function sessionQueued(setCookies: ResponseInterceptorContext['setCookies']): boolean
+{
+    return setCookies.some(cookie => cookie.name === COOKIE_NAMES.SESSION);
 }
 
 /**
@@ -334,8 +340,16 @@ export const generalAuthInterceptor: InterceptorRule =
 
                 pushCsrfCookieRemoval(ctx.setCookies);
             }
-            // Refresh session if needed and request was successful
-            else if (ctx.metadata.refreshSession && ctx.response.status === 200)
+            // Refresh session if needed and request was successful.
+            //
+            // Never over a replacement. An earlier rule in this same chain — a
+            // sign-in, a passkey renewal, a key rotation — may already have queued
+            // the session it just installed, and response phases run in
+            // registration order, so re-sealing the *inbound* session here would
+            // be the last write of that cookie name and the one the browser keeps.
+            // This branch exists to extend a session that is still the current
+            // one; when it has just been replaced there is nothing to extend.
+            else if (ctx.metadata.refreshSession && ctx.response.status === 200 && !sessionQueued(ctx.setCookies))
             {
                 try
                 {
