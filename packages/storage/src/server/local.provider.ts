@@ -16,19 +16,20 @@ import { copyFile, mkdir, readdir, readFile, realpath, stat, unlink, writeFile }
 import { dirname, join, resolve, sep } from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import {
-    DEFAULT_EXPIRES_IN,
     MAX_FILE_SIZE,
     StorageKeyError,
     StorageObjectNotFoundError,
     StorageVersionNotFoundError,
 } from '../shared/index';
 import { deleteManyIndividually } from './delete-many';
+import { downloadUrlOptions, responseHeaderQuery } from './download-url';
 import { assertKeyPrefix, assertObjectKey, compareKeys, resolveMaxKeys } from './object-key';
 import { awaitStreamStart } from './object-stream';
 import { deleteEveryListedObject } from './prefix-delete';
 import type { Readable } from 'node:stream';
 import type {
     DeleteManyResult,
+    DownloadUrlOptions,
     IStorageProvider,
     LocalProviderConfig,
     PrefixDeleteResult,
@@ -76,9 +77,9 @@ export class LocalStorageProvider implements IStorageProvider
         throw new Error('presigned upload not supported by local storage provider');
     }
 
-    async getDownloadUrl(key: string, _expiresIn = DEFAULT_EXPIRES_IN): Promise<string>
+    async getDownloadUrl(key: string, options?: number | DownloadUrlOptions): Promise<string>
     {
-        return this.getPublicUrl(key);
+        return this.getPublicUrl(key) + responseHeaderQuery(downloadUrlOptions(options));
     }
 
     getPublicUrl(key: string): string

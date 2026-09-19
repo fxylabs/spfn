@@ -15,6 +15,7 @@ import {
     StorageVersionNotFoundError,
 } from '../shared/index';
 import { deleteManyIndividually } from './delete-many';
+import { downloadUrlOptions } from './download-url';
 import { isPublicKey } from './keys';
 import { assertKeyPrefix, assertObjectKey, resolveMaxKeys } from './object-key';
 import { awaitStreamStart } from './object-stream';
@@ -23,6 +24,7 @@ import { assertSizeLimits, gcsContentLengthRange } from './size-limit';
 import type { Readable } from 'node:stream';
 import type {
     DeleteManyResult,
+    DownloadUrlOptions,
     GcsProviderConfig,
     IStorageProvider,
     PrefixDeleteResult,
@@ -91,10 +93,13 @@ export class GcsStorageProvider implements IStorageProvider
         return { uploadUrl, key, expiresIn, requiredHeaders: extensionHeaders };
     }
 
-    async getDownloadUrl(key: string, expiresIn = DEFAULT_EXPIRES_IN): Promise<string>
+    async getDownloadUrl(key: string, options?: number | DownloadUrlOptions): Promise<string>
     {
+        const { expiresIn, responseContentDisposition, responseContentType } = downloadUrlOptions(options);
         const [url] = await this.resolveBucket(key).file(key).getSignedUrl({
             version: 'v4', action: 'read', expires: Date.now() + expiresIn * 1000,
+            ...(responseContentDisposition ? { responseDisposition: responseContentDisposition } : {}),
+            ...(responseContentType ? { responseType: responseContentType } : {}),
         });
 
         return url;

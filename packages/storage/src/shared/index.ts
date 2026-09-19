@@ -89,6 +89,23 @@ export interface PublicUploadParams
     expiresIn?: number;
 }
 
+/**
+ * presigned GET URL에 서명되는 응답 헤더.
+ *
+ * 내용 주소 키(`<prefix>/<sha256>`)에는 객체에 파일 이름이 없다 — 같은 객체를 다른 이름의
+ * 행 여럿이 가리킬 수 있어 브라우저가 저장할 이름은 다운로드마다 정해진다. 두 값 다 서명에
+ * 들어가므로 클라이언트가 URL을 고쳐 바꿀 수 없다(S3·GCS). local은 쿼리로 붙여 주고 앱의
+ * 로컬 핸들러가 읽는다.
+ */
+export interface DownloadUrlOptions
+{
+    expiresIn?: number;
+    /** 응답의 `Content-Disposition`. 예: `attachment; filename*=UTF-8''report.md` */
+    responseContentDisposition?: string;
+    /** 이 응답에 한해 저장된 `Content-Type`을 덮어쓴다. */
+    responseContentType?: string;
+}
+
 export interface PresignedUrlResult
 {
     /** 클라이언트가 PUT 할 presigned URL */
@@ -251,8 +268,8 @@ export interface IStorageProvider
     getUploadUrl(params: PresignedUrlParams & { temp?: boolean }): Promise<PresignedUrlResult>;
     /** 공개 캐시 헤더가 붙은 presigned PUT URL. */
     getPublicUploadUrl(params: PublicUploadParams): Promise<PresignedUrlResult>;
-    /** presigned GET URL(비공개 객체 다운로드용). */
-    getDownloadUrl(key: string, expiresIn?: number): Promise<string>;
+    /** presigned GET URL(비공개 객체 다운로드용). 숫자는 `expiresIn`(기존 호출 호환). */
+    getDownloadUrl(key: string, options?: number | DownloadUrlOptions): Promise<string>;
     /** 공개 객체의 영구 URL(서명 없이 서빙). */
     getPublicUrl(key: string): string;
     /** 서버 직접 업로드. */

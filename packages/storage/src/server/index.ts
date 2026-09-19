@@ -44,6 +44,7 @@ export { parseManifest, restoreManifest, serializeManifest, snapshotPrefix } fro
 export type { RestoreOptions, SnapshotOptions } from './snapshot-restore';
 export type {
     DeleteManyResult,
+    DownloadUrlOptions,
     GcsProviderConfig,
     IStorageProvider,
     LocalProviderConfig,

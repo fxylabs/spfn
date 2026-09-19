@@ -1,6 +1,6 @@
 {
   "name": "@spfn/storage",
-  "version": "0.3.0-beta.2",
+  "version": "0.3.0-beta.3",
   "type": "module",
   "description": "Provider-agnostic object storage (S3/GCS/local) with upload, streaming download, server-side copy, prefix listing, and deletion APIs.",
   "exports": {

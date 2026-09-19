@@ -23,6 +23,7 @@ import {
     StorageVersionNotFoundError,
 } from '../shared/index';
 import { errorMessage } from './delete-many';
+import { downloadUrlOptions } from './download-url';
 import { assertKeyPrefix, assertObjectKey, resolveMaxKeys } from './object-key';
 import { deleteEveryListedObject } from './prefix-delete';
 import { assertSizeLimits } from './size-limit';
@@ -30,6 +31,7 @@ import type { GetObjectCommandOutput } from '@aws-sdk/client-s3';
 import type { Readable } from 'node:stream';
 import type {
     DeleteManyResult,
+    DownloadUrlOptions,
     IStorageProvider,
     PrefixDeleteResult,
     PresignedUrlParams,
@@ -114,9 +116,16 @@ export class S3StorageProvider implements IStorageProvider
         return { uploadUrl: await getSignedUrl(this.client, command, { expiresIn }), key, expiresIn, requiredHeaders };
     }
 
-    async getDownloadUrl(key: string, expiresIn = DEFAULT_EXPIRES_IN): Promise<string>
+    async getDownloadUrl(key: string, options?: number | DownloadUrlOptions): Promise<string>
     {
-        return getSignedUrl(this.client, new GetObjectCommand({ Bucket: this.bucket, Key: key }), { expiresIn });
+        const { expiresIn, responseContentDisposition, responseContentType } = downloadUrlOptions(options);
+        const command = new GetObjectCommand({
+            Bucket: this.bucket, Key: key,
+            ResponseContentDisposition: responseContentDisposition,
+            ResponseContentType: responseContentType,
+        });
+
+        return getSignedUrl(this.client, command, { expiresIn });
     }
 
     getPublicUrl(key: string): string

@@ -206,6 +206,31 @@ them. Enforcement by provider:
 `getPublicUploadUrl` behaves the same and additionally always returns its signed
 `cache-control` (and S3 `x-amz-tagging`) in `requiredHeaders`.
 
+## Download URLs with response headers
+
+`getDownloadUrl(key, options)` signs the response's `Content-Disposition` and
+`Content-Type` into the URL when you ask for them. This is the download side of a
+content-addressed layout: an object stored under `<prefix>/<sha256>` has no file name
+of its own, several rows may point at one object under different names, and the name
+the browser saves the file under is only known per download.
+
+```ts
+const url = await storage.getDownloadUrl('artifacts/ws1/9f86d0…', {
+    expiresIn: 900,
+    responseContentDisposition: `attachment; filename*=UTF-8''report.md`,
+    responseContentType: 'text/markdown',   // optional override of the stored type
+});
+```
+
+- **S3-compatible:** `ResponseContentDisposition` / `ResponseContentType` on the
+  signed `GetObject`; **GCS:** `responseDisposition` / `responseType` on the V4
+  signed URL. Both are part of the signature, so a client cannot edit the query to
+  change them.
+- **Local:** the values are appended as `response-content-disposition` and
+  `response-content-type` query parameters on the public URL. The local provider
+  serves no HTTP itself; the app's local file route decides whether to honour them.
+- The positional form `getDownloadUrl(key, 900)` still works and means `expiresIn`.
+
 ## Temp uploads and orphan cleanup
 
 `getUploadUrl({ temp: true })` marks the upload as unconfirmed so that objects whose
