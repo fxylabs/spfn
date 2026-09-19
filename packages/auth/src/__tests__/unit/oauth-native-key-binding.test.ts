@@ -102,7 +102,7 @@ describe('native sign-in binds the id_token to the key being enrolled', () =>
 
         const result = await oauthNativeService(paramsFor(key));
 
-        expect(result).toEqual({ userId: '1', keyId: 'key-id-1', isNewUser: true });
+        expect(result).toEqual({ mfaRequired: false, userId: '1', keyId: 'key-id-1', isNewUser: true });
         expect(verifyNativeIdToken).toHaveBeenCalledOnce();
         expect(registerPublicKeyService).toHaveBeenCalledOnce();
     });

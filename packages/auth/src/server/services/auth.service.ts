@@ -93,23 +93,51 @@ export interface LoginParams
 }
 
 /**
+ * The second-factor challenge a stepped-up sign-in hands back (#95).
+ *
+ * `secret` is the 32 random bytes the challenge was minted from, and it is the
+ * only form of it that ever leaves the server — the row is addressed by its
+ * hash. It authorizes exactly one thing, `POST /_auth/mfa/verify` for this one
+ * registration, and it is not a bearer credential for anything else.
+ */
+export interface MfaChallengeHandle
+{
+    secret: string;
+    /** Epoch milliseconds the challenge stops verifying at. */
+    expiresAtMillis: number;
+}
+
+/**
  * What a sign-in answers with, on every path that starts a session.
  *
- * The last two fields are the carrier #97 needed. The Next.js proxy generated
- * the device key and sealed the cookie, but only the backend knows whether the
- * account asked for a bound session and when the key it just registered runs
- * out — so the sign-in says it here and the interceptor copies both into
- * `SessionData`. A response without them seals an unbound session, which is what
- * every account that did not opt in gets and what every path predating this
- * change keeps getting.
+ * **One type with a required discriminant, not a union.** A sign-in on an
+ * account with a second factor and a device it has never seen answers 202 with
+ * `mfaRequired: true` and a challenge instead of a session (#95), and the two
+ * answers have to be one declared type: `authApi.login` infers its result from
+ * this declaration, so a union would make every existing `result.userId` in
+ * every consuming app stop compiling, and the mobile contract's grammar has no
+ * union type either — `DeviceAuthPollResponse` was flattened the same way and
+ * for the same reason. Narrow on `mfaRequired` before reading `userId`.
+ *
+ * `sessionBinding` and `keyExpiresAtMillis` are the carrier #97 needed. The
+ * Next.js proxy generated the device key and sealed the cookie, but only the
+ * backend knows whether the account asked for a bound session and when the key
+ * it just registered runs out — so the sign-in says it here and the interceptor
+ * copies both into `SessionData`. A response without them seals an unbound
+ * session, which is what every account that did not opt in gets and what every
+ * path predating that change keeps getting.
  */
 export interface LoginResult
 {
-    userId: string;
-    publicId: string;
+    /** true means no session was started: verify the challenge below first. */
+    mfaRequired: boolean;
+    /** Present exactly when `mfaRequired` is true. */
+    challenge?: MfaChallengeHandle;
+    userId?: string;
+    publicId?: string;
     email?: string;
     phone?: string;
-    passwordChangeRequired: boolean;
+    passwordChangeRequired?: boolean;
     /** `'passkey'` when the key registered by this sign-in is bound. Absent otherwise. */
     sessionBinding?: SessionBindingType;
     /** Epoch milliseconds that key expires at. Only sent alongside `sessionBinding`. */
@@ -414,6 +442,7 @@ export async function loginService(
     await updateLastLoginService(user.id);
 
     const result: LoginResult = {
+        mfaRequired: false,
         userId: String(user.id),
         publicId: user.publicId,
         email: user.email || undefined,
@@ -424,7 +453,7 @@ export async function loginService(
 
     // Emit login event
     await authLoginEvent.emit({
-        userId: result.userId,
+        userId: String(user.id),
         provider: email ? 'email' : 'phone',
         email: result.email,
         phone: result.phone,

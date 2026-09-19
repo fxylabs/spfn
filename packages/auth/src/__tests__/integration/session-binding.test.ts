@@ -679,7 +679,7 @@ describe.skipIf(!dbAvailable)('session binding (case tables 6a, 6b, 6g)', () =>
             }
         });
 
-        it('the contract: the four optional fields, the KeyBinding enum, and the bundle at 0.12.0', async () =>
+        it('the contract: the four optional fields, the KeyBinding enum, and the bundle at 0.13.0', async () =>
         {
             const { buildMobileContractBundle, CONTRACT_SUPPORTED_RANGE, CONTRACT_VERSION } =
                 await import('@/server/client-proof/contract-bundle');
@@ -689,8 +689,8 @@ describe.skipIf(!dbAvailable)('session binding (case tables 6a, 6b, 6g)', () =>
             };
             const fieldsOf = (name: string) => bundle.types.find(type => type.name === name)!.fields;
 
-            expect(CONTRACT_VERSION).toBe('0.12.0');
-            expect(CONTRACT_SUPPORTED_RANGE).toBe('>=0.12.0 <0.13.0');
+            expect(CONTRACT_VERSION).toBe('0.13.0');
+            expect(CONTRACT_SUPPORTED_RANGE).toBe('>=0.13.0 <0.14.0');
             expect(bundle.enums).toContainEqual({ name: 'KeyBinding', values: ['none', 'passkey'] });
 
             // Optional throughout: a consumer generated against 0.11.x reads

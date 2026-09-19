@@ -154,6 +154,9 @@ export async function finishSessionRenewService(
     });
 
     return {
+        // A renewal replaces the key of a device that is already signed in, so
+        // it is a rotation rather than an arrival and never steps up (#95).
+        mfaRequired: false,
         keyId: params.keyId,
         userId: String(user.id),
         publicId: user.publicId,

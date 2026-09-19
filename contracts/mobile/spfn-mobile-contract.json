@@ -4,8 +4,8 @@
   "originStatement": "Generated from the route and contract definitions in SPFN primitives (packages/auth/src/server/client-proof) and published from that repository. This file is generated output: edit the source modules and re-export, never this file.",
   "contractName": "spfn-mobile-contract",
   "contractMajor": 0,
-  "contractVersion": "0.12.0",
-  "supportedRange": ">=0.12.0 <0.13.0",
+  "contractVersion": "0.13.0",
+  "supportedRange": ">=0.13.0 <0.14.0",
   "exporterVersion": "@spfn/auth/contract-bundle@6.0.0",
   "authProfiles": { "allowed": ["clientProofV1"], "unknownProfilePolicy": "reject", "mixingWithinSession": "prohibited" },
   "operationAuthClasses": {
@@ -63,7 +63,7 @@
     "denyResponseRule": "deny answers 204 with an empty body and therefore declares no responseType, the way core.time declares no requestType"
   },
   "restOperations": {
-    "appliesTo": "every operation whose path starts with /_auth. The server also answers two /_auth routes that are not operations of this contract and are not reachable from a generated client — the sign-out-everywhere link confirm and consume, which a browser posts to from a page in the app with no session and no proof",
+    "appliesTo": "every operation whose path starts with /_auth. The server answers more /_auth routes than this contract declares, and the undeclared ones are not reachable from a generated client: the sign-out-everywhere link confirm and consume, which a browser posts to from a page in the app with no session and no proof; the passkey, session-binding and session-renewal ceremonies, which need a browser WebAuthn API; and the second-factor enrolment routes, each of which needs an account screen. Of the second-factor routes only verify and status are declared here — verify because a client that met a 202 sign-in has to be able to finish it, and status because it has to be able to say what the account enrolled",
     "requestBody": "plain JSON of the request type, validated server-side; canonical-JSON encoding is required only when the call is proven (the proof binds the canonical bytes)",
     "responseBody": "the response type as plain JSON, with no envelope around it. An operation that declares no responseType answers 204 with an empty body and there is nothing to decode",
     "errorEnvelope": "the same {\"error\":{\"code\",\"message\",\"requestId\"}} envelope every operation uses, carried alongside the SPFN web fields (__type and the error class's own public fields) in one body: the web client restores an error class from __type while a generated client reads error.code and ignores the rest. The codes are the server error class names listed under errors with surface \"rest\", not the six clientProofV1 refusal codes — those reach only proven calls",
@@ -254,13 +254,53 @@
     {
       "name": "LoginResponse",
       "fields": [
-        { "name": "userId", "type": "string", "optional": false },
-        { "name": "publicId", "type": "string", "optional": false },
+        { "name": "mfaRequired", "type": "boolean", "optional": false },
+        { "name": "challenge", "type": "MfaChallenge", "optional": true },
+        { "name": "userId", "type": "string", "optional": true },
+        { "name": "publicId", "type": "string", "optional": true },
         { "name": "email", "type": "string", "optional": true },
         { "name": "phone", "type": "string", "optional": true },
-        { "name": "passwordChangeRequired", "type": "boolean", "optional": false },
+        { "name": "passwordChangeRequired", "type": "boolean", "optional": true },
         { "name": "sessionBinding", "type": "KeyBinding", "optional": true },
         { "name": "keyExpiresAtMillis", "type": "integer", "optional": true }
+      ]
+    },
+    {
+      "name": "MfaChallenge",
+      "fields": [
+        { "name": "secret", "type": "string", "optional": false },
+        { "name": "expiresAtMillis", "type": "integer", "optional": false }
+      ]
+    },
+    {
+      "name": "MfaVerifyRequest",
+      "fields": [
+        { "name": "challenge", "type": "string", "optional": false },
+        { "name": "code", "type": "string", "optional": true },
+        { "name": "recoveryCode", "type": "string", "optional": true }
+      ]
+    },
+    {
+      "name": "MfaVerifyResponse",
+      "fields": [
+        { "name": "mfaRequired", "type": "boolean", "optional": false },
+        { "name": "keyId", "type": "string", "optional": false },
+        { "name": "challengeHash", "type": "string", "optional": false },
+        { "name": "userId", "type": "string", "optional": true },
+        { "name": "publicId", "type": "string", "optional": true },
+        { "name": "email", "type": "string", "optional": true },
+        { "name": "phone", "type": "string", "optional": true },
+        { "name": "passwordChangeRequired", "type": "boolean", "optional": true },
+        { "name": "sessionBinding", "type": "KeyBinding", "optional": true },
+        { "name": "keyExpiresAtMillis", "type": "integer", "optional": true }
+      ]
+    },
+    {
+      "name": "MfaStatusResponse",
+      "fields": [
+        { "name": "enrolled", "type": "boolean", "optional": false },
+        { "name": "methods", "type": "array<MfaMethod>", "optional": false },
+        { "name": "recoveryCodesRemaining", "type": "integer", "optional": false }
       ]
     },
     {
@@ -278,9 +318,11 @@
     {
       "name": "OauthNativeResponse",
       "fields": [
-        { "name": "userId", "type": "string", "optional": false },
-        { "name": "keyId", "type": "string", "optional": false },
-        { "name": "isNewUser", "type": "boolean", "optional": false }
+        { "name": "mfaRequired", "type": "boolean", "optional": false },
+        { "name": "challenge", "type": "MfaChallenge", "optional": true },
+        { "name": "userId", "type": "string", "optional": true },
+        { "name": "keyId", "type": "string", "optional": true },
+        { "name": "isNewUser", "type": "boolean", "optional": true }
       ]
     },
     {
@@ -372,6 +414,7 @@
       "fields": [
         { "name": "status", "type": "DeviceAuthPollStatus", "optional": false },
         { "name": "intervalMillis", "type": "integer", "optional": true },
+        { "name": "mfaRequired", "type": "boolean", "optional": true },
         { "name": "userId", "type": "string", "optional": true },
         { "name": "publicId", "type": "string", "optional": true },
         { "name": "email", "type": "string", "optional": true },
@@ -402,7 +445,8 @@
     { "name": "KeyAlgorithm", "values": ["ES256", "RS256"] },
     { "name": "KeyPlatform", "values": ["ios", "android", "web", "desktop"] },
     { "name": "KeyBinding", "values": ["none", "passkey"] },
-    { "name": "DeviceAuthPollStatus", "values": ["pending", "approved"] }
+    { "name": "DeviceAuthPollStatus", "values": ["pending", "approved"] },
+    { "name": "MfaMethod", "values": ["totp", "passkey"] }
   ],
   "operations": [
     {
@@ -480,6 +524,27 @@
       "responseType": "OauthNativeResponse",
       "summary": "Verifies a native/web social id_token server-side and enrolls the client-generated public key.",
       "since": "0.3.0"
+    },
+    {
+      "id": "auth.mfa.verify",
+      "method": "POST",
+      "path": "/_auth/mfa/verify",
+      "authProfile": "none",
+      "requiresSession": false,
+      "requestType": "MfaVerifyRequest",
+      "responseType": "MfaVerifyResponse",
+      "summary": "Finishes a sign-in that answered mfaRequired by spending the challenge, which activates the key.",
+      "since": "0.13.0"
+    },
+    {
+      "id": "auth.mfa.status",
+      "method": "GET",
+      "path": "/_auth/mfa/status",
+      "authProfile": "clientProofV1",
+      "requiresSession": false,
+      "responseType": "MfaStatusResponse",
+      "summary": "Reports whether the caller has a second factor, which methods, and how many recovery codes remain.",
+      "since": "0.13.0"
     },
     {
       "id": "auth.keys.rotate",
@@ -703,6 +768,13 @@
       "httpStatus": 409,
       "retryable": false,
       "summary": "that keyId is taken or was revoked — generate a fresh keyId and retry",
+      "surface": "rest"
+    },
+    {
+      "code": "MfaVerificationFailedError",
+      "httpStatus": 401,
+      "retryable": false,
+      "summary": "the second factor did not verify. One code for every way it can fail — a challenge that never existed, expired, was already spent or has run out of attempts, and a wrong or stale proof — because which one applies describes state the caller is guessing at",
       "surface": "rest"
     },
     {

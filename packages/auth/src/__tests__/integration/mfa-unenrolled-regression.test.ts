@@ -140,8 +140,12 @@ describe.skipIf(!dbAvailable)('an account with no second factor', () =>
         const { response } = await signIn();
 
         expect(response.status).toBe(200);
+        // `mfaRequired` joins the pin in #95 PR 2: the field is required on every
+        // sign-in answer, and false is what an account with no second factor
+        // gets. The rest of the body is byte-for-byte what it always was, which
+        // is the thing this file exists to hold.
         expect(Object.keys(await response.json()).sort())
-            .toEqual(['email', 'passwordChangeRequired', 'publicId', 'userId']);
+            .toEqual(['email', 'mfaRequired', 'passwordChangeRequired', 'publicId', 'userId']);
     });
 
     it('announces the login with mfaEnrolled false, and nothing else about the second factor', async () =>

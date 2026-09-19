@@ -120,6 +120,12 @@ export const DeviceAuthPollResponseSchema = Type.Union([
     }),
     Type.Object({
         status: Type.Literal('approved'),
+        // The `LoginResult` discriminant, carried because the approved branch is
+        // a `LoginResult` spread whole (#95). Always false here: a device-code
+        // approval is the owner saying yes on a device that is already signed
+        // in, which is itself a second factor, so this channel never steps up
+        // and never carries a challenge.
+        mfaRequired: Type.Boolean(),
         userId: Type.String(),
         publicId: Type.String(),
         email: Type.Optional(Type.String()),

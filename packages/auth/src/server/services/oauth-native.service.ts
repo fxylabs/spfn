@@ -23,6 +23,7 @@ import { type SocialProvider, type KeyAlgorithmType, type KeyPlatformType } from
 import { getOAuthProvider, type NormalizedIdentity } from '../lib/oauth';
 import { createOrLinkUser, assertActiveForOAuthSession, backfillVerifiedEmail } from './oauth.service';
 import { registerPublicKeyService } from './key.service';
+import type { MfaChallengeHandle } from './auth.service';
 import { updateLastLoginService } from './user.service';
 import { mfaEnrolledForUser } from './mfa.service';
 import { authLoginEvent, authRegisterEvent } from '../events';
@@ -63,11 +64,23 @@ export interface OAuthNativeParams
     metadata?: Record<string, unknown>;
 }
 
+/**
+ * What a native social sign-in answers with.
+ *
+ * Shaped like `LoginResult` and for the same reason (#95): this channel steps up
+ * too, so the answer is one type carrying a required discriminant and optional
+ * fields rather than a union the typed client and the mobile contract could not
+ * both express. Narrow on `mfaRequired` before reading `userId`.
+ */
 export interface OAuthNativeResult
 {
-    userId: string;
-    keyId: string;
-    isNewUser: boolean;
+    /** true means no key was activated: verify the challenge below first. */
+    mfaRequired: boolean;
+    /** Present exactly when `mfaRequired` is true. */
+    challenge?: MfaChallengeHandle;
+    userId?: string;
+    keyId?: string;
+    isNewUser?: boolean;
 }
 
 /**
@@ -210,6 +223,6 @@ async function persistNativeLogin(
             ? authRegisterEvent.emit(eventPayload)
             : authLoginEvent.emit({ ...eventPayload, mfaEnrolled })));
 
-        return { userId: String(userId), keyId: params.keyId, isNewUser };
+        return { mfaRequired: false, userId: String(userId), keyId: params.keyId, isNewUser };
     }, { context: 'auth:oauth-native' });
 }

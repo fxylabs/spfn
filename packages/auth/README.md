@@ -263,6 +263,44 @@ bound to a passkey is the one exception: it lives for hours and a rotation carri
 rather than resetting it, because only `session/renew` may move that window — see
 [Session binding](#session-binding).
 
+### Migration — narrow a sign-in on `mfaRequired` before reading `userId`
+
+**Breaking in `@spfn/auth` 0.3.0-beta.25 / mobile contract 0.13.0.** A sign-in no
+longer always answers with a session. An account that enrolled a second factor and
+signs in from a device the account has never seen gets `202` and a challenge
+instead, and the key it registered stays inactive until that challenge is spent —
+see [Second factor](#second-factor-mfa).
+
+So `LoginResult` carries one new required field, `mfaRequired`, and every field it
+carried before is now optional. It is still **one** type rather than a union:
+`authApi.login` infers its result from that declaration, and a union would make
+every `result.userId` in your app a compile error with no way to narrow it that
+was available in 0.12.x. Narrow on the discriminant:
+
+```typescript
+const result = await authApi.login.call({ body: { email, password } });
+
+if (result.mfaRequired)
+{
+    // No session yet. result.challenge is { secret, expiresAtMillis }.
+    router.push('/auth/mfa');
+
+    return;
+}
+
+console.log(result.userId); // string, from here on
+```
+
+The same reshape applies to `authApi.oauthNative` (`OauthNativeResult`), to
+`completePasswordReset`, and to the approved branch of `pollDeviceAuth` — which
+carries `mfaRequired: false` and can never carry anything else, since a
+device-code approval is itself a second factor.
+
+Nothing changes for an account with no second factor: every one of those calls
+answers `200` with `mfaRequired: false` and exactly the fields it always did.
+In the Next.js proxy nothing changes for your code at all — the interceptors
+handle the 202 and the pending cookie themselves.
+
 ### Verified-email signup
 
 A second way in, alongside the six-digit code. The address is proven before a password

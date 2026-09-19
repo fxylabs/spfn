@@ -581,6 +581,9 @@ async function startSession(user: User, params: FinishPasskeyLoginParams): Promi
     await updateLastLoginService(user.id);
 
     const result: LoginResult = {
+        // A passkey sign-in never steps up: the assertion is already a second
+        // factor, so this answer is always the session itself (#95).
+        mfaRequired: false,
         userId: String(user.id),
         publicId: user.publicId,
         email: user.email || undefined,
@@ -592,7 +595,7 @@ async function startSession(user: User, params: FinishPasskeyLoginParams): Promi
     const mfaEnrolled = await mfaEnrolledForUser(user.id);
 
     onAfterCommit(() => authLoginEvent.emit({
-        userId: result.userId,
+        userId: String(user.id),
         provider: 'passkey',
         email: result.email,
         phone: result.phone,

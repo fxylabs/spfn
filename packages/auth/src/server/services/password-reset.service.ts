@@ -47,7 +47,7 @@ import { revokeAllOAuth2GrantsForUser } from './oauth2-grant.service';
 import { registerPublicKeyService } from './key.service';
 import { decideKeyBinding } from '../lib/key-policy';
 import { updateLastLoginService } from './user.service';
-import { loginBindingFields, type LoginBindingFields, type RegisterResult } from './auth.service';
+import { loginBindingFields, type LoginBindingFields, type LoginResult } from './auth.service';
 import type { KeyAlgorithmType, KeyPlatformType, SessionBindingType } from '../types';
 
 /**
@@ -315,7 +315,7 @@ async function replaceCredentials(
  */
 export async function completePasswordResetService(
     params: CompletePasswordResetParams,
-): Promise<RegisterResult & LoginBindingFields>
+): Promise<LoginResult>
 {
     // Checked before anything is read or claimed. The device key is injected by
     // the proxy interceptor, so its absence means the request did not come
@@ -357,6 +357,7 @@ export async function completePasswordResetService(
     }));
 
     return {
+        mfaRequired: false,
         userId: String(user.id),
         publicId: user.publicId,
         email: user.email || undefined,

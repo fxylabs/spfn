@@ -632,7 +632,11 @@ describe.skipIf(!dbAvailable)('Password reset', () =>
             const response = await post('/_auth/password/reset/complete', body);
 
             expect(response.status).toBe(200);
+            // `mfaRequired: false` joins the body in #95: a completed reset is a
+            // path that starts a session, so it answers a `LoginResult`, and the
+            // discriminant is required on every one of them.
             expect(await response.json()).toEqual({
+                mfaRequired: false,
                 userId: String(user.id),
                 publicId: user.publicId,
                 email: 'c1@example.com',
