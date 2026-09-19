@@ -12,7 +12,7 @@
  */
 
 import { BaseRepository } from '@spfn/core/db';
-import { and, eq, gt, isNull, lte, or, sql } from 'drizzle-orm';
+import { and, eq, gt, inArray, isNotNull, isNull, lte, or, sql } from 'drizzle-orm';
 
 import { mfaChallenges, MFA_CHALLENGE_ATTEMPT_LIMIT } from '../entities/mfa-challenges';
 import type { MfaChallenge, NewMfaChallenge } from '../entities/mfa-challenges';
@@ -186,29 +186,38 @@ export class MfaChallengesRepository extends BaseRepository
     /**
      * Clear out challenges nobody finished, and the keys they were gating.
      *
-     * The key goes first and the cascade takes its challenge; the second delete
-     * catches a challenge whose key was already removed some other way. Both are
-     * bounded by the same cutoff — a spent challenge is kept until then, so a
-     * replay inside the window meets "already verified" rather than "unknown".
+     * Counted from the read rather than from either delete, because the two
+     * overlap: deleting a pending key cascades onto its challenge, so the second
+     * statement finds only the challenges whose key had already gone some other
+     * way — and a count taken there would report a sweep that did nothing.
+     *
+     * A spent challenge is kept for the same span as an expired one, so a replay
+     * inside the window meets "already verified" from a row rather than
+     * "unknown" from an absence. The 401 is the same either way; the record is
+     * not.
      *
      * @returns how many challenge rows are gone
      */
     async sweepFinished(cutoff: Date): Promise<number>
     {
-        const finished = or(lte(mfaChallenges.expiresAt, cutoff), sql`${mfaChallenges.verifiedAt} is not null`);
+        const finished = or(lte(mfaChallenges.expiresAt, cutoff), isNotNull(mfaChallenges.verifiedAt));
+        const doomed = await this.readDb
+            .select({ id: mfaChallenges.id })
+            .from(mfaChallenges)
+            .where(finished);
+
+        if (doomed.length === 0)
+        {
+            return 0;
+        }
 
         await this.db
             .delete(userPublicKeys)
-            .where(sql`${userPublicKeys.pendingMfaChallengeId} in (
-                select ${mfaChallenges.id} from ${mfaChallenges} where ${finished}
-            )`);
+            .where(inArray(userPublicKeys.pendingMfaChallengeId, doomed.map(row => row.id)));
 
-        const deleted = await this.db
-            .delete(mfaChallenges)
-            .where(finished)
-            .returning({ id: mfaChallenges.id });
+        await this.db.delete(mfaChallenges).where(finished);
 
-        return deleted.length;
+        return doomed.length;
     }
 }
 

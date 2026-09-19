@@ -240,6 +240,11 @@ const ChallengeSchema = Type.String({
  * Answers the `LoginResult` the sign-in would have answered, plus `keyId` and
  * `challengeHash` for the Next.js interceptor to match against the pending
  * cookie it baked at the 202. Every refusal is one 401 with one body.
+ *
+ * No `Transactional()`, for the reason `totp/confirm` has none: the challenge's
+ * attempt counter has to survive the refusal that raised it, and a route-wide
+ * transaction would roll it back with the error — five wrong codes would never
+ * reach five. The service opens its own for the success path.
  */
 export const mfaVerify = route.post('/_auth/mfa/verify')
     .input({
@@ -250,7 +255,7 @@ export const mfaVerify = route.post('/_auth/mfa/verify')
             response: Type.Optional(AssertionSchema),
         }),
     })
-    .use([rateLimitPolicy('auth-mfa-verify', CHALLENGE_LIMIT), Transactional()])
+    .use([rateLimitPolicy('auth-mfa-verify', CHALLENGE_LIMIT)])
     .skip(['auth'])
     .handler(async (c) =>
     {

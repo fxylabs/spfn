@@ -20,7 +20,14 @@ const { keysRepository } = vi.hoisted(() => ({
     },
 }));
 
-vi.mock('../../server/repositories', () => ({ keysRepository }));
+// `emitDeviceRegistered` reads the enrolment flag straight from its repository
+// rather than through the second-factor service, which would put the two in a
+// cycle (#95). Answered false here, as the rest of this file assumes.
+vi.mock('../../server/repositories', () => ({
+    keysRepository,
+    mfaEnrolmentRepository: { isEnrolled: vi.fn(async () => false) },
+    usersRepository: { currentKeyEpoch: vi.fn(async () => 0) },
+}));
 // `key.service` now asks the second-factor service two questions — whether the
 // caller must step up, and whether a rotation carries a verification across.
 // Both have their own suites; here they only have to be reachable.

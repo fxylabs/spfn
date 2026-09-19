@@ -356,15 +356,24 @@ export async function verifyMfaChallengeService(
         await countChallengeFailure(row);
     }
 
-    if (!await mfaChallengesRepository.markVerified(row.id, row.keyEpoch))
+    // The transaction starts here and not at the route, for the reason
+    // `totp/confirm` has no route-wide one either: the attempt counter above has
+    // to survive the refusal that raised it, and a transaction around the whole
+    // request would roll it back with the error — leaving every wrong proof
+    // free. From here on the mark, the activation and the announcements do have
+    // to land together.
+    return await runInTransaction(async () =>
     {
-        throw new MfaVerificationFailedError();
-    }
+        if (!await mfaChallengesRepository.markVerified(row.id, row.keyEpoch))
+        {
+            throw new MfaVerificationFailedError();
+        }
 
-    await mfaChallengesRepository.activateKey(row.keyId, row.id);
-    await mfaVerificationsRepository.record(row.keyId, row.userId, method!);
+        await mfaChallengesRepository.activateKey(row.keyId, row.id);
+        await mfaVerificationsRepository.record(row.keyId, row.userId, method!);
 
-    return { ...await settleStepUpLogin(row), keyId: row.keyId, challengeHash };
+        return { ...await settleStepUpLogin(row), keyId: row.keyId, challengeHash };
+    }, { context: 'auth:mfa-verify' });
 }
 
 /**
