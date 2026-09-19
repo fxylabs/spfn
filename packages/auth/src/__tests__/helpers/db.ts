@@ -16,6 +16,35 @@ import { initDatabase, closeDatabase } from '@spfn/core/db';
 // database per package. Override with TEST_DATABASE_URL to point elsewhere.
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL || 'postgresql://authtest:authtest123@localhost:5432/spfn_auth_test';
 
+/**
+ * What this helper's own connections refuse to wait for.
+ *
+ * `clearTables` TRUNCATEs, and a TRUNCATE needs ACCESS EXCLUSIVE on the table:
+ * one connection still inside a transaction on it makes the TRUNCATE wait, and
+ * with no `lock_timeout` it waits for as long as that transaction lives. CI runs
+ * #284 and #289 are what that looks like from outside — a suite that stopped
+ * producing output between two rows, with the last lines the TRUNCATE notices of
+ * the row before it, and nothing in the log naming a cause. A bounded wait turns
+ * the same leak into `canceling statement due to lock timeout`, on the statement
+ * and in the row that hit it.
+ *
+ * `idle_in_transaction_session_timeout` is the other half, and it is about this
+ * helper being the leaker rather than the victim: the application's own
+ * transactions already carry both timeouts from `runInTransaction`, so a
+ * connection left mid-transaction with no cap on its life can only be one of
+ * these. Twice the lock timeout, so the holder is named by the TRUNCATE that
+ * blocked before the server takes it away.
+ *
+ * Both are milliseconds — the unit postgres.js types these two server settings
+ * in, and the unit PostgreSQL reads a bare integer as.
+ */
+const TEST_CONNECTION_OPTIONS = {
+    connection: {
+        lock_timeout: 30_000,
+        idle_in_transaction_session_timeout: 120_000,
+    },
+};
+
 // The package's committed migrations (./migrations), resolved from this file.
 const MIGRATIONS_FOLDER = fileURLToPath(new URL('../../../migrations', import.meta.url));
 
@@ -40,6 +69,7 @@ export async function isDatabaseAvailable(): Promise<boolean>
         const client = postgres(TEST_DATABASE_URL, {
             max: 1,
             connect_timeout: 3, // 3 seconds timeout
+            ...TEST_CONNECTION_OPTIONS,
         });
 
         // Try to connect
@@ -80,7 +110,7 @@ export async function setupTestDb()
         throw new Error('Test database not available');
     }
 
-    testClient = postgres(TEST_DATABASE_URL);
+    testClient = postgres(TEST_DATABASE_URL, TEST_CONNECTION_OPTIONS);
     testDb = drizzle({ client: testClient });
 
     // Set DATABASE_URL environment variable for @spfn/core/db
