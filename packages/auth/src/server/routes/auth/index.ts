@@ -241,6 +241,12 @@ export const completeSignup = route.post('/_auth/signup/password')
  * POST /_auth/login - User login
  * Authenticate user with email/phone and password
  * Replaces existing key with new one
+ *
+ * 202 rather than 200 when the account has a second factor and this device is
+ * new to it (#95): the password was right, the key is registered and inactive,
+ * and the body carries the challenge that activates it. The status is what lets
+ * a proxy or a generated client tell "signed in" from "half signed in" without
+ * reading the body; `mfaRequired` says the same thing inside it.
  */
 export const login = route.post('/_auth/login')
     .input({
@@ -272,8 +278,9 @@ export const login = route.post('/_auth/login')
     .handler(async (c) =>
     {
         const { body } = await c.data();
+        const result = await loginService({ ...body, ...deviceProvenance(c.raw) });
 
-        return await loginService({ ...body, ...deviceProvenance(c.raw) });
+        return result.mfaRequired ? c.accepted(result) : result;
     });
 
 // ===== Device-code login =====

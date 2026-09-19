@@ -21,7 +21,7 @@ import {
     openStepUpChallengeService,
     resumeStepUpChallengeService,
 } from './mfa.service';
-import type { MfaChallengeHandle } from './auth.service';
+import type { MfaChallengeHandle } from './login-result';
 import { MFA_CHALLENGE_CHANNELS, type DeferredLoginEvent, type MfaChallengeChannel } from '../entities/mfa-challenges';
 import type { DeviceRegistrationChannel } from '../events';
 

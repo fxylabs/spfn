@@ -41,6 +41,7 @@ import { buildOtpauthUri, generateTotpSecret, verifyTotp } from '../lib/totp';
 import { buildAuthenticationOptions, verifyAuthentication } from '../lib/webauthn';
 import type { AuthenticationResponseJSON, PublicKeyCredentialRequestOptionsJSON } from '../lib/webauthn';
 import {
+    keysRepository,
     mfaChallengesRepository,
     mfaEnrolmentRepository,
     mfaRecoveryCodesRepository,
@@ -49,10 +50,14 @@ import {
     passkeysRepository,
     usersRepository,
 } from '../repositories';
-import { mintCredential } from '../lib/link-credentials';
-import type { MfaChallengeHandle } from './auth.service';
+import { hashCredential, mintCredential } from '../lib/link-credentials';
+import { loginBindingFields, type LoginResult, type MfaChallengeHandle } from './login-result';
+import { updateLastLoginService } from './user.service';
+import { emitDeviceRegistered } from './device-registration.service';
+import { authLoginEvent } from '../events';
 import { MFA_CONFIRM_ATTEMPT_LIMIT } from '../entities/mfa-totp';
-import type { DeferredLoginEvent, MfaChallengeChannel } from '../entities/mfa-challenges';
+import type { DeferredLoginEvent, MfaChallenge, MfaChallengeChannel } from '../entities/mfa-challenges';
+import type { UserPublicKey } from '../entities/user-public-keys';
 import type { MfaVerificationMethod } from '../entities/mfa-verifications';
 import { mintChallenge, presentedChallenge, spendChallenge } from './webauthn-challenge.service';
 
@@ -205,6 +210,214 @@ export async function resumeStepUpChallengeService(
     return await mfaChallengesRepository.resecret(live.id, hash)
         ? { secret, expiresAtMillis: live.expiresAt.getTime() }
         : null;
+}
+
+export interface VerifyMfaChallengeParams
+{
+    /** The secret from the 202 body, the callback query, or the pending page. */
+    challenge: string;
+    code?: string;
+    recoveryCode?: string;
+    response?: AuthenticationResponseJSON;
+}
+
+/**
+ * The sign-in the challenge was standing in for, plus what the proxy needs.
+ *
+ * `keyId` and `challengeHash` are for the Next.js interceptor and nothing else:
+ * it seals a session only when both match the pending cookie it baked at the
+ * 202, which is what stops a cookie minted for one flow from sealing a session
+ * around another flow's key. Neither is a credential — the hash is what the
+ * server already stores, and the key is inactive to anyone without the private
+ * half the proxy is holding.
+ */
+export interface VerifyMfaChallengeResult extends LoginResult
+{
+    keyId: string;
+    challengeHash: string;
+}
+
+/**
+ * The challenge a presented secret names, if it can still be spent.
+ *
+ * Every refusal here is the same 401 with the same body, and none of them counts
+ * an attempt: a secret that reaches no row, an expired one, one already spent
+ * and one from a key generation that has since ended are all states the caller
+ * is guessing at, and there is no counter belonging to a guess to move.
+ *
+ * @throws MfaVerificationFailedError
+ */
+async function spendableChallenge(challengeHash: string): Promise<MfaChallenge>
+{
+    const row = await mfaChallengesRepository.findByHash(challengeHash);
+
+    if (!row || row.verifiedAt || row.expiresAt.getTime() <= Date.now())
+    {
+        throw new MfaVerificationFailedError();
+    }
+
+    if (row.keyEpoch !== await usersRepository.currentKeyEpoch(row.userId))
+    {
+        throw new MfaVerificationFailedError();
+    }
+
+    return row;
+}
+
+/**
+ * Count a wrong proof, and take the challenge away once the tries are spent.
+ *
+ * Five is the limit, and reaching it deletes the pending key — which is safe
+ * only because the counter can be reached by nobody but the holder of the
+ * secret: the lookup is by hash, so there is no id for a stranger to name and no
+ * way to burn somebody else's attempts from outside.
+ *
+ * @throws MfaVerificationFailedError always — this is the refusal path
+ */
+async function countChallengeFailure(row: MfaChallenge): Promise<never>
+{
+    if (await mfaChallengesRepository.countFailure(row.id))
+    {
+        await mfaChallengesRepository.dropPendingKey(row.keyId, row.id);
+
+        authLogger.service.warn('Second-factor challenge discarded after repeated wrong proofs', {
+            userId: row.userId,
+        });
+    }
+
+    throw new MfaVerificationFailedError();
+}
+
+/**
+ * Everything the 202 held back, once the second factor is proved.
+ *
+ * All three at once and only here, so the account's record of a sign-in matches
+ * what actually happened: an attacker with a stolen password produced no login
+ * event, no device notice and no `lastLoginAt` — the owner's evidence stays the
+ * evidence. The channel is the original one, off the challenge row, because it
+ * is what the owner will read in the notice.
+ */
+async function releaseDeferredAnnouncements(row: MfaChallenge, key: UserPublicKey): Promise<void>
+{
+    await updateLastLoginService(row.userId);
+    await emitDeviceRegistered(key, row.channel);
+
+    if (!row.loginEvent)
+    {
+        return;
+    }
+
+    const mfaEnrolled = await mfaEnrolledForUser(row.userId);
+
+    onAfterCommit(() => authLoginEvent.emit({ ...row.loginEvent!, userId: String(row.userId), mfaEnrolled }));
+}
+
+/**
+ * Spend a new-device challenge, which activates the key and starts the session.
+ *
+ * Unauthenticated by construction: the key this would activate is the only one
+ * the caller has and it cannot sign anything yet. The challenge secret is the
+ * whole credential, and it authorizes exactly this — no other route reads it.
+ *
+ * The verified mark is a conditional UPDATE, so two requests carrying the same
+ * secret produce one session and one 401. The key is activated only after that
+ * mark is won, which is what makes "a pending challenge never yields a usable
+ * key" true even under a race.
+ *
+ * The binding the answer carries was decided at **registration**, not here, and
+ * is read back off the key row. It has to be: the decision reads the owner's
+ * `session_binding` setting together with whether the request came through the
+ * trusted Next.js proxy, and this route is unauthenticated and may be called
+ * from anywhere — deciding it here would let a direct caller ask for a cookie
+ * that believes a bound key is an ordinary one. A bound account that steps up
+ * therefore gets exactly the binding and the expiry its sign-in registered, and
+ * the ten minutes a challenge may sit for come out of that key's short life.
+ *
+ * @throws ValidationError when the body names none or more than one proof
+ * @throws MfaVerificationFailedError for every other refusal, in one body
+ */
+export async function verifyMfaChallengeService(
+    params: VerifyMfaChallengeParams,
+): Promise<VerifyMfaChallengeResult>
+{
+    const challengeHash = hashCredential(params.challenge);
+    const row = await spendableChallenge(challengeHash);
+
+    const method = await attemptSecondFactor({
+        userId: row.userId,
+        keyId: row.keyId,
+        code: params.code,
+        recoveryCode: params.recoveryCode,
+        response: params.response,
+    });
+
+    if (!method)
+    {
+        await countChallengeFailure(row);
+    }
+
+    if (!await mfaChallengesRepository.markVerified(row.id, row.keyEpoch))
+    {
+        throw new MfaVerificationFailedError();
+    }
+
+    await mfaChallengesRepository.activateKey(row.keyId, row.id);
+    await mfaVerificationsRepository.record(row.keyId, row.userId, method!);
+
+    return { ...await settleStepUpLogin(row), keyId: row.keyId, challengeHash };
+}
+
+/**
+ * The `LoginResult` a verified challenge answers with.
+ *
+ * Read from the rows rather than carried on the challenge: the account's name
+ * and its `passwordChangeRequired` flag are whatever they are now, and up to ten
+ * minutes have passed since the sign-in that minted this.
+ */
+async function settleStepUpLogin(row: MfaChallenge): Promise<LoginResult>
+{
+    const user = await usersRepository.findByIdOnPrimary(row.userId);
+    const key = await keysRepository.findByKeyIdAndUserId(row.keyId, row.userId);
+
+    if (!user || !key)
+    {
+        throw new MfaVerificationFailedError();
+    }
+
+    await releaseDeferredAnnouncements(row, key);
+
+    return {
+        mfaRequired: false,
+        userId: String(user.id),
+        publicId: user.publicId,
+        email: user.email || undefined,
+        phone: user.phone || undefined,
+        passwordChangeRequired: user.passwordChangeRequired,
+        ...loginBindingFields(key),
+    };
+}
+
+/**
+ * Options for finishing a new-device step-up with a passkey.
+ *
+ * The step-up challenge stands in for the session this caller does not have yet:
+ * it is what names the account, so the WebAuthn challenge can be minted for the
+ * right owner without the request having to say who that is. `allowCredentials`
+ * is empty for the reason it is everywhere else here (D3), and the ceremony kind
+ * is `'mfa'`, so what comes back cannot be spent as a sign-in.
+ *
+ * @throws MfaVerificationFailedError when the challenge cannot be spent
+ */
+export async function startMfaChallengeAssertionService(
+    challenge: string,
+): Promise<PublicKeyCredentialRequestOptionsJSON>
+{
+    const row = await spendableChallenge(hashCredential(challenge));
+
+    return await buildAuthenticationOptions({
+        config: getPasskeyConfig(),
+        challenge: await mintChallenge('mfa', row.userId),
+    });
 }
 
 /**
@@ -539,15 +752,20 @@ export async function stepUpService(params: StepUpParams): Promise<void>
 }
 
 /**
- * Check exactly one of the three proofs, and say which one it was.
+ * Check exactly one of the three proofs, and say which one it was — or null.
  *
  * Exactly one: two inputs in a body is a caller trying combinations, and none
  * is a malformed request. Neither is a failed verification, so both are a 400
  * rather than the uniform 401 a wrong proof gets.
  *
- * @throws ValidationError | MfaVerificationFailedError
+ * Null rather than a throw for the failure itself, because one caller has
+ * bookkeeping to do before it refuses: the new-device challenge counts the
+ * attempt, and counting it inside a `catch` around the thing that threw would be
+ * two control flows for one answer.
+ *
+ * @throws ValidationError when the body names none or more than one input
  */
-export async function verifySecondFactor(params: StepUpParams): Promise<MfaVerificationMethod>
+export async function attemptSecondFactor(params: StepUpParams): Promise<MfaVerificationMethod | null>
 {
     const presented = [params.code, params.recoveryCode, params.response].filter(value => value !== undefined);
 
@@ -569,21 +787,39 @@ export async function verifySecondFactor(params: StepUpParams): Promise<MfaVerif
 }
 
 /**
+ * `attemptSecondFactor`, for the callers whose only answer to a wrong proof is
+ * the uniform 401.
+ *
+ * @throws ValidationError | MfaVerificationFailedError
+ */
+export async function verifySecondFactor(params: StepUpParams): Promise<MfaVerificationMethod>
+{
+    const method = await attemptSecondFactor(params);
+
+    if (!method)
+    {
+        throw new MfaVerificationFailedError();
+    }
+
+    return method;
+}
+
+/**
  * A code from the authenticator app.
  *
  * The step it belongs to is written back, so the same code presented again
  * inside its own 30 seconds is refused — including from a second device, which
  * is the one legitimate case this costs. The client retries on the next step.
  *
- * @throws MfaVerificationFailedError
+ * @returns null when the code does not verify
  */
-async function verifyTotpProof(userId: number, code: string): Promise<MfaVerificationMethod>
+async function verifyTotpProof(userId: number, code: string): Promise<MfaVerificationMethod | null>
 {
     const row = await mfaTotpRepository.findByUserId(userId);
 
     if (!row?.confirmedAt)
     {
-        throw new MfaVerificationFailedError();
+        return null;
     }
 
     const step = verifyTotp({
@@ -594,7 +830,7 @@ async function verifyTotpProof(userId: number, code: string): Promise<MfaVerific
 
     if (step === null)
     {
-        throw new MfaVerificationFailedError();
+        return null;
     }
 
     await mfaTotpRepository.recordUsedStep(userId, step);
@@ -610,9 +846,9 @@ async function verifyTotpProof(userId: number, code: string): Promise<MfaVerific
  * the query rather than distinguished by it. The spend is a conditional UPDATE,
  * so two requests carrying the same code produce one winner.
  *
- * @throws MfaVerificationFailedError
+ * @returns null when the code does not verify
  */
-async function verifyRecoveryProof(userId: number, submitted: string): Promise<MfaVerificationMethod>
+async function verifyRecoveryProof(userId: number, submitted: string): Promise<MfaVerificationMethod | null>
 {
     const generation = await mfaRecoveryCodesRepository.currentGeneration(userId);
     const candidates = generation === 0 ? [] : await mfaRecoveryCodesRepository.listUnused(userId, generation);
@@ -627,7 +863,7 @@ async function verifyRecoveryProof(userId: number, submitted: string): Promise<M
         }
     }
 
-    throw new MfaVerificationFailedError();
+    return null;
 }
 
 /**
@@ -637,18 +873,18 @@ async function verifyRecoveryProof(userId: number, submitted: string): Promise<M
  * enrolling a credential is not the same decision as making it a second factor,
  * and the surface must not say which of the two is missing.
  *
- * @throws MfaVerificationFailedError
+ * @returns null when the assertion does not verify
  */
 async function verifyPasskeyProof(
     userId: number,
     response: AuthenticationResponseJSON,
-): Promise<MfaVerificationMethod>
+): Promise<MfaVerificationMethod | null>
 {
     const challenge = presentedChallenge(response.response.clientDataJSON);
 
     if (!await spendChallenge(challenge, 'mfa', userId))
     {
-        throw new MfaVerificationFailedError();
+        return null;
     }
 
     const marked = await passkeysRepository.listLiveSecondFactorByUserId(userId);
@@ -656,7 +892,7 @@ async function verifyPasskeyProof(
 
     if (!passkey)
     {
-        throw new MfaVerificationFailedError();
+        return null;
     }
 
     const outcome = await verifyAuthentication({
@@ -673,7 +909,7 @@ async function verifyPasskeyProof(
 
     if (!outcome.verified)
     {
-        throw new MfaVerificationFailedError();
+        return null;
     }
 
     await passkeysRepository.recordUse(passkey.id, outcome.newCounter);

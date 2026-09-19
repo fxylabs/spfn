@@ -12,15 +12,18 @@
  * 1. signupLinkInterceptor - Most specific (verified-email signup only)
  * 2. passwordResetInterceptor - Most specific (password reset only)
  * 3. loginRegisterInterceptor - Specific (login/register/signup password/reset complete)
- * 4. keyRotationInterceptor - Specific (key rotation only)
- * 5. oauthUrlInterceptor - OAuth URL generation (key generation + state injection)
- * 6. generalAuthInterceptor - General (all authenticated requests)
- * 7. sessionBindingInterceptor - Last, so its re-sealed cookie wins over the
+ * 4. mfaVerifyInterceptor - Right after it, so the 202 it passed through is still
+ *    the response body this rule reads (#95)
+ * 5. keyRotationInterceptor - Specific (key rotation only)
+ * 6. oauthUrlInterceptor - OAuth URL generation (key generation + state injection)
+ * 7. generalAuthInterceptor - General (all authenticated requests)
+ * 8. sessionBindingInterceptor - Last, so its re-sealed cookie wins over the
  *    general one: response phases run in this order and the later write of a
  *    cookie name is the one the browser keeps.
  */
 
 import { loginRegisterInterceptor } from './login-register';
+import { mfaVerifyInterceptor } from './mfa-verify';
 import { generalAuthInterceptor } from './general-auth';
 import { keyRotationInterceptor } from './key-rotation';
 import { oauthUrlInterceptor, oauthFinalizeInterceptor } from './oauth';
@@ -35,16 +38,18 @@ import { sessionBindingInterceptor } from './session-binding';
  * 1. signupLinkInterceptor - Handles verified-email signup (setup secret ↔ HttpOnly cookie)
  * 2. passwordResetInterceptor - Handles password reset (setup secret ↔ HttpOnly cookie)
  * 3. loginRegisterInterceptor - Handles login/register/signup password/reset complete/session renew (key generation + session save)
- * 4. keyRotationInterceptor - Handles key rotation (new key generation + session update)
- * 5. oauthUrlInterceptor - Handles OAuth URL requests (key generation + state injection + pending session)
- * 6. oauthFinalizeInterceptor - Handles OAuth finalize (pending session → full session)
- * 7. generalAuthInterceptor - Handles all authenticated requests (session validation + JWT injection + session renewal)
- * 8. sessionBindingInterceptor - Re-seals the session cookie when the binding setting changes
+ * 4. mfaVerifyInterceptor - Handles the second-factor step-up (202 → pending cookie, verify → session)
+ * 5. keyRotationInterceptor - Handles key rotation (new key generation + session update)
+ * 6. oauthUrlInterceptor - Handles OAuth URL requests (key generation + state injection + pending session)
+ * 7. oauthFinalizeInterceptor - Handles OAuth finalize (pending session → full session)
+ * 8. generalAuthInterceptor - Handles all authenticated requests (session validation + JWT injection + session renewal)
+ * 9. sessionBindingInterceptor - Re-seals the session cookie when the binding setting changes
  */
 export const authInterceptors = [
     signupLinkInterceptor,
     passwordResetInterceptor,
     loginRegisterInterceptor,
+    mfaVerifyInterceptor,
     keyRotationInterceptor,
     oauthUrlInterceptor,
     oauthFinalizeInterceptor,
@@ -53,6 +58,7 @@ export const authInterceptors = [
 ];
 
 export { loginRegisterInterceptor } from './login-register';
+export { mfaVerifyInterceptor } from './mfa-verify';
 export { generalAuthInterceptor } from './general-auth';
 export { keyRotationInterceptor } from './key-rotation';
 export { oauthUrlInterceptor, oauthFinalizeInterceptor } from './oauth';

@@ -30,19 +30,35 @@ import type { HttpError } from '@spfn/core/errors';
  */
 export function refusalEnvelope(error: HttpError, setCookies: ProxyAbort['setCookies'] = []): ProxyAbort
 {
+    return {
+        status: error.statusCode,
+        body: refusalBody(error),
+        setCookies,
+    };
+}
+
+/**
+ * The same body, for a refusal minted in a **response** phase.
+ *
+ * `ProxyAbort` belongs to the request phase — it is what stops the proxy before
+ * the fetch — and a rule that has already seen the backend's answer replaces
+ * `ctx.response` instead. The body has to be identical either way, or an app
+ * would restore an error class from one seam and a bare `ApiError` from the
+ * other for the same condition.
+ *
+ * @param error - an error class listed in `authErrorRegistry`
+ */
+export function refusalBody(error: HttpError): Record<string, unknown>
+{
     const body = error.toJSON() as { __type: string; message: string };
 
     return {
-        status: error.statusCode,
-        body: {
-            ...body,
-            error: {
-                code: body.__type,
-                message: body.message,
-                requestId: mintRequestId(),
-            },
+        ...body,
+        error: {
+            code: body.__type,
+            message: body.message,
+            requestId: mintRequestId(),
         },
-        setCookies,
     };
 }
 

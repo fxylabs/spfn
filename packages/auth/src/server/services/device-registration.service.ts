@@ -14,7 +14,7 @@ import { onAfterCommit } from '@spfn/core/db';
 
 import type { UserPublicKey } from '../entities/user-public-keys';
 import { authDeviceRegisteredEvent, type DeviceRegistrationChannel } from '../events';
-import { mfaEnrolledForUser } from './mfa.service';
+import { mfaEnrolmentRepository } from '../repositories';
 
 /**
  * How much of the fingerprint the event carries.
@@ -50,7 +50,11 @@ export async function emitDeviceRegistered(
     // without awaiting, so an async callback would deliver a tick later than
     // every consumer expects — and the value is the same either way, since the
     // read runs in the transaction that wrote the key row.
-    const mfaEnrolled = await mfaEnrolledForUser(row.userId);
+    // The repository rather than `mfaEnrolledForUser`, which is the same one
+    // statement: the second-factor service announces a device of its own when a
+    // step-up completes (#95), and importing it here would put the two in a
+    // cycle for a wrapper one line long.
+    const mfaEnrolled = await mfaEnrolmentRepository.isEnrolled(row.userId);
 
     onAfterCommit(() => authDeviceRegisteredEvent.emit({
         userId: String(row.userId),

@@ -42,6 +42,8 @@ import {
     mfaStatus,
     mfaStepUp,
     mfaStepUpOptions,
+    mfaVerify,
+    mfaVerifyOptions,
 } from './auth/mfa';
 import {
     setSessionBinding,
@@ -150,6 +152,8 @@ export const mainAuthRouter = defineRouter({
     mfaStatus,
     mfaStepUp,
     mfaStepUpOptions,
+    mfaVerify,
+    mfaVerifyOptions,
     logout,
     rotateKey,
     listKeys,

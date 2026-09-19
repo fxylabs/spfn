@@ -312,3 +312,103 @@ export async function disableSessionBinding(
 
     return { ok: true, mode: 'none' };
 }
+
+// ============================================================================
+// Second-factor step-up on a new device (#95)
+// ============================================================================
+
+/**
+ * What a completed step-up answers with — the sign-in the 202 was standing in for.
+ *
+ * Deliberately loose about the login fields. Through the Next.js proxy the
+ * session is already sealed by the time this resolves and the app reads it from
+ * the session cookie; a native client reads `userId` off the body. `keyId` and
+ * `challengeHash` are the proxy's business and are not repeated here.
+ */
+export interface CompleteMfaValue
+{
+    userId?: string;
+    keyId: string;
+}
+
+/**
+ * Finish a sign-in that answered `mfaRequired` with a code from the
+ * authenticator app.
+ *
+ * The challenge is the `secret` from that 202 — or, on the web OAuth path, the
+ * `?challenge=` the callback handler put on the confirm page's URL. It is single
+ * use and lives ten minutes.
+ *
+ * A wrong code is a rejected promise carrying `MfaVerificationFailedError`, not
+ * a result: it is the server declining rather than a ceremony failing, and there
+ * is no ceremony here at all. Five wrong ones end the challenge and the person
+ * signs in again.
+ *
+ * @param api - the typed auth client
+ * @param challenge - the challenge secret from the 202 or the callback query
+ * @param code - the six digits, spaces and dashes and all
+ */
+export async function completeMfaWithCode(
+    api: AuthApi,
+    challenge: string,
+    code: string,
+): Promise<CompleteMfaValue>
+{
+    return await api.mfaVerify.call({ body: { challenge, code } }) as CompleteMfaValue;
+}
+
+/**
+ * Finish the same sign-in with one of the ten written-down recovery codes.
+ *
+ * Single use, and the count in `mfa/status` drops by one — an app that warns at
+ * two remaining reads it from there after this resolves.
+ */
+export async function completeMfaWithRecoveryCode(
+    api: AuthApi,
+    challenge: string,
+    recoveryCode: string,
+): Promise<CompleteMfaValue>
+{
+    return await api.mfaVerify.call({ body: { challenge, recoveryCode } }) as CompleteMfaValue;
+}
+
+/**
+ * Finish the same sign-in with a passkey the owner marked as a second factor.
+ *
+ * `options` from the server, `navigator.credentials` in the browser, `verify`
+ * back — the shape every ceremony in this file has, and a discriminated union
+ * rather than a throw for the same reason: a person who dismisses the system
+ * sheet has not hit an application error.
+ *
+ * The challenge is what names the account, since there is no session yet. A
+ * passkey the owner never marked is refused with the same body as a wrong code.
+ */
+export async function completeMfaWithPasskey(
+    api: AuthApi,
+    challenge: string,
+): Promise<PasskeyResult<CompleteMfaValue>>
+{
+    if (!isPasskeySupported())
+    {
+        return { ok: false, reason: 'unsupported' };
+    }
+
+    const optionsJSON = await api.mfaVerifyOptions.call({
+        body: { challenge },
+    }) as PublicKeyCredentialRequestOptionsJSON;
+
+    let response: AuthenticationResponseJSON;
+
+    try
+    {
+        response = await startAuthentication({ optionsJSON });
+    }
+    catch (error)
+    {
+        return { ok: false, reason: failureReason(error, 'no-credential'), error };
+    }
+
+    const verified = await api.mfaVerify.call({ body: { challenge, response } }) as CompleteMfaValue;
+
+    return { ok: true, ...verified };
+}

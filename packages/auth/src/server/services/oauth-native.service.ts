@@ -23,7 +23,7 @@ import { type SocialProvider, type KeyAlgorithmType, type KeyPlatformType } from
 import { getOAuthProvider, type NormalizedIdentity } from '../lib/oauth';
 import { createOrLinkUser, assertActiveForOAuthSession, backfillVerifiedEmail } from './oauth.service';
 import { registerPublicKeyService } from './key.service';
-import type { MfaChallengeHandle } from './auth.service';
+import type { MfaChallengeHandle } from './login-result';
 import { updateLastLoginService } from './user.service';
 import { mfaEnrolledForUser } from './mfa.service';
 import { authLoginEvent, authRegisterEvent } from '../events';

@@ -31,6 +31,14 @@ function requiresAuth(path: string): boolean
         /^\/_auth\/codes$/,           // Send verification code
         /^\/_auth\/codes\/verify$/,   // Verify code
         /^\/_auth\/exists$/,           // Check account exists
+        // The two halves of a second-factor step-up (#95). Public for the same
+        // reason `login` is — the key they activate is inactive until they
+        // succeed, so there is nothing to sign them with — and public *here* for
+        // one more: a browser holding a stale session cookie would otherwise have
+        // this rule refresh or clear that session on the way out, over the fresh
+        // one `mfaVerifyInterceptor` just sealed.
+        /^\/_auth\/mfa\/verify$/,
+        /^\/_auth\/mfa\/verify\/options$/,
     ];
 
     return !publicPaths.some((pattern) => pattern.test(path));

@@ -23,6 +23,7 @@ import { id, enumText, foreignKey, timestamps, utcTimestamp } from '@spfn/core/d
 import { users } from './users';
 import { userPublicKeys } from './user-public-keys';
 import { authSchema } from './schema';
+import type { AuthLoginProvider } from '../events';
 
 /**
  * The four doors a second factor is asked for at.
@@ -57,7 +58,7 @@ export const MFA_CHALLENGE_ATTEMPT_LIMIT = 5;
  */
 export interface DeferredLoginEvent
 {
-    provider: string;
+    provider: AuthLoginProvider;
     email?: string;
     phone?: string;
     metadata?: Record<string, unknown>;

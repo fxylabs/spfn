@@ -416,6 +416,15 @@ export const authEnvSchema = defineEnvSchema({
         }),
     },
 
+    SPFN_AUTH_MFA_CONFIRM_PATH: {
+        ...envString({
+            description: 'App page that asks for the second factor after a 202 sign-in, as a path on {NEXT_PUBLIC_SPFN_APP_URL || SPFN_APP_URL}. createOAuthCallbackHandler redirects the browser there with ?challenge= when a social sign-in needs a step-up; the page posts that challenge and a code to /_auth/mfa/verify. It is a page in your app, not an API route.',
+            default: '/auth/mfa',
+            required: false,
+            examples: ['/auth/mfa', '/sign-in/two-factor'],
+        }),
+    },
+
     SPFN_AUTH_MFA_CHALLENGE_TTL_MINUTES: {
         ...envNumber({
             description: 'How long a new-device second-factor challenge stays spendable. A sign-in on an enrolled account from a device it has never seen answers 202 with a challenge instead of a session, and the key it registered is inactive until POST /_auth/mfa/verify spends it. This is how long the person has to reach for their authenticator — and how long an attacker holding only the password has. The Next.js proxy seals its pending cookie for the same span.',

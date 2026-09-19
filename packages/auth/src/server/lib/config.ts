@@ -50,6 +50,19 @@ export const COOKIE_NAMES = {
     {
         return `spfn_oauth_pending${getCookieSuffix()}`;
     },
+    /**
+     * Pending second-factor session (privateKey, keyId, challengeHash) (#95)
+     *
+     * Its own name and its own audience, separate from OAUTH_PENDING. The two
+     * coexist: a person who starts a social login in one tab while a password
+     * step-up is outstanding in another has both flows live, and one name would
+     * mean the second overwrote the first — sealing a session with a private key
+     * that does not match the key being activated.
+     */
+    get MFA_PENDING()
+    {
+        return `spfn_mfa_pending${getCookieSuffix()}`;
+    },
     /** OAuth CSRF nonce — double-submit against the (encrypted) state.nonce at callback */
     get OAUTH_CSRF()
     {

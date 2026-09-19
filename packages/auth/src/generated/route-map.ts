@@ -44,6 +44,8 @@ export const routeMap: Record<string, RouteInfo> = {
     mfaMarkPasskey: { method: 'POST', path: '/_auth/mfa/passkey/mark' },
     mfaRegenerateRecoveryCodes: { method: 'POST', path: '/_auth/mfa/recovery/regenerate' },
     mfaStatus: { method: 'GET', path: '/_auth/mfa/status' },
+    mfaVerify: { method: 'POST', path: '/_auth/mfa/verify' },
+    mfaVerifyOptions: { method: 'POST', path: '/_auth/mfa/verify/options' },
     mfaStepUp: { method: 'POST', path: '/_auth/mfa/step-up' },
     mfaStepUpOptions: { method: 'POST', path: '/_auth/mfa/step-up/options' },
     setSessionBinding: { method: 'POST', path: '/_auth/session/binding' },

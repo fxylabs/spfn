@@ -62,6 +62,8 @@ import {
     MfaVerificationFailedError,
     StepUpRequiredError,
     MfaConfigError,
+    SessionPendingMismatchError,
+    SessionPendingExpiredError,
 } from './auth-errors';
 
 export {
@@ -122,6 +124,8 @@ export {
     MfaVerificationFailedError,
     StepUpRequiredError,
     MfaConfigError,
+    SessionPendingMismatchError,
+    SessionPendingExpiredError,
 } from './auth-errors';
 
 export const authErrorRegistry = new ErrorRegistry();
@@ -183,6 +187,8 @@ authErrorRegistry.append([
     MfaVerificationFailedError,
     StepUpRequiredError,
     MfaConfigError,
+    SessionPendingMismatchError,
+    SessionPendingExpiredError,
 ]);
 
 export * as AuthError from './auth-errors';

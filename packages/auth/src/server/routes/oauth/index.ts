@@ -15,7 +15,7 @@ import { ValidationError } from '@spfn/core/errors';
 import { rateLimitPolicy } from '@spfn/core/middleware';
 import { defineRouter, route } from '@spfn/core/route';
 
-import { KEY_ALGORITHM, SOCIAL_PROVIDERS, type SocialProvider } from '../../types';
+import { KEY_ALGORITHM, SOCIAL_PROVIDERS, type SessionBindingType, type SocialProvider } from '../../types';
 import { DeviceNameSchema, PlatformSchema } from '../schema';
 import { COOKIE_NAMES, matchOAuthCsrfCookies } from '../../lib/config';
 import { byIpAndIdToken } from '../../lib/rate-limit-keys';
@@ -265,6 +265,28 @@ export const getGoogleOAuthUrl = route.post('/_auth/oauth/google/url')
     });
 
 /**
+ * What `POST /_auth/oauth/finalize` answers with, in both of its branches.
+ *
+ * One type with a required discriminant rather than a union, on the same
+ * reasoning as `LoginResult` (#95): `authApi.oauthFinalize` infers its result
+ * from this, and a union would make every `result.userId` in every callback page
+ * stop compiling. `mfaRequired` false is the 200 and carries `userId`/`keyId`;
+ * true is the 202 and carries `challenge`.
+ */
+export interface OAuthFinalizeResponse
+{
+    success: boolean;
+    mfaRequired: boolean;
+    /** The second-factor challenge, echoed back. Present exactly on the 202. */
+    challenge?: string;
+    userId?: string;
+    keyId?: string;
+    returnUrl: string;
+    sessionBinding?: SessionBindingType;
+    keyExpiresAtMillis?: number;
+}
+
+/**
  * POST /_auth/oauth/finalize - OAuth 세션 완료 (인터셉터용)
  *
  * 백엔드 콜백에서 이 라우트로 리다이렉트
@@ -273,14 +295,19 @@ export const getGoogleOAuthUrl = route.post('/_auth/oauth/google/url')
 export const oauthFinalize = route.post('/_auth/oauth/finalize')
     .input({
         body: Type.Object({
-            userId: Type.String({ description: 'User ID from OAuth callback' }),
-            keyId: Type.String({ description: 'Key ID from OAuth state' }),
+            userId: Type.Optional(Type.String({ description: 'User ID from OAuth callback' })),
+            keyId: Type.Optional(Type.String({ description: 'Key ID from OAuth state' })),
+            mfaChallenge: Type.Optional(Type.String({
+                minLength: 16,
+                maxLength: 256,
+                description: 'Second-factor challenge from the callback query, when the callback carried one',
+            })),
             returnUrl: Type.Optional(Type.String({ description: 'URL to redirect after login' })),
         }),
     })
     .use([rateLimitPolicy('oauth-start', { limit: 20, windowMs: 60_000 })])
     .skip(['auth'])
-    .handler(async (c) =>
+    .handler(async (c): Promise<OAuthFinalizeResponse> =>
     {
         const { body } = await c.data();
 
@@ -293,6 +320,29 @@ export const oauthFinalize = route.post('/_auth/oauth/finalize')
         if (body.returnUrl && !isSafeReturnPath(body.returnUrl))
         {
             throw new ValidationError({ message: 'returnUrl must be a relative path within the app' });
+        }
+
+        // The callback handed the page a challenge instead of a userId/keyId pair,
+        // because the account has a second factor and this device is new to it
+        // (#95). There is no session to finalize yet, so this answers 202 with
+        // the challenge echoed back — the interceptor bakes its pending cookie
+        // from that and lets the body through, and the app page sends the person
+        // to the confirm screen. The value is echoed rather than looked up: it is
+        // the page's own copy, it authorizes only `POST /_auth/mfa/verify`, and
+        // this route has no session to seal around it either way.
+        if (body.mfaChallenge)
+        {
+            return c.accepted({
+                success: true,
+                mfaRequired: true,
+                challenge: body.mfaChallenge,
+                returnUrl: body.returnUrl || '/',
+            });
+        }
+
+        if (!body.userId || !body.keyId)
+        {
+            throw new ValidationError({ message: 'userId and keyId are required unless mfaChallenge is sent' });
         }
 
         // 인터셉터가 세션을 저장함 — userId, keyId를 반환해야 인터셉터가 처리 가능.
@@ -316,6 +366,7 @@ export const oauthFinalize = route.post('/_auth/oauth/finalize')
         // believes a bound key is an ordinary one.
         return {
             success: true,
+            mfaRequired: false,
             userId: body.userId,
             keyId: body.keyId,
             returnUrl: body.returnUrl || '/',
@@ -537,8 +588,12 @@ export const oauthNative = route.post('/_auth/oauth/:provider/native')
     .handler(async (c) =>
     {
         const { params, body } = await c.data();
+        const result = await oauthNativeService({ provider: params.provider, ...body, ...deviceProvenance(c.raw) });
 
-        return await oauthNativeService({ provider: params.provider, ...body, ...deviceProvenance(c.raw) });
+        // 202 when the account has a second factor and this device is new to it
+        // (#95): the id_token verified, the key is registered inactive, and the
+        // body carries the challenge that activates it.
+        return result.mfaRequired ? c.accepted(result) : result;
     });
 
 /**
