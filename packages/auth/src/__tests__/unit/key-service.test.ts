@@ -20,7 +20,14 @@ const { keysRepository } = vi.hoisted(() => ({
     },
 }));
 
-vi.mock('../../server/repositories', () => ({ keysRepository }));
+// `emitDeviceRegistered` reads the enrolment flag straight from its repository
+// rather than through the second-factor service, which would put the two in a
+// cycle (#95). Answered false here, as the rest of this file assumes.
+vi.mock('../../server/repositories', () => ({
+    keysRepository,
+    mfaEnrolmentRepository: { isEnrolled: vi.fn(async () => false) },
+    usersRepository: { currentKeyEpoch: vi.fn(async () => 0) },
+}));
 // `key.service` now asks the second-factor service two questions — whether the
 // caller must step up, and whether a rotation carries a verification across.
 // Both have their own suites; here they only have to be reachable.
@@ -28,6 +35,12 @@ vi.mock('../../server/services/mfa.service', () => ({
     assertStepUp: vi.fn(async () => undefined),
     carryStepUpVerification: vi.fn(async () => undefined),
     mfaEnrolledForUser: vi.fn(async () => false),
+    // Unenrolled throughout this file, so neither of the step-up seams should
+    // ever be reached. Stubbed as null-answering rather than left out, so a
+    // collision case that started resuming a challenge fails on the assertion
+    // rather than on a missing export.
+    openStepUpChallengeService: vi.fn(async () => null),
+    resumeStepUpChallengeService: vi.fn(async () => null),
 }));
 
 // fingerprint 검증은 이 테스트의 관심사가 아니다 — 충돌 판정만 본다. 알고리즘 검사는

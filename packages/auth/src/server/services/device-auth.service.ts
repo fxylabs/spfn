@@ -50,7 +50,12 @@ import {
     hashDeviceCode,
     normalizeUserCode,
 } from '../lib/device-code';
-import { registerPublicKeyService, DEFAULT_KEY_ALGORITHM, KEY_FINGERPRINT_PREFIX_LENGTH } from './key.service';
+import {
+    registerPublicKeyService,
+    registeredBinding,
+    DEFAULT_KEY_ALGORITHM,
+    KEY_FINGERPRINT_PREFIX_LENGTH,
+} from './key.service';
 import { decideKeyBinding } from '../lib/key-policy';
 import { updateLastLoginService } from './user.service';
 import { getPendingDeletionInfo } from './account-deletion.service';
@@ -139,8 +144,23 @@ export interface DeviceAuthPendingResult
     intervalMillis: number;
 }
 
-/** Approved and spent: the key is registered and this is the login it produced. */
-export type DeviceAuthApprovedResult = { status: 'approved' } & LoginResult;
+/**
+ * Approved and spent: the key is registered and this is the login it produced.
+ *
+ * `LoginResult`'s login fields are optional because a sign-in may answer a
+ * second-factor challenge instead of a session (#95). This branch never can —
+ * the owner already said yes on a device that is signed in, which is itself the
+ * second factor — so the three it always carries are narrowed back to required
+ * and a consumer of the approved branch reads exactly what it always read.
+ */
+export type DeviceAuthApprovedResult = { status: 'approved' } & LoginResult & {
+    userId: string;
+    publicId: string;
+    passwordChangeRequired: boolean;
+};
+
+/** The login an approval produced, before `status` is put in front of it. */
+export type DeviceAuthLogin = Omit<DeviceAuthApprovedResult, 'status'>;
 
 export type PollDeviceAuthResult = DeviceAuthPendingResult | DeviceAuthApprovedResult;
 
@@ -449,7 +469,7 @@ export async function pollDeviceAuthService(
 async function completeDeviceLogin(
     record: DeviceAuthorization,
     provenance: DeviceProvenance,
-): Promise<LoginResult>
+): Promise<DeviceAuthLogin>
 {
     if (record.userId === null)
     {
@@ -496,23 +516,27 @@ async function completeDeviceLogin(
 
     await updateLastLoginService(user.id);
 
-    const result: LoginResult = {
+    const result: DeviceAuthLogin = {
+        // A device-code approval is itself a second factor: the owner read the
+        // code on a device that is already signed in and said yes, so this
+        // channel never steps up (#95).
+        mfaRequired: false,
         userId: String(user.id),
         publicId: user.publicId,
         email: user.email || undefined,
         phone: user.phone || undefined,
         passwordChangeRequired: user.passwordChangeRequired,
-        ...loginBindingFields(registered),
+        ...loginBindingFields(registeredBinding(registered)),
     };
 
     // After commit, not inline: the poll route is transactional, and a login
     // event emitted from inside it would announce a sign-in that a rollback then
     // erased — the key would not exist and the subscriber would already have
     // acted on it.
-    const mfaEnrolled = await mfaEnrolledForUser(Number(result.userId));
+    const mfaEnrolled = await mfaEnrolledForUser(user.id);
 
     onAfterCommit(() => authLoginEvent.emit({
-        userId: result.userId,
+        userId: String(user.id),
         provider: 'device',
         email: result.email,
         phone: result.phone,

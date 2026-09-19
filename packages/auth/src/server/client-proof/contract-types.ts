@@ -26,6 +26,8 @@ export interface ContractOperation
         | 'auth.enroll.register'
         | 'auth.enroll.login'
         | 'auth.enroll.oauthNative'
+        | 'auth.mfa.verify'
+        | 'auth.mfa.status'
         | 'auth.keys.rotate'
         | 'auth.keys.list'
         | 'auth.keys.revoke'
@@ -187,6 +189,15 @@ export const CONTRACT_OPERATIONS: readonly ContractOperation[] = [
  * `info`, `approve` and `deny` proven, from a device that is already signed in,
  * which is what lets the server read the approving account from the caller
  * rather than from the request body.
+ *
+ * `auth.mfa.verify` is unproven for the same reason the sign-ins are: the key it
+ * activates is not usable until it succeeds, so there is nothing to sign the
+ * call with. It is the only way to finish a sign-in that answered
+ * `mfaRequired: true`, which is why it is a contract operation while the six
+ * enrolment routes — all of which need an account screen — are not.
+ * `auth.mfa.status` is the one exception among them, because a client that has
+ * just met a 202 needs to be able to tell the person what they enrolled. It is
+ * a bodyless GET, like `core.time`, so it declares no request type.
  */
 export const AUTH_SURFACE_OPERATIONS: readonly ContractOperation[] = [
     {
@@ -221,6 +232,27 @@ export const AUTH_SURFACE_OPERATIONS: readonly ContractOperation[] = [
         responseType: 'OauthNativeResponse',
         summary: 'Verifies a native/web social id_token server-side and enrolls the client-generated public key.',
         since: '0.3.0',
+    },
+    {
+        id: 'auth.mfa.verify',
+        method: 'POST',
+        path: '/_auth/mfa/verify',
+        authProfile: 'none',
+        requiresSession: false,
+        requestType: 'MfaVerifyRequest',
+        responseType: 'MfaVerifyResponse',
+        summary: 'Finishes a sign-in that answered mfaRequired by spending the challenge, which activates the key.',
+        since: '0.13.0',
+    },
+    {
+        id: 'auth.mfa.status',
+        method: 'GET',
+        path: '/_auth/mfa/status',
+        authProfile: 'clientProofV1',
+        requiresSession: false,
+        responseType: 'MfaStatusResponse',
+        summary: 'Reports whether the caller has a second factor, which methods, and how many recovery codes remain.',
+        since: '0.13.0',
     },
     {
         id: 'auth.keys.rotate',

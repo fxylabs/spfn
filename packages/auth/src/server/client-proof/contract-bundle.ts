@@ -264,20 +264,48 @@ import { CLIENT_IDENTITY_HEADERS, CLIENT_KINDS, SERVER_CONTRACT_HEADERS } from '
  * legitimately — and the addresses behind it are not on this surface at all. It
  * is meaningful only where the deployment runs the proxy signature guard;
  * without it every web request carries one address and the field never appears.
+ *
+ * 0.13.0 carries second-factor step-up on a new device (#95): an account that
+ * enrolled a TOTP or a second-factor passkey answers a sign-in from a device it
+ * has never seen with a challenge instead of a session, and the key stays
+ * inactive until the challenge is spent.
+ *
+ * `LoginResponse` and `OauthNativeResponse` are reshaped the way
+ * `PollDeviceAuthResponse` was in 0.10.0, and for the identical reason: the
+ * answer is a union on the wire and this grammar has no union type. `mfaRequired`
+ * becomes the required discriminant and every field that was required becomes
+ * optional, because the 202 branch carries none of them — only `challenge`.
+ * `PollDeviceAuthResponse` gains `mfaRequired` with them, since its approved
+ * branch is a sign-in spread whole; it never carries `challenge`, because a
+ * device-code approval is the owner saying yes on a device that is already
+ * signed in and is itself the second factor.
+ *
+ * `auth.mfa.verify` joins the surface, because without it a client that received
+ * a 202 has no operation to finish the sign-in with — the flow would dead-end on
+ * the one surface this contract exists for. `auth.mfa.status` joins beside it so
+ * that client can tell the person what they enrolled; it is a bodyless GET, like
+ * `core.time`. The other six `mfa/*` routes stay out: each one needs an account
+ * screen, and a code list is a promise about failure paths enumerated one by
+ * one. `MfaVerificationFailedError` and the rate limit are that enumeration for
+ * `auth.mfa.*`, and they are in `errors` under surface `rest`.
+ *
+ * Breaking, and the one release here that is breaking in the ordinary sense: a
+ * consumer generated against 0.12.x reads `userId` off a sign-in as a required
+ * field and would decode a 202 as a malformed response. The range moves so such
+ * a client is refused `CONTRACT_UNSUPPORTED` rather than left to guess.
  */
-export const CONTRACT_VERSION = '0.12.0';
+export const CONTRACT_VERSION = '0.13.0';
 export const CONTRACT_MAJOR = 0;
 export const CONTRACT_NAME = 'spfn-mobile-contract';
 
 /**
- * Under 0.x the minor carries breaking changes, so the range stops at 0.12.0.
+ * Under 0.x the minor carries breaking changes, so the range stops at 0.13.0.
  *
- * 0.12.0 moves the floor because the minor is where this contract puts a surface
- * addition, and the floor is that minor's `.0` — not because a 0.11.x consumer
- * could not read the fields session binding added, which it would simply not
- * know about. A patch leaves the floor where it is; 0.10.1 did.
+ * 0.13.0 moves the floor for the strongest form of the reason: fields a 0.12.x
+ * consumer decodes as required became optional, so that consumer would reject a
+ * 202 sign-in outright. A patch leaves the floor where it is; 0.10.1 did.
  */
-export const CONTRACT_SUPPORTED_RANGE = '>=0.12.0 <0.13.0';
+export const CONTRACT_SUPPORTED_RANGE = '>=0.13.0 <0.14.0';
 
 /** What spfn-mobile's validator expects an upstream-exported bundle to name. */
 export const EXPORT_ORIGIN = 'spfn-primitives-ci-export';
@@ -361,6 +389,8 @@ type ReferencedTypeName =
     | 'KeyAlgorithm'
     | 'KeyPlatform'
     | 'KeyBinding'
+    | 'MfaChallenge'
+    | 'MfaMethod'
     | 'DeviceAuthPollStatus';
 
 type ElementTypeName = ScalarTypeName | DecimalTypeName | ReferencedTypeName;
@@ -563,16 +593,98 @@ export const CONTRACT_TYPES: readonly TypeDeclaration[] = [
             optional('oldKeyId', 'string'),
         ],
     },
+    /**
+     * The sign-in union, flattened the way the poll union was.
+     *
+     * `mfaRequired` is the discriminant and the only required field; everything
+     * else belongs to one branch. False is a session and carries the five login
+     * fields; true is a 202 carrying `challenge` and nothing else, which the
+     * client spends at `auth.mfa.verify` (#95). This grammar has no union type,
+     * so a required discriminant plus optional fields is the only way to say it
+     * — and the typed web client infers one result type from the same
+     * declaration, so it could not have been a union there either.
+     */
     {
         name: 'LoginResponse',
         fields: [
-            required('userId', 'string'),
-            required('publicId', 'string'),
+            required('mfaRequired', 'boolean'),
+            optional('challenge', 'MfaChallenge'),
+            optional('userId', 'string'),
+            optional('publicId', 'string'),
             optional('email', 'string'),
             optional('phone', 'string'),
-            required('passwordChangeRequired', 'boolean'),
+            optional('passwordChangeRequired', 'boolean'),
             optional('sessionBinding', 'KeyBinding'),
             optional('keyExpiresAtMillis', 'integer'),
+        ],
+    },
+    /**
+     * What a sign-in hands back instead of a session when the account has a
+     * second factor and this device is new to it.
+     *
+     * `secret` is the challenge itself, returned once. The server stores only its
+     * hash and addresses the row by that, so this value is not recoverable from
+     * the database and is not a bearer credential for anything but the one
+     * `auth.mfa.verify` call it belongs to.
+     */
+    {
+        name: 'MfaChallenge',
+        fields: [
+            required('secret', 'string'),
+            required('expiresAtMillis', 'integer'),
+        ],
+    },
+    /**
+     * Exactly one of `code` and `recoveryCode`, beside the challenge.
+     *
+     * The third form the server accepts — an assertion from a passkey the owner
+     * marked as a second factor — is not declared: a WebAuthn assertion is a
+     * nested browser object outside this grammar, and the passkey ceremonies are
+     * not on this surface for the same reason.
+     */
+    {
+        name: 'MfaVerifyRequest',
+        fields: [
+            required('challenge', 'string'),
+            optional('code', 'string'),
+            optional('recoveryCode', 'string'),
+        ],
+    },
+    /**
+     * The sign-in the challenge was standing in for, plus what the proxy needs.
+     *
+     * `mfaRequired` is false on every 200 here — the step-up just happened — and
+     * it is carried so the body is the same `LoginResponse` shape a direct
+     * sign-in answers. `keyId` and `challengeHash` are for the Next.js proxy: it
+     * seals a session only when both match the pending cookie it baked at the
+     * 202, which is what stops a cookie from one flow sealing a session for
+     * another's key.
+     */
+    {
+        name: 'MfaVerifyResponse',
+        fields: [
+            required('mfaRequired', 'boolean'),
+            required('keyId', 'string'),
+            required('challengeHash', 'string'),
+            optional('userId', 'string'),
+            optional('publicId', 'string'),
+            optional('email', 'string'),
+            optional('phone', 'string'),
+            optional('passwordChangeRequired', 'boolean'),
+            optional('sessionBinding', 'KeyBinding'),
+            optional('keyExpiresAtMillis', 'integer'),
+        ],
+    },
+    /**
+     * What the account has enrolled. No secret, no otpauth URI, no recovery code
+     * — only the counts and names an account screen renders.
+     */
+    {
+        name: 'MfaStatusResponse',
+        fields: [
+            required('enrolled', 'boolean'),
+            required('methods', 'array<MfaMethod>'),
+            required('recoveryCodesRemaining', 'integer'),
         ],
     },
     {
@@ -587,12 +699,20 @@ export const CONTRACT_TYPES: readonly TypeDeclaration[] = [
             required('algorithm', 'KeyAlgorithm'),
         ],
     },
+    /**
+     * Flattened on the same terms as `LoginResponse`: a native social sign-in on
+     * an enrolled account and a device it has not seen answers 202 with a
+     * challenge rather than a key, so the discriminant is required and the three
+     * login fields are the false branch.
+     */
     {
         name: 'OauthNativeResponse',
         fields: [
-            required('userId', 'string'),
-            required('keyId', 'string'),
-            required('isNewUser', 'boolean'),
+            required('mfaRequired', 'boolean'),
+            optional('challenge', 'MfaChallenge'),
+            optional('userId', 'string'),
+            optional('keyId', 'string'),
+            optional('isNewUser', 'boolean'),
         ],
     },
     {
@@ -710,6 +830,7 @@ export const CONTRACT_TYPES: readonly TypeDeclaration[] = [
         fields: [
             required('status', 'DeviceAuthPollStatus'),
             optional('intervalMillis', 'integer'),
+            optional('mfaRequired', 'boolean'),
             optional('userId', 'string'),
             optional('publicId', 'string'),
             optional('email', 'string'),
@@ -779,6 +900,11 @@ export const CONTRACT_ENUMS: readonly EnumDeclaration[] = [
     { name: 'KeyPlatform', values: [...KEY_PLATFORM] },
     { name: 'KeyBinding', values: [...SESSION_BINDINGS] },
     { name: 'DeviceAuthPollStatus', values: ['pending', 'approved'] },
+    // The two things an account screen can show as enrolled. `recovery` is a
+    // verification method but never a method the account *has* — a recovery code
+    // is what is left when the authenticator is not to hand, so `mfa/status`
+    // reports it as a count and not as a factor.
+    { name: 'MfaMethod', values: ['totp', 'passkey'] },
 ];
 
 /** One line per code describing what it means on the wire. */
@@ -836,6 +962,15 @@ interface RestSurfaceError
  * `KeyIdAlreadyRegisteredError`, and every one of the five routes is rate
  * limited — so a code is listed once and names the same failure wherever it
  * appears.
+ *
+ * `auth.mfa.*` is the third enumerated family (contract 0.13.0) and adds exactly
+ * one code. Everything `auth.mfa.verify` can refuse with is one of two things: a
+ * proof that did not verify, which is `MfaVerificationFailedError` whatever was
+ * wrong with it — an unknown challenge, an expired one, one already spent, a
+ * stale code, a used recovery code — and the rate limit, which is
+ * `TooManyRequestsError` and already listed above. A body naming two proofs or
+ * none is `ValidationError`, also already listed. `auth.mfa.status` refuses only
+ * by the admission rules every proven operation shares.
  */
 const REST_SURFACE_ERRORS: readonly RestSurfaceError[] = [
     {
@@ -905,6 +1040,15 @@ const REST_SURFACE_ERRORS: readonly RestSurfaceError[] = [
         httpStatus: 409,
         retryable: false,
         summary: 'that keyId is taken or was revoked — generate a fresh keyId and retry',
+    },
+    {
+        code: 'MfaVerificationFailedError',
+        httpStatus: 401,
+        retryable: false,
+        summary:
+            'the second factor did not verify. One code for every way it can fail — a challenge that never '
+            + 'existed, expired, was already spent or has run out of attempts, and a wrong or stale proof — '
+            + 'because which one applies describes state the caller is guessing at',
     },
     {
         code: 'TooManyRequestsError',
@@ -1109,10 +1253,14 @@ export function buildMobileContractBundle(): MobileContractBundle
         },
         restOperations: {
             appliesTo:
-                'every operation whose path starts with /_auth. The server also answers two /_auth routes that '
-                + 'are not operations of this contract and are not reachable from a generated client — the '
+                'every operation whose path starts with /_auth. The server answers more /_auth routes than this '
+                + 'contract declares, and the undeclared ones are not reachable from a generated client: the '
                 + 'sign-out-everywhere link confirm and consume, which a browser posts to from a page in the app '
-                + 'with no session and no proof',
+                + 'with no session and no proof; the passkey, session-binding and session-renewal ceremonies, '
+                + 'which need a browser WebAuthn API; and the second-factor enrolment routes, each of which needs '
+                + 'an account screen. Of the second-factor routes only verify and status are declared here — '
+                + 'verify because a client that met a 202 sign-in has to be able to finish it, and status because '
+                + 'it has to be able to say what the account enrolled',
             requestBody:
                 'plain JSON of the request type, validated server-side; canonical-JSON encoding is required only '
                 + 'when the call is proven (the proof binds the canonical bytes)',

@@ -50,6 +50,19 @@ export const COOKIE_NAMES = {
     {
         return `spfn_oauth_pending${getCookieSuffix()}`;
     },
+    /**
+     * Pending second-factor session (privateKey, keyId, challengeHash) (#95)
+     *
+     * Its own name and its own audience, separate from OAUTH_PENDING. The two
+     * coexist: a person who starts a social login in one tab while a password
+     * step-up is outstanding in another has both flows live, and one name would
+     * mean the second overwrote the first — sealing a session with a private key
+     * that does not match the key being activated.
+     */
+    get MFA_PENDING()
+    {
+        return `spfn_mfa_pending${getCookieSuffix()}`;
+    },
     /** OAuth CSRF nonce — double-submit against the (encrypted) state.nonce at callback */
     get OAUTH_CSRF()
     {
@@ -757,12 +770,31 @@ export interface MfaConfig
     issuer: string;
     /** How long a device's step-up stays good for a sensitive change. */
     stepUpWindowMs: number;
+    /**
+     * How long a new-device step-up challenge stays spendable.
+     *
+     * The window a person has to reach for their authenticator, and the window
+     * an attacker who has the password has to get past the second factor. Ten
+     * minutes is the same number the OAuth pending cookie and the link flows
+     * use, and the proxy's pending cookie is sealed for exactly this long.
+     */
+    challengeTtlMs: number;
 }
 
 /** Fallback issuer, for an app that has set neither the MFA nor the passkey name. */
 const DEFAULT_MFA_ISSUER = 'SPFN';
 
 const DEFAULT_STEP_UP_MINUTES = 10;
+
+const DEFAULT_CHALLENGE_TTL_MINUTES = 10;
+
+/** A positive whole-or-fractional minute count from the environment, or the default. */
+function minutesOr(configured: string | undefined, fallback: number): number
+{
+    const minutes = Number(configured);
+
+    return Number.isFinite(minutes) && minutes > 0 ? minutes : fallback;
+}
 
 /**
  * Resolve the second-factor configuration.
@@ -779,17 +811,14 @@ const DEFAULT_STEP_UP_MINUTES = 10;
  */
 export function getMfaConfig(): MfaConfig
 {
-    const configuredMinutes = Number(process.env.SPFN_AUTH_MFA_STEP_UP_MINUTES);
-    const minutes = Number.isFinite(configuredMinutes) && configuredMinutes > 0
-        ? configuredMinutes
-        : DEFAULT_STEP_UP_MINUTES;
-
     return {
         issuer: process.env.SPFN_AUTH_MFA_ISSUER?.trim()
             || process.env.SPFN_AUTH_PASSKEY_RP_NAME?.trim()
             || mfaIssuerFromAppUrl()
             || DEFAULT_MFA_ISSUER,
-        stepUpWindowMs: minutes * 60_000,
+        stepUpWindowMs: minutesOr(process.env.SPFN_AUTH_MFA_STEP_UP_MINUTES, DEFAULT_STEP_UP_MINUTES) * 60_000,
+        challengeTtlMs:
+            minutesOr(process.env.SPFN_AUTH_MFA_CHALLENGE_TTL_MINUTES, DEFAULT_CHALLENGE_TTL_MINUTES) * 60_000,
     };
 }
 

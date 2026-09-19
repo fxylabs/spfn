@@ -1175,6 +1175,62 @@ export class StepUpRequiredError extends ForbiddenError
 }
 
 /**
+ * Session Pending Mismatch Error (401)
+ *
+ * Minted by the Next.js proxy: a second-factor verification succeeded at the
+ * backend, but the pending cookie this browser is holding was baked for a
+ * different challenge or a different device key.
+ *
+ * The comparison is the whole reason the cookie exists. Without it the proxy
+ * would seal whatever private key it happens to be holding around whatever key
+ * the verification activated — a person who starts a social login in one tab
+ * while a password step-up is outstanding in another would get a session signed
+ * with the wrong key, and `authenticate` would refuse every request it made.
+ *
+ * The key really is active by the time this is raised: the backend accepted the
+ * proof and this browser simply cannot prove it is the one that asked. Signing
+ * in again is the remedy, and it is a cheap one.
+ */
+export class SessionPendingMismatchError extends UnauthorizedError
+{
+    readonly code = 'SESSION_PENDING_MISMATCH';
+
+    constructor(data: { message?: string; details?: Record<string, any> } = {})
+    {
+        super({
+            message: data.message || 'This browser did not start that sign-in. Sign in again.',
+            details: data.details,
+        });
+        this.name = 'SessionPendingMismatchError';
+    }
+}
+
+/**
+ * Session Pending Expired Error (401)
+ *
+ * Minted by the Next.js proxy: a second-factor verification succeeded and there
+ * is no pending cookie to seal a session from — ten minutes passed, or the
+ * browser that finished the step-up is not the browser that started it.
+ *
+ * Told apart from a mismatch on purpose. This one is the ordinary way a person
+ * meets the end of the window, and the message can say so; a mismatch is a
+ * cookie that is present and wrong, which is worth a different line in a log.
+ */
+export class SessionPendingExpiredError extends UnauthorizedError
+{
+    readonly code = 'SESSION_PENDING_EXPIRED';
+
+    constructor(data: { message?: string; details?: Record<string, any> } = {})
+    {
+        super({
+            message: data.message || 'That sign-in took too long. Sign in again.',
+            details: data.details,
+        });
+        this.name = 'SessionPendingExpiredError';
+    }
+}
+
+/**
  * MFA Config Error (500)
  *
  * Thrown when the at-rest keyring cannot serve a second factor:

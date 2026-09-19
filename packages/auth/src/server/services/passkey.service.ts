@@ -61,7 +61,7 @@ import type { WebAuthnChallengeKind } from '../entities/webauthn-challenges';
 import type { User } from '../entities/users';
 import { getDummyPasswordHash, verifyPassword } from '../helpers';
 import type { KeyAlgorithmType, KeyPlatformType } from '../types';
-import { registerPublicKeyService, revokeKeyService } from './key.service';
+import { registerPublicKeyService, registeredBinding, revokeKeyService } from './key.service';
 import { assertStepUp, mfaEnrolledForUser } from './mfa.service';
 import { decideKeyBinding } from '../lib/key-policy';
 import { updateLastLoginService } from './user.service';
@@ -581,18 +581,21 @@ async function startSession(user: User, params: FinishPasskeyLoginParams): Promi
     await updateLastLoginService(user.id);
 
     const result: LoginResult = {
+        // A passkey sign-in never steps up: the assertion is already a second
+        // factor, so this answer is always the session itself (#95).
+        mfaRequired: false,
         userId: String(user.id),
         publicId: user.publicId,
         email: user.email || undefined,
         phone: user.phone || undefined,
         passwordChangeRequired: user.passwordChangeRequired,
-        ...loginBindingFields(registered),
+        ...loginBindingFields(registeredBinding(registered)),
     };
 
     const mfaEnrolled = await mfaEnrolledForUser(user.id);
 
     onAfterCommit(() => authLoginEvent.emit({
-        userId: result.userId,
+        userId: String(user.id),
         provider: 'passkey',
         email: result.email,
         phone: result.phone,

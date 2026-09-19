@@ -7,6 +7,7 @@
 
 import { NewUserPublicKey, userPublicKeys } from '../entities/user-public-keys';
 import { users } from '../entities/users';
+import { mfaChallenges } from '../entities/mfa-challenges';
 import type { ClientIdentity } from '../client-proof/wire-version';
 import { BaseRepository } from '@spfn/core/db';
 import { eq, and, or, isNull, lt, desc, sql } from 'drizzle-orm';
@@ -102,6 +103,12 @@ export class KeysRepository extends BaseRepository
      * `lastSeenIp` is not selected, deliberately. The concurrent-use moment is
      * what the owner acts on; the trail of addresses behind it is stored PII the
      * account surface has no use for.
+     *
+     * A key still waiting on a second factor is excluded in **both** modes
+     * (#95). It is not a device that can sign, so it does not belong in the
+     * default list; and it is not a device the owner signed out either, so it
+     * does not belong in the revoked one — where it would read exactly like a
+     * revoked key with no revocation time, which is a different thing entirely.
      * Read replica 사용
      */
     async listForUser(userId: number, includeRevoked = false)
@@ -124,14 +131,11 @@ export class KeysRepository extends BaseRepository
                 concurrentUseAt: userPublicKeys.concurrentUseAt,
             })
             .from(userPublicKeys)
-            .where(
-                includeRevoked
-                    ? eq(userPublicKeys.userId, userId)
-                    : and(
-                        eq(userPublicKeys.userId, userId),
-                        eq(userPublicKeys.isActive, true),
-                    ),
-            )
+            .where(and(
+                eq(userPublicKeys.userId, userId),
+                isNull(userPublicKeys.pendingMfaChallengeId),
+                includeRevoked ? undefined : eq(userPublicKeys.isActive, true),
+            ))
             .orderBy(desc(userPublicKeys.createdAt));
     }
 
@@ -223,6 +227,17 @@ export class KeysRepository extends BaseRepository
      * active keys still had its generation ended, and an outstanding
      * sign-out-everywhere link must die with it.
      *
+     * The two second-factor CTEs are here for the same "no caller can forget"
+     * reason (#95). A pending key is `is_active = false`, so the UPDATE below
+     * does not touch it and neither would anything else: the owner who sees an
+     * unexpected second-factor prompt and does exactly what the notice says —
+     * change the password, sign out everywhere, open the revoke-all link, run a
+     * reset — would otherwise leave the attacker's pending key and its live
+     * challenge untouched. Deleting the key cascades onto its challenge; the
+     * expiry beside it catches a challenge whose key is already gone. A pending
+     * row and an active row are disjoint sets, so the two statements never
+     * contend for the same row.
+     *
      * Write primary 사용
      */
     private async revokeActive(userId: number, reason: string, keepKeyId?: string): Promise<RevokedKey[]>
@@ -234,6 +249,18 @@ export class KeysRepository extends BaseRepository
                 UPDATE ${users}
                 SET key_epoch = key_epoch + 1
                 WHERE id = ${userId}
+            ),
+            challenges_expired AS (
+                UPDATE ${mfaChallenges}
+                SET expires_at = now()
+                WHERE user_id = ${userId}
+                  AND verified_at IS NULL
+                  AND expires_at > now()
+            ),
+            pending_dropped AS (
+                DELETE FROM ${userPublicKeys}
+                WHERE user_id = ${userId}
+                  AND pending_mfa_challenge_id IS NOT NULL
             )
             UPDATE ${userPublicKeys} t
             SET is_active = false,

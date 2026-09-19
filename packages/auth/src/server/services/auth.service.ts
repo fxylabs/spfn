@@ -18,7 +18,7 @@ import {
 import { usersRepository, keysRepository, deviceAuthorizationsRepository } from '../repositories';
 import { revokeAllOAuth2GrantsForUser } from './oauth2-grant.service';
 import { runBeforeRegister } from '../lib/config';
-import { type KeyAlgorithmType, type KeyPlatformType, type SessionBindingType } from '../types';
+import { type KeyAlgorithmType, type KeyPlatformType } from '../types';
 import { hashPassword, verifyPassword, getDummyPasswordHash, normalizeEmail } from '../helpers';
 import { validateVerificationToken } from './verification.service';
 import { registerPublicKeyService, revokeKeyService } from './key.service';
@@ -93,57 +93,16 @@ export interface LoginParams
 }
 
 /**
- * What a sign-in answers with, on every path that starts a session.
+ * The sign-in answer shapes, re-exported from where they are defined.
  *
- * The last two fields are the carrier #97 needed. The Next.js proxy generated
- * the device key and sealed the cookie, but only the backend knows whether the
- * account asked for a bound session and when the key it just registered runs
- * out — so the sign-in says it here and the interceptor copies both into
- * `SessionData`. A response without them seals an unbound session, which is what
- * every account that did not opt in gets and what every path predating this
- * change keeps getting.
+ * `login-result.ts` holds them because `key.service` and `mfa.service` read them
+ * and this file reads those; they are re-exported here because this is where
+ * every consumer has always imported `LoginResult` from.
  */
-export interface LoginResult
-{
-    userId: string;
-    publicId: string;
-    email?: string;
-    phone?: string;
-    passwordChangeRequired: boolean;
-    /** `'passkey'` when the key registered by this sign-in is bound. Absent otherwise. */
-    sessionBinding?: SessionBindingType;
-    /** Epoch milliseconds that key expires at. Only sent alongside `sessionBinding`. */
-    keyExpiresAtMillis?: number;
-}
+export type { LoginBindingFields, LoginResult, MfaChallengeHandle } from './login-result';
+export { loginBindingFields } from './login-result';
 
-/**
- * The binding half of a sign-in answer, as a type.
- *
- * Named because more than one result carries it: a password reset registers a
- * device key exactly as a sign-in does, so its answer has to say so too or the
- * proxy seals a cookie that does not know the key it holds is short-lived.
- */
-export type LoginBindingFields = Pick<LoginResult, 'sessionBinding' | 'keyExpiresAtMillis'>;
-
-/**
- * The two binding fields a `LoginResult` carries, or nothing.
- *
- * Nothing, and not `{ sessionBinding: 'none' }`: absence is how every consumer
- * already reads "unbound", from the sealing interceptor to a generated mobile
- * client, and a response that started naming the default would change the shape
- * of every sign-in this package has ever answered.
- */
-export function loginBindingFields(
-    registered: { binding: SessionBindingType; expiresAt: Date | null },
-): LoginBindingFields
-{
-    if (registered.binding !== 'passkey' || !registered.expiresAt)
-    {
-        return {};
-    }
-
-    return { sessionBinding: 'passkey', keyExpiresAtMillis: registered.expiresAt.getTime() };
-}
+import { loginBindingFields, type LoginResult } from './login-result';
 
 export interface LogoutParams
 {
@@ -408,12 +367,28 @@ export async function loginService(
         userAgent: params.userAgent,
         binding: decideKeyBinding(user.sessionBinding, params.webProxy),
         replacesKeyId,
+        loginEvent: {
+            provider: email ? 'email' : 'phone',
+            email: user.email || undefined,
+            phone: user.phone || undefined,
+        },
     });
+
+    // An enrolled account on a device it has never seen gets a challenge instead
+    // of a session (#95). Nothing below this line runs: the sign-in has not
+    // happened yet, so `lastLoginAt` does not move and no login event is
+    // announced — an attacker holding only the password must not be able to
+    // produce either. Both happen at `POST /_auth/mfa/verify`.
+    if (registered.pending)
+    {
+        return { mfaRequired: true, challenge: registered.challenge };
+    }
 
     // Update last login
     await updateLastLoginService(user.id);
 
     const result: LoginResult = {
+        mfaRequired: false,
         userId: String(user.id),
         publicId: user.publicId,
         email: user.email || undefined,
@@ -424,7 +399,7 @@ export async function loginService(
 
     // Emit login event
     await authLoginEvent.emit({
-        userId: result.userId,
+        userId: String(user.id),
         provider: email ? 'email' : 'phone',
         email: result.email,
         phone: result.phone,

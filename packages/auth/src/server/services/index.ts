@@ -19,6 +19,7 @@ export type {
     LoginResult,
     LogoutParams,
     ChangePasswordParams,
+    MfaChallengeHandle,
 } from './auth.service';
 
 // Verification Service
@@ -138,8 +139,14 @@ export {
     mfaStatusService,
     startStepUpService,
     stepUpService,
+    attemptSecondFactor,
     verifySecondFactor,
+    openStepUpChallengeService,
+    resumeStepUpChallengeService,
+    verifyMfaChallengeService,
+    startMfaChallengeAssertionService,
     sweepUnconfirmedMfaService,
+    sweepMfaChallengesService,
 } from './mfa.service';
 
 export type {
@@ -148,8 +155,11 @@ export type {
     ConfirmTotpResult,
     MarkPasskeyParams,
     MfaStatus,
+    OpenStepUpChallengeParams,
     StepUpParams,
     TotpEnrolmentResult,
+    VerifyMfaChallengeParams,
+    VerifyMfaChallengeResult,
 } from './mfa.service';
 
 // Key Service
@@ -159,11 +169,13 @@ export {
     revokeKeyService,
     listKeysService,
     revokeAllKeysService,
+    registeredBinding,
     KEY_FINGERPRINT_PREFIX_LENGTH,
 } from './key.service';
 
 export type {
     RegisterPublicKeyParams,
+    RegisterPublicKeyResult,
     RotateKeyParams,
     RotateKeyResult,
     RevokeKeyParams,

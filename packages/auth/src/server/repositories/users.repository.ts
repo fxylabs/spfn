@@ -23,6 +23,27 @@ import { normalizeEmail, normalizeOptionalEmail } from '../helpers/email';
 export class UsersRepository extends BaseRepository
 {
     /**
+     * The account's current key generation.
+     *
+     * Read from the primary, and this is the one place that matters: the value
+     * is stamped onto a second-factor challenge that must die with the
+     * generation it was minted in, and a replica lagging behind a revoke-all
+     * would stamp the generation that has just ended.
+     *
+     * Write primary 사용
+     */
+    async currentKeyEpoch(id: number): Promise<number>
+    {
+        const result = await this.db
+            .select({ keyEpoch: users.keyEpoch })
+            .from(users)
+            .where(eq(users.id, id))
+            .limit(1);
+
+        return result[0]?.keyEpoch ?? 0;
+    }
+
+    /**
      * ID로 사용자 조회
      * Read replica 사용
      */

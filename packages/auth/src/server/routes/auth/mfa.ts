@@ -4,12 +4,16 @@
  * Enrolling, inspecting and removing an optional second factor, plus the
  * re-verification a device uses to open its step-up window.
  *
- * Every route here is authenticated. Four of them — enrol, disable, mark a
- * passkey, regenerate recovery codes — are additionally gated on `assertStepUp`,
- * because each one changes what the second factor is, and a stolen session
- * alone must not be able to do that. For an account with nothing enrolled that
- * gate is a no-op, so none of these is a new refusal for anybody who has not
- * opted in.
+ * Two of them are not authenticated and cannot be: `verify` and
+ * `verify/options` finish a sign-in whose device key is inactive until they
+ * succeed, so there is nothing yet to sign the call with. The challenge secret
+ * is their whole credential, it names one registration, and it buys nothing
+ * else. Every other route here is authenticated. Four of those — enrol, disable,
+ * mark a passkey, regenerate recovery codes — are additionally gated on
+ * `assertStepUp`, because each one changes what the second factor is, and a
+ * stolen session alone must not be able to do that. For an account with nothing
+ * enrolled that gate is a no-op, so none of these is a new refusal for anybody
+ * who has not opted in.
  *
  * `confirm` and `step-up` carry the `auth-mfa-verify` policy, the same numbers
  * as `auth-login`: both take a guessable six-digit value, so they are bounded
@@ -33,9 +37,11 @@ import {
     markPasskeySecondFactorService,
     mfaStatusService,
     regenerateRecoveryCodesService,
+    startMfaChallengeAssertionService,
     startStepUpService,
     startTotpEnrolmentService,
     stepUpService,
+    verifyMfaChallengeService,
 } from '../../services';
 
 /**
@@ -204,6 +210,85 @@ export const mfaStatus = route.get('/_auth/mfa/status')
         const { userId } = getAuth(c);
 
         return await mfaStatusService(Number(userId));
+    });
+
+/**
+ * The limit the two unauthenticated challenge routes share.
+ *
+ * Per client address, and nothing else: there is no session on either of them —
+ * that is the point of the flow — so `byIpAndCaller` would degrade to this
+ * anyway, with a second dimension that never fires. The number is `auth-login`'s,
+ * because the exposure is the same six-digit value, and the challenge's own
+ * five-attempt counter is the tighter bound on guessing one particular
+ * registration.
+ */
+const CHALLENGE_LIMIT = { limit: 10, windowMs: 60_000 };
+
+const ChallengeSchema = Type.String({
+    minLength: 16,
+    maxLength: 256,
+    description: 'The challenge secret from the 202 sign-in answer or the OAuth callback query',
+});
+
+/**
+ * POST /_auth/mfa/verify - Finish a sign-in that answered mfaRequired
+ *
+ * Unauthenticated, and it has to be: the key this activates is the only one the
+ * caller has and it is inactive until this succeeds. The challenge secret is the
+ * whole credential, it names one registration, and it is spent once.
+ *
+ * Answers the `LoginResult` the sign-in would have answered, plus `keyId` and
+ * `challengeHash` for the Next.js interceptor to match against the pending
+ * cookie it baked at the 202. Every refusal is one 401 with one body.
+ *
+ * No `Transactional()`, for the reason `totp/confirm` has none: the challenge's
+ * attempt counter has to survive the refusal that raised it, and a route-wide
+ * transaction would roll it back with the error — five wrong codes would never
+ * reach five. The service opens its own for the success path.
+ */
+export const mfaVerify = route.post('/_auth/mfa/verify')
+    .input({
+        body: Type.Object({
+            challenge: ChallengeSchema,
+            code: Type.Optional(TotpCodeSchema),
+            recoveryCode: Type.Optional(RecoveryCodeSchema),
+            response: Type.Optional(AssertionSchema),
+        }),
+    })
+    .use([rateLimitPolicy('auth-mfa-verify', CHALLENGE_LIMIT)])
+    .skip(['auth'])
+    .handler(async (c) =>
+    {
+        const { body } = await c.data();
+
+        return await verifyMfaChallengeService({
+            challenge: body.challenge,
+            code: body.code,
+            recoveryCode: body.recoveryCode,
+            response: body.response as Parameters<typeof verifyMfaChallengeService>[0]['response'],
+        });
+    });
+
+/**
+ * POST /_auth/mfa/verify/options - Begin finishing a step-up with a passkey
+ *
+ * The challenge secret stands in for the session the caller does not have: it is
+ * what names the account, so the WebAuthn challenge is minted for the right
+ * owner without the request having to say who that is.
+ */
+export const mfaVerifyOptions = route.post('/_auth/mfa/verify/options')
+    .input({
+        body: Type.Object({
+            challenge: ChallengeSchema,
+        }),
+    })
+    .use([rateLimitPolicy('auth-mfa-verify', CHALLENGE_LIMIT)])
+    .skip(['auth'])
+    .handler(async (c) =>
+    {
+        const { body } = await c.data();
+
+        return await startMfaChallengeAssertionService(body.challenge);
     });
 
 /**

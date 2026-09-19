@@ -206,8 +206,16 @@ export const oauthFinalizeInterceptor: InterceptorRule = {
 
     response: async (ctx, next) =>
     {
-        // 성공 응답일 때만 처리
-        if (!ctx.response.ok)
+        // 성공 응답일 때만 처리.
+        //
+        // A 202 is `ok` and is deliberately not one of them (#95): the callback
+        // carried a second-factor challenge rather than a userId/keyId pair, so
+        // there is no session to finalize yet and nothing here to match against
+        // the pending cookie. `mfaVerifyInterceptor` bakes its own cookie from
+        // that body and the app page sends the person to the confirm screen;
+        // sealing anything here would be sealing a session for a key whose
+        // second factor has not been proved.
+        if (!ctx.response.ok || ctx.response.status === 202)
         {
             await next();
 

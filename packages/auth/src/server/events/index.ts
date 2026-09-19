@@ -22,6 +22,9 @@ export const AuthProviderSchema = Type.Union([
     ...SOCIAL_PROVIDERS.map(p => Type.Literal(p)),
 ]);
 
+/** The doors `auth.login` can name, as a type. */
+export type AuthLoginProvider = Static<typeof AuthLoginProviderSchema>;
+
 /**
  * Login provider type
  *

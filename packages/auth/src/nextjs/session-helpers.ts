@@ -26,6 +26,24 @@ export interface PendingSessionData
 }
 
 /**
+ * Pending second-factor session, held between a 202 sign-in and its verify (#95).
+ *
+ * The same three fields plus `challengeHash`, and sealed under its own audience
+ * so it can never be unsealed as an OAuth pending cookie or the other way round.
+ * The extra field is the binding: the proxy seals a session only when the
+ * verified response names this challenge **and** this key, so a cookie minted
+ * for one flow cannot seal a session around another flow's key.
+ *
+ * The hash and not the secret. The proxy has no use for a spendable challenge —
+ * it is comparing, not verifying — and a cookie that carried one would be a
+ * second copy of a credential for no gain.
+ */
+export interface PendingMfaSessionData extends PendingSessionData
+{
+    challengeHash: string;
+}
+
+/**
  * Public session information (excludes sensitive data)
  */
 export interface PublicSession
@@ -181,13 +199,19 @@ export async function clearSession(): Promise<void>
 // ============================================================================
 
 /**
- * Get encryption key for pending session
+ * Get encryption key for a pending session, derived per purpose.
+ *
+ * The purpose is in the derivation as well as in the audience, so the OAuth and
+ * second-factor cookies cannot be unsealed as each other even if a caller named
+ * the wrong audience: two flows may be live in one browser at once, and the
+ * whole point of separating them is that neither can seal a session around the
+ * other's key.
  */
-async function getPendingSessionKey(): Promise<Uint8Array>
+async function getPendingSessionKey(purpose: 'oauth' | 'mfa'): Promise<Uint8Array>
 {
     const secret = env.SPFN_AUTH_SESSION_SECRET;
     const encoder = new TextEncoder();
-    const data = encoder.encode(`oauth-pending:${secret}`);
+    const data = encoder.encode(purpose === 'oauth' ? `oauth-pending:${secret}` : `mfa-pending:${secret}`);
     const hashBuffer = await crypto.subtle.digest('SHA-256', data);
 
     return new Uint8Array(hashBuffer);
@@ -204,15 +228,37 @@ export async function sealPendingSession(
     ttl: number = 600,
 ): Promise<string>
 {
-    const key = await getPendingSessionKey();
+    return await sealFor('oauth', data, ttl);
+}
 
+/**
+ * Seal the pending second-factor session (#95)
+ *
+ * Takes its data explicitly rather than reading a cookie: the only caller is an
+ * interceptor rule, which does not run inside `next/headers` and reads the jar
+ * through `ctx.cookies` instead.
+ *
+ * @param data - privateKey, keyId, algorithm and the challenge hash they are for
+ * @param ttl - Seconds. Ten minutes, matching the challenge's own life
+ */
+export async function sealPendingMfaSession(
+    data: PendingMfaSessionData,
+    ttl: number = 600,
+): Promise<string>
+{
+    return await sealFor('mfa', data, ttl);
+}
+
+/** The one sealer both pending cookies use, parameterized by purpose. */
+async function sealFor(purpose: 'oauth' | 'mfa', data: PendingSessionData, ttl: number): Promise<string>
+{
     return await new jose.EncryptJWT({ data })
         .setProtectedHeader({ alg: 'dir', enc: 'A256GCM' })
         .setIssuedAt()
         .setExpirationTime(`${ttl}s`)
         .setIssuer('spfn-auth')
-        .setAudience('spfn-oauth')
-        .encrypt(key);
+        .setAudience(purpose === 'oauth' ? 'spfn-oauth' : 'spfn-mfa')
+        .encrypt(await getPendingSessionKey(purpose));
 }
 
 /**
@@ -222,14 +268,30 @@ export async function sealPendingSession(
  */
 export async function unsealPendingSession(jwt: string): Promise<PendingSessionData>
 {
-    const key = await getPendingSessionKey();
-
-    const { payload } = await jose.jwtDecrypt(jwt, key, {
+    const { payload } = await jose.jwtDecrypt(jwt, await getPendingSessionKey('oauth'), {
         issuer: 'spfn-auth',
         audience: 'spfn-oauth',
     });
 
     return payload.data as PendingSessionData;
+}
+
+/**
+ * Unseal the pending second-factor session (#95)
+ *
+ * Throws on an OAuth pending cookie presented here, and on anything past its ten
+ * minutes — both are the separation this cookie exists for.
+ *
+ * @param jwt - Encrypted pending token from `COOKIE_NAMES.MFA_PENDING`
+ */
+export async function unsealPendingMfaSession(jwt: string): Promise<PendingMfaSessionData>
+{
+    const { payload } = await jose.jwtDecrypt(jwt, await getPendingSessionKey('mfa'), {
+        issuer: 'spfn-auth',
+        audience: 'spfn-mfa',
+    });
+
+    return payload.data as PendingMfaSessionData;
 }
 
 /**

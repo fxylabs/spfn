@@ -11,10 +11,18 @@ import { getBoundKeyTtlMs } from '../lib/config';
 import { uaFamily } from '../lib/ua-family';
 import { InvalidKeyFingerprintError, KeyIdAlreadyRegisteredError } from '@spfn/auth/errors';
 import { ValidationError } from '@spfn/core/errors';
-import { deviceAuthorizationsRepository, keysRepository } from '../repositories';
+import { deviceAuthorizationsRepository, keysRepository, usersRepository } from '../repositories';
 import { revokeAllOAuth2GrantsForUser } from './oauth2-grant.service';
 import { emitDeviceRegistered } from './device-registration.service';
-import { assertStepUp, carryStepUpVerification } from './mfa.service';
+import {
+    assertStepUp,
+    carryStepUpVerification,
+    mfaEnrolledForUser,
+    openStepUpChallengeService,
+    resumeStepUpChallengeService,
+} from './mfa.service';
+import type { MfaChallengeHandle } from './login-result';
+import { MFA_CHALLENGE_CHANNELS, type DeferredLoginEvent, type MfaChallengeChannel } from '../entities/mfa-challenges';
 import type { DeviceRegistrationChannel } from '../events';
 
 export interface RegisterPublicKeyParams
@@ -59,6 +67,46 @@ export interface RegisterPublicKeyParams
      * register a device with the owner's notice switched off.
      */
     replacesKeyId?: string;
+    /**
+     * What to announce if this registration is stopped and later verified (#95).
+     *
+     * Read only on a channel that can step up, and only when it does. The login
+     * event has to fire once and with the original channel's payload, and the
+     * app's own `metadata` and the social provider that carried it are gone by
+     * the time `POST /_auth/mfa/verify` runs — so the announcement rides the
+     * challenge row rather than being guessed at from the user row.
+     */
+    loginEvent?: DeferredLoginEvent;
+}
+
+/**
+ * What a registration settled on: a key, or a second factor still to prove.
+ *
+ * The `pending` branch is the 202 (#95). Its callers answer it to the client and
+ * stop — no session, no event, no `lastLoginAt` — and everything they would have
+ * done happens at `verify` instead.
+ */
+export type RegisterPublicKeyResult =
+    | ({ pending: false } & RegisteredKeyBinding)
+    | { pending: true; challenge: MfaChallengeHandle };
+
+/**
+ * The binding half of a registration that could not have been stepped up.
+ *
+ * Only four channels can answer `pending`, so a caller on any other one is
+ * reading a case its channel cannot reach. Throwing rather than defaulting is
+ * the honest answer if that ever stops being true: a silent `{}` would seal an
+ * unbound session for a key nobody had proved, which is the one outcome this
+ * whole feature exists to prevent.
+ */
+export function registeredBinding(result: RegisterPublicKeyResult): RegisteredKeyBinding
+{
+    if (result.pending)
+    {
+        throw new Error('This registration channel cannot require a second factor');
+    }
+
+    return result;
 }
 
 export interface RotateKeyParams
@@ -237,6 +285,72 @@ function isExpired(expiresAt: Date | null): boolean
 }
 
 /**
+ * Whether this registration is stopped and asked for a second factor (#95).
+ *
+ * The decision lives here, at the one chokepoint every registration path goes
+ * through, rather than at each of the four that can be stopped: a path added
+ * later then inherits the rule instead of having to remember it.
+ *
+ * Three terms. The account has a second factor, or there is nothing to ask for.
+ * The registration is not a rotation — `replacesKeyId` means a device already
+ * signed in is swapping its key, which is not an arrival and not a moment to
+ * challenge. And the channel is one of the four where a single stolen
+ * credential would be enough on its own; a device-code approval and a passkey
+ * sign-in each already carried a second proof, and `register`, `signup-link`,
+ * `invitation` and `renewal` cannot reach this at all — the first three create
+ * the account, which is by construction unenrolled, and the fourth is a
+ * rotation. The brand-new social account is covered by the same fact: a user row
+ * `createOrLinkUser` has just written has no second factor to ask for.
+ */
+async function decideStepUp(params: RegisterPublicKeyParams): Promise<MfaChallengeChannel | null>
+{
+    const channel = MFA_CHALLENGE_CHANNELS.find(candidate => candidate === params.channel);
+
+    if (!channel || params.replacesKeyId)
+    {
+        return null;
+    }
+
+    return await mfaEnrolledForUser(params.userId) ? channel : null;
+}
+
+/**
+ * The answer for a keyId this account already holds.
+ *
+ * Two of the three cases are ordinary: an active key being re-registered is a
+ * repeated login from one device, and a key still waiting on a second factor is
+ * a retried registration — a native client reusing its keyId, or an OAuth state
+ * replayed from the back button. Both get their own state back rather than a
+ * 409, which would refuse a caller for holding a key that is theirs.
+ *
+ * Anything else — a revoked key of their own, somebody else's key — is the one
+ * error, told the same way, so a caller cannot probe whether a keyId exists.
+ *
+ * @throws KeyIdAlreadyRegisteredError
+ */
+async function answerForExistingKey(
+    existing: NonNullable<Awaited<ReturnType<typeof keysRepository.findByKeyId>>>,
+    userId: number,
+): Promise<RegisterPublicKeyResult>
+{
+    if (existing.userId === userId && existing.isActive)
+    {
+        return { pending: false, ...await reRegisterOwnActiveKey(existing, userId) };
+    }
+
+    const resumed = existing.userId === userId && existing.pendingMfaChallengeId
+        ? await resumeStepUpChallengeService(userId, existing.keyId)
+        : null;
+
+    if (resumed)
+    {
+        return { pending: true, challenge: resumed };
+    }
+
+    throw new KeyIdAlreadyRegisteredError();
+}
+
+/**
  * Register a new public key for a user
  *
  * `keyId` is UNIQUE across all users, so the lookup must ignore `isActive` —
@@ -244,13 +358,18 @@ function isExpired(expiresAt: Date | null): boolean
  * index, rolling the whole login transaction back into a 500. Reuse is refused
  * with a domain error instead, telling the client to generate a fresh keyId.
  *
+ * An enrolled account arriving on a new device gets the key written **inactive**
+ * and a challenge back (#95). Nothing else happens: no device event, no login
+ * event, no `lastLoginAt` — those are what the challenge is holding, and they
+ * fire at `POST /_auth/mfa/verify` or not at all.
+ *
  * @throws KeyIdAlreadyRegisteredError keyId가 이미 쓰인 값일 때 (자기 폐기 키 재사용 · 남의 키)
  * @throws InvalidKeyFingerprintError fingerprint가 publicKey와 맞지 않을 때
  * @throws KeyAlgorithmMismatchError 키의 SPKI 타입이 선언된 algorithm과 다를 때
  */
 export async function registerPublicKeyService(
     params: RegisterPublicKeyParams,
-): Promise<RegisteredKeyBinding>
+): Promise<RegisterPublicKeyResult>
 {
     const { userId, keyId, publicKey, fingerprint, algorithm = DEFAULT_KEY_ALGORITHM, deviceName, platform } = params;
     const binding = params.binding ?? 'none';
@@ -258,16 +377,7 @@ export async function registerPublicKeyService(
     const existing = await keysRepository.findByKeyId(keyId);
     if (existing)
     {
-        // 같은 사용자가 자기 활성 키를 다시 등록하는 것만 무시한다 — 한 기기에서
-        // 반복 로그인할 때 걸리는 정상 경로다.
-        if (existing.userId === userId && existing.isActive)
-        {
-            return await reRegisterOwnActiveKey(existing, userId);
-        }
-
-        // 폐기된 자기 키 재사용과 남의 활성 키는 같은 에러로 답한다. 응답이 갈리면
-        // 임의의 keyId가 존재하는지를 caller가 떠볼 수 있다. 폐기는 되돌리지 않는다.
-        throw new KeyIdAlreadyRegisteredError();
+        return await answerForExistingKey(existing, userId);
     }
 
     // Verify fingerprint matches public key
@@ -282,6 +392,11 @@ export async function registerPublicKeyService(
     // at proof verification, after the caller believes it is enrolled.
     assertKeyMatchesAlgorithm(publicKey, algorithm);
 
+    // Decided before the insert, so `is_active` is right the moment the row
+    // exists. Deciding afterwards would leave a window, however short, in which
+    // the key an unproven second factor is meant to be holding back is live.
+    const stepUp = await decideStepUp(params);
+
     // Store public key — hours for a bound key, 90 days otherwise
     const row = await keysRepository.create({
         userId,
@@ -295,9 +410,20 @@ export async function registerPublicKeyService(
         registeredIp: params.ip ?? null,
         registeredUserAgent: params.userAgent ?? null,
         registeredUaFamily: params.userAgent ? uaFamily(params.userAgent) : null,
-        isActive: true,
+        isActive: stepUp === null,
         expiresAt: getKeyExpiryDate(binding),
     });
+
+    if (stepUp)
+    {
+        return { pending: true, challenge: await openStepUpChallengeService({
+            userId,
+            keyId,
+            channel: stepUp,
+            keyEpoch: await usersRepository.currentKeyEpoch(userId),
+            loginEvent: params.loginEvent,
+        }) };
+    }
 
     // A rotation replaces a device that is already signed in, so it is not the
     // arrival this event exists to announce. Every other return above is an
@@ -316,7 +442,7 @@ export async function registerPublicKeyService(
         await emitDeviceRegistered(row, params.channel);
     }
 
-    return { binding, expiresAt: row.expiresAt };
+    return { pending: false, binding, expiresAt: row.expiresAt };
 }
 
 /**

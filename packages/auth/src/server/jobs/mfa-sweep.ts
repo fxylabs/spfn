@@ -10,6 +10,13 @@
  * A confirmed row is never touched, whatever its age. That is somebody's second
  * factor.
  *
+ * It sweeps finished step-up challenges too, and the inactive keys they were
+ * gating (#95). A person who met a second-factor prompt and closed the tab
+ * leaves a key row on their account that nothing can ever use and nothing lists;
+ * ten minutes later the challenge is dead and both should go. One job rather
+ * than two, because they are the same table's leavings and a second cron entry
+ * would be a second thing to remember to register.
+ *
  * Registration is NOT automatic, for the reason `deletion-purge.ts` sets out at
  * length: `createAuthLifecycle()`'s `afterInfrastructure` hook runs before
  * `registerJobs` in `@spfn/core`'s startup, so the lifecycle cannot register a
@@ -18,7 +25,7 @@
  */
 
 import { job } from '@spfn/core/job';
-import { sweepUnconfirmedMfaService } from '../services/mfa.service';
+import { sweepMfaChallengesService, sweepUnconfirmedMfaService } from '../services/mfa.service';
 import { authLogger } from '../logger';
 
 /** Daily at 07:00, an hour after the sign-out-everywhere link sweep. */
@@ -37,10 +44,11 @@ export function createMfaSweepJob(cronExpression: string = DEFAULT_MFA_SWEEP_CRO
         .handler(async () =>
         {
             const { deleted } = await sweepUnconfirmedMfaService();
+            const { deleted: challenges } = await sweepMfaChallengesService();
 
-            if (deleted > 0)
+            if (deleted > 0 || challenges > 0)
             {
-                authLogger.service.info('[auth.mfa.sweep] sweep complete', { deleted });
+                authLogger.service.info('[auth.mfa.sweep] sweep complete', { deleted, challenges });
             }
         });
 }

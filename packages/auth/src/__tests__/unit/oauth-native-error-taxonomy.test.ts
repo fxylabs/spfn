@@ -24,7 +24,7 @@ const {
     socialAccountsRepository: {
         findByProviderAndProviderId: vi.fn(async () => null),
     },
-    registerPublicKeyService: vi.fn(async () => undefined),
+    registerPublicKeyService: vi.fn(async () => ({ pending: false, binding: 'none', expiresAt: null })),
 }));
 
 vi.mock('@spfn/core/db', () => ({
@@ -258,8 +258,16 @@ describe('native sign-in answers each failure path with its own code', () =>
             'DeviceAuthAlreadyHandledError',
         ];
 
+        // Second-factor step-up is the third enumerated family (contract 0.13.0,
+        // #95). It adds exactly one code: every way `auth.mfa.verify` can refuse
+        // a proof is one 401 with one body, deliberately, so that a guess cannot
+        // be told from a stale code. Its other two refusals — a body naming two
+        // proofs or none, and the rate limit — are `ValidationError` and
+        // `TooManyRequestsError`, both already in the table above.
+        const mfaCodes = ['MfaVerificationFailedError'];
+
         expect(declared.filter(e => e.surface === 'rest').map(e => e.code).sort())
-            .toEqual([...table.map(cell => cell.code), ...deviceCodes].sort());
+            .toEqual([...table.map(cell => cell.code), ...deviceCodes, ...mfaCodes].sort());
     });
 
     it('only the rate limit invites a retry of the same request', () =>

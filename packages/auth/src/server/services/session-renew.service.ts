@@ -40,7 +40,7 @@ import { keysRepository, usersRepository } from '../repositories';
 import type { UserPublicKey } from '../entities/user-public-keys';
 import type { User } from '../entities/users';
 import type { KeyAlgorithmType } from '../types';
-import { registerPublicKeyService, revokeKeyService } from './key.service';
+import { registerPublicKeyService, registeredBinding, revokeKeyService } from './key.service';
 import { startRenewalCeremonyService, verifyRenewalAssertionService } from './passkey.service';
 import { loginBindingFields, type LoginResult } from './auth.service';
 
@@ -154,13 +154,16 @@ export async function finishSessionRenewService(
     });
 
     return {
+        // A renewal replaces the key of a device that is already signed in, so
+        // it is a rotation rather than an arrival and never steps up (#95).
+        mfaRequired: false,
         keyId: params.keyId,
         userId: String(user.id),
         publicId: user.publicId,
         email: user.email || undefined,
         phone: user.phone || undefined,
         passwordChangeRequired: user.passwordChangeRequired,
-        ...loginBindingFields(registered),
+        ...loginBindingFields(registeredBinding(registered)),
     };
 }
 

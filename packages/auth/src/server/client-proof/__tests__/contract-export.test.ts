@@ -217,10 +217,24 @@ describe('operations describe the routes the server answers', () =>
 
     // 서명은 본문 바이트를 덮는다. 주소에 값이 끼면 클라이언트와 서버가 같은 문자열을
     // 만들어야 하는데 그 정규화 규칙이 없다 — 그래서 모든 operation이 POST이고 인자는 본문에 있다.
-    it('proof-bearing operations remain POST with arguments in the body; core.time is bodyless GET', () =>
+    it('operations that carry arguments remain POST with them in the body; the bodyless ones are GET', () =>
     {
+        // A GET is admissible only when there are no arguments at all: a proof
+        // covers the body bytes, and an operation with arguments in the address
+        // would need a normalization rule for that string which nothing states.
+        // `core.time` and `auth.mfa.status` are the two that take none.
+        const BODYLESS = ['core.time', 'auth.mfa.status'];
+
         for (const operation of [...CONTRACT_OPERATIONS, ...AUTH_SURFACE_OPERATIONS])
         {
+            if (BODYLESS.includes(operation.id))
+            {
+                expect(operation.method, operation.id).toBe('GET');
+                expect(operation, operation.id).not.toHaveProperty('requestType');
+
+                continue;
+            }
+
             expect(operation.method).toBe('POST');
             expect(operation.requestType).toBeDefined();
         }
@@ -247,18 +261,22 @@ describe('operations describe the routes the server answers', () =>
 
     // I2 — the unproven class is stated and covers clock sync, enrollment and
     // the two device-code operations a keyless device calls.
-    it('I2: core time, the three enrollment operations and device start/poll are the unproven class', () =>
+    it('I2: core time, the three enrollment operations, device start/poll and mfa verify are the unproven class', () =>
     {
         const unproven = ALL_OPERATIONS
             .filter((operation) => operation.authProfile === 'none')
             .map((operation) => operation.id)
             .sort();
+        // `auth.mfa.verify` is unproven on the enrollment terms exactly: the key
+        // it activates is inactive until it succeeds, so there is nothing yet to
+        // sign the call with (#95).
         expect(unproven).toEqual([
             'auth.device.poll',
             'auth.device.start',
             'auth.enroll.login',
             'auth.enroll.oauthNative',
             'auth.enroll.register',
+            'auth.mfa.verify',
             'core.time',
         ]);
 
@@ -499,6 +517,7 @@ describe('every operation records when it became available', () =>
      * | auth.keys.{list,revoke,revokeAll} | ee286775 | 0.4.1 |
      * | core.time | issue #146 | 0.9.0 |
      * | auth.device.{start,poll,info,approve,deny} | 1a5d6fd6 (#171), exported here | 0.10.0 |
+     * | auth.mfa.{verify,status} | #95 PR 2, exported here | 0.13.0 |
      */
     const RECORDED_HISTORY: Record<string, string> = {
         'auth.clientProof.handshake': '0.1.0',
@@ -517,6 +536,8 @@ describe('every operation records when it became available', () =>
         'auth.device.info': '0.10.0',
         'auth.device.approve': '0.10.0',
         'auth.device.deny': '0.10.0',
+        'auth.mfa.verify': '0.13.0',
+        'auth.mfa.status': '0.13.0',
     };
 
     it('every exported operation carries a since', () =>
@@ -1099,8 +1120,14 @@ describe('the poll answer keeps a union inside a grammar that has none', () =>
     {
         // pollDeviceAuthService spreads LoginResult into the approved answer, so
         // the two must not drift: a field added to login reaches this response.
+        //
+        // `challenge` is the exception and the only one. It belongs to the 202
+        // branch of a sign-in, and a device-code approval cannot be a 202 — the
+        // owner said yes on a device that is already signed in, which is itself
+        // the second factor (#95). Declaring it here would publish a field the
+        // approved branch can never carry.
         const approved = branchFields.filter((field) => field.name !== 'intervalMillis');
-        const loginFields = typeNamed('LoginResponse').fields;
+        const loginFields = typeNamed('LoginResponse').fields.filter((field) => field.name !== 'challenge');
 
         expect(approved.map((field) => field.name)).toEqual(loginFields.map((field) => field.name));
 
@@ -1357,18 +1384,19 @@ describe('declared proof rules match the implementation', () =>
         replayWindowMillis: number;
     };
 
-    it('the contract line is the revision that adds session binding', () =>
+    it('the contract line is the revision that adds second-factor step-up', () =>
     {
-        expect(bundle.contractVersion).toBe('0.12.0');
+        expect(bundle.contractVersion).toBe('0.13.0');
     });
 
     it('the supported range floor is the current minor, as the 0.x rule has it', () =>
     {
         // Under 0.x this contract carries a surface addition in the minor, and
-        // the range's floor is mechanically that minor's `.0`. 0.12.0 adds four
-        // optional fields and one enum, none of which a 0.11.x consumer reads;
-        // the floor moves because the minor did, not because anything broke.
-        expect(bundle.supportedRange).toBe('>=0.12.0 <0.13.0');
+        // the range's floor is mechanically that minor's `.0`. 0.13.0 moves it
+        // for the strongest form of the reason: a sign-in's login fields became
+        // optional, so a 0.12.x consumer would reject a 202 outright rather than
+        // merely not know about a new field.
+        expect(bundle.supportedRange).toBe('>=0.13.0 <0.14.0');
     });
 
     it('states the rule that binds a native id_token to the key it enrolls', () =>

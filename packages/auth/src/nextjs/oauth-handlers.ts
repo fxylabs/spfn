@@ -10,6 +10,7 @@ import { sealSession } from '../server/lib/session';
 import { deriveCsrfToken } from '../server/lib/csrf';
 import { COOKIE_NAMES, getSessionTtl } from '../server/lib/config';
 import { env } from '@spfn/core/config';
+import { env as authEnv } from '@spfn/auth/config';
 import { logger } from '@spfn/core/logger';
 import { unsealPendingSession } from './session-helpers';
 import { isSafeReturnPath } from '../lib/return-path';
@@ -28,6 +29,19 @@ export interface OAuthCallbackOptions
      * @default '/auth/error'
      */
     errorRedirectUrl?: string;
+
+    /**
+     * App page that asks for the second factor, when the callback carries a
+     * step-up challenge instead of a session (#95).
+     *
+     * An override for `SPFN_AUTH_MFA_CONFIRM_PATH`, which is where every other
+     * app-page path in this package lives; the env var is the one to set, and
+     * this exists for an app mounting two handlers on different screens. The
+     * handler redirects to it with `?challenge=` and `?returnUrl=`.
+     *
+     * @default env SPFN_AUTH_MFA_CONFIRM_PATH, then '/auth/mfa'
+     */
+    mfaPath?: string;
 }
 
 /**
@@ -64,6 +78,40 @@ function bindingFromQuery(searchParams: URLSearchParams): { sessionBinding?: str
 }
 
 /**
+ * Send the browser to the second-factor page, carrying the challenge (#95).
+ *
+ * No session is sealed and no cookie is touched. The OAuth pending cookie stays
+ * where it is — it holds the private half of the key the challenge would
+ * activate, and `mfaVerifyInterceptor` reads it when the page posts the proof.
+ *
+ * The challenge rides the query, as `userId` and `keyId` used to. Nothing else
+ * is authorized by it: it spends at `POST /_auth/mfa/verify` and at no other
+ * route, it is single use, it dies in ten minutes, and the request logger records
+ * `pathname` only — so unlike #94's revoke-all link this is not a bearer
+ * credential riding a URL.
+ */
+function mfaRedirect(
+    request: NextRequest,
+    challenge: string,
+    returnUrl: string,
+    configured?: string,
+): NextResponse
+{
+    const path = configured || authEnv.SPFN_AUTH_MFA_CONFIRM_PATH || DEFAULT_MFA_CONFIRM_PATH;
+    const target = new URL(path, request.url);
+
+    target.searchParams.set('challenge', challenge);
+    target.searchParams.set('returnUrl', returnUrl);
+
+    logger.debug('OAuth callback needs a second factor', { path });
+
+    return NextResponse.redirect(target);
+}
+
+/** Where the second-factor page lives when nothing says otherwise. */
+const DEFAULT_MFA_CONFIRM_PATH = '/auth/mfa';
+
+/**
  * Create OAuth callback handler for Next.js API Route
  *
  * Handles the final step of OAuth flow:
@@ -71,6 +119,11 @@ function bindingFromQuery(searchParams: URLSearchParams): { sessionBinding?: str
  * 2. Gets privateKey from pending session cookie
  * 3. Creates full session and saves to cookie
  * 4. Redirects to returnUrl
+ *
+ * When the account has a second factor and this device is new to it (#95) the
+ * backend sends `mfaChallenge` in place of `userId` and `keyId`. No session is
+ * sealed; the browser goes to `SPFN_AUTH_MFA_CONFIRM_PATH` with the challenge,
+ * and the session is sealed by `mfaVerifyInterceptor` once the page proves it.
  *
  * @example
  * ```typescript
@@ -99,6 +152,13 @@ export function createOAuthCallbackHandler(options?: OAuthCallbackOptions)
             errorUrl.searchParams.set('error', error);
 
             return NextResponse.redirect(errorUrl);
+        }
+
+        const mfaChallenge = searchParams.get('mfaChallenge');
+
+        if (mfaChallenge)
+        {
+            return mfaRedirect(request, mfaChallenge, returnUrl, options?.mfaPath);
         }
 
         // Validate required params

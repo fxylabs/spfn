@@ -173,6 +173,8 @@ real secret values out of band, never commit them.
 | `SPFN_AUTH_PASSKEY_CHALLENGE_TTL_SECONDS` / `_RECENT_AUTH_MINUTES` | `.env.server` | — | defaults `300` / `10` — see [Passkeys](#passkeys-webauthn) |
 | `SPFN_AUTH_MFA_ISSUER` | `.env.server` | — | name the authenticator app files the account under; defaults to the passkey relying-party name, then the app URL host — see [Second factor](#second-factor-mfa) |
 | `SPFN_AUTH_MFA_STEP_UP_MINUTES` | `.env.server` | — | default `10`; how recently an enrolled account's device must have proved its second factor for a sensitive change — see [Second factor](#second-factor-mfa) |
+| `SPFN_AUTH_MFA_CHALLENGE_TTL_MINUTES` | `.env.server` | — | default `10`; how long a new-device step-up challenge stays spendable — see [Step-up on a new device](#step-up-on-a-new-device) |
+| `SPFN_AUTH_MFA_CONFIRM_PATH` | `.env.server` | — | default `/auth/mfa`; app page the OAuth callback handler sends a browser to when a social sign-in needs a second factor |
 | `SPFN_AUTH_BOUND_KEY_TTL_HOURS` | `.env.server` | — | default `24`; how long a passkey-bound session key lives — see [Session binding](#session-binding) |
 | `SPFN_AUTH_BOUND_KEY_RENEW_GRACE_HOURS` | `.env.server` | — | default `168`; how long past expiry a bound key may still be renewed. Past it, sign in again |
 | `SPFN_AUTH_CONCURRENT_USE_WINDOW_MS` | `.env.server` | — | default `300000`; how close two sightings from two addresses must be to raise `concurrentUseAtMillis` |
@@ -228,6 +230,8 @@ routes use `.skip(['auth'])`; the rest require `Authorization: Bearer <client-si
 | `mfaStatus` | GET `/_auth/mfa/status` | yes | `{ enrolled, methods, recoveryCodesRemaining }`; no secret |
 | `mfaStepUp` | POST `/_auth/mfa/step-up` | yes | re-prove the second factor on this device |
 | `mfaStepUpOptions` | POST `/_auth/mfa/step-up/options` | yes | options for a step-up by passkey |
+| `mfaVerify` | POST `/_auth/mfa/verify` | public | finish a sign-in that answered `202 { mfaRequired: true }` — see [Step-up on a new device](#step-up-on-a-new-device) |
+| `mfaVerifyOptions` | POST `/_auth/mfa/verify/options` | public | options for finishing that sign-in with a passkey |
 | `logout` | POST `/_auth/logout` | yes | revoke current key |
 | `rotateKey` | POST `/_auth/keys/rotate` | yes | rotate public key before 90-day expiry |
 | `listKeys` | POST `/_auth/keys/list` | yes | the caller's registered devices — see [Registered devices](#registered-devices-key-management) |
@@ -262,6 +266,44 @@ Keys expire after 90 days — rotate with `rotateKey`, which starts the ninety d
 bound to a passkey is the one exception: it lives for hours and a rotation carries its expiry over
 rather than resetting it, because only `session/renew` may move that window — see
 [Session binding](#session-binding).
+
+### Migration — narrow a sign-in on `mfaRequired` before reading `userId`
+
+**Breaking in `@spfn/auth` 0.3.0-beta.25 / mobile contract 0.13.0.** A sign-in no
+longer always answers with a session. An account that enrolled a second factor and
+signs in from a device the account has never seen gets `202` and a challenge
+instead, and the key it registered stays inactive until that challenge is spent —
+see [Second factor](#second-factor-mfa).
+
+So `LoginResult` carries one new required field, `mfaRequired`, and every field it
+carried before is now optional. It is still **one** type rather than a union:
+`authApi.login` infers its result from that declaration, and a union would make
+every `result.userId` in your app a compile error with no way to narrow it that
+was available in 0.12.x. Narrow on the discriminant:
+
+```typescript
+const result = await authApi.login.call({ body: { email, password } });
+
+if (result.mfaRequired)
+{
+    // No session yet. result.challenge is { secret, expiresAtMillis }.
+    router.push('/auth/mfa');
+
+    return;
+}
+
+console.log(result.userId); // string, from here on
+```
+
+The same reshape applies to `authApi.oauthNative` (`OauthNativeResult`), to
+`completePasswordReset`, and to the approved branch of `pollDeviceAuth` — which
+carries `mfaRequired: false` and can never carry anything else, since a
+device-code approval is itself a second factor.
+
+Nothing changes for an account with no second factor: every one of those calls
+answers `200` with `mfaRequired: false` and exactly the fields it always did.
+In the Next.js proxy nothing changes for your code at all — the interceptors
+handle the 202 and the pending cookie themselves.
 
 ### Verified-email signup
 
@@ -540,6 +582,10 @@ login registers one.
 Keys are per-device, so a login never revokes the previous key and they accumulate on purpose.
 `listKeys` / `revokeKey` / `revokeAllKeys` are what let the account owner see what accumulated and
 cut off anything they no longer recognise.
+
+A key still waiting on a [second factor](#step-up-on-a-new-device) is in neither list. It
+cannot sign for anything, so it is not a device; and nobody signed it out, so it is not a
+revoked one either. A global revocation deletes it outright rather than revoking it.
 
 ```typescript
 const { keys } = await authApi.listKeys.call({ body: {} });
@@ -1102,6 +1148,99 @@ Two sign-ins deliberately produce a session with no verification of its own: a
 `POST /_auth/mfa/step-up` is for. Marking a passkey as a second factor is likewise not proving
 it, so the device that marks one steps up before it may change the second factor again.
 
+#### Step-up on a new device
+
+The moment the feature exists for. An **enrolled** account signing in from a device it has
+never seen does not get a session — it gets a challenge, and the device key it registered
+stays inactive until that challenge is spent. A password phished from somebody is no longer
+enough to hold their account.
+
+```
+POST /_auth/login            → 202 { mfaRequired: true, challenge: { secret, expiresAtMillis } }
+                               the key is registered, is_active = false, and nothing else moved
+POST /_auth/mfa/verify       → 200 the LoginResult the sign-in would have given
+  { challenge, code }          plus keyId and challengeHash, for the proxy
+  { challenge, recoveryCode }
+  { challenge, response }      options from POST /_auth/mfa/verify/options
+```
+
+Four channels stop: **password**, **oauth** (web), **oauth-native** and **password-reset** —
+the four where one stolen credential would otherwise be enough. A device-code approval and a
+passkey sign-in do not, because each already carried a second proof; nor does a key rotation,
+a renewal, or any path that is creating the account. A brand-new social account is not stepped
+up either, and needs no exemption to say so: an account that was written a moment ago has
+nothing enrolled.
+
+**A 202 moves nothing.** No login event, no new-device event, no `lastLoginAt`. All three are
+held on the challenge row and fire together at `verify`, with the original channel — so the
+owner's record of their own sign-ins stays a record of sign-ins that happened.
+
+**Until it is verified, the key does not exist** to anything the owner can see: `authenticate`
+refuses it, `optionalAuth` reads the caller as anonymous, and `listKeys` omits it in both
+modes. Every global revocation — `revoke-all`, a password change, the sign-out-everywhere
+link, a password reset — **deletes** it and kills its challenge in the same statement, so the
+owner who reacts to an unexpected prompt by signing out everywhere really has.
+
+The challenge is 32 random bytes. Only its hash is stored, so a guess reaches no row and
+cannot touch anybody's attempt counter; it is single use, it lives
+`SPFN_AUTH_MFA_CHALLENGE_TTL_MINUTES` (default 10), it dies with the account's key generation,
+and five wrong proofs end it and delete the pending key. Retrying the same registration while
+a challenge is live resumes it — same row, same expiry, same spent attempts — rather than
+answering 409.
+
+**Recovery codes work here**, which is the point of having them: somebody whose authenticator
+is on the phone they just lost signs in on the replacement with a written-down code.
+
+##### Migration
+
+`LoginResult` gained a required `mfaRequired` and every other field became optional. Narrow on
+it before reading `userId` — see [the migration note](#migration--narrow-a-sign-in-on-mfarequired-before-reading-userid).
+
+##### The web OAuth path
+
+The backend callback redirects with **`?mfaChallenge=`** instead of `userId` and `keyId`. The
+value is not a bearer credential for anything but this one `verify`, it is single use, and
+`requestLogger` records pathnames only — so unlike the sign-out-everywhere link it is not a
+capability riding a URL.
+
+Both consumers of that redirect are served:
+
+- `createOAuthCallbackHandler()` redirects the browser to **`SPFN_AUTH_MFA_CONFIRM_PATH`**
+  (default `/auth/mfa`, or the `mfaPath` option) with `?challenge=` and `?returnUrl=`.
+- An app on the callback-page flow posts `{ mfaChallenge }` to `POST /_auth/oauth/finalize`,
+  which answers **202** with the challenge echoed back instead of finalizing a session.
+
+##### In the Next.js proxy
+
+Nothing to write. `mfaVerifyInterceptor` — registered for you in `authInterceptors` — seals a
+`spfn_mfa_pending` cookie on any 202 (the browser's private key, the key id, and the hash of
+the challenge, for ten minutes) and turns it into the session on a verified `verify`. Its own
+name and audience, so a social login started in another tab does not overwrite it.
+
+A session is sealed **only** when the verified response names the same challenge and the same
+key the cookie holds. Otherwise the proxy answers **401 `SESSION_PENDING_MISMATCH`** without
+sealing anything, and **401 `SESSION_PENDING_EXPIRED`** when the cookie is gone. The key is
+active at the backend in both cases — what failed is this browser's claim to be the one that
+asked — so the remedy is to sign in again.
+
+##### From a browser, with the client helpers
+
+```typescript
+import { completeMfaWithCode, completeMfaWithPasskey } from '@spfn/auth/client';
+
+const result = await authApi.login.call({ body: { email, password } });
+
+if (result.mfaRequired)
+{
+    // Keep result.challenge.secret and send the person to your confirm screen.
+    await completeMfaWithCode(authApi, result.challenge.secret, code);
+    // The session cookie is sealed by the time this resolves.
+}
+```
+
+`completeMfaWithRecoveryCode` takes a written-down code, and `completeMfaWithPasskey` runs the
+ceremony and answers the same discriminated union the other passkey helpers do.
+
 #### Telling people it exists
 
 `authLoginEvent` and `authDeviceRegisteredEvent` carry **`mfaEnrolled: boolean`**, computed as
@@ -1117,20 +1256,27 @@ enrolment at a first login or when a new device appears. Nothing is ever blocked
 | `StepUpRequiredError` | 403 | `STEP_UP_REQUIRED` | an enrolled account's device is outside the window |
 | `MfaAlreadyEnrolledError` | 409 | — | `totp/enroll` on a confirmed enrolment |
 | `MfaConfigError` | 500 | — | `SPFN_AUTH_TOKEN_ENCRYPTION_KEYS` unset, or a stored secret naming a key id no longer in it |
+| `SessionPendingMismatchError` | 401 | `SESSION_PENDING_MISMATCH` | minted by the proxy: a verified step-up whose challenge or key is not the one this browser's pending cookie holds |
+| `SessionPendingExpiredError` | 401 | `SESSION_PENDING_EXPIRED` | minted by the proxy: a verified step-up with no pending cookie left to seal a session from |
 
-None of these is a mobile-contract error: the enrolment routes are not contract operations.
+`MfaVerificationFailedError` is the one contract error here, as the `auth.mfa.*` family of the
+mobile contract (0.13.0). The enrolment routes are not contract operations, so the rest are
+not on that surface.
 
 #### The case table
 
-Asserted row by row in `src/__tests__/integration/mfa-enrolment.test.ts` (enrolment) and
-`mfa-step-up.test.ts` (the window); each `it` is named for its row.
+Asserted row by row in `src/__tests__/integration/mfa-enrolment.test.ts` (enrolment),
+`mfa-step-up.test.ts` (the window), `mfa-step-up-registration.test.ts` (which channels stop a
+new device), `mfa-verify.test.ts` (verify × input) and `src/__tests__/unit/mfa-proxy.test.ts`
+(the Next.js proxy); each `it` is named for its row.
 `mfa-unenrolled-regression.test.ts` pins the status and the body shape an **unenrolled**
 account gets from `login`, `changePassword`, `keys/revoke-all` and `passkeys/revoke`.
 
 #### The sweep
 
-`auth.mfa.sweep` runs daily at 07:00 and deletes enrolments still unconfirmed after 24 hours.
-It is carried by `authJobRouter` beside the other sweeps; pass `mfaSweepCron` to
+`auth.mfa.sweep` runs daily at 07:00 and deletes enrolments still unconfirmed after 24 hours,
+plus step-up challenges that have expired or been spent and the inactive keys they were
+holding. It is carried by `authJobRouter` beside the other sweeps; pass `mfaSweepCron` to
 `createAuthJobRouter()` to move it. A confirmed enrolment is never touched.
 
 ### Session binding
@@ -1324,6 +1470,11 @@ key (and sends its optional client secret when configured).
 Client flow: call `authApi.getGoogleOAuthUrl.call({ body: { returnUrl } })`, redirect the browser
 to the returned `authUrl`, and render `OAuthCallback` on your success page. The Next.js interceptor
 manages the keypair → pending-session-cookie → full-session handoff transparently.
+
+On an account with a [second factor](#second-factor-mfa) and a device it has not seen, the
+callback carries `?mfaChallenge=` instead of `userId`/`keyId` and no session is created until
+that challenge is spent — see [the web OAuth path](#the-web-oauth-path). Both the
+`createOAuthCallbackHandler` route and the `OAuthCallback` page flow are handled.
 
 ```tsx
 // app/auth/callback/page.tsx
@@ -1991,6 +2142,13 @@ Both `authLoginEvent` and `authDeviceRegisteredEvent` carry `mfaEnrolled: boolea
 as the event is emitted. It is the hook an app uses to offer a [second
 factor](#second-factor-mfa) at a first login or when a new device appears; the package itself
 never blocks an account that has none.
+
+A sign-in that answered **202** because the account needs a [step-up on a new
+device](#step-up-on-a-new-device) emits neither event, and does not move `lastLoginAt` either.
+Both are held until `POST /_auth/mfa/verify` succeeds and then fire together, carrying the
+original channel — so an attacker holding only a password produces no login event and no
+device notice on an account they never got into, which is exactly the signal the owner needs
+these events to mean.
 
 Key **rotation** is deliberately not announced — replacing the key of a device that is already
 signed in is not a new device, and a notice for it would teach the owner to ignore the ones that

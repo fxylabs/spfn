@@ -604,7 +604,11 @@ describe.skipIf(!dbAvailable)('Passkeys (WebAuthn)', () =>
             expect(response.status).toBe(200);
 
             const user = await userRow('owner@test.com');
+            // `mfaRequired: false` is on every sign-in answer from #95 onward, and
+            // on this path it can never be anything else: a passkey assertion is
+            // already a second factor, so this channel does not step up.
             expect(await response.json()).toEqual({
+                mfaRequired: false,
                 userId: String(user.id),
                 publicId: user.publicId,
                 email: 'owner@test.com',

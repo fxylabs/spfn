@@ -118,6 +118,11 @@ export const completePasswordReset = route.post('/_auth/password/reset/complete'
     .handler(async (c) =>
     {
         const { body } = await c.data();
+        const result = await completePasswordResetService({ ...body, ...deviceProvenance(c.raw) });
 
-        return await completePasswordResetService({ ...body, ...deviceProvenance(c.raw) });
+        // 202 on an enrolled account (#95). The reset itself is done either way —
+        // the password is new and every earlier key is revoked — so an abandoned
+        // step-up leaves the owner signed out everywhere with a fresh password
+        // and a challenge they can still spend for the next ten minutes.
+        return result.mfaRequired ? c.accepted(result) : result;
     });

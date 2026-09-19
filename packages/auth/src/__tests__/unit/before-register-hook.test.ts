@@ -46,7 +46,7 @@ const {
         },
         rolesRepository: { findById: vi.fn() },
         validateVerificationToken: vi.fn(),
-        registerPublicKeyService: vi.fn(async () => undefined),
+        registerPublicKeyService: vi.fn(async () => ({ pending: false, binding: 'none', expiresAt: null })),
         getRoleByName: vi.fn(async () => ({ id: 1, name: 'user' })),
         hashPassword: vi.fn(async () => 'hashed-password'),
         verifyPassword: vi.fn(),
