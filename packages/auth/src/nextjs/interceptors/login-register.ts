@@ -9,9 +9,12 @@
  * `session/renew/verify` is on the list too (#97). Renewing a bound session key
  * needs exactly what a sign-in needs — a fresh pair generated here, the public
  * half in the body, the private half sealed into the cookie — so it is served by
- * this interceptor rather than by a second copy of it. `keyId` below means the
- * new key on that path exactly as it does on every other; the key being replaced
- * is not in the body at all, it is the one `general-auth` signs the request with.
+ * this interceptor rather than by a second copy of it. The body's `keyId` means
+ * the new key on that path exactly as it does on every other; the key being
+ * replaced is not in the body at all, it is the one `general-auth` signs the
+ * request with — and because `general-auth` matches the same request, the
+ * replacement credentials are kept under `newPrivateKey`/`newKeyId`/
+ * `newAlgorithm` rather than under names that rule also writes (#99).
  */
 
 import type { InterceptorRule } from '@spfn/core/nextjs/server';
@@ -78,10 +81,17 @@ export const loginRegisterInterceptor: InterceptorRule =
             // Remove remember from body (not part of contract)
             delete ctx.body.remember;
 
-            // Store privateKey and remember in metadata for response interceptor
-            ctx.metadata.privateKey = keyPair.privateKey;
-            ctx.metadata.keyId = keyPair.keyId;
-            ctx.metadata.algorithm = keyPair.algorithm;
+            // Store the replacement credentials and remember in metadata for the
+            // response interceptor. The `new` prefix is the whole point: the
+            // metadata object is shared by every rule that matched this request,
+            // and on `session/renew/verify` `generalAuthInterceptor` also matches
+            // and writes `keyId` — the id of the *expiring* key it signs the
+            // request with. Sharing that name sealed the new private key with the
+            // retired id and answered 200 to a session the next request could not
+            // use (#99). `keyRotationInterceptor` has always named them this way.
+            ctx.metadata.newPrivateKey = keyPair.privateKey;
+            ctx.metadata.newKeyId = keyPair.keyId;
+            ctx.metadata.newAlgorithm = keyPair.algorithm;
             ctx.metadata.remember = remember;
 
             await next();
@@ -118,9 +128,9 @@ export const loginRegisterInterceptor: InterceptorRule =
                 const sessionData =
                     {
                         userId: userData.userId,
-                        privateKey: ctx.metadata.privateKey,
-                        keyId: ctx.metadata.keyId,
-                        algorithm: ctx.metadata.algorithm,
+                        privateKey: ctx.metadata.newPrivateKey,
+                        keyId: ctx.metadata.newKeyId,
+                        algorithm: ctx.metadata.newAlgorithm,
                         ...bindingSessionFields(userData, ctx.request.headers['user-agent']),
                     };
 
@@ -142,7 +152,7 @@ export const loginRegisterInterceptor: InterceptorRule =
                 // Set keyId cookie (for oldKeyId lookup)
                 ctx.setCookies.push({
                     name: COOKIE_NAMES.SESSION_KEY_ID,
-                    value: ctx.metadata.keyId,
+                    value: ctx.metadata.newKeyId,
                     options: {
                         httpOnly: true,
                         secure: cookieSecure,
@@ -153,7 +163,7 @@ export const loginRegisterInterceptor: InterceptorRule =
                 });
 
                 // Set the readable CSRF cookie the client mirrors into a header
-                await pushCsrfCookie(ctx.setCookies, ctx.metadata.keyId, ttl);
+                await pushCsrfCookie(ctx.setCookies, ctx.metadata.newKeyId, ttl);
             }
             catch (error)
             {

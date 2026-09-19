@@ -775,9 +775,9 @@ describe('CSRF - readable cookie', () =>
         const ctx = responseContext({
             response: { ok: true, status: 200, statusText: 'OK', headers: new Headers(), body: { userId: 'user-1' } },
             metadata: {
-                privateKey: keyPair.privateKey,
-                keyId: keyPair.keyId,
-                algorithm: keyPair.algorithm,
+                newPrivateKey: keyPair.privateKey,
+                newKeyId: keyPair.keyId,
+                newAlgorithm: keyPair.algorithm,
             },
         });
 

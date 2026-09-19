@@ -85,18 +85,20 @@ function challengeSecretOf(body: unknown): string | undefined
  * The device key this browser is holding, whichever flow produced it.
  *
  * A password sign-in or a password reset ran through `loginRegisterInterceptor`
- * a moment ago, so the pair it minted is in shared metadata. The OAuth page flow
- * has no such request phase — its key was minted at `oauth/{provider}/url` and
- * sealed into `OAUTH_PENDING` — so that cookie is the fallback.
+ * a moment ago, so the pair it minted is in shared metadata, under the `new`
+ * names that rule reserves for the credentials it is installing (#99). The OAuth
+ * page flow has no such request phase — its key was minted at
+ * `oauth/{provider}/url` and sealed into `OAUTH_PENDING` — so that cookie is the
+ * fallback.
  */
 async function pendingKeyFor(ctx: ResponseInterceptorContext): Promise<PendingSessionData | null>
 {
-    if (ctx.metadata.privateKey && ctx.metadata.keyId)
+    if (ctx.metadata.newPrivateKey && ctx.metadata.newKeyId)
     {
         return {
-            privateKey: ctx.metadata.privateKey,
-            keyId: ctx.metadata.keyId,
-            algorithm: ctx.metadata.algorithm,
+            privateKey: ctx.metadata.newPrivateKey,
+            keyId: ctx.metadata.newKeyId,
+            algorithm: ctx.metadata.newAlgorithm,
         };
     }
 
