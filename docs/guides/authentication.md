@@ -17,6 +17,8 @@ available: true
 - **One-Time Tokens** - Direct API access for file uploads, SSE, streaming
 - **OAuth** - Google, Kakao, Naver, GitHub built in; extensible via a provider registry
 - **Second factor** - Optional TOTP or passkey, with a step-up when a new device signs in
+- **Registered devices** - A per-device key list, an event when one is added, and a mailed sign-out-everywhere link
+- **Session binding** - Opt-in: a web session runs on a short-lived key only a passkey can renew
 - **User Management** - Email/phone identity, profiles, invitations
 - **Next.js Integration** - Server components, session guards, OAuth callbacks
 
@@ -737,6 +739,11 @@ export default function OAuthCallbackPage()
 Hono matches literal segments before `:provider`, so `/google` and `/providers` are taken by
 their own routes and every other provider id falls through to the generic handlers.
 
+> These are the routes that sign somebody **in** with a social account. `/_auth/oauth2/*` is a
+> different feature — the OAuth 2.1 authorization server that lets an MCP client act as the
+> signed-in user — and it is off until you configure it. It has its own guide:
+> [MCP Clients](./mcp-clients.md).
+
 ### Custom Providers (Pluggable)
 
 Provider dispatch runs off a registry, so a provider outside the built-in set can be plugged in at
@@ -871,6 +878,77 @@ An account with nothing enrolled never sees it.
 
 ---
 
+## Registered devices
+
+Auth keys are per-device, so a login never revokes the previous one and they accumulate on
+purpose. `POST /_auth/keys/list` is what an account screen renders: each row carries
+`deviceName`, `platform`, a truncated `fingerprintPrefix`, every moment as epoch
+milliseconds, and the `registeredIp` / `registeredUserAgent` the key was first seen from —
+display material, spoofable on any request that does not come through a verified proxy, so
+render them and decide nothing by them. `revokeKey` signs one device out; `revokeAllKeys`
+signs the others out, or everything with `includeCurrent: true`.
+
+### Telling the owner a device appeared
+
+A login event says a session began, not what it began on. `authDeviceRegisteredEvent` says
+what it began on, and fires after commit on every channel that registers a key:
+
+```typescript
+import { authDeviceRegisteredEvent } from '@spfn/auth/server';
+
+authDeviceRegisteredEvent.subscribe(async (payload) =>
+{
+    // { userId, keyId, algorithm, fingerprintPrefix, createdAtMillis, channel, mfaEnrolled,
+    //   deviceName?, platform?, ip?, userAgent? }
+    // channel: 'register' | 'signup-link' | 'invitation' | 'password' | 'oauth'
+    //        | 'oauth-native' | 'device-code' | 'password-reset' | 'passkey'
+    await sendNewDeviceMail(payload);
+});
+```
+
+Key rotation is deliberately not announced — replacing the key of a device that is already
+signed in is not a new device, and mail about it teaches people to ignore the mail that
+matters. A sign-in that stopped at a second-factor challenge emits nothing until the
+challenge is spent.
+
+### The sign-out-everywhere link
+
+Send that mail with the action it should offer. `createRevokeAllLink(userId)` mints a
+one-time link that signs every device out **with no session at all** — which is the position
+somebody who no longer trusts the device in front of them is in.
+
+```typescript
+import { createRevokeAllLink } from '@spfn/auth/server';
+
+const { url, expiresAt } = await createRevokeAllLink(userId);   // default TTL 30 minutes
+```
+
+The `url` carries the plaintext token, because this flow sends no mail of its own: hand it to
+the mail template and let it go — never a log line, a row or a job payload.
+
+The link opens a page in your app (`SPFN_AUTH_REVOKE_ALL_CONFIRM_PATH`, default
+`/account/revoke-all`), not an API route, and that page ships with the package:
+
+```typescript
+// app/account/revoke-all/route.ts
+import { createRevokeAllPageHandlers } from '@spfn/auth/nextjs/server';
+
+export const { GET, POST } = createRevokeAllPageHandlers();
+```
+
+`GET` describes the link — when it expires, how many devices are active — and draws one
+button; `POST` confirms it and reports how many devices it signed out. Describing changes
+nothing, so a mail scanner that prefetches the page has signed nobody out. Pass
+`render: (view: RevokeAllPageView) => string` to own the body at all three stages while the
+handler keeps the status, the headers, the CSRF token and the hidden fields.
+
+The token rules, every refusal, the rate limit and the two settings are in
+[Registered devices](../../packages/auth/README.md#registered-devices-key-management) and
+[The sign-out-everywhere link](../../packages/auth/README.md#the-sign-out-everywhere-link)
+in the `@spfn/auth` README.
+
+---
+
 ## Session Management
 
 ### How Sessions Work
@@ -948,6 +1026,53 @@ SPFN_AUTH_SESSION_TTL=7d    # 7 days (default)
 SPFN_AUTH_SESSION_TTL=30d   # 30 days
 SPFN_AUTH_SESSION_TTL=12h   # 12 hours
 ```
+
+### Session binding
+
+A web session's signing key is sealed **inside** the session cookie, which is what makes the
+cookie a credential rather than a pointer to one — and it means a copy of the cookie *is*
+that device. It signs exactly as the original does, registers no key and raises no new-device
+notice. Session binding is the opt-in that closes that window, for an account that has a
+platform passkey.
+
+```typescript
+await authApi.setSessionBinding.call({ body: { mode: 'passkey' } });
+// → { mode: 'passkey', keyExpiresAtMillis }
+```
+
+What turning it on changes:
+
+- The session runs on a key that lives **24 hours** (`SPFN_AUTH_BOUND_KEY_TTL_HOURS`) instead
+  of ninety days, and only a fresh WebAuthn assertion can put a new one in the cookie. The
+  copy cannot produce one, so it stops working at the first renewal.
+- When the key runs out the proxy answers 401 `SessionRenewalRequiredError` and **keeps the
+  cookies**: the session is waiting on one prompt, not finished. A client component calls
+  `renewSession(api)`, and `RequireAuth` takes `renewalPath` (default
+  `SPFN_AUTH_SESSION_RENEW_PATH`, `/auth/renew`) to send a server-rendered page there, since
+  a server component cannot run a ceremony. Renewal stays possible for **seven days** past
+  expiry (`SPFN_AUTH_BOUND_KEY_RENEW_GRACE_HOURS`, default `168`); past that, sign in again.
+- A bound session presented from a different **browser family** is refused 401
+  `SessionContextChangedError` and its cookies are cleared. The comparison is coarse on
+  purpose — five families, no desktop/mobile axis — so a version bump or "Request desktop
+  site" is the same browser, and a request with no `user-agent` is no signal rather than a
+  mismatch.
+- `listKeys` rows gain `concurrentUseAtMillis`: the last time one key was seen from two
+  attested addresses at once. Show it and notify on it — it is never a refusal, because
+  addresses change legitimately several times an hour.
+
+Turning it **off** asks for a fresh passkey assertion or the account password —
+`disableSessionBinding(api)` from `@spfn/auth/client` — and never for key age alone, since a
+cookie copied minutes after a sign-in carries exactly that.
+
+> It needs a deployment where `proxy-guard` is configured: a key is bound only on a request
+> tagged `clientType: 'web'`, the one signal the backend has that a request came through the
+> proxy holding the cookie. Without it, `setSessionBinding` answers 400
+> `SessionBindingUnavailableError` rather than turning on a switch that would protect
+> nothing. An account that did not opt in is unchanged in every response, cookie and query.
+
+The full model — what a copy can still do before the key expires, how the renewal routes are
+bound to the expiring key, and the fail-closed re-seal — is in
+[Session binding](../../packages/auth/README.md#session-binding) in the `@spfn/auth` README.
 
 ### Cookie Secure Flag
 
@@ -1066,6 +1191,23 @@ full design.
 | `/_auth/keys/list` | POST | Required | List the caller's registered devices |
 | `/_auth/keys/revoke` | POST | Required | Sign one device out |
 | `/_auth/keys/revoke-all` | POST | Required | Sign every device out |
+| `/_auth/keys/revoke-all/confirm` | POST | — | Describe a mailed sign-out-everywhere link; there is no session here |
+| `/_auth/keys/revoke-all/consume` | POST | — | Spend that link: sign every device out |
+| `/_auth/mfa/totp/enroll` | POST | Required | Mint a TOTP secret and its `otpauth://` URI |
+| `/_auth/mfa/totp/confirm` | POST | Required | Spend the first code; answers the ten recovery codes |
+| `/_auth/mfa/status` | GET | Required | `{ enrolled, methods, recoveryCodesRemaining }` |
+| `/_auth/mfa/step-up` | POST | Required | Re-prove the second factor on this device |
+| `/_auth/mfa/step-up/options` | POST | Required | Options for a step-up by passkey |
+| `/_auth/mfa/disable` | POST | Required + step-up | Remove the second factor |
+| `/_auth/mfa/passkey/mark` | POST | Required + step-up | Mark or unmark a passkey as the second factor |
+| `/_auth/mfa/recovery/regenerate` | POST | Required + step-up | Ten fresh codes; every earlier one stops verifying |
+| `/_auth/mfa/verify` | POST | — | Finish a sign-in that answered 202 — it runs before a session exists |
+| `/_auth/mfa/verify/options` | POST | — | Options for finishing that sign-in with a passkey |
+| `/_auth/session/binding` | POST | Required | Turn session binding on or off |
+| `/_auth/session/binding` | GET | Required | Whether it is on, and when this session's key expires |
+| `/_auth/session/binding/disable/options` | POST | Required | The challenge that proves it is you before turning it off |
+| `/_auth/session/renew/options` | POST | Renewing key | Begin renewing a bound key — signed by the key being renewed, which may be past expiry |
+| `/_auth/session/renew/verify` | POST | Renewing key | Verify the assertion; answers exactly as `/_auth/login` |
 | `/_auth/password` | PUT | Required | Change password |
 | `/_auth/session` | GET | Required | Get session info |
 | `/_auth/tokens` | POST | Required | Issue one-time token |
@@ -1189,6 +1331,7 @@ instead, bind it with `.on(event)` from `@spfn/core/job`.
 |-------|---------|
 | `authLoginEvent` | `{ userId, provider, email?, phone? }` |
 | `authRegisterEvent` | `{ userId, provider, email?, phone?, metadata? }` |
+| `authDeviceRegisteredEvent` | `{ userId, keyId, algorithm, fingerprintPrefix, createdAtMillis, channel, mfaEnrolled, deviceName?, platform?, ip?, userAgent? }` — fires whenever a device key is registered, on every channel that registers one. See [Registered devices](#registered-devices) |
 | `invitationCreatedEvent` | `{ invitationId, email, token, roleId, invitedBy, expiresAt, isResend, metadata? }` |
 | `invitationAcceptedEvent` | `{ invitationId, email, userId, roleId, invitedBy, metadata? }` |
 | `authDeletionRequestedEvent` | `{ userId, userPublicId, purgeScheduledAt, requestedBy }` |
