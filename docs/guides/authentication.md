@@ -16,6 +16,7 @@ available: true
 - **Role-Based Access Control** - Roles, permissions, and middleware guards
 - **One-Time Tokens** - Direct API access for file uploads, SSE, streaming
 - **OAuth** - Google, Kakao, Naver, GitHub built in; extensible via a provider registry
+- **Second factor** - Optional TOTP or passkey, with a step-up when a new device signs in
 - **User Management** - Email/phone identity, profiles, invitations
 - **Next.js Integration** - Server components, session guards, OAuth callbacks
 
@@ -687,6 +688,11 @@ only value that disables the boot check.
 4. Next.js → OAuthCallback component      → Finalizes session, redirects to returnUrl
 ```
 
+If the account has a [second factor](#second-factor-mfa) and this browser is a device it has
+never seen, step 3 carries `?mfaChallenge=…` instead of `userId` and `keyId`, and no session
+exists until that challenge is spent. `OAuthCallback` posts it to `/_auth/oauth/finalize`,
+which answers 202 and hands it back for your confirm screen.
+
 The `state` in step 1 is produced by the Next.js interceptor (it generates the key pair and
 seals it into the state), so start the flow through `authApi.getGoogleOAuthUrl` rather than
 linking to `/_auth/oauth/google` directly.
@@ -725,7 +731,7 @@ export default function OAuthCallbackPage()
 | `/_auth/oauth/:provider/native` | POST | Native sign-in — verify a provider `id_token` from a mobile/web SDK |
 | `/_auth/oauth/start` | POST | Get OAuth URL (API mode) |
 | `/_auth/oauth/providers` | GET | List enabled providers |
-| `/_auth/oauth/finalize` | POST | Finalize OAuth session |
+| `/_auth/oauth/finalize` | POST | Finalize OAuth session, or answer 202 with a second-factor challenge |
 | `/_auth/oauth/:provider/unlink-notify` | GET/POST | Receives a provider-initiated unlink webhook — register it as Kakao's unlink webhook or Naver's disconnect callback URL. Once the signature verifies, the social link and its stored tokens are deleted |
 
 Hono matches literal segments before `:provider`, so `/google` and `/providers` are taken by
@@ -759,6 +765,109 @@ failure part-way through leaves no orphan user behind. The provider id has to be
 
 > The full interface specification (`OAuthProvider` / `NormalizedIdentity` / `OAuthTokens`) is under
 > [Custom providers in the `@spfn/auth` README](../../packages/auth/README.md#custom-providers).
+
+---
+
+## Second factor (MFA)
+
+Optional, and optional in the strong sense: an account that never enrols behaves exactly as it
+did before, on every route. You turn it on per account, not per app.
+
+Two forms — a TOTP authenticator app, or a passkey the person already enrolled and has marked
+as their second factor — and ten single-use recovery codes come with either. Enrolment is
+`POST /_auth/mfa/totp/enroll` then `/_auth/mfa/totp/confirm`, both from a signed-in session,
+and `GET /_auth/mfa/status` is what an account screen renders from.
+
+You need `SPFN_AUTH_TOKEN_ENCRYPTION_KEYS` set, even with no social login: it is the keyring
+the TOTP secret is encrypted with at rest.
+
+### Step-up on a new device
+
+This is the part that changes how your sign-in screen works.
+
+When somebody with a second factor signs in from a device their account has never seen,
+`POST /_auth/login` answers **202** instead of 200. There is no session: the device key was
+registered inactive, and the body carries a challenge that activates it.
+
+```typescript
+const result = await authApi.login.call({ body: { email, password } });
+
+if (result.mfaRequired)
+{
+    // No session yet. Keep result.challenge.secret and ask for a code.
+    setChallenge(result.challenge.secret);
+
+    return;
+}
+
+router.push('/dashboard');
+```
+
+Then finish it. The client helpers do the whole second half:
+
+```typescript
+import {
+    completeMfaWithCode,
+    completeMfaWithRecoveryCode,
+    completeMfaWithPasskey,
+} from '@spfn/auth/client';
+
+await completeMfaWithCode(authApi, challenge, code);
+// Session cookie sealed. Navigate.
+```
+
+Offer the recovery-code field beside the code field. Somebody whose authenticator was on the
+phone they just lost is precisely the person meeting this screen.
+
+The same 202 comes back from `POST /_auth/oauth/:provider/native` and from
+`POST /_auth/password/reset/complete`, and the same helpers finish all three. A password reset
+that stops here has still reset the password and still signed every device out — that happens
+before the step-up is asked for — so tell the person they are signed out everywhere and need
+to finish.
+
+### What you do not have to write
+
+The Next.js proxy handles the cookie half by itself. On a 202 it seals a short-lived pending
+cookie holding this browser's private key; on a successful verify it turns that into the
+session and clears it. You never touch either.
+
+Two refusals can come back from the proxy rather than the backend, and both mean the same
+thing to a person: sign in again.
+
+| code | when |
+|------|------|
+| `SESSION_PENDING_MISMATCH` | the verification succeeded, but this browser is not the one that started that sign-in |
+| `SESSION_PENDING_EXPIRED` | more than ten minutes passed, so there is no pending cookie left |
+
+### The web OAuth path
+
+If you mount `createOAuthCallbackHandler()`, a social sign-in that needs a second factor
+redirects to `SPFN_AUTH_MFA_CONFIRM_PATH` (default `/auth/mfa`) with `?challenge=` and
+`?returnUrl=`. Build that page; it is the same screen as the password one, and
+`completeMfaWithCode` finishes it the same way. Pass `mfaPath` to the handler to put it
+somewhere else.
+
+If you use the `OAuthCallback` page component instead, it posts the challenge to
+`/_auth/oauth/finalize`, gets a 202 back, and hands you the challenge through its `onSuccess`
+— send the person to your confirm screen from there.
+
+### What a 202 has not done
+
+No login event, no new-device event, no `lastLoginAt`. All three wait for the verify and then
+fire together. This matters if you send "new device signed in" mail: an attacker who has only
+the password produces no mail, because they have not signed in.
+
+The pending key is invisible everywhere too — `listKeys` omits it, it cannot authenticate, and
+anything that signs the account out deletes it. So "sign out everywhere" really does end an
+attempt that is mid-step-up.
+
+### Sensitive actions
+
+Separately from sign-in, an enrolled account has to have proved its second factor on the
+calling device within `SPFN_AUTH_MFA_STEP_UP_MINUTES` (default 10) before changing its
+password, signing every device out, or changing the second factor itself. Otherwise the answer
+is **403 `STEP_UP_REQUIRED`** and the remedy is `POST /_auth/mfa/step-up` followed by a retry.
+An account with nothing enrolled never sees it.
 
 ---
 
