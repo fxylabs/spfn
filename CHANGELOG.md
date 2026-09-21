@@ -371,18 +371,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 #### @spfn/core
 
-- **A route declared inside a nested `defineRouter` had no client type** (#100).
-  `registerRoutes` has always walked into a nested router and registered every route inside
-  it under its own flat name, but `RouterOutput` / `RouterInput` unwrapped exactly one level:
-  the nested router stayed a single key holding a `Router`, so none of the routes inside it
-  appeared in the allowed name set, and naming the group key instead resolved to `never`.
-  Nesting was therefore unusable in any app that referenced a route type — which is any app
-  built on the generated client. The second type argument is now the flat set of route names
-  across the whole tree, whatever depth a route was declared at, and a nested route yields
-  exactly the type it yields when the same route is declared flat. A name no branch declares
-  is still a compile error, so a typo is caught rather than resolved to `never`. Routes
-  mounted with `.packages()` remain deliberately absent — call them through the package's own
-  client. `@spfn/core` 0.3.0-beta.11.
+- **A route declared inside a nested `defineRouter` could not be named the way the server
+  registers it** (#100). `registerRoutes` has always walked into a nested router and
+  registered every route inside it under its own flat name, and the two client-side type
+  layers each disagreed with that, in opposite directions. `RouterOutput` / `RouterInput`
+  unwrapped exactly one level: the nested router stayed a single key holding a `Router`, so
+  none of the routes inside it appeared in the allowed name set, and naming the group key
+  instead resolved to `never`. `Client` — what `createApi<AppRouter>()` returns — recursed
+  into the nested router as a nested *property*, so it asked for `api.group.getThing`, which
+  the runtime proxy never built: a property access there returns a call builder, so
+  `api.group` was a builder for a route named `group` and `.getThing` on it was `undefined`.
+  Nesting was therefore unusable in any app that referenced a route type or called a nested
+  route — which is any app built on the generated client. Both layers now take the same flat
+  set of route names across the whole tree, whatever depth a route was declared at:
+  `RouterOutput<AppRouter, 'getThing'>` and `api.getThing.call(…)` name the route the way
+  `registerRoutes` mounts it and the way the RPC proxy resolves it on the wire. A nested route
+  yields exactly the type it yields when the same route is declared flat, and a name no branch
+  declares is still a compile error, so a typo is caught rather than resolved to `never`.
+  Routes mounted with `.packages()` remain deliberately absent from both — call them through
+  the package's own client. `@spfn/core` 0.3.0-beta.11.
+    - **Migration**: `api.group.getThing` is now a compile error. This is a compile error
+      replacing a runtime failure, not a silent fix: that call could never have worked, since
+      the proxy sends the property name as a whole route name and `/api/rpc/group` matches
+      nothing in the route map. Call the route by its own name — `api.getThing` — which is
+      what the server has always registered. A flat router's client is unchanged, so an app
+      with no nesting has nothing to migrate.
     - **Migration**: a name declared in two places in one tree — two branches, or the same
       sub-router mounted twice — is left out of the namespace rather than resolved to one of
       them, the same collision the contract collector refuses. Naming it is a compile error at
@@ -392,7 +405,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     - A router whose routes are not known — `Router<any>`, or an unresolved type parameter
       constrained to it — now contributes no names rather than accepting every name. A helper
       written generically over `TRouter extends Router<any>` can no longer name a route
-      through `RouterOutput`; take the concrete router type instead.
+      through `RouterOutput`; take the concrete router type instead. The same applies to the
+      client: `createApi<any>()` returns a client with no properties rather than one where
+      every property exists. Give `createApi` the generated `AppRouter` type.
+    - The RPC proxy itself is unchanged — it already sent one flat route name per property
+      access. Only its JSDoc claimed dot notation, and that claim is now removed; there is no
+      dotted traversal to add, because the route map the proxy resolves against is flat.
     - The generated route map is a separate layer and was not touched: `spfn codegen` reads
       the router file with a line-oriented parser, so a nested route reaches `routeMap` only
       when its key is written as one shorthand per line. `users: defineRouter({ createUser })`

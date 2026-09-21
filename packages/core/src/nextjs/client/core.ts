@@ -374,8 +374,18 @@ export function createApi<TRouter extends Router<any>>(
     /**
      * Build client proxy
      *
-     * Every property access returns a RouteCallBuilder.
-     * Nested routers are supported via dot notation in routeName.
+     * Every property access returns a `RouteCallBuilder` for that one property read as a
+     * whole route name, and that name goes on the wire as `/api/rpc/{routeName}`. The
+     * proxy route resolves it against the generated route map, whose names are flat.
+     *
+     * Nesting needs nothing here: `registerRoutes` mounts a route declared inside a
+     * nested `defineRouter` under its own key, so `api.getThing` is the call for a nested
+     * `getThing` exactly as for a top-level one — which is the namespace `Client` types.
+     * There is no dot-notation traversal: a property access never returns another proxy,
+     * so `api.group.getThing` reads a property of a builder and is `undefined`.
+     *
+     * `prefix` is vestigial — nothing passes one, and adding a caller that did would
+     * build a dotted name the route map cannot resolve.
      */
     function buildProxy(prefix = ''): any
     {

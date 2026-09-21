@@ -122,8 +122,28 @@ const created = await api.createUser.call({ body: { name: 'A' } }); // POST /api
 function createApi<TRouter extends Router<any>>(config?: ApiConfig): Client<TRouter>;
 ```
 
-Returns a `Proxy`: every property access (`api.getUser`, `api.foo.bar` for nested routers)
-yields a `RouteClient` builder. Calls are made via `.call(input)`.
+Returns a `Proxy`: every property access (`api.getUser`) yields a `RouteClient` builder.
+Calls are made via `.call(input)`.
+
+The client is one **flat** namespace, holding exactly the names the server registers. A
+route declared inside a nested `defineRouter` is reached by its own key — `registerRoutes`
+mounts it under that key, the proxy resolves that name against the route map, and
+`RouterOutput` takes the same name:
+
+```typescript
+const appRouter = defineRouter({
+    getRoot,
+    users: defineRouter({ getUser }),
+});
+
+await api.getUser.call({ params: { id: '123' } });   // ✅ GET /api/rpc/getUser
+await api.users.getUser.call({ ... });               // ❌ compile error — `users` is a group
+```
+
+There is no dot notation: a property access never yields another proxy, so a group key
+names nothing on either side. A name two branches both declare is left out of the client
+rather than resolved to one of them, and `.packages()` routes stay out on purpose — call
+them through the package's own client (`authApi`, `cmsApi`).
 
 ### Structured input
 
@@ -468,6 +488,10 @@ type ListData = RouterOutput<typeof appRouter, 'listExamples'>;   // not 'exampl
 A name two branches both declare is left out of that set rather than resolved to one of them,
 so naming it is a compile error where it is named. Routes mounted with `.packages()` stay out
 of the set on purpose — call them through the package's own client.
+
+`Client<AppRouter>` — what `createApi` returns — is built from the same flat set, so a route
+is named identically whether you call it (`api.listExamples`) or take its type
+(`RouterOutput<AppRouter, 'listExamples'>`).
 
 ---
 

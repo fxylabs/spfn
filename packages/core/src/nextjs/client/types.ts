@@ -202,8 +202,14 @@ type UnambiguousName<TLeaves, TName extends PropertyKey> =
  * `Router<TRoutes>` holds its routes in `_routes`, and a value in that record is either
  * a route or another router. Nested routers are flattened away, so every route appears
  * here under its own name at one level — the same set of names the server registers.
+ *
+ * Exported so that the typed client (`Client`, in `./builder`) names a route the same
+ * way `RouterOutput` and `RouterInput` do; the two must not diverge, or a route would
+ * type in one place and not the other. It stays internal to the package: the
+ * `@spfn/core/nextjs` entry point exports a fixed list of type names, and this is not
+ * one of them.
  */
-type ExtractRoutes<TRouter> =
+export type ExtractRoutes<TRouter> =
     TRouter extends { _routes: infer TRoutes }
         ? FlattenLeaves<RouteLeaves<TRoutes>>
         : FlattenLeaves<RouteLeaves<TRouter>>;
