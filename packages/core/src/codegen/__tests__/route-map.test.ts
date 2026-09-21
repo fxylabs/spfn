@@ -13,10 +13,12 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { dirname, join, resolve } from 'path';
+import { createJiti } from 'jiti';
 import { createRouteMapGenerator, RouteMapGeneratorError } from '../generators/route-map';
+import { ConditionalRegistrationError } from '../generators/contract-guard';
 
 const OUTPUT_PATH = 'src/generated/route-map.ts';
 
@@ -61,6 +63,21 @@ function entriesOf(content: string): string[]
         .split('\n')
         .filter(line => line.includes('{ method:'))
         .map(line => line.trim());
+}
+
+/**
+ * The generated file, loaded.
+ *
+ * A map that names a route is only worth what the file it is written to holds:
+ * a path that closed its own string literal, or a name that landed on the
+ * prototype, is visible here and in no assertion over the text.
+ */
+function loadGeneratedMap(): Record<string, { method: string; path: string }>
+{
+    const jiti = createJiti(projectDir, { interopDefault: true, moduleCache: false });
+
+    return (jiti(join(projectDir, OUTPUT_PATH)) as { routeMap: Record<string, { method: string; path: string }> })
+        .routeMap;
 }
 
 beforeEach(() =>
@@ -196,8 +213,71 @@ describe('route-map generator - walking the router', () =>
         );
 
         expect(entriesOf(await generate())).toEqual([
-            'quirky: { method: \'GET\', path: \'/it\\\'s\' },',
+            'quirky: { method: \'GET\', path: "/it\'s" },',
         ]);
+        expect(loadGeneratedMap().quirky.path).toBe('/it\'s');
+    });
+
+    it('escapes a backslash in a path', async () =>
+    {
+        writeRouter(
+            'const windowsish = route.get(\'/a\\\\b\').handler(async () => ({}));\n\n'
+            + 'export const appRouter = defineRouter({ windowsish });\n',
+        );
+
+        expect(entriesOf(await generate())).toEqual([
+            'windowsish: { method: \'GET\', path: "/a\\\\b" },',
+        ]);
+        expect(loadGeneratedMap().windowsish.path).toBe('/a\\b');
+    });
+
+    it('escapes every line terminator a path can carry', async () =>
+    {
+        const terminators = { newline: '\\n', carriageReturn: '\\r', lineSep: '\\u2028', paragraphSep: '\\u2029' };
+
+        writeRouter(
+            Object.entries(terminators)
+                .map(([name, escape]) => `const ${name} = route.get('/c${escape}d').handler(async () => ({}));\n`)
+                .join('')
+            + `\nexport const appRouter = defineRouter({ ${Object.keys(terminators).join(', ')} });\n`,
+        );
+
+        await generate();
+
+        expect(loadGeneratedMap()).toEqual({
+            newline: { method: 'GET', path: '/c\nd' },
+            carriageReturn: { method: 'GET', path: '/c\rd' },
+            lineSep: { method: 'GET', path: '/c\u2028d' },
+            paragraphSep: { method: 'GET', path: '/c\u2029d' },
+        });
+    });
+
+    it('quotes a numeric and a non-ASCII route name', async () =>
+    {
+        writeRouter(
+            'const getUser = route.get(\'/users/:id\').handler(async () => ({}));\n'
+            + 'const listUsers = route.get(\'/users\').handler(async () => ({}));\n\n'
+            + 'export const appRouter = defineRouter({ \'2fa\': getUser, \'사용자\': listUsers });\n',
+        );
+
+        expect(entriesOf(await generate())).toEqual([
+            '"2fa": { method: \'GET\', path: \'/users/:id\' },',
+            '"사용자": { method: \'GET\', path: \'/users\' },',
+        ]);
+        expect(Object.keys(loadGeneratedMap())).toEqual(['2fa', '사용자']);
+    });
+
+    it('emits __proto__ as a computed key, so the route stays an own property', async () =>
+    {
+        writeRouter(
+            'const weird = route.get(\'/weird\').handler(async () => ({}));\n\n'
+            + 'export const appRouter = defineRouter({ [\'__proto__\']: weird } as any);\n',
+        );
+
+        expect(entriesOf(await generate())).toEqual([
+            '["__proto__"]: { method: \'GET\', path: \'/weird\' },',
+        ]);
+        expect(Object.keys(loadGeneratedMap())).toEqual(['__proto__']);
     });
 
     it('writes an empty map for an empty router', async () =>
@@ -315,13 +395,230 @@ describe('route-map generator - output', () =>
         ]);
     });
 
-    it('warns and returns when the router file is absent', async () =>
+    it('warns and writes nothing when the router file is absent', async () =>
     {
         const generator = createRouteMapGenerator({
             name: '@spfn/core:route-map',
             routerPath: './src/server/router.ts',
+            outputPath: `./${OUTPUT_PATH}`,
         });
 
         await expect(generator.generate({ cwd: projectDir, trigger: { type: 'manual' } })).resolves.toBeUndefined();
+        expect(existsSync(join(projectDir, OUTPUT_PATH))).toBe(false);
+    });
+
+    it('ignores additionalRouteDirs when collecting, not only when watching', async () =>
+    {
+        writeFile(
+            'src/features/reports.ts',
+            `import { route } from '${ROUTE_BUILDER_MODULE}';\n\n`
+            + 'export const listReports = route.get(\'/reports\').handler(async () => ({}));\n',
+        );
+        writeRouter(
+            'const getRoot = route.get(\'/\').handler(async () => ({}));\n\n'
+            + 'export const appRouter = defineRouter({ getRoot });\n',
+        );
+
+        const generator = createRouteMapGenerator({
+            name: '@spfn/core:route-map',
+            routerPath: './src/server/router.ts',
+            outputPath: `./${OUTPUT_PATH}`,
+            additionalRouteDirs: ['src/features'],
+        });
+
+        await generator.generate({ cwd: projectDir, trigger: { type: 'manual' } });
+
+        expect(Object.keys(loadGeneratedMap())).toEqual(['getRoot']);
+    });
+});
+
+describe('route-map generator - conditional registration', () =>
+{
+    it('refuses a router that registers a route behind a flag', async () =>
+    {
+        writeRouter(
+            'const getRoot = route.get(\'/\').handler(async () => ({}));\n'
+            + 'const admin = route.get(\'/admin\').handler(async () => ({}));\n\n'
+            + 'export const appRouter = defineRouter({\n'
+            + '    getRoot,\n'
+            + '    ...(process.env.ENABLE_ADMIN ? { admin } : {}),\n'
+            + '});\n',
+        );
+
+        await expect(generate()).rejects.toThrow(ConditionalRegistrationError);
+        await expect(generate()).rejects.toThrow(/registers routes conditionally/);
+        expect(existsSync(join(projectDir, OUTPUT_PATH))).toBe(false);
+    });
+
+    it('accepts a spread of a plain object', async () =>
+    {
+        writeRouter(
+            'const getRoot = route.get(\'/\').handler(async () => ({}));\n'
+            + 'const base = { getRoot };\n\n'
+            + 'export const appRouter = defineRouter({ ...base });\n',
+        );
+
+        expect(entriesOf(await generate())).toEqual(['getRoot: { method: \'GET\', path: \'/\' },']);
+    });
+
+    it('pins NODE_ENV so the same router does not load two ways', async () =>
+    {
+        const shellValue = process.env.NODE_ENV;
+        delete process.env.NODE_ENV;
+
+        writeRouter(
+            'const env = route.get(`/${process.env.NODE_ENV}`).handler(async () => ({}));\n\n'
+            + 'export const appRouter = defineRouter({ env });\n',
+        );
+
+        try
+        {
+            expect(entriesOf(await generate())).toEqual(['env: { method: \'GET\', path: \'/production\' },']);
+        }
+        finally
+        {
+            if (shellValue === undefined)
+            {
+                delete process.env.NODE_ENV;
+            }
+            else
+            {
+                process.env.NODE_ENV = shellValue;
+            }
+        }
+    });
+});
+
+describe('route-map generator - package routers', () =>
+{
+    /** An app route and a package route under one name, as `@spfn/auth` mounts. */
+    function writeCollidingRouter(): void
+    {
+        writeRouter(
+            'const appLogout = route.post(\'/logout\').handler(async () => ({}));\n'
+            + 'const packageLogout = route.post(\'/_auth/logout\').handler(async () => ({}));\n\n'
+            + 'const authRouter = defineRouter({ logout: packageLogout });\n\n'
+            + 'export const appRouter = defineRouter({ logout: appLogout }).packages([authRouter]);\n',
+        );
+    }
+
+    it('refuses an app route a package router also registers, naming which side is the package', async () =>
+    {
+        writeCollidingRouter();
+
+        await expect(generate()).rejects.toThrow(RouteMapGeneratorError);
+        await expect(generate()).rejects.toThrow(/also registered by a package router/);
+        await expect(generate()).rejects.toThrow(/packages\[0\]\.logout/);
+    });
+
+    it('sees the collision through a nested package router', async () =>
+    {
+        writeRouter(
+            'const appAudit = route.get(\'/audit\').handler(async () => ({}));\n'
+            + 'const packageAudit = route.get(\'/_ops/audit\').handler(async () => ({}));\n\n'
+            + 'const opsRouter = defineRouter({ nested: defineRouter({ audit: packageAudit }) });\n'
+            + 'const users = defineRouter({ audit: appAudit }).packages([opsRouter]);\n\n'
+            + 'export const appRouter = defineRouter({ users });\n',
+        );
+
+        await expect(generate()).rejects.toThrow(/also registered by a package router/);
+    });
+
+    it('allows two package routers to share a name, which the app\'s merge order decides', async () =>
+    {
+        writeRouter(
+            'const getRoot = route.get(\'/\').handler(async () => ({}));\n'
+            + 'const authLogout = route.post(\'/_auth/logout\').handler(async () => ({}));\n'
+            + 'const cmsLogout = route.post(\'/_cms/logout\').handler(async () => ({}));\n\n'
+            + 'const authRouter = defineRouter({ logout: authLogout });\n'
+            + 'const cmsRouter = defineRouter({ logout: cmsLogout });\n\n'
+            + 'export const appRouter = defineRouter({ getRoot }).packages([authRouter, cmsRouter]);\n',
+        );
+
+        expect(entriesOf(await generate())).toEqual(['getRoot: { method: \'GET\', path: \'/\' },']);
+    });
+
+    it('does not refuse a package route that is missing a method', async () =>
+    {
+        writeRouter(
+            'const getRoot = route.get(\'/\').handler(async () => ({}));\n'
+            + 'const halfBuilt = route.post(\'/_auth/login\');\n\n'
+            + 'const authRouter = defineRouter({ halfBuilt } as any);\n\n'
+            + 'export const appRouter = defineRouter({ getRoot }).packages([authRouter]);\n',
+        );
+
+        expect(entriesOf(await generate())).toEqual(['getRoot: { method: \'GET\', path: \'/\' },']);
+    });
+});
+
+describe('route-map generator - the method it emits', () =>
+{
+    it('refuses a method the generated file could not be typed with', async () =>
+    {
+        writeRouter(
+            'const getRoot = route.get(\'/\').handler(async () => ({}));\n'
+            + 'getRoot.method = \'get\' as any;\n\n'
+            + 'export const appRouter = defineRouter({ getRoot });\n',
+        );
+
+        await expect(generate()).rejects.toThrow(RouteMapGeneratorError);
+        await expect(generate()).rejects.toThrow(/is not an HttpMethod/);
+    });
+
+    it('refuses a method that is only a property of Object.prototype', async () =>
+    {
+        writeRouter(
+            'const getRoot = route.get(\'/\').handler(async () => ({}));\n'
+            + 'getRoot.method = \'toString\' as any;\n\n'
+            + 'export const appRouter = defineRouter({ getRoot });\n',
+        );
+
+        await expect(generate()).rejects.toThrow(/is not an HttpMethod/);
+    });
+});
+
+describe('route-map generator - tsconfig path aliases', () =>
+{
+    /** A route module reached only through the project's own `@/*` alias. */
+    function writeAliasedRoutes(): void
+    {
+        writeFile(
+            'src/server/routes/users.ts',
+            `import { route } from '${ROUTE_BUILDER_MODULE}';\n\n`
+            + 'export const listUsers = route.get(\'/users\').handler(async () => ({}));\n',
+        );
+        writeRouter(
+            'import { listUsers } from \'@/server/routes/users\';\n\n'
+            + 'export const appRouter = defineRouter({ listUsers });\n',
+        );
+    }
+
+    it('loads a router that imports through the project\'s "@/*" alias', async () =>
+    {
+        writeAliasedRoutes();
+        writeFile('tsconfig.json', JSON.stringify({ compilerOptions: { paths: { '@/*': ['./src/*'] } } }));
+
+        expect(entriesOf(await generate())).toEqual(['listUsers: { method: \'GET\', path: \'/users\' },']);
+    });
+
+    it('reads the alias through an extends chain and a baseUrl', async () =>
+    {
+        writeAliasedRoutes();
+        writeFile('tsconfig.paths.json', JSON.stringify({ compilerOptions: { baseUrl: '.', paths: { '@/*': ['./src/*'] } } }));
+        writeFile('tsconfig.json', JSON.stringify({ extends: './tsconfig.paths.json', compilerOptions: { strict: true } }));
+
+        expect(entriesOf(await generate())).toEqual(['listUsers: { method: \'GET\', path: \'/users\' },']);
+    });
+
+    it('names the unresolved specifier when the alias is not configured', async () =>
+    {
+        writeAliasedRoutes();
+
+        const thrown = await generate().catch((error: Error) => error);
+
+        expect(thrown).toBeInstanceOf(RouteMapGeneratorError);
+        expect((thrown as Error).message).toContain('@/server/routes/users');
+        expect((thrown as Error).message).toContain('did not resolve');
+        expect((thrown as Error).message).not.toContain('without side effects');
     });
 });

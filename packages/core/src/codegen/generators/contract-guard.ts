@@ -7,9 +7,14 @@
  * compares a promise nobody made.
  *
  * Object spread is the one way a key can be conditionally present in the object
- * `defineRouter()` receives, so that is what this reads. A spread of a plain
- * identifier (`...baseRoutes`) is unconditional and passes; anything computed
- * inside the spread does not.
+ * `defineRouter()` receives, so that is what this reads — in every
+ * `defineRouter({...})` the file writes, since a nested router is assembled by
+ * writing a second one. A spread of a plain identifier (`...baseRoutes`) is
+ * unconditional and passes; anything computed inside the spread does not.
+ *
+ * What it reads is this one file's source. A conditional spread inside an
+ * imported route module, a router returned by a factory, and a `.packages()`
+ * list assembled conditionally are all past it.
  */
 
 /** Thrown when the router registers contracted routes conditionally. */
@@ -22,16 +27,9 @@ export class ConditionalRegistrationError extends Error
     }
 }
 
-/** Text inside the object literal passed to `defineRouter()`, comments stripped. */
-function defineRouterBlock(source: string): string | undefined
+/** Text inside one object literal passed to `defineRouter()`, comments stripped. */
+function defineRouterBlock(source: string, start: number): string | undefined
 {
-    const start = source.indexOf('defineRouter(');
-
-    if (start === -1)
-    {
-        return undefined;
-    }
-
     const open = source.indexOf('{', start);
 
     if (open === -1)
@@ -52,6 +50,31 @@ function defineRouterBlock(source: string): string | undefined
     return source.slice(open + 1, cursor - 1).replace(/\/\/[^\n]*/g, '');
 }
 
+/**
+ * Every `defineRouter({...})` in the file, not only the first.
+ *
+ * A nested router is assembled by writing a second `defineRouter(` in the same
+ * file — `const users = defineRouter({…})` and then `defineRouter({ users })` —
+ * so reading only the first block would look straight past the app router in the
+ * files where nesting is used.
+ */
+function defineRouterBlocks(source: string): string[]
+{
+    const blocks: string[] = [];
+
+    for (let start = source.indexOf('defineRouter('); start !== -1; start = source.indexOf('defineRouter(', start + 1))
+    {
+        const block = defineRouterBlock(source, start);
+
+        if (block !== undefined)
+        {
+            blocks.push(block);
+        }
+    }
+
+    return blocks;
+}
+
 const PLAIN_REFERENCE = /^[A-Za-z_$][\w$]*(\.[A-Za-z_$][\w$]*)*\s*$/;
 
 /**
@@ -62,13 +85,14 @@ const PLAIN_REFERENCE = /^[A-Za-z_$][\w$]*(\.[A-Za-z_$][\w$]*)*\s*$/;
  */
 export function assertUnconditionalRegistration(routerPath: string, source: string): void
 {
-    const block = defineRouterBlock(source);
-
-    if (!block)
+    for (const block of defineRouterBlocks(source))
     {
-        return;
+        assertUnconditionalBlock(routerPath, block);
     }
+}
 
+function assertUnconditionalBlock(routerPath: string, block: string): void
+{
     for (const [, expression] of block.matchAll(/\.\.\.\s*([^,\n]+)/g))
     {
         if (PLAIN_REFERENCE.test(expression))

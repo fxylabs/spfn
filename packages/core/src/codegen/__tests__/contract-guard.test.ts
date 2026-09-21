@@ -41,6 +41,20 @@ describe('conditional route registration', () =>
         expect(() => assertUnconditionalRegistration(PATH, source)).toThrow(ConditionalRegistrationError);
     });
 
+    it('refuses a conditional spread in a second defineRouter, where a nested router is assembled', () =>
+    {
+        const source = `
+            const users = defineRouter({ listUsers });
+
+            export const appRouter = defineRouter({
+                users,
+                ...(process.env.ENABLE_ADMIN ? { admin } : {}),
+            });
+        `;
+
+        expect(() => assertUnconditionalRegistration(PATH, source)).toThrow(ConditionalRegistrationError);
+    });
+
     it('refuses a route behind an environment check', () =>
     {
         const source = `

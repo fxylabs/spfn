@@ -154,25 +154,51 @@ way `registerRoutes` walks it. How the router is *written* does not matter: a on
 - `method` and `path` come from the `RouteDef`, not from a pattern over the source. A
   route not registered in the router is absent, because there is nothing registering it.
 - **`.packages()` routers are left out**, at every depth. A package publishes its own
-  route map and the app merges them (`{ ...routeMap, ...authRouteMap }`).
-- A name that is not a JS identifier (`'get-user'`) is emitted quoted, so the generated
-  file still parses.
+  route map and the app merges them (`{ ...routeMap, ...authRouteMap }`). Their *names*
+  are still read, because that merge is what a collision turns on — see below.
+- A name that is not a JS identifier (`'get-user'`) is emitted quoted, and `__proto__` is
+  emitted as a computed key, so the generated file parses and the map keeps every route as
+  an own property.
+- Imports are resolved by Node **and by `compilerOptions.paths` of the `tsconfig.json`
+  beside the project root**, `extends` chains included — so the `@/*` alias every spfn app
+  has resolves while the router loads. A mapping held in any other tsconfig does not; the
+  failure names the specifier that did not resolve.
+- `NODE_ENV` is pinned to `production` when the shell left it unset, so the same router
+  does not load two ways depending on how codegen was invoked. A value the shell *did* set
+  is left alone.
 
 ### When it refuses
 
 Unlike the old source parser, which dropped what it could not read, the generator throws
-— logged always, and fatal on the `build` trigger:
+— logged always, and fatal on the `build` trigger and on `spfn codegen run`:
 
-- The module will not load (it names the file and the cause, and says a route module must
-  be importable without side effects). It never falls back to parsing.
+- The module will not load. An import that did not resolve names the specifier; anything
+  else names the cause and says a route module must be importable without side effects. It
+  never falls back to parsing.
 - No router is found under `appRouter`, `default` or `router` (the message lists all three).
+- The router file registers a route **conditionally** (`...(flag ? { admin } : {})`), which
+  would put the flag's value into the map and leave `api.admin.call()` 404ing wherever the
+  flag differs. This is the same guard `@spfn/core:contract` uses; like that one it reads
+  the router file's own `defineRouter({...})`, so a conditional spread inside an imported
+  module, a router built by a factory, or a `.packages()` list assembled conditionally are
+  past what it sees.
 - Two routes reach the same name (the message names both places).
+- An **app route and a package route** reach the same name. Both register at runtime, and
+  the app's proxy merges `{ ...routeMap, ...authRouteMap }` — so the package's route wins
+  the name while the generated types still describe the app's. Two *package* routers
+  sharing a name is not refused: which one wins is the app's merge order, which this
+  generator neither sees nor writes.
 - A route has no method or path — reachable by registering a route before `.handler()` was
   called. The server drops such a route too, so naming it in the map would advertise a
   route that 404s.
+- A route's `method` is not an `HttpMethod`. `registerRoutes` lowercases the method before
+  registering, so `method: 'get'` serves fine and would emit a map that fails `tsc`.
 - A router entry is neither a route nor a router.
 
 A **missing router file** is still only a warning: the generator returns and writes nothing.
+
+What a *package* router carries is never refused — an entry the app developer cannot fix
+is skipped, exactly as `registerRoutes` skips it.
 
 ### Generated output
 
@@ -224,7 +250,7 @@ generator's own surface.
 | Reads the router by | loading the module and walking `RouteDef`s | the same |
 | Covers | every registered route | only routes carrying `.contract()` |
 | `runOn` | `watch`, `manual`, `build` | `watch`, `build`, `manual` |
-| Can fail a build | no | **yes**, on the `build` trigger only |
+| Can fail a build | **yes** — any refusal, on every trigger the CLI fails on | **yes**; a broken contract only on the `build` trigger |
 
 Loading rather than parsing is what makes the contract correct: real routes build schemas from
 imported values (`EmailSchema`, `FileSchema()`, constants) that a source parser cannot resolve. It
@@ -254,7 +280,7 @@ Provided by the `spfn` CLI (`@spfn/cli`), not by `@spfn/core` itself:
 ```bash
 spfn codegen init     # scaffold a .spfnrc.ts
 spfn codegen list     # list resolved generators + their watch patterns  (alias: ls)
-spfn codegen run      # run all generators once (CodegenOrchestrator.generateAll, trigger 'manual')
+spfn codegen run      # run all generators once (CodegenOrchestrator.generateAll, trigger 'manual'; a failure exits 1)
 spfn dev              # dev server + codegen in watch mode
 spfn build            # runs codegen once before building (trigger 'build'; a failure exits 1)
 
@@ -266,6 +292,11 @@ spfn contract list       # released snapshots  (alias: ls)
 `spfn codegen run` has **no** `--name` flag — it always runs every configured generator.
 (The `spfn init` project scaffold writes a `.spfnrc.ts` preconfigured with the route-map
 generator and adds a `"codegen": "spfn codegen run"` npm script.)
+
+`spfn codegen run` **exits 1 when a generator refuses**, and stops at the one that refused
+— the run that just failed to regenerate a map must not look like the run that did. `spfn
+dev` is unaffected: watch mode logs the failure and keeps going, because being unable to
+hold a half-finished route mid-edit would make the feature unusable.
 
 ---
 
@@ -436,6 +467,14 @@ regeneration when it's absent (build/manual passes don't set it).
   not just `spfn dev`. Move that read inside the handler. Top-level `await` in a route or
   router module does not load either — jiti transforms to CJS — the same limit
   `@spfn/core:contract` has always had.
+- **A path alias resolves only if the project root's `tsconfig.json` maps it.** Both
+  loading generators read `compilerOptions.paths` from the `tsconfig.json` beside the
+  project root (following `extends`) and hand it to jiti, so `@/server/routes/users`
+  resolves. A mapping that lives in another tsconfig — a solution-style project, a nested
+  package's own config — is not read, a `paths` entry whose `*` is not a trailing `/*` is
+  skipped, only the first of several targets is used, and a `baseUrl` with no `paths`
+  resolves nothing (an alias map cannot say "try this directory for every bare specifier").
+  Each skip is warned about, and an import that then fails to resolve names the specifier.
 - **Custom generators must default-export a factory.** `createGeneratorsFromConfig` calls
   `module.default()` (a zero-arg function) for `{ path }` entries. Exporting the Generator
   object directly, or a factory that needs args, won't load.

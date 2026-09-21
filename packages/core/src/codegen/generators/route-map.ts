@@ -30,12 +30,13 @@
  * ```
  */
 
-import { writeFileSync, mkdirSync, existsSync } from 'fs';
+import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'fs';
 import { join, dirname, relative } from 'path';
-import { createJiti } from 'jiti';
-import type { RouteDef, Router } from '@spfn/core/route';
+import type { HttpMethod, RouteDef, Router } from '@spfn/core/route';
 import { logger } from '@spfn/core/logger';
 import type { Generator, GeneratorOptions } from '../core/generator';
+import { assertUnconditionalRegistration } from './contract-guard';
+import { loadRouterModule, pinNodeEnv } from './router-module';
 
 const genLogger = logger.child('@spfn/core:route-map-generator');
 
@@ -113,23 +114,12 @@ function isRouteDef(value: unknown): value is RouteDef<any>
 
 function loadRouter(cwd: string, absoluteRouterPath: string): Router<any>
 {
-    let module: Record<string, unknown>;
-
-    try
-    {
-        const jiti = createJiti(cwd, { interopDefault: true, moduleCache: false });
-        module = jiti(absoluteRouterPath) as Record<string, unknown>;
-    }
-    catch (error)
-    {
-        const message = error instanceof Error ? error.message : String(error);
-
-        throw new RouteMapGeneratorError(
-            `Failed to load ${relative(cwd, absoluteRouterPath)}: ${message}\n\n`
-            + 'The route map is read from the loaded router, so a route module must be importable without side '
-            + 'effects. Check that nothing at module scope opens a connection or reads a missing environment value.',
-        );
-    }
+    const module = loadRouterModule({
+        cwd,
+        absoluteRouterPath,
+        subject: 'route map',
+        fail: message => new RouteMapGeneratorError(message),
+    });
 
     const candidates = ['appRouter', 'default', 'router'];
 
@@ -154,6 +144,12 @@ function loadRouter(cwd: string, absoluteRouterPath: string): Router<any>
 // Collection
 // ============================================================================
 
+/**
+ * Written as a record rather than a list so that a new `HttpMethod` does not
+ * compile until it is named here.
+ */
+const HTTP_METHODS: Record<HttpMethod, true> = { GET: true, POST: true, PUT: true, PATCH: true, DELETE: true };
+
 function addRoute(name: string, routeDef: RouteDef<any>, trail: string[], found: Map<string, CollectedRoute>): void
 {
     const where = trail.join('.');
@@ -165,6 +161,18 @@ function addRoute(name: string, routeDef: RouteDef<any>, trail: string[], found:
             + 'The RPC client resolves a name to a method and a path, so both are required. '
             + 'A route reaches this state by being registered before .handler() was called — '
             + 'the server drops it too, which is why the map refuses to name it.',
+        );
+    }
+
+    // The map is typed `HttpMethod`, and `registerRoutes` lowercases whatever it
+    // is given before handing it to Hono — so `method: 'get'` registers happily
+    // at runtime and would emit a generated file that does not compile.
+    if (!Object.hasOwn(HTTP_METHODS, routeDef.method))
+    {
+        throw new RouteMapGeneratorError(
+            `Route "${where}" declares the method "${routeDef.method}", which is not an HttpMethod `
+            + `(${Object.keys(HTTP_METHODS).join(', ')}). The generated map is typed HttpMethod, so naming it `
+            + 'would write a file that does not compile.',
         );
     }
 
@@ -182,14 +190,43 @@ function addRoute(name: string, routeDef: RouteDef<any>, trail: string[], found:
 }
 
 /**
+ * Every name a package router registers, at any depth below it.
+ *
+ * Nothing here is emitted — a package publishes its own route map — but the
+ * names are needed, because they are the ones that can quietly take an app
+ * route's place. Collection is deliberately lenient: an entry a package
+ * registers is not the app developer's to fix, and refusing their build over it
+ * would help nobody. `registerRoutes` skips such an entry too.
+ */
+function collectPackageNames(router: Router<any>, trail: string[], names: Map<string, string>): void
+{
+    for (const [name, entry] of Object.entries(router.routes))
+    {
+        if (isRouter(entry))
+        {
+            collectPackageNames(entry, [...trail, name], names);
+        }
+        else if (isRouteDef(entry) && !names.has(name))
+        {
+            names.set(name, [...trail, name].join('.'));
+        }
+    }
+
+    for (const [index, packageRouter] of (router._packageRouters ?? []).entries())
+    {
+        collectPackageNames(packageRouter, [...trail, `packages[${index}]`], names);
+    }
+}
+
+/**
  * Walk the router the way `registerRoutes` walks it.
  *
  * A nested route registers under its own key — the parent's key names the
  * grouping, not the route — so the map is flat and the trail exists only to
  * point at both sides of a collision.
  *
- * `_packageRouters` is deliberately not walked, at this or any depth: a package
- * publishes its own route map and the app merges the two
+ * `_packageRouters` is walked for their names alone, never for their routes: a
+ * package publishes its own route map and the app merges the two
  * (`{ ...routeMap, ...authRouteMap }` in a generated `rpc.ts`). Emitting them
  * here would duplicate every package route.
  *
@@ -197,13 +234,18 @@ function addRoute(name: string, routeDef: RouteDef<any>, trail: string[], found:
  * iterates: a symbol-keyed entry is invisible to `registerRoutes` and so has no
  * route to name in the map either.
  */
-function collectRoutes(router: Router<any>, trail: string[], found: Map<string, CollectedRoute>): void
+function collectRoutes(
+    router: Router<any>,
+    trail: string[],
+    found: Map<string, CollectedRoute>,
+    packageNames: Map<string, string>,
+): void
 {
     for (const [name, entry] of Object.entries(router.routes))
     {
         if (isRouter(entry))
         {
-            collectRoutes(entry, [...trail, name], found);
+            collectRoutes(entry, [...trail, name], found, packageNames);
             continue;
         }
 
@@ -218,6 +260,55 @@ function collectRoutes(router: Router<any>, trail: string[], found: Map<string, 
 
         addRoute(name, entry, [...trail, name], found);
     }
+
+    for (const [index, packageRouter] of (router._packageRouters ?? []).entries())
+    {
+        collectPackageNames(packageRouter, [...trail, `packages[${index}]`], packageNames);
+    }
+}
+
+/**
+ * Refuse an app route whose name a package router also registers.
+ *
+ * Both are registered at runtime, at their own paths, and the app's proxy merges
+ * the two maps as `{ ...routeMap, ...authRouteMap }` — so the *package* entry
+ * wins the name. The typed client would say `api.logout` is the app's own route
+ * while every call went to the package's path.
+ *
+ * A package route colliding with another package's route is not refused: which
+ * of them wins is decided by the order the app spreads their maps, which this
+ * generator neither sees nor writes.
+ */
+function assertNoPackageCollision(found: Map<string, CollectedRoute>, packageNames: Map<string, string>): void
+{
+    for (const [name, where] of packageNames)
+    {
+        const route = found.get(name);
+
+        if (!route)
+        {
+            continue;
+        }
+
+        throw new RouteMapGeneratorError(
+            `The app route "${name}" (${route.trail}) is also registered by a package router (${where}). `
+            + 'The app merges the two maps as { ...routeMap, ...packageRouteMap }, so the package entry wins the '
+            + 'name at runtime while the generated types still describe the app\'s route — every call would go to '
+            + 'the package\'s path. Rename the app route.',
+        );
+    }
+}
+
+/** The map the file is written from: app routes only, and no name a package took. */
+function collectRouteMap(router: Router<any>): Map<string, CollectedRoute>
+{
+    const found = new Map<string, CollectedRoute>();
+    const packageNames = new Map<string, string>();
+
+    collectRoutes(router, ['router'], found, packageNames);
+    assertNoPackageCollision(found, packageNames);
+
+    return found;
 }
 
 // ============================================================================
@@ -237,18 +328,45 @@ function collectRoutes(router: Router<any>, trail: string[], found: Map<string, 
  */
 function toObjectKey(name: string): string
 {
+    // `__proto__:` in an object literal sets the prototype instead of defining
+    // an own property, and so does `"__proto__":` — the route would vanish from
+    // Object.keys and from the proxy's spread. A computed key is the one form
+    // that always defines an own property.
+    if (name === '__proto__')
+    {
+        return `[${JSON.stringify(name)}]`;
+    }
+
     return /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(name) ? name : JSON.stringify(name);
 }
 
 /**
- * A path is emitted inside a single-quoted string literal, and a path carrying a
- * quote or a backslash would close it early and leave a file that does not parse.
- * Every realistic path passes through untouched, so an unchanged project
- * regenerates byte-identically.
+ * Printable ASCII, minus the two characters a single-quoted literal cannot hold.
+ * Every realistic path is in here and is emitted as it always was, so an
+ * unchanged project regenerates byte-identically.
+ */
+const SINGLE_QUOTABLE = /^[\x20-\x26\x28-\x5B\x5D-\x7E]*$/;
+
+/**
+ * A path is emitted as a string literal, and a path carrying a quote, a
+ * backslash or a line terminator would close it early — or end the line — and
+ * leave a `DO NOT EDIT` file whose syntax error points at nothing.
+ *
+ * `JSON.stringify` handles all of those, so anything outside the plain ASCII a
+ * single-quoted literal can hold is handed to it. U+2028 and U+2029 are the
+ * exception it does not cover: they are legal in a JSON string and were a line
+ * terminator in string literals before ES2019, so they are escaped by hand.
  */
 function toStringLiteral(value: string): string
 {
-    return `'${value.replace(/\\/g, '\\\\').replace(/'/g, '\\\'')}'`;
+    if (SINGLE_QUOTABLE.test(value))
+    {
+        return `'${value}'`;
+    }
+
+    return JSON.stringify(value)
+        .replace(/\u2028/g, '\\u2028')
+        .replace(/\u2029/g, '\\u2029');
 }
 
 /**
@@ -345,9 +463,10 @@ export function createRouteMapGenerator(config: RouteMapGeneratorConfig): Genera
                 genLogger.info('Loading router', { path: absoluteRouterPath });
             }
 
-            const router = loadRouter(cwd, absoluteRouterPath);
-            const routes = new Map<string, CollectedRoute>();
-            collectRoutes(router, ['router'], routes);
+            pinNodeEnv();
+            assertUnconditionalRegistration(routerPath, readFileSync(absoluteRouterPath, 'utf-8'));
+
+            const routes = collectRouteMap(loadRouter(cwd, absoluteRouterPath));
 
             if (debug)
             {
