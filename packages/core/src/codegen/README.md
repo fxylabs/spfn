@@ -195,26 +195,32 @@ Unlike the old source parser, which dropped what it could not read, the generato
   (`...metadataRoutes(config, resource)`): loading yields exactly the routes it returns.
   Past the guard, by construction: a conditional spread inside an imported module, a router
   built by a factory, a condition hoisted to a variable before the spread, and a
-  `.packages()` list assembled conditionally. `NODE_ENV` pinning is the defence for those —
-  the generator reads the router production gets, whatever the shell was.
+  `.packages()` list assembled conditionally. `NODE_ENV` pinning stands in for the guard on
+  those, but only when the shell left it unset: `spfn build` pins `production`, so what ships
+  is right, while `spfn dev` sets `development` and the watcher regenerates under it. The
+  generated header names the `NODE_ENV` the map was written under, so that difference is a
+  line in the diff rather than a route that vanishes at build.
 - Two routes reach the same name (the message names both places).
 - An **app route and a package route** reach the same name, where that package publishes a
   route map. Both register at runtime, and the app's proxy merges
   `{ ...routeMap, ...authRouteMap }` — so the package's route wins the name while the
   generated types still describe the app's. Two *package* routers sharing a name is not
   refused: which one wins is the app's merge order, which this generator neither sees nor
-  writes. Nor is a collision with a router that publishes **no** map: the ops surface
-  (`createOpsRouter`) is reached by URL, `spfn ops` never addresses a command by name, and
-  nothing merges over the app's map — so an app route named after an ops command overwrites
-  nothing and must not fail the build.
-- A route has no method or path — reachable by registering a route before `.handler()` was
-  called. The server drops such a route too, so naming it in the map would advertise a
-  route that 404s.
+  writes. Nor is a collision with a router that publishes **no** map — one declared with
+  `defineUnmappedRouter`, whose routes are reached by the URL something was handed rather
+  than by name: the ops surface (`createOpsRouter`), `@spfn/monitor`, `@spfn/cms` and the
+  tracking routes of `@spfn/notification`. Nothing of theirs merges over the app's map, so
+  an app route named after one of their routes overwrites nothing and must not fail the
+  build.
 - A route's `method` is not an `HttpMethod`. `registerRoutes` lowercases the method before
   registering, so `method: 'get'` serves fine and would emit a map that fails `tsc`.
-- A router entry is neither a route nor a router.
 
 A **missing router file** is still only a warning: the generator returns and writes nothing.
+
+**Warned about and left out, not refused**: a route with no method or path (reachable by
+registering a route before `.handler()` was called), and a router entry that is neither a
+route nor a router. `registerRoutes` warns and skips both, so a map without them still names
+every route the server answers — which is all a refusal would have been protecting.
 
 What a *package* router carries is never refused — an entry the app developer cannot fix
 is skipped, exactly as `registerRoutes` skips it.

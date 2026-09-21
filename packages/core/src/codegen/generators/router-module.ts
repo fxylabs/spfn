@@ -12,7 +12,7 @@
  * list first would otherwise decide what the other one loads.
  */
 
-import { existsSync } from 'fs';
+import { existsSync, readdirSync, statSync } from 'fs';
 import { dirname, isAbsolute, join, relative, resolve } from 'path';
 import { createJiti } from 'jiti';
 import type * as ts from 'typescript';
@@ -32,12 +32,20 @@ const loadLogger = logger.child('@spfn/core:codegen');
  * A route module that reads the environment at import — a schema built from a
  * flag, a config module with a `development` branch — would otherwise make the
  * generated output depend on how the generator happened to be invoked. It is
- * also the only defence against a condition the guard cannot see, such as one
- * hoisted to a variable before the spread that registers it.
+ * also what stands in for the guard against a condition the guard cannot see,
+ * such as one hoisted to a variable before the spread that registers it — but
+ * only when the shell left NODE_ENV unset.
  *
  * The pin is process-wide and deliberately only applies when NODE_ENV is unset,
  * so calling it from both generators in one run is the same as calling it once:
  * the second call finds the value the first one set and leaves it alone.
+ *
+ * It is unconditional nowhere, and `spfn dev` is why: it sets `development`
+ * before spawning the watcher, and a route registered only in development has
+ * to be in the map the watcher writes or it 404s in `spfn dev` itself.
+ * `spfn build` pins `production` and generates before it compiles, so what ships
+ * is right; the cost is churn between the two, which the generated header makes
+ * visible by naming the NODE_ENV the map was written under.
  */
 export function pinNodeEnv(): void
 {
@@ -74,6 +82,23 @@ function parseHost(compiler: typeof ts): ts.ParseConfigHost
  */
 const NO_INPUTS = 18003;
 
+/**
+ * One tsconfig `paths` entry, as jiti resolves it.
+ *
+ * `from`/`to` are the alias; `pattern`, `target` and `others` are kept so that a
+ * specifier which did not resolve can say which target it was tried through and
+ * which ones the entry also listed — jiti holds one alias per key, so those
+ * others were never tried.
+ */
+interface AliasEntry
+{
+    from: string;
+    to: string;
+    pattern: string;
+    target: string;
+    others: string[];
+}
+
 /** What has to exist for a target to resolve: the directory a prefix names, or the file itself. */
 function targetPath(target: string, base: string): string
 {
@@ -81,17 +106,53 @@ function targetPath(target: string, base: string): string
 }
 
 /**
+ * Whether a target can resolve anything at all.
+ *
+ * TypeScript and tsup substitute each target and take the first that resolves
+ * the *requested module*; jiti holds one alias per key, so the nearest this can
+ * get is asking whether the directory a prefix names holds anything. That is
+ * the difference that matters in practice: a `dist` left behind by `rm -rf
+ * dist/*`, or created empty by a tool that then failed, exists and resolves
+ * nothing, and taking it ahead of `./src/*` left every import unresolved.
+ *
+ * A target with no wildcard names a file, and `existsSync` is the whole of the
+ * question for it.
+ */
+function targetResolves(target: string, base: string): boolean
+{
+    const path = targetPath(target, base);
+
+    if (!target.endsWith('/*'))
+    {
+        return existsSync(path);
+    }
+
+    const stats = statSync(path, { throwIfNoEntry: false });
+
+    return stats?.isDirectory() === true && readdirSync(path).length > 0;
+}
+
+/** The target a `paths` entry resolves through, and the ones it passed over. */
+interface TargetChoice
+{
+    target: string;
+
+    /** Targets the pattern also listed. Named in a failure, since jiti tried none of them. */
+    others: string[];
+}
+
+/**
  * The target a `paths` entry resolves through.
  *
- * TypeScript tries each target in order and takes the first that exists, and so
- * does tsup; jiti holds one alias per key. Taking the first target
+ * TypeScript tries each target in order and takes the first that resolves, and
+ * so does tsup; jiti holds one alias per key. Taking the first target
  * unconditionally therefore failed a project whose first target is a build
  * output that has not been produced — an ordinary shape for a `paths` entry
  * listing `./dist/*` before `./src/*`.
  */
-function chooseTarget(pattern: string, targets: string[], base: string): string | undefined
+function chooseTarget(pattern: string, targets: string[], base: string): TargetChoice | undefined
 {
-    const present = targets.filter(target => existsSync(targetPath(target, base)));
+    const present = targets.filter(target => targetResolves(target, base));
     const [target] = present.length > 0 ? present : targets;
 
     if (!target)
@@ -102,35 +163,37 @@ function chooseTarget(pattern: string, targets: string[], base: string): string 
     if (present.length > 1)
     {
         loadLogger.warn(
-            `tsconfig "paths" maps ${pattern} to ${present.length} targets that all exist; while the router loads, `
-            + `only the first (${target}) resolves`,
+            `tsconfig "paths" maps ${pattern} to ${present.length} targets that could each resolve a module; `
+            + `while the router loads, only the first (${target}) does`,
         );
     }
 
     if (present.length === 0 && targets.length > 1)
     {
         loadLogger.warn(
-            `tsconfig "paths" maps ${pattern} to ${targets.length} targets and none of them exist; `
-            + `${target} is used, and an import through it will name itself as unresolved`,
+            `tsconfig "paths" maps ${pattern} to ${targets.length} targets and none of them exists with anything `
+            + `in it; ${target} is used, and an import through it will name itself as unresolved`,
         );
     }
 
-    return target;
+    return { target, others: targets.filter(candidate => candidate !== target) };
 }
 
 /** One `paths` entry as a jiti alias, or `undefined` when jiti cannot express it. */
-function toAlias(pattern: string, targets: string[], base: string): { from: string; to: string } | undefined
+function toAlias(pattern: string, targets: string[], base: string): AliasEntry | undefined
 {
-    const target = chooseTarget(pattern, targets, base);
+    const choice = chooseTarget(pattern, targets, base);
 
-    if (!target)
+    if (!choice)
     {
         return undefined;
     }
 
+    const { target, others } = choice;
+
     if (!pattern.includes('*'))
     {
-        return { from: pattern, to: resolve(base, target) };
+        return { from: pattern, to: resolve(base, target), pattern, target, others };
     }
 
     // jiti matches an alias by path segment, so the only mapping it can express
@@ -149,7 +212,7 @@ function toAlias(pattern: string, targets: string[], base: string): { from: stri
     // is how a package maps its own subpaths beside its entry point — become two
     // aliases instead of collapsing onto "@x" and losing the exact one. jiti
     // resolves "@x/a" through "@x/" either way.
-    return { from: pattern.slice(0, -1), to: resolve(base, target.slice(0, -2)) };
+    return { from: pattern.slice(0, -1), to: resolve(base, target.slice(0, -2)), pattern, target, others };
 }
 
 /** `compilerOptions` of one tsconfig, with `extends` already merged. */
@@ -226,9 +289,9 @@ function searchDirectories(cwd: string, startDir: string): string[]
 }
 
 /** `paths` as jiti aliases, with their targets resolved against `base`. */
-function aliasesOf(paths: ts.MapLike<string[]>, base: string): Record<string, string>
+function aliasesOf(paths: ts.MapLike<string[]>, base: string): AliasEntry[]
 {
-    const aliases = new Map<string, string>();
+    const aliases = new Map<string, AliasEntry>();
 
     for (const [pattern, targets] of Object.entries(paths))
     {
@@ -236,11 +299,11 @@ function aliasesOf(paths: ts.MapLike<string[]>, base: string): Record<string, st
 
         if (alias && !aliases.has(alias.from))
         {
-            aliases.set(alias.from, alias.to);
+            aliases.set(alias.from, alias);
         }
     }
 
-    return Object.fromEntries(aliases);
+    return [...aliases.values()];
 }
 
 /**
@@ -263,7 +326,7 @@ function aliasesOf(paths: ts.MapLike<string[]>, base: string): Record<string, st
  * Handled: an `extends` chain, including one that names a package; `paths`
  * targets resolved against `baseUrl`, and against the config file that declares
  * them when there is no `baseUrl`; several targets per pattern, taking the first
- * that exists as tsc and tsup do; comments and trailing commas, because
+ * that resolves as tsc and tsup do; comments and trailing commas, because
  * TypeScript's own parser reads the file.
  *
  * Not handled, each with a warning and no alias for that entry: a pattern whose
@@ -271,7 +334,7 @@ function aliasesOf(paths: ts.MapLike<string[]>, base: string): Record<string, st
  * `baseUrl` with no `paths` produces nothing: resolving every bare specifier
  * against a directory is not something an alias map can say.
  */
-export function tsconfigAliases(cwd: string, startDir: string = cwd): Record<string, string>
+function projectAliases(cwd: string, startDir: string): AliasEntry[]
 {
     for (const directory of searchDirectories(cwd, startDir))
     {
@@ -288,7 +351,13 @@ export function tsconfigAliases(cwd: string, startDir: string = cwd): Record<str
         }
     }
 
-    return {};
+    return [];
+}
+
+/** The alias map jiti is handed: see `projectAliases`, of which this is the public shape. */
+export function tsconfigAliases(cwd: string, startDir: string = cwd): Record<string, string>
+{
+    return Object.fromEntries(projectAliases(cwd, startDir).map(alias => [alias.from, alias.to]));
 }
 
 // ============================================================================
@@ -302,7 +371,7 @@ export function tsconfigAliases(cwd: string, startDir: string = cwd): Record<str
  * router imports `@/server/routes` looking for a module-scope side effect that
  * is not there.
  */
-function describeFailure(error: unknown, subject: string): string
+function describeFailure(error: unknown, subject: string, aliases: AliasEntry[]): string
 {
     const message = error instanceof Error ? error.message : String(error);
     const unresolved = /Cannot find module '([^']+)'/.exec(message);
@@ -318,7 +387,36 @@ function describeFailure(error: unknown, subject: string): string
         + `"${unresolved[1]}" did not resolve while the router was being imported. Imports resolve through Node and `
         + 'through the "paths" of the nearest tsconfig.json that declares them, searching from the router file up to '
         + 'the project root. Check that the specifier is mapped in one of those, and that what it points at exists: '
-        + 'a workspace package resolves to a dist/ that has to have been built.';
+        + 'a workspace package resolves to a dist/ that has to have been built.'
+        + describePassedOverTargets(unresolved[1], aliases);
+}
+
+/**
+ * The targets the failing specifier was never tried through.
+ *
+ * tsc substitutes every target of a matching pattern and takes the first that
+ * resolves the requested module; jiti holds one alias per key, so exactly one
+ * was tried. When the pattern listed others, the import that just failed would
+ * very likely have resolved through one of them, and saying so is the whole
+ * repair — the alternative is a developer reading "did not resolve" about a
+ * module that plainly exists under `./src`.
+ */
+function describePassedOverTargets(specifier: string, aliases: AliasEntry[]): string
+{
+    // Matched on either spelling: the loader names the specifier it was given
+    // for an alias it has no mapping for, and the path it resolved to for one it
+    // does — and it is the second that reaches here.
+    const alias = aliases.find(entry => specifier.startsWith(entry.from) || specifier.startsWith(entry.to));
+
+    if (!alias || alias.others.length === 0)
+    {
+        return '';
+    }
+
+    return `\n\nIt was resolved through "${alias.target}", the first target of the "paths" entry `
+        + `"${alias.pattern}" that names a directory holding anything. That entry also lists `
+        + `${alias.others.map(other => `"${other}"`).join(', ')}, which the router load never tried: one alias per `
+        + 'key is all the loader can express, so the whole load goes through a single target.';
 }
 
 export interface RouterModuleLoad
@@ -342,10 +440,12 @@ export function loadRouterModule(load: RouterModuleLoad): Record<string, unknown
 {
     const { cwd, absoluteRouterPath, subject, fail } = load;
 
+    const aliases = projectAliases(cwd, dirname(absoluteRouterPath));
+
     const jiti = createJiti(cwd, {
         interopDefault: true,
         moduleCache: false,
-        alias: tsconfigAliases(cwd, dirname(absoluteRouterPath)),
+        alias: Object.fromEntries(aliases.map(alias => [alias.from, alias.to])),
     });
 
     try
@@ -354,7 +454,9 @@ export function loadRouterModule(load: RouterModuleLoad): Record<string, unknown
     }
     catch (error)
     {
-        throw fail(`Failed to load ${relative(cwd, absoluteRouterPath)}: ${describeFailure(error, subject)}`);
+        throw fail(
+            `Failed to load ${relative(cwd, absoluteRouterPath)}: ${describeFailure(error, subject, aliases)}`,
+        );
     }
 }
 

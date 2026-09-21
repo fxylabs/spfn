@@ -246,11 +246,13 @@ export function defineRouter<TRoutes extends Record<string, RouteDef<any, any, a
  * told the URL — so a name it shares with an app route overwrites nothing and
  * the route-map generator leaves it alone.
  *
- * Used by `createOpsRouter`. It is not part of the app-facing surface: a
- * package that publishes a route map must not be declared with it, or a
- * collision that does overwrite would generate silently.
- *
- * @internal
+ * Declared by the package that ships the router, because only it knows whether
+ * it publishes a map: `createOpsRouter`, `@spfn/monitor`, `@spfn/cms` and the
+ * tracking routes of `@spfn/notification` all do, and any package whose surface
+ * is reached by URL may. The obligation is the whole of it — a package that
+ * *does* publish a route map must use `defineRouter`, or a collision that really
+ * would overwrite an app route generates silently. `defineRouter` is the
+ * default for exactly that reason: a package that says nothing is checked.
  */
 export function defineUnmappedRouter<TRoutes extends Record<string, RouteDef<any, any, any> | Router<any>>>(
     routes: TRoutes,

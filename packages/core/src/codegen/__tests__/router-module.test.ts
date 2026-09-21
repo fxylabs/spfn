@@ -351,6 +351,42 @@ describe('tsconfigAliases - several targets for one pattern', () =>
         expect(warnings).toMatch(/none of them exist/);
     });
 
+    it('passes over a target directory that exists but is empty', () =>
+    {
+        // `rm -rf dist/*` leaves the directory. tsc and tsup substitute the next
+        // target when the requested module is not under this one; jiti holds one
+        // alias per key, so the nearest equivalent is refusing a directory that
+        // can resolve nothing at all.
+        mkdirSync(join(projectDir, 'dist'), { recursive: true });
+        writeFile('src/routes.ts', 'export const x = 1;\n');
+        writeFile(
+            'tsconfig.json',
+            JSON.stringify({ compilerOptions: { paths: { '@/*': ['./dist/*', './src/*'] } } }),
+        );
+
+        let aliases: Record<string, string> = {};
+        const warnings = warningsOf(() => (aliases = tsconfigAliases(projectDir)));
+
+        expect(aliases).toEqual({ '@/': join(projectDir, 'src') });
+        expect(warnings).toBe('');
+    });
+
+    it('takes the first when every target is empty, and warns that an import will name itself', () =>
+    {
+        mkdirSync(join(projectDir, 'dist'), { recursive: true });
+        mkdirSync(join(projectDir, 'src'), { recursive: true });
+        writeFile(
+            'tsconfig.json',
+            JSON.stringify({ compilerOptions: { paths: { '@/*': ['./dist/*', './src/*'] } } }),
+        );
+
+        let aliases: Record<string, string> = {};
+        const warnings = warningsOf(() => (aliases = tsconfigAliases(projectDir)));
+
+        expect(aliases).toEqual({ '@/': join(projectDir, 'dist') });
+        expect(warnings).toMatch(/none of them exist/);
+    });
+
     it('says nothing when a pattern has one target', () =>
     {
         writeFile('src/routes.ts', 'export const x = 1;\n');

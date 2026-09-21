@@ -455,10 +455,16 @@ export const appRouter = defineRouter({ getRoot, getStatus })
 **A name a package route already uses is not available to an app route.** Both register, at
 their own paths, and the app's proxy merges the two maps as `{ ...routeMap, ...authRouteMap }`
 — so the package entry wins the name while the generated types still describe the app's
-route. `spfn codegen run` refuses rather than generating that, naming both sides. The ops
-surface is the exception: `createOpsRouter` publishes no route map for anything to merge and
-`spfn ops` invokes a command over its URL, so an app route may share a name with an ops
-command freely.
+route. `spfn codegen run` refuses rather than generating that, naming both sides.
+
+A package that publishes **no** route map is the exception, and declares itself one with
+`defineUnmappedRouter`: its routes are reached by the URL something was handed rather than by
+name, so nothing merges over the app's map and an app route may share a name with one of them
+freely. `createOpsRouter` builds the ops surface that way — `spfn ops` invokes a command over
+its URL — as do `@spfn/monitor`, `@spfn/cms` and the tracking routes of `@spfn/notification`.
+`defineRouter` is the default because the obligation runs the other way: a package that does
+publish a map must not declare itself unmapped, or a collision that really would overwrite an
+app route generates silently.
 
 ### `.use([...])` — router-level global middleware
 

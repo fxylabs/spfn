@@ -12,11 +12,12 @@
  * and without a node_modules link inside the temporary directory.
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { dirname, join, resolve } from 'path';
 import { createJiti } from 'jiti';
+import { Logger } from '@spfn/core/logger';
 import { createRouteMapGenerator, RouteMapGeneratorError } from '../generators/route-map';
 import { ConditionalRegistrationError } from '../generators/contract-guard';
 
@@ -78,6 +79,31 @@ function loadGeneratedMap(): Record<string, { method: string; path: string }>
 
     return (jiti(join(projectDir, OUTPUT_PATH)) as { routeMap: Record<string, { method: string; path: string }> })
         .routeMap;
+}
+
+/**
+ * Every warning a generate emitted, joined, so a case can assert what it said.
+ *
+ * `Logger` comes from the package entry rather than from `../../logger`: that is
+ * the module the generator logs through, and the two are different class
+ * objects.
+ */
+async function warningsOf(call: () => Promise<unknown>): Promise<string>
+{
+    const warn = vi.spyOn(Logger.prototype, 'warn').mockImplementation(() =>
+    {
+    });
+
+    try
+    {
+        await call();
+
+        return warn.mock.calls.map(([message]) => String(message)).join('\n');
+    }
+    finally
+    {
+        warn.mockRestore();
+    }
 }
 
 beforeEach(() =>
@@ -307,7 +333,7 @@ describe('route-map generator - walking the router', () =>
     });
 });
 
-describe('route-map generator - refusals', () =>
+describe('route-map generator - what it refuses, and what it only warns about', () =>
 {
     it('fails on a duplicate name, naming both branches', async () =>
     {
@@ -346,29 +372,75 @@ describe('route-map generator - refusals', () =>
         await expect(generate()).rejects.toThrow(/appRouter, default, router/);
     });
 
-    it('refuses a route registered before .handler() was called', async () =>
+    it('warns and leaves out a route registered before .handler() was called', async () =>
     {
+        // `registerRoutes` warns and skips this one, so a map without it names
+        // every route the server answers — which is all a refusal was for.
         writeRouter(
-            'const createUser = route.post(\'/users\');\n\n'
-            + 'export const appRouter = defineRouter({ createUser } as any);\n',
+            'const getRoot = route.get(\'/\').handler(async () => ({}));\n'
+            + 'const createUser = route.post(\'/users\');\n\n'
+            + 'export const appRouter = defineRouter({ getRoot, createUser } as any);\n',
         );
 
-        await expect(generate()).rejects.toThrow(/router\.createUser/);
-        await expect(generate()).rejects.toThrow(/no method or path/);
+        const warnings = await warningsOf(generate);
+
+        expect(warnings).toMatch(/router\.createUser/);
+        expect(warnings).toMatch(/no method or path/);
+        expect(Object.keys(loadGeneratedMap())).toEqual(['getRoot']);
     });
 
-    it('refuses a router entry that is neither a route nor a router', async () =>
+    it('warns and leaves out a router entry that is neither a route nor a router', async () =>
     {
         writeRouter(
-            'export const appRouter = defineRouter({ getRoot: \'/\' } as any);\n',
+            'const getRoot = route.get(\'/\').handler(async () => ({}));\n\n'
+            + 'export const appRouter = defineRouter({ getRoot, notARoute: \'/\' } as any);\n',
         );
 
-        await expect(generate()).rejects.toThrow(/neither a route nor a router/);
+        const warnings = await warningsOf(generate);
+
+        expect(warnings).toMatch(/router\.notARoute/);
+        expect(warnings).toMatch(/neither a route nor a router/);
+        expect(Object.keys(loadGeneratedMap())).toEqual(['getRoot']);
     });
 });
 
 describe('route-map generator - output', () =>
 {
+    it('names the NODE_ENV it was generated under in the header', async () =>
+    {
+        // What a route registered behind an environment condition depends on,
+        // and the only place it is written down: `spfn dev` regenerates under
+        // `development` where `spfn build` pins `production`, and this line is
+        // what makes the two maps differing visible in a diff.
+        const shellValue = process.env.NODE_ENV;
+        process.env.NODE_ENV = 'development';
+
+        writeRouter(
+            'const getRoot = route.get(\'/\').handler(async () => ({}));\n\n'
+            + 'export const appRouter = defineRouter({ getRoot });\n',
+        );
+
+        try
+        {
+            expect(await generate()).toContain(' * Generated with NODE_ENV=development.');
+
+            process.env.NODE_ENV = 'production';
+
+            expect(await generate()).toContain(' * Generated with NODE_ENV=production.');
+        }
+        finally
+        {
+            if (shellValue === undefined)
+            {
+                delete process.env.NODE_ENV;
+            }
+            else
+            {
+                process.env.NODE_ENV = shellValue;
+            }
+        }
+    });
+
     it('is byte-identical across runs', async () =>
     {
         writeRouter(
@@ -623,6 +695,41 @@ describe('route-map generator - tsconfig path aliases', () =>
         expect(entriesOf(await generate())).toEqual(['listUsers: { method: \'GET\', path: \'/users\' },']);
     });
 
+    it('takes the target that holds something, not the empty directory before it', async () =>
+    {
+        // `rm -rf dist/*` leaves the directory behind. tsc and tsup would
+        // substitute the next target; jiti holds one alias per key, so an empty
+        // `dist` taken ahead of `./src` left every import unresolved.
+        writeAliasedRoutes();
+        mkdirSync(join(projectDir, 'dist'), { recursive: true });
+        writeFile(
+            'tsconfig.json',
+            JSON.stringify({ compilerOptions: { paths: { '@/*': ['./dist/*', './src/*'] } } }),
+        );
+
+        expect(entriesOf(await generate())).toEqual(['listUsers: { method: \'GET\', path: \'/users\' },']);
+    });
+
+    it('names the targets the pattern also listed when the one it took did not resolve', async () =>
+    {
+        // A stale `dist`: it holds something, so it is taken, and the module the
+        // router wants is only under `src`. jiti tried no other target, and the
+        // message is the only place that can say so.
+        writeAliasedRoutes();
+        writeFile('dist/keep.js', 'exports.x = 1;\n');
+        writeFile(
+            'tsconfig.json',
+            JSON.stringify({ compilerOptions: { paths: { '@/*': ['./dist/*', './src/*'] } } }),
+        );
+
+        const thrown = await generate().catch((error: Error) => error);
+
+        expect((thrown as Error).message).toContain('did not resolve');
+        expect((thrown as Error).message).toContain('"./dist/*"');
+        expect((thrown as Error).message).toContain('"./src/*"');
+        expect((thrown as Error).message).toContain('never tried');
+    });
+
     it('names the unresolved specifier when the alias is not configured', async () =>
     {
         writeAliasedRoutes();
@@ -716,6 +823,50 @@ describe('route-map generator - a package router that publishes no route map', (
         );
 
         await expect(generate()).rejects.toThrow(/also registered by a package router/);
+        await expect(generate()).rejects.toThrow(/packages\[1\]\.logout/);
+    });
+});
+
+describe('route-map generator - a first-party package that publishes no route map', () =>
+{
+    /**
+     * `@spfn/monitor` as `packages/monitor/src/server/routes/index.ts` builds it
+     * — `defineUnmappedRouter`, because the package has no codegen config and
+     * exports no route map — beside an app route that shares the name `getStats`
+     * with one of its admin routes.
+     */
+    const MONITOR = 'const getStats = route.get(\'/stats\').handler(async () => ({}));\n'
+        + 'const monitorStats = route.get(\'/_monitor/admin/stats\').handler(async () => ({}));\n'
+        + 'const monitorRouter = defineUnmappedRouter({ getStats: monitorStats });\n';
+
+    /** `@spfn/auth`, which does publish one: the app spreads `authRouteMap` over its own. */
+    const AUTH = 'const appLogout = route.post(\'/logout\').handler(async () => ({}));\n'
+        + 'const authLogout = route.post(\'/_auth/logout\').handler(async () => ({}));\n'
+        + 'const authRouter = defineRouter({ logout: authLogout });\n';
+
+    it('generates for an app route named after a @spfn/monitor route', async () =>
+    {
+        writeRouter(
+            MONITOR
+            + '\nexport const appRouter = defineRouter({ getStats }).packages([monitorRouter]);\n',
+        );
+
+        expect(entriesOf(await generate())).toEqual([
+            'getStats: { method: \'GET\', path: \'/stats\' },',
+        ]);
+    });
+
+    it('refuses the same app\'s route named after a @spfn/auth route, beside that monitor one', async () =>
+    {
+        writeRouter(
+            MONITOR
+            + AUTH
+            + '\nexport const appRouter = defineRouter({ getStats, logout: appLogout })\n'
+            + '    .packages([monitorRouter, authRouter]);\n',
+        );
+
+        await expect(generate()).rejects.toThrow(RouteMapGeneratorError);
+        await expect(generate()).rejects.toThrow(/The app route "logout"/);
         await expect(generate()).rejects.toThrow(/packages\[1\]\.logout/);
     });
 });
