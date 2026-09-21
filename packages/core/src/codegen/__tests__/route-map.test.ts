@@ -26,7 +26,7 @@ const OUTPUT_PATH = 'src/generated/route-map.ts';
 const ROUTER_MODULE = resolve(__dirname, '../../route/router').replace(/\\/g, '/');
 const ROUTE_BUILDER_MODULE = resolve(__dirname, '../../route/route-builder').replace(/\\/g, '/');
 
-const IMPORTS = `import { defineRouter } from '${ROUTER_MODULE}';\n`
+const IMPORTS = `import { defineRouter, defineUnmappedRouter } from '${ROUTER_MODULE}';\n`
     + `import { route } from '${ROUTE_BUILDER_MODULE}';\n\n`;
 
 let projectDir: string;
@@ -610,6 +610,19 @@ describe('route-map generator - tsconfig path aliases', () =>
         expect(entriesOf(await generate())).toEqual(['listUsers: { method: \'GET\', path: \'/users\' },']);
     });
 
+    it('loads a router whose aliases live only in src/server/tsconfig.json', async () =>
+    {
+        // What `spfn init` scaffolds, and the tsconfig `spfn build` compiles the
+        // server with. A backend-only app has `@/*` nowhere else.
+        writeAliasedRoutes();
+        writeFile(
+            'src/server/tsconfig.json',
+            JSON.stringify({ compilerOptions: { baseUrl: '../..', paths: { '@/*': ['./src/*'] } } }),
+        );
+
+        expect(entriesOf(await generate())).toEqual(['listUsers: { method: \'GET\', path: \'/users\' },']);
+    });
+
     it('names the unresolved specifier when the alias is not configured', async () =>
     {
         writeAliasedRoutes();
@@ -620,5 +633,178 @@ describe('route-map generator - tsconfig path aliases', () =>
         expect((thrown as Error).message).toContain('@/server/routes/users');
         expect((thrown as Error).message).toContain('did not resolve');
         expect((thrown as Error).message).not.toContain('without side effects');
+    });
+});
+
+describe('route-map generator - a package router that publishes no route map', () =>
+{
+    /**
+     * The ops surface, as `createOpsRouter` builds it: an app route and an ops
+     * command under one name, which is what naming an ops command after the
+     * surface it inspects produces.
+     */
+    function writeOpsCollision(body = ''): void
+    {
+        writeRouter(
+            'const listExamples = route.get(\'/examples\').handler(async () => ({}));\n'
+            + 'const opsListExamples = route.get(\'/_ops/examples\').handler(async () => ({}));\n\n'
+            + 'const opsRouter = defineUnmappedRouter({ listExamples: opsListExamples });\n\n'
+            + body
+            + 'export const appRouter = defineRouter({ listExamples }).packages([opsRouter]);\n',
+        );
+    }
+
+    it('allows an app route whose name it shares, because no merge overwrites it', async () =>
+    {
+        writeOpsCollision();
+
+        expect(entriesOf(await generate())).toEqual([
+            'listExamples: { method: \'GET\', path: \'/examples\' },',
+        ]);
+    });
+
+    it('leaves its routes out of the map, exactly as a published package router is left out', async () =>
+    {
+        writeOpsCollision();
+        await generate();
+
+        expect(Object.keys(loadGeneratedMap())).toEqual(['listExamples']);
+        expect(loadGeneratedMap().listExamples.path).toBe('/examples');
+    });
+
+    it('is skipped at any depth below itself', async () =>
+    {
+        writeRouter(
+            'const purge = route.post(\'/purge\').handler(async () => ({}));\n'
+            + 'const opsPurge = route.post(\'/_ops/cache/purge\').handler(async () => ({}));\n\n'
+            + 'const cache = defineRouter({ purge: opsPurge });\n'
+            + 'const opsRouter = defineUnmappedRouter({ cache });\n\n'
+            + 'export const appRouter = defineRouter({ purge }).packages([opsRouter]);\n',
+        );
+
+        expect(entriesOf(await generate())).toEqual([
+            'purge: { method: \'POST\', path: \'/purge\' },',
+        ]);
+    });
+
+    it('is skipped when a published package router mounts it', async () =>
+    {
+        writeRouter(
+            'const audit = route.get(\'/audit\').handler(async () => ({}));\n'
+            + 'const opsAudit = route.get(\'/_ops/audit\').handler(async () => ({}));\n'
+            + 'const login = route.post(\'/_auth/login\').handler(async () => ({}));\n\n'
+            + 'const opsRouter = defineUnmappedRouter({ audit: opsAudit });\n'
+            + 'const authRouter = defineRouter({ login }).packages([opsRouter]);\n\n'
+            + 'export const appRouter = defineRouter({ audit }).packages([authRouter]);\n',
+        );
+
+        expect(entriesOf(await generate())).toEqual([
+            'audit: { method: \'GET\', path: \'/audit\' },',
+        ]);
+    });
+
+    it('still refuses the collision with a package that does publish a map', async () =>
+    {
+        writeRouter(
+            'const appLogout = route.post(\'/logout\').handler(async () => ({}));\n'
+            + 'const packageLogout = route.post(\'/_auth/logout\').handler(async () => ({}));\n'
+            + 'const opsLogout = route.post(\'/_ops/logout\').handler(async () => ({}));\n\n'
+            + 'const opsRouter = defineUnmappedRouter({ logout: opsLogout });\n'
+            + 'const authRouter = defineRouter({ logout: packageLogout });\n\n'
+            + 'export const appRouter = defineRouter({ logout: appLogout })\n'
+            + '    .packages([opsRouter, authRouter]);\n',
+        );
+
+        await expect(generate()).rejects.toThrow(/also registered by a package router/);
+        await expect(generate()).rejects.toThrow(/packages\[1\]\.logout/);
+    });
+});
+
+describe('route-map generator - it scans the router it was pointed at', () =>
+{
+    it('generates for an app whose file also declares an unmounted conditional router', async () =>
+    {
+        writeRouter(
+            'const getRoot = route.get(\'/\').handler(async () => ({}));\n'
+            + 'const testRoute = route.get(\'/__test\').handler(async () => ({}));\n\n'
+            + 'export const appRouter = defineRouter({ getRoot });\n\n'
+            + 'export const testRouter = defineRouter({\n'
+            + '    ...(process.env.ENABLE_TEST ? { testRoute } : {}),\n'
+            + '});\n',
+        );
+
+        expect(entriesOf(await generate())).toEqual(['getRoot: { method: \'GET\', path: \'/\' },']);
+    });
+
+    it('still refuses a conditional spread in a nested router the app router mounts', async () =>
+    {
+        writeRouter(
+            'const getRoot = route.get(\'/\').handler(async () => ({}));\n'
+            + 'const purge = route.post(\'/admin/purge\').handler(async () => ({}));\n\n'
+            + 'const admin = defineRouter({ ...(process.env.ENABLE_ADMIN ? { purge } : {}) });\n\n'
+            + 'export const appRouter = defineRouter({ getRoot, admin });\n',
+        );
+
+        await expect(generate()).rejects.toThrow(ConditionalRegistrationError);
+        expect(existsSync(join(projectDir, OUTPUT_PATH))).toBe(false);
+    });
+
+    it('refuses the conditional in a router it found by falling back to "router"', async () =>
+    {
+        // `appRouter` is absent, so the loader takes `router` — and the guard has
+        // to read that one, not the first defineRouter the file happens to write.
+        writeRouter(
+            'const getRoot = route.get(\'/\').handler(async () => ({}));\n'
+            + 'const admin = route.get(\'/admin\').handler(async () => ({}));\n\n'
+            + 'export const helperRouter = defineRouter({ getRoot });\n\n'
+            + 'export const router = defineRouter({\n'
+            + '    ...(process.env.ENABLE_ADMIN ? { admin } : {}),\n'
+            + '});\n',
+        );
+
+        await expect(generate()).rejects.toThrow(ConditionalRegistrationError);
+    });
+
+    it('accepts a static helper spread, as @spfn/mcp writes its router', async () =>
+    {
+        writeFile(
+            'src/server/metadata.ts',
+            `import { route } from '${ROUTE_BUILDER_MODULE}';\n\n`
+            + 'export function metadataRoutes(prefix)\n'
+            + '{\n'
+            + '    return {\n'
+            + '        wellKnown: route.get(`${prefix}/.well-known`).handler(async () => ({})),\n'
+            + '    };\n'
+            + '}\n',
+        );
+        writeRouter(
+            'import { metadataRoutes } from \'./metadata\';\n\n'
+            + 'const mcpPost = route.post(\'/mcp\').handler(async () => ({}));\n\n'
+            + 'export const appRouter = defineRouter({\n'
+            + '    mcpPost,\n'
+            + '    ...metadataRoutes(\'/mcp\'),\n'
+            + '});\n',
+        );
+
+        expect(entriesOf(await generate())).toEqual([
+            'mcpPost: { method: \'POST\', path: \'/mcp\' },',
+            'wellKnown: { method: \'GET\', path: \'/mcp/.well-known\' },',
+        ]);
+    });
+
+    it('accepts a JSDoc that spells a conditional defineRouter in prose', async () =>
+    {
+        writeRouter(
+            'const getRoot = route.get(\'/\').handler(async () => ({}));\n\n'
+            + '/**\n'
+            + ' * The app router.\n'
+            + ' *\n'
+            + ' * Written as defineRouter({ ... }); a flag-gated route would read\n'
+            + ' * defineRouter({ ...(flags.beta ? { betaRoute } : {}) }) and is refused.\n'
+            + ' */\n'
+            + 'export const appRouter = defineRouter({ getRoot });\n',
+        );
+
+        expect(entriesOf(await generate())).toEqual(['getRoot: { method: \'GET\', path: \'/\' },']);
     });
 });

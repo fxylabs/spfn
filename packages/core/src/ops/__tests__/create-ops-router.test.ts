@@ -12,7 +12,7 @@ import { describe, expect, it } from 'vitest';
 import { defineMiddleware } from '../../route/define-middleware';
 import { registerRoutes } from '../../route/register-routes';
 import { route, type RouteDef } from '../../route/route-builder';
-import { defineRouter } from '../../route/router';
+import { defineRouter, type Router } from '../../route/router';
 import { createOpsRouter, OPS_MANIFEST_PATH } from '../create-ops-router';
 import type { OpsManifest } from '../manifest';
 import { opsRoute } from '../ops-route';
@@ -100,6 +100,24 @@ describe('createOpsRouter', () =>
 
         expect(() => createOpsRouter({ first, second }, { auth: testAuth }))
             .toThrow(/Two ops routes are named "listUsers"/);
+    });
+
+    it('publishes no route map, at the surface and in a nested router', () =>
+    {
+        // What the route-map generator reads to decide whether an app route
+        // sharing this name is overwritten at runtime. Nothing publishes an ops
+        // route map for an app to merge, and `spfn ops` invokes a command over
+        // the URL the manifest gave it — so the answer is no, and an app route
+        // named after an ops command must not fail the app's build.
+        const opsRouter = createOpsRouter({
+            listExamples: opsRoute.get('/examples').handler(async () => ({})),
+            admin: defineRouter({
+                getStats: opsRoute.get('/stats').handler(async () => ({})),
+            }),
+        }, { auth: testAuth });
+
+        expect(opsRouter._publishesRouteMap).toBe(false);
+        expect((opsRouter.routes.admin as Router<any>)._publishesRouteMap).toBe(false);
     });
 
     it('keeps a nested router\'s own middlewares, behind auth, so a scope guard cannot be lost', () =>

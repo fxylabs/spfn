@@ -32,6 +32,7 @@ export { RouteMapGeneratorError } from './route-map';
 export type { ContractGeneratorConfig } from './contract';
 export { ContractGeneratorError } from './contract';
 export { assertUnconditionalRegistration, ConditionalRegistrationError } from './contract-guard';
+export type { RegistrationScan } from './contract-guard';
 
 /**
  * @internal

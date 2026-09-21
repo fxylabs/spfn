@@ -452,6 +452,14 @@ export const appRouter = defineRouter({ getRoot, getStatus })
 
 `.packages()` also flattens any nested package routers the given routers themselves declared.
 
+**A name a package route already uses is not available to an app route.** Both register, at
+their own paths, and the app's proxy merges the two maps as `{ ...routeMap, ...authRouteMap }`
+— so the package entry wins the name while the generated types still describe the app's
+route. `spfn codegen run` refuses rather than generating that, naming both sides. The ops
+surface is the exception: `createOpsRouter` publishes no route map for anything to merge and
+`spfn ops` invokes a command over its URL, so an app route may share a name with an ops
+command freely.
+
 ### `.use([...])` — router-level global middleware
 
 Named middleware applied to **every** route in the router (and package routers), unless a

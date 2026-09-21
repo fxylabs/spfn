@@ -20,6 +20,23 @@ export interface Router<TRoutes extends Record<string, RouteDef<any, any, any> |
     _contractVersion: string | null;
 
     /**
+     * Whether a client ever addresses these routes by name.
+     *
+     * True for an ordinary router. A package router is published with a route
+     * map its consumers merge into their own (`{ ...routeMap, ...authRouteMap }`),
+     * and that merge is what makes an app route sharing a name with a package
+     * route a defect worth refusing a build over — the package entry wins the
+     * name while the generated types still describe the app's route.
+     *
+     * False says no such merge exists: the routes are reached by URL and never
+     * by name, so nothing of the app's can be overwritten and a shared name is
+     * only a shared name. `createOpsRouter` sets it — `spfn ops` invokes an ops
+     * command over raw HTTP, and no ops route map is published for anyone to
+     * merge.
+     */
+    _publishesRouteMap: boolean;
+
+    /**
      * Register package routers (type-hidden)
      *
      * Package routes are:
@@ -91,25 +108,36 @@ export interface Router<TRoutes extends Record<string, RouteDef<any, any, any> |
 }
 
 /**
+ * Everything a router carries, so that a chainable method rebuilding the router
+ * states what it changes and cannot silently drop what it does not.
+ */
+interface RouterState<TRoutes extends Record<string, RouteDef<any, any, any> | Router<any>>>
+{
+    routes: TRoutes;
+    packageRouters: Router<any>[];
+    globalMiddlewares: NamedMiddleware<string>[];
+    contractVersion: string | null;
+    publishesRouteMap: boolean;
+}
+
+/**
  * Create a Router instance with chainable methods
  */
 function createRouterInstance<TRoutes extends Record<string, RouteDef<any, any, any> | Router<any>>>(
-    routes: TRoutes,
-    packageRouters: Router<any>[] = [],
-    globalMiddlewares: NamedMiddleware<string>[] = [],
-    contractVersion: string | null = null,
+    state: RouterState<TRoutes>,
 ): Router<TRoutes>
 {
     return {
-        routes,
-        _routes: routes,
-        _packageRouters: packageRouters,
-        _globalMiddlewares: globalMiddlewares,
-        _contractVersion: contractVersion,
+        routes: state.routes,
+        _routes: state.routes,
+        _packageRouters: state.packageRouters,
+        _globalMiddlewares: state.globalMiddlewares,
+        _contractVersion: state.contractVersion,
+        _publishesRouteMap: state.publishesRouteMap,
 
         packages(routers: Router<any>[]): Router<TRoutes>
         {
-            const newPackageRouters = [...this._packageRouters, ...routers];
+            const newPackageRouters = [...state.packageRouters, ...routers];
 
             // Also include nested package routers if any
             for (const pkgRouter of routers)
@@ -120,34 +148,22 @@ function createRouterInstance<TRoutes extends Record<string, RouteDef<any, any, 
                 }
             }
 
-            return createRouterInstance(
-                this.routes,
-                newPackageRouters,
-                this._globalMiddlewares,
-                this._contractVersion,
-            );
+            return createRouterInstance({ ...state, packageRouters: newPackageRouters });
         },
 
         use(middlewares: NamedMiddleware<string>[]): Router<TRoutes>
         {
-            return createRouterInstance(
-                this.routes,
-                this._packageRouters,
-                [...this._globalMiddlewares, ...middlewares],
-                this._contractVersion,
-            );
+            return createRouterInstance({
+                ...state,
+                globalMiddlewares: [...state.globalMiddlewares, ...middlewares],
+            });
         },
 
         contractVersion(version: string): Router<TRoutes>
         {
             assertContractVersion(version);
 
-            return createRouterInstance(
-                this.routes,
-                this._packageRouters,
-                this._globalMiddlewares,
-                version,
-            );
+            return createRouterInstance({ ...state, contractVersion: version });
         },
     };
 }
@@ -210,5 +226,41 @@ export function defineRouter<TRoutes extends Record<string, RouteDef<any, any, a
     routes: TRoutes,
 ): Router<TRoutes>
 {
-    return createRouterInstance(routes);
+    return createRouterInstance({
+        routes,
+        packageRouters: [],
+        globalMiddlewares: [],
+        contractVersion: null,
+        publishesRouteMap: true,
+    });
+}
+
+/**
+ * A router no client addresses by name.
+ *
+ * Mounting a package router is what makes a name collision between it and an
+ * app route a defect: the app merges the package's published route map into its
+ * own, so the package entry wins the name and every call the typed client makes
+ * against the app's route goes to the package's path. A router built here
+ * publishes no such map — its routes are reached by URL, by a tool that was
+ * told the URL — so a name it shares with an app route overwrites nothing and
+ * the route-map generator leaves it alone.
+ *
+ * Used by `createOpsRouter`. It is not part of the app-facing surface: a
+ * package that publishes a route map must not be declared with it, or a
+ * collision that does overwrite would generate silently.
+ *
+ * @internal
+ */
+export function defineUnmappedRouter<TRoutes extends Record<string, RouteDef<any, any, any> | Router<any>>>(
+    routes: TRoutes,
+): Router<TRoutes>
+{
+    return createRouterInstance({
+        routes,
+        packageRouters: [],
+        globalMiddlewares: [],
+        contractVersion: null,
+        publishesRouteMap: false,
+    });
 }

@@ -36,7 +36,7 @@ import type { HttpMethod, RouteDef, Router } from '@spfn/core/route';
 import { logger } from '@spfn/core/logger';
 import type { Generator, GeneratorOptions } from '../core/generator';
 import { assertUnconditionalRegistration } from './contract-guard';
-import { loadRouterModule, pinNodeEnv } from './router-module';
+import { isRouter, loadRouterModule, pinNodeEnv, resolveRouterExport, type ResolvedRouter } from './router-module';
 
 const genLogger = logger.child('@spfn/core:route-map-generator');
 
@@ -97,14 +97,6 @@ interface CollectedRoute
 // Loading
 // ============================================================================
 
-function isRouter(value: unknown): value is Router<any>
-{
-    return value !== null
-        && typeof value === 'object'
-        && 'routes' in value
-        && '_routes' in value;
-}
-
 function isRouteDef(value: unknown): value is RouteDef<any>
 {
     return value !== null
@@ -112,7 +104,9 @@ function isRouteDef(value: unknown): value is RouteDef<any>
         && 'handler' in value;
 }
 
-function loadRouter(cwd: string, absoluteRouterPath: string): Router<any>
+const ROUTER_EXPORTS = ['appRouter', 'default', 'router'];
+
+function loadRouter(cwd: string, absoluteRouterPath: string): ResolvedRouter
 {
     const module = loadRouterModule({
         cwd,
@@ -121,21 +115,16 @@ function loadRouter(cwd: string, absoluteRouterPath: string): Router<any>
         fail: message => new RouteMapGeneratorError(message),
     });
 
-    const candidates = ['appRouter', 'default', 'router'];
+    const resolved = resolveRouterExport(module, ROUTER_EXPORTS);
 
-    for (const name of candidates)
+    if (resolved)
     {
-        const candidate = module[name];
-
-        if (isRouter(candidate))
-        {
-            return candidate;
-        }
+        return resolved;
     }
 
     throw new RouteMapGeneratorError(
         `No router found in ${relative(cwd, absoluteRouterPath)}. `
-        + `Looked for: ${candidates.join(', ')}. `
+        + `Looked for: ${ROUTER_EXPORTS.join(', ')}. `
         + 'Export the defineRouter() result under one of those names.',
     );
 }
@@ -197,9 +186,19 @@ function addRoute(name: string, routeDef: RouteDef<any>, trail: string[], found:
  * route's place. Collection is deliberately lenient: an entry a package
  * registers is not the app developer's to fix, and refusing their build over it
  * would help nobody. `registerRoutes` skips such an entry too.
+ *
+ * A router that publishes no route map contributes no names at all, at any
+ * depth: nothing merges over the app's map, so nothing of the app's can be
+ * overwritten. That is the ops surface (`createOpsRouter`), whose routes `spfn
+ * ops` invokes over the URL the manifest gave it and never by name.
  */
 function collectPackageNames(router: Router<any>, trail: string[], names: Map<string, string>): void
 {
+    if (router._publishesRouteMap === false)
+    {
+        return;
+    }
+
     for (const [name, entry] of Object.entries(router.routes))
     {
         if (isRouter(entry))
@@ -277,7 +276,8 @@ function collectRoutes(
  *
  * A package route colliding with another package's route is not refused: which
  * of them wins is decided by the order the app spreads their maps, which this
- * generator neither sees nor writes.
+ * generator neither sees nor writes. Nor is a collision with a router that
+ * publishes no map — there is no merge for the app route to lose.
  */
 function assertNoPackageCollision(found: Map<string, CollectedRoute>, packageNames: Map<string, string>): void
 {
@@ -464,9 +464,19 @@ export function createRouteMapGenerator(config: RouteMapGeneratorConfig): Genera
             }
 
             pinNodeEnv();
-            assertUnconditionalRegistration(routerPath, readFileSync(absoluteRouterPath, 'utf-8'));
 
-            const routes = collectRouteMap(loadRouter(cwd, absoluteRouterPath));
+            // Loaded before the guard reads the source, because which router the
+            // guard reads is decided by which export the loader found.
+            const { router, exportName } = loadRouter(cwd, absoluteRouterPath);
+
+            assertUnconditionalRegistration({
+                routerPath,
+                source: readFileSync(absoluteRouterPath, 'utf-8'),
+                exportName,
+                subject: 'route map',
+            });
+
+            const routes = collectRouteMap(router);
 
             if (debug)
             {

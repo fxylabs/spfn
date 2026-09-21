@@ -28,7 +28,6 @@
 
 import { existsSync, readFileSync } from 'fs';
 import { join, relative } from 'path';
-import type { Router } from '@spfn/core/route';
 import { logger } from '@spfn/core/logger';
 import {
     checkContract,
@@ -38,7 +37,7 @@ import {
 } from '@spfn/core/contract';
 import type { Generator, GeneratorOptions } from '../core/generator';
 import { assertUnconditionalRegistration } from './contract-guard';
-import { loadRouterModule, pinNodeEnv } from './router-module';
+import { loadRouterModule, pinNodeEnv, resolveRouterExport, type ResolvedRouter } from './router-module';
 
 const genLogger = logger.child('@spfn/core:contract-generator');
 
@@ -83,15 +82,7 @@ export class ContractGeneratorError extends Error
     }
 }
 
-function isRouter(value: unknown): value is Router<any>
-{
-    return value !== null
-        && typeof value === 'object'
-        && 'routes' in value
-        && '_routes' in value;
-}
-
-function loadRouter(cwd: string, absoluteRouterPath: string, routerExport?: string): Router<any>
+function loadRouter(cwd: string, absoluteRouterPath: string, routerExport?: string): ResolvedRouter
 {
     const module = loadRouterModule({
         cwd,
@@ -104,14 +95,11 @@ function loadRouter(cwd: string, absoluteRouterPath: string, routerExport?: stri
         ? [routerExport]
         : ['appRouter', 'default', 'router'];
 
-    for (const name of candidates)
-    {
-        const candidate = module[name];
+    const resolved = resolveRouterExport(module, candidates);
 
-        if (isRouter(candidate))
-        {
-            return candidate;
-        }
+    if (resolved)
+    {
+        return resolved;
     }
 
     throw new ContractGeneratorError(
@@ -168,9 +156,18 @@ export function createContractGenerator(config: ContractGeneratorConfig): Genera
             }
 
             pinNodeEnv();
-            assertUnconditionalRegistration(routerPath, readFileSync(absoluteRouterPath, 'utf-8'));
 
-            const router = loadRouter(cwd, absoluteRouterPath, routerExport);
+            // Loaded before the guard reads the source, because which router the
+            // guard reads is decided by which export the loader found.
+            const { router, exportName } = loadRouter(cwd, absoluteRouterPath, routerExport);
+
+            assertUnconditionalRegistration({
+                routerPath,
+                source: readFileSync(absoluteRouterPath, 'utf-8'),
+                exportName,
+                subject: 'contract',
+            });
+
             const document = collectContractDocument(router);
 
             const changed = writeCurrentDocument(contractsDir, document);
