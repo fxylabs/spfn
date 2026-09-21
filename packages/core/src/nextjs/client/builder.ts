@@ -5,6 +5,7 @@
 import type { RouteDef, Router } from '@spfn/core/route';
 import type {
     CallOptions,
+    ExtractRoutes,
     InferRouteInput,
     InferRouteOutput,
     RequestInterceptor,
@@ -260,12 +261,42 @@ export type RouteClient<TRoute extends RouteDef<any, any>> = {
 };
 
 /**
- * Typed client for entire router
+ * One property per route in a flattened route record.
+ *
+ * A slot the flattening could not resolve to a route definition is `never`, as it was
+ * before nesting was flattened — a record whose values are neither routes nor routers
+ * names nothing callable.
  */
-export type Client<TRouter extends Router<any>> = {
-    [K in keyof TRouter['routes']]: TRouter['routes'][K] extends RouteDef<any, any, any>
-        ? RouteClient<TRouter['routes'][K]>
-        : TRouter['routes'][K] extends Router<any>
-            ? Client<TRouter['routes'][K]>
-            : never;
+type RouteClients<TRoutes> = {
+    [K in keyof TRoutes]: TRoutes[K] extends RouteDef<any, any, any>
+        ? RouteClient<TRoutes[K]>
+        : never;
 };
+
+/**
+ * Typed client for entire router
+ *
+ * One flat namespace, holding the same route names the server registers. A route
+ * declared inside a nested `defineRouter` is reached by its own key — `api.getThing`,
+ * never `api.group.getThing` — because that is the name `registerRoutes` mounts it
+ * under, the name the RPC proxy resolves, and the name `RouterOutput` takes. The group
+ * key is not a route and naming it is a compile error.
+ *
+ * @example
+ * ```typescript
+ * const appRouter = defineRouter({
+ *     getRoot,
+ *     users: defineRouter({ getUser }),
+ * });
+ *
+ * const api = createApi<typeof appRouter>();
+ *
+ * await api.getUser.call({ params: { id: '1' } });   // not api.users.getUser
+ * ```
+ *
+ * A name two branches both declare is left out of the namespace rather than resolved to
+ * one of them — the same collision `RouterOutput` refuses. Routes mounted with
+ * `.packages()` are deliberately absent: a package publishes its own route map and its
+ * own client (`authApi`, `cmsApi`), and that is what calls them.
+ */
+export type Client<TRouter extends Router<any>> = RouteClients<ExtractRoutes<TRouter>>;
