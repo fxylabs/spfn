@@ -435,6 +435,11 @@ export const appRouter = defineRouter({ ...userRoutes, ...postRoutes });
 export type AppRouter = typeof appRouter;
 ```
 
+Nesting groups the source, not the name: a nested route is registered — and typed, through
+`RouterOutput`/`RouterInput` — under its own key (`get`, `list`), never under `users.get`. Two
+branches declaring one name is therefore a collision, which the contract collector refuses and
+the client types leave out of the namespace.
+
 ### `.packages([...])` — mount package routers
 
 Attach routers from SPFN packages (`@spfn/auth`, `@spfn/cms`, …). Package routes **are**

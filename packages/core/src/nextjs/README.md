@@ -452,6 +452,23 @@ type BodyInput   = RouterInput<AppRouter, 'createExample'>['body'];
 `InferRouteOutput` take a single `RouteDef`. All inference is compile-time only (zero runtime
 cost).
 
+The route-name key is the **flat** set of names in the router tree. A route declared inside a
+nested `defineRouter` is named by its own key here, exactly as the server registers it — the
+group key is not part of the name and does not appear:
+
+```typescript
+const appRouter = defineRouter({
+    getRoot,
+    examples: defineRouter({ listExamples, createExample }),
+});
+
+type ListData = RouterOutput<typeof appRouter, 'listExamples'>;   // not 'examples.listExamples'
+```
+
+A name two branches both declare is left out of that set rather than resolved to one of them,
+so naming it is a compile error where it is named. Routes mounted with `.packages()` stay out
+of the set on purpose — call them through the package's own client.
+
 ---
 
 ## Error handling
