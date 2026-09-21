@@ -28,8 +28,6 @@
 
 import { existsSync, readFileSync } from 'fs';
 import { join, relative } from 'path';
-import { createJiti } from 'jiti';
-import type { Router } from '@spfn/core/route';
 import { logger } from '@spfn/core/logger';
 import {
     checkContract,
@@ -39,6 +37,7 @@ import {
 } from '@spfn/core/contract';
 import type { Generator, GeneratorOptions } from '../core/generator';
 import { assertUnconditionalRegistration } from './contract-guard';
+import { loadRouterModule, pinNodeEnv, resolveRouterExport, type ResolvedRouter } from './router-module';
 
 const genLogger = logger.child('@spfn/core:contract-generator');
 
@@ -83,46 +82,24 @@ export class ContractGeneratorError extends Error
     }
 }
 
-function isRouter(value: unknown): value is Router<any>
+function loadRouter(cwd: string, absoluteRouterPath: string, routerExport?: string): ResolvedRouter
 {
-    return value !== null
-        && typeof value === 'object'
-        && 'routes' in value
-        && '_routes' in value;
-}
-
-function loadRouter(cwd: string, absoluteRouterPath: string, routerExport?: string): Router<any>
-{
-    let module: Record<string, unknown>;
-
-    try
-    {
-        const jiti = createJiti(cwd, { interopDefault: true, moduleCache: false });
-        module = jiti(absoluteRouterPath) as Record<string, unknown>;
-    }
-    catch (error)
-    {
-        const message = error instanceof Error ? error.message : String(error);
-
-        throw new ContractGeneratorError(
-            `Failed to load ${relative(cwd, absoluteRouterPath)}: ${message}\n\n`
-            + 'The contract is read from the loaded router, so a route module must be importable without side '
-            + 'effects. Check that nothing at module scope opens a connection or reads a missing environment value.',
-        );
-    }
+    const module = loadRouterModule({
+        cwd,
+        absoluteRouterPath,
+        subject: 'contract',
+        fail: message => new ContractGeneratorError(message),
+    });
 
     const candidates = routerExport
         ? [routerExport]
         : ['appRouter', 'default', 'router'];
 
-    for (const name of candidates)
-    {
-        const candidate = module[name];
+    const resolved = resolveRouterExport(module, candidates);
 
-        if (isRouter(candidate))
-        {
-            return candidate;
-        }
+    if (resolved)
+    {
+        return resolved;
     }
 
     throw new ContractGeneratorError(
@@ -130,21 +107,6 @@ function loadRouter(cwd: string, absoluteRouterPath: string, routerExport?: stri
         + `Looked for: ${candidates.join(', ')}. `
         + 'Set "routerExport" to the export holding the defineRouter() result.',
     );
-}
-
-/**
- * Pin NODE_ENV before the router loads.
- *
- * Schemas that read the environment would otherwise make the contract depend on
- * how the generator happened to be invoked.
- */
-function pinNodeEnv(): void
-{
-    if (!process.env.NODE_ENV)
-    {
-        process.env.NODE_ENV = 'production';
-        genLogger.info('NODE_ENV was unset; pinned to "production" so the contract does not depend on the shell');
-    }
 }
 
 export function createContractGenerator(config: ContractGeneratorConfig): Generator
@@ -194,9 +156,18 @@ export function createContractGenerator(config: ContractGeneratorConfig): Genera
             }
 
             pinNodeEnv();
-            assertUnconditionalRegistration(routerPath, readFileSync(absoluteRouterPath, 'utf-8'));
 
-            const router = loadRouter(cwd, absoluteRouterPath, routerExport);
+            // Loaded before the guard reads the source, because which router the
+            // guard reads is decided by which export the loader found.
+            const { router, exportName } = loadRouter(cwd, absoluteRouterPath, routerExport);
+
+            assertUnconditionalRegistration({
+                routerPath,
+                source: readFileSync(absoluteRouterPath, 'utf-8'),
+                exportName,
+                subject: 'contract',
+            });
+
             const document = collectContractDocument(router);
 
             const changed = writeCurrentDocument(contractsDir, document);

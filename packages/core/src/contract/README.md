@@ -285,7 +285,13 @@ JSON body and upload the file through its own uncontracted route.
   generator refuses a `defineRouter({...})` containing a computed spread (`...(flag ? {x} : {})`);
   a spread of a plain identifier (`...baseRoutes`) is fine.
 - **`NODE_ENV` is pinned when unset.** The generator sets it to `production` before loading, so a
-  schema that reads the environment cannot make the contract depend on the shell it ran in.
+  schema that reads the environment cannot make the contract depend on the shell it ran in. The pin
+  is process-wide and shared with `@spfn/core:route-map`, so both generators in one run read the
+  same environment whichever `.spfnrc.ts` lists first.
+- **Path aliases come from the project root's `tsconfig.json`.** `compilerOptions.paths` is read
+  (`extends` followed) and handed to jiti, so a router importing `@/server/routes/users` loads. A
+  mapping held in any other tsconfig is not read, and the failure names the specifier that did not
+  resolve.
 - **A failed build still rewrites `current.json`.** That is deliberate — the regenerated file is
   what the gate compared, so `git diff` shows exactly what broke.
 - **Constraint changes count as type changes.** Narrowing `maxLength`, an `enum` or a `format` is

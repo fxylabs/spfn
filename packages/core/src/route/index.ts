@@ -16,7 +16,7 @@ export type { RouteDef, RouteHandlerFn } from './route-builder';
 export type { RouteContract, RouteAuthProfile } from './contract';
 
 // Router
-export { defineRouter } from './router';
+export { defineRouter, defineUnmappedRouter } from './router';
 export type { Router } from './router';
 
 // Route registration

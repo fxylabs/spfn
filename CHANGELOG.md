@@ -97,6 +97,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
       64 cached subtransaction ids until the root ends, so per-row nesting in a loop pushes the
       backend into subxid overflow.
 
+#### @spfn/cli
+
+- **Behaviour change: `spfn codegen run` exits 1 when a generator refuses** (#97), and stops at
+  the generator that refused. It used to log the failure, print `✓ Code generation completed`
+  and exit 0, leaving the stale output on disk — so a developer who added a route, ran
+  `spfn codegen run` and saw a green check shipped a map that did not name it, and a script
+  that gates on the exit code saw nothing. `spfn build` already failed this way; `spfn dev`
+  still logs and keeps watching.
+
+
 ### Added
 
 #### @spfn/auth
@@ -411,12 +421,102 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     - The RPC proxy itself is unchanged — it already sent one flat route name per property
       access. Only its JSDoc claimed dot notation, and that claim is now removed; there is no
       dotted traversal to add, because the route map the proxy resolves against is flat.
-    - The generated route map is a separate layer and was not touched: `spfn codegen` reads
-      the router file with a line-oriented parser, so a nested route reaches `routeMap` only
-      when its key is written as one shorthand per line. `users: defineRouter({ createUser })`
-      on a single line, or an aliased key such as `create: createUser`, still produces no
-      entry — and the RPC proxy resolves a call through that map, so such a route now types
-      but does not dispatch. Tracked separately from this fix.
+    - The generated route map is the layer underneath, and it dropped the same routes for its
+      own reason. It is fixed in this release too — see the next entry — so a nested route
+      now types, dispatches, and appears in the map under one name.
+
+- **Four ordinary ways of writing a router dropped routes from the generated route map**
+  (#97). `@spfn/core:route-map` read the router file as text: it found the **first**
+  `defineRouter(` in the file, brace-matched it, and collected a name only when that name
+  started its own line. So `defineRouter({ createUser })` written on one line contributed
+  nothing, an aliased key `create: createUser` contributed nothing, and a second
+  `defineRouter(` in the same file — which is how a nested router is assembled, as
+  `const users = defineRouter({…})` and then `defineRouter({ users })` — was not read at
+  all, silently costing the outer router its own routes. The RPC client sends
+  `/api/rpc/{routeName}` and the server resolves it against this map, so each dropped name
+  was a route that typechecked and answered 404.
+    - The generator now **loads the router with jiti and walks it**, the way
+      `@spfn/core:contract` already did, and takes `method` and `path` from the `RouteDef`.
+      The names it writes are exactly the names `registerRoutes` registers for the same
+      router: nesting recurses to any depth and every route lands flat under its own key,
+      and `.packages()` routers stay out at every depth, because a package publishes its own
+      route map and the app merges the two (`{ ...routeMap, ...authRouteMap }`). How the
+      router is spelled stopped mattering.
+    - **It refuses instead of dropping.** Two routes reaching the same name, a route with no
+      method or path, a `method` that is not an `HttpMethod`, an entry that is neither a route
+      nor a router, a module that will not load, and a file with no `appRouter` / `default` /
+      `router` export are all errors that name the places involved. A failure is logged on
+      every trigger and reaches the exit code of `spfn build` and `spfn codegen run`; there is
+      no fallback to the old text parser.
+    - **A conditionally registered route is refused**, the way the contract generator already
+      refused it: `defineRouter({ a, ...(process.env.ENABLE_ADMIN ? { admin } : {}) })` used to
+      emit `a` alone and exit 0, so the flag's value at generation time decided which names the
+      client could address — with the flag set in production, `api.admin.call()` 404ed. The
+      guard reads **the router the generator was pointed at** — the export its loader found,
+      plus the routers that export mounts by name from the same file, since a nested router's
+      routes land in the same flat map — with TypeScript's parser, so a second router the app
+      router never reaches, a JSDoc spelling `defineRouter({ ... })` in prose and a brace
+      inside a string are not scanned. Only a spread that **reads a condition** is refused (a
+      ternary, `&&`, `||`, `??`); a call is allowed, because loading yields exactly the routes
+      it returns — `...metadataRoutes(config, resource)` is how `@spfn/mcp` composes its
+      router. A conditional spread inside an imported module, a router built by a factory, a
+      condition hoisted to a variable before the spread and a `.packages()` list assembled
+      conditionally are past what it can see; `NODE_ENV` pinning is the defence for those.
+    - **An app route that collides with a route from a package publishing a route map is
+      refused.** Both register at runtime and the app's proxy merges
+      `{ ...routeMap, ...authRouteMap }`, so the *package* wins the name: an app defining its
+      own `logout` with `@spfn/auth` mounted got a typed client claiming `api.logout` was its
+      route while every call went to `POST /_auth/logout`. Package routes are still never
+      emitted, and two packages sharing a name is not refused — the app's merge order decides
+      that one. **The ops surface is not checked**: `createOpsRouter` publishes no route map
+      for anything to merge and `spfn ops` invokes a command over the URL its manifest gave,
+      so an app route named after an ops command overwrites nothing. `Router` carries
+      `_publishesRouteMap` to say which is which, and a package that does publish a map is
+      checked as before.
+    - **A route module must now import without side effects** on `spfn build` and
+      `spfn codegen run`, not only under the contract generator. A module-scope read of a
+      required environment value, or a connection opened at import, turns a working build
+      into a failing one — the error says so and names the file. All three examples load
+      with an empty environment and regenerate byte-identical maps.
+    - **`compilerOptions.paths` is read from the nearest `tsconfig.json` that declares them**
+      — searched from the router file's own directory up to the project root, `extends` chains
+      included — and handed to jiti, because jiti resolves a path alias only through its own
+      `alias` option. Without this, the `@/*` alias `spfn init` writes into every app — and
+      which the scaffold documents as the idiom — could not be resolved while the router
+      loaded, so an app with one `@/` import anywhere in its route graph could not generate a
+      map at all. The scaffold puts that alias in **`src/server/tsconfig.json`** (with
+      `baseUrl: "../.."`, which is honoured), the config `spfn build` itself compiles with, so
+      reading only the root config left a backend-only app unable to generate anything. The
+      search stops at the project root, and a config declaring no `paths` is passed over
+      rather than ending it. An import that still does not resolve now names the specifier
+      instead of advising about module-scope side effects. The contract generator gets the
+      same resolution. Several targets for one pattern resolve through the first that exists,
+      as tsc and tsup resolve them; an `extends` target TypeScript cannot read is warned about
+      rather than silently dropping every `paths` entry; a pattern whose `*` is not a trailing
+      `/*` is skipped with a warning; and a wildcard is keyed with its trailing slash
+      (`@x/*` → `@x/`) so an exact mapping of the same prefix survives beside it.
+    - **`NODE_ENV` is pinned to `production` when the shell left it unset**, as the contract
+      generator already did, and the pin is now shared by both. It is process-wide, so
+      whichever generator ran first used to decide what the other one loaded: the same repo and
+      the same command produced two different maps depending on the order `.spfnrc.ts` listed
+      them.
+    - `additionalRouteDirs` is **deprecated and ignored**. The loaded router reaches every
+      route through its own imports, so there are no extra directories to scan. It is still
+      accepted, and still contributes its `${dir}/**/*.ts` pattern to `watchPatterns`, so an
+      existing `.spfnrc.ts` keeps working unchanged.
+    - A path carrying a line terminator, a quote or a backslash, and a route named `__proto__`,
+      are now emitted so the generated file parses and the map keeps every route as an own
+      property. A path outside plain ASCII is emitted double-quoted (`JSON.stringify`); every
+      realistic path is written exactly as before, and the repo's committed maps regenerate
+      byte-identically apart from the reordering below.
+    - `packages/auth`'s committed route map is regenerated on this change: same 89 routes, now
+      in the order `defineRouter({…})` declares them, which is the order `registerRoutes`
+      registers them in.
+    - **TypeScript is loaded when a router is read, not when `@spfn/core/codegen` is
+      imported.** The compiler is what reads a tsconfig's `paths` and the router's own source,
+      and a top-level import of it cost every consumer of that entry ~0.3s and ~70MB —
+      `spfn dev` startup, the watcher child, every `.spfnrc.ts` evaluation and
+      `spfn codegen list`, none of which resolve an alias or parse a router.
 
 
 ## [@spfn/core@0.3.0-beta.4, @spfn/auth@0.3.0-beta.4] - 2026-08-10

@@ -7,7 +7,7 @@
 
 import { route } from '@spfn/core/route';
 import { Type } from '@sinclair/typebox';
-import { defineRouter } from '@spfn/core/route';
+import { defineUnmappedRouter } from '@spfn/core/route';
 import { verifyOpenToken, verifyClickToken, hashClickUrl } from './token';
 import { recordOpenEvent, recordClickEvent } from './tracking.service';
 import { logger } from '@spfn/core/logger';
@@ -134,8 +134,13 @@ export const trackClick = route.get('/_noti/t/c/:token')
 
 /**
  * Tracking router
+ *
+ * `defineUnmappedRouter`, not `defineRouter`: this package publishes no route
+ * map — it has no codegen config and exports none — and these two endpoints are
+ * reached by the URL baked into a sent email, never by name through the RPC
+ * client. An app route sharing a name with one of them loses nothing to it.
  */
-export const trackingRouter = defineRouter({
+export const trackingRouter = defineUnmappedRouter({
     trackOpen,
     trackClick,
 });

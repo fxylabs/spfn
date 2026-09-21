@@ -40,7 +40,7 @@
 import type { MiddlewareHandler } from 'hono';
 import type { NamedMiddleware } from '../route/define-middleware';
 import { route, type RouteDef } from '../route/route-builder';
-import { defineRouter, type Router } from '../route/router';
+import { defineUnmappedRouter, type Router } from '../route/router';
 import {
     collectOpsCommands,
     OpsRouterError,
@@ -160,6 +160,9 @@ function assertOpsName(name: string): void
  * a `requireOpsScope` guard among them — leaving those routes reachable by
  * any valid ops token.
  *
+ * It is rebuilt unmapped, like the surface that holds it: a nested ops router
+ * publishes no route map either.
+ *
  * Those middlewares are handed down to the routes rather than left on the
  * rebuilt router. Router-level middlewares are registered ahead of every
  * route-level one, so a guard left in place would run before the auth that
@@ -186,7 +189,7 @@ function rebuildNestedRouter(
 
     const handedDown = [...inherited, ...(router._globalMiddlewares ?? [])];
 
-    let rebuilt = defineRouter(
+    let rebuilt = defineUnmappedRouter(
         secureRoutes(router.routes, auth, handedDown) as Record<string, RouteDef<any>>,
     );
 
@@ -410,7 +413,13 @@ export function createOpsRouter<TRoutes extends Record<string, RouteDef<any, any
     // the app declares in its own router still shadows the manifest — as it
     // shadows every other package route, which is a property of where the app
     // put that pattern rather than of this factory.
-    return defineRouter({
+    // `defineUnmappedRouter`, not `defineRouter`: no ops route map is published
+    // for an app to merge, and `spfn ops` invokes a command over the URL the
+    // manifest gave it rather than by name through the RPC client. So an ops
+    // command and an app route sharing a name overwrite nothing, and the
+    // route-map generator must not refuse the build over it — naming an ops
+    // command after the surface it inspects is the natural instinct.
+    return defineUnmappedRouter({
         [OPS_MANIFEST_NAME]: manifestRoute,
         ...secured,
         ...securedModules,

@@ -5,7 +5,7 @@
  */
 
 import { Type } from '@sinclair/typebox';
-import { defineRouter, route } from '@spfn/core/route';
+import { defineUnmappedRouter, route } from '@spfn/core/route';
 import { cmsPublishedCacheRepository } from '../repositories';
 import {
     getSectionLabelsRoute,
@@ -39,7 +39,13 @@ export const getLabelCache = route.get('/_cms/labels/cache')
         }, {} as Record<string, any>);
     });
 
-export const cmsAppRouter = defineRouter({
+/**
+ * `defineUnmappedRouter`, not `defineRouter`: this package publishes no route
+ * map — its `.spfnrc.ts` runs the router generator only, and nothing here is
+ * exported as one — so an app that mounts it with `.packages()` merges nothing
+ * over its own map and cannot lose a name to it.
+ */
+export const cmsAppRouter = defineUnmappedRouter({
     getLabelCache,
     // Admin routes
     getSectionLabels: getSectionLabelsRoute,

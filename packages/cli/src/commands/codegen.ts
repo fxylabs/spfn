@@ -128,9 +128,24 @@ async function runGenerators(): Promise<void>
         generators,
         cwd,
         debug: true,
+
+        // A generator that refuses — a router that will not load, a duplicate
+        // route name — has to reach the exit code. Printing a green check over
+        // a logged failure leaves the stale output on disk and tells the
+        // developer who just added a route that the map now names it.
+        throwOnError: true,
     });
 
-    await orchestrator.generateAll();
+    try
+    {
+        await orchestrator.generateAll();
+    }
+    catch (error)
+    {
+        logger.error(error instanceof Error ? error.message : String(error));
+        console.log('\n' + chalk.red.bold('✗ Code generation failed'));
+        process.exit(1);
+    }
 
     console.log('\n' + chalk.green.bold('✓ Code generation completed'));
 }
