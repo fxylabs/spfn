@@ -127,7 +127,7 @@ call `generators['route-map'](config)`.
 
 ## Built-in: `@spfn/core:route-map`
 
-Parses your router + route files and emits a `routeName → {method, path}` map. This map is
+Loads your router and emits a `routeName → {method, path}` map. This map is
 what the **RPC proxy** (`createRpcProxy` in `@spfn/core/nextjs/server`) uses to turn
 `api.getUser.call(...)` into an HTTP request — it needs `method` and `path` without
 importing server code into the client bundle.
@@ -139,18 +139,40 @@ importing server code into the client bundle.
 | `name` | `'@spfn/core:route-map'` | yes | — | Generator identifier (literal). |
 | `routerPath` | `string` | yes | — | Router file, relative to project root. Throws at construction if missing. |
 | `outputPath` | `string` | no | `'./src/generated/route-map.ts'` | Where the map is written (parent dirs auto-created). |
-| `additionalRouteDirs` | `string[]` | no | `[]` | Extra route dirs to watch (each becomes `${dir}/**/*.ts`). |
+| `additionalRouteDirs` | `string[]` | no | `[]` | **Deprecated and ignored** for collection; still added to `watchPatterns` as `${dir}/**/*.ts`. |
 
-### What it parses
+### What it reads
 
-- **Router file** (`routerPath`): relative `import { ... } from './...'` statements, and the
-  route names listed inside the **first** `defineRouter({ ... })` call (top-level
-  identifiers, comments stripped).
-- **Route files**: only the exact pattern
-  `export const <name> = route.<get|post|put|patch|delete>('<path>')…` (single/double/back
-  quotes). The leading `route.<method>('<path>')` call is what's matched.
-- Only routes whose `name` also appears in `defineRouter({...})` end up in the output
-  (declared-but-unregistered routes are dropped).
+The router module is loaded with jiti (`appRouter` → `default` → `router`) and walked the
+way `registerRoutes` walks it. How the router is *written* does not matter: a one-line
+`defineRouter({ createUser })`, an aliased key `create: createUser`, and a second
+`defineRouter(` in the same file all produce the same map.
+
+- A **nested router** recurses to any depth and its routes land in the map **flat, under
+  their own keys** — the parent's key names the grouping, not the route, exactly as the
+  server registers them.
+- `method` and `path` come from the `RouteDef`, not from a pattern over the source. A
+  route not registered in the router is absent, because there is nothing registering it.
+- **`.packages()` routers are left out**, at every depth. A package publishes its own
+  route map and the app merges them (`{ ...routeMap, ...authRouteMap }`).
+- A name that is not a JS identifier (`'get-user'`) is emitted quoted, so the generated
+  file still parses.
+
+### When it refuses
+
+Unlike the old source parser, which dropped what it could not read, the generator throws
+— logged always, and fatal on the `build` trigger:
+
+- The module will not load (it names the file and the cause, and says a route module must
+  be importable without side effects). It never falls back to parsing.
+- No router is found under `appRouter`, `default` or `router` (the message lists all three).
+- Two routes reach the same name (the message names both places).
+- A route has no method or path — reachable by registering a route before `.handler()` was
+  called. The server drops such a route too, so naming it in the map would advertise a
+  route that 404s.
+- A router entry is neither a route nor a router.
+
+A **missing router file** is still only a warning: the generator returns and writes nothing.
 
 ### Generated output
 
@@ -199,7 +221,7 @@ generator's own surface.
 
 | | `route-map` | `contract` |
 |---|---|---|
-| Reads the router by | parsing the source | **loading the module** and walking `RouteDef`s |
+| Reads the router by | loading the module and walking `RouteDef`s | the same |
 | Covers | every registered route | only routes carrying `.contract()` |
 | `runOn` | `watch`, `manual`, `build` | `watch`, `build`, `manual` |
 | Can fail a build | no | **yes**, on the `build` trigger only |
@@ -405,11 +427,15 @@ regeneration when it's absent (build/manual passes don't set it).
   wrong (or no) `method`/`path`. `spfn build` runs codegen first; if you build by other
   means, run `spfn codegen run` yourself. Treat the file as generated (it's marked
   `DO NOT EDIT`).
-- **route-map only matches a specific route syntax.** Routes must be
-  `export const x = route.<method>('<literal path>')`. Dynamic paths, methods other than
-  get/post/put/patch/delete, or routes not listed in `defineRouter({...})` won't appear.
 - **A route must be in `defineRouter({...})` to be emitted.** Defining `export const foo =
-  route.get(...)` but not registering `foo` in the router drops it from the map.
+  route.get(...)` but not registering `foo` in the router drops it from the map — the
+  generator walks the router, so an unregistered route does not exist as far as it is
+  concerned. How the registration is *spelled* no longer matters.
+- **route-map loads your router, so route modules must import cleanly.** Reading a
+  required environment value at module scope now fails `spfn build` and `spfn codegen run`,
+  not just `spfn dev`. Move that read inside the handler. Top-level `await` in a route or
+  router module does not load either — jiti transforms to CJS — the same limit
+  `@spfn/core:contract` has always had.
 - **Custom generators must default-export a factory.** `createGeneratorsFromConfig` calls
   `module.default()` (a zero-arg function) for `{ path }` entries. Exporting the Generator
   object directly, or a factory that needs args, won't load.
@@ -505,12 +531,12 @@ interface RouteMapGeneratorConfig
     name: '@spfn/core:route-map';
     routerPath: string;
     outputPath?: string;               // default './src/generated/route-map.ts'
-    additionalRouteDirs?: string[];
+    additionalRouteDirs?: string[];   // deprecated: watched, never collected from
 }
 ```
 
 ## Related
 
-- [@spfn/core/route](../route/README.md) — `route.*` / `defineRouter` (the source parsed)
+- [@spfn/core/route](../route/README.md) — `route.*` / `defineRouter` (the router loaded and walked)
 - [@spfn/core/nextjs](../nextjs/README.md) — RPC proxy (`createRpcProxy`) that consumes `routeMap`
 - [@spfn/core/env](../env/README.md) — environment configuration

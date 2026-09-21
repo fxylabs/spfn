@@ -369,6 +369,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
       retirement are untouched, and a refused verify still installs no session and clears no
       cookie.
 
+#### @spfn/core
+
+- **Four ordinary ways of writing a router dropped routes from the generated route map**
+  (#97). `@spfn/core:route-map` read the router file as text: it found the **first**
+  `defineRouter(` in the file, brace-matched it, and collected a name only when that name
+  started its own line. So `defineRouter({ createUser })` written on one line contributed
+  nothing, an aliased key `create: createUser` contributed nothing, and a second
+  `defineRouter(` in the same file — which is how a nested router is assembled, as
+  `const users = defineRouter({…})` and then `defineRouter({ users })` — was not read at
+  all, silently costing the outer router its own routes. The RPC client sends
+  `/api/rpc/{routeName}` and the server resolves it against this map, so each dropped name
+  was a route that typechecked and answered 404.
+    - The generator now **loads the router with jiti and walks it**, the way
+      `@spfn/core:contract` already did, and takes `method` and `path` from the `RouteDef`.
+      The names it writes are exactly the names `registerRoutes` registers for the same
+      router: nesting recurses to any depth and every route lands flat under its own key,
+      and `.packages()` routers stay out at every depth, because a package publishes its own
+      route map and the app merges the two (`{ ...routeMap, ...authRouteMap }`). How the
+      router is spelled stopped mattering.
+    - **It refuses instead of dropping.** Two routes reaching the same name, a route with no
+      method or path, an entry that is neither a route nor a router, a module that will not
+      load, and a file with no `appRouter` / `default` / `router` export are all errors that
+      name the places involved. A failure is logged on every trigger and fails the build on
+      `spfn build`; there is no fallback to the old text parser.
+    - **A route module must now import without side effects** on `spfn build` and
+      `spfn codegen run`, not only under the contract generator. A module-scope read of a
+      required environment value, or a connection opened at import, turns a working build
+      into a failing one — the error says so and names the file. All three examples load
+      with an empty environment and regenerate byte-identical maps.
+    - `additionalRouteDirs` is **deprecated and ignored**. The loaded router reaches every
+      route through its own imports, so there are no extra directories to scan. It is still
+      accepted, and still contributes its `${dir}/**/*.ts` pattern to `watchPatterns`, so an
+      existing `.spfnrc.ts` keeps working unchanged.
+
+
 
 ## [@spfn/core@0.3.0-beta.4, @spfn/auth@0.3.0-beta.4] - 2026-08-10
 

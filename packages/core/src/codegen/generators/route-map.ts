@@ -4,6 +4,15 @@
  * Generates a route map file containing routeName → {method, path} mappings.
  * This allows RPC proxy to resolve routes without importing the full router.
  *
+ * The router is loaded and walked, not parsed from source. A source parser sees
+ * the spelling rather than the router: `defineRouter({ createUser })` written on
+ * one line, an aliased key `create: createUser`, and a nested router assembled by
+ * a second `defineRouter(` in the same file are all ordinary ways to write a
+ * router, and all of them used to leave routes out of the map. The RPC client
+ * addresses a route by name, so a dropped name is a route that typechecks and
+ * 404s. Walking the loaded router registers exactly what `registerRoutes`
+ * registers, whatever the source looks like.
+ *
  * @example
  * ```typescript
  * // .spfnrc.ts
@@ -21,10 +30,12 @@
  * ```
  */
 
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'fs';
-import { join, dirname, relative, resolve } from 'path';
-import type { Generator, GeneratorOptions } from '../core/generator';
+import { writeFileSync, mkdirSync, existsSync } from 'fs';
+import { join, dirname, relative } from 'path';
+import { createJiti } from 'jiti';
+import type { RouteDef, Router } from '@spfn/core/route';
 import { logger } from '@spfn/core/logger';
+import type { Generator, GeneratorOptions } from '../core/generator';
 
 const genLogger = logger.child('@spfn/core:route-map-generator');
 
@@ -52,132 +63,161 @@ export interface RouteMapGeneratorConfig
     outputPath?: string;
 
     /**
-     * Additional route directories to scan (for package routers)
+     * Extra file patterns to watch, for routes outside src/server/routes
+     *
+     * @deprecated Ignored. The map is read from the loaded router, which reaches
+     * every route through its own imports wherever they live, so there is no
+     * longer a set of directories to scan. Still accepted so an existing
+     * `.spfnrc.ts` keeps working; the watch patterns it produced are unchanged.
      */
     additionalRouteDirs?: string[];
 }
 
-interface ParsedRoute
+/** Thrown when the router cannot produce a route map at all. */
+export class RouteMapGeneratorError extends Error
 {
-    name: string;
+    constructor(message: string)
+    {
+        super(message);
+        this.name = 'RouteMapGeneratorError';
+    }
+}
+
+interface CollectedRoute
+{
     method: string;
     path: string;
-    file: string;
+
+    /** Where the route was found, for a collision message. */
+    trail: string;
 }
 
 // ============================================================================
-// Parser
+// Loading
 // ============================================================================
 
-/**
- * Parse route definitions from a route file
- *
- * Supports patterns:
- * - export const routeName = route.get('/path')...
- * - export const routeName = route.post('/path')...
- */
-function parseRouteFile(filePath: string): ParsedRoute[]
+function isRouter(value: unknown): value is Router<any>
 {
-    const routes: ParsedRoute[] = [];
+    return value !== null
+        && typeof value === 'object'
+        && 'routes' in value
+        && '_routes' in value;
+}
+
+function isRouteDef(value: unknown): value is RouteDef<any>
+{
+    return value !== null
+        && typeof value === 'object'
+        && 'handler' in value;
+}
+
+function loadRouter(cwd: string, absoluteRouterPath: string): Router<any>
+{
+    let module: Record<string, unknown>;
 
     try
     {
-        const content = readFileSync(filePath, 'utf-8');
-
-        // Pattern: export const {name} = route.{method}('{path}')
-        // Handles both single and double quotes
-        const routePattern = /export\s+const\s+(\w+)\s*=\s*route\.(get|post|put|patch|delete)\s*\(\s*['"`]([^'"`]+)['"`]\s*\)/gi;
-
-        let match;
-        while ((match = routePattern.exec(content)) !== null)
-        {
-            const [, name, method, path] = match;
-            routes.push({
-                name,
-                method: method.toUpperCase(),
-                path,
-                file: filePath,
-            });
-        }
+        const jiti = createJiti(cwd, { interopDefault: true, moduleCache: false });
+        module = jiti(absoluteRouterPath) as Record<string, unknown>;
     }
     catch (error)
     {
-        genLogger.warn(`Failed to parse route file: ${filePath}`, error as Error);
+        const message = error instanceof Error ? error.message : String(error);
+
+        throw new RouteMapGeneratorError(
+            `Failed to load ${relative(cwd, absoluteRouterPath)}: ${message}\n\n`
+            + 'The route map is read from the loaded router, so a route module must be importable without side '
+            + 'effects. Check that nothing at module scope opens a connection or reads a missing environment value.',
+        );
     }
 
-    return routes;
+    const candidates = ['appRouter', 'default', 'router'];
+
+    for (const name of candidates)
+    {
+        const candidate = module[name];
+
+        if (isRouter(candidate))
+        {
+            return candidate;
+        }
+    }
+
+    throw new RouteMapGeneratorError(
+        `No router found in ${relative(cwd, absoluteRouterPath)}. `
+        + `Looked for: ${candidates.join(', ')}. `
+        + 'Export the defineRouter() result under one of those names.',
+    );
+}
+
+// ============================================================================
+// Collection
+// ============================================================================
+
+function addRoute(name: string, routeDef: RouteDef<any>, trail: string[], found: Map<string, CollectedRoute>): void
+{
+    const where = trail.join('.');
+
+    if (!routeDef.method || !routeDef.path)
+    {
+        throw new RouteMapGeneratorError(
+            `Route "${where}" has no method or path. `
+            + 'The RPC client resolves a name to a method and a path, so both are required. '
+            + 'A route reaches this state by being registered before .handler() was called — '
+            + 'the server drops it too, which is why the map refuses to name it.',
+        );
+    }
+
+    const existing = found.get(name);
+    if (existing)
+    {
+        throw new RouteMapGeneratorError(
+            `Two routes are both named "${name}" (${existing.trail} and ${where}). `
+            + 'The RPC client addresses a route by its name alone, and a nested route registers under its own '
+            + 'key, so a name must be unique across the whole router.',
+        );
+    }
+
+    found.set(name, { method: routeDef.method, path: routeDef.path, trail: where });
 }
 
 /**
- * Parse router file to find route imports and names
+ * Walk the router the way `registerRoutes` walks it.
  *
- * Extracts:
- * - Import paths for route files
- * - Route names from defineRouter({...})
+ * A nested route registers under its own key — the parent's key names the
+ * grouping, not the route — so the map is flat and the trail exists only to
+ * point at both sides of a collision.
+ *
+ * `_packageRouters` is deliberately not walked, at this or any depth: a package
+ * publishes its own route map and the app merges the two
+ * (`{ ...routeMap, ...authRouteMap }` in a generated `rpc.ts`). Emitting them
+ * here would duplicate every package route.
+ *
+ * Only string keys are collected, because `Object.entries` is what the runtime
+ * iterates: a symbol-keyed entry is invisible to `registerRoutes` and so has no
+ * route to name in the map either.
  */
-function parseRouterFile(routerPath: string): { importPaths: string[]; routeNames: string[] }
+function collectRoutes(router: Router<any>, trail: string[], found: Map<string, CollectedRoute>): void
 {
-    const importPaths: string[] = [];
-    const routeNames: string[] = [];
-
-    try
+    for (const [name, entry] of Object.entries(router.routes))
     {
-        const content = readFileSync(routerPath, 'utf-8');
-
-        // Extract import paths
-        // Pattern: import { ... } from './xxx'
-        // Include all relative imports (not @spfn/core or other packages)
-        const importPattern = /import\s+\{[^}]+\}\s+from\s+['"`](\.[^'"`]+)['"`]/g;
-        let match;
-        while ((match = importPattern.exec(content)) !== null)
+        if (isRouter(entry))
         {
-            const importPath = match[1];
-            // Include relative imports, exclude external packages
-            if (importPath.startsWith('.'))
-            {
-                importPaths.push(importPath);
-            }
+            collectRoutes(entry, [...trail, name], found);
+            continue;
         }
 
-        // Extract route names from defineRouter({...})
-        // Use balanced brace matching for nested structures
-        const defineRouterStart = content.indexOf('defineRouter(');
-        if (defineRouterStart !== -1)
+        if (!isRouteDef(entry))
         {
-            // Find the opening brace after defineRouter(
-            const braceStart = content.indexOf('{', defineRouterStart);
-            if (braceStart !== -1)
-            {
-                // Find matching closing brace
-                let depth = 1;
-                let braceEnd = braceStart + 1;
-                while (depth > 0 && braceEnd < content.length)
-                {
-                    if (content[braceEnd] === '{') depth++;
-                    else if (content[braceEnd] === '}') depth--;
-                    braceEnd++;
-                }
-
-                const routerContent = content.slice(braceStart + 1, braceEnd - 1);
-
-                // Extract identifiers (route names), ignoring comments
-                // Remove single-line comments
-                const withoutComments = routerContent.replace(/\/\/[^\n]*/g, '');
-                // Extract identifiers that are standalone (not part of property access like xxx.routes)
-                const namePattern = /^\s*(\w+)\s*[,\n]/gm;
-                while ((match = namePattern.exec(withoutComments)) !== null)
-                {
-                    routeNames.push(match[1]);
-                }
-            }
+            throw new RouteMapGeneratorError(
+                `Router entry "${[...trail, name].join('.')}" is neither a route nor a router (got ${typeof entry}). `
+                + 'The server skips it, and a map that skipped it too would leave a name the client can call '
+                + 'and the server never answers.',
+            );
         }
-    }
-    catch (error)
-    {
-        genLogger.warn(`Failed to parse router file: ${routerPath}`, error as Error);
-    }
 
-    return { importPaths, routeNames };
+        addRoute(name, entry, [...trail, name], found);
+    }
 }
 
 // ============================================================================
@@ -185,9 +225,36 @@ function parseRouterFile(routerPath: string): { importPaths: string[]; routeName
 // ============================================================================
 
 /**
+ * A route name is a key in an object literal, and a key that is not an
+ * identifier has to be quoted or the generated file will not parse.
+ *
+ * The source parser could never produce such a name — it read names off
+ * `export const` — but `defineRouter({ 'get-user': getUser })` is a legal
+ * router that the server registers as `get-user`, so the map has to be able to
+ * spell it. `JSON.stringify` is the escaping: double quotes are what it emits,
+ * and every other name is left bare so an unchanged project regenerates
+ * byte-identically.
+ */
+function toObjectKey(name: string): string
+{
+    return /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(name) ? name : JSON.stringify(name);
+}
+
+/**
+ * A path is emitted inside a single-quoted string literal, and a path carrying a
+ * quote or a backslash would close it early and leave a file that does not parse.
+ * Every realistic path passes through untouched, so an unchanged project
+ * regenerates byte-identically.
+ */
+function toStringLiteral(value: string): string
+{
+    return `'${value.replace(/\\/g, '\\\\').replace(/'/g, '\\\'')}'`;
+}
+
+/**
  * Generate route map file content
  */
-function generateRouteMapContent(routes: ParsedRoute[]): string
+function generateRouteMapContent(routes: Map<string, CollectedRoute>): string
 {
     const lines: string[] = [
         '/**',
@@ -207,9 +274,9 @@ function generateRouteMapContent(routes: ParsedRoute[]): string
         'export const routeMap: Record<string, RouteInfo> = {',
     ];
 
-    for (const route of routes)
+    for (const [name, route] of routes)
     {
-        lines.push(`    ${route.name}: { method: '${route.method}', path: '${route.path}' },`);
+        lines.push(`    ${toObjectKey(name)}: { method: '${route.method}', path: ${toStringLiteral(route.path)} },`);
     }
 
     lines.push('};');
@@ -248,9 +315,11 @@ export function createRouteMapGenerator(config: RouteMapGeneratorConfig): Genera
     return {
         name: '@spfn/core:route-map',
 
+        // Unchanged, including the deprecated dirs: what the map is *built* from
+        // moved to the loaded router, but what a rebuild should be *triggered* by
+        // is still every file a route can live in.
         watchPatterns: [
             routerPath,
-            // Watch route directories derived from router imports
             'src/server/routes/**/*.ts',
             ...additionalRouteDirs.map(dir => `${dir}/**/*.ts`),
         ],
@@ -273,83 +342,27 @@ export function createRouteMapGenerator(config: RouteMapGeneratorConfig): Genera
 
             if (debug)
             {
-                genLogger.info('Parsing router file', { path: absoluteRouterPath });
+                genLogger.info('Loading router', { path: absoluteRouterPath });
             }
 
-            // Parse router file
-            const { importPaths, routeNames } = parseRouterFile(absoluteRouterPath);
+            const router = loadRouter(cwd, absoluteRouterPath);
+            const routes = new Map<string, CollectedRoute>();
+            collectRoutes(router, ['router'], routes);
 
             if (debug)
             {
-                genLogger.info('Found route imports', { count: importPaths.length, names: routeNames });
+                genLogger.info(`Found ${routes.size} routes`, { names: [...routes.keys()] });
             }
 
-            // Resolve import paths and parse route files
-            const routerDir = dirname(absoluteRouterPath);
-            const allRoutes: ParsedRoute[] = [];
-
-            for (const importPath of importPaths)
-            {
-                // Resolve path - try multiple patterns
-                let resolvedPath = resolve(routerDir, importPath);
-
-                // Try: exact path with .ts extension
-                if (!resolvedPath.endsWith('.ts'))
-                {
-                    const withTs = resolvedPath + '.ts';
-                    if (existsSync(withTs))
-                    {
-                        resolvedPath = withTs;
-                    }
-                    // Try: directory with index.ts
-                    else
-                    {
-                        const indexPath = join(resolvedPath, 'index.ts');
-                        if (existsSync(indexPath))
-                        {
-                            resolvedPath = indexPath;
-                        }
-                        else
-                        {
-                            resolvedPath = withTs; // fallback to original
-                        }
-                    }
-                }
-
-                if (existsSync(resolvedPath))
-                {
-                    const routes = parseRouteFile(resolvedPath);
-                    allRoutes.push(...routes);
-
-                    if (debug)
-                    {
-                        genLogger.info(`Parsed ${routes.length} routes from ${relative(cwd, resolvedPath)}`);
-                    }
-                }
-            }
-
-            // Filter routes that are actually exported in router
-            const exportedRoutes = allRoutes.filter(r => routeNames.includes(r.name));
-
-            if (debug)
-            {
-                genLogger.info(`Found ${exportedRoutes.length} exported routes`);
-            }
-
-            // Generate output
-            const content = generateRouteMapContent(exportedRoutes);
-
-            // Ensure output directory exists
             const outputDir = dirname(absoluteOutputPath);
             if (!existsSync(outputDir))
             {
                 mkdirSync(outputDir, { recursive: true });
             }
 
-            // Write file
-            writeFileSync(absoluteOutputPath, content, 'utf-8');
+            writeFileSync(absoluteOutputPath, generateRouteMapContent(routes), 'utf-8');
 
-            genLogger.info(`Generated route map: ${relative(cwd, absoluteOutputPath)} (${exportedRoutes.length} routes)`);
+            genLogger.info(`Generated route map: ${relative(cwd, absoluteOutputPath)} (${routes.size} routes)`);
         },
     };
 }
