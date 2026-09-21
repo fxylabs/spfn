@@ -14,7 +14,7 @@
  */
 
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -111,6 +111,63 @@ describe('spfn codegen run', () =>
 
         expect(status).toBe(1);
         expect(output).toContain('Code generation failed');
+
+        // The refusal under test, not any refusal: "Code generation failed" is
+        // also what a fixture that stopped resolving @spfn/core/route prints,
+        // and that run would pass an assertion on the exit code alone.
+        expect(output).toContain('Two routes are both named "list"');
         expect(output).not.toContain('Code generation completed');
+    });
+
+    it('writes the map for an app route sharing a name with an ops command', () =>
+    {
+        // `createOpsRouter` publishes no route map for the app to merge, and
+        // `spfn ops` invokes a command over its URL, so nothing overwrites the
+        // app's `listExamples`. Refusing here bricked a scaffolded app.
+        writeFile(
+            'src/server/router.ts',
+            'import { defineRouter, route } from \'@spfn/core/route\';\n'
+            + 'import { createOpsRouter, opsRoute } from \'@spfn/core/ops\';\n'
+            + 'import { defineMiddleware } from \'@spfn/core/route\';\n\n'
+            + 'const opsAuth = defineMiddleware(\'opsAuth\', async (_c, next) => { await next(); });\n\n'
+            + 'const listExamples = route.get(\'/examples\').handler(async () => ({}));\n\n'
+            + 'const opsRouter = createOpsRouter({\n'
+            + '    listExamples: opsRoute.get(\'/examples\').handler(async () => ({})),\n'
+            + '}, { auth: opsAuth });\n\n'
+            + 'export const appRouter = defineRouter({ listExamples }).packages([opsRouter]);\n',
+        );
+
+        const { status, output } = runCodegen();
+
+        expect(status).toBe(0);
+        expect(output).toContain('Code generation completed');
+        expect(readFileSync(OUTPUT_PATH, 'utf-8')).toContain('listExamples: { method: \'GET\', path: \'/examples\' }');
+    });
+
+    it('writes the map when the aliases live only in src/server/tsconfig.json', () =>
+    {
+        // What `spfn init` scaffolds, and what `spfn build` compiles with. An app
+        // with no Next.js root config has `@/*` nowhere else.
+        writeFile(
+            'src/server/tsconfig.json',
+            JSON.stringify({ compilerOptions: { baseUrl: '../..', paths: { '@/*': ['./src/*'] } } }),
+        );
+        writeFile(
+            'src/server/routes/users.ts',
+            'import { route } from \'@spfn/core/route\';\n\n'
+            + 'export const listUsers = route.get(\'/users\').handler(async () => ({}));\n',
+        );
+        writeFile(
+            'src/server/router.ts',
+            'import { defineRouter } from \'@spfn/core/route\';\n'
+            + 'import { listUsers } from \'@/server/routes/users\';\n\n'
+            + 'export const appRouter = defineRouter({ listUsers });\n',
+        );
+
+        const { status, output } = runCodegen();
+
+        expect(status).toBe(0);
+        expect(output).toContain('Code generation completed');
+        expect(readFileSync(OUTPUT_PATH, 'utf-8')).toContain('listUsers: { method: \'GET\', path: \'/users\' }');
     });
 });
