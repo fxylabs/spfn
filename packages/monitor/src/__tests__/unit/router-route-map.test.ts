@@ -1,12 +1,13 @@
 /**
  * @spfn/monitor - What the router tells the route-map generator
  *
- * The generator refuses an app route whose name a mounted package router also
- * registers, because the app spreads that package's published route map over
- * its own and the package entry wins the name. This package publishes no such
- * map — no `.spfnrc.ts`, and nothing named as one in its exports — so an app
- * route called `getStats` loses nothing to the admin route of the same name,
- * and the build that refused it was refusing a merge that does not exist.
+ * The app's generated route map carries the routes of every package router the
+ * app mounts with `.packages()` and whose `_publishesRouteMap` is true. This
+ * package needs to be in there: `monitorApi` is `createApi<typeof
+ * monitorRouter>` and the dashboard calls `monitorApi.getStats.call({})`, a name
+ * the app's RPC proxy resolves in that one map. The same flag is what makes an
+ * app route named `getStats` a collision the app's build refuses — both would
+ * want the one entry that name has.
  *
  * The flag is how the generator is told. It is asserted here rather than in
  * `@spfn/core`, which cannot import this package.
@@ -17,9 +18,9 @@ import { monitorRouter } from '../../server/routes';
 
 describe('monitorRouter', () =>
 {
-    it('publishes no route map, so an app route may share a name with it', () =>
+    it('publishes its route map, so the app that mounts it can resolve monitorApi by name', () =>
     {
-        expect(monitorRouter._publishesRouteMap).toBe(false);
+        expect(monitorRouter._publishesRouteMap).toBe(true);
     });
 
     it('still registers the routes it always did', () =>

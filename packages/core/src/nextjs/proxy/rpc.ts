@@ -8,14 +8,18 @@
  * ```typescript
  * // app/api/rpc/[routeName]/route.ts
  * import { createRpcProxy } from '@spfn/core/nextjs/server';
- * import { authRouteMap } from '@spfn/auth';
  * import { eventRouteMap } from '@spfn/core/event';
  * import { routeMap } from '@/generated/route-map';
  *
  * export const { GET, POST } = createRpcProxy({
- *     routeMap: { ...routeMap, ...authRouteMap, ...eventRouteMap },
+ *     routeMap: { ...routeMap, ...eventRouteMap },
  * });
  * ```
+ *
+ * The generated `routeMap` already holds the routes of every package router the
+ * app mounts with `.packages()`, so no package map is merged by hand.
+ * `eventRouteMap` is the exception: a hand-written constant, not a mounted
+ * router.
  */
 import { NextRequest, NextResponse } from 'next/server';
 
@@ -68,16 +72,17 @@ export interface RpcProxyConfig extends Omit<TypedProxyConfig, 'onRequest' | 'on
     /**
      * Route map containing routeName → {method, path} mappings
      *
-     * Merge generated route map with package route maps (auth, events, etc.)
+     * The generated map carries the app's own routes and those of every package
+     * router it mounts with `.packages()`. Merge `eventRouteMap` beside it when
+     * the app uses SSE — that one is a constant rather than a mounted router.
      *
      * @example
      * ```typescript
-     * import { authRouteMap } from '@spfn/auth';
      * import { eventRouteMap } from '@spfn/core/event';
      * import { routeMap } from '@/generated/route-map';
      *
      * export const { GET, POST } = createRpcProxy({
-     *     routeMap: { ...routeMap, ...authRouteMap, ...eventRouteMap },
+     *     routeMap: { ...routeMap, ...eventRouteMap },
      * });
      * ```
      */

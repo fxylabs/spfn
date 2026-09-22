@@ -458,19 +458,24 @@ export const appRouter = defineRouter({ getRoot, getStatus })
 
 `.packages()` also flattens any nested package routers the given routers themselves declared.
 
+A mounted package's routes are written into the app's generated route map, so the app merges
+nothing by hand — `createRpcProxy({ routeMap })` resolves `authApi.login` as it resolves the
+app's own names.
+
 **A name a package route already uses is not available to an app route.** Both register, at
-their own paths, and the app's proxy merges the two maps as `{ ...routeMap, ...authRouteMap }`
-— so the package entry wins the name while the generated types still describe the app's
-route. `spfn codegen run` refuses rather than generating that, naming both sides.
+their own paths, but the map holds one entry per name: one of the two paths becomes
+unreachable while the generated types still describe the app's route. `spfn codegen run`
+refuses rather than generating that, naming both sides. Two package routers reaching one
+name is refused the same way.
 
 A package that publishes **no** route map is the exception, and declares itself one with
 `defineUnmappedRouter`: its routes are reached by the URL something was handed rather than by
-name, so nothing merges over the app's map and an app route may share a name with one of them
-freely. `createOpsRouter` builds the ops surface that way — `spfn ops` invokes a command over
-its URL — as do `@spfn/monitor`, `@spfn/cms` and the tracking routes of `@spfn/notification`.
-`defineRouter` is the default because the obligation runs the other way: a package that does
-publish a map must not declare itself unmapped, or a collision that really would overwrite an
-app route generates silently.
+name, so nothing of theirs is written into the app's map and an app route may share a name
+with one of them freely. `createOpsRouter` builds the ops surface that way — `spfn ops`
+invokes a command over its URL — as do the tracking routes of `@spfn/notification`.
+`defineRouter` is the default because the obligation runs the other way: a package whose
+client names its own routes (`@spfn/auth`, `@spfn/monitor`, `@spfn/cms`) must not declare
+itself unmapped, or those names land in nobody's map and resolve nowhere.
 
 ### `.use([...])` — router-level global middleware
 

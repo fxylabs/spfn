@@ -30,7 +30,7 @@ This example is the finished code for the site tutorial
 | --- | --- |
 | `src/server/server.config.ts` | `.lifecycle(createAuthLifecycle())` — validates env, seeds admins, inits RBAC |
 | `src/server/router.ts` | `.packages([authRouter])` + `.use([authenticate])` — mounts auth routes, applies global auth |
-| `src/app/api/rpc/[routeName]/route.ts` | `import '@spfn/auth/nextjs/api'` (interceptor) + merge `authRouteMap` |
+| `src/app/api/rpc/[routeName]/route.ts` | `import '@spfn/auth/nextjs/api'` (interceptor); the generated `routeMap` already holds the /_auth/* routes |
 | migrations | `pnpm spfn db migrate` — creates the auth tables (users, keys, roles, …) |
 
 Auth uses **asymmetric, client-signed JWTs**: the client holds the private key (in an

@@ -106,13 +106,13 @@ because nothing signs the outbound requests:
 ```ts
 import '@spfn/auth/nextjs/api';   // self-registers the auth interceptor — MUST come first
 import { createRpcProxy } from '@spfn/core/nextjs/server';
-import { authRouteMap } from '@spfn/auth';
 import { routeMap } from '@/generated/route-map';
 
-export const { GET, POST } = createRpcProxy({
-    routeMap: { ...routeMap, ...authRouteMap },
-});
+export const { GET, POST } = createRpcProxy({ routeMap });
 ```
+
+No auth route map is merged: the generated `routeMap` carries the routes of every package
+router the app router mounts with `.packages()`, `authRouter`'s included.
 
 **④ Migrations** — auth ships its tables (users, keys, roles, …) as package
 migrations:

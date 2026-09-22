@@ -292,24 +292,26 @@ type RouteMap = Record<string, RouteMapEntry>;
 
 ### `routeMap` — the proxy's source of truth
 
-`routeMap` comes from codegen (`@/generated/route-map`). Merge in route maps exported by
-SPFN packages so their endpoints are reachable through the same proxy:
+`routeMap` comes from codegen (`@/generated/route-map`) and already holds the routes of every
+package router the app router mounts with `.packages()` — `@spfn/auth`'s included, so
+`{ ...routeMap, ...authRouteMap }` is a no-op and no longer needed. `eventRouteMap` is still
+merged by hand: it is a hand-written constant, not a mounted router.
 
 ```typescript
 // app/api/rpc/[routeName]/route.ts
 import '@spfn/auth/nextjs/api';                 // side-effect: registers auth interceptors
 import { createRpcProxy } from '@spfn/core/nextjs/server';
-import { authRouteMap } from '@spfn/auth';
 import { eventRouteMap } from '@spfn/core/event';
 import { routeMap } from '@/generated/route-map';
 
 export const { GET, POST } = createRpcProxy({
-    routeMap: { ...routeMap, ...authRouteMap, ...eventRouteMap },
+    routeMap: { ...routeMap, ...eventRouteMap },
 });
 ```
 
-A `routeName` absent from the merged `routeMap` returns **404** from the proxy (not from the
-backend). After adding routes, re-run codegen and clear `.spfn` cache if stale.
+A `routeName` absent from `routeMap` returns **404** from the proxy (not from the backend).
+After adding routes — or after upgrading a mounted package — re-run codegen and clear `.spfn`
+cache if stale.
 
 ### Header forwarding & client IP
 
@@ -341,7 +343,7 @@ to your LB/nginx depth) rather than widening the header allowlist — forwarding
 
 ```typescript
 export const { GET, POST } = createRpcProxy({
-    routeMap: { ...routeMap, ...authRouteMap },
+    routeMap: { ...routeMap, ...eventRouteMap },
     apiUrl: process.env.SPFN_API_URL,
     timeout: 60000,
     debug: true,
@@ -595,9 +597,10 @@ export async function createUser(formData: FormData) {
 - **The proxy resolves the real HTTP method from `routeMap`, not from the client call.** The
   client only ever sends GET (no body) or POST (body/formData) to `/api/rpc/...`. A PUT /
   PATCH / DELETE route still works — the backend method comes from `routeMap[routeName]`.
-- **A missing `routeName` in `routeMap` is a proxy 404, not a backend 404.** Merge package
-  route maps (`authRouteMap`, `eventRouteMap`, …) and re-run codegen after adding routes;
-  delete `.spfn` if the map looks stale.
+- **A missing `routeName` in `routeMap` is a proxy 404, not a backend 404.** Re-run codegen
+  after adding routes or upgrading a mounted package — the generated map carries the mounted
+  packages' routes — merge `eventRouteMap` if you use SSE, and delete `.spfn` if the map
+  looks stale.
 - **Interceptor `pathPattern` matches the resolved backend path** (e.g. `/users/123`,
   `/_auth/login`) — *not* the `/api/rpc/{routeName}` URL the client hit.
 - **Two same-named interceptor type pairs.** `RequestInterceptor`/`ResponseInterceptor` from

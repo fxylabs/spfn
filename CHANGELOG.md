@@ -97,6 +97,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
       64 cached subtransaction ids until the root ends, so per-row nesting in a loop pushes the
       backend into subxid overflow.
 
+- **The app's generated route map now carries the routes of the package routers the app
+  mounts** (#101). `@spfn/core:route-map` used to walk `.packages()` for names alone and throw
+  the method and path away, on the assumption that every package publishes its own route map
+  for the app to merge (`{ ...routeMap, ...authRouteMap }`). Two first-party packages publish
+  none and still address their routes by name — `@spfn/monitor`'s dashboard calls
+  `monitorApi.getStats.call({})`, `@spfn/cms` calls `api.getLabelCache.call(…)` — and
+  `createApi` resolves nothing itself: it posts `/api/rpc/{routeName}` and `createRpcProxy`
+  looks the name up in the one map it was constructed with. Those calls resolved nowhere. A
+  runtime merge is not available to fix it (`rpc.ts` lives in the Next.js app, `.packages()`
+  on the backend router), so the generator — which already loads that router — keeps what it
+  was discarding.
+    - **`{ ...routeMap, ...authRouteMap }` is no longer needed and stays harmless**: the two
+      maps now hold the same entries for auth, so the spread is a no-op. `authRouteMap` is
+      still exported from `@spfn/auth` and nothing has to change in an existing app.
+      `spfn init` stops emitting the merge (the `import '@spfn/auth/nextjs/api';` side effect
+      stays), and `examples/03-auth` drops it. `eventRouteMap` stays merged by hand: it is a
+      hand-written constant, not a mounted router.
+    - A router built with `defineUnmappedRouter` contributes nothing, at any depth, exactly as
+      before — the ops surface (`createOpsRouter`) and `@spfn/notification`'s tracking routes
+      are reached by URL and named by nobody.
+    - **BREAKING: two package routers reaching one name is now refused**, naming both mounts.
+      It was tolerated while the app's spread order decided the winner and the generator
+      neither saw nor wrote that order; the generator writes it now, so an app that already
+      mounts two packages that took the same name stops building. **Migration**: drop one of
+      the two mounts, or raise the name with the package that took it second — nothing of the
+      app's own can be renamed to fix it, because neither of the two names is the app's. The
+      same route reached through two mounts (a package exporting its routes under two routers)
+      is still one route and is not a collision.
+    - The generated file keeps the app's own routes first, in their order and spelling, then
+      the package routes under a comment line naming where they came from; the header says how
+      many there are and which mount each came through. **An app that mounts no package
+      regenerates byte-identically.**
+    - The copy is as old as the file: a package upgrade reaches an app only through a
+      regeneration. `spfn build` and `spfn dev` regenerate, so what ships is right; a bare
+      `next build` against a stale committed map is not, which is why the header names the
+      mounts and their route counts — an upgrade then reads as an upgrade in the diff.
+    - `@spfn/core` 0.3.0-beta.14, `spfn` 0.3.0-beta.12. `@spfn/monitor` and `@spfn/cms` raise
+      their `@spfn/core` peer floor to `>=0.3.0-beta.14 <0.4.0`, because this generator is
+      what puts their routes into an app's map: under an older `@spfn/core` their clients
+      still resolve nowhere, and an app owning one of their names gets a build refusal
+      describing a merge that no longer exists.
+
 #### @spfn/cli
 
 - **Behaviour change: `spfn codegen run` exits 1 when a generator refuses** (#97), and stops at
@@ -378,6 +420,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     - Nothing else changes: the renewal protocol, the backend's proof check and its key
       retirement are untouched, and a refused verify still installs no session and clears no
       cookie.
+
+#### @spfn/monitor · @spfn/cms
+
+- **BREAKING: an app that owns a route named after one of theirs no longer builds** (#101),
+  because both packages ship clients that call their own routes by name and those names
+  resolved nowhere. `monitorApi` is `createApi<typeof monitorRouter>` and five dashboard
+  components call through it (`getStats`, `listErrors`, `getErrorDetail`, `updateErrorStatus`,
+  `listLogs`); `@spfn/cms` calls `api.getLabelCache.call(…)` itself. Neither package published
+  a route map, so no app's proxy could resolve those names — and where an app happened to own
+  a route of the same name, the call silently reached the **app's** route. Both routers go
+  back to `defineRouter`, which is what puts their routes into the map of every app that
+  mounts them. `@spfn/monitor` 0.2.0-beta.3, `@spfn/cms` 0.3.0-beta.3, both against an
+  `@spfn/core` peer floor raised to `>=0.3.0-beta.14 <0.4.0` — that is the release whose
+  generator writes these routes, and an older one resolving under them delivers no fix.
+    - `defineRouter` restores the collision refusal, so `spfn codegen run` and `spfn build`
+      now fail for an app that mounts one of these packages and declares its own route named
+      `getStats`, `listLogs`, `listErrors`, `getErrorDetail`, `updateErrorStatus`,
+      `listErrorEvents`, `getLabelCache`, `getSectionLabels`, `saveSectionDraft`,
+      `publishSection` or `resetSectionDraft`. **Migration**: rename the app route. The
+      refusal names both sides. It is a refusal replacing a silent wrong answer — with both
+      routes registered and one entry per name, one of the two paths is unreachable while the
+      types still describe the app's route.
+    - Neither package gains a `.spfnrc.ts`, a generated map or an exported
+      `monitorRouteMap`/`cmsRouteMap`: the app's generator is the only producer.
+      `@spfn/notification`'s tracking router stays unmapped — email clients open those
+      endpoints by URL and no client names them.
 
 #### @spfn/core
 

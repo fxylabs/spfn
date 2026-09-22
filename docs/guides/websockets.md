@@ -277,8 +277,8 @@ export default defineServerConfig()
 Pass a **lazy resolver** (`() => getOneTimeTokenManager()`), not the manager itself —
 `getOneTimeTokenManager()` throws until `createAuthLifecycle()` has run. With the pool
 shared, any token from auth's own endpoint also opens the socket, so `acquireToken` can be
-`() => authApi.issueOneTimeToken.call().then(r => r.token)` (needs `authRouteMap` merged
-into your RPC proxy).
+`() => authApi.issueOneTimeToken.call().then(r => r.token)` (the generated route map holds
+that route once the app router mounts `authRouter` with `.packages()`).
 
 ### Authorization
 

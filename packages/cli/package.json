@@ -1,6 +1,6 @@
 {
   "name": "spfn",
-  "version": "0.3.0-beta.11",
+  "version": "0.3.0-beta.12",
   "description": "Scaffold a full-stack TypeScript backend onto a Next.js app built with an AI coding agent: auth, database, typed routes and codegen, one fixed vertical slice per feature",
   "type": "module",
   "bin": {

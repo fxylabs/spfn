@@ -1,12 +1,12 @@
 /**
  * @spfn/cms - What the app router tells the route-map generator
  *
- * The generator refuses an app route whose name a mounted package router also
- * registers, because the app spreads that package's published route map over
- * its own and the package entry wins the name. This package publishes no such
- * map — its `.spfnrc.ts` runs the router generator only, and nothing here is
- * exported as one — so an app route sharing a name with a CMS route loses
- * nothing to it.
+ * The app's generated route map carries the routes of every package router the
+ * app mounts with `.packages()` and whose `_publishesRouteMap` is true. This
+ * package needs to be in there: it calls `api.getLabelCache.call(...)` itself,
+ * a name the app's RPC proxy resolves in that one map. The same flag is what
+ * makes an app route sharing a CMS route's name a collision the app's build
+ * refuses — both would want the one entry that name has.
  *
  * The flag is how the generator is told. It is asserted here rather than in
  * `@spfn/core`, which cannot import this package.
@@ -17,9 +17,9 @@ import { cmsAppRouter } from '../server/routes';
 
 describe('cmsAppRouter', () =>
 {
-    it('publishes no route map, so an app route may share a name with it', () =>
+    it('publishes its route map, so the app that mounts it can resolve getLabelCache by name', () =>
     {
-        expect(cmsAppRouter._publishesRouteMap).toBe(false);
+        expect(cmsAppRouter._publishesRouteMap).toBe(true);
     });
 
     it('still registers the routes it always did', () =>

@@ -42,7 +42,7 @@ describe('scaffold modes', () =>
 
         expect(router).not.toContain('@spfn/auth');
         expect(router).not.toContain('opsRouter');
-        expect(proxy).toContain('createRpcProxy({ routeMap: routeMap })');
+        expect(proxy).toContain('createRpcProxy({ routeMap })');
         expect(proxy).not.toContain('authRouteMap');
         expect(localExample).not.toContain('SPFN_AUTH_SESSION_SECRET');
         await expect(readFile(join(directory, 'src/server/routes/ops.ts'), 'utf8'))
@@ -68,7 +68,10 @@ describe('scaffold modes', () =>
         expect(serverConfig).toContain('.lifecycle(createAuthLifecycle())');
         expect(serverConfig).toContain("import '@/i18n/server'");
         expect(proxy).toContain("import '@spfn/auth/nextjs/api'");
-        expect(proxy).toContain('{ ...routeMap, ...authRouteMap }');
+        // No map is merged by hand: the generated one carries the routes of
+        // every package router `.packages()` mounts, `@spfn/auth`'s included.
+        expect(proxy).toContain('createRpcProxy({ routeMap })');
+        expect(proxy).not.toContain('authRouteMap');
         const ops = await readFile(join(directory, 'src/server/routes/ops.ts'), 'utf8');
         expect(ops).toContain("from '@spfn/core/ops'");
         expect(ops).toContain('createOpsRouter(');

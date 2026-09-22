@@ -9,11 +9,10 @@
  * // app/api/rpc/[routeName]/route.ts
  * import { createRpcProxy } from '@spfn/core/nextjs/server';
  * import { eventRouteMap } from '@spfn/core/event';
- * import { authRouteMap } from '@spfn/auth';
  * import { routeMap } from '@/generated/route-map';
  *
  * export const { GET, POST } = createRpcProxy({
- *     routeMap: { ...routeMap, ...authRouteMap, ...eventRouteMap },
+ *     routeMap: { ...routeMap, ...eventRouteMap },
  * });
  * ```
  */

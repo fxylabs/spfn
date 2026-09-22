@@ -122,8 +122,9 @@ the route map the RPC proxy needs — and nothing else.
 5. **Mount the RPC proxy** in Next.js as the `app/api/rpc/[routeName]/route.ts`
    catch-all. The browser only ever sends `GET` (no body) or `POST` (body or formData)
    to `/api/rpc/{routeName}`; the proxy looks up `routeMap[routeName]`, substitutes
-   `:params`, and forwards with the real method. Package route maps (`authRouteMap`,
-   `eventRouteMap`) merge into the same map.
+   `:params`, and forwards with the real method. The generated map already carries the
+   routes of the packages the app router mounts with `.packages()`; `eventRouteMap` is
+   merged by hand, being a constant rather than a mounted router.
 6. **Call it** through `createApi<AppRouter>()`. The client is a `Proxy` over the
    `AppRouter` type — typed in and out, with no runtime cost for the types. Errors
    arrive as `ApiError`, or as the original error class when that class is registered in
@@ -791,9 +792,10 @@ way so the endpoint never reveals that someone else's record exists.
 
 Other SPFN packages build on `@spfn/core`:
 
-- [`@spfn/auth`](../auth/README.md) — sessions, social login and RBAC. Exports
-  `authRouteMap` and registers proxy interceptors automatically; merge its route map into
-  `createRpcProxy`.
+- [`@spfn/auth`](../auth/README.md) — sessions, social login and RBAC. Mount `authRouter`
+  with `.packages()` and its routes are in the app's generated map; the package registers
+  proxy interceptors automatically. (`authRouteMap` is still exported, and merging it is
+  now a no-op.)
 - [`@spfn/mcp`](../mcp/README.md) — exposes your operations as MCP tools, so an agent can
   run them instead of you building an admin dashboard.
 - `@spfn/i18n`, `@spfn/storage`, `@spfn/notification`, `@spfn/cms`, `@spfn/monitor`,

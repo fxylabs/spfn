@@ -13,6 +13,15 @@
  * 404s. Walking the loaded router registers exactly what `registerRoutes`
  * registers, whatever the source looks like.
  *
+ * The map carries the routes of every package router the app mounts with
+ * `.packages()`, not only the app's own. A package ships a client that addresses
+ * its routes by name — `authApi.login`, `monitorApi.getStats` — and the app's
+ * `createRpcProxy` resolves a name in the single map it was constructed with, so
+ * a package route in nobody's map is a call that resolves nowhere. The app
+ * therefore merges nothing by hand: `{ ...routeMap, ...authRouteMap }` is a
+ * no-op today and `{ ...routeMap }` is the whole of it. (`eventRouteMap` is the
+ * exception that stays — it is a hand-written constant, not a mounted router.)
+ *
  * @example
  * ```typescript
  * // .spfnrc.ts
@@ -91,6 +100,70 @@ interface CollectedRoute
 
     /** Where the route was found, for a collision message. */
     trail: string;
+
+    /**
+     * The definition itself, so that one route reached twice is not two routes.
+     *
+     * A package that exports one set of routes under two routers — a router and
+     * a sub-router an app may mount beside it — hands an app that mounts both
+     * the same `RouteDef` object under the same name twice. That is one route
+     * with two mounts, not an ambiguity, and the app cannot resolve it by
+     * renaming anything of its own. No first-party package ships that shape
+     * today; the rule is keyed on object identity so that the day one does, the
+     * app that mounts both still builds.
+     */
+    def: RouteDef<any>;
+}
+
+/** One entry of a router's `_packageRouters`, as the generated header describes it. */
+interface PackageMount
+{
+    /** The trail of the mount: `router.packages[0]`. */
+    label: string;
+
+    /** How many routes it contributed, which is zero for an unmapped router. */
+    count: number;
+
+    /** Why it contributed nothing, when it contributed nothing. */
+    skipped?: string;
+
+    /**
+     * Where a route it holds had already been collected, if one had.
+     *
+     * A mount reaching only routes another mount already collected contributes
+     * nothing without being skipped, so without this its header line would read
+     * `— no routes` and give no reason.
+     */
+    sharedWith?: string;
+
+    /** The first path segment of each route it contributed, for the header line. */
+    prefixes: Set<string>;
+}
+
+/** Everything one walk of the router produced. */
+interface Collection
+{
+    /** The app's own routes, in walk order. */
+    app: Map<string, CollectedRoute>;
+
+    /** The routes of every mounted package router that publishes a map, in walk order. */
+    packages: Map<string, CollectedRoute>;
+
+    /** Every `.packages()` mount, contributing or not, in the order it was mounted. */
+    mounts: PackageMount[];
+
+    /**
+     * Package routers already walked.
+     *
+     * `.packages()` copies a mounted router's own `_packageRouters` up to the
+     * top level while leaving them in place below it, so one nested package
+     * router is reachable by two trails. The second walk would collect nothing
+     * either way — `addRoute`'s identity rule sees the same `RouteDef` under
+     * the same name and collapses it — so this is not what keeps a router from
+     * colliding with itself. It skips the work, and it is what lets the mount's
+     * header line say where the routes were already reached.
+     */
+    visited: Map<Router<any>, string>;
 }
 
 // ============================================================================
@@ -139,7 +212,46 @@ function loadRouter(cwd: string, absoluteRouterPath: string): ResolvedRouter
  */
 const HTTP_METHODS: Record<HttpMethod, true> = { GET: true, POST: true, PUT: true, PATCH: true, DELETE: true };
 
-function addRoute(name: string, routeDef: RouteDef<any>, trail: string[], found: Map<string, CollectedRoute>): void
+/** Which map a route is collected into, and so which collision it can be part of. */
+type Origin = 'app' | 'package';
+
+function duplicateNameError(
+    origin: Origin,
+    name: string,
+    existing: CollectedRoute,
+    where: string,
+): RouteMapGeneratorError
+{
+    if (origin === 'app')
+    {
+        return new RouteMapGeneratorError(
+            `Two routes are both named "${name}" (${existing.trail} and ${where}). `
+            + 'The RPC client addresses a route by its name alone, and a nested route registers under its own '
+            + 'key, so a name must be unique across the whole router.',
+        );
+    }
+
+    return new RouteMapGeneratorError(
+        `Two package routers both register a route named "${name}" (${existing.trail} and ${where}). `
+        + 'Both are written into this app\'s route map, which holds one entry per name, so one of the two '
+        + 'packages would have its client call the other package\'s path. Nothing of this app\'s can be renamed '
+        + 'to fix it: drop one of the two mounts, or raise the name with the package that took it second.',
+    );
+}
+
+/**
+ * Collect one route, or say why it is not in the map.
+ *
+ * Returns what was collected, which is what lets a mount count and describe
+ * what it contributed without counting a route twice.
+ */
+function addRoute(
+    name: string,
+    routeDef: RouteDef<any>,
+    trail: string[],
+    into: Map<string, CollectedRoute>,
+    origin: Origin,
+): CollectedRoute | undefined
 {
     const where = trail.join('.');
 
@@ -155,7 +267,7 @@ function addRoute(name: string, routeDef: RouteDef<any>, trail: string[], found:
             + 'the server skips it too.',
         );
 
-        return;
+        return undefined;
     }
 
     // The map is typed `HttpMethod`, and `registerRoutes` lowercases whatever it
@@ -170,56 +282,150 @@ function addRoute(name: string, routeDef: RouteDef<any>, trail: string[], found:
         );
     }
 
-    const existing = found.get(name);
+    const existing = into.get(name);
     if (existing)
     {
-        throw new RouteMapGeneratorError(
-            `Two routes are both named "${name}" (${existing.trail} and ${where}). `
-            + 'The RPC client addresses a route by its name alone, and a nested route registers under its own '
-            + 'key, so a name must be unique across the whole router.',
-        );
+        // The same route, reached through two mounts, is one route: a package
+        // that exports its routes under two routers hands both to an app that
+        // mounts both, and the entry either mount writes is the same entry.
+        //
+        // Only for a package route. The app's own router reaches one name twice
+        // by registering one route both at the top level and inside a nested
+        // group, and that stays refused even though the two entries are
+        // identical: it is the app's own spelling, so the app can fix it by
+        // dropping one registration, and leaving it silent would hide a
+        // grouping the author meant to be a second route.
+        if (origin === 'package' && existing.def === routeDef)
+        {
+            return undefined;
+        }
+
+        throw duplicateNameError(origin, name, existing, where);
     }
 
-    found.set(name, { method: routeDef.method, path: routeDef.path, trail: where });
+    const collected: CollectedRoute = {
+        method: routeDef.method,
+        path: routeDef.path,
+        trail: where,
+        def: routeDef,
+    };
+
+    into.set(name, collected);
+
+    return collected;
+}
+
+/** `/_auth/login` → `/_auth`: what the header line says a mount's routes live under. */
+function pathPrefix(path: string): string
+{
+    const [, first] = path.split('/');
+
+    return first ? `/${first}` : path;
 }
 
 /**
- * Every name a package router registers, at any depth below it.
+ * Every route a mounted package router registers, at any depth below it.
  *
- * Nothing here is emitted — a package publishes its own route map — but the
- * names are needed, because they are the ones that can quietly take an app
- * route's place. Collection is deliberately lenient: an entry a package
- * registers is not the app developer's to fix, and refusing their build over it
- * would help nobody. `registerRoutes` skips such an entry too.
+ * These are written into the app's map beside the app's own routes. A package
+ * ships a client that addresses its routes by name — `authApi.login`,
+ * `monitorApi.getStats` — and the app's `createRpcProxy` resolves that name in
+ * the single map it was constructed with, so a name in nobody's map resolves
+ * nowhere.
  *
- * A router that publishes no route map contributes no names at all, at any
- * depth: nothing merges over the app's map, so nothing of the app's can be
- * overwritten. That is the ops surface (`createOpsRouter`), whose routes `spfn
- * ops` invokes over the URL the manifest gave it and never by name.
+ * A router whose `_publishesRouteMap` is false contributes nothing, and neither
+ * does anything below it: no client names those routes. That is the ops surface
+ * (`createOpsRouter`), whose routes `spfn ops` invokes over the URL the manifest
+ * gave it, and whose own sub-routers carry the flag too.
+ *
+ * The flag is read on the router being walked rather than on the mount that
+ * reached it. So an unmapped router nested inside a mapped package router is
+ * left out while its parent contributes, and a mapped router nested inside an
+ * unmapped one is left out with it — what the flag says is whether a client
+ * names these routes, which nesting does not change either way.
  */
-function collectPackageNames(router: Router<any>, trail: string[], names: Map<string, string>): void
+function collectPackageRoutes(
+    router: Router<any>,
+    trail: string[],
+    mount: PackageMount,
+    collection: Collection,
+): void
 {
-    if (router._publishesRouteMap === false)
+    if (router._publishesRouteMap === false || collection.visited.has(router))
     {
         return;
     }
+
+    collection.visited.set(router, trail.join('.'));
 
     for (const [name, entry] of Object.entries(router.routes))
     {
         if (isRouter(entry))
         {
-            collectPackageNames(entry, [...trail, name], names);
+            collectPackageRoutes(entry, [...trail, name], mount, collection);
+            continue;
         }
-        else if (isRouteDef(entry) && !names.has(name))
+
+        if (!isRouteDef(entry))
         {
-            names.set(name, [...trail, name].join('.'));
+            genLogger.warn(
+                `Package router entry "${[...trail, name].join('.')}" is neither a route nor a router `
+                + `(got ${typeof entry}) and is left out of the map. \`registerRoutes\` skips it too.`,
+            );
+
+            continue;
+        }
+
+        const collected = addRoute(name, entry, [...trail, name], collection.packages, 'package');
+
+        if (collected)
+        {
+            mount.count += 1;
+            mount.prefixes.add(pathPrefix(collected.path));
+
+            continue;
+        }
+
+        const already = collection.packages.get(name);
+
+        if (already?.def === entry)
+        {
+            mount.sharedWith ??= already.trail;
         }
     }
 
-    for (const [index, packageRouter] of (router._packageRouters ?? []).entries())
+    for (const [index, nested] of (router._packageRouters ?? []).entries())
     {
-        collectPackageNames(packageRouter, [...trail, `packages[${index}]`], names);
+        collectPackageRoutes(nested, [...trail, `packages[${index}]`], mount, collection);
     }
+}
+
+/** One entry of a router's `_packageRouters`, walked and described for the generated header. */
+function mountPackageRouter(router: Router<any>, label: string, collection: Collection): PackageMount
+{
+    const mount: PackageMount = { label, count: 0, prefixes: new Set() };
+    const alreadyAt = collection.visited.get(router);
+
+    // Said before the walk, because the walk is what makes both true of it.
+    if (router._publishesRouteMap === false)
+    {
+        mount.skipped = 'publishes no route map';
+    }
+    else if (alreadyAt)
+    {
+        mount.skipped = `already reached through ${alreadyAt}`;
+    }
+
+    collectPackageRoutes(router, [label], mount, collection);
+
+    // Said after the walk, because the walk is what found the other mount.
+    if (mount.count === 0 && !mount.skipped && mount.sharedWith)
+    {
+        mount.skipped = `every route it holds was already collected through ${mount.sharedWith}`;
+    }
+
+    collection.mounts.push(mount);
+
+    return mount;
 }
 
 /**
@@ -229,27 +435,23 @@ function collectPackageNames(router: Router<any>, trail: string[], names: Map<st
  * grouping, not the route — so the map is flat and the trail exists only to
  * point at both sides of a collision.
  *
- * `_packageRouters` is walked for their names alone, never for their routes: a
- * package publishes its own route map and the app merges the two
- * (`{ ...routeMap, ...authRouteMap }` in a generated `rpc.ts`). Emitting them
- * here would duplicate every package route.
+ * `_packageRouters` is walked into a second map rather than this one, because
+ * the generated file keeps the app's own routes first and in their own order:
+ * an app that mounts nothing regenerates byte-identically, and an app that
+ * mounts something has the routes that are not its own written below a line
+ * that says so.
  *
  * Only string keys are collected, because `Object.entries` is what the runtime
  * iterates: a symbol-keyed entry is invisible to `registerRoutes` and so has no
  * route to name in the map either.
  */
-function collectRoutes(
-    router: Router<any>,
-    trail: string[],
-    found: Map<string, CollectedRoute>,
-    packageNames: Map<string, string>,
-): void
+function collectRoutes(router: Router<any>, trail: string[], collection: Collection): void
 {
     for (const [name, entry] of Object.entries(router.routes))
     {
         if (isRouter(entry))
         {
-            collectRoutes(entry, [...trail, name], found, packageNames);
+            collectRoutes(entry, [...trail, name], collection);
             continue;
         }
 
@@ -266,58 +468,61 @@ function collectRoutes(
             continue;
         }
 
-        addRoute(name, entry, [...trail, name], found);
+        addRoute(name, entry, [...trail, name], collection.app, 'app');
     }
 
     for (const [index, packageRouter] of (router._packageRouters ?? []).entries())
     {
-        collectPackageNames(packageRouter, [...trail, `packages[${index}]`], packageNames);
+        mountPackageRouter(packageRouter, `${trail.join('.')}.packages[${index}]`, collection);
     }
 }
 
 /**
  * Refuse an app route whose name a package router also registers.
  *
- * Both are registered at runtime, at their own paths, and the app's proxy merges
- * the two maps as `{ ...routeMap, ...authRouteMap }` — so the *package* entry
- * wins the name. The typed client would say `api.logout` is the app's own route
- * while every call went to the package's path.
+ * Both are registered at runtime, at their own paths, and both are written into
+ * this one map — which holds one entry per name. The name would resolve to
+ * whichever of the two the map ended up holding while the generated types still
+ * describe the app's route, so every call the typed client made against the
+ * app's route could go to the package's path.
  *
- * A package route colliding with another package's route is not refused: which
- * of them wins is decided by the order the app spreads their maps, which this
- * generator neither sees nor writes. Nor is a collision with a router that
- * publishes no map — there is no merge for the app route to lose.
+ * A collision with a router that publishes no map is not refused: nothing of
+ * that router is written here, so the app route keeps its name and its path.
  */
-function assertNoPackageCollision(found: Map<string, CollectedRoute>, packageNames: Map<string, string>): void
+function assertNoPackageCollision(collection: Collection): void
 {
-    for (const [name, where] of packageNames)
+    for (const [name, route] of collection.packages)
     {
-        const route = found.get(name);
+        const appRoute = collection.app.get(name);
 
-        if (!route)
+        if (!appRoute)
         {
             continue;
         }
 
         throw new RouteMapGeneratorError(
-            `The app route "${name}" (${route.trail}) is also registered by a package router (${where}). `
-            + 'The app merges the two maps as { ...routeMap, ...packageRouteMap }, so the package entry wins the '
-            + 'name at runtime while the generated types still describe the app\'s route — every call would go to '
-            + 'the package\'s path. Rename the app route.',
+            `The app route "${name}" (${appRoute.trail}) is also registered by a package router (${route.trail}). `
+            + 'Both go into this app\'s generated route map, which holds one entry per name, so one of the two '
+            + 'paths becomes unreachable while the typed client still describes the app\'s route. Rename the app '
+            + 'route.',
         );
     }
 }
 
-/** The map the file is written from: app routes only, and no name a package took. */
-function collectRouteMap(router: Router<any>): Map<string, CollectedRoute>
+/** The map the file is written from: the app's own routes, then its mounted packages'. */
+function collectRouteMap(router: Router<any>): Collection
 {
-    const found = new Map<string, CollectedRoute>();
-    const packageNames = new Map<string, string>();
+    const collection: Collection = {
+        app: new Map(),
+        packages: new Map(),
+        mounts: [],
+        visited: new Map(),
+    };
 
-    collectRoutes(router, ['router'], found, packageNames);
-    assertNoPackageCollision(found, packageNames);
+    collectRoutes(router, ['router'], collection);
+    assertNoPackageCollision(collection);
 
-    return found;
+    return collection;
 }
 
 // ============================================================================
@@ -378,6 +583,51 @@ function toStringLiteral(value: string): string
         .replace(/\u2029/g, '\\u2029');
 }
 
+/** One mount, as the generated header lists it. */
+function describeMount(mount: PackageMount): string
+{
+    if (mount.count === 0)
+    {
+        return `${mount.label} — no routes${mount.skipped ? ` (${mount.skipped})` : ''}`;
+    }
+
+    const routes = `${mount.count} route${mount.count === 1 ? '' : 's'}`;
+
+    return `${mount.label} — ${routes} under ${[...mount.prefixes].join(', ')}`;
+}
+
+/**
+ * The header lines that say which of the entries below are not the app's.
+ *
+ * A package route in this file is a copy, and a copy is as old as the file: the
+ * app used to import the package's own map, which an upgrade changed by itself.
+ * So the header says what the copy is and names every mount it came through —
+ * the diff after an upgrade then reads as an upgrade rather than as somebody
+ * editing a generated file.
+ *
+ * Nothing is added when no package contributed, so an app that mounts nothing
+ * (or mounts only routers that publish no map) regenerates byte-identically to
+ * what it has committed.
+ */
+function packageHeaderLines(collection: Collection): string[]
+{
+    if (collection.packages.size === 0)
+    {
+        return [];
+    }
+
+    return [
+        ' *',
+        ' * The entries under the .packages() line below are not this app\'s. They belong',
+        ' * to the package routers it mounts, copied in as they were when this file was',
+        ' * generated:',
+        ...collection.mounts.map(mount => ` *   ${describeMount(mount)}`),
+        ' *',
+        ' * A package upgrade reaches them only through a regeneration: `spfn build`',
+        ' * regenerates before it compiles, a bare `next build` uses what is committed here.',
+    ];
+}
+
 /**
  * Generate route map file content
  *
@@ -389,7 +639,7 @@ function toStringLiteral(value: string): string
  * `development`. Writing the value makes that difference a line in the diff
  * instead of a route that typechecks in the editor and vanishes at build.
  */
-function generateRouteMapContent(routes: Map<string, CollectedRoute>, nodeEnv: string): string
+function generateRouteMapContent(collection: Collection, nodeEnv: string): string
 {
     const lines: string[] = [
         '/**',
@@ -400,6 +650,7 @@ function generateRouteMapContent(routes: Map<string, CollectedRoute>, nodeEnv: s
         ` * Generated with NODE_ENV=${nodeEnv}. A route registered only under one environment is`,
         ' * named here only when the generator ran under it, so this line changing is that',
         ' * difference rather than an edit.',
+        ...packageHeaderLines(collection),
         ' */',
         '',
         'import type { HttpMethod } from \'@spfn/core/route\';',
@@ -413,9 +664,19 @@ function generateRouteMapContent(routes: Map<string, CollectedRoute>, nodeEnv: s
         'export const routeMap: Record<string, RouteInfo> = {',
     ];
 
-    for (const [name, route] of routes)
+    for (const [name, route] of collection.app)
     {
-        lines.push(`    ${toObjectKey(name)}: { method: '${route.method}', path: ${toStringLiteral(route.path)} },`);
+        lines.push(entryLine(name, route));
+    }
+
+    if (collection.packages.size > 0)
+    {
+        lines.push('    // From the package routers this app mounts with .packages(), not its own:');
+
+        for (const [name, route] of collection.packages)
+        {
+            lines.push(entryLine(name, route));
+        }
     }
 
     lines.push('};');
@@ -426,6 +687,12 @@ function generateRouteMapContent(routes: Map<string, CollectedRoute>, nodeEnv: s
     lines.push('');
 
     return lines.join('\n');
+}
+
+/** One `name: { method, path },` line of the map. */
+function entryLine(name: string, route: CollectedRoute): string
+{
+    return `    ${toObjectKey(name)}: { method: '${route.method}', path: ${toStringLiteral(route.path)} },`;
 }
 
 /**
@@ -497,11 +764,15 @@ export function createRouteMapGenerator(config: RouteMapGeneratorConfig): Genera
                 subject: 'route map',
             });
 
-            const routes = collectRouteMap(router);
+            const collection = collectRouteMap(router);
+            const total = collection.app.size + collection.packages.size;
 
             if (debug)
             {
-                genLogger.info(`Found ${routes.size} routes`, { names: [...routes.keys()] });
+                genLogger.info(`Found ${total} routes`, {
+                    app: [...collection.app.keys()],
+                    packages: [...collection.packages.keys()],
+                });
             }
 
             const outputDir = dirname(absoluteOutputPath);
@@ -514,9 +785,12 @@ export function createRouteMapGenerator(config: RouteMapGeneratorConfig): Genera
             // the shell left it unset.
             const nodeEnv = process.env.NODE_ENV ?? 'unset';
 
-            writeFileSync(absoluteOutputPath, generateRouteMapContent(routes, nodeEnv), 'utf-8');
+            writeFileSync(absoluteOutputPath, generateRouteMapContent(collection, nodeEnv), 'utf-8');
 
-            genLogger.info(`Generated route map: ${relative(cwd, absoluteOutputPath)} (${routes.size} routes)`);
+            genLogger.info(
+                `Generated route map: ${relative(cwd, absoluteOutputPath)} `
+                + `(${collection.app.size} app routes, ${collection.packages.size} from mounted packages)`,
+            );
         },
     };
 }

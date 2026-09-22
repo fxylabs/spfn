@@ -104,11 +104,15 @@ Import it for its side-effect (it self-registers); it must run before the proxy 
 // app/api/rpc/[routeName]/route.ts
 import '@spfn/auth/nextjs/api';        // side-effect: registers auth interceptors
 import { createRpcProxy } from '@spfn/core/nextjs/server';
-import { authRouteMap } from '@spfn/auth';
 import { routeMap } from '@/generated/route-map';
 
-export const { GET, POST } = createRpcProxy({ routeMap: { ...routeMap, ...authRouteMap } });
+export const { GET, POST } = createRpcProxy({ routeMap });
 ```
+
+No auth route map is merged: the generated `routeMap` carries the routes of every package
+router the app router mounts with `.packages()`, `authRouter`'s included. `authRouteMap` is
+still exported and `{ ...routeMap, ...authRouteMap }` is still harmless — the two hold the
+same entries — but it is a no-op.
 
 ### 4. Run migrations
 
@@ -3231,9 +3235,8 @@ export type AppRouter = typeof appRouter;
 // app/api/rpc/[routeName]/route.ts
 import '@spfn/auth/nextjs/api';
 import { createRpcProxy } from '@spfn/core/nextjs/server';
-import { authRouteMap } from '@spfn/auth';
-import { routeMap } from '@/generated/route-map';
-export const { GET, POST } = createRpcProxy({ routeMap: { ...routeMap, ...authRouteMap } });
+import { routeMap } from '@/generated/route-map';   // already holds authRouter's routes
+export const { GET, POST } = createRpcProxy({ routeMap });
 
 // any client component
 import { authApi } from '@spfn/auth';

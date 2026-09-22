@@ -806,7 +806,8 @@ next.config.ts                       # /_auth/* callback rewrite
 .env.server                          # auth keyring (gitignored)
 ```
 
-The full RPC proxy imports the auth interceptor and merges `authRouteMap`. Internal auth
+The full RPC proxy imports the auth interceptor; it merges no route map, because the
+generated one already carries the routes of the packages `.packages()` mounts. Internal auth
 keys are generated with cryptographic randomness in ignored local env files;
 `.env.local.example` and `.env.server.example` contain placeholders only. Add only the provider keys you use, then run
 `pnpm spfn db migrate`.

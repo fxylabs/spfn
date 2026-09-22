@@ -5,7 +5,7 @@
  */
 
 import { Type } from '@sinclair/typebox';
-import { defineUnmappedRouter, route } from '@spfn/core/route';
+import { defineRouter, route } from '@spfn/core/route';
 import { cmsPublishedCacheRepository } from '../repositories';
 import {
     getSectionLabelsRoute,
@@ -40,12 +40,14 @@ export const getLabelCache = route.get('/_cms/labels/cache')
     });
 
 /**
- * `defineUnmappedRouter`, not `defineRouter`: this package publishes no route
- * map — its `.spfnrc.ts` runs the router generator only, and nothing here is
- * exported as one — so an app that mounts it with `.packages()` merges nothing
- * over its own map and cannot lose a name to it.
+ * `defineRouter`, because a client addresses these routes by name: this package
+ * calls `api.getLabelCache.call(...)` itself, from `src/index.ts`. The name is
+ * resolved in the app's route map, which carries the routes of every package
+ * router the app mounts with `.packages()` — so `defineRouter` is what puts
+ * these there, and what makes an app route of the same name a collision the
+ * app's build refuses instead of a call that silently reaches the app's route.
  */
-export const cmsAppRouter = defineUnmappedRouter({
+export const cmsAppRouter = defineRouter({
     getLabelCache,
     // Admin routes
     getSectionLabels: getSectionLabelsRoute,

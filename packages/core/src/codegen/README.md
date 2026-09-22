@@ -153,9 +153,13 @@ way `registerRoutes` walks it. How the router is *written* does not matter: a on
   server registers them.
 - `method` and `path` come from the `RouteDef`, not from a pattern over the source. A
   route not registered in the router is absent, because there is nothing registering it.
-- **`.packages()` routers are left out**, at every depth. A package publishes its own
-  route map and the app merges them (`{ ...routeMap, ...authRouteMap }`). Their *names*
-  are still read, because that merge is what a collision turns on — see below.
+- **`.packages()` routers are carried**, at every depth, provided the router publishes a
+  route map (`defineRouter`, not `defineUnmappedRouter`). A package ships a client that
+  names its own routes — `authApi.login`, `monitorApi.getStats` — and the app's
+  `createRpcProxy` resolves a name in the one map it was constructed with, so the app
+  merges nothing by hand: `{ ...routeMap, ...authRouteMap }` is a no-op today. They are
+  written after the app's own routes, under a comment line naming where they came from,
+  and the header says how many there are and which mount each came through.
 - A name that is not a JS identifier (`'get-user'`) is emitted quoted, and `__proto__` is
   emitted as a computed key, so the generated file parses and the map keeps every route as
   an own property.
@@ -202,16 +206,20 @@ Unlike the old source parser, which dropped what it could not read, the generato
   line in the diff rather than a route that vanishes at build.
 - Two routes reach the same name (the message names both places).
 - An **app route and a package route** reach the same name, where that package publishes a
-  route map. Both register at runtime, and the app's proxy merges
-  `{ ...routeMap, ...authRouteMap }` — so the package's route wins the name while the
-  generated types still describe the app's. Two *package* routers sharing a name is not
-  refused: which one wins is the app's merge order, which this generator neither sees nor
-  writes. Nor is a collision with a router that publishes **no** map — one declared with
+  route map. Both register at runtime, and both want the single entry that name has in this
+  map — so one of the two paths becomes unreachable while the generated types still
+  describe the app's route. **Two package routers** reaching one name is refused too, and
+  names both mounts: the generator writes the order now, so the ambiguity is its to refuse.
+  The same route reached through two mounts is not two routes — a package exporting one set
+  of routes under a router and a sub-router an app mounts beside it hands both mounts the
+  same route object, and it is collected once. No first-party package ships that shape today;
+  the rule is keyed on object identity so that an app mounting both still builds when one
+  does, and the header line of the second mount says which mount got there first.
+  A collision with a router that publishes **no** map is not refused — one declared with
   `defineUnmappedRouter`, whose routes are reached by the URL something was handed rather
-  than by name: the ops surface (`createOpsRouter`), `@spfn/monitor`, `@spfn/cms` and the
-  tracking routes of `@spfn/notification`. Nothing of theirs merges over the app's map, so
-  an app route named after one of their routes overwrites nothing and must not fail the
-  build.
+  than by name: the ops surface (`createOpsRouter`) and the tracking routes of
+  `@spfn/notification`. Nothing of theirs is written here, so an app route named after one
+  of their routes keeps its own path and must not fail the build.
 - A route's `method` is not an `HttpMethod`. `registerRoutes` lowercases the method before
   registering, so `method: 'get'` serves fine and would emit a map that fails `tsc`.
 
@@ -222,8 +230,9 @@ registering a route before `.handler()` was called), and a router entry that is 
 route nor a router. `registerRoutes` warns and skips both, so a map without them still names
 every route the server answers — which is all a refusal would have been protecting.
 
-What a *package* router carries is never refused — an entry the app developer cannot fix
-is skipped, exactly as `registerRoutes` skips it.
+A package route with no method or path is skipped the same way, and for the same reason.
+What is refused is only what would write a file that does not compile or that answers to
+the wrong path: a method that is not an `HttpMethod`, and the two collisions above.
 
 ### Generated output
 
@@ -240,6 +249,8 @@ export interface RouteInfo
 export const routeMap: Record<string, RouteInfo> = {
     getUser: { method: 'GET', path: '/users/:id' },
     createUser: { method: 'POST', path: '/users' },
+    // From the package routers this app mounts with .packages(), not its own:
+    login: { method: 'POST', path: '/_auth/login' },
 };
 
 export type RouteMap = typeof routeMap;
@@ -484,7 +495,10 @@ regeneration when it's absent (build/manual passes don't set it).
   output the RPC proxy imports. If it's missing or stale, `api.<route>.call()` resolves the
   wrong (or no) `method`/`path`. `spfn build` runs codegen first; if you build by other
   means, run `spfn codegen run` yourself. Treat the file as generated (it's marked
-  `DO NOT EDIT`).
+  `DO NOT EDIT`). **Upgrading a mounted package goes stale the same way and is quieter about
+  it**: the map carries that package's routes, but the upgrade changes no app source, so no
+  watcher fires and nothing else says the committed map is a version behind — re-run codegen
+  after an upgrade as you would after adding a route.
 - **A route must be in `defineRouter({...})` to be emitted.** Defining `export const foo =
   route.get(...)` but not registering `foo` in the router drops it from the map — the
   generator walks the router, so an unregistered route does not exist as far as it is

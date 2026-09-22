@@ -42,10 +42,11 @@ export async function setupApiProxy(cwd: string, includeAuth: boolean): Promise<
 
     ensureDirSync(rpcDir);
 
-    const authImports = includeAuth
-        ? `import '@spfn/auth/nextjs/api';\nimport { authRouteMap } from '@spfn/auth';\n`
-        : '';
-    const proxyRouteMap = includeAuth ? '{ ...routeMap, ...authRouteMap }' : 'routeMap';
+    // The import is a side effect and stays: it registers the auth interceptor.
+    // No route map is merged beside the generated one — that one already carries
+    // the routes of every package router the app mounts with `.packages()`,
+    // `@spfn/auth`'s included.
+    const authImports = includeAuth ? `import '@spfn/auth/nextjs/api';\n` : '';
 
     const routeContent = `/**
  * SPFN RPC Proxy
@@ -63,7 +64,7 @@ export async function setupApiProxy(cwd: string, includeAuth: boolean): Promise<
 ${authImports}import { routeMap } from '@/generated/route-map';
 import { createRpcProxy } from '@spfn/core/nextjs/server';
 
-export const { GET, POST } = createRpcProxy({ routeMap: ${proxyRouteMap} });
+export const { GET, POST } = createRpcProxy({ routeMap });
 `;
     writeFileSync(rpcRoutePath, routeContent);
 

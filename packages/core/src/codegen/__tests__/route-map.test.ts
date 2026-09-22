@@ -27,6 +27,10 @@ const OUTPUT_PATH = 'src/generated/route-map.ts';
 const ROUTER_MODULE = resolve(__dirname, '../../route/router').replace(/\\/g, '/');
 const ROUTE_BUILDER_MODULE = resolve(__dirname, '../../route/route-builder').replace(/\\/g, '/');
 
+const OPS_ROUTER_MODULE = resolve(__dirname, '../../ops/create-ops-router').replace(/\\/g, '/');
+const OPS_ROUTE_MODULE = resolve(__dirname, '../../ops/ops-route').replace(/\\/g, '/');
+const MIDDLEWARE_MODULE = resolve(__dirname, '../../route/define-middleware').replace(/\\/g, '/');
+
 const IMPORTS = `import { defineRouter, defineUnmappedRouter } from '${ROUTER_MODULE}';\n`
     + `import { route } from '${ROUTE_BUILDER_MODULE}';\n\n`;
 
@@ -200,22 +204,27 @@ describe('route-map generator - walking the router', () =>
         ]);
     });
 
-    it('leaves package routes out, including a package attached to a nested router', async () =>
+    it('carries package routes, including a package mounted on a nested router', async () =>
     {
+        // The app's own routes keep their order and come first; each mount
+        // follows the router it was mounted on, which is the order
+        // `registerRoutes` registers them in.
         writeRouter(
             'const getRoot = route.get(\'/\').handler(async () => ({}));\n'
             + 'const listUsers = route.get(\'/users\').handler(async () => ({}));\n'
             + 'const login = route.post(\'/_auth/login\').handler(async () => ({}));\n'
-            + 'const audit = route.get(\'/_ops/audit\').handler(async () => ({}));\n\n'
+            + 'const audit = route.get(\'/_audit/entries\').handler(async () => ({}));\n\n'
             + 'const authRouter = defineRouter({ login });\n'
-            + 'const opsRouter = defineRouter({ audit });\n'
-            + 'const users = defineRouter({ listUsers }).packages([opsRouter]);\n\n'
+            + 'const auditRouter = defineRouter({ audit });\n'
+            + 'const users = defineRouter({ listUsers }).packages([auditRouter]);\n\n'
             + 'export const appRouter = defineRouter({ getRoot, users }).packages([authRouter]);\n',
         );
 
         expect(entriesOf(await generate())).toEqual([
             'getRoot: { method: \'GET\', path: \'/\' },',
             'listUsers: { method: \'GET\', path: \'/users\' },',
+            'audit: { method: \'GET\', path: \'/_audit/entries\' },',
+            'login: { method: \'POST\', path: \'/_auth/login\' },',
         ]);
     });
 
@@ -596,8 +605,11 @@ describe('route-map generator - package routers', () =>
         await expect(generate()).rejects.toThrow(/also registered by a package router/);
     });
 
-    it('allows two package routers to share a name, which the app\'s merge order decides', async () =>
+    it('refuses two package routers that register one name, naming both mounts', async () =>
     {
+        // Tolerated while the app spread one map over the other and the
+        // generator neither saw nor wrote that order. It writes it now, so the
+        // ambiguity is the generator's to refuse.
         writeRouter(
             'const getRoot = route.get(\'/\').handler(async () => ({}));\n'
             + 'const authLogout = route.post(\'/_auth/logout\').handler(async () => ({}));\n'
@@ -607,7 +619,13 @@ describe('route-map generator - package routers', () =>
             + 'export const appRouter = defineRouter({ getRoot }).packages([authRouter, cmsRouter]);\n',
         );
 
-        expect(entriesOf(await generate())).toEqual(['getRoot: { method: \'GET\', path: \'/\' },']);
+        const thrown = await generate().catch((error: Error) => error);
+
+        expect(thrown).toBeInstanceOf(RouteMapGeneratorError);
+        expect((thrown as Error).message).toContain('Two package routers');
+        expect((thrown as Error).message).toContain('router.packages[0].logout');
+        expect((thrown as Error).message).toContain('router.packages[1].logout');
+        expect(existsSync(join(projectDir, OUTPUT_PATH))).toBe(false);
     });
 
     it('does not refuse a package route that is missing a method', async () =>
@@ -794,8 +812,12 @@ describe('route-map generator - a package router that publishes no route map', (
         ]);
     });
 
-    it('is skipped when a published package router mounts it', async () =>
+    it('is skipped when a published package router mounts it, which still contributes its own', async () =>
     {
+        // The flag is read on the router being walked, not on the mount that
+        // reached it: what it says is that no client names these routes, and
+        // being nested under a package that does publish a map changes nothing
+        // about that.
         writeRouter(
             'const audit = route.get(\'/audit\').handler(async () => ({}));\n'
             + 'const opsAudit = route.get(\'/_ops/audit\').handler(async () => ({}));\n'
@@ -805,8 +827,11 @@ describe('route-map generator - a package router that publishes no route map', (
             + 'export const appRouter = defineRouter({ audit }).packages([authRouter]);\n',
         );
 
+        // `audit` is the app's own, at its own path: the ops route of that name
+        // is not in the map, so it is no collision and overwrites nothing.
         expect(entriesOf(await generate())).toEqual([
             'audit: { method: \'GET\', path: \'/audit\' },',
+            'login: { method: \'POST\', path: \'/_auth/login\' },',
         ]);
     });
 
@@ -827,28 +852,34 @@ describe('route-map generator - a package router that publishes no route map', (
     });
 });
 
-describe('route-map generator - a first-party package that publishes no route map', () =>
+describe('route-map generator - an app mounting an unmapped package router beside a mapped one', () =>
 {
     /**
-     * `@spfn/monitor` as `packages/monitor/src/server/routes/index.ts` builds it
-     * — `defineUnmappedRouter`, because the package has no codegen config and
-     * exports no route map — beside an app route that shares the name `getStats`
-     * with one of its admin routes.
+     * An unmapped package router — `defineUnmappedRouter`, because no client
+     * names its routes — holding a route the app also names. `createOpsRouter`
+     * is the real remaining example of the shape: `spfn ops` invokes those
+     * routes over the URL the manifest handed it. The stand-in is hand-built
+     * because what is asserted is the flag, not the factory that sets it.
      */
-    const MONITOR = 'const getStats = route.get(\'/stats\').handler(async () => ({}));\n'
-        + 'const monitorStats = route.get(\'/_monitor/admin/stats\').handler(async () => ({}));\n'
-        + 'const monitorRouter = defineUnmappedRouter({ getStats: monitorStats });\n';
+    const UNMAPPED = 'const getStats = route.get(\'/stats\').handler(async () => ({}));\n'
+        + 'const unmappedStats = route.get(\'/_unmapped/admin/stats\').handler(async () => ({}));\n'
+        + 'const unmappedRouter = defineUnmappedRouter({ getStats: unmappedStats });\n';
 
-    /** `@spfn/auth`, which does publish one: the app spreads `authRouteMap` over its own. */
+    /**
+     * A package router that does publish a map — `@spfn/auth`'s shape. Its routes
+     * are written into the app's map by this generator, so an app route of the
+     * same name is a collision. (`authRouteMap` is still exported and spreading
+     * it is a no-op: the two maps hold the same entries.)
+     */
     const AUTH = 'const appLogout = route.post(\'/logout\').handler(async () => ({}));\n'
         + 'const authLogout = route.post(\'/_auth/logout\').handler(async () => ({}));\n'
         + 'const authRouter = defineRouter({ logout: authLogout });\n';
 
-    it('generates for an app route named after a @spfn/monitor route', async () =>
+    it('generates for an app route named after an unmapped package route', async () =>
     {
         writeRouter(
-            MONITOR
-            + '\nexport const appRouter = defineRouter({ getStats }).packages([monitorRouter]);\n',
+            UNMAPPED
+            + '\nexport const appRouter = defineRouter({ getStats }).packages([unmappedRouter]);\n',
         );
 
         expect(entriesOf(await generate())).toEqual([
@@ -856,13 +887,13 @@ describe('route-map generator - a first-party package that publishes no route ma
         ]);
     });
 
-    it('refuses the same app\'s route named after a @spfn/auth route, beside that monitor one', async () =>
+    it('refuses the same app\'s route named after a mapped package route, beside that tolerated one', async () =>
     {
         writeRouter(
-            MONITOR
+            UNMAPPED
             + AUTH
             + '\nexport const appRouter = defineRouter({ getStats, logout: appLogout })\n'
-            + '    .packages([monitorRouter, authRouter]);\n',
+            + '    .packages([unmappedRouter, authRouter]);\n',
         );
 
         await expect(generate()).rejects.toThrow(RouteMapGeneratorError);
@@ -957,5 +988,251 @@ describe('route-map generator - it scans the router it was pointed at', () =>
         );
 
         expect(entriesOf(await generate())).toEqual(['getRoot: { method: \'GET\', path: \'/\' },']);
+    });
+});
+
+describe('route-map generator - the routes of the packages an app mounts', () =>
+{
+    /**
+     * A package that publishes a map, as `@spfn/auth` does: its client
+     * (`authApi.login`) names the route, and the app's `createRpcProxy` resolves
+     * that name in the one map it was constructed with.
+     */
+    const AUTH = 'const login = route.post(\'/_auth/login\').handler(async () => ({}));\n'
+        + 'const logout = route.post(\'/_auth/logout\').handler(async () => ({}));\n'
+        + 'const authRouter = defineRouter({ login, logout });\n';
+
+    /**
+     * The ops surface, built by the factory that decides the flag rather than by
+     * a stand-in: `createOpsRouter` is the reason the early return exists, so it
+     * is what the fixture mounts.
+     */
+    const OPS = `import { createOpsRouter } from '${OPS_ROUTER_MODULE}';\n`
+        + `import { opsRoute } from '${OPS_ROUTE_MODULE}';\n`
+        + `import { defineMiddleware } from '${MIDDLEWARE_MODULE}';\n\n`
+        + 'const opsTokenAuth = defineMiddleware(\'opsToken\', async (c, next) => next());\n'
+        + 'const countExamples = opsRoute.get(\'/examples/count\').handler(async () => ({}));\n'
+        + 'const opsRouter = createOpsRouter({ countExamples }, { auth: opsTokenAuth });\n';
+
+    it('writes the file it always wrote for an app that mounts no package', async () =>
+    {
+        writeRouter(
+            'const getRoot = route.get(\'/\').handler(async () => ({}));\n\n'
+            + 'export const appRouter = defineRouter({ getRoot });\n',
+        );
+
+        // The whole file, so that carrying package routes cannot move a byte of
+        // the map an app without packages has committed.
+        expect(await generate()).toBe(
+            '/**\n'
+            + ' * Route Map (Auto-generated)\n'
+            + ' *\n'
+            + ' * DO NOT EDIT - This file is generated by @spfn/core:route-map generator\n'
+            + ' *\n'
+            + ` * Generated with NODE_ENV=${process.env.NODE_ENV}. A route registered only under one environment is\n`
+            + ' * named here only when the generator ran under it, so this line changing is that\n'
+            + ' * difference rather than an edit.\n'
+            + ' */\n'
+            + '\n'
+            + 'import type { HttpMethod } from \'@spfn/core/route\';\n'
+            + '\n'
+            + 'export interface RouteInfo\n'
+            + '{\n'
+            + '    method: HttpMethod;\n'
+            + '    path: string;\n'
+            + '}\n'
+            + '\n'
+            + 'export const routeMap: Record<string, RouteInfo> = {\n'
+            + '    getRoot: { method: \'GET\', path: \'/\' },\n'
+            + '};\n'
+            + '\n'
+            + 'export type RouteMap = typeof routeMap;\n'
+            + '\n'
+            + 'export type RouteName = keyof RouteMap;\n',
+        );
+    });
+
+    it('carries a mounted package\'s routes with their own method and path', async () =>
+    {
+        writeRouter(
+            AUTH
+            + 'const getRoot = route.get(\'/\').handler(async () => ({}));\n\n'
+            + 'export const appRouter = defineRouter({ getRoot }).packages([authRouter]);\n',
+        );
+
+        await generate();
+
+        expect(loadGeneratedMap()).toEqual({
+            getRoot: { method: 'GET', path: '/' },
+            login: { method: 'POST', path: '/_auth/login' },
+            logout: { method: 'POST', path: '/_auth/logout' },
+        });
+    });
+
+    it('writes the app\'s own routes first, then the package\'s under a line that says so', async () =>
+    {
+        writeRouter(
+            AUTH
+            + 'const getRoot = route.get(\'/\').handler(async () => ({}));\n\n'
+            + 'export const appRouter = defineRouter({ getRoot }).packages([authRouter]);\n',
+        );
+
+        const content = await generate();
+        const map = content.split('routeMap: Record<string, RouteInfo> = {')[1];
+
+        expect(map.split('\n').slice(1, 3)).toEqual([
+            '    getRoot: { method: \'GET\', path: \'/\' },',
+            '    // From the package routers this app mounts with .packages(), not its own:',
+        ]);
+    });
+
+    it('names each mount in the header, with what it contributed', async () =>
+    {
+        writeRouter(
+            AUTH
+            + 'const getRoot = route.get(\'/\').handler(async () => ({}));\n\n'
+            + 'export const appRouter = defineRouter({ getRoot }).packages([authRouter]);\n',
+        );
+
+        const content = await generate();
+
+        expect(content).toContain('The entries under the .packages() line below are not this app\'s');
+        expect(content).toContain('router.packages[0] — 2 routes under /_auth');
+        expect(content).toContain('A package upgrade reaches them only through a regeneration');
+    });
+
+    it('leaves out an ops router, and says in the header that it contributed nothing', async () =>
+    {
+        writeRouter(
+            OPS
+            + '\nconst getRoot = route.get(\'/\').handler(async () => ({}));\n\n'
+            + 'export const appRouter = defineRouter({ getRoot }).packages([opsRouter]);\n',
+        );
+
+        const content = await generate();
+
+        // Not one entry, so not one header line either: an app whose only mount
+        // publishes no map regenerates byte-identically to what it committed.
+        expect(entriesOf(content)).toEqual(['getRoot: { method: \'GET\', path: \'/\' },']);
+        expect(content).not.toContain('.packages()');
+        expect(content).not.toContain('countExamples');
+    });
+
+    it('takes the mapped package and leaves the ops one out when both are mounted', async () =>
+    {
+        writeRouter(
+            OPS
+            + AUTH
+            + '\nconst getRoot = route.get(\'/\').handler(async () => ({}));\n\n'
+            + 'export const appRouter = defineRouter({ getRoot }).packages([authRouter, opsRouter]);\n',
+        );
+
+        const content = await generate();
+
+        expect(Object.keys(loadGeneratedMap())).toEqual(['getRoot', 'login', 'logout']);
+        expect(content).toContain('router.packages[0] — 2 routes under /_auth');
+        expect(content).toContain('router.packages[1] — no routes (publishes no route map)');
+    });
+
+    it('reaches a package router mounted two deep', async () =>
+    {
+        writeRouter(
+            AUTH
+            + 'const getRoot = route.get(\'/\').handler(async () => ({}));\n'
+            + 'const getLabelCache = route.get(\'/_cms/labels/cache\').handler(async () => ({}));\n\n'
+            + 'const cmsRouter = defineRouter({ getLabelCache }).packages([authRouter]);\n\n'
+            + 'export const appRouter = defineRouter({ getRoot }).packages([cmsRouter]);\n',
+        );
+
+        await generate();
+
+        expect(Object.keys(loadGeneratedMap())).toEqual(['getRoot', 'getLabelCache', 'login', 'logout']);
+    });
+
+    it('collects a route reached through two mounts once, not twice', async () =>
+    {
+        // A package exporting one set of routes under a router and a sub-router
+        // an app mounts beside it hands the generator the same RouteDef under
+        // the same name twice. That is one route with two mounts and nothing
+        // the app could rename.
+        writeRouter(
+            'const getRoot = route.get(\'/\').handler(async () => ({}));\n'
+            + 'const publishSection = route.post(\'/_pkg/admin/publish\').handler(async () => ({}));\n\n'
+            + 'const packageAdminRouter = defineRouter({ publishSection });\n'
+            + 'const packageRouter = defineRouter({ publishSection });\n\n'
+            + 'export const appRouter = defineRouter({ getRoot })\n'
+            + '    .packages([packageRouter, packageAdminRouter]);\n',
+        );
+
+        const content = await generate();
+
+        expect(Object.keys(loadGeneratedMap())).toEqual(['getRoot', 'publishSection']);
+
+        // The second mount contributed nothing, and the header says why rather
+        // than leaving a bare `no routes` to read as an empty package.
+        expect(content).toContain('router.packages[1] — no routes '
+            + '(every route it holds was already collected through router.packages[0].publishSection)');
+    });
+
+    it('still refuses the app\'s own route registered under one name twice', async () =>
+    {
+        // The identity rule collapses a second collection only for a package
+        // route. The app registering one route at the top level and again
+        // inside a group reaches one name twice with one RouteDef, and that is
+        // the app's own spelling to fix.
+        writeRouter(
+            'const getRoot = route.get(\'/\').handler(async () => ({}));\n\n'
+            + 'const group = defineRouter({ getRoot });\n\n'
+            + 'export const appRouter = defineRouter({ getRoot, group });\n',
+        );
+
+        await expect(generate()).rejects.toThrow(RouteMapGeneratorError);
+        await expect(generate()).rejects.toThrow(/Two routes are both named "getRoot"/);
+        await expect(generate()).rejects.toThrow(/router\.group\.getRoot/);
+    });
+
+    it('walks a package router hoisted to two mounts once', async () =>
+    {
+        // `.packages()` copies a mounted router's own package routers up to the
+        // top level and leaves them in place below it, so `authRouter` is
+        // reachable twice. Walking it twice would collide it with itself.
+        writeRouter(
+            AUTH
+            + 'const getRoot = route.get(\'/\').handler(async () => ({}));\n'
+            + 'const getLabelCache = route.get(\'/_cms/labels/cache\').handler(async () => ({}));\n\n'
+            + 'const cmsRouter = defineRouter({ getLabelCache }).packages([authRouter]);\n\n'
+            + 'export const appRouter = defineRouter({ getRoot }).packages([cmsRouter]);\n',
+        );
+
+        const content = await generate();
+
+        expect(Object.keys(loadGeneratedMap())).toEqual(['getRoot', 'getLabelCache', 'login', 'logout']);
+        expect(content).toContain('router.packages[1] — no routes (already reached through router.packages[0].packages[0])');
+    });
+
+    it('regenerates byte-identically with packages mounted', async () =>
+    {
+        writeRouter(
+            AUTH
+            + 'const getRoot = route.get(\'/\').handler(async () => ({}));\n\n'
+            + 'export const appRouter = defineRouter({ getRoot }).packages([authRouter]);\n',
+        );
+
+        expect(await generate()).toBe(await generate());
+    });
+
+    it('refuses a package route that names a method the file could not be typed with', async () =>
+    {
+        // Left out of the map while only the app's own routes were written; it
+        // is written now, and `method: 'get'` would emit a file that does not
+        // compile.
+        writeRouter(
+            'const getRoot = route.get(\'/\').handler(async () => ({}));\n'
+            + 'const login = route.post(\'/_auth/login\').handler(async () => ({}));\n\n'
+            + 'const authRouter = defineRouter({ login: { ...login, method: \'get\' } } as any);\n\n'
+            + 'export const appRouter = defineRouter({ getRoot }).packages([authRouter]);\n',
+        );
+
+        await expect(generate()).rejects.toThrow(/is not an HttpMethod/);
     });
 });

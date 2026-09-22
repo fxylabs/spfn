@@ -22,17 +22,19 @@ export interface Router<TRoutes extends Record<string, RouteDef<any, any, any> |
     /**
      * Whether a client ever addresses these routes by name.
      *
-     * True for an ordinary router. A package router is published with a route
-     * map its consumers merge into their own (`{ ...routeMap, ...authRouteMap }`),
-     * and that merge is what makes an app route sharing a name with a package
-     * route a defect worth refusing a build over — the package entry wins the
-     * name while the generated types still describe the app's route.
+     * True for an ordinary router. A mounted package router that is true here
+     * has its routes written into the app's generated route map, which is what
+     * lets the package's own client (`authApi.login`) resolve a name through the
+     * app's RPC proxy. It is also what makes an app route sharing a name with a
+     * package route a defect worth refusing a build over: the map holds one
+     * entry per name, so one of the two paths would become unreachable while the
+     * generated types still describe the app's route.
      *
-     * False says no such merge exists: the routes are reached by URL and never
-     * by name, so nothing of the app's can be overwritten and a shared name is
-     * only a shared name. `createOpsRouter` sets it — `spfn ops` invokes an ops
-     * command over raw HTTP, and no ops route map is published for anyone to
-     * merge.
+     * False says no client names these routes: they are reached by URL, by
+     * something that was handed the URL, so nothing of them belongs in the map
+     * and a name they share with an app route is only a shared name.
+     * `createOpsRouter` sets it — `spfn ops` invokes an ops command over the URL
+     * the manifest gave it.
      */
     _publishesRouteMap: boolean;
 
@@ -238,21 +240,21 @@ export function defineRouter<TRoutes extends Record<string, RouteDef<any, any, a
 /**
  * A router no client addresses by name.
  *
- * Mounting a package router is what makes a name collision between it and an
- * app route a defect: the app merges the package's published route map into its
- * own, so the package entry wins the name and every call the typed client makes
- * against the app's route goes to the package's path. A router built here
- * publishes no such map — its routes are reached by URL, by a tool that was
- * told the URL — so a name it shares with an app route overwrites nothing and
- * the route-map generator leaves it alone.
+ * The app's generated route map carries the routes of every package router the
+ * app mounts with `.packages()`, so that a package client calling its own route
+ * by name resolves through the app's RPC proxy. A router built here is left out
+ * of that map: its routes are reached by URL, by a tool that was told the URL,
+ * so no name of theirs has to resolve anywhere and a name shared with an app
+ * route is only a shared name.
  *
  * Declared by the package that ships the router, because only it knows whether
- * it publishes a map: `createOpsRouter`, `@spfn/monitor`, `@spfn/cms` and the
- * tracking routes of `@spfn/notification` all do, and any package whose surface
- * is reached by URL may. The obligation is the whole of it — a package that
- * *does* publish a route map must use `defineRouter`, or a collision that really
- * would overwrite an app route generates silently. `defineRouter` is the
- * default for exactly that reason: a package that says nothing is checked.
+ * any client names these routes: `createOpsRouter` and the tracking routes of
+ * `@spfn/notification` do it, and any package whose surface is reached by URL
+ * may. The obligation is the whole of it — a package whose client *does* name
+ * its routes must use `defineRouter`, or those names land in nobody's map and
+ * resolve nowhere (and a collision that really would take an app route's entry
+ * generates silently). `defineRouter` is the default for exactly that reason: a
+ * package that says nothing is carried and checked.
  */
 export function defineUnmappedRouter<TRoutes extends Record<string, RouteDef<any, any, any> | Router<any>>>(
     routes: TRoutes,

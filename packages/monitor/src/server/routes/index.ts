@@ -4,7 +4,7 @@
  * Combines all monitor-related routes into a single router
  */
 
-import { defineUnmappedRouter } from '@spfn/core/route';
+import { defineRouter } from '@spfn/core/route';
 import {
     listErrors,
     getErrorDetail,
@@ -22,12 +22,15 @@ import {
  * - Logs: /_monitor/admin/logs
  * - Stats: /_monitor/admin/stats
  *
- * `defineUnmappedRouter`, not `defineRouter`: this package publishes no route
- * map — it has no codegen config and exports none — so an app that mounts it
- * with `.packages()` merges nothing over its own map, and an app route sharing
- * a name with one of these (`getStats`) loses nothing to it.
+ * `defineRouter`, because a client addresses these routes by name: `monitorApi`
+ * is `createApi<typeof monitorRouter>`, and every dashboard component calls
+ * through it (`monitorApi.getStats.call({})`). The name is resolved in the app's
+ * route map, which carries the routes of every package router the app mounts
+ * with `.packages()` — so `defineRouter` is what puts these there, and what
+ * makes an app route of the same name (`getStats`) a collision the app's build
+ * refuses instead of a call that silently reaches the app's route.
  */
-export const monitorRouter = defineUnmappedRouter({
+export const monitorRouter = defineRouter({
     listErrors,
     getErrorDetail,
     updateErrorStatus,
