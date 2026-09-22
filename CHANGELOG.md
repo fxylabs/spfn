@@ -381,6 +381,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 #### @spfn/core
 
+- **BREAKING: a response interceptor could not redirect, and the caller was handed a network
+  failure that never happened** (#104). The client ran `onResponse` inside the `try` that wraps
+  `fetch`, whose `catch` tells apart only `AbortError` and calls everything else
+  `ApiError(message, 0, url, undefined, 'network')`. Next.js implements `redirect()` and
+  `notFound()` by throwing an error carrying a `digest`, so the pattern the scaffold's own
+  `api-client.ts` suggests — `if (response.status === 401) redirect('/login')` — never
+  navigated: the digest was caught and relabelled, and the caller got a transport error for a
+  request that completed. That is worse than the interceptor doing nothing, because retry and
+  offline handling keyed on `errorType === 'network'` act on it. The response interceptors now
+  run **after** the `try`/`catch` rather than inside it, so an interceptor's throw reaches the
+  caller unchanged — `redirect()` and `notFound()` navigate, and an interceptor raising a
+  domain error of its own raises that error. The `try` still classifies exactly what it exists
+  to classify: an aborted request is still `408` / `'timeout'`, a failed fetch is still `0` /
+  `'network'`, and a body that is not the JSON its content-type claims is unchanged too.
+  Replacing `response` / `body` from an interceptor still takes effect for everything after it,
+  error-status handling included, and the global interceptor still runs before the per-call
+  one. `@spfn/core` 0.3.0-beta.13.
+    - **Migration**: the inversion is that an `onResponse` which throws now raises **its own**
+      error at the call site, where beta.12 handed the caller an `ApiError(message, 0, url,
+      undefined, 'network')` instead — so a `catch (e) { if (e instanceof ApiError) … }` around
+      a call no longer sees it and the error escapes that catch. An interceptor whose throw was
+      being absorbed that way must either catch it inside the interceptor and return a
+      response, or the call site must widen its handler to the error the interceptor really
+      raises; a `redirect()` or `notFound()` thrown from an interceptor needs no handler and
+      must not be caught at all.
+
+- **A `paths` target the generator could not read crashed it with a bare `EACCES`** (#103).
+  Alias resolution asks whether a wildcard target names a directory holding anything, and
+  `statSync(path, { throwIfNoEntry: false })` suppresses only `ENOENT`: a directory the
+  process may not read stats fine and then makes `readdirSync` throw, and an unreadable parent
+  makes `statSync` throw too. `projectAliases` runs before the `try`/`catch` that turns a load
+  failure into a `RouteMapGeneratorError`, so `spfn codegen run` died with
+  `EACCES: permission denied, scandir '<dir>'` and nothing naming alias resolution or the
+  `paths` entry involved, where every other load failure names the file and the cause. A
+  target that cannot be read now counts as unresolvable and the next target in the entry is
+  tried — what already happened for a missing one — so `"@/*": ["./dist/*", "./src/*"]`
+  resolves through `./src` when `./dist` is unreadable. The guard names `EACCES` and `EPERM`,
+  the latter being what Windows and some container runtimes raise for the same directory, and
+  lets every other error through. A narrow regression from the empty-directory change in #216.
+  `@spfn/core` 0.3.0-beta.13.
+
 - **A route declared inside a nested `defineRouter` could not be named the way the server
   registers it** (#100). `registerRoutes` has always walked into a nested router and
   registered every route inside it under its own flat name, and the two client-side type

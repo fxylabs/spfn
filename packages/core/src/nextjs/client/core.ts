@@ -302,25 +302,6 @@ export function createApi<TRouter extends Router<any>>(
 
             // Parse response
             body = await parseResponseBody(response);
-
-            // Execute global + local response interceptors
-            if (globalOnResponse)
-            {
-                const result = await globalOnResponse(response, body);
-                response = result.response;
-                body = result.body;
-            }
-            if (options.onResponse)
-            {
-                const result = await options.onResponse(response, body);
-                response = result.response;
-                body = result.body;
-            }
-
-            if (debug)
-            {
-                debugLogs.logResponse(apiLogger, routeName, response.status, !!body);
-            }
         }
         catch (error)
         {
@@ -360,6 +341,34 @@ export function createApi<TRouter extends Router<any>>(
                 undefined,
                 'network',
             );
+        }
+
+        // Execute global + local response interceptors
+        //
+        // These run outside the try/catch on purpose. That catch classifies a transport
+        // failure, and an interceptor throwing is not one: Next.js implements `redirect()`
+        // and `notFound()` by throwing an error carrying a digest, and an interceptor
+        // raising a domain error of its own is not a transport failure either. Run inside
+        // the try, every one of those became `ApiError(..., 0, ..., 'network')` — the
+        // navigation never happened and the caller was handed a network failure that never
+        // occurred, which retry and offline handling keyed on `errorType === 'network'`
+        // act on.
+        if (globalOnResponse)
+        {
+            const result = await globalOnResponse(response, body);
+            response = result.response;
+            body = result.body;
+        }
+        if (options.onResponse)
+        {
+            const result = await options.onResponse(response, body);
+            response = result.response;
+            body = result.body;
+        }
+
+        if (debug)
+        {
+            debugLogs.logResponse(apiLogger, routeName, response.status, !!body);
         }
 
         // Handle error responses

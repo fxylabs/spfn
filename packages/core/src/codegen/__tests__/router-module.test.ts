@@ -14,13 +14,36 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs';
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { dirname, join } from 'path';
 import { Logger } from '@spfn/core/logger';
 import { tsconfigAliases } from '../generators/router-module';
 
 let projectDir: string;
+
+/** Directories a case made unreadable, so `afterEach` can give the mode back and remove them. */
+const unreadableDirs: string[] = [];
+
+/**
+ * A directory the process may not read, holding a file at `contentPath` under it: the shape
+ * issue #103 crashed the generator on.
+ *
+ * The content is what makes a case using this assert anything. Where the mode bit does not
+ * bite — Windows, a process holding `CAP_DAC_OVERRIDE`, a filesystem mounted without
+ * permission enforcement — the target resolves, the alias comes out as this directory rather
+ * than `src`, and the case fails. Left empty it would read as "exists and resolves nothing"
+ * there instead, which is the case above and passes whether or not the mode is enforced.
+ */
+function makeUnreadableDir(relativePath: string, contentPath: string): void
+{
+    writeFile(contentPath, 'export const x = 1;\n');
+
+    const absolutePath = join(projectDir, relativePath);
+
+    chmodSync(absolutePath, 0o000);
+    unreadableDirs.push(absolutePath);
+}
 
 function writeFile(relativePath: string, content: string): void
 {
@@ -61,6 +84,14 @@ beforeEach(() =>
 
 afterEach(() =>
 {
+    // `rmSync` cannot walk an unreadable directory either, so give the mode back first.
+    for (const path of unreadableDirs)
+    {
+        chmodSync(path, 0o700);
+    }
+
+    unreadableDirs.length = 0;
+
     rmSync(projectDir, { recursive: true, force: true });
 });
 
@@ -385,6 +416,81 @@ describe('tsconfigAliases - several targets for one pattern', () =>
 
         expect(aliases).toEqual({ '@/': join(projectDir, 'dist') });
         expect(warnings).toMatch(/none of them exist/);
+    });
+
+    it('passes over a target directory the process cannot read', ctx =>
+    {
+        if (process.getuid?.() === 0)
+        {
+            ctx.skip('runs as root, which bypasses the permission bits: a mode-000 directory would '
+                + 'read fine and this case would pass without exercising the guard');
+        }
+
+        // `statSync`'s `throwIfNoEntry: false` suppresses only ENOENT, so a
+        // directory with no read permission used to reach the developer as a bare
+        // `EACCES: permission denied, scandir` out of `readdirSync` — thrown before
+        // the catch that names the router file and the cause.
+        makeUnreadableDir('dist', 'dist/routes.js');
+        writeFile('src/routes.ts', 'export const x = 1;\n');
+        writeFile(
+            'tsconfig.json',
+            JSON.stringify({ compilerOptions: { paths: { '@/*': ['./dist/*', './src/*'] } } }),
+        );
+
+        let aliases: Record<string, string> = {};
+        const warnings = warningsOf(() => (aliases = tsconfigAliases(projectDir)));
+
+        expect(aliases).toEqual({ '@/': join(projectDir, 'src') });
+        expect(warnings).toBe('');
+    });
+
+    it('passes over a target whose parent directory the process cannot read', ctx =>
+    {
+        if (process.getuid?.() === 0)
+        {
+            ctx.skip('runs as root, which bypasses the permission bits: a mode-000 directory would '
+                + 'read fine and this case would pass without exercising the guard');
+        }
+
+        // The `statSync` above the `readdirSync` has the same hole: `throwIfNoEntry:
+        // false` suppresses ENOENT, not the EACCES an unsearchable path component
+        // raises. `./build/dist/*` under a mode-000 `build` is that shape. `build/dist`
+        // is real and holds a file, so the failure this case sees is EACCES on the
+        // parent rather than ENOENT on a directory nobody created.
+        makeUnreadableDir('build', 'build/dist/routes.js');
+        writeFile('src/routes.ts', 'export const x = 1;\n');
+        writeFile(
+            'tsconfig.json',
+            JSON.stringify({ compilerOptions: { paths: { '@/*': ['./build/dist/*', './src/*'] } } }),
+        );
+
+        let aliases: Record<string, string> = {};
+        const warnings = warningsOf(() => (aliases = tsconfigAliases(projectDir)));
+
+        expect(aliases).toEqual({ '@/': join(projectDir, 'src') });
+        expect(warnings).toBe('');
+    });
+
+    it('propagates a filesystem error that is not a refusal to read', () =>
+    {
+        // The guard passes over a target the filesystem refuses to read and rethrows
+        // everything else, and this is the only case holding it to the second half:
+        // replacing the whole `catch` with `return false` leaves every other case in this
+        // file passing, and that swallow is the `existsSync` defect #216 removed coming
+        // back by another route.
+        //
+        // A path component past the filesystem's name limit raises ENAMETOOLONG out of
+        // `statSync`. It needs no fixture and no permissions, so it does the same thing as
+        // root and on every platform. ENOTDIR cannot serve here: `throwIfNoEntry: false`
+        // suppresses it along with ENOENT, so a target under a regular file comes back
+        // `undefined` and is merely unresolvable.
+        writeFile('src/routes.ts', 'export const x = 1;\n');
+        writeFile(
+            'tsconfig.json',
+            JSON.stringify({ compilerOptions: { paths: { '@/*': [`./${'n'.repeat(300)}/*`, './src/*'] } } }),
+        );
+
+        expect(() => tsconfigAliases(projectDir)).toThrow(/ENAMETOOLONG/);
     });
 
     it('says nothing when a pattern has one target', () =>

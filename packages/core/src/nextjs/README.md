@@ -619,6 +619,10 @@ export async function createUser(formData: FormData) {
   `x-forwarded-for` — adding it back makes the IP spoofable. See *Header forwarding & client IP*.
 - **Each `.headers()/.cookies()/.fetchOptions()/.onRequest()/.onResponse()` returns a new
   builder.** Chain them in one expression; a dangling builder without `.call()` does nothing.
+- **A client `onResponse` may throw, and the throw is the caller's.** It runs outside the
+  transport error handling, so `redirect('/login')` on a 401 navigates and a domain error
+  raised there is raised as itself — neither is relabelled an `ApiError` of type `'network'`.
+  Only a failed fetch (`0` / `'network'`) and an aborted one (`408` / `'timeout'`) are.
 
 ---
 

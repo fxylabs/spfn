@@ -106,6 +106,23 @@ function targetPath(target: string, base: string): string
 }
 
 /**
+ * Codes the filesystem raises when it refuses to read a path at all.
+ *
+ * POSIX says EACCES; Windows and some container runtimes say EPERM for the same
+ * directory. Keying on one of them would fix a developer machine and leave the
+ * other platform crashing, so the guard names both.
+ */
+const UNREADABLE_CODES = new Set(['EACCES', 'EPERM']);
+
+/** Whether an error is the filesystem refusing to read a path, rather than a fault to surface. */
+function isUnreadable(error: unknown): boolean
+{
+    // A `throw` that is not an object at all must not make the guard itself throw and
+    // bury what was really raised.
+    return UNREADABLE_CODES.has((error as { code?: string } | null)?.code ?? '');
+}
+
+/**
  * Whether a target can resolve anything at all.
  *
  * TypeScript and tsup substitute each target and take the first that resolves
@@ -116,7 +133,17 @@ function targetPath(target: string, base: string): string
  * nothing, and taking it ahead of `./src/*` left every import unresolved.
  *
  * A target with no wildcard names a file, and `existsSync` is the whole of the
- * question for it.
+ * question for it — it reports false for a path it cannot read rather than
+ * throwing.
+ *
+ * The wildcard branch has to say so itself. `throwIfNoEntry: false` suppresses
+ * only ENOENT: a directory the process cannot read stats fine and then makes
+ * `readdirSync` throw, and an unreadable parent makes `statSync` throw too. That
+ * used to reach the developer as a bare `EACCES: permission denied, scandir` from
+ * inside `loadRouterModule`, before the catch that names the file and the cause.
+ * A target that cannot be read resolves nothing, so it counts as unresolvable and
+ * the next target in the entry is tried — which is what the caller already does
+ * for a missing one. Every other error is left to throw.
  */
 function targetResolves(target: string, base: string): boolean
 {
@@ -127,9 +154,21 @@ function targetResolves(target: string, base: string): boolean
         return existsSync(path);
     }
 
-    const stats = statSync(path, { throwIfNoEntry: false });
+    try
+    {
+        const stats = statSync(path, { throwIfNoEntry: false });
 
-    return stats?.isDirectory() === true && readdirSync(path).length > 0;
+        return stats?.isDirectory() === true && readdirSync(path).length > 0;
+    }
+    catch (error)
+    {
+        if (!isUnreadable(error))
+        {
+            throw error;
+        }
+
+        return false;
+    }
 }
 
 /** The target a `paths` entry resolves through, and the ones it passed over. */

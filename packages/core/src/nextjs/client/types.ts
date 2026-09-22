@@ -314,6 +314,12 @@ export type RequestInterceptor = (
 
 /**
  * Response interceptor - called after fetch
+ *
+ * It runs outside the client's transport error handling, so throwing from it is a
+ * supported way to end the call: the error reaches the caller unchanged, which is what
+ * lets `redirect()` and `notFound()` navigate from one (issue #104). Returning
+ * `{ response, body }` replaces both for everything after it, error-status handling
+ * included.
  */
 export type ResponseInterceptor = (
     response: Response,
