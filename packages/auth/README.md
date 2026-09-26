@@ -1394,6 +1394,11 @@ Both consumers of that redirect are served:
   (default `/auth/mfa`, or the `mfaPath` option) with `?challenge=` and `?returnUrl=`.
 - An app on the callback-page flow posts `{ mfaChallenge }` to `POST /_auth/oauth/finalize`,
   which answers **202** with the challenge echoed back instead of finalizing a session.
+  `OAuthCallback` does this for you and then navigates to the confirm page with the same
+  `?challenge=` and `?returnUrl=` — so both flows are supported end to end: callback → 202 and
+  pending cookie → confirm page → proof → session → return path. The component runs in the
+  browser and cannot read `SPFN_AUTH_MFA_CONFIRM_PATH`; an app that sets it passes the same
+  path as `<OAuthCallback mfaPath="…" />`.
 
 ##### In the Next.js proxy
 
@@ -1425,6 +1430,72 @@ if (result.mfaRequired)
 
 `completeMfaWithRecoveryCode` takes a written-down code, and `completeMfaWithPasskey` runs the
 ceremony and answers the same discriminated union the other passkey helpers do.
+
+##### The confirm page, with `useMfaConfirm`
+
+Both OAuth flows land on `SPFN_AUTH_MFA_CONFIRM_PATH` (`/auth/mfa`). `useMfaConfirm()`, from
+`@spfn/auth/nextjs/client`, is that page's flow without its look: it reads `?challenge=` and
+`?returnUrl=` (the return path through `isSafeReturnPath`, `/` when refused), sends a page
+without a challenge to `signInPath` (default `/auth/login`), and on success does a full
+`window.location.assign` to the return path so the server reads the session cookie the proxy
+just sealed.
+
+```tsx
+// app/auth/mfa/page.tsx — a server component
+import { redirect } from 'next/navigation';
+import { getSession, isSafeReturnPath } from '@spfn/auth/nextjs/server';
+import { MfaForm } from './mfa-form';
+
+export default async function MfaPage({ searchParams }: { searchParams: Promise<{ returnUrl?: string }> })
+{
+    const { returnUrl } = await searchParams;
+
+    // Already signed in: nothing to confirm.
+    if (await getSession())
+    {
+        redirect(returnUrl && isSafeReturnPath(returnUrl) ? returnUrl : '/');
+    }
+
+    return <MfaForm />;
+}
+```
+
+```tsx
+// app/auth/mfa/mfa-form.tsx
+'use client';
+import { useState } from 'react';
+import { useMfaConfirm } from '@spfn/auth/nextjs/client';
+
+export function MfaForm()
+{
+    const mfa = useMfaConfirm();
+    const [code, setCode] = useState('');
+
+    return (
+        <form onSubmit={(event) => { event.preventDefault(); mfa.submitCode(code); }}>
+            <input value={code} onChange={(event) => setCode(event.target.value)} autoComplete="one-time-code" />
+            {mfa.state === 'wrong' && <p>That code did not verify. Check your authenticator.</p>}
+            {mfa.state === 'expired' && <p>That sign-in expired. <a href="/auth/login">Sign in again</a>.</p>}
+            {mfa.state === 'failed' && <p>Something went wrong. Try again.</p>}
+            <button disabled={mfa.state === 'submitting'}>Continue</button>
+            {mfa.isPasskeySupported && <button type="button" onClick={mfa.tryPasskey}>Use a passkey</button>}
+        </form>
+    );
+}
+```
+
+| `state` | means | what the page offers |
+|---------|-------|----------------------|
+| `idle` | nothing submitted, or a passkey sheet closed (`cancelled`, `no-credential`, `unsupported`) | the inputs |
+| `submitting` | a proof is in flight; another submit is ignored; stays so while navigating away | a disabled button |
+| `wrong` | `MfaVerificationFailedError` (401) — a wrong code, or a challenge spent by five wrong ones | try again |
+| `expired` | `SESSION_PENDING_EXPIRED` or `SESSION_PENDING_MISMATCH` from the proxy | sign in again |
+| `failed` | anything else — network, rate limit, a passkey ceremony `error` | try again; the page's inputs are untouched |
+
+`error` carries the error behind the last `wrong` / `expired` / `failed`. The challenge itself
+is never logged or handed to a callback. A challenge that outlives its ten minutes **at the
+backend** is refused like a wrong code, so it reads as `wrong` rather than `expired`; the
+backend answers both with one body on purpose.
 
 #### Telling people it exists
 
