@@ -15,6 +15,7 @@ import { eq } from 'drizzle-orm';
 
 import { setupTestDb, teardownTestDb, clearTables, getTestDb, isDatabaseAvailable } from '../helpers/db';
 import { roles, users, userInvitations } from '@/server/entities';
+import type { UserStatus } from '@/server/types';
 import { hashPassword } from '@/server/helpers/password';
 import { getAuth } from '@/server/helpers/context';
 import { generateKeyPair, generateClientToken } from '@/server/lib/crypto';
@@ -81,6 +82,15 @@ async function seed(email: string | null, role: RoleName, { verified = true, pho
         roleId: await roleId(role),
         emailVerifiedAt: verified ? new Date() : null,
     }).returning();
+
+    return row;
+}
+
+async function seedWithStatus(email: string, role: RoleName, status: UserStatus)
+{
+    const row = await seed(email, role);
+
+    await getTestDb().update(users).set({ status }).where(eq(users.id, row.id));
 
     return row;
 }
@@ -594,6 +604,32 @@ describe.skipIf(!dbAvailable)('Per-role email-domain policy', () =>
             await expect(assertRoleEmailDomainPolicy()).resolves.toBeUndefined();
         });
 
+        it('#29a superadmin restricted, compliant superadmin suspended, the only active one out: refuses', async () =>
+        {
+            await seed('boss@gmail.test', 'superadmin');
+            await seedWithStatus('root@example.com', 'superadmin', 'suspended');
+            setPolicy('superadmin=example.com');
+
+            await expect(assertRoleEmailDomainPolicy()).rejects.toThrow("entry 'superadmin=example.com'");
+        });
+
+        it('#29b superadmin restricted, the only superadmin row is deleted and anonymised: starts', async () =>
+        {
+            await seedWithStatus('deleted-1@deleted.invalid', 'superadmin', 'deleted');
+            setPolicy('superadmin=example.com');
+
+            await expect(assertRoleEmailDomainPolicy()).resolves.toBeUndefined();
+        });
+
+        it('#29c superadmin restricted, an inactive one out and an active one compliant: starts', async () =>
+        {
+            await seedWithStatus('boss@gmail.test', 'superadmin', 'inactive');
+            await seed('root@example.com', 'superadmin');
+            setPolicy('superadmin=example.com');
+
+            await expect(assertRoleEmailDomainPolicy()).resolves.toBeUndefined();
+        });
+
         it('#30 ADMIN_ACCOUNTS seeds an out-of-domain superadmin: refuses, creates nothing', async () =>
         {
             setPolicy('superadmin=example.com');
@@ -635,6 +671,16 @@ describe.skipIf(!dbAvailable)('Per-role email-domain policy', () =>
                 { userId: outOfDomain.id, roleName: 'admin', reason: 'domain' },
                 { userId: unverified.id, roleName: 'admin', reason: 'unverified' },
             ]));
+        });
+
+        it('#31a listRoleEmailDomainViolations: a suspended out-of-policy admin is still listed', async () =>
+        {
+            setPolicy('admin=example.com');
+            const suspended = await seedWithStatus('staff@gmail.test', 'admin', 'suspended');
+
+            expect(await listRoleEmailDomainViolations()).toEqual([
+                { userId: suspended.id, roleName: 'admin', reason: 'domain' },
+            ]);
         });
 
         it('#32 demoteRoleEmailDomainViolations: the two become user, compliant untouched, returns the two', async () =>

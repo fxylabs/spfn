@@ -10,6 +10,7 @@ import { BaseRepository } from '@spfn/core/db';
 import { EntityNotFoundError, NotFoundError } from '@spfn/core/errors';
 
 import { rolePermissions, roles, NewUser, users, permissions } from '../entities';
+import type { UserStatus } from '../types';
 import { normalizeEmail, normalizeOptionalEmail } from '../helpers/email';
 
 /**
@@ -242,8 +243,11 @@ export class UsersRepository extends BaseRepository
      *
      * The two columns the policy reads and the stored role name — nothing else,
      * so a report built on it has no address to leak beyond the rule itself.
+     *
+     * @param roleNames - Stored role names to match
+     * @param status - Only accounts in this status; every status when omitted
      */
-    async findRoleHolders(roleNames: string[])
+    async findRoleHolders(roleNames: string[], status?: UserStatus)
     {
         return this.readDb
             .select({
@@ -254,7 +258,10 @@ export class UsersRepository extends BaseRepository
             })
             .from(users)
             .innerJoin(roles, eq(users.roleId, roles.id))
-            .where(inArray(roles.name, roleNames));
+            .where(and(
+                inArray(roles.name, roleNames),
+                status ? eq(users.status, status) : undefined,
+            ));
     }
 
     /**

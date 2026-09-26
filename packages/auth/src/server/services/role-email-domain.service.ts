@@ -158,6 +158,11 @@ async function assertRestrictedRolesExist(roleNames: string[]): Promise<void>
     }
 }
 
+/**
+ * Only active superadmins count: one that is suspended, inactive, pending
+ * deletion or deleted cannot sign in, so it neither keeps the policy safe nor
+ * makes it a lock-out.
+ */
 async function assertSuperadminReachable(): Promise<void>
 {
     if (!getRoleEmailDomainPolicy().has('superadmin'))
@@ -165,7 +170,7 @@ async function assertSuperadminReachable(): Promise<void>
         return;
     }
 
-    const holders = await usersRepository.findRoleHolders(['superadmin']);
+    const holders = await usersRepository.findRoleHolders(['superadmin'], 'active');
 
     if (holders.length > 0 && !holders.some(holder => isEmailAllowedForRole(holder, 'superadmin')))
     {

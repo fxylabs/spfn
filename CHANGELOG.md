@@ -157,6 +157,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`admin=example.com;support=example.com,partner.example`) lets a listed role be held only by an
   account with a verified email under one of its domains — exact, IDNA-normalised match. Unset,
   nothing changes. `@spfn/auth` 0.3.0-beta.28.
+    - **Removed**: `fetchUserRoleAndPermissions`, the `usersRepository` method that was public through
+      `@spfn/auth/server`. It read the stored role and its permissions; the role a request holds now
+      depends on the policy. Use `getAuthSessionService(userId)` (exported) for the resolved role and
+      permissions, or `usersRepository.fetchActiveRolePermissions(roleId)` (exported) when you already
+      hold the role.
     - **Grant**: the admin role route, `updateUserService`, invitation create and accept refuse
       with `403 RoleEmailDomainNotAllowedError` (`details.reason`: `domain`, `unverified`,
       `no_email`).
