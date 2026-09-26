@@ -217,6 +217,24 @@ export const authEnvSchema = defineEnvSchema({
     },
 
     // ============================================================================
+    // Role Email-Domain Policy
+    // ============================================================================
+    SPFN_AUTH_ROLE_EMAIL_DOMAINS: {
+        ...envString({
+            description: 'Per-role allow-list of email domains: "role=domain[,domain]" entries separated by ";". '
+                + 'A listed role is granted and resolved only for an account with a verified email under one of its '
+                + 'domains (exact match, IDNA-normalised); anyone else resolves to the "user" role. Unlisted roles '
+                + 'are unrestricted; unset means no policy. Boot refuses a malformed value, a restriction on "user", '
+                + 'an unknown role, and a superadmin restriction no stored superadmin satisfies.',
+            required: false,
+            examples: [
+                'admin=example.com',
+                'admin=example.com;support=example.com,partner.example',
+            ],
+        }),
+    },
+
+    // ============================================================================
     // Username Configuration
     // ============================================================================
     SPFN_AUTH_RESERVED_USERNAMES: {
@@ -418,7 +436,7 @@ export const authEnvSchema = defineEnvSchema({
 
     SPFN_AUTH_MFA_CONFIRM_PATH: {
         ...envString({
-            description: 'App page that asks for the second factor after a 202 sign-in, as a path on {NEXT_PUBLIC_SPFN_APP_URL || SPFN_APP_URL}. createOAuthCallbackHandler redirects the browser there with ?challenge= when a social sign-in needs a step-up; the page posts that challenge and a code to /_auth/mfa/verify. It is a page in your app, not an API route.',
+            description: 'App page that asks for the second factor after a 202 sign-in, as a path on {NEXT_PUBLIC_SPFN_APP_URL || SPFN_APP_URL}. When a social sign-in needs a step-up, createOAuthCallbackHandler redirects the browser there with ?challenge=, and the Next.js proxy adds it to the oauthFinalize 202 as mfaPath so OAuthCallback navigates there too; a full URL is reduced to its path; the page posts that challenge and a code to /_auth/mfa/verify. It is a page in your app, not an API route.',
             default: '/auth/mfa',
             required: false,
             examples: ['/auth/mfa', '/sign-in/two-factor'],

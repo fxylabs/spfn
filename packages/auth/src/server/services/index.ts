@@ -102,6 +102,28 @@ export type {
     DeviceAuthApprovedResult,
 } from './device-auth.service';
 
+// Device Link Service
+export {
+    issueDeviceLinkService,
+    redeemDeviceLinkService,
+    getDeviceLinkStatusService,
+    confirmDeviceLinkService,
+    denyDeviceLinkService,
+    cancelDeviceLinkService,
+    pollDeviceLinkService,
+} from './device-link.service';
+
+export type {
+    DeviceLinkIssuer,
+    IssueDeviceLinkResult,
+    RedeemDeviceLinkParams,
+    RedeemDeviceLinkResult,
+    DeviceLinkParams,
+    ConfirmDeviceLinkParams,
+    DeviceLinkStatusResult,
+    PollDeviceLinkParams,
+} from './device-link.service';
+
 // Passkey Service (WebAuthn)
 export {
     startPasskeyEnrollmentService,
@@ -211,10 +233,20 @@ export {
     hasAnyPermission,
     hasAllPermissions,
     getUserRole,
+    getStoredUserRole,
     hasRole,
     hasAnyRole,
     assertCanAssignRole,
 } from './permission.service';
+
+// Role Email-Domain Policy
+export {
+    findUserWithEffectiveRole,
+    listRoleEmailDomainViolations,
+    demoteRoleEmailDomainViolations,
+    assertRoleEmailDomainPolicy,
+} from './role-email-domain.service';
+export type { RoleEmailDomainViolation, UserWithEffectiveRole } from './role-email-domain.service';
 
 // Role Service
 export {

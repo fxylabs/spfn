@@ -19,6 +19,7 @@ const {
     keysRepository,
     passkeysRepository,
     deviceAuthorizationsRepository,
+    deviceLinksRepository,
     socialAccountsRepository,
     userProfilesRepository,
     verificationCodesRepository,
@@ -46,6 +47,9 @@ const {
     },
     deviceAuthorizationsRepository: {
         denyAllActiveByUserId: vi.fn(async () => []),
+    },
+    deviceLinksRepository: {
+        expireAllLiveByUserId: vi.fn(async () => []),
     },
     socialAccountsRepository: {
         deleteAllByUserId: vi.fn(async () => 0),
@@ -77,6 +81,7 @@ vi.mock('../../server/repositories', () => ({
     keysRepository,
     passkeysRepository,
     deviceAuthorizationsRepository,
+    deviceLinksRepository,
     socialAccountsRepository,
     userProfilesRepository,
     verificationCodesRepository,

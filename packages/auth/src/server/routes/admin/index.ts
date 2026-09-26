@@ -11,7 +11,7 @@ import {
     updateRole as _updateRole,
     deleteRole as _deleteRole,
     updateUserService,
-    getUserRole,
+    getStoredUserRole,
     assertCanAssignRole,
 } from '../../services';
 import { getAuth } from '../../helpers';
@@ -149,7 +149,9 @@ export const updateUserRole = route.patch('/_auth/admin/users/:userId/role')
             throw new ForbiddenError({ message: 'Cannot change your own role' });
         }
 
-        const targetRole = await getUserRole(params.userId);
+        // The stored role, not the effective one: an out-of-policy superadmin is
+        // still a superadmin's row, and only a superadmin may change it.
+        const targetRole = await getStoredUserRole(params.userId);
         if (targetRole === 'superadmin')
         {
             throw new ForbiddenError({ message: 'Cannot modify superadmin role' });

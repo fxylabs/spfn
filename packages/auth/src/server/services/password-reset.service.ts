@@ -33,6 +33,7 @@ import { onAfterCommit } from '@spfn/core/db';
 import { authLogger } from '../logger';
 import {
     deviceAuthorizationsRepository,
+    deviceLinksRepository,
     keysRepository,
     passwordResetTokensRepository,
     usersRepository,
@@ -268,7 +269,14 @@ async function replaceCredentials(
         ...(user.emailVerifiedAt ? {} : { emailVerifiedAt: new Date() }),
     });
 
+    // The key rows are locked before any device-link row, the order every
+    // device-link statement takes them in; the revoke itself stays last.
+    await keysRepository.lockActiveByUserId(user.id);
     await deviceAuthorizationsRepository.denyAllActiveByUserId(user.id);
+
+    // Device links the account issued go with them, for the same reason: an
+    // approved link nobody has collected would register a key after this.
+    await deviceLinksRepository.expireAllLiveByUserId(user.id);
 
     // A grant the user gave a CLI carries a refresh token, so a client holding
     // one signs itself back in within the hour — which is exactly the client a

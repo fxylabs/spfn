@@ -37,6 +37,8 @@ export interface ContractOperation
         | 'auth.device.info'
         | 'auth.device.approve'
         | 'auth.device.deny'
+        | 'auth.deviceLink.redeem'
+        | 'auth.deviceLink.poll'
         | typeof CORE_TIME_OPERATION_ID;
     method: 'GET' | 'POST';
     path: string;
@@ -189,6 +191,13 @@ export const CONTRACT_OPERATIONS: readonly ContractOperation[] = [
  * `info`, `approve` and `deny` proven, from a device that is already signed in,
  * which is what lets the server read the approving account from the caller
  * rather than from the request body.
+ *
+ * Device link is device-code login's mirror image, and only the new device's
+ * half of it is here: `redeem` and `poll`, both unproven for the same reason.
+ * The issuer's five operations — issue, status, confirm, deny, cancel — are
+ * bound to the key that signed `issue`, and the device that runs them is the
+ * already-signed-in one showing a code, not the phone this contract generates
+ * a client for. They stay REST routes, as the `mfa/*` enrolment routes do.
  *
  * `auth.mfa.verify` is unproven for the same reason the sign-ins are: the key it
  * activates is not usable until it succeeds, so there is nothing to sign the
@@ -351,6 +360,28 @@ export const AUTH_SURFACE_OPERATIONS: readonly ContractOperation[] = [
         requestType: 'DenyDeviceAuthRequest',
         summary: 'Refuses the waiting device. Answers 204 with no body, so it names no response type.',
         since: '0.10.0',
+    },
+    {
+        id: 'auth.deviceLink.redeem',
+        method: 'POST',
+        path: '/_auth/device/link/redeem',
+        authProfile: 'none',
+        requiresSession: false,
+        requestType: 'RedeemDeviceLinkRequest',
+        responseType: 'RedeemDeviceLinkResponse',
+        summary: 'Parks a new device\'s public key on the code a signed-in device shows, and returns the match number to show.',
+        since: '0.13.2',
+    },
+    {
+        id: 'auth.deviceLink.poll',
+        method: 'POST',
+        path: '/_auth/device/link/poll',
+        authProfile: 'none',
+        requiresSession: false,
+        requestType: 'PollDeviceLinkRequest',
+        responseType: 'PollDeviceAuthResponse',
+        summary: 'Asks whether the issuer picked the match number; the approved answer is the login it produced.',
+        since: '0.13.2',
     },
 ];
 

@@ -14,6 +14,7 @@ import {
 } from '../repositories';
 import type { InvitationStatus, KeyAlgorithmType } from '../types';
 import { runBeforeRegister } from '../lib/config';
+import { assertEmailAllowedForRole } from '../lib/role-email-domains';
 import { assertKeyMatchesAlgorithm, hashPassword } from '../helpers';
 import { invitationCreatedEvent, invitationAcceptedEvent } from '../events';
 import { emitDeviceRegistered } from './device-registration.service';
@@ -100,6 +101,10 @@ export async function createInvitation(params: {
     {
         throw new NotFoundError({ message: `Role with id ${roleId} not found`, resource: 'Role' });
     }
+
+    // A pending grant: the domain must already be allowed for the role, while
+    // verification waits for acceptance, which is what proves the address.
+    assertEmailAllowedForRole({ email, emailVerifiedAt: null }, role.name, { requireVerified: false });
 
     // Verify inviter exists
     const inviter = await usersRepository.findById(invitedBy);
@@ -264,6 +269,12 @@ export async function acceptInvitation(params: {
         throw new NotFoundError({ message: 'Role not found', resource: 'Role' });
     }
 
+    // Re-checked against the configuration in force now, not the one the
+    // invitation was created under. Accepting verifies the address — the account
+    // is created with it verified — so the rule is applied to that row.
+    const emailVerifiedAt = new Date();
+    assertEmailAllowedForRole({ email: invitation.email, emailVerifiedAt }, role.name);
+
     // App-level pre-registration policy gate — throws to reject
     // metadata 컬럼은 nullable — SQL NULL을 계약 타입(Record | undefined)에 맞게 정규화
     await runBeforeRegister({
@@ -280,7 +291,7 @@ export async function acceptInvitation(params: {
         email: invitation.email,
         passwordHash,
         roleId: invitation.roleId,
-        emailVerifiedAt: new Date(), // Auto-verify invited users
+        emailVerifiedAt, // Auto-verify invited users
         passwordChangeRequired: false,
         status: 'active',
     });

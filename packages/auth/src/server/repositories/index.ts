@@ -19,6 +19,7 @@ export * from './mfa-verifications.repository';
 export * from './mfa-challenges.repository';
 export * from './mfa-enrolment.repository';
 export * from './device-authorizations.repository';
+export * from './device-links.repository';
 export * from './roles.repository';
 export * from './permissions.repository';
 export * from './role-permissions.repository';

@@ -572,16 +572,57 @@ export async function pollDeviceAuthService(
         );
     }
 
-    return { status: 'approved', ...await completeDeviceLogin(consumed, params) };
+    // userId is non-null on any record that reached `approved` — the transition
+    // that sets the status sets it in the same statement — but it is a nullable
+    // column, so the impossible case is refused rather than coerced.
+    if (consumed.userId === null)
+    {
+        throw new DeviceAuthNotFoundError();
+    }
+
+    return {
+        status: 'approved',
+        ...await completeDeviceLogin({
+            userId: consumed.userId,
+            key: consumed,
+            channel: 'device-code',
+            provenance: params,
+            missingAccount: () => new DeviceAuthNotFoundError(),
+        }),
+    };
+}
+
+/** A parked key as a device-code or device-link record carries it. */
+export interface ParkedDeviceKey
+{
+    keyId: string;
+    publicKey: string;
+    fingerprint: string;
+    algorithm: KeyAlgorithmType;
+    deviceName: string | null;
+    platform: KeyPlatformType | null;
+}
+
+export interface CompleteDeviceLoginParams
+{
+    /** The account the key joins: the approver's, or the link's issuer's. */
+    userId: number;
+    key: ParkedDeviceKey;
+    channel: 'device-code' | 'device-link';
+    /** The polling device's request — the device that will be signing. */
+    provenance: DeviceProvenance;
+    /** The flow's own refusal for an account that is gone by the time the key is collected. */
+    missingAccount: () => Error;
 }
 
 /**
- * Turn a spent authorization into a login: register the parked key, stamp the
- * sign-in, and answer with exactly what password login answers with.
+ * Turn a spent record into a login: register the parked key, stamp the sign-in,
+ * and answer with exactly what password login answers with.
  *
- * `userId` is non-null on any record that reached `approved` — the transition
- * that sets the status sets it in the same statement — but it is a nullable
- * column, so the impossible case is refused rather than coerced.
+ * Shared by device-code login and device link, so the two ways a device is let
+ * in by another one judge the account alike, register the key alike, and answer
+ * alike — a client cannot tell which door it came through, and neither can a
+ * weakness be fixed in one and left in the other.
  *
  * The account is judged here and not only at approve time, with the same gate
  * and the same errors `loginService` uses, because approval and collection are
@@ -592,21 +633,14 @@ export async function pollDeviceAuthService(
  * would bring it back to life. Registering a key is registering a key, whichever
  * door it came through.
  */
-async function completeDeviceLogin(
-    record: DeviceAuthorization,
-    provenance: DeviceProvenance,
-): Promise<DeviceAuthLogin>
+export async function completeDeviceLogin(params: CompleteDeviceLoginParams): Promise<DeviceAuthLogin>
 {
-    if (record.userId === null)
-    {
-        throw new DeviceAuthNotFoundError();
-    }
-
-    const user = await usersRepository.findById(record.userId);
+    const { key, provenance } = params;
+    const user = await usersRepository.findById(params.userId);
 
     if (!user)
     {
-        throw new DeviceAuthNotFoundError();
+        throw params.missingAccount();
     }
 
     if (user.status !== 'active')
@@ -628,13 +662,13 @@ async function completeDeviceLogin(
     // the owner sees in their list is the device that will be signing.
     const registered = await registerPublicKeyService({
         userId: user.id,
-        keyId: record.keyId,
-        publicKey: record.publicKey,
-        fingerprint: record.fingerprint,
-        algorithm: record.algorithm,
-        deviceName: record.deviceName ?? undefined,
-        platform: record.platform ?? undefined,
-        channel: 'device-code',
+        keyId: key.keyId,
+        publicKey: key.publicKey,
+        fingerprint: key.fingerprint,
+        algorithm: key.algorithm,
+        deviceName: key.deviceName ?? undefined,
+        platform: key.platform ?? undefined,
+        channel: params.channel,
         ip: provenance.ip,
         userAgent: provenance.userAgent,
         binding: decideKeyBinding(user.sessionBinding, provenance.webProxy),
@@ -643,9 +677,9 @@ async function completeDeviceLogin(
     await updateLastLoginService(user.id);
 
     const result: DeviceAuthLogin = {
-        // A device-code approval is itself a second factor: the owner read the
-        // code on a device that is already signed in and said yes, so this
-        // channel never steps up (#95).
+        // An approval from a device that is already signed in is itself a
+        // second factor — the owner read the code there and said yes — so
+        // neither channel ever steps up (#95).
         mfaRequired: false,
         userId: String(user.id),
         publicId: user.publicId,

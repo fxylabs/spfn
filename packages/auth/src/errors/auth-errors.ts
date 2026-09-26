@@ -427,6 +427,129 @@ export class DeviceAuthDeniedError extends ForbiddenError
 }
 
 /**
+ * Device Link Not Found Error (404)
+ *
+ * Thrown when a device-link operation names a link the caller cannot act on: a
+ * code or handle that was never issued, a link already spent, a code another
+ * device already redeemed, and — to the issuer's operations — a link issued by
+ * a different key or account.
+ *
+ * All of those answer alike on purpose. Redeem is public, and telling a guesser
+ * "that code is real, someone got there first" is the difference between
+ * guessing at random and knowing a guess landed; and a device of the same
+ * account that did not issue the link has no business learning it exists.
+ */
+export class DeviceLinkNotFoundError extends NotFoundError
+{
+    constructor(data: { message?: string; details?: Record<string, any> } = {})
+    {
+        super({ message: data.message || 'Device link not found', details: data.details });
+        this.name = 'DeviceLinkNotFoundError';
+    }
+}
+
+/**
+ * Device Link Expired Error (400)
+ *
+ * Thrown when a device-link operation names a link whose TTL has run out, that
+ * its issuer cancelled or replaced, or whose issuing key has been revoked since
+ * — whatever state it was in. The issuer shows a fresh code; the new device
+ * starts again from it.
+ *
+ * 400 rather than 401, as `DeviceAuthExpiredError` is: the issuer's own session
+ * may be fine, and a 401 would send it to a login screen over a stale code.
+ */
+export class DeviceLinkExpiredError extends ValidationError
+{
+    constructor(data: { message?: string; details?: Record<string, any> } = {})
+    {
+        super({
+            message: data.message || 'This link code has expired. Show a new code on the signed-in device.',
+            details: data.details,
+        });
+        this.name = 'DeviceLinkExpiredError';
+    }
+}
+
+/**
+ * Device Link Not Redeemed Error (409)
+ *
+ * Thrown when the issuer confirms or denies a link no device has redeemed yet.
+ * There is no device to decide about, and the issuer's screen should still be
+ * showing the code.
+ */
+export class DeviceLinkNotRedeemedError extends ConflictError
+{
+    constructor(data: { message?: string; details?: Record<string, any> } = {})
+    {
+        super({
+            message: data.message || 'No device has used this link code yet',
+            details: data.details,
+        });
+        this.name = 'DeviceLinkNotRedeemedError';
+    }
+}
+
+/**
+ * Device Link Already Handled Error (409)
+ *
+ * Thrown when the issuer confirms, denies or cancels a link that was already
+ * approved, denied or collected. A decision on a device is made once; this is
+ * also what the loser of two concurrent decisions is told.
+ */
+export class DeviceLinkAlreadyHandledError extends ConflictError
+{
+    constructor(data: { message?: string; details?: Record<string, any> } = {})
+    {
+        super({
+            message: data.message || 'This device link has already been answered',
+            details: data.details,
+        });
+        this.name = 'DeviceLinkAlreadyHandledError';
+    }
+}
+
+/**
+ * Device Link Wrong Match Error (400)
+ *
+ * Thrown when the issuer picks a number that is not the one the redeeming device
+ * shows. The link is denied in the same moment and there is no second pick:
+ * with three choices a second try would make a blind guess two in three, and a
+ * wrong pick most often means the device that redeemed the code is not the one
+ * in the issuer's hand.
+ */
+export class DeviceLinkWrongMatchError extends ValidationError
+{
+    constructor(data: { message?: string; details?: Record<string, any> } = {})
+    {
+        super({
+            message: data.message || 'That is not the number on the new device. The link was refused; show a new code to try again.',
+            details: data.details,
+        });
+        this.name = 'DeviceLinkWrongMatchError';
+    }
+}
+
+/**
+ * Device Link Denied Error (403)
+ *
+ * Thrown when the redeeming device polls a link its issuer refused, or on which
+ * the issuer picked the wrong number. The device stops polling and says so
+ * rather than timing out.
+ */
+export class DeviceLinkDeniedError extends ForbiddenError
+{
+    constructor(data: { message?: string; details?: Record<string, any> } = {})
+    {
+        super({
+            message: data.message || 'This device link was denied',
+            details: data.details,
+        });
+        this.name = 'DeviceLinkDeniedError';
+    }
+}
+
+/**
  * Nonce Key Binding Error (400)
  *
  * Thrown when a native id_token sign-in submits a nonce that is not the public
@@ -690,6 +813,26 @@ export class InsufficientRoleError extends ForbiddenError
             details: { requiredRoles, ...data.details },
         });
         this.name = 'InsufficientRoleError';
+    }
+}
+
+/**
+ * Role Email Domain Not Allowed Error (403)
+ *
+ * Thrown when a role restricted by `SPFN_AUTH_ROLE_EMAIL_DOMAINS` is granted to an
+ * account the policy does not admit: an address outside the role's domains, an
+ * unverified address, or no address at all. `details.reason` says which
+ * (`domain`, `unverified`, `no_email`). The address itself is never carried.
+ */
+export class RoleEmailDomainNotAllowedError extends ForbiddenError
+{
+    constructor(data: { roleName?: string; reason?: string; message?: string; details?: Record<string, any> } = {})
+    {
+        super({
+            message: data.message || `The account's email does not allow it to hold the role '${data.roleName ?? ''}'`,
+            details: { roleName: data.roleName, reason: data.reason, ...data.details },
+        });
+        this.name = 'RoleEmailDomainNotAllowedError';
     }
 }
 

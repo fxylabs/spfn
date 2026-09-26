@@ -10,10 +10,11 @@ import type { PurgeStrategy } from './types';
 import type { AccountDeletionPurgeUser } from './lib/deletion-config';
 import { ensureAdminExists } from './setup';
 import { authLogger } from './logger';
-import { initializeAuth, normalizeStoredEmails } from './services';
+import { assertRoleEmailDomainPolicy, initializeAuth, normalizeStoredEmails } from './services';
 import { initOneTimeTokenManager } from './lib/one-time-token';
 import { configureDeletion } from './lib/deletion-config';
 import { configureDeviceAuth } from './lib/device-auth-config';
+import { configureDeviceLink } from './lib/device-link-config';
 import { assertOAuthRedirectUris } from './lib/oauth/redirect-uri-check';
 import {
     assertAuthorizationServerIssuer,
@@ -252,6 +253,30 @@ export interface AuthLifecycleOptions extends AuthInitOptions
     };
 
     /**
+     * Device link configuration
+     *
+     * Controls the codes handed out by `POST /_auth/device/link/issue`. The poll
+     * interval and the long-poll cap are `deviceAuth`'s: both flows wait the same
+     * way behind the same proxies.
+     *
+     * @example
+     * ```typescript
+     * createAuthLifecycle({
+     *     deviceLink: {
+     *         ttlMs: 3 * 60 * 1000,   // a link code lives 3 minutes
+     *     },
+     * })
+     * ```
+     */
+    deviceLink?: {
+        /**
+         * How long a link code stays usable, in milliseconds.
+         * @default 300000 (5 minutes)
+         */
+        ttlMs?: number;
+    };
+
+    /**
      * OAuth 2.1 authorization server for MCP clients
      *
      * Opt-in, and the opt-in is this block. Without it `/_auth/oauth2/*` and
@@ -293,6 +318,7 @@ export function createAuthLifecycle(options: AuthLifecycleOptions = {}): AuthLif
     // they all run later — but resolving it here keeps every knob set in one place
     // and rules out a first request that is served under the defaults.
     configureDeviceAuth(options.deviceAuth);
+    configureDeviceLink(options.deviceLink);
 
     // Same again, and it is also what decides whether the authorization server
     // exists at all: every route under /_auth/oauth2/* reads this and answers
@@ -310,7 +336,8 @@ export function createAuthLifecycle(options: AuthLifecycleOptions = {}): AuthLif
          *    or on an authorization server issuer no client could use
          * 1. Ensures admin account exists (creates if missing)
          * 2. Initializes RBAC system with built-in + custom roles/permissions
-         * 3. Initializes one-time token manager
+         * 3. Refuses boot on an SPFN_AUTH_ROLE_EMAIL_DOMAINS policy that cannot work
+         * 4. Initializes one-time token manager
          */
         afterInfrastructure: async () =>
         {
@@ -364,6 +391,10 @@ export function createAuthLifecycle(options: AuthLifecycleOptions = {}): AuthLif
             // ordinary accounts — leaves an install with no administrator and
             // nothing but a log line saying so.
             await ensureAdminExists();
+
+            // After seeding and RBAC init, so the roles it looks for and the
+            // superadmins it counts are the ones this instance will serve.
+            await assertRoleEmailDomainPolicy();
             initOneTimeTokenManager(options.oneTimeToken);
         },
     };

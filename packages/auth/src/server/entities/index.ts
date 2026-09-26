@@ -23,6 +23,7 @@ export * from './mfa-recovery-codes';
 export * from './mfa-verifications';
 export * from './mfa-challenges';
 export * from './device-authorizations';
+export * from './device-links';
 export * from './user-invitations';
 export * from './account-deletion-requests';
 

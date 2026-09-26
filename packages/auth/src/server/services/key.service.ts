@@ -11,7 +11,7 @@ import { getBoundKeyTtlMs } from '../lib/config';
 import { uaFamily } from '../lib/ua-family';
 import { InvalidKeyFingerprintError, KeyIdAlreadyRegisteredError } from '@spfn/auth/errors';
 import { ValidationError } from '@spfn/core/errors';
-import { deviceAuthorizationsRepository, keysRepository, usersRepository } from '../repositories';
+import { deviceAuthorizationsRepository, deviceLinksRepository, keysRepository, usersRepository } from '../repositories';
 import { revokeAllOAuth2GrantsForUser } from './oauth2-grant.service';
 import { emitDeviceRegistered } from './device-registration.service';
 import {
@@ -650,6 +650,10 @@ export async function revokeAllKeysService(
         : await keysRepository.revokeAllActiveByUserId(userId, reason);
 
     await deviceAuthorizationsRepository.denyAllActiveByUserId(userId);
+
+    // Device links the account issued go with them, for the same reason: an
+    // approved link nobody has collected would register a key after this.
+    await deviceLinksRepository.expireAllLiveByUserId(userId);
 
     // A grant the user gave a CLI carries a refresh token, so a client holding
     // one signs itself back in within the hour — which is exactly the client a

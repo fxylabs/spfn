@@ -41,7 +41,7 @@ import type { User } from '@spfn/auth/server';
 import {
     authLogger,
     keysRepository,
-    usersRepository,
+    findUserWithEffectiveRole,
     userProfilesRepository,
     getPendingDeletionInfo,
 } from '@spfn/auth/server';
@@ -135,7 +135,7 @@ export async function resolveAuthenticatedUser(userId: number): Promise<{
 }>
 {
     const [result, locale] = await Promise.all([
-        usersRepository.findByIdWithRole(userId),
+        findUserWithEffectiveRole(userId),
         userProfilesRepository.findLocaleByUserId(userId),
     ]);
     if (!result)

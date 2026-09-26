@@ -153,6 +153,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 #### @spfn/auth
 
+- **Roles can be restricted to email domains** (#106). `SPFN_AUTH_ROLE_EMAIL_DOMAINS`
+  (`admin=example.com;support=example.com,partner.example`) lets a listed role be held only by an
+  account with a verified email under one of its domains — exact, IDNA-normalised match. Unset,
+  nothing changes. `@spfn/auth` 0.3.0-beta.28.
+    - **Removed**: `fetchUserRoleAndPermissions`, the `usersRepository` method that was public through
+      `@spfn/auth/server`. It read the stored role and its permissions; the role a request holds now
+      depends on the policy. Use `getAuthSessionService(userId)` (exported) for the resolved role and
+      permissions, or `usersRepository.fetchActiveRolePermissions(roleId)` (exported) when you already
+      hold the role.
+    - **Grant**: the admin role route, `updateUserService`, invitation create and accept refuse
+      with `403 RoleEmailDomainNotAllowedError` (`details.reason`: `domain`, `unverified`,
+      `no_email`).
+    - **Check**: every role and permission resolution goes through `findUserWithEffectiveRole`;
+      an account outside the policy resolves as `user` without its row being written, so a
+      config revert restores the role. A target's protection still reads the stored role
+      (`getStoredUserRole`).
+    - **Boot** refuses a malformed value, a restriction on `user`, an unknown role, a
+      `superadmin` restriction no stored superadmin satisfies, and a seeded admin account
+      outside the policy.
+    - `listRoleEmailDomainViolations()` and `demoteRoleEmailDomainViolations()` report and
+      remediate. Ops tokens minted before an account fell out of policy are not revoked.
+
 - **An OAuth 2.1 authorization server, so Claude Code and Codex can connect to an app's `/mcp`
   endpoint as the signed-in user** (#93). Dynamic client registration, PKCE and a consent
   screen: the CLI discovers, registers itself, opens a browser and catches the redirect on a
@@ -281,6 +303,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
       notify on, never a refusal, and the addresses themselves are never returned.
       Mobile contract **0.12.0**; every new field is optional and absent for an account that
       did not opt in.
+- **`useMfaConfirm()`**, a headless hook for the second-factor confirm page, from
+  `@spfn/auth/nextjs/client` (#107): it reads `?challenge=` and `?returnUrl=`, wraps the three
+  `completeMfaWith*` helpers, reports one `state` (`idle | submitting | wrong | expired |
+  failed`) and leaves for the return path on success; the app renders the page.
 
 #### @spfn/storage
 
@@ -420,6 +446,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     - Nothing else changes: the renewal protocol, the backend's proof check and its key
       retirement are untouched, and a refused verify still installs no session and clears no
       cookie.
+- `OAuthCallback` finishes a social sign-in on an account with a second factor (#107): a
+  callback carrying `?mfaChallenge=` is posted to `oauthFinalize` and, on its 202, sent to the
+  confirm page (`mfaPath`, default `/auth/mfa`) instead of failing with "Missing required
+  parameters".
 
 #### @spfn/monitor · @spfn/cms
 

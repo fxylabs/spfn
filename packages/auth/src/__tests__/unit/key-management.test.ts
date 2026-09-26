@@ -9,7 +9,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { createHash, generateKeyPairSync } from 'node:crypto';
 
-const { keysRepository, deviceAuthorizationsRepository, revokeAllOAuth2GrantsForUser } = vi.hoisted(() => ({
+const { keysRepository, deviceAuthorizationsRepository, deviceLinksRepository, revokeAllOAuth2GrantsForUser } = vi.hoisted(() => ({
     keysRepository: {
         listForUser: vi.fn(),
         revokeByKeyIdAndUserId: vi.fn(),
@@ -22,10 +22,13 @@ const { keysRepository, deviceAuthorizationsRepository, revokeAllOAuth2GrantsFor
     deviceAuthorizationsRepository: {
         denyAllActiveByUserId: vi.fn(async () => []),
     },
+    deviceLinksRepository: {
+        expireAllLiveByUserId: vi.fn(async () => []),
+    },
     revokeAllOAuth2GrantsForUser: vi.fn(async () => undefined),
 }));
 
-vi.mock('../../server/repositories', () => ({ keysRepository, deviceAuthorizationsRepository }));
+vi.mock('../../server/repositories', () => ({ keysRepository, deviceAuthorizationsRepository, deviceLinksRepository }));
 vi.mock('../../server/services/oauth2-grant.service', () => ({ revokeAllOAuth2GrantsForUser }));
 // `key.service` now asks the second-factor service two questions — whether the
 // caller must step up, and whether a rotation carries a verification across.
@@ -295,6 +298,11 @@ describe('revoking every key', () =>
 
         expect(deviceAuthorizationsRepository.denyAllActiveByUserId).toHaveBeenCalledTimes(2);
         expect(deviceAuthorizationsRepository.denyAllActiveByUserId).toHaveBeenCalledWith(1);
+
+        // Device links the account issued go the same way: an approved link
+        // nobody collected would register a key after the sign-out.
+        expect(deviceLinksRepository.expireAllLiveByUserId).toHaveBeenCalledTimes(2);
+        expect(deviceLinksRepository.expireAllLiveByUserId).toHaveBeenCalledWith(1);
 
         // And the OAuth grants, one step further out: a grant carries a refresh
         // token, so a CLI holding one would sign itself back in within the hour.

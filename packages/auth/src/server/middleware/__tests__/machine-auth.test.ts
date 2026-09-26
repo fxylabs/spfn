@@ -35,7 +35,7 @@ vi.mock('@spfn/auth/server', async (importOriginal) =>
             findByKeyId: vi.fn(),
             updateLastUsedById: vi.fn().mockResolvedValue(undefined),
         },
-        usersRepository: { findByIdWithRole: vi.fn() },
+        findUserWithEffectiveRole: vi.fn(),
         userProfilesRepository: { findLocaleByUserId: vi.fn().mockResolvedValue('en') },
         getPendingDeletionInfo: vi.fn(),
     };
@@ -55,7 +55,7 @@ import { CLIENT_PROOF_HEADERS } from '@/server/client-proof/admission';
 import { CONTRACT_SUPPORTED_RANGE, CONTRACT_VERSION } from '@/server/client-proof/contract-bundle';
 import { SERVER_CONTRACT_HEADERS } from '@/server/client-proof/wire-headers';
 import { authLogger } from '@/server/logger';
-import { decodeToken, verifyClientToken, keysRepository, usersRepository } from '@spfn/auth/server';
+import { decodeToken, verifyClientToken, keysRepository, findUserWithEffectiveRole } from '@spfn/auth/server';
 import type { Context, Next } from 'hono';
 
 const USER_ID = 7;
@@ -310,7 +310,7 @@ describe('the machine-principal case table', () =>
     {
         vi.clearAllMocks();
         vi.mocked(keysRepository.updateLastUsedById).mockResolvedValue(undefined as never);
-        vi.mocked(usersRepository.findByIdWithRole).mockResolvedValue({
+        vi.mocked(findUserWithEffectiveRole).mockResolvedValue({
             user: { id: USER_ID, email: 'machine-table@example.com', status: 'active' },
             role: { name: 'user' },
         } as never);

@@ -855,8 +855,9 @@ redirects to `SPFN_AUTH_MFA_CONFIRM_PATH` (default `/auth/mfa`) with `?challenge
 somewhere else.
 
 If you use the `OAuthCallback` page component instead, it posts the challenge to
-`/_auth/oauth/finalize`, gets a 202 back, and hands you the challenge through its `onSuccess`
-— send the person to your confirm screen from there.
+`/_auth/oauth/finalize`, gets a 202 back, and navigates to the confirm page itself. The proxy
+puts `SPFN_AUTH_MFA_CONFIRM_PATH` on that 202, so the one variable moves both flows; the
+component's `mfaPath` prop is only an override.
 
 ### What a 202 has not done
 
@@ -901,7 +902,8 @@ authDeviceRegisteredEvent.subscribe(async (payload) =>
     // { userId, keyId, algorithm, fingerprintPrefix, createdAtMillis, channel, mfaEnrolled,
     //   deviceName?, platform?, ip?, userAgent? }
     // channel: 'register' | 'signup-link' | 'invitation' | 'password' | 'oauth'
-    //        | 'oauth-native' | 'device-code' | 'password-reset' | 'passkey'
+    //        | 'oauth-native' | 'device-code' | 'device-link' | 'password-reset' | 'passkey'
+    //        | 'renewal'
     await sendNewDeviceMail(payload);
 });
 ```
@@ -1216,6 +1218,13 @@ full design.
 | `/_auth/device/info` | POST | Required | Describe the device asking to be let in |
 | `/_auth/device/approve` | POST | Required | Let the waiting device in |
 | `/_auth/device/deny` | POST | Required | Refuse the waiting device |
+| `/_auth/device/link/issue` | POST | Required | Device link: show a code a new device can come in by |
+| `/_auth/device/link/redeem` | POST | — | Park the new device's key on that code; get the match number to show |
+| `/_auth/device/link/status` | POST | Required (issuing key) | Where the link stands; the device and three numbers once redeemed. `waitMillis` long-polls |
+| `/_auth/device/link/confirm` | POST | Required (issuing key) | Pick the number the new device shows; a wrong pick denies the link |
+| `/_auth/device/link/deny` | POST | Required (issuing key) | Refuse the new device |
+| `/_auth/device/link/cancel` | POST | Required (issuing key) | Close the link before anyone is let in |
+| `/_auth/device/link/poll` | POST | — | Ask whether the issuer picked; collects the login. `waitMillis` long-polls |
 
 > **Device-code login** signs in a device that has no key on file yet — a TV, a console, a
 > headless CLI. It shows a short `XXXX-XXXX` code from `start`; the account owner enters that
@@ -1227,6 +1236,15 @@ full design.
 > device does not have to tick every few seconds. TTL, poll interval and the long-poll cap are
 > configured via `createAuthLifecycle({ deviceAuth })`; the full flow and its security model are documented in
 > `packages/auth/README.md`.
+
+> **Device link** is the same thing the other way round. A device that is already signed in
+> calls `link/issue` and shows the code (as text, and as a QR its client draws); the new device
+> sends it to `link/redeem` with its public key and shows the two-digit match number it gets
+> back; the signed-in device is shown the new device and three numbers and picks that one with
+> `link/confirm`. The new device's next `link/poll` registers its key and answers exactly as
+> `/_auth/login` does. Only the key that signed `issue` can see or answer the link, and the link
+> dies with that key. The code lives 5 minutes (`createAuthLifecycle({ deviceLink: { ttlMs } })`);
+> see "Device link" in `packages/auth/README.md`.
 
 > There is no account-existence endpoint. `POST /_auth/exists` was removed on purpose — it
 > let anyone enumerate registered users — and the login path is timing-equalized so existence
