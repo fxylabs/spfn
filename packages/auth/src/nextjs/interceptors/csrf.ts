@@ -17,7 +17,7 @@
 import type { ProxyAbort, RequestInterceptorContext } from '@spfn/core/nextjs/server';
 import type { SetCookie } from '@spfn/core/nextjs';
 
-import { getCsrfMode, getCsrfExemptPaths, getSessionTtl, COOKIE_NAMES } from '../../server/lib/config';
+import { getCsrfMode, getCsrfExemptPaths, getSessionTtl, COOKIE_NAMES, type CsrfMode } from '../../server/lib/config';
 import { CSRF_HEADER, deriveCsrfToken, matchesCsrfToken, timingSafeEqualString } from '../../server/lib/csrf';
 import { authLogger } from '../../server/logger';
 import { cookieSecure } from './cookie-options';
@@ -32,6 +32,21 @@ import { cookieSecure } from './cookie-options';
  * every mutation reachable that way.
  */
 const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
+
+/**
+ * Paths checked in every mode, `off` and `warn` included, and never exempt.
+ *
+ * `POST /_auth/oauth2/authorize` is the consent decision: it issues an
+ * authorization code for a third-party client on the strength of the session
+ * cookie alone. The package ships no consent screen, so an app's own page calls
+ * it through this proxy, and a cross-site POST that got past a relaxed mode
+ * would hand a code to a client the user never approved. Nothing else earns a
+ * place here; everything else follows the configured mode.
+ */
+const ALWAYS_ENFORCED_PATHS = new Set(['/_auth/oauth2/authorize']);
+
+/** Always-enforced paths an exempt list has already been warned about */
+const exemptionsReported = new Set<string>();
 
 /**
  * The readable CSRF cookie, as every place that issues one builds it.
@@ -76,6 +91,57 @@ function refusal(): ProxyAbort
 }
 
 /**
+ * The mode this request is checked under.
+ *
+ * Safe methods and exempt paths come out as `off`. An always-enforced path comes
+ * out as `enforce` whatever the configuration says, and an exempt-list entry
+ * naming it is ignored — with one warning, so the entry does not sit there
+ * looking like it took effect.
+ */
+function checkModeFor(ctx: RequestInterceptorContext): CsrfMode
+{
+    if (SAFE_METHODS.has(ctx.method.toUpperCase()))
+    {
+        return 'off';
+    }
+
+    if (ALWAYS_ENFORCED_PATHS.has(ctx.path))
+    {
+        reportIgnoredExemption(ctx.path);
+
+        return 'enforce';
+    }
+
+    const mode = getCsrfMode();
+
+    if (mode !== 'off' && getCsrfExemptPaths().includes(ctx.path))
+    {
+        authLogger.interceptor.csrf.debug('Path is CSRF-exempt', { path: ctx.path });
+
+        return 'off';
+    }
+
+    return mode;
+}
+
+/**
+ * Warn, once per process, that the exempt list names an always-enforced path.
+ */
+function reportIgnoredExemption(path: string): void
+{
+    if (exemptionsReported.has(path) || !getCsrfExemptPaths().includes(path))
+    {
+        return;
+    }
+
+    exemptionsReported.add(path);
+    authLogger.interceptor.csrf.warn(
+        'CSRF exempt list names a path that is always checked — the entry is ignored',
+        { path },
+    );
+}
+
+/**
  * Refuse a cookie-authenticated mutation that has no valid CSRF header.
  *
  * Call only once the session has been unsealed — a refusal must never be the
@@ -89,6 +155,10 @@ function refusal(): ProxyAbort
  * "wrong token" while holding nothing better to try, and the documented recovery
  * would need an unrelated GET to happen first.
  *
+ * The consent POST is refused in every mode, `off` included (see
+ * ALWAYS_ENFORCED_PATHS); the cookie it repairs is issued in every mode too, so
+ * a page's retry with the mirrored header passes.
+ *
  * @param ctx - Request interceptor context, mutated with `abort` on refusal
  * @param keyId - Key id of the session that authenticated this request
  * @returns True when the request was refused and the caller must stop
@@ -98,17 +168,10 @@ export async function refuseInvalidCsrf(
     keyId: string,
 ): Promise<boolean>
 {
-    const mode = getCsrfMode();
+    const mode = checkModeFor(ctx);
 
-    if (mode === 'off' || SAFE_METHODS.has(ctx.method.toUpperCase()))
+    if (mode === 'off')
     {
-        return false;
-    }
-
-    if (getCsrfExemptPaths().includes(ctx.path))
-    {
-        authLogger.interceptor.csrf.debug('Path is CSRF-exempt', { path: ctx.path });
-
         return false;
     }
 

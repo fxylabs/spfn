@@ -2220,8 +2220,8 @@ the refusal itself cannot tell an anonymous caller whether anyone is signed in.
 
 | Mode | Behaviour |
 |---|---|
-| `off` | No check. |
-| `warn` | **Default.** Allows the request, logs one line per request that would be refused. |
+| `off` | No check — except the OAuth2 consent POST, below. |
+| `warn` | **Default.** Allows the request, logs one line per request that would be refused — except the OAuth2 consent POST, below. |
 | `enforce` | Refuses with `403 {"error":"Forbidden","message":"CSRF token missing or invalid"}`. |
 
 Existing apps get signal before breakage: unset means `warn`. Watch for
@@ -2251,6 +2251,15 @@ configureAuth({
 `configureAuth` wins over the environment variable. `enforce` and `warn` both need
 `SPFN_AUTH_SESSION_SECRET` — sessions need it anyway — and refuse rather than quietly
 passing everything if it is missing.
+
+**One route is checked in every mode.** `POST /_auth/oauth2/authorize` — the consent
+decision — is refused without a matching header under `off` and `warn` too, and an
+`exemptPaths` entry naming it is ignored (with one warning line). It issues an
+authorization code for a third-party client on the strength of the session alone, and
+the page that posts it is your app's own, so the proxy's check is the only thing between
+a cross-site POST and a consent the user never gave. Nothing on your side changes: the
+cookie is issued in every mode, the api client mirrors it, and a refusal repairs a
+missing one as described below.
 
 ### If a request is refused
 

@@ -8,16 +8,24 @@
  * without it, the proxy's check is the only thing between a cross-site POST and
  * a consent the user never gave.
  *
- * So these rows run the whole path: a real login on the backend, a session
- * cookie sealed around the key that login registered, the shipped
- * `authInterceptors` chain as `createRpcProxy` runs it, and — when the chain
- * lets the request through — the real authorize routes on the real database.
+ * The proxy therefore checks this one POST in every mode — `off` and `warn`
+ * included — and whatever the exempt list says. These rows run the whole path:
+ * a real login on the backend, a session cookie sealed around the key that
+ * login registered, the shipped `authInterceptors` chain as `createRpcProxy`
+ * runs it, and — when the chain lets the request through — the real authorize
+ * routes on the real database and the response interceptors after them.
  */
 
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 import type { Hono } from 'hono';
-import type { RequestInterceptorContext } from '@spfn/core/nextjs/server';
-import { executeRequestInterceptors, filterMatchingInterceptors } from '@spfn/core/nextjs/server';
+import type { SetCookie } from '@spfn/core/nextjs';
+import { csrfHeaderValue } from '@spfn/core/nextjs';
+import type { RequestInterceptorContext, ResponseInterceptorContext } from '@spfn/core/nextjs/server';
+import {
+    executeRequestInterceptors,
+    executeResponseInterceptors,
+    filterMatchingInterceptors,
+} from '@spfn/core/nextjs/server';
 
 import { setupTestDb, teardownTestDb, clearTables, getTestDb, isDatabaseAvailable } from '../helpers/db';
 import {
@@ -49,12 +57,19 @@ const NAME = 'consent-app-page-cli';
 const AUTHORIZE = '/_auth/oauth2/authorize';
 const STATE = 'state-from-the-cli';
 
-/** What the proxy answered, and whether the backend was reached at all. */
+/** What the proxy answered, whether the backend was reached, and the cookies it set. */
 interface ProxyAnswer
 {
     status: number;
     body: Record<string, unknown>;
     reachedBackend: boolean;
+    setCookies: SetCookie[];
+}
+
+/** The CSRF cookie value a proxy answer set, if it set one. */
+function issuedCsrf(answer: ProxyAnswer): string | undefined
+{
+    return answer.setCookies.find(cookie => cookie.name === COOKIE_NAMES.CSRF)?.value;
 }
 
 /**
@@ -131,7 +146,8 @@ function requestContext(
 
 /**
  * One call from the app page: the matching interceptors, exactly as
- * `createRpcProxy` selects and runs them, then the backend unless they aborted.
+ * `createRpcProxy` selects and runs them, then the backend and the response
+ * interceptors unless the request phase aborted.
  */
 async function throughTheProxy(app: Hono, ctx: RequestInterceptorContext): Promise<ProxyAnswer>
 {
@@ -144,9 +160,32 @@ async function throughTheProxy(app: Hono, ctx: RequestInterceptorContext): Promi
 
     if (ctx.abort)
     {
-        return { status: ctx.abort.status, body: ctx.abort.body as Record<string, unknown>, reachedBackend: false };
+        return {
+            status: ctx.abort.status,
+            body: ctx.abort.body as Record<string, unknown>,
+            reachedBackend: false,
+            setCookies: ctx.abort.setCookies ?? [],
+        };
     }
 
+    const responseCtx = await callBackend(app, ctx);
+
+    await executeResponseInterceptors(
+        responseCtx,
+        matching.map(rule => rule.response).filter((phase): phase is NonNullable<typeof phase> => !!phase),
+    );
+
+    return {
+        status: responseCtx.response.status,
+        body: responseCtx.response.body as Record<string, unknown>,
+        reachedBackend: true,
+        setCookies: responseCtx.setCookies,
+    };
+}
+
+/** Forward the request to the backend; `buildResponseContext`'s shape for what came back. */
+async function callBackend(app: Hono, ctx: RequestInterceptorContext): Promise<ResponseInterceptorContext>
+{
     const query = ctx.method === 'GET' ? `?${new URLSearchParams(ctx.query as Record<string, string>)}` : '';
     const response = await app.request(`${ctx.path}${query}`, {
         method: ctx.method,
@@ -154,7 +193,21 @@ async function throughTheProxy(app: Hono, ctx: RequestInterceptorContext): Promi
         body: ctx.method === 'POST' ? JSON.stringify(ctx.body) : undefined,
     });
 
-    return { status: response.status, body: await response.json() as Record<string, unknown>, reachedBackend: true };
+    return {
+        path: ctx.path,
+        method: ctx.method,
+        request: { headers: ctx.headers, body: ctx.body },
+        response: {
+            ok: response.ok,
+            status: response.status,
+            statusText: response.statusText,
+            headers: response.headers,
+            body: await response.json(),
+        },
+        cookies: ctx.cookies,
+        setCookies: [],
+        metadata: ctx.metadata,
+    };
 }
 
 describe.skipIf(!dbAvailable)('OAuth2 consent API called from an app page (#108 c3)', () =>
@@ -238,33 +291,111 @@ describe.skipIf(!dbAvailable)('OAuth2 consent API called from an app page (#108 
         });
     });
 
-    // The package default. These rows record what an app gets when it never set
-    // a mode: the proxy logs the failed check and forwards the request anyway.
+    // Every mode short of enforce. The consent POST is checked regardless: it
+    // issues a code on the strength of the session alone.
     describe.each<[string, CsrfMode | undefined]>([
         ['unset (package default, behaves as warn)', undefined],
         ['warn', 'warn'],
-    ])('mode %s', (_label, mode) =>
+        ['off', 'off'],
+    ])('mode %s — the consent POST is still checked', (_label, mode) =>
     {
         beforeEach(() =>
         {
             configureAuth({ csrf: mode ? { mode } : undefined });
         });
 
-        it('POST without the header is NOT refused — the consent is recorded', async () =>
+        it('GET without the header describes the request (safe method, unchecked)', async () =>
+        {
+            const answer = await throughTheProxy(app, requestContext('GET', fields, jar));
+
+            expect(answer.status).toBe(200);
+            expect(answer.body.clientName).toBe(NAME);
+        });
+
+        it('POST without the header is refused 403 before the backend', async () =>
         {
             const answer = await approve();
 
-            expect(answer.reachedBackend).toBe(true);
-            expect(answer.status).toBe(200);
-            expect(answer.body.code).toEqual(expect.any(String));
+            expect(answer.status).toBe(403);
+            expect(answer.reachedBackend).toBe(false);
         });
 
-        it('POST with a mismatched header is NOT refused — the consent is recorded', async () =>
+        it('POST with a mismatched header is refused 403 before the backend', async () =>
         {
             const answer = await approve('0'.repeat(64));
 
-            expect(answer.reachedBackend).toBe(true);
+            expect(answer.status).toBe(403);
+            expect(answer.reachedBackend).toBe(false);
+        });
+
+        it('POST with a CSRF header equal to the CSRF cookie issues a code', async () =>
+        {
+            const answer = await approve(jar.get(COOKIE_NAMES.CSRF));
+
             expect(answer.status).toBe(200);
+            expect(answer.body.code).toEqual(expect.any(String));
+            expect(answer.body.redirectUri).toBe(TEST_REDIRECT_URI);
+        });
+
+        it('an exempt-list entry naming the consent path does not reopen it', async () =>
+        {
+            configureAuth({ csrf: { ...(mode ? { mode } : {}), exemptPaths: [AUTHORIZE] } });
+
+            const answer = await approve();
+
+            expect(answer.status).toBe(403);
+            expect(answer.reachedBackend).toBe(false);
+        });
+
+        it('a server-side authApi call, which mirrors the forwarded jar itself, passes', async () =>
+        {
+            // What @spfn/core's client sends when it runs on the server: the
+            // header built from the jar it forwards, not from document.cookie.
+            const answer = await approve(csrfHeaderValue(jar.entries()));
+
+            expect(answer.status).toBe(200);
+            expect(answer.body.code).toEqual(expect.any(String));
         });
     });
+
+    // An app running `off` must still be able to approve. The readable cookie is
+    // issued in every mode, and a refusal repairs a jar that lacks it.
+    describe('mode off — a jar without the CSRF cookie', () =>
+    {
+        beforeEach(() =>
+        {
+            configureAuth({ csrf: { mode: 'off' } });
+            jar.delete(COOKIE_NAMES.CSRF);
+        });
+
+        it('a page load (the consent GET) issues the cookie', async () =>
+        {
+            const answer = await throughTheProxy(app, requestContext('GET', fields, jar));
+
+            expect(answer.status).toBe(200);
+            expect(issuedCsrf(answer)).toBe(await expectedCsrf());
+        });
+
+        it('the first POST is refused 403 with a repair cookie; the retry mirroring it gets a code', async () =>
+        {
+            const first = await approve();
+
+            expect(first.status).toBe(403);
+            expect(first.reachedBackend).toBe(false);
+            expect(issuedCsrf(first)).toBe(await expectedCsrf());
+
+            jar.set(COOKIE_NAMES.CSRF, issuedCsrf(first)!);
+
+            const retry = await approve(csrfHeaderValue(jar.entries()));
+
+            expect(retry.status).toBe(200);
+            expect(retry.body.code).toEqual(expect.any(String));
+        });
+    });
+
+    /** The token the proxy derives for this jar's session key. */
+    async function expectedCsrf(): Promise<string>
+    {
+        return await deriveCsrfToken(jar.get(COOKIE_NAMES.SESSION_KEY_ID)!);
+    }
 });

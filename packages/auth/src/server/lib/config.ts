@@ -201,7 +201,8 @@ export interface AuthCsrfConfig
     /**
      * @default 'warn' — an existing app gets signal before it gets breakage.
      *          `SPFN_AUTH_CSRF` sets it when this is not; new apps scaffolded by
-     *          `spfn init` are given `enforce`.
+     *          `spfn init` are given `enforce`. The consent POST
+     *          (`/_auth/oauth2/authorize`) is checked in every mode regardless.
      */
     mode?: CsrfMode;
 
@@ -212,7 +213,8 @@ export interface AuthCsrfConfig
      * `/api/rpc/...` URLs, with route params already substituted. Intended for
      * endpoints a browser session never calls — webhook receivers and the like.
      * A path listed here is unprotected for cookie callers too, so list only
-     * endpoints that carry their own authentication.
+     * endpoints that carry their own authentication. `/_auth/oauth2/authorize`
+     * cannot be exempted: an entry naming it is ignored with a warning.
      */
     exemptPaths?: string[];
 }
@@ -424,8 +426,9 @@ export function getCsrfMode(): CsrfMode
  * that works rather than a 403 nothing in the logs explains.
  *
  * `/_auth/oauth2/authorize` is deliberately absent. That one IS a
- * cookie-session mutation, posted by the consent form on the web app, and it is
- * exactly what the check exists to protect.
+ * cookie-session mutation, posted by the app's consent page, and it is exactly
+ * what the check exists to protect — the proxy checks it in every mode and
+ * ignores an app entry that names it.
  */
 const PACKAGE_CSRF_EXEMPT_PATHS = [
     '/_auth/oauth2/register',
