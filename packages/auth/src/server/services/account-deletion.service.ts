@@ -28,6 +28,7 @@ import {
     keysRepository,
     passkeysRepository,
     deviceAuthorizationsRepository,
+    deviceLinksRepository,
     socialAccountsRepository,
     userProfilesRepository,
     verificationCodesRepository,
@@ -312,6 +313,10 @@ export async function requestAccountDeletionService(
     // cancelling the deletion later would restore an account with a signing key
     // nothing in the deletion path ever saw.
     await deviceAuthorizationsRepository.denyAllActiveByUserId(user.id);
+
+    // Device links the account issued go with them, for the same reason: an
+    // approved link nobody has collected would register a key after this.
+    await deviceLinksRepository.expireAllLiveByUserId(user.id);
 
     // A grant the user gave a CLI carries a refresh token, so a client holding
     // one signs itself back in within the hour — which is exactly the client a

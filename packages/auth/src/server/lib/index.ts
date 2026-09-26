@@ -29,4 +29,5 @@ export * from './oauth2';
 export * from './one-time-token';
 export * from './deletion-config';
 export * from './device-auth-config';
+export * from './device-link-config';
 export * from './device-code';

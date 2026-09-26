@@ -7,7 +7,7 @@
 import {
     EmailSchema, PhoneSchema, PasswordSchema, TargetTypeSchema, VerificationPurposeSchema,
     DeviceNameSchema, PlatformSchema, UserCodeSchema, DeviceAuthPollResponseSchema,
-    PublicKeySchema, KeyIdSchema, FingerprintSchema,
+    PublicKeySchema, KeyIdSchema, FingerprintSchema, LinkIdSchema, MatchChoiceSchema,
 } from '../schema';
 import { getAuth, getUser } from '../../helpers';
 import { KEY_ALGORITHM } from '../../types';
@@ -35,6 +35,14 @@ import {
     getDeviceAuthInfoService,
     approveDeviceAuthService,
     denyDeviceAuthService,
+    issueDeviceLinkService,
+    redeemDeviceLinkService,
+    getDeviceLinkStatusService,
+    confirmDeviceLinkService,
+    denyDeviceLinkService,
+    cancelDeviceLinkService,
+    pollDeviceLinkService,
+    type DeviceLinkIssuer,
 } from '../../services';
 import { Type, type Static } from '@sinclair/typebox';
 import { Transactional } from '@spfn/core/db';
@@ -43,6 +51,11 @@ import { byIpAndAccount, byIpAndTarget, byIpAndCaller } from '../../lib/rate-lim
 import { defineRouter, route } from '@spfn/core/route';
 import { deviceProvenance } from '../../lib/device-provenance';
 import { deviceAuthLongPoll, DEVICE_AUTH_WAITED_MILLIS } from '../../middleware/device-auth-long-poll';
+import {
+    deviceLinkPollLongPoll,
+    deviceLinkStatusLongPoll,
+    DEVICE_LINK_WAITED_MILLIS,
+} from '../../middleware/device-link-long-poll';
 
 // NOTE: a POST /_auth/exists endpoint was removed deliberately — it answered
 // account existence directly (user enumeration). Existence is no longer exposed;
@@ -461,6 +474,205 @@ export const denyDeviceAuth = route.post('/_auth/device/deny')
         return c.noContent();
     });
 
+// ===== Device link =====
+//
+// Device-code login's mirror image. A device that is already signed in — the
+// issuer — calls `issue` and shows the code as text and as a QR its client draws.
+// A new device with no key reads it and calls `redeem` with its public key, then
+// shows the two-digit match number it gets back and polls. The issuer long-polls
+// `status`, sees the device and three numbers, and calls `confirm` with the one
+// on the new device's screen, or `deny`. The next `poll` registers the parked key
+// under the issuer's account and answers exactly as login does.
+//
+// The issuer's five routes are bound to the key that signed `issue`: the
+// principal's keyId, not only its account, so another device of the same account
+// is answered as if the link did not exist. `redeem` and `poll` are the public
+// two, with plain `.input` bodies for device-code login's reason.
+
+/** The signed-in device calling, as a link's issuer is recorded and matched. */
+function issuerOf(c: Parameters<typeof getAuth>[0]): DeviceLinkIssuer
+{
+    const { userId, keyId } = getAuth(c);
+
+    return { userId: Number(userId), keyId };
+}
+
+/**
+ * POST /_auth/device/link/issue - Show a code a new device can come in by
+ *
+ * Replaces any link the calling key still has in play: one live link per
+ * issuing key.
+ */
+export const issueDeviceLink = route.post('/_auth/device/link/issue')
+    .use([
+        rateLimitPolicy('auth-device-link-issue', { limit: 10, windowMs: 60_000, by: byIpAndCaller({ ipLimit: 50 }) }),
+        Transactional(),
+    ])
+    .handler(async (c) =>
+    {
+        return await issueDeviceLinkService(issuerOf(c));
+    });
+
+/**
+ * POST /_auth/device/link/redeem - Park a new device's key on a shown code
+ *
+ * Public: the caller has no key yet. A code that was already redeemed, used, or
+ * never issued answers the same 404, and the route is limited per IP, so the
+ * code space is not something a caller can map. The body is bounded exactly as
+ * `device/start`'s is, for its reason — key material stored before anyone has
+ * agreed to it.
+ */
+export const redeemDeviceLink = route.post('/_auth/device/link/redeem')
+    .input({
+        body: Type.Object({
+            userCode: UserCodeSchema,
+            publicKey: PublicKeySchema,
+            keyId: KeyIdSchema,
+            fingerprint: FingerprintSchema,
+            algorithm: Type.Optional(Type.Union(
+                KEY_ALGORITHM.map(algo => Type.Literal(algo)),
+                { description: 'Signature algorithm' },
+            )),
+            deviceName: Type.Optional(DeviceNameSchema),
+            platform: Type.Optional(PlatformSchema),
+        }),
+    })
+    .use([rateLimitPolicy('auth-device-link-redeem', { limit: 10, windowMs: 60_000 }), Transactional()])
+    .skip(['auth'])
+    .handler(async (c) =>
+    {
+        const { body } = await c.data();
+
+        return await redeemDeviceLinkService(body);
+    });
+
+/**
+ * POST /_auth/device/link/status - Where the issuer's link stands
+ *
+ * `waitMillis` makes it a long poll: a link still waiting on the other device —
+ * not yet redeemed, or approved and not yet collected — holds the request until
+ * it moves or the wait runs out, capped at `deviceAuth.maxWaitMs`.
+ *
+ * No `Transactional()`: it writes nothing, and every read behind it is already
+ * a primary read.
+ */
+export const getDeviceLinkStatus = route.post('/_auth/device/link/status')
+    .input({
+        body: Type.Object({
+            linkId: LinkIdSchema,
+            waitMillis: Type.Optional(Type.Integer({
+                minimum: 0,
+                description: 'Longest to hold the request while the link waits on the other device; capped by the server',
+            })),
+        }),
+    })
+    .use([
+        rateLimitPolicy('auth-device-link-status', { limit: 30, windowMs: 60_000, by: byIpAndCaller({ ipLimit: 150 }) }),
+        deviceLinkStatusLongPoll(),
+    ])
+    .handler(async (c) =>
+    {
+        const { body } = await c.data();
+
+        return await getDeviceLinkStatusService({ linkId: body.linkId, issuer: issuerOf(c) });
+    });
+
+/**
+ * POST /_auth/device/link/confirm - Pick the number the new device shows
+ *
+ * The right number approves the link; any other denies it and answers
+ * `DeviceLinkWrongMatchError`, with no second pick. Not `Transactional()`, on
+ * purpose: the wrong-number denial has to commit even though the request fails,
+ * and each outcome is one conditional statement that needs no transaction to be
+ * atomic.
+ */
+export const confirmDeviceLink = route.post('/_auth/device/link/confirm')
+    .input({
+        body: Type.Object({
+            linkId: LinkIdSchema,
+            choice: MatchChoiceSchema,
+        }),
+    })
+    .use([
+        rateLimitPolicy('auth-device-link-confirm', { limit: 10, windowMs: 60_000, by: byIpAndCaller({ ipLimit: 50 }) }),
+    ])
+    .handler(async (c) =>
+    {
+        const { body } = await c.data();
+
+        return await confirmDeviceLinkService({ linkId: body.linkId, choice: body.choice, issuer: issuerOf(c) });
+    });
+
+/** POST /_auth/device/link/deny - Refuse the device that redeemed the code */
+export const denyDeviceLink = route.post('/_auth/device/link/deny')
+    .input({
+        body: Type.Object({
+            linkId: LinkIdSchema,
+        }),
+    })
+    .use([
+        rateLimitPolicy('auth-device-link-deny', { limit: 10, windowMs: 60_000, by: byIpAndCaller({ ipLimit: 50 }) }),
+        Transactional(),
+    ])
+    .handler(async (c) =>
+    {
+        const { body } = await c.data();
+
+        return await denyDeviceLinkService({ linkId: body.linkId, issuer: issuerOf(c) });
+    });
+
+/** POST /_auth/device/link/cancel - Close the link before anyone is let in */
+export const cancelDeviceLink = route.post('/_auth/device/link/cancel')
+    .input({
+        body: Type.Object({
+            linkId: LinkIdSchema,
+        }),
+    })
+    .use([
+        rateLimitPolicy('auth-device-link-cancel', { limit: 10, windowMs: 60_000, by: byIpAndCaller({ ipLimit: 50 }) }),
+        Transactional(),
+    ])
+    .handler(async (c) =>
+    {
+        const { body } = await c.data();
+
+        return await cancelDeviceLinkService({ linkId: body.linkId, issuer: issuerOf(c) });
+    });
+
+/**
+ * POST /_auth/device/link/poll - Ask whether the issuer has picked
+ *
+ * `device/poll` for a link: public, the device code standing in for a
+ * credential, a pending answer a normal 200, and the approved answer the login
+ * itself, in the same shape. `waitMillis` long-polls exactly as it does there.
+ */
+export const pollDeviceLink = route.post('/_auth/device/link/poll')
+    .input({
+        body: Type.Object({
+            deviceCode: Type.String({ description: 'Device code returned by /_auth/device/link/redeem' }),
+            waitMillis: Type.Optional(Type.Integer({
+                minimum: 0,
+                description: 'Longest to hold the request while the issuer has not picked; capped by the server',
+            })),
+        }),
+    })
+    .use([
+        rateLimitPolicy('auth-device-link-poll', { limit: 30, windowMs: 60_000 }),
+        deviceLinkPollLongPoll(),
+        Transactional(),
+    ])
+    .skip(['auth'])
+    .handler(async (c): Promise<Static<typeof DeviceAuthPollResponseSchema>> =>
+    {
+        const { body } = await c.data();
+
+        return await pollDeviceLinkService({
+            deviceCode: body.deviceCode,
+            ...deviceProvenance(c.raw),
+            waitedMillis: Number(c.raw.get(DEVICE_LINK_WAITED_MILLIS) ?? 0),
+        });
+    });
+
 // ===== Authenticated Routes Below =====
 
 /**
@@ -685,6 +897,13 @@ export const authRouter = defineRouter({
     getDeviceAuthInfo: getDeviceAuthInfo,
     approveDeviceAuth: approveDeviceAuth,
     denyDeviceAuth: denyDeviceAuth,
+    issueDeviceLink: issueDeviceLink,
+    redeemDeviceLink: redeemDeviceLink,
+    getDeviceLinkStatus: getDeviceLinkStatus,
+    confirmDeviceLink: confirmDeviceLink,
+    denyDeviceLink: denyDeviceLink,
+    cancelDeviceLink: cancelDeviceLink,
+    pollDeviceLink: pollDeviceLink,
     logout: logout,
     rotateKey: rotateKey,
     listKeys: listKeys,

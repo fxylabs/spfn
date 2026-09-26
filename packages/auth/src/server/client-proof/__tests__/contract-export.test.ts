@@ -29,6 +29,9 @@ import {
     DeviceAuthDeniedError,
     DeviceAuthExpiredError,
     DeviceAuthNotFoundError,
+    DeviceLinkDeniedError,
+    DeviceLinkExpiredError,
+    DeviceLinkNotFoundError,
     KeyAlgorithmMismatchError,
 } from '../../../errors/auth-errors';
 import { CLIENT_PROOF_CONTENT_TYPE, CLIENT_PROOF_HEADERS } from '../admission';
@@ -260,8 +263,8 @@ describe('operations describe the routes the server answers', () =>
     });
 
     // I2 — the unproven class is stated and covers clock sync, enrollment and
-    // the two device-code operations a keyless device calls.
-    it('I2: core time, the three enrollment operations, device start/poll and mfa verify are the unproven class', () =>
+    // the device-code and device-link operations a keyless device calls.
+    it('I2: core time, the three enrollment operations, device start/poll, device-link redeem/poll and mfa verify are the unproven class', () =>
     {
         const unproven = ALL_OPERATIONS
             .filter((operation) => operation.authProfile === 'none')
@@ -273,6 +276,8 @@ describe('operations describe the routes the server answers', () =>
         expect(unproven).toEqual([
             'auth.device.poll',
             'auth.device.start',
+            'auth.deviceLink.poll',
+            'auth.deviceLink.redeem',
             'auth.enroll.login',
             'auth.enroll.oauthNative',
             'auth.enroll.register',
@@ -361,16 +366,17 @@ describe('operations describe the routes the server answers', () =>
 
     it('I6: the omitted algorithm has its default stated, since start is where it is fixed', () =>
     {
-        // StartDeviceAuthRequest.algorithm is the only optional algorithm in the
-        // contract, and the value is read from the key service rather than
-        // transcribed: a client that omits the field would otherwise be guessing
-        // what its own key was registered as.
+        // StartDeviceAuthRequest.algorithm and RedeemDeviceLinkRequest.algorithm
+        // are the only optional algorithms in the contract — the two places a key
+        // is parked before anyone agreed to it — and the value is read from the
+        // key service rather than transcribed: a client that omits the field
+        // would otherwise be guessing what its own key was registered as.
         const device = bundle.deviceAuthorization as Record<string, string>;
         const optionalAlgorithms = declaredTypes
             .flatMap((type) => type.fields.map((field) => ({ type: type.name, field })))
             .filter((entry) => entry.field.name === 'algorithm' && entry.field.optional);
 
-        expect(optionalAlgorithms.map((entry) => entry.type)).toEqual(['StartDeviceAuthRequest']);
+        expect(optionalAlgorithms.map((entry) => entry.type)).toEqual(['StartDeviceAuthRequest', 'RedeemDeviceLinkRequest']);
         expect(device.algorithmDefaultRule).toContain(DEFAULT_KEY_ALGORITHM);
         expect(device.algorithmDefaultRule).toContain('StartDeviceAuthRequest');
     });
@@ -392,6 +398,59 @@ describe('operations describe the routes the server answers', () =>
         expect(deny).not.toHaveProperty('responseType');
         expect(device.denyResponseRule).toContain('204');
         expect(device.denyResponseRule).toContain('no responseType');
+    });
+
+    // I7 — device link's new-device half is exported; the issuer's half is not.
+    it('I7: redeem and poll are exported at the paths the routes answer, and nothing else of device link', () =>
+    {
+        const byId = new Map(AUTH_SURFACE_OPERATIONS.map((operation) => [operation.id, operation]));
+        const linkOperations = AUTH_SURFACE_OPERATIONS
+            .filter((operation) => operation.id.startsWith('auth.deviceLink.'))
+            .map((operation) => operation.id);
+
+        expect(linkOperations).toEqual(['auth.deviceLink.redeem', 'auth.deviceLink.poll']);
+        expect(byId.get('auth.deviceLink.redeem')?.path).toBe('/_auth/device/link/redeem');
+        expect(byId.get('auth.deviceLink.poll')?.path).toBe('/_auth/device/link/poll');
+
+        const link = bundle.deviceLink as Record<string, string>;
+        expect(link.issuerOperations).toContain('not on this surface');
+        expect(link.issuerOperations).toContain('bound to the key that signed issue');
+    });
+
+    it('I7: redeem and poll are unproven, because no key exists yet to sign them with', () =>
+    {
+        for (const id of ['auth.deviceLink.redeem', 'auth.deviceLink.poll'])
+        {
+            const operation = AUTH_SURFACE_OPERATIONS.find((entry) => entry.id === id);
+
+            expect(operation?.authProfile, id).toBe('none');
+            expect(operation?.requiresSession, id).toBe(false);
+        }
+
+        expect((bundle.deviceLink as Record<string, string>).unprovenOperations).toContain('no registered key yet');
+    });
+
+    it('I7: the link poll answers the device-code poll\'s own type — an approved link is the same login', () =>
+    {
+        const byId = new Map(AUTH_SURFACE_OPERATIONS.map((operation) => [operation.id, operation]));
+
+        expect(byId.get('auth.deviceLink.poll')?.responseType).toBe(byId.get('auth.device.poll')?.responseType);
+        expect(typeNamed('PollDeviceLinkRequest').fields).toEqual(typeNamed('PollDeviceAuthRequest').fields);
+    });
+
+    it('I7: redeem carries the start body with the code in front, and answers a whole match number', () =>
+    {
+        expect(typeNamed('RedeemDeviceLinkRequest').fields).toEqual([
+            { name: 'userCode', type: 'string', optional: false },
+            ...typeNamed('StartDeviceAuthRequest').fields,
+        ]);
+        expect(typeNamed('RedeemDeviceLinkResponse').fields.find((field) => field.name === 'matchNumber'))
+            .toEqual({ name: 'matchNumber', type: 'integer', optional: false });
+
+        const link = bundle.deviceLink as Record<string, string>;
+        expect(link.matchRule).toContain('10 to 99');
+        expect(link.matchRule).toContain('one time in three');
+        expect(link.algorithmDefaultRule).toContain(DEFAULT_KEY_ALGORITHM);
     });
 
     // I5 — the three dev operations survive the 0.3.0 export.
@@ -518,6 +577,7 @@ describe('every operation records when it became available', () =>
      * | core.time | issue #146 | 0.9.0 |
      * | auth.device.{start,poll,info,approve,deny} | 1a5d6fd6 (#171), exported here | 0.10.0 |
      * | auth.mfa.{verify,status} | #95 PR 2, exported here | 0.13.0 |
+     * | auth.deviceLink.{redeem,poll} | device link, exported here | 0.13.2 |
      */
     const RECORDED_HISTORY: Record<string, string> = {
         'auth.clientProof.handshake': '0.1.0',
@@ -538,6 +598,8 @@ describe('every operation records when it became available', () =>
         'auth.device.deny': '0.10.0',
         'auth.mfa.verify': '0.13.0',
         'auth.mfa.status': '0.13.0',
+        'auth.deviceLink.redeem': '0.13.2',
+        'auth.deviceLink.poll': '0.13.2',
     };
 
     it('every exported operation carries a since', () =>
@@ -1253,6 +1315,34 @@ describe('declared errors match the refusals', () =>
         }
     });
 
+    it('the three device-link refusals carry the status their error class carries', () =>
+    {
+        // Added in 0.13.2 — the refusals a new device can meet on redeem and
+        // poll. The issuer-only ones (wrong match, not redeemed, already
+        // handled) are not on this surface, because the issuer's operations
+        // are not.
+        const thrown = [
+            new DeviceLinkNotFoundError(),
+            new DeviceLinkExpiredError(),
+            new DeviceLinkDeniedError(),
+        ];
+
+        for (const error of thrown)
+        {
+            const entry = declared.find((candidate) => candidate.code === error.name);
+
+            expect(entry, error.name).toBeDefined();
+            expect(entry?.httpStatus, error.name).toBe(error.statusCode);
+            expect(entry?.surface, error.name).toBe('rest');
+        }
+
+        expect(declared.map((error) => error.code).filter((code) => code.startsWith('DeviceLink')).sort()).toEqual([
+            'DeviceLinkDeniedError',
+            'DeviceLinkExpiredError',
+            'DeviceLinkNotFoundError',
+        ]);
+    });
+
     it('the key-algorithm refusal carries the status its error class carries', () =>
     {
         // Added in 0.10.1. The class name is the code a client matches on, so the
@@ -1269,9 +1359,11 @@ describe('declared errors match the refusals', () =>
 
     it('no device refusal is retryable: the same request cannot be answered differently', () =>
     {
-        // Every one of the four is a fact about the record, not about load. A
-        // client that retried on them would poll a code that will never move.
-        const deviceErrors = declared.filter((error) => error.code.startsWith('DeviceAuth'));
+        // Every one of them is a fact about the record, not about load. A client
+        // that retried on them would poll a code that will never move.
+        const deviceErrors = declared.filter((error) => error.code.startsWith('Device'));
+
+        expect(deviceErrors).toHaveLength(7);
 
         for (const error of deviceErrors)
         {
@@ -1384,9 +1476,9 @@ describe('declared proof rules match the implementation', () =>
         replayWindowMillis: number;
     };
 
-    it('the contract line is the revision that adds the long-poll wait to the device poll', () =>
+    it('the contract line is the revision that adds device link\'s new-device operations', () =>
     {
-        expect(bundle.contractVersion).toBe('0.13.1');
+        expect(bundle.contractVersion).toBe('0.13.2');
     });
 
     it('the supported range floor is the current minor, as the 0.x rule has it', () =>

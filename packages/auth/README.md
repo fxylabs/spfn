@@ -219,6 +219,13 @@ routes use `.skip(['auth'])`; the rest require `Authorization: Bearer <client-si
 | `getDeviceAuthInfo` | POST `/_auth/device/info` | yes | what device is asking, so the approval screen can show it |
 | `approveDeviceAuth` | POST `/_auth/device/approve` | yes | let the waiting device in |
 | `denyDeviceAuth` | POST `/_auth/device/deny` | yes | refuse it |
+| `issueDeviceLink` | POST `/_auth/device/link/issue` | yes | show a code a new device can come in by — see [Device link](#device-link) |
+| `redeemDeviceLink` | POST `/_auth/device/link/redeem` | public | the new device parks its key on that code and gets the match number to show |
+| `getDeviceLinkStatus` | POST `/_auth/device/link/status` | issuing key | where the link stands; the device and three numbers once redeemed |
+| `confirmDeviceLink` | POST `/_auth/device/link/confirm` | issuing key | pick the number the new device shows |
+| `denyDeviceLink` | POST `/_auth/device/link/deny` | issuing key | refuse the new device |
+| `cancelDeviceLink` | POST `/_auth/device/link/cancel` | issuing key | close the link before anyone is let in |
+| `pollDeviceLink` | POST `/_auth/device/link/poll` | public | ask whether the issuer picked; the approved answer *is* the login |
 | `passkeyRegisterOptions` | POST `/_auth/passkeys/register/options` | yes | begin enrolling a passkey — see [Passkeys](#passkeys-webauthn) |
 | `passkeyRegisterVerify` | POST `/_auth/passkeys/register/verify` | yes | verify the attestation and keep the credential |
 | `passkeyLoginOptions` | POST `/_auth/passkeys/login/options` | public | begin a passkey sign-in; takes no identifier |
@@ -615,6 +622,141 @@ answer — Google Cloud's load balancer closes a backend request at 30 seconds b
 No job sweeps the table. Rows are judged by `expiresAt` whenever they are read or moved, so a
 stale row authorizes nothing; it only keeps its user code out of circulation, and 31⁸ codes do
 not run out.
+
+### Device link
+
+Device-code login the other way round: the device that is already signed in shows the code,
+and the new one reads it. This is the natural way onto a phone — the signed-in device is a
+laptop with a screen, and the phone has a camera. The signed-in device (the *issuer*) asks for a
+code and shows it, as text and as a QR its own client draws. The new device reads it, sends it
+with its fresh public key, and shows a two-digit number. The issuer is shown the new device and
+three numbers, and taps the one on the new device's screen. The new device's next poll is its
+login.
+
+```typescript
+// On the signed-in device — the issuer. Every call below is signed with its key.
+const { linkId, userCode, expiresAtMillis } = await authApi.issueDeviceLink.call({});
+
+// Show `userCode` (XXXX-XXXX) as text and in a QR code, then wait for a device to use it.
+let link;
+
+do
+{
+    // Held up to 20s while nobody has redeemed the code (deviceAuth.maxWaitMs caps it).
+    link = await authApi.getDeviceLinkStatus.call({ body: { linkId, waitMillis: 20_000 } });
+}
+while (link.status === 'issued');
+// → { status: 'redeemed', deviceName?, platform?, fingerprintPrefix, redeemedAtMillis,
+//     choices: [37, 82, 15], expiresAtMillis }
+
+// Show the device and the three numbers; the person taps the one on the new device.
+await authApi.confirmDeviceLink.call({ body: { linkId, choice: tapped } });
+// or authApi.denyDeviceLink.call({ body: { linkId } }); closing the screen:
+// authApi.cancelDeviceLink.call({ body: { linkId } })
+```
+
+```typescript
+// On the new device — it has no key on file, so both calls are public.
+const { deviceCode, matchNumber, expiresAtMillis, intervalMillis } =
+    await authApi.redeemDeviceLink.call({ body: {
+        userCode,                          // read from the QR, or typed
+        publicKey, keyId, fingerprint, algorithm: 'ES256',
+        deviceName: 'Pocket phone', platform: 'ios',
+    } });
+
+// Show `matchNumber` large ("tap 37 on your computer"), then long-poll as device-code does.
+let answer;
+
+do
+{
+    answer = await authApi.pollDeviceLink.call({ body: { deviceCode, waitMillis: 20_000 } });
+
+    if (answer.status === 'pending' && answer.intervalMillis > 0)
+    {
+        await new Promise(resolve => setTimeout(resolve, answer.intervalMillis));
+    }
+}
+while (answer.status === 'pending');
+// → { status: 'approved', userId, publicId, email?, phone?, passwordChangeRequired }
+```
+
+The approved answer is the one `pollDeviceAuth` and `login` return, produced by the same
+completion — account status checks, key registration, the login event — so a client cannot tell
+which way in it took. Its key is registered under the issuer's account with channel
+`device-link` on `auth.device.registered`.
+
+| state ↓ call → | redeem | status | confirm | deny | cancel | poll |
+| --- | --- | --- | --- | --- | --- | --- |
+| issued | → redeemed | `issued` | 409 NotRedeemed | 409 NotRedeemed | → expired | — |
+| redeemed | 404 | device + `choices` | right number → approved; wrong → denied + 400 WrongMatch | → denied | → expired | `pending` |
+| approved | 404 | `approved` | 409 AlreadyHandled | 409 AlreadyHandled | 409 AlreadyHandled | login, → consumed |
+| denied | 404 | `denied` | 409 AlreadyHandled | 409 AlreadyHandled | 409 AlreadyHandled | 403 Denied |
+| consumed | 404 | `consumed` | 409 AlreadyHandled | 409 AlreadyHandled | 409 AlreadyHandled | 404 |
+| dead (TTL, cancelled, replaced, issuer signed out) | 400 Expired | 400 Expired | 400 Expired | 400 Expired | 400 Expired | 400 Expired |
+| unknown, or another key's link | 404 | 404 | 404 | 404 | 404 | 404 |
+
+Error names are `DeviceLink` + the cell: `DeviceLinkNotFoundError` (404),
+`DeviceLinkExpiredError` (400), `DeviceLinkWrongMatchError` (400), `DeviceLinkDeniedError` (403),
+`DeviceLinkNotRedeemedError` (409), `DeviceLinkAlreadyHandledError` (409). A consumed link stays
+404 to the new device after its TTL, for device-code login's reason.
+
+- **Single use.** A code is redeemed once, by one device: redeem moves the link from `issued` and
+  nowhere else, so of two devices sending the same code exactly one parks its key, and the other
+  is told the code does not exist. The approval is collected once, the same way: of two polls
+  arriving together, one registers the key and the other gets 404.
+- **Five-minute TTL.** A link code lives 5 minutes (`deviceLink.ttlMs`). Every decision uses the
+  server's clock, carried into the statement that moves the link; `expiresAtMillis` is for the
+  countdown on screen and nothing else. Issuing again from the same device expires the previous
+  link, so there is one live link per issuing key.
+- **Only the issuing key can confirm.** Status, confirm, deny and cancel are bound to the key that
+  signed `issue` — not merely the account. Another device of the same account, or another account,
+  is answered 404, exactly as for a link that never existed. The link also dies with that key: once
+  it is revoked, signed out or past its own expiry, every call on the link answers expired — and
+  confirm and the poll that registers the key re-check the issuing key inside the statement that
+  moves the link, under a lock on the key row, so a sign-out landing at the same moment is never
+  read around. A global revocation (`revoke-all`, even the kind that spares the calling device, a
+  password change, a deletion request) expires the account's links as well.
+- **The match number, and its limit, stated plainly.** Redeem answers the new device with a number
+  from 10 to 99; the issuer is shown it among two other distinct numbers, in an order fixed when the
+  code was redeemed. The number is what ties the device the issuer is looking at to the device that
+  redeemed the code: someone who read the code off the issuer's screen redeems it on a phone the
+  issuer cannot see, so the issuer has no number to match. **A person who taps without looking at
+  the new device picks the right number one time in three.** That is the whole of the odds, because
+  one wrong pick denies the link — there is no second try, and the new device is told it was refused.
+  Typing the number would be stronger; three to tap is the trade taken for a flow people finish.
+- **The new device's key is registered only after a confirm.** It is parked in
+  `spfn_auth.device_links`, not in `user_public_keys`, until the poll after the right pick moves it
+  over. A key parked on a link that was denied, cancelled, or expired can never sign anything and
+  can never be collected.
+- **A redeemed, spent or never-issued code answer alike** (`DeviceLinkNotFoundError`, 404), so a
+  guesser cannot learn a code was real. A code that died of age answers 400.
+- **Rate limits.** `issue` per account (10/min, and 50/min per IP); `redeem` and `poll` per IP
+  (10/min and 30/min); `status` per account (30/min, 150/min per IP) and `confirm` / `deny` /
+  `cancel` per account (10/min, 50/min per IP) — the device-code policies' sizes.
+- **The device code is stored only as a SHA-256 hash**, returned once, as in device-code login.
+  Nothing in the flow logs a user code, device code, match number or key.
+- **Long polls hold no transaction.** Both `status` (the issuer, while the link waits on the other
+  device) and `poll` (the new device, while it waits on the pick) take `waitMillis` and wait exactly
+  as the device-code poll does: ahead of the transaction, capped at `deviceAuth.maxWaitMs`, at most
+  three requests waiting on one link, a re-read every second for a change committed on another
+  instance, every transition waking both after commit, and a shutdown ending every wait with the
+  current answer.
+- **`redeem` bounds what it stores** exactly as `device/start` does — it is the other route that
+  takes key material from a caller who cannot authenticate.
+
+One knob of its own; the poll interval and long-poll cap are `deviceAuth`'s:
+
+```typescript
+createAuthLifecycle({
+    deviceLink: {
+        ttlMs: 5 * 60 * 1000,   // how long a link code lives. default 5 minutes
+    },
+})
+```
+
+The mobile contract carries the new device's half — `auth.deviceLink.redeem` and
+`auth.deviceLink.poll`, since contract 0.13.2. The issuer's five routes run on the signed-in
+device and are not on that surface.
 
 ### Registered devices (key management)
 
@@ -2172,8 +2314,8 @@ whoever opened a link in a mailbox, so it is the notice to send the owner.
 
 `authDeviceRegisteredEvent` (`auth.device.registered`) fires after commit whenever a device key is
 registered on an account, on every channel that registers one — `channel` says which: `register`,
-`signup-link`, `invitation`, `password`, `oauth`, `oauth-native`, `device-code`, `password-reset`
-or `passkey`. It carries `userId`, `keyId`, `algorithm`, a 12-character `fingerprintPrefix`,
+`signup-link`, `invitation`, `password`, `oauth`, `oauth-native`, `device-code`, `device-link`,
+`password-reset` or `passkey`. It carries `userId`, `keyId`, `algorithm`, a 12-character `fingerprintPrefix`,
 `createdAtMillis`, and whatever the registration knew about the device: `deviceName?`, `platform?`,
 `ip?` and `userAgent?` — the web OAuth callback has neither label, because the sealed state does
 not carry them. Subscribe to tell the owner a device was added: a login event says a session began
@@ -2521,6 +2663,8 @@ Every operation in the exported bundle carries `since` — the contract version 
 | `auth.keys.list`, `auth.keys.revoke`, `auth.keys.revokeAll` | 0.4.1 |
 | `core.time` | 0.9.0 |
 | `auth.device.start`, `auth.device.poll`, `auth.device.info`, `auth.device.approve`, `auth.device.deny` | 0.10.0 |
+| `auth.mfa.verify`, `auth.mfa.status` | 0.13.0 |
+| `auth.deviceLink.redeem`, `auth.deviceLink.poll` | 0.13.2 |
 
 - **This is history, not policy.** The mobile contract's compatibility policy is `allOrNothing`: one
   contract version passes or refuses the whole surface, so these three fields change no verdict here.

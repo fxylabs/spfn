@@ -15,7 +15,7 @@ import {
     VerificationTokenTargetMismatchError,
 } from '@spfn/auth/errors';
 
-import { usersRepository, keysRepository, deviceAuthorizationsRepository } from '../repositories';
+import { usersRepository, keysRepository, deviceAuthorizationsRepository, deviceLinksRepository } from '../repositories';
 import { revokeAllOAuth2GrantsForUser } from './oauth2-grant.service';
 import { runBeforeRegister } from '../lib/config';
 import { type KeyAlgorithmType, type KeyPlatformType } from '../types';
@@ -488,6 +488,10 @@ export async function changePasswordService(
     // still signed in, which the user can see and revoke; losing them the other
     // way round leaves a live approval that hands out a key nothing revoked.
     await deviceAuthorizationsRepository.denyAllActiveByUserId(userId);
+
+    // Device links the account issued go with them, for the same reason: an
+    // approved link nobody has collected would register a key after this.
+    await deviceLinksRepository.expireAllLiveByUserId(userId);
 
     // A grant the user gave a CLI carries a refresh token, so a client holding
     // one signs itself back in within the hour — which is exactly the client a
