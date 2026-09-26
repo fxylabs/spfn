@@ -11,6 +11,7 @@ const {
     usersRepository,
     keysRepository,
     deviceAuthorizationsRepository,
+    deviceLinksRepository,
     verifyPassword,
     hashPassword,
     revokeAllOAuth2GrantsForUser,
@@ -26,6 +27,9 @@ const {
     deviceAuthorizationsRepository: {
         denyAllActiveByUserId: vi.fn(async () => []),
     },
+    deviceLinksRepository: {
+        expireAllLiveByUserId: vi.fn(async () => []),
+    },
     verifyPassword: vi.fn(async () => true),
     hashPassword: vi.fn(async () => 'new-hash'),
     revokeAllOAuth2GrantsForUser: vi.fn(async () => undefined),
@@ -36,6 +40,7 @@ vi.mock('../../server/repositories', () => ({
     usersRepository,
     keysRepository,
     deviceAuthorizationsRepository,
+    deviceLinksRepository,
 }));
 vi.mock('../../server/helpers', () => ({ hashPassword, verifyPassword }));
 vi.mock('../../server/services/oauth2-grant.service', () => ({ revokeAllOAuth2GrantsForUser }));
