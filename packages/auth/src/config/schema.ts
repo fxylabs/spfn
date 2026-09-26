@@ -436,7 +436,7 @@ export const authEnvSchema = defineEnvSchema({
 
     SPFN_AUTH_MFA_CONFIRM_PATH: {
         ...envString({
-            description: 'App page that asks for the second factor after a 202 sign-in, as a path on {NEXT_PUBLIC_SPFN_APP_URL || SPFN_APP_URL}. createOAuthCallbackHandler redirects the browser there with ?challenge= when a social sign-in needs a step-up; the page posts that challenge and a code to /_auth/mfa/verify. It is a page in your app, not an API route.',
+            description: 'App page that asks for the second factor after a 202 sign-in, as a path on {NEXT_PUBLIC_SPFN_APP_URL || SPFN_APP_URL}. When a social sign-in needs a step-up, createOAuthCallbackHandler redirects the browser there with ?challenge=, and the Next.js proxy adds it to the oauthFinalize 202 as mfaPath so OAuthCallback navigates there too; a full URL is reduced to its path; the page posts that challenge and a code to /_auth/mfa/verify. It is a page in your app, not an API route.',
             default: '/auth/mfa',
             required: false,
             examples: ['/auth/mfa', '/sign-in/two-factor'],

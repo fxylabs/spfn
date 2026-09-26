@@ -56,3 +56,15 @@ export function isSafeReturnPath(returnPath: string): boolean
     // above, this catches `/foo:bar` forms that some parsers read as an authority.
     return !/^\/[^/?#]*:/.test(returnPath);
 }
+
+/**
+ * The value when `isSafeReturnPath` accepts it, otherwise `/`.
+ *
+ * For the browser seams that navigate rather than refuse: a missing or rejected
+ * destination sends the person home instead of failing a sign-in they have just
+ * finished.
+ */
+export function toSafeReturnPath(value: string | null | undefined): string
+{
+    return value && isSafeReturnPath(value) ? value : '/';
+}

@@ -6,6 +6,13 @@
  * OAuth 콜백 페이지용 클라이언트 컴포넌트
  * URL params에서 userId, keyId를 추출하여 oauthFinalize API 호출 후 returnUrl로 리다이렉트
  *
+ * An account with a second factor signing in on a new device arrives with
+ * `?mfaChallenge=` instead. The component hands it to `oauthFinalize`, which
+ * answers 202 while the proxy seals the pending cookie and names the confirm
+ * page, and then navigates there — `SPFN_AUTH_MFA_CONFIRM_PATH` on the server,
+ * `/auth/mfa` by default, `mfaPath` to override — with `?challenge=` and
+ * `?returnUrl=`. The decisions live in `oauth-callback-flow.ts`.
+ *
  * @example
  * ```tsx
  * // app/auth/callback/page.tsx
@@ -13,22 +20,9 @@
  * ```
  */
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
-import { isSafeReturnPath } from '../../lib/return-path';
-
-/**
- * The destination to navigate to, or `/` when the value would leave the app.
- *
- * Both the query parameter and the value echoed by `oauthFinalize` pass through
- * here. A callback URL is something a user can be handed, so neither is trusted
- * to be a path inside the app — without this an absolute URL in `?returnUrl=`
- * would make a genuine login end on someone else's origin.
- */
-function toSafePath(value: string | null | undefined): string
-{
-    return value && isSafeReturnPath(value) ? value : '/';
-}
+import { runOAuthCallback } from './oauth-callback-flow';
 
 export interface OAuthCallbackProps
 {
@@ -37,6 +31,18 @@ export interface OAuthCallbackProps
      * @default '/api/rpc'
      */
     apiBasePath?: string;
+
+    /**
+     * An override for the second-factor confirm page, where a callback carrying
+     * `mfaChallenge` goes next.
+     *
+     * Normally left unset: the proxy puts `SPFN_AUTH_MFA_CONFIRM_PATH` on the
+     * `oauthFinalize` 202 and the component goes there, and with the page at
+     * `/auth/mfa` nothing needs setting at all. A path within the app; a URL is
+     * reduced to its path.
+     * @default the server's `SPFN_AUTH_MFA_CONFIRM_PATH`, then '/auth/mfa'
+     */
+    mfaPath?: string;
 
     /**
      * Custom loading component
@@ -49,7 +55,8 @@ export interface OAuthCallbackProps
     errorComponent?: (error: string) => React.ReactNode;
 
     /**
-     * Callback after successful OAuth
+     * Callback after successful OAuth. Not called on the way to the confirm page:
+     * there is no session yet.
      */
     onSuccess?: (userId: string) => void;
 
@@ -61,6 +68,7 @@ export interface OAuthCallbackProps
 
 export function OAuthCallback({
     apiBasePath = '/api/rpc',
+    mfaPath,
     loadingComponent,
     errorComponent,
     onSuccess,
@@ -68,71 +76,42 @@ export function OAuthCallback({
 }: OAuthCallbackProps)
 {
     const [error, setError] = useState<string | null>(null);
-    const [isLoading, setIsLoading] = useState(true);
+
+    // One finalize per page load. React strict mode runs this effect twice in
+    // development, and a parent passing inline callbacks re-runs it on every
+    // render; neither should post the callback query a second time.
+    const started = useRef(false);
 
     useEffect(() =>
     {
-        async function finalizeOAuth()
+        if (started.current)
         {
-            try
-            {
-                const params = new URLSearchParams(window.location.search);
-                const userId = params.get('userId');
-                const keyId = params.get('keyId');
-                const returnUrl = toSafePath(params.get('returnUrl'));
-                const errorParam = params.get('error');
-
-                // Handle error from backend
-                if (errorParam)
-                {
-                    throw new Error(errorParam);
-                }
-
-                if (!userId || !keyId)
-                {
-                    throw new Error('Missing required parameters');
-                }
-
-                // Call oauthFinalize API
-                const response = await fetch(`${apiBasePath}/oauthFinalize`, {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                    },
-                    credentials: 'include',
-                    body: JSON.stringify({
-                        body: {
-                            userId,
-                            keyId,
-                            returnUrl,
-                        },
-                    }),
-                });
-
-                if (!response.ok)
-                {
-                    const data = await response.json().catch(() => ({}));
-                    throw new Error(data.message || 'Failed to finalize OAuth');
-                }
-
-                const data = await response.json();
-
-                onSuccess?.(userId);
-
-                // Redirect to returnUrl
-                window.location.href = toSafePath(data.returnUrl || returnUrl);
-            }
-            catch (err)
-            {
-                const message = err instanceof Error ? err.message : 'OAuth failed';
-                setError(message);
-                setIsLoading(false);
-                onError?.(message);
-            }
+            return;
         }
 
-        finalizeOAuth();
-    }, [apiBasePath, onSuccess, onError]);
+        started.current = true;
+
+        runOAuthCallback(window.location.search, { apiBasePath, mfaPath, fetch: window.fetch.bind(window) })
+            .then((outcome) =>
+            {
+                if (outcome.kind === 'error')
+                {
+                    setError(outcome.message);
+                    onError?.(outcome.message);
+
+                    return;
+                }
+
+                if (outcome.userId)
+                {
+                    onSuccess?.(outcome.userId);
+                }
+
+                // Built by the flow from checked values only: toSafeReturnPath on
+                // the session path, mfaConfirmUrl on the challenge path.
+                window.location.href = outcome.to;
+            });
+    }, [apiBasePath, mfaPath, onSuccess, onError]);
 
     if (error)
     {
@@ -152,21 +131,16 @@ export function OAuthCallback({
         );
     }
 
-    if (isLoading)
+    if (loadingComponent)
     {
-        if (loadingComponent)
-        {
-            return <>{loadingComponent}</>;
-        }
-
-        return (
-            <div style={{ padding: '20px', textAlign: 'center' }}>
-                <p>Completing authentication...</p>
-            </div>
-        );
+        return <>{loadingComponent}</>;
     }
 
-    return null;
+    return (
+        <div style={{ padding: '20px', textAlign: 'center' }}>
+            <p>Completing authentication...</p>
+        </div>
+    );
 }
 
 export default OAuthCallback;

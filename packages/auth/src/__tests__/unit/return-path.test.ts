@@ -101,7 +101,7 @@ describe('the seams that hand a destination back to the browser', () =>
     it.each([
         ['nextjs/interceptors/oauth.ts', 'seals returnUrl into the OAuth state'],
         ['server/routes/oauth/index.ts', 'echoes returnUrl from /_auth/oauth/finalize'],
-        ['nextjs/components/oauth-callback.tsx', 'navigates with window.location.href'],
+        ['lib/return-path.ts', 'toSafeReturnPath, which the browser seams below navigate through'],
         ['nextjs/oauth-handlers.ts', 'redirects from the Next.js callback route'],
         ['server/services/oauth.service.ts', 'puts the unsealed returnUrl in a redirect URL'],
     ])('%s calls isSafeReturnPath (%s)', (file) =>
@@ -109,15 +109,24 @@ describe('the seams that hand a destination back to the browser', () =>
         expect(readFileSync(join(SRC, file), 'utf8')).toContain('isSafeReturnPath');
     });
 
+    it.each([
+        ['nextjs/components/oauth-callback-flow.ts', 'builds where the OAuth callback page navigates'],
+        ['nextjs/components/mfa-confirm-flow.ts', 'reads the confirm page return path'],
+    ])('%s calls toSafeReturnPath (%s)', (file) =>
+    {
+        expect(readFileSync(join(SRC, file), 'utf8')).toContain('toSafeReturnPath(');
+    });
+
     // The component is a browser component and vitest here runs node-only specs,
-    // so the navigation itself is pinned at the source: every assignment to
-    // window.location.href in the OAuth callback goes through the check.
+    // so the navigation itself is pinned at the source: the OAuth callback assigns
+    // window.location.href only from the flow's outcome, whose `to` is built by
+    // toSafeReturnPath or mfaConfirmUrl (oauth-callback-mfa.test.ts drives both).
     it('oauth-callback.tsx navigates only through the checked value', () =>
     {
         const source = readFileSync(join(SRC, 'nextjs', 'components', 'oauth-callback.tsx'), 'utf8');
         const navigations = source.match(/window\.location\.href = .+/g) ?? [];
 
-        expect(navigations).toContain('window.location.href = toSafePath(data.returnUrl || returnUrl);');
-        expect(navigations.filter(line => line.includes('returnUrl') && !line.includes('toSafePath'))).toEqual([]);
+        expect(navigations).toContain('window.location.href = outcome.to;');
+        expect(navigations.filter(line => line !== 'window.location.href = outcome.to;' && !line.includes("'/'"))).toEqual([]);
     });
 });

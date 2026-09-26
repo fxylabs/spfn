@@ -44,6 +44,7 @@ import { cookieSecure } from './cookie-options';
 import { pushCsrfCookie } from './csrf';
 import { refusalBody } from './error-envelope';
 import { bindingSessionFields } from './session-binding';
+import { resolveMfaConfirmPath } from '../mfa-confirm-path';
 
 /**
  * The four paths that can answer 202, plus the one that resolves it.
@@ -140,6 +141,27 @@ async function bakePendingCookie(ctx: ResponseInterceptorContext): Promise<void>
 }
 
 /**
+ * Tell the OAuth callback page where the confirm page is (#107).
+ *
+ * The page runs in the browser and cannot read `SPFN_AUTH_MFA_CONFIRM_PATH`, so
+ * the proxy adds it to the one 202 that page reads — `oauth/finalize` for a
+ * challenge — from the same resolver `createOAuthCallbackHandler` redirects
+ * with. Every other answer this rule sees passes through with its body as the
+ * backend wrote it.
+ */
+function addConfirmPath(ctx: ResponseInterceptorContext): void
+{
+    const body = ctx.response.body as { mfaRequired?: unknown } | null;
+
+    if (ctx.path !== '/_auth/oauth/finalize' || body?.mfaRequired !== true)
+    {
+        return;
+    }
+
+    ctx.response.body = { ...body, mfaPath: resolveMfaConfirmPath() };
+}
+
+/**
  * Replace the backend's answer with a refusal this browser can act on.
  *
  * The verification really did succeed and the key really is active — what failed
@@ -219,8 +241,8 @@ function pushSessionCookies(ctx: ResponseInterceptorContext, sealed: string, key
 /**
  * Second-Factor Verify Interceptor
  *
- * Response: bakes the pending cookie on a 202, and seals the session on a
- * verified challenge. Registered after `loginRegisterInterceptor`, whose 202
+ * Response: bakes the pending cookie on a 202 — adding the confirm path to an
+ * `oauth/finalize` one — and seals the session on a verified challenge. Registered after `loginRegisterInterceptor`, whose 202
  * pass-through is what leaves the body for this rule to read.
  */
 export const mfaVerifyInterceptor: InterceptorRule = {
@@ -233,6 +255,7 @@ export const mfaVerifyInterceptor: InterceptorRule = {
         {
             if (ctx.response.status === 202)
             {
+                addConfirmPath(ctx);
                 await bakePendingCookie(ctx);
             }
             else if (ctx.response.status === 200 && ctx.path === '/_auth/mfa/verify')

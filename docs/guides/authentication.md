@@ -855,8 +855,9 @@ redirects to `SPFN_AUTH_MFA_CONFIRM_PATH` (default `/auth/mfa`) with `?challenge
 somewhere else.
 
 If you use the `OAuthCallback` page component instead, it posts the challenge to
-`/_auth/oauth/finalize`, gets a 202 back, and hands you the challenge through its `onSuccess`
-— send the person to your confirm screen from there.
+`/_auth/oauth/finalize`, gets a 202 back, and navigates to the confirm page itself. The proxy
+puts `SPFN_AUTH_MFA_CONFIRM_PATH` on that 202, so the one variable moves both flows; the
+component's `mfaPath` prop is only an override.
 
 ### What a 202 has not done
 

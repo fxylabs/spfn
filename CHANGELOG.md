@@ -303,6 +303,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
       notify on, never a refusal, and the addresses themselves are never returned.
       Mobile contract **0.12.0**; every new field is optional and absent for an account that
       did not opt in.
+- **`useMfaConfirm()`**, a headless hook for the second-factor confirm page, from
+  `@spfn/auth/nextjs/client` (#107): it reads `?challenge=` and `?returnUrl=`, wraps the three
+  `completeMfaWith*` helpers, reports one `state` (`idle | submitting | wrong | expired |
+  failed`) and leaves for the return path on success; the app renders the page.
 
 #### @spfn/storage
 
@@ -442,6 +446,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     - Nothing else changes: the renewal protocol, the backend's proof check and its key
       retirement are untouched, and a refused verify still installs no session and clears no
       cookie.
+- `OAuthCallback` finishes a social sign-in on an account with a second factor (#107): a
+  callback carrying `?mfaChallenge=` is posted to `oauthFinalize` and, on its 202, sent to the
+  confirm page (`mfaPath`, default `/auth/mfa`) instead of failing with "Missing required
+  parameters".
 
 #### @spfn/monitor · @spfn/cms
 

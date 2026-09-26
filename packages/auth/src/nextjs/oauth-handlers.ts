@@ -10,11 +10,11 @@ import { sealSession } from '../server/lib/session';
 import { deriveCsrfToken } from '../server/lib/csrf';
 import { COOKIE_NAMES, getSessionTtl } from '../server/lib/config';
 import { env } from '@spfn/core/config';
-import { env as authEnv } from '@spfn/auth/config';
 import { logger } from '@spfn/core/logger';
 import { unsealPendingSession } from './session-helpers';
 import { isSafeReturnPath } from '../lib/return-path';
 import { bindingSessionFields } from './interceptors/session-binding';
+import { resolveMfaConfirmPath } from './mfa-confirm-path';
 
 export interface OAuthCallbackOptions
 {
@@ -37,7 +37,8 @@ export interface OAuthCallbackOptions
      * An override for `SPFN_AUTH_MFA_CONFIRM_PATH`, which is where every other
      * app-page path in this package lives; the env var is the one to set, and
      * this exists for an app mounting two handlers on different screens. The
-     * handler redirects to it with `?challenge=` and `?returnUrl=`.
+     * handler redirects to it with `?challenge=` and `?returnUrl=`, reduced to a
+     * path on this origin.
      *
      * @default env SPFN_AUTH_MFA_CONFIRM_PATH, then '/auth/mfa'
      */
@@ -97,7 +98,7 @@ function mfaRedirect(
     configured?: string,
 ): NextResponse
 {
-    const path = configured || authEnv.SPFN_AUTH_MFA_CONFIRM_PATH || DEFAULT_MFA_CONFIRM_PATH;
+    const path = resolveMfaConfirmPath(configured);
     const target = new URL(path, request.url);
 
     target.searchParams.set('challenge', challenge);
@@ -107,9 +108,6 @@ function mfaRedirect(
 
     return NextResponse.redirect(target);
 }
-
-/** Where the second-factor page lives when nothing says otherwise. */
-const DEFAULT_MFA_CONFIRM_PATH = '/auth/mfa';
 
 /**
  * Create OAuth callback handler for Next.js API Route

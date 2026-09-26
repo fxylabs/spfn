@@ -279,6 +279,11 @@ export interface OAuthFinalizeResponse
     mfaRequired: boolean;
     /** The second-factor challenge, echoed back. Present exactly on the 202. */
     challenge?: string;
+    /**
+     * The confirm page, `SPFN_AUTH_MFA_CONFIRM_PATH`. Added to the 202 by
+     * `mfaVerifyInterceptor` in the Next.js proxy, never by this route.
+     */
+    mfaPath?: string;
     userId?: string;
     keyId?: string;
     returnUrl: string;
