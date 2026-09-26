@@ -46,8 +46,13 @@ jobs:
 
       # The conformance suites import @spfn/core subpaths, whose exports point at
       # dist/ — a fresh checkout has no dist, so the workspace deps must be built.
+      # @spfn/auth is one of them: its own source imports itself by package name
+      # (`@spfn/auth`, `@spfn/auth/errors`), and those resolve through the same
+      # dist/ exports. Without it contract-export.test.ts fails at import with
+      # "Failed to resolve entry for package @spfn/auth". Same order as the
+      # publish workflow's build.
       - name: Build workspace dependencies the suites import
-        run: pnpm --filter @spfn/core build && pnpm --filter @spfn/notification build
+        run: pnpm --filter @spfn/core build && pnpm --filter @spfn/notification build && pnpm --filter @spfn/auth build
 
       - name: Regenerate the export
         run: pnpm --filter @spfn/auth export:mobile-contract
