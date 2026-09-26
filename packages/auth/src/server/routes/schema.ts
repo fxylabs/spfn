@@ -92,6 +92,25 @@ export const UserCodeSchema = Type.String({
 });
 
 /**
+ * The issuer's handle on a device link, as `issue` returned it.
+ *
+ * A UUID today; bounded rather than patterned so the handle's format stays the
+ * server's to change. It authorizes nothing without the issuing key beside it.
+ */
+export const LinkIdSchema = Type.String({
+    minLength: 1,
+    maxLength: 64,
+    description: 'Device link handle returned by /_auth/device/link/issue',
+});
+
+/** A number the issuer picked from the three `status` showed. */
+export const MatchChoiceSchema = Type.Integer({
+    minimum: 10,
+    maximum: 99,
+    description: 'The number the issuer picked — the one the new device shows',
+});
+
+/**
  * What `POST /_auth/device/poll` answers with.
  *
  * A union, because the two answers are different kinds of thing rather than one

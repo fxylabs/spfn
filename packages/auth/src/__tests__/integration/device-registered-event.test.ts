@@ -576,6 +576,39 @@ describe.skipIf(!dbAvailable)('device-registered event (case table 7a)', () =>
         expect(seen[0]).toMatchObject({ keyId: device.keyId, channel: 'device-code', ip: '203.0.113.77' });
     });
 
+    it('device-link (pollDeviceLinkService), new keyId: one emission, channel device-link, ip of the polling device', async () =>
+    {
+        await seedUser('a12l@test.com');
+        const session = await signIn('a12l@test.com');
+
+        const issued = await post('/_auth/device/link/issue', {}, session.authorization);
+        const { linkId, userCode } = await issued.json();
+
+        const device = generateKeyPair('ES256');
+        const redeemed = await post('/_auth/device/link/redeem', {
+            userCode,
+            publicKey: device.publicKey,
+            keyId: device.keyId,
+            fingerprint: device.fingerprint,
+            algorithm: device.algorithm,
+            deviceName: 'Pocket phone',
+            platform: 'ios',
+        });
+        const { deviceCode, matchNumber } = await redeemed.json();
+
+        const confirmed = await post('/_auth/device/link/confirm', { linkId, choice: matchNumber }, session.authorization);
+        expect(confirmed.status).toBe(200);
+
+        seen.length = 0;
+        clientIp = '203.0.113.78';
+        const polled = await post('/_auth/device/link/poll', { deviceCode });
+        await settled();
+
+        expect(polled.status).toBe(200);
+        expect(seen).toHaveLength(1);
+        expect(seen[0]).toMatchObject({ keyId: device.keyId, channel: 'device-link', ip: '203.0.113.78' });
+    });
+
     it('password-reset (completePasswordResetService), new keyId: one emission, channel password-reset', async () =>
     {
         await seedUser('a13@test.com');

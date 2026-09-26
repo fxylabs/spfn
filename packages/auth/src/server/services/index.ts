@@ -102,6 +102,28 @@ export type {
     DeviceAuthApprovedResult,
 } from './device-auth.service';
 
+// Device Link Service
+export {
+    issueDeviceLinkService,
+    redeemDeviceLinkService,
+    getDeviceLinkStatusService,
+    confirmDeviceLinkService,
+    denyDeviceLinkService,
+    cancelDeviceLinkService,
+    pollDeviceLinkService,
+} from './device-link.service';
+
+export type {
+    DeviceLinkIssuer,
+    IssueDeviceLinkResult,
+    RedeemDeviceLinkParams,
+    RedeemDeviceLinkResult,
+    DeviceLinkParams,
+    ConfirmDeviceLinkParams,
+    DeviceLinkStatusResult,
+    PollDeviceLinkParams,
+} from './device-link.service';
+
 // Passkey Service (WebAuthn)
 export {
     startPasskeyEnrollmentService,

@@ -98,12 +98,13 @@ export const DeviceRegistrationChannelSchema = Type.Union([
     Type.Literal('oauth'),
     Type.Literal('oauth-native'),
     Type.Literal('device-code'),
+    Type.Literal('device-link'),
     Type.Literal('password-reset'),
     Type.Literal('passkey'),
     Type.Literal('renewal'),
 ]);
 
-/** The ten doors a device key is registered through. */
+/** The eleven doors a device key is registered through. */
 export type DeviceRegistrationChannel = Static<typeof DeviceRegistrationChannelSchema>;
 
 /**
@@ -111,7 +112,7 @@ export type DeviceRegistrationChannel = Static<typeof DeviceRegistrationChannelS
  *
  * 발행 시점:
  * - a key row was created for an account and the transaction that created it
- *   committed, on every one of the ten channels above
+ *   committed, on every one of the eleven channels above
  *
  * This is the notice an account owner needs and could not get before: a stolen
  * password used to sign in on a new device was silent, because a login event

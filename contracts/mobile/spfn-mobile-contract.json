@@ -4,12 +4,12 @@
   "originStatement": "Generated from the route and contract definitions in SPFN primitives (packages/auth/src/server/client-proof) and published from that repository. This file is generated output: edit the source modules and re-export, never this file.",
   "contractName": "spfn-mobile-contract",
   "contractMajor": 0,
-  "contractVersion": "0.13.1",
+  "contractVersion": "0.13.2",
   "supportedRange": ">=0.13.0 <0.14.0",
-  "exporterVersion": "@spfn/auth/contract-bundle@6.0.0",
+  "exporterVersion": "@spfn/auth/contract-bundle@6.1.0",
   "authProfiles": { "allowed": ["clientProofV1"], "unknownProfilePolicy": "reject", "mixingWithinSession": "prohibited" },
   "operationAuthClasses": {
-    "none": "the unproven class: the operation is accepted with neither proof headers nor a session header, because it is called before any proof can be minted (clock synchronization, enrollment, login, and the two device-code operations a device with no key on file calls)",
+    "none": "the unproven class: the operation is accepted with neither proof headers nor a session header, because it is called before any proof can be minted (clock synchronization, enrollment, login, and the device-code and device-link operations a device with no key on file calls)",
     "clientProofV1": "the operation is admitted by the clientProofV1 admission order; requiresSession states whether the session header travels",
     "rule": "an operation whose authProfile is not none refuses an unproven call exactly as it refuses any failed admission; nothing is downgraded to anonymous handling"
   },
@@ -61,6 +61,17 @@
     "pendingRule": "a pending answer is a 200 carrying status \"pending\", not a refusal, and none of the error codes stands for it. It is the answer to \"has anyone decided yet\", so the client waits intervalMillis and asks again. A client that sends waitMillis is held until the record is answered or that long passes, capped by the server; a pending answer then takes the time already waited off intervalMillis, so after a wait at least that long it is 0 and the client asks again at once. Every other answer is an error response, and an error response ends the wait unless its entry under errors marks it retryable — TooManyRequestsError is the only one that does today, and it means the device polled faster than the limit allows, so it resumes after the window rather than treating the code as answered. DeviceAuthDeniedError, DeviceAuthExpiredError and DeviceAuthNotFoundError are the device-code outcomes among the ones that end it, and they are not the whole set: this operation also answers ValidationError, the account and key refusals raised when the approved branch turns the approval into a login, and codes this bundle does not list. A client that kept polling on an answer it did not recognise would wait out a code that will never move",
     "userCodeRule": "the userCode is what a person reads off one screen and types on another; the server folds case, spaces and dashes away before looking it up, so a client may send it as displayed",
     "denyResponseRule": "deny answers 204 with an empty body and therefore declares no responseType, the way core.time declares no requestType"
+  },
+  "deviceLink": {
+    "appliesTo": "the auth.deviceLink.* operations",
+    "flow": "the mirror image of deviceAuthorization. A device that is already signed in shows a userCode, as text and as a QR its own client draws; the new device reads it, generates its key and calls redeem, shows the matchNumber it gets back, and polls. The signed-in device is shown the new device and three numbers and picks the one this device shows. The next poll registers the key under the signed-in device's account",
+    "unprovenOperations": "redeem and poll are the unproven class, on deviceAuthorization's terms: the device calling them has no registered key yet. The deviceCode redeem returned stands in for a credential on poll, and it is returned once",
+    "issuerOperations": "issue, status, confirm, deny and cancel are not on this surface. They run on the signed-in device that shows the code, and they are bound to the key that signed issue: another device of the same account is answered as if the link did not exist",
+    "algorithmDefaultRule": "algorithm is optional in RedeemDeviceLinkRequest, and an omitted one is ES256, as in StartDeviceAuthRequest: the value is fixed when the key is parked and no later request can correct it",
+    "matchRule": "matchNumber is a whole number from 10 to 99. The new device shows it and nothing else about the link; the signed-in device picks it from three distinct numbers. One wrong pick denies the link, so a pick made without looking at this device succeeds one time in three and is never retried",
+    "pollRule": "poll answers PollDeviceAuthResponse, read exactly as deviceAuthorization.pollStatusRule and pendingRule say: status \"pending\" with intervalMillis while the signed-in device has not picked, status \"approved\" with the login once it has. DeviceLinkDeniedError, DeviceLinkExpiredError and DeviceLinkNotFoundError are the device-link outcomes that end the wait, alongside the rest of the set pendingRule names",
+    "redeemRefusalRule": "a code that was never issued, one another device already redeemed, and one already spent all answer DeviceLinkNotFoundError. Only a code that died — its TTL, a cancel, a newer code from the same device, or that device signing out — answers DeviceLinkExpiredError",
+    "userCodeRule": "the userCode is folded as deviceAuthorization.userCodeRule states"
   },
   "restOperations": {
     "appliesTo": "every operation whose path starts with /_auth. The server answers more /_auth routes than this contract declares, and the undeclared ones are not reachable from a generated client: the sign-out-everywhere link confirm and consume, which a browser posts to from a page in the app with no session and no proof; the passkey, session-binding and session-renewal ceremonies, which need a browser WebAuthn API; and the second-factor enrolment routes, each of which needs an account screen. Of the second-factor routes only verify and status are declared here — verify because a client that met a 202 sign-in has to be able to finish it, and status because it has to be able to say what the account enrolled",
@@ -442,7 +453,35 @@
       "name": "ApproveDeviceAuthRequest",
       "fields": [{ "name": "userCode", "type": "string", "optional": false }]
     },
-    { "name": "DenyDeviceAuthRequest", "fields": [{ "name": "userCode", "type": "string", "optional": false }] }
+    { "name": "DenyDeviceAuthRequest", "fields": [{ "name": "userCode", "type": "string", "optional": false }] },
+    {
+      "name": "RedeemDeviceLinkRequest",
+      "fields": [
+        { "name": "userCode", "type": "string", "optional": false },
+        { "name": "publicKey", "type": "string", "optional": false },
+        { "name": "keyId", "type": "string", "optional": false },
+        { "name": "fingerprint", "type": "string", "optional": false },
+        { "name": "algorithm", "type": "KeyAlgorithm", "optional": true },
+        { "name": "deviceName", "type": "string", "optional": true },
+        { "name": "platform", "type": "KeyPlatform", "optional": true }
+      ]
+    },
+    {
+      "name": "RedeemDeviceLinkResponse",
+      "fields": [
+        { "name": "deviceCode", "type": "string", "optional": false },
+        { "name": "matchNumber", "type": "integer", "optional": false },
+        { "name": "expiresAtMillis", "type": "integer", "optional": false },
+        { "name": "intervalMillis", "type": "integer", "optional": false }
+      ]
+    },
+    {
+      "name": "PollDeviceLinkRequest",
+      "fields": [
+        { "name": "deviceCode", "type": "string", "optional": false },
+        { "name": "waitMillis", "type": "integer", "optional": true }
+      ]
+    }
   ],
   "enums": [
     { "name": "KeyAlgorithm", "values": ["ES256", "RS256"] },
@@ -646,6 +685,28 @@
       "requestType": "DenyDeviceAuthRequest",
       "summary": "Refuses the waiting device. Answers 204 with no body, so it names no response type.",
       "since": "0.10.0"
+    },
+    {
+      "id": "auth.deviceLink.redeem",
+      "method": "POST",
+      "path": "/_auth/device/link/redeem",
+      "authProfile": "none",
+      "requiresSession": false,
+      "requestType": "RedeemDeviceLinkRequest",
+      "responseType": "RedeemDeviceLinkResponse",
+      "summary": "Parks a new device's public key on the code a signed-in device shows, and returns the match number to show.",
+      "since": "0.13.2"
+    },
+    {
+      "id": "auth.deviceLink.poll",
+      "method": "POST",
+      "path": "/_auth/device/link/poll",
+      "authProfile": "none",
+      "requiresSession": false,
+      "requestType": "PollDeviceLinkRequest",
+      "responseType": "PollDeviceAuthResponse",
+      "summary": "Asks whether the issuer picked the match number; the approved answer is the login it produced.",
+      "since": "0.13.2"
     }
   ],
   "errorEnvelope": {
@@ -820,6 +881,27 @@
       "httpStatus": 409,
       "retryable": false,
       "summary": "the request was already approved or denied, and a decision on a device is made once; it is also what the loser of two concurrent approvals is told",
+      "surface": "rest"
+    },
+    {
+      "code": "DeviceLinkExpiredError",
+      "httpStatus": 400,
+      "retryable": false,
+      "summary": "the link code passed its TTL, was cancelled or replaced by the device that showed it, or that device has signed out since — whatever state the link was in. The new device starts again from a fresh code",
+      "surface": "rest"
+    },
+    {
+      "code": "DeviceLinkDeniedError",
+      "httpStatus": 403,
+      "retryable": false,
+      "summary": "the signed-in device refused this one, or picked a number that was not the one shown here; the new device stops polling instead of timing out",
+      "surface": "rest"
+    },
+    {
+      "code": "DeviceLinkNotFoundError",
+      "httpStatus": 404,
+      "retryable": false,
+      "summary": "the code names no link this device can act on — never issued, already redeemed by a device, or already spent. They answer alike on purpose, so a guess that landed cannot be told from one that did not",
       "surface": "rest"
     }
   ],

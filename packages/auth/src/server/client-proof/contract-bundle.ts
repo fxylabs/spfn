@@ -303,8 +303,26 @@ import { CLIENT_IDENTITY_HEADERS, CLIENT_KINDS, SERVER_CONTRACT_HEADERS } from '
  * this follows: an optional field a client may send is a patch, because the
  * server is what has to understand it; a field the server sends is a minor,
  * because every generated decoder meets it.
+ *
+ * 0.13.2 adds device link's two operations for the device being let in —
+ * `auth.deviceLink.redeem` and `auth.deviceLink.poll` — with the two request
+ * types and the one response type they carry, and the three refusals a new
+ * device can meet on them. Device link is device-code login's mirror image: a
+ * device that is already signed in shows the code, and the phone reads it,
+ * redeems it with its public key, shows a two-digit match number and polls. The
+ * issuer's side is bound to the key that signed its issue request and runs on
+ * the signed-in device, so it is not on this surface.
+ *
+ * A patch, by 0.4.1's rule: operations added with the types they carry, and no
+ * existing operation, type or enum touched. `auth.deviceLink.poll` answers
+ * `PollDeviceAuthResponse` itself rather than a copy — an approved link is the
+ * same login a device-code approval is — so the one shape a consumer already
+ * decodes is the one it meets here. The three codes join an error list that was
+ * already open (`unlistedCodes`), as `KeyAlgorithmMismatchError` did in 0.10.1.
+ * A consumer generated against 0.13.0 or 0.13.1 keeps matching the server, so
+ * the supported range does not move.
  */
-export const CONTRACT_VERSION = '0.13.1';
+export const CONTRACT_VERSION = '0.13.2';
 export const CONTRACT_MAJOR = 0;
 export const CONTRACT_NAME = 'spfn-mobile-contract';
 
@@ -342,8 +360,11 @@ export const EXPORT_ORIGIN = 'spfn-primitives-ci-export';
  * and called the result a minor. That was this same change under a bump that
  * understated it. A published version is not rewritten, so 5.1.0 stays as it is
  * and the rule is spelled out here instead, so the next one is judged by it.
+ *
+ * 6.1.0 is a minor: it adds the `deviceLink` section, and every section and key
+ * that was there is still there, meaning what it meant.
  */
-export const EXPORTER_VERSION = '@spfn/auth/contract-bundle@6.0.0';
+export const EXPORTER_VERSION = '@spfn/auth/contract-bundle@6.1.0';
 
 /**
  * The scalars the grammar admits.
@@ -885,6 +906,39 @@ export const CONTRACT_TYPES: readonly TypeDeclaration[] = [
             required('userCode', 'string'),
         ],
     },
+    /**
+     * `StartDeviceAuthRequest` with the code it redeems in front: the same key
+     * material under the same bounds, since this is the other place a caller
+     * with nothing to authenticate parks a key before anyone agreed to it.
+     */
+    {
+        name: 'RedeemDeviceLinkRequest',
+        fields: [
+            required('userCode', 'string'),
+            required('publicKey', 'string'),
+            required('keyId', 'string'),
+            required('fingerprint', 'string'),
+            optional('algorithm', 'KeyAlgorithm'),
+            optional('deviceName', 'string'),
+            optional('platform', 'KeyPlatform'),
+        ],
+    },
+    {
+        name: 'RedeemDeviceLinkResponse',
+        fields: [
+            required('deviceCode', 'string'),
+            required('matchNumber', 'integer'),
+            required('expiresAtMillis', 'integer'),
+            required('intervalMillis', 'integer'),
+        ],
+    },
+    {
+        name: 'PollDeviceLinkRequest',
+        fields: [
+            required('deviceCode', 'string'),
+            optional('waitMillis', 'integer'),
+        ],
+    },
 ];
 
 /**
@@ -945,7 +999,7 @@ interface RestSurfaceError
 }
 
 /**
- * Every way `auth.enroll.oauthNative` and the device-code operations refuse, as
+ * Every way `auth.enroll.oauthNative` and the device operations refuse, as
  * codes a consumer can switch on.
  *
  * "Every way" includes the app's own `beforeRegister` check: what that check
@@ -973,6 +1027,10 @@ interface RestSurfaceError
  * `KeyIdAlreadyRegisteredError`, and every one of the five routes is rate
  * limited — so a code is listed once and names the same failure wherever it
  * appears.
+ *
+ * The device-link operations add three codes (contract 0.13.2) and reuse the
+ * rest on the same terms — the redeem body is the start body with a code in
+ * front, and the poll's approved branch is the same login.
  *
  * `auth.mfa.*` is the third enumerated family (contract 0.13.0) and adds exactly
  * one code. Everything `auth.mfa.verify` can refuse with is one of two things: a
@@ -1103,6 +1161,30 @@ const REST_SURFACE_ERRORS: readonly RestSurfaceError[] = [
             'the request was already approved or denied, and a decision on a device is made once; it is also what '
             + 'the loser of two concurrent approvals is told',
     },
+    {
+        code: 'DeviceLinkExpiredError',
+        httpStatus: 400,
+        retryable: false,
+        summary:
+            'the link code passed its TTL, was cancelled or replaced by the device that showed it, or that device '
+            + 'has signed out since — whatever state the link was in. The new device starts again from a fresh code',
+    },
+    {
+        code: 'DeviceLinkDeniedError',
+        httpStatus: 403,
+        retryable: false,
+        summary:
+            'the signed-in device refused this one, or picked a number that was not the one shown here; the new '
+            + 'device stops polling instead of timing out',
+    },
+    {
+        code: 'DeviceLinkNotFoundError',
+        httpStatus: 404,
+        retryable: false,
+        summary:
+            'the code names no link this device can act on — never issued, already redeemed by a device, or '
+            + 'already spent. They answer alike on purpose, so a guess that landed cannot be told from one that did not',
+    },
 ];
 
 export interface MobileContractBundle
@@ -1134,7 +1216,7 @@ export function buildMobileContractBundle(): MobileContractBundle
             none:
                 'the unproven class: the operation is accepted with neither proof headers nor a session header, '
                 + 'because it is called before any proof can be minted (clock synchronization, enrollment, login, '
-                + 'and the two device-code operations a device with no key on file calls)',
+                + 'and the device-code and device-link operations a device with no key on file calls)',
             [CLIENT_PROOF_PROFILE]:
                 'the operation is admitted by the clientProofV1 admission order; requiresSession states whether '
                 + 'the session header travels',
@@ -1264,6 +1346,41 @@ export function buildMobileContractBundle(): MobileContractBundle
             denyResponseRule:
                 'deny answers 204 with an empty body and therefore declares no responseType, the way core.time '
                 + 'declares no requestType',
+        },
+        deviceLink: {
+            appliesTo: 'the auth.deviceLink.* operations',
+            flow:
+                'the mirror image of deviceAuthorization. A device that is already signed in shows a userCode, as '
+                + 'text and as a QR its own client draws; the new device reads it, generates its key and calls '
+                + 'redeem, shows the matchNumber it gets back, and polls. The signed-in device is shown the new '
+                + 'device and three numbers and picks the one this device shows. The next poll registers the key '
+                + 'under the signed-in device\'s account',
+            unprovenOperations:
+                'redeem and poll are the unproven class, on deviceAuthorization\'s terms: the device calling them has '
+                + 'no registered key yet. The deviceCode redeem returned stands in for a credential on poll, and it '
+                + 'is returned once',
+            issuerOperations:
+                'issue, status, confirm, deny and cancel are not on this surface. They run on the signed-in device '
+                + 'that shows the code, and they are bound to the key that signed issue: another device of the same '
+                + 'account is answered as if the link did not exist',
+            algorithmDefaultRule:
+                'algorithm is optional in RedeemDeviceLinkRequest, and an omitted one is ES256, as in '
+                + 'StartDeviceAuthRequest: the value is fixed when the key is parked and no later request can correct it',
+            matchRule:
+                'matchNumber is a whole number from 10 to 99. The new device shows it and nothing else about the link; '
+                + 'the signed-in device picks it from three distinct numbers. One wrong pick denies the link, so a '
+                + 'pick made without looking at this device succeeds one time in three and is never retried',
+            pollRule:
+                'poll answers PollDeviceAuthResponse, read exactly as deviceAuthorization.pollStatusRule and pendingRule '
+                + 'say: status "pending" with intervalMillis while the signed-in device has not picked, status '
+                + '"approved" with the login once it has. DeviceLinkDeniedError, DeviceLinkExpiredError and '
+                + 'DeviceLinkNotFoundError are the device-link outcomes that end the wait, alongside the rest of the '
+                + 'set pendingRule names',
+            redeemRefusalRule:
+                'a code that was never issued, one another device already redeemed, and one already spent all answer '
+                + 'DeviceLinkNotFoundError. Only a code that died — its TTL, a cancel, a newer code from the same '
+                + 'device, or that device signing out — answers DeviceLinkExpiredError',
+            userCodeRule: 'the userCode is folded as deviceAuthorization.userCodeRule states',
         },
         restOperations: {
             appliesTo:
