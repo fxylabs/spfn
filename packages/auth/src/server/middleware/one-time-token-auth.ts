@@ -23,7 +23,7 @@
 import { defineMiddleware } from '@spfn/core/route';
 import { UnauthorizedError } from '@spfn/core/errors';
 import { verifyOneTimeTokenService } from '../services/one-time-token.service';
-import { usersRepository, userProfilesRepository } from '@spfn/auth/server';
+import { findUserWithEffectiveRole, userProfilesRepository } from '@spfn/auth/server';
 
 export const oneTimeTokenAuth = defineMiddleware('oneTimeTokenAuth', async (c, next) =>
 {
@@ -46,7 +46,7 @@ export const oneTimeTokenAuth = defineMiddleware('oneTimeTokenAuth', async (c, n
 
     // Load user data (same as authenticate middleware)
     const [result, locale] = await Promise.all([
-        usersRepository.findByIdWithRole(Number(userId)),
+        findUserWithEffectiveRole(Number(userId)),
         userProfilesRepository.findLocaleByUserId(Number(userId)),
     ]);
 

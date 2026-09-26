@@ -4,8 +4,9 @@
  * Handles user CRUD operations
  */
 
-import { type NewUser } from '../entities/users';
-import { usersRepository } from '../repositories';
+import { type NewUser, type User } from '../entities/users';
+import { rolesRepository, usersRepository } from '../repositories';
+import { assertEmailAllowedForRole, getRoleEmailDomainPolicy } from '../lib/role-email-domains';
 import { ValidationError } from '@spfn/core/errors';
 import { ReservedUsernameError, UsernameAlreadyTakenError } from '@spfn/auth/errors';
 import { env } from '@spfn/auth/config';
@@ -43,13 +44,57 @@ export async function updateLastLoginService(userId: number)
 }
 
 /**
+ * The email columns as they will stand after `updates`. An update that changes
+ * the address together with the role is judged on the new address.
+ */
+function emailAfterUpdate(user: User, updates: Partial<NewUser>)
+{
+    return {
+        email: updates.email !== undefined ? updates.email : user.email,
+        emailVerifiedAt: updates.emailVerifiedAt !== undefined ? updates.emailVerifiedAt : user.emailVerifiedAt,
+    };
+}
+
+/**
+ * Refuse a role the email-domain policy does not let this account hold.
+ *
+ * Reads nothing when no policy is configured, so an install without one
+ * behaves exactly as before.
+ */
+async function assertRoleGrantAllowed(userId: number, roleId: number, updates: Partial<NewUser>): Promise<void>
+{
+    if (getRoleEmailDomainPolicy().size === 0)
+    {
+        return;
+    }
+
+    const [user, role] = await Promise.all([usersRepository.findById(userId), rolesRepository.findById(roleId)]);
+
+    if (user && role)
+    {
+        assertEmailAllowedForRole(emailAfterUpdate(user, updates), role.name);
+    }
+}
+
+/**
  * Update user data
+ *
+ * A `roleId` in `updates` is a grant, and is refused when the role is
+ * restricted by `SPFN_AUTH_ROLE_EMAIL_DOMAINS` and the account's email is
+ * outside it, unverified, or absent.
+ *
+ * @throws RoleEmailDomainNotAllowedError (403) when the policy refuses the role
  */
 export async function updateUserService(
     userId: number,
     updates: Partial<NewUser>,
 ): Promise<void>
 {
+    if (updates.roleId != null)
+    {
+        await assertRoleGrantAllowed(userId, updates.roleId, updates);
+    }
+
     await usersRepository.updateById(userId, updates);
 }
 

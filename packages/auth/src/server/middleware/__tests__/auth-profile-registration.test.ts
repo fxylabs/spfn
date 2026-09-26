@@ -29,7 +29,7 @@ vi.mock('@spfn/auth/server', async (importOriginal) =>
             findByKeyId: vi.fn(),
             updateLastUsedById: vi.fn().mockResolvedValue(undefined),
         },
-        usersRepository: { findByIdWithRole: vi.fn() },
+        findUserWithEffectiveRole: vi.fn(),
         userProfilesRepository: { findLocaleByUserId: vi.fn().mockResolvedValue('en') },
         getPendingDeletionInfo: vi.fn(),
     };
@@ -38,7 +38,7 @@ vi.mock('@spfn/auth/server', async (importOriginal) =>
 import { authenticate, optionalAuth } from '@/server/middleware/authenticate';
 import { registerAuthProfile, type AuthContext, type AuthProfileVerifier } from '@/server/middleware/auth-profiles';
 import { UnauthorizedError } from '@spfn/core/errors';
-import { decodeToken, verifyClientToken, keysRepository, usersRepository } from '@spfn/auth/server';
+import { decodeToken, verifyClientToken, keysRepository, findUserWithEffectiveRole } from '@spfn/auth/server';
 import type { User } from '@spfn/auth/server';
 import { CLIENT_PROOF_HEADERS } from '@/server/client-proof/admission';
 import { CLIENT_PROOF_PROFILE } from '@/server/client-proof/proof';
@@ -189,7 +189,7 @@ describe('registerAuthProfile — the dispatch around a registered verifier', ()
     {
         vi.clearAllMocks();
         vi.mocked(keysRepository.updateLastUsedById).mockResolvedValue(undefined as never);
-        vi.mocked(usersRepository.findByIdWithRole).mockResolvedValue(activeUser() as never);
+        vi.mocked(findUserWithEffectiveRole).mockResolvedValue(activeUser() as never);
     });
 
     describe('1/2 — no profile header: the Bearer path, untouched', () =>

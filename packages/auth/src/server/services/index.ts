@@ -233,10 +233,20 @@ export {
     hasAnyPermission,
     hasAllPermissions,
     getUserRole,
+    getStoredUserRole,
     hasRole,
     hasAnyRole,
     assertCanAssignRole,
 } from './permission.service';
+
+// Role Email-Domain Policy
+export {
+    findUserWithEffectiveRole,
+    listRoleEmailDomainViolations,
+    demoteRoleEmailDomainViolations,
+    assertRoleEmailDomainPolicy,
+} from './role-email-domain.service';
+export type { RoleEmailDomainViolation, UserWithEffectiveRole } from './role-email-domain.service';
 
 // Role Service
 export {

@@ -10,7 +10,7 @@ import type { PurgeStrategy } from './types';
 import type { AccountDeletionPurgeUser } from './lib/deletion-config';
 import { ensureAdminExists } from './setup';
 import { authLogger } from './logger';
-import { initializeAuth, normalizeStoredEmails } from './services';
+import { assertRoleEmailDomainPolicy, initializeAuth, normalizeStoredEmails } from './services';
 import { initOneTimeTokenManager } from './lib/one-time-token';
 import { configureDeletion } from './lib/deletion-config';
 import { configureDeviceAuth } from './lib/device-auth-config';
@@ -336,7 +336,8 @@ export function createAuthLifecycle(options: AuthLifecycleOptions = {}): AuthLif
          *    or on an authorization server issuer no client could use
          * 1. Ensures admin account exists (creates if missing)
          * 2. Initializes RBAC system with built-in + custom roles/permissions
-         * 3. Initializes one-time token manager
+         * 3. Refuses boot on an SPFN_AUTH_ROLE_EMAIL_DOMAINS policy that cannot work
+         * 4. Initializes one-time token manager
          */
         afterInfrastructure: async () =>
         {
@@ -390,6 +391,10 @@ export function createAuthLifecycle(options: AuthLifecycleOptions = {}): AuthLif
             // ordinary accounts — leaves an install with no administrator and
             // nothing but a log line saying so.
             await ensureAdminExists();
+
+            // After seeding and RBAC init, so the roles it looks for and the
+            // superadmins it counts are the ones this instance will serve.
+            await assertRoleEmailDomainPolicy();
             initOneTimeTokenManager(options.oneTimeToken);
         },
     };

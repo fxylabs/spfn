@@ -12,12 +12,17 @@ import {
     userPermissionsRepository,
 } from '../repositories';
 import { ForbiddenError } from '@spfn/core/errors';
+import { findUserWithEffectiveRole } from './role-email-domain.service';
 
 /**
  * Get all permissions for a user
  *
  * Combines role-based permissions with user-specific overrides
  * Handles expiration of temporary permissions
+ *
+ * The role is the effective one: an account outside `SPFN_AUTH_ROLE_EMAIL_DOMAINS`
+ * for its stored role gets the `user` role's permissions. User-specific
+ * overrides are grants on the account, not the role, and still apply.
  *
  * @param userId - User ID (string, number, or bigint)
  * @returns Array of permission names
@@ -32,10 +37,10 @@ export async function getUserPermissions(userId: string | number | bigint): Prom
 {
     const userIdNum = typeof userId === 'string' ? Number(userId) : Number(userId);
 
-    // 1. Get user's role
-    const user = await usersRepository.findById(userIdNum);
+    // 1. Get user's effective role
+    const role = (await findUserWithEffectiveRole(userIdNum))?.role;
 
-    if (!user || !user.roleId)
+    if (!role)
     {
         return [];
     }
@@ -43,7 +48,7 @@ export async function getUserPermissions(userId: string | number | bigint): Prom
     const permSet = new Set<string>();
 
     // 2. Get role-based permissions
-    const rolePermMappings = await rolePermissionsRepository.findByRoleId(user.roleId);
+    const rolePermMappings = await rolePermissionsRepository.findByRoleId(role.id);
     const permIds = rolePermMappings.map(rp => rp.permissionId);
 
     if (permIds.length > 0)
@@ -159,6 +164,9 @@ export async function hasAllPermissions(
 /**
  * Get user's role name
  *
+ * The effective role: `user` for an account outside `SPFN_AUTH_ROLE_EMAIL_DOMAINS`
+ * for its stored role. For the stored role itself, see `getStoredUserRole`.
+ *
  * @param userId - User ID
  * @returns Role name or null if user has no role
  *
@@ -172,16 +180,23 @@ export async function getUserRole(userId: string | number | bigint): Promise<str
 {
     const userIdNum = typeof userId === 'string' ? Number(userId) : Number(userId);
 
-    const user = await usersRepository.findById(userIdNum);
+    return (await findUserWithEffectiveRole(userIdNum))?.role?.name ?? null;
+}
 
-    if (!user || !user.roleId)
-    {
-        return null;
-    }
-
-    const role = await rolesRepository.findById(user.roleId);
-
-    return role?.name || null;
+/**
+ * Get the role stored on a user's row, whatever the email-domain policy says
+ *
+ * For protecting a **target** account, never for authorizing a caller. An
+ * account outside the policy still stores its role; judging it by the effective
+ * `user` role would let an ordinary admin overwrite an out-of-policy superadmin,
+ * and a revert of the configuration could no longer restore it.
+ *
+ * @param userId - User ID
+ * @returns Stored role name or null if user has no role
+ */
+export async function getStoredUserRole(userId: string | number | bigint): Promise<string | null>
+{
+    return (await usersRepository.findByIdWithRole(Number(userId)))?.role?.name ?? null;
 }
 
 /**
@@ -227,6 +242,9 @@ export async function hasAnyRole(userId: string | number | bigint, roleNames: st
 
 /**
  * Assert that the caller is allowed to assign the given role.
+ *
+ * The caller's authority is their effective role and permissions: a caller
+ * outside the email-domain policy for their stored role acts as `user`.
  *
  * Centralizes the privilege rule shared by direct role assignment and invitation:
  * a non-superadmin caller may never grant the superadmin role, and may grant the

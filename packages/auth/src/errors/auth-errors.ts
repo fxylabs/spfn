@@ -817,6 +817,26 @@ export class InsufficientRoleError extends ForbiddenError
 }
 
 /**
+ * Role Email Domain Not Allowed Error (403)
+ *
+ * Thrown when a role restricted by `SPFN_AUTH_ROLE_EMAIL_DOMAINS` is granted to an
+ * account the policy does not admit: an address outside the role's domains, an
+ * unverified address, or no address at all. `details.reason` says which
+ * (`domain`, `unverified`, `no_email`). The address itself is never carried.
+ */
+export class RoleEmailDomainNotAllowedError extends ForbiddenError
+{
+    constructor(data: { roleName?: string; reason?: string; message?: string; details?: Record<string, any> } = {})
+    {
+        super({
+            message: data.message || `The account's email does not allow it to hold the role '${data.roleName ?? ''}'`,
+            details: { roleName: data.roleName, reason: data.reason, ...data.details },
+        });
+        this.name = 'RoleEmailDomainNotAllowedError';
+    }
+}
+
+/**
  * Passkey Challenge Error (401)
  *
  * Thrown when the challenge a WebAuthn ceremony presents is unknown, expired,

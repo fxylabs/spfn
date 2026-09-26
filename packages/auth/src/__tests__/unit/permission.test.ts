@@ -5,11 +5,11 @@
  * Repositories are mocked so the privilege rule is tested in isolation.
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 vi.mock('@/server/repositories', () => ({
-    usersRepository: { findById: vi.fn() },
-    rolesRepository: { findById: vi.fn() },
+    usersRepository: { findByIdWithRole: vi.fn() },
+    rolesRepository: { findById: vi.fn(), findByName: vi.fn() },
     permissionsRepository: { findById: vi.fn() },
     rolePermissionsRepository: { findByRoleId: vi.fn() },
     userPermissionsRepository: { findValidByUserId: vi.fn() },
@@ -34,12 +34,17 @@ const ROLES: Record<number, { id: number; name: string }> = {
     [MEMBER_ROLE]: { id: MEMBER_ROLE, name: 'member' },
 };
 
+const USER_ROLE = 4;
+
 const CALLER_ID = 10;
 
-/** Set the role the caller currently holds. */
-function setCallerRole(roleId: number): void
+/** Set the role the caller stores, and the email the policy reads. */
+function setCallerRole(roleId: number, email = 'caller@example.com'): void
 {
-    vi.mocked(usersRepository.findById).mockResolvedValue({ id: CALLER_ID, roleId } as never);
+    vi.mocked(usersRepository.findByIdWithRole).mockResolvedValue({
+        user: { id: CALLER_ID, roleId, email, emailVerifiedAt: new Date() },
+        role: { id: roleId, name: ROLES[roleId].name, displayName: ROLES[roleId].name, priority: 0 },
+    } as never);
 }
 
 /** Control whether the caller resolves the `admin:promote` permission. */
@@ -59,10 +64,28 @@ describe('assertCanAssignRole', () =>
     beforeEach(() =>
     {
         vi.clearAllMocks();
+        delete process.env.SPFN_AUTH_ROLE_EMAIL_DOMAINS;
         vi.mocked(rolesRepository.findById).mockImplementation(
             (async (id: number) => ROLES[id] ?? null) as never,
         );
+        vi.mocked(rolesRepository.findByName).mockResolvedValue(
+            { id: USER_ROLE, name: 'user', displayName: 'User', priority: 10 } as never,
+        );
         setAdminPromote(false);
+    });
+
+    afterEach(() =>
+    {
+        delete process.env.SPFN_AUTH_ROLE_EMAIL_DOMAINS;
+    });
+
+    it('judges the caller by the effective role: a superadmin outside the policy acts as user', async () =>
+    {
+        process.env.SPFN_AUTH_ROLE_EMAIL_DOMAINS = 'superadmin=example.com';
+        setCallerRole(SUPERADMIN_ROLE, 'boss@gmail.test');
+
+        await expect(assertCanAssignRole(CALLER_ID, SUPERADMIN_ROLE))
+            .rejects.toThrow('Only superadmin can assign superadmin role');
     });
 
     it('lets a superadmin assign any role, including superadmin', async () =>

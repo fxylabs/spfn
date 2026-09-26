@@ -24,7 +24,7 @@ vi.mock('@spfn/auth/server', async (importOriginal) =>
             findByKeyId: vi.fn(),
             updateLastUsedById: vi.fn().mockResolvedValue(undefined),
         },
-        usersRepository: { findByIdWithRole: vi.fn() },
+        findUserWithEffectiveRole: vi.fn(),
         userProfilesRepository: { findLocaleByUserId: vi.fn().mockResolvedValue('en') },
         getPendingDeletionInfo: vi.fn(),
     };
@@ -36,7 +36,7 @@ import { ValidationError } from '@spfn/core/errors';
 
 import { authenticate, optionalAuth } from '@/server/middleware/authenticate';
 import { selectAuthProfile } from '@/server/middleware/auth-profiles';
-import { keysRepository, usersRepository } from '@spfn/auth/server';
+import { keysRepository, findUserWithEffectiveRole } from '@spfn/auth/server';
 import { CLIENT_PROOF_HEADERS } from '@/server/client-proof/admission';
 import { encodeCanonicalJson, parseCanonicalJson } from '@/server/client-proof/canonical-json';
 import { ABSENT_BODY_SHA256, sha256Hex, signClientProof } from '@/server/client-proof/proof';
@@ -258,7 +258,7 @@ describe.each(EACH_MIDDLEWARE)('clientProofV1 refusal envelope (%s)', (_name, mi
         configureClientProofReplayStore(new MemoryReplayStore());
         vi.mocked(keysRepository.updateLastUsedById).mockResolvedValue(undefined as never);
         vi.mocked(keysRepository.findByKeyId).mockResolvedValue(validKeyRecord() as never);
-        vi.mocked(usersRepository.findByIdWithRole).mockResolvedValue(activeUser() as never);
+        vi.mocked(findUserWithEffectiveRole).mockResolvedValue(activeUser() as never);
     });
 
     it.each(CLIENT_PROOF_ERROR_CODES.map((code) => [code] as const))(
@@ -318,7 +318,7 @@ describe.each(EACH_MIDDLEWARE)('clientProofV1 refusal envelope (%s)', (_name, mi
     {
         // The user-status path runs after admission and is not part of the
         // contract's refusal vocabulary — it must keep its own error class.
-        vi.mocked(usersRepository.findByIdWithRole).mockResolvedValue(
+        vi.mocked(findUserWithEffectiveRole).mockResolvedValue(
             activeUser({ status: 'inactive' }) as never,
         );
 
@@ -382,7 +382,7 @@ describe('a refused proven call through the whole server stack', () =>
         configureClientProofReplayStore(new MemoryReplayStore());
         vi.mocked(keysRepository.updateLastUsedById).mockResolvedValue(undefined as never);
         vi.mocked(keysRepository.findByKeyId).mockResolvedValue(validKeyRecord() as never);
-        vi.mocked(usersRepository.findByIdWithRole).mockResolvedValue(activeUser() as never);
+        vi.mocked(findUserWithEffectiveRole).mockResolvedValue(activeUser() as never);
     });
 
     function appWithAuth(): Hono
