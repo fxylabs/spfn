@@ -335,7 +335,7 @@ describe.skipIf(!dbAvailable)('key registration provenance and the key epoch (ca
         expect(entry).toMatchObject({ registeredIp: clientIp, registeredUserAgent: USER_AGENT });
     });
 
-    it('the contract: KeySummary declares the two fields and the bundle is at 0.13.0', async () =>
+    it('the contract: KeySummary declares the two fields and the bundle is at 0.13.1', async () =>
     {
         const bundle = buildMobileContractBundle();
         const summary = (bundle.types as { name: string; fields: { name: string; optional: boolean }[] }[])
@@ -343,8 +343,8 @@ describe.skipIf(!dbAvailable)('key registration provenance and the key epoch (ca
 
         expect(summary.fields.find((field) => field.name === 'registeredIp')).toMatchObject({ optional: true });
         expect(summary.fields.find((field) => field.name === 'registeredUserAgent')).toMatchObject({ optional: true });
-        expect(CONTRACT_VERSION).toBe('0.13.0');
-        expect(bundle.contractVersion).toBe('0.13.0');
+        expect(CONTRACT_VERSION).toBe('0.13.1');
+        expect(bundle.contractVersion).toBe('0.13.1');
     });
 
     // ========================================================================

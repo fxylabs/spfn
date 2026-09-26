@@ -42,6 +42,7 @@ import { rateLimitPolicy } from '@spfn/core/middleware';
 import { byIpAndAccount, byIpAndTarget, byIpAndCaller } from '../../lib/rate-limit-keys';
 import { defineRouter, route } from '@spfn/core/route';
 import { deviceProvenance } from '../../lib/device-provenance';
+import { deviceAuthLongPoll, DEVICE_AUTH_WAITED_MILLIS } from '../../middleware/device-auth-long-poll';
 
 // NOTE: a POST /_auth/exists endpoint was removed deliberately — it answered
 // account existence directly (user enumeration). Existence is no longer exposed;
@@ -337,14 +338,29 @@ export const startDeviceAuth = route.post('/_auth/device/start')
  * Public, and the device code in the body is what stands in for a credential.
  * A pending answer is a normal 200 — only a refusal, an expiry or an unknown
  * code is an error, so a client can tell "keep waiting" from "stop".
+ *
+ * `waitMillis` makes it a long poll: a pending record holds the request until it
+ * is answered or the wait runs out, capped at `deviceAuth.maxWaitMs`. A pending
+ * answer takes the time already waited off `intervalMillis` — 0 after a wait at
+ * least that long, so the device asks again at once. The
+ * wait is `deviceAuthLongPoll()`, ahead of `Transactional()` so that nothing is
+ * held while waiting and the judgement runs inside the transaction as before.
  */
 export const pollDeviceAuth = route.post('/_auth/device/poll')
     .input({
         body: Type.Object({
             deviceCode: Type.String({ description: 'Device code returned by /_auth/device/start' }),
+            waitMillis: Type.Optional(Type.Integer({
+                minimum: 0,
+                description: 'Longest to hold the request while nobody has answered; capped by the server',
+            })),
         }),
     })
-    .use([rateLimitPolicy('auth-device-poll', { limit: 30, windowMs: 60_000 }), Transactional()])
+    .use([
+        rateLimitPolicy('auth-device-poll', { limit: 30, windowMs: 60_000 }),
+        deviceAuthLongPoll(),
+        Transactional(),
+    ])
     .skip(['auth'])
     .handler(async (c): Promise<Static<typeof DeviceAuthPollResponseSchema>> =>
     {
@@ -353,7 +369,11 @@ export const pollDeviceAuth = route.post('/_auth/device/poll')
         // The polling device is the one being registered, so its address and
         // user agent are what the owner's device list should carry — not the
         // approving device's, which made a different request minutes ago.
-        return await pollDeviceAuthService({ ...body, ...deviceProvenance(c.raw) });
+        return await pollDeviceAuthService({
+            deviceCode: body.deviceCode,
+            ...deviceProvenance(c.raw),
+            waitedMillis: Number(c.raw.get(DEVICE_AUTH_WAITED_MILLIS) ?? 0),
+        });
     });
 
 /**

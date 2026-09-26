@@ -1384,9 +1384,9 @@ describe('declared proof rules match the implementation', () =>
         replayWindowMillis: number;
     };
 
-    it('the contract line is the revision that adds second-factor step-up', () =>
+    it('the contract line is the revision that adds the long-poll wait to the device poll', () =>
     {
-        expect(bundle.contractVersion).toBe('0.13.0');
+        expect(bundle.contractVersion).toBe('0.13.1');
     });
 
     it('the supported range floor is the current minor, as the 0.x rule has it', () =>

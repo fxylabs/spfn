@@ -4,7 +4,7 @@
   "originStatement": "Generated from the route and contract definitions in SPFN primitives (packages/auth/src/server/client-proof) and published from that repository. This file is generated output: edit the source modules and re-export, never this file.",
   "contractName": "spfn-mobile-contract",
   "contractMajor": 0,
-  "contractVersion": "0.13.0",
+  "contractVersion": "0.13.1",
   "supportedRange": ">=0.13.0 <0.14.0",
   "exporterVersion": "@spfn/auth/contract-bundle@6.0.0",
   "authProfiles": { "allowed": ["clientProofV1"], "unknownProfilePolicy": "reject", "mixingWithinSession": "prohibited" },
@@ -58,7 +58,7 @@
     "algorithmDefaultRule": "algorithm is the one optional field of StartDeviceAuthRequest, and an omitted one is ES256: the parked key is stored as ES256 and the poll registers it as ES256. A device holding a key of any other algorithm states it here, because the value is fixed when the key is parked and no later request in this flow can correct it",
     "approverOperations": "info, approve and deny are proven calls from a device that is already signed in, on the same clientProofV1 terms as the key operations. approve is the one of the three that binds an account: it reads the approving user from the admitted caller and never from the request body, because that call is the entire authorization. info and deny bind nobody — info describes the waiting device to any admitted caller holding the code, and deny records the refusal without recording who refused",
     "pollStatusRule": "PollDeviceAuthResponse is one object with a discriminant, because this grammar has no union type. status is always present and every other field belongs to one branch, so every other field is optional: status \"pending\" carries intervalMillis and nothing else, and status \"approved\" carries userId, publicId, passwordChangeRequired and the optional email and phone — the fields LoginResponse carries, because an approved poll is the login the approval produced. Read the branch from status, never from which fields happen to be present",
-    "pendingRule": "a pending answer is a 200 carrying status \"pending\", not a refusal, and none of the error codes stands for it. It is the answer to \"has anyone decided yet\", so the client waits intervalMillis and asks again. Every other answer is an error response, and an error response ends the wait unless its entry under errors marks it retryable — TooManyRequestsError is the only one that does today, and it means the device polled faster than the limit allows, so it resumes after the window rather than treating the code as answered. DeviceAuthDeniedError, DeviceAuthExpiredError and DeviceAuthNotFoundError are the device-code outcomes among the ones that end it, and they are not the whole set: this operation also answers ValidationError, the account and key refusals raised when the approved branch turns the approval into a login, and codes this bundle does not list. A client that kept polling on an answer it did not recognise would wait out a code that will never move",
+    "pendingRule": "a pending answer is a 200 carrying status \"pending\", not a refusal, and none of the error codes stands for it. It is the answer to \"has anyone decided yet\", so the client waits intervalMillis and asks again. A client that sends waitMillis is held until the record is answered or that long passes, capped by the server; a pending answer then takes the time already waited off intervalMillis, so after a wait at least that long it is 0 and the client asks again at once. Every other answer is an error response, and an error response ends the wait unless its entry under errors marks it retryable — TooManyRequestsError is the only one that does today, and it means the device polled faster than the limit allows, so it resumes after the window rather than treating the code as answered. DeviceAuthDeniedError, DeviceAuthExpiredError and DeviceAuthNotFoundError are the device-code outcomes among the ones that end it, and they are not the whole set: this operation also answers ValidationError, the account and key refusals raised when the approved branch turns the approval into a login, and codes this bundle does not list. A client that kept polling on an answer it did not recognise would wait out a code that will never move",
     "userCodeRule": "the userCode is what a person reads off one screen and types on another; the server folds case, spaces and dashes away before looking it up, so a client may send it as displayed",
     "denyResponseRule": "deny answers 204 with an empty body and therefore declares no responseType, the way core.time declares no requestType"
   },
@@ -407,7 +407,10 @@
     },
     {
       "name": "PollDeviceAuthRequest",
-      "fields": [{ "name": "deviceCode", "type": "string", "optional": false }]
+      "fields": [
+        { "name": "deviceCode", "type": "string", "optional": false },
+        { "name": "waitMillis", "type": "integer", "optional": true }
+      ]
     },
     {
       "name": "PollDeviceAuthResponse",

@@ -1212,7 +1212,7 @@ full design.
 | `/_auth/session` | GET | Required | Get session info |
 | `/_auth/tokens` | POST | Required | Issue one-time token |
 | `/_auth/device/start` | POST | — | Begin device-code login: park a key, get the codes |
-| `/_auth/device/poll` | POST | — | Ask whether the request was answered; collects the login |
+| `/_auth/device/poll` | POST | — | Ask whether the request was answered; collects the login. `waitMillis` makes it a long poll |
 | `/_auth/device/info` | POST | Required | Describe the device asking to be let in |
 | `/_auth/device/approve` | POST | Required | Let the waiting device in |
 | `/_auth/device/deny` | POST | Required | Refuse the waiting device |
@@ -1222,8 +1222,10 @@ full design.
 > code on a device that is already signed in (`info` shows which device is asking, then
 > `approve`); the waiting device's next `poll` registers its key and answers exactly as
 > `/_auth/login` does. A global sign-out (`keys/revoke-all`, a password change, a deletion
-> request) also cancels approvals not yet collected. TTL and poll interval are configured via
-> `createAuthLifecycle({ deviceAuth })`; the full flow and its security model are documented in
+> request) also cancels approvals not yet collected. A `poll` that sends `waitMillis` is held
+> until the owner answers or the wait runs out (capped at `maxWaitMs`, default 20s), so the
+> device does not have to tick every few seconds. TTL, poll interval and the long-poll cap are
+> configured via `createAuthLifecycle({ deviceAuth })`; the full flow and its security model are documented in
 > `packages/auth/README.md`.
 
 > There is no account-existence endpoint. `POST /_auth/exists` was removed on purpose — it

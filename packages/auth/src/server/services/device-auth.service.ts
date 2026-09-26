@@ -24,6 +24,12 @@
  * refuses the account's live records too, as `denied`, so they land in that row
  * of the table. See `denyAllActiveByUserId`; the three callers are the three
  * places that revoke every key at once.
+ *
+ * A poll may ask to wait (`waitMillis`). `waitForDeviceAuthAnswerService` then
+ * holds a pending record's request — before the route's transaction opens — until
+ * something answers it, the wait runs out, or the device hangs up, and only after
+ * that is the table above applied. A long poll answers exactly what a short poll
+ * sent at the same moment would, only sooner.
  */
 
 import {
@@ -36,11 +42,13 @@ import {
     InvalidKeyFingerprintError,
 } from '@spfn/auth/errors';
 import { onAfterCommit } from '@spfn/core/db';
+import { getShutdownManager } from '@spfn/core/server';
 
 import { deviceAuthorizationsRepository, usersRepository } from '../repositories';
 import type { DeviceAuthorization, DeviceAuthStatus } from '../entities/device-authorizations';
 import { type KeyAlgorithmType, type KeyPlatformType } from '../types';
 import { getDeviceAuthConfig } from '../lib/device-auth-config';
+import { holdDeviceAuthWait, waitForDeviceAuthAnswer, waitingOnDeviceAuth } from '../lib/device-auth-waiters';
 import type { DeviceProvenance } from '../lib/device-provenance';
 import { assertKeyMatchesAlgorithm, verifyKeyFingerprint } from '../helpers/jwt';
 import {
@@ -135,12 +143,32 @@ export interface PollDeviceAuthParams
      * to run a WebAuthn ceremony in needs.
      */
     webProxy?: boolean;
+    /**
+     * How long this request already waited on the server, from the long-poll
+     * middleware. A pending answer subtracts it from the interval: the device
+     * has done that much of its waiting here.
+     */
+    waitedMillis?: number;
+}
+
+export interface WaitForDeviceAuthAnswerParams
+{
+    deviceCode: string;
+    /** Longest the device is willing to wait, in milliseconds. Capped at `maxWaitMs`. */
+    waitMillis: number;
+    /** Aborts when the device hangs up, so a wait nobody is listening to ends. */
+    signal?: AbortSignal;
 }
 
 /** Nobody has answered yet. Not an error — the waiting device waits. */
 export interface DeviceAuthPendingResult
 {
     status: 'pending';
+    /**
+     * How long to wait before polling again, less what the request already
+     * waited on the server — 0 once a long poll has waited at least the interval,
+     * so the device asks again at once.
+     */
     intervalMillis: number;
 }
 
@@ -173,6 +201,23 @@ export type PollDeviceAuthResult = DeviceAuthPendingResult | DeviceAuthApprovedR
  * is not what this code thinks it is, and quietly looping would hide that.
  */
 const USER_CODE_ATTEMPTS = 3;
+
+/**
+ * How often a waiting poll re-reads its record on its own.
+ *
+ * The wake an answer sends reaches only polls parked in the same process, so a
+ * poll parked on another instance learns of an approval from this re-read. One
+ * second bounds that delay; the read is one indexed lookup per waiting device.
+ */
+const WAIT_RECHECK_MS = 1000;
+
+/**
+ * How many polls may wait on one record at once. A device has one poll in
+ * flight; a few more cover a retry that overlaps its own timed-out request.
+ * Past this the poll is answered at once instead of waiting — the record's
+ * answer is the same, and a caller cannot turn one code into many open waits.
+ */
+const MAX_WAITERS_PER_RECORD = 3;
 
 /**
  * Refuse any record that cannot be acted on, whatever the operation.
@@ -406,6 +451,84 @@ export async function denyDeviceAuthService(params: DenyDeviceAuthParams): Promi
 }
 
 /**
+ * Hold a long poll while its record is still pending.
+ *
+ * Called by the poll route's long-poll middleware, before `Transactional()`
+ * opens: a transaction held open for the wait would pin a pooled connection per
+ * waiting device. The reads here only decide whether to keep waiting and never
+ * the answer — `pollDeviceAuthService` reads the record again inside the route's
+ * transaction, and that read is the one the answer is built from. They go to
+ * the primary, so a wake is not wasted on a replica that has not caught up.
+ *
+ * Every way out of the wait hands the request on to be judged, and none of them
+ * throws. The wait ends at `expiresAt` (the judgement answers Expired), when the
+ * server starts shutting down (so the device gets a pending answer instead of a
+ * connection cut by the drain timeout), and when a read fails — the judgement
+ * inside `Transactional()` runs the same read, and that is where a database
+ * error is turned into the answer a client can read.
+ *
+ * @returns milliseconds the request waited; 0 when it did not wait at all
+ */
+export async function waitForDeviceAuthAnswerService(params: WaitForDeviceAuthAnswerParams): Promise<number>
+{
+    const requested = Math.min(params.waitMillis, getDeviceAuthConfig().maxWaitMs);
+    const deviceCodeHash = hashDeviceCode(params.deviceCode);
+    const record = requested > 0 ? await readWaitable(deviceCodeHash) : null;
+
+    if (!record || waitingOnDeviceAuth(record.id) >= MAX_WAITERS_PER_RECORD)
+    {
+        return 0;
+    }
+
+    const startedAt = Date.now();
+    const deadline = Math.min(startedAt + requested, record.expiresAt.getTime());
+
+    await holdDeviceAuthWait(record.id, () => waitUntil(record.id, deviceCodeHash, deadline, params.signal));
+
+    return Date.now() - startedAt;
+}
+
+/** Park, re-read, repeat — until the record moves, the deadline passes, or the wait has to end. */
+async function waitUntil(id: number, deviceCodeHash: string, deadline: number, signal?: AbortSignal): Promise<void>
+{
+    while (!signal?.aborted && !getShutdownManager().isShuttingDown())
+    {
+        const remaining = deadline - Date.now();
+
+        if (remaining <= 0)
+        {
+            return;
+        }
+
+        await waitForDeviceAuthAnswer(id, Math.min(remaining, WAIT_RECHECK_MS), signal);
+
+        if (!await readWaitable(deviceCodeHash))
+        {
+            return;
+        }
+    }
+}
+
+/**
+ * The record, if it is one a poll should keep waiting on. A failed read is "stop
+ * waiting", not an error: the judgement repeats it inside `Transactional()`.
+ */
+async function readWaitable(deviceCodeHash: string): Promise<DeviceAuthorization | null>
+{
+    const record = await deviceAuthorizationsRepository
+        .findByDeviceCodeHashOnPrimary(deviceCodeHash)
+        .catch(() => null);
+
+    return isWaitable(record) ? record : null;
+}
+
+/** Still nobody's answer, and still alive: the only record a poll waits on. */
+function isWaitable(record: DeviceAuthorization | null): boolean
+{
+    return record?.status === 'pending' && record.expiresAt.getTime() > Date.now();
+}
+
+/**
  * The waiting device asking whether anyone has answered.
  *
  * Approved is the one branch with a side effect, and it is a one-shot: the record
@@ -429,7 +552,10 @@ export async function pollDeviceAuthService(
 
     if (record.status === 'pending')
     {
-        return { status: 'pending', intervalMillis: getDeviceAuthConfig().intervalMs };
+        return {
+            status: 'pending',
+            intervalMillis: Math.max(0, getDeviceAuthConfig().intervalMs - (params.waitedMillis ?? 0)),
+        };
     }
 
     const consumed = await deviceAuthorizationsRepository.consumeApproved(deviceCodeHash);

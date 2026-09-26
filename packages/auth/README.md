@@ -503,6 +503,31 @@ const answer = await authApi.pollDeviceAuth.call({ body: { deviceCode } });
 // → { status: 'approved', userId, publicId, email?, phone?, passwordChangeRequired }
 ```
 
+Or long-poll: send `waitMillis` and the server holds a pending request until the owner
+answers or the wait runs out, so the device learns of an approval the moment it is made
+instead of at its next tick.
+
+```typescript
+let answer;
+
+do
+{
+    // Held up to 20s (the server's maxWaitMs caps it). A pending answer takes the time
+    // already waited off intervalMillis — 0 after a full wait, so ask again at once.
+    // An error ends the loop, as before.
+    answer = await authApi.pollDeviceAuth.call({ body: { deviceCode, waitMillis: 20_000 } });
+
+    if (answer.status === 'pending' && answer.intervalMillis > 0)
+    {
+        await new Promise(resolve => setTimeout(resolve, answer.intervalMillis));
+    }
+}
+while (answer.status === 'pending');
+```
+
+Keep the loop's sleep on `intervalMillis > 0`. It covers a server that answered without
+waiting — an older one that ignores the field — so the loop never spins.
+
 ```typescript
 // On the signed-in device — the user typed the code they read off the other screen.
 const asking = await authApi.getDeviceAuthInfo.call({ body: { userCode } });
@@ -557,21 +582,35 @@ two ways in are indistinguishable.
   who cannot authenticate, so `publicKey`, `keyId` and `fingerprint` carry length limits —
   generous next to a real key (an RSA-2048 SPKI is 392 base64 characters against a 2048 limit)
   and small next to the megabyte that would otherwise sit in a table no job clears.
+- **A long poll holds no transaction.** The wait is route middleware in front of the poll's
+  `Transactional()`, so a waiting device does not pin a pooled connection, and the answer is
+  judged inside the transaction exactly as a poll without `waitMillis` is — same atomicity,
+  same database-error answers. Approve, deny and a global revocation wake a poll parked in the
+  same process after they commit. A poll parked on another instance re-reads its record every
+  second, so an approval committed elsewhere reaches it within about a second. A device that
+  hangs up mid-wait is not judged, so an approval it can no longer hear waits for its next poll;
+  at most three polls wait on one code at a time — a fourth is answered at once; and a server
+  that starts shutting down ends every wait with a pending answer rather than a cut connection.
 - **Clock skew cannot affect this.** Every timestamp in the decision is the server's. The
   `expiresAtMillis` in the start response is for the waiting device's countdown display, and
   nothing the client believes about the time reaches the server's judgement.
 
-Two knobs, both announced to the waiting device in the start response and therefore resolved
-at lifecycle time rather than read per call:
+Three knobs, resolved at lifecycle time rather than read per call — the first two are
+announced to the waiting device in the start response:
 
 ```typescript
 createAuthLifecycle({
     deviceAuth: {
         ttlMs: 10 * 60 * 1000,   // how long a code lives. default 10 minutes
         intervalMs: 5000,        // poll interval the server asks for. default 5s
+        maxWaitMs: 20_000,       // longest a long poll is held. default 20s
     },
 })
 ```
+
+Keep `maxWaitMs` under the idle timeout of every proxy and load balancer in front of the
+server. A long poll cut off by one reaches the device as a network error, not as a pending
+answer — Google Cloud's load balancer closes a backend request at 30 seconds by default.
 
 No job sweeps the table. Rows are judged by `expiresAt` whenever they are read or moved, so a
 stale row authorizes nothing; it only keeps its user code out of circulation, and 31⁸ codes do

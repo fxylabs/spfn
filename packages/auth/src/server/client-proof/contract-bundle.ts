@@ -293,8 +293,18 @@ import { CLIENT_IDENTITY_HEADERS, CLIENT_KINDS, SERVER_CONTRACT_HEADERS } from '
  * consumer generated against 0.12.x reads `userId` off a sign-in as a required
  * field and would decode a 202 as a malformed response. The range moves so such
  * a client is refused `CONTRACT_UNSUPPORTED` rather than left to guess.
+ *
+ * 0.13.1 adds the optional `waitMillis` to `PollDeviceAuthRequest`, which turns
+ * the poll into a long poll: a pending record holds the request until it is
+ * answered or the wait runs out, and a pending answer takes the time already
+ * waited off `intervalMillis` — 0 once the wait was at least the interval. A patch, on 0.3.1's reasoning: a consumer generated
+ * against 0.13.0 never sends the field and gets exactly the answers it got
+ * before, so the supported range stays put. The line 0.12.0 draws is the one
+ * this follows: an optional field a client may send is a patch, because the
+ * server is what has to understand it; a field the server sends is a minor,
+ * because every generated decoder meets it.
  */
-export const CONTRACT_VERSION = '0.13.0';
+export const CONTRACT_VERSION = '0.13.1';
 export const CONTRACT_MAJOR = 0;
 export const CONTRACT_NAME = 'spfn-mobile-contract';
 
@@ -813,6 +823,7 @@ export const CONTRACT_TYPES: readonly TypeDeclaration[] = [
         name: 'PollDeviceAuthRequest',
         fields: [
             required('deviceCode', 'string'),
+            optional('waitMillis', 'integer'),
         ],
     },
     /**
@@ -1235,7 +1246,10 @@ export function buildMobileContractBundle(): MobileContractBundle
             pendingRule:
                 'a pending answer is a 200 carrying status "pending", not a refusal, and none of the error codes '
                 + 'stands for it. It is the answer to "has anyone decided yet", so the client waits intervalMillis '
-                + 'and asks again. Every other answer is an error response, and an error response ends the wait '
+                + 'and asks again. A client that sends waitMillis is held until the record is answered or that '
+                + 'long passes, capped by the server; a pending answer then takes the time already waited off '
+                + 'intervalMillis, so after a wait at least that long it is 0 and the client asks again at once. '
+                + 'Every other answer is an error response, and an error response ends the wait '
                 + 'unless its entry under errors marks it retryable — TooManyRequestsError is the only one that '
                 + 'does today, and it means the device polled faster than the limit allows, so it resumes after '
                 + 'the window rather than treating the code as answered. DeviceAuthDeniedError, '

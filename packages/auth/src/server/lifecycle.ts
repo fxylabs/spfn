@@ -242,6 +242,13 @@ export interface AuthLifecycleOptions extends AuthInitOptions
          * @default 5000
          */
         intervalMs?: number;
+
+        /**
+         * The longest a poll that sends `waitMillis` is held open, in milliseconds.
+         * Keep it under the idle timeout of every proxy in front of the server.
+         * @default 20000
+         */
+        maxWaitMs?: number;
     };
 
     /**

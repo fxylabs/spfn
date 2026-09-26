@@ -17,12 +17,19 @@
  * most of all, since the poll that spends it is the one call that registers a
  * key. Judging the clock only in the read would let that key be registered after
  * the code was dead.
+ *
+ * The three transitions that answer a record — approve, deny, and the global
+ * revocation's sweep — also wake any long poll parked on it, after commit. That
+ * is done here rather than in each caller because the sweep has four callers
+ * across the revocation paths, and a caller that forgot would leave a waiting
+ * device on its slower recheck instead of telling it no.
  */
 
 import { deviceAuthorizations } from '../entities/device-authorizations';
 import type { DeviceAuthorization, NewDeviceAuthorization } from '../entities/device-authorizations';
 import { BaseRepository } from '@spfn/core/db';
 import { eq, and, gt, inArray, sql } from 'drizzle-orm';
+import { announceDeviceAuthAnswered } from '../lib/device-auth-waiters';
 
 /**
  * The TTL condition every transition carries.
@@ -97,6 +104,26 @@ export class DeviceAuthorizationsRepository extends BaseRepository
     }
 
     /**
+     * `findByDeviceCodeHash`, read from the primary even outside a transaction.
+     *
+     * For the long poll's wait, which runs before any transaction opens: it is
+     * woken right after an answer commits, and a replica that has not caught up
+     * yet would show it the record still pending and send it back to sleep.
+     *
+     * Write primary.
+     */
+    async findByDeviceCodeHashOnPrimary(deviceCodeHash: string): Promise<DeviceAuthorization | null>
+    {
+        const result = await this.db
+            .select()
+            .from(deviceAuthorizations)
+            .where(eq(deviceAuthorizations.deviceCodeHash, deviceCodeHash))
+            .limit(1);
+
+        return result[0] ?? null;
+    }
+
+    /**
      * Bind the approving user and move the record to `approved`, but only from
      * `pending`.
      *
@@ -119,7 +146,7 @@ export class DeviceAuthorizationsRepository extends BaseRepository
             )
             .returning();
 
-        return result[0] ?? null;
+        return this.answered(result[0] ?? null);
     }
 
     /**
@@ -143,7 +170,7 @@ export class DeviceAuthorizationsRepository extends BaseRepository
             )
             .returning();
 
-        return result[0] ?? null;
+        return this.answered(result[0] ?? null);
     }
 
     /**
@@ -173,7 +200,7 @@ export class DeviceAuthorizationsRepository extends BaseRepository
      */
     async denyAllActiveByUserId(userId: number): Promise<DeviceAuthorization[]>
     {
-        return await this.db
+        const denied = await this.db
             .update(deviceAuthorizations)
             .set({ status: 'denied' })
             .where(
@@ -183,6 +210,10 @@ export class DeviceAuthorizationsRepository extends BaseRepository
                 ),
             )
             .returning();
+
+        announceDeviceAuthAnswered(denied.map(record => record.id));
+
+        return denied;
     }
 
     /**
@@ -211,6 +242,17 @@ export class DeviceAuthorizationsRepository extends BaseRepository
             .returning();
 
         return result[0] ?? null;
+    }
+
+    /** Wake the polls parked on a record this call moved, and hand the row back. */
+    private answered(record: DeviceAuthorization | null): DeviceAuthorization | null
+    {
+        if (record)
+        {
+            announceDeviceAuthAnswered([record.id]);
+        }
+
+        return record;
     }
 }
 
