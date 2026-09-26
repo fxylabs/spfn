@@ -317,6 +317,24 @@ answers `200` with `mfaRequired: false` and exactly the fields it always did.
 In the Next.js proxy nothing changes for your code at all — the interceptors
 handle the 202 and the pending cookie themselves.
 
+### Migration — build the sign-out-everywhere and consent screens yourself
+
+**Breaking after `@spfn/auth` 0.3.0-beta.29** ([fxylabs/spfn#108](https://github.com/fxylabs/spfn/issues/108)).
+The package renders no HTML. `@spfn/auth/nextjs/server` no longer exports
+`createRevokeAllPageHandlers`, `RevokeAllPageView`, `RevokeAllPageHandlerOptions`,
+`RevokeAllPageHandlers`, `createOAuth2AuthorizeHandlers`, `OAuth2AuthorizeHandlerOptions`,
+`OAuth2AuthorizeHandlers`, its `OAuth2ConsentView` and `OAuth2ConsentScope`, or `escapeHtml`.
+The JSON routes behind them are unchanged, and so is the `OAuth2ConsentView` that
+`@spfn/auth/server` exports as their response type.
+
+Delete `app/account/revoke-all/route.ts` and `app/oauth/authorize/route.ts` and put a page at
+each path, calling `authApi` the way your login and reset screens already do:
+[The sign-out-everywhere link](#the-sign-out-everywhere-link) and
+[The consent screen](#the-consent-screen) each show one. The consent page takes over the rules
+the handler enforced — the login redirect, redirecting only to the API's `redirectUri`, and the
+`frame-ancestors 'none'` / `no-store` headers. Its CSRF check needs nothing from you: the proxy
+checks the consent POST in every mode.
+
 ### Verified-email signup
 
 A second way in, alongside the six-digit code. The address is proven before a password
@@ -882,46 +900,86 @@ const short = await createRevokeAllLink(userId, { ttlMinutes: 10 });
 ```
 
 **The link opens a page in your app** (`SPFN_AUTH_REVOKE_ALL_CONFIRM_PATH`, default
-`/account/revoke-all`), not an API route — the same shape the signup and reset links use. That page
-ships with the package: mount it in one route file and you are done.
+`/account/revoke-all`), not an API route — the same shape the signup and reset links use. The
+package ships no HTML: you build that page with your own components, the way you build the login
+and reset screens. It calls two public endpoints, `confirmRevokeAllLink` to describe the link and
+`consumeRevokeAllLink` to press the button, both with the token from the query string in the body.
 
-```typescript
-// app/account/revoke-all/route.ts
-import { createRevokeAllPageHandlers } from '@spfn/auth/nextjs/server';
+```tsx
+// app/account/revoke-all/page.tsx — a server component
+import { authApi } from '@spfn/auth';
+import { RevokeAllButton } from './revoke-all-button';
 
-export const { GET, POST } = createRevokeAllPageHandlers();
+export default async function RevokeAllLinkPage({ searchParams }: { searchParams: Promise<{ token?: string }> })
+{
+    const { token } = await searchParams;
+
+    // Describing the link changes nothing, so a mail scanner that prefetches the
+    // page has signed nobody out.
+    const described = token
+        ? await authApi.confirmRevokeAllLink.call({ body: { token } }).catch(() => null)
+        : null;
+
+    if (!token || !described)
+    {
+        return <p>This link cannot be used. Request a new one from the mail you received.</p>;
+    }
+
+    return <RevokeAllButton token={token} {...described} />;
+}
 ```
 
-`GET` reads the token out of the query string, calls `confirmRevokeAllLink` and draws the expiry,
-the device count and one button; `POST` calls `consumeRevokeAllLink` and reports the count it
-signed out. Every answer carries `Cache-Control: no-store` and
-`Content-Security-Policy: frame-ancestors 'none'`, the token appears in a hidden field and the API
-body and nowhere else, and every 404 is the same screen with no reason on it. Pass
-`render: (view: RevokeAllPageView) => string` to own the body at all three stages
-(`confirm` / `done` / `invalid`) while the handler keeps the status, the headers and the fields.
-
-- **There is no session on this page, so the CSRF token is not derived from one.** `GET` mints 32
-  random bytes, sets them in a cookie scoped to the page's own path (`HttpOnly`, `Secure` in
-  production, `SameSite=Strict`, 15 minutes) and mirrors them into the form; `POST` compares the
-  two before calling the API and expires the cookie afterwards. A custom `render` must echo
-  `view.fields` and `view.csrfToken` back as hidden inputs, or the form it draws cannot be
-  submitted.
-
-**An app that wants its own page** can call the two endpoints directly instead — they are public,
-and this is what the handlers above do:
-
-```typescript
+```tsx
+// app/account/revoke-all/revoke-all-button.tsx
 'use client';
+import { useState } from 'react';
+import { authApi } from '@spfn/auth';
 
-const token = useSearchParams().get('token');
+interface RevokeAllButtonProps
+{
+    token: string;
+    expiresAt: string;
+    activeKeyCount: number;
+}
 
-// Describing the link changes nothing at all, so a mail scanner that prefetches
-// the page has not signed anybody out.
-const { expiresAt, activeKeyCount } = await authApi.confirmRevokeAllLink.call({ body: { token } });
+export function RevokeAllButton({ token, expiresAt, activeKeyCount }: RevokeAllButtonProps)
+{
+    const [revokedCount, setRevokedCount] = useState<number | null>(null);
+    const [failed, setFailed] = useState(false);
 
-// The button.
-const { revokedCount } = await authApi.consumeRevokeAllLink.call({ body: { token } });
+    async function signOutEverywhere()
+    {
+        await authApi.consumeRevokeAllLink.call({ body: { token } })
+            .then(answer => setRevokedCount(answer.revokedCount), () => setFailed(true));
+    }
+
+    if (revokedCount !== null)
+    {
+        return <p>Signed out of {revokedCount} device(s).</p>;
+    }
+
+    return (
+        <main>
+            <p>
+                {activeKeyCount} device(s) are signed in to your account. This link stops working at{' '}
+                <time dateTime={expiresAt}>{expiresAt}</time>.
+            </p>
+            {failed && <p>This link cannot be used any more. Nothing was changed.</p>}
+            <button onClick={signOutEverywhere}>Sign out everywhere</button>
+        </main>
+    );
+}
 ```
+
+- **Opening the page signs nobody out.** The page only calls `confirmRevokeAllLink`, which
+  changes nothing; `consumeRevokeAllLink` is reached from the button and nowhere else, because a
+  mail scanner that prefetches the link must not end anyone's sessions.
+- **No CSRF token and no frame guard are needed.** There is no session on this page: the token in
+  the link is the whole credential and both endpoints are public, so a cross-site request or a
+  framed page could do nothing a holder of the link cannot already do directly.
+- **Say the same thing for every refusal.** Do not tell an expired link from an unknown one on the
+  page, for the reason the API does not (below). Keep the token out of your own logs and
+  analytics — it is in the page URL, so an analytics script that records full URLs records it.
 
 - **Every refusal is the same 404** (`RevokeAllLinkError`), with the same body: unknown, expired,
   already spent, superseded by a newer link, issued against a key generation that has since moved,
@@ -3073,46 +3131,215 @@ requiring a throw. `expiresAt` is seconds since the epoch, like every other OAut
 
 ### The consent screen
 
-The screen itself is one route file on the web app, at the path published as
-`authorization_endpoint`:
+The screen is a page in your app, at the path published as `authorization_endpoint`
+(default `/oauth/authorize`). The package ships no HTML: you build it with your own components.
+The page asks `authApi.getOAuth2Authorize` what the request is and draws it; the button sends
+the decision to `authApi.createOAuth2AuthorizationCode` and sends the browser back to the waiting
+CLI. Neither decides anything — the API validates the request from scratch both times, because
+the page between the two calls is in the user's browser.
 
-```typescript
-// app/oauth/authorize/route.ts
-import { createOAuth2AuthorizeHandlers } from '@spfn/auth/nextjs/server';
+```tsx
+// app/oauth/authorize/page.tsx — a server component
+import { redirect } from 'next/navigation';
+import { authApi, type AuthRouter } from '@spfn/auth';
+import type { RouterInput } from '@spfn/core/nextjs';
+import { ConsentForm } from './consent-form';
+import { refusalDestination } from './consent-refusal';
 
-export const { GET, POST } = createOAuth2AuthorizeHandlers({ loginPath: '/login' });
+type SearchParams = Record<string, string | string[] | undefined>;
+
+export type AuthorizeFields = RouterInput<AuthRouter, 'getOAuth2Authorize'>['query'];
+
+const PARAMETERS = ['client_id', 'redirect_uri', 'code_challenge', 'code_challenge_method', 'resource', 'scope', 'state'];
+
+/** The authorize parameters the link carried, and nothing else it carried. */
+function authorizeFields(params: SearchParams): AuthorizeFields
+{
+    return Object.fromEntries(
+        PARAMETERS.flatMap(name => typeof params[name] === 'string' ? [[name, params[name]]] : []),
+    ) as AuthorizeFields;
+}
+
+export default async function ConsentPage({ searchParams }: { searchParams: Promise<SearchParams> })
+{
+    const fields = authorizeFields(await searchParams);
+    const described = await authApi.getOAuth2Authorize.call({ query: fields })
+        .then(consent => ({ consent }), (refusal: unknown) => ({ refusal }));
+
+    if ('refusal' in described)
+    {
+        const destination = refusalDestination(
+            described.refusal,
+            `/oauth/authorize?${new URLSearchParams(fields as Record<string, string>)}`,
+        );
+
+        if (destination)
+        {
+            redirect(destination);
+        }
+
+        return <p>This authorization request cannot be completed. Nothing was shared.</p>;
+    }
+
+    return <ConsentForm consent={described.consent} fields={fields} />;
+}
 ```
 
-`GET` asks `GET /_auth/oauth2/authorize` what the request is and draws it; `POST` checks the
-form's own CSRF token, sends the decision to `POST /_auth/oauth2/authorize`, and redirects the
-browser back to the waiting CLI. Neither decides anything — the API validates the request from
-scratch both times, because the form between the two calls is in the user's browser.
+```tsx
+// app/oauth/authorize/consent-form.tsx
+'use client';
+import { useState } from 'react';
+import { authApi } from '@spfn/auth';
+import type { AuthorizeFields } from './page';
+import { refusalDestination } from './consent-refusal';
 
-| Option | What it is |
-| --- | --- |
-| `loginPath` | Where a visitor with no session goes. The handler appends `?returnUrl=` pointing at this request's own path and query, so signing in lands back on the screen with its parameters intact. The value is held to `isSafeReturnPath` like every other return destination in this package, and a refusal is a 400 screen rather than a redirect |
-| `render?` | `(view: OAuth2ConsentView) => string`, replacing the default body. Status, headers and the field set stay the handler's |
+type Consent = Awaited<ReturnType<typeof authApi.getOAuth2Authorize.call>>;
 
-Every answer carries `Cache-Control: no-store`, and every page also carries
-`Content-Type: text/html; charset=utf-8` and `Content-Security-Policy: frame-ancestors 'none'`
-— a consent screen that can be framed is a consent screen that can be clickjacked.
+export function ConsentForm({ consent, fields }: { consent: Consent; fields: AuthorizeFields })
+{
+    const [failed, setFailed] = useState(false);
 
-- **The two refusal kinds become the two answers.** `unknown_client` and
-  `redirect_uri_mismatch` are shown on a 400 screen with no `Location` at all. Every other
-  refusal — `invalid_request`, `invalid_target`, `invalid_scope`, `access_denied` — is a 302 to
-  the redirect URI **the API returned**, carrying `error=` and the `state` verbatim. The
-  `redirect_uri` in the request is forwarded to the API and never built into a `Location`: the
-  API's value is the one that matched a registration, which is the whole difference between a
-  redirect and an open redirect.
-- **The POST carries its own CSRF token.** The page puts the readable CSRF cookie in a hidden
-  `csrf` field and the POST refuses, before calling the API at all, unless the field matches
-  the cookie. The handler's server-side call to the API mints the CSRF header itself and would
-  always pass, so the form's token is the only check that means anything here.
-- **`render` owns the body and nothing else.** `OAuth2ConsentView` carries `clientName`,
-  `redirectHost`, `scopes`, `resource`, the `fields` to echo as hidden inputs, and the
-  `csrfToken`, all raw — put every one of them through the exported `escapeHtml`. `clientName`
-  arrives from unauthenticated dynamic registration, and a renderer that drops `fields` or
-  `csrfToken` produces a form the API refuses.
+    async function decide(approve: boolean)
+    {
+        try
+        {
+            const issued = await authApi.createOAuth2AuthorizationCode.call({ body: { ...fields, approve } });
+            const url = new URL(issued.redirectUri);
+
+            url.searchParams.set('code', issued.code);
+
+            if (issued.state !== undefined)
+            {
+                url.searchParams.set('state', issued.state);
+            }
+
+            window.location.assign(url);
+        }
+        catch (refusal)
+        {
+            const destination = refusalDestination(refusal, `${location.pathname}${location.search}`);
+
+            if (destination)
+            {
+                window.location.assign(destination);
+            }
+            else
+            {
+                setFailed(true);
+            }
+        }
+    }
+
+    return (
+        <main>
+            <h1>Authorize {consent.clientName}</h1>
+            <p>
+                <strong>{consent.clientName}</strong> is asking to act on your behalf at{' '}
+                <code>{consent.resource}</code>. The authorization would be returned to{' '}
+                <code>{consent.redirectHost}</code>.
+            </p>
+            <ul>
+                {consent.scopes.map(scope => <li key={scope.name}><strong>{scope.name}</strong> — {scope.description}</li>)}
+            </ul>
+            {failed && <p>This request could not be completed. Nothing was shared — try again.</p>}
+            <button onClick={() => decide(true)}>Allow</button>
+            <button onClick={() => decide(false)}>Deny</button>
+        </main>
+    );
+}
+```
+
+```typescript
+// app/oauth/authorize/consent-refusal.ts — used by both files above
+import { HttpError } from '@spfn/core/errors';
+
+/** Refusals with no vetted URI to carry them: shown on the page, never redirected. */
+const SHOWN = new Set(['unknown_client', 'redirect_uri_mismatch']);
+
+/**
+ * Where an API refusal sends the browser, or null when the page shows it.
+ *
+ * `redirectUri` is read from the refusal the API sent, never from the request:
+ * it is the value that matched the registration.
+ */
+export function refusalDestination(refusal: unknown, returnPath: string): string | null
+{
+    if (!(refusal instanceof HttpError))
+    {
+        return null;
+    }
+
+    if (refusal.statusCode === 401)
+    {
+        return `/login?returnUrl=${encodeURIComponent(returnPath)}`;
+    }
+
+    const { error, redirectUri, state } = refusal.details ?? {};
+
+    if (typeof error !== 'string' || SHOWN.has(error) || typeof redirectUri !== 'string')
+    {
+        return null;
+    }
+
+    const url = new URL(redirectUri);
+
+    url.searchParams.set('error', error);
+
+    if (typeof state === 'string')
+    {
+        url.searchParams.set('state', state);
+    }
+
+    return url.toString();
+}
+```
+
+```typescript
+// next.config.ts
+import type { NextConfig } from 'next';
+
+const nextConfig: NextConfig = {
+    async headers()
+    {
+        return [
+            {
+                source: '/oauth/authorize',
+                headers: [
+                    { key: 'Content-Security-Policy', value: "frame-ancestors 'none'" },
+                    { key: 'Cache-Control', value: 'no-store' },
+                ],
+            },
+        ];
+    },
+};
+
+export default nextConfig;
+```
+
+These are rules your page owns; each one is an attack that would otherwise work.
+
+- **No session: send the visitor to your login page** with `?returnUrl=` set to the consent
+  request's own path and query — a same-app path, never an absolute URL — so signing in lands
+  back on the screen with its parameters intact. The API answers `401` to both calls without a
+  session.
+- **Redirect only to the `redirectUri` the API returned**, with `code` and `state` appended on
+  success. Never build a destination from the request's `redirect_uri`: the API's value is the
+  one that matched a registration, which is the whole difference between a redirect and an open
+  redirect.
+- **The two unredirectable refusals are shown on the page.** `unknown_client` and
+  `redirect_uri_mismatch` have no vetted URI to carry them. Every other refusal —
+  `invalid_request`, `invalid_target`, `invalid_scope`, and `access_denied` when the user denies —
+  arrives with `details.redirectUri`, and goes to that URI with `error` and the `state` verbatim.
+- **`clientName` is attacker-controlled.** It arrives from unauthenticated dynamic registration.
+  Render it as text — React escapes it — and never through `dangerouslySetInnerHTML`.
+- **Forbid framing and caching** with `Content-Security-Policy: frame-ancestors 'none'` and
+  `Cache-Control: no-store` on the consent path (the `next.config` snippet above). A consent
+  screen that can be framed is a consent screen that can be clickjacked.
+- **The decision is CSRF-checked in every mode.** `POST /_auth/oauth2/authorize` is the one
+  route the proxy checks whatever `SPFN_AUTH_CSRF` says (see
+  [CSRF protection](#csrf-protection)), so the page needs nothing beyond the normal `authApi`
+  client, which mirrors the CSRF cookie into the header. A browser whose CSRF cookie was missing
+  gets one on the refusal, and a second click goes through.
 
 The end-to-end path — lifecycle config, this route, `/mcp`, and connecting from Claude Code
 and Codex — is [docs/guides/mcp-clients.md](../../docs/guides/mcp-clients.md).
