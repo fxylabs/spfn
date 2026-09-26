@@ -217,7 +217,7 @@ describe('useMfaConfirm flow (#107)', () =>
     it.each([
         ['cancelled', 17],
         ['no-credential', 18],
-    ] as const)('row %2$i: tryPasskey answering %1$s is idle with no error', async (reason) =>
+    ] as const)('row %2$i: tryPasskey answering %1$s is idle with no error', async (reason, _row) =>
     {
         const page = confirmPage(verifierStub({ passkey: vi.fn().mockResolvedValue({ ok: false, reason }) }));
 
