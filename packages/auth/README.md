@@ -147,6 +147,7 @@ real secret values out of band, never commit them.
 | `SPFN_AUTH_COOKIE_SECURE` | both | — | override Secure flag (defaults to `NODE_ENV==='production'`) |
 | `SPFN_AUTH_CSRF` | `.env.local` | — | `off` \| `warn` \| `enforce`; unset behaves as `warn` — see [CSRF protection](#csrf-protection) |
 | `SPFN_AUTH_ADMIN_*` | `.env.server` | — | admin seeding (see below) |
+| `SPFN_AUTH_ROLE_EMAIL_DOMAINS` | `.env.server` | — | per-role allow-list of email domains, e.g. `admin=example.com;support=example.com,partner.example`; **checked at boot** — see [Restricting roles to email domains](#restricting-roles-to-email-domains) |
 | `SPFN_AUTH_GOOGLE_CLIENT_ID` / `_CLIENT_SECRET` | `.env.server` | — | enables Google OAuth when both set |
 | `SPFN_AUTH_GOOGLE_SCOPES` | `.env.server` | — | comma-separated; default `email,profile` |
 | `SPFN_AUTH_GOOGLE_REDIRECT_URI` | `.env.server` | — | default `{NEXT_PUBLIC_SPFN_APP_URL\|\|SPFN_APP_URL}/_auth/oauth/google/callback`; an override must stay on the web app origin at that path and is **checked at boot** — see [OAuth callback origin](#oauth-callback-origin-web-app-host--rewrite) |
@@ -2221,9 +2222,67 @@ createAuthLifecycle({
 ```
 
 Programmatic checks (server): `hasPermission`, `hasAnyPermission`, `hasAllPermissions`, `hasRole`,
-`hasAnyRole`, `getUserRole`, `getUserPermissions`. Runtime role admin: `createRole`, `updateRole`,
+`hasAnyRole`, `getUserRole`, `getUserPermissions` (all by the effective role — see below), `getStoredUserRole`. Runtime role admin: `createRole`, `updateRole`,
 `deleteRole`, `setRolePermissions`, `addPermissionToRole`, `removePermissionFromRole`,
 `getAllRoles`, `getRoleByName`, `getRolePermissions`.
+
+### Restricting roles to email domains
+
+`SPFN_AUTH_ROLE_EMAIL_DOMAINS` keeps staff roles on staff accounts: each listed role may be
+held only by an account whose email is **verified** and whose domain is listed for it.
+
+```bash
+SPFN_AUTH_ROLE_EMAIL_DOMAINS="admin=example.com;support=example.com,partner.example"
+```
+
+- **Format.** `role=domain[,domain]` entries separated by `;`. Whitespace is trimmed; domains
+  are lowercased and IDNA-normalised (`bücher.example` and `xn--bcher-kva.example` are one
+  domain). The domain of an address is the part after its last `@`. Matching is exact:
+  `example.com` does not admit `sub.example.com` — list the subdomain if you mean it.
+- **Opt-in.** Unset or empty means no policy, and a role absent from the map is unrestricted:
+  both behave exactly as before, including granting a role to an unverified account.
+- **At grant — refused.** `PATCH /_auth/admin/users/:userId/role`, `updateUserService` with a
+  `roleId`, invitation create (the domain only: the invitee has not verified yet) and
+  invitation accept (the full rule, against the configuration in force at acceptance —
+  accepting verifies the address) answer `403 RoleEmailDomainNotAllowedError` with
+  `details: { roleName, reason }`, `reason` one of `domain`, `unverified`, `no_email`. The
+  address is never in the error.
+- **At check — downgraded, never written.** Everything that resolves a principal's role —
+  `authenticate` and the other authenticating middlewares, `requireRole`, `requirePermissions`,
+  `getUserRole`, `hasRole`, `getUserPermissions` and the rest, `GET /_auth/session` — applies
+  the rule to the current row and the current configuration. An account outside it resolves as
+  the built-in `user` role (`getAuth(c).role === 'user'`, the `user` role's permissions; direct
+  user permission grants still apply), so it keeps signing in. One `warn` is logged per
+  resolution with `reason: 'role_email_domain_policy'`, the user id and the stored role — never
+  the email. `users.roleId` is not touched: reverting the configuration restores the role on
+  the next request. The check reads the row the request already loads; only a downgrade reads
+  the `user` role.
+- **Authority.** A caller is judged by the effective role; a **target** by the stored one, so
+  an out-of-policy superadmin's row still only yields to a superadmin (`getStoredUserRole`).
+- **At boot — refused.** After RBAC initialization and admin seeding, startup throws, naming the
+  variable and the entry, when the value is malformed, when it restricts `user` (the fallback
+  must always be satisfiable), when it names a role that does not exist, and when `superadmin`
+  is restricted, at least one account stores it, and none of those accounts satisfies the rule
+  (zero superadmins passes, so a fresh install boots). A seeded `SPFN_AUTH_ADMIN_*` account whose
+  email the policy refuses for its role also refuses boot, before any account is created.
+- **Per instance.** Nothing is stored in the database; each instance applies its own env.
+
+Two server functions (`@spfn/auth/server`) for the app to call deliberately:
+
+```typescript
+import { listRoleEmailDomainViolations, demoteRoleEmailDomainViolations } from '@spfn/auth/server';
+
+// Accounts whose stored role is restricted and who fail the rule — for a periodic check.
+const violations = await listRoleEmailDomainViolations();
+// [{ userId: 42, roleName: 'admin', reason: 'domain' | 'unverified' | 'no_email' }]
+
+// Store `user` on exactly those accounts, through updateUserService; returns what it changed.
+// Only violators are touched, so a compliant superadmin is never demoted.
+const demoted = await demoteRoleEmailDomainViolations();
+```
+
+Ops tokens minted by an account that later falls outside the policy are **not** revoked: a token
+records no owner. Revoke them with `spfn ops` if that matters to you.
 
 ## Can I operate the app without building an admin dashboard?
 

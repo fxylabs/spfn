@@ -5,11 +5,12 @@
  * BaseRepository를 상속받아 자동 트랜잭션 컨텍스트 지원 및 Read/Write 분리
  */
 
-import { eq, and, sql } from 'drizzle-orm';
+import { eq, and, inArray, sql } from 'drizzle-orm';
 import { BaseRepository } from '@spfn/core/db';
 import { EntityNotFoundError, NotFoundError } from '@spfn/core/errors';
 
 import { rolePermissions, roles, NewUser, users, permissions } from '../entities';
+import type { UserStatus } from '../types';
 import { normalizeEmail, normalizeOptionalEmail } from '../helpers/email';
 
 /**
@@ -212,6 +213,7 @@ export class UsersRepository extends BaseRepository
         const result = await this.readDb
             .select({
                 user: users,
+                roleId: roles.id,
                 roleName: roles.name,
                 roleDisplayName: roles.displayName,
                 rolePriority: roles.priority,
@@ -230,9 +232,36 @@ export class UsersRepository extends BaseRepository
         return {
             user: row.user,
             role: row.roleName
-                ? { name: row.roleName, displayName: row.roleDisplayName!, priority: row.rolePriority! }
+                ? { id: row.roleId!, name: row.roleName, displayName: row.roleDisplayName!, priority: row.rolePriority! }
                 : null,
         };
+    }
+
+    /**
+     * 주어진 역할을 저장한 사용자 목록 (email-domain policy 점검용)
+     * Read replica 사용
+     *
+     * The two columns the policy reads and the stored role name — nothing else,
+     * so a report built on it has no address to leak beyond the rule itself.
+     *
+     * @param roleNames - Stored role names to match
+     * @param status - Only accounts in this status; every status when omitted
+     */
+    async findRoleHolders(roleNames: string[], status?: UserStatus)
+    {
+        return this.readDb
+            .select({
+                id: users.id,
+                email: users.email,
+                emailVerifiedAt: users.emailVerifiedAt,
+                roleName: roles.name,
+            })
+            .from(users)
+            .innerJoin(roles, eq(users.roleId, roles.id))
+            .where(and(
+                inArray(roles.name, roleNames),
+                status ? eq(users.status, status) : undefined,
+            ));
     }
 
     /**
@@ -430,34 +459,18 @@ export class UsersRepository extends BaseRepository
     }
 
     /**
-     * User의 Role과 Permissions 조회 (JOIN)
+     * 역할의 활성 permissions 조회 (JOIN)
      * Read replica 사용
      *
-     * @param userId - User ID
-     * @returns Role 정보와 permissions 배열
+     * Takes the role rather than the user: the caller resolves which role
+     * applies — the stored one, or the `user` role when the email-domain policy
+     * refuses the stored one — and this reads that role's permissions.
+     *
+     * @param roleId - Role ID
+     * @returns Active permissions of the role
      */
-    async fetchUserRoleAndPermissions(userId: number)
+    async fetchActiveRolePermissions(roleId: number)
     {
-        // 1. Get user's role
-        const userWithRole = await this.readDb
-            .select({
-                roleId: roles.id,
-                roleName: roles.name,
-                roleDisplayName: roles.displayName,
-                rolePriority: roles.priority,
-            })
-            .from(users)
-            .innerJoin(roles, eq(users.roleId, roles.id))
-            .where(eq(users.id, userId))
-            .limit(1)
-            .then(rows => rows[0] ?? null);
-
-        if (!userWithRole)
-        {
-            throw new NotFoundError({ message: '[@spfn/auth] User or role not found' });
-        }
-
-        // 2. Get role permissions
         const rolePerms = await this.readDb
             .select({
                 id: permissions.id,
@@ -469,25 +482,17 @@ export class UsersRepository extends BaseRepository
             .innerJoin(permissions, eq(rolePermissions.permissionId, permissions.id))
             .where(
                 and(
-                    eq(rolePermissions.roleId, userWithRole.roleId),
+                    eq(rolePermissions.roleId, roleId),
                     eq(permissions.isActive, true),
                 ),
             );
 
-        return {
-            role: {
-                id: userWithRole.roleId,
-                name: userWithRole.roleName,
-                displayName: userWithRole.roleDisplayName,
-                priority: userWithRole.rolePriority,
-            },
-            permissions: rolePerms.map(perm => ({
-                id: perm.id,
-                name: perm.name,
-                displayName: perm.displayName,
-                category: perm.category ?? undefined,
-            })),
-        };
+        return rolePerms.map(perm => ({
+            id: perm.id,
+            name: perm.name,
+            displayName: perm.displayName,
+            category: perm.category ?? undefined,
+        }));
     }
 
     /**

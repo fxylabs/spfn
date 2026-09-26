@@ -8,6 +8,7 @@ import { env } from '@spfn/auth/config';
 import { getRoleByName } from '@spfn/auth/server';
 
 import { hashPassword } from './helpers';
+import { isEmailAllowedForRole, ROLE_EMAIL_DOMAINS_VAR } from './lib/role-email-domains';
 import { authLogger } from './logger';
 import { usersRepository } from './repositories';
 
@@ -154,6 +155,35 @@ function parseAdminAccounts(): AdminAccountConfig[]
 }
 
 /**
+ * Refuse boot when a configured admin account's role is one the email-domain
+ * policy would not let it hold.
+ *
+ * A throw rather than a `failed` count: the account would be created holding a
+ * role every check then refuses, or — for a superadmin — not created while the
+ * operator believes it was. Seeded accounts are auto-verified, so only the
+ * domain can fail. The accounts are named by position, never by address.
+ */
+function assertSeedAccountsWithinPolicy(accounts: AdminAccountConfig[]): void
+{
+    const refused = accounts.flatMap((account, index) =>
+    {
+        const roleName = account.role || 'user';
+
+        return isEmailAllowedForRole({ email: account.email, emailVerifiedAt: new Date() }, roleName)
+            ? []
+            : [`#${index + 1} (role '${roleName}')`];
+    });
+
+    if (refused.length > 0)
+    {
+        throw new Error(
+            `${ROLE_EMAIL_DOMAINS_VAR} does not allow the email of configured admin account(s) ${refused.join(', ')} `
+            + 'to hold that role. Seed the account under an allowed domain, change its role, or list the domain.',
+        );
+    }
+}
+
+/**
  * Ensure admin accounts exist from environment variables
  *
  * Supports multiple admin account creation via three formats:
@@ -165,6 +195,9 @@ function parseAdminAccounts(): AdminAccountConfig[]
  * - emailVerifiedAt: current timestamp (auto-verified)
  * - passwordChangeRequired: true (must change on first login)
  * - status: 'active'
+ *
+ * @throws Error when `SPFN_AUTH_ROLE_EMAIL_DOMAINS` does not allow an account's
+ *         email for its role — checked for every account before any is created
  *
  * @example
  * ```typescript
@@ -183,6 +216,8 @@ export async function ensureAdminExists(): Promise<void>
     {
         return;
     }
+
+    assertSeedAccountsWithinPolicy(accounts);
 
     authLogger.setup.info(`Creating ${accounts.length} admin account(s)...`);
 

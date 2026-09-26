@@ -153,6 +153,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 #### @spfn/auth
 
+- **Roles can be restricted to email domains** (#106). `SPFN_AUTH_ROLE_EMAIL_DOMAINS`
+  (`admin=example.com;support=example.com,partner.example`) lets a listed role be held only by an
+  account with a verified email under one of its domains — exact, IDNA-normalised match. Unset,
+  nothing changes. `@spfn/auth` 0.3.0-beta.28.
+    - **Removed**: `fetchUserRoleAndPermissions`, the `usersRepository` method that was public through
+      `@spfn/auth/server`. It read the stored role and its permissions; the role a request holds now
+      depends on the policy. Use `getAuthSessionService(userId)` (exported) for the resolved role and
+      permissions, or `usersRepository.fetchActiveRolePermissions(roleId)` (exported) when you already
+      hold the role.
+    - **Grant**: the admin role route, `updateUserService`, invitation create and accept refuse
+      with `403 RoleEmailDomainNotAllowedError` (`details.reason`: `domain`, `unverified`,
+      `no_email`).
+    - **Check**: every role and permission resolution goes through `findUserWithEffectiveRole`;
+      an account outside the policy resolves as `user` without its row being written, so a
+      config revert restores the role. A target's protection still reads the stored role
+      (`getStoredUserRole`).
+    - **Boot** refuses a malformed value, a restriction on `user`, an unknown role, a
+      `superadmin` restriction no stored superadmin satisfies, and a seeded admin account
+      outside the policy.
+    - `listRoleEmailDomainViolations()` and `demoteRoleEmailDomainViolations()` report and
+      remediate. Ops tokens minted before an account fell out of policy are not revoked.
+
 - **An OAuth 2.1 authorization server, so Claude Code and Codex can connect to an app's `/mcp`
   endpoint as the signed-in user** (#93). Dynamic client registration, PKCE and a consent
   screen: the CLI discovers, registers itself, opens a browser and catches the redirect on a

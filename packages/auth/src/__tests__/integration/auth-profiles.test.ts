@@ -26,7 +26,7 @@ vi.mock('@spfn/auth/server', async (importOriginal) =>
             findByKeyId: vi.fn(),
             updateLastUsedById: vi.fn().mockResolvedValue(undefined),
         },
-        usersRepository: { findByIdWithRole: vi.fn() },
+        findUserWithEffectiveRole: vi.fn(),
         userProfilesRepository: { findLocaleByUserId: vi.fn().mockResolvedValue('en') },
         getPendingDeletionInfo: vi.fn(),
     };
@@ -37,7 +37,7 @@ import {
     decodeToken,
     verifyClientToken,
     keysRepository,
-    usersRepository,
+    findUserWithEffectiveRole,
     getPendingDeletionInfo,
 } from '@spfn/auth/server';
 import { CLIENT_PROOF_HEADERS } from '@/server/client-proof/admission';
@@ -248,7 +248,7 @@ describe('auth profile branch (case table G)', () =>
         configureClientProofReplayStore(new MemoryReplayStore());
         vi.mocked(keysRepository.updateLastUsedById).mockResolvedValue(undefined as never);
         vi.mocked(keysRepository.findByKeyId).mockResolvedValue(validKeyRecord() as never);
-        vi.mocked(usersRepository.findByIdWithRole).mockResolvedValue(activeUser() as never);
+        vi.mocked(findUserWithEffectiveRole).mockResolvedValue(activeUser() as never);
     });
 
     describe('G1 — Bearer only: the web path, untouched', () =>
@@ -450,7 +450,7 @@ describe('auth profile branch (case table G)', () =>
     {
         it('an inactive account is refused as AccountDisabledError', async () =>
         {
-            vi.mocked(usersRepository.findByIdWithRole).mockResolvedValue(
+            vi.mocked(findUserWithEffectiveRole).mockResolvedValue(
                 activeUser({ status: 'inactive' }) as never,
             );
             const driven = contextFor({ headers: proofHeaders() });
@@ -461,7 +461,7 @@ describe('auth profile branch (case table G)', () =>
 
         it('a pending_deletion account carries purgeScheduledAt, as on the web path', async () =>
         {
-            vi.mocked(usersRepository.findByIdWithRole).mockResolvedValue(
+            vi.mocked(findUserWithEffectiveRole).mockResolvedValue(
                 activeUser({ status: 'pending_deletion' }) as never,
             );
             const purgeScheduledAt = new Date('2030-01-01T00:00:00.000Z');
@@ -532,7 +532,7 @@ describe('replay ledger through the middleware (case table H)', () =>
         configureClientProofReplayStore(new MemoryReplayStore());
         vi.mocked(keysRepository.updateLastUsedById).mockResolvedValue(undefined as never);
         vi.mocked(keysRepository.findByKeyId).mockResolvedValue(validKeyRecord() as never);
-        vi.mocked(usersRepository.findByIdWithRole).mockResolvedValue(activeUser() as never);
+        vi.mocked(findUserWithEffectiveRole).mockResolvedValue(activeUser() as never);
     });
 
     it('H1/H2: a nonce is admitted once, and its reuse is PROOF_REPLAYED', async () =>

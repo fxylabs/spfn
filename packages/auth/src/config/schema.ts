@@ -217,6 +217,24 @@ export const authEnvSchema = defineEnvSchema({
     },
 
     // ============================================================================
+    // Role Email-Domain Policy
+    // ============================================================================
+    SPFN_AUTH_ROLE_EMAIL_DOMAINS: {
+        ...envString({
+            description: 'Per-role allow-list of email domains: "role=domain[,domain]" entries separated by ";". '
+                + 'A listed role is granted and resolved only for an account with a verified email under one of its '
+                + 'domains (exact match, IDNA-normalised); anyone else resolves to the "user" role. Unlisted roles '
+                + 'are unrestricted; unset means no policy. Boot refuses a malformed value, a restriction on "user", '
+                + 'an unknown role, and a superadmin restriction no stored superadmin satisfies.',
+            required: false,
+            examples: [
+                'admin=example.com',
+                'admin=example.com;support=example.com,partner.example',
+            ],
+        }),
+    },
+
+    // ============================================================================
     // Username Configuration
     // ============================================================================
     SPFN_AUTH_RESERVED_USERNAMES: {

@@ -4,10 +4,17 @@
  * Service for retrieving authentication session information
  * Returns minimal user info with role and permissions
  */
+import { NotFoundError } from '@spfn/core/errors';
+
 import { usersRepository } from '../repositories';
+import { findUserWithEffectiveRole } from './role-email-domain.service';
 
 /**
  * Get authentication session information
+ *
+ * The role and permissions are the effective ones, as every server-side check
+ * sees them: an account outside `SPFN_AUTH_ROLE_EMAIL_DOMAINS` for its stored
+ * role reports the `user` role, so a page guard agrees with the API.
  *
  * @param userId - User ID (string, number, or bigint)
  * @returns Auth session data (minimal user info + role + permissions)
@@ -24,11 +31,16 @@ export async function getAuthSessionService(userId: string | number | bigint)
 {
     const userIdNum = typeof userId === 'string' ? Number(userId) : Number(userId);
 
-    // Fetch user and role/permissions in parallel
-    const [user, roleAndPerms] = await Promise.all([
+    // Fetch user and effective role in parallel
+    const [user, resolved] = await Promise.all([
         usersRepository.fetchMinimalUserData(userIdNum),
-        usersRepository.fetchUserRoleAndPermissions(userIdNum),
+        findUserWithEffectiveRole(userIdNum),
     ]);
+
+    if (!resolved?.role)
+    {
+        throw new NotFoundError({ message: '[@spfn/auth] User or role not found' });
+    }
 
     return {
         userId: user.userId,
@@ -37,6 +49,7 @@ export async function getAuthSessionService(userId: string | number | bigint)
         emailVerified: user.isEmailVerified,
         phoneVerified: user.isPhoneVerified,
         hasPassword: user.hasPassword,
-        ...roleAndPerms,
+        role: resolved.role,
+        permissions: await usersRepository.fetchActiveRolePermissions(resolved.role.id),
     };
 }
