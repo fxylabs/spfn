@@ -792,6 +792,53 @@ describe.skipIf(!dbAvailable)('Device link', () =>
             expect((await readLink(link.linkId)).keyId).toBe(winner.keyPair.keyId);
         });
 
+        it('R2 concurrent issues from one key leave exactly one live link', async () =>
+        {
+            const issuer = await signIn();
+
+            const links = await Promise.all(Array.from({ length: 6 }, () => issue(issuer)));
+
+            expect(new Set(links.map(link => link.linkId)).size).toBe(links.length);
+
+            const rows = await getTestDb()
+                .select()
+                .from(deviceLinks)
+                .where(eq(deviceLinks.issuerKeyId, issuer.keyId));
+
+            expect(rows).toHaveLength(links.length);
+            expect(rows.filter(row => row.status === 'issued')).toHaveLength(1);
+            expect(rows.filter(row => row.status === 'expired')).toHaveLength(links.length - 1);
+        });
+
+        it('two concurrent confirms, right and wrong number: exactly one outcome', async () =>
+        {
+            const { issuer, link, device } = await redeemedLink();
+            const { choices } = await (await status(link.linkId, issuer)).json();
+
+            const [right, wrong] = await Promise.all([
+                confirm(link.linkId, device.matchNumber, issuer),
+                confirm(link.linkId, wrongChoice(choices, device.matchNumber), issuer),
+            ]);
+
+            const { status: ending } = await readLink(link.linkId);
+
+            if (ending === 'approved')
+            {
+                expect(right.status).toBe(200);
+                await expectError(wrong, 409, 'DeviceLinkAlreadyHandledError');
+                expect((await poll(device.deviceCode)).status).toBe(200);
+                expect(await keysOf(device.keyId)).toHaveLength(1);
+            }
+            else
+            {
+                expect(ending).toBe('denied');
+                await expectError(wrong, 400, 'DeviceLinkWrongMatchError');
+                await expectError(right, 409, 'DeviceLinkAlreadyHandledError');
+                await expectError(await poll(device.deviceCode), 403, 'DeviceLinkDeniedError');
+                expect(await keysOf(device.keyId)).toHaveLength(0);
+            }
+        });
+
         it('the issuer signing out between redeem and confirm makes confirm impossible, even from its own session', async () =>
         {
             const { issuer, link, device } = await redeemedLink();

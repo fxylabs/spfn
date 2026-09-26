@@ -218,6 +218,24 @@ export class KeysRepository extends BaseRepository
     }
 
     /**
+     * Lock the user's active key rows until the transaction ends, for a revocation
+     * that has to touch other rows before it revokes the keys.
+     *
+     * Device-link statements lock the issuing key row before the link row. A
+     * transaction that expires links and then revokes keys takes them the other
+     * way round, and deadlocks against an issue, redeem, approve or consume in
+     * flight on the same key. Calling this first restores the key-before-link order.
+     */
+    async lockActiveByUserId(userId: number): Promise<void>
+    {
+        await this.db
+            .select({ id: userPublicKeys.id })
+            .from(userPublicKeys)
+            .where(and(eq(userPublicKeys.userId, userId), eq(userPublicKeys.isActive, true)))
+            .for('no key update');
+    }
+
+    /**
      * The one statement behind both global revocations.
      *
      * The epoch bump is a data-modifying CTE on the same statement rather than a

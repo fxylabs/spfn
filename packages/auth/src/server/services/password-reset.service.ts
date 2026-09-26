@@ -269,6 +269,9 @@ async function replaceCredentials(
         ...(user.emailVerifiedAt ? {} : { emailVerifiedAt: new Date() }),
     });
 
+    // The key rows are locked before any device-link row, the order every
+    // device-link statement takes them in; the revoke itself stays last.
+    await keysRepository.lockActiveByUserId(user.id);
     await deviceAuthorizationsRepository.denyAllActiveByUserId(user.id);
 
     // Device links the account issued go with them, for the same reason: an

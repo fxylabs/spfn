@@ -306,6 +306,9 @@ function describeDevice(record: DeviceLink): Partial<DeviceLinkStatusResult>
  */
 export async function issueDeviceLinkService(issuer: DeviceLinkIssuer): Promise<IssueDeviceLinkResult>
 {
+    // The route's transaction holds this lock through the insert below: a second
+    // issue from the same key waits here, then expires the link this one inserts.
+    await deviceLinksRepository.lockIssuerKey(issuer.keyId);
     await deviceLinksRepository.expireLiveByIssuerKey(issuer.keyId);
 
     const expiresAt = new Date(Date.now() + getDeviceLinkConfig().ttlMs);

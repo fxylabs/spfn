@@ -182,7 +182,29 @@ export class DeviceLinksRepository extends BaseRepository
     }
 
     /**
+     * Lock the issuing key's row until the transaction ends, so two issues from
+     * one key run one after the other: each expires the other's link or waits for
+     * it to be inserted, and never both read "nothing live" and insert.
+     *
+     * `no key update` is the lock a plain UPDATE of the row takes: it conflicts
+     * with itself, with the share lock `issuerKeyLive(true)` takes and with a
+     * revocation's UPDATE, and it leaves foreign-key checks on the row alone.
+     * Taken first, before any link row, so every path that locks both — redeem,
+     * approve, consume and the revocations — locks the key row before the link.
+     */
+    async lockIssuerKey(issuerKeyId: string): Promise<void>
+    {
+        await this.db
+            .select({ one: sql`1` })
+            .from(userPublicKeys)
+            .where(eq(userPublicKeys.keyId, issuerKeyId))
+            .for('no key update');
+    }
+
+    /**
      * Expire the live link a key issued, so a fresh issue leaves one link per key.
+     *
+     * Race-free only after `lockIssuerKey` in the same transaction.
      *
      * @returns the rows this call expired
      */
