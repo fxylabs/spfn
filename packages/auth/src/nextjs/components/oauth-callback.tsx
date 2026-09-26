@@ -8,8 +8,9 @@
  *
  * An account with a second factor signing in on a new device arrives with
  * `?mfaChallenge=` instead. The component hands it to `oauthFinalize`, which
- * answers 202 while the proxy seals the pending cookie, and then navigates to the
- * confirm page — `mfaPath`, `/auth/mfa` by default — with `?challenge=` and
+ * answers 202 while the proxy seals the pending cookie and names the confirm
+ * page, and then navigates there — `SPFN_AUTH_MFA_CONFIRM_PATH` on the server,
+ * `/auth/mfa` by default, `mfaPath` to override — with `?challenge=` and
  * `?returnUrl=`. The decisions live in `oauth-callback-flow.ts`.
  *
  * @example
@@ -21,7 +22,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 
-import { DEFAULT_MFA_CONFIRM_PATH, runOAuthCallback } from './oauth-callback-flow';
+import { runOAuthCallback } from './oauth-callback-flow';
 
 export interface OAuthCallbackProps
 {
@@ -32,13 +33,14 @@ export interface OAuthCallbackProps
     apiBasePath?: string;
 
     /**
-     * The second-factor confirm page, where a callback carrying `mfaChallenge`
-     * goes next.
+     * An override for the second-factor confirm page, where a callback carrying
+     * `mfaChallenge` goes next.
      *
-     * This component runs in the browser and cannot read server env, so it does
-     * not see `SPFN_AUTH_MFA_CONFIRM_PATH`: an app that sets that variable passes
-     * the same path here. A path within the app, not a URL.
-     * @default '/auth/mfa'
+     * Normally left unset: the proxy puts `SPFN_AUTH_MFA_CONFIRM_PATH` on the
+     * `oauthFinalize` 202 and the component goes there, and with the page at
+     * `/auth/mfa` nothing needs setting at all. A path within the app; a URL is
+     * reduced to its path.
+     * @default the server's `SPFN_AUTH_MFA_CONFIRM_PATH`, then '/auth/mfa'
      */
     mfaPath?: string;
 
@@ -66,7 +68,7 @@ export interface OAuthCallbackProps
 
 export function OAuthCallback({
     apiBasePath = '/api/rpc',
-    mfaPath = DEFAULT_MFA_CONFIRM_PATH,
+    mfaPath,
     loadingComponent,
     errorComponent,
     onSuccess,

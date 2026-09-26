@@ -12,7 +12,6 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import {
-    DEFAULT_MFA_CONFIRM_PATH,
     mfaConfirmUrl,
     runOAuthCallback,
     type CallbackOptions,
@@ -26,7 +25,7 @@ function jsonResponse(status: number, body: unknown): Response
     return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
 }
 
-function optionsWith(response: Response | Error, mfaPath = DEFAULT_MFA_CONFIRM_PATH): CallbackOptions
+function optionsWith(response: Response | Error, mfaPath?: string): CallbackOptions
 {
     const fetchStub = response instanceof Error
         ? vi.fn().mockRejectedValue(response)
@@ -95,6 +94,54 @@ describe('OAuthCallback — mfaChallenge (#107)', () =>
         const outcome = await runOAuthCallback(`?mfaChallenge=${CHALLENGE}`, options);
 
         expect(outcome).toEqual({ kind: 'navigate', to: `/signin/2fa?challenge=${CHALLENGE}&returnUrl=%2F` });
+    });
+
+    it('env unset, no prop: a 202 without mfaPath navigates to /auth/mfa', async () =>
+    {
+        const options = optionsWith(jsonResponse(202, { challenge: CHALLENGE, returnUrl: '/' }));
+
+        const outcome = await runOAuthCallback(`?mfaChallenge=${CHALLENGE}`, options);
+
+        expect(outcome).toEqual({ kind: 'navigate', to: `/auth/mfa?challenge=${CHALLENGE}&returnUrl=%2F` });
+    });
+
+    it('env /signin/2fa, no prop: navigates to the mfaPath the 202 carries', async () =>
+    {
+        const options = optionsWith(jsonResponse(202, { challenge: CHALLENGE, returnUrl: '/', mfaPath: '/signin/2fa' }));
+
+        const outcome = await runOAuthCallback(`?mfaChallenge=${CHALLENGE}`, options);
+
+        expect(outcome).toEqual({ kind: 'navigate', to: `/signin/2fa?challenge=${CHALLENGE}&returnUrl=%2F` });
+    });
+
+    it('env /signin/2fa, prop /x: the prop overrides the server value', async () =>
+    {
+        const options = optionsWith(jsonResponse(202, { challenge: CHALLENGE, returnUrl: '/', mfaPath: '/signin/2fa' }), '/x');
+
+        const outcome = await runOAuthCallback(`?mfaChallenge=${CHALLENGE}`, options);
+
+        expect(outcome).toEqual({ kind: 'navigate', to: `/x?challenge=${CHALLENGE}&returnUrl=%2F` });
+    });
+
+    it.each([
+        ['https://evil.test/p'],
+        ['//evil.test/p'],
+    ])('a server mfaPath of %s navigates to the same-origin path only', async (mfaPath) =>
+    {
+        const options = optionsWith(jsonResponse(202, { challenge: CHALLENGE, returnUrl: '/', mfaPath }));
+
+        const outcome = await runOAuthCallback(`?mfaChallenge=${CHALLENGE}`, options);
+
+        expect(outcome).toEqual({ kind: 'navigate', to: `/p?challenge=${CHALLENGE}&returnUrl=%2F` });
+    });
+
+    it('a server mfaPath that is not a string is ignored', async () =>
+    {
+        const options = optionsWith(jsonResponse(202, { challenge: CHALLENGE, returnUrl: '/', mfaPath: 42 }));
+
+        const outcome = await runOAuthCallback(`?mfaChallenge=${CHALLENGE}`, options);
+
+        expect(outcome).toEqual({ kind: 'navigate', to: `/auth/mfa?challenge=${CHALLENGE}&returnUrl=%2F` });
     });
 
     it.each([

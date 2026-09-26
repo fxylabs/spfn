@@ -34,6 +34,7 @@ import { mfaVerifyInterceptor } from '../../nextjs/interceptors/mfa-verify';
 import { oauthFinalizeInterceptor, oauthUrlInterceptor } from '../../nextjs/interceptors/oauth';
 import { authInterceptors } from '../../nextjs/interceptors';
 import { createOAuthCallbackHandler } from '../../nextjs/oauth-handlers';
+import { runOAuthCallback } from '../../nextjs/components/oauth-callback-flow';
 import { sealPendingMfaSession, sealPendingSession, unsealPendingMfaSession } from '../../nextjs/session-helpers';
 import { unsealSession, type SessionData } from '../../server/lib/session';
 import { hashCredential } from '../../server/lib/link-credentials';
@@ -364,5 +365,93 @@ describe('the proxy and a second-factor step-up (case table 6e)', () =>
         // silently does not exist. This is the assertion that would catch it.
         expect(routeMap.mfaVerify).toEqual({ method: 'POST', path: '/_auth/mfa/verify' });
         expect(routeMap.mfaVerifyOptions).toEqual({ method: 'POST', path: '/_auth/mfa/verify/options' });
+    });
+});
+
+describe('the confirm path on the oauthFinalize 202 (#107)', () =>
+{
+    beforeEach(() =>
+    {
+        vi.stubEnv('SPFN_AUTH_SESSION_SECRET', SECRET);
+        pendingOAuthCookie.value = '';
+    });
+
+    afterEach(() =>
+    {
+        vi.unstubAllEnvs();
+    });
+
+    function finalizeChallengeBody(): Record<string, unknown>
+    {
+        return { success: true, mfaRequired: true, challenge: CHALLENGE, returnUrl: '/' };
+    }
+
+    /** The body `mfaVerifyInterceptor` leaves on an answer, after it ran. */
+    async function bodyAfter(path: string, status: number, body: unknown): Promise<unknown>
+    {
+        const ctx = responseContext(path, status, body, { metadata: asMintedMetadata(mintedKey()) });
+
+        await mfaVerifyInterceptor.response?.(ctx, next);
+
+        return ctx.response.body;
+    }
+
+    /** Where `createOAuthCallbackHandler`, with no option, sends a callback carrying a challenge. */
+    async function handlerRedirectPath(): Promise<string>
+    {
+        const url = new URL('/api/auth/callback', APP);
+        url.searchParams.set('mfaChallenge', CHALLENGE);
+
+        const response = await createOAuthCallbackHandler()(new NextRequest(url));
+
+        return new URL(response.headers.get('location')!).pathname;
+    }
+
+    it('env unset: the 202 carries /auth/mfa', async () =>
+    {
+        expect(await bodyAfter('/_auth/oauth/finalize', 202, finalizeChallengeBody()))
+            .toEqual({ ...finalizeChallengeBody(), mfaPath: '/auth/mfa' });
+    });
+
+    it('env /signin/2fa: the 202 carries it, and the callback page navigates there', async () =>
+    {
+        vi.stubEnv('SPFN_AUTH_MFA_CONFIRM_PATH', '/signin/2fa');
+
+        const body = await bodyAfter('/_auth/oauth/finalize', 202, finalizeChallengeBody());
+
+        expect(body).toEqual({ ...finalizeChallengeBody(), mfaPath: '/signin/2fa' });
+
+        const fetchStub = vi.fn().mockResolvedValue(new Response(JSON.stringify(body), { status: 202 }));
+        const outcome = await runOAuthCallback(`?mfaChallenge=${CHALLENGE}`, { apiBasePath: '/api/rpc', fetch: fetchStub });
+
+        expect(outcome).toEqual({ kind: 'navigate', to: `/signin/2fa?challenge=${CHALLENGE}&returnUrl=%2F` });
+    });
+
+    it.each([
+        ['/signin/2fa', '/signin/2fa'],
+        ['https://evil.test/p', '/p'],
+    ])('env %s: createOAuthCallbackHandler and the interceptor agree on %s', async (configured, expected) =>
+    {
+        vi.stubEnv('SPFN_AUTH_MFA_CONFIRM_PATH', configured);
+
+        const body = await bodyAfter('/_auth/oauth/finalize', 202, finalizeChallengeBody()) as { mfaPath: string };
+
+        expect(body.mfaPath).toBe(expected);
+        expect(await handlerRedirectPath()).toBe(expected);
+    });
+
+    it.each([
+        ['login 202', '/_auth/login', 202, stepUpBody()],
+        ['password/reset/complete 202', '/_auth/password/reset/complete', 202, stepUpBody()],
+        ['oauth native 202', '/_auth/oauth/google/native', 202, stepUpBody()],
+        ['finalize 200', '/_auth/oauth/finalize', 200, { success: true, mfaRequired: false, userId: '7', keyId: 'k', returnUrl: '/' }],
+        ['finalize 202 without mfaRequired', '/_auth/oauth/finalize', 202, { success: true, challenge: CHALLENGE }],
+        ['finalize 400', '/_auth/oauth/finalize', 400, { message: 'returnUrl must be a relative path within the app' }],
+        ['verify 401', '/_auth/mfa/verify', 401, { message: 'Invalid code' }],
+    ])('%s: the body passes through unchanged', async (_name, path, status, body) =>
+    {
+        vi.stubEnv('SPFN_AUTH_MFA_CONFIRM_PATH', '/signin/2fa');
+
+        expect(await bodyAfter(path, status, structuredClone(body))).toEqual(body);
     });
 });
