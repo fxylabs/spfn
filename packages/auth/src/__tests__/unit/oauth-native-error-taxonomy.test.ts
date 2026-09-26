@@ -266,8 +266,18 @@ describe('native sign-in answers each failure path with its own code', () =>
         // `TooManyRequestsError`, both already in the table above.
         const mfaCodes = ['MfaVerificationFailedError'];
 
+        // Device link is the fourth enumerated family (contract 0.13.2), device-code
+        // login's mirror image: the three refusals a new device can meet while it
+        // redeems a code and polls, held to their error classes in
+        // contract-export.test.ts.
+        const deviceLinkCodes = [
+            'DeviceLinkExpiredError',
+            'DeviceLinkDeniedError',
+            'DeviceLinkNotFoundError',
+        ];
+
         expect(declared.filter(e => e.surface === 'rest').map(e => e.code).sort())
-            .toEqual([...table.map(cell => cell.code), ...deviceCodes, ...mfaCodes].sort());
+            .toEqual([...table.map(cell => cell.code), ...deviceCodes, ...mfaCodes, ...deviceLinkCodes].sort());
     });
 
     it('only the rate limit invites a retry of the same request', () =>
