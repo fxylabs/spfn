@@ -397,14 +397,19 @@ describe('the confirm path on the oauthFinalize 202 (#107)', () =>
     }
 
     /** Where `createOAuthCallbackHandler`, with no option, sends a callback carrying a challenge. */
-    async function handlerRedirectPath(): Promise<string>
+    async function handlerRedirect(): Promise<URL>
     {
         const url = new URL('/api/auth/callback', APP);
         url.searchParams.set('mfaChallenge', CHALLENGE);
 
         const response = await createOAuthCallbackHandler()(new NextRequest(url));
 
-        return new URL(response.headers.get('location')!).pathname;
+        return new URL(response.headers.get('location')!, APP);
+    }
+
+    async function handlerRedirectPath(): Promise<string>
+    {
+        return (await handlerRedirect()).pathname;
     }
 
     it('env unset: the 202 carries /auth/mfa', async () =>
@@ -438,6 +443,24 @@ describe('the confirm path on the oauthFinalize 202 (#107)', () =>
 
         expect(body.mfaPath).toBe(expected);
         expect(await handlerRedirectPath()).toBe(expected);
+    });
+
+    it.each([
+        ['/.//evil.test'],
+        ['/a/..//evil.test'],
+        ['http://x//evil.test'],
+        ['//a//b//evil.test'],
+        ['/\\evil.test'],
+    ])('env %s: the 202 carries /auth/mfa and the handler redirect stays on the request host', async (configured) =>
+    {
+        vi.stubEnv('SPFN_AUTH_MFA_CONFIRM_PATH', configured);
+
+        const body = await bodyAfter('/_auth/oauth/finalize', 202, finalizeChallengeBody()) as { mfaPath: string };
+        const redirect = await handlerRedirect();
+
+        expect(body.mfaPath).toBe('/auth/mfa');
+        expect(redirect.host).toBe(new URL(APP).host);
+        expect(redirect.pathname).toBe('/auth/mfa');
     });
 
     it.each([

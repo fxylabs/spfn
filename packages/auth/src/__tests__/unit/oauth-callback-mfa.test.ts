@@ -14,6 +14,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
     mfaConfirmUrl,
     runOAuthCallback,
+    toSameOriginPath,
     type CallbackOptions,
 } from '../../nextjs/components/oauth-callback-flow';
 
@@ -42,6 +43,23 @@ function postedBody(options: CallbackOptions): Record<string, string>
     expect(url).toBe('/api/rpc/oauthFinalize');
 
     return JSON.parse(String(init?.body)).body;
+}
+
+/** Configured paths that normalise to a `//host` path, and so to another host on a second parse. */
+const HOST_SMUGGLING_PATHS = [
+    '/.//evil.test',
+    '/a/..//evil.test',
+    'http://x//evil.test',
+    '//a//b//evil.test',
+    '/\\evil.test',
+];
+
+const APP_ORIGIN = 'http://app.test';
+
+/** The URL the browser ends up on when it follows `to` from the app. */
+function landedOn(to: string): URL
+{
+    return new URL(to, APP_ORIGIN);
 }
 
 function confirmQuery(to: string): URLSearchParams
@@ -135,6 +153,30 @@ describe('OAuthCallback — mfaChallenge (#107)', () =>
         expect(outcome).toEqual({ kind: 'navigate', to: `/p?challenge=${CHALLENGE}&returnUrl=%2F` });
     });
 
+    it.each(HOST_SMUGGLING_PATHS)('mfaPath prop %s stays on the app host, at /auth/mfa', async (mfaPath) =>
+    {
+        const options = optionsWith(jsonResponse(202, { challenge: CHALLENGE, returnUrl: '/' }), mfaPath);
+
+        const outcome = await runOAuthCallback(`?mfaChallenge=${CHALLENGE}`, options) as { to: string };
+        const landed = landedOn(outcome.to);
+
+        expect(landed.host).toBe(landedOn('/').host);
+        expect(landed.pathname).toBe('/auth/mfa');
+        expect(landed.searchParams.get('challenge')).toBe(CHALLENGE);
+    });
+
+    it.each(HOST_SMUGGLING_PATHS)('a server mfaPath of %s stays on the app host, at /auth/mfa', async (mfaPath) =>
+    {
+        const options = optionsWith(jsonResponse(202, { challenge: CHALLENGE, returnUrl: '/', mfaPath }));
+
+        const outcome = await runOAuthCallback(`?mfaChallenge=${CHALLENGE}`, options) as { to: string };
+        const landed = landedOn(outcome.to);
+
+        expect(landed.host).toBe(landedOn('/').host);
+        expect(landed.pathname).toBe('/auth/mfa');
+        expect(landed.searchParams.get('challenge')).toBe(CHALLENGE);
+    });
+
     it('a server mfaPath that is not a string is ignored', async () =>
     {
         const options = optionsWith(jsonResponse(202, { challenge: CHALLENGE, returnUrl: '/', mfaPath: 42 }));
@@ -224,5 +266,26 @@ describe('mfaConfirmUrl', () =>
     {
         expect(mfaConfirmUrl('https://evil.test/collect', CHALLENGE, '/')).toBe(`/collect?challenge=${CHALLENGE}&returnUrl=%2F`);
         expect(mfaConfirmUrl('//evil.test/collect', CHALLENGE, '/')).toBe(`/collect?challenge=${CHALLENGE}&returnUrl=%2F`);
+    });
+});
+
+describe('toSameOriginPath', () =>
+{
+    it.each(HOST_SMUGGLING_PATHS)('%s falls back to /auth/mfa and parses to no other host', (value) =>
+    {
+        const path = toSameOriginPath(value);
+
+        expect(path).toBe('/auth/mfa');
+        expect(landedOn(path).host).toBe(landedOn('/').host);
+    });
+
+    it.each([
+        ['/signin/2fa', '/signin/2fa'],
+        ['/signin/2fa?from=oauth', '/signin/2fa?from=oauth'],
+        ['https://evil.test/p', '/p'],
+        ['//evil.test/collect', '/collect'],
+    ])('%s reduces to %s', (value, expected) =>
+    {
+        expect(toSameOriginPath(value)).toBe(expected);
     });
 });

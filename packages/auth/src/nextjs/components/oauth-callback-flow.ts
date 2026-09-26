@@ -16,7 +16,7 @@
  * challenge: it is the one value on this page that can finish someone's sign-in.
  */
 
-import { toSafeReturnPath } from '../../lib/return-path';
+import { isSafeReturnPath, toSafeReturnPath } from '../../lib/return-path';
 
 /** Where the second-factor page lives when nothing says otherwise. */
 export const DEFAULT_MFA_CONFIRM_PATH = '/auth/mfa';
@@ -84,13 +84,18 @@ export function readCallbackInput(search: string): CallbackInput
  * A configured page, reduced to its path and query.
  *
  * Resolved against a placeholder origin, so whatever the value holds — a full
- * URL, a protocol-relative `//host` — what comes out stays on this origin.
+ * URL, a protocol-relative `//host` — what comes out stays on this origin. A
+ * pathname can still begin with `//` after normalisation (`/.//host`), which a
+ * second parse reads as another host, so the result must pass `isSafeReturnPath`
+ * or the default confirm page is used. So is a value that names only a host
+ * (`/\host`, whose path is `/`): it names no page.
  */
 export function toSameOriginPath(value: string): string
 {
     const target = new URL(value, 'http://confirm.invalid');
+    const path = `${target.pathname}${target.search}`;
 
-    return `${target.pathname}${target.search}`;
+    return path !== '/' && isSafeReturnPath(path) ? path : DEFAULT_MFA_CONFIRM_PATH;
 }
 
 /**
