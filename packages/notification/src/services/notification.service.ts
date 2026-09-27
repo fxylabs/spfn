@@ -181,17 +181,46 @@ export async function markNotificationPending(
 }
 
 /**
- * Cancel scheduled notification
+ * Statuses a scheduled-send job may claim a row from. `pending` and `failed`
+ * are pg-boss retries (a worker that died mid-send, a failed attempt);
+ * `cancelled` and `sent` are never claimed.
  */
-export async function cancelScheduledNotification(
-    id: number,
-): Promise<Notification | null>
+const CLAIMABLE_STATUSES: NotificationStatus[] = ['scheduled', 'pending', 'failed'];
+
+/**
+ * Move a scheduled row to `pending` if it may still be sent.
+ *
+ * A single status-guarded UPDATE, so a concurrent cancel either lands first
+ * (this returns false and nothing is sent) or loses (the cancel sees
+ * `pending` and refuses).
+ */
+export async function claimScheduledNotification(id: number): Promise<boolean>
 {
-    return await updateOne(
-        notifications,
-        { id },
-        { status: 'cancelled' },
-    );
+    const rows = await getDatabase('write')
+        .update(notifications)
+        .set({ status: 'pending' })
+        .where(and(eq(notifications.id, id), inArray(notifications.status, CLAIMABLE_STATUSES)))
+        .returning({ id: notifications.id });
+
+    return rows.length > 0;
+}
+
+/**
+ * Mark a row `cancelled` if it is still `scheduled`.
+ *
+ * Only updates the record — it does not touch the queued job. The scheduled
+ * job skips any row this has cancelled, so the record is what stops the send.
+ * Use `cancelNotification` to also remove the queued job.
+ */
+export async function markNotificationCancelled(id: number): Promise<boolean>
+{
+    const rows = await getDatabase('write')
+        .update(notifications)
+        .set({ status: 'cancelled' })
+        .where(and(eq(notifications.id, id), eq(notifications.status, 'scheduled')))
+        .returning({ id: notifications.id });
+
+    return rows.length > 0;
 }
 
 /**
