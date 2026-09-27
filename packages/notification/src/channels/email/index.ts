@@ -4,20 +4,17 @@
 
 import type { SendEmailParams, EmailProvider, InternalSendEmailParams } from './types';
 import type { SendResult } from '../types';
-import type { Notification } from '../../entities';
 import { awsSesProvider } from './providers/aws-ses';
-import { getEmailFrom, getEmailReplyTo, env, isHistoryEnabled, isHistoryContentStored, isTrackingEnabled, getTrackingBaseUrl } from '../../config';
+import { getEmailFrom, getEmailReplyTo, env, isHistoryContentStored, isTrackingEnabled, getTrackingBaseUrl } from '../../config';
 import { processTrackingHtml } from '../../tracking/processor';
 import { renderTemplate, hasTemplate, getTemplate } from '../../templates';
 import { maskRecipients, historyRecipient, scrubSendResult } from '../../privacy';
 import {
-    createNotificationRecord,
-    createNotificationRecords,
-    markNotificationSent,
-    markNotificationFailed,
     markManySent,
     markManyFailed,
 } from '../../services/notification.service';
+import { idempotencyKeyError } from '../../services/idempotency.service';
+import { openHistoryRow, closeHistoryRow, openBulkHistoryRows, splitStopped, type HistoryRowData } from '../history';
 import { runWithConcurrency } from '../concurrency';
 import { sendBulkEmailItemJob } from '../../jobs/send-bulk-email-item';
 import { logger } from '@spfn/core/logger';
@@ -91,6 +88,24 @@ function sendLogContext(sensitive: boolean, template: string | undefined, subjec
  */
 export async function sendEmail(params: SendEmailParams): Promise<SendResult>
 {
+    return deliverEmail(params);
+}
+
+/**
+ * Send an email. `scheduledRowId` is the history row a scheduled job already
+ * owns: no row is opened or closed here, and the job records the outcome.
+ *
+ * @internal
+ */
+export async function deliverEmail(params: SendEmailParams, scheduledRowId?: number): Promise<SendResult>
+{
+    const keyError = scheduledRowId ? undefined : idempotencyKeyError(params.idempotencyKey);
+
+    if (keyError)
+    {
+        return { success: false, error: keyError };
+    }
+
     // Prepare recipients
     const recipients = Array.isArray(params.to) ? params.to : [params.to];
 
@@ -160,30 +175,16 @@ export async function sendEmail(params: SendEmailParams): Promise<SendResult>
     // Get provider
     const provider = getProvider();
 
-    // Create history record if enabled
-    let historyId: number | undefined;
-    if (isHistoryEnabled())
-    {
-        const storePayload = !sensitive && isHistoryContentStored();
+    const opened = scheduledRowId
+        ? { historyId: scheduledRowId }
+        : await openHistoryRow(() => emailHistoryRow(params, recipients, subject, text, sensitive, provider.name), params.idempotencyKey, log);
 
-        try
-        {
-            const record = await createNotificationRecord({
-                channel: 'email',
-                recipient: historyRecipient(recipients),
-                templateName: params.template,
-                templateData: storePayload ? params.data : undefined,
-                subject: sensitive ? undefined : subject,
-                content: storePayload ? text : undefined,
-                providerName: provider.name,
-            });
-            historyId = record.id;
-        }
-        catch (error)
-        {
-            log.warn('Failed to create notification history record', error as Error);
-        }
+    if (opened.stop)
+    {
+        return opened.stop;
     }
+
+    const historyId = opened.historyId;
 
     // Apply tracking if enabled
     const shouldTrack = params.tracking ?? isTrackingEnabled();
@@ -217,18 +218,35 @@ export async function sendEmail(params: SendEmailParams): Promise<SendResult>
         log.error('Email send failed', { to: maskRecipients(recipients), ...sendLogContext(sensitive, params.template, subject), error: result.error });
     }
 
-    // Update history record (fire-and-forget — best-effort history must not add a
-    // serial DB round trip to the send path, e.g. a signup OTP).
-    if (historyId && isHistoryEnabled())
+    // A scheduled job records the outcome on its own row.
+    if (!scheduledRowId)
     {
-        const update = result.success
-            ? markNotificationSent(historyId, result.messageId)
-            : markNotificationFailed(historyId, result.error || 'Unknown error');
-
-        update.catch(error => log.warn('Failed to update notification history record', error as Error));
+        await closeHistoryRow(historyId, result, params.idempotencyKey !== undefined, log);
     }
 
     return result;
+}
+
+function emailHistoryRow(
+    params: SendEmailParams,
+    recipients: string[],
+    subject: string,
+    text: string | undefined,
+    sensitive: boolean,
+    providerName: string,
+): HistoryRowData
+{
+    const storePayload = !sensitive && isHistoryContentStored();
+
+    return {
+        channel: 'email',
+        recipient: historyRecipient(recipients),
+        templateName: params.template,
+        templateData: storePayload ? params.data : undefined,
+        subject: sensitive ? undefined : subject,
+        content: storePayload ? text : undefined,
+        providerName,
+    };
 }
 
 /**
@@ -256,6 +274,7 @@ interface PreparedEmail
     text?: string;
     tracking?: boolean;
     sensitive: boolean;
+    idempotencyKey?: string;
 }
 
 /**
@@ -293,6 +312,13 @@ function prepareEmailItems(items: SendEmailParams[]): {
     {
         const item = items[i];
         const recipients = Array.isArray(item.to) ? item.to : [item.to];
+        const keyError = idempotencyKeyError(item.idempotencyKey);
+
+        if (keyError)
+        {
+            earlyFailures.push({ index: i, result: { success: false, error: keyError } });
+            continue;
+        }
 
         let subject = item.subject;
         let text = item.text;
@@ -345,6 +371,7 @@ function prepareEmailItems(items: SendEmailParams[]): {
             text,
             tracking: item.tracking,
             sensitive: resolveSensitive(item),
+            idempotencyKey: item.idempotencyKey,
         });
     }
 
@@ -373,47 +400,38 @@ export async function sendEmailBulk(
     // 1. Validate and prepare all items
     const { prepared, earlyFailures } = prepareEmailItems(items);
 
-    // 2. Batch create notification records
-    let historyRecords: Notification[] = [];
-
-    if (isHistoryEnabled() && prepared.length > 0)
+    // 2. Open history rows; a spent idempotency key stops its item here
+    const storeContent = isHistoryContentStored();
+    const opened = await openBulkHistoryRows(prepared.map(p =>
     {
-        try
-        {
-            const storeContent = isHistoryContentStored();
+        const storePayload = !p.sensitive && storeContent;
 
-            historyRecords = await createNotificationRecords(
-                prepared.map((p) =>
-                {
-                    const storePayload = !p.sensitive && storeContent;
-
-                    return {
-                        channel: 'email' as const,
-                        recipient: historyRecipient(p.recipients),
-                        templateName: p.template,
-                        templateData: storePayload ? p.data : undefined,
-                        subject: p.sensitive ? undefined : p.subject,
-                        content: storePayload ? p.text : undefined,
-                        providerName: provider.name,
-                        batchId,
-                    };
-                }),
-            );
-        }
-        catch (error)
-        {
-            log.warn('Failed to batch create notification history records', error as Error);
-        }
-    }
+        return {
+            buildRow: () => ({
+                channel: 'email' as const,
+                recipient: historyRecipient(p.recipients),
+                templateName: p.template,
+                templateData: storePayload ? p.data : undefined,
+                subject: p.sensitive ? undefined : p.subject,
+                content: storePayload ? p.text : undefined,
+                providerName: provider.name,
+                batchId,
+            }),
+            idempotencyKey: p.idempotencyKey,
+        };
+    }), log);
+    const { sendable, historyIds, stopped } = splitStopped(prepared, opened);
+    const settled = [...earlyFailures, ...stopped];
+    const settledSuccesses = stopped.filter(s => s.result.success).length;
 
     // 3. Apply tracking per email
     const shouldTrackGlobal = isTrackingEnabled();
     const trackingBaseUrl = getTrackingBaseUrl();
 
-    for (let i = 0; i < prepared.length; i++)
+    for (let i = 0; i < sendable.length; i++)
     {
-        const p = prepared[i];
-        const historyId = historyRecords[i]?.id;
+        const p = sendable[i];
+        const historyId = historyIds[i];
         const shouldTrack = p.tracking ?? shouldTrackGlobal;
 
         if (shouldTrack && historyId && p.params.html && trackingBaseUrl)
@@ -436,8 +454,8 @@ export async function sendEmailBulk(
     // 4. Distributed mode: enqueue to pg-boss and return immediately
     if (options?.distributed)
     {
-        const jobInputs = prepared.map((p, i) => ({
-            notificationId: historyRecords[i]?.id ?? 0,
+        const jobInputs = sendable.map((p, i) => ({
+            notificationId: historyIds[i] ?? 0,
             to: p.params.to,
             from: p.params.from,
             replyTo: p.params.replyTo,
@@ -451,27 +469,28 @@ export async function sendEmailBulk(
         log.info('Bulk email enqueued for distributed processing', {
             batchId,
             total: items.length,
-            enqueued: prepared.length,
+            enqueued: sendable.length,
             earlyFailures: earlyFailures.length,
+            deduplicated: stopped.length,
         });
 
         // Return pending results — actual send happens via pg-boss workers
         const results: SendResult[] = new Array(items.length);
 
-        for (const { index, result } of earlyFailures)
+        for (const { index, result } of settled)
         {
             results[index] = result;
         }
 
-        for (const p of prepared)
+        for (const p of sendable)
         {
             results[p.index] = { success: true, messageId: `pending:${batchId}` };
         }
 
         return {
             results,
-            successCount: prepared.length,
-            failureCount: earlyFailures.length,
+            successCount: sendable.length + settledSuccesses,
+            failureCount: settled.length - settledSuccesses,
             batchId,
         };
     }
@@ -480,17 +499,17 @@ export async function sendEmailBulk(
     const concurrency = options?.concurrency ?? 10;
 
     const sendResults = await runWithConcurrency(
-        prepared,
+        sendable,
         (p) => provider.send(p.params).then(scrubSendResult),
         concurrency,
     );
 
     // 6. Build results + update history records
     const results: SendResult[] = new Array(items.length);
-    let successCount = 0;
-    let failureCount = earlyFailures.length;
+    let successCount = settledSuccesses;
+    let failureCount = settled.length - settledSuccesses;
 
-    for (const { index, result } of earlyFailures)
+    for (const { index, result } of settled)
     {
         results[index] = result;
     }
@@ -500,9 +519,9 @@ export async function sendEmailBulk(
     const sentItems: Array<{ id: number; providerMessageId?: string }> = [];
     const failedItems: Array<{ id: number; errorMessage: string }> = [];
 
-    for (let i = 0; i < prepared.length; i++)
+    for (let i = 0; i < sendable.length; i++)
     {
-        const { index, recipients, subject, sensitive, template } = prepared[i];
+        const { index, recipients, subject, sensitive, template } = sendable[i];
         const result = sendResults[i];
         results[index] = result;
         const logContext = sendLogContext(sensitive, template, subject);
@@ -518,9 +537,9 @@ export async function sendEmailBulk(
             log.error('Email send failed', { to: maskRecipients(recipients), ...logContext, error: result.error });
         }
 
-        const historyId = historyRecords[i]?.id;
+        const historyId = historyIds[i];
 
-        if (historyId && isHistoryEnabled())
+        if (historyId)
         {
             if (result.success)
             {

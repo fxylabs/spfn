@@ -15,6 +15,11 @@ export interface SendResult
     success: boolean;
     messageId?: string;
     error?: string;
+    /**
+     * The idempotency key was already used: the provider was not called, and
+     * this reports the first send (`success: true` once it was sent).
+     */
+    deduplicated?: boolean;
 }
 
 /**

@@ -4,7 +4,7 @@
 
 import { job } from '@spfn/core/job';
 import { Type } from '@sinclair/typebox';
-import { sendSMS } from '../channels/sms';
+import { deliverSMS } from '../channels/sms';
 import { runScheduledSend } from './run-scheduled-send';
 
 /**
@@ -32,5 +32,5 @@ export const sendScheduledSmsJob = job('notification.send-scheduled-sms')
     {
         const { notificationId, ...smsParams } = input;
 
-        await runScheduledSend(notificationId, () => sendSMS(smsParams));
+        await runScheduledSend(notificationId, () => deliverSMS(smsParams, notificationId));
     });

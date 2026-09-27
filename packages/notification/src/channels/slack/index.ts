@@ -4,15 +4,12 @@
 
 import type { SendSlackParams, SlackProvider, InternalSendSlackParams } from './types';
 import type { SendResult } from '../types';
-import type { Notification } from '../../entities';
 import { webhookProvider } from './providers/webhook';
-import { env, isHistoryEnabled } from '../../config';
+import { env } from '../../config';
 import { renderTemplate, hasTemplate } from '../../templates';
+import { idempotencyKeyError } from '../../services/idempotency.service';
+import { openHistoryRow, closeHistoryRow, openBulkHistoryRows, splitStopped } from '../history';
 import {
-    createNotificationRecord,
-    createNotificationRecords,
-    markNotificationSent,
-    markNotificationFailed,
     markManySent,
     markManyFailed,
 } from '../../services/notification.service';
@@ -62,6 +59,13 @@ function resolveWebhookUrl(params: SendSlackParams): string | undefined
  */
 export async function sendSlack(params: SendSlackParams): Promise<SendResult>
 {
+    const keyError = idempotencyKeyError(params.idempotencyKey);
+
+    if (keyError)
+    {
+        return { success: false, error: keyError };
+    }
+
     const webhookUrl = resolveWebhookUrl(params);
 
     if (!webhookUrl)
@@ -121,26 +125,18 @@ export async function sendSlack(params: SendSlackParams): Promise<SendResult>
     // Get provider
     const provider = getProvider();
 
-    // Create history record if enabled
-    let historyId: number | undefined;
-    if (isHistoryEnabled())
+    const opened = await openHistoryRow(() => ({
+        channel: 'slack',
+        recipient: webhookUrl,
+        templateName: params.template,
+        templateData: params.data,
+        content: text,
+        providerName: provider.name,
+    }), params.idempotencyKey, log);
+
+    if (opened.stop)
     {
-        try
-        {
-            const record = await createNotificationRecord({
-                channel: 'slack',
-                recipient: webhookUrl,
-                templateName: params.template,
-                templateData: params.data,
-                content: text,
-                providerName: provider.name,
-            });
-            historyId = record.id;
-        }
-        catch (error)
-        {
-            log.warn('Failed to create notification history record', error as Error);
-        }
+        return opened.stop;
     }
 
     // Send via provider
@@ -155,16 +151,7 @@ export async function sendSlack(params: SendSlackParams): Promise<SendResult>
         log.error('Slack send failed', { error: result.error });
     }
 
-    // Update history record (fire-and-forget — best-effort history must not add a
-    // serial DB round trip to the send path).
-    if (historyId && isHistoryEnabled())
-    {
-        const update = result.success
-            ? markNotificationSent(historyId, result.messageId)
-            : markNotificationFailed(historyId, result.error || 'Unknown error');
-
-        update.catch(error => log.warn('Failed to update notification history record', error as Error));
-    }
+    await closeHistoryRow(opened.historyId, result, params.idempotencyKey !== undefined, log);
 
     return result;
 }
@@ -191,6 +178,7 @@ interface PreparedSlack
     template?: string;
     data?: Record<string, unknown>;
     text?: string;
+    idempotencyKey?: string;
 }
 
 /**
@@ -229,6 +217,13 @@ export async function sendSlackBulk(
     {
         const item = items[i];
         const webhookUrl = resolveWebhookUrl(item);
+        const keyError = idempotencyKeyError(item.idempotencyKey);
+
+        if (keyError)
+        {
+            earlyFailures.push({ index: i, result: { success: false, error: keyError } });
+            continue;
+        }
 
         if (!webhookUrl)
         {
@@ -269,39 +264,32 @@ export async function sendSlackBulk(
             template: item.template,
             data: item.data,
             text,
+            idempotencyKey: item.idempotencyKey,
         });
     }
 
-    // 2. Batch create notification records
-    let historyRecords: Notification[] = [];
-
-    if (isHistoryEnabled() && prepared.length > 0)
-    {
-        try
-        {
-            historyRecords = await createNotificationRecords(
-                prepared.map((p) => ({
-                    channel: 'slack' as const,
-                    recipient: p.webhookUrl,
-                    templateName: p.template,
-                    templateData: p.data,
-                    content: p.text,
-                    providerName: provider.name,
-                    batchId,
-                })),
-            );
-        }
-        catch (error)
-        {
-            log.warn('Failed to batch create notification history records', error as Error);
-        }
-    }
+    // 2. Open history rows; a spent idempotency key stops its item here
+    const opened = await openBulkHistoryRows(prepared.map(p => ({
+        buildRow: () => ({
+            channel: 'slack' as const,
+            recipient: p.webhookUrl,
+            templateName: p.template,
+            templateData: p.data,
+            content: p.text,
+            providerName: provider.name,
+            batchId,
+        }),
+        idempotencyKey: p.idempotencyKey,
+    })), log);
+    const { sendable, historyIds, stopped } = splitStopped(prepared, opened);
+    const settled = [...earlyFailures, ...stopped];
+    const settledSuccesses = stopped.filter(s => s.result.success).length;
 
     // 3. Distributed mode: enqueue to pg-boss
     if (options?.distributed)
     {
-        const jobInputs = prepared.map((p, i) => ({
-            notificationId: historyRecords[i]?.id ?? 0,
+        const jobInputs = sendable.map((p, i) => ({
+            notificationId: historyIds[i] ?? 0,
             webhookUrl: p.webhookUrl,
             text: p.text,
             blocks: p.params.blocks,
@@ -312,29 +300,27 @@ export async function sendSlackBulk(
         log.info('Bulk Slack enqueued for distributed processing', {
             batchId,
             total: items.length,
-            enqueued: prepared.length,
+            enqueued: sendable.length,
             earlyFailures: earlyFailures.length,
+            deduplicated: stopped.length,
         });
 
         const results: SendResult[] = new Array(items.length);
 
-        for (const { index, result } of earlyFailures)
+        for (const { index, result } of settled)
         {
             results[index] = result;
         }
 
-        for (const p of prepared)
+        for (const p of sendable)
         {
-            if (!results[p.index])
-            {
-                results[p.index] = { success: true, messageId: `pending:${batchId}` };
-            }
+            results[p.index] = { success: true, messageId: `pending:${batchId}` };
         }
 
         return {
             results,
-            successCount: prepared.length,
-            failureCount: earlyFailures.length,
+            successCount: sendable.length + settledSuccesses,
+            failureCount: settled.length - settledSuccesses,
             batchId,
         };
     }
@@ -343,17 +329,17 @@ export async function sendSlackBulk(
     const concurrency = options?.concurrency ?? 10;
 
     const sendResults = await runWithConcurrency(
-        prepared,
+        sendable,
         (p) => provider.send(p.params).then(scrubSendResult),
         concurrency,
     );
 
     // 5. Build results + update history records
     const results: SendResult[] = new Array(items.length);
-    let successCount = 0;
-    let failureCount = earlyFailures.length;
+    let successCount = settledSuccesses;
+    let failureCount = settled.length - settledSuccesses;
 
-    for (const { index, result } of earlyFailures)
+    for (const { index, result } of settled)
     {
         results[index] = result;
     }
@@ -361,9 +347,9 @@ export async function sendSlackBulk(
     const sentItems: Array<{ id: number; providerMessageId?: string }> = [];
     const failedItems: Array<{ id: number; errorMessage: string }> = [];
 
-    for (let i = 0; i < prepared.length; i++)
+    for (let i = 0; i < sendable.length; i++)
     {
-        const { index } = prepared[i];
+        const { index } = sendable[i];
         const result = sendResults[i];
         results[index] = result;
 
@@ -378,9 +364,9 @@ export async function sendSlackBulk(
             log.error('Slack send failed', { error: result.error });
         }
 
-        const historyId = historyRecords[i]?.id;
+        const historyId = historyIds[i];
 
-        if (historyId && isHistoryEnabled())
+        if (historyId)
         {
             if (result.success)
             {

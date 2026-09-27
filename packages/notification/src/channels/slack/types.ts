@@ -33,6 +33,15 @@ export interface SendSlackParams
      * Template data for variable substitution
      */
     data?: Record<string, unknown>;
+
+    /**
+     * Makes retries safe: a second send with the same key (per channel and
+     * recipient) returns the first result instead of sending again. Derive it
+     * from the business event (`invoice-8812:payment-failed`) or generate it
+     * once and store it; a fresh UUID per attempt deduplicates nothing.
+     * 1-255 characters. Requires notification history.
+     */
+    idempotencyKey?: string;
 }
 
 /**

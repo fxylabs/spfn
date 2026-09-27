@@ -217,6 +217,45 @@ A cancel is refused (`success: false`) once the row has left `scheduled` — a s
 progress, already sent, or failed. `markNotificationCancelled(id)` is the record-only
 form: it updates the row and returns whether it did, without touching the queue.
 
+## Retries without duplicates (idempotency keys)
+
+A send can be retried safely by giving it an `idempotencyKey`. The first send with a key
+records it on the history row; a later send with the same key, channel and recipient
+returns the first result without calling the provider.
+
+```typescript
+const result = await sendEmail({
+    to: user.email,
+    template: 'payment-failed',
+    data: { invoiceId },
+    idempotencyKey: `invoice-${invoiceId}:payment-failed`,
+});
+// retry → { success: true, messageId: '<first>', deduplicated: true }
+```
+
+**The key must come out the same on every retry.** Derive it from the business event,
+or generate a UUID once and store it with the job that sends. A `crypto.randomUUID()`
+called right before each send gives every attempt a new key and deduplicates nothing.
+
+| First send's row | A repeat with the same key |
+|---|---|
+| `sent` | returns the first result, `deduplicated: true` |
+| `failed` | takes over the same row and sends again |
+| `pending` / `scheduled` (in flight) | `success: false`, `error: 'send in progress'`, not sent |
+| `cancelled` / `skipped` | `success: false`, `error: 'already cancelled'` (…), not sent |
+
+- Available on `sendEmail`, `sendSMS`, `sendSlack`, each bulk item, and `scheduleEmail` /
+  `scheduleSMS` (a repeat schedule returns the first `notificationId` and queues nothing).
+- The key is unique per channel and recipient: one key can cover an email and an SMS, and
+  an SMS to several numbers is deduplicated number by number.
+- 1–255 characters (`MAX_IDEMPOTENCY_KEY_LENGTH`). Requires `enableHistory: true`; a
+  keyed send is refused when history is off, and when the key cannot be recorded, rather
+  than sent without protection.
+- A process that dies after claiming a key and before the provider answers leaves the row
+  `pending`, and the key stays blocked. The provider may already have delivered, so it
+  is not retried automatically: after checking, `markNotificationFailed(id, reason)` frees
+  it.
+
 ## Bulk Sending
 
 All channels support bulk sending with two modes:
