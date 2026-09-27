@@ -42,8 +42,8 @@ export const userProfiles = authSchema.table('user_profiles',
         bio: text('bio'),
 
         // Preferences
-        // Locale/language preference (e.g., 'en', 'ko', 'ja')
-        locale: text('locale').default('en'),
+        // Locale/language choice (e.g., 'en', 'ko', 'ja'); NULL = never chose, follow the request
+        locale: text('locale'),
 
         // Timezone (e.g., 'Asia/Seoul', 'America/New_York')
         timezone: text('timezone').default('UTC'),

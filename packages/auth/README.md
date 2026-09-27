@@ -257,7 +257,7 @@ routes use `.skip(['auth'])`; the rest require `Authorization: Bearer <client-si
 | `changePassword` | PUT `/_auth/password` | yes | change password |
 | `getAuthSession` | GET `/_auth/session` | yes | current session/user |
 | `issueOneTimeToken` | POST | yes | short-lived token (e.g. SSE handshake) |
-| `checkUsername` / `updateUsername` / `updateLocale` | — | mixed | username availability/update, locale |
+| `checkUsername` / `updateUsername` / `updateLocale` | — | mixed | username availability/update; set or clear (`null`) the language choice |
 | `getUserProfile` / `updateUserProfile` | — | yes | profile read/update |
 | `createInvitation` / `acceptInvitation` / `listInvitations` / `cancelInvitation` / `resendInvitation` / `deleteInvitation` / `getInvitation` | — | mixed | invitation flow |
 | `requestAccountDeletion` | POST `/_auth/deletion/request` | yes | request account deletion (re-auth gated) — see [Account Deletion & Recovery](#account-deletion--recovery) |
@@ -334,6 +334,38 @@ each path, calling `authApi` the way your login and reset screens already do:
 the handler enforced — the login redirect, redirecting only to the API's `redirectUri`, and the
 `frame-ancestors 'none'` / `no-store` headers. Its CSRF check needs nothing from you: the proxy
 checks the consent POST in every mode.
+
+### Migration — tell a chosen locale from none
+
+**Behaviour change in `@spfn/auth` 0.3.0-beta.31** ([fxylabs/spfn#110](https://github.com/fxylabs/spfn/issues/110)).
+`user_profiles.locale` no longer defaults to `'en'`: NULL now means the person never picked a
+language, so an app can follow the request's language instead (see `negotiateLocale` in
+`@spfn/i18n/next`).
+
+| Where | `locale` | `chosenLocale` (new) |
+|---|---|---|
+| `AuthContext` / `getLocale(c)` | the choice, or `'en'` — unchanged | `getChosenLocale(c)`: the choice, or `null` |
+| `ProfileInfo` (`getUserProfile`, `updateUserProfile`) | the choice, or `'en'` — unchanged | the choice, or `null` |
+| `PATCH /_auth/users/locale` | answers the resolved value | answers the stored choice; send `null` or `''` to clear it |
+
+Three things read differently:
+
+- `userProfilesRepository.findLocaleByUserId` returns `string | null` — the stored value, no fallback.
+- `updateUserProfile` with `locale: ''` clears the choice instead of storing `'en'`.
+- A profile row created without a locale stores NULL instead of `'en'`.
+
+The migration only drops the column default. Rows already stored as `'en'` stay `'en'`, because
+a stored value cannot say whether a person picked it. If your app never offered a language
+picker, every `'en'` came from the old default, and you can reset them once:
+
+```sql
+UPDATE spfn_auth.user_profiles SET locale = NULL WHERE locale = 'en';
+```
+
+If it did offer one, leave the rows alone.
+
+A profile registered with `registerAuthProfile` may leave `chosenLocale` out of the principal it
+returns; `getChosenLocale` then answers `null`.
 
 ### Verified-email signup
 
@@ -1776,7 +1808,7 @@ export const getProducts = route.get('/products')
 ```
 
 Context helpers from `@spfn/auth/server`: `getAuth`, `getOptionalAuth`, `getUser`, `getUserId`,
-`getRole`, `getLocale`, `getKeyId`. Middleware: `authenticate`, `optionalAuth`,
+`getRole`, `getLocale`, `getChosenLocale` (`null` when the person never picked a language), `getKeyId`. Middleware: `authenticate`, `optionalAuth`,
 `requirePermissions`, `requireAnyPermission`, `requireRole`, `roleGuard`, `oneTimeTokenAuth`.
 
 ## OAuth

@@ -37,6 +37,7 @@ import { readContextClientIdentity } from '../client-proof/version-middleware';
 import { attestedClientIp } from '../lib/device-provenance';
 import { resolveAuthenticatedUser, runAuthProfile, type AuthContext } from './auth-profiles';
 import { matchesMachineDiscriminator } from './machine-principals';
+import { profileLocale, type ProfileLocale } from '../lib/profile-locale';
 
 // Auth context type — one principal shape for every scheme (see auth-profiles).
 export type { AuthContext } from './auth-profiles';
@@ -229,7 +230,7 @@ function bearerRefusal(c: Context, refused: BearerRefusal): Error
  */
 export function bearerAuthContext(
     keyId: string,
-    resolved: { user: User; role: string | null; locale: string },
+    resolved: { user: User; role: string | null } & ProfileLocale,
 ): AuthContext
 {
     return {
@@ -238,6 +239,7 @@ export function bearerAuthContext(
         keyId,
         role: resolved.role,
         locale: resolved.locale,
+        chosenLocale: resolved.chosenLocale,
         scheme: 'bearer',
     };
 }
@@ -455,7 +457,7 @@ export const optionalAuth = defineMiddleware('optionalAuth', async (c, next) =>
             keyRecord.algorithm as KeyAlgorithmType,
         );
 
-        const [result, locale] = await Promise.all([
+        const [result, chosenLocale] = await Promise.all([
             findUserWithEffectiveRole(keyRecord.userId),
             userProfilesRepository.findLocaleByUserId(keyRecord.userId),
         ]);
@@ -477,7 +479,7 @@ export const optionalAuth = defineMiddleware('optionalAuth', async (c, next) =>
             userId: String(user.id),
             keyId,
             role: role?.name ?? null,
-            locale,
+            ...profileLocale(chosenLocale),
             scheme: 'bearer',
         });
     }

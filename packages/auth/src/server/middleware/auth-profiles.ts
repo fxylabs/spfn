@@ -68,6 +68,7 @@ import { ClientProofRefusal } from '../client-proof/refusal';
 import { clientProofRefusalResponse } from '../client-proof/refusal-response';
 import { getClientProofReplayStore } from '../client-proof/replay-store';
 import { readContextClientIdentity } from '../client-proof/version-middleware';
+import { profileLocale, type ProfileLocale } from '../lib/profile-locale';
 
 /** What a verified request leaves in the context — one shape for every scheme. */
 export interface AuthContext
@@ -76,7 +77,15 @@ export interface AuthContext
     userId: string;
     keyId: string;
     role: string | null;
+    /** The person's language choice, or `'en'` when they never made one. */
     locale: string;
+    /**
+     * The person's language choice, or `null` when they never made one — so an
+     * app can follow the request's language instead. Optional so a registered
+     * profile that builds its own principal keeps compiling; read it with
+     * `getChosenLocale`, which treats an absent value as `null`.
+     */
+    chosenLocale?: string | null;
 
     /**
      * How the principal was authenticated. Informational — downstream code
@@ -131,10 +140,9 @@ export function selectAuthProfile(c: Context): AuthProfileVerifier | null
 export async function resolveAuthenticatedUser(userId: number): Promise<{
     user: User;
     role: string | null;
-    locale: string;
-}>
+} & ProfileLocale>
 {
-    const [result, locale] = await Promise.all([
+    const [result, chosenLocale] = await Promise.all([
         findUserWithEffectiveRole(userId),
         userProfilesRepository.findLocaleByUserId(userId),
     ]);
@@ -157,7 +165,7 @@ export async function resolveAuthenticatedUser(userId: number): Promise<{
         throw new AccountDisabledError({ status: user.status });
     }
 
-    return { user, role: role?.name ?? null, locale };
+    return { user, role: role?.name ?? null, ...profileLocale(chosenLocale) };
 }
 
 // ---- clientProofV1 ---------------------------------------------------------
@@ -379,7 +387,7 @@ async function verifyClientProofProfile(c: Context): Promise<AuthContext>
     }
 
     // 7. The same user-status path the Bearer scheme takes.
-    const { user, role, locale } = await resolveAuthenticatedUser(keyRecord.userId);
+    const { user, role, locale, chosenLocale } = await resolveAuthenticatedUser(keyRecord.userId);
 
     // Fire-and-forget, as the Bearer path does — and with the address under the
     // same rule, so this surface neither erases `last_seen_ip` on every throttle
@@ -404,6 +412,7 @@ async function verifyClientProofProfile(c: Context): Promise<AuthContext>
         keyId: credentials.keyId,
         role,
         locale,
+        chosenLocale,
         scheme: 'clientProofV1',
     };
 }

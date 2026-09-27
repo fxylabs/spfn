@@ -8,6 +8,7 @@
 import { NewUserProfile, userProfiles } from '../entities/user-profiles';
 import { BaseRepository } from '@spfn/core/db';
 import { eq } from 'drizzle-orm';
+import { profileLocale } from '../lib/profile-locale';
 
 /**
  * User Profiles Repository 클래스
@@ -29,9 +30,11 @@ export class UserProfilesRepository extends BaseRepository
     }
 
     /**
-     * User ID로 locale만 조회 (경량)
+     * User ID로 locale 선택값만 조회 (경량)
+     *
+     * NULL(또는 프로필 없음)은 "고른 적 없음"이다. 기본값으로 바꾸지 않는다.
      */
-    async findLocaleByUserId(userId: number): Promise<string>
+    async findLocaleByUserId(userId: number): Promise<string | null>
     {
         const result = await this.readDb
             .select({ locale: userProfiles.locale })
@@ -39,7 +42,7 @@ export class UserProfilesRepository extends BaseRepository
             .where(eq(userProfiles.userId, userId))
             .limit(1);
 
-        return result[0]?.locale || 'en';
+        return result[0]?.locale ?? null;
     }
 
     /**
@@ -182,7 +185,7 @@ export class UserProfilesRepository extends BaseRepository
             lastName: profile.lastName,
             avatarUrl: profile.avatarUrl,
             bio: profile.bio,
-            locale: profile.locale || 'en',
+            ...profileLocale(profile.locale),
             timezone: profile.timezone || 'UTC',
             website: profile.website,
             location: profile.location,

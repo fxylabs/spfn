@@ -241,5 +241,27 @@ describe('Authenticate Middleware', () =>
             }));
             expect(mockNext).toHaveBeenCalled();
         });
+
+        // Case table #110, row 11 for the Bearer path: the stored choice is
+        // carried as chosenLocale, and no choice keeps locale's 'en' fallback.
+        it.each([
+            { stored: null, locale: 'en', chosenLocale: null },
+            { stored: 'ko', locale: 'ko', chosenLocale: 'ko' },
+        ])('carries a stored locale of $stored as chosenLocale $chosenLocale', async ({ stored, locale, chosenLocale }) =>
+        {
+            withBearer();
+            vi.mocked(decodeToken).mockReturnValue({ keyId: KEY_ID } as never);
+            vi.mocked(keysRepository.findActiveByKeyId).mockResolvedValue(validKeyRecord() as never);
+            vi.mocked(verifyClientToken).mockReturnValue({ keyId: KEY_ID, iss: 'spfn-client' } as never);
+            vi.mocked(findUserWithEffectiveRole).mockResolvedValue({
+                user: { id: 1, email: 'test@example.com', status: 'active' },
+                role: { name: 'user' },
+            } as never);
+            vi.mocked(userProfilesRepository.findLocaleByUserId).mockResolvedValue(stored as never);
+
+            await authenticate.handler(mockContext as Context, mockNext);
+
+            expect(mockContext.set).toHaveBeenCalledWith('auth', expect.objectContaining({ locale, chosenLocale }));
+        });
     });
 });

@@ -138,6 +138,26 @@ export function getLocale(c: Context | { raw: Context }): string
 }
 
 /**
+ * Get the authenticated user's own language choice from route context
+ *
+ * @returns The chosen locale, or `null` when the person never chose one —
+ *          the cue to follow the request's language (`Accept-Language`,
+ *          a cookie) rather than defaulting to `'en'`.
+ *
+ * @example
+ * ```typescript
+ * app.bind(contract, [authenticate], async (c) => {
+ *     const chosen = getChosenLocale(c);
+ *     // 'ko' | null
+ * });
+ * ```
+ */
+export function getChosenLocale(c: Context | { raw: Context }): string | null
+{
+    return getAuth(c).chosenLocale ?? null;
+}
+
+/**
  * Get current key ID from route context
  *
  * @example

@@ -126,7 +126,7 @@ export const updateUsername = route.patch('/_auth/users/username')
 export const updateLocale = route.patch('/_auth/users/locale')
     .input({
         body: Type.Object({
-            locale: Type.String({ minLength: 1, description: 'Locale code (e.g., en, ko, ja)' }),
+            locale: Type.Union([Type.String(), Type.Null()], { description: 'Locale code (e.g., en, ko, ja); null or blank clears the choice' }),
         }),
     })
     .handler(async (c) =>

@@ -1,0 +1,1 @@
+ALTER TABLE "spfn_auth"."user_profiles" ALTER COLUMN "locale" DROP DEFAULT;

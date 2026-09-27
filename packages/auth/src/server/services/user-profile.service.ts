@@ -7,6 +7,7 @@
 
 import type { UserProfile, ProfileInfo } from '@spfn/auth';
 import { usersRepository, userProfilesRepository } from '../repositories';
+import { normalizeChosenLocale, profileLocale, type ProfileLocale } from '../lib/profile-locale';
 
 /**
  * Profile update parameters
@@ -72,20 +73,19 @@ export async function getUserProfileService(userId: string | number | bigint): P
  * Update user locale
  *
  * @param userId - User ID
- * @param locale - Locale code (e.g., 'en', 'ko', 'ja')
- * @returns Updated locale
+ * @param locale - Locale code (e.g., 'en', 'ko', 'ja'); `null` or blank clears the choice
+ * @returns The stored choice, and the locale it resolves to
  */
 export async function updateLocaleService(
     userId: string | number | bigint,
-    locale: string,
-): Promise<{ locale: string }>
+    locale: string | null,
+): Promise<ProfileLocale>
 {
-    const userIdNum = Number(userId);
-    const normalized = locale.trim() || 'en';
+    const chosen = normalizeChosenLocale(locale);
 
-    await userProfilesRepository.upsertByUserId(userIdNum, { locale: normalized });
+    await userProfilesRepository.upsertByUserId(Number(userId), { locale: chosen });
 
-    return { locale: normalized };
+    return profileLocale(chosen);
 }
 
 /**
@@ -152,7 +152,7 @@ export async function updateUserProfileService(
     }
     if (params.locale !== undefined)
     {
-        updateData.locale = emptyToNull(params.locale) || 'en';
+        updateData.locale = normalizeChosenLocale(params.locale);
     }
     if (params.timezone !== undefined)
     {

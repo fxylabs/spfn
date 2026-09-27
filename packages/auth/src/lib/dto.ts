@@ -53,7 +53,10 @@ export interface ProfileInfo
     lastName: string | null;
     avatarUrl: string | null;
     bio: string | null;
+    /** The person's language choice, or `'en'` when they never made one. */
     locale: string;
+    /** The person's language choice, or `null` when they never made one. */
+    chosenLocale: string | null;
     timezone: string;
     website: string | null;
     location: string | null;

@@ -23,6 +23,7 @@
 import { defineMiddleware } from '@spfn/core/route';
 import { UnauthorizedError } from '@spfn/core/errors';
 import { verifyOneTimeTokenService } from '../services/one-time-token.service';
+import { profileLocale } from '../lib/profile-locale';
 import { findUserWithEffectiveRole, userProfilesRepository } from '@spfn/auth/server';
 
 export const oneTimeTokenAuth = defineMiddleware('oneTimeTokenAuth', async (c, next) =>
@@ -45,7 +46,7 @@ export const oneTimeTokenAuth = defineMiddleware('oneTimeTokenAuth', async (c, n
     }
 
     // Load user data (same as authenticate middleware)
-    const [result, locale] = await Promise.all([
+    const [result, chosenLocale] = await Promise.all([
         findUserWithEffectiveRole(Number(userId)),
         userProfilesRepository.findLocaleByUserId(Number(userId)),
     ]);
@@ -68,7 +69,7 @@ export const oneTimeTokenAuth = defineMiddleware('oneTimeTokenAuth', async (c, n
         userId: String(user.id),
         keyId: '',  // No key involved in OTT auth
         role: role?.name ?? null,
-        locale,
+        ...profileLocale(chosenLocale),
         scheme: 'oneTimeToken',
     });
 

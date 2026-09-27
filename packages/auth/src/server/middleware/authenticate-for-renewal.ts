@@ -30,6 +30,7 @@ import { defineMiddleware } from '@spfn/core/route';
 import { SessionRenewalRefusedError } from '@spfn/auth/errors';
 
 import { getBoundKeyRenewGraceMs } from '../lib/config';
+import { profileLocale } from '../lib/profile-locale';
 import { userProfilesRepository } from '../repositories';
 import { findUserWithEffectiveRole } from '../services/role-email-domain.service';
 import type { UserPublicKey } from '../entities/user-public-keys';
@@ -101,7 +102,7 @@ export const authenticateForRenewal = defineMiddleware('authForRenewal', async (
  */
 async function activeAccount(userId: number)
 {
-    const [result, locale] = await Promise.all([
+    const [result, chosenLocale] = await Promise.all([
         findUserWithEffectiveRole(userId),
         userProfilesRepository.findLocaleByUserId(userId),
     ]);
@@ -111,5 +112,5 @@ async function activeAccount(userId: number)
         return null;
     }
 
-    return { user: result.user, role: result.role?.name ?? null, locale };
+    return { user: result.user, role: result.role?.name ?? null, ...profileLocale(chosenLocale) };
 }
