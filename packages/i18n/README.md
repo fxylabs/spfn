@@ -220,6 +220,49 @@ const alternates = routing.localizedMetadata({ locale: 'ko' });
 
 Your app still owns locale validation in `[locale]/layout.tsx`, `<html lang>`, catalogs, `generateStaticParams`, and the proxy matcher. The package only keeps their path and metadata decisions consistent.
 
+## How do I pick the locale in an app behind sign-in?
+
+A URL prefix suits marketing pages. An app screen wants the person's language instead, with no locale in the address, so a shared link opens in the reader's language and sign-in, OAuth and deep-link flows carry nothing extra. `@spfn/i18n/next` resolves it in one call:
+
+```ts
+import { cookies, headers } from 'next/headers';
+import { negotiateLocale } from '@spfn/i18n/next';
+
+const locale = negotiateLocale({
+    locales: ['en', 'ko'],
+    fallback: 'en',
+    chosen: profile?.chosenLocale,   // optional: the signed-in person's saved choice
+    cookies: await cookies(),
+    headers: await headers(),
+});
+```
+
+| Order | Source | Used when |
+|---|---|---|
+| 1 | `chosen` | the app passes a saved choice and it is one of `locales` |
+| 2 | locale cookie | the person picked a language on this browser |
+| 3 | `Accept-Language` | the browser or system language; highest q-value first, `ko-KR` matches `ko`, `zh-Hant-TW` matches `zh-Hant` before `zh` |
+| 4 | `fallback` | nothing above matched |
+
+A value that is not one of `locales` is skipped, never returned. `fallback` must be one of `locales`; anything else throws.
+
+Write the cookie only when the person picks a language:
+
+```ts
+'use server';
+import { cookies } from 'next/headers';
+import { localeCookie } from '@spfn/i18n/next';
+
+export async function chooseLocale(locale: 'en' | 'ko')
+{
+    localeCookie.set(await cookies(), locale);   // or localeCookie.clear(...) to follow the system again
+}
+```
+
+The cookie is `spfn-locale` (`LOCALE_COOKIE_NAME`): `Path=/`, `SameSite=Lax`, `HttpOnly`, one year, `Secure` in production. Never write it from the negotiated value; a person who changes their system language is then still followed. With `@spfn/auth`, pass `chosenLocale`, not `locale`: `locale` answers `'en'` for a person who never chose, which would hide the system language.
+
+Feed the one result into `<html lang>`, `getClientMessages(locale, …)` and `I18nProvider`, so the app has a single place that decides.
+
 ## Can I use it without React or SPFN?
 
 Yes. The package root is a standalone translator:
@@ -240,7 +283,7 @@ t('missing'); // "missing"
 ## FAQ
 
 **Where does the locale come from?**
-From your application, always. This package never guesses. Common sources are the authenticated SPFN profile (`@spfn/auth` stores a per-user locale and exposes `updateLocale`), a route segment such as `/ko/...`, or an `Accept-Language` header. Pass whichever you use into `getT` and `getClientMessages`.
+From your application. The package never guesses on its own: a route segment such as `/ko/...` goes through the routing helpers above, and an app behind sign-in calls `negotiateLocale`, which combines the saved choice from `@spfn/auth`, a cookie and `Accept-Language`. Pass the result into `getT` and `getClientMessages`.
 
 **Does the browser download every language?**
 No, and that is what `getClientMessages(locale, ['common'])` is for: it resolves the one locale and only the namespaces that subtree needs, merges the fallback underneath, and hands the result to `I18nProvider` as a complete dictionary. Nothing loads after paint, so there is no flash of untranslated text.
@@ -253,7 +296,7 @@ No — use the platform's `Intl` APIs. See Scope below for what else the package
 
 ## Scope
 
-This runtime intentionally does not load catalog files, detect locales, format dates or numbers, or implement plural rules. Use platform `Intl` APIs for locale-aware formatting and keep catalog loading and locale policy in the consuming application.
+This runtime intentionally does not load catalog files, detect locales unless the app calls `negotiateLocale`, format dates or numbers, or implement plural rules. Use platform `Intl` APIs for locale-aware formatting and keep catalog loading and locale policy in the consuming application.
 
 Interpolation returns strings; it does not sanitize HTML. React escapes text values by default, but applications must sanitize messages before inserting them as raw HTML.
 

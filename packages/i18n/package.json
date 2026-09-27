@@ -1,6 +1,6 @@
 {
     "name": "@spfn/i18n",
-    "version": "0.2.0-beta.5",
+    "version": "0.2.0-beta.6",
     "description": "Small, content-agnostic internationalization runtime for SPFN and React applications.",
     "type": "module",
     "sideEffects": false,
