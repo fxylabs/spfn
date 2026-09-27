@@ -13,6 +13,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 #### @spfn/auth
 
+- **BREAKING: the package ships no HTML screens** (#108). `createRevokeAllPageHandlers` and
+  `createOAuth2AuthorizeHandlers` are removed from `@spfn/auth/nextjs/server`, with
+  `RevokeAllPageView`, `RevokeAllPageHandlerOptions`, `RevokeAllPageHandlers`,
+  `OAuth2AuthorizeHandlerOptions`, `OAuth2AuthorizeHandlers`, the nextjs-side
+  `OAuth2ConsentView` and `OAuth2ConsentScope`, and `escapeHtml`. The JSON routes are unchanged,
+  and so is the `OAuth2ConsentView` `@spfn/auth/server` exports as their response type.
+    - **Migration**: replace `app/account/revoke-all/route.ts` and `app/oauth/authorize/route.ts`
+      with pages of your own that call `authApi` (`confirmRevokeAllLink` /
+      `consumeRevokeAllLink`, `getOAuth2Authorize` / `createOAuth2AuthorizationCode`), as the
+      login and reset screens already do. The README's "The sign-out-everywhere link" and "The
+      consent screen" show both. The consent page owns what the handler enforced: the login
+      redirect with `?returnUrl=`, redirecting only to the API-returned `redirectUri`, showing
+      `unknown_client` / `redirect_uri_mismatch` instead of redirecting, rendering `clientName`
+      as text, and `frame-ancestors 'none'` plus `Cache-Control: no-store` via `next.config`
+      `headers()`. The consent POST's CSRF check is the proxy's, in every mode.
 - **BREAKING: a sign-in no longer always answers with a session** (#95). An account that has
   enrolled a second factor and signs in from a device the account has never seen gets `202`
   and a challenge instead; the device key that sign-in registered stays inactive until the
@@ -421,6 +436,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 #### @spfn/auth
 
+- **The OAuth2 consent POST is CSRF-checked in every mode** (#108). `POST
+  /_auth/oauth2/authorize` issues an authorization code on the strength of the session
+  alone, and under the default `warn` mode (or `off`) the proxy logged a missing or wrong
+  `x-spfn-csrf` header and forwarded the request anyway. The proxy now refuses it with the
+  usual `403` and repair cookie whatever `SPFN_AUTH_CSRF` / `configureAuth({ csrf })` says,
+  and ignores an `exemptPaths` entry naming it (one warning line per process). No other path
+  or mode changes; the readable CSRF cookie was already issued in every mode, so an app on
+  `off` whose pages use the api client needs no change.
 - **A passkey-bound session renewal answered 200 and left the browser signed out** (#99).
   `POST /_auth/session/renew/verify` matches two registered proxy rules:
   `loginRegisterInterceptor` mints the replacement key pair, and `generalAuthInterceptor`

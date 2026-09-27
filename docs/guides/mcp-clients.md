@@ -86,37 +86,209 @@ start, naming the value it read.
 
 ## 2. Add the consent screen
 
-One route file on the web app, at the path published as
-`authorization_endpoint`:
+A page in your app, at the path published as `authorization_endpoint`
+(default `/oauth/authorize`). The package ships no HTML, so you build it with
+your own components: a server component asks the API what the request is, and
+a client component sends the decision.
 
-```typescript
-// app/oauth/authorize/route.ts
-import { createOAuth2AuthorizeHandlers } from '@spfn/auth/nextjs/server';
+```tsx
+// app/oauth/authorize/page.tsx — a server component
+import { redirect } from 'next/navigation';
+import { authApi, type AuthRouter } from '@spfn/auth';
+import type { RouterInput } from '@spfn/core/nextjs';
+import { ConsentForm } from './consent-form';
+import { refusalDestination } from './consent-refusal';
 
-export const { GET, POST } = createOAuth2AuthorizeHandlers({ loginPath: '/login' });
+type SearchParams = Record<string, string | string[] | undefined>;
+
+export type AuthorizeFields = RouterInput<AuthRouter, 'getOAuth2Authorize'>['query'];
+
+const PARAMETERS = ['client_id', 'redirect_uri', 'code_challenge', 'code_challenge_method', 'resource', 'scope', 'state'];
+
+/** The authorize parameters the link carried, and nothing else it carried. */
+function authorizeFields(params: SearchParams): AuthorizeFields
+{
+    return Object.fromEntries(
+        PARAMETERS.flatMap(name => typeof params[name] === 'string' ? [[name, params[name]]] : []),
+    ) as AuthorizeFields;
+}
+
+export default async function ConsentPage({ searchParams }: { searchParams: Promise<SearchParams> })
+{
+    const fields = authorizeFields(await searchParams);
+    const described = await authApi.getOAuth2Authorize.call({ query: fields })
+        .then(consent => ({ consent }), (refusal: unknown) => ({ refusal }));
+
+    if ('refusal' in described)
+    {
+        const destination = refusalDestination(
+            described.refusal,
+            `/oauth/authorize?${new URLSearchParams(fields as Record<string, string>)}`,
+        );
+
+        if (destination)
+        {
+            redirect(destination);
+        }
+
+        return <p>This authorization request cannot be completed. Nothing was shared.</p>;
+    }
+
+    return <ConsentForm consent={described.consent} fields={fields} />;
+}
 ```
 
-That is the whole page. `GET` asks the API what the request is and draws it;
-`POST` checks the form's CSRF token, sends the decision, and redirects the
-browser back to the waiting CLI. A visitor with no session is sent to
-`loginPath` with a `returnUrl` pointing back at the consent request, so signing
-in lands on the screen with its parameters intact.
+```tsx
+// app/oauth/authorize/consent-form.tsx
+'use client';
+import { useState } from 'react';
+import { authApi } from '@spfn/auth';
+import type { AuthorizeFields } from './page';
+import { refusalDestination } from './consent-refusal';
 
-To draw it yourself, pass `render`:
+type Consent = Awaited<ReturnType<typeof authApi.getOAuth2Authorize.call>>;
 
-```typescript
-export const { GET, POST } = createOAuth2AuthorizeHandlers({
-    loginPath: '/login',
-    render: view => renderToStaticMarkup(<Consent {...view} />),
-});
+export function ConsentForm({ consent, fields }: { consent: Consent; fields: AuthorizeFields })
+{
+    const [failed, setFailed] = useState(false);
+
+    async function decide(approve: boolean)
+    {
+        try
+        {
+            const issued = await authApi.createOAuth2AuthorizationCode.call({ body: { ...fields, approve } });
+            const url = new URL(issued.redirectUri);
+
+            url.searchParams.set('code', issued.code);
+
+            if (issued.state !== undefined)
+            {
+                url.searchParams.set('state', issued.state);
+            }
+
+            window.location.assign(url);
+        }
+        catch (refusal)
+        {
+            const destination = refusalDestination(refusal, `${location.pathname}${location.search}`);
+
+            if (destination)
+            {
+                window.location.assign(destination);
+            }
+            else
+            {
+                setFailed(true);
+            }
+        }
+    }
+
+    return (
+        <main>
+            <h1>Authorize {consent.clientName}</h1>
+            <p>
+                <strong>{consent.clientName}</strong> is asking to act on your behalf at{' '}
+                <code>{consent.resource}</code>. The authorization would be returned to{' '}
+                <code>{consent.redirectHost}</code>.
+            </p>
+            <ul>
+                {consent.scopes.map(scope => <li key={scope.name}><strong>{scope.name}</strong> — {scope.description}</li>)}
+            </ul>
+            {failed && <p>This request could not be completed. Nothing was shared — try again.</p>}
+            <button onClick={() => decide(true)}>Allow</button>
+            <button onClick={() => decide(false)}>Deny</button>
+        </main>
+    );
+}
 ```
 
-`render` owns the body; status and headers stay the handler's. The view carries
-`fields` and `csrfToken`, and your markup has to echo both back as hidden inputs
-— the POST is refused without the token, and the API re-validates the request
-from the fields rather than trusting what the page was once shown. Escape every
-string you interpolate: `escapeHtml` is exported from the same module, and
-`clientName` in particular comes from unauthenticated dynamic registration.
+```typescript
+// app/oauth/authorize/consent-refusal.ts
+import { HttpError } from '@spfn/core/errors';
+
+/** Refusals with no vetted URI to carry them: shown on the page, never redirected. */
+const SHOWN = new Set(['unknown_client', 'redirect_uri_mismatch']);
+
+/**
+ * Where an API refusal sends the browser, or null when the page shows it.
+ *
+ * `redirectUri` is read from the refusal the API sent, never from the request:
+ * it is the value that matched the registration.
+ */
+export function refusalDestination(refusal: unknown, returnPath: string): string | null
+{
+    if (!(refusal instanceof HttpError))
+    {
+        return null;
+    }
+
+    if (refusal.statusCode === 401)
+    {
+        return `/login?returnUrl=${encodeURIComponent(returnPath)}`;
+    }
+
+    const { error, redirectUri, state } = refusal.details ?? {};
+
+    if (typeof error !== 'string' || SHOWN.has(error) || typeof redirectUri !== 'string')
+    {
+        return null;
+    }
+
+    const url = new URL(redirectUri);
+
+    url.searchParams.set('error', error);
+
+    if (typeof state === 'string')
+    {
+        url.searchParams.set('state', state);
+    }
+
+    return url.toString();
+}
+```
+
+```typescript
+// next.config.ts
+import type { NextConfig } from 'next';
+
+const nextConfig: NextConfig = {
+    async headers()
+    {
+        return [
+            {
+                source: '/oauth/authorize',
+                headers: [
+                    { key: 'Content-Security-Policy', value: "frame-ancestors 'none'" },
+                    { key: 'Cache-Control', value: 'no-store' },
+                ],
+            },
+        ];
+    },
+};
+
+export default nextConfig;
+```
+
+The page owns these rules:
+
+- **No session** — the API answers `401` — sends the visitor to your login page
+  with `?returnUrl=` set to the consent request's own path and query, so signing
+  in lands back on the screen with its parameters intact.
+- **Redirect only to the `redirectUri` the API returned**, with `code` and
+  `state` appended — never to the request's `redirect_uri`, which is the open
+  redirect the registration check exists to close.
+- **`unknown_client` and `redirect_uri_mismatch` are shown on the page**, never
+  redirected. Every other refusal, a denial included, goes to the API-returned
+  `redirectUri` with `error` and `state`.
+- **`clientName` comes from unauthenticated dynamic registration.** Render it as
+  text — React escapes it — and never through `dangerouslySetInnerHTML`.
+- **`frame-ancestors 'none'` and `no-store`** on the consent path, as in the
+  `next.config` snippet: a consent screen that can be framed can be clickjacked.
+
+The decision needs no CSRF work from you. `POST /_auth/oauth2/authorize` is the
+one route the proxy CSRF-checks in every mode, whatever `SPFN_AUTH_CSRF` says,
+and the `authApi` client already mirrors the CSRF cookie into the header. The
+full rules are in [The consent screen](../../packages/auth/README.md#the-consent-screen).
 
 ## 3. Serve `/mcp`
 
@@ -228,8 +400,8 @@ request each revoke every grant the account has.
 | `/.well-known/oauth-authorization-server` answers 404 | No `authorizationServer` block in `createAuthLifecycle` | Add it (step 1). Without it every endpoint in this guide answers 404 and the boot check does not run |
 | `/.well-known/oauth-protected-resource` answers 404 | `mcpRouter` is not registered, or the app is served under a base path | Add it to `.packages([...])`. Under a base path the documents move with it, where clients will not look — terminate the base path at the proxy or set `resourceMetadataUrl` |
 | The CLI reports an issuer mismatch | `authorization_servers` in the protected-resource document and `issuer` in the authorization-server document are not the same string | They are derived separately: `issuer` from `SPFN_API_URL` or `authorizationServer.issuer`, `authorization_servers` from `createMcpRoute`'s `appUrl`. Make them the same origin, with no trailing path |
-| The consent screen answers 403 on Approve | The form's CSRF token did not match the session's cookie | The session ended or was replaced between drawing the page and submitting it — sign in and start the authorization again. A custom `render` that drops the hidden `csrf` field produces this on every attempt |
-| The consent screen answers 400 with "Address not recognized" | The `redirect_uri` is not one the client registered | Loopback registrations vary only in **port**; `localhost`, `127.0.0.1` and `[::1]` are three separate registrations. An `https` URI must be on an origin in `allowedRedirectOrigins` |
+| `createOAuth2AuthorizationCode` answers 403 `CSRF token missing or invalid` on Allow | The `x-spfn-csrf` header did not match the session's CSRF cookie — the proxy checks this route in every mode | The refusal carries a fresh CSRF cookie, so a second click passes. Every click refused means the call is not going through the `authApi` client (which mirrors the cookie) or the page's origin cannot read the cookie |
+| The consent page shows a `redirect_uri_mismatch` refusal | The `redirect_uri` is not one the client registered | Loopback registrations vary only in **port**; `localhost`, `127.0.0.1` and `[::1]` are three separate registrations. An `https` URI must be on an origin in `allowedRedirectOrigins` |
 | The API refuses to start, naming `SPFN_API_URL` | The issuer has a path, or is neither `https` nor loopback `http` | Set it to a bare origin |
 
 ## Related

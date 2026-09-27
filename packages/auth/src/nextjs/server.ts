@@ -40,26 +40,6 @@ export {
     type OAuthCallbackOptions,
 } from './oauth-handlers';
 
-// The OAuth 2.1 consent screen — the one half of the authorization server that
-// has to live on the web app, because that is where the session cookie is
-export {
-    createOAuth2AuthorizeHandlers,
-    escapeHtml,
-    type OAuth2AuthorizeHandlerOptions,
-    type OAuth2AuthorizeHandlers,
-    type OAuth2ConsentScope,
-    type OAuth2ConsentView,
-} from './oauth2-authorize-handlers';
-
-// The sign-out-everywhere page — the mailed link opens a page in the app, and
-// the page has no session to lean on, which is the whole point of the link
-export {
-    createRevokeAllPageHandlers,
-    type RevokeAllPageHandlerOptions,
-    type RevokeAllPageHandlers,
-    type RevokeAllPageView,
-} from './revoke-all-page-handlers';
-
 // The rule every return destination is held to — validate before calling
 // getGoogleOAuthUrl rather than writing a second rule per screen.
 export { isSafeReturnPath } from '../lib/return-path';

@@ -929,20 +929,81 @@ The `url` carries the plaintext token, because this flow sends no mail of its ow
 the mail template and let it go — never a log line, a row or a job payload.
 
 The link opens a page in your app (`SPFN_AUTH_REVOKE_ALL_CONFIRM_PATH`, default
-`/account/revoke-all`), not an API route, and that page ships with the package:
+`/account/revoke-all`), not an API route. The package ships no HTML, so you build that page
+the way you build the login screen: a server component describes the link with
+`confirmRevokeAllLink`, and a client component presses the button with `consumeRevokeAllLink`.
 
-```typescript
-// app/account/revoke-all/route.ts
-import { createRevokeAllPageHandlers } from '@spfn/auth/nextjs/server';
+```tsx
+// app/account/revoke-all/page.tsx — a server component
+import { authApi } from '@spfn/auth';
+import { RevokeAllButton } from './revoke-all-button';
 
-export const { GET, POST } = createRevokeAllPageHandlers();
+export default async function RevokeAllLinkPage({ searchParams }: { searchParams: Promise<{ token?: string }> })
+{
+    const { token } = await searchParams;
+
+    // Describing the link changes nothing, so a mail scanner that prefetches the
+    // page has signed nobody out.
+    const described = token
+        ? await authApi.confirmRevokeAllLink.call({ body: { token } }).catch(() => null)
+        : null;
+
+    if (!token || !described)
+    {
+        return <p>This link cannot be used. Request a new one from the mail you received.</p>;
+    }
+
+    return <RevokeAllButton token={token} {...described} />;
+}
 ```
 
-`GET` describes the link — when it expires, how many devices are active — and draws one
-button; `POST` confirms it and reports how many devices it signed out. Describing changes
-nothing, so a mail scanner that prefetches the page has signed nobody out. Pass
-`render: (view: RevokeAllPageView) => string` to own the body at all three stages while the
-handler keeps the status, the headers, the CSRF token and the hidden fields.
+```tsx
+// app/account/revoke-all/revoke-all-button.tsx
+'use client';
+import { useState } from 'react';
+import { authApi } from '@spfn/auth';
+
+interface RevokeAllButtonProps
+{
+    token: string;
+    expiresAt: string;
+    activeKeyCount: number;
+}
+
+export function RevokeAllButton({ token, expiresAt, activeKeyCount }: RevokeAllButtonProps)
+{
+    const [revokedCount, setRevokedCount] = useState<number | null>(null);
+    const [failed, setFailed] = useState(false);
+
+    async function signOutEverywhere()
+    {
+        await authApi.consumeRevokeAllLink.call({ body: { token } })
+            .then(answer => setRevokedCount(answer.revokedCount), () => setFailed(true));
+    }
+
+    if (revokedCount !== null)
+    {
+        return <p>Signed out of {revokedCount} device(s).</p>;
+    }
+
+    return (
+        <main>
+            <p>
+                {activeKeyCount} device(s) are signed in to your account. This link stops working at{' '}
+                <time dateTime={expiresAt}>{expiresAt}</time>.
+            </p>
+            {failed && <p>This link cannot be used any more. Nothing was changed.</p>}
+            <button onClick={signOutEverywhere}>Sign out everywhere</button>
+        </main>
+    );
+}
+```
+
+Describing changes nothing, so a mail scanner that prefetches the page has signed nobody
+out; only the button consumes the link. The page needs no CSRF token and no frame guard:
+there is no session on it, and the token in the link is the whole credential. Show every
+refusal the same way, and keep the token — it is in the page URL — out of your logs and
+analytics.
 
 The token rules, every refusal, the rate limit and the two settings are in
 [Registered devices](../../packages/auth/README.md#registered-devices-key-management) and
