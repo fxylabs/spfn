@@ -10,6 +10,7 @@ import type { EventDef, InferEventPayload } from '@spfn/core/event';
 import { logger } from '@spfn/core/logger';
 import { getBoss } from './boss';
 import { resolveQueuePolicy, type QueuePolicySource } from './queue-policy';
+import { toPgBossRetryOptions } from './retry-options';
 
 const jobLogger = logger.child('@spfn/core:job');
 
@@ -58,7 +59,7 @@ function buildPgBossOptions(
     sendOptions?: JobSendOptions,
 ): Record<string, unknown>
 {
-    const options: Record<string, unknown> = {};
+    const options: Record<string, unknown> = { ...toPgBossRetryOptions(defaults) };
 
     // Send options (per-job invocation)
     if (sendOptions?.startAfter)
@@ -75,14 +76,6 @@ function buildPgBossOptions(
     }
 
     // Default options (from job definition)
-    if (defaults?.retryLimit !== undefined)
-    {
-        options.retryLimit = defaults.retryLimit;
-    }
-    if (defaults?.retryDelay !== undefined)
-    {
-        options.retryDelay = defaults.retryDelay;
-    }
     if (defaults?.expireInSeconds !== undefined)
     {
         options.expireInSeconds = defaults.expireInSeconds;

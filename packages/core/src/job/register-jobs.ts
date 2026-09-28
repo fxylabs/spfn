@@ -11,6 +11,7 @@ import type { JobDef, JobOptions, JobQueuePolicy, JobRouter } from './types';
 import type { EventDef } from '@spfn/core/event';
 import { collectJobEntries, collectJobs } from './job-router';
 import { resolveQueuePolicy } from './queue-policy';
+import { toPgBossRetryOptions } from './retry-options';
 import { getBoss, shouldClearOnStart, shouldSweepOrphanSchedules } from './boss';
 
 const jobLogger = logger.child('@spfn/core:job');
@@ -29,11 +30,7 @@ export function getEventQueueName(eventName: string): string
 function getDefaultJobOptions(options?: JobOptions): PgBoss.SendOptions
 {
     return {
-        retryLimit: options?.retryLimit ?? 3,
-        retryDelay: options?.retryDelay ?? 1000,
-        // Exponential backoff by default — a failed cohort (e.g. a provider 429)
-        // would otherwise all retry at the same fixed offset (thundering herd).
-        retryBackoff: options?.retryBackoff ?? true,
+        ...toPgBossRetryOptions(options),
         expireInSeconds: options?.expireInSeconds ?? 300,
     };
 }
