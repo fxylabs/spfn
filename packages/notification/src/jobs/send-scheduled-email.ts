@@ -21,6 +21,7 @@ const SendScheduledEmailInput = Type.Object({
     from: Type.Optional(Type.String()),
     replyTo: Type.Optional(Type.String()),
     sensitive: Type.Optional(Type.Boolean()),
+    locale: Type.Optional(Type.String()),
     claimToken: Type.Optional(Type.String()),
     guard: Type.Optional(Type.String()),
     referenceType: Type.Optional(Type.String()),

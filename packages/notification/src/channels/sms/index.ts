@@ -6,7 +6,7 @@ import type { SendSMSParams, SMSProvider, InternalSendSMSParams } from './types'
 import type { SendResult } from '../types';
 import { awsSnsProvider } from './providers/aws-sns';
 import { env, isHistoryContentStored } from '../../config';
-import { renderTemplate, hasTemplate, getTemplate } from '../../templates';
+import { renderTemplateChannel, getTemplate } from '../../templates';
 import { maskRecipients, maskPhone, historyRecipient, scrubSendResult } from '../../privacy';
 import {
     markManySent,
@@ -85,25 +85,29 @@ export async function deliverSMS(params: SendSMSParams, scheduledRowId?: number)
     // Prepare content
     let message = params.message;
 
+    let usedLocale: string | undefined;
+
     // Render template if specified
     if (params.template)
     {
-        if (!hasTemplate(params.template))
+        const rendered = renderTemplateChannel(params.template, params.data || {}, 'sms', params.locale);
+
+        if ('error' in rendered)
         {
-            log.warn(`Template not found: ${params.template}`);
+            log.warn(rendered.error);
 
             return {
                 success: false,
-                error: `Template not found: ${params.template}`,
+                error: rendered.error,
             };
         }
 
-        const rendered = renderTemplate(params.template, params.data || {}, 'sms');
-
-        if (rendered.sms)
+        if (rendered.content)
         {
-            message = rendered.sms.message;
+            message = rendered.content.message;
         }
+
+        usedLocale = rendered.locale;
     }
 
     // Validate required fields
@@ -131,7 +135,7 @@ export async function deliverSMS(params: SendSMSParams, scheduledRowId?: number)
 
         const opened = scheduledRowId
             ? {}
-            : await openHistoryRow(() => smsHistoryRow(params, normalizedPhone, message, provider.name), params.idempotencyKey, log);
+            : await openHistoryRow(() => ({ ...smsHistoryRow(params, normalizedPhone, message, provider.name), locale: usedLocale }), params.idempotencyKey, log);
 
         if (opened.stop)
         {
@@ -216,6 +220,7 @@ interface PreparedSMS
     data?: Record<string, unknown>;
     sensitive: boolean;
     idempotencyKey?: string;
+    locale?: string;
     /** Distributed mode: the token the item's job claims its row with. */
     claimToken?: string;
 }
@@ -266,20 +271,24 @@ export async function sendSMSBulk(
 
         let message = item.message;
 
+        let usedLocale: string | undefined;
+
         if (item.template)
         {
-            if (!hasTemplate(item.template))
+            const rendered = renderTemplateChannel(item.template, item.data || {}, 'sms', item.locale);
+
+            if ('error' in rendered)
             {
-                earlyFailures.push({ index: i, result: { success: false, error: `Template not found: ${item.template}` } });
+                earlyFailures.push({ index: i, result: { success: false, error: rendered.error } });
                 continue;
             }
 
-            const rendered = renderTemplate(item.template, item.data || {}, 'sms');
-
-            if (rendered.sms)
+            if (rendered.content)
             {
-                message = rendered.sms.message;
+                message = rendered.content.message;
             }
+
+            usedLocale = rendered.locale;
         }
 
         if (!message)
@@ -302,6 +311,7 @@ export async function sendSMSBulk(
                 data: item.data,
                 sensitive,
                 idempotencyKey: item.idempotencyKey,
+                locale: usedLocale,
             });
         }
     }
@@ -324,6 +334,7 @@ export async function sendSMSBulk(
         return {
             buildRow: () => ({
                 channel: 'sms' as const,
+                locale: p.locale,
                 recipient: historyRecipient([p.phone]),
                 templateName: p.template,
                 templateData: storePayload ? p.data : undefined,

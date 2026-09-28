@@ -387,6 +387,38 @@ registerTemplate({
 });
 ```
 
+### Localised Templates
+
+A template can carry content per locale. A send picks one with `locale`:
+
+```typescript
+registerTemplate({
+    name: 'order-shipped',
+    channels: ['email', 'sms'],
+    defaultLocale: 'en',
+    locales: {
+        ko: { email: { subject: '{{orderId}} 주문이 발송되었습니다', text: '…' }, sms: { message: '…' } },
+        en: { email: { subject: 'Order {{orderId}} has shipped', text: '…' } },
+    },
+});
+
+await sendEmail({ to, template: 'order-shipped', data: { orderId }, locale: user.locale });
+```
+
+- Resolution: the exact tag (`ko-KR`), then its base language (`ko`), then `defaultLocale`,
+  then the template's unlocalised `email`/`sms`/`slack` content. Tags match
+  case-insensitively.
+- It resolves per channel. A locale that has no content for the channel falls through to
+  the next candidate. In the example, an SMS with `locale: 'en'` finds no `en` SMS, then no
+  unlocalised SMS, and is refused; with `locale: 'ko'` it is sent in Korean.
+- A template with `locales` that has nothing for the channel in any candidate is refused
+  (`success: false`) instead of sending empty content. A template without `locales`
+  behaves as before.
+- The history row records the locale whose content was sent (`null` for unlocalised
+  content).
+- `locale` works on every send, bulk item and schedule; a scheduled send renders in it
+  when the job runs.
+
 ### Template Filters
 
 ```

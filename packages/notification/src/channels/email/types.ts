@@ -30,6 +30,12 @@ export interface SendEmailParams
     data?: Record<string, unknown>;
 
     /**
+     * Locale tag for a template with `locales` (`ko`, `en-US`). Falls back
+     * to the base language, then the template's `defaultLocale`.
+     */
+    locale?: string;
+
+    /**
      * Plain text content (if not using template)
      */
     text?: string;

@@ -45,6 +45,31 @@ export function idempotencyKeyError(key: string | undefined): string | undefined
 }
 
 /**
+ * Every nullable column a takeover resets unless the retry sets it
+ */
+const CLEARED_ON_TAKEOVER = {
+    templateName: null,
+    templateData: null,
+    subject: null,
+    content: null,
+    providerMessageId: null,
+    errorMessage: null,
+    scheduledAt: null,
+    sentAt: null,
+    jobId: null,
+    batchId: null,
+    referenceType: null,
+    referenceId: null,
+    claimToken: null,
+    locale: null,
+} satisfies Partial<Record<keyof NewNotification, null>>;
+
+function definedFields<T extends object>(row: T): Partial<T>
+{
+    return Object.fromEntries(Object.entries(row).filter(([, value]) => value !== undefined)) as Partial<T>;
+}
+
+/**
  * Insert the row, or take over a `failed` row with the same key. Any other
  * existing row (sent, pending, scheduled, cancelled, skipped) means the key is
  * spent and nothing may be sent.
@@ -60,17 +85,14 @@ export async function claimKeyedSend(
         .onConflictDoUpdate({
             target: [notifications.channel, notifications.idempotencyKey, notifications.recipient],
             targetWhere: sql`${notifications.idempotencyKey} is not null`,
+            // The retry's row replaces the failed one whole. drizzle drops
+            // undefined fields from an UPDATE, so every field the retry leaves
+            // out is cleared here instead of keeping the failed attempt's value
+            // (its content, locale, owner token, schedule).
             set: {
-                ...row,
+                ...CLEARED_ON_TAKEOVER,
+                ...definedFields(row),
                 status,
-                // A new owner: the job that failed this row must not send it again.
-                claimToken: row.claimToken ?? null,
-                // A direct send taking over a scheduled row makes it a direct row.
-                scheduledAt: row.scheduledAt ?? null,
-                errorMessage: null,
-                providerMessageId: null,
-                sentAt: null,
-                jobId: null,
             },
             setWhere: eq(notifications.status, 'failed'),
         })

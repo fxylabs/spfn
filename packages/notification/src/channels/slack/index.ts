@@ -6,7 +6,7 @@ import type { SendSlackParams, SlackProvider, InternalSendSlackParams } from './
 import type { SendResult } from '../types';
 import { webhookProvider } from './providers/webhook';
 import { env } from '../../config';
-import { renderTemplate, hasTemplate } from '../../templates';
+import { renderTemplateChannel } from '../../templates';
 import { idempotencyKeyError } from '../../services/idempotency.service';
 import { openHistoryRow, closeHistoryRow, openBulkHistoryRows, splitStopped } from '../history';
 import {
@@ -82,26 +82,30 @@ export async function sendSlack(params: SendSlackParams): Promise<SendResult>
     let text = params.text;
     let blocks = params.blocks;
 
+    let usedLocale: string | undefined;
+
     // Render template if specified
     if (params.template)
     {
-        if (!hasTemplate(params.template))
+        const rendered = renderTemplateChannel(params.template, params.data || {}, 'slack', params.locale);
+
+        if ('error' in rendered)
         {
-            log.warn(`Template not found: ${params.template}`);
+            log.warn(rendered.error);
 
             return {
                 success: false,
-                error: `Template not found: ${params.template}`,
+                error: rendered.error,
             };
         }
 
-        const rendered = renderTemplate(params.template, params.data || {}, 'slack');
-
-        if (rendered.slack)
+        if (rendered.content)
         {
-            text = rendered.slack.text;
-            blocks = rendered.slack.blocks;
+            text = rendered.content.text;
+            blocks = rendered.content.blocks;
         }
+
+        usedLocale = rendered.locale;
     }
 
     // Validate required fields
@@ -127,6 +131,7 @@ export async function sendSlack(params: SendSlackParams): Promise<SendResult>
 
     const opened = await openHistoryRow(() => ({
         channel: 'slack',
+        locale: usedLocale,
         recipient: webhookUrl,
         templateName: params.template,
         templateData: params.data,
@@ -179,6 +184,7 @@ interface PreparedSlack
     data?: Record<string, unknown>;
     text?: string;
     idempotencyKey?: string;
+    locale?: string;
     /** Distributed mode: the token the item's job claims its row with. */
     claimToken?: string;
 }
@@ -236,21 +242,25 @@ export async function sendSlackBulk(
         let text = item.text;
         let blocks = item.blocks;
 
+        let usedLocale: string | undefined;
+
         if (item.template)
         {
-            if (!hasTemplate(item.template))
+            const rendered = renderTemplateChannel(item.template, item.data || {}, 'slack', item.locale);
+
+            if ('error' in rendered)
             {
-                earlyFailures.push({ index: i, result: { success: false, error: `Template not found: ${item.template}` } });
+                earlyFailures.push({ index: i, result: { success: false, error: rendered.error } });
                 continue;
             }
 
-            const rendered = renderTemplate(item.template, item.data || {}, 'slack');
-
-            if (rendered.slack)
+            if (rendered.content)
             {
-                text = rendered.slack.text;
-                blocks = rendered.slack.blocks;
+                text = rendered.content.text;
+                blocks = rendered.content.blocks;
             }
+
+            usedLocale = rendered.locale;
         }
 
         if (!text && !blocks)
@@ -267,6 +277,7 @@ export async function sendSlackBulk(
             data: item.data,
             text,
             idempotencyKey: item.idempotencyKey,
+            locale: usedLocale,
         });
     }
 
@@ -283,6 +294,7 @@ export async function sendSlackBulk(
     const opened = await openBulkHistoryRows(prepared.map(p => ({
         buildRow: () => ({
             channel: 'slack' as const,
+            locale: p.locale,
             recipient: p.webhookUrl,
             templateName: p.template,
             templateData: p.data,

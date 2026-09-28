@@ -121,6 +121,11 @@ export const notifications = notificationSchema.table('history',
          */
         claimToken: text('claim_token'),
 
+        /**
+         * Locale whose template content was sent (null: unlocalised content)
+         */
+        locale: text('locale'),
+
         ...timestamps(),
     },
     (table) => [

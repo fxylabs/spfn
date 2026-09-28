@@ -17,6 +17,7 @@ const SendScheduledSmsInput = Type.Object({
     template: Type.Optional(Type.String()),
     data: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
     sensitive: Type.Optional(Type.Boolean()),
+    locale: Type.Optional(Type.String()),
     claimToken: Type.Optional(Type.String()),
     guard: Type.Optional(Type.String()),
     referenceType: Type.Optional(Type.String()),

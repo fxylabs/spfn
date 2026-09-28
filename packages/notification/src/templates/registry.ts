@@ -9,6 +9,7 @@ import type {
     EmailTemplateContent,
     SmsTemplateContent,
     SlackTemplateContent,
+    LocaleTemplateContent,
 } from './types';
 import type { NotificationChannel } from '../channels/types';
 import { render } from './renderer';
@@ -61,6 +62,7 @@ export function renderTemplate(
     name: string,
     data: TemplateData,
     channel?: NotificationChannel,
+    locale?: string,
 ): RenderedTemplate
 {
     const template = templates.get(name);
@@ -78,24 +80,135 @@ export function renderTemplate(
     const result: RenderedTemplate = {};
 
     // Render email if requested or no specific channel
-    if ((!channel || channel === 'email') && template.email)
+    const email = (!channel || channel === 'email') ? resolveTemplateContent(template, 'email', locale).content : undefined;
+
+    if (email)
     {
-        result.email = renderEmailTemplate(template.email, fullData);
+        result.email = renderEmailTemplate(email, fullData);
     }
 
     // Render SMS if requested or no specific channel
-    if ((!channel || channel === 'sms') && template.sms)
+    const sms = (!channel || channel === 'sms') ? resolveTemplateContent(template, 'sms', locale).content : undefined;
+
+    if (sms)
     {
-        result.sms = renderSmsTemplate(template.sms, fullData);
+        result.sms = renderSmsTemplate(sms, fullData);
     }
 
     // Render Slack if requested or no specific channel
-    if ((!channel || channel === 'slack') && template.slack)
+    const slack = (!channel || channel === 'slack') ? resolveTemplateContent(template, 'slack', locale).content : undefined;
+
+    if (slack)
     {
-        result.slack = renderSlackTemplate(template.slack, fullData);
+        result.slack = renderSlackTemplate(slack, fullData);
     }
 
     return result;
+}
+
+type ContentChannel = keyof LocaleTemplateContent;
+
+/**
+ * Locale tags to try, most specific first: `ko-KR` → `ko` → the template's
+ * default.
+ */
+function localeCandidates(template: TemplateDefinition, locale?: string): string[]
+{
+    const candidates: string[] = [];
+
+    if (locale)
+    {
+        candidates.push(locale);
+
+        const base = locale.split('-')[0];
+
+        if (base !== locale)
+        {
+            candidates.push(base);
+        }
+    }
+
+    if (template.defaultLocale)
+    {
+        candidates.push(template.defaultLocale);
+    }
+
+    return candidates;
+}
+
+function findLocaleKey(template: TemplateDefinition, tag: string): string | undefined
+{
+    const wanted = tag.toLowerCase();
+
+    return Object.keys(template.locales ?? {}).find(key => key.toLowerCase() === wanted);
+}
+
+/**
+ * The content a template has for one channel in the requested locale, and
+ * the locale it came from (undefined for the template's unlocalised content).
+ */
+export function resolveTemplateContent<C extends ContentChannel>(
+    template: TemplateDefinition,
+    channel: C,
+    locale?: string,
+): { content?: LocaleTemplateContent[C]; locale?: string }
+{
+    for (const candidate of localeCandidates(template, locale))
+    {
+        const key = findLocaleKey(template, candidate);
+        const content = key ? template.locales![key][channel] : undefined;
+
+        if (content)
+        {
+            return { content, locale: key };
+        }
+    }
+
+    return { content: template[channel] };
+}
+
+/**
+ * Render one channel of a template in a locale.
+ *
+ * `content` is undefined when a template without `locales` has no content
+ * for the channel: the caller keeps its own params, as before locales
+ * existed. A template with `locales` that has nothing for the channel in any
+ * candidate locale is an error rather than an empty send.
+ */
+export function renderTemplateChannel<C extends ContentChannel>(
+    name: string,
+    data: TemplateData,
+    channel: C,
+    locale?: string,
+): { content?: LocaleTemplateContent[C]; locale?: string } | { error: string }
+{
+    const template = templates.get(name);
+
+    if (!template)
+    {
+        return { error: `Template not found: ${name}` };
+    }
+
+    const resolved = resolveTemplateContent(template, channel, locale);
+
+    if (!resolved.content)
+    {
+        return template.locales
+            ? { error: `Template ${name} has no ${channel} content for locale ${locale ?? '(none)'}` }
+            : {};
+    }
+
+    const fullData: TemplateData = { appName: getAppName(), ...data };
+    const renderers = {
+        email: renderEmailTemplate,
+        sms: renderSmsTemplate,
+        slack: renderSlackTemplate,
+    } as Record<ContentChannel, (content: never, data: TemplateData) => unknown>;
+
+    return {
+        content: renderers[channel](resolved.content as never, fullData) as LocaleTemplateContent[C],
+        locale: resolved.locale,
+    };
 }
 
 /**

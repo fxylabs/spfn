@@ -32,15 +32,40 @@ export interface SlackTemplateContent
 }
 
 /**
+ * Content for one locale. A locale may cover only some channels; a channel it
+ * lacks falls through to the next candidate locale.
+ */
+export interface LocaleTemplateContent
+{
+    email?: EmailTemplateContent;
+    sms?: SmsTemplateContent;
+    slack?: SlackTemplateContent;
+}
+
+/**
  * Template definition
  */
 export interface TemplateDefinition
 {
     name: string;
     channels: NotificationChannel[];
+    /**
+     * Content without a locale: the last fallback, and all a template that
+     * has no `locales` needs.
+     */
     email?: EmailTemplateContent;
     sms?: SmsTemplateContent;
     slack?: SlackTemplateContent;
+    /**
+     * Content per locale tag (`ko`, `en`, `ko-KR`). A send's `locale` picks
+     * the exact tag, then its base language, then `defaultLocale`, then the
+     * content above. Tags match case-insensitively.
+     */
+    locales?: Record<string, LocaleTemplateContent>;
+    /**
+     * Locale used when the send names none, or names one the template lacks.
+     */
+    defaultLocale?: string;
     /**
      * The rendered output carries a credential (OTP code, magic link, …).
      * Sends using a sensitive template keep content and template data out of

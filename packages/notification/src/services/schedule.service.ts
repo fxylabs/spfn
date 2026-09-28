@@ -6,7 +6,7 @@
 
 import type { SendEmailParams } from '../channels/email/types';
 import type { SendSMSParams } from '../channels/sms/types';
-import { hasTemplate, renderTemplate, getTemplate } from '../templates';
+import { renderTemplateChannel, getTemplate } from '../templates';
 import { historyRecipient } from '../privacy';
 import { isHistoryContentStored } from '../config';
 import {
@@ -127,25 +127,29 @@ export async function scheduleEmail(
     let text = params.text;
     let html = params.html;
 
+    let usedLocale: string | undefined;
+
     // Render template if specified
     if (params.template)
     {
-        if (!hasTemplate(params.template))
+        const rendered = renderTemplateChannel(params.template, params.data || {}, 'email', params.locale);
+
+        if ('error' in rendered)
         {
             return {
                 success: false,
-                error: `Template not found: ${params.template}`,
+                error: rendered.error,
             };
         }
 
-        const rendered = renderTemplate(params.template, params.data || {}, 'email');
-
-        if (rendered.email)
+        if (rendered.content)
         {
-            subject = rendered.email.subject;
-            text = rendered.email.text;
-            html = rendered.email.html;
+            subject = rendered.content.subject;
+            text = rendered.content.text;
+            html = rendered.content.html;
         }
+
+        usedLocale = rendered.locale;
     }
 
     // Validate required fields
@@ -179,6 +183,7 @@ export async function scheduleEmail(
         const claimToken = crypto.randomUUID();
         const opened = await openScheduledRow({
             channel: 'email',
+            locale: usedLocale,
             claimToken,
             recipient: historyRecipient(recipients),
             templateName: params.template,
@@ -211,6 +216,7 @@ export async function scheduleEmail(
                 from: params.from,
                 replyTo: params.replyTo,
                 sensitive: params.sensitive,
+                locale: params.locale,
                 claimToken,
                 guard: options.guard,
                 referenceType: options.referenceType,
@@ -261,23 +267,27 @@ export async function scheduleSMS(
     // Prepare content
     let message = params.message;
 
+    let usedLocale: string | undefined;
+
     // Render template if specified
     if (params.template)
     {
-        if (!hasTemplate(params.template))
+        const rendered = renderTemplateChannel(params.template, params.data || {}, 'sms', params.locale);
+
+        if ('error' in rendered)
         {
             return {
                 success: false,
-                error: `Template not found: ${params.template}`,
+                error: rendered.error,
             };
         }
 
-        const rendered = renderTemplate(params.template, params.data || {}, 'sms');
-
-        if (rendered.sms)
+        if (rendered.content)
         {
-            message = rendered.sms.message;
+            message = rendered.content.message;
         }
+
+        usedLocale = rendered.locale;
     }
 
     // Validate required fields
@@ -304,6 +314,7 @@ export async function scheduleSMS(
         const claimToken = crypto.randomUUID();
         const opened = await openScheduledRow({
             channel: 'sms',
+            locale: usedLocale,
             claimToken,
             recipient: historyRecipient(normalizedRecipients),
             templateName: params.template,
@@ -331,6 +342,7 @@ export async function scheduleSMS(
                 template: params.template,
                 data: params.data,
                 sensitive: params.sensitive,
+                locale: params.locale,
                 claimToken,
                 guard: options.guard,
                 referenceType: options.referenceType,

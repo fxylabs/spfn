@@ -7,7 +7,7 @@ import type { SendResult } from '../types';
 import { awsSesProvider } from './providers/aws-ses';
 import { getEmailFrom, getEmailReplyTo, env, isHistoryContentStored, isTrackingEnabled, getTrackingBaseUrl } from '../../config';
 import { processTrackingHtml } from '../../tracking/processor';
-import { renderTemplate, hasTemplate, getTemplate } from '../../templates';
+import { renderTemplateChannel, getTemplate } from '../../templates';
 import { maskRecipients, historyRecipient, scrubSendResult } from '../../privacy';
 import {
     markManySent,
@@ -114,27 +114,31 @@ export async function deliverEmail(params: SendEmailParams, scheduledRowId?: num
     let text = params.text;
     let html = params.html;
 
+    let usedLocale: string | undefined;
+
     // Render template if specified
     if (params.template)
     {
-        if (!hasTemplate(params.template))
+        const rendered = renderTemplateChannel(params.template, params.data || {}, 'email', params.locale);
+
+        if ('error' in rendered)
         {
-            log.warn(`Template not found: ${params.template}`);
+            log.warn(rendered.error);
 
             return {
                 success: false,
-                error: `Template not found: ${params.template}`,
+                error: rendered.error,
             };
         }
 
-        const rendered = renderTemplate(params.template, params.data || {}, 'email');
-
-        if (rendered.email)
+        if (rendered.content)
         {
-            subject = rendered.email.subject;
-            text = rendered.email.text;
-            html = rendered.email.html;
+            subject = rendered.content.subject;
+            text = rendered.content.text;
+            html = rendered.content.html;
         }
+
+        usedLocale = rendered.locale;
     }
 
     // A sensitive send keeps its rendered values out of history AND out of
@@ -177,7 +181,7 @@ export async function deliverEmail(params: SendEmailParams, scheduledRowId?: num
 
     const opened = scheduledRowId
         ? { historyId: scheduledRowId }
-        : await openHistoryRow(() => emailHistoryRow(params, recipients, subject, text, sensitive, provider.name), params.idempotencyKey, log);
+        : await openHistoryRow(() => ({ ...emailHistoryRow(params, recipients, subject, text, sensitive, provider.name), locale: usedLocale }), params.idempotencyKey, log);
 
     if (opened.stop)
     {
@@ -275,6 +279,7 @@ interface PreparedEmail
     tracking?: boolean;
     sensitive: boolean;
     idempotencyKey?: string;
+    locale?: string;
     /** Distributed mode: the token the item's job claims its row with. */
     claimToken?: string;
 }
@@ -326,22 +331,26 @@ function prepareEmailItems(items: SendEmailParams[]): {
         let text = item.text;
         let html = item.html;
 
+        let usedLocale: string | undefined;
+
         if (item.template)
         {
-            if (!hasTemplate(item.template))
+            const rendered = renderTemplateChannel(item.template, item.data || {}, 'email', item.locale);
+
+            if ('error' in rendered)
             {
-                earlyFailures.push({ index: i, result: { success: false, error: `Template not found: ${item.template}` } });
+                earlyFailures.push({ index: i, result: { success: false, error: rendered.error } });
                 continue;
             }
 
-            const rendered = renderTemplate(item.template, item.data || {}, 'email');
-
-            if (rendered.email)
+            if (rendered.content)
             {
-                subject = rendered.email.subject;
-                text = rendered.email.text;
-                html = rendered.email.html;
+                subject = rendered.content.subject;
+                text = rendered.content.text;
+                html = rendered.content.html;
             }
+
+            usedLocale = rendered.locale;
         }
 
         if (!subject)
@@ -373,6 +382,7 @@ function prepareEmailItems(items: SendEmailParams[]): {
             text,
             tracking: item.tracking,
             sensitive: resolveSensitive(item),
+            locale: usedLocale,
             idempotencyKey: item.idempotencyKey,
         });
     }
@@ -420,6 +430,7 @@ export async function sendEmailBulk(
         return {
             buildRow: () => ({
                 channel: 'email' as const,
+                locale: p.locale,
                 recipient: historyRecipient(p.recipients),
                 templateName: p.template,
                 templateData: storePayload ? p.data : undefined,

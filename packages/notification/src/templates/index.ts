@@ -9,6 +9,7 @@ export type {
     EmailTemplateContent,
     SmsTemplateContent,
     SlackTemplateContent,
+    LocaleTemplateContent,
 } from './types';
 
 export {
@@ -17,6 +18,8 @@ export {
     hasTemplate,
     templateSupportsChannel,
     renderTemplate,
+    renderTemplateChannel,
+    resolveTemplateContent,
     getTemplateNames,
     clearTemplates,
 } from './registry';

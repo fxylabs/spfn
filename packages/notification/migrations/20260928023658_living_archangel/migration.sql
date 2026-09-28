@@ -1,0 +1,1 @@
+ALTER TABLE "spfn_notification"."history" ADD COLUMN "locale" text;

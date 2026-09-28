@@ -25,6 +25,12 @@ export interface SendSMSParams
     data?: Record<string, unknown>;
 
     /**
+     * Locale tag for a template with `locales` (`ko`, `en-US`). Falls back
+     * to the base language, then the template's `defaultLocale`.
+     */
+    locale?: string;
+
+    /**
      * Message content (if not using template)
      */
     message?: string;
