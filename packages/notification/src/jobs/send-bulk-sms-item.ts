@@ -7,13 +7,11 @@
 import { job } from '@spfn/core/job';
 import { Type } from '@sinclair/typebox';
 import { awsSnsProvider } from '../channels/sms/providers/aws-sns';
-import {
-    markNotificationSent,
-    markNotificationFailed,
-} from '../services/notification.service';
+import { runBulkItemSend } from './run-scheduled-send';
 
 const SendBulkSmsItemInput = Type.Object({
     notificationId: Type.Number(),
+    claimToken: Type.Optional(Type.String()),
     to: Type.String(),
     message: Type.String(),
 });
@@ -27,17 +25,7 @@ export const sendBulkSmsItemJob = job('notification.send-bulk-sms-item')
     })
     .handler(async (input) =>
     {
-        const { notificationId, ...smsParams } = input;
+        const { notificationId, claimToken, ...smsParams } = input;
 
-        const result = await awsSnsProvider.send(smsParams);
-
-        if (result.success)
-        {
-            await markNotificationSent(notificationId, result.messageId);
-        }
-        else
-        {
-            await markNotificationFailed(notificationId, result.error || 'Unknown error');
-            throw new Error(result.error || 'Failed to send SMS');
-        }
+        await runBulkItemSend(notificationId, claimToken, () => awsSnsProvider.send(smsParams));
     });

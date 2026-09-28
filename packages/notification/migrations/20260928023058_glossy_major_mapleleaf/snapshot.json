@@ -1,7 +1,7 @@
 {
   "version": "8",
   "dialect": "postgres",
-  "id": "f36f5010-d067-4212-be02-74b1dc9733c4",
+  "id": "4eda388d-e24a-4723-90cd-b26a0210e406",
   "prevIds": [
     "d0403561-969d-40d4-88e9-da9341f2435d"
   ],
@@ -252,6 +252,19 @@
       "generated": null,
       "identity": null,
       "name": "idempotency_key",
+      "entityType": "columns",
+      "schema": "spfn_notification",
+      "table": "history"
+    },
+    {
+      "type": "text",
+      "typeSchema": null,
+      "notNull": false,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "claim_token",
       "entityType": "columns",
       "schema": "spfn_notification",
       "table": "history"

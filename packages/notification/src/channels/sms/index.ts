@@ -216,6 +216,8 @@ interface PreparedSMS
     data?: Record<string, unknown>;
     sensitive: boolean;
     idempotencyKey?: string;
+    /** Distributed mode: the token the item's job claims its row with. */
+    claimToken?: string;
 }
 
 /**
@@ -304,6 +306,15 @@ export async function sendSMSBulk(
         }
     }
 
+    // A queued item may only send the row it was enqueued for (see claimNotificationForJob).
+    if (options?.distributed)
+    {
+        for (const p of prepared)
+        {
+            p.claimToken = crypto.randomUUID();
+        }
+    }
+
     // 2. Open history rows (one per recipient); a spent key stops that recipient
     const storeContent = isHistoryContentStored();
     const opened = await openBulkHistoryRows(prepared.map(p =>
@@ -319,6 +330,7 @@ export async function sendSMSBulk(
                 content: storePayload ? p.message : undefined,
                 providerName: provider.name,
                 batchId,
+                claimToken: p.claimToken,
             }),
             idempotencyKey: p.idempotencyKey,
         };
@@ -330,6 +342,7 @@ export async function sendSMSBulk(
     {
         const jobInputs = sendable.map((p, i) => ({
             notificationId: historyIds[i] ?? 0,
+            claimToken: p.claimToken,
             to: p.phone,
             message: p.message,
         }));

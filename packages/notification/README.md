@@ -213,8 +213,8 @@ when the queued job could not be removed (`jobCancelled: false` — no queue in 
 process, or a queue error) and even when it races the send time. Whichever of the cancel
 and the job updates the row first wins; the other sees the new status and stands down.
 
-A cancel is refused (`success: false`) once the row has left `scheduled` — a send in
-progress, already sent, or failed. `markNotificationCancelled(id)` is the record-only
+A cancel also works on a row whose attempt `failed` and is waiting for a job retry. It is
+refused (`success: false`) for a send in progress or already sent. `markNotificationCancelled(id)` is the record-only
 form: it updates the row and returns whether it did, without touching the queue.
 
 ## Retries without duplicates (idempotency keys)
@@ -251,6 +251,8 @@ called right before each send gives every attempt a new key and deduplicates not
 - 1–255 characters (`MAX_IDEMPOTENCY_KEY_LENGTH`). Requires `enableHistory: true`; a
   keyed send is refused when history is off, and when the key cannot be recorded, rather
   than sent without protection.
+- A keyed send that takes over a `failed` row also takes it away from the queued job that
+  failed it: that job's retry finds the row no longer its own and sends nothing.
 - A process that dies after claiming a key and before the provider answers leaves the row
   `pending`, and the key stays blocked. The provider may already have delivered, so it
   is not retried automatically: after checking, `markNotificationFailed(id, reason)` frees

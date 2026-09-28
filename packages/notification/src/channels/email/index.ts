@@ -275,6 +275,8 @@ interface PreparedEmail
     tracking?: boolean;
     sensitive: boolean;
     idempotencyKey?: string;
+    /** Distributed mode: the token the item's job claims its row with. */
+    claimToken?: string;
 }
 
 /**
@@ -400,6 +402,15 @@ export async function sendEmailBulk(
     // 1. Validate and prepare all items
     const { prepared, earlyFailures } = prepareEmailItems(items);
 
+    // A queued item may only send the row it was enqueued for (see claimNotificationForJob).
+    if (options?.distributed)
+    {
+        for (const p of prepared)
+        {
+            p.claimToken = crypto.randomUUID();
+        }
+    }
+
     // 2. Open history rows; a spent idempotency key stops its item here
     const storeContent = isHistoryContentStored();
     const opened = await openBulkHistoryRows(prepared.map(p =>
@@ -416,6 +427,7 @@ export async function sendEmailBulk(
                 content: storePayload ? p.text : undefined,
                 providerName: provider.name,
                 batchId,
+                claimToken: p.claimToken,
             }),
             idempotencyKey: p.idempotencyKey,
         };
@@ -456,6 +468,7 @@ export async function sendEmailBulk(
     {
         const jobInputs = sendable.map((p, i) => ({
             notificationId: historyIds[i] ?? 0,
+            claimToken: p.claimToken,
             to: p.params.to,
             from: p.params.from,
             replyTo: p.params.replyTo,

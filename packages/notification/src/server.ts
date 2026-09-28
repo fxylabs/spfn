@@ -107,7 +107,7 @@ export {
     markNotificationSent,
     markNotificationFailed,
     markNotificationPending,
-    claimScheduledNotification,
+    claimNotificationForJob,
     markNotificationCancelled,
     findNotificationByJobId,
     findNotifications,

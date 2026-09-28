@@ -60,7 +60,16 @@ export async function claimKeyedSend(
         .onConflictDoUpdate({
             target: [notifications.channel, notifications.idempotencyKey, notifications.recipient],
             targetWhere: sql`${notifications.idempotencyKey} is not null`,
-            set: { ...row, status, errorMessage: null, providerMessageId: null, sentAt: null, jobId: null },
+            set: {
+                ...row,
+                status,
+                // A new owner: the job that failed this row must not send it again.
+                claimToken: row.claimToken ?? null,
+                errorMessage: null,
+                providerMessageId: null,
+                sentAt: null,
+                jobId: null,
+            },
             setWhere: eq(notifications.status, 'failed'),
         })
         .returning({ id: notifications.id });

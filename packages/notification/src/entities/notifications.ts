@@ -114,6 +114,13 @@ export const notifications = notificationSchema.table('history',
          */
         idempotencyKey: text('idempotency_key'),
 
+        /**
+         * Which queued job may send this row. A job carries the token it was
+         * enqueued with and claims the row only while it still matches, so a
+         * keyed send that took the row over makes the old job's retry stand down.
+         */
+        claimToken: text('claim_token'),
+
         ...timestamps(),
     },
     (table) => [

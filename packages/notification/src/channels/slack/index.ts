@@ -179,6 +179,8 @@ interface PreparedSlack
     data?: Record<string, unknown>;
     text?: string;
     idempotencyKey?: string;
+    /** Distributed mode: the token the item's job claims its row with. */
+    claimToken?: string;
 }
 
 /**
@@ -268,6 +270,15 @@ export async function sendSlackBulk(
         });
     }
 
+    // A queued item may only send the row it was enqueued for (see claimNotificationForJob).
+    if (options?.distributed)
+    {
+        for (const p of prepared)
+        {
+            p.claimToken = crypto.randomUUID();
+        }
+    }
+
     // 2. Open history rows; a spent idempotency key stops its item here
     const opened = await openBulkHistoryRows(prepared.map(p => ({
         buildRow: () => ({
@@ -278,6 +289,7 @@ export async function sendSlackBulk(
             content: p.text,
             providerName: provider.name,
             batchId,
+            claimToken: p.claimToken,
         }),
         idempotencyKey: p.idempotencyKey,
     })), log);
@@ -290,6 +302,7 @@ export async function sendSlackBulk(
     {
         const jobInputs = sendable.map((p, i) => ({
             notificationId: historyIds[i] ?? 0,
+            claimToken: p.claimToken,
             webhookUrl: p.webhookUrl,
             text: p.text,
             blocks: p.params.blocks,

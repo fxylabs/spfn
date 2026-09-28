@@ -158,8 +158,10 @@ export async function scheduleEmail(
         // still carries the raw recipient and content — it has to, that is what
         // gets sent later — so scheduled sends inherently persist the payload
         // until pg-boss archives the job.
+        const claimToken = crypto.randomUUID();
         const opened = await openScheduledRow({
             channel: 'email',
+            claimToken,
             recipient: historyRecipient(recipients),
             templateName: params.template,
             templateData: storePayload ? params.data : undefined,
@@ -191,6 +193,7 @@ export async function scheduleEmail(
                 from: params.from,
                 replyTo: params.replyTo,
                 sensitive: params.sensitive,
+                claimToken,
             },
             { startAfter: options.scheduledAt },
         );
@@ -277,8 +280,10 @@ export async function scheduleSMS(
 
         // Create scheduled notification record (see the email note above about
         // the pg-boss payload).
+        const claimToken = crypto.randomUUID();
         const opened = await openScheduledRow({
             channel: 'sms',
+            claimToken,
             recipient: historyRecipient(normalizedRecipients),
             templateName: params.template,
             templateData: storePayload ? params.data : undefined,
@@ -305,6 +310,7 @@ export async function scheduleSMS(
                 template: params.template,
                 data: params.data,
                 sensitive: params.sensitive,
+                claimToken,
             },
             { startAfter: options.scheduledAt },
         );

@@ -12,13 +12,11 @@
 import { job } from '@spfn/core/job';
 import { Type } from '@sinclair/typebox';
 import { awsSesProvider } from '../channels/email/providers/aws-ses';
-import {
-    markNotificationSent,
-    markNotificationFailed,
-} from '../services/notification.service';
+import { runBulkItemSend } from './run-scheduled-send';
 
 const SendBulkEmailItemInput = Type.Object({
     notificationId: Type.Number(),
+    claimToken: Type.Optional(Type.String()),
     to: Type.Array(Type.String()),
     from: Type.String(),
     replyTo: Type.Optional(Type.String()),
@@ -36,17 +34,7 @@ export const sendBulkEmailItemJob = job('notification.send-bulk-email-item')
     })
     .handler(async (input) =>
     {
-        const { notificationId, ...emailParams } = input;
+        const { notificationId, claimToken, ...emailParams } = input;
 
-        const result = await awsSesProvider.send(emailParams);
-
-        if (result.success)
-        {
-            await markNotificationSent(notificationId, result.messageId);
-        }
-        else
-        {
-            await markNotificationFailed(notificationId, result.error || 'Unknown error');
-            throw new Error(result.error || 'Failed to send email');
-        }
+        await runBulkItemSend(notificationId, claimToken, () => awsSesProvider.send(emailParams));
     });

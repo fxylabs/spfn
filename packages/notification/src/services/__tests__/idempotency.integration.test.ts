@@ -8,7 +8,15 @@ import { describe, it, expect, vi, beforeAll, afterAll, beforeEach, afterEach } 
 import { and, eq } from 'drizzle-orm';
 import { getDatabase } from '@spfn/core/db';
 
-const { getBoss } = vi.hoisted(() => ({ getBoss: vi.fn((): unknown => undefined) }));
+const { getBoss, sesSend } = vi.hoisted(() => ({
+    getBoss: vi.fn((): unknown => undefined),
+    sesSend: vi.fn(),
+}));
+
+// The distributed bulk job calls the SES provider directly.
+vi.mock('../../channels/email/providers/aws-ses', () => ({
+    awsSesProvider: { name: 'aws-ses', send: sesSend },
+}));
 
 vi.mock('@spfn/core/job', async (importOriginal) => ({
     ...(await importOriginal<Record<string, unknown>>()),
@@ -22,9 +30,8 @@ import { sendEmail, sendEmailBulk, registerEmailProvider } from '../../channels/
 import { sendSMS, sendSMSBulk, registerSMSProvider } from '../../channels/sms';
 import { sendSlack, registerSlackProvider } from '../../channels/slack';
 import { scheduleEmail } from '../schedule.service';
-import { deliverEmail } from '../../channels/email';
-import { runScheduledSend } from '../../jobs/run-scheduled-send';
 import { sendScheduledEmailJob } from '../../jobs/send-scheduled-email';
+import { sendBulkEmailItemJob } from '../../jobs/send-bulk-email-item';
 import { setupTestDb, teardownTestDb, clearTables } from '../../__tests__/helpers/db';
 
 const emailSend = vi.fn(async (_params: unknown): Promise<SendResult> => ({ success: true, messageId: 'ses-1' }));
@@ -32,6 +39,7 @@ const smsSend = vi.fn(async (_params: unknown): Promise<SendResult> => ({ succes
 const slackSend = vi.fn(async (_params: unknown): Promise<SendResult> => ({ success: true }));
 
 registerEmailProvider({ name: 'aws-ses', send: (p) => emailSend(p) });
+sesSend.mockImplementation((p: unknown) => emailSend(p));
 registerSMSProvider({ name: 'aws-sns', send: (p) => smsSend(p) });
 registerSlackProvider({ name: 'webhook', send: (p) => slackSend(p) });
 
@@ -54,11 +62,16 @@ afterAll(teardownTestDb);
 
 // No pg-boss in these tests: the enqueue returns a job id and is counted.
 const enqueue = vi.spyOn(sendScheduledEmailJob, 'send').mockImplementation(async () => 'job-1');
+const enqueueBulk = vi.spyOn(sendBulkEmailItemJob, 'sendBatch').mockImplementation(async () => undefined);
+
+const lastPayload = (spy: { mock: { calls: unknown[][] } }) => spy.mock.calls.at(-1)![0];
+const failOnce = () => emailSend.mockImplementationOnce(async () => ({ success: false, error: 'throttled' }));
 
 beforeEach(async () =>
 {
     await clearTables();
     enqueue.mockClear();
+    enqueueBulk.mockClear();
     configureNotification({ enableHistory: true, history: HISTORY_RESET });
     for (const send of [emailSend, smsSend, slackSend])
     {
@@ -252,10 +265,106 @@ describe('scheduled send keeps one history row', () =>
     {
         const scheduled = await scheduleEmail(mail(), { scheduledAt: new Date(Date.now() + 60_000) });
 
-        await runScheduledSend(scheduled.notificationId!, () => deliverEmail(mail(), scheduled.notificationId));
+        const [payload] = enqueue.mock.calls.at(-1)!;
+        await sendScheduledEmailJob.handler!(payload as never);
 
         const all = await getDatabase('write').select().from(notifications);
         expect(all).toHaveLength(1);
         expect(all[0]).toMatchObject({ id: scheduled.notificationId, status: 'sent' });
+    });
+});
+
+describe('a keyed send that takes over a row makes the queued job stand down (review B1)', () =>
+{
+    /**
+     * Start a keyed send whose provider call hangs until released, and wait
+     * until it is inside the provider: its row is then `pending`, the state a
+     * pg-boss retry would otherwise claim.
+     */
+    async function takeOverAndHold(key: string)
+    {
+        let release!: () => void;
+        const held = new Promise<void>(resolve =>
+        {
+            release = resolve;
+        });
+        emailSend.mockImplementationOnce(async () =>
+        {
+            await held;
+
+            return { success: true, messageId: 'ses-takeover' };
+        });
+        const calls = emailSend.mock.calls.length;
+        const sending = sendEmail(mail(key));
+        await vi.waitFor(() => expect(emailSend.mock.calls.length).toBe(calls + 1));
+
+        return { release, sending };
+    }
+
+    it('scheduled: job fails once, a keyed send takes over, a retry during that send sends nothing', async () =>
+    {
+        await scheduleEmail(mail('t1'), { scheduledAt: new Date(Date.now() + 60_000) });
+        const job = lastPayload(enqueue);
+        failOnce();
+        await expect(sendScheduledEmailJob.handler!(job as never)).rejects.toThrow('throttled');
+
+        const takeover = await takeOverAndHold('t1');
+        const callsDuringTakeover = emailSend.mock.calls.length;
+
+        await sendScheduledEmailJob.handler!(job as never);
+        expect(emailSend.mock.calls.length).toBe(callsDuringTakeover);
+
+        takeover.release();
+        await expect(takeover.sending).resolves.toMatchObject({ success: true, messageId: 'ses-takeover' });
+        expect((await rows('email', 't1')).map(r => r.status)).toEqual(['sent']);
+    });
+
+    it('scheduled: re-scheduling a failed key hands the row to the new job only', async () =>
+    {
+        const scheduledAt = new Date(Date.now() + 60_000);
+        await scheduleEmail(mail('t2'), { scheduledAt });
+        const oldJob = lastPayload(enqueue);
+        failOnce();
+        await expect(sendScheduledEmailJob.handler!(oldJob as never)).rejects.toThrow();
+
+        await expect(scheduleEmail(mail('t2'), { scheduledAt })).resolves.toMatchObject({ success: true });
+        const newJob = lastPayload(enqueue);
+        emailSend.mockClear();
+
+        await sendScheduledEmailJob.handler!(oldJob as never);
+        expect(emailSend).not.toHaveBeenCalled();
+
+        await sendScheduledEmailJob.handler!(newJob as never);
+        expect(emailSend).toHaveBeenCalledTimes(1);
+    });
+
+    it('distributed bulk: item job fails once, a keyed send takes over, a retry during that send sends nothing', async () =>
+    {
+        await sendEmailBulk([mail('t3')], { distributed: true });
+        const [item] = lastPayload(enqueueBulk) as unknown[];
+        failOnce();
+        await expect(sendBulkEmailItemJob.handler!(item as never)).rejects.toThrow('throttled');
+
+        const takeover = await takeOverAndHold('t3');
+        const callsDuringTakeover = emailSend.mock.calls.length;
+
+        await sendBulkEmailItemJob.handler!(item as never);
+        expect(emailSend.mock.calls.length).toBe(callsDuringTakeover);
+
+        takeover.release();
+        await expect(takeover.sending).resolves.toMatchObject({ success: true, messageId: 'ses-takeover' });
+        expect((await rows('email', 't3')).map(r => r.status)).toEqual(['sent']);
+    });
+
+    it('distributed bulk without a key: the item job sends and records its row', async () =>
+    {
+        await sendEmailBulk([mail()], { distributed: true });
+        const [item] = lastPayload(enqueueBulk) as unknown[];
+
+        await sendBulkEmailItemJob.handler!(item as never);
+
+        expect(emailSend).toHaveBeenCalledTimes(1);
+        const all = await getDatabase('write').select().from(notifications);
+        expect(all.map(r => r.status)).toEqual(['sent']);
     });
 });

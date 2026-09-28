@@ -5,7 +5,7 @@
  */
 
 import { create, createMany, findOne, findMany, updateOne, count, getDatabase } from '@spfn/core/db';
-import { desc, eq, and, gte, lte, inArray, sql, count as drizzleCount } from 'drizzle-orm';
+import { desc, eq, and, gte, lte, inArray, isNotNull, sql, count as drizzleCount } from 'drizzle-orm';
 import {
     notifications,
     type Notification,
@@ -181,32 +181,39 @@ export async function markNotificationPending(
 }
 
 /**
- * Statuses a scheduled-send job may claim a row from. `pending` and `failed`
- * are pg-boss retries (a worker that died mid-send, a failed attempt);
- * `cancelled` and `sent` are never claimed.
+ * Statuses a job may claim a row from. `pending` and `failed` are pg-boss
+ * retries (a worker that died mid-send, a failed attempt); `cancelled` and
+ * `sent` are never claimed.
  */
 const CLAIMABLE_STATUSES: NotificationStatus[] = ['scheduled', 'pending', 'failed'];
 
 /**
- * Move a scheduled row to `pending` if it may still be sent.
+ * Move a row a queued job is about to send to `pending`, if it may still be
+ * sent and still belongs to that job.
  *
- * A single status-guarded UPDATE, so a concurrent cancel either lands first
- * (this returns false and nothing is sent) or loses (the cancel sees
- * `pending` and refuses).
+ * One guarded UPDATE: a concurrent cancel either lands first (this returns
+ * false and nothing is sent) or loses (the cancel sees `pending` and
+ * refuses). `claimToken` is the token the job was enqueued with; a keyed
+ * send that took the row over replaced it, so the old job stands down.
  */
-export async function claimScheduledNotification(id: number): Promise<boolean>
+export async function claimNotificationForJob(id: number, claimToken?: string): Promise<boolean>
 {
     const rows = await getDatabase('write')
         .update(notifications)
         .set({ status: 'pending' })
-        .where(and(eq(notifications.id, id), inArray(notifications.status, CLAIMABLE_STATUSES)))
+        .where(and(
+            eq(notifications.id, id),
+            inArray(notifications.status, CLAIMABLE_STATUSES),
+            sql`${notifications.claimToken} is not distinct from ${claimToken ?? null}`,
+        ))
         .returning({ id: notifications.id });
 
     return rows.length > 0;
 }
 
 /**
- * Mark a row `cancelled` if it is still `scheduled`.
+ * Mark a scheduled row `cancelled` while it is waiting: `scheduled`, or
+ * `failed` between pg-boss retries.
  *
  * Only updates the record — it does not touch the queued job. The scheduled
  * job skips any row this has cancelled, so the record is what stops the send.
@@ -217,7 +224,11 @@ export async function markNotificationCancelled(id: number): Promise<boolean>
     const rows = await getDatabase('write')
         .update(notifications)
         .set({ status: 'cancelled' })
-        .where(and(eq(notifications.id, id), eq(notifications.status, 'scheduled')))
+        .where(and(
+            eq(notifications.id, id),
+            isNotNull(notifications.scheduledAt),
+            inArray(notifications.status, ['scheduled', 'failed']),
+        ))
         .returning({ id: notifications.id });
 
     return rows.length > 0;

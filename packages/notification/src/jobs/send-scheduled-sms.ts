@@ -17,6 +17,7 @@ const SendScheduledSmsInput = Type.Object({
     template: Type.Optional(Type.String()),
     data: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
     sensitive: Type.Optional(Type.Boolean()),
+    claimToken: Type.Optional(Type.String()),
 });
 
 /**
@@ -30,7 +31,7 @@ export const sendScheduledSmsJob = job('notification.send-scheduled-sms')
     })
     .handler(async (input) =>
     {
-        const { notificationId, ...smsParams } = input;
+        const { notificationId, claimToken, ...smsParams } = input;
 
-        await runScheduledSend(notificationId, () => deliverSMS(smsParams, notificationId));
+        await runScheduledSend(notificationId, claimToken, () => deliverSMS(smsParams, notificationId));
     });

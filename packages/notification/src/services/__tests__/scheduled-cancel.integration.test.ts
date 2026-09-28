@@ -18,8 +18,9 @@ vi.mock('@spfn/core/job', async (importOriginal) => ({
 }));
 
 import { notifications, type NotificationStatus } from '../../entities';
-import { createScheduledNotification, claimScheduledNotification, markNotificationCancelled } from '../notification.service';
+import { createScheduledNotification, claimNotificationForJob, markNotificationCancelled } from '../notification.service';
 import { cancelNotification } from '../cancel.service';
+import * as notificationService from '../notification.service';
 import { runScheduledSend } from '../../jobs/run-scheduled-send';
 import { setupTestDb, teardownTestDb, clearTables } from '../../__tests__/helpers/db';
 
@@ -71,7 +72,7 @@ describe('scheduled job claims only a sendable row', () =>
         const id = await seed(initial);
         const send = sendOk();
 
-        await expect(runScheduledSend(id, send)).resolves.toBe(outcome);
+        await expect(runScheduledSend(id, undefined, send)).resolves.toBe(outcome);
 
         expect(send).toHaveBeenCalledTimes(outcome === 'sent' ? 1 : 0);
         expect(await statusOf(id)).toBe(final);
@@ -81,7 +82,7 @@ describe('scheduled job claims only a sendable row', () =>
     {
         const send = sendOk();
 
-        await expect(runScheduledSend(999_999, send)).resolves.toBe('skipped');
+        await expect(runScheduledSend(999_999, undefined, send)).resolves.toBe('skipped');
         expect(send).not.toHaveBeenCalled();
     });
 
@@ -89,7 +90,7 @@ describe('scheduled job claims only a sendable row', () =>
     {
         const id = await seed();
 
-        await expect(runScheduledSend(id, async () => ({ success: false, error: 'boom' }))).rejects.toThrow('boom');
+        await expect(runScheduledSend(id, undefined, async () => ({ success: false, error: 'boom' }))).rejects.toThrow('boom');
         expect(await statusOf(id)).toBe('failed');
     });
 });
@@ -102,7 +103,7 @@ describe('cancelNotification', () =>
         const send = sendOk();
 
         await expect(cancelNotification(id)).resolves.toEqual({ success: true, jobCancelled: false });
-        await expect(runScheduledSend(id, send)).resolves.toBe('skipped');
+        await expect(runScheduledSend(id, undefined, send)).resolves.toBe('skipped');
 
         expect(send).not.toHaveBeenCalled();
         expect(await statusOf(id)).toBe('cancelled');
@@ -131,7 +132,7 @@ describe('cancelNotification', () =>
         expect(await statusOf(id)).toBe('cancelled');
     });
 
-    it.each<NotificationStatus>(['pending', 'sent', 'failed', 'cancelled'])(
+    it.each<NotificationStatus>(['pending', 'sent', 'cancelled'])(
         'a %s row is refused and left unchanged; the queue is not touched',
         async (status) =>
         {
@@ -148,6 +149,30 @@ describe('cancelNotification', () =>
         },
     );
 
+    it('a scheduled row that failed and awaits a pg-boss retry can be cancelled; the retry sends nothing', async () =>
+    {
+        const id = await seed('failed', 'job-5');
+        const send = sendOk();
+
+        await expect(cancelNotification(id)).resolves.toMatchObject({ success: true });
+        await expect(runScheduledSend(id, undefined, send)).resolves.toBe('skipped');
+
+        expect(send).not.toHaveBeenCalled();
+    });
+
+    it('a failed row that was never scheduled is refused', async () =>
+    {
+        const row = await notificationService.createNotificationRecord({
+            channel: 'email',
+            recipient: 'learner@example.com',
+            providerName: 'aws-ses',
+        });
+        await getDatabase('write').update(notifications).set({ status: 'failed' }).where(eq(notifications.id, row.id));
+
+        await expect(cancelNotification(row.id)).resolves.toMatchObject({ success: false });
+        expect(await statusOf(row.id)).toBe('failed');
+    });
+
     it('an unknown id is refused', async () =>
     {
         await expect(cancelNotification(999_999)).resolves.toEqual({ success: false, error: 'Notification not found' });
@@ -163,7 +188,7 @@ describe('claim and cancel racing on the same row', () =>
         const outcomes = await Promise.all(ids.map(async (id) =>
         {
             const [claimed, cancelled] = await Promise.all([
-                claimScheduledNotification(id),
+                claimNotificationForJob(id),
                 markNotificationCancelled(id),
             ]);
 
