@@ -201,8 +201,21 @@ const result = await scheduleEmail(
 
 // Cancel scheduled notification
 import { cancelNotification } from '@spfn/notification/server';
-await cancelNotification(result.notificationId);
+const cancel = await cancelNotification(result.notificationId);
+// { success: true, jobCancelled: true }
 ```
+
+**What a cancel guarantees.** `success: true` means the notification will not be sent.
+The history row moves from `scheduled` to `cancelled` in one status-guarded update, and
+the scheduled job re-checks the row when it runs: it sends only a row it can move to
+`pending`, and skips a `cancelled` or `sent` row without error. So a cancel holds even
+when the queued job could not be removed (`jobCancelled: false` — no queue in this
+process, or a queue error) and even when it races the send time. Whichever of the cancel
+and the job updates the row first wins; the other sees the new status and stands down.
+
+A cancel is refused (`success: false`) once the row has left `scheduled` — a send in
+progress, already sent, or failed. `markNotificationCancelled(id)` is the record-only
+form: it updates the row and returns whether it did, without touching the queue.
 
 ## Bulk Sending
 

@@ -5,11 +5,7 @@
 import { job } from '@spfn/core/job';
 import { Type } from '@sinclair/typebox';
 import { sendSMS } from '../channels/sms';
-import {
-    markNotificationPending,
-    markNotificationSent,
-    markNotificationFailed,
-} from '../services/notification.service';
+import { runScheduledSend } from './run-scheduled-send';
 
 /**
  * Job input schema
@@ -36,20 +32,5 @@ export const sendScheduledSmsJob = job('notification.send-scheduled-sms')
     {
         const { notificationId, ...smsParams } = input;
 
-        // Mark as pending (processing started)
-        await markNotificationPending(notificationId);
-
-        // Send SMS
-        const result = await sendSMS(smsParams);
-
-        // Update notification record
-        if (result.success)
-        {
-            await markNotificationSent(notificationId, result.messageId);
-        }
-        else
-        {
-            await markNotificationFailed(notificationId, result.error || 'Unknown error');
-            throw new Error(result.error || 'Failed to send SMS');
-        }
+        await runScheduledSend(notificationId, () => sendSMS(smsParams));
     });

@@ -6,65 +6,49 @@
 
 import { getBoss } from '@spfn/core/job';
 import { findOne } from '@spfn/core/db';
-import { notifications } from '../entities';
-import { cancelScheduledNotification } from './notification.service';
+import { logger } from '@spfn/core/logger';
+import { notifications, type Notification } from '../entities';
+import { markNotificationCancelled } from './notification.service';
+import { sendScheduledEmailJob } from '../jobs/send-scheduled-email';
+import { sendScheduledSmsJob } from '../jobs/send-scheduled-sms';
+
+const log = logger.child('@spfn/notification:cancel');
 
 export interface CancelResult
 {
     success: boolean;
+    /**
+     * Whether the queued pg-boss job was also removed. `false` does not mean
+     * the notification may still go out: the job skips a cancelled row.
+     */
+    jobCancelled?: boolean;
     error?: string;
 }
 
+const SCHEDULED_QUEUES: Partial<Record<Notification['channel'], string>> = {
+    email: sendScheduledEmailJob.name,
+    sms: sendScheduledSmsJob.name,
+};
+
 /**
- * Cancel a scheduled notification by ID
+ * Cancel a scheduled notification by ID.
+ *
+ * `success: true` means the notification will not be sent: the row moved from
+ * `scheduled` to `cancelled` in one guarded update, and the scheduled job
+ * skips cancelled rows. Removing the queued job afterwards is cleanup only.
  */
 export async function cancelNotification(notificationId: number): Promise<CancelResult>
 {
-    // Find the notification
-    const notification = await findOne(notifications, { id: notificationId });
-
-    if (!notification)
-    {
-        return {
-            success: false,
-            error: 'Notification not found',
-        };
-    }
-
-    if (notification.status !== 'scheduled')
-    {
-        return {
-            success: false,
-            error: `Cannot cancel notification with status: ${notification.status}`,
-        };
-    }
-
     try
     {
-        // Cancel pg-boss job if exists
-        if (notification.jobId)
+        if (!(await markNotificationCancelled(notificationId)))
         {
-            const boss = getBoss();
-            if (boss)
-            {
-                // Determine queue name based on channel
-                const queueName = notification.channel === 'email'
-                    ? 'notification.send-scheduled-email'
-                    : notification.channel === 'sms'
-                        ? 'notification.send-scheduled-sms'
-                        : null;
-
-                if (queueName)
-                {
-                    await boss.cancel(queueName, notification.jobId);
-                }
-            }
+            return refusal(notificationId);
         }
 
-        // Update notification status
-        await cancelScheduledNotification(notificationId);
+        const notification = await findOne(notifications, { id: notificationId });
 
-        return { success: true };
+        return { success: true, jobCancelled: await cancelQueuedJob(notification) };
     }
     catch (error)
     {
@@ -72,6 +56,46 @@ export async function cancelNotification(notificationId: number): Promise<Cancel
             success: false,
             error: error instanceof Error ? error.message : 'Failed to cancel notification',
         };
+    }
+}
+
+async function refusal(notificationId: number): Promise<CancelResult>
+{
+    const notification = await findOne(notifications, { id: notificationId });
+
+    return {
+        success: false,
+        error: notification
+            ? `Cannot cancel notification with status: ${notification.status}`
+            : 'Notification not found',
+    };
+}
+
+/**
+ * Best-effort removal of the queued job. Never fails the cancel: the row is
+ * already cancelled, which is what stops the send.
+ */
+async function cancelQueuedJob(notification: Notification | null): Promise<boolean>
+{
+    const queueName = notification ? SCHEDULED_QUEUES[notification.channel] : undefined;
+    const boss = getBoss();
+
+    if (!notification?.jobId || !queueName || !boss)
+    {
+        return false;
+    }
+
+    try
+    {
+        await boss.cancel(queueName, notification.jobId);
+
+        return true;
+    }
+    catch (error)
+    {
+        log.warn('Failed to cancel queued job; the job will skip the cancelled row', error as Error);
+
+        return false;
     }
 }
 

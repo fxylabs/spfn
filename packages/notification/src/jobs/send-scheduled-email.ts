@@ -5,11 +5,7 @@
 import { job } from '@spfn/core/job';
 import { Type } from '@sinclair/typebox';
 import { sendEmail } from '../channels/email';
-import {
-    markNotificationPending,
-    markNotificationSent,
-    markNotificationFailed,
-} from '../services/notification.service';
+import { runScheduledSend } from './run-scheduled-send';
 
 /**
  * Job input schema
@@ -40,20 +36,5 @@ export const sendScheduledEmailJob = job('notification.send-scheduled-email')
     {
         const { notificationId, ...emailParams } = input;
 
-        // Mark as pending (processing started)
-        await markNotificationPending(notificationId);
-
-        // Send email
-        const result = await sendEmail(emailParams);
-
-        // Update notification record
-        if (result.success)
-        {
-            await markNotificationSent(notificationId, result.messageId);
-        }
-        else
-        {
-            await markNotificationFailed(notificationId, result.error || 'Unknown error');
-            throw new Error(result.error || 'Failed to send email');
-        }
+        await runScheduledSend(notificationId, () => sendEmail(emailParams));
     });
