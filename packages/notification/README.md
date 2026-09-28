@@ -217,6 +217,44 @@ A cancel also works on a row whose attempt `failed` and is waiting for a job ret
 refused (`success: false`) for a send in progress or already sent. `markNotificationCancelled(id)` is the record-only
 form: it updates the row and returns whether it did, without touching the queue.
 
+### Send guards — "send this later, unless it no longer applies"
+
+A scheduled send can name a guard that the job calls when it runs, after checking the
+row was not cancelled. It answers the question the app could not answer at schedule
+time, so the app does not have to race a cancel against the send time.
+
+```typescript
+import { registerSendGuard, scheduleEmail } from '@spfn/notification/server';
+
+// Register in every process that runs notification jobs.
+registerSendGuard('incident-still-open', async ({ referenceId }) =>
+{
+    return (await incidents.find(referenceId))?.status === 'open';
+});
+
+await scheduleEmail(
+    { to: oncall, template: 'outage', data: { incidentId } },
+    {
+        scheduledAt: new Date(Date.now() + 10 * 60 * 1000),
+        referenceType: 'incident',
+        referenceId: incidentId,
+        guard: 'incident-still-open',
+    },
+);
+```
+
+The guard receives `{ notificationId, channel, referenceType, referenceId, data }`.
+
+| The guard | Row | Sent | Job |
+|---|---|---|---|
+| returns `true` | `sent` | yes | done |
+| returns `false` | `skipped` | no | done, no retry |
+| throws | `failed` | no | retried; the guard runs again |
+| is not registered when the job runs | `failed` (`Send guard not registered: …`) | no | done, no retry |
+
+An unknown guard name is refused when scheduling (`success: false`), before anything is
+queued. A cancelled row never reaches its guard.
+
 ## Retries without duplicates (idempotency keys)
 
 A send can be retried safely by giving it an `idempotencyKey`. The first send with a key

@@ -61,12 +61,12 @@ beforeEach(async () =>
 
 describe('scheduled job claims only a sendable row', () =>
 {
-    it.each<[NotificationStatus, 'sent' | 'skipped', string]>([
+    it.each<[NotificationStatus, 'sent' | 'not-sendable', string]>([
         ['scheduled', 'sent', 'sent'],
         ['failed', 'sent', 'sent'],      // pg-boss retry after a failed attempt
         ['pending', 'sent', 'sent'],     // pg-boss retry after a worker died mid-send
-        ['cancelled', 'skipped', 'cancelled'],
-        ['sent', 'skipped', 'sent'],
+        ['cancelled', 'not-sendable', 'cancelled'],
+        ['sent', 'not-sendable', 'sent'],
     ])('row %s → job %s, row ends %s', async (initial, outcome, final) =>
     {
         const id = await seed(initial);
@@ -82,7 +82,7 @@ describe('scheduled job claims only a sendable row', () =>
     {
         const send = sendOk();
 
-        await expect(runScheduledSend(999_999, undefined, send)).resolves.toBe('skipped');
+        await expect(runScheduledSend(999_999, undefined, send)).resolves.toBe('not-sendable');
         expect(send).not.toHaveBeenCalled();
     });
 
@@ -103,7 +103,7 @@ describe('cancelNotification', () =>
         const send = sendOk();
 
         await expect(cancelNotification(id)).resolves.toEqual({ success: true, jobCancelled: false });
-        await expect(runScheduledSend(id, undefined, send)).resolves.toBe('skipped');
+        await expect(runScheduledSend(id, undefined, send)).resolves.toBe('not-sendable');
 
         expect(send).not.toHaveBeenCalled();
         expect(await statusOf(id)).toBe('cancelled');
@@ -155,7 +155,7 @@ describe('cancelNotification', () =>
         const send = sendOk();
 
         await expect(cancelNotification(id)).resolves.toMatchObject({ success: true });
-        await expect(runScheduledSend(id, undefined, send)).resolves.toBe('skipped');
+        await expect(runScheduledSend(id, undefined, send)).resolves.toBe('not-sendable');
 
         expect(send).not.toHaveBeenCalled();
     });

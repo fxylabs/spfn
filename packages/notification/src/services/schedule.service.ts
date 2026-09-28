@@ -14,6 +14,7 @@ import {
     updateNotificationJobId,
 } from './notification.service';
 import { claimKeyedSend, idempotencyKeyError } from './idempotency.service';
+import { hasSendGuard } from './send-guard.service';
 import type { HistoryRowData } from '../channels/history';
 import { sendScheduledEmailJob } from '../jobs/send-scheduled-email';
 import { sendScheduledSmsJob } from '../jobs/send-scheduled-sms';
@@ -34,6 +35,23 @@ export interface ScheduleOptions
      */
     referenceType?: string;
     referenceId?: string;
+
+    /**
+     * Name of a guard registered with `registerSendGuard`. When the job runs
+     * it calls the guard (after checking the row was not cancelled); `false`
+     * marks the row `skipped` and sends nothing.
+     */
+    guard?: string;
+}
+
+/**
+ * Why these options cannot be scheduled, or undefined.
+ */
+function scheduleOptionsError(options: ScheduleOptions): string | undefined
+{
+    return options.guard !== undefined && !hasSendGuard(options.guard)
+        ? `Send guard not registered: ${options.guard}`
+        : undefined;
 }
 
 /**
@@ -94,11 +112,11 @@ export async function scheduleEmail(
     options: ScheduleOptions,
 ): Promise<ScheduleResult>
 {
-    const keyError = idempotencyKeyError(params.idempotencyKey);
+    const optionsError = idempotencyKeyError(params.idempotencyKey) ?? scheduleOptionsError(options);
 
-    if (keyError)
+    if (optionsError)
     {
-        return { success: false, error: keyError };
+        return { success: false, error: optionsError };
     }
 
     // Prepare recipients
@@ -194,6 +212,9 @@ export async function scheduleEmail(
                 replyTo: params.replyTo,
                 sensitive: params.sensitive,
                 claimToken,
+                guard: options.guard,
+                referenceType: options.referenceType,
+                referenceId: options.referenceId,
             },
             { startAfter: options.scheduledAt },
         );
@@ -227,11 +248,11 @@ export async function scheduleSMS(
     options: ScheduleOptions,
 ): Promise<ScheduleResult>
 {
-    const keyError = idempotencyKeyError(params.idempotencyKey);
+    const optionsError = idempotencyKeyError(params.idempotencyKey) ?? scheduleOptionsError(options);
 
-    if (keyError)
+    if (optionsError)
     {
-        return { success: false, error: keyError };
+        return { success: false, error: optionsError };
     }
 
     // Prepare recipients
@@ -311,6 +332,9 @@ export async function scheduleSMS(
                 data: params.data,
                 sensitive: params.sensitive,
                 claimToken,
+                guard: options.guard,
+                referenceType: options.referenceType,
+                referenceId: options.referenceId,
             },
             { startAfter: options.scheduledAt },
         );

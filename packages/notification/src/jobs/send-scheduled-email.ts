@@ -22,6 +22,9 @@ const SendScheduledEmailInput = Type.Object({
     replyTo: Type.Optional(Type.String()),
     sensitive: Type.Optional(Type.Boolean()),
     claimToken: Type.Optional(Type.String()),
+    guard: Type.Optional(Type.String()),
+    referenceType: Type.Optional(Type.String()),
+    referenceId: Type.Optional(Type.String()),
 });
 
 /**
@@ -35,7 +38,13 @@ export const sendScheduledEmailJob = job('notification.send-scheduled-email')
     })
     .handler(async (input) =>
     {
-        const { notificationId, claimToken, ...emailParams } = input;
+        const { notificationId, claimToken, guard, referenceType, referenceId, ...emailParams } = input;
+        const context = { channel: 'email' as const, referenceType, referenceId, data: emailParams.data };
 
-        await runScheduledSend(notificationId, claimToken, () => deliverEmail(emailParams, notificationId));
+        await runScheduledSend(
+            notificationId,
+            claimToken,
+            () => deliverEmail(emailParams, notificationId),
+            guard ? { name: guard, context } : undefined,
+        );
     });

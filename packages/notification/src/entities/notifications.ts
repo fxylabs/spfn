@@ -18,7 +18,7 @@ export type NotificationChannel = typeof NOTIFICATION_CHANNELS[number];
 /**
  * Notification status types
  */
-export const NOTIFICATION_STATUSES = ['scheduled', 'pending', 'sent', 'failed', 'cancelled'] as const;
+export const NOTIFICATION_STATUSES = ['scheduled', 'pending', 'sent', 'failed', 'cancelled', 'skipped'] as const;
 export type NotificationStatus = typeof NOTIFICATION_STATUSES[number];
 
 /**

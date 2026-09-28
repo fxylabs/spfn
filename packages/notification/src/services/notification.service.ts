@@ -212,6 +212,18 @@ export async function claimNotificationForJob(id: number, claimToken?: string): 
 }
 
 /**
+ * Mark a claimed row `skipped`: its send guard said the send is no longer
+ * wanted.
+ */
+export async function markNotificationSkipped(id: number): Promise<void>
+{
+    await getDatabase('write')
+        .update(notifications)
+        .set({ status: 'skipped' })
+        .where(and(eq(notifications.id, id), eq(notifications.status, 'pending')));
+}
+
+/**
  * Mark a scheduled row `cancelled` while it is waiting: `scheduled`, or
  * `failed` between pg-boss retries.
  *
@@ -349,6 +361,7 @@ export interface NotificationStats
     sent: number;
     failed: number;
     cancelled: number;
+    skipped: number;
 }
 
 export async function getNotificationStats(
@@ -378,7 +391,7 @@ export async function getNotificationStats(
         .groupBy(notifications.status);
 
     const stats: NotificationStats = {
-        total: 0, scheduled: 0, pending: 0, sent: 0, failed: 0, cancelled: 0,
+        total: 0, scheduled: 0, pending: 0, sent: 0, failed: 0, cancelled: 0, skipped: 0,
     };
 
     for (const row of rows)

@@ -9,29 +9,52 @@ import {
     claimNotificationForJob,
     markNotificationSent,
     markNotificationFailed,
+    markNotificationSkipped,
 } from '../services/notification.service';
+import { getSendGuard, type SendGuard, type SendGuardContext } from '../services/send-guard.service';
 import { logger } from '@spfn/core/logger';
 
 const log = logger.child('@spfn/notification:scheduled');
 
 /**
+ * The guard a scheduled send names, and what it is called with.
+ */
+export interface ScheduledGuard
+{
+    name: string;
+    context: Omit<SendGuardContext, 'notificationId'>;
+}
+
+export type ScheduledOutcome = 'sent' | 'skipped' | 'not-sendable' | 'guard-missing';
+
+/**
  * Send a scheduled notification unless its row was cancelled, already sent,
- * or taken over by a keyed send.
+ * or taken over by a keyed send — and, when it names a guard, unless the
+ * guard says no.
  *
- * A skipped row returns normally: throwing would make pg-boss retry a send
- * that must never happen. A failed send throws so pg-boss retries it.
+ * Outcomes that must not be retried return normally: throwing would make
+ * pg-boss run them again. A failed send or a throwing guard throws so pg-boss
+ * retries it.
  */
 export async function runScheduledSend(
     notificationId: number,
     claimToken: string | undefined,
     send: () => Promise<SendResult>,
-): Promise<'sent' | 'skipped'>
+    guard?: ScheduledGuard,
+): Promise<ScheduledOutcome>
 {
     if (!(await claimNotificationForJob(notificationId, claimToken)))
     {
         log.info('Scheduled notification skipped: no longer sendable', { notificationId });
 
-        return 'skipped';
+        return 'not-sendable';
+    }
+
+    const verdict = guard ? await checkGuard(notificationId, guard) : 'send';
+
+    if (verdict !== 'send')
+    {
+        return verdict;
     }
 
     const result = await send();
@@ -45,6 +68,56 @@ export async function runScheduledSend(
     await markNotificationSent(notificationId, result.messageId);
 
     return 'sent';
+}
+
+async function checkGuard(
+    notificationId: number,
+    { name, context }: ScheduledGuard,
+): Promise<'send' | 'skipped' | 'guard-missing'>
+{
+    const guard = getSendGuard(name);
+
+    if (!guard)
+    {
+        // Configuration, not a transient failure: a retry would find it missing too.
+        log.error('Scheduled notification not sent: send guard not registered', { notificationId, guard: name });
+        await markNotificationFailed(notificationId, `Send guard not registered: ${name}`);
+
+        return 'guard-missing';
+    }
+
+    const outcome = await callGuard(guard, { ...context, notificationId });
+
+    if ('error' in outcome)
+    {
+        await markNotificationFailed(notificationId, `Send guard ${name} failed: ${outcome.error.message}`);
+        throw outcome.error;
+    }
+
+    if (!outcome.allowed)
+    {
+        log.info('Scheduled notification skipped by its send guard', { notificationId, guard: name });
+        await markNotificationSkipped(notificationId);
+
+        return 'skipped';
+    }
+
+    return 'send';
+}
+
+async function callGuard(
+    guard: SendGuard,
+    context: SendGuardContext,
+): Promise<{ allowed: boolean } | { error: Error }>
+{
+    try
+    {
+        return { allowed: await guard(context) };
+    }
+    catch (error)
+    {
+        return { error: error instanceof Error ? error : new Error(String(error)) };
+    }
 }
 
 /**

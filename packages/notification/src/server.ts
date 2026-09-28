@@ -109,6 +109,7 @@ export {
     markNotificationPending,
     claimNotificationForJob,
     markNotificationCancelled,
+    markNotificationSkipped,
     findNotificationByJobId,
     findNotifications,
     findScheduledNotifications,
@@ -125,6 +126,12 @@ export {
 } from './services/cancel.service';
 
 export { MAX_IDEMPOTENCY_KEY_LENGTH } from './services/idempotency.service';
+
+export {
+    registerSendGuard,
+    type SendGuard,
+    type SendGuardContext,
+} from './services/send-guard.service';
 
 // Jobs
 export {
