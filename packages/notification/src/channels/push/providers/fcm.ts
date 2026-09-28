@@ -142,7 +142,11 @@ interface FcmErrorBody
     error?: {
         status?: string;
         message?: string;
-        details?: { '@type'?: string; errorCode?: string }[];
+        details?: {
+            '@type'?: string;
+            errorCode?: string;
+            fieldViolations?: { field?: string }[];
+        }[];
     };
 }
 
@@ -153,9 +157,19 @@ function failure(httpStatus: number, body: FcmErrorBody): PushProviderResult
     return {
         success: false,
         error: `${code}: ${body.error?.message ?? 'FCM request failed'}`,
-        invalidToken: INVALIDATING[code],
+        invalidToken: INVALIDATING[code] ?? (code === 'INVALID_ARGUMENT' && rejectsToken(body) ? 'invalid_token' : undefined),
         retryable: RETRYABLE.has(code) || httpStatus === 429 || httpStatus >= 500,
     };
+}
+
+/**
+ * INVALID_ARGUMENT also covers a bad payload, which says nothing about the
+ * device. Only a field violation on `message.token` means the token itself
+ * is malformed and will fail every send.
+ */
+function rejectsToken(body: FcmErrorBody): boolean
+{
+    return body.error?.details?.some(detail => detail.fieldViolations?.some(violation => violation.field === 'message.token')) ?? false;
 }
 
 async function googleAuthCredentials(): Promise<FcmCredentials>

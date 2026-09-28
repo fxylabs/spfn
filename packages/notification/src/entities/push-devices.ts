@@ -15,7 +15,7 @@ export type PushPlatform = typeof PUSH_PLATFORMS[number];
 /**
  * Why a token stopped receiving pushes
  */
-export const PUSH_INVALIDATION_REASONS = ['unregistered', 'sender_mismatch', 'replaced', 'moved'] as const;
+export const PUSH_INVALIDATION_REASONS = ['unregistered', 'sender_mismatch', 'invalid_token', 'replaced', 'moved'] as const;
 export type PushInvalidationReason = typeof PUSH_INVALIDATION_REASONS[number];
 
 export const pushDevices = notificationSchema.table('push_devices',

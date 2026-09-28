@@ -223,9 +223,10 @@ await unregisterPushDevice(body.fcmToken);
   device, whoever owned it). Take `deviceId` from the device itself (an install id the
   app generates), never from user input: anyone who can name another user's `deviceId`
   can retire that device's token.
-- FCM answering `UNREGISTERED` or `SENDER_ID_MISMATCH` invalidates the token.
-  `INVALID_ARGUMENT` never does: a malformed payload looks the same and would otherwise
-  wipe every token it was sent to.
+- FCM answering `UNREGISTERED` or `SENDER_ID_MISMATCH` invalidates the token. So does
+  `INVALID_ARGUMENT` whose field violation names `message.token` (a malformed token);
+  an `INVALID_ARGUMENT` about any other field is a payload error and leaves the token
+  alone, since otherwise one bad payload would wipe every token it was sent to.
 
 ### Sending
 

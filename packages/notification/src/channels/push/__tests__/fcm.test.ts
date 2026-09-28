@@ -61,6 +61,53 @@ describe('FCM response table', () =>
         expect(result.error).toContain(code);
     });
 
+    // Bodies captured from the live FCM v1 API (2026-09-28).
+    it('INVALID_ARGUMENT on message.token: the token is malformed and invalidated', async () =>
+    {
+        const { provider } = providerAnswering(400, {
+            error: {
+                code: 400,
+                message: 'The registration token is not a valid FCM registration token',
+                status: 'INVALID_ARGUMENT',
+                details: [
+                    { '@type': 'type.googleapis.com/google.firebase.fcm.v1.FcmError', errorCode: 'INVALID_ARGUMENT' },
+                    {
+                        '@type': 'type.googleapis.com/google.rpc.BadRequest',
+                        fieldViolations: [{ field: 'message.token', description: 'The registration token is not a valid FCM registration token' }],
+                    },
+                ],
+            },
+        });
+
+        await expect(provider.send({ token: 'not-a-real-token', title: 'Hi' })).resolves.toMatchObject({
+            success: false,
+            invalidToken: 'invalid_token',
+            retryable: false,
+        });
+    });
+
+    it('INVALID_ARGUMENT on another field: a payload error, the token stays', async () =>
+    {
+        const { provider } = providerAnswering(400, {
+            error: {
+                code: 400,
+                message: "Invalid value at 'message.android.ttl'",
+                status: 'INVALID_ARGUMENT',
+                details: [
+                    {
+                        '@type': 'type.googleapis.com/google.rpc.BadRequest',
+                        fieldViolations: [{ field: 'message.android.ttl', description: 'Illegal duration format' }],
+                    },
+                ],
+            },
+        });
+
+        const result = await provider.send({ token: 't', title: 'Hi' });
+
+        expect(result).toMatchObject({ success: false, retryable: false });
+        expect(result.invalidToken).toBeUndefined();
+    });
+
     it('an error body without FcmError details falls back to the status', async () =>
     {
         const { provider } = providerAnswering(404, fcmError('NOT_FOUND'));
