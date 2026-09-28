@@ -11,6 +11,7 @@ import { notifications, type Notification } from '../entities';
 import { markNotificationCancelled } from './notification.service';
 import { sendScheduledEmailJob } from '../jobs/send-scheduled-email';
 import { sendScheduledSmsJob } from '../jobs/send-scheduled-sms';
+import { sendScheduledPushJob } from '../jobs/send-scheduled-push';
 
 const log = logger.child('@spfn/notification:cancel');
 
@@ -28,6 +29,7 @@ export interface CancelResult
 const SCHEDULED_QUEUES: Partial<Record<Notification['channel'], string>> = {
     email: sendScheduledEmailJob.name,
     sms: sendScheduledSmsJob.name,
+    push: sendScheduledPushJob.name,
 };
 
 /**

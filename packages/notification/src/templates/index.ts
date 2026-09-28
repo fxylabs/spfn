@@ -10,6 +10,7 @@ export type {
     SmsTemplateContent,
     SlackTemplateContent,
     LocaleTemplateContent,
+    PushTemplateContent,
 } from './types';
 
 export {

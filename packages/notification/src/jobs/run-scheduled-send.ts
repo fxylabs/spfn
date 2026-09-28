@@ -25,7 +25,7 @@ export interface ScheduledGuard
     context: Omit<SendGuardContext, 'notificationId'>;
 }
 
-export type ScheduledOutcome = 'sent' | 'skipped' | 'not-sendable' | 'guard-missing';
+export type ScheduledOutcome = 'sent' | 'skipped' | 'not-sendable' | 'guard-missing' | 'failed';
 
 /**
  * Send a scheduled notification unless its row was cancelled, already sent,
@@ -39,7 +39,7 @@ export type ScheduledOutcome = 'sent' | 'skipped' | 'not-sendable' | 'guard-miss
 export async function runScheduledSend(
     notificationId: number,
     claimToken: string | undefined,
-    send: () => Promise<SendResult>,
+    send: () => Promise<SendResult & { retryable?: boolean }>,
     guard?: ScheduledGuard,
 ): Promise<ScheduledOutcome>
 {
@@ -62,6 +62,13 @@ export async function runScheduledSend(
     if (!result.success)
     {
         await markNotificationFailed(notificationId, result.error || 'Unknown error');
+
+        // A send that says a retry cannot help ends here instead of burning retries.
+        if (result.retryable === false)
+        {
+            return 'failed';
+        }
+
         throw new Error(result.error || 'Failed to send scheduled notification');
     }
 

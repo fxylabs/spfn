@@ -42,6 +42,32 @@ export const notificationEnvSchema = defineEnvSchema({
         }),
     },
 
+    // Push
+    SPFN_NOTIFICATION_PUSH_PROVIDER: {
+        ...envString({
+            description: 'Push provider (fcm)',
+            default: 'fcm',
+            required: false,
+            examples: ['fcm'],
+        }),
+    },
+
+    SPFN_NOTIFICATION_FCM_PROJECT_ID: {
+        ...envString({
+            description: 'Firebase project id; defaults to the credential\'s project',
+            required: false,
+            examples: ['my-app-prod'],
+        }),
+    },
+
+    SPFN_NOTIFICATION_FCM_SERVICE_ACCOUNT: {
+        ...envString({
+            description: 'Firebase service-account JSON. Unset: Application Default Credentials (e.g. GKE Workload Identity)',
+            required: false,
+            sensitive: true,
+        }),
+    },
+
     // Tracking
     SPFN_NOTIFICATION_TRACKING_ENABLED: {
         ...envString({

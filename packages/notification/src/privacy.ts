@@ -60,6 +60,15 @@ function maskOpaque(value: string): string
 }
 
 /**
+ * Mask a push token for logs and results: enough to tell tokens apart,
+ * not enough to send to.
+ */
+export function maskToken(token: string): string
+{
+    return token.length <= 12 ? '***' : `${token.slice(0, 6)}…${token.slice(-4)}`;
+}
+
+/**
  * Mask a recipient of either kind by shape.
  */
 export function maskRecipient(value: string): string

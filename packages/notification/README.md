@@ -12,7 +12,7 @@ record of what was sent.
 
 ## What you get
 
-- **Multi-channel support**: Email, SMS, Slack (Push coming soon)
+- **Multi-channel support**: Email, SMS, Slack, native push (FCM: Android, iOS, web)
 - **Provider pattern**: Pluggable providers (AWS SES, AWS SNS, etc.)
 - **Template system**: Variable substitution with filters
 - **Scheduled delivery**: Schedule notifications for later via pg-boss
@@ -177,6 +177,113 @@ await sendSMS({
     message: 'Your code is 123456',
 });
 ```
+
+## Push (FCM)
+
+Native push goes through Firebase Cloud Messaging's HTTP v1 API, which reaches Android,
+iOS (FCM relays to APNs — upload your APNs auth key in the Firebase console) and web.
+
+### Setup
+
+```bash
+pnpm add google-auth-library        # optional peer dependency, needed only for push
+```
+
+| Variable | Meaning |
+|---|---|
+| `SPFN_NOTIFICATION_FCM_SERVICE_ACCOUNT` | Service-account JSON. Unset: Application Default Credentials (GKE Workload Identity, `gcloud auth application-default login`) |
+| `SPFN_NOTIFICATION_FCM_PROJECT_ID` | Firebase project id; defaults to the credential's project |
+| `SPFN_NOTIFICATION_PUSH_PROVIDER` | `fcm` (default), or the name of a provider passed to `registerPushProvider` |
+
+### Device tokens
+
+The package stores tokens but ships no route: registering a token must be tied to the
+signed-in user, and the package does not depend on auth. Call it from your own
+authenticated route and pass your user id as a string.
+
+```typescript
+import { registerPushDevice, unregisterPushDevice } from '@spfn/notification/server';
+
+// after sign-in, and whenever the app gets a new FCM token
+await registerPushDevice({
+    ownerId: String(auth.userId),
+    token: body.fcmToken,
+    platform: 'ios',            // 'ios' | 'android' | 'web'
+    deviceId: body.installId,   // optional, recommended
+    locale: body.locale,        // optional: renders localised templates per device
+});
+
+// on sign-out
+await unregisterPushDevice(body.fcmToken);
+```
+
+- A token registered by another owner moves to the new one, so a shared device that
+  signs in as someone else stops receiving the previous user's pushes.
+- With `deviceId`, a rotated token replaces the device's old one (one active token per
+  device, whoever owned it). Take `deviceId` from the device itself (an install id the
+  app generates), never from user input: anyone who can name another user's `deviceId`
+  can retire that device's token.
+- FCM answering `UNREGISTERED` or `SENDER_ID_MISMATCH` invalidates the token.
+  `INVALID_ARGUMENT` never does: a malformed payload looks the same and would otherwise
+  wipe every token it was sent to.
+
+### Sending
+
+```typescript
+import { sendPush } from '@spfn/notification/server';
+
+// every active device of the user
+await sendPush({ to: { ownerId: userId }, title: 'Order shipped', body: '#1234', data: { orderId: '1234' } });
+
+// narrowed: iOS only / named devices / the device used last
+await sendPush({ to: { ownerId: userId, devices: { platforms: ['ios'] } }, title: '…' });
+await sendPush({ to: { ownerId: userId, devices: { deviceIds: ['install-1'] } }, title: '…' });
+await sendPush({ to: { ownerId: userId, devices: { latest: 1 } }, title: '…' });
+
+// tokens you manage yourself
+await sendPush({ to: { tokens: [a, b] }, title: '…' });
+```
+
+Which devices get a push is the caller's decision; the default is all of the owner's
+active devices. For a rule the selector cannot express, read `listPushDevices(ownerId)`
+and pass `{ tokens }`.
+
+The result is per device, with masked tokens:
+
+```typescript
+{
+    success: false,             // true only when every device succeeded
+    successCount: 1,
+    failureCount: 1,
+    results: [
+        { token: 'dF3k9a…x81Q', deviceId: 'install-1', platform: 'ios', success: true, messageId: '…' },
+        { token: 'c2Pq0Z…7tLm', platform: 'android', success: false, error: 'UNREGISTERED: …' },
+    ],
+}
+```
+
+An owner with no active device returns `success: false, error: 'no_devices'`.
+
+- `data` values must be strings (FCM's rule); a payload over 4096 bytes is refused before
+  sending.
+- `options`: `priority` (`high`/`normal`), `ttlSeconds`, `collapseKey`, `badge`, `sound`,
+  `contentAvailable` (silent push: data only, wakes the app). They are mapped onto the
+  Android, APNs and web blocks. `fcm` takes raw FCM `message` fields, merged last.
+- Templates take `push: { title, body, data }`, also per locale. A registered device's
+  `locale` wins over the send's `locale`.
+- `idempotencyKey` applies per device: a retry reaches only the devices that did not get
+  it. `sensitive: true` keeps title and body out of history.
+- `sendPushBulk(items)` sends several pushes with bounded concurrency.
+
+### Scheduling
+
+`schedulePush(params, options)` takes the same `ScheduleOptions` as email and SMS
+(`scheduledAt`, `referenceType`/`referenceId`, `guard`, cancellation). Devices are
+resolved when the job runs, so a device registered in between is included, and a
+retry after a partial failure reaches only the devices that failed.
+
+Delivery through FCM and APNs is best effort: an accepted message can still be dropped
+without the sender being told. Do not build anything that needs a push to arrive.
 
 ## Scheduled Notifications
 

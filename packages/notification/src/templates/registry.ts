@@ -10,6 +10,7 @@ import type {
     SmsTemplateContent,
     SlackTemplateContent,
     LocaleTemplateContent,
+    PushTemplateContent,
 } from './types';
 import type { NotificationChannel } from '../channels/types';
 import { render } from './renderer';
@@ -101,6 +102,13 @@ export function renderTemplate(
     if (slack)
     {
         result.slack = renderSlackTemplate(slack, fullData);
+    }
+
+    const push = (!channel || channel === 'push') ? resolveTemplateContent(template, 'push', locale).content : undefined;
+
+    if (push)
+    {
+        result.push = renderPushTemplate(push, fullData);
     }
 
     return result;
@@ -203,6 +211,7 @@ export function renderTemplateChannel<C extends ContentChannel>(
         email: renderEmailTemplate,
         sms: renderSmsTemplate,
         slack: renderSlackTemplate,
+        push: renderPushTemplate,
     } as Record<ContentChannel, (content: never, data: TemplateData) => unknown>;
 
     return {
@@ -251,6 +260,23 @@ function renderSlackTemplate(
     return {
         text: template.text ? render(template.text, data) : undefined,
         blocks: template.blocks, // Blocks are not rendered (complex structure)
+    };
+}
+
+/**
+ * Render push template
+ */
+function renderPushTemplate(
+    template: PushTemplateContent,
+    data: TemplateData,
+): PushTemplateContent
+{
+    return {
+        title: template.title ? render(template.title, data) : undefined,
+        body: template.body ? render(template.body, data) : undefined,
+        data: template.data
+            ? Object.fromEntries(Object.entries(template.data).map(([key, value]) => [key, render(value, data)]))
+            : undefined,
     };
 }
 

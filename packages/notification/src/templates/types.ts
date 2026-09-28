@@ -32,6 +32,17 @@ export interface SlackTemplateContent
 }
 
 /**
+ * Push template content. `data` values are strings (FCM requires it) and
+ * are rendered like `title` and `body`.
+ */
+export interface PushTemplateContent
+{
+    title?: string;
+    body?: string;
+    data?: Record<string, string>;
+}
+
+/**
  * Content for one locale. A locale may cover only some channels; a channel it
  * lacks falls through to the next candidate locale.
  */
@@ -40,6 +51,7 @@ export interface LocaleTemplateContent
     email?: EmailTemplateContent;
     sms?: SmsTemplateContent;
     slack?: SlackTemplateContent;
+    push?: PushTemplateContent;
 }
 
 /**
@@ -56,6 +68,7 @@ export interface TemplateDefinition
     email?: EmailTemplateContent;
     sms?: SmsTemplateContent;
     slack?: SlackTemplateContent;
+    push?: PushTemplateContent;
     /**
      * Content per locale tag (`ko`, `en`, `ko-KR`). A send's `locale` picks
      * the exact tag, then its base language, then `defaultLocale`, then the
@@ -82,6 +95,7 @@ export interface RenderedTemplate
     email?: EmailTemplateContent;
     sms?: SmsTemplateContent;
     slack?: SlackTemplateContent;
+    push?: PushTemplateContent;
 }
 
 /**

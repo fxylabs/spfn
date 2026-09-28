@@ -6,6 +6,7 @@
 
 import type { SendEmailParams } from '../channels/email/types';
 import type { SendSMSParams } from '../channels/sms/types';
+import type { SendPushParams, PushTarget } from '../channels/push/types';
 import { renderTemplateChannel, getTemplate } from '../templates';
 import { historyRecipient } from '../privacy';
 import { isHistoryContentStored } from '../config';
@@ -18,6 +19,7 @@ import { hasSendGuard } from './send-guard.service';
 import type { HistoryRowData } from '../channels/history';
 import { sendScheduledEmailJob } from '../jobs/send-scheduled-email';
 import { sendScheduledSmsJob } from '../jobs/send-scheduled-sms';
+import { sendScheduledPushJob } from '../jobs/send-scheduled-push';
 import { normalizePhoneNumber } from '../channels/sms/utils';
 
 /**
@@ -370,4 +372,90 @@ export async function scheduleSMS(
             error: error instanceof Error ? error.message : 'Failed to schedule SMS',
         };
     }
+}
+
+/**
+ * Schedule a push. The target's devices are resolved when the job runs; the
+ * scheduled row stands for the whole push, and each device gets its own row
+ * when it is sent.
+ */
+export async function schedulePush(
+    params: SendPushParams,
+    options: ScheduleOptions,
+): Promise<ScheduleResult>
+{
+    const optionsError = idempotencyKeyError(params.idempotencyKey)
+        ?? scheduleOptionsError(options)
+        ?? (params.template && !getTemplate(params.template) ? `Template not found: ${params.template}` : undefined);
+
+    if (optionsError)
+    {
+        return { success: false, error: optionsError };
+    }
+
+    try
+    {
+        const sensitive = params.sensitive
+            ?? (params.template ? getTemplate(params.template)?.sensitive : undefined)
+            ?? false;
+        const storePayload = !sensitive && isHistoryContentStored();
+        const claimToken = crypto.randomUUID();
+        const opened = await openScheduledRow({
+            channel: 'push',
+            claimToken,
+            recipient: historyRecipient(pushTargetRecipients(params.to)),
+            templateName: params.template,
+            templateData: storePayload ? params.templateData : undefined,
+            subject: sensitive ? undefined : params.title,
+            content: storePayload ? params.body : undefined,
+            providerName: 'pending',
+            scheduledAt: options.scheduledAt,
+            referenceType: options.referenceType,
+            referenceId: options.referenceId,
+        }, params.idempotencyKey);
+
+        if ('duplicate' in opened)
+        {
+            return opened.duplicate;
+        }
+
+        const jobId = await sendScheduledPushJob.send(
+            {
+                notificationId: opened.id,
+                claimToken,
+                guard: options.guard,
+                referenceType: options.referenceType,
+                referenceId: options.referenceId,
+                params: { ...params, idempotencyKey: undefined },
+            },
+            { startAfter: options.scheduledAt },
+        );
+
+        if (jobId)
+        {
+            await updateNotificationJobId(opened.id, jobId);
+        }
+
+        return { success: true, notificationId: opened.id, jobId: jobId || undefined };
+    }
+    catch (error)
+    {
+        return {
+            success: false,
+            error: error instanceof Error ? error.message : 'Failed to schedule push',
+        };
+    }
+}
+
+/**
+ * What the scheduled row records as the push's recipient
+ */
+function pushTargetRecipients(to: PushTarget): string[]
+{
+    if ('ownerId' in to)
+    {
+        return [`owner:${to.ownerId}`];
+    }
+
+    return 'token' in to ? [to.token] : to.tokens;
 }

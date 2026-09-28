@@ -32,7 +32,7 @@ export async function teardownTestDb(): Promise<void>
 export async function clearTables(): Promise<void>
 {
     await getDatabase('write').execute(sql`
-        TRUNCATE TABLE spfn_notification.tracking_events, spfn_notification.history
+        TRUNCATE TABLE spfn_notification.tracking_events, spfn_notification.history, spfn_notification.push_devices
         RESTART IDENTITY CASCADE
     `);
 }

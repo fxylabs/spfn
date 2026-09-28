@@ -25,7 +25,11 @@ export type HistoryRowData = Omit<NewNotification, 'id' | 'createdAt' | 'updated
 export interface OpenedHistory
 {
     historyId?: number;
-    stop?: SendResult;
+    /**
+     * `retryable` is set when the stop was a transient failure (the claim
+     * could not be written), not a spent key.
+     */
+    stop?: SendResult & { retryable?: boolean };
 }
 
 /**
@@ -80,7 +84,7 @@ async function claimRow(buildRow: HistoryRowBuilder, idempotencyKey: string, log
     {
         log.warn('Failed to claim idempotency key; nothing was sent', error as Error);
 
-        return { stop: { success: false, error: 'Failed to record the idempotency key; nothing was sent' } };
+        return { stop: { success: false, error: 'Failed to record the idempotency key; nothing was sent', retryable: true } };
     }
 }
 
