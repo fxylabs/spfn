@@ -108,13 +108,16 @@ export async function cancelNotificationsByReference(
 ): Promise<{ cancelled: number; errors: number }>
 {
     const { findMany } = await import('@spfn/core/db');
-    const { eq, and } = await import('drizzle-orm');
+    const { eq, and, inArray, isNotNull } = await import('drizzle-orm');
 
+    // Same rows markNotificationCancelled accepts: waiting to send, or
+    // failed and waiting for a pg-boss retry.
     const scheduledNotifications = await findMany(notifications, {
         where: and(
             eq(notifications.referenceType, referenceType),
             eq(notifications.referenceId, referenceId),
-            eq(notifications.status, 'scheduled'),
+            isNotNull(notifications.scheduledAt),
+            inArray(notifications.status, ['scheduled', 'failed']),
         ),
     });
 

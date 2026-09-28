@@ -65,6 +65,8 @@ export async function claimKeyedSend(
                 status,
                 // A new owner: the job that failed this row must not send it again.
                 claimToken: row.claimToken ?? null,
+                // A direct send taking over a scheduled row makes it a direct row.
+                scheduledAt: row.scheduledAt ?? null,
                 errorMessage: null,
                 providerMessageId: null,
                 sentAt: null,

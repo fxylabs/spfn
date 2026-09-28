@@ -30,6 +30,7 @@ import { sendEmail, sendEmailBulk, registerEmailProvider } from '../../channels/
 import { sendSMS, sendSMSBulk, registerSMSProvider } from '../../channels/sms';
 import { sendSlack, registerSlackProvider } from '../../channels/slack';
 import { scheduleEmail } from '../schedule.service';
+import { cancelNotification, cancelNotificationsByReference } from '../cancel.service';
 import { sendScheduledEmailJob } from '../../jobs/send-scheduled-email';
 import { sendBulkEmailItemJob } from '../../jobs/send-bulk-email-item';
 import { setupTestDb, teardownTestDb, clearTables } from '../../__tests__/helpers/db';
@@ -366,5 +367,42 @@ describe('a keyed send that takes over a row makes the queued job stand down (re
         expect(emailSend).toHaveBeenCalledTimes(1);
         const all = await getDatabase('write').select().from(notifications);
         expect(all.map(r => r.status)).toEqual(['sent']);
+    });
+});
+
+describe('review round 2', () =>
+{
+    it('a direct send that takes over a failed scheduled row makes it a direct row: cancel refuses it, the key stays open', async () =>
+    {
+        await scheduleEmail(mail('r1'), { scheduledAt: new Date(Date.now() + 60_000) });
+        failOnce();
+        await expect(sendScheduledEmailJob.handler!(lastPayload(enqueue) as never)).rejects.toThrow();
+        failOnce();
+        await sendEmail(mail('r1'));
+        const [row] = await rows('email', 'r1');
+
+        expect(row).toMatchObject({ status: 'failed', scheduledAt: null });
+        await expect(cancelNotification(row.id)).resolves.toMatchObject({ success: false });
+        await expect(sendEmail(mail('r1'))).resolves.toMatchObject({ success: true });
+    });
+
+    it('cancel by reference also cancels a scheduled row that failed and awaits a retry', async () =>
+    {
+        const scheduled = await scheduleEmail(mail(), {
+            scheduledAt: new Date(Date.now() + 60_000),
+            referenceType: 'order',
+            referenceId: 'o-1',
+        });
+        const job = lastPayload(enqueue);
+        failOnce();
+        await expect(sendScheduledEmailJob.handler!(job as never)).rejects.toThrow();
+
+        await expect(cancelNotificationsByReference('order', 'o-1')).resolves.toEqual({ cancelled: 1, errors: 0 });
+        emailSend.mockClear();
+        await sendScheduledEmailJob.handler!(job as never);
+
+        expect(emailSend).not.toHaveBeenCalled();
+        const [row] = await getDatabase('write').select().from(notifications).where(eq(notifications.id, scheduled.notificationId!));
+        expect(row.status).toBe('cancelled');
     });
 });
