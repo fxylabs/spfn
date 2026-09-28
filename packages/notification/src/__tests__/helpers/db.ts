@@ -43,13 +43,15 @@ async function applyMigrations(): Promise<void>
 
     await db.execute(sql`DROP SCHEMA IF EXISTS spfn_notification CASCADE`);
 
-    const files = readdirSync(MIGRATIONS_FOLDER)
-        .filter(file => file.endsWith('.sql'))
+    // drizzle-kit 1.0 layout: one <timestamp>_<name>/migration.sql per migration.
+    const folders = readdirSync(MIGRATIONS_FOLDER, { withFileTypes: true })
+        .filter(entry => entry.isDirectory())
+        .map(entry => entry.name)
         .sort();
 
-    for (const file of files)
+    for (const folder of folders)
     {
-        const statements = readFileSync(resolve(MIGRATIONS_FOLDER, file), 'utf8')
+        const statements = readFileSync(resolve(MIGRATIONS_FOLDER, folder, 'migration.sql'), 'utf8')
             .split('--> statement-breakpoint')
             .map(statement => statement.trim())
             .filter(Boolean);

@@ -4,7 +4,8 @@
  * Stores notification sending history for tracking and auditing
  */
 
-import { text, jsonb, index } from 'drizzle-orm/pg-core';
+import { text, jsonb, index, uniqueIndex } from 'drizzle-orm/pg-core';
+import { sql } from 'drizzle-orm';
 import { id, timestamps, utcTimestamp } from '@spfn/core/db';
 import { notificationSchema } from './schema';
 
@@ -107,6 +108,19 @@ export const notifications = notificationSchema.table('history',
         referenceType: text('reference_type'),
         referenceId: text('reference_id'),
 
+        /**
+         * Caller-supplied idempotency key. Unique per (channel, key, recipient),
+         * so a retried send with the same key never reaches the provider twice.
+         */
+        idempotencyKey: text('idempotency_key'),
+
+        /**
+         * Which queued job may send this row. A job carries the token it was
+         * enqueued with and claims the row only while it still matches, so a
+         * keyed send that took the row over makes the old job's retry stand down.
+         */
+        claimToken: text('claim_token'),
+
         ...timestamps(),
     },
     (table) => [
@@ -118,6 +132,9 @@ export const notifications = notificationSchema.table('history',
         index('noti_job_id_idx').on(table.jobId),
         index('noti_batch_id_idx').on(table.batchId),
         index('noti_reference_idx').on(table.referenceType, table.referenceId),
+        uniqueIndex('noti_idempotency_idx')
+            .on(table.channel, table.idempotencyKey, table.recipient)
+            .where(sql`${table.idempotencyKey} is not null`),
     ],
 );
 

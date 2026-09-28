@@ -13,6 +13,8 @@ import {
     createScheduledNotification,
     updateNotificationJobId,
 } from './notification.service';
+import { claimKeyedSend, idempotencyKeyError } from './idempotency.service';
+import type { HistoryRowData } from '../channels/history';
 import { sendScheduledEmailJob } from '../jobs/send-scheduled-email';
 import { sendScheduledSmsJob } from '../jobs/send-scheduled-sms';
 import { normalizePhoneNumber } from '../channels/sms/utils';
@@ -43,6 +45,45 @@ export interface ScheduleResult
     notificationId?: number;
     jobId?: string;
     error?: string;
+    /**
+     * The idempotency key was already used: nothing new was scheduled, and
+     * `notificationId`/`jobId` are the first schedule's.
+     */
+    deduplicated?: boolean;
+}
+
+/**
+ * Create the scheduled row, or — for a keyed schedule — claim it. A spent key
+ * returns the first schedule instead of a new row.
+ */
+async function openScheduledRow(
+    row: HistoryRowData & { scheduledAt: Date },
+    idempotencyKey: string | undefined,
+): Promise<{ id: number } | { duplicate: ScheduleResult }>
+{
+    if (idempotencyKey === undefined)
+    {
+        return { id: (await createScheduledNotification(row)).id };
+    }
+
+    const claim = await claimKeyedSend({ ...row, idempotencyKey }, 'scheduled');
+
+    if (claim.claimed)
+    {
+        return { id: claim.id };
+    }
+
+    const spent = claim.existing?.status === 'scheduled' || claim.existing?.status === 'sent';
+
+    return {
+        duplicate: {
+            success: spent,
+            notificationId: claim.existing?.id,
+            jobId: claim.existing?.jobId ?? undefined,
+            deduplicated: true,
+            error: spent ? undefined : claim.result.error,
+        },
+    };
 }
 
 /**
@@ -53,6 +94,13 @@ export async function scheduleEmail(
     options: ScheduleOptions,
 ): Promise<ScheduleResult>
 {
+    const keyError = idempotencyKeyError(params.idempotencyKey);
+
+    if (keyError)
+    {
+        return { success: false, error: keyError };
+    }
+
     // Prepare recipients
     const recipients = Array.isArray(params.to) ? params.to : [params.to];
 
@@ -110,8 +158,10 @@ export async function scheduleEmail(
         // still carries the raw recipient and content — it has to, that is what
         // gets sent later — so scheduled sends inherently persist the payload
         // until pg-boss archives the job.
-        const notification = await createScheduledNotification({
+        const claimToken = crypto.randomUUID();
+        const opened = await openScheduledRow({
             channel: 'email',
+            claimToken,
             recipient: historyRecipient(recipients),
             templateName: params.template,
             templateData: storePayload ? params.data : undefined,
@@ -121,7 +171,14 @@ export async function scheduleEmail(
             scheduledAt: options.scheduledAt,
             referenceType: options.referenceType,
             referenceId: options.referenceId,
-        });
+        }, params.idempotencyKey);
+
+        if ('duplicate' in opened)
+        {
+            return opened.duplicate;
+        }
+
+        const notification = opened;
 
         // Schedule job with pg-boss
         const jobId = await sendScheduledEmailJob.send(
@@ -136,6 +193,7 @@ export async function scheduleEmail(
                 from: params.from,
                 replyTo: params.replyTo,
                 sensitive: params.sensitive,
+                claimToken,
             },
             { startAfter: options.scheduledAt },
         );
@@ -169,6 +227,13 @@ export async function scheduleSMS(
     options: ScheduleOptions,
 ): Promise<ScheduleResult>
 {
+    const keyError = idempotencyKeyError(params.idempotencyKey);
+
+    if (keyError)
+    {
+        return { success: false, error: keyError };
+    }
+
     // Prepare recipients
     const recipients = Array.isArray(params.to) ? params.to : [params.to];
 
@@ -215,8 +280,10 @@ export async function scheduleSMS(
 
         // Create scheduled notification record (see the email note above about
         // the pg-boss payload).
-        const notification = await createScheduledNotification({
+        const claimToken = crypto.randomUUID();
+        const opened = await openScheduledRow({
             channel: 'sms',
+            claimToken,
             recipient: historyRecipient(normalizedRecipients),
             templateName: params.template,
             templateData: storePayload ? params.data : undefined,
@@ -225,7 +292,14 @@ export async function scheduleSMS(
             scheduledAt: options.scheduledAt,
             referenceType: options.referenceType,
             referenceId: options.referenceId,
-        });
+        }, params.idempotencyKey);
+
+        if ('duplicate' in opened)
+        {
+            return opened.duplicate;
+        }
+
+        const notification = opened;
 
         // Schedule job with pg-boss
         const jobId = await sendScheduledSmsJob.send(
@@ -236,6 +310,7 @@ export async function scheduleSMS(
                 template: params.template,
                 data: params.data,
                 sensitive: params.sensitive,
+                claimToken,
             },
             { startAfter: options.scheduledAt },
         );

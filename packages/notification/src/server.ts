@@ -107,7 +107,7 @@ export {
     markNotificationSent,
     markNotificationFailed,
     markNotificationPending,
-    claimScheduledNotification,
+    claimNotificationForJob,
     markNotificationCancelled,
     findNotificationByJobId,
     findNotifications,
@@ -123,6 +123,8 @@ export {
     cancelNotificationsByReference,
     type CancelResult,
 } from './services/cancel.service';
+
+export { MAX_IDEMPOTENCY_KEY_LENGTH } from './services/idempotency.service';
 
 // Jobs
 export {

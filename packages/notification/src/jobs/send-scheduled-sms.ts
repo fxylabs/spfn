@@ -4,7 +4,7 @@
 
 import { job } from '@spfn/core/job';
 import { Type } from '@sinclair/typebox';
-import { sendSMS } from '../channels/sms';
+import { deliverSMS } from '../channels/sms';
 import { runScheduledSend } from './run-scheduled-send';
 
 /**
@@ -17,6 +17,7 @@ const SendScheduledSmsInput = Type.Object({
     template: Type.Optional(Type.String()),
     data: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
     sensitive: Type.Optional(Type.Boolean()),
+    claimToken: Type.Optional(Type.String()),
 });
 
 /**
@@ -30,7 +31,7 @@ export const sendScheduledSmsJob = job('notification.send-scheduled-sms')
     })
     .handler(async (input) =>
     {
-        const { notificationId, ...smsParams } = input;
+        const { notificationId, claimToken, ...smsParams } = input;
 
-        await runScheduledSend(notificationId, () => sendSMS(smsParams));
+        await runScheduledSend(notificationId, claimToken, () => deliverSMS(smsParams, notificationId));
     });

@@ -4,19 +4,16 @@
 
 import type { SendSMSParams, SMSProvider, InternalSendSMSParams } from './types';
 import type { SendResult } from '../types';
-import type { Notification } from '../../entities';
 import { awsSnsProvider } from './providers/aws-sns';
-import { env, isHistoryEnabled, isHistoryContentStored } from '../../config';
+import { env, isHistoryContentStored } from '../../config';
 import { renderTemplate, hasTemplate, getTemplate } from '../../templates';
 import { maskRecipients, maskPhone, historyRecipient, scrubSendResult } from '../../privacy';
 import {
-    createNotificationRecord,
-    createNotificationRecords,
-    markNotificationSent,
-    markNotificationFailed,
     markManySent,
     markManyFailed,
 } from '../../services/notification.service';
+import { idempotencyKeyError } from '../../services/idempotency.service';
+import { openHistoryRow, closeHistoryRow, openBulkHistoryRows, splitStopped, type HistoryRowData } from '../history';
 import { runWithConcurrency } from '../concurrency';
 import { sendBulkSmsItemJob } from '../../jobs/send-bulk-sms-item';
 import { normalizePhoneNumber } from './utils';
@@ -63,6 +60,25 @@ function getProvider(): SMSProvider
  */
 export async function sendSMS(params: SendSMSParams): Promise<SendResult>
 {
+    return deliverSMS(params);
+}
+
+/**
+ * Send an SMS. `scheduledRowId` is the history row a scheduled job already
+ * owns: no per-recipient rows are opened or closed, and the job records the
+ * outcome.
+ *
+ * @internal
+ */
+export async function deliverSMS(params: SendSMSParams, scheduledRowId?: number): Promise<SendResult>
+{
+    const keyError = scheduledRowId ? undefined : idempotencyKeyError(params.idempotencyKey);
+
+    if (keyError)
+    {
+        return { success: false, error: keyError };
+    }
+
     // Prepare recipients
     const recipients = Array.isArray(params.to) ? params.to : [params.to];
 
@@ -103,7 +119,7 @@ export async function sendSMS(params: SendSMSParams): Promise<SendResult>
 
     // Send to each recipient
     const provider = getProvider();
-    // Send one recipient: create history, send, then update history fire-and-forget.
+    // Send one recipient: open its history row (the idempotency claim when keyed), send, record.
     const sendOne = async (recipient: string): Promise<SendResult> =>
     {
         const normalizedPhone = normalizePhoneNumber(recipient);
@@ -113,31 +129,13 @@ export async function sendSMS(params: SendSMSParams): Promise<SendResult>
             message,
         };
 
-        // Create history record if enabled
-        let historyId: number | undefined;
-        if (isHistoryEnabled())
-        {
-            const sensitive = params.sensitive
-                ?? (params.template ? getTemplate(params.template)?.sensitive : undefined)
-                ?? false;
-            const storePayload = !sensitive && isHistoryContentStored();
+        const opened = scheduledRowId
+            ? {}
+            : await openHistoryRow(() => smsHistoryRow(params, normalizedPhone, message, provider.name), params.idempotencyKey, log);
 
-            try
-            {
-                const record = await createNotificationRecord({
-                    channel: 'sms',
-                    recipient: historyRecipient([normalizedPhone]),
-                    templateName: params.template,
-                    templateData: storePayload ? params.data : undefined,
-                    content: storePayload ? message : undefined,
-                    providerName: provider.name,
-                });
-                historyId = record.id;
-            }
-            catch (error)
-            {
-                log.warn('Failed to create notification history record', error as Error);
-            }
+        if (opened.stop)
+        {
+            return opened.stop;
         }
 
         const result = scrubSendResult(await provider.send(internalParams));
@@ -151,15 +149,7 @@ export async function sendSMS(params: SendSMSParams): Promise<SendResult>
             log.error('SMS send failed', { to: maskPhone(normalizedPhone), error: result.error });
         }
 
-        // Update history record (fire-and-forget — best-effort, off the send path)
-        if (historyId && isHistoryEnabled())
-        {
-            const update = result.success
-                ? markNotificationSent(historyId, result.messageId)
-                : markNotificationFailed(historyId, result.error || 'Unknown error');
-
-            update.catch(error => log.warn('Failed to update notification history record', error as Error));
-        }
+        await closeHistoryRow(opened.historyId, result, params.idempotencyKey !== undefined, log);
 
         return result;
     };
@@ -182,6 +172,24 @@ export async function sendSMS(params: SendSMSParams): Promise<SendResult>
         success: allSuccess,
         messageId: messageIds || undefined,
         error: errors || undefined,
+        deduplicated: results.some(r => r.deduplicated) || undefined,
+    };
+}
+
+function smsHistoryRow(params: SendSMSParams, phone: string, message: string, providerName: string): HistoryRowData
+{
+    const sensitive = params.sensitive
+        ?? (params.template ? getTemplate(params.template)?.sensitive : undefined)
+        ?? false;
+    const storePayload = !sensitive && isHistoryContentStored();
+
+    return {
+        channel: 'sms',
+        recipient: historyRecipient([phone]),
+        templateName: params.template,
+        templateData: storePayload ? params.data : undefined,
+        content: storePayload ? message : undefined,
+        providerName,
     };
 }
 
@@ -207,6 +215,9 @@ interface PreparedSMS
     template?: string;
     data?: Record<string, unknown>;
     sensitive: boolean;
+    idempotencyKey?: string;
+    /** Distributed mode: the token the item's job claims its row with. */
+    claimToken?: string;
 }
 
 /**
@@ -245,6 +256,13 @@ export async function sendSMSBulk(
     {
         const item = items[i];
         const recipients = Array.isArray(item.to) ? item.to : [item.to];
+        const keyError = idempotencyKeyError(item.idempotencyKey);
+
+        if (keyError)
+        {
+            earlyFailures.push({ index: i, result: { success: false, error: keyError } });
+            continue;
+        }
 
         let message = item.message;
 
@@ -283,47 +301,48 @@ export async function sendSMSBulk(
                 template: item.template,
                 data: item.data,
                 sensitive,
+                idempotencyKey: item.idempotencyKey,
             });
         }
     }
 
-    // 2. Batch create notification records
-    let historyRecords: Notification[] = [];
-
-    if (isHistoryEnabled() && prepared.length > 0)
+    // A queued item may only send the row it was enqueued for (see claimNotificationForJob).
+    if (options?.distributed)
     {
-        try
+        for (const p of prepared)
         {
-            const storeContent = isHistoryContentStored();
-
-            historyRecords = await createNotificationRecords(
-                prepared.map((p) =>
-                {
-                    const storePayload = !p.sensitive && storeContent;
-
-                    return {
-                        channel: 'sms' as const,
-                        recipient: historyRecipient([p.phone]),
-                        templateName: p.template,
-                        templateData: storePayload ? p.data : undefined,
-                        content: storePayload ? p.message : undefined,
-                        providerName: provider.name,
-                        batchId,
-                    };
-                }),
-            );
-        }
-        catch (error)
-        {
-            log.warn('Failed to batch create notification history records', error as Error);
+            p.claimToken = crypto.randomUUID();
         }
     }
+
+    // 2. Open history rows (one per recipient); a spent key stops that recipient
+    const storeContent = isHistoryContentStored();
+    const opened = await openBulkHistoryRows(prepared.map(p =>
+    {
+        const storePayload = !p.sensitive && storeContent;
+
+        return {
+            buildRow: () => ({
+                channel: 'sms' as const,
+                recipient: historyRecipient([p.phone]),
+                templateName: p.template,
+                templateData: storePayload ? p.data : undefined,
+                content: storePayload ? p.message : undefined,
+                providerName: provider.name,
+                batchId,
+                claimToken: p.claimToken,
+            }),
+            idempotencyKey: p.idempotencyKey,
+        };
+    }), log);
+    const { sendable, historyIds, stopped } = splitStopped(prepared, opened);
 
     // 3. Distributed mode: enqueue to pg-boss
     if (options?.distributed)
     {
-        const jobInputs = prepared.map((p, i) => ({
-            notificationId: historyRecords[i]?.id ?? 0,
+        const jobInputs = sendable.map((p, i) => ({
+            notificationId: historyIds[i] ?? 0,
+            claimToken: p.claimToken,
             to: p.phone,
             message: p.message,
         }));
@@ -333,64 +352,33 @@ export async function sendSMSBulk(
         log.info('Bulk SMS enqueued for distributed processing', {
             batchId,
             total: items.length,
-            enqueued: prepared.length,
+            enqueued: sendable.length,
             earlyFailures: earlyFailures.length,
+            deduplicated: stopped.length,
         });
 
-        const results: SendResult[] = new Array(items.length);
+        const pending = sendable.map(p => ({ index: p.index, result: { success: true, messageId: `pending:${batchId}` } }));
 
-        for (const { index, result } of earlyFailures)
-        {
-            results[index] = result;
-        }
-
-        // Aggregate pending results per original item
-        const pendingMap = new Map<number, number>();
-        for (const p of prepared)
-        {
-            pendingMap.set(p.index, (pendingMap.get(p.index) ?? 0) + 1);
-        }
-
-        for (const [index] of pendingMap)
-        {
-            if (!results[index])
-            {
-                results[index] = { success: true, messageId: `pending:${batchId}` };
-            }
-        }
-
-        return {
-            results,
-            successCount: pendingMap.size,
-            failureCount: earlyFailures.length,
-            batchId,
-        };
+        return { ...aggregateSmsResults(items.length, earlyFailures, [...stopped, ...pending]), batchId };
     }
 
     // 4. In-process mode: send with concurrency control
     const concurrency = options?.concurrency ?? 10;
 
     const sendResults = await runWithConcurrency(
-        prepared,
+        sendable,
         (p) => provider.send({ to: p.phone, message: p.message }).then(scrubSendResult),
         concurrency,
     );
 
-    // 5. Build per-item aggregated results + update history
-    const resultsMap = new Map<number, SendResult[]>();
+    // 5. Log + update history
     const sentItems: Array<{ id: number; providerMessageId?: string }> = [];
     const failedItems: Array<{ id: number; errorMessage: string }> = [];
 
-    for (let i = 0; i < prepared.length; i++)
+    for (let i = 0; i < sendable.length; i++)
     {
-        const { index, phone } = prepared[i];
+        const { phone } = sendable[i];
         const result = sendResults[i];
-
-        if (!resultsMap.has(index))
-        {
-            resultsMap.set(index, []);
-        }
-        resultsMap.get(index)!.push(result);
 
         if (result.success)
         {
@@ -401,9 +389,9 @@ export async function sendSMSBulk(
             log.error('SMS send failed', { to: maskPhone(phone), error: result.error });
         }
 
-        const historyId = historyRecords[i]?.id;
+        const historyId = historyIds[i];
 
-        if (historyId && isHistoryEnabled())
+        if (historyId)
         {
             if (result.success)
             {
@@ -422,36 +410,47 @@ export async function sendSMSBulk(
     ]);
 
     // 6. Aggregate results per original item
-    const results: SendResult[] = new Array(items.length);
-    let successCount = 0;
-    let failureCount = earlyFailures.length;
+    const sent = sendable.map((p, i) => ({ index: p.index, result: sendResults[i] }));
+
+    return { ...aggregateSmsResults(items.length, earlyFailures, [...stopped, ...sent]), batchId };
+}
+
+/**
+ * Fold per-recipient results into one result per original item.
+ */
+function aggregateSmsResults(
+    itemCount: number,
+    earlyFailures: { index: number; result: SendResult }[],
+    perRecipient: { index: number; result: SendResult }[],
+): Omit<BulkSMSResult, 'batchId'>
+{
+    const results: SendResult[] = new Array(itemCount);
+    const byItem = new Map<number, SendResult[]>();
 
     for (const { index, result } of earlyFailures)
     {
         results[index] = result;
     }
 
-    for (const [index, itemResults] of resultsMap)
+    for (const { index, result } of perRecipient)
     {
-        const allSuccess = itemResults.every(r => r.success);
+        byItem.set(index, [...(byItem.get(index) ?? []), result]);
+    }
+
+    for (const [index, itemResults] of byItem)
+    {
         const messageIds = itemResults.filter(r => r.messageId).map(r => r.messageId).join(',');
         const errors = itemResults.filter(r => r.error).map(r => r.error).join('; ');
 
         results[index] = {
-            success: allSuccess,
+            success: itemResults.every(r => r.success),
             messageId: messageIds || undefined,
             error: errors || undefined,
+            deduplicated: itemResults.some(r => r.deduplicated) || undefined,
         };
-
-        if (allSuccess)
-        {
-            successCount++;
-        }
-        else
-        {
-            failureCount++;
-        }
     }
 
-    return { results, successCount, failureCount, batchId };
+    const successCount = results.filter(r => r?.success).length;
+
+    return { results, successCount, failureCount: results.filter(Boolean).length - successCount };
 }
