@@ -53,6 +53,14 @@ const VERIFIED_ALGORITHMS: readonly unknown[] = ['EdDSA', 'ES256', 'RS256'];
 
 const COORDINATE_BYTES = 32;
 
+/**
+ * The most a JWK Set may hold: keys, and bytes of JSON text. Issuers publish
+ * a handful of keys; a set far past that is a misconfiguration or an attack,
+ * and every key in it is imported before a single token is checked.
+ */
+const MAX_JWKS_KEYS = 64;
+const MAX_JWKS_TEXT_BYTES = 64 * 1024;
+
 /** Members that are strings when present at all. */
 const STRING_MEMBERS = ['kid', 'crv', 'use', 'alg'];
 
@@ -257,9 +265,22 @@ function readJwk(jwk: Jwk, where: string): VerifyKeyEntry
     return { kid: jwk.kid, alg, public: key } as VerifyKeyEntry;
 }
 
+/** Throw if `set` is JSON text longer than a JWK Set is allowed to be. */
+function assertTextSize(set: unknown): void
+{
+    const bytes = typeof set === 'string' ? Buffer.byteLength(set, 'utf8') : 0;
+
+    if (bytes > MAX_JWKS_TEXT_BYTES)
+    {
+        throw new Error(`Invalid JWK Set: ${bytes} bytes of text, over the ${MAX_JWKS_TEXT_BYTES} allowed`);
+    }
+}
+
 /** The JSON object `set` is, or holds as text with no duplicate member. */
 function setObject(set: unknown): Jwk
 {
+    assertTextSize(set);
+
     const object = typeof set === 'string' ? parseJsonObject(set) : set;
 
     if (typeof object !== 'object' || object === null || !Array.isArray((object as Jwk).keys))
@@ -268,6 +289,11 @@ function setObject(set: unknown): Jwk
             'Invalid JWK Set: expected an object with a "keys" array '
             + '(as text: one JSON object, no duplicate member at any depth)',
         );
+    }
+
+    if ((object as Jwk & { keys: unknown[] }).keys.length > MAX_JWKS_KEYS)
+    {
+        throw new Error(`Invalid JWK Set: more than ${MAX_JWKS_KEYS} keys`);
     }
 
     return object as Jwk;
@@ -284,8 +310,10 @@ function setObject(set: unknown): Jwk
  * than `sig`, `key_ops` without `verify`, an `alg` this package does not
  * verify. Thrown, refusing the whole set: a broken key of a kind this package
  * reads — private members, a missing or duplicate kid, non-canonical
- * base64url, a weak RSA key, an `alg` the key contradicts — and a set with no
- * usable key left.
+ * base64url, a weak RSA key, an `alg` the key contradicts — a set with no
+ * usable key left, and a set of more than 64 keys or 64 KiB of text.
+ *
+ * Parse once per fetch and reuse `keys`; parsing imports every key.
  */
 export function parseJwks(set: unknown): ParsedJwks
 {
@@ -373,11 +401,43 @@ function isJwkSet(source: VerifyKeySource): source is { keys: readonly Jwk[] }
 }
 
 /**
+ * Throw unless a hand-built entry is one the verifier can use: a string kid, a
+ * `KeyObject`, and the algorithm that key verifies as its label.
+ *
+ * The label is checked against the key, never trusted: an `rsa-pss` or P-384
+ * key labelled `ES256`, or an RSA key labelled `EdDSA`, would otherwise verify
+ * whatever its `crypto.verify` call happens to accept under that header.
+ */
+function assertEntry(entry: Partial<VerifyKeyEntry> | undefined): void
+{
+    if (typeof entry?.kid !== 'string' || !(entry.public instanceof KeyObject))
+    {
+        throw new Error(
+            'Invalid key entry: expected { kid: string, alg, public: KeyObject } '
+            + '(for a JWK Set, pass parseJwks(set).keys, not what parseJwks returns)',
+        );
+    }
+
+    const where = `for kid ${JSON.stringify(entry.kid)}`;
+    const alg = verifyAlgorithmOf(entry.public);
+
+    if (entry.alg !== alg)
+    {
+        throw jwkError(where, `a ${alg} key is labelled ${String(entry.alg)}; it verifies ${alg} only`);
+    }
+
+    if (alg === 'RS256')
+    {
+        assertRsaKey(entry.public, where);
+    }
+}
+
+/**
  * Normalise every key source into a map keyed by `kid`.
  *
  * A JWK Set is parsed on every call — parse it once with `parseJwks()` and
- * pass `keys`. An RSA key handed over directly is held to the RSA rules here,
- * and so is an entry that labels an RSA key with another algorithm.
+ * pass `keys`. Every entry is held to the key it carries: its label must be
+ * the algorithm that key verifies, and an RSA key must meet the RSA rules.
  */
 export function toVerifyKeyMap(source: VerifyKeySource): ReadonlyMap<string, VerifyKeyEntry>
 {
@@ -390,17 +450,7 @@ export function toVerifyKeyMap(source: VerifyKeySource): ReadonlyMap<string, Ver
 
     for (const entry of keys.values())
     {
-        const where = `for kid ${JSON.stringify(entry.kid)}`;
-
-        if (entry.alg !== 'RS256' && entry.public?.asymmetricKeyType === 'rsa')
-        {
-            throw jwkError(where, `an RSA key is labelled ${entry.alg}; it verifies RS256 only`);
-        }
-
-        if (entry.alg === 'RS256')
-        {
-            assertRsaKey(entry.public, where);
-        }
+        assertEntry(entry);
     }
 
     return keys;

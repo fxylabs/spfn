@@ -4,7 +4,7 @@ import { parseJwks, rsaPublicKeyEntry } from './jwks';
 import { encodeBase64Url } from './jws';
 import { formatPublicKeyEntry, parsePublicKeys, toJwks } from './keys';
 import { equivalentFinalCharacters, testKey } from './test-support';
-import type { RsaPublicKeyEntry } from './types';
+import type { RsaPublicKeyEntry, VerifyKeyEntry } from './types';
 import { verifyJws } from './verify';
 
 /** One RSA key for the whole file: 2048-bit generation is the slow part. */
@@ -130,14 +130,52 @@ describe('RS256 verification', () =>
         expect(() => formatPublicKeyEntry(RSA_ENTRY as never)).toThrow();
     });
 
-    it('S6: a hand-built entry is held to the RSA rules, and cannot relabel an RSA key', () =>
+    it('S6: a hand-built entry is held to the RSA rules, and cannot relabel any key', () =>
     {
         const weak = generateKeyPairSync('rsa', { modulusLength: 1024 }).publicKey;
+        const pss = generateKeyPairSync('rsa-pss', { modulusLength: 2048 }).publicKey;
+        const p384 = generateKeyPairSync('ec', { namedCurve: 'P-384' }).publicKey;
+        const secp256k1 = generateKeyPairSync('ec', { namedCurve: 'secp256k1' }).publicKey;
+        const ed25519 = generateKeyPairSync('ed25519').publicKey;
+        const mislabelled: [VerifyKeyEntry['alg'], KeyObject, RegExp][] = [
+            ['EdDSA', RSA.publicKey, /RS256 key is labelled EdDSA/],
+            ['ES256', RSA.publicKey, /RS256 key is labelled ES256/],
+            ['ES256', pss, /Unsupported key type rsa-pss/],
+            ['EdDSA', pss, /Unsupported key type rsa-pss/],
+            ['ES256', p384, /Unsupported key type ec/],
+            ['ES256', secp256k1, /Unsupported key type ec/],
+            ['ES256', ed25519, /EdDSA key is labelled ES256/],
+            ['RS256', ed25519, /EdDSA key is labelled RS256/],
+        ];
 
         expect(() => verifyJws(rsaToken(), [{ kid: 'weak', alg: 'RS256', public: weak }]))
             .toThrow(/1024 bits/);
-        expect(() => verifyJws(rsaToken(), [{ kid: 'x', alg: 'EdDSA', public: RSA.publicKey }]))
-            .toThrow(/RS256 only/);
+
+        for (const [alg, key, error] of mislabelled)
+        {
+            const entry = { kid: 'x', alg, public: key } as VerifyKeyEntry;
+
+            expect(() => verifyJws(rsaToken(), [entry]), `${alg} ${key.asymmetricKeyType}`).toThrow(error);
+            expect(() => verifyJws(rsaToken(), new Map([['x', entry]]))).toThrow(error);
+        }
+    });
+
+    it('S10: an entry without a string kid or a KeyObject is a configuration error', () =>
+    {
+        const parsed = parseJwks(toJwks([RSA_ENTRY]));
+        const broken = [
+            parsed,
+            { kid: 1, alg: 'RS256', public: RSA.publicKey },
+            { kid: 'a', alg: 'RS256', public: rsaJwk() },
+            { kid: 'a', alg: 'RS256' },
+        ];
+
+        for (const source of broken)
+        {
+            expect(() => verifyJws(rsaToken(), source as never)).toThrow(/parseJwks\(set\)\.keys/);
+        }
+
+        expect(verifyJws(rsaToken(), parsed.keys, { now: NOW })).toMatchObject({ ok: true });
     });
 });
 
@@ -274,5 +312,26 @@ describe('parseJwks', () =>
 
         expect((parsed.keys.get('issuer-rsa') as RsaPublicKeyEntry).alg).toBe('RS256');
         expect(parsed.skipped).toEqual([{ index: 0, kid: 'issuer-rsa', reason: 'not-for-signing' }]);
+    });
+
+    it('W10: refuses a set of more than 64 keys or 64 KiB of text', () =>
+    {
+        const keys = (count: number): Record<string, unknown>[] => Array.from(
+            { length: count },
+            (_, index) => rsaJwk({ kid: `k${index}` }),
+        );
+        const padded = (bytes: number): string =>
+        {
+            const text = JSON.stringify({ keys: [rsaJwk()], pad: '' });
+
+            return text.replace('"pad":""', `"pad":"${'x'.repeat(bytes - text.length)}"`);
+        };
+
+        expect(parseJwks({ keys: keys(64) }).keys.size).toBe(64);
+        expect(() => parseJwks({ keys: keys(65) })).toThrow(/more than 64 keys/);
+        expect(() => parseJwks(JSON.stringify({ keys: keys(65) }))).toThrow(/more than 64 keys/);
+        expect(parseJwks(padded(64 * 1024)).keys.size).toBe(1);
+        expect(() => parseJwks(padded(64 * 1024 + 1))).toThrow(/65537 bytes of text/);
+        expect(() => verifyJws(rsaToken(), { keys: keys(65) } as never)).toThrow(/more than 64 keys/);
     });
 });
