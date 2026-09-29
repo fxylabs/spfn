@@ -281,7 +281,7 @@ if (result.ok)
 ```
 
 - `rest` must be anchored: its source starts with `^` and ends with an unescaped `$`, and
-  it may not carry the `g`, `y` or `m` flag. Anything else throws on every call. An
+  it may carry no flag but `u` or `v`. Anything else throws on every call. An
   unanchored pattern would let `…/register/<nonce>/../report` through because it merely
   *contains* a match.
 - `rest` is also evaluated as `^(?:rest)$`, so a top-level alternation (`^a|b$`) cannot
@@ -321,8 +321,10 @@ const result = verifyJws(token, keys, {
 that issuer holds a token its keys verify; the audience is what says the token was meant
 for you.
 
-`verifyJws()` also accepts the JWK Set object itself, and parses it on every call. Parse it
-once.
+`verifyJws()` also accepts the JWK Set object itself, and parses it on every call — every
+key imported again for every token. Parse it once per fetch with `parseJwks()` and reuse
+`.keys`. Pass `.keys`, not what `parseJwks()` returns: that object is not a key source, and
+`verifyJws()` throws on it.
 
 ### RSA keys
 
@@ -342,7 +344,10 @@ An RSA key reaches the verifier through a JWK Set or through
 RSA keys and still refuses them: it is the format of keys this package hands out.
 
 An RSA key decides its algorithm like any other. It verifies `RS256` and nothing else, and
-an entry that labels an RSA key `EdDSA` or `ES256` throws.
+an entry that labels an RSA key `EdDSA` or `ES256` throws. Every hand-built entry is held to
+the same rule: its `alg` must be the algorithm its key verifies, so an `rsa-pss`, P-384 or
+secp256k1 key throws whatever it is labelled, and so does an entry with no string `kid` or
+no `KeyObject`.
 
 ### JWK Sets
 
@@ -362,6 +367,7 @@ are in a token, and a parsed object has already lost them.
 | private members (`d`, `p`, `q`, …) on a key of a kind this package reads | throws |
 | a key given only as a certificate (`x5c`, `x5t`) | throws — `n` and `e` are what is read |
 | no usable key left after skipping | throws |
+| more than 64 keys, or JSON text over 64 KiB | throws |
 
 Unknown kinds are skipped because RFC 7517 §5 asks for exactly that, and because issuers
 add new kinds of key to their sets: an encryption key appearing next to yours must not stop
@@ -531,6 +537,36 @@ WebCrypto detour, have both been there since Node 12.
 `engines` says `>=20.0.0`, which is the floor for the package's *code*; 20.19 is the floor
 for the `require()` interop the repository tests. Node 20 left maintenance on 2026-04-30,
 so 22 is the line to be on.
+
+## Changelog
+
+### 0.1.0-alpha.2
+
+Added: RS256 verification, JWK Set input (`parseJwks()`, `rsaPublicKeyEntry()`), the
+`issuer`, `audience` and `issuedWithinSec` options, and purposes.
+
+**Changed behaviour.** Default-option verdicts on well-formed key sources are unchanged.
+Mislabelled hand-built entries now throw at configuration:
+
+- An entry whose `alg` is not the algorithm its key verifies throws when `verifyJws()` reads
+  it. In 0.1.0-alpha.1, `{ kid, alg: 'EdDSA', public: <RSA key> }` in a `Map` or an array
+  verified an RSA PKCS#1 v1.5 signature under an `EdDSA` header as `ok: true`; it now
+  throws. So do entries holding a key this package does not verify (`rsa-pss`, P-384,
+  secp256k1), whatever their label.
+- An entry without a string `kid` or a `KeyObject` `public` throws — for instance the
+  result of `parseJwks()` passed where its `.keys` belongs.
+
+**Types.**
+
+- `verifyJws()` has two overloads: a `PublicKeySource` gives `VerifyResult` (EdDSA or ES256
+  headers), any other `VerifyKeySource` gives `VerifyResult<VerifyAlgorithm>` (RS256
+  included). `ReturnType<typeof verifyJws>` takes the last overload, so it is now the wide
+  type; name `VerifyResult` directly if you want the narrow one. The overloads stay in this
+  order because TypeScript picks the first that matches: with the wide one first, a call
+  with a `PublicKeySource` would resolve to the wide result too.
+- `VerifyFailureReason` gained `wrong-audience`, `no-audience`, `wrong-issuer` and
+  `no-issuer`. They are returned only when the matching option is set, but an exhaustive
+  `switch` over the type must handle them.
 
 ## License
 
