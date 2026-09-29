@@ -1,6 +1,6 @@
 {
     "name": "@spfn/signing",
-    "version": "0.1.0-alpha.1",
+    "version": "0.1.0-alpha.2",
     "description": "Asymmetric token signing for SPFN with pluggable key providers (local, GCP KMS, AWS KMS) and a zero-dependency verifier.",
     "type": "module",
     "sideEffects": false,

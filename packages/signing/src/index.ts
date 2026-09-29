@@ -24,11 +24,8 @@
  * installs and runs with neither of them present.
  */
 
-import { LocalSigner, type LocalSignerOptions } from './providers/local';
-import type { AwsKmsSignerOptions } from './providers/aws-kms';
-import type { GcpKmsSignerOptions } from './providers/gcp-kms';
-import type { Signer } from './types';
-
+export { createSigner } from './create-signer';
+export type { SignerConfig } from './create-signer';
 export {
     CompactSigner,
     derSignatureToJose,
@@ -51,39 +48,16 @@ export type {
     AwsSigningAlgorithm,
 } from './providers/aws-kms';
 export type { GcpKmsClient, GcpKmsSigner, GcpKmsSignerOptions } from './providers/gcp-kms';
+export { definePurposes } from './purposes';
+export type {
+    KeyConfigEntry,
+    LoadedPurposes,
+    ProviderOptions,
+    PurposeRegistry,
+    PurposeSigner,
+} from './purposes';
 export type { RawSigner, SignOptions, Signer } from './types';
 
 // The whole verify-only surface — parseCompact, verifyJws, the key formats
 // and every shared type — so an issuer needs one import, not two.
 export * from './verify';
-
-/** What `createSigner()` takes, one member per provider. */
-export type SignerConfig =
-    | ({ provider: 'local' } & LocalSignerOptions)
-    | ({ provider: 'gcp-kms' } & GcpKmsSignerOptions)
-    | ({ provider: 'aws-kms' } & AwsKmsSignerOptions);
-
-/**
- * Build the signer a configuration names.
- *
- * Asynchronous for every provider: a KMS signer has to read its key's
- * algorithm and public half before it can claim to be one.
- */
-export async function createSigner(config: SignerConfig): Promise<Signer>
-{
-    if (config.provider === 'local')
-    {
-        return new LocalSigner(config);
-    }
-
-    if (config.provider === 'gcp-kms')
-    {
-        const { createGcpKmsSigner } = await import('./providers/gcp-kms');
-
-        return createGcpKmsSigner(config);
-    }
-
-    const { createAwsKmsSigner } = await import('./providers/aws-kms');
-
-    return createAwsKmsSigner(config);
-}

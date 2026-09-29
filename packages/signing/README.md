@@ -1,6 +1,8 @@
 # @spfn/signing
 
 > **One signer interface. Three places a private key can live. One token format.**
+>
+> Signs EdDSA and ES256. Verifies those two and RS256.
 
 SPFN signs four different things — client request tokens, session envelopes, one-time SSE
 tokens, and now bridge tokens read inside untrusted tenant containers — and until this
@@ -149,7 +151,9 @@ and a key that turns out to be the other one is an error at construction.
 
 JWS compact serialization (RFC 7515): `header.payload.signature`.
 
-- `alg` is `EdDSA` or `ES256`. Nothing else, and `none` is simply an `alg` no key has.
+- `alg` is `EdDSA` or `ES256` for a token this package signs, and may also be `RS256` for
+  one it only verifies ([RSA keys](#rsa-keys)). Nothing else, and `none` is simply an
+  `alg` no key has.
 - `kid` is **required** in the protected header.
 - `typ` and `cty` are optional, and each is a string when present — a header
   that carries either as a number or an object is `malformed`.
@@ -172,16 +176,22 @@ JWS compact serialization (RFC 7515): `header.payload.signature`.
 
 `kid` selects the key. That key's algorithm is the algorithm. The header's `alg` is then
 checked for *equality* with it and used for nothing else. This is what makes algorithm
-confusion — including `alg: "none"` — a `alg-mismatch` rather than a decision.
+confusion — including `alg: "none"` — a `alg-mismatch` rather than a decision. The same
+holds across key families: an `RS256` header naming an Ed25519 key, or an `EdDSA` header
+naming an RSA key, is `alg-mismatch` before any signature is looked at.
 
 ### Verification
 
 ```typescript
-verifyJws(token, keys, { now?, clockSkewSec = 30, maxAgeSec? })
+verifyJws(token, keys, {
+    now?, clockSkewSec = 30, maxAgeSec?,
+    issuedWithinSec?, issuer?, audience?,
+})
 ```
 
-`keys` is the `kid:key,…` string, a `PublicKeyEntry`, an array of them, a `Map`, or a
-`KeyRing`'s `publicKeys()`.
+`keys` is the `kid:key,…` string, a `PublicKeyEntry`, an array of them, a `Map`, a
+`KeyRing`'s `publicKeys()`, or — for keys you did not issue — an `RsaPublicKeyEntry`, a JWK
+Set, or the `keys` of a parsed one.
 
 | `reason` | Means |
 |---|---|
@@ -193,7 +203,14 @@ verifyJws(token, keys, { now?, clockSkewSec = 30, maxAgeSec? })
 | `expired` | `exp` is in the past by more than the skew |
 | `not-yet-valid` | `nbf` is in the future by more than the skew, or — under `maxAgeSec` — so is `iat` |
 | `too-old` | the token granted itself a longer life (`exp - iat`) than `maxAgeSec` |
-| `no-expiry` | `maxAgeSec` was set and the token omits `exp` or `iat` |
+| `no-expiry` | `maxAgeSec` was set and the token omits `exp` or `iat`; or `issuedWithinSec` was set and it omits `iat` |
+| `wrong-issuer` | `issuer` was set and `iss` is not one of the issuers given |
+| `no-issuer` | `issuer` was set and the token has no `iss` |
+| `wrong-audience` | `audience` was set and no `aud` value matches it |
+| `no-audience` | `audience` was set and the token has no `aud`, or an empty array of them |
+
+With `issuedWithinSec`, `issuer` and `audience` all unset, `iss` and `aud` are never read
+and every verdict is what it was before those options existed.
 
 `maxAgeSec` bounds how long a token is *accepted*: at most that many seconds of life,
 starting no later than now. It needs **both** `exp` and `iat` to say so, and it checks
@@ -223,6 +240,186 @@ correctly rejected.
 **There is no size limit here.** A 1 MiB payload signs and verifies. If you read tokens off
 a network, cap the length before you call — that is a decision to make on purpose, not one
 to inherit.
+
+### Issuer, audience and issue date
+
+These three run **after** every check above, in this order: `issuedWithinSec`, `issuer`,
+`audience`. Setting them never changes why a token is refused — it only refuses some tokens
+that would otherwise have been accepted.
+
+- `issuer: string | string[]` — `iss` must be one of these. Missing is `no-issuer`, a
+  different string is `wrong-issuer`, a non-string is `invalid-claims`.
+- `audience: string | string[] | { prefix, rest }` — `aud` may be a string or an array of
+  strings (RFC 7519 §4.1.3); one value matching is enough, and the successful verdict
+  carries it as `audience`. Missing or an empty array is `no-audience`, no match is
+  `wrong-audience`, and `aud` that is neither a string nor an array of strings is
+  `invalid-claims` — one non-string member is enough.
+- `issuedWithinSec: number` — `iat` no more than that many seconds ago, plus the skew:
+  `too-old` beyond it, `no-expiry` without `iat`. A token with a lifetime of an hour can
+  still be required to have been issued within the last five minutes, which `maxAgeSec`
+  cannot say. An `iat` further ahead than the skew is `not-yet-valid`, for the reason
+  `maxAgeSec` refuses one: a forward-dated token carries its acceptance window with it.
+
+An empty list, an empty string, or a negative `issuedWithinSec` is a configuration error and
+throws, as bad keys do.
+
+### Per-request audiences
+
+Some audiences carry a value that differs per request — a callback URL that ends in a
+one-time nonce, say. They cannot be compared exactly, so `audience` also takes a prefix and
+a pattern for what follows it:
+
+```typescript
+const result = verifyJws(token, keys, {
+    audience: { prefix: 'https://issuer.example/register/', rest: /^[0-9a-f]{32}$/ },
+});
+
+if (result.ok)
+{
+    const nonce = result.audience!.slice('https://issuer.example/register/'.length);
+}
+```
+
+- `rest` must be anchored: its source starts with `^` and ends with an unescaped `$`, and
+  it may not carry the `g`, `y` or `m` flag. Anything else throws on every call. An
+  unanchored pattern would let `…/register/<nonce>/../report` through because it merely
+  *contains* a match.
+- `rest` is also evaluated as `^(?:rest)$`, so a top-level alternation (`^a|b$`) cannot
+  slip out of its anchors.
+- An empty remainder is `wrong-audience` whatever `rest` accepts.
+- The prefix is compared as a string. End it at a boundary — `/`, `:` — or let `rest`
+  draw one: `https://issuer.example/a` is also a prefix of `https://issuer.example/ab…`.
+- `rest` is yours, and it runs on every request against attacker-chosen text. Keep it a
+  character class and a length; a pattern that backtracks catastrophically is a denial of
+  service this package cannot see.
+
+**If you keep a replay store, spend the nonce only after every other check has passed** —
+signature, time claims, issuer, audience, and your own. A request refused for any other
+reason must not burn a nonce the legitimate caller still holds, and `verifyJws()` returning
+`ok` is the earliest point at which spending it is safe.
+
+## Verifying tokens you did not sign
+
+An OIDC issuer publishes its public keys as a JWK Set and signs with RS256. This package
+verifies those tokens with the same verifier and the same verdicts; what it does not do is
+fetch the set. There is no HTTP here — fetching, caching and refreshing the set is the
+caller's.
+
+```typescript
+import { parseJwks, verifyJws } from '@spfn/signing/verify';
+
+const { keys, skipped } = parseJwks(await response.text());    // once per fetch, not per token
+
+const result = verifyJws(token, keys, {
+    issuer: 'https://issuer.example',
+    audience: 'https://api.example',
+    issuedWithinSec: 300,
+});
+```
+
+**Never accept a token you did not sign without `issuer` and `audience`.** Every client of
+that issuer holds a token its keys verify; the audience is what says the token was meant
+for you.
+
+`verifyJws()` also accepts the JWK Set object itself, and parses it on every call. Parse it
+once.
+
+### RSA keys
+
+Verify only. This package never signs RS256: an RSA signature is four times the size of an
+Ed25519 one for no gain on tokens you issue, and a signer that can produce three algorithms
+is three algorithms to rotate. RSA is here because issuers you do not control use it.
+
+| Rule | Value | Why |
+|---|---|---|
+| Modulus | 2048–8192 bits | the floor is RFC 7518 §3.3; the ceiling bounds what one request costs |
+| Exponent | 65537 (`AQAB`) only | every mainstream issuer uses it, and small exponents have a history of forgeries |
+| Padding | PKCS#1 v1.5 only | that is RS256; PSS is `PS256`, another algorithm, and is not accepted |
+| Signature length | exactly the modulus length | a signature with its leading zero bytes stripped is the same number — accepting it would give one token two encodings. Nothing is left-padded |
+
+An RSA key reaches the verifier through a JWK Set or through
+`rsaPublicKeyEntry(kid, keyObjectOrJwk)`. The `kid:key` string format does **not** take
+RSA keys and still refuses them: it is the format of keys this package hands out.
+
+An RSA key decides its algorithm like any other. It verifies `RS256` and nothing else, and
+an entry that labels an RSA key `EdDSA` or `ES256` throws.
+
+### JWK Sets
+
+`parseJwks(set)` takes the set as JSON text or as a parsed object and returns
+`{ keys, skipped }`. Pass the text when you have it: duplicate members are refused as they
+are in a token, and a parsed object has already lost them.
+
+| Input | Result |
+|---|---|
+| `kty` `RSA`, `OKP` with `Ed25519`, `EC` with `P-256` | read |
+| an unknown `kty` (`oct`, anything new), an unknown curve (`X25519`, `Ed448`, `P-384`) | skipped |
+| `use` other than `sig`, or `key_ops` without `verify` | skipped |
+| an `alg` this package does not verify (`RS384`, `PS256`, …) | skipped |
+| an `alg` the key contradicts (`kty: RSA` with `alg: ES256`) | throws |
+| a read key without a `kid`, or two with the same one | throws |
+| broken material: non-canonical base64url, `n` with a leading zero byte, `e` other than `AQAB`, a weak RSA key, a point off the curve | throws |
+| private members (`d`, `p`, `q`, …) on a key of a kind this package reads | throws |
+| a key given only as a certificate (`x5c`, `x5t`) | throws — `n` and `e` are what is read |
+| no usable key left after skipping | throws |
+
+Unknown kinds are skipped because RFC 7517 §5 asks for exactly that, and because issuers
+add new kinds of key to their sets: an encryption key appearing next to yours must not stop
+your verification. A skipped key verifies nothing — its tokens are `unknown-kid` — so
+skipping costs no safety.
+
+A broken key of a kind this package reads refuses the whole set, because it is not someone
+else's kind of key: it is a broken or substituted one. Dropping it quietly would turn it
+into an `unknown-kid` nobody can trace. Treat the throw as "this fetch is bad" and keep the
+set you had.
+
+A JWK Set's `kid` is any 1–128 printable ASCII characters without whitespace — wider than
+the string format's, since it never passes through the `kid:key` separator.
+
+## Purposes
+
+An application usually issues more than one kind of token. `definePurposes()` declares them,
+and keeps each one's tokens out of every other one's verifier: each purpose owns its keys
+(every kid starts with its `kidPrefix` and a dash) and its audience (every token it signs
+carries it, and its verifier requires it).
+
+```typescript
+import { definePurposes } from '@spfn/signing';
+
+const purposes = definePurposes({
+    api: { kidPrefix: 'api', audience: 'https://issuer.example/api', maxTtlSec: 300 },
+    webhook: {
+        kidPrefix: 'whk',
+        audience: 'https://issuer.example/webhook',
+        scoped: true,                   // aud = `${audience}:${scope}`
+        maxTtlSec: 60,
+        typ: 'webhook+jwt',
+    },
+});
+
+// kid:alg:provider:ref, separated by commas or newlines
+const loaded = await purposes.load({
+    api: 'api-2026-09:EdDSA:gcp-kms:projects/p/locations/l/keyRings/r/cryptoKeys/api/cryptoKeyVersions/3',
+    webhook: process.env.WEBHOOK_SIGNING_KEYS!,   // whk-2026-09:EdDSA:local:<base64url PKCS#8>
+});
+
+const token = await loaded.signer('api').sign({ sub: userId });          // aud, iat, exp written
+const check = loaded.verifier('webhook', { scope: 'tenant-7' });         // its keys, its aud, its TTL
+```
+
+- `load()` throws when one public key appears twice — in two purposes, or twice in one —
+  when a kid lacks its purpose's prefix, when a purpose holds more than `maxKeys` (default 2:
+  one rotation in flight), and when a KMS key is not the algorithm its line names. Two
+  purposes sharing a `kidPrefix` or an audience are refused by `definePurposes()` itself.
+- A purpose's signer writes `aud`, `iat` and `exp`, refuses claims that carry any of them,
+  and refuses a `ttlSec` above `maxTtlSec`.
+- `verifier()` pins the purpose's keys, its audience, and `maxAgeSec: maxTtlSec`.
+  `purposeVerifier(spec, keys)` in `@spfn/signing/verify` builds the same thing where only
+  the verifier runs.
+- `exclude: [kid]` on `publicKeys()`, `jwks()` and `verifier()` takes a retired key out.
+  Which keys are retired, and which kid signs (`signer(name, { kid })`), is the caller's to
+  remember — there is no storage here.
+- No error message quotes a key configuration line: a `local` line carries a private key.
 
 ## Rotation
 
@@ -263,9 +460,10 @@ published packages, and the ordering constraint that would come with one.
 
 ## Test vectors
 
-`contracts/signing/vectors.json` holds six tokens — valid, expired and corrupted, for each
-algorithm, EdDSA first — with the public keys that verify them and the verdict each must
-produce. It is
+`contracts/signing/vectors.json` holds forty tokens — valid, expired and corrupted for each
+algorithm, EdDSA first, then one per rule, RS256 and the issuer and audience options — with
+the public keys that verify them and the verdict each must produce, and a block of JWK Sets
+with what `parseJwks()` makes of each. It is
 generated from fixed key material by `src/vectors.test.ts`, which also re-runs the
 generation on every test run and compares. Regenerate with:
 
@@ -275,7 +473,8 @@ UPDATE_SIGNING_VECTORS=1 pnpm --filter @spfn/signing test
 
 ECDSA picks a fresh nonce per signature, so an ES256 token is never byte-stable; the
 comparison covers the keys, headers and payloads, and the committed tokens are checked by
-verifying them.
+verifying them. Ed25519 and RSA PKCS#1 v1.5 signatures are deterministic, so every other
+vector is compared byte for byte.
 
 ## Migrating `@spfn/auth`'s client tokens
 
@@ -305,11 +504,15 @@ changed for it.
 - `KeyRing`, `rotate()`, `rotationStage()`, `shouldRotate()`
 - `timeClaims()`, `withTimeClaims()`, `signCompact()`, `CompactSigner`
 - `derSignatureToJose()` — DER `SEQUENCE { r, s }` → JOSE `r || s`
+- `definePurposes(specs)` → `{ names, spec(), parseKeyConfig(), load() }`; `load(config)` →
+  `{ signer(), publicKeys(), jwks(), verifier() }`
 - everything below
 
 ### `@spfn/signing/verify`
 
-- `verifyJws(token, keys, options?)` → `{ ok: true, header, payload } | { ok: false, reason }`
+- `verifyJws(token, keys, options?)` → `{ ok: true, header, payload, audience? } | { ok: false, reason }`
+- `parseJwks(set)` → `{ keys, skipped }`; `rsaPublicKeyEntry(kid, keyObjectOrJwk)`
+- `purposeVerifier(spec, keys, { scope?, clockSkewSec? })` → `(token, now?) => VerifyResult`
 - `parseCompact(token)` → the parts and the signed bytes, or `null`
 - `parsePublicKeys()`, `parsePublicKeyEntry()`, `formatPublicKeys()`, `formatPublicKeyEntry()`
 - `publicKeyToJwk()`, `toJwks()`, `rawPublicKey()`, `algorithmOf()`

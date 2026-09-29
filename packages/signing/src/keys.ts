@@ -18,7 +18,7 @@
 
 import { createPublicKey, type JsonWebKey, type KeyObject } from 'node:crypto';
 import { decodeBase64Url, encodeBase64Url } from './jws';
-import type { PublicKeyEntry, PublicKeySource, SigningAlgorithm } from './types';
+import type { PublicKeyEntry, PublicKeySource, SigningAlgorithm, VerifyKeyEntry } from './types';
 
 /** A `kid` travels in a JWS header and in the entry format, so it takes no `:`. */
 const KID = /^[A-Za-z0-9._-]{1,128}$/;
@@ -30,10 +30,16 @@ const ED25519_RAW_BYTES = 32;
 const P256_COORDINATE_BYTES = 32;
 const P256_POINT_BYTES = 65;
 
+/** Whether `kid` is one this package will accept, without saying what it is. */
+export function isKid(kid: string): boolean
+{
+    return KID.test(kid);
+}
+
 /** Throw unless `kid` is one this package will accept. */
 export function assertKid(kid: string): string
 {
-    if (!KID.test(kid))
+    if (!isKid(kid))
     {
         throw new Error(
             `Invalid kid ${JSON.stringify(kid)}: expected 1-128 characters from [A-Za-z0-9._-] `
@@ -152,7 +158,7 @@ export function publicKeyToJwk(key: KeyObject): JsonWebKey
 }
 
 /** A JWK Set — every key with its `kid` and `alg`, ready to publish. */
-export function toJwks(entries: Iterable<PublicKeyEntry>): { keys: JsonWebKey[] }
+export function toJwks(entries: Iterable<VerifyKeyEntry>): { keys: JsonWebKey[] }
 {
     const keys = [...entries].map((entry) => ({
         ...publicKeyToJwk(entry.public),
