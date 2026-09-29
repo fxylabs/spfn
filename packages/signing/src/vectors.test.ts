@@ -6,16 +6,20 @@ import {
     respellSignature,
     serializeVectorFile,
     VECTORS_FILE,
+    vectorKeys,
+    verifyOptions,
     writeVectorFile,
     type VectorFile,
 } from '../../../contracts/signing/record-vectors';
+import { parseJwks } from './jwks';
 import { verifyJws } from './verify';
 import type { VerifyFailureReason } from './types';
 
 /**
  * `contracts/signing/vectors.json` is the fixed point other implementations
- * check themselves against: twenty tokens, the public keys that verify them,
- * and the verdict each one must produce.
+ * check themselves against: forty tokens, the public keys that verify them,
+ * the verdict each one must produce — and a block of JWK Sets with what
+ * `parseJwks()` makes of each.
  *
  * The file is written by `contracts/signing/record-vectors.ts`, which asks
  * this package's own verifier what each token means and refuses to write
@@ -65,6 +69,10 @@ const EVERY_REASON_WITNESS: Record<VerifyFailureReason, true> = {
     'not-yet-valid': true,
     'too-old': true,
     'no-expiry': true,
+    'wrong-audience': true,
+    'no-audience': true,
+    'wrong-issuer': true,
+    'no-issuer': true,
 };
 
 const EVERY_REASON = Object.keys(EVERY_REASON_WITNESS) as VerifyFailureReason[];
@@ -72,15 +80,15 @@ const EVERY_REASON = Object.keys(EVERY_REASON_WITNESS) as VerifyFailureReason[];
 /**
  * The six vectors this contract started with, pinned.
  *
- * superself-apps holds a byte copy of them in
- * `infra/workspace/bridge/fixtures/signing-vectors.json`, refreshed by copying
- * the file again and reading the diff. Their tokens are therefore frozen — an
- * ES256 signature that silently re-randomised, or an Ed25519 payload that
- * gained a space, is a diff nobody can review. Written out here rather than
- * read from the file so that the file cannot be its own witness.
+ * Downstream repositories hold a byte copy of them as a fixture, refreshed by
+ * copying the file again and reading the diff. Their tokens are therefore
+ * frozen — an ES256 signature that silently re-randomised, or an Ed25519
+ * payload that gained a space, is a diff nobody can review. Written out here
+ * rather than read from the file so that the file cannot be its own witness.
  */
 const FROZEN_KEYS = 'vector-ed25519:Kay64UG8yvCyLhqU000LxzYeUm0L_hLIl5S8kyKWbdc,'
-    + 'vector-es256:BFFcPW6545a5BNP-yn9U_c0MwemXvzddylFa0KbDtANfRTa-OlDzGPv5pUdZAqIhUCvvDVfgjFOyzApW8X2fk1Q';
+    + 'vector-es256:'
+    + 'BFFcPW6545a5BNP-yn9U_c0MwemXvzddylFa0KbDtANfRTa-OlDzGPv5pUdZAqIhUCvvDVfgjFOyzApW8X2fk1Q';
 
 const FROZEN_TOKENS: Record<string, string> = {
     'ed25519-valid':
@@ -114,24 +122,61 @@ describe('signing vectors', () =>
     {
         const file = committedFile();
 
-        expect(file.vectors.length).toBeGreaterThanOrEqual(20);
+        expect(file.vectors.length).toBeGreaterThanOrEqual(40);
 
         for (const vector of file.vectors)
         {
-            const result = verifyJws(vector.token, file.publicKeys, {
-                now: file.verifyAt,
-                ...vector.options,
-            });
+            const result = verifyJws(
+                vector.token,
+                vectorKeys(file, vector),
+                verifyOptions(file.verifyAt, vector.options),
+            );
 
             expect(result, `${vector.name}: ${vector.why ?? 'a frozen vector'}`)
                 .toMatchObject(vector.expect);
         }
     });
 
+    it('X2: a vector without an audience option has no audience in its verdict', () =>
+    {
+        const file = committedFile();
+
+        for (const vector of file.vectors.filter((item) => item.options?.audience === undefined))
+        {
+            const options = verifyOptions(file.verifyAt, vector.options);
+
+            expect(verifyJws(vector.token, vectorKeys(file, vector), options))
+                .not.toHaveProperty('audience');
+        }
+    });
+
+    it('X2: every committed JWK Set still parses to its recorded keys, or is still refused', () =>
+    {
+        const file = committedFile();
+
+        expect(file.jwks.length).toBeGreaterThanOrEqual(10);
+
+        for (const item of file.jwks)
+        {
+            if ('throws' in item.expect)
+            {
+                expect(() => parseJwks(item.set), `${item.name}: ${item.why}`).toThrow();
+                continue;
+            }
+
+            const parsed = parseJwks(item.set);
+
+            expect([...parsed.keys.keys()], item.name).toEqual(item.expect.kids);
+            expect(parsed.skipped, item.name).toEqual(item.expect.skipped);
+        }
+    });
+
     it('X2: every failure reason the verifier can give has a vector', () =>
     {
         const recorded = new Set(
-            committedFile().vectors.flatMap((vector) => (vector.expect.ok ? [] : [vector.expect.reason])),
+            committedFile().vectors.flatMap(
+                (vector) => (vector.expect.ok ? [] : [vector.expect.reason]),
+            ),
         );
 
         expect(EVERY_REASON.filter((reason) => !recorded.has(reason))).toEqual([]);

@@ -75,7 +75,8 @@ function privateKeyFromRaw(bytes: Buffer, alg: SigningAlgorithm): KeyObject
     });
 }
 
-function privateKeyFromBytes(bytes: Buffer, alg: SigningAlgorithm, source: string): KeyObject
+/** PKCS#8 PEM or DER, or a raw 32-byte `alg` key. Errors name `source`, never the bytes. */
+export function privateKeyFromBytes(bytes: Buffer, alg: SigningAlgorithm, source: string): KeyObject
 {
     if (bytes.subarray(0, PEM_PREFIX.length).toString('ascii') === PEM_PREFIX)
     {

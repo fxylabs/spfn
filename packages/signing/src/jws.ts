@@ -180,12 +180,19 @@ function hasDuplicateMember(json: string): boolean
 function decodeJsonObject(segment: string): Record<string, unknown> | null
 {
     const bytes = decodeBase64Url(segment);
-    if (!bytes)
-    {
-        return null;
-    }
 
-    const text = bytes.toString('utf8');
+    return bytes && parseJsonObject(bytes.toString('utf8'));
+}
+
+/**
+ * Parse JSON text that must be one object with no duplicate member at any
+ * depth, or return `null`.
+ *
+ * The rule tokens are held to, offered to anything else read off the wire —
+ * a JWK Set with two `n` members is two keys to two readers.
+ */
+export function parseJsonObject(text: string): Record<string, unknown> | null
+{
     let value: unknown;
 
     try

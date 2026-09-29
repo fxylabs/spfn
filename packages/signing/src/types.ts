@@ -17,6 +17,14 @@ import type { KeyObject } from 'node:crypto';
  */
 export type SigningAlgorithm = 'ES256' | 'EdDSA';
 
+/**
+ * The algorithms this package verifies: the two it signs, and `RS256`.
+ *
+ * RS256 is verify-only. It is here for tokens somebody else signed — an OIDC
+ * issuer publishing a JWK Set — and never for tokens this package issues.
+ */
+export type VerifyAlgorithm = SigningAlgorithm | 'RS256';
+
 /** Names of the key providers `createSigner()` understands. */
 export type ProviderName = 'local' | 'gcp-kms' | 'aws-kms';
 
@@ -26,9 +34,9 @@ export type ProviderName = 'local' | 'gcp-kms' | 'aws-kms';
  * `kid` is required: the key it names decides the algorithm, and `alg` is
  * only ever checked for equality against that decision.
  */
-export interface JwsHeader
+export interface JwsHeader<A extends VerifyAlgorithm = SigningAlgorithm>
 {
-    alg: SigningAlgorithm;
+    alg: A;
     kid: string;
     typ?: string;
     [claim: string]: unknown;
@@ -56,6 +64,51 @@ export type PublicKeySource =
     | ReadonlyMap<string, PublicKeyEntry>;
 
 /**
+ * One RSA public key, for verifying RS256.
+ *
+ * Built by `rsaPublicKeyEntry()` or `parseJwks()`, which hold it to the RSA
+ * key rules: 2048 to 8192 bits, public exponent 65537.
+ */
+export interface RsaPublicKeyEntry
+{
+    kid: string;
+    alg: 'RS256';
+    public: KeyObject;
+}
+
+/** A key `verifyJws()` can check a signature with. */
+export type VerifyKeyEntry = PublicKeyEntry | RsaPublicKeyEntry;
+
+/** A JWK Set (RFC 7517 §5), as an issuer publishes it. */
+export interface JwkSet
+{
+    keys: readonly Record<string, unknown>[];
+}
+
+/** Every key source, RSA keys and JWK Sets included. */
+export type VerifyKeySource =
+    | PublicKeySource
+    | VerifyKeyEntry
+    | readonly VerifyKeyEntry[]
+    | ReadonlyMap<string, VerifyKeyEntry>
+    | JwkSet;
+
+/** A JWK that `parseJwks()` passed over, and why. */
+export interface SkippedJwk
+{
+    /** Its position in the set's `keys`. */
+    index: number;
+    kid?: string;
+    reason: 'unknown-kty' | 'unknown-curve' | 'not-for-signing' | 'unsupported-alg';
+}
+
+export interface ParsedJwks
+{
+    keys: ReadonlyMap<string, VerifyKeyEntry>;
+    skipped: readonly SkippedJwk[];
+}
+
+/**
  * Why a token was rejected.
  *
  * - `malformed` — not three canonical base64url segments, or the header is not
@@ -73,7 +126,12 @@ export type PublicKeySource =
  *   Under `maxAgeSec` an `iat` in the future is `not-yet-valid` too.
  * - `too-old` — the token's own lifetime (`exp - iat`) exceeds `maxAgeSec`.
  * - `no-expiry` — `maxAgeSec` was set and the token omits `exp` or `iat`, so
- *   its lifetime cannot be computed and the policy cannot be met.
+ *   its lifetime cannot be computed and the policy cannot be met. The same
+ *   under `issuedWithinSec` for a token without `iat`.
+ * - `wrong-audience` / `no-audience` — `audience` was set and no `aud` value
+ *   matches it, or the token has no `aud` (or an empty array of them).
+ * - `wrong-issuer` / `no-issuer` — `issuer` was set and `iss` is not one of
+ *   the issuers given, or the token has no `iss`.
  */
 export type VerifyFailureReason =
     | 'malformed'
@@ -84,12 +142,38 @@ export type VerifyFailureReason =
     | 'expired'
     | 'not-yet-valid'
     | 'too-old'
-    | 'no-expiry';
+    | 'no-expiry'
+    | 'wrong-audience'
+    | 'no-audience'
+    | 'wrong-issuer'
+    | 'no-issuer';
 
-/** The result of verifying a token. `verifyJws()` never throws instead. */
-export type VerifyResult =
-    | { ok: true; header: JwsHeader; payload: JwsPayload }
+/**
+ * The result of verifying a token. `verifyJws()` never throws instead.
+ *
+ * `audience` is present exactly when an `audience` option was given: it is
+ * the one `aud` value that matched, so a caller never has to search an array
+ * `aud` again to find it.
+ */
+export type VerifyResult<A extends VerifyAlgorithm = SigningAlgorithm> =
+    | { ok: true; header: JwsHeader<A>; payload: JwsPayload; audience?: string }
     | { ok: false; reason: VerifyFailureReason };
+
+/**
+ * An audience that differs per request: a fixed `prefix`, then a remainder
+ * that must match `rest` in full.
+ *
+ * `rest` must be anchored — its source starts with `^` and ends with `$` —
+ * and may carry no flag but `u` or `v`. It is also evaluated as
+ * `^(?:rest)$`, so a top-level alternation cannot slip out of the anchors.
+ * The expression itself is yours: a pattern that backtracks catastrophically
+ * does so on every request, so keep it a plain character class and a length.
+ */
+export interface AudiencePrefix
+{
+    prefix: string;
+    rest: RegExp;
+}
 
 export interface VerifyOptions
 {
@@ -109,6 +193,46 @@ export interface VerifyOptions
      * that, so a token without them is `no-expiry` rather than exempt.
      */
     maxAgeSec?: number;
+    /**
+     * Accept only a token issued within this many seconds of now (plus the
+     * skew): `iat` older than that is `too-old`, and a token without `iat`
+     * is `no-expiry`. An `iat` further in the future than the skew is
+     * `not-yet-valid` — a forward-dated token would otherwise carry its own
+     * window with it.
+     */
+    issuedWithinSec?: number;
+    /**
+     * Require an `aud` value — `aud` may be a string or an array of strings —
+     * equal to this one, one of these, or matching this prefix and remainder.
+     */
+    audience?: string | readonly string[] | AudiencePrefix;
+    /** Require `iss` to be this issuer, or one of these. */
+    issuer?: string | readonly string[];
+}
+
+/**
+ * One kind of token an application issues.
+ *
+ * A purpose owns its keys — every kid starts with `kidPrefix` and a dash —
+ * and its audience, which every token it signs carries and every verifier it
+ * builds requires. The two together keep one purpose's tokens out of another
+ * purpose's verifier: a foreign kid is `unknown-kid`, and a foreign `aud` is
+ * `wrong-audience` even if a key were ever shared.
+ */
+export interface PurposeSpec
+{
+    /** Two to eight lowercase letters. A kid of this purpose is `<kidPrefix>-…`. */
+    kidPrefix: string;
+    /** The `aud` every token of this purpose carries. */
+    audience: string;
+    /** When set, `aud` is `<audience>:<scope>` and signer and verifier name the scope. */
+    scoped?: boolean;
+    /** The longest life a token of this purpose may have; the verifier's `maxAgeSec`. */
+    maxTtlSec: number;
+    /** `typ` for the protected header. Written by the signer; not checked by the verifier. */
+    typ?: string;
+    /** How many keys the purpose may hold at once. Default: 2 — one rotation in flight. */
+    maxKeys?: number;
 }
 
 export interface SignOptions

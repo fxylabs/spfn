@@ -1,8 +1,9 @@
 # Signing test vectors
 
 `vectors.json` is what an implementation of SPFN's token format checks itself
-against: twenty tokens, the public keys that verify them, and the verdict each
-one must produce. It is **generated output** — do not edit it by hand.
+against: forty tokens, the public keys that verify them, and the verdict each
+one must produce — plus a block of JWK Sets and what a verifier must make of
+each. It is **generated output** — do not edit it by hand.
 
 | File | What it is |
 |---|---|
@@ -31,9 +32,17 @@ verifier's and never the generator's opinion of what they should be.
 ## The vectors
 
 `kid` and `alg` name the key that produced the signature, not what the header
-claims — six of these vectors exist precisely because those two disagree.
-Vectors that need a `maxAgeSec` policy to reach their rule carry their own
-`options`; everything else is judged with the defaults at `verifyAt`.
+claims — eight of these vectors exist precisely because those two disagree.
+Vectors that need a policy to reach their rule carry their own `options`;
+everything else is judged with the defaults at `verifyAt`.
+
+Vectors 1–20 are verified against `publicKeys`, the `kid:key` string. Vectors
+21–40 carry `kids`, and are verified against the members of `publicJwks` with
+those kids — `publicJwks` is every fixture key as a JWK Set, including the RSA
+key the string format cannot carry. A prefix audience is written
+`{ "prefix": …, "rest": "<regular expression source>" }`; the expression is
+compiled from that source. A successful verdict under an `audience` option
+records the `aud` value it matched as `audience`.
 
 | # | Vector | Verdict | The rule it holds in place |
 |---|---|---|---|
@@ -57,11 +66,56 @@ Vectors that need a `maxAgeSec` policy to reach their rule carry their own
 | 18 | `not-yet-valid` | `not-yet-valid` | `nbf` an hour ahead, well beyond the default 30 seconds of skew |
 | 19 | `too-old` (`maxAgeSec: 300`) | `too-old` | a token that granted itself a longer life than the caller allows |
 | 20 | `no-expiry` (`maxAgeSec: 300`) | `no-expiry` | under `maxAgeSec` a missing `exp` leaves the lifetime uncomputable, so it is a refusal and not an exemption |
+| 21 | `rs256-valid` | `ok` | the anchor for RSA keys |
+| 22 | `rs256-expired` | `expired` | the same clock rules on RSA |
+| 23 | `rs256-bad-signature` | `bad-signature` | one flipped bit |
+| 24 | `rs256-header-on-ed25519-key` | `alg-mismatch` | an Ed25519 key does not verify RS256 |
+| 25 | `ed25519-header-on-rsa-key` | `alg-mismatch` | an RSA key verifies RS256 and nothing else |
+| 26 | `rs256-short-signature` | `bad-signature` | a valid signature with its leading zero byte stripped: a signature must be exactly the modulus length, or one token has two encodings |
+| 27 | `audience-wrong` (`audience`) | `wrong-audience` | `aud` is compared exactly |
+| 28 | `audience-missing` (`audience`) | `no-audience` | a missing `aud` is not an exemption |
+| 29 | `audience-in-array` (`audience`) | `ok`, `audience` | RFC 7519 lets `aud` be an array; one member matching is enough |
+| 30 | `issuer-wrong` (`issuer`) | `wrong-issuer` | the same rule for `iss` |
+| 31 | `issuer-missing` (`issuer`) | `no-issuer` | a missing `iss` is not an exemption |
+| 32 | `issued-too-long-ago` (`issuedWithinSec: 300`) | `too-old` | inside its own lifetime, but issued earlier than the caller accepts |
+| 33 | `cross-purpose` (one purpose's kid) | `unknown-kid` | a verifier holding one purpose's keys does not hold another's |
+| 34 | `cross-purpose-same-key` (`audience`) | `wrong-audience` | if one key served two purposes, `aud` still keeps their tokens apart |
+| 35 | `audience-prefix-ok` (`{ prefix, rest: ^[0-9a-f]{32}$ }`) | `ok`, `audience` | the anchor for a per-request audience |
+| 36 | `audience-prefix-other-path` | `wrong-audience` | a well-formed remainder after a different path |
+| 37 | `audience-prefix-empty-rest` (`rest: ^[0-9a-f]*$`) | `wrong-audience` | an empty remainder is refused whatever `rest` accepts |
+| 38 | `audience-prefix-rest-mismatch` | `wrong-audience` | a remainder of the wrong shape |
+| 39 | `audience-prefix-extra-path` | `wrong-audience` | `rest` must match the whole remainder |
+| 40 | `audience-prefix-missing` | `no-audience` | a missing `aud` is not an exemption under a prefix either |
+
+### JWK Sets
+
+The `jwks` block holds JWK Sets rather than tokens: a set is configuration, and
+its verdict is the kids read and the keys skipped (`{ kids, skipped }`), or a
+refusal of the whole set (`{ throws: true }`). A key of a kind the verifier
+does not read is skipped; a key of a kind it reads that is broken refuses the
+set.
+
+| Set | Expected | The rule it holds in place |
+|---|---|---|
+| `jwks-one-of-each` | three keys | RSA, OKP Ed25519 and EC P-256 are read |
+| `jwks-unknown-kty` | three keys, two skipped | an unknown `kty` (`oct`) and an unknown curve (`X25519`) are skipped, not refused |
+| `jwks-use-enc` | one key, one skipped | `use` other than `sig` |
+| `jwks-key-ops-without-verify` | one key, one skipped | `key_ops` without `verify` |
+| `jwks-unsupported-alg` | one key, one skipped | an `alg` the verifier does not implement (`RS384`) |
+| `jwks-weak-rsa` | throws | a 1024-bit modulus |
+| `jwks-rsa-exponent-3` | throws | an exponent other than 65537 |
+| `jwks-non-canonical-n` | throws | `n` respelled in its unused bits |
+| `jwks-missing-kid` | throws | a read key with no kid |
+| `jwks-duplicate-kid` | throws | two read keys with one kid |
+| `jwks-nothing-usable` | throws | nothing left after skipping |
+| `jwks-alg-contradicts-key` | throws | `kty: RSA` with `alg: ES256` |
+| `jwks-private-member` | throws | private key material in a published set |
+| `jwks-certificate-only` | throws | a key given only as a certificate thumbprint |
 
 Every member of `VerifyFailureReason` appears at least once. The list
 `vectors.test.ts` checks against is not typed out by hand — it is the keys of a
 `Record<VerifyFailureReason, true>`, which stops compiling as soon as the union
-grows. A tenth reason therefore fails `pnpm type-check` until it is named there,
+grows. A new reason therefore fails `pnpm type-check` until it is named there,
 and then fails the test until it has a vector of its own.
 
 ## What is not here
@@ -80,17 +134,19 @@ behaviours cannot be expressed as one and stay verifier tests in
 
 ## Stability
 
-The key material behind these vectors is two fixed 32-byte constants in
-`record-vectors.ts`. They are throwaway values used for nothing else, which is
-why the private halves are reproducible and are not stored here.
+The key material behind these vectors is three fixed 32-byte constants and one
+fixed 2048-bit RSA key in `record-vectors.ts`. They are throwaway values used
+for nothing else, which is why the private halves are reproducible and are not
+stored here. The RSA key is spelled out as PKCS#8 because `node:crypto` cannot
+seed RSA key generation.
 
 `verifyAt` is the instant every vector is judged at, so `expired` stays expired
 and `valid` stays valid however long this file lives.
 
-Vectors 1–6 are **frozen**. superself-apps holds a byte copy of them as
-`infra/workspace/bridge/fixtures/signing-vectors.json`, refreshed by copying
-this file again and reading the diff, so a token that changed here would be a
-diff nobody could review. They carry no `why` member for the same reason: an
+Vectors 1–6 are **frozen**. Downstream repositories hold a byte copy of them as
+a fixture, refreshed by copying this file again and reading the diff, so a
+token that changed here would be a diff nobody could review. New vectors and
+blocks are only ever appended, so that diff stays readable. They carry no `why` member for the same reason: an
 added member is a changed byte. `vectors.test.ts` pins all six tokens and the
 public keys, out of line, so a change to them fails rather than regenerates.
 
@@ -103,8 +159,8 @@ what its vector claims fails the run rather than being carried past it. For
 `es256-bad-signature` that verifier pass proves less than it looks: any wrong
 signature over those bytes is `bad-signature`, so what actually holds vector 6's
 exact signature in place is the frozen-token pin in `vectors.test.ts` and
-nothing else. Everything else is Ed25519, which signs the same bytes the same
-way every time.
+nothing else. Everything else is Ed25519 or RSA PKCS#1 v1.5, both of which sign
+the same bytes the same way every time.
 
 ## Shipping
 
