@@ -121,16 +121,23 @@ describe('audience', () =>
             .toEqual({ ok: false, reason: 'wrong-audience' });
     });
 
-    it('P7: an unanchored or stateful rest is a config error, thrown before the token is read', () =>
+    it('P7: an unanchored rest, or one with a flag but u or v, is a config error, thrown before the token is read', () =>
     {
         const unanchored = [/[0-9a-f]{32}/, /^[0-9a-f]{32}/, /[0-9a-f]{32}$/, /^[0-9a-f]{32}\$/];
+        const flagged = [/^a$/g, /^a$/m, /^a$/y, /^a$/s, /^a$/i, /^a$/d, /^a$/gu];
 
-        for (const rest of [...unanchored, /^a$/g, /^a$/m, /^a$/y])
+        for (const rest of [...unanchored, ...flagged])
         {
             expect(
                 () => verifyJws('not a token', keys, { audience: { prefix: REGISTER, rest } }),
                 String(rest),
             ).toThrow(/anchored/);
+        }
+
+        for (const rest of [/^a$/u, new RegExp('^a$', 'v')])
+        {
+            expect(verifyJws('x', keys, { audience: { prefix: REGISTER, rest } }), String(rest))
+                .toEqual({ ok: false, reason: 'malformed' });
         }
 
         expect(() => verifyJws('x', keys, { audience: { prefix: '', rest: /^a$/ } })).toThrow(/prefix/);

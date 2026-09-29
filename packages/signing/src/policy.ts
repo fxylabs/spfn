@@ -65,19 +65,21 @@ function stringList(value: unknown, option: string): readonly string[]
  * `…/register/x/../report` cannot pass a pattern that only had to *contain*
  * a match. The wrapper is the guarantee: `^a|b$` starts and ends with anchors
  * and still matches anything ending in `b`, so the expression runs as
- * `^(?:^a|b$)$`. `g` and `y` make `test()` stateful; `m` lets `$` stop at a
- * newline inside the remainder.
+ * `^(?:^a|b$)$`. Only `u` or `v` may be set: `g` and `y` make `test()`
+ * stateful, `m` lets `$` stop at a newline inside the remainder, `i` and `s`
+ * widen what a character class the caller wrote admits, and `d` is not a
+ * matching flag at all.
  */
 function compiledRest(rest: unknown): RegExp
 {
     const valid = rest instanceof RegExp
         && rest.source.startsWith('^')
         && ENDS_ANCHORED.test(rest.source)
-        && !/[gmy]/.test(rest.flags);
+        && /^[uv]?$/.test(rest.flags);
 
     if (!valid)
     {
-        throw configError('audience.rest must be a RegExp anchored as ^…$, without the g, m or y flag');
+        throw configError('audience.rest must be a RegExp anchored as ^…$, with no flag but u or v');
     }
 
     const compiled = COMPILED_REST.get(rest) ?? new RegExp(`^(?:${rest.source})$`, rest.flags);

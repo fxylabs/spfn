@@ -164,7 +164,7 @@ export type VerifyResult<A extends VerifyAlgorithm = SigningAlgorithm> =
  * that must match `rest` in full.
  *
  * `rest` must be anchored — its source starts with `^` and ends with `$` —
- * and may not carry the `g`, `y` or `m` flags. It is also evaluated as
+ * and may carry no flag but `u` or `v`. It is also evaluated as
  * `^(?:rest)$`, so a top-level alternation cannot slip out of the anchors.
  * The expression itself is yours: a pattern that backtracks catastrophically
  * does so on every request, so keep it a plain character class and a length.
