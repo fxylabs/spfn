@@ -34,6 +34,7 @@ export interface EnvSchemaEntry
     nextjs?: boolean;
     examples?: unknown[];
     layer?: EnvLayer;
+    readBy?: string[];
     minLength?: number;
     validator?: (value: string) => unknown;
 }

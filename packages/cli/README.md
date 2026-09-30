@@ -428,9 +428,41 @@ module without an `envSchema` export, is an error naming the path. Top-level `en
 | `env init` | Generate `.env` template files (`-e <env>` for per-env, `-f` to overwrite) |
 | `env check` | Check `.env` files against the schema (`-e <env>` for a full env chain) |
 | `env validate` | Validate `process.env` against the schema — for CI/CD (`-e <env>`, `-s` strict) |
+| `env audit` | Find direct `process.env` reads and app variables nothing reads; exits 1 on findings |
 
-All accept `-p, --package <pkg>` to read that one package only (`env validate` uses
+All but `env audit` accept `-p, --package <pkg>` to read that one package only (`env validate` uses
 `-p, --packages <pkgs...>`).
+
+**Audit.** `spfn env audit` prints `file:line  NAME  reason` — names only — and exits 1 when
+it finds any of:
+
+- a direct read — `process.env.X`, `process.env['X']`, `process.env[expr]`,
+  `const { X } = process.env` — outside the `env.schemas` modules, root-level
+  `*.config.{js,cjs,mjs,ts}` files and `env.audit.ignore` (`NODE_ENV` is always allowed);
+- a name in the app's own schemas that no scanned file reads as a property (`env.X`), a
+  destructured key or a string literal, and that has no `readBy` (see the `@spfn/core/env`
+  README); a `readBy` file that does not exist or is not scanned. Skipped, with a notice,
+  when `env.schemas` is not set.
+
+A list that cannot be built — a missing schema module, or a name declared differently by an
+app schema and a package — is reported and exits 1.
+
+```js
+// spfn.config.js
+export default {
+  env: {
+    schemas: ['src/server/config/env.config.ts'],
+    audit: {
+      include: ['src'],             // default — directories or globs from the project root
+      ignore: ['src/**/*.test.ts'],
+    },
+  },
+};
+```
+
+`node_modules`, build output, `*.d.ts` and symbolic links are never scanned. Sources —
+`.ts`, `.tsx`, `.js`, `.jsx`, `.mjs`, `.cjs`, `.mts`, `.cts` — are parsed with TypeScript,
+taken from the app, else from the CLI's optional peer, else from `@spfn/core`.
 
 ### `spfn key [preset]`
 
@@ -458,7 +490,7 @@ reads plain `process.env`.
 | Subcommand | Description |
 |------------|-------------|
 | `secret set [key]` | Store a value (masked prompt, or `--stdin`). `--env local` → keychain; other envs → SOPS |
-| `secret list` | List declared secrets and their status per env (never prints values) |
+| `secret list` | List declared secrets and their status per env; names in a deployed file that the list lacks show as "not in list" (never prints values) |
 | `secret generate [key]` | Mint values for schema secrets with a `generate` strategy (`-a/--all`) |
 | `secret rotate [key]` | Rotate values; external secrets are flagged for manual reissue (`-a/--all`) |
 | `secret keygen` | Generate an age key pair for the SOPS no-cloud backend |

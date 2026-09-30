@@ -53,6 +53,15 @@ describe('defineEnvSchema', () =>
         expect(schema.DB_NAME.layer).toBe('instance');
         expect('layer' in schema.API_KEY).toBe(false);
     });
+
+    it('should keep the declared readBy paths', () =>
+    {
+        const schema = defineEnvSchema({
+            PROVIDER_KEY: envSecret({ description: 'Provider key', readBy: ['src/server/providers.ts'] }),
+        });
+
+        expect(schema.PROVIDER_KEY.readBy).toEqual(['src/server/providers.ts']);
+    });
 });
 
 describe('envString', () =>
