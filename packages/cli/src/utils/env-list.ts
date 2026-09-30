@@ -10,8 +10,8 @@
  *   discovered from the app's `package.json` and resolved from the project root.
  *
  * A key declared by more than one source becomes one entry. Two declarations
- * that disagree on the shape of the value cannot both be right, so that is an
- * error naming the key and both sources.
+ * that disagree cannot both be right, so that is an error naming the key and
+ * both sources.
  */
 
 import { existsSync, readFileSync } from 'node:fs';
@@ -38,9 +38,6 @@ export interface EnvList
 
     /** The sources declaring each key, in list order. */
     declaredBy: Record<string, string[]>;
-
-    /** Keys two sources declare with different `required`/`sensitive`. */
-    notices: string[];
 }
 
 /** A slice of the list: the keys first declared by one source. */
@@ -77,20 +74,17 @@ export async function loadEnvList(
 /**
  * Merge sources into one entry per key.
  *
- * Declarations of a key agree when their `type`, `required` and `sensitive`
- * match; `url` and `string` count as the same type, since both hold a string.
- * A differing `type` is an error. A differing `required` or `sensitive` keeps
- * the stricter value and leaves a notice: every package enforces its own
- * declaration at runtime, so the app needs the value as soon as one of them
- * requires it, and must guard it as soon as one of them calls it a secret.
+ * Identical declarations merge. Declarations that differ in `type`, `required`
+ * or `sensitive` are an error: every package enforces its own declaration at
+ * runtime, so two rule sets for one variable means one of them is wrong, and
+ * the fix is a single owner that the others read from — not a merged guess.
  *
- * @throws Error listing every key whose declarations disagree on `type`
+ * @throws Error listing every key whose declarations disagree
  */
 export function mergeEnvSources(sources: EnvSource[]): EnvList
 {
     const schema: EnvSchema = {};
     const declaredBy: Record<string, string[]> = {};
-    const notices: string[] = [];
     const conflicts: string[] = [];
 
     for (const source of sources)
@@ -108,30 +102,20 @@ export function mergeEnvSources(sources: EnvSource[]): EnvList
                 continue;
             }
 
-            if (valueShape(existing.type) !== valueShape(entry.type))
+            if (describeRules(existing) !== describeRules(entry))
             {
-                conflicts.push(`${key}: ${owners.join(', ')} declares "${existing.type}", ${source.name} declares "${entry.type}"`);
-                continue;
-            }
-
-            if (!!existing.required !== !!entry.required || !!existing.sensitive !== !!entry.sensitive)
-            {
-                notices.push(describeDisagreement(key, existing, owners, entry, source.name));
-                schema[key] = {
-                    ...existing,
-                    required: !!existing.required || !!entry.required,
-                    sensitive: !!existing.sensitive || !!entry.sensitive,
-                };
+                conflicts.push(`${key}: ${owners.join(', ')} declares ${describeRules(existing)}, `
+                    + `${source.name} declares ${describeRules(entry)}`);
             }
         }
     }
 
     if (conflicts.length > 0)
     {
-        throw new Error(`Env schemas disagree on the type of a variable:\n  - ${conflicts.join('\n  - ')}`);
+        throw new Error(`Env schemas declare a variable differently:\n  - ${conflicts.join('\n  - ')}`);
     }
 
-    return { sources, schema, declaredBy, notices };
+    return { sources, schema, declaredBy };
 }
 
 /**
@@ -163,24 +147,12 @@ export function describeEnvList(options: { package?: string }): string
     return options.package ?? 'whole app';
 }
 
-function valueShape(type: EnvSchemaEntry['type']): string
+/**
+ * The rules a declaration sets, as the merge compares and the error shows them.
+ */
+function describeRules(entry: EnvSchemaEntry): string
 {
-    return type === 'url' ? 'string' : type;
-}
-
-function describeDisagreement(
-    key: string,
-    existing: EnvSchemaEntry,
-    owners: string[],
-    entry: EnvSchemaEntry,
-    source: string,
-): string
-{
-    const flags = (value: EnvSchemaEntry) =>
-        `${value.required ? 'required' : 'optional'}${value.sensitive ? ', sensitive' : ''}`;
-
-    return `${key} is ${flags(existing)} in ${owners.join(', ')} but ${flags(entry)} in ${source}; `
-        + 'the list uses the stricter of each.';
+    return `"${entry.type}" (${entry.required ? 'required' : 'optional'}${entry.sensitive ? ', sensitive' : ''})`;
 }
 
 // ============================================================================

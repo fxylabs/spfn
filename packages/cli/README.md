@@ -415,9 +415,8 @@ export default {
 };
 ```
 
-A variable declared by two sources alike is listed once. Two sources that give it different
-value types are an error naming both; two that differ only in `required`/`sensitive` are
-listed once with the stricter value and a warning. A schema path that does not exist, or a
+A variable declared by two sources alike is listed once. Two sources that declare it with a
+different type, `required` or `sensitive` are an error naming the key and both sources. A schema path that does not exist, or a
 module without an `envSchema` export, is an error naming the path. Top-level `env` is not
 `deployment.env`: the latter holds values to inject, the former says where the schemas are.
 

@@ -6,8 +6,8 @@
  * a wrong path or a module without `envSchema` is an error that names the
  * path; installed `@spfn/*` packages join when their `./config` exports
  * `envSchema`. Merging: a key declared twice alike is one entry, a key declared
- * with two value types is an error naming both sources, and the list groups
- * entries by the source that declared them first.
+ * with a different type, `required` or `sensitive` is an error naming both
+ * sources, and the list groups entries by the source that declared them first.
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -128,7 +128,6 @@ describe('merging sources', () =>
 
         expect(Object.keys(list.schema)).toEqual(['SHARED_URL']);
         expect(list.declaredBy.SHARED_URL).toEqual(['@spfn/alpha', '@spfn/beta']);
-        expect(list.notices).toEqual([]);
     });
 
     it('is an error naming the key and both sources when the value types differ', () =>
@@ -138,21 +137,49 @@ describe('merging sources', () =>
             source('src/server/config/env.config.ts', [entry('RETRY_LIMIT', { type: 'string' })]),
         ]);
 
-        expect(merge).toThrow('RETRY_LIMIT: @spfn/alpha declares "number", src/server/config/env.config.ts declares "string"');
+        expect(merge).toThrow('RETRY_LIMIT: @spfn/alpha declares "number" (optional), '
+            + 'src/server/config/env.config.ts declares "string" (optional)');
     });
 
-    it('keeps the stricter required/sensitive of two declarations and says so', () =>
+    it('is an error when one source says url and the other string — no type is equivalent to another', () =>
     {
-        const list = mergeEnvSources([
-            source('@spfn/alpha', [entry('API_URL', { type: 'url', required: true })]),
-            source('@spfn/beta', [entry('API_URL', { type: 'string', sensitive: true })]),
+        const merge = () => mergeEnvSources([
+            source('@spfn/alpha', [entry('API_URL', { type: 'url' })]),
+            source('@spfn/beta', [entry('API_URL', { type: 'string' })]),
         ]);
 
-        expect(list.schema.API_URL).toMatchObject({ required: true, sensitive: true });
-        expect(list.notices).toHaveLength(1);
-        expect(list.notices[0]).toContain('API_URL');
-        expect(list.notices[0]).toContain('@spfn/alpha');
-        expect(list.notices[0]).toContain('@spfn/beta');
+        expect(merge).toThrow('API_URL: @spfn/alpha declares "url" (optional), @spfn/beta declares "string" (optional)');
+    });
+
+    it('is an error, not a merge to the stricter flag, when only required differs', () =>
+    {
+        const merge = () => mergeEnvSources([
+            source('@spfn/alpha', [entry('API_URL', { required: true })]),
+            source('@spfn/beta', [entry('API_URL')]),
+        ]);
+
+        expect(merge).toThrow('API_URL: @spfn/alpha declares "string" (required), @spfn/beta declares "string" (optional)');
+    });
+
+    it('is an error when only sensitive differs', () =>
+    {
+        const merge = () => mergeEnvSources([
+            source('@spfn/alpha', [entry('SIGNING_KEY', { sensitive: true })]),
+            source('@spfn/beta', [entry('SIGNING_KEY')]),
+        ]);
+
+        expect(merge).toThrow('SIGNING_KEY: @spfn/alpha declares "string" (optional, sensitive), '
+            + '@spfn/beta declares "string" (optional)');
+    });
+
+    it('names every disagreeing key in one error', () =>
+    {
+        const merge = () => mergeEnvSources([
+            source('@spfn/alpha', [entry('FIRST', { required: true }), entry('SECOND', { type: 'number' })]),
+            source('@spfn/beta', [entry('FIRST'), entry('SECOND')]),
+        ]);
+
+        expect(merge).toThrow(/FIRST: [\s\S]*SECOND: /);
     });
 
     it('groups entries under the source that declares them first', () =>

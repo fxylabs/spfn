@@ -100,8 +100,6 @@ async function listEnvVars(options: { package?: string; group?: boolean }): Prom
         const list = await loadEnvList(options);
         const allVars = orderedVars(list);
 
-        printNotices(list);
-
         if (options.group)
         {
             // Group by target file
@@ -158,17 +156,6 @@ async function listEnvVars(options: { package?: string; group?: boolean }): Prom
 function orderedVars(list: EnvList): [string, EnvSchemaEntry][]
 {
     return groupBySource(list).flatMap((group) => group.entries.map((entry): [string, EnvSchemaEntry] => [entry.key, entry]));
-}
-
-/**
- * Report keys that two sources declare with different required/sensitive flags
- */
-function printNotices(list: EnvList): void
-{
-    for (const notice of list.notices)
-    {
-        console.log(chalk.yellow(`⚠️  ${notice}`));
-    }
 }
 
 /**
@@ -393,8 +380,6 @@ async function initEnvFiles(options: { package?: string; force?: boolean; env?: 
         const list = await loadEnvList(options);
         const allVars = orderedVars(list) as [string, any][];
 
-        printNotices(list);
-
         // Group by target file
         const grouped = allVars.reduce((acc, [key, schema]) =>
         {
@@ -552,8 +537,6 @@ async function checkEnvFiles(options: { package?: string; env?: string }): Promi
     {
         const list = await loadEnvList(options);
         const allVars = orderedVars(list) as [string, any][];
-
-        printNotices(list);
 
         const envLabel = targetEnv ? ` (${targetEnv})` : '';
         console.log(chalk.blue.bold(`\n🔍 Checking .env files against schema${envLabel}\n`));
@@ -864,8 +847,6 @@ async function loadWholeListToValidate(): Promise<EnvSource[]>
     {
         console.log(chalk.dim(`  📦 ${source.name}`));
     }
-
-    printNotices(list);
 
     return list.sources;
 }
