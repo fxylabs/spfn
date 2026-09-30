@@ -10,6 +10,7 @@ import type { SSEHandlerConfig } from '../event/sse/types';
 import type { WSRouterDef, WSHandlerConfig } from '../event/ws/types';
 import type { DatabaseProvider } from '@spfn/core/db';
 import type { ServerClock } from './server-time';
+import type { EnvRegistry } from '../env/registry';
 
 /**
  * Workflow router interface for @spfn/core integration
@@ -560,6 +561,36 @@ export interface ServerConfig
          * @env SPFN_ALLOW_PENDING_MIGRATIONS
          */
         allowPending?: boolean;
+    };
+
+    /**
+     * Environment boot check
+     *
+     * Before serving, the server validates every variable of `@spfn/core`'s
+     * registry and of the registries listed here: a required variable must be
+     * set, and a set variable must pass its `validator`. On failure it logs
+     * each key with the reason — never a value — and refuses to start.
+     * `SKIP_ENV_VALIDATION` does not skip this check.
+     *
+     * @example
+     * ```typescript
+     * // src/server/config/env.config.ts
+     * export const envSchema = defineEnvSchema({ ... });
+     * export const envRegistry = createEnvRegistry(envSchema);
+     * export const env = envRegistry.validate();
+     *
+     * // src/server/server.config.ts
+     * export default defineServerConfig()
+     *     .env({ registries: [envRegistry] })
+     *     .build();
+     * ```
+     */
+    env?: {
+        /**
+         * Registries checked alongside `@spfn/core`'s: the app's own, and any
+         * package registry the app wants held to the same gate.
+         */
+        registries?: EnvRegistry<any>[];
     };
 
     /**

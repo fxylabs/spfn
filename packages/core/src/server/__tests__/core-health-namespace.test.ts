@@ -487,6 +487,10 @@ describe('cell 18 — a serverless app', () =>
     {
         resetServerlessApp();
 
+        // Core's required variables — the boot check refuses an app without them.
+        vi.stubEnv('SPFN_API_URL', 'http://localhost:8790');
+        vi.stubEnv('NEXT_PUBLIC_SPFN_API_URL', 'http://localhost:8790');
+
         const app = await createServerlessApp(serverConfig());
 
         const core: any = await (await get(app, CORE_HEALTH_PATH)).json();
@@ -494,6 +498,7 @@ describe('cell 18 — a serverless app', () =>
         expect(core.status).toBe('ok');
         expect((await get(app, LEGACY_HEALTH_PATH)).status).toBe(410);
 
+        vi.unstubAllEnvs();
         resetServerlessApp();
     });
 });

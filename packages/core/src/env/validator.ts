@@ -3,6 +3,10 @@
  *
  * Parser functions that transform and validate environment variable strings.
  * All parsers follow the pattern: (value: string) => T or throw Error
+ *
+ * An error message never contains the input. Messages are logged — by the
+ * registry and by the server's boot check — and the input may be a secret or a
+ * URL carrying credentials. Describe the expected shape instead.
  */
 
 // ============================================================================
@@ -139,9 +143,7 @@ export function parseBoolean(value: string): boolean
         return false;
     }
 
-    throw new Error(
-        `Must be a boolean value (true/false, 1/0, yes/no), got: ${value}`,
-    );
+    throw new Error('Must be a boolean value (true/false, 1/0, yes/no)');
 }
 
 // ============================================================================
@@ -181,22 +183,22 @@ export function parseNumber(
 
     if (isNaN(num))
     {
-        throw new Error(`Must be a valid number, got: ${value}`);
+        throw new Error('Must be a valid number');
     }
 
     if (integer && !Number.isInteger(num))
     {
-        throw new Error(`Must be an integer, got: ${value}`);
+        throw new Error('Must be an integer');
     }
 
     if (min !== undefined && num < min)
     {
-        throw new Error(`Must be at least ${min}, got: ${num}`);
+        throw new Error(`Must be at least ${min}`);
     }
 
     if (max !== undefined && num > max)
     {
-        throw new Error(`Must be at most ${max}, got: ${num}`);
+        throw new Error(`Must be at most ${max}`);
     }
 
     return num;
@@ -307,7 +309,7 @@ export function parseUrl(
     {
         if (error instanceof TypeError)
         {
-            throw new Error(`Invalid URL: ${value}`);
+            throw new Error('Invalid URL');
         }
         throw error;
     }
@@ -467,7 +469,7 @@ export function parseEnum(
         if (index === -1)
         {
             throw new Error(
-                `Must be one of [${allowed.join(', ')}], got: ${value}`,
+                `Must be one of [${allowed.join(', ')}]`,
             );
         }
 
@@ -477,7 +479,7 @@ export function parseEnum(
     if (!allowed.includes(value))
     {
         throw new Error(
-            `Must be one of [${allowed.join(', ')}], got: ${value}`,
+            `Must be one of [${allowed.join(', ')}]`,
         );
     }
 
@@ -528,11 +530,10 @@ export function parseJson<T = any>(value: string): T
     {
         return JSON.parse(value) as T;
     }
-    catch (error)
+    catch
     {
-        throw new Error(
-            `Invalid JSON: ${error instanceof Error ? error.message : 'Unknown error'}`,
-        );
+        // JSON.parse quotes the input in its message; the input may be a secret.
+        throw new Error('Invalid JSON');
     }
 }
 

@@ -88,6 +88,11 @@ Consequences:
   (returns `{ errors, warnings }`) or pass `registry` to `validateAllEnv([...])` from
   `@spfn/core/env`. `SKIP_ENV_VALIDATION=true` skips only the lazy `required` check, not
   these eager checks.
+- **The SPFN server runs that eager check at boot.** `startServer` validates this
+  registry — plus any registries the app hands over with
+  `defineServerConfig().env({ registries })` — before it listens, and exits with code 1
+  listing each failing key (never a value). See
+  [Boot-time check](../env/README.md#boot-time-check-the-server).
 
 See [@spfn/core/env](../env/README.md) for the full registry / proxy / `SKIP_ENV_VALIDATION`
 semantics — this module inherits all of it unchanged.
@@ -234,8 +239,9 @@ validator **throw on access** if the value is present but malformed.
 
 - **Don't expect validation on import.** Importing `@spfn/core/config` validates nothing;
   the proxy validates each variable on property access. A missing `SPFN_API_URL` /
-  `NEXT_PUBLIC_SPFN_API_URL` throws when you *read* it, not when you import `env`. For a
-  startup gate, call `registry.validateAll()` explicitly.
+  `NEXT_PUBLIC_SPFN_API_URL` throws when you *read* it, not when you import `env`. The SPFN
+  server does check them eagerly at boot (`startServer` / `createServerlessApp`), so a
+  server process needs both set even though it does not read them itself.
 - **`SPFN_API_URL` and `NEXT_PUBLIC_SPFN_API_URL` are both required and both URLs.** Setting
   only one of them will throw on access of the other. They are validated as URLs (`envUrl`),
   so a non-URL string fails too.
@@ -265,7 +271,8 @@ import { env, registry } from '@spfn/core/config';
 
 loadEnv();   // populate process.env from .env* (server includes .env.server)
 
-// Optional eager gate: fail fast on missing/invalid required vars at startup.
+// Eager gate for a custom entry point — startServer() already runs this check
+// (see "Boot-time check" in the env README), so an SPFN server needs none of it.
 const { errors, warnings } = registry.validateAll();
 for (const w of warnings) console.warn(`${w.key}: ${w.message}`);
 if (errors.length)

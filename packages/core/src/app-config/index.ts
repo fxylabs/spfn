@@ -36,12 +36,32 @@ export interface SpfnPorts
     server?: number;
 }
 
+/**
+ * Where the app's own environment schema lives.
+ *
+ * Read by the CLI (`spfn env`, `spfn secret`), which cannot otherwise find an
+ * app's variables: a package's schema sits at `<package>/config`, an app's
+ * sits wherever the app put it.
+ */
+export interface SpfnEnvConfig
+{
+    /**
+     * Modules that export `envSchema`, as paths relative to the project root —
+     * e.g. `['src/server/config/env.config.ts']`. TypeScript and the
+     * tsconfig path aliases it imports through are supported.
+     */
+    schemas?: string[];
+}
+
 export interface SpfnAppConfig
 {
     ports?: SpfnPorts;
 
     /** Host the SPFN API server binds. */
     host?: string;
+
+    /** The app's environment schema modules. */
+    env?: SpfnEnvConfig;
 
     /** Deployment settings — untouched by this module, kept so the type is whole. */
     [key: string]: unknown;

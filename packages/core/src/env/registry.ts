@@ -268,9 +268,15 @@ export class EnvRegistry<T extends EnvSchemaCollection = EnvSchemaCollection>
                 }
                 catch (error)
                 {
+                    // Same rule as the lazy path: a sensitive key's validator
+                    // message may have interpolated the value, so it is dropped.
+                    const detail = schema.sensitive
+                        ? '(value hidden — sensitive key)'
+                        : (error instanceof Error ? error.message : String(error));
+
                     errors.push({
                         key,
-                        message: `${key} validation failed: ${error instanceof Error ? error.message : String(error)}`,
+                        message: `${key} validation failed: ${detail}`,
                     });
                 }
             }
