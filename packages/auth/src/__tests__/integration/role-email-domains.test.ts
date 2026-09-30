@@ -139,6 +139,7 @@ describe.skipIf(!dbAvailable)('Per-role email-domain policy', () =>
         setPolicy(undefined);
         delete process.env.SPFN_AUTH_ADMIN_ACCOUNTS;
         vi.restoreAllMocks();
+        vi.unstubAllEnvs();
     });
 
     async function signIn(email: string): Promise<string>
@@ -350,6 +351,8 @@ describe.skipIf(!dbAvailable)('Per-role email-domain policy', () =>
         {
             const caller = await superadminCaller();
             setPolicy('admin=example.com');
+            // The invitation link is built on SPFN_API_URL, which core requires — no localhost default.
+            vi.stubEnv('SPFN_API_URL', 'https://api.example.com');
 
             const response = await call('POST', '/_auth/invitations', caller, {
                 email: 'staff@example.com',
@@ -357,6 +360,8 @@ describe.skipIf(!dbAvailable)('Per-role email-domain policy', () =>
             });
 
             expect(response.status).toBe(200);
+            expect((await response.json() as { invitationUrl: string }).invitationUrl)
+                .toMatch(/^https:\/\/api\.example\.com\/auth\/invite\//);
         });
 
         it('#13 invite created while unset, policy then set, invitee out: 403 at accept, no account created', async () =>

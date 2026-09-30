@@ -19,6 +19,7 @@ import { usersRepository, socialAccountsRepository } from '../repositories';
 import { authLogger } from '../logger';
 import { isSafeReturnPath } from '../../lib/return-path';
 import { runBeforeRegister } from '../lib/config';
+import { resolveAppUrl } from '../lib/app-url';
 import { type SocialProvider, type KeyAlgorithmType, type SessionBindingType } from '../types';
 import {
     refreshAccessToken,
@@ -268,9 +269,8 @@ export async function oauthCallbackService(
         },
     });
 
-    const appUrl = env.NEXT_PUBLIC_SPFN_APP_URL || env.SPFN_APP_URL;
     const callbackPath = env.SPFN_AUTH_OAUTH_SUCCESS_URL || '/auth/callback';
-    const callbackUrl = callbackPath.startsWith('http') ? callbackPath : `${appUrl}${callbackPath}`;
+    const callbackUrl = callbackPath.startsWith('http') ? callbackPath : `${resolveAppUrl()}${callbackPath}`;
     const returnUrl = isSafeReturnPath(stateData.returnUrl) ? stateData.returnUrl : '/';
 
     // An enrolled account on a new device is redirected with a challenge and

@@ -21,6 +21,7 @@ import {
     assertCanAssignRole,
 } from '../../services';
 import { Type } from '@sinclair/typebox';
+import { env as coreEnv } from '@spfn/core/config';
 import { Transactional } from '@spfn/core/db';
 import { rateLimitPolicy } from '@spfn/core/middleware';
 import { defineRouter, route } from '@spfn/core/route';
@@ -173,9 +174,8 @@ export const createInvitation = route.post('/_auth/invitations')
             metadata: body.metadata,
         });
 
-        // Build invitation URL (use environment variable or default)
-        const baseUrl = process.env.SPFN_API_URL || 'http://localhost:8790';
-        const invitationUrl = `${baseUrl}/auth/invite/${invitation.token}`;
+        // SPFN_API_URL is required by @spfn/core, so there is no fallback to guess
+        const invitationUrl = `${coreEnv.SPFN_API_URL}/auth/invite/${invitation.token}`;
 
         return {
             id: invitation.id,

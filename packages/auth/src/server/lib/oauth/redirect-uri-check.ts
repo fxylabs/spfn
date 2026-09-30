@@ -32,8 +32,10 @@ function redirectUriVar(provider: Provider): string
 
 /**
  * The web app origin the callback has to come back to, or null when the configured
- * value is absent or unparseable — the startup env validation already reports that,
- * and this check must not become a second failure for the same value.
+ * value is absent or unparseable. Without it there is no origin to compare against,
+ * and neither case is this check's to refuse: a flow that builds a URL on the app
+ * fails naming both variables, and a malformed `SPFN_APP_URL` is refused by the
+ * startup env validation.
  */
 function resolveWebAppOrigin(env: EnvSource): string | null
 {
@@ -139,8 +141,8 @@ export function assertOAuthRedirectUris(env: EnvSource = process.env): void
     {
         authLogger.service.info(
             'The OAuth callback origin check was skipped: neither NEXT_PUBLIC_SPFN_APP_URL nor '
-            + 'SPFN_APP_URL resolves to a parseable URL, which the startup env validation reports '
-            + `on its own. Not examined: ${examined}.`,
+            + 'SPFN_APP_URL is set to a parseable URL, so there is no web app origin to check '
+            + `against. Not examined: ${examined}.`,
         );
 
         return;

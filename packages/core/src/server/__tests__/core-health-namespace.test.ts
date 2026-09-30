@@ -487,9 +487,8 @@ describe('cell 18 — a serverless app', () =>
     {
         resetServerlessApp();
 
-        // Core's required variables — the boot check refuses an app without them.
+        // Core's required variable — the boot check refuses an app without it.
         vi.stubEnv('SPFN_API_URL', 'http://localhost:8790');
-        vi.stubEnv('NEXT_PUBLIC_SPFN_API_URL', 'http://localhost:8790');
 
         const app = await createServerlessApp(serverConfig());
 

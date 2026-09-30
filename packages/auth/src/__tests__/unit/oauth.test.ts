@@ -199,14 +199,36 @@ describe('Google OAuth Config', () =>
     {
         vi.stubEnv('SPFN_AUTH_GOOGLE_CLIENT_ID', 'test-client-id.apps.googleusercontent.com');
         vi.stubEnv('SPFN_AUTH_GOOGLE_CLIENT_SECRET', 'GOCSPX-test-secret');
+        vi.stubEnv('SPFN_APP_URL', 'http://localhost:3790');
 
         const config = getGoogleOAuthConfig();
 
         expect(config.clientId).toBe('test-client-id.apps.googleusercontent.com');
         expect(config.clientSecret).toBe('GOCSPX-test-secret');
-        // SPFN_APP_URL 기본값(http://localhost:3000) 기반 — 콜백은 CSRF 쿠키가
-        // 심긴 웹 앱 origin으로 돌아온다.
-        expect(config.redirectUri).toBe('http://localhost:3000/_auth/oauth/google/callback');
+        // SPFN_APP_URL 기반 — 콜백은 CSRF 쿠키가 심긴 웹 앱 origin으로 돌아온다.
+        expect(config.redirectUri).toBe('http://localhost:3790/_auth/oauth/google/callback');
+    });
+
+    it('should refuse, naming both variables, when no app URL is set', () =>
+    {
+        vi.stubEnv('SPFN_AUTH_GOOGLE_CLIENT_ID', 'test-client-id');
+        vi.stubEnv('SPFN_AUTH_GOOGLE_CLIENT_SECRET', 'test-secret');
+        vi.stubEnv('SPFN_APP_URL', '');
+        vi.stubEnv('NEXT_PUBLIC_SPFN_APP_URL', '');
+
+        // 기본값(localhost)으로 조용히 대체하지 않는다.
+        expect(() => getGoogleOAuthConfig()).toThrow('Set NEXT_PUBLIC_SPFN_APP_URL or SPFN_APP_URL');
+    });
+
+    it('should not need an app URL when the redirect URI is set explicitly', () =>
+    {
+        vi.stubEnv('SPFN_AUTH_GOOGLE_CLIENT_ID', 'test-client-id');
+        vi.stubEnv('SPFN_AUTH_GOOGLE_CLIENT_SECRET', 'test-secret');
+        vi.stubEnv('SPFN_AUTH_GOOGLE_REDIRECT_URI', 'https://app.example.com/_auth/oauth/google/callback');
+        vi.stubEnv('SPFN_APP_URL', '');
+        vi.stubEnv('NEXT_PUBLIC_SPFN_APP_URL', '');
+
+        expect(getGoogleOAuthConfig().redirectUri).toBe('https://app.example.com/_auth/oauth/google/callback');
     });
 
     it('should use custom redirect URI when provided', () =>
@@ -254,7 +276,7 @@ describe('Google Auth URL', () =>
     {
         vi.stubEnv('SPFN_AUTH_GOOGLE_CLIENT_ID', 'test-client-id.apps.googleusercontent.com');
         vi.stubEnv('SPFN_AUTH_GOOGLE_CLIENT_SECRET', 'GOCSPX-test-secret');
-        vi.stubEnv('SPFN_API_URL', 'http://localhost:8790');
+        vi.stubEnv('SPFN_APP_URL', 'http://localhost:3790');
     });
 
     afterEach(() =>
@@ -279,7 +301,7 @@ describe('Google Auth URL', () =>
     {
         const authUrl = getGoogleAuthUrl('state');
 
-        expect(authUrl).toContain(encodeURIComponent('http://localhost:3000/_auth/oauth/google/callback'));
+        expect(authUrl).toContain(encodeURIComponent('http://localhost:3790/_auth/oauth/google/callback'));
     });
 });
 

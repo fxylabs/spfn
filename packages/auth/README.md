@@ -140,7 +140,8 @@ real secret values out of band, never commit them.
 | `SPFN_AUTH_VERIFICATION_TOKEN_SECRET` | `.env.server` | yes | OTP / verification token signing |
 | `SPFN_AUTH_SESSION_SECRET` | `.env.local` | yes | ≥32 chars, AES-256 session cookie encryption (validated: entropy/unique-char checks) |
 | `SPFN_AUTH_TOKEN_ENCRYPTION_KEYS` | `.env.server` | web OAuth, **MFA** | At-rest keyring: comma-separated `<keyId>:<base64-32-byte-key>` entries; first key is active. Required by any app offering a [second factor](#second-factor-mfa), social login or not |
-| `SPFN_API_URL` | `.env.local` | — | default `http://localhost:8790` |
+| `SPFN_API_URL` | `.env.local` | yes | declared by `@spfn/core`, no default; the OAuth 2.1 issuer and invitation links are built on it |
+| `SPFN_APP_URL` | `.env.local` | OAuth, links, passkeys | declared by `@spfn/core`, no default; the web app origin, unless `NEXT_PUBLIC_SPFN_APP_URL` is set. With neither set, a flow that builds a URL on the app fails with an error naming both |
 | `SPFN_AUTH_SESSION_TTL` | both | — | default `7d` (e.g. `7d`, `12h`, `45m`) |
 | `SPFN_AUTH_JWT_SECRET` / `SPFN_AUTH_JWT_EXPIRES_IN` | `.env.server` | — | legacy server-signed JWT mode only |
 | `SPFN_AUTH_BCRYPT_SALT_ROUNDS` | `.env.server` | — | default `12` (native bcrypt, off the event loop) |
@@ -184,10 +185,13 @@ real secret values out of band, never commit them.
 | `SPFN_AUTH_BOUND_KEY_RENEW_GRACE_HOURS` | `.env.server` | — | default `168`; how long past expiry a bound key may still be renewed. Past it, sign in again |
 | `SPFN_AUTH_CONCURRENT_USE_WINDOW_MS` | `.env.server` | — | default `300000`; how close two sightings from two addresses must be to raise `concurrentUseAtMillis` |
 | `SPFN_AUTH_SESSION_RENEW_PATH` | `.env.local` | — | default `/auth/renew`; the page `RequireAuth` sends a bound session whose key ran out |
-| `NEXT_PUBLIC_SPFN_API_URL` / `NEXT_PUBLIC_SPFN_APP_URL` | `.env.local` | — | browser-facing URLs for OAuth redirects |
+| `NEXT_PUBLIC_SPFN_APP_URL` | `.env.local` | — | browser-facing app URL; read before `SPFN_APP_URL` wherever the app origin is needed |
+| `NEXT_PUBLIC_SPFN_API_URL` | `.env.local` | — | declared by `@spfn/core`; the API URL browser code calls |
 
 Read validated values via `import { env } from '@spfn/auth/config'` (a proxy validated at
-startup). `envSchema` carries descriptions/defaults.
+startup). `envSchema` carries descriptions/defaults. The three URLs `@spfn/core` declares
+(`SPFN_API_URL`, `NEXT_PUBLIC_SPFN_API_URL`, `SPFN_APP_URL`) are not in it — read them from
+`import { env } from '@spfn/core/config'`.
 
 ### Admin seeding
 

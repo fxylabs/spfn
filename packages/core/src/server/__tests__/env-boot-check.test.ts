@@ -58,7 +58,7 @@ function capturedLog(): string
 beforeEach(() =>
 {
     vi.stubEnv('SPFN_API_URL', 'http://localhost:8790');
-    vi.stubEnv('NEXT_PUBLIC_SPFN_API_URL', 'http://localhost:8790');
+    vi.stubEnv('NEXT_PUBLIC_SPFN_API_URL', '');
     vi.stubEnv('BILLING_API_KEY', '');
     vi.stubEnv('BILLING_WEBHOOK_SECRET', '');
     vi.stubEnv('BILLING_RETRY_LIMIT', '');
@@ -97,6 +97,11 @@ describe('runEnvBootCheck', () =>
 
         expect(result.valid).toBe(false);
         expect(result.errors.map(error => error.key)).toEqual(['SPFN_API_URL']);
+    });
+
+    it('does not require NEXT_PUBLIC_SPFN_API_URL, which Next.js inlines at build and the server does not read', () =>
+    {
+        expect(runEnvBootCheck({}).valid).toBe(true);
     });
 
     it('runs each validator on a present value, and logs the key but not the value', () =>

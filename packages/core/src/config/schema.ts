@@ -406,15 +406,15 @@ export const coreEnvSchema = defineEnvSchema({
     // ========================================================================
 
     SPFN_API_URL: envUrl({
-        description: 'SPFN API URL (used by Next.js to call backend)',
+        description: 'SPFN API URL. Next.js calls the backend on it, and the server reads it wherever it names its own origin (e.g. an OAuth 2.1 issuer, links it sends out).',
         required: true,
         nextjs: true,
         examples: ['http://localhost:8790', 'https://api.your-app.com'],
     }),
 
     NEXT_PUBLIC_SPFN_API_URL: envUrl({
-        description: 'SPFN API URL (used by Next.js to call backend)',
-        required: true,
+        description: 'SPFN API URL for browser code. Next.js inlines it into the client bundle at build time; the server does not read it and falls back to SPFN_API_URL, so it is optional here.',
+        required: false,
         nextjs: true,
         examples: ['http://localhost:8790', 'https://api.your-app.com'],
     }),

@@ -283,8 +283,9 @@ package's variables are checked only when the app passes a registry for them —
 - `createServerlessApp()` runs the same check and rejects its promise instead of exiting.
 - `createServer()` (the app factory both of them use) and `provisionInfrastructure()` do not
   run it.
-- `@spfn/core` itself requires `SPFN_API_URL` and `NEXT_PUBLIC_SPFN_API_URL`, so the server
-  process needs both set.
+- `@spfn/core` itself requires `SPFN_API_URL`, so the server process needs it set.
+  `NEXT_PUBLIC_SPFN_API_URL` is optional there: Next.js inlines it at build time and the
+  server falls back to `SPFN_API_URL`.
 
 ### The app's schema in the CLI (`spfn.config.js` `env.schemas`)
 
@@ -302,8 +303,10 @@ export default {
 
 Paths are relative to the project root; TypeScript and tsconfig path aliases are supported.
 Without `-p <package>`, the CLI reads these modules plus every installed `@spfn/*` package
-whose `./config` exports `envSchema`, and groups its output by source. See the CLI README
-(`spfn env`) for how duplicate keys are merged.
+whose `./config` exports `envSchema`, and groups its output by source. A key two sources
+declare identically is listed once; two declarations that differ in type, `required` or
+`sensitive` are an error naming the key and both sources — one variable has one owner, and
+other packages read it from the owner's `env` instead of declaring it again.
 
 ### Fallback keys
 

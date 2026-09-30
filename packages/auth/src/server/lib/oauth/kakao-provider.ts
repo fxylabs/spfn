@@ -6,6 +6,7 @@ import { ValidationError } from '@spfn/core/errors';
 import { NativeSignInUnsupportedError } from '@spfn/auth/errors';
 
 import { env } from '../../../config';
+import { resolveAppUrl } from '../app-url';
 import { timingSafeEqual } from 'node:crypto';
 
 import { authLogger } from '../../logger';
@@ -70,13 +71,11 @@ function getKakaoConfig()
         });
     }
 
-    const baseUrl = env.NEXT_PUBLIC_SPFN_APP_URL || env.SPFN_APP_URL;
-
     return {
         clientId,
         clientSecret,
         redirectUri: env.SPFN_AUTH_KAKAO_REDIRECT_URI
-            || `${baseUrl}/_auth/oauth/kakao/callback`,
+            || `${resolveAppUrl()}/_auth/oauth/kakao/callback`,
     };
 }
 

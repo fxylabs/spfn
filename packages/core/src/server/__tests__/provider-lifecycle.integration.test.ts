@@ -16,9 +16,8 @@ describe('server database provider lifecycle', () =>
 {
     beforeEach(() =>
     {
-        // Core's required variables — the boot check stops a server without them.
+        // Core's required variable — the boot check stops a server without it.
         vi.stubEnv('SPFN_API_URL', 'http://localhost:8790');
-        vi.stubEnv('NEXT_PUBLIC_SPFN_API_URL', 'http://localhost:8790');
     });
 
     afterEach(async () =>

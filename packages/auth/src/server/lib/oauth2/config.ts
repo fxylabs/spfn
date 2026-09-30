@@ -14,6 +14,7 @@
  */
 
 import { authLogger } from '../../logger';
+import { resolveAppUrl } from '../app-url';
 
 /**
  * Everything the authorization server needs, resolved.
@@ -87,9 +88,7 @@ export function resolveIssuerSource(
 
 function resolveAuthorizeUrl(env: Record<string, string | undefined>): string
 {
-    const appUrl = env.NEXT_PUBLIC_SPFN_APP_URL || env.SPFN_APP_URL || 'http://localhost:3000';
-
-    return new URL(AUTHORIZE_PATH, appUrl).toString();
+    return new URL(AUTHORIZE_PATH, resolveAppUrl(env)).toString();
 }
 
 /**
@@ -104,6 +103,10 @@ function resolveAuthorizeUrl(env: Record<string, string | undefined>): string
  * `assertAuthorizationServerIssuer` from `afterInfrastructure`, where a throw
  * exits the process instead of leaving a server listening without routes. See
  * `lifecycle.ts`.
+ *
+ * @throws When `scopes` is empty or `defaultScopes` names an unknown scope, and
+ *         when `authorizeUrl` is not given and neither `NEXT_PUBLIC_SPFN_APP_URL`
+ *         nor `SPFN_APP_URL` is set to derive it from.
  */
 export function configureAuthorizationServer(
     options?: AuthorizationServerOptions,
