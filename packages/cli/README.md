@@ -396,9 +396,29 @@ TLS by itself and `sslmode=disable` remains authoritative.
 
 ### `spfn env`
 
-Schema-driven environment variable tooling (schema comes from a package's `envSchema`,
-default `@spfn/core`). Routes vars to the right file: `NEXT_PUBLIC_*` → `.env`/`.env.local`,
-server vars → `.env.server`.
+Schema-driven environment variable tooling. Routes vars to the right file: `NEXT_PUBLIC_*`
+→ `.env`/`.env.local`, server vars → `.env.server`.
+
+Without `-p`, every subcommand reads the **whole-app list**: the app's own schema modules
+named in `spfn.config.js` under `env.schemas`, then every installed `@spfn/*` package whose
+`./config` exports `envSchema` (found through the app's `package.json`, resolved from the
+project root). Output is grouped by the source that declares each variable.
+
+```js
+// spfn.config.js
+export default {
+  env: {
+    // Modules exporting `envSchema`, relative to the project root.
+    // TypeScript and tsconfig path aliases load the way `spfn dev` loads them (tsx).
+    schemas: ['src/server/config/env.config.ts'],
+  },
+};
+```
+
+A variable declared by two sources alike is listed once. Two sources that declare it with a
+different type, `required` or `sensitive` are an error naming the key and both sources. A schema path that does not exist, or a
+module without an `envSchema` export, is an error naming the path. Top-level `env` is not
+`deployment.env`: the latter holds values to inject, the former says where the schemas are.
 
 | Subcommand | Description |
 |------------|-------------|
@@ -409,7 +429,8 @@ server vars → `.env.server`.
 | `env check` | Check `.env` files against the schema (`-e <env>` for a full env chain) |
 | `env validate` | Validate `process.env` against the schema — for CI/CD (`-e <env>`, `-s` strict) |
 
-All accept `-p, --package <pkg>` (`env validate` uses `-p, --packages <pkgs...>`).
+All accept `-p, --package <pkg>` to read that one package only (`env validate` uses
+`-p, --packages <pkgs...>`).
 
 ### `spfn key [preset]`
 
@@ -445,7 +466,8 @@ reads plain `process.env`.
 | `secret check` | Static lint — flag plaintext secret leaks |
 
 Options: `-e, --env <env>` (`local` default; also `development`/`staging`/`production`),
-`-p, --package <pkg>` (schema source, default `@spfn/core`).
+`-p, --package <pkg>` (read that one package's schema; without it, the whole-app list
+described under `spfn env`).
 
 **Local (keychain).** `spfn secret set DB_URL` stores the value in the OS keychain
 (macOS `security`, Windows Credential Manager via optional `@napi-rs/keyring`, Linux

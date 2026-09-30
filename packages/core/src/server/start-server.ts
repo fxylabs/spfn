@@ -31,6 +31,7 @@ import {
     getTimeoutConfig,
     resolveEndpointMiddlewares,
 } from './helpers';
+import { runEnvBootCheck } from './env-boot-check';
 import { runMigrationBootGate } from './migration-gate';
 import { getShutdownManager, resetShutdownManager } from './shutdown-manager';
 
@@ -114,6 +115,8 @@ let processHandlersRegistered = false;
  * Start SPFN server
  *
  * Automatically loads server.config.ts if exists
+ * Validates the environment (core's registry + `config.env.registries`) and
+ * exits with code 1 when a variable is missing or invalid
  * Automatically initializes Database and Redis from environment
  * Sets up graceful shutdown handlers for SIGTERM and SIGINT
  *
@@ -124,6 +127,15 @@ export async function startServer(config?: ServerConfig): Promise<ServerInstance
     loadEnv();
 
     const finalConfig = await loadAndMergeConfig(config);
+
+    // As soon as the app's registries are known — they come with server.config.
+    // A missing variable stops the boot here instead of failing a request later.
+    if (!runEnvBootCheck(finalConfig).valid)
+    {
+        serverLogger.error('Refusing to start: fix the environment variables listed above.');
+        process.exit(1);
+    }
+
     const { host, port, debug } = finalConfig;
 
     validateServerConfig(finalConfig);

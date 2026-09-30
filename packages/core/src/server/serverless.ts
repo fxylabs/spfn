@@ -16,6 +16,9 @@
  *   - does NOT run seed/RBAC provisioning per cold start — that moves to a
  *     deploy-time step, see {@link provisionInfrastructure}.
  *
+ * Like {@link startServer}, it runs the environment boot check before building
+ * the app; a failure rejects the returned promise instead of exiting.
+ *
  * `startServer()` / `spfn start` (the always-on path) is unchanged by this module.
  */
 
@@ -26,6 +29,7 @@ import { initDatabase } from '@spfn/core/db';
 
 import { loadEnv } from '../env/loader';
 import { createServer } from './create-server';
+import { runEnvBootCheck } from './env-boot-check';
 import { serverLogger } from './logger';
 import type { ServerConfig } from './types';
 
@@ -116,6 +120,13 @@ export function createServerlessApp(config?: ServerConfig): Promise<Hono>
 async function buildServerlessApp(rawConfig?: ServerConfig): Promise<Hono>
 {
     loadEnv();
+
+    // The same gate as startServer, but thrown rather than exited: a serverless
+    // runtime owns the process, so the failure belongs to the invocation.
+    if (!runEnvBootCheck(rawConfig ?? {}).valid)
+    {
+        throw new Error('Environment validation failed — the missing or invalid keys are logged above.');
+    }
 
     const config = withServerlessDefaults(rawConfig);
 

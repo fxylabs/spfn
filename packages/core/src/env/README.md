@@ -249,6 +249,65 @@ for (const w of result.warnings) {
 A single registry exposes the same via `registry.validateAll()` returning just
 `{ errors, warnings }`.
 
+Messages carry the key and the rule, never the value. For a `sensitive` key the validator's
+own message is replaced by `(value hidden — sensitive key)`, because a validator may echo its
+input; core's parsers describe the expected shape instead of quoting the input. An app
+validator on a non-sensitive key should do the same.
+
+### Boot-time check (the server)
+
+`startServer()` runs `validateAllEnv` right after loading the env files and the app's
+`server.config`, before it initializes infrastructure or listens. The list is `@spfn/core`'s
+registry plus the registries the app hands over in `server.config`:
+
+```typescript
+// src/server/config/env.config.ts
+export const envSchema = defineEnvSchema({ /* ... */ });
+export const envRegistry = createEnvRegistry(envSchema);
+export const env = envRegistry.validate();
+
+// src/server/server.config.ts
+import { envRegistry } from '@/server/config/env.config';
+
+export default defineServerConfig()
+    .env({ registries: [envRegistry] })
+    .build();
+```
+
+On failure it logs each key with its reason (never a value) and exits with code 1. A
+package's variables are checked only when the app passes a registry for them —
+`createEnvRegistry(envSchema)` over the schema the package exports from `./config`.
+
+- `SKIP_ENV_VALIDATION` does not apply: it relaxes the lazy proxy for build steps, and a
+  server about to serve is not a build step.
+- `createServerlessApp()` runs the same check and rejects its promise instead of exiting.
+- `createServer()` (the app factory both of them use) and `provisionInfrastructure()` do not
+  run it.
+- `@spfn/core` itself requires `SPFN_API_URL`, so the server process needs it set.
+  `NEXT_PUBLIC_SPFN_API_URL` is optional there: Next.js inlines it at build time and the
+  server falls back to `SPFN_API_URL`.
+
+### The app's schema in the CLI (`spfn.config.js` `env.schemas`)
+
+`spfn env` and `spfn secret` find a package's schema at `<package>/config`; an app's own
+schema can live anywhere, so `spfn.config.js` names it:
+
+```js
+// spfn.config.js
+export default {
+    env: {
+        schemas: ['src/server/config/env.config.ts'], // modules exporting `envSchema`
+    },
+};
+```
+
+Paths are relative to the project root; TypeScript and tsconfig path aliases are supported.
+Without `-p <package>`, the CLI reads these modules plus every installed `@spfn/*` package
+whose `./config` exports `envSchema`, and groups its output by source. A key two sources
+declare identically is listed once; two declarations that differ in type, `required` or
+`sensitive` are an error naming the key and both sources — one variable has one owner, and
+other packages read it from the owner's `env` instead of declaring it again.
+
 ### Fallback keys
 
 ```typescript
@@ -556,7 +615,10 @@ optional(parseRedisUrl);                                    // '' → undefined,
 - **`sensitive: true` + `NEXT_PUBLIC_` is wrong.** It only emits a warning, not an error —
   the secret is still exposed. Remove the prefix.
 - **`SKIP_ENV_VALIDATION` only skips the `required` check** (and only in the lazy proxy);
-  present values are still validated, and `validateAll()` ignores the flag entirely.
+  present values are still validated, and `validateAll()` — and with it the server's boot
+  check — ignores the flag entirely.
+- **A validator message must not contain the value.** Validation errors are logged. Throw
+  `'Must be a valid number'`, not `` `got: ${value}` ``.
 - **Removed API.** `getEnvVar`, `requireEnvVar`, `hasEnvVar`, `getEnvVars`,
   `loadEnvironment`, `namespace`/`useFolderStructure`/`customPaths`/`useCache` loader
   options, `env.get()`/`env.require()`, `getByCategory()`/`getAllSchemas()`,

@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { closeDatabase } from '../../db';
 import { startServer } from '../start-server';
@@ -14,8 +14,15 @@ vi.mock('@hono/node-server', () => ({
 
 describe('server database provider lifecycle', () =>
 {
+    beforeEach(() =>
+    {
+        // Core's required variable — the boot check stops a server without it.
+        vi.stubEnv('SPFN_API_URL', 'http://localhost:8790');
+    });
+
     afterEach(async () =>
     {
+        vi.unstubAllEnvs();
         await closeDatabase();
     });
 

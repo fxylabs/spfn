@@ -3,7 +3,15 @@ import chalk from 'chalk';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { parse } from 'dotenv';
-import { VALID_ENVS, loadEnvSchema, getTargetFile } from '../utils/env-schema.js';
+import { VALID_ENVS, loadEnvSchema, getTargetFile, type EnvSchemaEntry } from '../utils/env-schema.js';
+import {
+    alsoDeclaredBy,
+    describeEnvList,
+    groupBySource,
+    loadEnvList,
+    type EnvList,
+    type EnvSource,
+} from '../utils/env-list.js';
 
 /**
  * Base environment file targets (no NODE_ENV)
@@ -85,12 +93,12 @@ function formatDefault(value: any, type: string): string
  */
 async function listEnvVars(options: { package?: string; group?: boolean }): Promise<void>
 {
-    const packageName = options.package || '@spfn/core';
+    const label = describeEnvList(options);
 
     try
     {
-        const envSchema = await loadEnvSchema(packageName);
-        const allVars = Object.entries(envSchema as Record<string, any>);
+        const list = await loadEnvList(options);
+        const allVars = orderedVars(list);
 
         if (options.group)
         {
@@ -104,7 +112,7 @@ async function listEnvVars(options: { package?: string; group?: boolean }): Prom
                 return acc;
             }, {} as Record<string, [string, any][]>);
 
-            console.log(chalk.blue.bold(`\n📋 Environment Variables by File (${packageName})\n`));
+            console.log(chalk.blue.bold(`\n📋 Environment Variables by File (${label})\n`));
 
             for (const [file, vars] of Object.entries(grouped))
             {
@@ -113,17 +121,23 @@ async function listEnvVars(options: { package?: string; group?: boolean }): Prom
 
                 for (const [key, schema] of vars)
                 {
-                    printEnvVar(key, schema);
+                    printEnvVar(key, schema, false, list.declaredBy[key]);
                 }
             }
         }
         else
         {
-            console.log(chalk.blue.bold(`\n📋 Environment Variables (${packageName})\n`));
+            console.log(chalk.blue.bold(`\n📋 Environment Variables (${label})\n`));
 
-            for (const [key, schema] of allVars)
+            for (const group of groupBySource(list))
             {
-                printEnvVar(key, schema, true);
+                console.log(chalk.bold.magenta(`\n${group.source}`));
+                console.log(chalk.dim('─'.repeat(50)));
+
+                for (const entry of group.entries)
+                {
+                    printEnvVar(entry.key, entry, true, alsoDeclaredBy(list, entry.key));
+                }
             }
         }
 
@@ -137,9 +151,20 @@ async function listEnvVars(options: { package?: string; group?: boolean }): Prom
 }
 
 /**
- * Print a single environment variable
+ * Every entry of the list as `[key, entry]`, grouped by the source declaring it
  */
-function printEnvVar(key: string, schema: any, showFile = false): void
+function orderedVars(list: EnvList): [string, EnvSchemaEntry][]
+{
+    return groupBySource(list).flatMap((group) => group.entries.map((entry): [string, EnvSchemaEntry] => [entry.key, entry]));
+}
+
+/**
+ * Print a single environment variable
+ *
+ * `sources` lists where else the key is declared (or, grouped by file, every
+ * source declaring it); nothing is printed for it when empty.
+ */
+function printEnvVar(key: string, schema: any, showFile = false, sources: string[] = []): void
 {
     const typeStr = formatType(schema.type);
     const requiredStr = schema.required || schema.default !== undefined
@@ -150,6 +175,11 @@ function printEnvVar(key: string, schema: any, showFile = false): void
 
     console.log(`${chalk.bold.cyan(key)} ${chalk.dim('(')}${typeStr}${chalk.dim(')')} ${requiredStr}${sensitiveStr}${fileStr}`);
     console.log(`  ${chalk.dim(schema.description)}`);
+
+    if (sources.length > 0)
+    {
+        console.log(`  ${chalk.dim(showFile ? 'Also declared by:' : 'Declared by:')} ${chalk.dim(sources.join(', '))}`);
+    }
 
     if (schema.default !== undefined)
     {
@@ -172,15 +202,13 @@ function printEnvVar(key: string, schema: any, showFile = false): void
  */
 async function showEnvStats(options: { package?: string }): Promise<void>
 {
-    const packageName = options.package || '@spfn/core';
-
     try
     {
-        const envSchema = await loadEnvSchema(packageName);
+        const list = await loadEnvList(options);
 
-        console.log(chalk.blue.bold(`\n📊 Environment Variable Statistics (${packageName})\n`));
+        console.log(chalk.blue.bold(`\n📊 Environment Variable Statistics (${describeEnvList(options)})\n`));
 
-        const allVars = Object.entries(envSchema as Record<string, any>);
+        const allVars = orderedVars(list) as [string, any][];
         const required = allVars.filter(([_, schema]) => schema.required || schema.default !== undefined);
         const optional = allVars.filter(([_, schema]) => !schema.required && schema.default === undefined);
         const sensitive = allVars.filter(([_, schema]) => schema.sensitive);
@@ -243,16 +271,14 @@ async function showEnvStats(options: { package?: string }): Promise<void>
  */
 async function searchEnvVars(query: string, options: { package?: string }): Promise<void>
 {
-    const packageName = options.package || '@spfn/core';
-
     try
     {
-        const envSchema = await loadEnvSchema(packageName);
+        const list = await loadEnvList(options);
 
         const normalizedQuery = query.toLowerCase();
         const results: [string, any][] = [];
 
-        for (const [key, schema] of Object.entries(envSchema as Record<string, any>))
+        for (const [key, schema] of orderedVars(list) as [string, any][])
         {
             const matchesKey = key.toLowerCase().includes(normalizedQuery);
             const matchesDescription = schema.description.toLowerCase().includes(normalizedQuery);
@@ -297,6 +323,8 @@ async function searchEnvVars(query: string, options: { package?: string }): Prom
     }
 }
 
+const PACKAGE_OPTION_HELP = 'Read only this package\'s env schema (default: the whole app — spfn.config.js env.schemas + installed @spfn/* packages)';
+
 // Create env command with subcommands
 export const envCommand = new Command('env')
     .description('Manage environment variables');
@@ -305,7 +333,7 @@ export const envCommand = new Command('env')
 envCommand
     .command('list')
     .description('List all environment variables from schema')
-    .option('-p, --package <package>', 'Package name to read env schema from', '@spfn/core')
+    .option('-p, --package <package>', PACKAGE_OPTION_HELP)
     .option('-g, --group', 'Group variables by target file')
     .action(listEnvVars);
 
@@ -313,7 +341,7 @@ envCommand
 envCommand
     .command('stats')
     .description('Show environment variable statistics')
-    .option('-p, --package <package>', 'Package name to read env schema from', '@spfn/core')
+    .option('-p, --package <package>', PACKAGE_OPTION_HELP)
     .action(showEnvStats);
 
 // env:search - Search environment variables
@@ -321,7 +349,7 @@ envCommand
     .command('search')
     .description('Search environment variables')
     .argument('<query>', 'Search query (matches key or description)')
-    .option('-p, --package <package>', 'Package name to read env schema from', '@spfn/core')
+    .option('-p, --package <package>', PACKAGE_OPTION_HELP)
     .action(searchEnvVars);
 
 /**
@@ -344,14 +372,13 @@ function validateEnvOption(envValue: string): string
  */
 async function initEnvFiles(options: { package?: string; force?: boolean; env?: string }): Promise<void>
 {
-    const packageName = options.package || '@spfn/core';
     const targetEnv = options.env ? validateEnvOption(options.env) : undefined;
     const cwd = process.cwd();
 
     try
     {
-        const envSchema = await loadEnvSchema(packageName);
-        const allVars = Object.entries(envSchema as Record<string, any>);
+        const list = await loadEnvList(options);
+        const allVars = orderedVars(list) as [string, any][];
 
         // Group by target file
         const grouped = allVars.reduce((acc, [key, schema]) =>
@@ -391,7 +418,7 @@ async function initEnvFiles(options: { package?: string; force?: boolean; env?: 
 
             for (const [file, vars] of Object.entries(allGrouped))
             {
-                writeEnvTemplate(cwd, file, vars, options.force ?? false);
+                writeEnvTemplate(cwd, file, vars, options.force ?? false, list);
             }
         }
         else
@@ -400,7 +427,7 @@ async function initEnvFiles(options: { package?: string; force?: boolean; env?: 
 
             for (const [file, vars] of Object.entries(grouped))
             {
-                writeEnvTemplate(cwd, file, vars, options.force ?? false);
+                writeEnvTemplate(cwd, file, vars, options.force ?? false, list);
             }
         }
 
@@ -427,7 +454,7 @@ async function initEnvFiles(options: { package?: string; force?: boolean; env?: 
 /**
  * Write a single .env template file
  */
-function writeEnvTemplate(cwd: string, file: string, vars: [string, any][], force: boolean): void
+function writeEnvTemplate(cwd: string, file: string, vars: [string, any][], force: boolean, list: EnvList): void
 {
     const filePath = resolve(cwd, file);
 
@@ -438,23 +465,34 @@ function writeEnvTemplate(cwd: string, file: string, vars: [string, any][], forc
         return;
     }
 
-    writeFileSync(filePath, generateEnvFileContent(vars), 'utf-8');
+    writeFileSync(filePath, generateEnvFileContent(vars, list), 'utf-8');
     console.log(chalk.green(`  ✅ ${file} (${vars.length} variables)`));
 }
 
 /**
  * Generate .env file content from schema
+ *
+ * With more than one source, a comment line opens each source's section.
  */
-function generateEnvFileContent(vars: [string, any][]): string
+function generateEnvFileContent(vars: [string, any][], list: EnvList): string
 {
     const lines: string[] = [
         '# Auto-generated by spfn env init',
         '# Copy this file and fill in the values',
         '',
     ];
+    let section: string | undefined;
 
     for (const [key, schema] of vars)
     {
+        const source = list.declaredBy[key]?.[0];
+
+        if (list.sources.length > 1 && source !== section)
+        {
+            section = source;
+            lines.push(`# ── ${source} ──`, '');
+        }
+
         // Comment with description
         lines.push(`# ${schema.description}`);
 
@@ -492,14 +530,13 @@ function generateEnvFileContent(vars: [string, any][]): string
  */
 async function checkEnvFiles(options: { package?: string; env?: string }): Promise<void>
 {
-    const packageName = options.package || '@spfn/core';
     const targetEnv = options.env ? validateEnvOption(options.env) : undefined;
     const cwd = process.cwd();
 
     try
     {
-        const envSchema = await loadEnvSchema(packageName);
-        const allVars = Object.entries(envSchema as Record<string, any>);
+        const list = await loadEnvList(options);
+        const allVars = orderedVars(list) as [string, any][];
 
         const envLabel = targetEnv ? ` (${targetEnv})` : '';
         console.log(chalk.blue.bold(`\n🔍 Checking .env files against schema${envLabel}\n`));
@@ -510,8 +547,8 @@ async function checkEnvFiles(options: { package?: string; env?: string }): Promi
             : [...BASE_ENV_FILES.nextjs, ...BASE_ENV_FILES.server];
 
         const loadedEnv: Record<string, { value: string; file: string }> = {};
-        const issues: string[] = [];
-        const warnings: string[] = [];
+        const issues: SourcedLine[] = [];
+        const warnings: SourcedLine[] = [];
 
         // Load env files
         for (const file of filesToCheck)
@@ -546,7 +583,7 @@ async function checkEnvFiles(options: { package?: string; env?: string }): Promi
             {
                 if (schema.required && schema.default === undefined)
                 {
-                    issues.push(`${chalk.red('✗')} ${chalk.cyan(key)} is required but not found in any .env file`);
+                    issues.push(sourced(list, key, `${chalk.red('✗')} ${chalk.cyan(key)} is required but not found in any .env file`));
                 }
 
                 continue;
@@ -562,17 +599,21 @@ async function checkEnvFiles(options: { package?: string; env?: string }): Promi
                 // Server-only var in nextjs file = security issue
                 if (schema.sensitive)
                 {
-                    issues.push(
+                    issues.push(sourced(
+                        list,
+                        key,
                         `${chalk.red('✗')} ${chalk.cyan(key)} is sensitive and should be in ${chalk.magenta(expectedFile)}, ` +
                         `but found in ${chalk.yellow(found.file)} (security risk!)`,
-                    );
+                    ));
                 }
                 else
                 {
-                    warnings.push(
+                    warnings.push(sourced(
+                        list,
+                        key,
                         `${chalk.yellow('⚠')} ${chalk.cyan(key)} should be in ${chalk.magenta(expectedFile)}, ` +
                         `but found in ${chalk.dim(found.file)}`,
-                    );
+                    ));
                 }
             }
         }
@@ -580,11 +621,9 @@ async function checkEnvFiles(options: { package?: string; env?: string }): Promi
         // Check for unknown variables
         for (const [key, { file }] of Object.entries(loadedEnv))
         {
-            const inSchema = allVars.some(([k]) => k === key);
-
-            if (!inSchema)
+            if (!list.schema[key])
             {
-                warnings.push(`${chalk.yellow('⚠')} ${chalk.cyan(key)} in ${chalk.dim(file)} is not in schema`);
+                warnings.push({ source: UNDECLARED, text: `${chalk.yellow('⚠')} ${chalk.cyan(key)} in ${chalk.dim(file)} is not in schema` });
             }
         }
 
@@ -592,24 +631,14 @@ async function checkEnvFiles(options: { package?: string; env?: string }): Promi
         if (issues.length > 0)
         {
             console.log(chalk.red.bold('Issues:'));
-
-            for (const issue of issues)
-            {
-                console.log(`  ${issue}`);
-            }
-
+            printBySource(issues);
             console.log('');
         }
 
         if (warnings.length > 0)
         {
             console.log(chalk.yellow.bold('Warnings:'));
-
-            for (const warning of warnings)
-            {
-                console.log(`  ${warning}`);
-            }
-
+            printBySource(warnings);
             console.log('');
         }
 
@@ -634,11 +663,44 @@ async function checkEnvFiles(options: { package?: string; env?: string }): Promi
     }
 }
 
+/** A report line and the source whose key it is about. */
+interface SourcedLine
+{
+    source: string;
+    text: string;
+}
+
+/** Heading for report lines about keys no schema declares. */
+const UNDECLARED = '(not declared by any schema)';
+
+function sourced(list: EnvList, key: string, text: string): SourcedLine
+{
+    return { source: list.declaredBy[key]?.[0] ?? UNDECLARED, text };
+}
+
+/**
+ * Print report lines under one heading per source, in first-seen order
+ */
+function printBySource(lines: SourcedLine[]): void
+{
+    const sources = [...new Set(lines.map((line) => line.source))];
+
+    for (const source of sources)
+    {
+        console.log(`  ${chalk.bold.magenta(source)}`);
+
+        for (const line of lines.filter((candidate) => candidate.source === source))
+        {
+            console.log(`    ${line.text}`);
+        }
+    }
+}
+
 // env:init - Generate template files
 envCommand
     .command('init')
     .description('Generate .env template files from schema')
-    .option('-p, --package <package>', 'Package name to read env schema from', '@spfn/core')
+    .option('-p, --package <package>', PACKAGE_OPTION_HELP)
     .option('-e, --env <environment>', 'Generate environment-specific templates (e.g. production, staging)')
     .option('-f, --force', 'Overwrite existing files')
     .action(initEnvFiles);
@@ -647,7 +709,7 @@ envCommand
 envCommand
     .command('check')
     .description('Check .env files against schema')
-    .option('-p, --package <package>', 'Package name to read env schema from', '@spfn/core')
+    .option('-p, --package <package>', PACKAGE_OPTION_HELP)
     .option('-e, --env <environment>', 'Check files for a specific environment (e.g. production)')
     .action(checkEnvFiles);
 
@@ -663,7 +725,6 @@ envCommand
  */
 async function validateEnvVars(options: { packages?: string[]; strict?: boolean; env?: string }): Promise<void>
 {
-    const packages = options.packages || ['@spfn/core'];
     const targetEnv = options.env ? validateEnvOption(options.env) : undefined;
 
     // If --env specified, load env files for that environment before validating
@@ -686,99 +747,168 @@ async function validateEnvVars(options: { packages?: string[]; strict?: boolean;
         console.log(chalk.blue.bold(`\n🔍 Validating environment variables\n`));
     }
 
-    const allErrors: Array<{ key: string; message: string; package: string }> = [];
-    const allWarnings: Array<{ key: string; message: string; package: string }> = [];
-
-    for (const packageName of packages)
-    {
-        try
-        {
-            console.log(chalk.dim(`  📦 ${packageName}`));
-
-            const envSchema = await loadEnvSchema(packageName);
-            const { createEnvRegistry } = await import('@spfn/core/env');
-
-            const registry = createEnvRegistry(envSchema);
-            const result = registry.validateAll();
-
-            for (const error of result.errors)
-            {
-                allErrors.push({ ...error, package: packageName });
-            }
-
-            for (const warning of result.warnings)
-            {
-                allWarnings.push({ ...warning, package: packageName });
-            }
-        }
-        catch (error)
-        {
-            if (error instanceof Error && error.message.includes('does not export envSchema'))
-            {
-                console.log(chalk.dim(`    ⏭️  No envSchema exported, skipping`));
-                continue;
-            }
-
-            console.error(chalk.red(`    ❌ Failed to load: ${error instanceof Error ? error.message : String(error)}`));
-
-            if (options.strict)
-            {
-                process.exit(1);
-            }
-        }
-    }
+    const sources = options.packages
+        ? await loadPackagesToValidate(options.packages, options.strict ?? false)
+        : await loadWholeListToValidate();
+    const { errors, warnings } = await validateSources(sources);
 
     console.log('');
 
-    // Print errors
-    if (allErrors.length > 0)
+    if (errors.length > 0)
     {
-        console.log(chalk.red.bold(`❌ Validation Errors (${allErrors.length}):\n`));
-
-        for (const error of allErrors)
-        {
-            console.log(`  ${chalk.red('✗')} ${chalk.cyan(error.key)}`);
-            console.log(`    ${chalk.dim(error.message)}`);
-            console.log(`    ${chalk.dim(`from ${error.package}`)}`);
-            console.log('');
-        }
+        console.log(chalk.red.bold(`❌ Validation Errors (${errors.length}):\n`));
+        printFindingsBySource(errors, chalk.red('✗'));
     }
 
-    // Print warnings
-    if (allWarnings.length > 0)
+    if (warnings.length > 0)
     {
-        console.log(chalk.yellow.bold(`⚠️  Warnings (${allWarnings.length}):\n`));
-
-        for (const warning of allWarnings)
-        {
-            console.log(`  ${chalk.yellow('⚠')} ${chalk.cyan(warning.key)}`);
-            console.log(`    ${chalk.dim(warning.message)}`);
-            console.log('');
-        }
+        console.log(chalk.yellow.bold(`⚠️  Warnings (${warnings.length}):\n`));
+        printFindingsBySource(warnings, chalk.yellow('⚠'));
     }
 
     // Summary
-    if (allErrors.length === 0 && allWarnings.length === 0)
+    if (errors.length === 0 && warnings.length === 0)
     {
         console.log(chalk.green.bold('✅ All environment variables are valid!\n'));
     }
-    else if (allErrors.length === 0)
+    else if (errors.length === 0)
     {
         console.log(chalk.green('✅ No errors found.'));
-        console.log(chalk.yellow(`⚠️  ${allWarnings.length} warning(s) found.\n`));
+        console.log(chalk.yellow(`⚠️  ${warnings.length} warning(s) found.\n`));
     }
     else
     {
-        console.log(chalk.red(`\n❌ Validation failed with ${allErrors.length} error(s)\n`));
+        console.log(chalk.red(`\n❌ Validation failed with ${errors.length} error(s)\n`));
         process.exit(1);
     }
+}
+
+/** A validation error or warning and the source whose schema raised it. */
+interface Finding
+{
+    key: string;
+    message: string;
+    source: string;
+}
+
+/**
+ * The packages named with `-p`. A package without an `envSchema` is skipped;
+ * one that fails to load is reported, and ends the run under `--strict`.
+ */
+async function loadPackagesToValidate(packages: string[], strict: boolean): Promise<EnvSource[]>
+{
+    const sources: EnvSource[] = [];
+
+    for (const packageName of packages)
+    {
+        console.log(chalk.dim(`  📦 ${packageName}`));
+
+        const schema = await loadEnvSchema(packageName).catch((error: unknown) =>
+        {
+            const message = error instanceof Error ? error.message : String(error);
+
+            if (message.includes('does not export envSchema'))
+            {
+                console.log(chalk.dim(`    ⏭️  No envSchema exported, skipping`));
+            }
+            else
+            {
+                console.error(chalk.red(`    ❌ Failed to load: ${message}`));
+                exitIf(strict);
+            }
+
+            return undefined;
+        });
+
+        if (schema)
+        {
+            sources.push({ name: packageName, schema });
+        }
+    }
+
+    return sources;
+}
+
+/**
+ * The whole-app list. Failing to build it — a schema module that is missing,
+ * or two schemas at odds — ends the run: validating part of the app would
+ * report a pass it has not earned.
+ */
+async function loadWholeListToValidate(): Promise<EnvSource[]>
+{
+    const list = await loadEnvList({}).catch((error: unknown) =>
+    {
+        console.error(chalk.red(`  ❌ ${error instanceof Error ? error.message : String(error)}`));
+
+        return process.exit(1);
+    });
+
+    for (const source of list.sources)
+    {
+        console.log(chalk.dim(`  📦 ${source.name}`));
+    }
+
+    return list.sources;
+}
+
+function exitIf(condition: boolean): void
+{
+    if (condition)
+    {
+        process.exit(1);
+    }
+}
+
+/**
+ * Validate each source with its own registry — the way each package enforces
+ * its schema at runtime. A key two sources declare identically fails once.
+ */
+async function validateSources(sources: EnvSource[]): Promise<{ errors: Finding[]; warnings: Finding[] }>
+{
+    const { createEnvRegistry } = await import('@spfn/core/env');
+    const errors: Finding[] = [];
+    const warnings: Finding[] = [];
+
+    for (const source of sources)
+    {
+        const result = createEnvRegistry(source.schema).validateAll();
+
+        errors.push(...result.errors.map((error) => ({ ...error, source: source.name })));
+        warnings.push(...result.warnings.map((warning) => ({ ...warning, source: source.name })));
+    }
+
+    return { errors: uniqueFindings(errors), warnings: uniqueFindings(warnings) };
+}
+
+function uniqueFindings(findings: Finding[]): Finding[]
+{
+    const seen = new Set<string>();
+
+    return findings.filter((finding) =>
+    {
+        const id = `${finding.key}\n${finding.message}`;
+        const isNew = !seen.has(id);
+
+        seen.add(id);
+
+        return isNew;
+    });
+}
+
+function printFindingsBySource(findings: Finding[], mark: string): void
+{
+    printBySource(findings.map((finding) => ({
+        source: finding.source,
+        text: `${mark} ${chalk.cyan(finding.key)}\n      ${chalk.dim(finding.message)}`,
+    })));
+    console.log('');
 }
 
 // env:validate - Validate runtime environment variables
 envCommand
     .command('validate')
     .description('Validate environment variables against schema (for CI/CD)')
-    .option('-p, --packages <packages...>', 'Packages to validate', ['@spfn/core'])
+    .option('-p, --packages <packages...>', 'Validate only these packages (default: the whole app — spfn.config.js env.schemas + installed @spfn/* packages)')
     .option('-e, --env <environment>', 'Load env files for specific environment before validating')
     .option('-s, --strict', 'Exit on any error (including load failures)')
     .action(validateEnvVars);

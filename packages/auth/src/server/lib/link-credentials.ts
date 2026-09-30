@@ -15,7 +15,7 @@
 
 import crypto from 'crypto';
 
-import { env } from '@spfn/auth/config';
+import { resolveAppUrl } from './app-url';
 
 /**
  * Bytes of entropy in a link token or a setup secret.
@@ -60,10 +60,9 @@ export function hashCredential(secret: string): string
  *
  * @param path - Page path within the app, from the flow's `*_CONFIRM_PATH`
  * @param token - The plaintext credential, encoded into the query string
+ * @throws Error naming both variables when neither app URL variable is set
  */
 export function buildConfirmUrl(path: string, token: string): string
 {
-    const appUrl = (env.NEXT_PUBLIC_SPFN_APP_URL || env.SPFN_APP_URL || '').replace(/\/$/, '');
-
-    return `${appUrl}${path}?token=${encodeURIComponent(token)}`;
+    return `${resolveAppUrl().replace(/\/$/, '')}${path}?token=${encodeURIComponent(token)}`;
 }

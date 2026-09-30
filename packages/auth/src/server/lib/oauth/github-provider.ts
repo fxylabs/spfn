@@ -5,6 +5,7 @@
 import { ValidationError } from '@spfn/core/errors';
 
 import { env } from '../../../config';
+import { resolveAppUrl } from '../app-url';
 import {
     registerOAuthProvider,
     type NormalizedIdentity,
@@ -60,13 +61,11 @@ function getGithubConfig()
         });
     }
 
-    const baseUrl = env.NEXT_PUBLIC_SPFN_APP_URL || env.SPFN_APP_URL;
-
     return {
         clientId,
         clientSecret,
         redirectUri: env.SPFN_AUTH_GITHUB_REDIRECT_URI
-            || `${baseUrl}/_auth/oauth/github/callback`,
+            || `${resolveAppUrl()}/_auth/oauth/github/callback`,
     };
 }
 

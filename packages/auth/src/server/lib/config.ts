@@ -535,20 +535,10 @@ const DEFAULT_CHALLENGE_TTL_SECONDS = 300;
 const DEFAULT_RECENT_AUTH_MINUTES = 10;
 
 /**
- * Every variable this resolution reads, with the one schema default filled in.
- *
- * `SPFN_APP_URL` defaults to `http://localhost:3000` in the validated `env`
- * proxy rather than in `process.env`, so reading the raw environment alone would
- * refuse boot for an app that simply never set it.
- */
-function passkeyEnvSource(): PasskeyEnvSource
-{
-    return { ...process.env, SPFN_APP_URL: process.env.SPFN_APP_URL || env.SPFN_APP_URL };
-}
-
-/**
- * The app URL every default here is derived from — the same resolution the OAuth
- * callbacks use, so passkeys and OAuth cannot disagree about where the app is.
+ * The app URL every default here is derived from — the same variables, in the
+ * same order, that `resolveAppUrl` reads for the OAuth callbacks, so passkeys and
+ * OAuth cannot disagree about where the app is. Neither has a default, so an app
+ * that set neither is told to set one of them or the relying party ID.
  */
 function passkeyAppUrl(env: PasskeyEnvSource): URL
 {
@@ -558,7 +548,7 @@ function passkeyAppUrl(env: PasskeyEnvSource): URL
     {
         throw new PasskeyConfigError({
             message: 'Passkeys need a relying party ID. Set SPFN_AUTH_PASSKEY_RP_ID, or set '
-                + 'NEXT_PUBLIC_SPFN_APP_URL / SPFN_APP_URL to the app origin it should be derived from.',
+                + 'NEXT_PUBLIC_SPFN_APP_URL or SPFN_APP_URL to the app origin it should be derived from.',
         });
     }
 
@@ -684,7 +674,7 @@ function resolvePositiveNumber(env: PasskeyEnvSource, variable: string, fallback
  * @param env - Environment to read; defaults to `process.env`.
  * @throws PasskeyConfigError when the configuration cannot be honoured.
  */
-export function getPasskeyConfig(env: PasskeyEnvSource = passkeyEnvSource()): PasskeyConfig
+export function getPasskeyConfig(env: PasskeyEnvSource = process.env): PasskeyConfig
 {
     const rpId = env.SPFN_AUTH_PASSKEY_RP_ID?.trim() || passkeyAppUrl(env).hostname;
     const configuredOrigins = env.SPFN_AUTH_PASSKEY_ORIGINS
@@ -740,7 +730,7 @@ const PASSKEY_VARS = [
  *
  * @throws PasskeyConfigError when a passkey variable is set and cannot be honoured
  */
-export function assertPasskeyConfig(env: PasskeyEnvSource = passkeyEnvSource()): void
+export function assertPasskeyConfig(env: PasskeyEnvSource = process.env): void
 {
     if (PASSKEY_VARS.some(variable => env[variable]))
     {

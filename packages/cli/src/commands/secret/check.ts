@@ -7,12 +7,11 @@
 
 import { join } from 'path';
 import chalk from 'chalk';
-import { logger } from '../../utils/logger.js';
-import { loadEnvSchema, secretEntries, type EnvSchemaEntry } from '../../utils/env-schema.js';
+import { secretEntries } from '../../utils/env-schema.js';
 import { parseEnvFile } from '../../utils/env-file.js';
 import { KEYCHAIN_REF_PREFIX } from '../../utils/secret-store/index.js';
 import { hasSopsConfig } from '../../utils/secret-config.js';
-import type { SecretOptions } from './options.js';
+import { loadSecretList, type SecretOptions } from './options.js';
 
 /**
  * Files that may be committed — a real secret value here is a leak. The reference
@@ -27,19 +26,7 @@ const PLACEHOLDER = /(your-|changeme|placeholder|example|<.*>)/i;
 export async function secretCheck(options: SecretOptions): Promise<void>
 {
     const cwd = process.cwd();
-    const pkg = options.package ?? '@spfn/core';
-
-    let entries: EnvSchemaEntry[];
-
-    try
-    {
-        entries = secretEntries(await loadEnvSchema(pkg));
-    }
-    catch (error)
-    {
-        logger.error(error instanceof Error ? error.message : String(error));
-        process.exit(1);
-    }
+    const entries = secretEntries((await loadSecretList(options)).schema);
 
     const secretKeys = new Set(entries.map((entry) => entry.key));
     const issues: string[] = [];

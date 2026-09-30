@@ -81,13 +81,18 @@ env.SPFN_API_URL;  // read + validated HERE; throws if missing (required) or inv
 
 Consequences:
 
-- A missing **required** variable (`SPFN_API_URL`, `NEXT_PUBLIC_SPFN_API_URL`) does not
+- A missing **required** variable (`SPFN_API_URL`) does not
   throw on import — it throws on first access (`Error('Environment validation failed')`).
 - You may import `env` before `loadEnv()` runs; values are picked up lazily.
 - For an **eager** all-at-once check (CI / startup gate), call `registry.validateAll()`
   (returns `{ errors, warnings }`) or pass `registry` to `validateAllEnv([...])` from
   `@spfn/core/env`. `SKIP_ENV_VALIDATION=true` skips only the lazy `required` check, not
   these eager checks.
+- **The SPFN server runs that eager check at boot.** `startServer` validates this
+  registry — plus any registries the app hands over with
+  `defineServerConfig().env({ registries })` — before it listens, and exits with code 1
+  listing each failing key (never a value). See
+  [Boot-time check](../env/README.md#boot-time-check-the-server).
 
 See [@spfn/core/env](../env/README.md) for the full registry / proxy / `SKIP_ENV_VALIDATION`
 semantics — this module inherits all of it unchanged.
@@ -221,24 +226,25 @@ validator **throw on access** if the value is present but malformed.
 | Variable | Type | Required | Validator | Notes |
 |----------|------|----------|-----------|-------|
 | `SPFN_API_URL` | `string` (`envUrl`) | **Yes** | URL | `nextjs: true`; Next.js → backend |
-| `NEXT_PUBLIC_SPFN_API_URL` | `string` (`envUrl`) | **Yes** | URL | `nextjs: true`; client-exposed |
-| `SPFN_APP_URL` | `string` (`envUrl`) | No | URL | `nextjs: true`; SPFN server → Next.js |
+| `NEXT_PUBLIC_SPFN_API_URL` | `string` (`envUrl`) | No | URL | `nextjs: true`; client-exposed, inlined by Next.js at build; the server uses `SPFN_API_URL` |
+| `SPFN_APP_URL` | `string` (`envUrl`) | No (no default) | URL | `nextjs: true`; SPFN server → Next.js |
 | `RPC_PROXY_TIMEOUT` | `number` | No (default `120000`) | — | `nextjs: true`; keep < `FETCH_HEADERS_TIMEOUT` |
 
-> `SPFN_API_URL` and `NEXT_PUBLIC_SPFN_API_URL` are both `envUrl` and both **required** —
-> a missing or non-URL value throws on first access of that property.
+> `SPFN_API_URL` is **required** — a missing or non-URL value throws on first access.
+> `NEXT_PUBLIC_SPFN_API_URL` is optional to the server, which falls back to `SPFN_API_URL`;
+> set it wherever browser code needs the API URL. These three URLs are declared by
+> `@spfn/core` only — packages read them from `@spfn/core/config` rather than declaring them again.
 
 ---
 
 ## Pitfalls & anti-patterns
 
 - **Don't expect validation on import.** Importing `@spfn/core/config` validates nothing;
-  the proxy validates each variable on property access. A missing `SPFN_API_URL` /
-  `NEXT_PUBLIC_SPFN_API_URL` throws when you *read* it, not when you import `env`. For a
-  startup gate, call `registry.validateAll()` explicitly.
-- **`SPFN_API_URL` and `NEXT_PUBLIC_SPFN_API_URL` are both required and both URLs.** Setting
-  only one of them will throw on access of the other. They are validated as URLs (`envUrl`),
-  so a non-URL string fails too.
+  the proxy validates each variable on property access. A missing `SPFN_API_URL` throws
+  when you *read* it, not when you import `env`. The SPFN server does check it eagerly at
+  boot (`startServer` / `createServerlessApp`), so a server process needs it set.
+- **The three URLs are validated as URLs (`envUrl`).** A non-URL string in `SPFN_API_URL`,
+  `NEXT_PUBLIC_SPFN_API_URL` or `SPFN_APP_URL` fails on access and at boot.
 - **Don't call `loadEnv()` inside Next.js.** Next.js already loads `.env*`. Calling it there
   (with `server: true`) would pull `.env.server` secrets into the Next.js process. In the
   **SPFN server** entry point you *do* call `loadEnv()` before touching `env`.
@@ -265,7 +271,8 @@ import { env, registry } from '@spfn/core/config';
 
 loadEnv();   // populate process.env from .env* (server includes .env.server)
 
-// Optional eager gate: fail fast on missing/invalid required vars at startup.
+// Eager gate for a custom entry point — startServer() already runs this check
+// (see "Boot-time check" in the env README), so an SPFN server needs none of it.
 const { errors, warnings } = registry.validateAll();
 for (const w of warnings) console.warn(`${w.key}: ${w.message}`);
 if (errors.length)
@@ -296,7 +303,7 @@ const apiUrl = env.SPFN_API_URL;          // required URL — throws if unset/in
 // Next.js — no loadEnv()
 import { env } from '@spfn/core/config';
 
-const apiUrl = env.NEXT_PUBLIC_SPFN_API_URL; // required URL, client-exposed
+const apiUrl = env.NEXT_PUBLIC_SPFN_API_URL; // optional URL, client-exposed
 ```
 
 ```typescript

@@ -6,6 +6,7 @@ import { ValidationError } from '@spfn/core/errors';
 import { NativeSignInUnsupportedError } from '@spfn/auth/errors';
 
 import { env } from '../../../config';
+import { resolveAppUrl } from '../app-url';
 import { createDecipheriv, createHash, createHmac, timingSafeEqual } from 'node:crypto';
 
 import { authLogger } from '../../logger';
@@ -76,13 +77,11 @@ function getNaverConfig()
         });
     }
 
-    const baseUrl = env.NEXT_PUBLIC_SPFN_APP_URL || env.SPFN_APP_URL;
-
     return {
         clientId,
         clientSecret,
         redirectUri: env.SPFN_AUTH_NAVER_REDIRECT_URI
-            || `${baseUrl}/_auth/oauth/naver/callback`,
+            || `${resolveAppUrl()}/_auth/oauth/naver/callback`,
     };
 }
 

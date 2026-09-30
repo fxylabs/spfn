@@ -8,6 +8,7 @@
  */
 
 import { env } from '@spfn/auth/config';
+import { resolveAppUrl } from '../app-url';
 
 // Google OAuth endpoints
 const GOOGLE_AUTH_URL = 'https://accounts.google.com/o/oauth2/v2/auth';
@@ -61,10 +62,9 @@ export function getGoogleOAuthConfig()
     // web/api가 다른 호스트인 분리 배포에서 API 호스트로 돌아오면 호스트 전용
     // 쿠키가 전달되지 않아 콜백 CSRF 검증이 항상 실패한다. 앱에는
     // /_auth/:path* → API rewrite가 표준 구성이다(README의 OAuth 절 참고).
-    // SPFN_APP_URL은 기본값(http://localhost:3000)이 있어 항상 해석된다.
-    const baseUrl = env.NEXT_PUBLIC_SPFN_APP_URL || env.SPFN_APP_URL;
+    // 앱 URL에는 기본값이 없다 — 둘 다 없으면 resolveAppUrl이 두 변수를 짚어 실패한다.
     const redirectUri = env.SPFN_AUTH_GOOGLE_REDIRECT_URI
-        || `${baseUrl}/_auth/oauth/google/callback`;
+        || `${resolveAppUrl()}/_auth/oauth/google/callback`;
 
     return {
         clientId,

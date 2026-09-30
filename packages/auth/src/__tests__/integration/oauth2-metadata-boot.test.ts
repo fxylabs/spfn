@@ -38,6 +38,9 @@ const { initializeAuth } = await import('@/server/services/rbac.service');
 
 const METADATA_PATH = '/.well-known/oauth-authorization-server';
 
+/** The consent screen's origin — the authorize URL is derived from it when no option names one. */
+const APP_URL = 'https://app.example.com';
+
 interface Metadata
 {
     issuer: string;
@@ -106,7 +109,7 @@ describe.skipIf(!dbAvailable)('OAuth2 metadata and boot check (8f)', () =>
 
     it('an issuer carrying a path → boot refused, message names the source', () =>
     {
-        configureAuthorizationServer({ issuer: 'https://api.example.com/auth', scopes: TEST_SCOPES });
+        configureAuthorizationServer({ issuer: 'https://api.example.com/auth', scopes: TEST_SCOPES }, { SPFN_APP_URL: APP_URL });
 
         expect(() => assertAuthorizationServerIssuer())
             .toThrow(/authorizationServer\.issuer must be an origin with no path/);
@@ -114,7 +117,7 @@ describe.skipIf(!dbAvailable)('OAuth2 metadata and boot check (8f)', () =>
 
     it('an issuer from SPFN_API_URL carrying a path → boot refused, message names the variable', () =>
     {
-        configureAuthorizationServer({ scopes: TEST_SCOPES }, { SPFN_API_URL: 'https://api.example.com/auth' });
+        configureAuthorizationServer({ scopes: TEST_SCOPES }, { SPFN_API_URL: 'https://api.example.com/auth', SPFN_APP_URL: APP_URL });
 
         expect(() => assertAuthorizationServerIssuer())
             .toThrow(/SPFN_API_URL must be an origin with no path/);
@@ -142,7 +145,7 @@ describe.skipIf(!dbAvailable)('OAuth2 metadata and boot check (8f)', () =>
         // check reading it has nothing to refuse. The rule is written on the raw
         // string instead: an origin, or that origin with a trailing slash, and
         // nothing else is reduced or accepted.
-        configureAuthorizationServer({ issuer: 'https://api.example.com/%2e%2e', scopes: TEST_SCOPES });
+        configureAuthorizationServer({ issuer: 'https://api.example.com/%2e%2e', scopes: TEST_SCOPES }, { SPFN_APP_URL: APP_URL });
 
         expect(() => assertAuthorizationServerIssuer())
             .toThrow(/authorizationServer\.issuer must be an origin with no path/);
@@ -150,7 +153,7 @@ describe.skipIf(!dbAvailable)('OAuth2 metadata and boot check (8f)', () =>
 
     it('an issuer carrying credentials → boot refused, message names the source', () =>
     {
-        configureAuthorizationServer({ issuer: 'https://u:p@api.example.com', scopes: TEST_SCOPES });
+        configureAuthorizationServer({ issuer: 'https://u:p@api.example.com', scopes: TEST_SCOPES }, { SPFN_APP_URL: APP_URL });
 
         expect(() => assertAuthorizationServerIssuer())
             .toThrow(/authorizationServer\.issuer must not carry a username or a password/);
@@ -158,7 +161,7 @@ describe.skipIf(!dbAvailable)('OAuth2 metadata and boot check (8f)', () =>
 
     it('an issuer that is neither https nor loopback http → boot refused', () =>
     {
-        configureAuthorizationServer({ scopes: TEST_SCOPES }, { SPFN_API_URL: 'http://api.example.com' });
+        configureAuthorizationServer({ scopes: TEST_SCOPES }, { SPFN_API_URL: 'http://api.example.com', SPFN_APP_URL: APP_URL });
 
         expect(() => assertAuthorizationServerIssuer()).toThrow(/SPFN_API_URL must be https/);
     });
@@ -167,7 +170,7 @@ describe.skipIf(!dbAvailable)('OAuth2 metadata and boot check (8f)', () =>
     {
         for (const issuer of ['http://localhost:8790', 'http://127.0.0.1:8790', 'http://[::1]:8790'])
         {
-            configureAuthorizationServer({ scopes: TEST_SCOPES }, { SPFN_API_URL: issuer });
+            configureAuthorizationServer({ scopes: TEST_SCOPES }, { SPFN_API_URL: issuer, SPFN_APP_URL: APP_URL });
 
             expect(() => assertAuthorizationServerIssuer()).not.toThrow();
         }

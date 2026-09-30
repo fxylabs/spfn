@@ -5,23 +5,23 @@
 import prompts from 'prompts';
 import chalk from 'chalk';
 import { logger } from '../../utils/logger.js';
-import { loadEnvSchema, secretEntries } from '../../utils/env-schema.js';
+import { secretEntries } from '../../utils/env-schema.js';
+import { describeEnvList, loadEnvList } from '../../utils/env-list.js';
 import { resolveEnv, type SecretOptions } from './options.js';
 import { storeSecret, describeTarget } from './store-value.js';
 
 export async function secretSet(key: string | undefined, options: SecretOptions): Promise<void>
 {
     const env = resolveEnv(options.env);
-    const pkg = options.package ?? '@spfn/core';
 
-    const resolvedKey = key ?? await pickSecretKey(pkg);
+    const resolvedKey = key ?? await pickSecretKey(options);
     if (!resolvedKey)
     {
         logger.error('No secret key provided.');
         process.exit(1);
     }
 
-    await warnIfNotSecret(pkg, resolvedKey);
+    await warnIfNotSecret(options, resolvedKey);
 
     const { value } = await prompts({
         type: 'password',
@@ -49,20 +49,12 @@ export async function secretSet(key: string | undefined, options: SecretOptions)
 }
 
 /**
- * Prompt the user to choose from the package's declared secrets when no key is given.
+ * Prompt the user to choose from the declared secrets when no key is given.
  */
-async function pickSecretKey(pkg: string): Promise<string | undefined>
+async function pickSecretKey(options: SecretOptions): Promise<string | undefined>
 {
-    let entries;
-
-    try
-    {
-        entries = secretEntries(await loadEnvSchema(pkg));
-    }
-    catch
-    {
-        return undefined;
-    }
+    const list = await loadEnvList(options).catch(() => undefined);
+    const entries = list ? secretEntries(list.schema) : [];
 
     if (entries.length === 0)
     {
@@ -85,22 +77,16 @@ async function pickSecretKey(pkg: string): Promise<string | undefined>
 
 /**
  * Advisory check: warn when the key exists in the schema but isn't marked secret.
- * Unknown keys (app-defined, not in this package) are allowed without comment.
+ * Unknown keys (not in any schema read) are allowed without comment, and a
+ * schema that cannot be loaded here skips the advisory.
  */
-async function warnIfNotSecret(pkg: string, key: string): Promise<void>
+async function warnIfNotSecret(options: SecretOptions, key: string): Promise<void>
 {
-    try
-    {
-        const schema = await loadEnvSchema(pkg);
-        const entry = schema[key];
+    const list = await loadEnvList(options).catch(() => undefined);
+    const entry = list?.schema[key];
 
-        if (entry && !entry.sensitive)
-        {
-            logger.warn(`${key} is not marked as a secret in ${pkg}. Consider declaring it with envSecret().`);
-        }
-    }
-    catch
+    if (entry && !entry.sensitive)
     {
-        // Schema not loadable here — proceed without the advisory.
+        logger.warn(`${key} is not marked as a secret in ${describeEnvList(options)}. Consider declaring it with envSecret().`);
     }
 }

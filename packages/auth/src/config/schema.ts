@@ -493,46 +493,14 @@ export const authEnvSchema = defineEnvSchema({
     },
 
     // ============================================================================
-    // API Configuration
+    // App URL
+    //
+    // SPFN_API_URL, NEXT_PUBLIC_SPFN_API_URL and SPFN_APP_URL belong to
+    // @spfn/core; read them from `env` in '@spfn/core/config'.
     // ============================================================================
-    SPFN_API_URL: {
-        ...envString({
-            description: 'Internal API URL for server-to-server communication',
-            default: 'http://localhost:8790',
-            required: false,
-            examples: [
-                'https://api.example.com',
-                'http://localhost:8790',
-            ],
-        }),
-    },
-
-    NEXT_PUBLIC_SPFN_API_URL: {
-        ...envString({
-            description: 'Public-facing API URL used for browser-facing redirects. Falls back to SPFN_API_URL if not set.',
-            required: false,
-            examples: [
-                'https://api.example.com',
-                'http://localhost:8790',
-            ],
-        }),
-    },
-
-    SPFN_APP_URL: {
-        ...envString({
-            description: 'Next.js application URL (internal). Used for server-to-server communication.',
-            default: 'http://localhost:3000',
-            required: false,
-            examples: [
-                'https://app.example.com',
-                'http://localhost:3000',
-            ],
-        }),
-    },
-
     NEXT_PUBLIC_SPFN_APP_URL: {
         ...envString({
-            description: 'Public-facing Next.js app URL for browser redirects (e.g. OAuth redirect). Falls back to SPFN_APP_URL if not set.',
+            description: 'Public-facing Next.js app URL for browser redirects (e.g. OAuth redirect). Falls back to SPFN_APP_URL (declared by @spfn/core) if not set; with neither set, every flow that builds an app URL fails with an error naming both.',
             required: false,
             examples: [
                 'https://app.example.com',

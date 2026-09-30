@@ -12,7 +12,7 @@ import { secretRecipients } from './recipients.js';
 import { secretCheck } from './check.js';
 
 const ENV_OPTION = ['-e, --env <env>', 'Target environment (local | development | staging | production)', 'local'] as const;
-const PKG_OPTION = ['-p, --package <package>', 'Package whose env schema to read', '@spfn/core'] as const;
+const PKG_OPTION = ['-p, --package <package>', 'Read only this package\'s env schema (default: the whole app — spfn.config.js env.schemas + installed @spfn/* packages)'] as const;
 
 export const secretCommand = new Command('secret')
     .description('Manage secrets: keychain locally, SOPS (age / GCP KMS / AWS KMS) for deployed environments');

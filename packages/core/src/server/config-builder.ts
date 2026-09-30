@@ -433,6 +433,28 @@ export class ServerConfigBuilder
     }
 
     /**
+     * Hand the app's env registries to the boot check
+     *
+     * `@spfn/core`'s own registry is always checked; the registries given here
+     * are checked with it, before the server listens.
+     *
+     * @example
+     * ```typescript
+     * import { envRegistry } from '@/server/config/env.config';
+     *
+     * export default defineServerConfig()
+     *     .env({ registries: [envRegistry] })
+     *     .build();
+     * ```
+     */
+    env(env: ServerConfig['env']): this
+    {
+        this.config.env = env;
+
+        return this;
+    }
+
+    /**
      * Register workflow router for workflow orchestration
      *
      * Automatically initializes the workflow engine after database is ready.

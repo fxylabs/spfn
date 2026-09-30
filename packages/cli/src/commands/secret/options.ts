@@ -4,12 +4,28 @@
 
 import { logger } from '../../utils/logger.js';
 import { VALID_ENVS } from '../../utils/env-schema.js';
+import { loadEnvList, type EnvList } from '../../utils/env-list.js';
 
 export interface SecretOptions
 {
     env?: string;
     package?: string;
     all?: boolean;
+}
+
+/**
+ * The env list a subcommand works on — the `-p` package alone, or the whole
+ * app. A list that cannot be built — two sources declaring a key differently,
+ * say — ends the run.
+ */
+export async function loadSecretList(options: SecretOptions): Promise<EnvList>
+{
+    return await loadEnvList(options).catch((error: unknown) =>
+    {
+        logger.error(error instanceof Error ? error.message : String(error));
+
+        return process.exit(1);
+    });
 }
 
 /**

@@ -310,7 +310,7 @@ export function envEnum<
         {
             if (!allowed.includes(val as T))
             {
-                throw new Error(`Must be one of: ${allowed.join(', ')}, got: ${val}`);
+                throw new Error(`Must be one of: ${allowed.join(', ')}`);
             }
 
             return val as T;
