@@ -1,8 +1,11 @@
 /**
- * `spfn secret check` — static hygiene lint for declared secrets.
+ * `spfn secret check [--env <env>] [--instance <name>]` — static hygiene lint for
+ * declared secrets.
  *
  * Flags secrets sitting in plaintext where they shouldn't, and points server secrets
- * at the keychain workflow. Reads files only; never prints values.
+ * at the keychain workflow. With a deployed `--env` it also checks the names in the
+ * encrypted files against their declared layer — SOPS leaves names in the clear, so
+ * nothing is decrypted. Reads files only; never prints values.
  */
 
 import { join } from 'path';
@@ -10,8 +13,11 @@ import chalk from 'chalk';
 import { secretEntries } from '../../utils/env-schema.js';
 import { parseEnvFile } from '../../utils/env-file.js';
 import { KEYCHAIN_REF_PREFIX } from '../../utils/secret-store/index.js';
-import { hasSopsConfig } from '../../utils/secret-config.js';
-import { loadSecretList, type SecretOptions } from './options.js';
+import { getSopsFile, hasSopsConfig, type SopsFile } from '../../utils/secret-config.js';
+import { sopsKeyNames } from '../../utils/sops.js';
+import { layerOf, type EnvLayer, type EnvSchema } from '../../utils/env-schema.js';
+import { loadSecretList, resolveTarget, type SecretOptions } from './options.js';
+import { isLocalEnv, type SecretTarget } from './store-value.js';
 
 /**
  * Files that may be committed — a real secret value here is a leak. The reference
@@ -26,7 +32,9 @@ const PLACEHOLDER = /(your-|changeme|placeholder|example|<.*>)/i;
 export async function secretCheck(options: SecretOptions): Promise<void>
 {
     const cwd = process.cwd();
-    const entries = secretEntries((await loadSecretList(options)).schema);
+    const target = resolveTarget(options);
+    const schema = (await loadSecretList(options)).schema;
+    const entries = secretEntries(schema);
 
     const secretKeys = new Set(entries.map((entry) => entry.key));
     const issues: string[] = [];
@@ -57,7 +65,44 @@ export async function secretCheck(options: SecretOptions): Promise<void>
         }
     }
 
+    if (!isLocalEnv(target.env))
+    {
+        checkPlacement(cwd, schema, target, issues, warnings);
+    }
+
     report(issues, warnings, cwd);
+}
+
+/**
+ * Names in the target's encrypted files that the list does not know (a warning)
+ * or that belong to the other layer (an issue). A name in both files is always
+ * in one of the wrong layer, so it is caught too.
+ */
+function checkPlacement(cwd: string, schema: EnvSchema, target: SecretTarget, issues: string[], warnings: string[]): void
+{
+    const files: Array<{ file: SopsFile; layer: EnvLayer }> = [{ file: getSopsFile(cwd, target.env), layer: 'environment' }];
+
+    if (target.instance)
+    {
+        files.push({ file: getSopsFile(cwd, target.env, target.instance), layer: 'instance' });
+    }
+
+    for (const { file, layer } of files)
+    {
+        for (const name of sopsKeyNames(file.absFile))
+        {
+            const entry = Object.hasOwn(schema, name) ? schema[name] : undefined;
+
+            if (!entry)
+            {
+                warnings.push(`${chalk.cyan(name)} in ${chalk.yellow(file.relFile)} is not in the env list — export skips it.`);
+            }
+            else if (layerOf(entry) !== layer)
+            {
+                issues.push(`${chalk.cyan(name)} is declared with layer "${layerOf(entry)}" but is in ${chalk.yellow(file.relFile)}.`);
+            }
+        }
+    }
 }
 
 function report(issues: string[], warnings: string[], cwd: string): void

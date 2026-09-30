@@ -18,7 +18,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { loadAppConfig } from '@spfn/core/app-config';
-import { loadEnvSchema, resolveFrom, type EnvSchema, type EnvSchemaEntry } from './env-schema.js';
+import { layerOf, loadEnvSchema, resolveFrom, type EnvSchema, type EnvSchemaEntry } from './env-schema.js';
 
 /** One schema and the name it is reported under. */
 export interface EnvSource
@@ -74,8 +74,8 @@ export async function loadEnvList(
 /**
  * Merge sources into one entry per key.
  *
- * Identical declarations merge. Declarations that differ in `type`, `required`
- * or `sensitive` are an error: every package enforces its own declaration at
+ * Identical declarations merge. Declarations that differ in `type`, `required`,
+ * `sensitive` or `layer` are an error: every package enforces its own declaration at
  * runtime, so two rule sets for one variable means one of them is wrong, and
  * the fix is a single owner that the others read from — not a merged guess.
  *
@@ -152,7 +152,8 @@ export function describeEnvList(options: { package?: string }): string
  */
 function describeRules(entry: EnvSchemaEntry): string
 {
-    return `"${entry.type}" (${entry.required ? 'required' : 'optional'}${entry.sensitive ? ', sensitive' : ''})`;
+    return `"${entry.type}" (${entry.required ? 'required' : 'optional'}${entry.sensitive ? ', sensitive' : ''}`
+        + `${layerOf(entry) === 'instance' ? ', instance layer' : ''})`;
 }
 
 // ============================================================================

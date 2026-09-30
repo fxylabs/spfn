@@ -6,7 +6,7 @@
  * a wrong path or a module without `envSchema` is an error that names the
  * path; installed `@spfn/*` packages join when their `./config` exports
  * `envSchema`. Merging: a key declared twice alike is one entry, a key declared
- * with a different type, `required` or `sensitive` is an error naming both
+ * with a different type, `required`, `sensitive` or `layer` is an error naming both
  * sources, and the list groups entries by the source that declared them first.
  */
 
@@ -170,6 +170,21 @@ describe('merging sources', () =>
 
         expect(merge).toThrow('SIGNING_KEY: @spfn/alpha declares "string" (optional, sensitive), '
             + '@spfn/beta declares "string" (optional)');
+    });
+
+    it('is an error when only layer differs, and an unset layer is environment', () =>
+    {
+        const merge = () => mergeEnvSources([
+            source('@spfn/alpha', [entry('DB_NAME', { layer: 'instance' })]),
+            source('@spfn/beta', [entry('DB_NAME')]),
+        ]);
+
+        expect(merge).toThrow('DB_NAME: @spfn/alpha declares "string" (optional, instance layer), '
+            + '@spfn/beta declares "string" (optional)');
+        expect(() => mergeEnvSources([
+            source('@spfn/alpha', [entry('API_KEY', { layer: 'environment' })]),
+            source('@spfn/beta', [entry('API_KEY')]),
+        ])).not.toThrow();
     });
 
     it('names every disagreeing key in one error', () =>

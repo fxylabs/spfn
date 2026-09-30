@@ -81,6 +81,7 @@ export {
 export type {
     EnvVarSchema,
     EnvSchemaCollection,
+    EnvLayer,
     InferEnvType,
 } from './schema';
 

@@ -10,8 +10,10 @@ import { secretRotate } from './rotate.js';
 import { secretKeygen } from './keygen.js';
 import { secretRecipients } from './recipients.js';
 import { secretCheck } from './check.js';
+import { secretExport } from './export.js';
 
 const ENV_OPTION = ['-e, --env <env>', 'Target environment (local | development | staging | production)', 'local'] as const;
+const INSTANCE_OPTION = ['-i, --instance <name>', 'Target one instance of the environment: secrets/<env>.<instance>.enc.json (lowercase letters, digits, dashes)'] as const;
 const PKG_OPTION = ['-p, --package <package>', 'Read only this package\'s env schema (default: the whole app — spfn.config.js env.schemas + installed @spfn/* packages)'] as const;
 
 export const secretCommand = new Command('secret')
@@ -19,8 +21,10 @@ export const secretCommand = new Command('secret')
 
 secretCommand
     .command('set [key]')
-    .description('Store a secret value (prompts for the value, masked)')
+    .description('Store a secret value (prompts for the value, masked; --stdin reads it from a pipe)')
     .option(...ENV_OPTION)
+    .option(...INSTANCE_OPTION)
+    .option('--stdin', 'Read the value from stdin (one trailing newline dropped); never prompts')
     .option(...PKG_OPTION)
     .action(secretSet);
 
@@ -28,6 +32,7 @@ secretCommand
     .command('list')
     .description('List declared secrets and their status (never prints values)')
     .option(...ENV_OPTION)
+    .option(...INSTANCE_OPTION)
     .option(...PKG_OPTION)
     .action(secretList);
 
@@ -36,6 +41,7 @@ secretCommand
     .description('Generate value(s) for schema secrets that declare a generate strategy')
     .option('-a, --all', 'Generate every generatable secret')
     .option(...ENV_OPTION)
+    .option(...INSTANCE_OPTION)
     .option(...PKG_OPTION)
     .action(secretGenerate);
 
@@ -44,6 +50,7 @@ secretCommand
     .description('Rotate secret value(s); external secrets are flagged for manual reissue')
     .option('-a, --all', 'Rotate every secret')
     .option(...ENV_OPTION)
+    .option(...INSTANCE_OPTION)
     .option(...PKG_OPTION)
     .action(secretRotate);
 
@@ -59,6 +66,22 @@ secretCommand
 
 secretCommand
     .command('check')
-    .description('Static hygiene lint — flag plaintext secret leaks')
+    .description('Static hygiene lint — flag plaintext secret leaks; with a deployed --env, names in the wrong layer')
+    .option(...ENV_OPTION)
+    .option(...INSTANCE_OPTION)
     .option(...PKG_OPTION)
     .action(secretCheck);
+
+secretCommand
+    .command('export')
+    .description('Decrypt and merge a deployment\'s layers into a 0600 dotenv file (prints names only)')
+    .requiredOption('-e, --env <env>', 'Deployed environment (development | staging | production | test)')
+    .option(...INSTANCE_OPTION)
+    .option('-w, --with <file>', 'Plaintext dotenv file of computed instance values (repeatable)', collect, [])
+    .option('-o, --out <file>', 'Dotenv file to write (required; its directory must exist)')
+    .action(secretExport);
+
+function collect(value: string, previous: string[]): string[]
+{
+    return [...previous, value];
+}

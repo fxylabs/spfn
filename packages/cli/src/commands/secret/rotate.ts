@@ -1,5 +1,6 @@
 /**
- * `spfn secret rotate [KEY|--all] [--env <env>]` — replace secret values.
+ * `spfn secret rotate [KEY|--all] [--env <env>] [--instance <name>]` — replace secret
+ * values. `--all` takes the secrets of the target's layer only.
  *
  * Generatable secrets (those with a `generate` strategy) are minted fresh and
  * stored. External secrets can't be regenerated here — the command points the user
@@ -12,27 +13,28 @@ import chalk from 'chalk';
 import { logger } from '../../utils/logger.js';
 import { secretEntries, type EnvSchema, type EnvSchemaEntry } from '../../utils/env-schema.js';
 import { generateSecretValue } from '../../utils/secret-gen.js';
-import { loadSecretList, resolveEnv, type SecretOptions } from './options.js';
+import { assertTargetLayer, entriesForTarget, loadSecretList, resolveTarget, type SecretOptions } from './options.js';
 import { storeSecret, describeTarget } from './store-value.js';
 
 export async function secretRotate(key: string | undefined, options: SecretOptions): Promise<void>
 {
-    const env = resolveEnv(options.env);
+    const target = resolveTarget(options);
     const schema = (await loadSecretList(options)).schema;
 
-    const targets = options.all ? secretEntries(schema) : [requireEntry(schema, key)];
+    const targets = options.all ? entriesForTarget(secretEntries(schema), target) : [requireEntry(schema, key)];
+    targets.forEach((entry) => assertTargetLayer(entry, target));
     const generatable = targets.filter((entry) => entry.generate);
     const external = targets.filter((entry) => !entry.generate);
 
     if (generatable.length > 0)
     {
-        logger.step(`Rotating ${generatable.length} secret(s) → ${await describeTarget(env)}`);
+        logger.step(`Rotating ${generatable.length} secret(s) → ${await describeTarget(target)}`);
 
         for (const entry of generatable)
         {
             try
             {
-                await storeSecret(process.cwd(), env, entry.key, generateSecretValue(entry.generate!));
+                await storeSecret(process.cwd(), target, entry.key, generateSecretValue(entry.generate!));
             }
             catch (error)
             {
@@ -44,7 +46,7 @@ export async function secretRotate(key: string | undefined, options: SecretOptio
 
     for (const entry of external)
     {
-        logger.warn(`${chalk.cyan(entry.key)} is external — reissue it at the provider, then \`spfn secret set ${entry.key} --env ${env}\`.`);
+        logger.warn(`${chalk.cyan(entry.key)} is external — reissue it at the provider, then \`spfn secret set ${entry.key} --env ${target.env}${target.instance ? ` --instance ${target.instance}` : ''}\`.`);
     }
 
     if (generatable.length > 0)

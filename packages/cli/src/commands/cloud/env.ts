@@ -83,7 +83,7 @@ async function storeServiceKey(cwd: string, keys: SupabaseApiKey[]): Promise<voi
         return;
     }
 
-    await storeSecret(cwd, 'local', 'SUPABASE_SERVICE_ROLE_KEY', service.api_key);
+    await storeSecret(cwd, { env: 'local' }, 'SUPABASE_SERVICE_ROLE_KEY', service.api_key);
 }
 
 /** Match by key name first, then by type — the dashboard is migrating names (anon→publishable). */
@@ -118,7 +118,7 @@ async function storeDatabaseUrl(cwd: string, token: string, projectRef: string):
     }
 
     const url = sessionPoolerUrl(template, password);
-    await storeSecret(cwd, 'local', 'DATABASE_URL', url);
+    await storeSecret(cwd, { env: 'local' }, 'DATABASE_URL', url);
     logger.info('This is the session-mode pooler connection (IPv4-safe, works for migrations). Serverless runtime can use the transaction pooler (port 6543) instead.');
 }
 

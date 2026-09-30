@@ -18,6 +18,9 @@ export type EnvName = (typeof VALID_ENVS)[number];
 /** Generation strategies declared by `envSecret({ generate })` in the schema. */
 export type GenerateSpec = 'hex32' | 'hex64' | 'uuid' | 'base64url32';
 
+/** The deployment layer a value comes from; an entry without one is `environment`. */
+export type EnvLayer = 'environment' | 'instance';
+
 /** A single env-var schema entry (the shape `@spfn/core/env` produces). */
 export interface EnvSchemaEntry
 {
@@ -30,6 +33,9 @@ export interface EnvSchemaEntry
     generate?: GenerateSpec;
     nextjs?: boolean;
     examples?: unknown[];
+    layer?: EnvLayer;
+    minLength?: number;
+    validator?: (value: string) => unknown;
 }
 
 export type EnvSchema = Record<string, EnvSchemaEntry>;
@@ -101,4 +107,10 @@ export function secretEntries(schema: EnvSchema): EnvSchemaEntry[]
 export function generatableSecrets(schema: EnvSchema): EnvSchemaEntry[]
 {
     return secretEntries(schema).filter((entry) => !!entry.generate);
+}
+
+/** The layer an entry's value comes from. */
+export function layerOf(entry: EnvSchemaEntry): EnvLayer
+{
+    return entry.layer ?? 'environment';
 }
