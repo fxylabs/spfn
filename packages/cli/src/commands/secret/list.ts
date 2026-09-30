@@ -1,6 +1,7 @@
 /**
- * `spfn secret list [--env <env>]` — show declared secrets and their status for an
- * environment. Never prints values.
+ * `spfn secret list [--env <env>] [--instance <name>]` — show declared secrets and their
+ * status for an environment, or for one instance of it. A deployed target lists the
+ * secrets of its layer only. Never prints values.
  */
 
 import chalk from 'chalk';
@@ -10,17 +11,17 @@ import { describeEnvList, groupBySource } from '../../utils/env-list.js';
 import { detectStore, keychainName } from '../../utils/secret-store/index.js';
 import { getSopsFile } from '../../utils/secret-config.js';
 import { ensureSopsInstalled, sopsDecrypt } from '../../utils/sops.js';
-import { loadSecretList, resolveEnv, type SecretOptions } from './options.js';
-import { isLocalEnv } from './store-value.js';
+import { entriesForTarget, loadSecretList, resolveTarget, type SecretOptions } from './options.js';
+import { isLocalEnv, type SecretTarget } from './store-value.js';
 
 type Status = 'set' | 'missing' | 'awaiting-input';
 
 export async function secretList(options: SecretOptions): Promise<void>
 {
-    const env = resolveEnv(options.env);
+    const target = resolveTarget(options);
     const label = describeEnvList(options);
     const list = await loadSecretList(options);
-    const entries = secretEntries(list.schema);
+    const entries = entriesForTarget(secretEntries(list.schema), target);
 
     if (entries.length === 0)
     {
@@ -29,9 +30,9 @@ export async function secretList(options: SecretOptions): Promise<void>
         return;
     }
 
-    const present = await loadPresence(env, entries);
+    const present = await loadPresence(target, entries);
 
-    console.log(chalk.blue.bold(`\n🔑 Secrets (${label}) — ${env}\n`));
+    console.log(chalk.blue.bold(`\n🔑 Secrets (${label}) — ${target.instance ? `${target.env}.${target.instance}` : target.env}\n`));
 
     for (const group of groupBySource(list, entries))
     {
@@ -50,9 +51,9 @@ export async function secretList(options: SecretOptions): Promise<void>
 /**
  * The set of secret keys that currently have a value for this environment.
  */
-async function loadPresence(env: string, entries: EnvSchemaEntry[]): Promise<Set<string>>
+async function loadPresence(target: SecretTarget, entries: EnvSchemaEntry[]): Promise<Set<string>>
 {
-    if (isLocalEnv(env))
+    if (isLocalEnv(target.env))
     {
         const store = detectStore();
 
@@ -77,7 +78,7 @@ async function loadPresence(env: string, entries: EnvSchemaEntry[]): Promise<Set
     }
 
     await ensureSopsInstalled();
-    const { absFile } = getSopsFile(process.cwd(), env);
+    const { absFile } = getSopsFile(process.cwd(), target.env, target.instance);
     const decrypted = await sopsDecrypt(absFile);
 
     return new Set(Object.keys(decrypted));

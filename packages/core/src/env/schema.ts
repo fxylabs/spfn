@@ -76,7 +76,29 @@ export interface EnvVarSchema<T = string>
      * @default NEXT_PUBLIC_* 이면 true, 아니면 false
      */
     nextjs?: boolean;
+
+    // === Deployment layer ===
+
+    /**
+     * Which layer of a deployment supplies the value.
+     *
+     * - `'environment'`: one value shared by every instance of an environment
+     *   (a third-party API key) — kept in `secrets/<env>.enc.json`.
+     * - `'instance'`: a value that differs per instance — kept in
+     *   `secrets/<env>.<instance>.enc.json` or computed by the deploy script
+     *   and passed to `spfn secret export --with <file>`.
+     *
+     * `spfn secret export` fails when a value arrives from the wrong layer.
+     *
+     * @default 'environment'
+     */
+    layer?: EnvLayer;
 }
+
+/**
+ * The layer of a deployment an env value comes from — see {@link EnvVarSchema.layer}.
+ */
+export type EnvLayer = 'environment' | 'instance';
 
 /**
  * 스키마 컬렉션 타입
@@ -117,7 +139,9 @@ export type InferEnvType<T extends EnvSchemaCollection> = {
 /**
  * 스키마 정의 헬퍼 (타입 추론 지원)
  *
- * Automatically fills in the `key` property from object keys.
+ * Automatically fills in the `key` property from object keys. Every other
+ * field passes through as written — an entry without `layer` is an
+ * `'environment'` value.
  *
  * @example
  * ```typescript

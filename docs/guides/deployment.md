@@ -251,6 +251,32 @@ For a managed workflow, `spfn secret` stores deployed secrets in encrypted SOPS 
 that are safe to commit; your GitOps step decrypts them into env at deploy time. Local
 secrets go to the OS keychain instead. See [CLI → spfn secret](/docs/packages/cli#spfn-secret).
 
+### Assembling an instance's env file
+
+When one environment runs several instances (`staging` as `blue` and `green`), each
+instance's values come from three layers, and the schema's `layer` field says which
+layer a variable belongs to:
+
+| Layer | Holds | File |
+|-------|-------|------|
+| environment | Secrets every instance shares (third-party keys) | `secrets/<env>.enc.json` |
+| instance secrets | Secrets of one instance | `secrets/<env>.<instance>.enc.json` (optional) |
+| instance computed | Plain values the deploy script computes (port, URLs, database name) | a plaintext dotenv file passed with `--with` |
+
+The deploy step writes the computed values, then exports the merged file:
+
+```bash
+printf 'PORT=4100\nDB_NAME=api_blue\nAPP_URL=https://blue.staging.example.com\n' > computed.env
+spfn secret export --env staging --instance blue --with computed.env --out /run/api/blue.env
+```
+
+`export` decrypts with whatever `.sops.yaml` configures, writes only names in the
+whole-app env list, and creates `--out` with mode 0600 through a temp file and a rename —
+a failed export leaves the previous file in place. It fails without writing when a
+required name is missing, a name is in two layers, a name is in the wrong layer, or a value
+fails its validator; errors name the variable and never print its value. The terminal
+shows only names and the layer each came from. Mode 0600 is not enforced on Windows.
+
 ## Building for Production
 
 ### Local Build

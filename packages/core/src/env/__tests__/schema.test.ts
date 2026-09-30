@@ -5,6 +5,7 @@
 import { describe, it, expect } from 'vitest';
 import {
     defineEnvSchema,
+    envSecret,
     envString,
     envNumber,
     envBoolean,
@@ -40,6 +41,17 @@ describe('defineEnvSchema', () =>
         expect(schema.DEBUG.description).toBe('Debug mode');
         expect(schema.DEBUG.default).toBe(false);
         expect(schema.DEBUG.type).toBe('boolean');
+    });
+
+    it('should keep the declared layer and leave it unset otherwise', () =>
+    {
+        const schema = defineEnvSchema({
+            DB_NAME: envString({ description: 'Database name', layer: 'instance' }),
+            API_KEY: envSecret({ description: 'Third-party key' }),
+        });
+
+        expect(schema.DB_NAME.layer).toBe('instance');
+        expect('layer' in schema.API_KEY).toBe(false);
     });
 });
 

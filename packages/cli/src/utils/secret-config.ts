@@ -2,7 +2,8 @@
  * Conventions for where encrypted prod/staging secrets live and how `.sops.yaml` is
  * located.
  *
- * Each non-local environment maps to `secrets/<env>.enc.json` under the project. The
+ * Each non-local environment maps to `secrets/<env>.enc.json` under the project, and
+ * each named instance of one to `secrets/<env>.<instance>.enc.json`. The
  * `.sops.yaml` (which selects the age/KMS backend) is searched for from the project
  * directory upward, since it commonly sits at the repo root.
  */
@@ -21,10 +22,14 @@ export interface SopsFile
     relFile: string;
 }
 
-/** The encrypted secret file for a given environment. */
-export function getSopsFile(cwd: string, env: string): SopsFile
+/**
+ * The encrypted secret file for an environment — `secrets/<env>.enc.json` — or,
+ * with an instance, for that instance of it: `secrets/<env>.<instance>.enc.json`.
+ * Both match the `secrets/.*\.enc\.json$` rule `spfn secret recipients` writes.
+ */
+export function getSopsFile(cwd: string, env: string, instance?: string): SopsFile
 {
-    const relFile = `${SECRETS_DIR}/${env}.enc.json`;
+    const relFile = `${SECRETS_DIR}/${instance ? `${env}.${instance}` : env}.enc.json`;
 
     return { absFile: join(cwd, relFile), relFile };
 }

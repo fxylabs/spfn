@@ -160,6 +160,7 @@ CONFIG: envJson<{ host: string; port: number }>({
 | `sensitive` | `boolean` | Marks a secret; triggers a warning if `NEXT_PUBLIC_*` |
 | `examples` | `T[]` | Example values (metadata only) |
 | `nextjs` | `boolean` | File-separation hint (see below). Defaults to `true` for `NEXT_PUBLIC_*`, else `false` |
+| `layer` | `'environment' \| 'instance'` | Which deployment layer supplies the value (see below). Defaults to `'environment'` |
 
 > There is **no** `category` option. Docs that show `category: '...'` are stale — passing
 > it is harmless (excess property) but it does nothing.
@@ -307,6 +308,29 @@ whose `./config` exports `envSchema`, and groups its output by source. A key two
 declare identically is listed once; two declarations that differ in type, `required` or
 `sensitive` are an error naming the key and both sources — one variable has one owner, and
 other packages read it from the owner's `env` instead of declaring it again.
+
+### Deployment layers (`layer`)
+
+A deployed environment can run more than one instance — `staging` as `blue` and `green`,
+each with its own port, URLs and database. `layer` says where a variable's value comes
+from, so `spfn secret export` can assemble one instance's env file and refuse a value that
+arrives from the wrong place:
+
+| Layer | Holds | Source |
+|-------|-------|--------|
+| `environment` (default) | Values every instance of the environment shares — third-party API keys | `secrets/<env>.enc.json` |
+| `instance` | Values of one instance: its own secrets, or plain values the deploy script computes (port, URLs, database name) | `secrets/<env>.<instance>.enc.json`, or a `--with <file>` dotenv file |
+
+```typescript
+const schema = defineEnvSchema({
+    PAYMENT_API_KEY: envSecret({ description: 'Payment provider key', required: true }),
+    DB_NAME: envString({ description: 'Database of this instance', required: true, layer: 'instance' }),
+});
+```
+
+An `environment` name found in an instance layer, an `instance` name found in the
+environment file, or a name found in two layers fails the export. The runtime ignores
+`layer`; it only steers the CLI.
 
 ### Fallback keys
 

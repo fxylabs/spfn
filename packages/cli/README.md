@@ -457,17 +457,55 @@ reads plain `process.env`.
 
 | Subcommand | Description |
 |------------|-------------|
-| `secret set [key]` | Store a value (masked prompt). `--env local` → keychain; other envs → SOPS |
+| `secret set [key]` | Store a value (masked prompt, or `--stdin`). `--env local` → keychain; other envs → SOPS |
 | `secret list` | List declared secrets and their status per env (never prints values) |
 | `secret generate [key]` | Mint values for schema secrets with a `generate` strategy (`-a/--all`) |
 | `secret rotate [key]` | Rotate values; external secrets are flagged for manual reissue (`-a/--all`) |
 | `secret keygen` | Generate an age key pair for the SOPS no-cloud backend |
 | `secret recipients <add\|remove\|list> [age1…]` | Manage `.sops.yaml` recipients + re-encrypt |
-| `secret check` | Static lint — flag plaintext secret leaks |
+| `secret check` | Static lint — flag plaintext secret leaks; with a deployed `--env`, names in the wrong layer's file |
+| `secret export` | Decrypt and merge one deployment's layers into a 0600 dotenv file (prints names only) |
 
 Options: `-e, --env <env>` (`local` default; also `development`/`staging`/`production`),
-`-p, --package <pkg>` (read that one package's schema; without it, the whole-app list
-described under `spfn env`).
+`-i, --instance <name>` (one instance of a deployed environment: `secrets/<env>.<instance>.enc.json`;
+lowercase letters, digits and dashes), `-p, --package <pkg>` (read that one package's
+schema; without it, the whole-app list described under `spfn env`).
+
+**`--stdin`.** `spfn secret set --stdin --env staging SIGNING_KEY < key.pem` stores the
+whole of stdin as the value — one trailing newline dropped, inner newlines kept — for
+local and deployed targets alike. It never prompts, and refuses a terminal on stdin.
+Shaped values such as key pairs come from the app's own command, piped in.
+
+**Layers.** A schema entry's `layer` (`'environment'` default, or `'instance'`) says where a
+deployment's value comes from. Without `--instance`, `set`/`generate`/`rotate`/`list` on a
+deployed environment work on the `environment` names in `secrets/<env>.enc.json`; with
+`--instance blue`, on the `instance` names in `secrets/<env>.blue.enc.json`. A named key of
+the other layer is refused.
+
+**Export.**
+
+```bash
+spfn secret export --env <env> [--instance <name>] [--with <file>]... --out <file>
+```
+
+Decrypts `secrets/<env>.enc.json` and — with `--instance`, when it exists —
+`secrets/<env>.<instance>.enc.json`, reads each plaintext `--with` dotenv file (computed
+instance values such as port and URLs), and writes the merge to `--out`. Only names in the
+whole-app list are written; an unlisted name in an encrypted file is a warning by name.
+The export fails, writing nothing, when a required name is in no layer, a name is in two
+layers, an `instance` name is in the environment file, an `environment` name is in an
+instance layer, a value fails its validator (the error names the variable and the
+reason, never the value), or decryption fails. `--out` is required and its directory must
+exist; relative paths resolve from the working directory. The file is created 0600 beside
+the destination and renamed over it, so a failure leaves the previous file untouched
+(POSIX only — Windows does not enforce the mode).
+
+**SOPS rules for instance files.** The rule `spfn secret recipients add` writes,
+`secrets/.*\.enc\.json$`, already covers `secrets/<env>.<instance>.enc.json`. A project
+with per-environment rules needs each to accept the instance form too, e.g.
+`path_regex: secrets/production(\.[a-z0-9-]+)?\.enc\.json$`. Writes need sops 3.10 or
+later (`sops encrypt` from stdin, `sops set --value-stdin`), so a value never appears as a
+process argument.
 
 **Local (keychain).** `spfn secret set DB_URL` stores the value in the OS keychain
 (macOS `security`, Windows Credential Manager via optional `@napi-rs/keyring`, Linux

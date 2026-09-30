@@ -14,6 +14,16 @@ import { upsertEnvVar, ensureGitignored, restrictEnvFilePerms } from '../../util
 import { ensureSopsInstalled, sopsSetValue } from '../../utils/sops.js';
 import { getSopsFile, hasSopsConfig } from '../../utils/secret-config.js';
 
+/**
+ * Where a secret command reads and writes: an environment, and optionally one
+ * named instance of it (deployed environments only).
+ */
+export interface SecretTarget
+{
+    env: string;
+    instance?: string;
+}
+
 export function isLocalEnv(env: string): boolean
 {
     return env === 'local';
@@ -34,25 +44,25 @@ export function assertValidKey(key: string): void
     }
 }
 
-/** Human-readable description of where a value will be stored for an environment. */
-export async function describeTarget(env: string): Promise<string>
+/** Human-readable description of where a value will be stored for a target. */
+export async function describeTarget(target: SecretTarget): Promise<string>
 {
-    if (isLocalEnv(env))
+    if (isLocalEnv(target.env))
     {
         return detectStore().label;
     }
 
-    return `SOPS (${getSopsFile(process.cwd(), env).relFile})`;
+    return `SOPS (${getSopsFile(process.cwd(), target.env, target.instance).relFile})`;
 }
 
 /**
- * Store one secret value for the given environment.
+ * Store one secret value for the given target.
  */
-export async function storeSecret(cwd: string, env: string, key: string, value: string): Promise<void>
+export async function storeSecret(cwd: string, target: SecretTarget, key: string, value: string): Promise<void>
 {
     assertValidKey(key);
 
-    if (isLocalEnv(env))
+    if (isLocalEnv(target.env))
     {
         const store = detectStore();
 
@@ -86,7 +96,7 @@ export async function storeSecret(cwd: string, env: string, key: string, value: 
         );
     }
 
-    const { absFile, relFile } = getSopsFile(cwd, env);
+    const { absFile, relFile } = getSopsFile(cwd, target.env, target.instance);
     await sopsSetValue(absFile, relFile, key, value);
 
     logger.success(`Set ${key} in ${relFile} (encrypted). Commit and deploy to apply.`);
