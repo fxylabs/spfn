@@ -4,7 +4,7 @@
  *
  * Flags secrets sitting in plaintext where they shouldn't, and points server secrets
  * at the keychain workflow. With a deployed `--env` it also checks the names in the
- * encrypted files against their declared layer — SOPS leaves names in the clear, so
+ * encrypted files against the layer an entry declares — SOPS leaves names in the clear, so
  * nothing is decrypted. Reads files only; never prints values.
  */
 
@@ -15,7 +15,7 @@ import { parseEnvFile } from '../../utils/env-file.js';
 import { KEYCHAIN_REF_PREFIX } from '../../utils/secret-store/index.js';
 import { getSopsFile, hasSopsConfig, type SopsFile } from '../../utils/secret-config.js';
 import { sopsKeyNames } from '../../utils/sops.js';
-import { layerOf, type EnvLayer, type EnvSchema } from '../../utils/env-schema.js';
+import { allowsLayer, type EnvLayer, type EnvSchema } from '../../utils/env-schema.js';
 import { loadSecretList, resolveTarget, type SecretOptions } from './options.js';
 import { isLocalEnv, type SecretTarget } from './store-value.js';
 
@@ -74,13 +74,14 @@ export async function secretCheck(options: SecretOptions): Promise<void>
 }
 
 /**
- * Names in the target's encrypted files that the list does not know (a warning)
- * or that belong to the other layer (an issue). A name in both files is always
- * in one of the wrong layer, so it is caught too.
+ * Names in the target's encrypted files that the list does not know (a warning),
+ * that declare the other layer, or that are in both files (issues) — export takes
+ * each name from exactly one layer.
  */
 function checkPlacement(cwd: string, schema: EnvSchema, target: SecretTarget, issues: string[], warnings: string[]): void
 {
     const files: Array<{ file: SopsFile; layer: EnvLayer }> = [{ file: getSopsFile(cwd, target.env), layer: 'environment' }];
+    const seenIn = new Map<string, string>();
 
     if (target.instance)
     {
@@ -97,10 +98,16 @@ function checkPlacement(cwd: string, schema: EnvSchema, target: SecretTarget, is
             {
                 warnings.push(`${chalk.cyan(name)} in ${chalk.yellow(file.relFile)} is not in the env list — export skips it.`);
             }
-            else if (layerOf(entry) !== layer)
+            else if (!allowsLayer(entry, layer))
             {
-                issues.push(`${chalk.cyan(name)} is declared with layer "${layerOf(entry)}" but is in ${chalk.yellow(file.relFile)}.`);
+                issues.push(`${chalk.cyan(name)} is declared with layer "${entry.layer}" but is in ${chalk.yellow(file.relFile)}.`);
             }
+            else if (seenIn.has(name))
+            {
+                issues.push(`${chalk.cyan(name)} is in both ${chalk.yellow(seenIn.get(name))} and ${chalk.yellow(file.relFile)}.`);
+            }
+
+            seenIn.set(name, file.relFile);
         }
     }
 }

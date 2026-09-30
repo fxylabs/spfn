@@ -1,6 +1,7 @@
 /**
- * `spfn secret export` — the case table, one test per row (E1–E9), run against
- * real `sops` and `age` with throwaway keys generated into a temp dir.
+ * `spfn secret export` — the case table, one test per row (E1–E9, and L1–L5 for
+ * an entry without `layer`), run against real `sops` and `age` with throwaway
+ * keys generated into a temp dir.
  *
  * Layers: the environment file `secrets/staging.enc.json`, the instance file
  * `secrets/staging.blue.enc.json`, and plaintext `--with` files. Every assertion
@@ -32,12 +33,13 @@ function parsePort(value: string): number
 }
 
 const SCHEMA: EnvSchema = {
-    API_KEY: entry('API_KEY', { required: true, sensitive: true }),
+    API_KEY: entry('API_KEY', { required: true, sensitive: true, layer: 'environment' }),
     ANALYTICS_KEY: entry('ANALYTICS_KEY', { sensitive: true }),
     DB_NAME: entry('DB_NAME', { required: true, layer: 'instance' }),
     PORT: entry('PORT', { type: 'number', required: true, layer: 'instance', validator: parsePort }),
     INSTANCE_TOKEN: entry('INSTANCE_TOKEN', { sensitive: true, layer: 'instance' }),
     LOG_FORMAT: entry('LOG_FORMAT', { required: true, default: 'json' }),
+    SESSION_SECRET: entry('SESSION_SECRET', { sensitive: true }),
 };
 
 let keysDir: string;
@@ -162,7 +164,7 @@ describe('spfn secret export — case table', () =>
         expect(existsSync(outPath())).toBe(false);
     });
 
-    it('E3: an instance-layer name in the environment file fails', async () =>
+    it('E3 / L5: an explicit instance-layer name in the environment file fails', async () =>
     {
         await writeValidLayers();
         await encrypt('staging', { API_KEY: 'value-one', INSTANCE_TOKEN: 'value-six' });
@@ -174,7 +176,7 @@ describe('spfn secret export — case table', () =>
         expect(existsSync(outPath())).toBe(false);
     });
 
-    it('E4: an environment-layer name in a --with file fails', async () =>
+    it('E4 / L4: an explicit environment-layer name in a --with file fails', async () =>
     {
         await writeValidLayers();
         await encrypt('staging', {});
@@ -183,6 +185,42 @@ describe('spfn secret export — case table', () =>
         const report = await exportEnvFile(request());
 
         expect(report.errors).toEqual(['API_KEY: declared with layer "environment", but found in --with computed.env']);
+        expect(existsSync(outPath())).toBe(false);
+    });
+
+    it('L1: a name without layer only in the instance secrets file is written', async () =>
+    {
+        await writeValidLayers();
+        await encrypt('staging.blue', { INSTANCE_TOKEN: 'value-two', SESSION_SECRET: 'value-eight' });
+
+        const report = await exportEnvFile(request());
+
+        expect(report.errors).toEqual([]);
+        expect(report.origins.SESSION_SECRET).toBe('instance');
+        expect(parse(readFileSync(outPath())).SESSION_SECRET).toBe('value-eight');
+    });
+
+    it('L2: a name without layer only in a --with file is written', async () =>
+    {
+        await writeValidLayers();
+        writePlain('computed.env', 'DB_NAME=app_blue\nPORT=4100\nSESSION_SECRET=value-nine\n');
+
+        const report = await exportEnvFile(request());
+
+        expect(report.errors).toEqual([]);
+        expect(report.origins.SESSION_SECRET).toBe('--with computed.env');
+        expect(parse(readFileSync(outPath())).SESSION_SECRET).toBe('value-nine');
+    });
+
+    it('L3: a name without layer in the environment file and a --with file fails (E2)', async () =>
+    {
+        await writeValidLayers();
+        await encrypt('staging', { API_KEY: 'value-one', SESSION_SECRET: 'value-eight' });
+        writePlain('computed.env', 'DB_NAME=app_blue\nPORT=4100\nSESSION_SECRET=value-nine\n');
+
+        const report = await exportEnvFile(request());
+
+        expect(report.errors).toEqual(['SESSION_SECRET: in more than one layer: environment and --with computed.env']);
         expect(existsSync(outPath())).toBe(false);
     });
 

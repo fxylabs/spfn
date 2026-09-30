@@ -18,7 +18,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { loadAppConfig } from '@spfn/core/app-config';
-import { layerOf, loadEnvSchema, resolveFrom, type EnvSchema, type EnvSchemaEntry } from './env-schema.js';
+import { loadEnvSchema, resolveFrom, type EnvSchema, type EnvSchemaEntry } from './env-schema.js';
 
 /** One schema and the name it is reported under. */
 export interface EnvSource
@@ -77,7 +77,8 @@ export async function loadEnvList(
  * Identical declarations merge. Declarations that differ in `type`, `required`,
  * `sensitive` or `layer` are an error: every package enforces its own declaration at
  * runtime, so two rule sets for one variable means one of them is wrong, and
- * the fix is a single owner that the others read from — not a merged guess.
+ * the fix is a single owner that the others read from — not a merged guess. A
+ * declared `layer` and an unset one differ too: the declarations must agree.
  *
  * @throws Error listing every key whose declarations disagree
  */
@@ -153,7 +154,7 @@ export function describeEnvList(options: { package?: string }): string
 function describeRules(entry: EnvSchemaEntry): string
 {
     return `"${entry.type}" (${entry.required ? 'required' : 'optional'}${entry.sensitive ? ', sensitive' : ''}`
-        + `${layerOf(entry) === 'instance' ? ', instance layer' : ''})`;
+        + `${entry.layer ? `, ${entry.layer} layer` : ''})`;
 }
 
 // ============================================================================

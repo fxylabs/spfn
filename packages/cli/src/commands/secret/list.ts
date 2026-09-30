@@ -1,8 +1,8 @@
 /**
  * `spfn secret list [--env <env>] [--instance <name>]` — show declared secrets and their
  * status for an environment, or for one instance of it. A deployed target lists the
- * secrets of its layer only, plus any name in its encrypted file that the whole-app
- * list does not know ("not in list"). A deployed file is read by the names SOPS
+ * secrets `--all` would take for it (see `entriesForTarget`), plus any name in its
+ * encrypted file that the whole-app list does not know ("not in list"). A deployed file is read by the names SOPS
  * leaves in the clear — nothing is decrypted. Never prints values.
  */
 

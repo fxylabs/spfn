@@ -1,10 +1,11 @@
 /**
  * Layer targeting for `set`/`list`/`generate`/`rotate`, and `check --env`.
  *
- * Pinned: without `--instance` a deployed target holds `environment` names, with
- * it `instance` names, and `local` holds everything; `check` with a deployed
- * `--env` reads the names SOPS leaves in the clear — nothing is decrypted — and
- * fails on a name in the wrong layer's file.
+ * Pinned: `--all` without `--instance` takes `environment` names and names without
+ * a layer, with it only names declared `instance`, and `local` takes everything;
+ * a named key without a layer fits any target. `check` with a deployed `--env`
+ * reads the names SOPS leaves in the clear — nothing is decrypted — and fails on
+ * a name outside its declared layer or in both files.
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -13,10 +14,11 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { EnvSchemaEntry } from '../../../utils/env-schema.js';
 import { getSopsFile } from '../../../utils/secret-config.js';
-import { entriesForTarget, isValidInstance, targetLayer } from '../options.js';
+import { assertTargetLayer, entriesForTarget, isValidInstance, targetLayer } from '../options.js';
 import { secretCheck } from '../check.js';
 
-const SHARED: EnvSchemaEntry = { key: 'API_KEY', type: 'string', description: 'shared', sensitive: true };
+const SHARED: EnvSchemaEntry = { key: 'API_KEY', type: 'string', description: 'shared', sensitive: true, layer: 'environment' };
+const ANY_LAYER: EnvSchemaEntry = { key: 'SESSION_SECRET', type: 'string', description: 'either', sensitive: true };
 const PER_INSTANCE: EnvSchemaEntry = { key: 'DB_PASSWORD', type: 'string', description: 'own', sensitive: true, layer: 'instance' };
 
 describe('layer targeting', () =>
@@ -28,11 +30,28 @@ describe('layer targeting', () =>
         expect(targetLayer({ env: 'staging', instance: 'blue' })).toBe('instance');
     });
 
-    it('keeps the entries of the target layer', () =>
+    it('L6: --all on an instance target takes explicit instance names only', () =>
     {
-        expect(entriesForTarget([SHARED, PER_INSTANCE], { env: 'local' })).toEqual([SHARED, PER_INSTANCE]);
-        expect(entriesForTarget([SHARED, PER_INSTANCE], { env: 'staging' })).toEqual([SHARED]);
-        expect(entriesForTarget([SHARED, PER_INSTANCE], { env: 'staging', instance: 'blue' })).toEqual([PER_INSTANCE]);
+        const entries = [SHARED, ANY_LAYER, PER_INSTANCE];
+
+        expect(entriesForTarget(entries, { env: 'local' })).toEqual(entries);
+        expect(entriesForTarget(entries, { env: 'staging' })).toEqual([SHARED, ANY_LAYER]);
+        expect(entriesForTarget(entries, { env: 'staging', instance: 'blue' })).toEqual([PER_INSTANCE]);
+    });
+
+    it('accepts a named key without a layer on any target, and refuses one declared for the other layer', () =>
+    {
+        vi.spyOn(console, 'log').mockImplementation(() => undefined);
+        vi.spyOn(process, 'exit').mockImplementation(((code?: number) =>
+        {
+            throw new Error(`exit ${code}`);
+        }) as never);
+
+        expect(() => assertTargetLayer(ANY_LAYER, { env: 'staging' })).not.toThrow();
+        expect(() => assertTargetLayer(ANY_LAYER, { env: 'staging', instance: 'blue' })).not.toThrow();
+        expect(() => assertTargetLayer(SHARED, { env: 'staging', instance: 'blue' })).toThrow('exit 1');
+        expect(() => assertTargetLayer(PER_INSTANCE, { env: 'staging' })).toThrow('exit 1');
+        vi.restoreAllMocks();
     });
 
     it('names the instance file beside the environment file', () =>
@@ -69,7 +88,7 @@ describe('spfn secret check --env', () =>
         }) as never);
         writeFileSync(join(dir, 'package.json'), '{ "type": "module" }\n');
         writeFileSync(join(dir, 'spfn.config.js'), 'export default { env: { schemas: ["env.schema.js"] } };\n');
-        writeFileSync(join(dir, 'env.schema.js'), `export const envSchema = ${JSON.stringify({ API_KEY: SHARED, DB_PASSWORD: PER_INSTANCE })};\n`);
+        writeFileSync(join(dir, 'env.schema.js'), `export const envSchema = ${JSON.stringify({ API_KEY: SHARED, SESSION_SECRET: ANY_LAYER, DB_PASSWORD: PER_INSTANCE })};\n`);
         mkdirSync(join(dir, 'secrets'));
     });
 
@@ -103,6 +122,26 @@ describe('spfn secret check --env', () =>
         await expect(secretCheck({ env: 'staging', instance: 'blue' })).rejects.toThrow('exit 1');
         expect(output.join('\n')).toMatch(/API_KEY.*layer "environment".*secrets\/staging\.blue\.enc\.json/);
         expect(output.join('\n')).toMatch(/RETIRED_KEY.*not in the env list/);
+    });
+
+    it('L7: a name without layer in the instance file gets no placement flag', async () =>
+    {
+        writeNames('secrets/staging.enc.json', ['API_KEY']);
+        writeNames('secrets/staging.blue.enc.json', ['DB_PASSWORD', 'SESSION_SECRET']);
+
+        await secretCheck({ env: 'staging', instance: 'blue' });
+
+        expect(output.join('\n')).not.toContain('SESSION_SECRET');
+        expect(output.join('\n')).toContain('No plaintext secret leaks found');
+    });
+
+    it('fails on a name without layer in both files', async () =>
+    {
+        writeNames('secrets/staging.enc.json', ['API_KEY', 'SESSION_SECRET']);
+        writeNames('secrets/staging.blue.enc.json', ['SESSION_SECRET']);
+
+        await expect(secretCheck({ env: 'staging', instance: 'blue' })).rejects.toThrow('exit 1');
+        expect(output.join('\n')).toMatch(/SESSION_SECRET.*both.*secrets\/staging\.enc\.json.*secrets\/staging\.blue\.enc\.json/);
     });
 
     it('passes when every name is in its own layer', async () =>

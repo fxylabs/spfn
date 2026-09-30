@@ -172,7 +172,7 @@ describe('merging sources', () =>
             + '@spfn/beta declares "string" (optional)');
     });
 
-    it('is an error when only layer differs, and an unset layer is environment', () =>
+    it('L8: is an error when one source declares layer instance and another leaves it unset', () =>
     {
         const merge = () => mergeEnvSources([
             source('@spfn/alpha', [entry('DB_NAME', { layer: 'instance' })]),
@@ -181,10 +181,20 @@ describe('merging sources', () =>
 
         expect(merge).toThrow('DB_NAME: @spfn/alpha declares "string" (optional, instance layer), '
             + '@spfn/beta declares "string" (optional)');
+    });
+
+    it('is an error when the explicit layers differ, or an explicit environment meets an unset one', () =>
+    {
+        expect(() => mergeEnvSources([
+            source('@spfn/alpha', [entry('DB_NAME', { layer: 'instance' })]),
+            source('@spfn/beta', [entry('DB_NAME', { layer: 'environment' })]),
+        ])).toThrow('DB_NAME: @spfn/alpha declares "string" (optional, instance layer), '
+            + '@spfn/beta declares "string" (optional, environment layer)');
         expect(() => mergeEnvSources([
             source('@spfn/alpha', [entry('API_KEY', { layer: 'environment' })]),
             source('@spfn/beta', [entry('API_KEY')]),
-        ])).not.toThrow();
+        ])).toThrow('API_KEY: @spfn/alpha declares "string" (optional, environment layer), '
+            + '@spfn/beta declares "string" (optional)');
     });
 
     it('names every disagreeing key in one error', () =>

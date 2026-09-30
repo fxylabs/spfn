@@ -254,8 +254,9 @@ secrets go to the OS keychain instead. See [CLI → spfn secret](/docs/packages/
 ### Assembling an instance's env file
 
 When one environment runs several instances (`staging` as `blue` and `green`), each
-instance's values come from three layers, and the schema's `layer` field says which
-layer a variable belongs to:
+instance's values come from three layers. The schema's `layer` field pins which layer a
+variable must come from; unset, it may come from any layer — a per-instance session
+secret can live in each instance's file while a shared key lives in the environment's:
 
 | Layer | Holds | File |
 |-------|-------|------|
@@ -273,7 +274,7 @@ spfn secret export --env staging --instance blue --with computed.env --out /run/
 `export` decrypts with whatever `.sops.yaml` configures, writes only names in the
 whole-app env list, and creates `--out` with mode 0600 through a temp file and a rename —
 a failed export leaves the previous file in place. It fails without writing when a
-required name is missing, a name is in two layers, a name is in the wrong layer, or a value
+required name is missing, a name is in two layers, a name is outside its declared layer, or a value
 fails its validator; errors name the variable and never print its value. The terminal
 shows only names and the layer each came from. Mode 0600 is not enforced on Windows.
 

@@ -3,13 +3,14 @@
  *
  * A deployment's values come from three layers: the environment's encrypted file
  * (shared by every instance), the instance's encrypted file, and plaintext files a
- * deploy script computes (`--with`). Each name comes from exactly one layer, and
- * the schema's `layer` says which kind: a name found twice, or found in a layer of
- * the wrong kind, is an error rather than an override. Messages carry names,
+ * deploy script computes (`--with`). Each name comes from exactly one layer; a
+ * schema entry that sets `layer` pins which kind, one without it may come from any.
+ * A name found twice, or found in a layer of the wrong kind, is an error rather
+ * than an override. Messages carry names,
  * layers and reasons — never a value.
  */
 
-import { layerOf, type EnvLayer, type EnvSchema, type EnvSchemaEntry } from './env-schema.js';
+import { allowsLayer, type EnvLayer, type EnvSchema, type EnvSchemaEntry } from './env-schema.js';
 
 /** One layer's values and how output names it. */
 export interface LayerSource
@@ -17,7 +18,7 @@ export interface LayerSource
     /** `environment`, `instance`, or the `--with` path. */
     label: string;
 
-    /** The kind of layer — which schema `layer` it may supply. */
+    /** The kind of layer — which declared schema `layer` it may supply. */
     kind: EnvLayer;
 
     values: Record<string, string>;
@@ -95,7 +96,7 @@ function collectListed(schema: EnvSchema, sources: LayerSource[], warnings: stri
 
 /**
  * Why a name's layers are wrong: found in more than one, or in a layer of
- * another kind than its schema declares.
+ * another kind than its schema declares. A name without a declared layer fits any.
  */
 function placementError(entry: EnvSchemaEntry, found: LayerSource[]): string | undefined
 {
@@ -104,9 +105,9 @@ function placementError(entry: EnvSchemaEntry, found: LayerSource[]): string | u
         return `in more than one layer: ${found.map((source) => source.label).join(' and ')}`;
     }
 
-    if (found[0].kind !== layerOf(entry))
+    if (!allowsLayer(entry, found[0].kind))
     {
-        return `declared with layer "${layerOf(entry)}", but found in ${found[0].label}`;
+        return `declared with layer "${entry.layer}", but found in ${found[0].label}`;
     }
 
     return undefined;

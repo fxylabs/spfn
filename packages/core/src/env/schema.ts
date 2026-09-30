@@ -80,7 +80,7 @@ export interface EnvVarSchema<T = string>
     // === Deployment layer ===
 
     /**
-     * Which layer of a deployment supplies the value.
+     * Which layer of a deployment must supply the value.
      *
      * - `'environment'`: one value shared by every instance of an environment
      *   (a third-party API key) — kept in `secrets/<env>.enc.json`.
@@ -88,9 +88,10 @@ export interface EnvVarSchema<T = string>
      *   `secrets/<env>.<instance>.enc.json` or computed by the deploy script
      *   and passed to `spfn secret export --with <file>`.
      *
-     * `spfn secret export` fails when a value arrives from the wrong layer.
-     *
-     * @default 'environment'
+     * Unset: the value may come from any layer. Set it to pin where a value
+     * must live — `spfn secret export` then fails when the value arrives from
+     * another layer. `--all` on `spfn secret set`/`generate`/`rotate` gives an
+     * unset entry to the environment target only.
      */
     layer?: EnvLayer;
 
@@ -153,8 +154,8 @@ export type InferEnvType<T extends EnvSchemaCollection> = {
  * 스키마 정의 헬퍼 (타입 추론 지원)
  *
  * Automatically fills in the `key` property from object keys. Every other
- * field passes through as written — an entry without `layer` is an
- * `'environment'` value.
+ * field passes through as written — an entry without `layer` may come from
+ * any deployment layer.
  *
  * @example
  * ```typescript
