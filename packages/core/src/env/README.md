@@ -160,7 +160,7 @@ CONFIG: envJson<{ host: string; port: number }>({
 | `sensitive` | `boolean` | Marks a secret; triggers a warning if `NEXT_PUBLIC_*` |
 | `examples` | `T[]` | Example values (metadata only) |
 | `nextjs` | `boolean` | File-separation hint (see below). Defaults to `true` for `NEXT_PUBLIC_*`, else `false` |
-| `layer` | `'environment' \| 'instance'` | Which deployment layer supplies the value (see below). Defaults to `'environment'` |
+| `layer` | `'environment' \| 'instance'` | Which deployment layer must supply the value (see below). Unset: may come from any layer |
 | `readBy` | `string[]` | Files that read the name under a computed key, relative to the project root — for `spfn env audit` (see below) |
 
 > There is **no** `category` option. Docs that show `category: '...'` are stale — passing
@@ -360,24 +360,26 @@ cannot tell a message from a lookup key.
 ### Deployment layers (`layer`)
 
 A deployed environment can run more than one instance — `staging` as `blue` and `green`,
-each with its own port, URLs and database. `layer` says where a variable's value comes
+each with its own port, URLs and database. `layer` pins where a variable's value must come
 from, so `spfn secret export` can assemble one instance's env file and refuse a value that
-arrives from the wrong place:
+arrives from the wrong place. Unset, the value may come from any layer — a package schema
+leaves it unset, so an app can keep a value such as a session secret shared or give each
+instance its own:
 
 | Layer | Holds | Source |
 |-------|-------|--------|
-| `environment` (default) | Values every instance of the environment shares — third-party API keys | `secrets/<env>.enc.json` |
+| `environment` | Values every instance of the environment shares — third-party API keys | `secrets/<env>.enc.json` |
 | `instance` | Values of one instance: its own secrets, or plain values the deploy script computes (port, URLs, database name) | `secrets/<env>.<instance>.enc.json`, or a `--with <file>` dotenv file |
 
 ```typescript
 const schema = defineEnvSchema({
-    PAYMENT_API_KEY: envSecret({ description: 'Payment provider key', required: true }),
+    PAYMENT_API_KEY: envSecret({ description: 'Payment provider key', required: true, layer: 'environment' }),
     DB_NAME: envString({ description: 'Database of this instance', required: true, layer: 'instance' }),
 });
 ```
 
-An `environment` name found in an instance layer, an `instance` name found in the
-environment file, or a name found in two layers fails the export. The runtime ignores
+A name declared `environment` found in an instance layer, a name declared `instance` found
+in the environment file, or any name found in two layers fails the export. The runtime ignores
 `layer`; it only steers the CLI.
 
 ### Fallback keys

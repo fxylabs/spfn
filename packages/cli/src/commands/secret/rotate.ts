@@ -1,6 +1,7 @@
 /**
  * `spfn secret rotate [KEY|--all] [--env <env>] [--instance <name>]` — replace secret
- * values. `--all` takes the secrets of the target's layer only.
+ * values. `--all` takes the secrets declared with the target's layer; one without a
+ * declared layer goes to the environment target only.
  *
  * Generatable secrets (those with a `generate` strategy) are minted fresh and
  * stored. External secrets can't be regenerated here — the command points the user

@@ -1,7 +1,8 @@
 /**
  * `spfn secret generate [KEY|--all] [--env <env>] [--instance <name>]` — mint values
- * for schema secrets that declare a `generate` strategy. `--all` takes the secrets of
- * the target's layer only.
+ * for schema secrets that declare a `generate` strategy. `--all` takes the secrets
+ * declared with the target's layer; one without a declared layer goes to the
+ * environment target only.
  */
 
 import chalk from 'chalk';

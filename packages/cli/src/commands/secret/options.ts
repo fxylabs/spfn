@@ -4,7 +4,7 @@
  */
 
 import { logger } from '../../utils/logger.js';
-import { VALID_ENVS, layerOf, type EnvLayer, type EnvSchemaEntry } from '../../utils/env-schema.js';
+import { VALID_ENVS, allowsLayer, type EnvLayer, type EnvSchemaEntry } from '../../utils/env-schema.js';
 import { loadEnvList, type EnvList } from '../../utils/env-list.js';
 import { isLocalEnv, type SecretTarget } from './store-value.js';
 
@@ -103,29 +103,32 @@ export function targetLayer(target: SecretTarget): EnvLayer | undefined
 }
 
 /**
- * The entries whose values belong in the target's file.
+ * The entries `--all` takes for the target's file: an entry with a declared layer
+ * goes to that layer's target, one without goes to the environment target only —
+ * so `--all` never fills an instance file with names every instance shares.
  */
 export function entriesForTarget(entries: EnvSchemaEntry[], target: SecretTarget): EnvSchemaEntry[]
 {
     const layer = targetLayer(target);
 
-    return layer ? entries.filter((entry) => layerOf(entry) === layer) : entries;
+    return layer ? entries.filter((entry) => (entry.layer ?? 'environment') === layer) : entries;
 }
 
 /**
- * End the run when a declared key belongs to another layer than the target's
- * file — `spfn secret export` would refuse the value where it is written.
+ * End the run when a key declares another layer than the target's file —
+ * `spfn secret export` would refuse the value where it is written. A key without
+ * a declared layer may be written to any target.
  */
 export function assertTargetLayer(entry: EnvSchemaEntry | undefined, target: SecretTarget): void
 {
     const layer = targetLayer(target);
 
-    if (!entry || !layer || layerOf(entry) === layer)
+    if (!entry || !layer || allowsLayer(entry, layer))
     {
         return;
     }
 
     const hint = layer === 'environment' ? 'pass --instance <name>' : 'drop --instance';
-    logger.error(`${entry.key} is declared with layer "${layerOf(entry)}" — ${hint}.`);
+    logger.error(`${entry.key} is declared with layer "${entry.layer}" — ${hint}.`);
     process.exit(1);
 }

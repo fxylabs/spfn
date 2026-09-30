@@ -495,7 +495,7 @@ reads plain `process.env`.
 | `secret rotate [key]` | Rotate values; external secrets are flagged for manual reissue (`-a/--all`) |
 | `secret keygen` | Generate an age key pair for the SOPS no-cloud backend |
 | `secret recipients <add\|remove\|list> [age1…]` | Manage `.sops.yaml` recipients + re-encrypt |
-| `secret check` | Static lint — flag plaintext secret leaks; with a deployed `--env`, names in the wrong layer's file |
+| `secret check` | Static lint — flag plaintext secret leaks; with a deployed `--env`, names outside their declared layer or in both files |
 | `secret export` | Decrypt and merge one deployment's layers into a 0600 dotenv file (prints names only) |
 
 Options: `-e, --env <env>` (`local` default; also `development`/`staging`/`production`),
@@ -508,11 +508,15 @@ whole of stdin as the value — one trailing newline dropped, inner newlines kep
 local and deployed targets alike. It never prompts, and refuses a terminal on stdin.
 Shaped values such as key pairs come from the app's own command, piped in.
 
-**Layers.** A schema entry's `layer` (`'environment'` default, or `'instance'`) says where a
-deployment's value comes from. Without `--instance`, `set`/`generate`/`rotate`/`list` on a
-deployed environment work on the `environment` names in `secrets/<env>.enc.json`; with
-`--instance blue`, on the `instance` names in `secrets/<env>.blue.enc.json`. A named key of
-the other layer is refused.
+**Layers.** A schema entry's `layer` (`'environment'` or `'instance'`) pins where a
+deployment's value must live; unset, the value may come from any layer. Without
+`--instance`, `set`/`generate`/`rotate`/`list` on a deployed environment work on
+`secrets/<env>.enc.json`; with `--instance blue`, on `secrets/<env>.blue.enc.json`. A named
+key declared with the other layer is refused; a key without `layer` is accepted by either.
+`--all` (and `list`) takes the names declared with the target's layer, and names without
+`layer` on the environment target only — so `--all --instance blue` never fills an
+instance file with names every instance shares. To give each instance its own value of
+such a name, set it by name with `--instance`.
 
 **Export.**
 
@@ -525,8 +529,8 @@ Decrypts `secrets/<env>.enc.json` and — with `--instance`, when it exists —
 instance values such as port and URLs), and writes the merge to `--out`. Only names in the
 whole-app list are written; an unlisted name in an encrypted file is a warning by name.
 The export fails, writing nothing, when a required name is in no layer, a name is in two
-layers, an `instance` name is in the environment file, an `environment` name is in an
-instance layer, a value fails its validator (the error names the variable and the
+layers, a name declared `instance` is in the environment file, a name declared
+`environment` is in an instance layer, a value fails its validator (the error names the variable and the
 reason, never the value), or decryption fails. `--out` is required and its directory must
 exist; relative paths resolve from the working directory. The file is created 0600 beside
 the destination and renamed over it, so a failure leaves the previous file untouched
