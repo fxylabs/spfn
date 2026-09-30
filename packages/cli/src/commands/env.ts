@@ -12,6 +12,7 @@ import {
     type EnvList,
     type EnvSource,
 } from '../utils/env-list.js';
+import { runEnvAudit, type AuditFinding } from '../utils/env-audit/index.js';
 
 /**
  * Base environment file targets (no NODE_ENV)
@@ -912,3 +913,65 @@ envCommand
     .option('-e, --env <environment>', 'Load env files for specific environment before validating')
     .option('-s, --strict', 'Exit on any error (including load failures)')
     .action(validateEnvVars);
+
+/**
+ * Audit the code against the env list: direct `process.env` reads outside the
+ * schema, and app schema names nothing reads. Prints names, never values, and
+ * exits 1 on any finding — or when the list itself cannot be built.
+ */
+export async function auditEnv(): Promise<void>
+{
+    const report = await runEnvAudit().catch((error: unknown) =>
+    {
+        console.error(chalk.red(`\n❌ ${error instanceof Error ? error.message : String(error)}\n`));
+
+        return process.exit(1);
+    });
+
+    console.log(chalk.blue.bold(`\n🔍 Env audit — ${report.fileCount} file(s) scanned\n`));
+    printAuditFindings('Direct reads of process.env', report.directReads);
+    printAuditFindings('Declarations', report.declarations);
+
+    for (const notice of report.notices)
+    {
+        console.log(chalk.dim(`  ℹ ${notice}\n`));
+    }
+
+    const count = report.directReads.length + report.declarations.length;
+
+    if (count === 0)
+    {
+        console.log(chalk.green('✅ The code reads the env list, and every app variable is read.\n'));
+
+        return;
+    }
+
+    console.log(chalk.dim(`Found ${count} finding(s)\n`));
+    process.exit(1);
+}
+
+/**
+ * One `file:line  NAME  reason` line per finding, in file order.
+ */
+function printAuditFindings(heading: string, findings: AuditFinding[]): void
+{
+    if (findings.length === 0)
+    {
+        return;
+    }
+
+    console.log(chalk.bold(`${heading} (${findings.length}):`));
+
+    for (const finding of [...findings].sort((a, b) => a.file.localeCompare(b.file) || a.line - b.line))
+    {
+        console.log(`  ${chalk.yellow(`${finding.file}:${finding.line}`)}  ${chalk.cyan(finding.name)}  ${chalk.dim(finding.reason)}`);
+    }
+
+    console.log('');
+}
+
+// env:audit - Keep the env list and the code in step
+envCommand
+    .command('audit')
+    .description('Find direct process.env reads and app env variables nothing reads (spfn.config.js env.audit)')
+    .action(auditEnv);

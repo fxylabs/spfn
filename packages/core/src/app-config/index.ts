@@ -51,6 +51,31 @@ export interface SpfnEnvConfig
      * tsconfig path aliases it imports through are supported.
      */
     schemas?: string[];
+
+    /** What `spfn env audit` scans. */
+    audit?: SpfnEnvAuditConfig;
+}
+
+/**
+ * The files `spfn env audit` reads, as globs relative to the project root.
+ *
+ * `node_modules`, build output, `*.d.ts` files and symbolic links are never
+ * scanned, whatever the globs say.
+ */
+export interface SpfnEnvAuditConfig
+{
+    /**
+     * Directories or globs to scan — e.g. `['src', 'scripts/*.ts']`.
+     *
+     * @default ['src']
+     */
+    include?: string[];
+
+    /**
+     * Directories or globs to leave out — e.g. `['src/legacy/**']`. A file left
+     * out may read `process.env` directly, and names it reads do not count as read.
+     */
+    ignore?: string[];
 }
 
 export interface SpfnAppConfig
@@ -60,7 +85,7 @@ export interface SpfnAppConfig
     /** Host the SPFN API server binds. */
     host?: string;
 
-    /** The app's environment schema modules. */
+    /** The app's environment schema modules, and what `spfn env audit` scans. */
     env?: SpfnEnvConfig;
 
     /** Deployment settings — untouched by this module, kept so the type is whole. */

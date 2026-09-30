@@ -161,6 +161,7 @@ CONFIG: envJson<{ host: string; port: number }>({
 | `examples` | `T[]` | Example values (metadata only) |
 | `nextjs` | `boolean` | File-separation hint (see below). Defaults to `true` for `NEXT_PUBLIC_*`, else `false` |
 | `layer` | `'environment' \| 'instance'` | Which deployment layer supplies the value (see below). Defaults to `'environment'` |
+| `readBy` | `string[]` | Files that read the name under a computed key, relative to the project root — for `spfn env audit` (see below) |
 
 > There is **no** `category` option. Docs that show `category: '...'` are stale — passing
 > it is harmless (excess property) but it does nothing.
@@ -308,6 +309,53 @@ whose `./config` exports `envSchema`, and groups its output by source. A key two
 declare identically is listed once; two declarations that differ in type, `required` or
 `sensitive` are an error naming the key and both sources — one variable has one owner, and
 other packages read it from the owner's `env` instead of declaring it again.
+
+### Auditing the code against the list (`env.audit`, `readBy`)
+
+`spfn env audit` keeps the list and the code in step, and exits 1 on any finding. It prints
+`file:line  NAME  reason` — names only, never values — for:
+
+- **Direct reads.** `process.env.X`, `process.env['X']`, `process.env[expr]` and
+  `const { X } = process.env` (also through `process?.env` and `globalThis.process.env`).
+  Allowed in the modules named in `env.schemas`, in root-level `*.config.{js,cjs,mjs,ts}`
+  files and in files matching `env.audit.ignore`. `NODE_ENV` is allowed everywhere.
+- **Unused declarations.** A name in the app's own schemas that no scanned file outside the
+  schema modules reads — as a property (`env.X`), a destructured key (`const { X } = env`)
+  or a string literal `'X'`. Names an installed `@spfn/*` package also declares are read
+  inside that package and are not checked. Without `env.schemas` this check is skipped
+  with a notice.
+
+```js
+// spfn.config.js
+export default {
+    env: {
+        schemas: ['src/server/config/env.config.ts'],
+        audit: {
+            include: ['src'],             // default; directories or globs from the project root
+            ignore: ['src/**/*.test.ts'], // may read process.env; the names they read do not count
+        },
+    },
+};
+```
+
+`node_modules`, build output (`dist`, `build`, `out`, `.next`, …), `*.d.ts` files and
+symbolic links are never scanned. Sources are parsed with TypeScript, so a mention in a
+comment or a string is not a read.
+
+A name the code only reaches under a computed key — ``env[`${provider}_API_KEY`]`` — is
+invisible to the scan. List the files that read it in `readBy`:
+
+```typescript
+const schema = defineEnvSchema({
+    PAYMENT_API_KEY: envSecret({ description: 'Payment provider key', readBy: ['src/server/providers.ts'] }),
+});
+```
+
+The name passes when every listed file exists and is scanned; a listed file that does not
+exist, or that the audit does not scan, is a finding. The runtime ignores `readBy`.
+
+A name that appears only in a log message string counts as read — the string-literal rule
+cannot tell a message from a lookup key.
 
 ### Deployment layers (`layer`)
 

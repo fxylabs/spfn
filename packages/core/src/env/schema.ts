@@ -93,6 +93,19 @@ export interface EnvVarSchema<T = string>
      * @default 'environment'
      */
     layer?: EnvLayer;
+
+    // === Audit ===
+
+    /**
+     * Files that read this variable under a computed key, as paths relative to
+     * the project root — e.g. `['src/server/config/providers.ts']`.
+     *
+     * `spfn env audit` counts a name as read when it appears as a property
+     * access or a string literal; a name only ever reached through
+     * `env[name]` needs this instead. The name passes when every listed file
+     * exists and is scanned. The runtime ignores `readBy`.
+     */
+    readBy?: string[];
 }
 
 /**
