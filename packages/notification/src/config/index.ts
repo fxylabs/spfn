@@ -8,6 +8,12 @@ import { notificationEnvSchema } from './schema';
 export { notificationEnvSchema };
 
 /**
+ * The same schema under the name every `@spfn/*` package exports it by, so the
+ * CLI finds it without knowing this package's own name for it.
+ */
+export { notificationEnvSchema as envSchema };
+
+/**
  * Environment registry
  */
 const registry = createEnvRegistry(notificationEnvSchema);

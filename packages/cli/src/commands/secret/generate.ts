@@ -5,27 +5,15 @@
 
 import chalk from 'chalk';
 import { logger } from '../../utils/logger.js';
-import { loadEnvSchema, generatableSecrets, type EnvSchema } from '../../utils/env-schema.js';
+import { generatableSecrets, type EnvSchema } from '../../utils/env-schema.js';
 import { generateSecretValue } from '../../utils/secret-gen.js';
-import { resolveEnv, type SecretOptions } from './options.js';
+import { loadSecretList, resolveEnv, type SecretOptions } from './options.js';
 import { storeSecret, describeTarget } from './store-value.js';
 
 export async function secretGenerate(key: string | undefined, options: SecretOptions): Promise<void>
 {
     const env = resolveEnv(options.env);
-    const pkg = options.package ?? '@spfn/core';
-
-    let schema: EnvSchema;
-
-    try
-    {
-        schema = await loadEnvSchema(pkg);
-    }
-    catch (error)
-    {
-        logger.error(error instanceof Error ? error.message : String(error));
-        process.exit(1);
-    }
+    const schema = (await loadSecretList(options)).schema;
 
     const targets = options.all
         ? generatableSecrets(schema)

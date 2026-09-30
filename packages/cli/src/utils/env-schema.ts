@@ -6,6 +6,10 @@
  * the same way.
  */
 
+import { createRequire } from 'node:module';
+import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
+
 /** Valid NODE_ENV values accepted by `--env`. */
 export const VALID_ENVS = ['local', 'development', 'staging', 'production', 'test'] as const;
 
@@ -32,29 +36,43 @@ export type EnvSchema = Record<string, EnvSchemaEntry>;
 
 /**
  * Load the `envSchema` export from a package's `/config` entrypoint.
+ *
+ * The package is resolved from the project root first, so the app's installed
+ * copy is the one read even when the CLI runs from elsewhere (`npx`); the
+ * CLI's own resolution is the fallback.
  */
-export async function loadEnvSchema(packageName: string): Promise<EnvSchema>
+export async function loadEnvSchema(packageName: string, cwd: string = process.cwd()): Promise<EnvSchema>
+{
+    const specifier = `${packageName}/config`;
+    const path = resolveFrom(join(cwd, 'noop.js'), specifier);
+    const module = await import(path ? pathToFileURL(path).href : specifier).catch((error: unknown) =>
+    {
+        const message = error instanceof Error ? error.message : String(error);
+
+        return Promise.reject(new Error(`Failed to load package ${packageName}: ${message}`));
+    });
+
+    if (!module.envSchema)
+    {
+        throw new Error(`Package ${packageName} does not export envSchema from config`);
+    }
+
+    return module.envSchema as EnvSchema;
+}
+
+/**
+ * Resolve a specifier as if imported from `parent`, or `undefined` when it
+ * does not resolve there (not installed, or the subpath is not exported).
+ */
+export function resolveFrom(parent: string, specifier: string): string | undefined
 {
     try
     {
-        const module = await import(`${packageName}/config`);
-
-        if (!module.envSchema)
-        {
-            throw new Error(`Package ${packageName} does not export envSchema from config`);
-        }
-
-        return module.envSchema as EnvSchema;
+        return createRequire(parent).resolve(specifier);
     }
-    catch (error)
+    catch
     {
-        if (error instanceof Error && error.message.includes('does not export envSchema'))
-        {
-            throw error;
-        }
-
-        const message = error instanceof Error ? error.message : String(error);
-        throw new Error(`Failed to load package ${packageName}: ${message}`);
+        return undefined;
     }
 }
 

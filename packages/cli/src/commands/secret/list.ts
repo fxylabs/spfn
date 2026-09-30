@@ -5,11 +5,12 @@
 
 import chalk from 'chalk';
 import { logger } from '../../utils/logger.js';
-import { loadEnvSchema, secretEntries, type EnvSchemaEntry } from '../../utils/env-schema.js';
+import { secretEntries, type EnvSchemaEntry } from '../../utils/env-schema.js';
+import { describeEnvList, groupBySource } from '../../utils/env-list.js';
 import { detectStore, keychainName } from '../../utils/secret-store/index.js';
 import { getSopsFile } from '../../utils/secret-config.js';
 import { ensureSopsInstalled, sopsDecrypt } from '../../utils/sops.js';
-import { resolveEnv, type SecretOptions } from './options.js';
+import { loadSecretList, resolveEnv, type SecretOptions } from './options.js';
 import { isLocalEnv } from './store-value.js';
 
 type Status = 'set' | 'missing' | 'awaiting-input';
@@ -17,35 +18,30 @@ type Status = 'set' | 'missing' | 'awaiting-input';
 export async function secretList(options: SecretOptions): Promise<void>
 {
     const env = resolveEnv(options.env);
-    const pkg = options.package ?? '@spfn/core';
-
-    let entries: EnvSchemaEntry[];
-
-    try
-    {
-        entries = secretEntries(await loadEnvSchema(pkg));
-    }
-    catch (error)
-    {
-        logger.error(error instanceof Error ? error.message : String(error));
-        process.exit(1);
-    }
+    const label = describeEnvList(options);
+    const list = await loadSecretList(options);
+    const entries = secretEntries(list.schema);
 
     if (entries.length === 0)
     {
-        logger.info(`No secrets declared in ${pkg}.`);
+        logger.info(`No secrets declared in ${label}.`);
 
         return;
     }
 
     const present = await loadPresence(env, entries);
 
-    console.log(chalk.blue.bold(`\n🔑 Secrets (${pkg}) — ${env}\n`));
+    console.log(chalk.blue.bold(`\n🔑 Secrets (${label}) — ${env}\n`));
 
-    for (const entry of entries)
+    for (const group of groupBySource(list, entries))
     {
-        const status = statusOf(entry, present.has(entry.key));
-        console.log(`  ${badge(status)} ${chalk.cyan(entry.key)}${entry.generate ? chalk.dim(' (generatable)') : ''}`);
+        console.log(`  ${chalk.bold.magenta(group.source)}`);
+
+        for (const entry of group.entries)
+        {
+            const status = statusOf(entry, present.has(entry.key));
+            console.log(`    ${badge(status)} ${chalk.cyan(entry.key)}${entry.generate ? chalk.dim(' (generatable)') : ''}`);
+        }
     }
 
     console.log();
