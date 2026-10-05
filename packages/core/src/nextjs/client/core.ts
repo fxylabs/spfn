@@ -71,7 +71,10 @@ interface CallSite
  * - timeout → 408 `'timeout'`, reporting the applied timeout
  * - caller abort → status 0 `'aborted'`, the signal's reason as `cause`; logged at debug
  *   level, since it is the caller's own intent
- * - anything else, including a custom fetch's own `AbortError` → status 0 `'network'`
+ * - no cause recorded but the error is a plain `AbortError` (a custom `fetch` aborting its
+ *   own controller, with neither our timer nor the caller's signal involved) → 408
+ *   `'timeout'`, as it always was before the scope recorded a cause
+ * - anything else → status 0 `'network'`
  */
 function transportError(
     failure: Extract<ScopedFetchResult, { ok: false }>,
@@ -94,6 +97,14 @@ function transportError(
     }
 
     const { error } = failure;
+
+    if (error instanceof Error && error.name === 'AbortError')
+    {
+        apiLogger.error('Request timeout', { ...site, timeout });
+
+        return new ApiError(`Request timeout after ${timeout}ms`, 408, site.url, undefined, 'timeout');
+    }
+
     const errorMessage = error instanceof Error ? error.message : 'Network error';
     apiLogger.error('Network error', {
         ...site,

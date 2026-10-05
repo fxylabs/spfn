@@ -23,6 +23,7 @@ import { Type } from '@sinclair/typebox';
 import { defineRouter, route } from '../../../route';
 import { createApi } from '../core';
 import { ApiError } from '../errors';
+import { RouteCallBuilder } from '../builder';
 import type { RouteClient } from '../builder';
 
 vi.mock('next/headers', () => ({
@@ -311,6 +312,40 @@ describe('api client - caller abort', () =>
 
         expectApiError(await outcome, 'aborted', 0);
     });
+
+    it('row 16: a caller abort after headers wins even when the body ignores the signal', async () =>
+    {
+        let controller: ReadableStreamDefaultController<Uint8Array> | undefined;
+        const body = new ReadableStream<Uint8Array>({
+            start: (c) =>
+            {
+                controller = c;
+            },
+        });
+
+        const unresponsiveFetch = vi.fn(async () => new Response(body, {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+        }));
+        const server: FakeServer = {
+            fetch: unresponsiveFetch as unknown as Mock,
+            sendHeaders: () => undefined,
+            sendBody: () => undefined,
+        };
+
+        const caller = new AbortController();
+        const api = createApi<any>({ fetch: server.fetch as unknown as typeof fetch }) as any;
+
+        const outcome = settle(api.getUser.fetchOptions({ signal: caller.signal }).call({}));
+        await untilFetched(server);
+        await drain();
+
+        caller.abort();
+        controller!.enqueue(new TextEncoder().encode(JSON.stringify({ id: '1' })));
+        controller!.close();
+
+        expectApiError(await outcome, 'aborted', 0);
+    });
 });
 
 describe('api client - failures and validation', () =>
@@ -329,7 +364,7 @@ describe('api client - failures and validation', () =>
         expect(vi.getTimerCount()).toBe(0);
     });
 
-    it('row 13: .timeout() of 0, -1, NaN, Infinity or 2147483648 throws a TypeError and makes no request', () =>
+    it('row 13: .timeout() of 0, -1, NaN, Infinity or 2147483648 throws a TypeError; the bounds are inclusive', () =>
     {
         const server = fakeServer();
         const api = createApi<any>({ fetch: server.fetch as unknown as typeof fetch }) as any;
@@ -340,7 +375,8 @@ describe('api client - failures and validation', () =>
             expect(() => api.getUser.timeout(value)).toThrow(`got ${value}`);
         }
 
-        expect(server.fetch).not.toHaveBeenCalled();
+        expect(api.getUser.timeout(2147483647)).toBeInstanceOf(RouteCallBuilder);
+        expect(api.getUser.timeout(1)).toBeInstanceOf(RouteCallBuilder);
     });
 
     it('row 14: the timer stops at headers, so a body arriving after it succeeds', async () =>
@@ -358,6 +394,83 @@ describe('api client - failures and validation', () =>
         server.sendBody({ late: true });
 
         await expect(outcome).resolves.toEqual({ late: true });
+    });
+
+    it('row 15: an uncaused AbortError from a custom fetch stays a timeout; a plain TypeError stays network', async () =>
+    {
+        const abortingFetch = async () =>
+        {
+            throw new DOMException('x', 'AbortError');
+        };
+        const abortingApi = createApi<any>({ fetch: abortingFetch as unknown as typeof fetch }) as any;
+
+        expectApiError(await settle(abortingApi.getUser.call({})), 'timeout', 408);
+
+        const failingFetch = async () =>
+        {
+            throw new TypeError('x');
+        };
+        const failingApi = createApi<any>({ fetch: failingFetch as unknown as typeof fetch }) as any;
+
+        expectApiError(await settle(failingApi.getUser.call({})), 'network', 0);
+    });
+});
+
+describe('api client - listener cleanup on failure', () =>
+{
+    it('row 17a: a timeout removes the caller listener and leaves no timer', async () =>
+    {
+        const server = fakeServer();
+        const caller = new AbortController();
+        const added = vi.spyOn(caller.signal, 'addEventListener');
+        const removed = vi.spyOn(caller.signal, 'removeEventListener');
+        const api = createApi<any>({ fetch: server.fetch as unknown as typeof fetch }) as any;
+
+        const outcome = settle(api.getUser.timeout(50).fetchOptions({ signal: caller.signal }).call({}));
+        await untilFetched(server);
+        vi.advanceTimersByTime(50);
+
+        expectApiError(await outcome, 'timeout', 408);
+        expect(removed).toHaveBeenCalledTimes(1);
+        expect(removed.mock.calls[0].slice(0, 2)).toEqual(added.mock.calls[0].slice(0, 2));
+        expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it('row 17b: a caller abort removes the listener and leaves no timer', async () =>
+    {
+        const server = fakeServer();
+        const caller = new AbortController();
+        const added = vi.spyOn(caller.signal, 'addEventListener');
+        const removed = vi.spyOn(caller.signal, 'removeEventListener');
+        const api = createApi<any>({ fetch: server.fetch as unknown as typeof fetch }) as any;
+
+        const outcome = settle(api.getUser.fetchOptions({ signal: caller.signal }).call({}));
+        await untilFetched(server);
+        caller.abort();
+
+        expectApiError(await outcome, 'aborted', 0);
+        expect(removed).toHaveBeenCalledTimes(1);
+        expect(removed.mock.calls[0].slice(0, 2)).toEqual(added.mock.calls[0].slice(0, 2));
+        expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it('row 17c: a network rejection removes the listener and leaves no timer', async () =>
+    {
+        const caller = new AbortController();
+        const added = vi.spyOn(caller.signal, 'addEventListener');
+        const removed = vi.spyOn(caller.signal, 'removeEventListener');
+        const failing = vi.fn(async () =>
+        {
+            throw new TypeError('fetch failed');
+        });
+        const api = createApi<any>({ fetch: failing as unknown as typeof fetch }) as any;
+
+        const caught = await settle(api.getUser.fetchOptions({ signal: caller.signal }).call({}));
+
+        expectApiError(caught, 'network', 0);
+        expect(removed).toHaveBeenCalledTimes(1);
+        expect(removed.mock.calls[0].slice(0, 2)).toEqual(added.mock.calls[0].slice(0, 2));
+        expect(vi.getTimerCount()).toBe(0);
     });
 });
 

@@ -110,6 +110,10 @@ function openAbortScope(callerSignal: AbortSignal | undefined, timeout: number)
  * stops when response headers arrive; the caller's abort stays effective until the body
  * is parsed. A failure is returned, not thrown, with the cause the scope recorded —
  * classification reads that record, never the error's name.
+ *
+ * A custom `fetch`'s body read may not honour the signal at all, so a caller abort during
+ * that read can otherwise go unnoticed and the call resolves as if nothing happened. After
+ * the body is parsed, the scope is checked again: a recorded `'caller'` cause still wins.
  */
 export async function fetchInAbortScope(
     url: string,
@@ -133,7 +137,14 @@ export async function fetchInAbortScope(
 
         scope.stopTimer();
 
-        return { ok: true, response, body: await parseResponseBody(response) };
+        const body = await parseResponseBody(response);
+
+        if (scope.cause() === 'caller')
+        {
+            return { ok: false, error: callerSignal?.reason, cause: 'caller' };
+        }
+
+        return { ok: true, response, body };
     }
     catch (error)
     {

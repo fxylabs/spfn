@@ -556,7 +556,7 @@ try {
 The client classifies an abort by who triggered it, never by the error's name: `'timeout'`
 when its own timer fired, `'aborted'` when your signal did — whichever came first. An
 `AbortError` that a custom `fetch` throws on its own, with neither of those having fired, is
-`'network'`.
+`'timeout'` too, as it always was.
 
 **Custom errors**: if the backend body carries a `__type` discriminator and a matching entry
 is registered in the client's `errorRegistry`, the client deserializes and throws the
