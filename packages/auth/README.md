@@ -29,7 +29,8 @@ through a typed `authApi` client. Requires `@spfn/core`; Next.js is an optional 
 pnpm add @spfn/auth drizzle-orm@1.0.0-rc.4
 ```
 
-Requires `@spfn/core` **0.3.0-beta.9** or later — the OAuth callback page uses its CSRF helpers.
+Requires `@spfn/core` **0.3.0-beta.18** or later — the guards bound their session lookup with its
+per-call `.timeout()`, and the OAuth callback page uses its CSRF helpers.
 
 `@simplewebauthn/server` and `@simplewebauthn/browser` come along as dependencies —
 [passkeys](#passkeys-webauthn) need them, and standards conformance is the whole risk there.
@@ -187,6 +188,7 @@ real secret values out of band, never commit them.
 | `SPFN_AUTH_BOUND_KEY_RENEW_GRACE_HOURS` | `.env.server` | — | default `168`; how long past expiry a bound key may still be renewed. Past it, sign in again |
 | `SPFN_AUTH_CONCURRENT_USE_WINDOW_MS` | `.env.server` | — | default `300000`; how close two sightings from two addresses must be to raise `concurrentUseAtMillis` |
 | `SPFN_AUTH_SESSION_RENEW_PATH` | `.env.local` | — | default `/auth/renew`; the page `RequireAuth` sends a bound session whose key ran out |
+| `SPFN_AUTH_GUARD_TIMEOUT` | `.env.local` | — | no default; milliseconds the guards' server-side session lookup may take. Unset, it waits as long as the API client does (`SERVER_TIMEOUT`, 120 s). A lookup that times out reads as no session — see [the guards' timeout](#the-guards-timeout) |
 | `NEXT_PUBLIC_SPFN_APP_URL` | `.env.local` | — | browser-facing app URL; read before `SPFN_APP_URL` wherever the app origin is needed |
 | `NEXT_PUBLIC_SPFN_API_URL` | `.env.local` | — | declared by `@spfn/core`; the API URL browser code calls |
 
@@ -1152,6 +1154,12 @@ async function addPasskey()
 ```
 
 `isPasskeySupported()` is what decides whether to render the button at all.
+
+The passkey helpers take a client and call through it, so they wait as long as that client
+does — `SPFN_AUTH_GUARD_TIMEOUT` bounds only the guards. To bound them, pass a client created
+with a timeout, `createApi<AuthRouter>({ timeout: 5000 })` (`createApi` from
+`@spfn/core/nextjs`, `AuthRouter` from `@spfn/auth`), or call `.timeout()` on your own calls:
+`authApi.login.timeout(5000).call(...)`.
 
 #### Signing in, with conditional UI
 
@@ -2245,6 +2253,26 @@ export default async function AdminPage()
 
 Also exported: `getAuthSessionData`, `getUserRole`, `getUserPermissions`, `hasAnyRole`,
 `hasAnyPermission`, the OAuth pending-session helpers, and `createOAuthCallbackHandler`.
+
+#### The guards' timeout
+
+Every guard and helper above asks the backend for the session through one call,
+`getAuthSessionData()`. Unset, that call waits as long as the API client does —
+`SERVER_TIMEOUT`, 120 s by default, the same variable the backend uses for its own requests —
+so a slow backend holds every protected render for up to two minutes. Bound it for the guards
+alone:
+
+```bash
+# .env.local — read by the guards, in the Next.js process
+SPFN_AUTH_GUARD_TIMEOUT=3000
+```
+
+Milliseconds, greater than 0 and at most 2147483647; a few seconds (`3000`–`10000`) suits most
+apps. **A lookup that times out reads as no session: the guard sends a signed-in person to the
+sign-in page**, exactly as when the backend refuses. It is logged at warn level as
+`Auth session lookup timed out`, with the timeout. A malformed value is refused by the env
+validation, and at runtime fails the lookup the same way — `null`, with the env registry's
+error naming `SPFN_AUTH_GUARD_TIMEOUT`.
 
 ### Emptying the cookie jar from a route handler or middleware
 

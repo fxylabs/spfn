@@ -4,7 +4,9 @@
  * Uses authApi to check permissions in real-time
  */
 
+import { ApiError } from '@spfn/core/nextjs';
 import { authApi } from '@spfn/auth';
+import { env as authEnv } from '@spfn/auth/config';
 import { SessionRenewalRequiredError } from '@spfn/auth/errors';
 import { authLogger } from '../../server/logger';
 
@@ -28,29 +30,60 @@ export type AuthSessionState = AuthSessionData | typeof RENEWAL_REQUIRED | null;
 
 /**
  * Get current auth session with roles and permissions via API
+ *
+ * Any failure answers `null`, which a guard reads as signed out — a lookup that
+ * outlives `SPFN_AUTH_GUARD_TIMEOUT` included, so a slow backend sends a signed-in
+ * person to the sign-in page rather than holding the render.
  */
 export async function getAuthSessionData(): Promise<AuthSessionState>
 {
     try
     {
-        const session = await authApi.getAuthSession.call();
+        const session = await sessionLookup().call();
         authLogger.middleware.debug('Auth session retrieved', { name: session.role?.name });
 
         return session;
     }
     catch (error)
     {
-        if (isRenewalRequired(error))
-        {
-            authLogger.middleware.debug('Auth session needs renewing');
+        return failedLookupState(error);
+    }
+}
 
-            return RENEWAL_REQUIRED;
-        }
+/**
+ * The session route, bounded by `SPFN_AUTH_GUARD_TIMEOUT` when it is set.
+ *
+ * Read on every lookup, not at module load, like the rest of the auth env. Unset,
+ * the call is exactly the unbounded one and the client-wide timeout applies. A
+ * malformed value throws from the read, inside `getAuthSessionData`'s catch.
+ */
+function sessionLookup(): typeof authApi.getAuthSession
+{
+    const timeoutMs = authEnv.SPFN_AUTH_GUARD_TIMEOUT;
 
-        authLogger.middleware.error('Failed to get auth session', { error });
+    return timeoutMs === undefined ? authApi.getAuthSession : authApi.getAuthSession.timeout(timeoutMs);
+}
+
+/** What a failed lookup means to a guard: renewal, or no session. */
+function failedLookupState(error: unknown): typeof RENEWAL_REQUIRED | null
+{
+    if (isRenewalRequired(error))
+    {
+        authLogger.middleware.debug('Auth session needs renewing');
+
+        return RENEWAL_REQUIRED;
+    }
+
+    if (isTimeout(error))
+    {
+        authLogger.middleware.warn('Auth session lookup timed out', { timeoutMs: authEnv.SPFN_AUTH_GUARD_TIMEOUT });
 
         return null;
     }
+
+    authLogger.middleware.error('Failed to get auth session', { error });
+
+    return null;
 }
 
 /**
@@ -67,6 +100,20 @@ function isRenewalRequired(error: unknown): boolean
 {
     return error instanceof SessionRenewalRequiredError
         || (error as { name?: unknown } | null)?.name === 'SessionRenewalRequiredError';
+}
+
+/**
+ * Whether a failure is the client's timeout.
+ *
+ * Matched by name and `errorType` as well as by class, for the same reason as
+ * `isRenewalRequired`: `@spfn/core/nextjs` can resolve to two module instances.
+ */
+function isTimeout(error: unknown): boolean
+{
+    const candidate = error as { name?: unknown; errorType?: unknown } | null;
+
+    return (error instanceof ApiError || candidate?.name === 'ApiError')
+        && candidate?.errorType === 'timeout';
 }
 
 /** The session itself, or null for either of the two non-session states. */
