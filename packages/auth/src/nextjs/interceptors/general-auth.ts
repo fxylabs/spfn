@@ -292,8 +292,13 @@ export const generalAuthInterceptor: InterceptorRule =
             // `sessionValid` is set there and this branch would otherwise fire on
             // the refusal a renewal answers with — emptying the cookie jar, and
             // with it the session the person was in the middle of repairing.
+            //
+            // And never on a 401 an earlier rule wrote itself (`proxyWroteError`,
+            // e.g. a finalize refused for want of its pending cookie): the
+            // backend did not refuse this session, so there is nothing to clear.
             if (ctx.response.status === 401
                 && ctx.metadata.sessionValid
+                && !ctx.metadata.proxyWroteError
                 && !SESSION_RENEW_PATH_PATTERN.test(ctx.path))
             {
                 authLogger.interceptor.general.warn('Backend returned 401, clearing session');

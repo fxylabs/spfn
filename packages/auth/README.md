@@ -29,6 +29,8 @@ through a typed `authApi` client. Requires `@spfn/core`; Next.js is an optional 
 pnpm add @spfn/auth drizzle-orm@1.0.0-rc.4
 ```
 
+Requires `@spfn/core` **0.3.0-beta.9** or later — the OAuth callback page uses its CSRF helpers.
+
 `@simplewebauthn/server` and `@simplewebauthn/browser` come along as dependencies —
 [passkeys](#passkeys-webauthn) need them, and standards conformance is the whole risk there.
 The browser half is bundled into the `./client` entry rather than marked external, so nothing
@@ -370,6 +372,15 @@ If it did offer one, leave the rows alone.
 
 A profile registered with `registerAuthProfile` may leave `chosenLocale` out of the principal it
 returns; `getChosenLocale` then answers `null`.
+
+### Migration — `SPFN_AUTH_SESSION_TTL` takes effect
+
+**Behaviour change in `@spfn/auth` 0.3.0-beta.33** ([fxylabs/spfn#126](https://github.com/fxylabs/spfn/issues/126)).
+Before this release the variable was ignored and every session lasted seven days; it now takes
+effect, so an app that had it set gets that lifetime after upgrading. A malformed value (such as
+`1w`) is now refused when the environment is validated — by `spfn env validate`, by the server's
+boot check when the app lists a registry holding `envSchema` from `@spfn/auth/config`, and
+otherwise on the first read — instead of being ignored, so check the value before you deploy.
 
 ### Verified-email signup
 
@@ -1826,6 +1837,14 @@ key (and sends its optional client secret when configured).
 Client flow: call `authApi.getGoogleOAuthUrl.call({ body: { returnUrl } })`, redirect the browser
 to the returned `authUrl`, and render `OAuthCallback` on your success page. The Next.js interceptor
 manages the keypair → pending-session-cookie → full-session handoff transparently.
+
+A repeated `POST /_auth/oauth/finalize` — a reload of the callback page after the sign-in
+finished — is answered with success and never ends a session: when the pending cookie is gone
+and the browser's session already belongs to the key being finalized, the proxy passes the 200
+through and the finalize rule writes no cookie — the ordinary renewal still applies, so a session
+within a day of expiry is re-sealed on that 200 for the same key. A finalize the proxy refuses
+(no pending cookie and a different key, or a key mismatch) answers 401 and leaves the session the
+browser holds in place; only a 401 from the backend itself signs the browser out.
 
 On an account with a [second factor](#second-factor-mfa) and a device it has not seen, the
 callback carries `?mfaChallenge=` instead of `userId`/`keyId` and no session is created until
@@ -3714,7 +3733,12 @@ account owner what accumulated, `revokeKey` cuts one off, `revokeAllKeys` cuts o
 everything but the caller.
 
 **How long does a session last?**
-`SPFN_AUTH_SESSION_TTL`, seven days by default. It accepts `7d`, `12h`, `45m`.
+The first of these that is set: a per-call override (the `remember` value a login posts),
+`configureAuth({ sessionTtl })`, `SPFN_AUTH_SESSION_TTL`, and otherwise seven days. Each
+accepts `7d`, `12h`, `45m` or a number of seconds; a malformed value at the level that answers
+throws rather than falling through to the next. A malformed `SPFN_AUTH_SESSION_TTL` is refused
+when the environment is validated (`spfn env validate`, or the server's boot check for a registry
+the app lists), naming the variable and the accepted forms.
 
 **Is account deletion immediate?**
 No. A request moves the account to `pending_deletion`, revokes every session key, and
