@@ -396,8 +396,8 @@ export interface ApiConfig {
  */
 export interface CallOptions {
     /**
-     * Request timeout in milliseconds
-     * Overrides the global timeout set in ApiConfig
+     * Request timeout in milliseconds, covering the wait for response headers
+     * Overrides the global timeout set in ApiConfig; set it with `.timeout(ms)`
      */
     timeout?: number;
 

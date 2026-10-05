@@ -194,9 +194,33 @@ const user = await api.getUser
     .headers({ 'X-Custom': 'value' })
     .cookies({ session: 'xxx' })
     .fetchOptions({ next: { revalidate: 60 } })
+    .timeout(5000)                                        // this call only; overrides ApiConfig.timeout
     .onRequest((url, init) => init)                       // client RequestInterceptor
     .onResponse((res, body) => ({ response: res, body })) // client ResponseInterceptor
     .call({ params: { id: '123' } });
+```
+
+`.timeout(ms)` throws a `TypeError` — before any request is made — unless `ms` is a finite
+number greater than 0 and at most 2147483647 (`setTimeout`'s ceiling). The timer covers the
+wait for response headers, not the body read: once headers arrive it stops, however long the
+body takes.
+
+#### Cancellation
+
+Pass your own `AbortSignal` through `.fetchOptions({ signal })` (or set `init.signal` in an
+`onRequest` interceptor — the signal on the final `init` is the one honoured). Aborting it
+rejects the call with an `ApiError` of type `'aborted'`, from before the request is sent until
+the response body has been read; the timeout keeps running alongside it.
+
+```typescript
+const controller = new AbortController();
+
+const pending = api.searchUsers
+    .timeout(10_000)
+    .fetchOptions({ signal: controller.signal })
+    .call({ query: { q: 'ada' } });
+
+controller.abort('superseded');   // pending rejects: errorType 'aborted', status 0, cause 'superseded'
 ```
 
 ### `ApiConfig`
@@ -205,7 +229,7 @@ const user = await api.getUser
 interface ApiConfig {
     baseUrl?: string;                              // default '/api/rpc'
     headers?: Record<string, string>;             // default headers on every request
-    timeout?: number;                              // default env.SERVER_TIMEOUT (120000 ms)
+    timeout?: number;                              // default env.SERVER_TIMEOUT (120000 ms); per call: .timeout(ms)
     fetch?: typeof fetch;                          // custom fetch impl
     onRequest?: RequestInterceptor;                // global, (url, init) => init
     onResponse?: ResponseInterceptor;              // global, (response, body) => { response, body }
@@ -226,7 +250,7 @@ const api = createApi<AppRouter>({ errorRegistry: [errorRegistry, authErrorRegis
 
 ```typescript
 interface CallOptions {
-    timeout?: number;
+    timeout?: number;                   // ms until response headers; overrides ApiConfig.timeout
     headers?: Record<string, string>;
     cookies?: Record<string, string>;   // override only; cookies are auto-forwarded otherwise
     onRequest?: RequestInterceptor;
@@ -499,16 +523,17 @@ is named identically whether you call it (`api.listExamples`) or take its type
 
 ## Error handling
 
-`ApiError` is thrown for non-2xx responses, network failures, and timeouts:
+`ApiError` is thrown for non-2xx responses, network failures, timeouts, and caller aborts:
 
 ```typescript
 class ApiError extends Error {
     constructor(
         message: string,
-        public readonly status: number,            // HTTP status; 0 for network; 408 for timeout
+        public readonly status: number,            // HTTP status; 0 for network and aborted; 408 for timeout
         public readonly url: string,
         public readonly response?: unknown,         // parsed error body
-        public readonly errorType?: 'http' | 'network' | 'timeout',
+        public readonly errorType?: 'http' | 'network' | 'timeout' | 'aborted',
+        options?: { cause?: unknown },              // 'aborted': cause is the signal's reason
     ) {}
 }
 ```
@@ -521,11 +546,17 @@ try {
 } catch (error) {
     if (error instanceof ApiError) {
         if (error.errorType === 'timeout')      { /* 408 */ }
+        else if (error.errorType === 'aborted') { /* status 0; you aborted it — error.cause is the reason */ }
         else if (error.errorType === 'network') { /* status 0 */ }
         else                                    { /* error.status, error.response */ }
     }
 }
 ```
+
+The client classifies an abort by who triggered it, never by the error's name: `'timeout'`
+when its own timer fired, `'aborted'` when your signal did — whichever came first. An
+`AbortError` that a custom `fetch` throws on its own, with neither of those having fired, is
+`'timeout'` too, as it always was.
 
 **Custom errors**: if the backend body carries a `__type` discriminator and a matching entry
 is registered in the client's `errorRegistry`, the client deserializes and throws the
@@ -620,12 +651,13 @@ export async function createUser(formData: FormData) {
   HMAC-signed requests. Missing visitor IP in production means `SPFN_PROXY_SECRET` isn't set on
   both sides (and/or `TRUSTED_PROXY_HOPS` is wrong), not that the header allowlist needs
   `x-forwarded-for` — adding it back makes the IP spoofable. See *Header forwarding & client IP*.
-- **Each `.headers()/.cookies()/.fetchOptions()/.onRequest()/.onResponse()` returns a new
+- **Each `.headers()/.cookies()/.fetchOptions()/.timeout()/.onRequest()/.onResponse()` returns a new
   builder.** Chain them in one expression; a dangling builder without `.call()` does nothing.
 - **A client `onResponse` may throw, and the throw is the caller's.** It runs outside the
   transport error handling, so `redirect('/login')` on a 401 navigates and a domain error
   raised there is raised as itself — neither is relabelled an `ApiError` of type `'network'`.
-  Only a failed fetch (`0` / `'network'`) and an aborted one (`408` / `'timeout'`) are.
+  Only a failed fetch (`0` / `'network'`), a timed-out one (`408` / `'timeout'`) and one the
+  caller aborted (`0` / `'aborted'`) are.
 
 ---
 

@@ -3,6 +3,7 @@ import type { ErrorRegistry } from '@spfn/core/errors';
 import { logger } from '@spfn/core/logger';
 import { ApiError } from './errors';
 import * as debugLogs from './debug-logs';
+import { parseResponseBody } from '../shared';
 
 // Re-export shared utilities
 export { buildCookieHeader, parseResponseBody } from '../shared';
@@ -54,33 +55,106 @@ export async function autoDetectServerCookies(): Promise<Record<string, string>>
 }
 
 /**
- * Execute fetch with timeout and abort controller
+ * Why a call was aborted, as recorded by the abort scope that aborted it
  */
-export async function executeFetchWithTimeout(
+export type AbortCause = 'timeout' | 'caller';
+
+/**
+ * What a fetch run in an abort scope produced: the response and its parsed body,
+ * or the failure together with the abort cause the scope recorded, if any. For a
+ * caller abort, `error` is the caller signal's reason.
+ */
+export type ScopedFetchResult =
+    | { ok: true; response: Response; body: any }
+    | { ok: false; error: unknown; cause?: AbortCause };
+
+/**
+ * One controller that two sources may abort: the call's timer and the caller's signal
+ *
+ * The first source to fire is recorded as the cause and later ones are ignored, so a
+ * caller aborting after the timer fired still reads as a timeout. Composed by hand
+ * rather than with `AbortSignal.any` / `AbortSignal.timeout`, which browsers below
+ * Safari 17.4 lack.
+ */
+function openAbortScope(callerSignal: AbortSignal | undefined, timeout: number)
+{
+    const controller = new AbortController();
+    let cause: AbortCause | undefined;
+
+    const abort = (source: AbortCause, reason?: unknown) =>
+    {
+        cause ??= source;
+        controller.abort(reason);
+    };
+    const onCallerAbort = () => abort('caller', callerSignal?.reason);
+    const timeoutId = setTimeout(() => abort('timeout'), timeout);
+
+    callerSignal?.addEventListener('abort', onCallerAbort, { once: true });
+
+    return {
+        signal: controller.signal,
+        cause: () => cause,
+        stopTimer: () => clearTimeout(timeoutId),
+        close: () =>
+        {
+            clearTimeout(timeoutId);
+            callerSignal?.removeEventListener('abort', onCallerAbort);
+        },
+    };
+}
+
+/**
+ * Fetch and parse a response inside one abort scope
+ *
+ * The caller's signal is the one on the final `init`, after interceptors ran. The timer
+ * stops when response headers arrive; the caller's abort stays effective until the body
+ * is parsed. A failure is returned, not thrown, with the cause the scope recorded —
+ * classification reads that record, never the error's name.
+ *
+ * A custom `fetch`'s body read may not honour the signal at all, so a caller abort during
+ * that read can otherwise go unnoticed and the call resolves as if nothing happened. After
+ * the body is parsed, the scope is checked again: a recorded `'caller'` cause still wins.
+ */
+export async function fetchInAbortScope(
     url: string,
     init: RequestInit,
     timeout: number,
     customFetch: typeof fetch = fetch,
-): Promise<Response>
+): Promise<ScopedFetchResult>
 {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), timeout);
+    const callerSignal = init.signal ?? undefined;
+
+    if (callerSignal?.aborted)
+    {
+        return { ok: false, error: callerSignal.reason, cause: 'caller' };
+    }
+
+    const scope = openAbortScope(callerSignal, timeout);
 
     try
     {
-        const response = await customFetch(url, {
-            ...init,
-            signal: controller.signal,
-        });
+        const response = await customFetch(url, { ...init, signal: scope.signal });
 
-        clearTimeout(timeoutId);
+        scope.stopTimer();
 
-        return response;
+        const body = await parseResponseBody(response);
+
+        if (scope.cause() === 'caller')
+        {
+            return { ok: false, error: callerSignal?.reason, cause: 'caller' };
+        }
+
+        return { ok: true, response, body };
     }
     catch (error)
     {
-        clearTimeout(timeoutId);
-        throw error;
+        const cause = scope.cause();
+
+        return { ok: false, cause, error: cause === 'caller' ? callerSignal?.reason : error };
+    }
+    finally
+    {
+        scope.close();
     }
 }
 
