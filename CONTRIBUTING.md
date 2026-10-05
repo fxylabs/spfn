@@ -107,6 +107,13 @@ pnpm test                           # integration tests are part of the default 
 
 Override the database with `TEST_DATABASE_URL` if yours does not live on 5432.
 
+`pnpm test` also needs `age` and `sops` 3.10 or later on `PATH`: the CLI's secret
+tests (`packages/cli/src/commands/secret/__tests__/`) generate a key with
+`age-keygen` and encrypt with the real `sops`. On macOS, `brew install age sops`. On
+Debian or Ubuntu, `apt-get install age` gives you `age`, but sops has no package
+there — take a release binary from https://github.com/getsops/sops/releases, as
+the `test` step in `.woodpecker/pr.yml` does.
+
 **Tests run one at a time, on purpose.** The root `pnpm test` passes
 `--concurrency=1` to turbo and every package's vitest config pins a single worker
 running one file at a time. Two reasons: the packages share one PostgreSQL and one
