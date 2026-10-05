@@ -51,9 +51,13 @@ vi.mock('../../server/services/session-binding.service', async (importActual) =>
 const SECRET = 'test-secret-with-at-least-32-characters-for-security-testing';
 const FINALIZE = '/_auth/oauth/finalize';
 const SEVEN_DAYS = 7 * 24 * 3600;
+const ONE_HOUR = 3600;
 
-/** The jar right after the first, successful finalize: a session, no pending cookie. */
-async function signedInJar(): Promise<{ jar: Map<string, string>; keyId: string }>
+/**
+ * The jar right after the first, successful finalize: a session, no pending cookie.
+ * A `lifetime` under a day seals a session `generalAuthInterceptor` will renew.
+ */
+async function signedInJar(lifetime = SEVEN_DAYS): Promise<{ jar: Map<string, string>; keyId: string }>
 {
     const keyPair = generateKeyPair('ES256');
     const sealed = await sealSession({
@@ -61,7 +65,7 @@ async function signedInJar(): Promise<{ jar: Map<string, string>; keyId: string 
         privateKey: keyPair.privateKey,
         keyId: keyPair.keyId,
         algorithm: keyPair.algorithm,
-    }, SEVEN_DAYS);
+    }, lifetime);
 
     const jar = new Map([
         [COOKIE_NAMES.SESSION, sealed],
@@ -397,6 +401,27 @@ describe('POST /_auth/oauth/finalize case table (#126)', () =>
             expect(sessionCookiesTouched(responseCtx!.setCookies)).toEqual([]);
         }
     });
+
+    it('F9: no pending cookie, session for the body key within the refresh window — 200, the same session renewed', async () =>
+    {
+        const { jar, keyId } = await signedInJar(ONE_HOUR);
+
+        // The body names another user: the finalize rule writes nothing on a
+        // repeat, so whatever is written comes from general-auth's ordinary
+        // renewal, which re-seals the inbound session and never reads the body.
+        const { responseCtx } = await throughTheChain(app, { body: { userId: '99', keyId }, jar });
+        const renewed = await unsealSession(written(responseCtx!.setCookies, COOKIE_NAMES.SESSION)!);
+
+        expect(responseCtx!.response.status).toBe(200);
+        expect(sessionCookiesTouched(responseCtx!.setCookies)).toEqual(expect.arrayContaining([
+            COOKIE_NAMES.SESSION,
+            COOKIE_NAMES.SESSION_KEY_ID,
+            COOKIE_NAMES.CSRF,
+        ]));
+        expect(written(responseCtx!.setCookies, COOKIE_NAMES.SESSION_KEY_ID)).toBe(keyId);
+        expect(renewed).toMatchObject({ keyId, userId: '7' });
+        expect(expired(responseCtx!.setCookies)).toEqual([]);
+    });
 });
 
 /** A `fetch` that hands what `postFinalize` sends to the proxy chain, the real routes behind it. */
@@ -500,7 +525,7 @@ describe('postFinalize carries the CSRF header (#126)', () =>
         expect(written(result.responseCtx!.setCookies, COOKIE_NAMES.SESSION_KEY_ID)).toBe(keyId);
     });
 
-    it('C4: warn — signing in again and a replay both succeed, as before', async () =>
+    it('C4: warn — a replay navigates on the current session, and signing in again seals the new key', async () =>
     {
         const { jar, keyId: currentKeyId } = await signedInJar();
 

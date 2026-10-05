@@ -697,10 +697,12 @@ which answers 202 and hands it back for your confirm screen.
 
 A repeated finalize — a reload of the callback page after step 4 — is answered with success and
 never ends a session: with the pending cookie gone and the browser's session already on the key
-being finalized, the proxy passes the 200 through and writes no cookie. A finalize the proxy
-refuses answers 401 and leaves the existing session in place; only a 401 from the backend
-itself signs the browser out. `OAuthCallback` also sends the CSRF header when the browser
-holds the CSRF cookie, so signing in again under `SPFN_AUTH_CSRF=enforce` is not refused.
+being finalized, the proxy passes the 200 through and the finalize rule writes no cookie; the
+ordinary renewal still applies, so a session within a day of expiry is re-sealed on that 200 for
+the same key. A finalize the proxy refuses answers 401 and leaves the existing session in place;
+only a 401 from the backend itself signs the browser out. `OAuthCallback` also sends the CSRF
+header when the browser holds the CSRF cookie, so signing in again under
+`SPFN_AUTH_CSRF=enforce` is not refused.
 
 The `state` in step 1 is produced by the Next.js interceptor (it generates the key pair and
 seals it into the state), so start the flow through `authApi.getGoogleOAuthUrl` rather than
@@ -1099,7 +1101,14 @@ SPFN_AUTH_SESSION_TTL=12h   # 12 hours
 
 The lifetime is the first of these that is set: a per-call override (the `remember` value a
 login posts), `configureAuth({ sessionTtl })`, `SPFN_AUTH_SESSION_TTL`, and otherwise seven
-days. A malformed value at the level that answers throws rather than falling through.
+days. A malformed value at the level that answers throws rather than falling through, and a
+malformed `SPFN_AUTH_SESSION_TTL` is refused when the environment is validated (`spfn env
+validate`, or the server's boot check for a registry the app lists in
+`defineServerConfig().env({ registries })`), with a message naming the variable and the
+accepted forms.
+
+Before `@spfn/auth` 0.3.0-beta.33 the variable was ignored and every session lasted seven days.
+It now takes effect: an app that had it set gets that lifetime after upgrading.
 
 ### Session binding
 

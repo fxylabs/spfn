@@ -17,6 +17,20 @@ import {
     createPasswordParser,
 } from '@spfn/core/env';
 
+import { parseDuration } from '../lib/duration';
+
+/**
+ * Accept a session lifetime only in a form `getSessionTtl` can read, so a
+ * malformed `SPFN_AUTH_SESSION_TTL` is refused when the environment is
+ * validated rather than at the first sign-in. The value stays a string.
+ */
+function parseSessionTtl(value: string): string
+{
+    parseDuration(value);
+
+    return value;
+}
+
 /**
  * Auth environment variable schema
  *
@@ -63,6 +77,7 @@ export const authEnvSchema = defineEnvSchema({
             description: 'Session TTL (time to live) - supports duration strings like \'7d\', \'12h\', \'45m\'',
             default: '7d',
             required: false,
+            validator: parseSessionTtl,
             nextjs: true, // May be needed for session validation in Next.js RSC
             examples: ['7d', '30d', '12h', '45m', '3600'],
         }),

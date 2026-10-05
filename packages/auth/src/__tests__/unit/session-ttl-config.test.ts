@@ -14,6 +14,8 @@
 
 import { describe, it, expect, afterEach, vi } from 'vitest';
 
+import { authEnvSchema } from '../../config/schema';
+
 type ConfigModule = typeof import('../../server/lib/config');
 
 /** The module instance the current row configured, and what its sessionTtl was before. */
@@ -123,13 +125,27 @@ describe('getSessionTtl precedence (#126 claim 3)', () =>
 
     it('T5: an invalid SPFN_AUTH_SESSION_TTL throws, as an invalid configureAuth value does', async () =>
     {
-        // The env schema declares the variable a plain string, so nothing rejects
-        // it at load; `parseDuration` throws when the value is first used — the
-        // same thing a malformed `configureAuth({ sessionTtl })` does.
+        // The schema's validator (T5b) refuses the value when the environment is
+        // validated, and the env proxy runs the same validator on every read, so
+        // reading the variable throws the registry's error. Either way the value
+        // never falls through to the default — the same thing a malformed
+        // `configureAuth({ sessionTtl })` does.
         vi.stubEnv('SPFN_AUTH_SESSION_TTL', 'a fortnight');
         const { getSessionTtl } = await freshConfig();
 
-        expect(() => getSessionTtl()).toThrow(/Invalid duration format: a fortnight/);
+        expect(() => getSessionTtl()).toThrow('Environment validation failed');
+    });
+
+    it('T5b: the schema refuses a duration parseDuration cannot read and keeps one it can, as a string', async () =>
+    {
+        const { validator } = authEnvSchema.SPFN_AUTH_SESSION_TTL;
+
+        expect(() => validator('1w')).toThrow(/Invalid duration format: 1w/);
+
+        for (const value of ['7d', '12h', '45m', '3600s', '3600', authEnvSchema.SPFN_AUTH_SESSION_TTL.default])
+        {
+            expect(validator(value)).toBe(value);
+        }
     });
 
     it('T6: the `remember` argument login-register passes is still a per-call override', async () =>

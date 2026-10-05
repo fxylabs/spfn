@@ -10,7 +10,10 @@ import { PasskeyConfigError } from '@spfn/auth/errors';
 import type { SocialProvider } from '../types';
 import { BOUND_KEY_RENEW_GRACE_HOURS, BOUND_KEY_TTL_HOURS, CONCURRENT_USE_WINDOW_MS } from './key-policy';
 import { normalizeOptionalEmail } from '../helpers/email';
+import { parseDuration } from '../../lib/duration';
 import { authLogger } from '../logger';
+
+export { parseDuration };
 
 /**
  * Cookie name suffix derived from the server port, so several local dev
@@ -100,48 +103,6 @@ export function matchOAuthCsrfCookies(
     return Object.entries(cookies)
         .filter(([name]) => /^spfn_oauth_csrf(_\d+)?$/.test(name))
         .map(([name, value]) => ({ name, value }));
-}
-
-/**
- * Parse duration string to seconds
- *
- * Supports: '30d', '12h', '45m', '3600s', or plain number
- *
- * @example
- * parseDuration('30d')   // 2592000 (30 days in seconds)
- * parseDuration('12h')   // 43200
- * parseDuration('45m')   // 2700
- * parseDuration('3600')  // 3600
- */
-export function parseDuration(duration: string | number): number
-{
-    if (typeof duration === 'number')
-    {
-        return duration;
-    }
-
-    const match = duration.match(/^(\d+)([dhms]?)$/);
-    if (!match)
-    {
-        throw new Error(`Invalid duration format: ${duration}. Use format like '30d', '12h', '45m', '3600s', or plain number.`);
-    }
-
-    const value = parseInt(match[1], 10);
-    const unit = match[2] || 's';
-
-    switch (unit)
-    {
-        case 'd':
-            return value * 24 * 60 * 60;
-        case 'h':
-            return value * 60 * 60;
-        case 'm':
-            return value * 60;
-        case 's':
-            return value;
-        default:
-            throw new Error(`Unknown duration unit: ${unit}`);
-    }
 }
 
 /**
