@@ -133,8 +133,19 @@ steps:
             # a password, and a client that sends one anyway still connects — so
             # the roles scripts/test-services.sh creates keep working unchanged
             # and nothing has to juggle a superuser password.
+            #
+            # Durability is switched off for the same reason: nothing in this
+            # cluster outlives the step, so a commit has nothing to wait for. And
+            # the suite commits constantly — every @spfn/auth test truncates the
+            # schema and reseeds it before it runs. Measured against a throwaway
+            # cluster with the Debian defaults, then with these three lines:
+            # device-auth.test.ts 72s → 38s, mfa-verify.test.ts 57s → 48s. The core
+            # and cms suites share the cluster and get the same settings, which
+            # changes nothing they assert. Appended rather than edited in place:
+            # the last setting in the file wins.
             - PGVER=$(ls /etc/postgresql | head -n1)
             - printf '%s\n' 'local all all trust' 'host all all 127.0.0.1/32 trust' > "/etc/postgresql/$PGVER/main/pg_hba.conf"
+            - printf '%s\n' 'fsync = off' 'synchronous_commit = off' 'full_page_writes = off' >> "/etc/postgresql/$PGVER/main/postgresql.conf"
             - pg_ctlcluster "$PGVER" main start
             - PGUSER=postgres ./scripts/test-services.sh start
 
