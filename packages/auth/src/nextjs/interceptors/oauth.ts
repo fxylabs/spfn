@@ -13,12 +13,17 @@ import type { InterceptorRule, ProxyAbort, ResponseInterceptorContext } from '@s
 import type { SetCookie } from '@spfn/core/nextjs';
 import { generateKeyPair } from '../../server/lib/crypto';
 import { createOAuthState, generateOAuthNonce } from '../../server/lib/oauth/state';
-import { buildStartCookieName, namesEvictedByStart, pendingCookieFor } from '../../server/lib/oauth/start-cookies';
+import { buildStartCookieName, legacyPendingCookie, namesEvictedByStart } from '../../server/lib/oauth/start-cookies';
 import { sealSession } from '../../server/lib/session';
 import { COOKIE_NAMES, getSessionTtl } from '../../server/lib/config';
 import { authLogger } from '../../server/logger';
 import { isSafeReturnPath } from '../../lib/return-path';
-import { sealPendingSession, unsealPendingSession } from '../session-helpers';
+import {
+    isPendingSessionExpired,
+    pendingCookieForKey,
+    sealPendingSession,
+    unsealPendingSession,
+} from '../session-helpers';
 import { cookieSecure } from './cookie-options';
 import { pushCsrfCookie } from './csrf';
 import { bindingSessionFields } from './session-binding';
@@ -342,6 +347,37 @@ function pushFinalizedCookies(
     ctx.setCookies.push(lockedCookie(pendingCookieName, '', 0));
 }
 
+/** The pending cookie the finalize body's keyId names, else the legacy one when the body has none. */
+async function finalizePendingCookie(ctx: ResponseInterceptorContext): Promise<{ name: string; value: string } | undefined>
+{
+    const keyId = ctx.response.body?.keyId;
+
+    return typeof keyId === 'string' && keyId
+        ? await pendingCookieForKey(ctx.cookies, keyId)
+        : legacyPendingCookie(ctx.cookies);
+}
+
+/**
+ * Refuse a finalize whose pending cookie could not be used.
+ *
+ * The browser gets a fixed sentence, never the library's message — jose's text
+ * about a JWE or an initialization vector says nothing a person can act on, and
+ * the `OAuthCallback` page shows it. The full error is in the log. A seal past
+ * its ten minutes is `expired`, told apart by jose's error class; anything else
+ * is `invalid_state`.
+ */
+function refuseUnreadablePendingCookie(ctx: ResponseInterceptorContext, error: unknown, cookieName: string): void
+{
+    if (isPendingSessionExpired(error))
+    {
+        setFinalizeError(ctx, 'OAuth session expired. Please try again.', 'expired', cookieName);
+
+        return;
+    }
+
+    setFinalizeError(ctx, 'OAuth session could not be verified. Please try again.', 'invalid_state', cookieName);
+}
+
 /**
  * OAuth Finalize Interceptor
  *
@@ -372,7 +408,7 @@ export const oauthFinalizeInterceptor: InterceptorRule = {
 
         // This start's own pending cookie, else the legacy fixed name (a start
         // made before per-start cookies).
-        const pendingCookie = pendingCookieFor(ctx.cookies, ctx.response.body?.keyId);
+        const pendingCookie = await finalizePendingCookie(ctx);
 
         if (!pendingCookie)
         {
@@ -388,9 +424,8 @@ export const oauthFinalizeInterceptor: InterceptorRule = {
         }
         catch (error)
         {
-            const err = error as Error;
-            authLogger.interceptor.oauth?.error?.('Failed to finalize OAuth session', err);
-            setFinalizeError(ctx, err.message, 'invalid_state', pendingCookie.name);
+            authLogger.interceptor.oauth?.error?.('Failed to finalize OAuth session', error as Error);
+            refuseUnreadablePendingCookie(ctx, error, pendingCookie.name);
         }
 
         await next();

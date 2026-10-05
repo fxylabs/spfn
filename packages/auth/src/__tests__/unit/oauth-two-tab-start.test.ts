@@ -56,11 +56,12 @@ import { NextRequest } from 'next/server';
 import { authInterceptors, oauthUrlInterceptor } from '../../nextjs/interceptors';
 import { createOAuthCallbackHandler } from '../../nextjs/oauth-handlers';
 import { runOAuthCallback, type CallbackOptions } from '../../nextjs/components/oauth-callback-flow';
-import { sealPendingSession, unsealPendingMfaSession } from '../../nextjs/session-helpers';
+import { getPendingSession, sealPendingSession, unsealPendingMfaSession } from '../../nextjs/session-helpers';
 import { getOAuthProvider, registerOAuthProvider, type OAuthProvider } from '../../server/lib/oauth';
 import { createOAuthState, verifyOAuthState } from '../../server/lib/oauth/state';
 import {
     buildStartCookieName,
+    latestOwnStartCookie,
     listStartCookies,
     namesEvictedByStart,
     parseStartCookieName,
@@ -423,6 +424,29 @@ async function secondFactorIn(
     return { ctx: calls[0], outcome };
 }
 
+/** A pending cookie value sealed for a fresh key, and that key. */
+async function sealedPending(): Promise<{ keyId: string; value: string }>
+{
+    const keyPair = generateKeyPair('ES256');
+
+    return {
+        keyId: keyPair.keyId,
+        value: await sealPendingSession({ privateKey: keyPair.privateKey, keyId: keyPair.keyId, algorithm: keyPair.algorithm }),
+    };
+}
+
+/** A 202 finalize whose body carries the challenge only, as a page written before #126 posts it. */
+async function secondFactorWithoutKeyId(app: Hono, jar: Map<string, string>): Promise<ResponseInterceptorContext>
+{
+    return await throughTheChain(app, FINALIZE, { mfaChallenge: CHALLENGE, returnUrl: '/' }, jar);
+}
+
+/** The key the second-factor cookie a response wrote was baked from. */
+async function bakedKeyId(ctx: ResponseInterceptorContext): Promise<string>
+{
+    return (await unsealPendingMfaSession(written(ctx.setCookies, COOKIE_NAMES.MFA_PENDING)!)).keyId;
+}
+
 /**
  * The case table of the fix (#126, part B). Each `it` is named for its row.
  */
@@ -503,6 +527,8 @@ describe('per-start OAuth cookies — case table (#126)', () =>
 
     it('B4: a state with no cookie in this browser (login-CSRF) is refused invalid_state; the start in flight is untouched and finishes', async () =>
     {
+        // A foreign id finds no candidate cookie, so no value is compared here;
+        // the comparison itself is exercised by B5 and B4b.
         const jar = new Map<string, string>();
         const own = await startIn(jar);
         const before = new Map(jar);
@@ -515,6 +541,18 @@ describe('per-start OAuth cookies — case table (#126)', () =>
 
         expect((await callback(app, own.state, jar)).reason).toBe(GATE_PASSED);
         expect((await finalize(app, own.keyId, jar)).response.status).toBe(200);
+    });
+
+    it('B4b: a foreign state while a legacy CSRF cookie with another value is in the jar — refused invalid_state, nothing expired', async () =>
+    {
+        const jar = new Map([[COOKIE_NAMES.OAUTH_CSRF, 'legacy-nonce-from-before-the-upgrade']]);
+        const before = new Map(jar);
+
+        const forged = await callback(app, await foreignState(), jar);
+
+        expect(forged.reason).toBe('invalid_state');
+        expect(forged.expired).toEqual([]);
+        expect(jar).toEqual(before);
     });
 
     it('B5: the per-start CSRF cookie is found by id but holds another value — refused invalid_state, no cookie expired', async () =>
@@ -634,6 +672,63 @@ describe('per-start OAuth cookies — case table (#126)', () =>
         expect(startCookiesIn(jar)).toHaveLength(10);
     });
 
+    it('B9c: five names dated far in the future plus one real start — the next start evicts a future-dated one, the real start survives', async () =>
+    {
+        vi.useFakeTimers({ toFake: ['Date'] });
+        vi.setSystemTime(new Date('2026-10-05T10:00:00Z'));
+        const future = Date.parse('2099-01-01T00:00:00Z');
+        const futureSegment = `.${Math.floor(future / 1000).toString(36)}.`;
+        const jar = new Map<string, string>();
+
+        for (let i = 0; i < 5; i++)
+        {
+            const keyId = generateKeyPair('ES256').keyId;
+
+            jar.set(buildStartCookieName('pending', keyId, future), 'planted');
+            jar.set(buildStartCookieName('csrf', keyId, future), 'planted');
+        }
+
+        const real = await startIn(jar);
+        vi.setSystemTime(new Date('2026-10-05T10:01:00Z'));
+        const next = await startIn(jar);
+
+        expect(expired(real.setCookies)).toHaveLength(2);
+        expect(expired(next.setCookies)).toHaveLength(2);
+        expect([...expired(real.setCookies), ...expired(next.setCookies)].every(name => name.includes(futureSegment))).toBe(true);
+        expect(jar.has(startNames(real).pending) && jar.has(startNames(real).csrf)).toBe(true);
+        expect((await callback(app, real.state, jar)).reason).toBe(GATE_PASSED);
+    });
+
+    it('B9d: getPendingSession() without a keyId ignores a future-dated cookie when a normally dated one exists', async () =>
+    {
+        const planted = await sealedPending();
+        browser.jar.set(buildStartCookieName('pending', planted.keyId, Date.parse('2099-01-01T00:00:00Z')), planted.value);
+        const real = await startIn(browser.jar);
+
+        expect((await getPendingSession())?.keyId).toBe(real.keyId);
+    });
+
+    it('B9e: a name dated five seconds ahead (clock skew between proxy and backend) is an ordinary start — newest, and not evicted first', async () =>
+    {
+        vi.useFakeTimers({ toFake: ['Date'] });
+        vi.setSystemTime(new Date('2026-10-05T10:00:00Z'));
+        const jar = new Map<string, string>();
+        const now = Date.now();
+
+        for (let i = 4; i > 0; i--)
+        {
+            jar.set(buildStartCookieName('pending', generateKeyPair('ES256').keyId, now - i * 60_000), 'v');
+        }
+
+        const oldest = listStartCookies('pending', jar)[0].name;
+        const skewed = buildStartCookieName('pending', generateKeyPair('ES256').keyId, now + 5_000);
+        jar.set(skewed, 'v');
+
+        expect(namesEvictedByStart('pending', jar)).toEqual([oldest]);
+        expect(latestOwnStartCookie('pending', jar)?.name).toBe(skewed);
+        expect(listStartCookies('pending', jar).at(-1)?.name).toBe(skewed);
+    });
+
     it('B10: a start made before the upgrade (legacy names only) — callback passes, finalize seals, both legacy cookies expired after use', async () =>
     {
         const keyPair = generateKeyPair('ES256');
@@ -725,6 +820,45 @@ describe('per-start OAuth cookies — case table (#126)', () =>
         expect(ctx.setCookies.map(cookie => cookie.name)).not.toContain(COOKIE_NAMES.MFA_PENDING);
     });
 
+    it('B11c: one start in flight, a 202 without keyId — the second-factor cookie is baked from that start\'s key', async () =>
+    {
+        const jar = new Map<string, string>();
+        const tab = await startIn(jar);
+
+        const ctx = await secondFactorWithoutKeyId(app, jar);
+
+        expect(ctx.response.status).toBe(202);
+        expect(ctx.response.body).not.toHaveProperty('keyId');
+        expect(await bakedKeyId(ctx)).toBe(tab.keyId);
+    });
+
+    it('B11d: two starts in flight, a 202 without keyId — baked from the most recent start', async () =>
+    {
+        vi.useFakeTimers({ toFake: ['Date'] });
+        vi.setSystemTime(new Date('2026-10-05T10:00:00Z'));
+        const jar = new Map<string, string>();
+        const first = await startIn(jar);
+        vi.setSystemTime(new Date('2026-10-05T10:01:00Z'));
+        const second = await startIn(jar);
+
+        const ctx = await secondFactorWithoutKeyId(app, jar);
+
+        expect(ctx.response.status).toBe(202);
+        expect(await bakedKeyId(ctx)).toBe(second.keyId);
+        expect(await bakedKeyId(ctx)).not.toBe(first.keyId);
+    });
+
+    it('B11e: only a legacy pending cookie, a 202 without keyId — baked from it', async () =>
+    {
+        const legacy = await sealedPending();
+        const jar = new Map([[COOKIE_NAMES.OAUTH_PENDING, legacy.value]]);
+
+        const ctx = await secondFactorWithoutKeyId(app, jar);
+
+        expect(ctx.response.status).toBe(202);
+        expect(await bakedKeyId(ctx)).toBe(legacy.keyId);
+    });
+
     it('B12: logout with two starts in flight plus legacy cookies expires all of them', async () =>
     {
         const jar = new Map([[COOKIE_NAMES.OAUTH_PENDING, 'legacy-pending'], [COOKIE_NAMES.OAUTH_CSRF, 'legacy-nonce']]);
@@ -764,6 +898,22 @@ describe('per-start OAuth cookies — case table (#126)', () =>
         }
     });
 
+    it('B13b: createOAuthCallbackHandler\'s second-factor redirect carries the callback\'s keyId to the confirm page', async () =>
+    {
+        const handler = createOAuthCallbackHandler();
+        const keyId = generateKeyPair('ES256').keyId;
+
+        const keyed = await handler(new NextRequest(new URL(`/api/auth/callback?mfaChallenge=${CHALLENGE}&keyId=${keyId}&returnUrl=%2Fhome`, 'https://app.example')));
+        const unkeyed = await handler(new NextRequest(new URL(`/api/auth/callback?mfaChallenge=${CHALLENGE}&returnUrl=%2Fhome`, 'https://app.example')));
+        const keyedTarget = new URL(keyed.headers.get('location')!);
+
+        expect(keyedTarget.pathname).toBe('/auth/mfa');
+        expect(keyedTarget.searchParams.get('challenge')).toBe(CHALLENGE);
+        expect(keyedTarget.searchParams.get('keyId')).toBe(keyId);
+        expect(keyedTarget.searchParams.get('returnUrl')).toBe('/home');
+        expect(new URL(unkeyed.headers.get('location')!).searchParams.has('keyId')).toBe(false);
+    });
+
     it('B14: API-mode oauthStart then callback — per-start CSRF cookie written and matched; a second start does not break the first', async () =>
     {
         const jar = new Map<string, string>();
@@ -798,6 +948,81 @@ describe('per-start OAuth cookies — case table (#126)', () =>
         expect(listStartCookies('csrf', jar)).toHaveLength(2);
         expect((await callback(app, firstState, jar)).reason).toBe(GATE_PASSED);
         expect((await callback(app, secondState, jar)).reason).toBe(GATE_PASSED);
+    });
+
+    it('B14b: API-mode start twice with one keyId — the later state\'s callback passes, then the earlier one\'s too', async () =>
+    {
+        vi.useFakeTimers({ toFake: ['Date'] });
+        vi.setSystemTime(new Date('2026-10-05T10:00:00Z'));
+        const jar = new Map<string, string>();
+        const keyPair = generateKeyPair('ES256');
+
+        async function apiStart(): Promise<string>
+        {
+            const response = await app.request('/_auth/oauth/start', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'Cookie': cookieHeader(jar), 'x-forwarded-for': clientIp() },
+                body: JSON.stringify({
+                    provider: 'superself',
+                    returnUrl: '/',
+                    publicKey: keyPair.publicKey,
+                    keyId: keyPair.keyId,
+                    fingerprint: keyPair.fingerprint,
+                    algorithm: keyPair.algorithm,
+                }),
+            });
+
+            applyHeadersToJar(jar, response.headers.getSetCookie());
+
+            return new URL((await response.json()).authUrl).searchParams.get('state')!;
+        }
+
+        const earlierState = await apiStart();
+        const [earlierName] = listStartCookies('csrf', jar).map(cookie => cookie.name);
+        vi.setSystemTime(new Date('2026-10-05T10:00:05Z'));
+        const laterState = await apiStart();
+        const laterName = listStartCookies('csrf', jar).map(cookie => cookie.name).find(name => name !== earlierName);
+
+        expect(listStartCookies('csrf', jar).map(cookie => cookie.id)).toEqual([startCookieId(keyPair.keyId), startCookieId(keyPair.keyId)]);
+
+        const later = await callback(app, laterState, jar);
+        const earlier = await callback(app, earlierState, jar);
+
+        expect([later.reason, earlier.reason]).toEqual([GATE_PASSED, GATE_PASSED]);
+        expect(later.expired).toEqual([laterName]);
+        expect(earlier.expired).toEqual([earlierName]);
+    });
+
+    it('B14c: a cookie under the same id, older and holding a wrong value, sits beside the real one — the callback passes and expires only the real one', async () =>
+    {
+        vi.useFakeTimers({ toFake: ['Date'] });
+        vi.setSystemTime(new Date('2026-10-05T10:00:00Z'));
+        const jar = new Map<string, string>();
+        const tab = await startIn(jar);
+        const planted = buildStartCookieName('csrf', tab.keyId, Date.now() - 60_000);
+        jar.set(planted, 'a-value-this-state-never-sealed');
+
+        const back = await callback(app, tab.state, jar);
+
+        expect(back.reason).toBe(GATE_PASSED);
+        expect(back.expired).toEqual([startNames(tab).csrf]);
+        expect(jar.get(planted)).toBe('a-value-this-state-never-sealed');
+    });
+
+    it('B14d: the state\'s own nonce under a different id only — refused invalid_state, nothing expired', async () =>
+    {
+        const jar = new Map<string, string>();
+        const tab = await startIn(jar);
+        const nonce = jar.get(startNames(tab).csrf)!;
+        jar.delete(startNames(tab).csrf);
+        jar.set(buildStartCookieName('csrf', generateKeyPair('ES256').keyId), nonce);
+        const before = new Map(jar);
+
+        const refused = await callback(app, tab.state, jar);
+
+        expect(refused.reason).toBe('invalid_state');
+        expect(refused.expired).toEqual([]);
+        expect(jar).toEqual(before);
     });
 
     it('B15: a callback after the state\'s ten minutes is refused with reason=expired', async () =>

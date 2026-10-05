@@ -412,6 +412,29 @@ describe('SPFN_AUTH_OAUTH_ERROR_URL and {reason} (#126)', () =>
         expect(parsed.hash).toBe('#top');
         expect(withFragment.endsWith('&reason=cancelled#top')).toBe(true);
     });
+
+    it.each([
+        ['absolute', 'https://app.example/e?error={error}', 'https://app.example/e?error=Too%20slow&reason=expired'],
+        ['protocol-relative', '//other.example/e?error={error}', '//other.example/e?error=Too%20slow&reason=expired'],
+        ['path-only', '/auth/oops', '/auth/oops?reason=expired'],
+        ['existing query', '/auth/oops?src=oauth&error={error}', '/auth/oops?src=oauth&error=Too%20slow&reason=expired'],
+        ['fragment', '/auth/oops?error={error}#top', '/auth/oops?error=Too%20slow&reason=expired#top'],
+        ['fragment holding a ?', '/auth/oops#top?x', '/auth/oops?reason=expired#top?x'],
+        ['%20 in the template', '/auth/sign%20in?note=a%20b&error={error}', '/auth/sign%20in?note=a%20b&error=Too%20slow&reason=expired'],
+    ])('R8 (exact form, %s): the template with {error} substituted plus exactly the appended parameter, byte for byte', (_form, template, expected) =>
+    {
+        vi.stubEnv('SPFN_AUTH_OAUTH_ERROR_URL', template);
+
+        expect(buildOAuthErrorUrl('Too slow', 'expired')).toBe(expected);
+    });
+
+    it('R8 (no injection): a literal {reason} inside the error text is encoded with it and never substituted', () =>
+    {
+        vi.stubEnv('SPFN_AUTH_OAUTH_ERROR_URL', '/auth/error?error={error}');
+
+        expect(buildOAuthErrorUrl('bad {reason} &x=//evil', 'failed'))
+            .toBe('/auth/error?error=bad%20%7Breason%7D%20%26x%3D%2F%2Fevil&reason=failed');
+    });
 });
 
 /** The callback page's finalize, through every matching proxy rule, the real routes behind them. */
@@ -501,6 +524,55 @@ describe('OAuthCallback page flow reason codes (#126)', () =>
         expect(await runOAuthCallback(`?userId=7&keyId=${keyId}`, { apiBasePath: '/api/rpc', fetch: brokenFetch }))
             .toMatchObject({ kind: 'error', reason: 'failed' });
         expect(await outcomeFor('?userId=7')).toMatchObject({ kind: 'error', reason: 'failed' });
+    });
+
+    /** The finalize a callback page posts, through the proxy rules, answered by the real route. */
+    async function finalizeAnswer(keyId: string, jar: Map<string, string>): Promise<{ status: number; body: Record<string, unknown> }>
+    {
+        const response = await proxiedFetch(app, jar)('/api/rpc', {
+            method: 'POST',
+            body: JSON.stringify({ body: { userId: '7', keyId, returnUrl: '/' } }),
+        });
+
+        return { status: response.status, body: await response.json() };
+    }
+
+    it('R9b: a malformed per-start pending cookie — 401 with a fixed sentence and invalid_state, no library text', async () =>
+    {
+        const keyPair = generateKeyPair('ES256');
+        const parts = (await sealPendingSession({
+            privateKey: keyPair.privateKey,
+            keyId: keyPair.keyId,
+            algorithm: keyPair.algorithm,
+        })).split('.');
+        parts[2] = 'AAAA';
+        const jar = new Map([[buildStartCookieName('pending', keyPair.keyId), parts.join('.')]]);
+
+        const answer = await finalizeAnswer(keyPair.keyId, jar);
+        const outcome = await outcomeFor(`?userId=7&keyId=${keyPair.keyId}`, new Map(jar));
+
+        expect(answer.status).toBe(401);
+        expect(answer.body).toEqual({ success: false, message: 'OAuth session could not be verified. Please try again.', reason: 'invalid_state' });
+        expect(JSON.stringify(answer.body)).not.toMatch(/Vector|JWE|JWT|claim/);
+        expect(outcome).toEqual({ kind: 'error', message: 'OAuth session could not be verified. Please try again.', reason: 'invalid_state' });
+    });
+
+    it('R9c: a per-start pending cookie past its ten minutes — 401 expired', async () =>
+    {
+        vi.useFakeTimers({ toFake: ['Date'] });
+        const keyPair = generateKeyPair('ES256');
+        const jar = new Map([[buildStartCookieName('pending', keyPair.keyId), await sealPendingSession({
+            privateKey: keyPair.privateKey,
+            keyId: keyPair.keyId,
+            algorithm: keyPair.algorithm,
+        })]]);
+        vi.setSystemTime(Date.now() + 11 * 60 * 1000);
+
+        const answer = await finalizeAnswer(keyPair.keyId, jar);
+        vi.useRealTimers();
+
+        expect(answer.status).toBe(401);
+        expect(answer.body).toEqual({ success: false, message: 'OAuth session expired. Please try again.', reason: 'expired' });
     });
 
     it('R9 (types): the codes are a closed union, and the error outcome carries one', () =>

@@ -694,7 +694,11 @@ only value that disables the boot check.
 If the account has a [second factor](#second-factor-mfa) and this browser is a device it has
 never seen, step 3 carries `?mfaChallenge=…` instead of `userId` (the `keyId` rides along), and
 no session exists until that challenge is spent. `OAuthCallback` posts it to `/_auth/oauth/finalize`,
-which answers 202 and hands it back for your confirm screen.
+which answers 202 and hands it back for your confirm screen. `createOAuthCallbackHandler` redirects
+to the confirm page with `?challenge=`, `?keyId=` and `?returnUrl=`; a custom page posts
+`{ mfaChallenge, keyId }`. One that posts `{ mfaChallenge }` only still works — the proxy then uses
+the most recent start's pending cookie — but with two sign-ins in flight only the `keyId` names the
+right one.
 
 A repeated finalize — a reload of the callback page after step 4 — is answered with success and
 never ends a session: with the pending cookie gone and the browser's session already on the key
@@ -727,6 +731,11 @@ that start's pending session, or the most recent start's when called without a k
 **Upgrading:** a sign-in started before the upgrade still finishes — the callback and the finalize
 fall back to the legacy fixed-name cookies and expire them after use. An app that read the pending
 cookie by its exact name should match on `oauthPendingPrefix` instead.
+
+In a split deployment, upgrade the **backend first**: a proxy on this version with a backend on an
+older one fails every OAuth sign-in until the backend catches up, because the old callback does not
+know the per-start names. After a rollback, a sign-in that was in flight shows a state validation
+error, and a retry works.
 
 ### Error page reasons
 

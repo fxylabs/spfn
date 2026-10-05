@@ -91,9 +91,9 @@ async function oauthCallbackRedirect(c: Context, provider: SocialProvider, query
  * The CSRF gate, then the sign-in.
  *
  * `matchOAuthCallbackCsrf` verifies the state before it reads any cookie, and
- * picks the one CSRF cookie that state names. Only that cookie is expired, and
- * only once its value matched — a refused callback expires nothing, so another
- * start in flight in this browser can still finish (#126).
+ * picks the CSRF cookie under that state's id whose value is its nonce. Only
+ * that cookie is expired, and only once it matched — a refused callback expires
+ * nothing, so another start in flight in this browser can still finish (#126).
  */
 async function completeOAuthCallback(c: Context, provider: SocialProvider, code: string, state: string): Promise<string>
 {

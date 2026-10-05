@@ -1505,7 +1505,9 @@ capability riding a URL.
 Both consumers of that redirect are served:
 
 - `createOAuthCallbackHandler()` redirects the browser to **`SPFN_AUTH_MFA_CONFIRM_PATH`**
-  (default `/auth/mfa`, or the `mfaPath` option) with `?challenge=` and `?returnUrl=`.
+  (default `/auth/mfa`, or the `mfaPath` option) with `?challenge=`, the start's `?keyId=` and
+  `?returnUrl=`. A confirm page that posts to `POST /_auth/oauth/finalize` passes that `keyId` on
+  as `{ mfaChallenge, keyId }`.
 - An app on the callback-page flow posts `{ mfaChallenge, keyId }` to `POST /_auth/oauth/finalize`,
   which answers **202** with the challenge (and the `keyId`, which names the start whose pending
   cookie holds the private key) echoed back instead of finalizing a session.
@@ -1516,6 +1518,11 @@ Both consumers of that redirect are served:
   `SPFN_AUTH_MFA_CONFIRM_PATH`, through the same resolver the handler redirects with, so
   setting the variable once moves both flows. `<OAuthCallback mfaPath="…" />` is an override
   for one screen, not part of the normal setup.
+- A custom callback or confirm page that posts `{ mfaChallenge }` only, as this README told it to
+  before per-start cookies, keeps working: the 202 then carries no `keyId`, and the proxy takes the
+  private key from the most recent start's pending cookie (else the legacy one) — the start
+  `getPendingSession()` without an argument reads. Pass the `keyId` when you have it: with two
+  sign-ins in flight, only it names the right one.
 
 ##### In the Next.js proxy
 
@@ -1939,11 +1946,14 @@ key id. Neither the key id nor the nonce appears in a name. Both cookies stay `H
 - **Cap of five.** At most five starts live in one browser. A sixth expires the oldest start's two
   cookies in the same response; that start's callback is then refused with `reason=invalid_state`.
   Worst case the five pairs add about 3.4 KB to the `Cookie` header (one ES256 pair is ~670 bytes).
-- **Callback.** The state is decrypted first; its key id names the one CSRF cookie to compare, under
+  A name dated more than a minute ahead of the server's clock counts as the oldest, so it is
+  evicted first and is never "the most recent start".
+- **Callback.** The state is decrypted first; its key id names the CSRF cookies to compare, under
   any port suffix (the API process may run under another `SPFN_PORT` than the Next.js process that
-  set it). The value is compared with the state's nonce in constant time and only that cookie is
-  expired. A refused callback expires nothing, so a login-CSRF attempt cannot break a sign-in in
-  flight in another tab.
+  set it) — more than one when an API-mode client started twice with one key. Every value is
+  compared with the state's nonce in constant time and only the matching cookie is expired. A
+  refused callback expires nothing, so a login-CSRF attempt cannot break a sign-in in flight in
+  another tab.
 - **Finalize.** The proxy, `createOAuthCallbackHandler` and the second-factor 202 pick the pending
   cookie by the key id the callback named, and expire that cookie only. The 202 body of
   `POST /_auth/oauth/finalize` carries that `keyId` (additive).
@@ -1959,6 +1969,11 @@ cookie begins with it. `oauthPending` still names the fixed legacy cookie.
 the finalize fall back to them, so it still finishes, and both are expired after use. An app that
 read the pending cookie by its exact name (`sessionCookieNames().oauthPending`) reads a cookie new
 starts never write — match on `oauthPendingPrefix`, or call `getPendingSession(keyId)`.
+
+In a split deployment, **upgrade the backend first.** A proxy on this version writes only per-start
+names, and a backend on an older one looks for the fixed name at the callback — so every OAuth
+sign-in fails until the backend catches up. A backend on this version reads both. After a rollback,
+a sign-in that was in flight across it shows a state validation error; trying again works.
 
 ### The error page: `reason` codes
 

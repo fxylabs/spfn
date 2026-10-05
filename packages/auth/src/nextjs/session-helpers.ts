@@ -9,7 +9,13 @@ import { cookies } from 'next/headers.js';
 import { sealSession, unsealSession, type SessionData } from '../server/lib/session';
 import { deriveCsrfToken } from '../server/lib/csrf';
 import { COOKIE_NAMES, getSessionTtl, parseDuration } from '../server/lib/config';
-import { listOwnStartCookies, ownStartCookieNames, pendingCookieFor } from '../server/lib/oauth/start-cookies';
+import {
+    latestOwnStartCookie,
+    legacyPendingCookie,
+    ownStartCookieNames,
+    pendingCookieCandidates,
+    type CookieJar,
+} from '../server/lib/oauth/start-cookies';
 import { type KeyAlgorithmType } from '../server/types';
 import { env } from '@spfn/auth/config';
 import { logger } from '@spfn/core/logger';
@@ -278,6 +284,16 @@ export async function unsealPendingSession(jwt: string): Promise<PendingSessionD
 }
 
 /**
+ * Whether `unsealPendingSession` refused a pending cookie for being past its ten
+ * minutes rather than for being malformed or sealed under another key — by
+ * jose's error class, never its message.
+ */
+export function isPendingSessionExpired(error: unknown): boolean
+{
+    return error instanceof jose.errors.JWTExpired;
+}
+
+/**
  * Unseal the pending second-factor session (#95)
  *
  * Throws on an OAuth pending cookie presented here, and on anything past its ten
@@ -302,33 +318,51 @@ async function cookieEntries(): Promise<[string, string][]>
 }
 
 /**
- * The pending cookie `getPendingSession` reads: the keyed start's, or the most
- * recent start's (highest issuedAt), each falling back to the legacy name.
+ * The pending cookie for `keyId` (#126). Of the candidates — that start's own,
+ * newest first, else the legacy fixed name — the first that unseals to `keyId`;
+ * a candidate that does not unseal is skipped. When none does, the newest
+ * candidate, so the caller's own unseal refuses it as it would refuse a lone one.
  */
-function pendingCookieOf(jar: [string, string][], keyId?: string): string | undefined
+export async function pendingCookieForKey(jar: CookieJar, keyId: string): Promise<{ name: string; value: string } | undefined>
 {
-    if (keyId)
+    const candidates = pendingCookieCandidates(jar, keyId);
+
+    for (const candidate of candidates)
     {
-        return pendingCookieFor(jar, keyId)?.value;
+        const pending = await unsealPendingSession(candidate.value).catch(() => null);
+
+        if (pending?.keyId === keyId)
+        {
+            return candidate;
+        }
     }
 
-    return listOwnStartCookies('pending', jar).at(-1)?.value
-        ?? pendingCookieFor(jar, undefined)?.value;
+    return candidates[0];
 }
 
 /**
- * Get pending session from cookie
- *
- * Several OAuth sign-ins can be in flight in one browser (#126). With a `keyId`,
- * that start's pending session — a legacy fixed-name cookie counts only when it
- * holds that key. Without one, the most recent start's, falling back to the
- * legacy cookie.
- *
- * @param keyId - The key the start minted, as the callback query names it
+ * The pending cookie `pendingSessionIn` reads: the keyed start's, or the most
+ * recent start's (highest issuedAt, never a future-dated one), else the legacy name.
  */
-export async function getPendingSession(keyId?: string): Promise<PendingSessionData | null>
+async function pendingCookieOf(jar: CookieJar, keyId?: string): Promise<string | undefined>
 {
-    const pendingCookie = pendingCookieOf(await cookieEntries(), keyId);
+    if (keyId)
+    {
+        return (await pendingCookieForKey(jar, keyId))?.value;
+    }
+
+    return latestOwnStartCookie('pending', jar)?.value ?? legacyPendingCookie(jar)?.value;
+}
+
+/**
+ * The pending session in `jar`: with a `keyId`, that start's — a legacy
+ * fixed-name cookie counts only when it holds that key; without one, the most
+ * recent start's, falling back to the legacy cookie. Null when there is none or
+ * it does not unseal.
+ */
+export async function pendingSessionIn(jar: CookieJar, keyId?: string): Promise<PendingSessionData | null>
+{
+    const pendingCookie = await pendingCookieOf(jar, keyId);
 
     if (!pendingCookie)
     {
@@ -349,6 +383,21 @@ export async function getPendingSession(keyId?: string): Promise<PendingSessionD
 
         return null;
     }
+}
+
+/**
+ * Get pending session from cookie
+ *
+ * Several OAuth sign-ins can be in flight in one browser (#126). With a `keyId`,
+ * that start's pending session — a legacy fixed-name cookie counts only when it
+ * holds that key. Without one, the most recent start's, falling back to the
+ * legacy cookie.
+ *
+ * @param keyId - The key the start minted, as the callback query names it
+ */
+export async function getPendingSession(keyId?: string): Promise<PendingSessionData | null>
+{
+    return await pendingSessionIn(await cookieEntries(), keyId);
 }
 
 /**

@@ -24,7 +24,7 @@ import { authLogger } from '../logger';
 import { isSafeReturnPath } from '../../lib/return-path';
 import { withOAuthErrorReason, type OAuthErrorReason } from '../../lib/oauth-error-reason';
 import { timingSafeEqualString } from '../lib/csrf';
-import { findStartCookie, legacyStartCookies } from '../lib/oauth/start-cookies';
+import { findStartCookies, legacyStartCookies } from '../lib/oauth/start-cookies';
 import { runBeforeRegister } from '../lib/config';
 import { resolveAppUrl } from '../lib/app-url';
 import { type SocialProvider, type KeyAlgorithmType, type SessionBindingType } from '../types';
@@ -349,12 +349,13 @@ export async function oauthCallbackService(
  * Pick the CSRF cookie a callback's state names, and prove it belongs to this start (#126).
  *
  * The state is verified first: until it decrypts it is attacker-supplied, so no
- * cookie is looked up because of it. Its keyId then names the per-start cookie
- * (any port suffix, any issuedAt); a start made before per-start cookies has only
- * the legacy name, which is the fallback. The cookie's value is compared with the
- * state's nonce in constant time — that comparison, not the name, is what keeps
- * a state minted in another browser out, since a cookie can only have been set
- * by this browser's own start.
+ * cookie is looked up because of it. Its keyId then names the per-start cookies
+ * (any port suffix, any issuedAt) — more than one when a client started twice
+ * with one key; a start made before per-start cookies has only the legacy name,
+ * which is the fallback. Each value is compared with the state's nonce in
+ * constant time — that comparison, not the name, is what keeps a state minted in
+ * another browser out, since a cookie can only have been set by this browser's
+ * own start.
  *
  * Reads, never expires: the route expires the returned name, and only that one.
  *
@@ -368,8 +369,7 @@ export async function matchOAuthCallbackCsrf(params: {
 {
     const stateData = await verifyOAuthState(params.state);
     const match = stateData.provider === params.provider
-        ? csrfCandidates(stateData.keyId, params.cookies)
-            .find(cookie => timingSafeEqualString(cookie.value, stateData.nonce))
+        ? cookieHoldingNonce(csrfCandidates(stateData.keyId, params.cookies), stateData.nonce)
         : undefined;
 
     if (!match)
@@ -380,12 +380,27 @@ export async function matchOAuthCallbackCsrf(params: {
     return { name: match.name, nonce: match.value };
 }
 
-/** The start's own CSRF cookie, else the legacy ones — never both. */
+/** The start's own CSRF cookies, else the legacy ones — never both. */
 function csrfCandidates(keyId: string, cookies: Record<string, string>): { name: string; value: string }[]
 {
-    const perStart = findStartCookie('csrf', cookies, keyId);
+    const perStart = findStartCookies('csrf', cookies, keyId);
 
-    return perStart ? [perStart] : legacyStartCookies('csrf', cookies);
+    return perStart.length > 0 ? perStart : legacyStartCookies('csrf', cookies);
+}
+
+/**
+ * The candidate whose value is the nonce. Every candidate is compared, in
+ * constant time, before one is picked, so how long this takes does not say
+ * which position matched.
+ */
+function cookieHoldingNonce(
+    candidates: { name: string; value: string }[],
+    nonce: string,
+): { name: string; value: string } | undefined
+{
+    const matches = candidates.map(cookie => timingSafeEqualString(cookie.value, nonce));
+
+    return candidates[matches.indexOf(true)];
 }
 
 /** Whether one of the cookie values equals the state's nonce, compared in constant time. */

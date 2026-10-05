@@ -9,10 +9,9 @@ import { cookies } from 'next/headers.js';
 import { sealSession } from '../server/lib/session';
 import { deriveCsrfToken } from '../server/lib/csrf';
 import { COOKIE_NAMES, getSessionTtl } from '../server/lib/config';
-import { pendingCookieFor } from '../server/lib/oauth/start-cookies';
 import { env } from '@spfn/core/config';
 import { logger } from '@spfn/core/logger';
-import { unsealPendingSession, type PendingSessionData } from './session-helpers';
+import { pendingCookieForKey, unsealPendingSession, type PendingSessionData } from './session-helpers';
 import { isSafeReturnPath } from '../lib/return-path';
 import { bindingSessionFields } from './interceptors/session-binding';
 import { resolveMfaConfirmPath } from './mfa-confirm-path';
@@ -40,8 +39,8 @@ export interface OAuthCallbackOptions
      * An override for `SPFN_AUTH_MFA_CONFIRM_PATH`, which is where every other
      * app-page path in this package lives; the env var is the one to set, and
      * this exists for an app mounting two handlers on different screens. The
-     * handler redirects to it with `?challenge=` and `?returnUrl=`, reduced to a
-     * path on this origin.
+     * handler redirects to it with `?challenge=`, the start's `?keyId=` and
+     * `?returnUrl=`, reduced to a path on this origin.
      *
      * @default env SPFN_AUTH_MFA_CONFIRM_PATH, then '/auth/mfa'
      */
@@ -93,19 +92,28 @@ function bindingFromQuery(searchParams: URLSearchParams): { sessionBinding?: str
  * route, it is single use, it dies in ten minutes, and the request logger records
  * `pathname` only — so unlike #94's revoke-all link this is not a bearer
  * credential riding a URL.
+ *
+ * The callback's `keyId` rides along when it carried one (#126): it names which
+ * in-flight start's pending cookie holds the key, and the page passes it on to
+ * `oauthFinalize` as `OAuthCallback` does.
  */
 function mfaRedirect(
     request: NextRequest,
-    challenge: string,
-    returnUrl: string,
+    flow: { challenge: string; keyId: string | null; returnUrl: string },
     configured?: string,
 ): NextResponse
 {
     const path = resolveMfaConfirmPath(configured);
     const target = new URL(path, request.url);
 
-    target.searchParams.set('challenge', challenge);
-    target.searchParams.set('returnUrl', returnUrl);
+    target.searchParams.set('challenge', flow.challenge);
+
+    if (flow.keyId)
+    {
+        target.searchParams.set('keyId', flow.keyId);
+    }
+
+    target.searchParams.set('returnUrl', flow.returnUrl);
 
     logger.debug('OAuth callback needs a second factor', { path });
 
@@ -136,7 +144,7 @@ type PendingLookup =
 async function lookUpPending(keyId: string): Promise<PendingLookup>
 {
     const jar = (await cookies()).getAll().map(({ name, value }) => [name, value] as const);
-    const cookie = pendingCookieFor(jar, keyId);
+    const cookie = await pendingCookieForKey(jar, keyId);
 
     if (!cookie)
     {
@@ -239,7 +247,7 @@ export function createOAuthCallbackHandler(options?: OAuthCallbackOptions)
 
         if (mfaChallenge)
         {
-            return mfaRedirect(request, mfaChallenge, returnUrl, options?.mfaPath);
+            return mfaRedirect(request, { challenge: mfaChallenge, keyId, returnUrl }, options?.mfaPath);
         }
 
         // Validate required params

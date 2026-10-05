@@ -33,12 +33,11 @@ import { SessionPendingExpiredError, SessionPendingMismatchError } from '@spfn/a
 import { hashCredential } from '../../server/lib/link-credentials';
 import { sealSession } from '../../server/lib/session';
 import { COOKIE_NAMES, getSessionTtl } from '../../server/lib/config';
-import { pendingCookieFor } from '../../server/lib/oauth/start-cookies';
 import { authLogger } from '../../server/logger';
 import {
     sealPendingMfaSession,
     unsealPendingMfaSession,
-    unsealPendingSession,
+    pendingSessionIn,
     type PendingSessionData,
 } from '../session-helpers';
 import { cookieSecure } from './cookie-options';
@@ -110,18 +109,20 @@ async function pendingKeyFor(ctx: ResponseInterceptorContext): Promise<PendingSe
 /**
  * The OAuth start the 202 names, by the `keyId` its body carries (#126).
  *
- * Several starts can be in flight, so the cookie is picked by that key and never
- * by position; a legacy fixed-name cookie counts only when it holds that key. No
- * keyId, or no cookie for it, bakes nothing — the confirm page then meets the
- * expired answer, as it did when the pending cookie was missing.
+ * Several starts can be in flight, so with a keyId the cookie is picked by that
+ * key and never by position; a legacy fixed-name cookie counts only when it
+ * holds that key, and no cookie for it bakes nothing — the confirm page then
+ * meets the expired answer, as it did when the pending cookie was missing.
+ *
+ * A body without a keyId comes from a page that posts `{ mfaChallenge }` only,
+ * as the README told custom pages to before #126. It gets the most recent
+ * start's key, else the legacy cookie's — the one `getPendingSession()` reads.
  */
 async function oauthPendingKeyFor(ctx: ResponseInterceptorContext): Promise<PendingSessionData | null>
 {
     const keyId = (ctx.response.body as { keyId?: unknown } | null)?.keyId;
-    const cookie = typeof keyId === 'string' ? pendingCookieFor(ctx.cookies, keyId) : undefined;
-    const pending = cookie ? await unsealPendingSession(cookie.value) : null;
 
-    return pending?.keyId === keyId ? pending : null;
+    return await pendingSessionIn(ctx.cookies, typeof keyId === 'string' && keyId ? keyId : undefined);
 }
 
 /**

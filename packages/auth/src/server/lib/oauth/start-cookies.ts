@@ -96,10 +96,36 @@ function entriesOf(jar: CookieJar): Iterable<readonly [string, string]>
         : Object.entries(jar as Record<string, string>);
 }
 
-/** Every per-start cookie of `kind` in the jar, any port suffix, oldest first. */
+/**
+ * Seconds a name's `issuedAt` may run ahead of this clock and still be taken as
+ * written: the proxy and the API are separate processes whose clocks can differ
+ * by a few seconds. A name dated further ahead was not written by a start (#126).
+ */
+const MAX_ISSUED_AT_SKEW_SECONDS = 60;
+
+/** Whether a cookie's `issuedAt` is further ahead of `nowSeconds` than clock skew explains. */
+function isFutureDated(cookie: OAuthStartCookie, nowSeconds: number): boolean
+{
+    return cookie.issuedAt > nowSeconds + MAX_ISSUED_AT_SKEW_SECONDS;
+}
+
+/**
+ * The position a cookie sorts by. A future-dated name sorts before every other,
+ * so a planted one is evicted first and is never the most recent start.
+ */
+function ageOrderOf(cookie: OAuthStartCookie, nowSeconds: number): number
+{
+    return isFutureDated(cookie, nowSeconds) ? -1 : cookie.issuedAt;
+}
+
+/**
+ * Every per-start cookie of `kind` in the jar, any port suffix, oldest first —
+ * with a future-dated name counted as the oldest.
+ */
 export function listStartCookies(kind: OAuthStartCookieKind, jar: CookieJar): OAuthStartCookie[]
 {
     const found: OAuthStartCookie[] = [];
+    const nowSeconds = Math.floor(Date.now() / 1000);
 
     for (const [name, value] of entriesOf(jar))
     {
@@ -111,7 +137,7 @@ export function listStartCookies(kind: OAuthStartCookieKind, jar: CookieJar): OA
         }
     }
 
-    return found.sort((a, b) => a.issuedAt - b.issuedAt || a.name.localeCompare(b.name));
+    return found.sort((a, b) => ageOrderOf(a, nowSeconds) - ageOrderOf(b, nowSeconds) || a.name.localeCompare(b.name));
 }
 
 /** The per-start cookies of `kind` under this process's own base, oldest first. */
@@ -122,12 +148,27 @@ export function listOwnStartCookies(kind: OAuthStartCookieKind, jar: CookieJar):
     return listStartCookies(kind, jar).filter(cookie => cookie.base === base);
 }
 
-/** The start cookie of `kind` written for `keyId`, under any port suffix and any issuedAt. */
-export function findStartCookie(kind: OAuthStartCookieKind, jar: CookieJar, keyId: string): OAuthStartCookie | undefined
+/**
+ * The most recent start's cookie of `kind` under this process's own base. A
+ * future-dated name is never the most recent.
+ */
+export function latestOwnStartCookie(kind: OAuthStartCookieKind, jar: CookieJar): OAuthStartCookie | undefined
+{
+    const nowSeconds = Math.floor(Date.now() / 1000);
+
+    return listOwnStartCookies(kind, jar).filter(cookie => !isFutureDated(cookie, nowSeconds)).at(-1);
+}
+
+/**
+ * Every start cookie of `kind` written for `keyId`, under any port suffix and any
+ * issuedAt, oldest first. More than one when a client started twice with one key
+ * (API mode supplies its own keyId), or when a name was planted beside the real one.
+ */
+export function findStartCookies(kind: OAuthStartCookieKind, jar: CookieJar, keyId: string): OAuthStartCookie[]
 {
     const id = startCookieId(keyId);
 
-    return listStartCookies(kind, jar).find(cookie => cookie.id === id);
+    return listStartCookies(kind, jar).filter(cookie => cookie.id === id);
 }
 
 /** Cookies under the legacy fixed name of `kind`, any port suffix. */
@@ -147,19 +188,26 @@ export function ownStartCookieNames(kind: OAuthStartCookieKind, jar: CookieJar):
     return [startCookieBase(kind), ...listOwnStartCookies(kind, jar).map(cookie => cookie.name)];
 }
 
-/**
- * The pending cookie for `keyId`: that start's own, else the legacy fixed name
- * when the jar holds it. Whether the legacy cookie is for `keyId` is only known
- * once it is unsealed, so callers check the unsealed keyId themselves.
- */
-export function pendingCookieFor(jar: CookieJar, keyId: unknown): { name: string; value: string } | undefined
+/** The legacy fixed-name pending cookie under this process's own suffix, when the jar holds it. */
+export function legacyPendingCookie(jar: CookieJar): { name: string; value: string } | undefined
 {
-    const perStart = typeof keyId === 'string' && keyId ? findStartCookie('pending', jar, keyId) : undefined;
     const legacyName = startCookieBase('pending');
 
-    return perStart
-        ? { name: perStart.name, value: perStart.value }
-        : legacyStartCookies('pending', jar).find(cookie => cookie.name === legacyName);
+    return legacyStartCookies('pending', jar).find(cookie => cookie.name === legacyName);
+}
+
+/**
+ * The pending cookies that may hold `keyId`, newest first: that start's own —
+ * several when its id is shared — else the legacy fixed name when the jar holds
+ * it. Which one holds `keyId` is only known once unsealed, so callers unseal
+ * them in order and check the keyId themselves.
+ */
+export function pendingCookieCandidates(jar: CookieJar, keyId: string): { name: string; value: string }[]
+{
+    const perStart = findStartCookies('pending', jar, keyId).reverse().map(({ name, value }) => ({ name, value }));
+    const legacy = legacyPendingCookie(jar);
+
+    return perStart.length > 0 || !legacy ? perStart : [legacy];
 }
 
 /**
@@ -178,8 +226,8 @@ export function namesEvictedByStart(kind: OAuthStartCookieKind, jar: CookieJar):
  * Every OAuth CSRF cookie candidate in the jar — the legacy name and every
  * per-start name, under any port suffix.
  *
- * @deprecated The callback routes pick the one cookie a state names
- * (`findStartCookie`); this list is kept for apps that imported it.
+ * @deprecated The callback routes pick the cookies a state names
+ * (`findStartCookies`); this list is kept for apps that imported it.
  */
 export function matchOAuthCsrfCookies(cookies: Record<string, string>): { name: string; value: string }[]
 {

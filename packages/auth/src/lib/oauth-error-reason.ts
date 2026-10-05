@@ -54,8 +54,12 @@ export function callbackQueryReason(reason: string | null, error: string): OAuth
 
 /**
  * Put `reason` on an error URL: into its `{reason}` placeholder when it has one,
- * otherwise as a query parameter, through the URL API so an existing query and a
- * fragment stay where they are. A relative URL comes back relative.
+ * otherwise appended as `reason=<code>` before any `#fragment`, after `&` when
+ * the URL already has a query and `?` when it does not.
+ *
+ * Textually, never through a URL parser: the URL is the operator's template, and
+ * a parse would rewrite it — a protocol-relative `//host/path` lost its host, and
+ * `%20` came back as `+`. The code is one of a closed set and needs no encoding.
  */
 export function withOAuthErrorReason(url: string, reason: OAuthErrorReason): string
 {
@@ -64,9 +68,9 @@ export function withOAuthErrorReason(url: string, reason: OAuthErrorReason): str
         return url.replaceAll('{reason}', reason);
     }
 
-    const parsed = new URL(url, 'http://placeholder.invalid');
+    const hashAt = url.indexOf('#');
+    const beforeHash = hashAt === -1 ? url : url.slice(0, hashAt);
+    const separator = beforeHash.includes('?') ? '&' : '?';
 
-    parsed.searchParams.set('reason', reason);
-
-    return /^[a-z][a-z\d+.-]*:/i.test(url) ? parsed.toString() : `${parsed.pathname}${parsed.search}${parsed.hash}`;
+    return `${beforeHash}${separator}reason=${reason}${hashAt === -1 ? '' : url.slice(hashAt)}`;
 }
