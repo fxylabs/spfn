@@ -49,6 +49,11 @@ type CleanStructuredInput<TInput> = MakeOptionalIfUndefinable<PickNonEmpty<TInpu
 type HasAnyRequiredFields<TInput> = {} extends CleanStructuredInput<TInput> ? false : true;
 
 /**
+ * Largest delay `setTimeout` honours; a longer one fires immediately
+ */
+const MAX_TIMEOUT_MS = 2147483647;
+
+/**
  * Route call builder with structured input API
  *
  * Input is structured with explicit params, query, body fields
@@ -91,6 +96,7 @@ export class RouteCallBuilder<
     private _headers?: Record<string, string>;
     private _cookies?: Record<string, string>;
     private _fetchOptions?: RequestInit;
+    private _timeout?: number;
     private _onRequest?: RequestInterceptor;
     private _onResponse?: ResponseInterceptor;
 
@@ -112,6 +118,7 @@ export class RouteCallBuilder<
         builder._headers = this._headers;
         builder._cookies = this._cookies;
         builder._fetchOptions = this._fetchOptions;
+        builder._timeout = this._timeout;
         builder._onRequest = this._onRequest;
         builder._onResponse = this._onResponse;
 
@@ -147,6 +154,25 @@ export class RouteCallBuilder<
     {
         const builder = this.clone();
         builder._fetchOptions = { ...this._fetchOptions, ...options };
+
+        return builder;
+    }
+
+    /**
+     * Set this call's timeout in milliseconds, overriding the client-wide one
+     *
+     * Throws a `TypeError`, before any request is made, unless `ms` is a finite number
+     * greater than 0 and at most 2147483647 (the largest delay `setTimeout` honours).
+     */
+    timeout(ms: number): RouteCallBuilder<TInput, TOutput>
+    {
+        if (!Number.isFinite(ms) || ms <= 0 || ms > MAX_TIMEOUT_MS)
+        {
+            throw new TypeError(`timeout must be a finite number of milliseconds in (0, ${MAX_TIMEOUT_MS}], got ${String(ms)}`);
+        }
+
+        const builder = this.clone();
+        builder._timeout = ms;
 
         return builder;
     }
@@ -200,6 +226,11 @@ export class RouteCallBuilder<
             options.fetchOptions = this._fetchOptions;
         }
 
+        if (this._timeout !== undefined)
+        {
+            options.timeout = this._timeout;
+        }
+
         if (this._onRequest)
         {
             options.onRequest = this._onRequest;
@@ -232,6 +263,12 @@ export type RouteClient<TRoute extends RouteDef<any, any>> = {
      * Set Next.js fetch options
      */
     fetchOptions(options: RequestInit & { next?: { revalidate?: number | false; tags?: string[] } }): RouteClient<TRoute>;
+
+    /**
+     * Set this call's timeout in milliseconds, overriding the client-wide one.
+     * Throws a `TypeError` unless `ms` is finite, `> 0` and `<= 2147483647`.
+     */
+    timeout(ms: number): RouteClient<TRoute>;
 
     /**
      * Set request interceptor

@@ -42,18 +42,67 @@ import type { Router } from '@spfn/core/route';
 import * as debugLogs from './debug-logs';
 import { ApiError } from './errors';
 import {
-    parseResponseBody,
-    executeFetchWithTimeout,
+    fetchInAbortScope,
     handleErrorResponse,
     buildCookieHeader,
     autoDetectServerCookies,
 } from './helpers';
 import { CSRF_HEADER, csrfHeaderValue, documentCookieEntries } from './csrf';
 import { RouteCallBuilder } from './builder';
+import type { ScopedFetchResult } from './helpers';
 import type { ApiConfig, CallOptions } from './types';
 import type { Client } from './builder';
 
 const apiLogger = logger.child('@spfn/core:api-client');
+
+/**
+ * Where a failed call went, for the log line its transport error writes
+ */
+interface CallSite
+{
+    route: string;
+    method: string;
+    url: string;
+}
+
+/**
+ * Classify a failed fetch by the abort cause its scope recorded
+ *
+ * - timeout → 408 `'timeout'`, reporting the applied timeout
+ * - caller abort → status 0 `'aborted'`, the signal's reason as `cause`; logged at debug
+ *   level, since it is the caller's own intent
+ * - anything else, including a custom fetch's own `AbortError` → status 0 `'network'`
+ */
+function transportError(
+    failure: Extract<ScopedFetchResult, { ok: false }>,
+    site: CallSite,
+    timeout: number,
+): ApiError
+{
+    if (failure.cause === 'timeout')
+    {
+        apiLogger.error('Request timeout', { ...site, timeout });
+
+        return new ApiError(`Request timeout after ${timeout}ms`, 408, site.url, undefined, 'timeout');
+    }
+
+    if (failure.cause === 'caller')
+    {
+        apiLogger.debug('Request aborted by caller', site);
+
+        return new ApiError('Request aborted', 0, site.url, undefined, 'aborted', { cause: failure.error });
+    }
+
+    const { error } = failure;
+    const errorMessage = error instanceof Error ? error.message : 'Network error';
+    apiLogger.error('Network error', {
+        ...site,
+        error: errorMessage,
+        errorName: error instanceof Error ? error.name : 'unknown',
+    });
+
+    return new ApiError(errorMessage, 0, site.url, undefined, 'network');
+}
 
 // ============================================================================
 // Client Implementation
@@ -292,64 +341,24 @@ export function createApi<TRouter extends Router<any>>(
             debugLogs.logRequest(apiLogger, routeName, method, fullUrl, !!init.body);
         }
 
-        // Execute fetch with timeout
-        let response: Response;
-        let body: any;
+        // Execute fetch and parse the body inside one abort scope
+        const appliedTimeout = options.timeout ?? timeout;
+        const fetched = await fetchInAbortScope(fullUrl, init, appliedTimeout, customFetch);
 
-        try
+        if (!fetched.ok)
         {
-            response = await executeFetchWithTimeout(fullUrl, init, timeout, customFetch);
-
-            // Parse response
-            body = await parseResponseBody(response);
+            throw transportError(fetched, { route: routeName, method, url: fullUrl }, appliedTimeout);
         }
-        catch (error)
-        {
-            // Handle timeout specifically
-            if (error instanceof Error && error.name === 'AbortError')
-            {
-                apiLogger.error('Request timeout', {
-                    route: routeName,
-                    method,
-                    url: fullUrl,
-                    timeout,
-                });
 
-                throw new ApiError(
-                    `Request timeout after ${timeout}ms`,
-                    408,
-                    fullUrl,
-                    undefined,
-                    'timeout',
-                );
-            }
-
-            // Network error
-            const errorMessage = error instanceof Error ? error.message : 'Network error';
-            apiLogger.error('Network error', {
-                route: routeName,
-                method,
-                url: fullUrl,
-                error: errorMessage,
-                errorName: error instanceof Error ? error.name : 'unknown',
-            });
-
-            throw new ApiError(
-                errorMessage,
-                0,
-                fullUrl,
-                undefined,
-                'network',
-            );
-        }
+        let { response, body } = fetched;
 
         // Execute global + local response interceptors
         //
-        // These run outside the try/catch on purpose. That catch classifies a transport
+        // These run outside the abort scope on purpose. That scope classifies a transport
         // failure, and an interceptor throwing is not one: Next.js implements `redirect()`
         // and `notFound()` by throwing an error carrying a digest, and an interceptor
         // raising a domain error of its own is not a transport failure either. Run inside
-        // the try, every one of those became `ApiError(..., 0, ..., 'network')` — the
+        // it, every one of those became `ApiError(..., 0, ..., 'network')` — the
         // navigation never happened and the caller was handed a network failure that never
         // occurred, which retry and offline handling keyed on `errorType === 'network'`
         // act on.
