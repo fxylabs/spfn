@@ -643,7 +643,7 @@ SPFN_AUTH_GOOGLE_CLIENT_SECRET=GOCSPX-...
 # Optional
 SPFN_AUTH_GOOGLE_SCOPES=email,profile               # Default: email,profile
 SPFN_AUTH_OAUTH_SUCCESS_URL=/auth/callback           # Default: /auth/callback
-SPFN_AUTH_OAUTH_ERROR_URL=/auth/error?error={error}  # Default: /auth/error?error={error}
+SPFN_AUTH_OAUTH_ERROR_URL=/auth/error?error={error}  # Default: /auth/error?error={error}; {reason} optional (else appended as reason=)
 SPFN_AUTH_GOOGLE_REDIRECT_URI=                       # Default: {NEXT_PUBLIC_SPFN_APP_URL||SPFN_APP_URL}/_auth/oauth/google/callback (an override is checked at boot)
 ```
 
@@ -692,8 +692,8 @@ only value that disables the boot check.
 ```
 
 If the account has a [second factor](#second-factor-mfa) and this browser is a device it has
-never seen, step 3 carries `?mfaChallenge=…` instead of `userId` and `keyId`, and no session
-exists until that challenge is spent. `OAuthCallback` posts it to `/_auth/oauth/finalize`,
+never seen, step 3 carries `?mfaChallenge=…` instead of `userId` (the `keyId` rides along), and
+no session exists until that challenge is spent. `OAuthCallback` posts it to `/_auth/oauth/finalize`,
 which answers 202 and hands it back for your confirm screen.
 
 A repeated finalize — a reload of the callback page after step 4 — is answered with success and
@@ -708,6 +708,45 @@ header when the browser holds the CSRF cookie, so signing in again under
 The `state` in step 1 is produced by the Next.js interceptor (it generates the key pair and
 seals it into the state), so start the flow through `authApi.getGoogleOAuthUrl` rather than
 linking to `/_auth/oauth/google` directly.
+
+### Several sign-ins at once
+
+Each start writes its own pending and CSRF cookie, named `<base>.<issuedAt>.<id>` — `<base>` is
+the old fixed name with its `SPFN_PORT` suffix (`spfn_oauth_pending_3790`, `spfn_oauth_csrf_3790`),
+`<issuedAt>` the start time in seconds (base-36), `<id>` the first 16 hex characters of SHA-256 over
+the start's key id. Two tabs can therefore both finish, in either order. At most five starts live
+in one browser; a sixth expires the oldest one's cookies (its callback is then refused with
+`reason=invalid_state`). The callback and the finalize each read and expire only their own start's
+cookies, and a refused callback expires nothing.
+
+`sessionCookieNames().oauthPendingPrefix` is the prefix every in-flight start's pending cookie
+begins with; `oauthPending` still names the legacy fixed cookie. `getPendingSession(keyId?)` returns
+that start's pending session, or the most recent start's when called without a key id;
+`clearPendingSession()` clears all of them.
+
+**Upgrading:** a sign-in started before the upgrade still finishes — the callback and the finalize
+fall back to the legacy fixed-name cookies and expire them after use. An app that read the pending
+cookie by its exact name should match on `oauthPendingPrefix` instead.
+
+### Error page reasons
+
+Every redirect to `SPFN_AUTH_OAUTH_ERROR_URL` carries `reason=<code>` beside the `error` text. The
+codes are the closed union `OAuthErrorReason`:
+
+| `reason` | cause |
+|---|---|
+| `cancelled` | the person declined at the provider (`error=access_denied`) |
+| `expired` | the sign-in took longer than ten minutes (or its pending cookie is gone at finalize) |
+| `invalid_state` | the sign-in cannot be confirmed as started in this browser (state tampered, nonce cookie missing or different, provider mismatch, pending cookie for another key) |
+| `provider_error` | any other provider error, or the token exchange / user-info call failed |
+| `account_unavailable` | the account is disabled, pending deletion, or gone |
+| `failed` | anything else |
+
+For `expired`, `invalid_state` and a library failure behind `provider_error` the `error` text is a
+fixed sentence, never a library message. Put `{reason}` in the template
+(`/auth/error?error={error}&code={reason}`) to place it yourself; without it `reason` is appended as
+a query parameter. `OAuthCallback`'s `onError(message, reason)` and `errorComponent(message, reason)`
+receive the code as well.
 
 ### Callback Page
 
@@ -1629,4 +1668,5 @@ NEXT_PUBLIC_SPFN_APP_URL=http://localhost:3000
 ```
 
 The landing path is `SPFN_AUTH_OAUTH_SUCCESS_URL` (default `/auth/callback`); errors go to
-`SPFN_AUTH_OAUTH_ERROR_URL` (default `/auth/error?error={error}`).
+`SPFN_AUTH_OAUTH_ERROR_URL` (default `/auth/error?error={error}`), with a
+[`reason` code](#error-page-reasons) beside the text.

@@ -9,12 +9,14 @@ import { cookies } from 'next/headers.js';
 import { sealSession } from '../server/lib/session';
 import { deriveCsrfToken } from '../server/lib/csrf';
 import { COOKIE_NAMES, getSessionTtl } from '../server/lib/config';
+import { pendingCookieFor } from '../server/lib/oauth/start-cookies';
 import { env } from '@spfn/core/config';
 import { logger } from '@spfn/core/logger';
-import { unsealPendingSession } from './session-helpers';
+import { unsealPendingSession, type PendingSessionData } from './session-helpers';
 import { isSafeReturnPath } from '../lib/return-path';
 import { bindingSessionFields } from './interceptors/session-binding';
 import { resolveMfaConfirmPath } from './mfa-confirm-path';
+import { callbackQueryReason, type OAuthErrorReason } from '../lib/oauth-error-reason';
 
 export interface OAuthCallbackOptions
 {
@@ -25,7 +27,8 @@ export interface OAuthCallbackOptions
     defaultRedirectUrl?: string;
 
     /**
-     * Error redirect URL
+     * Error redirect URL. Every redirect to it carries `error` (text) and
+     * `reason` (an `OAuthErrorReason` code).
      * @default '/auth/error'
      */
     errorRedirectUrl?: string;
@@ -109,19 +112,103 @@ function mfaRedirect(
     return NextResponse.redirect(target);
 }
 
+/** The error page, with the text and the reason code on its query. */
+function errorRedirect(request: NextRequest, errorUrl: string, error: string, reason: OAuthErrorReason): NextResponse
+{
+    const target = new URL(errorUrl, request.url);
+
+    target.searchParams.set('error', error);
+    target.searchParams.set('reason', reason);
+
+    return NextResponse.redirect(target);
+}
+
+/** Why a pending session could not be had for `keyId`, or the session itself. */
+type PendingLookup =
+    | { ok: true; pending: PendingSessionData; cookieName: string }
+    | { ok: false; error: string; reason: OAuthErrorReason };
+
+/**
+ * This start's pending session, found by the callback's keyId (#126) — its own
+ * cookie, else a legacy fixed-name one. A missing cookie is `expired`; one that
+ * does not unseal, or holds another key, is `invalid_state`.
+ */
+async function lookUpPending(keyId: string): Promise<PendingLookup>
+{
+    const jar = (await cookies()).getAll().map(({ name, value }) => [name, value] as const);
+    const cookie = pendingCookieFor(jar, keyId);
+
+    if (!cookie)
+    {
+        return { ok: false, error: 'OAuth session expired. Please try again.', reason: 'expired' };
+    }
+
+    const pending = await unsealPendingSession(cookie.value).catch(() => null);
+
+    if (pending?.keyId !== keyId)
+    {
+        return { ok: false, error: 'Session mismatch. Please try again.', reason: 'invalid_state' };
+    }
+
+    return { ok: true, pending, cookieName: cookie.name };
+}
+
+/**
+ * Seal the session and answer with the redirect that installs it.
+ *
+ * The binding fields ride the callback query, put there by the backend that
+ * registered the key: this handler runs before any route call, so the redirect
+ * is the only thing that can tell it the key is short-lived. Nothing is
+ * authorized by them — the key row expires when it says it does whatever the
+ * query claims — but a cookie that did not carry them would take the unbound
+ * branch at the first expiry and sign the person out instead of renewing.
+ *
+ * Only this start's pending cookie is cleared; other starts in flight keep theirs.
+ */
+async function sessionRedirect(
+    request: NextRequest,
+    session: { userId: string; returnUrl: string; found: Extract<PendingLookup, { ok: true }> },
+): Promise<NextResponse>
+{
+    const { pending, cookieName } = session.found;
+    const ttl = getSessionTtl();
+    const sessionToken = await sealSession({
+        userId: session.userId,
+        privateKey: pending.privateKey,
+        keyId: pending.keyId,
+        algorithm: pending.algorithm,
+        ...bindingSessionFields(bindingFromQuery(request.nextUrl.searchParams), request.headers.get('user-agent')),
+    }, ttl);
+    const response = NextResponse.redirect(new URL(session.returnUrl, request.url));
+    const options = { httpOnly: true, secure: env.NODE_ENV === 'production', sameSite: 'lax' as const, maxAge: ttl, path: '/' };
+
+    response.cookies.set(COOKIE_NAMES.SESSION, sessionToken, options);
+    response.cookies.set(COOKIE_NAMES.SESSION_KEY_ID, pending.keyId, options);
+    // Readable CSRF cookie — the client mirrors it into x-spfn-csrf
+    response.cookies.set(COOKIE_NAMES.CSRF, await deriveCsrfToken(pending.keyId), { ...options, httpOnly: false });
+    response.cookies.delete(cookieName);
+
+    logger.debug('OAuth callback completed', { userId: session.userId, keyId: pending.keyId });
+
+    return response;
+}
+
 /**
  * Create OAuth callback handler for Next.js API Route
  *
  * Handles the final step of OAuth flow:
  * 1. Gets userId, keyId from query params (set by backend)
- * 2. Gets privateKey from pending session cookie
+ * 2. Gets privateKey from this start's pending session cookie, found by keyId
  * 3. Creates full session and saves to cookie
  * 4. Redirects to returnUrl
  *
  * When the account has a second factor and this device is new to it (#95) the
- * backend sends `mfaChallenge` in place of `userId` and `keyId`. No session is
- * sealed; the browser goes to `SPFN_AUTH_MFA_CONFIRM_PATH` with the challenge,
- * and the session is sealed by `mfaVerifyInterceptor` once the page proves it.
+ * backend sends `mfaChallenge` in place of `userId`. No session is sealed; the
+ * browser goes to `SPFN_AUTH_MFA_CONFIRM_PATH` with the challenge, and the
+ * session is sealed by `mfaVerifyInterceptor` once the page proves it.
+ *
+ * Every failure redirects to `errorRedirectUrl` with `error` and a `reason`
+ * code (#126): `cancelled`, `failed`, `expired` or `invalid_state`.
  *
  * @example
  * ```typescript
@@ -133,7 +220,7 @@ function mfaRedirect(
 export function createOAuthCallbackHandler(options?: OAuthCallbackOptions)
 {
     const defaultRedirect = options?.defaultRedirectUrl || '/';
-    const errorRedirect = options?.errorRedirectUrl || '/auth/error';
+    const errorUrl = options?.errorRedirectUrl || '/auth/error';
 
     return async (request: NextRequest): Promise<NextResponse> =>
     {
@@ -142,17 +229,13 @@ export function createOAuthCallbackHandler(options?: OAuthCallbackOptions)
         const keyId = searchParams.get('keyId');
         const returnUrl = safeReturnUrl(searchParams.get('returnUrl'), defaultRedirect);
         const error = searchParams.get('error');
+        const mfaChallenge = searchParams.get('mfaChallenge');
 
         // Handle error from backend
         if (error)
         {
-            const errorUrl = new URL(errorRedirect, request.url);
-            errorUrl.searchParams.set('error', error);
-
-            return NextResponse.redirect(errorUrl);
+            return errorRedirect(request, errorUrl, error, callbackQueryReason(searchParams.get('reason'), error));
         }
-
-        const mfaChallenge = searchParams.get('mfaChallenge');
 
         if (mfaChallenge)
         {
@@ -163,96 +246,38 @@ export function createOAuthCallbackHandler(options?: OAuthCallbackOptions)
         if (!userId || !keyId)
         {
             logger.error('OAuth callback missing required params', { userId: !!userId, keyId: !!keyId });
-            const errorUrl = new URL(errorRedirect, request.url);
-            errorUrl.searchParams.set('error', 'Missing required parameters');
 
-            return NextResponse.redirect(errorUrl);
+            return errorRedirect(request, errorUrl, 'Missing required parameters', 'failed');
         }
 
-        try
-        {
-            // Get pending session from cookie
-            const cookieStore = await cookies();
-            const pendingCookie = cookieStore.get(COOKIE_NAMES.OAUTH_PENDING);
-
-            if (!pendingCookie)
-            {
-                throw new Error('OAuth session expired. Please try again.');
-            }
-
-            const pendingSession = await unsealPendingSession(pendingCookie.value);
-
-            // Verify keyId matches
-            if (pendingSession.keyId !== keyId)
-            {
-                throw new Error('Session mismatch. Please try again.');
-            }
-
-            // Create full session.
-            //
-            // The binding fields ride the callback query, put there by the
-            // backend that registered the key: this handler runs before any
-            // route call, so the redirect is the only thing that can tell it the
-            // key is short-lived. Nothing is authorized by them — the key row
-            // expires when it says it does whatever the query claims — but a
-            // cookie that did not carry them would take the unbound branch at the
-            // first expiry and sign the person out instead of renewing.
-            const ttl = getSessionTtl();
-            const sessionToken = await sealSession({
-                userId,
-                privateKey: pendingSession.privateKey,
-                keyId: pendingSession.keyId,
-                algorithm: pendingSession.algorithm,
-                ...bindingSessionFields(bindingFromQuery(searchParams), request.headers.get('user-agent')),
-            }, ttl);
-
-            // Build redirect response
-            const redirectUrl = new URL(returnUrl, request.url);
-            const response = NextResponse.redirect(redirectUrl);
-
-            // Set session cookie
-            response.cookies.set(COOKIE_NAMES.SESSION, sessionToken, {
-                httpOnly: true,
-                secure: env.NODE_ENV === 'production',
-                sameSite: 'lax',
-                maxAge: ttl,
-                path: '/',
-            });
-
-            // Set keyId cookie
-            response.cookies.set(COOKIE_NAMES.SESSION_KEY_ID, keyId, {
-                httpOnly: true,
-                secure: env.NODE_ENV === 'production',
-                sameSite: 'lax',
-                maxAge: ttl,
-                path: '/',
-            });
-
-            // Readable CSRF cookie — the client mirrors it into x-spfn-csrf
-            response.cookies.set(COOKIE_NAMES.CSRF, await deriveCsrfToken(keyId), {
-                httpOnly: false,
-                secure: env.NODE_ENV === 'production',
-                sameSite: 'lax',
-                maxAge: ttl,
-                path: '/',
-            });
-
-            // Clear pending session cookie
-            response.cookies.delete(COOKIE_NAMES.OAUTH_PENDING);
-
-            logger.debug('OAuth callback completed', { userId, keyId });
-
-            return response;
-        }
-        catch (error)
-        {
-            const err = error as Error;
-            logger.error('OAuth callback failed', { error: err.message });
-
-            const errorUrl = new URL(errorRedirect, request.url);
-            errorUrl.searchParams.set('error', err.message);
-
-            return NextResponse.redirect(errorUrl);
-        }
+        return await finishCallback(request, { userId, keyId, returnUrl, errorUrl });
     };
+}
+
+/** The pending lookup, then the session — or the error page with the lookup's reason. */
+async function finishCallback(
+    request: NextRequest,
+    input: { userId: string; keyId: string; returnUrl: string; errorUrl: string },
+): Promise<NextResponse>
+{
+    try
+    {
+        const found = await lookUpPending(input.keyId);
+
+        if (!found.ok)
+        {
+            logger.error('OAuth callback failed', { error: found.error });
+
+            return errorRedirect(request, input.errorUrl, found.error, found.reason);
+        }
+
+        return await sessionRedirect(request, { userId: input.userId, returnUrl: input.returnUrl, found });
+    }
+    catch (error)
+    {
+        const err = error as Error;
+        logger.error('OAuth callback failed', { error: err.message });
+
+        return errorRedirect(request, input.errorUrl, err.message, 'failed');
+    }
 }

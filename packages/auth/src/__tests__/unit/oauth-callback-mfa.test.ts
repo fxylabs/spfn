@@ -85,7 +85,7 @@ describe('OAuthCallback — mfaChallenge (#107)', () =>
 
         const outcome = await runOAuthCallback(`?error=access_denied&mfaChallenge=${CHALLENGE}`, options);
 
-        expect(outcome).toEqual({ kind: 'error', message: 'access_denied' });
+        expect(outcome).toEqual({ kind: 'error', message: 'access_denied', reason: 'cancelled' });
         expect(options.fetch).not.toHaveBeenCalled();
     });
 
@@ -226,14 +226,14 @@ describe('OAuthCallback — mfaChallenge (#107)', () =>
     {
         const outcome = await runOAuthCallback(`?mfaChallenge=${CHALLENGE}`, optionsWith(jsonResponse(200, { success: true })));
 
-        expect(outcome).toEqual({ kind: 'error', message: 'Failed to finalize OAuth' });
+        expect(outcome).toEqual({ kind: 'error', message: 'Failed to finalize OAuth', reason: 'failed' });
     });
 
     it('row 6: a network failure is an error outcome, not a throw', async () =>
     {
         const outcome = await runOAuthCallback(`?mfaChallenge=${CHALLENGE}`, optionsWith(new TypeError('Failed to fetch')));
 
-        expect(outcome).toEqual({ kind: 'error', message: 'Failed to fetch' });
+        expect(outcome).toEqual({ kind: 'error', message: 'Failed to fetch', reason: 'failed' });
     });
 
     it('row 6: a failure message that echoes the challenge never reaches onError', async () =>
@@ -242,15 +242,15 @@ describe('OAuthCallback — mfaChallenge (#107)', () =>
 
         const outcome = await runOAuthCallback(`?mfaChallenge=${CHALLENGE}`, options);
 
-        expect(outcome).toEqual({ kind: 'error', message: 'Failed to finalize OAuth' });
+        expect(outcome).toEqual({ kind: 'error', message: 'Failed to finalize OAuth', reason: 'failed' });
     });
 
     it('row 7: neither userId/keyId nor mfaChallenge is "Missing required parameters" as today', async () =>
     {
         const options = optionsWith(jsonResponse(200, {}));
 
-        expect(await runOAuthCallback('?userId=7', options)).toEqual({ kind: 'error', message: 'Missing required parameters' });
-        expect(await runOAuthCallback('', options)).toEqual({ kind: 'error', message: 'Missing required parameters' });
+        expect(await runOAuthCallback('?userId=7', options)).toEqual({ kind: 'error', message: 'Missing required parameters', reason: 'failed' });
+        expect(await runOAuthCallback('', options)).toEqual({ kind: 'error', message: 'Missing required parameters', reason: 'failed' });
         expect(options.fetch).not.toHaveBeenCalled();
     });
 });

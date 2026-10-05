@@ -7,6 +7,7 @@
 
 import { type NextResponse } from 'next/server';
 import { COOKIE_NAMES } from '../server/lib/config';
+import { ownStartCookieNames } from '../server/lib/oauth/start-cookies';
 
 /**
  * The cookie names that make up a browser session
@@ -17,8 +18,16 @@ export interface SessionCookieNames
     session: string;
     /** Current key ID (for key rotation) */
     keyId: string;
-    /** Pending OAuth session — present only mid-flow */
+    /**
+     * Pending OAuth session under its legacy fixed name — written only by a
+     * start made before per-start cookies (#126). Read `oauthPendingPrefix`.
+     */
     oauthPending: string;
+    /**
+     * Every in-flight start's pending cookie begins with this (#126): the legacy
+     * name followed by `.`, then `<issuedAt>.<id>`. Up to five can be present.
+     */
+    oauthPendingPrefix: string;
     /** CSRF token — the only one the browser can read */
     csrf: string;
 }
@@ -42,8 +51,15 @@ export function sessionCookieNames(): SessionCookieNames
         session: COOKIE_NAMES.SESSION,
         keyId: COOKIE_NAMES.SESSION_KEY_ID,
         oauthPending: COOKIE_NAMES.OAUTH_PENDING,
+        oauthPendingPrefix: `${COOKIE_NAMES.OAUTH_PENDING}.`,
         csrf: COOKIE_NAMES.CSRF,
     };
+}
+
+/** The `getAll()` a NextRequest's cookie jar answers with. */
+interface RequestCookieSource
+{
+    cookies: { getAll(): { name: string; value: string }[] };
 }
 
 /**
@@ -54,20 +70,28 @@ export function sessionCookieNames(): SessionCookieNames
  * path matches the one the setters use, because a delete under a different
  * path leaves the cookie in place. Absent cookies are not an error.
  *
+ * The OAuth start cookies are named per start (#126), so their names are known
+ * only from the request: pass it, and every in-flight start's pending and CSRF
+ * cookie is expired too. Without it, the legacy fixed names are.
+ *
  * @param response - Response to expire the cookies on
+ * @param request - The request whose jar names the in-flight OAuth starts
  * @returns The same response, so the call chains
  *
  * @example
  * ```typescript
- * export function GET(): NextResponse
+ * export function GET(request: NextRequest): NextResponse
  * {
- *     return clearSessionCookies(NextResponse.redirect(new URL('/login', request.url)));
+ *     return clearSessionCookies(NextResponse.redirect(new URL('/login', request.url)), request);
  * }
  * ```
  */
-export function clearSessionCookies(response: NextResponse): NextResponse
+export function clearSessionCookies(response: NextResponse, request?: RequestCookieSource): NextResponse
 {
-    for (const name of Object.values(sessionCookieNames()))
+    const { session, keyId, csrf } = sessionCookieNames();
+    const jar = (request?.cookies.getAll() ?? []).map(({ name, value }) => [name, value] as const);
+
+    for (const name of [session, keyId, csrf, ...ownStartCookieNames('pending', jar), ...ownStartCookieNames('csrf', jar)])
     {
         response.cookies.delete({ name, path: '/' });
     }

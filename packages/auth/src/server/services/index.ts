@@ -296,7 +296,9 @@ export type { UpdateProfileParams } from './user-profile.service';
 export {
     oauthStartService,
     oauthCallbackService,
+    matchOAuthCallbackCsrf,
     buildOAuthErrorUrl,
+    oauthErrorReason,
     isOAuthProviderEnabled,
     requireEnabledProvider,
     getEnabledOAuthProviders,

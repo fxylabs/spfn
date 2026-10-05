@@ -168,7 +168,7 @@ real secret values out of band, never commit them.
 | `SPFN_AUTH_KAKAO_NATIVE_CLIENT_IDS` | `.env.server` | — | comma-separated Kakao app keys accepted as native id_token audience (native app key); `SPFN_AUTH_KAKAO_CLIENT_ID` is also accepted, so either one enables Kakao native sign-in |
 | `SPFN_AUTH_NAVER_NATIVE_CLIENT_IDS` | `.env.server` | — | comma-separated Naver client IDs accepted as native id_token audience. `SPFN_AUTH_NAVER_CLIENT_ID` is also accepted, so this is only needed for a separate app application |
 | `SPFN_AUTH_OAUTH_SUCCESS_URL` | `.env.server` | — | default `/auth/callback` |
-| `SPFN_AUTH_OAUTH_ERROR_URL` | `.env.server` | — | default `/auth/error?error={error}` |
+| `SPFN_AUTH_OAUTH_ERROR_URL` | `.env.server` | — | default `/auth/error?error={error}`; `{reason}` takes the [reason code](#the-error-page-reason-codes), appended as `reason=` when absent |
 | `SPFN_AUTH_RESERVED_USERNAMES` / `_USERNAME_MIN_LENGTH` / `_USERNAME_MAX_LENGTH` | `.env.server` | — | username rules |
 | `SPFN_AUTH_SIGNUP_LINK_TTL_MINUTES` / `_SETUP_TTL_MINUTES` | `.env.server` | — | defaults `30` / `15` — see [Verified-email signup](#verified-email-signup) |
 | `SPFN_AUTH_SIGNUP_CONFIRM_PATH` | `.env.server` | — | default `/signup/confirm`; the page in your app the emailed link opens |
@@ -1497,8 +1497,8 @@ it before reading `userId` — see [the migration note](#migration--narrow-a-sig
 
 ##### The web OAuth path
 
-The backend callback redirects with **`?mfaChallenge=`** instead of `userId` and `keyId`. The
-value is not a bearer credential for anything but this one `verify`, it is single use, and
+The backend callback redirects with **`?mfaChallenge=`** (and the start's `keyId`) instead of
+`userId`. The value is not a bearer credential for anything but this one `verify`, it is single use, and
 `requestLogger` records pathnames only — so unlike the sign-out-everywhere link it is not a
 capability riding a URL.
 
@@ -1506,8 +1506,9 @@ Both consumers of that redirect are served:
 
 - `createOAuthCallbackHandler()` redirects the browser to **`SPFN_AUTH_MFA_CONFIRM_PATH`**
   (default `/auth/mfa`, or the `mfaPath` option) with `?challenge=` and `?returnUrl=`.
-- An app on the callback-page flow posts `{ mfaChallenge }` to `POST /_auth/oauth/finalize`,
-  which answers **202** with the challenge echoed back instead of finalizing a session.
+- An app on the callback-page flow posts `{ mfaChallenge, keyId }` to `POST /_auth/oauth/finalize`,
+  which answers **202** with the challenge (and the `keyId`, which names the start whose pending
+  cookie holds the private key) echoed back instead of finalizing a session.
   `OAuthCallback` does this for you and then navigates to the confirm page with the same
   `?challenge=` and `?returnUrl=` — so both flows are supported end to end: callback → 202 and
   pending cookie → confirm page → proof → session → return path. The component does not need
@@ -1855,7 +1856,7 @@ within a day of expiry is re-sealed on that 200 for the same key. A finalize the
 browser holds in place; only a 401 from the backend itself signs the browser out.
 
 On an account with a [second factor](#second-factor-mfa) and a device it has not seen, the
-callback carries `?mfaChallenge=` instead of `userId`/`keyId` and no session is created until
+callback carries `?mfaChallenge=` instead of `userId` and no session is created until
 that challenge is spent — see [the web OAuth path](#the-web-oauth-path). Both the
 `createOAuthCallbackHandler` route and the `OAuthCallback` page flow are handled.
 
@@ -1918,6 +1919,70 @@ the same trust level as Kakao. Accounts created before this policy (user row wit
 are backfilled on their next login: if the provider reports a verified email and no other account
 owns it, `email` and `emailVerifiedAt` are filled in (best-effort; a conflict skips the backfill
 and the login continues).
+
+### Several sign-ins at once
+
+Every start — the proxy's `oauth/*/url` interceptor and the API-mode `POST /_auth/oauth/start` —
+writes its **own** pair of cookies, so a person who opens the sign-in in two tabs can finish both,
+in either order:
+
+| cookie | name | value |
+|---|---|---|
+| pending session | `<base>.<issuedAt>.<id>` on `spfn_oauth_pending[_PORT]` | the sealed private key, key id and algorithm |
+| CSRF nonce | `<base>.<issuedAt>.<id>` on `spfn_oauth_csrf[_PORT]` | the raw nonce sealed into that start's state |
+
+`<base>` is the fixed name the cookie had before, `SPFN_PORT` suffix included; `<issuedAt>` is the
+start time in seconds, base-36; `<id>` is the first 16 hex characters of SHA-256 over the start's
+key id. Neither the key id nor the nonce appears in a name. Both cookies stay `HttpOnly`,
+`SameSite=Lax`, `Path=/`, `Secure` in production, ten minutes.
+
+- **Cap of five.** At most five starts live in one browser. A sixth expires the oldest start's two
+  cookies in the same response; that start's callback is then refused with `reason=invalid_state`.
+  Worst case the five pairs add about 3.4 KB to the `Cookie` header (one ES256 pair is ~670 bytes).
+- **Callback.** The state is decrypted first; its key id names the one CSRF cookie to compare, under
+  any port suffix (the API process may run under another `SPFN_PORT` than the Next.js process that
+  set it). The value is compared with the state's nonce in constant time and only that cookie is
+  expired. A refused callback expires nothing, so a login-CSRF attempt cannot break a sign-in in
+  flight in another tab.
+- **Finalize.** The proxy, `createOAuthCallbackHandler` and the second-factor 202 pick the pending
+  cookie by the key id the callback named, and expire that cookie only. The 202 body of
+  `POST /_auth/oauth/finalize` carries that `keyId` (additive).
+- **Sign-out** expires every start's cookies.
+
+In a server component or route handler, `getPendingSession(keyId?)` from
+`@spfn/auth/nextjs/server` returns that start's pending session, or — called without an argument
+— the most recent start's. `clearPendingSession()` clears all of them. `sessionCookieNames()`
+returns `oauthPendingPrefix` (`spfn_oauth_pending[_PORT].`): every in-flight start's pending
+cookie begins with it. `oauthPending` still names the fixed legacy cookie.
+
+**Upgrading.** A sign-in started before the upgrade holds the fixed-name cookies; the callback and
+the finalize fall back to them, so it still finishes, and both are expired after use. An app that
+read the pending cookie by its exact name (`sessionCookieNames().oauthPending`) reads a cookie new
+starts never write — match on `oauthPendingPrefix`, or call `getPendingSession(keyId)`.
+
+### The error page: `reason` codes
+
+Every redirect to `SPFN_AUTH_OAUTH_ERROR_URL` (and to `createOAuthCallbackHandler`'s
+`errorRedirectUrl`) carries `reason=<code>` beside the `error` text, classified by the error's
+type. Branch on `reason`; show `error` if you like. The codes are the closed union
+`OAuthErrorReason` (with `OAUTH_ERROR_REASONS` and `isOAuthErrorReason`) from `@spfn/auth`,
+`@spfn/auth/server` and `@spfn/auth/nextjs/client`.
+
+| `reason` | cause | `error` text |
+|---|---|---|
+| `cancelled` | the person declined at the provider (`error=access_denied`) | the provider's `error_description` or `error` |
+| `expired` | the sign-in took longer than ten minutes, or its pending cookie is gone at finalize | a fixed sentence |
+| `invalid_state` | the state does not decrypt, its nonce has no matching cookie in this browser or a different one, it names another provider, or the pending cookie holds another key | a fixed sentence |
+| `provider_error` | any other provider `error=…`, or the token exchange / user-info call failed | the provider's text; a fixed sentence for a library failure |
+| `account_unavailable` | the account is disabled, pending deletion, or gone | unchanged |
+| `failed` | anything else — missing `code`/`state`, an unverified email that would link an account, a missing role | unchanged |
+
+`SPFN_AUTH_OAUTH_ERROR_URL` takes `{reason}` beside `{error}`
+(`/auth/error?error={error}&code={reason}`); a template without `{reason}` gets `reason` as a query
+parameter, placed before any `#fragment`. `OAuthCallback` passes the code too —
+`onError(message, reason)` and `errorComponent(message, reason)`: the backend's code when the
+callback query carried one, `expired` or `invalid_state` for a finalize the proxy refused, and
+`failed` otherwise.
 
 ### Provider-initiated unlink notifications (`unlink-notify`)
 
@@ -1985,8 +2050,9 @@ Register each **web app host** callback URL in its provider console, for example
 
 The cookie name also carries a `_${PORT}` suffix from the process that set it (the Next.js
 process), which differs from the API process in a split deployment — the callback therefore
-matches every `spfn_oauth_csrf*` cookie candidate against the state nonce, so no PORT
-coordination is needed.
+finds the start's CSRF cookie by the id in its name under any port suffix and compares its
+value with the state nonce, so no PORT coordination is needed (see
+[Several sign-ins at once](#several-sign-ins-at-once)).
 
 An explicit `SPFN_AUTH_<PROVIDER>_REDIRECT_URI` is checked when the server boots, because the
 value used to be read lazily on the first OAuth request and a wrong one surfaced much later as
@@ -2278,22 +2344,26 @@ error naming `SPFN_AUTH_GUARD_TIMEOUT`.
 
 `clearSession()` works where `next/headers` is writable. The page that answers *the API
 refused your session* is usually a route handler or middleware holding a `NextResponse`
-instead — `clearSessionCookies(response)` expires the session, key-id, OAuth-pending and
-CSRF cookies on it and returns the same response, so the call chains:
+instead — `clearSessionCookies(response, request)` expires the session, key-id and CSRF
+cookies on it, plus every in-flight OAuth start's pending and CSRF cookie the request's jar
+names (only the legacy fixed names when no request is passed), and returns the same response,
+so the call chains:
 
 ```typescript
 import { clearSessionCookies } from '@spfn/auth/nextjs/server';
 
 export function GET(request: NextRequest)
 {
-    return clearSessionCookies(NextResponse.redirect(new URL('/login', request.url)));
+    return clearSessionCookies(NextResponse.redirect(new URL('/login', request.url)), request);
 }
 ```
 
 Never spell the names in your app. They carry an `SPFN_PORT` suffix (`spfn_session_4001`),
 so two dev instances do not overwrite each other's cookies, and a hand-written copy of that
 rule clears the wrong cookie without failing. Read them from `sessionCookieNames()`, which
-returns `{ session, keyId, oauthPending, csrf }` at call time.
+returns `{ session, keyId, oauthPending, oauthPendingPrefix, csrf }` at call time —
+`oauthPendingPrefix` is a prefix, not a name: every in-flight OAuth start's pending cookie
+begins with it.
 
 ## CSRF protection
 

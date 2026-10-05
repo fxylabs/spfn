@@ -17,12 +17,15 @@ import { defineRouter, route } from '@spfn/core/route';
 
 import { KEY_ALGORITHM, SOCIAL_PROVIDERS, type SessionBindingType, type SocialProvider } from '../../types';
 import { DeviceNameSchema, PlatformSchema } from '../schema';
-import { COOKIE_NAMES, matchOAuthCsrfCookies } from '../../lib/config';
+import { buildStartCookieName, namesEvictedByStart } from '../../lib/oauth/start-cookies';
+import { providerErrorReason } from '../../../lib/oauth-error-reason';
 import { byIpAndIdToken } from '../../lib/rate-limit-keys';
 import { deviceProvenance } from '../../lib/device-provenance';
 import {
     oauthStartService,
     oauthCallbackService,
+    matchOAuthCallbackCsrf,
+    oauthErrorReason,
     oauthNativeService,
     oauthUnlinkNotifyService,
     buildOAuthErrorUrl,
@@ -42,6 +45,72 @@ const providerParams = Type.Object({
         description: 'OAuth provider id (google, github, kakao, naver, superself)',
     }),
 });
+
+/** What a provider's redirect back to a callback route carries. */
+interface CallbackQuery
+{
+    code?: string;
+    state?: string;
+    error?: string;
+    error_description?: string;
+}
+
+/**
+ * Where a provider's redirect back sends the browser — both callback routes.
+ *
+ * Every failure goes to the error URL with a `reason` code beside the text
+ * (#126), classified by the error's type.
+ */
+async function oauthCallbackRedirect(c: Context, provider: SocialProvider, query: CallbackQuery): Promise<string>
+{
+    // provider에서 에러가 반환된 경우
+    if (query.error)
+    {
+        return buildOAuthErrorUrl(query.error_description || query.error, providerErrorReason(query.error));
+    }
+
+    // code와 state 필수 확인
+    if (!query.code || !query.state)
+    {
+        return buildOAuthErrorUrl('Missing authorization code or state', 'failed');
+    }
+
+    try
+    {
+        return await completeOAuthCallback(c, provider, query.code, query.state);
+    }
+    catch (err)
+    {
+        const message = err instanceof Error ? err.message : 'OAuth callback failed';
+
+        return buildOAuthErrorUrl(message, oauthErrorReason(err));
+    }
+}
+
+/**
+ * The CSRF gate, then the sign-in.
+ *
+ * `matchOAuthCallbackCsrf` verifies the state before it reads any cookie, and
+ * picks the one CSRF cookie that state names. Only that cookie is expired, and
+ * only once its value matched — a refused callback expires nothing, so another
+ * start in flight in this browser can still finish (#126).
+ */
+async function completeOAuthCallback(c: Context, provider: SocialProvider, code: string, state: string): Promise<string>
+{
+    const csrf = await matchOAuthCallbackCsrf({ provider, state, cookies: getCookie(c) });
+
+    deleteCookie(c, csrf.name, { path: '/' });
+
+    const result = await oauthCallbackService({
+        provider,
+        code,
+        state,
+        expectedNonce: csrf.nonce,
+        ...deviceProvenance(c),
+    });
+
+    return result.redirectUrl;
+}
 
 /**
  * GET /_auth/oauth/google - Google OAuth 시작
@@ -102,46 +171,7 @@ export const oauthGoogleCallback = route.get('/_auth/oauth/google/callback')
     {
         const { query } = await c.data();
 
-        // Google에서 에러가 반환된 경우
-        if (query.error)
-        {
-            const errorMessage = query.error_description || query.error;
-
-            return c.redirect(buildOAuthErrorUrl(errorMessage));
-        }
-
-        // code와 state 필수 확인
-        if (!query.code || !query.state)
-        {
-            return c.redirect(buildOAuthErrorUrl('Missing authorization code or state'));
-        }
-
-        // 심는 프로세스(Next)와 읽는 프로세스(API)의 PORT가 달라 쿠키 이름
-        // 접미사가 어긋날 수 있으므로 spfn_oauth_csrf* 후보를 전부 대조한다.
-        const csrfCookies = matchOAuthCsrfCookies(getCookie(c.raw));
-        for (const cookie of csrfCookies)
-        {
-            deleteCookie(c.raw, cookie.name, { path: '/' });
-        }
-
-        try
-        {
-            const result = await oauthCallbackService({
-                provider: 'google',
-                code: query.code,
-                state: query.state,
-                expectedNonce: csrfCookies.map(cookie => cookie.value),
-                ...deviceProvenance(c.raw),
-            });
-
-            return c.redirect(result.redirectUrl);
-        }
-        catch (err)
-        {
-            const message = err instanceof Error ? err.message : 'OAuth callback failed';
-
-            return c.redirect(buildOAuthErrorUrl(message));
-        }
+        return c.redirect(await oauthCallbackRedirect(c.raw, 'google', query));
     });
 
 /**
@@ -191,18 +221,36 @@ export const oauthStart = route.post('/_auth/oauth/start')
 
         // CSRF: bind the flow to this browser via a cookie matched at the callback.
         const nonce = generateOAuthNonce();
-        setCookie(c.raw, COOKIE_NAMES.OAUTH_CSRF, nonce, {
-            httpOnly: true,
-            secure: process.env.NODE_ENV === 'production',
-            sameSite: 'Lax',
-            maxAge: 600,
-            path: '/',
-        });
+        setStartCsrfCookie(c.raw, body.keyId, nonce);
 
         const result = await oauthStartService({ ...body, nonce });
 
         return result;
     });
+
+/**
+ * The API-mode start's CSRF cookie, under its own per-start name (#126).
+ *
+ * The same name the proxy's start writes, built from the start's keyId, so the
+ * callback finds it the same way; a second start in another tab writes its own.
+ * The oldest start past the cap of five has its cookie expired in this response.
+ */
+function setStartCsrfCookie(c: Context, keyId: string, nonce: string): void
+{
+    const options = {
+        httpOnly: true,
+        secure: process.env.NODE_ENV === 'production',
+        sameSite: 'Lax',
+        path: '/',
+    } as const;
+
+    for (const name of namesEvictedByStart('csrf', getCookie(c)))
+    {
+        deleteCookie(c, name, options);
+    }
+
+    setCookie(c, buildStartCookieName('csrf', keyId), nonce, { ...options, maxAge: 600 });
+}
 
 /**
  * GET /_auth/oauth/providers - 활성화된 OAuth provider 목록
@@ -285,6 +333,11 @@ export interface OAuthFinalizeResponse
      */
     mfaPath?: string;
     userId?: string;
+    /**
+     * The key being finalized. On the 202 it is the key the callback named
+     * beside the challenge (#126), echoed so the proxy picks that start's
+     * pending cookie; absent when the page did not send one.
+     */
     keyId?: string;
     returnUrl: string;
     sessionBinding?: SessionBindingType;
@@ -334,13 +387,16 @@ export const oauthFinalize = route.post('/_auth/oauth/finalize')
         // from that and lets the body through, and the app page sends the person
         // to the confirm screen. The value is echoed rather than looked up: it is
         // the page's own copy, it authorizes only `POST /_auth/mfa/verify`, and
-        // this route has no session to seal around it either way.
+        // this route has no session to seal around it either way. The keyId is
+        // echoed on the same terms (#126): it names which in-flight start's
+        // pending cookie the interceptor bakes from, and authorizes nothing.
         if (body.mfaChallenge)
         {
             return c.accepted({
                 success: true,
                 mfaRequired: true,
                 challenge: body.mfaChallenge,
+                ...(body.keyId ? { keyId: body.keyId } : {}),
                 returnUrl: body.returnUrl || '/',
             });
         }
@@ -444,46 +500,7 @@ export const oauthProviderCallback = route.get('/_auth/oauth/:provider/callback'
     {
         const { params, query } = await c.data();
 
-        // provider에서 에러가 반환된 경우
-        if (query.error)
-        {
-            const errorMessage = query.error_description || query.error;
-
-            return c.redirect(buildOAuthErrorUrl(errorMessage));
-        }
-
-        // code와 state 필수 확인
-        if (!query.code || !query.state)
-        {
-            return c.redirect(buildOAuthErrorUrl('Missing authorization code or state'));
-        }
-
-        // 심는 프로세스(Next)와 읽는 프로세스(API)의 PORT가 달라 쿠키 이름
-        // 접미사가 어긋날 수 있으므로 spfn_oauth_csrf* 후보를 전부 대조한다.
-        const csrfCookies = matchOAuthCsrfCookies(getCookie(c.raw));
-        for (const cookie of csrfCookies)
-        {
-            deleteCookie(c.raw, cookie.name, { path: '/' });
-        }
-
-        try
-        {
-            const result = await oauthCallbackService({
-                provider: params.provider,
-                code: query.code,
-                state: query.state,
-                expectedNonce: csrfCookies.map(cookie => cookie.value),
-                ...deviceProvenance(c.raw),
-            });
-
-            return c.redirect(result.redirectUrl);
-        }
-        catch (err)
-        {
-            const message = err instanceof Error ? err.message : 'OAuth callback failed';
-
-            return c.redirect(buildOAuthErrorUrl(message));
-        }
+        return c.redirect(await oauthCallbackRedirect(c.raw, params.provider, query));
     });
 
 /**

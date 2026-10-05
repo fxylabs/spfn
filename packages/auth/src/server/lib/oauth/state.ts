@@ -11,6 +11,7 @@
 
 import * as jose from 'jose';
 import { env } from '@spfn/auth/config';
+import { OAuthStateExpiredError, OAuthStateInvalidError } from '@spfn/auth/errors';
 import { type KeyAlgorithmType } from '../../types';
 
 export interface OAuthState
@@ -111,14 +112,32 @@ export async function createOAuthState(params: CreateOAuthStateParams): Promise<
  *
  * @param encryptedState - 암호화된 state 문자열
  * @returns 복호화된 state 객체
- * @throws Error if state is invalid or expired (JWE exp claim으로 자동 검증)
+ * @throws OAuthStateExpiredError past the ten minutes (jose's exp check)
+ * @throws OAuthStateInvalidError for anything that does not decrypt, or decrypts
+ *   to a state without its keyId and nonce
  */
 export async function verifyOAuthState(encryptedState: string): Promise<OAuthState>
 {
     const key = await getStateKey();
 
-    const jwe = decodeURIComponent(encryptedState);
-    const { payload } = await jose.jwtDecrypt(jwe, key);
+    const { payload } = await Promise.resolve()
+        .then(() => jose.jwtDecrypt(decodeURIComponent(encryptedState), key))
+        .catch((cause: unknown) => Promise.reject(stateRefusal(cause)));
+    const state = payload.state as OAuthState | undefined;
 
-    return payload.state as OAuthState;
+    if (typeof state?.keyId !== 'string' || typeof state.nonce !== 'string')
+    {
+        throw new OAuthStateInvalidError();
+    }
+
+    return state;
+}
+
+/**
+ * The typed refusal for a state that did not decrypt — by jose's error class,
+ * never by its message, which is what used to reach the browser verbatim.
+ */
+function stateRefusal(cause: unknown): Error
+{
+    return cause instanceof jose.errors.JWTExpired ? new OAuthStateExpiredError() : new OAuthStateInvalidError();
 }

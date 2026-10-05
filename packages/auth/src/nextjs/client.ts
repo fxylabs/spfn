@@ -23,3 +23,7 @@ export {
 // The rule OAuthCallback applies before it navigates. Exported here too so a
 // page that builds its own `returnUrl` validates it with the same function.
 export { isSafeReturnPath } from '../lib/return-path';
+
+// The closed set of codes the OAuth error redirect and `OAuthCallback`'s
+// `onError` carry (#126).
+export { OAUTH_ERROR_REASONS, isOAuthErrorReason, type OAuthErrorReason } from '../lib/oauth-error-reason';

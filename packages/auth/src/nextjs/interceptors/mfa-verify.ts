@@ -13,8 +13,8 @@
  * nobody asked for. Its response phase already returns early on any non-200, so
  * the 202 passes through it untouched and nothing in that file changes.
  *
- * The pending cookie is its own name and its own audience, separate from
- * `OAUTH_PENDING`. The two coexist: a person who starts a social login in one tab
+ * The pending cookie is its own name and its own audience, separate from the
+ * OAuth pending cookies. They coexist: a person who starts a social login in one tab
  * while a step-up is outstanding in another has both live, and one name would
  * mean the second overwrote the first — sealing a session with a private key
  * that does not match the key the verification activated.
@@ -33,6 +33,7 @@ import { SessionPendingExpiredError, SessionPendingMismatchError } from '@spfn/a
 import { hashCredential } from '../../server/lib/link-credentials';
 import { sealSession } from '../../server/lib/session';
 import { COOKIE_NAMES, getSessionTtl } from '../../server/lib/config';
+import { pendingCookieFor } from '../../server/lib/oauth/start-cookies';
 import { authLogger } from '../../server/logger';
 import {
     sealPendingMfaSession,
@@ -89,8 +90,8 @@ function challengeSecretOf(body: unknown): string | undefined
  * a moment ago, so the pair it minted is in shared metadata, under the `new`
  * names that rule reserves for the credentials it is installing (#99). The OAuth
  * page flow has no such request phase — its key was minted at
- * `oauth/{provider}/url` and sealed into `OAUTH_PENDING` — so that cookie is the
- * fallback.
+ * `oauth/{provider}/url` and sealed into that start's pending cookie — so that
+ * cookie is the fallback.
  */
 async function pendingKeyFor(ctx: ResponseInterceptorContext): Promise<PendingSessionData | null>
 {
@@ -103,9 +104,24 @@ async function pendingKeyFor(ctx: ResponseInterceptorContext): Promise<PendingSe
         };
     }
 
-    const oauthPending = ctx.cookies.get(COOKIE_NAMES.OAUTH_PENDING);
+    return await oauthPendingKeyFor(ctx);
+}
 
-    return oauthPending ? await unsealPendingSession(oauthPending) : null;
+/**
+ * The OAuth start the 202 names, by the `keyId` its body carries (#126).
+ *
+ * Several starts can be in flight, so the cookie is picked by that key and never
+ * by position; a legacy fixed-name cookie counts only when it holds that key. No
+ * keyId, or no cookie for it, bakes nothing — the confirm page then meets the
+ * expired answer, as it did when the pending cookie was missing.
+ */
+async function oauthPendingKeyFor(ctx: ResponseInterceptorContext): Promise<PendingSessionData | null>
+{
+    const keyId = (ctx.response.body as { keyId?: unknown } | null)?.keyId;
+    const cookie = typeof keyId === 'string' ? pendingCookieFor(ctx.cookies, keyId) : undefined;
+    const pending = cookie ? await unsealPendingSession(cookie.value) : null;
+
+    return pending?.keyId === keyId ? pending : null;
 }
 
 /**

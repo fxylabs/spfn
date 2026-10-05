@@ -12,12 +12,14 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
 // The handler reads the pending-session cookie through next/headers; the sealed
-// value is produced by the real sealer below, so unsealing runs for real.
-const pendingCookie = { value: '' };
+// value is produced by the real sealer below, so unsealing runs for real. The jar
+// holds it under the start's own per-start name (#126), so the handler has to
+// find it by the callback's keyId rather than by a fixed name.
+const pendingCookie = { name: '', value: '' };
 
 vi.mock('next/headers.js', () => ({
     cookies: async () => ({
-        get: (name: string) => (name.startsWith('spfn_oauth_pending') ? { name, value: pendingCookie.value } : undefined),
+        getAll: () => (pendingCookie.value ? [{ name: pendingCookie.name, value: pendingCookie.value }] : []),
     }),
 }));
 
@@ -27,6 +29,7 @@ import { createOAuthCallbackHandler } from '../../nextjs/oauth-handlers';
 import { sealPendingSession } from '../../nextjs/session-helpers';
 import { unsealSession, type SessionData } from '../../server/lib/session';
 import { generateKeyPair } from '../../server/lib/crypto';
+import { buildStartCookieName } from '../../server/lib/oauth/start-cookies';
 
 const APP = 'https://app.example';
 const DEFAULT_REDIRECT = '/after-login';
@@ -41,6 +44,7 @@ describe('createOAuthCallbackHandler - returnUrl', () =>
 
         const keyPair = generateKeyPair('ES256');
         keyId = keyPair.keyId;
+        pendingCookie.name = buildStartCookieName('pending', keyPair.keyId);
         pendingCookie.value = await sealPendingSession({
             privateKey: keyPair.privateKey,
             keyId: keyPair.keyId,
@@ -144,6 +148,7 @@ describe('createOAuthCallbackHandler - the session binding fields', () =>
 
         const keyPair = generateKeyPair('ES256');
         keyId = keyPair.keyId;
+        pendingCookie.name = buildStartCookieName('pending', keyPair.keyId);
         pendingCookie.value = await sealPendingSession({
             privateKey: keyPair.privateKey,
             keyId: keyPair.keyId,

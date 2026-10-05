@@ -18,12 +18,12 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import type { ResponseInterceptorContext } from '@spfn/core/nextjs/server';
 import type { SetCookie } from '@spfn/core/nextjs';
 
-const pendingOAuthCookie = { value: '' };
+// The pending cookie sits under its start's own per-start name (#126).
+const pendingOAuthCookie = { name: '', value: '' };
 
 vi.mock('next/headers.js', () => ({
     cookies: async () => ({
-        get: (name: string) =>
-            (name.startsWith('spfn_oauth_pending') ? { name, value: pendingOAuthCookie.value } : undefined),
+        getAll: () => (pendingOAuthCookie.value ? [{ name: pendingOAuthCookie.name, value: pendingOAuthCookie.value }] : []),
     }),
 }));
 
@@ -40,6 +40,7 @@ import { unsealSession, type SessionData } from '../../server/lib/session';
 import { hashCredential } from '../../server/lib/link-credentials';
 import { generateKeyPair } from '../../server/lib/crypto';
 import { COOKIE_NAMES } from '../../server/lib/config';
+import { buildStartCookieName, parseStartCookieName, startCookieId } from '../../server/lib/oauth/start-cookies';
 import { authErrorRegistry, SessionPendingMismatchError } from '../../errors';
 import { routeMap } from '../../generated/route-map';
 
@@ -264,15 +265,18 @@ describe('the proxy and a second-factor step-up (case table 6e)', () =>
 
         await mfaVerifyInterceptor.response?.(stepUp, next);
 
+        const oauthKey = mintedKey();
         const oauth = responseContext('/_auth/oauth/google/url', 200, { authUrl: 'https://provider.example/auth' }, {
-            metadata: { pendingSession: mintedKey() },
+            metadata: { pendingSession: oauthKey },
         });
 
         await oauthUrlInterceptor.response?.(oauth, next);
 
         const mfaPending = cookieNamed(stepUp.setCookies, COOKIE_NAMES.MFA_PENDING)!;
-        const oauthPending = cookieNamed(oauth.setCookies, COOKIE_NAMES.OAUTH_PENDING)!;
+        // The OAuth start's pending cookie is named for its own start (#126).
+        const oauthPending = oauth.setCookies.find(cookie => parseStartCookieName('pending', cookie.name))!;
 
+        expect(parseStartCookieName('pending', oauthPending.name)?.id).toBe(startCookieId(oauthKey.keyId as string));
         expect(mfaPending.name).not.toBe(oauthPending.name);
 
         // Separate audiences and separate derived keys, so neither opens as the
@@ -285,6 +289,7 @@ describe('the proxy and a second-factor step-up (case table 6e)', () =>
     it('row: the callback carries mfaChallenge — the handler redirects to the mfa page, keeping the pending cookie', async () =>
     {
         const keyPair = generateKeyPair('ES256');
+        pendingOAuthCookie.name = buildStartCookieName('pending', keyPair.keyId);
         pendingOAuthCookie.value = await sealPendingSession({
             privateKey: keyPair.privateKey,
             keyId: keyPair.keyId,
@@ -311,15 +316,18 @@ describe('the proxy and a second-factor step-up (case table 6e)', () =>
     it('row: oauthFinalize answers 202 for an mfaChallenge — passed through unsealed, and the pending cookie is baked', async () =>
     {
         const key = mintedKey();
-        const cookies = new Map([[COOKIE_NAMES.OAUTH_PENDING, await sealPendingSession({
+        const cookies = new Map([[buildStartCookieName('pending', key.keyId as string), await sealPendingSession({
             privateKey: key.privateKey as string,
             keyId: key.keyId as string,
             algorithm: key.algorithm as 'ES256',
         })]]);
+        // The 202 echoes the keyId the callback named (#126); the proxy picks
+        // that start's pending cookie by it.
         const ctx = responseContext('/_auth/oauth/finalize', 202, {
             success: true,
             mfaRequired: true,
             challenge: CHALLENGE,
+            keyId: key.keyId,
             returnUrl: '/',
         }, { cookies });
 

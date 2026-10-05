@@ -23,6 +23,7 @@
 import { useEffect, useRef, useState } from 'react';
 
 import { runOAuthCallback } from './oauth-callback-flow';
+import type { OAuthErrorReason } from '../../lib/oauth-error-reason';
 
 export interface OAuthCallbackProps
 {
@@ -52,7 +53,7 @@ export interface OAuthCallbackProps
     /**
      * Custom error component
      */
-    errorComponent?: (error: string) => React.ReactNode;
+    errorComponent?: (error: string, reason: OAuthErrorReason) => React.ReactNode;
 
     /**
      * Callback after successful OAuth. Not called on the way to the confirm page:
@@ -61,9 +62,11 @@ export interface OAuthCallbackProps
     onSuccess?: (userId: string) => void;
 
     /**
-     * Callback on error
+     * Callback on error. `reason` is a closed code (#126) a page can branch on:
+     * the backend's when the callback query carried one, `expired` or
+     * `invalid_state` for a refused finalize, `failed` otherwise.
      */
-    onError?: (error: string) => void;
+    onError?: (error: string, reason: OAuthErrorReason) => void;
 }
 
 export function OAuthCallback({
@@ -75,7 +78,7 @@ export function OAuthCallback({
     onError,
 }: OAuthCallbackProps)
 {
-    const [error, setError] = useState<string | null>(null);
+    const [error, setError] = useState<{ message: string; reason: OAuthErrorReason } | null>(null);
 
     // One finalize per page load. React strict mode runs this effect twice in
     // development, and a parent passing inline callbacks re-runs it on every
@@ -96,8 +99,8 @@ export function OAuthCallback({
             {
                 if (outcome.kind === 'error')
                 {
-                    setError(outcome.message);
-                    onError?.(outcome.message);
+                    setError({ message: outcome.message, reason: outcome.reason });
+                    onError?.(outcome.message, outcome.reason);
 
                     return;
                 }
@@ -117,13 +120,13 @@ export function OAuthCallback({
     {
         if (errorComponent)
         {
-            return <>{errorComponent(error)}</>;
+            return <>{errorComponent(error.message, error.reason)}</>;
         }
 
         return (
             <div style={{ padding: '20px', textAlign: 'center' }}>
                 <h2>Authentication Error</h2>
-                <p style={{ color: 'red' }}>{error}</p>
+                <p style={{ color: 'red' }}>{error.message}</p>
                 <button onClick={() => window.location.href = '/'}>
                     Go Home
                 </button>

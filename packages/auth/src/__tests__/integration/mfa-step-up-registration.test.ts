@@ -25,6 +25,7 @@ import { hashPassword } from '@/server/helpers/password';
 import { generateKeyPair, generateClientToken } from '@/server/lib/crypto';
 import { decodeBase32, hotp, totpStep } from '@/server/lib/totp';
 import { createOAuthState } from '@/server/lib/oauth/state';
+import { buildStartCookieName } from '@/server/lib/oauth/start-cookies';
 import { registerOAuthProvider, type OAuthProvider } from '@/server/lib/oauth';
 import { authDeviceRegisteredEvent, authLoginEvent, authRegisterEvent } from '@/server/events';
 import { authenticate } from '@/server/middleware/authenticate';
@@ -244,7 +245,8 @@ describe.skipIf(!dbAvailable)('new-device step-up (case table 6b)', () =>
         });
 
         return await app.request(`/_auth/oauth/${PROVIDER}/callback?code=x&state=${encodeURIComponent(state)}`, {
-            headers: { Cookie: `spfn_oauth_csrf=${nonce}` },
+            // The CSRF cookie under the start's own per-start name (#126).
+            headers: { Cookie: `${buildStartCookieName('csrf', keyPair.keyId)}=${nonce}` },
         });
     }
 
@@ -390,7 +392,9 @@ describe.skipIf(!dbAvailable)('new-device step-up (case table 6b)', () =>
         expect(response.status).toBe(302);
         expect(location.searchParams.get('mfaChallenge')).toBeTruthy();
         expect(location.searchParams.get('userId')).toBeNull();
-        expect(location.searchParams.get('keyId')).toBeNull();
+        // The keyId rides along (#126): it names the start whose pending cookie
+        // the proxy bakes the second-factor cookie from. Not a session — no userId.
+        expect(location.searchParams.get('keyId')).toBe(keyPair.keyId);
 
         await settle();
 
