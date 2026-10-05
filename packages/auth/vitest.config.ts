@@ -30,6 +30,17 @@ export default defineConfig(
             // Timeout for integration tests
             testTimeout: 30000,
 
+            // bcrypt at the production cost of 12 is ~265 ms a hash, and an
+            // integration test seeds users, logs in and may hash ten recovery
+            // codes — about 2 s a test spent on nothing it asserts. Cost 4 is
+            // bcrypt's minimum. The env proxy reads on every access, so
+            // unit/password.test.ts removes this for itself and keeps proving
+            // the production default.
+            env:
+            {
+                SPFN_AUTH_BCRYPT_SALT_ROUNDS: '4',
+            },
+
             // Coverage configuration
             coverage:
             {

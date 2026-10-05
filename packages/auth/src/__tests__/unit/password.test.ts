@@ -4,12 +4,25 @@
  * Tests for bcrypt password hashing, verification, and strength validation
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, beforeAll, afterAll } from 'vitest';
 import {
     hashPassword,
     verifyPassword,
     validatePasswordStrength,
 } from '@/server/helpers/password';
+import { authEnvSchema } from '@/config/schema';
+
+// vitest.config.ts lowers the cost for the suite; this file is about the
+// production cost itself, so it hashes at the schema's default.
+beforeAll(() =>
+{
+    vi.stubEnv('SPFN_AUTH_BCRYPT_SALT_ROUNDS', undefined);
+});
+
+afterAll(() =>
+{
+    vi.unstubAllEnvs();
+});
 
 describe('Password - Hashing', () =>
 {
@@ -40,6 +53,8 @@ describe('Password - Hashing', () =>
 
     it('should use default 12 salt rounds', async () =>
     {
+        expect(authEnvSchema.SPFN_AUTH_BCRYPT_SALT_ROUNDS.default).toBe(12);
+
         const hash = await hashPassword('test123');
         expect(hash).toMatch(/^\$2[aby]\$12\$/); // Default: 12 rounds
     });
