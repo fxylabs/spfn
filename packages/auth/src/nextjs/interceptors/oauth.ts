@@ -173,9 +173,16 @@ export const oauthUrlInterceptor: InterceptorRule = {
 
 /**
  * Finalize 실패 시 에러 응답 설정 + pending 쿠키 정리
+ *
+ * The 401 is this rule's own answer, not the backend's, and `proxyWroteError`
+ * says so to the rules after it. `generalAuthInterceptor` expires the session on
+ * a 401 because a backend 401 means the key was refused; a finalize that failed
+ * here says nothing about the session the browser already holds, so the flag is
+ * what keeps that session in place.
  */
 function setFinalizeError(ctx: ResponseInterceptorContext, message: string): void
 {
+    ctx.metadata.proxyWroteError = true;
     ctx.response.ok = false;
     ctx.response.status = 401;
     ctx.response.statusText = 'Unauthorized';
@@ -192,6 +199,51 @@ function setFinalizeError(ctx: ResponseInterceptorContext, message: string): voi
             path: '/',
         },
     });
+}
+
+/**
+ * Whether a finalize repeats the one that installed the browser's current session.
+ *
+ * The first finalize clears the pending cookie, so a reload of the callback page
+ * posts the same `userId`/`keyId` again with no pending cookie and the session it
+ * sealed. The backend route keeps no state and answers 200 again; the session's
+ * key id matching the body's is what makes this the same sign-in rather than a
+ * different one. Both are server-issued ids, not secrets, so plain equality.
+ *
+ * The body's `userId` is only required to be present, never compared or used:
+ * it is a UI convenience (see the SECURITY note on the oauthFinalize route), and
+ * the repeat writes nothing, so nothing is taken on trust from it.
+ */
+function repeatsCurrentSession(ctx: ResponseInterceptorContext): boolean
+{
+    const { userId, keyId } = ctx.response.body || {};
+
+    return Boolean(userId && keyId)
+        && ctx.metadata.sessionValid === true
+        && ctx.metadata.keyId === keyId;
+}
+
+/**
+ * A backend success with no pending cookie: a repeat, or a finalize that cannot complete.
+ *
+ * A repeat is answered with the backend's success, unchanged, and writes no
+ * cookie — there is no private key to seal with (the pending cookie is gone)
+ * and none is needed: the session it would seal is the one already installed.
+ * Anything else is refused without touching the session the browser holds.
+ */
+function answerWithoutPendingCookie(ctx: ResponseInterceptorContext): void
+{
+    if (repeatsCurrentSession(ctx))
+    {
+        authLogger.interceptor.oauth?.debug?.('Repeated finalize for the current session, answered unchanged', {
+            keyId: ctx.metadata.keyId,
+        });
+
+        return;
+    }
+
+    authLogger.interceptor.oauth?.warn?.('No pending session cookie found');
+    setFinalizeError(ctx, 'OAuth session expired. Please try again.');
 }
 
 /**
@@ -225,8 +277,7 @@ export const oauthFinalizeInterceptor: InterceptorRule = {
         const pendingCookie = ctx.cookies.get(COOKIE_NAMES.OAUTH_PENDING);
         if (!pendingCookie)
         {
-            authLogger.interceptor.oauth?.warn?.('No pending session cookie found');
-            setFinalizeError(ctx, 'OAuth session expired. Please try again.');
+            answerWithoutPendingCookie(ctx);
             await next();
 
             return;

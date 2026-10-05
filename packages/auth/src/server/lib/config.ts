@@ -280,10 +280,11 @@ export interface AuthConfig
 
 /**
  * Global auth configuration state
+ *
+ * Starts empty. A `sessionTtl` set here would answer before the environment
+ * variable is ever read, so the seven-day default lives in `getSessionTtl` alone.
  */
-let globalConfig: AuthConfig = {
-    sessionTtl: '7d', // Default: 7 days
-};
+let globalConfig: AuthConfig = {};
 
 /**
  * Configure global auth settings
@@ -343,6 +344,9 @@ export async function runBeforeRegister(context: BeforeRegisterContext): Promise
  * 2. Global config (configureAuth)
  * 3. Environment variable (SPFN_AUTH_SESSION_TTL) - via config module
  * 4. Default (7 days)
+ *
+ * A malformed value at whichever level answers throws (see `parseDuration`);
+ * it is not skipped in favour of the next level.
  */
 export function getSessionTtl(override?: string | number): number
 {

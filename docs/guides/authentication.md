@@ -695,6 +695,13 @@ never seen, step 3 carries `?mfaChallenge=…` instead of `userId` and `keyId`, 
 exists until that challenge is spent. `OAuthCallback` posts it to `/_auth/oauth/finalize`,
 which answers 202 and hands it back for your confirm screen.
 
+A repeated finalize — a reload of the callback page after step 4 — is answered with success and
+never ends a session: with the pending cookie gone and the browser's session already on the key
+being finalized, the proxy passes the 200 through and writes no cookie. A finalize the proxy
+refuses answers 401 and leaves the existing session in place; only a 401 from the backend
+itself signs the browser out. `OAuthCallback` also sends the CSRF header when the browser
+holds the CSRF cookie, so signing in again under `SPFN_AUTH_CSRF=enforce` is not refused.
+
 The `state` in step 1 is produced by the Next.js interceptor (it generates the key pair and
 seals it into the state), so start the flow through `authApi.getGoogleOAuthUrl` rather than
 linking to `/_auth/oauth/google` directly.
@@ -1089,6 +1096,10 @@ SPFN_AUTH_SESSION_TTL=7d    # 7 days (default)
 SPFN_AUTH_SESSION_TTL=30d   # 30 days
 SPFN_AUTH_SESSION_TTL=12h   # 12 hours
 ```
+
+The lifetime is the first of these that is set: a per-call override (the `remember` value a
+login posts), `configureAuth({ sessionTtl })`, `SPFN_AUTH_SESSION_TTL`, and otherwise seven
+days. A malformed value at the level that answers throws rather than falling through.
 
 ### Session binding
 

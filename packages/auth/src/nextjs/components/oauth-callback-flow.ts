@@ -16,6 +16,7 @@
  * challenge: it is the one value on this page that can finish someone's sign-in.
  */
 
+import { CSRF_HEADER, csrfHeaderValue, documentCookieEntries } from '@spfn/core/nextjs';
 import { isSafeReturnPath, toSafeReturnPath } from '../../lib/return-path';
 
 /** Where the second-factor page lives when nothing says otherwise. */
@@ -183,13 +184,28 @@ async function finishWithChallenge(
     return { kind: 'navigate', to: mfaConfirmUrl(mfaPath, input.mfaChallenge, data.returnUrl || input.returnUrl) };
 }
 
+/**
+ * Post the callback's answer to `oauthFinalize`.
+ *
+ * The readable CSRF cookie is mirrored into its header the way the RPC client
+ * does for every other call. A browser that is already signed in holds one, and
+ * under `SPFN_AUTH_CSRF=enforce` the proxy refuses that session's finalize
+ * without it — signing in again, or as another account, would stop at a 403. No
+ * cookie, no header: a browser with no session has nothing to check.
+ */
 async function postFinalize(options: CallbackOptions, body: Record<string, string>): Promise<Response>
 {
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    const csrf = csrfHeaderValue(documentCookieEntries());
+
+    if (csrf)
+    {
+        headers[CSRF_HEADER] = csrf;
+    }
+
     return await options.fetch(`${options.apiBasePath}/oauthFinalize`, {
         method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-        },
+        headers,
         credentials: 'include',
         body: JSON.stringify({ body }),
     });
