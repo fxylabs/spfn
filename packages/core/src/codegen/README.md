@@ -264,7 +264,8 @@ export type RouteName = keyof RouteMap;
 
 ## Built-in: `@spfn/core:contract`
 
-Writes `contracts/current.json` — every route carrying `.contract()` — and on a **build** compares
+Writes `contracts/current.json` — every route carrying `.contract()`, and with `eventRouterPath`
+every SSE event carrying `.contract()` — and on a **build** compares
 it against the newest released snapshot, refusing changes that would break a client already in the
 field. Full behaviour lives in [`../contract/README.md`](../contract/README.md); this section is the
 generator's own surface.
@@ -276,6 +277,8 @@ generator's own surface.
 | `name` | `'@spfn/core:contract'` | yes | — | Generator identifier (literal). |
 | `routerPath` | `string` | yes | — | Router file, relative to project root. Throws at construction if missing. |
 | `routerExport` | `string` | no | `appRouter` → `default` → `router` | Export holding the `defineRouter()` result. |
+| `eventRouterPath` | `string` | no | — | Event router file, relative to project root. Loaded like the router (same `NODE_ENV` pin, same tsconfig aliases) and watched; its contracted events become the document's `events` section. Unset → no section. |
+| `eventRouterExport` | `string` | no | `eventRouter` → `default` | Export holding the `defineEventRouter()` result. |
 | `outputDir` | `string` | no | `'./contracts'` | Holds `current.json`, `released/`, `usage/`. |
 | `additionalRouteDirs` | `string[]` | no | `[]` | Extra route dirs to watch. |
 
@@ -298,12 +301,18 @@ costs a module import and no infrastructure — `@spfn/auth`'s 43 routes load in
 - The router file is missing, or the module will not load (it names the module and the cause —
   it never skips quietly).
 - No router export is found under the configured or default names.
+- `eventRouterPath` is set and the file is missing, or holds no event router (an object with
+  `events` and `eventNames`) under the configured or default names — the message names the
+  candidates it tried.
+- The event router contracts events without a router-level `.contract()`, or a contracted event
+  has no payload schema, no `since`, or the reserved key `connected` / `ping`.
 - Two contracted routes share a name, or a contracted route has no method, path, `since` or
   `response`.
 - The router the generator was pointed at contains a conditional spread
   (`...(flag ? { route } : {})`), which would make the contract describe whichever way the
   generator happened to run. Same guard as `route-map` — see its bullet for exactly what is
-  scanned and what is allowed.
+  scanned and what is allowed. The event router file gets the same scan for
+  `defineEventRouter({ ...(flag ? { event } : {}) })`.
 - On the `build` trigger only: the contract breaks the newest released snapshot.
 
 `spfn dev` generates but never refuses — being unable to hold a half-finished route mid-edit would

@@ -60,6 +60,7 @@ export { defineEventRouter } from './router';
 // WebSocket router
 export { defineWSRouter } from './ws';
 export type {
+    EventRouterContract,
     EventRouterDef,
     InferEventNames,
     InferEventPayload as InferRouterEventPayload,
@@ -68,6 +69,7 @@ export type {
 
 // Types
 export type {
+    EventContract,
     EventDef,
     EventHandler,
     InferEventPayload,

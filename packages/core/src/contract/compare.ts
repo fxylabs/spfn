@@ -18,14 +18,21 @@
  * | required → optional     | pass    | refuse   |
  * | optional → required     | refuse  | pass     |
  * | type changed            | refuse  | refuse   |
+ *
+ * An event payload flows server → client like a response, so it is compared
+ * under the response rules by the same walk, and only the violation kinds are
+ * renamed.
  */
 
 import { stableStringify } from './stable-json';
 import type {
     ContractDocument,
+    ContractEvent,
+    ContractEvents,
     ContractOperation,
     ContractRequest,
     ContractViolation,
+    ContractViolationKind,
     JsonSchema,
 } from './types';
 
@@ -43,6 +50,12 @@ export interface DocumentComparison
      * whether any released app still calls it, which is a separate check.
      */
     removedOperations: string[];
+
+    /**
+     * Events present in the baseline and gone from the current contract —
+     * decided against usage files exactly as a removed operation is.
+     */
+    removedEvents: string[];
 }
 
 const REQUEST_SECTIONS = ['params', 'query', 'body', 'formData', 'headers', 'cookies'] as const;
@@ -293,11 +306,93 @@ export function compareOperation(before: ContractOperation, after: ContractOpera
     return violations;
 }
 
+/** What a response-side violation is called when the schema is an event payload. */
+const PAYLOAD_KINDS: Partial<Record<ContractViolationKind, ContractViolationKind>> = {
+    'response.field-removed': 'event.payload.field-removed',
+    'response.field-became-optional': 'event.payload.field-became-optional',
+    'response.type-changed': 'event.payload.type-changed',
+};
+
+/** Compare one event that exists on both sides, under the response rules. */
+function compareEvent(before: ContractEvent, after: ContractEvent): ContractViolation[]
+{
+    const found: ContractViolation[] = [];
+
+    compareSchema(before.payload, after.payload, 'payload', { operation: before.name, side: 'response', violations: found });
+
+    return found.map(({ kind, operation, ...rest }) => ({ ...rest, kind: PAYLOAD_KINDS[kind] ?? kind, event: operation }));
+}
+
+/** A stream path or auth mode that moved breaks every released subscriber at once. */
+function compareStream(before: ContractEvents, after: ContractEvents): ContractViolation[]
+{
+    const violations: ContractViolation[] = [];
+
+    if (before.streamPath !== after.streamPath)
+    {
+        violations.push({
+            kind: 'events.stream-path-changed',
+            detail: `stream path moved ${before.streamPath} → ${after.streamPath}; released clients open the old one`,
+        });
+    }
+
+    if (before.auth !== after.auth)
+    {
+        violations.push({
+            kind: 'events.auth-changed',
+            detail: `stream auth changed ${before.auth} → ${after.auth}; released clients connect the old way`,
+        });
+    }
+
+    return violations;
+}
+
+/**
+ * Compare the events sections.
+ *
+ * A baseline without one promised no events, so nothing in `after` can break
+ * it. A current document without one removed every event the baseline had.
+ */
+function compareEvents(
+    before: ContractEvents | undefined,
+    after: ContractEvents | undefined,
+): Pick<DocumentComparison, 'violations' | 'removedEvents'>
+{
+    if (!before)
+    {
+        return { violations: [], removedEvents: [] };
+    }
+
+    if (!after)
+    {
+        return { violations: [], removedEvents: before.items.map(item => item.name) };
+    }
+
+    const current = new Map(after.items.map(item => [item.name, item]));
+    const violations = compareStream(before, after);
+    const removedEvents: string[] = [];
+
+    for (const item of before.items)
+    {
+        const now = current.get(item.name);
+
+        if (!now)
+        {
+            removedEvents.push(item.name);
+            continue;
+        }
+
+        violations.push(...compareEvent(item, now));
+    }
+
+    return { violations, removedEvents };
+}
+
 /**
  * Compare a released contract against the one this build produced.
  *
- * Operations that are new in `after` need no check — nothing has been promised
- * about them yet.
+ * Operations and events that are new in `after` need no check — nothing has
+ * been promised about them yet.
  */
 export function compareDocuments(before: ContractDocument, after: ContractDocument): DocumentComparison
 {
@@ -318,5 +413,11 @@ export function compareDocuments(before: ContractDocument, after: ContractDocume
         violations.push(...compareOperation(operation, now));
     }
 
-    return { violations, removedOperations };
+    const events = compareEvents(before.events, after.events);
+
+    return {
+        violations: [...violations, ...events.violations],
+        removedOperations,
+        removedEvents: events.removedEvents,
+    };
 }

@@ -19,6 +19,7 @@
  *         defineGenerator({
  *             name: '@spfn/core:contract',
  *             routerPath: './src/server/router.ts',
+ *             eventRouterPath: './src/server/events.ts',   // optional: contracted SSE events
  *             outputDir: './contracts',
  *         })
  *     ]
@@ -35,6 +36,7 @@ import {
     formatViolations,
     writeCurrentDocument,
 } from '@spfn/core/contract';
+import type { EventRouterDef } from '@spfn/core/event';
 import type { Generator, GeneratorOptions } from '../core/generator';
 import { assertUnconditionalRegistration } from './contract-guard';
 import { loadRouterModule, pinNodeEnv, resolveRouterExport, type ResolvedRouter } from './router-module';
@@ -59,6 +61,20 @@ export interface ContractGeneratorConfig
      * @default 'appRouter', falling back to the default export
      */
     routerExport?: string;
+
+    /**
+     * Path to the file exporting the `defineEventRouter()` result (relative to
+     * project root). When set, its contracted events are written into the
+     * document's `events` section; unset, the document has none.
+     * @example './src/server/events.ts'
+     */
+    eventRouterPath?: string;
+
+    /**
+     * Named export holding the event router.
+     * @default 'eventRouter', falling back to the default export
+     */
+    eventRouterExport?: string;
 
     /**
      * Directory holding current.json, released/ and usage/ (relative to project root)
@@ -109,11 +125,93 @@ function loadRouter(cwd: string, absoluteRouterPath: string, routerExport?: stri
     );
 }
 
+function isEventRouter(value: unknown): value is EventRouterDef<any>
+{
+    return value !== null
+        && typeof value === 'object'
+        && 'events' in value
+        && 'eventNames' in value;
+}
+
+interface ResolvedEventRouter
+{
+    eventRouter: EventRouterDef<any>;
+
+    /** The export it was found under, which the registration guard reads. */
+    exportName: string;
+}
+
+/**
+ * Load the event router through the same loader as the route router: the same
+ * `NODE_ENV` pin, the same tsconfig aliases.
+ */
+function loadEventRouter(cwd: string, absolutePath: string, eventRouterExport?: string): ResolvedEventRouter
+{
+    const module = loadRouterModule({
+        cwd,
+        absoluteRouterPath: absolutePath,
+        subject: 'contract',
+        fail: message => new ContractGeneratorError(message),
+    });
+
+    const candidates = eventRouterExport ? [eventRouterExport] : ['eventRouter', 'default'];
+    const exportName = candidates.find(candidate => isEventRouter(module[candidate]));
+
+    if (exportName)
+    {
+        return { eventRouter: module[exportName] as EventRouterDef<any>, exportName };
+    }
+
+    throw new ContractGeneratorError(
+        `No event router found in ${relative(cwd, absolutePath)}. `
+        + `Looked for: ${candidates.join(', ')}. `
+        + 'Set "eventRouterExport" to the export holding the defineEventRouter() result.',
+    );
+}
+
+/**
+ * The event router `eventRouterPath` names, or `undefined` when it is unset.
+ *
+ * Its source is scanned like the route router's: an event registered behind a
+ * flag would make the published event set depend on how the generator ran.
+ */
+function readEventRouter(cwd: string, eventRouterPath?: string, eventRouterExport?: string): EventRouterDef<any> | undefined
+{
+    if (!eventRouterPath)
+    {
+        return undefined;
+    }
+
+    const absolutePath = join(cwd, eventRouterPath);
+
+    if (!existsSync(absolutePath))
+    {
+        throw new ContractGeneratorError(
+            `Event router file not found: ${eventRouterPath}. `
+            + 'The contract generator is configured with "eventRouterPath" but has nothing to read there.',
+        );
+    }
+
+    const { eventRouter, exportName } = loadEventRouter(cwd, absolutePath, eventRouterExport);
+
+    assertUnconditionalRegistration({
+        routerPath: eventRouterPath,
+        source: readFileSync(absolutePath, 'utf-8'),
+        exportName,
+        subject: 'contract',
+        factory: 'defineEventRouter',
+    });
+
+    return eventRouter;
+}
+
 export function createContractGenerator(config: ContractGeneratorConfig): Generator
 {
     const {
         routerPath,
         routerExport,
+        eventRouterPath,
+        eventRouterExport,
         outputDir = './contracts',
         additionalRouteDirs = [],
     } = config;
@@ -135,6 +233,7 @@ export function createContractGenerator(config: ContractGeneratorConfig): Genera
 
         watchPatterns: [
             routerPath,
+            ...(eventRouterPath ? [eventRouterPath] : []),
             'src/server/routes/**/*.ts',
             ...additionalRouteDirs.map(dir => `${dir}/**/*.ts`),
         ],
@@ -168,7 +267,7 @@ export function createContractGenerator(config: ContractGeneratorConfig): Genera
                 subject: 'contract',
             });
 
-            const document = collectContractDocument(router);
+            const document = collectContractDocument(router, readEventRouter(cwd, eventRouterPath, eventRouterExport));
 
             const changed = writeCurrentDocument(contractsDir, document);
             genLogger.info(

@@ -42,7 +42,11 @@ From `@spfn/core/event`:
 - `defineEventRouter(events)` — group events for SSE
 - `defineWSRouter({ events, messages? })` — group events + message handlers for WebSocket
 - `eventRouteMap` — `{ eventsToken: { method: 'POST', path: '/events/token' } }` (merge into RPC proxy)
+- `.contract({ since, deprecatedIn?, removedIn? })` on an event and `.contract({ auth, streamPath? })`
+  on an event router — publish the event in `contracts/current.json` (see
+  [Contracted events](#contracted-events-for-separately-compiled-clients))
 - Types: `EventDef`, `EventHandler`, `InferEventPayload`, `PubSubCache`, `JobQueueSender`,
+  `EventContract`, `EventRouterContract`,
   `EventRouterDef`, `InferEventNames`, `InferEventPayloads`,
   `InferRouterEventPayload` (the two-arg router variant — see note)
 
@@ -128,6 +132,7 @@ Promise<void>` otherwise. Handlers run via `Promise.allSettled` — see
 | `unsubscribeAll()` | `() => void` | drop all in-memory handlers |
 | `emit(payload?)` | `Promise<void>` | fan-out to handlers (or cache) + job queues |
 | `useCache(cache)` | `(PubSubCache) => Promise<EventDef>` | enable cross-instance broadcast (must `await`) |
+| `contract(contract)` | `(EventContract) => EventDef` | publish in the contract; returns the same event; a second call throws |
 
 > `_registerJobQueue` and `_payload` exist on the interface but are **internal** —
 > `_registerJobQueue` is called by `@spfn/core/job` when a job does `.on(event)`; `_payload`
@@ -203,6 +208,42 @@ SSEAuthConfig<TRouter> }`. The `auth` field is the **generic** `SSEAuthConfig<TR
 > `SSEHandlerConfig` also declares a `headers` field, but the current handler only reads
 > `pingInterval`, `auth`, and `maxQueue`. Setting custom `headers` here is a no-op — set
 > response headers in middleware instead.
+
+### Contracted events (for separately compiled clients)
+
+A web client takes its event names and payload types from `typeof eventRouter`. A native app
+cannot, so it hand-writes both — and they break at runtime. Declaring `.contract()` puts the
+events into `contracts/current.json`, where the contract gate refuses a breaking change at build:
+
+```typescript
+export const sessionActivity = defineEvent('session.activity', Type.Object({
+    sessionId: Type.String(),
+})).contract({ since: '1.0.0' });            // deprecatedIn?, removedIn? as on routes
+
+export const eventRouter = defineEventRouter({ sessionActivity, userCreated })
+    .contract({ auth: 'tokenExchange' });     // streamPath?: string, default '/events/stream'
+```
+
+- Only events carrying `.contract()` are published (`userCreated` above is not). The published
+  name is the **router key** (`sessionActivity`), the name on the wire — not `'session.activity'`.
+- `.contract()` on an event returns the same event and may be called once; a second call throws.
+- The router's `auth` is required: `'tokenExchange'` when `.events()` enables `auth`, else
+  `'none'`. A `streamPath` not starting with `/` throws where it is declared.
+- Point the contract generator at the file with `eventRouterPath` — see
+  [the contract README](../contract/README.md#events).
+
+**Boot check.** When the event router declares `.contract()`, `createServer` compares it with
+`.events()` before anything is served and refuses to start on a mismatch: the contract's
+`streamPath` (default `/events/stream`) must equal `.events({ path })` (same default), and
+`auth: 'tokenExchange'` must match `auth.enabled: true`. A router without `.contract()` is not
+checked.
+
+```
+SSE event router contract declares streamPath /sse but .events() registers /events/stream; the contract would describe a path the server does not serve
+```
+
+An `authorize` hook narrowing which events a connection receives is per-connection policy and
+not part of the contract.
 
 ---
 
@@ -699,7 +740,11 @@ interface EventDef<TPayload = void> {
     unsubscribeAll: () => void;
     emit: TPayload extends void ? () => Promise<void> : (payload: TPayload) => Promise<void>;
     useCache: (cache: PubSubCache) => Promise<EventDef<TPayload>>;
+    readonly _contract?: EventContract;
+    contract: (contract: EventContract) => EventDef<TPayload>;
 }
+
+interface EventContract { since: string; deprecatedIn?: string; removedIn?: string; }
 
 type EventHandler<TPayload> = (payload: TPayload) => void | Promise<void>;
 type InferEventPayload<TEvent> = TEvent extends EventDef<infer P> ? P : never; // single-arg
@@ -714,7 +759,10 @@ interface EventRouterDef<TEvents> {
     readonly events: TEvents;
     readonly eventNames: (keyof TEvents)[];
     readonly _types: { [K in keyof TEvents]: TEvents[K]['_payload'] };
+    readonly _contract?: EventRouterContract;
+    contract: (contract: EventRouterContract) => EventRouterDef<TEvents>;
 }
+interface EventRouterContract { auth: 'none' | 'tokenExchange'; streamPath?: string; }
 type InferEventNames<T>     = /* keyof router events as string union */;
 type InferEventPayloads<T>  = T['_types'];
 // router two-arg payload, exported as `InferRouterEventPayload`:

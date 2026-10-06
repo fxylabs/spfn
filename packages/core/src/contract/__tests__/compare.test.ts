@@ -9,7 +9,7 @@
 import { describe, it, expect } from 'vitest';
 import { Type, type TSchema } from '@sinclair/typebox';
 import { compareDocuments, compareOperation } from '../compare';
-import type { ContractDocument, ContractOperation, JsonSchema } from '../types';
+import type { ContractDocument, ContractEvent, ContractEvents, ContractOperation, JsonSchema } from '../types';
 
 function schema(value: TSchema): JsonSchema
 {
@@ -234,5 +234,146 @@ describe('both sides at once', () =>
         });
 
         expect(kinds(before, after).sort()).toEqual(['request.required-field-added', 'response.field-removed']);
+    });
+});
+
+describe('events — the payload is compared under the response rules', () =>
+{
+    const base = Type.Object({ userId: Type.String(), status: Type.String() });
+
+    function event(name: string, payload: TSchema = base): ContractEvent
+    {
+        return { name, since: '1.0.0', payload: schema(payload) };
+    }
+
+    function events(items: ContractEvent[], overrides: Partial<ContractEvents> = {}): ContractEvents
+    {
+        return { streamPath: '/events/stream', tokenPath: '/events/token', auth: 'tokenExchange', items, ...overrides };
+    }
+
+    function withEvents(section: ContractEvents | undefined): ContractDocument
+    {
+        return { ...document([operation()]), ...(section ? { events: section } : {}) };
+    }
+
+    function compareEvents(before: ContractEvents | undefined, after: ContractEvents | undefined)
+    {
+        return compareDocuments(withEvents(before), withEvents(after));
+    }
+
+    function payloadKinds(before: TSchema, after: TSchema): string[]
+    {
+        return compareEvents(events([event('sessionActivity', before)]), events([event('sessionActivity', after)]))
+            .violations.map(violation => violation.kind);
+    }
+
+    it('E1 passes an added event', () =>
+    {
+        const result = compareEvents(events([event('a')]), events([event('a'), event('b')]));
+
+        expect(result.violations).toEqual([]);
+        expect(result.removedEvents).toEqual([]);
+    });
+
+    it('E2 reports a removed event without deciding it', () =>
+    {
+        const result = compareEvents(events([event('a'), event('b')]), events([event('a')]));
+
+        expect(result.violations).toEqual([]);
+        expect(result.removedEvents).toEqual(['b']);
+        expect(result.removedOperations).toEqual([]);
+    });
+
+    it('E3 refuses a changed stream path', () =>
+    {
+        const result = compareEvents(events([event('a')]), events([event('a')], { streamPath: '/sse', tokenPath: '/token' }));
+
+        expect(result.violations.map(violation => violation.kind)).toEqual(['events.stream-path-changed']);
+    });
+
+    it('E4 refuses a changed auth mode', () =>
+    {
+        const result = compareEvents(events([event('a')]), events([event('a')], { auth: 'none' }));
+
+        expect(result.violations.map(violation => violation.kind)).toEqual(['events.auth-changed']);
+    });
+
+    it('E5 passes an added payload field', () =>
+    {
+        const after = Type.Object({ userId: Type.String(), status: Type.String(), at: Type.Number() });
+
+        expect(payloadKinds(base, after)).toEqual([]);
+    });
+
+    it('E6 refuses a removed payload field, naming the event and the field', () =>
+    {
+        const result = compareEvents(
+            events([event('sessionActivity')]),
+            events([event('sessionActivity', Type.Object({ userId: Type.String() }))]),
+        );
+
+        expect(result.violations).toHaveLength(1);
+        expect(result.violations[0]).toMatchObject({
+            kind: 'event.payload.field-removed',
+            event: 'sessionActivity',
+            location: 'payload.status',
+        });
+    });
+
+    it('E7 refuses payload required → optional', () =>
+    {
+        const after = Type.Object({ userId: Type.String(), status: Type.Optional(Type.String()) });
+
+        expect(payloadKinds(base, after)).toEqual(['event.payload.field-became-optional']);
+    });
+
+    it('E8 passes payload optional → required', () =>
+    {
+        const before = Type.Object({ userId: Type.String(), status: Type.Optional(Type.String()) });
+
+        expect(payloadKinds(before, base)).toEqual([]);
+    });
+
+    it('E9 refuses a changed payload type', () =>
+    {
+        const after = Type.Object({ userId: Type.Number(), status: Type.String() });
+
+        expect(payloadKinds(base, after)).toEqual(['event.payload.type-changed']);
+    });
+
+    it('E10 refuses a narrowed payload constraint', () =>
+    {
+        const before = Type.Object({ note: Type.String({ maxLength: 100 }) });
+        const after = Type.Object({ note: Type.String({ maxLength: 50 }) });
+
+        expect(payloadKinds(before, after)).toEqual(['event.payload.type-changed']);
+    });
+
+    it('E11 passes events appearing where the baseline had no events section', () =>
+    {
+        const result = compareEvents(undefined, events([event('a'), event('b')]));
+
+        expect(result.violations).toEqual([]);
+        expect(result.removedEvents).toEqual([]);
+    });
+
+    it('E12 reports every event as removed when the events section disappears', () =>
+    {
+        const result = compareEvents(events([event('a'), event('b')]), undefined);
+
+        expect(result.violations).toEqual([]);
+        expect(result.removedEvents).toEqual(['a', 'b']);
+    });
+
+    it('E13 keeps event violations out of the operation violations', () =>
+    {
+        const result = compareEvents(
+            events([event('sessionActivity')]),
+            events([event('sessionActivity', Type.Object({ userId: Type.String() }))]),
+        );
+
+        expect(result.violations.filter(violation => violation.operation !== undefined)).toEqual([]);
+        expect(result.violations.every(violation => violation.kind.startsWith('event.'))).toBe(true);
+        expect(result.removedOperations).toEqual([]);
     });
 });

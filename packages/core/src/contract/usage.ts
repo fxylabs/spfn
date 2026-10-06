@@ -1,10 +1,10 @@
 /**
- * Usage files — who still calls an operation
+ * Usage files — who still calls an operation or subscribes to an event
  *
  * A released app is compiled and shipped; the server cannot ask it what it
- * calls. So each released client writes down the operations it uses, and those
- * files are what a removal is judged against:
- * `contracts/usage/<platform>-<appVersion>.json`.
+ * calls. So each released client writes down the operations it uses and the
+ * events it subscribes to, and those files are what a removal is judged
+ * against: `contracts/usage/<platform>-<appVersion>.json`.
  *
  * The one rule this file exists to hold: **an unreadable file and "nobody calls
  * it" are not the same answer.** An empty scan result reading as a pass is how
@@ -21,6 +21,13 @@ export interface UsageRecord
     platform: string;
     appVersion: string;
     operations: string[];
+
+    /**
+     * Contracted events the client subscribes to. Always set when read from a
+     * file — a file without the key subscribes to none — and optional only so a
+     * record built by hand before events were contracted still type-checks.
+     */
+    events?: string[];
 
     /** File this came from, for messages. */
     file: string;
@@ -49,10 +56,20 @@ function parseRecord(file: string, raw: string): UsageRecord
         throw new Error('"operations" must be an array of operation names');
     }
 
+    // Absent is an app released before events were contracted: it subscribes to
+    // none of them. Present and malformed is as unreadable as a bad "operations".
+    const events = parsed.events ?? [];
+
+    if (!Array.isArray(events) || events.some(name => typeof name !== 'string'))
+    {
+        throw new Error('"events" must be an array of event names');
+    }
+
     return {
         platform: parsed.platform,
         appVersion: parsed.appVersion,
         operations: parsed.operations,
+        events,
         file,
     };
 }
@@ -111,4 +128,10 @@ export function readUsageRecords(usageDir: string): UsageReadResult
 export function callersOf(operation: string, records: UsageRecord[]): UsageRecord[]
 {
     return records.filter(record => record.operations.includes(operation));
+}
+
+/** Which released clients still subscribe to `event`. */
+export function subscribersOf(event: string, records: UsageRecord[]): UsageRecord[]
+{
+    return records.filter(record => (record.events ?? []).includes(event));
 }

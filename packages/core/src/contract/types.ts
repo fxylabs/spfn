@@ -76,6 +76,49 @@ export interface ContractOperation
 }
 
 /**
+ * One contracted SSE event.
+ *
+ * On the wire the frame's `event:` field is `name`, and its `data` is the JSON
+ * `{ "event": name, "data": payload }` with `payload` matching `payload` here.
+ */
+export interface ContractEvent
+{
+    /**
+     * Router key — what a client subscribes to with `events=` and what the
+     * frame's `event:` field carries. Not `defineEvent`'s first argument, which
+     * never reaches the wire.
+     */
+    name: string;
+
+    /** Contract version the event first appeared in. */
+    since: string;
+
+    /** Present only when the event is announced for removal. */
+    deprecatedIn?: string;
+
+    /** Present only when the event is gone. */
+    removedIn?: string;
+
+    /** The payload schema. Compared under the response rules: events flow server → client. */
+    payload: JsonSchema;
+}
+
+/** How a client reaches the contracted events, and which events it may receive. */
+export interface ContractEvents
+{
+    /** The path a client opens the stream on. */
+    streamPath: string;
+
+    /** The path a client posts to for a one-time stream token when `auth` is `tokenExchange`. */
+    tokenPath: string;
+
+    auth: 'none' | 'tokenExchange';
+
+    /** Sorted by name. */
+    items: ContractEvent[];
+}
+
+/**
  * How a client's version is judged against the server's.
  *
  * - `allOrNothing` — one contract version is the whole surface's pass or
@@ -109,6 +152,12 @@ export interface ContractDocument
 
     /** Sorted by name, so the file does not churn on router reordering. */
     operations: ContractOperation[];
+
+    /**
+     * Present only when the app's event router contracts at least one event,
+     * so an app without contracted events writes the document it always did.
+     */
+    events?: ContractEvents;
 }
 
 /** A released snapshot: the document plus the digest that pins it. */
@@ -133,8 +182,15 @@ export type ContractViolationKind =
     | 'response.field-removed'
     | 'response.field-became-optional'
     | 'response.type-changed'
+    | 'event.removed'
+    | 'events.stream-path-changed'
+    | 'events.auth-changed'
+    | 'event.payload.field-removed'
+    | 'event.payload.field-became-optional'
+    | 'event.payload.type-changed'
     | 'usage.undecidable'
     | 'usage.still-called'
+    | 'usage.still-subscribed'
     | 'snapshot.digest-mismatch';
 
 /** One reason the build refuses. */
@@ -145,7 +201,10 @@ export interface ContractViolation
     /** Operation name, when the violation belongs to one. */
     operation?: string;
 
-    /** Where inside the operation, e.g. `request.body.email`. */
+    /** Event name, when the violation belongs to one. */
+    event?: string;
+
+    /** Where inside the operation or event, e.g. `request.body.email`, `payload.userId`. */
     location?: string;
 
     /** What went wrong, in one line. */

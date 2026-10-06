@@ -2,7 +2,8 @@
  * Contract Collection
  *
  * Walks a loaded router and turns every route carrying `.contract()` into a
- * contract operation.
+ * contract operation, and every event of an event router carrying
+ * `.contract()` into a contract event.
  *
  * The router is loaded and walked rather than parsed from source. Real routes
  * build their schemas from imported values — `EmailSchema`, `FileSchema()`,
@@ -11,10 +12,20 @@
  * import-time side effects, so nothing here opens a database connection.
  */
 
+import type { EventRouterDef } from '../event/router';
+import { DEFAULT_SSE_STREAM_PATH, sseTokenPath } from '../event/sse/paths';
+import type { EventDef } from '../event/types';
 import type { RouteDef } from '../route/route-builder';
 import type { RouteInput } from '../route/route-input';
 import type { Router } from '../route/router';
-import type { ContractDocument, ContractOperation, ContractRequest, JsonSchema } from './types';
+import type {
+    ContractDocument,
+    ContractEvent,
+    ContractEvents,
+    ContractOperation,
+    ContractRequest,
+    JsonSchema,
+} from './types';
 
 /** Thrown when the router cannot produce a contract at all. */
 export class ContractCollectionError extends Error
@@ -205,23 +216,119 @@ function addOperation(name: string, routeDef: RouteDef<any>, trail: string[], fo
 }
 
 /**
- * Build the contract document from a loaded router.
- *
- * Routes without `.contract()` are skipped — they are not part of the promise.
+ * Frame names the stream sends on its own: `connected` once the stream opens,
+ * `ping` as keep-alive. An event under either key would be indistinguishable
+ * from them on the wire.
  */
-export function collectContractDocument(router: Router<any>): ContractDocument
+const RESERVED_EVENT_NAMES = new Set(['connected', 'ping']);
+
+function byName<T extends { name: string }>(a: T, b: T): number
+{
+    return a.name < b.name ? -1 : a.name > b.name ? 1 : 0;
+}
+
+function toContractEvent(name: string, eventDef: EventDef<any>): ContractEvent
+{
+    const contract = eventDef._contract!;
+
+    if (RESERVED_EVENT_NAMES.has(name))
+    {
+        throw new ContractCollectionError(
+            `Contracted event "${name}" uses a reserved frame name. `
+            + 'The stream itself sends "connected" and "ping" frames, so a client could not tell this event from them. '
+            + 'Register the event under another key.',
+        );
+    }
+
+    if (!contract.since)
+    {
+        throw new ContractCollectionError(
+            `Contracted event "${name}" has no "since" version. `
+            + 'The version an event first appeared in is part of the promise.',
+        );
+    }
+
+    if (!eventDef.schema)
+    {
+        throw new ContractCollectionError(
+            `Contracted event "${name}" declares no payload schema. `
+            + 'Its frame carries no data, so there is nothing for the contract to describe. '
+            + 'Declare Type.Object({}) and emit {} instead.',
+        );
+    }
+
+    return {
+        name,
+        since: contract.since,
+        ...(contract.deprecatedIn ? { deprecatedIn: contract.deprecatedIn } : {}),
+        ...(contract.removedIn ? { removedIn: contract.removedIn } : {}),
+        payload: toJsonSchema(eventDef.schema),
+    };
+}
+
+/**
+ * The events section, or `undefined` when nothing in the router is contracted.
+ *
+ * An item is named by its router key, the name on the wire. The same `EventDef`
+ * registered under two keys therefore becomes two items with two names — keys
+ * are unique by construction, so no collision check is needed here.
+ */
+function collectEvents(eventRouter: EventRouterDef<any> | undefined): ContractEvents | undefined
+{
+    const contracted = Object.entries<EventDef<any>>(eventRouter?.events ?? {})
+        .filter(([, eventDef]) => eventDef._contract);
+
+    if (contracted.length === 0)
+    {
+        return undefined;
+    }
+
+    const routerContract = eventRouter!._contract;
+
+    if (!routerContract)
+    {
+        throw new ContractCollectionError(
+            `Event router defineEventRouter({ ${eventRouter!.eventNames.join(', ')} }) contracts events but declares `
+            + 'no .contract() of its own. '
+            + 'Without it the contract cannot say whether a client must exchange a token before opening the stream. '
+            + 'Add .contract({ auth: \'none\' }) or .contract({ auth: \'tokenExchange\' }) to the router.',
+        );
+    }
+
+    const streamPath = routerContract.streamPath ?? DEFAULT_SSE_STREAM_PATH;
+
+    return {
+        streamPath,
+        tokenPath: sseTokenPath(streamPath),
+        auth: routerContract.auth,
+        items: contracted.map(([name, eventDef]) => toContractEvent(name, eventDef)).sort(byName),
+    };
+}
+
+/**
+ * Build the contract document from a loaded router and, optionally, the app's
+ * event router.
+ *
+ * Routes and events without `.contract()` are skipped — they are not part of
+ * the promise. A document with no contracted event carries no `events` key, so
+ * it is byte-identical to one collected without an event router.
+ */
+export function collectContractDocument(router: Router<any>, eventRouter?: EventRouterDef<any>): ContractDocument
 {
     const found = new Map<string, Found>();
     visitRouter(router, ['router'], found);
 
     const operations = [...found.values()]
         .map(entry => entry.operation)
-        .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+        .sort(byName);
+
+    const events = collectEvents(eventRouter);
 
     return {
         documentVersion: 1,
         ...(router._contractVersion ? { contractVersion: router._contractVersion } : {}),
         compatibilityPolicy: 'perOperation',
         operations,
+        ...(events ? { events } : {}),
     };
 }
