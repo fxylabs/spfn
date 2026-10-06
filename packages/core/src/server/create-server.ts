@@ -14,6 +14,7 @@ import { ErrorHandler, RequestLogger, rateLimit, setRateLimitPolicies, setRateLi
 import { setDefaultSafeFetchPolicy } from '@spfn/core/security';
 import { env } from '@spfn/core/config';
 import { createSSEHandler } from '../event/sse/handler';
+import { DEFAULT_SSE_STREAM_PATH, sseTokenPath } from '../event/sse/paths';
 import { SSETokenManager, CacheTokenStore } from '../event/sse/token-manager';
 import { wireEventRouterCache } from '../event/cache-transport';
 import { createHealthCheckHandler, resolveEndpointMiddlewares } from './helpers';
@@ -22,6 +23,7 @@ import { createCoreTimeRouter } from './server-time';
 import { serverLogger } from './logger';
 
 import type { ServerConfig, AppFactory } from './types';
+import type { EventRouterContract } from '../event/router';
 import type { NonceStore, RateLimitOptions } from '@spfn/core/middleware';
 
 // Tracks configs whose global rate-limit middleware has already been injected,
@@ -590,8 +592,10 @@ async function registerSSEEndpoint(app: Hono, config?: ServerConfig): Promise<vo
     }
 
     const eventsConfig = config.eventsConfig ?? {};
-    const streamPath = eventsConfig.path ?? '/events/stream';
+    const streamPath = eventsConfig.path ?? DEFAULT_SSE_STREAM_PATH;
     const authConfig = eventsConfig.auth;
+
+    assertEventContractServed(config.events._contract, streamPath, !!authConfig?.enabled);
     const debug = isDebugMode(config);
 
     let tokenManager: SSETokenManager | undefined;
@@ -630,8 +634,7 @@ async function registerSSEEndpoint(app: Hono, config?: ServerConfig): Promise<vo
             store,
         });
 
-        // Derive token path: /events/stream → /events/token
-        const tokenPath = streamPath.replace(/\/[^/]+$/, '/token');
+        const tokenPath = sseTokenPath(streamPath);
 
         // Guard the token endpoint with the app's own middleware — from the server
         // config and from the router's .use(), which registerRoutes owns and this
@@ -677,6 +680,48 @@ async function registerSSEEndpoint(app: Hono, config?: ServerConfig): Promise<vo
             auth: !!authConfig?.enabled,
             transport,
         });
+    }
+}
+
+/**
+ * Refuse to boot when the event router's contract describes a stream this
+ * server does not serve.
+ *
+ * The contract is generated from the router alone — the generator never reads
+ * the server config — so this is the one place the two meet. Without it a
+ * document could promise `/sse` or token exchange while `.events()` serves
+ * something else, and a released client would fail at runtime instead of the
+ * server failing here, before anything is served.
+ */
+function assertEventContractServed(
+    contract: EventRouterContract | undefined,
+    streamPath: string,
+    authEnabled: boolean,
+): void
+{
+    if (!contract)
+    {
+        return;
+    }
+
+    const contractPath = contract.streamPath ?? DEFAULT_SSE_STREAM_PATH;
+
+    if (contractPath !== streamPath)
+    {
+        throw new Error(
+            `SSE event router contract declares streamPath ${contractPath} but .events() registers ${streamPath}; `
+            + 'the contract would describe a path the server does not serve',
+        );
+    }
+
+    const servedAuth = authEnabled ? 'tokenExchange' : 'none';
+
+    if (contract.auth !== servedAuth)
+    {
+        throw new Error(
+            `SSE event router contract declares auth ${contract.auth} but .events() serves auth ${servedAuth}; `
+            + 'the contract would describe an auth mode the server does not serve',
+        );
     }
 }
 

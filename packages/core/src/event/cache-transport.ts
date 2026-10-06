@@ -12,7 +12,7 @@
  */
 
 import { logger } from '@spfn/core/logger';
-import type { EventRouterDef } from './router';
+import type { EventRouterBase } from './router';
 import type { PubSubCache } from './types';
 
 const transportLogger = logger.child('@spfn/core:event-transport');
@@ -399,7 +399,7 @@ export interface WireEventCacheOptions
  * safe to call for both `.events()` and `.websockets()`.
  */
 export async function wireEventRouterCache(
-    router: EventRouterDef<any>,
+    router: EventRouterBase<any>,
     options: WireEventCacheOptions = {},
 ): Promise<'in-process' | 'redis'>
 {

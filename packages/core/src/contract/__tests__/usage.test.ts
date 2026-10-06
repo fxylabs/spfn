@@ -63,6 +63,30 @@ describe('reading usage files', () =>
         expect(result.decidable === false && result.reason).toContain('appVersion');
     });
 
+    it('U1 refuses a file whose events is not an array, naming the field', () =>
+    {
+        writeUsage('ios-2.4.1.json', JSON.stringify({
+            platform: 'ios',
+            appVersion: '2.4.1',
+            operations: [],
+            events: 'sessionActivity',
+        }));
+
+        const result = readUsageRecords(USAGE);
+
+        expect(result.decidable).toBe(false);
+        expect(result.decidable === false && result.reason).toContain('"events"');
+    });
+
+    it('U2 reads a file without events as subscribing to none', () =>
+    {
+        writeUsage('ios-2.4.1.json', JSON.stringify({ platform: 'ios', appVersion: '2.4.1', operations: [] }));
+
+        const result = readUsageRecords(USAGE);
+
+        expect(result.decidable === true && result.records[0].events).toEqual([]);
+    });
+
     it('decides once every file is read', () =>
     {
         writeUsage('ios-2.4.1.json', JSON.stringify({ platform: 'ios', appVersion: '2.4.1', operations: ['getUser'] }));

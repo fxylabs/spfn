@@ -28,6 +28,7 @@ The clients that need a contract are the ones compiled and shipped separately.
 | Path | Contents |
 |------|----------|
 | `@spfn/core/route` | `.contract()` on the route builder, `RouteContract`, `RouteAuthProfile` |
+| `@spfn/core/event` | `.contract()` on `defineEvent` and `defineEventRouter`, `EventContract`, `EventRouterContract` |
 | `@spfn/core/contract` | Everything below: collect, compare, snapshots, usage, the gate |
 | `@spfn/core/codegen` | `@spfn/core:contract` generator, `ContractGeneratorConfig` |
 
@@ -127,6 +128,8 @@ export default defineConfig({
 |--------|---------|---------|
 | `routerPath` | — | Router file, relative to the project root. Required. |
 | `routerExport` | `appRouter`, then `default`, then `router` | Export holding the `defineRouter()` result. |
+| `eventRouterPath` | — | Event router file, relative to the project root. Set it to publish contracted SSE events — see [Events](#events). |
+| `eventRouterExport` | `eventRouter`, then `default` | Export holding the `defineEventRouter()` result. |
 | `outputDir` | `./contracts` | Directory holding `current.json`, `released/` and `usage/`. |
 | `additionalRouteDirs` | `[]` | Extra directories to watch, for routes outside `src/server/routes`. |
 
@@ -182,6 +185,98 @@ path. That is what lets a moved path be reported as a broken promise instead of 
 operation vanishing and another appearing. Names must therefore be unique across the whole router
 tree; two contracted routes sharing a name is refused at generation time.
 
+### Events
+
+A native app subscribes to SSE events by name and decodes each payload itself. Without the events
+in the contract both are hand-written, and both break at runtime — the stream answers 400 with
+`validEvents`, or a decoder throws — instead of at build. Contracted events close that gap.
+
+| Change | Previous snapshot exists | No snapshot yet |
+|--------|--------------------------|-----------------|
+| event added | pass | pass |
+| event removed | **usage check**, against the usage file's `events` | pass |
+| stream path changed | refuse (`events.stream-path-changed`) | pass |
+| auth mode changed | refuse (`events.auth-changed`) | pass |
+| payload field added | pass | pass |
+| payload field removed | refuse (`event.payload.field-removed`) | pass |
+| payload required → optional | refuse (`event.payload.field-became-optional`) | pass |
+| payload optional → required | pass | pass |
+| payload type or constraint changed | refuse (`event.payload.type-changed`) | pass |
+| baseline has no `events` section | pass — nothing was promised | pass |
+| current has no `events` section | every baseline event is **removed** | pass |
+
+A payload flows server → client, so it is judged under the **response** rules — the same walk,
+with the violation kinds renamed.
+
+**Declaring.** Opt in per event, and once on the router:
+
+```ts
+// src/server/events.ts
+import { defineEvent, defineEventRouter } from '@spfn/core/event';
+
+const sessionActivity = defineEvent('session.activity', Type.Object({ sessionId: Type.String() }))
+    .contract({ since: '1.0.0' });             // deprecatedIn?, removedIn? as on routes
+
+export const eventRouter = defineEventRouter({ sessionActivity })
+    .contract({ auth: 'tokenExchange' });      // streamPath?: string, default '/events/stream'
+```
+
+and point the generator at the file with `eventRouterPath: './src/server/events.ts'`. An event
+without `.contract()` is untouched and never appears. A router with no contracted event produces no
+`events` section at all, so an app that contracts none writes exactly the document it wrote before.
+
+`.contract()` on an event may be called once — an event is defined once and shared, so a second call
+throws instead of one declaration silently winning. A router `streamPath` that does not start with
+`/` throws where it is declared.
+
+**Refused at collection**, each with a message saying what to do:
+
+- contracted events on a router with no `.contract()` of its own — the contract cannot say whether
+  a client must exchange a token first;
+- a contracted event without a payload schema (`defineEvent(name)`) — its frame carries no `data`;
+  declare `Type.Object({})` and emit `{}` instead;
+- a contracted event under the key `connected` or `ping` — those are the stream's own frames;
+- a contracted event with no `since`.
+
+**What a reader of the document needs.**
+
+```json
+"events": {
+    "streamPath": "/events/stream",
+    "tokenPath": "/events/token",
+    "auth": "tokenExchange",
+    "items": [{ "name": "sessionActivity", "since": "1.0.0", "payload": { "type": "object", "…": "…" } }]
+}
+```
+
+- `name` is the **router key** — what a client lists in `?events=` and what the frame's `event:`
+  field carries. `defineEvent`'s first argument never reaches the wire and is not published. The same
+  `EventDef` registered under two keys is two items.
+- A frame's `data` is the JSON `{ "event": name, "data": payload }`, with `payload` matching the
+  item's schema.
+- `connected` (once, when the stream opens) and `ping` (keep-alive) frames are the stream's own and
+  are not items.
+- With `auth: "tokenExchange"` the client first posts to `tokenPath`, then opens
+  `streamPath?events=…&token=…`. `tokenPath` is derived from `streamPath` exactly as the server
+  derives it.
+- An `authorize` hook may narrow which contracted events a given connection receives. That is
+  per-connection policy, not a promise the contract makes, and the document does not describe it.
+
+**The boot check.** The generator reads the event router only, never the server config. So
+`createServer` checks the router's contract against `.events()` before anything is served: the
+contract's `streamPath` (default `/events/stream`) must equal the path `.events()` registers, and
+`auth: 'tokenExchange'` must match `.events({ auth: { enabled: true } })`. A mismatch refuses to
+boot:
+
+```
+SSE event router contract declares streamPath /sse but .events() registers /events/stream; the contract would describe a path the server does not serve
+```
+
+A router without `.contract()` is not checked.
+
+**Conditional registration is refused here too.** `defineEventRouter({ ...(flag ? { x } : {}) })`
+in the event router file stops the generator, for the same reason as a conditional route.
+
 ### Request — safe when the server grows more tolerant
 
 | Change | Result | Why |
@@ -225,8 +320,14 @@ A removal is decided against `contracts/usage/<platform>-<appVersion>.json`, whi
 client writes:
 
 ```json
-{ "platform": "ios", "appVersion": "2.4.1", "operations": ["getUser", "listItems"] }
+{ "platform": "ios", "appVersion": "2.4.1", "operations": ["getUser", "listItems"], "events": ["sessionActivity"] }
 ```
+
+`events` lists the contracted events the client subscribes to. A file without the key subscribes
+to none — an app released before events were contracted cannot be subscribed to one — and a value
+that is not an array of names is refused like a bad `operations`. A removed event is judged by the
+table below exactly as a removed operation, and a client still listing it is reported as
+`usage.still-subscribed` with its platform and version.
 
 | Situation | Verdict |
 |-----------|---------|
@@ -250,7 +351,9 @@ Named here rather than left to be discovered:
   approved case table; adding it is a deliberate decision, not a quiet extension.
 - **Runtime response validation.** Whether a handler actually returns what it declared is a separate
   feature from generating a contract, and integration tests already cover it for contracted routes.
-- **WebSocket and SSE.** The contract covers REST operations only.
+- **WebSocket.** The contract covers REST operations and SSE events; a WebSocket router is not
+  contracted.
+- **`since` and `deprecatedIn` changes on an event**, and per-connection narrowing by `authorize`.
 - **How a client produces its usage file.** That belongs to the client's toolchain.
 - **Multipart routes are refused, not checked.** See below.
 
@@ -307,16 +410,21 @@ route.get('/x').contract({ since, response, auth?, requiresSession?, deprecatedI
 defineRouter({...}).contractVersion('1.2.0')    // the version's source
 type RouteContract, RouteAuthProfile
 
+// @spfn/core/event
+defineEvent(name, schema).contract({ since, deprecatedIn?, removedIn? })
+defineEventRouter({...}).contract({ auth, streamPath? })
+type EventContract, EventRouterContract
+
 // @spfn/core/contract
-collectContractDocument(router)                 // Router → ContractDocument
-compareDocuments(before, after)                 // → { violations, removedOperations }
+collectContractDocument(router, eventRouter?)   // Router (+ event router) → ContractDocument
+compareDocuments(before, after)                 // → { violations, removedOperations, removedEvents }
 compareOperation(before, after)                 // → ContractViolation[]
 checkContract(contractsDir, current)            // the gate → { baselineVersion, violations, warnings }
 formatViolations(violations)                    // → the message a failing build prints
 
 readCurrentDocument(dir) / writeCurrentDocument(dir, document)
 listSnapshots(dir) / newestSnapshot(dir) / readSnapshot(file) / writeSnapshot(dir, document)
-readUsageRecords(usageDir) / callersOf(operation, records)
+readUsageRecords(usageDir) / callersOf(operation, records) / subscribersOf(event, records)
 compareVersions(a, b)
 canonicalize / stableStringify / stableStringifyPretty / stableDigest
 

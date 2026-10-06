@@ -2,7 +2,11 @@ import { describe, it, expect } from 'vitest';
 import { Type } from '@sinclair/typebox';
 import { route } from '../../route/route-builder';
 import { defineRouter } from '../../route/router';
+import { defineEvent } from '../../event/event';
+import { defineEventRouter } from '../../event/router';
 import { collectContractDocument, ContractCollectionError } from '../collect';
+import { stableStringify } from '../stable-json';
+import type { EventContract } from '../../event/types';
 
 const getUser = route.get('/users/:id')
     .input({ params: Type.Object({ id: Type.String() }) })
@@ -230,5 +234,148 @@ describe('the contract version the router declares', () =>
         // The same bundle format carries @spfn/auth's all-or-nothing contract,
         // so a consumer must not have to guess which rules it is holding.
         expect(collectContractDocument(defineRouter({ getUser })).compatibilityPolicy).toBe('perOperation');
+    });
+});
+
+describe('collecting contracted SSE events', () =>
+{
+    /** A fresh definition per case: `.contract()` may be called once per event. */
+    function activity(name = 'session.activity')
+    {
+        return defineEvent(name, Type.Object({ sessionId: Type.String(), at: Type.Number() }));
+    }
+
+    function contracted(contract: Partial<EventContract> = {}, name?: string)
+    {
+        return activity(name).contract({ since: '1.0.0', ...contract } as EventContract);
+    }
+
+    const appRouter = defineRouter({ getUser });
+
+    it('C1 publishes the contracted events sorted, each named by its router key', () =>
+    {
+        const eventRouter = defineEventRouter({
+            zeta: contracted({}, 'z.wire.never'),
+            alpha: contracted({}, 'a.wire.never'),
+            internal: activity(),
+        }).contract({ auth: 'none' });
+
+        const { events } = collectContractDocument(appRouter, eventRouter);
+
+        expect(events!.items.map(item => item.name)).toEqual(['alpha', 'zeta']);
+        expect(events!.items[0]).toEqual({
+            name: 'alpha',
+            since: '1.0.0',
+            payload: {
+                type: 'object',
+                properties: { sessionId: { type: 'string' }, at: { type: 'number' } },
+                required: ['sessionId', 'at'],
+            },
+        });
+    });
+
+    it('C2 writes no events key when the event router contracts nothing', () =>
+    {
+        const eventRouter = defineEventRouter({ internal: activity() }).contract({ auth: 'none' });
+
+        expect(collectContractDocument(appRouter, eventRouter)).not.toHaveProperty('events');
+    });
+
+    it('C3 writes the document it wrote before events existed when no event router is given', () =>
+    {
+        const before = '{"compatibilityPolicy":"perOperation","contractVersion":"1.2.0","documentVersion":1,'
+            + '"operations":[{"auth":"clientProofV1","interceptor":{},"method":"GET","name":"getUser",'
+            + '"path":"/users/:id","request":{"params":{"properties":{"id":{"type":"string"}},"required":["id"],'
+            + '"type":"object"}},"requiresSession":true,"response":{"properties":{"email":{"type":"string"},'
+            + '"id":{"type":"string"}},"required":["id"],"type":"object"},"since":"1.2.0"}]}';
+
+        const document = collectContractDocument(defineRouter({ getUser }).contractVersion('1.2.0'));
+
+        expect(document).not.toHaveProperty('events');
+        expect(stableStringify(document)).toBe(before);
+    });
+
+    it('C4 refuses contracted events on a router that declares no contract, naming the router', () =>
+    {
+        const eventRouter = defineEventRouter({ sessionActivity: contracted() });
+
+        expect(() => collectContractDocument(appRouter, eventRouter)).toThrow(ContractCollectionError);
+        expect(() => collectContractDocument(appRouter, eventRouter))
+            .toThrow(/defineEventRouter\(\{ sessionActivity \}\)/);
+    });
+
+    it('C5 refuses a contracted event without a payload schema', () =>
+    {
+        const eventRouter = defineEventRouter({
+            sessionEnded: defineEvent('session.ended').contract({ since: '1.0.0' }),
+        }).contract({ auth: 'none' });
+
+        expect(() => collectContractDocument(appRouter, eventRouter)).toThrow(ContractCollectionError);
+        expect(() => collectContractDocument(appRouter, eventRouter)).toThrow(/Type\.Object\(\{\}\)/);
+    });
+
+    it('C6 refuses a contracted event under a reserved frame name', () =>
+    {
+        const eventRouter = defineEventRouter({ ping: contracted() }).contract({ auth: 'none' });
+
+        expect(() => collectContractDocument(appRouter, eventRouter)).toThrow(ContractCollectionError);
+        expect(() => collectContractDocument(appRouter, eventRouter)).toThrow(/"ping"/);
+    });
+
+    it('C7 refuses a contracted event with no since version', () =>
+    {
+        const eventRouter = defineEventRouter({ sessionActivity: contracted({ since: '' }) })
+            .contract({ auth: 'none' });
+
+        expect(() => collectContractDocument(appRouter, eventRouter)).toThrow(ContractCollectionError);
+        expect(() => collectContractDocument(appRouter, eventRouter)).toThrow(/since/);
+    });
+
+    it('C8 defaults the stream path and derives the token path beside it', () =>
+    {
+        const eventRouter = defineEventRouter({ sessionActivity: contracted() }).contract({ auth: 'none' });
+
+        const { events } = collectContractDocument(appRouter, eventRouter);
+
+        expect(events).toMatchObject({ streamPath: '/events/stream', tokenPath: '/events/token', auth: 'none' });
+    });
+
+    it('C9 derives the token path from a declared stream path', () =>
+    {
+        const eventRouter = defineEventRouter({ sessionActivity: contracted() })
+            .contract({ auth: 'tokenExchange', streamPath: '/sse' });
+
+        const { events } = collectContractDocument(appRouter, eventRouter);
+
+        expect(events).toMatchObject({ streamPath: '/sse', tokenPath: '/token', auth: 'tokenExchange' });
+    });
+
+    it('C10 refuses a relative stream path where it is declared', () =>
+    {
+        const eventRouter = defineEventRouter({ sessionActivity: activity() });
+
+        expect(() => eventRouter.contract({ auth: 'none', streamPath: 'sse' })).toThrow(/streamPath: "sse"/);
+    });
+
+    it('C11 records deprecatedIn and removedIn only when the event states them', () =>
+    {
+        const eventRouter = defineEventRouter({
+            legacy: contracted({ deprecatedIn: '1.4.0', removedIn: '2.0.0' }),
+            current: contracted(),
+        }).contract({ auth: 'none' });
+
+        const [current, legacy] = collectContractDocument(appRouter, eventRouter).events!.items;
+
+        expect(legacy).toMatchObject({ deprecatedIn: '1.4.0', removedIn: '2.0.0' });
+        expect(current).not.toHaveProperty('deprecatedIn');
+        expect(current).not.toHaveProperty('removedIn');
+    });
+
+    it('refuses a second .contract() on the same event instead of keeping the first', () =>
+    {
+        const event = contracted();
+
+        expect(() => event.contract({ since: '2.0.0' })).toThrow(/already declares/);
+        expect(event._contract).toEqual({ since: '1.0.0' });
     });
 });

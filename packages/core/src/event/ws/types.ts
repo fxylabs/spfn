@@ -4,7 +4,7 @@
 
 import type { Context } from 'hono';
 import type { EventDef } from '../types';
-import type { EventRouterDef, InferEventNames, InferEventPayload } from '../router';
+import type { EventRouterBase, InferEventNames, InferEventPayload } from '../router';
 import type { SSETokenStore, SSETokenManager } from '../sse/token-manager';
 
 // ============================================================================
@@ -14,12 +14,12 @@ import type { SSETokenStore, SSETokenManager } from '../sse/token-manager';
 /**
  * WebSocket Router Definition
  *
- * Extends EventRouterDef with client→server message handlers.
+ * Extends the event router shape with client→server message handlers.
  */
 export interface WSRouterDef<
     TEvents extends Record<string, EventDef<any>>,
     TMessages extends WSMessageHandlers = WSMessageHandlers,
-> extends EventRouterDef<TEvents>
+> extends EventRouterBase<TEvents>
 {
     messages: TMessages;
 }

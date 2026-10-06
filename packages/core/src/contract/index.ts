@@ -35,11 +35,13 @@ export {
     writeSnapshot,
 } from './snapshot';
 export type { SnapshotFile } from './snapshot';
-export { callersOf, readUsageRecords } from './usage';
+export { callersOf, readUsageRecords, subscribersOf } from './usage';
 export type { UsageReadResult, UsageRecord } from './usage';
 export type {
     CompatibilityPolicy,
     ContractDocument,
+    ContractEvent,
+    ContractEvents,
     ContractOperation,
     ContractRequest,
     ContractSnapshot,

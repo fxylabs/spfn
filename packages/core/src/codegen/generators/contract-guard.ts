@@ -62,7 +62,30 @@ export interface RegistrationScan
 
     /** What is being generated, named in the message: `route map`, `contract`. */
     subject: string;
+
+    /**
+     * The call the router is built with. `defineEventRouter` scans an event
+     * router file, whose event set the contract publishes the same way.
+     * @default 'defineRouter'
+     */
+    factory?: RouterFactory;
 }
+
+export type RouterFactory = 'defineRouter' | 'defineEventRouter';
+
+/** What a refusal says, per kind of router: what is left out and what a client sees. */
+const REFUSAL_WORDING: Record<RouterFactory, { noun: string; consequence: string; remedy: string }> = {
+    defineRouter: {
+        noun: 'routes',
+        consequence: 'a route production registers is left out, and the client that addresses it by name gets a 404',
+        remedy: 'Register the route unconditionally and gate its behaviour inside the handler instead.',
+    },
+    defineEventRouter: {
+        noun: 'events',
+        consequence: 'an event production streams is left out, and the client that subscribes to it by name gets a 400',
+        remedy: 'Register the event unconditionally and decide who receives it with the stream\'s authorize hook instead.',
+    },
+};
 
 /**
  * Refuse a router whose route set depends on a condition.
@@ -78,7 +101,7 @@ export function assertUnconditionalRegistration(scan: RegistrationScan): void
     );
 
     const declarations = topLevelInitialisers(compiler, file);
-    const routes = routesLiteral(compiler, declarations.get(scan.exportName), declarations, new Set());
+    const routes = routesLiteral(compiler, declarations.get(scan.exportName), declarations, new Set(), factoryOf(scan));
 
     // No literal means the router is not written as `defineRouter({...})` in
     // this file — a factory, or an import. Documented as past the guard.
@@ -86,6 +109,11 @@ export function assertUnconditionalRegistration(scan: RegistrationScan): void
     {
         assertLiteral(compiler, file, routes, declarations, new Set(), scan);
     }
+}
+
+function factoryOf(scan: RegistrationScan): RouterFactory
+{
+    return scan.factory ?? 'defineRouter';
 }
 
 /**
@@ -194,6 +222,7 @@ function routesLiteral(
     expression: ts.Expression | undefined,
     declarations: Map<string, ts.Expression>,
     seen: Set<string>,
+    factory: RouterFactory,
 ): ts.ObjectLiteralExpression | undefined
 {
     const node = unwrap(compiler, expression);
@@ -212,7 +241,7 @@ function routesLiteral(
 
         seen.add(node.text);
 
-        return routesLiteral(compiler, declarations.get(node.text), declarations, seen);
+        return routesLiteral(compiler, declarations.get(node.text), declarations, seen, factory);
     }
 
     if (!compiler.isCallExpression(node))
@@ -222,7 +251,7 @@ function routesLiteral(
 
     const callee = unwrap(compiler, node.expression);
 
-    if (callee && compiler.isIdentifier(callee) && callee.text === 'defineRouter')
+    if (callee && compiler.isIdentifier(callee) && callee.text === factory)
     {
         const routes = unwrap(compiler, node.arguments[0]);
 
@@ -234,7 +263,7 @@ function routesLiteral(
     // arguments are not followed — a package router registers its own routes,
     // which this generator neither emits nor completes.
     return callee && compiler.isPropertyAccessExpression(callee)
-        ? routesLiteral(compiler, callee.expression, declarations, seen)
+        ? routesLiteral(compiler, callee.expression, declarations, seen, factory)
         : undefined;
 }
 
@@ -264,7 +293,7 @@ function assertLiteral(
             continue;
         }
 
-        const nested = routesLiteral(compiler, mountedRouter(compiler, property), declarations, seen);
+        const nested = routesLiteral(compiler, mountedRouter(compiler, property), declarations, seen, factoryOf(scan));
 
         if (nested)
         {
@@ -298,12 +327,14 @@ function assertUnconditionalSpread(
         return;
     }
 
+    const wording = REFUSAL_WORDING[factoryOf(scan)];
+
     throw new ConditionalRegistrationError(
-        `${scan.routerPath} registers routes conditionally: "...${spreadText(file, expression)}" (${condition}).\n\n`
-        + `The ${scan.subject} is generated from the router as it loads, so a route set that depends on a flag or `
-        + 'an environment describes whichever way the generator happened to run: a route production registers is '
-        + 'left out, and the client that addresses it by name gets a 404.\n'
-        + 'Register the route unconditionally and gate its behaviour inside the handler instead.',
+        `${scan.routerPath} registers ${wording.noun} conditionally: "...${spreadText(file, expression)}" `
+        + `(${condition}).\n\n`
+        + `The ${scan.subject} is generated from the router as it loads, so a set of ${wording.noun} that depends on `
+        + `a flag or an environment describes whichever way the generator happened to run: ${wording.consequence}.\n`
+        + wording.remedy,
     );
 }
 

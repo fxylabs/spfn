@@ -11,7 +11,7 @@ import {
     writeCurrentDocument,
     writeSnapshot,
 } from '../snapshot';
-import { stableStringifyPretty } from '../stable-json';
+import { stableDigest, stableStringifyPretty } from '../stable-json';
 import type { ContractDocument } from '../types';
 
 const ROOT = resolve(process.cwd(), '.test-tmp-contract-snapshot');
@@ -75,6 +75,29 @@ describe('released snapshots', () =>
 
         expect(snapshot.version).toBe('1.2.0');
         expect(snapshot.document).toEqual(at('1.2.0'));
+    });
+
+    it('S1 round-trips a document with an events section, digest verified', () =>
+    {
+        const withEvents: ContractDocument = {
+            ...at('1.2.0'),
+            events: {
+                streamPath: '/events/stream',
+                tokenPath: '/events/token',
+                auth: 'tokenExchange',
+                items: [{
+                    name: 'sessionActivity',
+                    since: '1.2.0',
+                    deprecatedIn: '1.3.0',
+                    payload: { type: 'object', properties: { at: { type: 'number' } }, required: ['at'] },
+                }],
+            },
+        };
+
+        const snapshot = readSnapshot(writeSnapshot(ROOT, withEvents));
+
+        expect(snapshot.document).toEqual(withEvents);
+        expect(snapshot.sha256).toBe(stableDigest(withEvents));
     });
 
     it('names the release from the document, not from a second argument', () =>

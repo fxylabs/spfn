@@ -27,7 +27,7 @@
 
 import type { TSchema, Static } from '@sinclair/typebox';
 import { logger } from '@spfn/core/logger';
-import type { EventDef, EventHandler, JobQueueSender, PubSubCache } from './types';
+import type { EventContract, EventDef, EventHandler, JobQueueSender, PubSubCache } from './types';
 
 const eventLogger = logger.child('@spfn/core:event');
 
@@ -208,9 +208,32 @@ function createEventImpl<TPayload>(
         cacheSubscribed = false;
     };
 
+    let contract: EventContract | undefined;
+
+    const declareContract = (next: EventContract): EventDef<TPayload> =>
+    {
+        if (contract)
+        {
+            throw new Error(
+                `Event "${name}" already declares .contract({ since: '${contract.since}' }). `
+                + 'An event is defined once and shared, so a second declaration would silently replace one of the '
+                + 'two. Declare the contract once, where the event is defined.',
+            );
+        }
+
+        contract = next;
+
+        return self;
+    };
+
     const self: EventDef<TPayload> = {
         name,
         schema,
+        get _contract()
+        {
+            return contract;
+        },
+        contract: declareContract,
         subscribe: handlerManager.add,
         unsubscribeAll: handlerManager.clear,
         emit: emit as EventDef<TPayload>['emit'],
