@@ -103,6 +103,7 @@ SPFN_AUTH_SESSION_SECRET="my-super-secret-session-key-at-least-32-chars-long"
 SPFN_AUTH_SESSION_TTL=7d
 SPFN_AUTH_COOKIE_SECURE=false   # Override cookie Secure flag (default: true in production)
 SPFN_AUTH_CSRF=enforce          # off | warn | enforce (unset = warn); see CSRF Protection
+SPFN_AUTH_GUARD_TIMEOUT=3000    # ms the guards' session lookup may take (unset = the client's 120 s); see Server Component Guards
 ```
 
 > **Why two files?**
@@ -1079,6 +1080,28 @@ optional `fallback` — render that instead of redirecting when the check fails.
 
 > Note the difference from the route middleware: `requirePermissions` on a route is an AND
 > check, while the `RequirePermission` component is an OR check.
+
+#### Guard timeout
+
+The guards — and `getUserRole`, `getUserPermissions`, `hasAnyRole`, `hasAnyPermission` — reach
+the backend through one call, `getAuthSessionData()`. Unset, it waits as long as the API client
+does: `SERVER_TIMEOUT`, 120 s by default, the same variable the backend uses for its own
+requests, so it cannot be lowered for the guards alone. `SPFN_AUTH_GUARD_TIMEOUT` (milliseconds,
+`.env.local`, no default) bounds that one lookup:
+
+```bash
+SPFN_AUTH_GUARD_TIMEOUT=3000   # a few seconds; > 0 and <= 2147483647
+```
+
+**A lookup that times out reads as no session — the guard sends the person to sign in**, even
+when they are signed in and the backend is merely slow. It is logged at warn level as
+`Auth session lookup timed out`. A malformed value is refused by env validation; at runtime it
+fails the lookup the same way (no session), with an error log naming the variable.
+
+The variable bounds only this lookup. The passkey and MFA client helpers (`enrollPasskey`,
+`signInWithPasskey`, `completeMfaWithPasskey`, …) take a client and wait as long as it does; to
+bound them, pass `createApi<AuthRouter>({ timeout: 5000 })`, or use `.timeout()` on your own
+calls — `authApi.login.timeout(5000).call(...)`.
 
 ### Logout
 

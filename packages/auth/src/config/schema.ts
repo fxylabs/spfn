@@ -15,6 +15,7 @@ import {
     envEnum,
     createSecureSecretParser,
     createPasswordParser,
+    parseNumber,
 } from '@spfn/core/env';
 
 import { parseDuration } from '../lib/duration';
@@ -29,6 +30,27 @@ function parseSessionTtl(value: string): string
     parseDuration(value);
 
     return value;
+}
+
+/** The largest delay `setTimeout` honours, and so the largest `.timeout()` accepts. */
+const MAX_TIMEOUT_MS = 2147483647;
+
+/**
+ * Accept a guard timeout only in a form the route builder's `.timeout()` takes —
+ * finite, above 0, at most `MAX_TIMEOUT_MS` — so a malformed
+ * `SPFN_AUTH_GUARD_TIMEOUT` is refused when the environment is validated rather
+ * than as a `TypeError` inside every guarded render.
+ */
+function parseGuardTimeout(value: string): number
+{
+    const ms = parseNumber(value, { max: MAX_TIMEOUT_MS });
+
+    if (!(ms > 0))
+    {
+        throw new Error('Must be greater than 0');
+    }
+
+    return ms;
 }
 
 /**
@@ -504,6 +526,19 @@ export const authEnvSchema = defineEnvSchema({
             required: false,
             nextjs: true, // Read by RequireAuth, which renders in the Next.js runtime
             examples: ['/auth/renew', '/session/renew'],
+        }),
+    },
+
+    // ============================================================================
+    // Guards
+    // ============================================================================
+    SPFN_AUTH_GUARD_TIMEOUT: {
+        ...envNumber({
+            description: 'Timeout in milliseconds of the server-side session lookup behind the guards (`RequireAuth`, `RequireRole`, `RequirePermission` and the helpers in `@spfn/auth/nextjs/server`). Unset, the lookup waits as long as the API client does (`SERVER_TIMEOUT`, 120 s by default). A lookup that times out reads as no session, so the guard sends the person to sign in; a few seconds is a reasonable value.',
+            required: false,
+            validator: parseGuardTimeout,
+            nextjs: true, // Read by the guards, which render in the Next.js runtime
+            examples: [3000, 5000, 10000],
         }),
     },
 
