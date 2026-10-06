@@ -32,6 +32,18 @@ function getCookieSuffix(): string
 }
 
 /**
+ * The two OAuth start cookies' names before any suffix.
+ *
+ * Owned here beside `COOKIE_NAMES` and read by `oauth/start-cookies.ts`, which
+ * needs the name without the port suffix to recognise a cookie set by a process
+ * that runs under another `SPFN_PORT`.
+ */
+export const OAUTH_COOKIE_STEMS = {
+    pending: 'spfn_oauth_pending',
+    csrf: 'spfn_oauth_csrf',
+} as const;
+
+/**
  * Cookie names used by SPFN Auth
  *
  * Names include a port-based suffix so that multiple dev instances
@@ -48,10 +60,17 @@ export const COOKIE_NAMES = {
     {
         return `spfn_session_key_id${getCookieSuffix()}`; 
     },
-    /** Pending OAuth session (privateKey, keyId, algorithm) - temporary during OAuth flow */
+    /**
+     * Pending OAuth session (privateKey, keyId, algorithm) - temporary during OAuth flow
+     *
+     * The legacy fixed name, and the base of every per-start name: a start
+     * writes `<this>.<issuedAt>.<id>` (#126), so several sign-ins can be in
+     * flight at once. This exact name is read only as a fallback, for a start
+     * made before that change.
+     */
     get OAUTH_PENDING()
     {
-        return `spfn_oauth_pending${getCookieSuffix()}`;
+        return `${OAUTH_COOKIE_STEMS.pending}${getCookieSuffix()}`;
     },
     /**
      * Pending second-factor session (privateKey, keyId, challengeHash) (#95)
@@ -66,10 +85,14 @@ export const COOKIE_NAMES = {
     {
         return `spfn_mfa_pending${getCookieSuffix()}`;
     },
-    /** OAuth CSRF nonce — double-submit against the (encrypted) state.nonce at callback */
+    /**
+     * OAuth CSRF nonce — double-submit against the (encrypted) state.nonce at callback
+     *
+     * Legacy fixed name and per-start base, exactly as `OAUTH_PENDING`.
+     */
     get OAUTH_CSRF()
     {
-        return `spfn_oauth_csrf${getCookieSuffix()}`;
+        return `${OAUTH_COOKIE_STEMS.csrf}${getCookieSuffix()}`;
     },
     /** Password-setup session for verified-email signup — temporary, single-purpose */
     get SIGNUP_SETUP()
@@ -87,23 +110,6 @@ export const COOKIE_NAMES = {
         return `spfn_csrf${getCookieSuffix()}`;
     },
 };
-
-/**
- * OAuth CSRF 쿠키를 PORT 접미사와 무관하게 전부 수집한다.
- *
- * 쿠키를 심는 쪽은 Next.js 프로세스, 읽는 쪽은 API 프로세스라 분리 배포에서는
- * 두 프로세스의 PORT가 달라 COOKIE_NAMES.OAUTH_CSRF 정확 일치 조회가 빗나간다.
- * nonce 자체가 랜덤값이고 암호화된 state의 nonce와 대조되므로, 접미사가 다른
- * spfn_oauth_csrf* 후보를 모두 대조 대상으로 넘겨도 안전하다.
- */
-export function matchOAuthCsrfCookies(
-    cookies: Record<string, string>,
-): { name: string; value: string }[]
-{
-    return Object.entries(cookies)
-        .filter(([name]) => /^spfn_oauth_csrf(_\d+)?$/.test(name))
-        .map(([name, value]) => ({ name, value }));
-}
 
 /**
  * Registration channel passed to the beforeRegister hook

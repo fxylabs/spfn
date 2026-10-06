@@ -70,6 +70,8 @@ export * from './server/types';
 export * from './server/routes/schema';  // TypeBox schemas for validation
 export * from './server/lib';
 export * from './server/logger';
+// `buildOAuthErrorUrl(error, reason)` takes one of these (#126)
+export { OAUTH_ERROR_REASONS, isOAuthErrorReason, type OAuthErrorReason } from './lib/oauth-error-reason';
 
 // ============================================================================
 // Lifecycle Hooks

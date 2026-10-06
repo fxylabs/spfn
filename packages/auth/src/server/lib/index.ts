@@ -19,6 +19,9 @@
 export * from './crypto';
 export * from './session';
 export * from './config';
+// Kept on the public surface where it used to live (config); the routes no
+// longer use it.
+export { matchOAuthCsrfCookies } from './oauth/start-cookies';
 // Named rather than `export *`: `timingSafeEqualString` is an implementation
 // detail of the check, and putting a comparison helper of that name on the public
 // surface invites it to be mistaken for node's Buffer-based `timingSafeEqual`,

@@ -12,12 +12,19 @@ import { ValidationError } from '@spfn/core/errors';
 import {
     AccountDisabledError,
     AccountPendingDeletionError,
+    OAuthAccountNotFoundError,
+    OAuthProviderError,
+    OAuthStateExpiredError,
+    OAuthStateInvalidError,
     UnverifiedEmailLinkError,
 } from '@spfn/auth/errors';
 
 import { usersRepository, socialAccountsRepository } from '../repositories';
 import { authLogger } from '../logger';
 import { isSafeReturnPath } from '../../lib/return-path';
+import { withOAuthErrorReason, type OAuthErrorReason } from '../../lib/oauth-error-reason';
+import { timingSafeEqualString } from '../lib/csrf';
+import { findStartCookies, legacyStartCookies } from '../lib/oauth/start-cookies';
 import { runBeforeRegister } from '../lib/config';
 import { resolveAppUrl } from '../lib/app-url';
 import { type SocialProvider, type KeyAlgorithmType, type SessionBindingType } from '../types';
@@ -65,11 +72,10 @@ export interface OAuthCallbackParams
     /**
      * Value(s) of the oauth_csrf cookie from the callback request. One of them
      * must equal the nonce bound into the (encrypted) state — otherwise the flow
-     * wasn't initiated by this browser (login CSRF). An array arises because the
-     * cookie name carries the PORT suffix of the process that set it (the Next.js
-     * web process), which differs from the API process in a split deployment, so
-     * the callback collects every spfn_oauth_csrf* candidate. Pass `undefined` or
-     * an empty array when absent; verification then fails closed.
+     * wasn't initiated by this browser (login CSRF). The built-in routes pass the
+     * one cookie `matchOAuthCallbackCsrf` picked for this state; a custom callback
+     * may still pass several candidates. Pass `undefined` or an empty array when
+     * absent; verification then fails closed.
      */
     expectedNonce: string | string[] | undefined;
     /** Client address of the callback request, from `deviceProvenance` at the route. */
@@ -184,28 +190,18 @@ export async function oauthCallbackService(
     // CSRF: the state's nonce must match an oauth_csrf cookie from THIS browser.
     // A login-CSRF victim (handed the attacker's state) has no matching cookie, so
     // this fails closed before any account is created or any key is registered.
-    const nonceCandidates = typeof expectedNonce === 'string' ? [expectedNonce] : expectedNonce ?? [];
-    if (!stateData.nonce || !nonceCandidates.includes(stateData.nonce))
+    if (!nonceMatches(stateData.nonce, expectedNonce) || stateData.provider !== provider)
     {
-        throw new ValidationError({
-            message: 'OAuth state validation failed',
-        });
-    }
-
-    if (stateData.provider !== provider)
-    {
-        throw new ValidationError({
-            message: 'OAuth state provider mismatch',
-        });
+        throw new OAuthStateInvalidError();
     }
 
     const oauthProvider = requireEnabledProvider(provider);
 
     // 1. Code를 Token으로 교환
-    const tokens = await oauthProvider.exchangeCodeForTokens(code, { state });
+    const tokens = await fromProvider(() => oauthProvider.exchangeCodeForTokens(code, { state }));
 
     // 2. 사용자 정보 조회 (provider별 응답을 공통 형태로 정규화)
-    const identity = await oauthProvider.getUserInfo(tokens.accessToken);
+    const identity = await fromProvider(() => oauthProvider.getUserInfo(tokens.accessToken));
 
     // 3. 기존 소셜 계정 확인
     const existingSocialAccount = await socialAccountsRepository.findByProviderAndProviderId(
@@ -241,7 +237,7 @@ export async function oauthCallbackService(
     // (기존 버그: 정지/탈퇴예정 계정도 OAuth로 로그인 가능했음). 두 분기(기존 소셜
     // 연결 재로그인 / createOrLinkUser 신규·연결) 모두 여기서 합류하므로 한 번의
     // 검사로 양쪽을 다 막는다.
-    await assertActiveForOAuthSession(userId);
+    await assertActiveForOAuthSession(userId, () => new OAuthAccountNotFoundError());
 
     // Read once, here rather than at step 7 where it used to be: registering the
     // key needs the account's session_binding setting, and the event payload
@@ -273,9 +269,12 @@ export async function oauthCallbackService(
     const callbackUrl = callbackPath.startsWith('http') ? callbackPath : `${resolveAppUrl()}${callbackPath}`;
     const returnUrl = isSafeReturnPath(stateData.returnUrl) ? stateData.returnUrl : '/';
 
-    // An enrolled account on a new device is redirected with a challenge and
-    // nothing else (#95): no `userId`, no `keyId`, and neither the login event
-    // nor `lastLoginAt` below. A brand-new social account never reaches this —
+    // An enrolled account on a new device is redirected with a challenge (#95):
+    // no `userId`, and neither the login event nor `lastLoginAt` below. The
+    // `keyId` rides along (#126) — not a session, but the name of the start whose
+    // pending cookie holds the private key, so the proxy can pick that cookie
+    // when it bakes the second-factor one while other starts are in flight. A
+    // brand-new social account never reaches this —
     // `createOrLinkUser` has just written the user row, so there is no second
     // factor to ask for and `isNewUser` is answered exactly as it always was.
     if (registered.pending)
@@ -283,6 +282,7 @@ export async function oauthCallbackService(
         return {
             redirectUrl: buildRedirectUrl(callbackUrl, {
                 mfaChallenge: registered.challenge.secret,
+                keyId: stateData.keyId,
                 returnUrl,
                 isNewUser: String(isNewUser),
             }),
@@ -346,6 +346,92 @@ export async function oauthCallbackService(
 }
 
 /**
+ * Pick the CSRF cookie a callback's state names, and prove it belongs to this start (#126).
+ *
+ * The state is verified first: until it decrypts it is attacker-supplied, so no
+ * cookie is looked up because of it. Its keyId then names the per-start cookies
+ * (any port suffix, any issuedAt) — more than one when a client started twice
+ * with one key; a start made before per-start cookies has only the legacy name,
+ * which is the fallback. Each value is compared with the state's nonce in
+ * constant time — that comparison, not the name, is what keeps a state minted in
+ * another browser out, since a cookie can only have been set by this browser's
+ * own start.
+ *
+ * Reads, never expires: the route expires the returned name, and only that one.
+ *
+ * @throws OAuthStateExpiredError, OAuthStateInvalidError
+ */
+export async function matchOAuthCallbackCsrf(params: {
+    provider: SocialProvider;
+    state: string;
+    cookies: Record<string, string>;
+}): Promise<{ name: string; nonce: string }>
+{
+    const stateData = await verifyOAuthState(params.state);
+    const match = stateData.provider === params.provider
+        ? cookieHoldingNonce(csrfCandidates(stateData.keyId, params.cookies), stateData.nonce)
+        : undefined;
+
+    if (!match)
+    {
+        throw new OAuthStateInvalidError();
+    }
+
+    return { name: match.name, nonce: match.value };
+}
+
+/** The start's own CSRF cookies, else the legacy ones — never both. */
+function csrfCandidates(keyId: string, cookies: Record<string, string>): { name: string; value: string }[]
+{
+    const perStart = findStartCookies('csrf', cookies, keyId);
+
+    return perStart.length > 0 ? perStart : legacyStartCookies('csrf', cookies);
+}
+
+/**
+ * The candidate whose value is the nonce. Every candidate is compared, in
+ * constant time, before one is picked, so how long this takes does not say
+ * which position matched.
+ */
+function cookieHoldingNonce(
+    candidates: { name: string; value: string }[],
+    nonce: string,
+): { name: string; value: string } | undefined
+{
+    const matches = candidates.map(cookie => timingSafeEqualString(cookie.value, nonce));
+
+    return candidates[matches.indexOf(true)];
+}
+
+/** Whether one of the cookie values equals the state's nonce, compared in constant time. */
+function nonceMatches(nonce: string, expected: string | string[] | undefined): boolean
+{
+    const candidates = typeof expected === 'string' ? [expected] : expected ?? [];
+
+    return candidates.some(candidate => timingSafeEqualString(candidate, nonce));
+}
+
+/**
+ * A provider call whose failure reaches the browser as one fixed sentence.
+ *
+ * Whatever the provider or its HTTP client threw stays in the log; the redirect
+ * carries `OAuthProviderError` and `reason=provider_error` (#126).
+ */
+async function fromProvider<T>(call: () => Promise<T>): Promise<T>
+{
+    return await Promise.resolve()
+        .then(call)
+        .catch((cause: unknown) =>
+        {
+            authLogger.service.warn('OAuth provider call failed', {
+                error: cause instanceof Error ? cause.message : String(cause),
+            });
+
+            return Promise.reject(new OAuthProviderError());
+        });
+}
+
+/**
  * OAuth 세션(공개키 등록) 발급 전 계정 상태 검사
  *
  * web(code 교환)·native(id_token) 두 흐름 모두 "기존 소셜 연결 재로그인" 또는
@@ -354,17 +440,24 @@ export async function oauthCallbackService(
  * 한 번에 막는다 — 이전에는 이 검사가 아예 없어 정지/탈퇴예정 계정도 OAuth로
  * 로그인 세션을 얻을 수 있었다(기존 버그).
  *
+ * `missing` builds the refusal for an account that is gone. The native route keeps
+ * the plain ValidationError its contract declares; the web callback passes
+ * `OAuthAccountNotFoundError` so its redirect can name `account_unavailable`.
+ *
  * status는 replica가 아닌 primary에서 읽는다: 삭제 요청 직후(세션 revoke + status
  * 전이가 막 커밋된 시점) 복제 지연 창에서 OAuth 로그인이 stale 'active' 상태를 보고
  * 새 세션 키를 발급받는 것을 막기 위함.
  */
-export async function assertActiveForOAuthSession(userId: number): Promise<void>
+export async function assertActiveForOAuthSession(
+    userId: number,
+    missing: () => Error = () => new ValidationError({ message: 'User not found' }),
+): Promise<void>
 {
     const user = await usersRepository.findByIdOnPrimary(userId);
 
     if (!user)
     {
-        throw new ValidationError({ message: 'User not found' });
+        throw missing();
     }
 
     if (user.status === 'active')
@@ -565,12 +658,31 @@ function buildRedirectUrl(
 
 /**
  * OAuth 에러 리다이렉트 URL 생성
+ *
+ * `SPFN_AUTH_OAUTH_ERROR_URL` is a template: `{error}` takes the text, `{reason}`
+ * the code (#126). A template without `{reason}` gets it as a query parameter.
  */
-export function buildOAuthErrorUrl(error: string): string
+export function buildOAuthErrorUrl(error: string, reason: OAuthErrorReason = 'failed'): string
 {
     const errorUrl = env.SPFN_AUTH_OAUTH_ERROR_URL || '/auth/error?error={error}';
 
-    return errorUrl.replace('{error}', encodeURIComponent(error));
+    return withOAuthErrorReason(errorUrl.replace('{error}', encodeURIComponent(error)), reason);
+}
+
+/** Error classes the callback names a reason for; anything else is `failed`. */
+const REASON_BY_ERROR: [abstract new (...args: never[]) => Error, OAuthErrorReason][] = [
+    [OAuthStateExpiredError, 'expired'],
+    [OAuthStateInvalidError, 'invalid_state'],
+    [OAuthProviderError, 'provider_error'],
+    [AccountDisabledError, 'account_unavailable'],
+    [AccountPendingDeletionError, 'account_unavailable'],
+    [OAuthAccountNotFoundError, 'account_unavailable'],
+];
+
+/** The reason code for a failed callback, by the error's type — never its message. */
+export function oauthErrorReason(error: unknown): OAuthErrorReason
+{
+    return REASON_BY_ERROR.find(([type]) => error instanceof type)?.[1] ?? 'failed';
 }
 
 /**

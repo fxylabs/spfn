@@ -12,6 +12,7 @@ import { SessionContextChangedError, SessionRenewalRequiredError } from '@spfn/a
 import { unsealSession, sealSession, shouldRefreshSession, type SessionData } from '../../server/lib/session';
 import { generateClientToken } from '../../server/lib/crypto';
 import { getSessionTtl, COOKIE_NAMES } from '../../server/lib/config';
+import { ownStartCookieNames } from '../../server/lib/oauth/start-cookies';
 import { authLogger } from '../../server/logger';
 import { cookieSecure } from './cookie-options';
 import { uaFamily } from '../../server/lib/ua-family';
@@ -433,11 +434,12 @@ export const generalAuthInterceptor: InterceptorRule =
                     options: { ...base, sameSite: 'lax' },
                 });
 
-                ctx.setCookies.push({
-                    name: COOKIE_NAMES.OAUTH_PENDING,
-                    value: '',
-                    options: { ...base, sameSite: 'lax' },
-                });
+                // Every OAuth start in flight, both of its cookies, and the
+                // legacy fixed names (#126).
+                for (const name of [...ownStartCookieNames('pending', ctx.cookies), ...ownStartCookieNames('csrf', ctx.cookies)])
+                {
+                    ctx.setCookies.push({ name, value: '', options: { ...base, sameSite: 'lax' } });
+                }
 
                 pushCsrfCookieRemoval(ctx.setCookies);
             }

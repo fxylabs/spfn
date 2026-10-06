@@ -711,6 +711,88 @@ export class UnverifiedEmailLinkError extends ValidationError
 }
 
 /**
+ * OAuth State Expired Error (400)
+ *
+ * The web OAuth callback came back with a state older than its ten minutes
+ * (#126). Raised from jose's own expiry error by type, so the message the
+ * browser sees is this fixed sentence and never the library's claim wording.
+ * The callback redirects with `reason=expired`; it never reaches a REST body.
+ */
+export class OAuthStateExpiredError extends ValidationError
+{
+    constructor(data: { message?: string; details?: Record<string, any> } = {})
+    {
+        super({
+            message: data.message || 'This sign-in took longer than ten minutes. Start it again.',
+            details: data.details,
+        });
+        this.name = 'OAuthStateExpiredError';
+    }
+}
+
+/**
+ * OAuth State Invalid Error (400)
+ *
+ * The web OAuth callback's state cannot be trusted for this browser (#126): it
+ * does not decrypt, its nonce has no matching cookie or a different one, or it
+ * names another provider. A login-CSRF attempt and a cookie that simply went
+ * missing look the same from here, and both are refused the same way. The
+ * callback redirects with `reason=invalid_state`.
+ */
+export class OAuthStateInvalidError extends ValidationError
+{
+    constructor(data: { message?: string; details?: Record<string, any> } = {})
+    {
+        super({
+            message: data.message || 'This sign-in could not be confirmed as started in this browser. Start it again.',
+            details: data.details,
+        });
+        this.name = 'OAuthStateInvalidError';
+    }
+}
+
+/**
+ * OAuth Provider Error (502)
+ *
+ * The provider's token exchange or user-info call failed during the web OAuth
+ * callback (#126). The library's own message stays in the log; the browser gets
+ * this sentence, and the callback redirects with `reason=provider_error`.
+ */
+export class OAuthProviderError extends HttpError
+{
+    constructor(data: { message?: string; details?: Record<string, any> } = {})
+    {
+        super({
+            message: data.message || 'The sign-in provider could not complete the sign-in. Try again.',
+            statusCode: 502,
+            details: data.details,
+        });
+        this.name = 'OAuthProviderError';
+    }
+}
+
+/**
+ * OAuth Account Not Found Error (400)
+ *
+ * The web OAuth callback resolved to an account that is no longer there by the
+ * time its status is checked. Same status and message as the ValidationError the
+ * check has always thrown; its own class so the callback can tell it apart by
+ * type (`reason=account_unavailable`). The native route keeps throwing the plain
+ * ValidationError its contract declares.
+ */
+export class OAuthAccountNotFoundError extends ValidationError
+{
+    constructor(data: { message?: string; details?: Record<string, any> } = {})
+    {
+        super({
+            message: data.message || 'User not found',
+            details: data.details,
+        });
+        this.name = 'OAuthAccountNotFoundError';
+    }
+}
+
+/**
  * Verification Token Purpose Mismatch Error (400)
  *
  * Thrown when verification token purpose doesn't match expected purpose

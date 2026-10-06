@@ -23,7 +23,8 @@ import {
     type OAuthProvider,
 } from '../../server/lib/oauth';
 import { oauthStartService, oauthCallbackService } from '../../server/services/oauth.service';
-import { matchOAuthCsrfCookies } from '../../server/lib/config';
+import { matchOAuthCsrfCookies } from '../../server/lib/oauth/start-cookies';
+import { OAuthProviderError, OAuthStateInvalidError } from '@spfn/auth/errors';
 import {
     sealPendingSession,
     unsealPendingSession,
@@ -333,6 +334,22 @@ describe('OAuth CSRF cookie matching (matchOAuthCsrfCookies)', () =>
 
         expect(matched).toEqual([]);
     });
+
+    it('also lists every per-start CSRF cookie (#126), any port suffix, and still no lookalike', () =>
+    {
+        const matched = matchOAuthCsrfCookies({
+            'spfn_oauth_csrf.kx1a2b.0123456789abcdef': 'nonce-start',
+            'spfn_oauth_csrf_8790.kx1a2b.fedcba9876543210': 'nonce-other-port',
+            'spfn_oauth_csrf.kx1a2b.0123': 'short-id',
+            'spfn_oauth_csrf_extra.kx1a2b.0123456789abcdef': 'other-base',
+        });
+
+        expect(matched).toHaveLength(2);
+        expect(matched).toEqual(expect.arrayContaining([
+            { name: 'spfn_oauth_csrf.kx1a2b.0123456789abcdef', value: 'nonce-start' },
+            { name: 'spfn_oauth_csrf_8790.kx1a2b.fedcba9876543210', value: 'nonce-other-port' },
+        ]));
+    });
 });
 
 describe('OAuth Callback - CSRF nonce candidates', () =>
@@ -362,11 +379,11 @@ describe('OAuth Callback - CSRF nonce candidates', () =>
 
         await expect(oauthCallbackService({
             provider: 'google', code: 'code', state, expectedNonce: [],
-        })).rejects.toThrow('OAuth state validation failed');
+        })).rejects.toThrow(OAuthStateInvalidError);
 
         await expect(oauthCallbackService({
             provider: 'google', code: 'code', state, expectedNonce: undefined,
-        })).rejects.toThrow('OAuth state validation failed');
+        })).rejects.toThrow(OAuthStateInvalidError);
     });
 
     it('should reject when no candidate matches the state nonce', async () =>
@@ -375,7 +392,7 @@ describe('OAuth Callback - CSRF nonce candidates', () =>
 
         await expect(oauthCallbackService({
             provider: 'google', code: 'code', state, expectedNonce: ['nonce-b', 'nonce-c'],
-        })).rejects.toThrow('OAuth state validation failed');
+        })).rejects.toThrow(OAuthStateInvalidError);
     });
 
     it('should pass the CSRF gate when one of several candidates matches', async () =>
@@ -411,9 +428,14 @@ describe('OAuth Callback - CSRF nonce candidates', () =>
             nonce: 'nonce-a',
         });
 
-        await expect(oauthCallbackService({
+        // The library's message stays in the log; the caller sees the typed
+        // provider failure with its fixed sentence (#126).
+        const refusal = oauthCallbackService({
             provider: 'naver', code: 'authorization-code', state, expectedNonce: 'nonce-a',
-        })).rejects.toThrow('stop-after-exchange');
+        });
+
+        await expect(refusal).rejects.toThrow(OAuthProviderError);
+        await expect(refusal).rejects.not.toThrow('stop-after-exchange');
         expect(exchangeCodeForTokens).toHaveBeenCalledWith('authorization-code', { state });
     });
 });

@@ -13,8 +13,8 @@
  * nobody asked for. Its response phase already returns early on any non-200, so
  * the 202 passes through it untouched and nothing in that file changes.
  *
- * The pending cookie is its own name and its own audience, separate from
- * `OAUTH_PENDING`. The two coexist: a person who starts a social login in one tab
+ * The pending cookie is its own name and its own audience, separate from the
+ * OAuth pending cookies. They coexist: a person who starts a social login in one tab
  * while a step-up is outstanding in another has both live, and one name would
  * mean the second overwrote the first — sealing a session with a private key
  * that does not match the key the verification activated.
@@ -37,7 +37,7 @@ import { authLogger } from '../../server/logger';
 import {
     sealPendingMfaSession,
     unsealPendingMfaSession,
-    unsealPendingSession,
+    pendingSessionIn,
     type PendingSessionData,
 } from '../session-helpers';
 import { cookieSecure } from './cookie-options';
@@ -89,8 +89,8 @@ function challengeSecretOf(body: unknown): string | undefined
  * a moment ago, so the pair it minted is in shared metadata, under the `new`
  * names that rule reserves for the credentials it is installing (#99). The OAuth
  * page flow has no such request phase — its key was minted at
- * `oauth/{provider}/url` and sealed into `OAUTH_PENDING` — so that cookie is the
- * fallback.
+ * `oauth/{provider}/url` and sealed into that start's pending cookie — so that
+ * cookie is the fallback.
  */
 async function pendingKeyFor(ctx: ResponseInterceptorContext): Promise<PendingSessionData | null>
 {
@@ -103,9 +103,26 @@ async function pendingKeyFor(ctx: ResponseInterceptorContext): Promise<PendingSe
         };
     }
 
-    const oauthPending = ctx.cookies.get(COOKIE_NAMES.OAUTH_PENDING);
+    return await oauthPendingKeyFor(ctx);
+}
 
-    return oauthPending ? await unsealPendingSession(oauthPending) : null;
+/**
+ * The OAuth start the 202 names, by the `keyId` its body carries (#126).
+ *
+ * Several starts can be in flight, so with a keyId the cookie is picked by that
+ * key and never by position; a legacy fixed-name cookie counts only when it
+ * holds that key, and no cookie for it bakes nothing — the confirm page then
+ * meets the expired answer, as it did when the pending cookie was missing.
+ *
+ * A body without a keyId comes from a page that posts `{ mfaChallenge }` only,
+ * as the README told custom pages to before #126. It gets the most recent
+ * start's key, else the legacy cookie's — the one `getPendingSession()` reads.
+ */
+async function oauthPendingKeyFor(ctx: ResponseInterceptorContext): Promise<PendingSessionData | null>
+{
+    const keyId = (ctx.response.body as { keyId?: unknown } | null)?.keyId;
+
+    return await pendingSessionIn(ctx.cookies, typeof keyId === 'string' && keyId ? keyId : undefined);
 }
 
 /**

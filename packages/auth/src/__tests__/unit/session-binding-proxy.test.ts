@@ -26,6 +26,7 @@ import { sealPendingSession } from '../../nextjs/session-helpers';
 import { sealSession, unsealSession, type SessionData } from '../../server/lib/session';
 import { generateKeyPair } from '../../server/lib/crypto';
 import { COOKIE_NAMES } from '../../server/lib/config';
+import { buildStartCookieName } from '../../server/lib/oauth/start-cookies';
 import { refusalEnvelope } from '../../nextjs/interceptors/error-envelope';
 import { authErrorRegistry, SessionContextChangedError, SessionRenewalRequiredError, SessionResealFailedError } from '../../errors';
 
@@ -335,7 +336,7 @@ describe('the proxy and a bound session (case table 6c)', () =>
             algorithm: keyPair.algorithm,
         });
         const ctx = responseContext('/_auth/oauth/finalize', 200, { userId: '7', keyId: keyPair.keyId, ...BOUND }, {
-            cookies: new Map([[COOKIE_NAMES.OAUTH_PENDING, pending]]),
+            cookies: new Map([[buildStartCookieName('pending', keyPair.keyId), pending]]),
             userAgent: CHROME,
         });
 
