@@ -45,7 +45,7 @@ export async function setupPackageJson(
     packageJson.dependencies['postgres'] = '^3.4.0';
     packageJson.dependencies['pg'] = '^8.16.3';
     packageJson.dependencies['spfn'] = spfnTag;
-    packageJson.dependencies['concurrently'] = '^9.2.1';
+    packageJson.dependencies['concurrently'] = '^9.2.5';
 
     // Node 20 is the floor in both modes: @spfn/core runs on @hono/node-server 2,
     // which declares engines.node >= 20. Full mode's @spfn/auth needs the same.

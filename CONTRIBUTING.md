@@ -71,9 +71,10 @@ pnpm db:generate        # drizzle-kit generate — create a migration from schem
 
 A published `peerDependencies` range is what an adopter resolves against, so a range
 that still admits a vulnerable release ships that vulnerability to every app installing
-the package. `@spfn/*` packages that couple to Next.js require `^16.3.3` — the floor
-that clears GHSA-p293-qw3h-jr36 and GHSA-2xp9-vwfh-vxw4 (remote code execution through a
-Windows-hosted server and through image optimization), and, further back, CVE-2025-66478
+the package. `@spfn/*` packages that couple to Next.js require `^16.3.8` — the floor
+that clears GHSA-vcvr-r3jv-pc5j (critical, fixed in 16.3.6) and GHSA-cjq9-62q9-8jv4 (high,
+fixed in 16.3.8), and, further back, GHSA-p293-qw3h-jr36 and GHSA-2xp9-vwfh-vxw4 (remote
+code execution through a Windows-hosted server and through image optimization), CVE-2025-66478
 (remote code execution through React Server Components) and the Server Components denial
 of service. Next.js 15 is not supported: its patches landed per minor line (15.0.5,
 15.1.9, 15.2.6, …), so no single caret range can express "patched".
@@ -90,7 +91,15 @@ needs `CREATE EXTENSION pg_trgm`, which some managed providers withhold.
 
 Advisories are usually published long after the affected code is written, which is why
 `.github/workflows/security-audit.yml` runs daily rather than only on a pull request. It
-fails on a critical finding in the production graph and reports everything else.
+fails on a high or critical finding in the production graph and reports everything else.
+One high advisory is ignored by name in the root `package.json` (`pnpm.auditConfig`):
+CVE-2026-93687 (GHSA-vfj7-8cjw-p6xm), a stack-exhaustion denial of service in braces through
+deeply nested brace patterns, which has no patched release. `@spfn/core` reaches it only
+through micromatch, whose patterns come from the developer's own codegen and db
+configuration (including the `DRIZZLE_SCHEMA_PATH` environment value) and from the
+`spfn.schemas` field in the `package.json` of installed SPFN packages and direct
+dependencies, and never from a request; remove the entry when braces or micromatch
+ships a fix.
 
 ## Running the tests
 

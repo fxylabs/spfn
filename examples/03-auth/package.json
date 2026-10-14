@@ -18,10 +18,10 @@
         "@sinclair/typebox": "^0.34.0",
         "@spfn/auth": "workspace:*",
         "@spfn/core": "workspace:*",
-        "concurrently": "^9.2.1",
+        "concurrently": "^9.2.5",
         "drizzle-orm": "1.0.0-rc.4",
         "drizzle-typebox": "^0.3.3",
-        "next": "16.3.5",
+        "next": "^16.3.8",
         "react": "19.2.3",
         "react-dom": "19.2.3",
         "spfn": "workspace:*"
