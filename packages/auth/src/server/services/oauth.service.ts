@@ -13,6 +13,7 @@ import {
     AccountDisabledError,
     AccountPendingDeletionError,
     OAuthAccountNotFoundError,
+    OAuthCookieMissingError,
     OAuthProviderError,
     OAuthStateExpiredError,
     OAuthStateInvalidError,
@@ -357,9 +358,14 @@ export async function oauthCallbackService(
  * another browser out, since a cookie can only have been set by this browser's
  * own start.
  *
+ * A state that names another provider is refused before any cookie is read.
+ * Only past that is a missing cookie told apart (#129): no candidate at all is
+ * `OAuthCookieMissingError`, while candidates none of which holds the nonce
+ * stay `OAuthStateInvalidError`.
+ *
  * Reads, never expires: the route expires the returned name, and only that one.
  *
- * @throws OAuthStateExpiredError, OAuthStateInvalidError
+ * @throws OAuthStateExpiredError, OAuthStateInvalidError, OAuthCookieMissingError
  */
 export async function matchOAuthCallbackCsrf(params: {
     provider: SocialProvider;
@@ -368,9 +374,13 @@ export async function matchOAuthCallbackCsrf(params: {
 }): Promise<{ name: string; nonce: string }>
 {
     const stateData = await verifyOAuthState(params.state);
-    const match = stateData.provider === params.provider
-        ? cookieHoldingNonce(csrfCandidates(stateData.keyId, params.cookies), stateData.nonce)
-        : undefined;
+
+    if (stateData.provider !== params.provider)
+    {
+        throw new OAuthStateInvalidError();
+    }
+
+    const match = cookieHoldingNonce(presentCsrfCandidates(stateData.keyId, params.cookies), stateData.nonce);
 
     if (!match)
     {
@@ -378,6 +388,19 @@ export async function matchOAuthCallbackCsrf(params: {
     }
 
     return { name: match.name, nonce: match.value };
+}
+
+/** The CSRF candidates for `keyId`, refused with `OAuthCookieMissingError` when there are none. */
+function presentCsrfCandidates(keyId: string, cookies: Record<string, string>): { name: string; value: string }[]
+{
+    const candidates = csrfCandidates(keyId, cookies);
+
+    if (candidates.length === 0)
+    {
+        throw new OAuthCookieMissingError();
+    }
+
+    return candidates;
 }
 
 /** The start's own CSRF cookies, else the legacy ones — never both. */
@@ -673,6 +696,7 @@ export function buildOAuthErrorUrl(error: string, reason: OAuthErrorReason = 'fa
 const REASON_BY_ERROR: [abstract new (...args: never[]) => Error, OAuthErrorReason][] = [
     [OAuthStateExpiredError, 'expired'],
     [OAuthStateInvalidError, 'invalid_state'],
+    [OAuthCookieMissingError, 'no_cookie'],
     [OAuthProviderError, 'provider_error'],
     [AccountDisabledError, 'account_unavailable'],
     [AccountPendingDeletionError, 'account_unavailable'],

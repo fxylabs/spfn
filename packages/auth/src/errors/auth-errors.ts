@@ -734,10 +734,9 @@ export class OAuthStateExpiredError extends ValidationError
  * OAuth State Invalid Error (400)
  *
  * The web OAuth callback's state cannot be trusted for this browser (#126): it
- * does not decrypt, its nonce has no matching cookie or a different one, or it
- * names another provider. A login-CSRF attempt and a cookie that simply went
- * missing look the same from here, and both are refused the same way. The
- * callback redirects with `reason=invalid_state`.
+ * does not decrypt, it names another provider, or the start's cookies are there
+ * and none holds its nonce. No cookie at all is `OAuthCookieMissingError`
+ * (#129). The callback redirects with `reason=invalid_state`.
  */
 export class OAuthStateInvalidError extends ValidationError
 {
@@ -748,6 +747,36 @@ export class OAuthStateInvalidError extends ValidationError
             details: data.details,
         });
         this.name = 'OAuthStateInvalidError';
+    }
+}
+
+/**
+ * The fixed sentence every OAuth callback path answers with when it finds none
+ * of the cookies the start set (#129): the backend callback, the Next.js
+ * callback handler and the finalize interceptor.
+ */
+export const OAUTH_COOKIE_MISSING_MESSAGE
+    = 'This browser kept none of the cookies this sign-in set. Allow cookies for this site, or start the sign-in again in the browser where it began.';
+
+/**
+ * OAuth Cookie Missing Error (400)
+ *
+ * The web OAuth callback's state decrypted and names this provider, but the
+ * request carries none of the CSRF cookies a start sets — neither this start's
+ * own nor a legacy one (#129). The browser keeps no cookies for the site, or the
+ * sign-in began in another browser. A cookie that exists and holds another nonce
+ * is still `OAuthStateInvalidError`. The callback redirects with
+ * `reason=no_cookie`; it never reaches a REST body.
+ */
+export class OAuthCookieMissingError extends ValidationError
+{
+    constructor(data: { message?: string; details?: Record<string, any> } = {})
+    {
+        super({
+            message: data.message || OAUTH_COOKIE_MISSING_MESSAGE,
+            details: data.details,
+        });
+        this.name = 'OAuthCookieMissingError';
     }
 }
 

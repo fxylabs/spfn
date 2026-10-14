@@ -11,6 +11,7 @@ import { deriveCsrfToken } from '../server/lib/csrf';
 import { COOKIE_NAMES, getSessionTtl } from '../server/lib/config';
 import { env } from '@spfn/core/config';
 import { logger } from '@spfn/core/logger';
+import { OAUTH_COOKIE_MISSING_MESSAGE } from '@spfn/auth/errors';
 import { pendingCookieForKey, unsealPendingSession, type PendingSessionData } from './session-helpers';
 import { isSafeReturnPath } from '../lib/return-path';
 import { bindingSessionFields } from './interceptors/session-binding';
@@ -138,8 +139,9 @@ type PendingLookup =
 
 /**
  * This start's pending session, found by the callback's keyId (#126) — its own
- * cookie, else a legacy fixed-name one. A missing cookie is `expired`; one that
- * does not unseal, or holds another key, is `invalid_state`.
+ * cookie, else a legacy fixed-name one. No cookie at all is `no_cookie` (#129):
+ * the browser kept none of the start's cookies. One that does not unseal, or
+ * holds another key, is `invalid_state`. A refusal writes no cookie.
  */
 async function lookUpPending(keyId: string): Promise<PendingLookup>
 {
@@ -148,7 +150,7 @@ async function lookUpPending(keyId: string): Promise<PendingLookup>
 
     if (!cookie)
     {
-        return { ok: false, error: 'OAuth session expired. Please try again.', reason: 'expired' };
+        return { ok: false, error: OAUTH_COOKIE_MISSING_MESSAGE, reason: 'no_cookie' };
     }
 
     const pending = await unsealPendingSession(cookie.value).catch(() => null);
@@ -216,7 +218,8 @@ async function sessionRedirect(
  * session is sealed by `mfaVerifyInterceptor` once the page proves it.
  *
  * Every failure redirects to `errorRedirectUrl` with `error` and a `reason`
- * code (#126): `cancelled`, `failed`, `expired` or `invalid_state`.
+ * code (#126): `cancelled`, `failed`, `expired`, `invalid_state` or `no_cookie`
+ * (#129) — or the code the backend's own redirect already carried.
  *
  * @example
  * ```typescript

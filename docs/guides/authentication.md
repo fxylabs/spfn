@@ -719,8 +719,8 @@ Each start writes its own pending and CSRF cookie, named `<base>.<issuedAt>.<id>
 the old fixed name with its `SPFN_PORT` suffix (`spfn_oauth_pending_3790`, `spfn_oauth_csrf_3790`),
 `<issuedAt>` the start time in seconds (base-36), `<id>` the first 16 hex characters of SHA-256 over
 the start's key id. Two tabs can therefore both finish, in either order. At most five starts live
-in one browser; a sixth expires the oldest one's cookies (its callback is then refused with
-`reason=invalid_state`). The callback and the finalize each read and expire only their own start's
+in one browser; a sixth expires the oldest one's cookies (its callback then finds none of its
+cookies and is refused with `reason=no_cookie`). The callback and the finalize each read and expire only their own start's
 cookies, and a refused callback expires nothing.
 
 `sessionCookieNames().oauthPendingPrefix` is the prefix every in-flight start's pending cookie
@@ -745,13 +745,14 @@ codes are the closed union `OAuthErrorReason`:
 | `reason` | cause |
 |---|---|
 | `cancelled` | the person declined at the provider (`error=access_denied`) |
-| `expired` | the sign-in took longer than ten minutes (or its pending cookie is gone at finalize) |
-| `invalid_state` | the sign-in cannot be confirmed as started in this browser (state tampered, nonce cookie missing or different, provider mismatch, pending cookie for another key) |
+| `expired` | the sign-in took longer than ten minutes |
+| `invalid_state` | the sign-in cannot be confirmed as started in this browser (state tampered, nonce cookie different, provider mismatch, pending cookie unreadable or for another key) |
+| `no_cookie` | the browser kept none of the cookies the start set — it keeps no cookies for the site, or the sign-in began in another browser |
 | `provider_error` | any other provider error, or the token exchange / user-info call failed |
 | `account_unavailable` | the account is disabled, pending deletion, or gone |
 | `failed` | anything else |
 
-For `expired`, `invalid_state` and a library failure behind `provider_error` the `error` text is a
+For `expired`, `invalid_state`, `no_cookie` and a library failure behind `provider_error` the `error` text is a
 fixed sentence, never a library message. Put `{reason}` in the template
 (`/auth/error?error={error}&code={reason}`) to place it yourself; without it `reason` is appended as
 a query parameter. `OAuthCallback`'s `onError(message, reason)` and `errorComponent(message, reason)`

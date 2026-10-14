@@ -42,6 +42,7 @@ import { generateKeyPair } from '../../server/lib/crypto';
 import { COOKIE_NAMES } from '../../server/lib/config';
 import { CSRF_HEADER, deriveCsrfToken } from '../../server/lib/csrf';
 import { mainAuthRouter } from '../../server/routes';
+import { OAUTH_COOKIE_MISSING_MESSAGE } from '@spfn/auth/errors';
 
 vi.mock('../../server/services/session-binding.service', async (importActual) => ({
     ...(await importActual<typeof import('../../server/services/session-binding.service')>()),
@@ -329,7 +330,7 @@ describe('POST /_auth/oauth/finalize case table (#126)', () =>
         const { responseCtx } = await throughTheChain(app, { body: { userId: '7', keyId: 'some-other-key' }, jar });
 
         expect(responseCtx!.response.status).toBe(401);
-        expect(responseCtx!.response.body).toMatchObject({ success: false, message: 'OAuth session expired. Please try again.' });
+        expect(responseCtx!.response.body).toMatchObject({ success: false, message: OAUTH_COOKIE_MISSING_MESSAGE, reason: 'no_cookie' });
         expect(sessionCookiesTouched(responseCtx!.setCookies)).toEqual([]);
     });
 
@@ -338,7 +339,7 @@ describe('POST /_auth/oauth/finalize case table (#126)', () =>
         const { responseCtx } = await throughTheChain(app, { body: { userId: '7', keyId: 'any-key' }, jar: new Map() });
 
         expect(responseCtx!.response.status).toBe(401);
-        expect(responseCtx!.response.body).toMatchObject({ success: false, message: 'OAuth session expired. Please try again.' });
+        expect(responseCtx!.response.body).toMatchObject({ success: false, message: OAUTH_COOKIE_MISSING_MESSAGE, reason: 'no_cookie' });
         expect(sessionCookiesTouched(responseCtx!.setCookies)).toEqual([]);
     });
 

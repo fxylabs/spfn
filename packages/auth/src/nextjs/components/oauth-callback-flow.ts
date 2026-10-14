@@ -31,8 +31,8 @@ const FINALIZE_FAILED = 'Failed to finalize OAuth';
  *
  * An error carries `reason` (#126): the backend's code when the query brought
  * one (else the provider's `error` read as `cancelled` or `provider_error`),
- * `expired` or `invalid_state` for the finalize refusals the proxy names, and
- * `failed` for anything else — so an app page can branch on it.
+ * `expired`, `invalid_state` or `no_cookie` (#129) for the finalize refusals the
+ * proxy names, and `failed` for anything else — so an app page can branch on it.
  */
 export type CallbackOutcome =
     | { kind: 'navigate'; to: string; userId?: string }

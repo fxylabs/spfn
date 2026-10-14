@@ -11,6 +11,7 @@
 
 import type { InterceptorRule, ProxyAbort, ResponseInterceptorContext } from '@spfn/core/nextjs/server';
 import type { SetCookie } from '@spfn/core/nextjs';
+import { OAUTH_COOKIE_MISSING_MESSAGE } from '@spfn/auth/errors';
 import { generateKeyPair } from '../../server/lib/crypto';
 import { createOAuthState, generateOAuthNonce } from '../../server/lib/oauth/state';
 import { buildStartCookieName, legacyPendingCookie, namesEvictedByStart } from '../../server/lib/oauth/start-cookies';
@@ -222,7 +223,7 @@ async function pushStartCookies(ctx: ResponseInterceptorContext): Promise<void>
 function setFinalizeError(
     ctx: ResponseInterceptorContext,
     message: string,
-    reason: 'expired' | 'invalid_state' | 'failed',
+    reason: 'expired' | 'invalid_state' | 'no_cookie' | 'failed',
     readCookie?: string,
 ): void
 {
@@ -266,7 +267,9 @@ function repeatsCurrentSession(ctx: ResponseInterceptorContext): boolean
  * A repeat is answered with the backend's success, unchanged, and writes no
  * cookie — there is no private key to seal with (the pending cookie is gone)
  * and none is needed: the session it would seal is the one already installed.
- * Anything else is refused without touching the session the browser holds.
+ * Anything else is refused with `no_cookie` (#129) — the browser kept none of
+ * the start's cookies — without touching the session the browser holds, and
+ * without expiring any cookie: there is none this finalize read.
  */
 function answerWithoutPendingCookie(ctx: ResponseInterceptorContext): void
 {
@@ -280,7 +283,7 @@ function answerWithoutPendingCookie(ctx: ResponseInterceptorContext): void
     }
 
     authLogger.interceptor.oauth?.warn?.('No pending session cookie found');
-    setFinalizeError(ctx, 'OAuth session expired. Please try again.', 'expired');
+    setFinalizeError(ctx, OAUTH_COOKIE_MISSING_MESSAGE, 'no_cookie');
 }
 
 /**

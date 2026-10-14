@@ -1944,7 +1944,8 @@ key id. Neither the key id nor the nonce appears in a name. Both cookies stay `H
 `SameSite=Lax`, `Path=/`, `Secure` in production, ten minutes.
 
 - **Cap of five.** At most five starts live in one browser. A sixth expires the oldest start's two
-  cookies in the same response; that start's callback is then refused with `reason=invalid_state`.
+  cookies in the same response; that start's callback then finds none of its cookies and is
+  refused with `reason=no_cookie`.
   Worst case the five pairs add about 3.4 KB to the `Cookie` header (one ES256 pair is ~670 bytes).
   A name dated more than a minute ahead of the server's clock counts as the oldest, so it is
   evicted first and is never "the most recent start".
@@ -1986,8 +1987,9 @@ type. Branch on `reason`; show `error` if you like. The codes are the closed uni
 | `reason` | cause | `error` text |
 |---|---|---|
 | `cancelled` | the person declined at the provider (`error=access_denied`) | the provider's `error_description` or `error` |
-| `expired` | the sign-in took longer than ten minutes, or its pending cookie is gone at finalize | a fixed sentence |
-| `invalid_state` | the state does not decrypt, its nonce has no matching cookie in this browser or a different one, it names another provider, or the pending cookie holds another key | a fixed sentence |
+| `expired` | the sign-in took longer than ten minutes | a fixed sentence |
+| `invalid_state` | the state does not decrypt, it names another provider, the CSRF cookie holds a different nonce, or the pending cookie does not unseal or holds another key | a fixed sentence |
+| `no_cookie` | the callback or the finalize found none of the cookies the start set: the browser keeps no cookies for the site, or the sign-in began in another browser (added in 0.3.0-beta.38, #129) | a fixed sentence |
 | `provider_error` | any other provider `error=…`, or the token exchange / user-info call failed | the provider's text; a fixed sentence for a library failure |
 | `account_unavailable` | the account is disabled, pending deletion, or gone | unchanged |
 | `failed` | anything else — missing `code`/`state`, an unverified email that would link an account, a missing role | unchanged |
@@ -1996,7 +1998,8 @@ type. Branch on `reason`; show `error` if you like. The codes are the closed uni
 (`/auth/error?error={error}&code={reason}`); a template without `{reason}` gets `reason` as a query
 parameter, placed before any `#fragment`. `OAuthCallback` passes the code too —
 `onError(message, reason)` and `errorComponent(message, reason)`: the backend's code when the
-callback query carried one, `expired` or `invalid_state` for a finalize the proxy refused, and
+callback query carried one, `expired`, `invalid_state` or `no_cookie` for a finalize the proxy
+refused, and
 `failed` otherwise.
 
 ### Provider-initiated unlink notifications (`unlink-notify`)

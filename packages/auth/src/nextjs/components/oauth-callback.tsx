@@ -63,8 +63,8 @@ export interface OAuthCallbackProps
 
     /**
      * Callback on error. `reason` is a closed code (#126) a page can branch on:
-     * the backend's when the callback query carried one, `expired` or
-     * `invalid_state` for a refused finalize, `failed` otherwise.
+     * the backend's when the callback query carried one, `expired`,
+     * `invalid_state` or `no_cookie` for a refused finalize, `failed` otherwise.
      */
     onError?: (error: string, reason: OAuthErrorReason) => void;
 }

@@ -14,6 +14,7 @@ export const OAUTH_ERROR_REASONS = [
     'cancelled',
     'expired',
     'invalid_state',
+    'no_cookie',
     'provider_error',
     'account_unavailable',
     'failed',
@@ -25,6 +26,9 @@ export const OAUTH_ERROR_REASONS = [
  * - `cancelled` — the person declined at the provider (`error=access_denied`)
  * - `expired` — the sign-in took longer than ten minutes
  * - `invalid_state` — the sign-in cannot be confirmed as started in this browser
+ * - `no_cookie` — the callback found none of the cookies the start set: the
+ *   browser keeps no cookies for the site, or the sign-in began in another
+ *   browser (#129)
  * - `provider_error` — the provider reported an error or could not be reached
  * - `account_unavailable` — the account is disabled, pending deletion, or gone
  * - `failed` — anything else

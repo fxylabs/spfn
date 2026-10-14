@@ -12,6 +12,11 @@
  * database; there `oauthCallbackService` is replaced, per test, by one that
  * throws the error the real service throws at that point. The CSRF gate before
  * it stays real.
+ *
+ * fxylabs/spfn#129 adds `no_cookie`: a callback that finds none of the cookies
+ * the start set. Its case table — A (backend callback), B (Next.js callback
+ * handler), D (the reason-code surface) — follows the #126 rows; the finalize
+ * rows (C) sit with the finalize chain in `oauth-two-tab-start.test.ts`.
  */
 
 import { describe, it, expect, expectTypeOf, afterAll, beforeAll, beforeEach, afterEach, vi } from 'vitest';
@@ -72,7 +77,7 @@ import { createOAuthState } from '../../server/lib/oauth/state';
 import { buildStartCookieName } from '../../server/lib/oauth/start-cookies';
 import { generateKeyPair } from '../../server/lib/crypto';
 import { COOKIE_NAMES } from '../../server/lib/config';
-import { buildOAuthErrorUrl } from '../../server/services/oauth.service';
+import { buildOAuthErrorUrl, matchOAuthCallbackCsrf, oauthErrorReason } from '../../server/services/oauth.service';
 import { mainAuthRouter } from '../../server/routes';
 import { authInterceptors } from '../../nextjs/interceptors';
 import { createOAuthCallbackHandler } from '../../nextjs/oauth-handlers';
@@ -82,13 +87,24 @@ import {
     type CallbackOptions,
     type CallbackOutcome,
 } from '../../nextjs/components/oauth-callback-flow';
-import { OAUTH_ERROR_REASONS, type OAuthErrorReason } from '../../lib/oauth-error-reason';
+import {
+    OAUTH_ERROR_REASONS,
+    isOAuthErrorReason,
+    withOAuthErrorReason,
+    type OAuthErrorReason,
+} from '../../lib/oauth-error-reason';
 import {
     AccountDisabledError,
     AccountPendingDeletionError,
+    authErrorRegistry,
+    OAUTH_COOKIE_MISSING_MESSAGE,
     OAuthAccountNotFoundError,
+    OAuthCookieMissingError,
+    OAuthStateExpiredError,
+    OAuthStateInvalidError,
     UnverifiedEmailLinkError,
 } from '@spfn/auth/errors';
+import { ValidationError } from '@spfn/core/errors';
 
 const SECRET = 'test-secret-with-at-least-32-characters-for-security-testing';
 const NONCE = 'nonce-of-this-browser';
@@ -105,7 +121,7 @@ function clientIp(): string
     return `2001:db8:1::${requests.toString(16)}`;
 }
 
-const exchange = { failure: null as null | Error };
+const exchange = { failure: null as null | Error, calls: 0 };
 
 /**
  * Auth's suite runs every file in one fork and the registry has no removal, so
@@ -129,6 +145,8 @@ function provider(): OAuthProvider
         getAuthUrl: (state: string) => `https://idp.example/auth?state=${state}`,
         exchangeCodeForTokens: async () =>
         {
+            exchange.calls += 1;
+
             if (exchange.failure)
             {
                 throw exchange.failure;
@@ -177,6 +195,14 @@ async function pastTheGate(app: Hono): Promise<URLSearchParams>
         `code=c&state=${await stateIssued()}`,
         `${buildStartCookieName('csrf', KEY_ID)}=${NONCE}`,
     );
+}
+
+/** A pending session sealed for `keyId`, its private key a fresh one. */
+function sealedFor(keyId: string): Promise<string>
+{
+    const keyPair = generateKeyPair('ES256');
+
+    return sealPendingSession({ privateKey: keyPair.privateKey, keyId, algorithm: keyPair.algorithm });
 }
 
 describe('OAuth callback error redirect (#126 claim 4)', () =>
@@ -270,12 +296,12 @@ describe('OAuth callback reason codes — backend redirect (#126)', () =>
         expect(params.get('error')).not.toMatch(LIBRARY_LEAK);
     });
 
-    it('R3: a tampered state, a missing or mismatched nonce, a provider mismatch — invalid_state, one fixed sentence', async () =>
+    it('R3: a tampered state, a mismatched nonce, a provider mismatch — invalid_state, one fixed sentence', async () =>
     {
+        // A missing nonce cookie is `no_cookie` since #129 (row A5).
         const perStart = buildStartCookieName('csrf', KEY_ID);
         const cases = [
             await errorRedirect(app, 'code=c&state=tampered-garbage'),
-            await errorRedirect(app, `code=c&state=${await stateIssued()}`, 'unrelated=1'),
             await errorRedirect(app, `code=c&state=${await stateIssued()}`, `${perStart}=another-nonce`),
             await errorRedirect(app, `code=c&state=${await stateIssued({ provider: 'kakao' })}`, `${perStart}=${NONCE}`),
         ];
@@ -360,14 +386,7 @@ describe('OAuth callback reason codes — createOAuthCallbackHandler (#126)', ()
         return location.searchParams;
     }
 
-    function sealedFor(keyId: string): Promise<string>
-    {
-        const keyPair = generateKeyPair('ES256');
-
-        return sealPendingSession({ privateKey: keyPair.privateKey, keyId, algorithm: keyPair.algorithm });
-    }
-
-    it('R7: ?error=access_denied, missing params, missing pending, key mismatch, unseal failure — cancelled, failed, expired, invalid_state, invalid_state', async () =>
+    it('R7: ?error=access_denied, missing params, missing pending, key mismatch, unseal failure — cancelled, failed, no_cookie, invalid_state, invalid_state', async () =>
     {
         const keyId = generateKeyPair('ES256').keyId;
         const reasons: (string | null)[] = [];
@@ -380,7 +399,7 @@ describe('OAuth callback reason codes — createOAuthCallbackHandler (#126)', ()
         seams.jar = new Map([[buildStartCookieName('pending', keyId), 'not-a-sealed-value']]);
         reasons.push((await handled(`userId=7&keyId=${keyId}`)).get('reason'));
 
-        expect(reasons).toEqual(['cancelled', 'failed', 'expired', 'invalid_state', 'invalid_state']);
+        expect(reasons).toEqual(['cancelled', 'failed', 'no_cookie', 'invalid_state', 'invalid_state']);
     });
 });
 
@@ -517,7 +536,7 @@ describe('OAuthCallback page flow reason codes (#126)', () =>
         })]]);
         const brokenFetch = (async () => new Response('{}', { status: 500 })) as unknown as CallbackOptions['fetch'];
 
-        expect(await outcomeFor(`?userId=7&keyId=${keyId}`)).toMatchObject({ kind: 'error', reason: 'expired' });
+        expect(await outcomeFor(`?userId=7&keyId=${keyId}`)).toMatchObject({ kind: 'error', reason: 'no_cookie' });
         expect(await outcomeFor(`?userId=7&keyId=${keyId}`, mismatchJar)).toMatchObject({ kind: 'error', reason: 'invalid_state' });
         expect(await outcomeFor('?error=gone&reason=account_unavailable')).toMatchObject({ kind: 'error', reason: 'account_unavailable' });
         expect(await outcomeFor('?error=whatever&reason=not-a-code')).toMatchObject({ kind: 'error', reason: 'provider_error' });
@@ -575,12 +594,326 @@ describe('OAuthCallback page flow reason codes (#126)', () =>
         expect(answer.body).toEqual({ success: false, message: 'OAuth session expired. Please try again.', reason: 'expired' });
     });
 
+    it('D3: a 401 finalize body with reason no_cookie reaches the error outcome — onError\'s arguments — unchanged', async () =>
+    {
+        const keyId = generateKeyPair('ES256').keyId;
+        const refusal = { success: false, message: OAUTH_COOKIE_MISSING_MESSAGE, reason: 'no_cookie' };
+        const stubbed = (async () => new Response(JSON.stringify(refusal), { status: 401 })) as unknown as CallbackOptions['fetch'];
+        const expected = { kind: 'error', message: OAUTH_COOKIE_MISSING_MESSAGE, reason: 'no_cookie' };
+
+        expect(await runOAuthCallback(`?userId=7&keyId=${keyId}`, { apiBasePath: '/api/rpc', fetch: stubbed })).toEqual(expected);
+        expect(await outcomeFor(`?userId=7&keyId=${keyId}`)).toEqual(expected);
+    });
+
     it('R9 (types): the codes are a closed union, and the error outcome carries one', () =>
     {
         expectTypeOf<OAuthErrorReason>()
-            .toEqualTypeOf<'cancelled' | 'expired' | 'invalid_state' | 'provider_error' | 'account_unavailable' | 'failed'>();
+            .toEqualTypeOf<'cancelled' | 'expired' | 'invalid_state' | 'no_cookie' | 'provider_error' | 'account_unavailable' | 'failed'>();
         expectTypeOf<'unknown_reason'>().not.toMatchTypeOf<OAuthErrorReason>();
         expectTypeOf<Extract<CallbackOutcome, { kind: 'error' }>['reason']>().toEqualTypeOf<OAuthErrorReason>();
-        expect(OAUTH_ERROR_REASONS).toHaveLength(6);
+        expect(OAUTH_ERROR_REASONS).toHaveLength(7);
+    });
+});
+
+/**
+ * A jar that throws on any access: a refusal raised with it proves no cookie
+ * was read before the refusal was decided.
+ */
+const untouchable = new Proxy({}, {
+    get: () =>
+    {
+        throw new Error('a cookie was read');
+    },
+    ownKeys: () =>
+    {
+        throw new Error('a cookie was read');
+    },
+    has: () =>
+    {
+        throw new Error('a cookie was read');
+    },
+}) as Record<string, string>;
+
+/** What `matchOAuthCallbackCsrf` threw for the route's provider, or `null` when it matched. */
+async function refusalFor(state: string, cookies: Record<string, string>): Promise<unknown>
+{
+    return await matchOAuthCallbackCsrf({ provider: 'superself', state, cookies }).then(() => null, (error: unknown) => error);
+}
+
+/** The callback route's answer: the error page's query and every Set-Cookie it wrote. */
+async function callbackAnswer(app: Hono, state: string, cookie: string): Promise<{ params: URLSearchParams; setCookies: string[] }>
+{
+    const response = await app.request(`/_auth/oauth/superself/callback?code=c&state=${state}`, {
+        headers: { 'Cookie': cookie, 'x-forwarded-for': clientIp() },
+    });
+
+    expect(response.status).toBe(302);
+
+    return {
+        params: new URL(response.headers.get('location')!, 'https://app.example').searchParams,
+        setCookies: response.headers.getSetCookie(),
+    };
+}
+
+/** The case table for the backend callback (#129). Each `it` is named for its row. */
+describe('no_cookie case table A — backend callback, matchOAuthCallbackCsrf (#129)', () =>
+{
+    const perStart = buildStartCookieName('csrf', KEY_ID);
+    const anotherStart = `${buildStartCookieName('csrf', 'key-of-another-start')}=nonce-of-another-start`;
+    let app: Hono;
+
+    beforeAll(() =>
+    {
+        registerOAuthProvider(provider());
+        app = new Hono();
+        registerRoutes(app, mainAuthRouter);
+    });
+
+    beforeEach(() =>
+    {
+        vi.stubEnv('SPFN_AUTH_SESSION_SECRET', SECRET);
+        exchange.calls = 0;
+    });
+
+    afterEach(() =>
+    {
+        vi.useRealTimers();
+        vi.unstubAllEnvs();
+        exchange.failure = null;
+    });
+
+    it('A1: a state that does not decrypt — invalid_state even beside a matching cookie; no cookie read, none expired', async () =>
+    {
+        const refusal = await refusalFor('not-a-state', untouchable);
+        const answer = await callbackAnswer(app, 'not-a-state', `${perStart}=${NONCE}`);
+
+        expect(refusal).toBeInstanceOf(OAuthStateInvalidError);
+        expect(answer.params.get('reason')).toBe('invalid_state');
+        expect(answer.setCookies).toEqual([]);
+        expect(exchange.calls).toBe(0);
+    });
+
+    it('A2: a state past its ten minutes — expired, whatever the cookies', async () =>
+    {
+        vi.useFakeTimers({ toFake: ['Date'] });
+        const state = await stateIssued();
+        vi.setSystemTime(Date.now() + 11 * 60 * 1000);
+
+        const refusal = await refusalFor(state, untouchable);
+        const answer = await callbackAnswer(app, state, '');
+
+        expect(refusal).toBeInstanceOf(OAuthStateExpiredError);
+        expect(answer.params.get('reason')).toBe('expired');
+    });
+
+    it('A3: a valid state naming another provider, no cookie — invalid_state, never no_cookie, decided before any cookie is read', async () =>
+    {
+        const state = await stateIssued({ provider: 'kakao' });
+
+        const refusal = await refusalFor(state, untouchable);
+        const answer = await callbackAnswer(app, state, '');
+
+        expect(refusal).toBeInstanceOf(OAuthStateInvalidError);
+        expect(refusal).not.toBeInstanceOf(OAuthCookieMissingError);
+        expect(answer.params.get('reason')).toBe('invalid_state');
+    });
+
+    it('A4: a valid state naming another provider, a cookie holding its nonce — invalid_state, never proceeds', async () =>
+    {
+        const state = await stateIssued({ provider: 'kakao' });
+
+        const refusal = await refusalFor(state, { [perStart]: NONCE });
+        const answer = await callbackAnswer(app, state, `${perStart}=${NONCE}`);
+
+        expect(refusal).toBeInstanceOf(OAuthStateInvalidError);
+        expect(answer.params.get('reason')).toBe('invalid_state');
+        expect(answer.setCookies).toEqual([]);
+        expect(exchange.calls).toBe(0);
+    });
+
+    it('A5: a valid state for this provider, no per-start and no legacy cookie — no_cookie with the fixed sentence; nothing expired, the provider never called', async () =>
+    {
+        const state = await stateIssued();
+
+        const refusal = await refusalFor(state, { unrelated: '1', [buildStartCookieName('csrf', 'key-of-another-start')]: NONCE });
+        const answer = await callbackAnswer(app, state, `unrelated=1; ${anotherStart}`);
+
+        expect(refusal).toBeInstanceOf(OAuthCookieMissingError);
+        expect((refusal as Error).message).toBe(OAUTH_COOKIE_MISSING_MESSAGE);
+        expect(oauthErrorReason(refusal)).toBe('no_cookie');
+        expect(answer.params.get('reason')).toBe('no_cookie');
+        expect(answer.params.get('error')).toBe(OAUTH_COOKIE_MISSING_MESSAGE);
+        expect(answer.setCookies).toEqual([]);
+        expect(exchange.calls).toBe(0);
+    });
+
+    it('A6: a valid state for this provider, per-start cookies none of which holds the nonce — invalid_state, not no_cookie; nothing expired', async () =>
+    {
+        const state = await stateIssued();
+        const older = buildStartCookieName('csrf', KEY_ID, Date.now() - 60_000);
+
+        const refusal = await refusalFor(state, { [perStart]: 'another-nonce', [older]: 'yet-another-nonce' });
+        const answer = await callbackAnswer(app, state, `${perStart}=another-nonce; ${older}=yet-another-nonce`);
+
+        expect(refusal).toBeInstanceOf(OAuthStateInvalidError);
+        expect(refusal).not.toBeInstanceOf(OAuthCookieMissingError);
+        expect(answer.params.get('reason')).toBe('invalid_state');
+        expect(answer.setCookies).toEqual([]);
+        expect(exchange.calls).toBe(0);
+    });
+
+    it('A7: a valid state for this provider, a per-start cookie holding the nonce — proceeds; that cookie only is expired', async () =>
+    {
+        const state = await stateIssued();
+        exchange.failure = new Error('the code exchange ran');
+
+        const match = await matchOAuthCallbackCsrf({ provider: 'superself', state, cookies: { [perStart]: NONCE } });
+        const answer = await callbackAnswer(app, state, `${perStart}=${NONCE}; ${anotherStart}`);
+
+        expect(match).toEqual({ name: perStart, nonce: NONCE });
+        expect(answer.params.get('reason')).toBe('provider_error');
+        expect(exchange.calls).toBe(1);
+        expect(answer.setCookies.map(header => header.split('=')[0])).toEqual([perStart]);
+        expect(answer.setCookies[0]).toMatch(/Max-Age=0/i);
+    });
+
+    it('A8: a valid state for this provider, no per-start cookie, a legacy cookie holding the nonce — proceeds through the legacy fallback', async () =>
+    {
+        const state = await stateIssued();
+        exchange.failure = new Error('the code exchange ran');
+
+        const match = await matchOAuthCallbackCsrf({ provider: 'superself', state, cookies: { [COOKIE_NAMES.OAUTH_CSRF]: NONCE } });
+        const answer = await callbackAnswer(app, state, `${COOKIE_NAMES.OAUTH_CSRF}=${NONCE}`);
+
+        expect(match).toEqual({ name: COOKIE_NAMES.OAUTH_CSRF, nonce: NONCE });
+        expect(answer.params.get('reason')).toBe('provider_error');
+        expect(exchange.calls).toBe(1);
+        expect(answer.setCookies.map(header => header.split('=')[0])).toEqual([COOKIE_NAMES.OAUTH_CSRF]);
+    });
+
+    it('A9: a valid state for this provider, no per-start cookie, a legacy cookie with another nonce — invalid_state, not no_cookie', async () =>
+    {
+        const state = await stateIssued();
+
+        const refusal = await refusalFor(state, { [COOKIE_NAMES.OAUTH_CSRF]: 'legacy-nonce-of-another-start' });
+        const answer = await callbackAnswer(app, state, `${COOKIE_NAMES.OAUTH_CSRF}=legacy-nonce-of-another-start`);
+
+        expect(refusal).toBeInstanceOf(OAuthStateInvalidError);
+        expect(refusal).not.toBeInstanceOf(OAuthCookieMissingError);
+        expect(answer.params.get('reason')).toBe('invalid_state');
+        expect(answer.setCookies).toEqual([]);
+    });
+});
+
+/** The case table for `createOAuthCallbackHandler`'s pending lookup (#129). */
+describe('no_cookie case table B — createOAuthCallbackHandler, lookUpPending (#129)', () =>
+{
+    beforeEach(() =>
+    {
+        vi.stubEnv('SPFN_AUTH_SESSION_SECRET', SECRET);
+    });
+
+    afterEach(() =>
+    {
+        vi.unstubAllEnvs();
+        seams.jar = new Map();
+    });
+
+    async function handled(keyId: string): Promise<{ location: URL; setCookies: string[] }>
+    {
+        const url = new URL(`/api/auth/callback?userId=7&keyId=${keyId}&returnUrl=%2Fhome`, 'https://app.example');
+        const response = await createOAuthCallbackHandler()(new NextRequest(url));
+
+        return { location: new URL(response.headers.get('location')!), setCookies: response.headers.getSetCookie() };
+    }
+
+    it('B1: no pending cookie for the keyId and no legacy one — redirect with reason=no_cookie and the fixed sentence; no cookie written or deleted', async () =>
+    {
+        const keyId = generateKeyPair('ES256').keyId;
+        const other = generateKeyPair('ES256').keyId;
+        seams.jar = new Map([[buildStartCookieName('pending', other), await sealedFor(other)]]);
+
+        const answer = await handled(keyId);
+
+        expect(answer.location.pathname).toBe('/auth/error');
+        expect(answer.location.searchParams.get('reason')).toBe('no_cookie');
+        expect(answer.location.searchParams.get('error')).toBe(OAUTH_COOKIE_MISSING_MESSAGE);
+        expect(answer.setCookies).toEqual([]);
+    });
+
+    it('B2: a pending cookie that does not unseal — invalid_state, not no_cookie', async () =>
+    {
+        const keyId = generateKeyPair('ES256').keyId;
+        seams.jar = new Map([[buildStartCookieName('pending', keyId), 'not-a-sealed-value']]);
+
+        const answer = await handled(keyId);
+
+        expect(answer.location.searchParams.get('reason')).toBe('invalid_state');
+        expect(answer.setCookies).toEqual([]);
+    });
+
+    it('B3: a pending cookie that unseals to another keyId — invalid_state', async () =>
+    {
+        const keyId = generateKeyPair('ES256').keyId;
+        seams.jar = new Map([[buildStartCookieName('pending', keyId), await sealedFor('some-other-key')]]);
+
+        const answer = await handled(keyId);
+
+        expect(answer.location.searchParams.get('reason')).toBe('invalid_state');
+    });
+
+    it('B4: a pending cookie that unseals to this keyId — the session is sealed and the browser goes to returnUrl', async () =>
+    {
+        const keyId = generateKeyPair('ES256').keyId;
+        const pending = buildStartCookieName('pending', keyId);
+        seams.jar = new Map([[pending, await sealedFor(keyId)]]);
+
+        const answer = await handled(keyId);
+        const names = answer.setCookies.map(header => header.split('=')[0]);
+
+        expect(answer.location.pathname).toBe('/home');
+        expect(names).toEqual(expect.arrayContaining([COOKIE_NAMES.SESSION, pending]));
+    });
+});
+
+/** The reason-code surface of #129. */
+describe('no_cookie case table D — the reason-code surface (#129)', () =>
+{
+    it('D1: OAUTH_ERROR_REASONS holds no_cookie and isOAuthErrorReason accepts it', () =>
+    {
+        expect(OAUTH_ERROR_REASONS).toContain('no_cookie');
+        expect(isOAuthErrorReason('no_cookie')).toBe(true);
+    });
+
+    it.each([
+        ['placeholder', '/auth/error?code={reason}', '/auth/error?code=no_cookie'],
+        ['path-only', '/auth/oops', '/auth/oops?reason=no_cookie'],
+        ['existing query', '/auth/oops?src=oauth', '/auth/oops?src=oauth&reason=no_cookie'],
+        ['fragment', '/auth/oops?src=oauth#top', '/auth/oops?src=oauth&reason=no_cookie#top'],
+    ])('D2 (%s): withOAuthErrorReason places no_cookie by the same rules as every code', (_form, url, expected) =>
+    {
+        expect(withOAuthErrorReason(url, 'no_cookie')).toBe(expected);
+    });
+
+    it('D4: @spfn/auth, @spfn/auth/server and @spfn/auth/nextjs/client carry the widened union; @spfn/auth/errors exports OAuthCookieMissingError', async () =>
+    {
+        // The client entry imports React components, which this suite cannot load,
+        // so it is checked by type: its re-exports are the same module's.
+        const entries = await Promise.all([import('../../index'), import('../../server')]);
+        const error = new OAuthCookieMissingError();
+
+        for (const entry of entries)
+        {
+            expect(entry.OAUTH_ERROR_REASONS).toContain('no_cookie');
+            expect(entry.isOAuthErrorReason('no_cookie')).toBe(true);
+        }
+
+        expectTypeOf<'no_cookie'>().toMatchTypeOf<import('../../index').OAuthErrorReason>();
+        expectTypeOf<'no_cookie'>().toMatchTypeOf<import('../../server').OAuthErrorReason>();
+        expectTypeOf<import('../../nextjs/client').OAuthErrorReason>().toEqualTypeOf<OAuthErrorReason>();
+        expectTypeOf<typeof import('../../nextjs/client').OAUTH_ERROR_REASONS>().toEqualTypeOf<typeof OAUTH_ERROR_REASONS>();
+        expect(error).toBeInstanceOf(ValidationError);
+        expect([error.name, error.message, error.statusCode]).toEqual(['OAuthCookieMissingError', OAUTH_COOKIE_MISSING_MESSAGE, 400]);
+        expect(authErrorRegistry.has('OAuthCookieMissingError')).toBe(true);
     });
 });

@@ -70,9 +70,14 @@ import {
 import { generateKeyPair } from '../../server/lib/crypto';
 import { sealSession, unsealSession } from '../../server/lib/session';
 import { COOKIE_NAMES } from '../../server/lib/config';
+import { deriveCsrfToken } from '../../server/lib/csrf';
 import { matchOAuthCallbackCsrf } from '../../server/services/oauth.service';
 import { mainAuthRouter } from '../../server/routes';
-import { OAuthStateExpiredError, OAuthStateInvalidError } from '@spfn/auth/errors';
+import {
+    OAUTH_COOKIE_MISSING_MESSAGE,
+    OAuthStateExpiredError,
+    OAuthStateInvalidError,
+} from '@spfn/auth/errors';
 
 const SECRET = 'test-secret-with-at-least-32-characters-for-security-testing';
 const GATE_PASSED = 'provider_error';
@@ -525,17 +530,18 @@ describe('per-start OAuth cookies — case table (#126)', () =>
         expect(written(firstFinal.setCookies, COOKIE_NAMES.SESSION_KEY_ID)).toBe(first.keyId);
     });
 
-    it('B4: a state with no cookie in this browser (login-CSRF) is refused invalid_state; the start in flight is untouched and finishes', async () =>
+    it('B4: a state with no cookie in this browser (login-CSRF) is refused no_cookie; the start in flight is untouched and finishes', async () =>
     {
         // A foreign id finds no candidate cookie, so no value is compared here;
-        // the comparison itself is exercised by B5 and B4b.
+        // the comparison itself is exercised by B5 and B4b. Since #129 a refusal
+        // that found no candidate at all says so (row A5).
         const jar = new Map<string, string>();
         const own = await startIn(jar);
         const before = new Map(jar);
 
         const forged = await callback(app, await foreignState(), jar);
 
-        expect(forged.reason).toBe('invalid_state');
+        expect(forged.reason).toBe('no_cookie');
         expect(forged.expired).toEqual([]);
         expect(jar).toEqual(before);
 
@@ -602,7 +608,7 @@ describe('per-start OAuth cookies — case table (#126)', () =>
         expect(startCookiesExpired).toEqual([startNames(second).pending]);
     });
 
-    it('B8: a finalize whose keyId has no pending cookie while another start\'s exists, no session — 401 as F4, the other start untouched', async () =>
+    it('B8: a finalize whose keyId has no pending cookie while another start\'s exists, no session — 401 no_cookie as F4, the other start untouched', async () =>
     {
         const jar = new Map<string, string>();
         const other = await startIn(jar);
@@ -611,7 +617,7 @@ describe('per-start OAuth cookies — case table (#126)', () =>
         const ctx = await finalize(app, generateKeyPair('ES256').keyId, jar);
 
         expect(ctx.response.status).toBe(401);
-        expect(ctx.response.body).toMatchObject({ success: false, message: 'OAuth session expired. Please try again.' });
+        expect(ctx.response.body).toMatchObject({ success: false, message: OAUTH_COOKIE_MISSING_MESSAGE, reason: 'no_cookie' });
         expect(expired(ctx.setCookies)).toEqual([]);
         expect(jar).toEqual(before);
         expect((await finalize(app, other.keyId, jar)).response.status).toBe(200);
@@ -634,7 +640,7 @@ describe('per-start OAuth cookies — case table (#126)', () =>
         expect(expired(ctx.setCookies)).toEqual([]);
     });
 
-    it('B9: a sixth start within ten minutes expires the oldest start\'s two cookies; five remain; the evicted callback is refused', async () =>
+    it('B9: a sixth start within ten minutes expires the oldest start\'s two cookies; five remain; the evicted callback is refused no_cookie', async () =>
     {
         vi.useFakeTimers({ toFake: ['Date'] });
         const jar = new Map<string, string>();
@@ -652,7 +658,7 @@ describe('per-start OAuth cookies — case table (#126)', () =>
         expect(listStartCookies('pending', jar).map(cookie => cookie.id))
             .toEqual(tabs.slice(1).map(tab => startCookieId(tab.keyId)));
         expect(listStartCookies('csrf', jar)).toHaveLength(5);
-        expect((await callback(app, tabs[0].state, jar)).reason).toBe('invalid_state');
+        expect((await callback(app, tabs[0].state, jar)).reason).toBe('no_cookie');
         expect((await callback(app, tabs[1].state, jar)).reason).toBe(GATE_PASSED);
     });
 
@@ -1009,7 +1015,7 @@ describe('per-start OAuth cookies — case table (#126)', () =>
         expect(jar.get(planted)).toBe('a-value-this-state-never-sealed');
     });
 
-    it('B14d: the state\'s own nonce under a different id only — refused invalid_state, nothing expired', async () =>
+    it('B14d: the state\'s own nonce under a different id only — no candidate for its id, so refused no_cookie; nothing expired', async () =>
     {
         const jar = new Map<string, string>();
         const tab = await startIn(jar);
@@ -1020,7 +1026,7 @@ describe('per-start OAuth cookies — case table (#126)', () =>
 
         const refused = await callback(app, tab.state, jar);
 
-        expect(refused.reason).toBe('invalid_state');
+        expect(refused.reason).toBe('no_cookie');
         expect(refused.expired).toEqual([]);
         expect(jar).toEqual(before);
     });
@@ -1148,5 +1154,130 @@ describe('B4/B5 order — the state is verified before any cookie is read (#126)
 
         await expect(matchOAuthCallbackCsrf({ provider: 'superself', state, cookies: untouchable }))
             .rejects.toThrow(OAuthStateExpiredError);
+    });
+});
+
+/**
+ * The finalize interceptor's refusals (#129, case table C). A finalize the
+ * backend answered 200 meets the proxy with or without this start's pending
+ * cookie; only "none at all, and not a repeat" is `no_cookie`.
+ */
+describe('no_cookie case table C — finalize interceptor (#129)', () =>
+{
+    let app: Hono;
+
+    beforeAll(() =>
+    {
+        app = new Hono();
+        registerRoutes(app, mainAuthRouter);
+    });
+
+    beforeEach(() =>
+    {
+        vi.stubEnv('SPFN_AUTH_SESSION_SECRET', SECRET);
+    });
+
+    afterEach(() =>
+    {
+        vi.unstubAllEnvs();
+        vi.useRealTimers();
+    });
+
+    /** A signed-in browser's jar — session, key id and CSRF cookie — for a fresh key, and that key's id. */
+    async function signedIn(): Promise<{ jar: Map<string, string>; keyId: string }>
+    {
+        const keyPair = generateKeyPair('ES256');
+        const session = await sealSession({
+            userId: '7',
+            privateKey: keyPair.privateKey,
+            keyId: keyPair.keyId,
+            algorithm: keyPair.algorithm,
+        }, 7 * 24 * 3600);
+        const jar = new Map([
+            [COOKIE_NAMES.SESSION, session],
+            [COOKIE_NAMES.SESSION_KEY_ID, keyPair.keyId],
+            [COOKIE_NAMES.CSRF, await deriveCsrfToken(keyPair.keyId)],
+        ]);
+
+        return { jar, keyId: keyPair.keyId };
+    }
+
+    /** A pending session sealed for `keyId`, its private key a fresh one. */
+    async function pendingFor(keyId: string): Promise<string>
+    {
+        const keyPair = generateKeyPair('ES256');
+
+        return await sealPendingSession({ privateKey: keyPair.privateKey, keyId, algorithm: keyPair.algorithm });
+    }
+
+    it('C1: no pending cookie, a repeat of the current session — 200 unchanged, no Set-Cookie', async () =>
+    {
+        const { jar, keyId } = await signedIn();
+
+        const ctx = await finalize(app, keyId, jar);
+
+        expect(ctx.response.status).toBe(200);
+        expect(ctx.response.body).toMatchObject({ userId: '7', keyId });
+        expect(ctx.setCookies).toEqual([]);
+        expect(ctx.metadata.proxyWroteError).toBeUndefined();
+    });
+
+    it('C2: no pending cookie, not a repeat — 401 no_cookie with the fixed sentence, proxyWroteError; no cookie expired, the held session untouched', async () =>
+    {
+        const { jar } = await signedIn();
+        await startIn(jar);
+        const before = new Map(jar);
+
+        const ctx = await finalize(app, generateKeyPair('ES256').keyId, jar);
+
+        expect(ctx.response.status).toBe(401);
+        expect(ctx.response.body).toEqual({ success: false, message: OAUTH_COOKIE_MISSING_MESSAGE, reason: 'no_cookie' });
+        expect(ctx.metadata.proxyWroteError).toBe(true);
+        expect(ctx.setCookies).toEqual([]);
+        expect(jar).toEqual(before);
+    });
+
+    it('C2 (no session held): the same refusal writes nothing at all', async () =>
+    {
+        const ctx = await finalize(app, generateKeyPair('ES256').keyId, new Map());
+
+        expect(ctx.response.body).toEqual({ success: false, message: OAUTH_COOKIE_MISSING_MESSAGE, reason: 'no_cookie' });
+        expect(ctx.metadata.proxyWroteError).toBe(true);
+        expect(ctx.setCookies).toEqual([]);
+    });
+
+    it('C3: a pending cookie whose seal is past its ten minutes — 401 expired, not no_cookie', async () =>
+    {
+        vi.useFakeTimers({ toFake: ['Date'] });
+        const keyId = generateKeyPair('ES256').keyId;
+        const jar = new Map([[buildStartCookieName('pending', keyId), await pendingFor(keyId)]]);
+        vi.setSystemTime(Date.now() + 11 * 60 * 1000);
+
+        const ctx = await finalize(app, keyId, jar);
+
+        expect(ctx.response.status).toBe(401);
+        expect(ctx.response.body).toMatchObject({ success: false, reason: 'expired' });
+    });
+
+    it('C4: a pending cookie that does not unseal — 401 invalid_state', async () =>
+    {
+        const keyId = generateKeyPair('ES256').keyId;
+        const jar = new Map([[buildStartCookieName('pending', keyId), 'not-a-sealed-value']]);
+
+        const ctx = await finalize(app, keyId, jar);
+
+        expect(ctx.response.status).toBe(401);
+        expect(ctx.response.body).toMatchObject({ success: false, reason: 'invalid_state' });
+    });
+
+    it('C5: a pending cookie sealed for another keyId — 401 invalid_state', async () =>
+    {
+        const keyId = generateKeyPair('ES256').keyId;
+        const jar = new Map([[buildStartCookieName('pending', keyId), await pendingFor('some-other-key')]]);
+
+        const ctx = await finalize(app, keyId, jar);
+
+        expect(ctx.response.status).toBe(401);
+        expect(ctx.response.body).toMatchObject({ success: false, reason: 'invalid_state' });
     });
 });
