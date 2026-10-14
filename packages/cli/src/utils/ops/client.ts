@@ -31,7 +31,7 @@ export type OpsResponse = SurfaceResponse;
 const OPS_NAMESPACE = '/_ops';
 
 /** What the surface client dropped, as `spfn ops` has always said it. */
-function printOpsWarning(_message: string, warning: SurfaceWarning): void
+export function printOpsWarning(_message: string, warning: SurfaceWarning): void
 {
     switch (warning.kind)
     {
@@ -40,8 +40,8 @@ function printOpsWarning(_message: string, warning: SurfaceWarning): void
             break;
         case 'metadata':
             console.error(
-                `⚠️  Ignoring module metadata for ops command "${plain(warning.command)}": ${warning.reason}. `
-                + 'Calling it will require --yes.',
+                `⚠️  Ignoring ${warning.metadata ?? 'module'} metadata for ops command "${plain(warning.command)}": `
+                + `${warning.reason}. Calling it will require --yes.`,
             );
             break;
         case 'modules':

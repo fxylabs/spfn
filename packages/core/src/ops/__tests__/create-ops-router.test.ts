@@ -261,3 +261,39 @@ describe('createOpsRouter', () =>
         expect(manifest.commands.some(c => c.path === OPS_MANIFEST_PATH)).toBe(false);
     });
 });
+
+describe('createOpsRouter — effect and summary (#128)', () =>
+{
+    it('12 — mounts an ops route that declares no effect, and its entry carries no effect or summary key', async () =>
+    {
+        const opsRouter = createOpsRouter({ listSignups: listSignupsRoute() }, { auth: testAuth });
+        const manifest = await (opsRouter.routes.getOpsManifest as RouteDef<any>).handler({} as never) as OpsManifest;
+        const [entry] = manifest.commands;
+
+        expect(Object.keys(entry!)).toEqual(['name', 'method', 'path', 'input']);
+        expect(entry).not.toHaveProperty('effect');
+        expect(entry).not.toHaveProperty('summary');
+    });
+
+    it('13 — carries an effect an ops route declares', async () =>
+    {
+        const opsRouter = createOpsRouter({
+            listSignups: opsRoute.get('/signups').effect('read').handler(async () => ({ items: [] })),
+        }, { auth: testAuth });
+        const manifest = await (opsRouter.routes.getOpsManifest as RouteDef<any>).handler({} as never) as OpsManifest;
+
+        expect(manifest.commands).toEqual([
+            { name: 'listSignups', method: 'GET', path: '/_ops/signups', effect: 'read', input: {} },
+        ]);
+    });
+
+    it('still refuses an ops route declaring an effect or summary a client could not use', () =>
+    {
+        expect(() => createOpsRouter({
+            wipe: opsRoute.post('/wipe').effect('nuke' as never).handler(async () => ({})),
+        }, { auth: testAuth })).toThrow(/Ops command "wipe" has invalid effect "nuke"/);
+        expect(() => createOpsRouter({
+            wipe: opsRoute.post('/wipe').summary('').handler(async () => ({})),
+        }, { auth: testAuth })).toThrow(/Ops command "wipe" has an empty summary/);
+    });
+});

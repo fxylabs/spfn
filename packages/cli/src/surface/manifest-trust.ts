@@ -16,10 +16,14 @@ import { unstablePathBecause } from './command-path.js';
 import { plain } from './plain.js';
 import type { SurfaceCommandDescriptor, SurfaceManifest, SurfaceModuleDescriptor } from './types.js';
 
-/** What the client dropped from a manifest, and why. */
+/**
+ * What the client dropped from a manifest, and why. A `metadata` warning says
+ * whose rules refused it: a module command's, or an app command's own
+ * `effect` and `summary`.
+ */
 export type SurfaceWarning =
     | { kind: 'command'; reason: string }
-    | { kind: 'metadata'; command: string; reason: string }
+    | { kind: 'metadata'; command: string; metadata?: 'module' | 'command'; reason: string }
     | { kind: 'modules'; reason: string }
     | { kind: 'module'; reason: string };
 
@@ -125,40 +129,126 @@ function usableCommands(
             continue;
         }
 
-        const normalized: SurfaceCommandDescriptor = {
-            name: command.name,
-            method: command.method,
-            path: command.path,
-            input: isPlainObject(command.input) ? command.input : {},
-        };
-        const metadataReason = unusableModuleMetadataBecause(command, moduleIds, reader);
-
-        if (metadataReason === null && command.module !== undefined)
-        {
-            normalized.module = command.module;
-            normalized.summary = command.summary;
-            normalized.effect = command.effect;
-            normalized.scopes = [...command.scopes!];
-        }
-        else if (metadataReason !== null)
-        {
-            // The command still lists — hiding it would read as an app with a
-            // smaller surface than it has. But its effect came from the same
-            // metadata just refused, so it is no longer known, and `destructive`
-            // is what it may have been. Confirmation is required rather than
-            // inferred from a field that is now absent.
-            normalized.metadataRejected = true;
-            reader.warn(
-                `Ignoring module metadata for command "${plain(command.name)}": ${metadataReason}. `
-                + 'Its effect is unknown, so treat it as destructive.',
-                { kind: 'metadata', command: command.name, reason: metadataReason },
-            );
-        }
-
-        usable.push(normalized);
+        usable.push(withMetadata(command, moduleIds, reader));
     }
 
     return usable;
+}
+
+/**
+ * The command as the client keeps it: its wire fields, and its metadata when
+ * that metadata passes the rules for its kind.
+ *
+ * A command naming a module or scopes is read as a module command; one
+ * carrying only `effect` or `summary` as an app's own command, which declares
+ * them on its route. Refused metadata is dropped whole, and the command still
+ * lists — hiding it would read as an app with a smaller surface than it has.
+ * But its effect came from the same metadata just refused, so it is no longer
+ * known, and `destructive` is what it may have been. Confirmation is required
+ * rather than inferred from a field that is now absent.
+ */
+function withMetadata(
+    command: SurfaceCommandDescriptor,
+    moduleIds: ReadonlySet<string>,
+    reader: ManifestReader,
+): SurfaceCommandDescriptor
+{
+    const normalized: SurfaceCommandDescriptor = {
+        name: command.name,
+        method: command.method,
+        path: command.path,
+        input: isPlainObject(command.input) ? command.input : {},
+    };
+
+    if (command.module !== undefined || command.scopes !== undefined)
+    {
+        return withModuleMetadata(normalized, command, moduleIds, reader);
+    }
+
+    return withAppMetadata(normalized, command, reader);
+}
+
+function withModuleMetadata(
+    normalized: SurfaceCommandDescriptor,
+    command: SurfaceCommandDescriptor,
+    moduleIds: ReadonlySet<string>,
+    reader: ManifestReader,
+): SurfaceCommandDescriptor
+{
+    const reason = unusableModuleMetadataBecause(command, moduleIds, reader);
+
+    if (reason !== null)
+    {
+        return rejectedMetadata(normalized, 'module', reason, reader);
+    }
+
+    return {
+        ...normalized,
+        module: command.module,
+        summary: command.summary,
+        effect: command.effect,
+        scopes: [...command.scopes!],
+    };
+}
+
+function withAppMetadata(
+    normalized: SurfaceCommandDescriptor,
+    command: SurfaceCommandDescriptor,
+    reader: ManifestReader,
+): SurfaceCommandDescriptor
+{
+    const reason = unusableAppMetadataBecause(command);
+
+    if (reason !== null)
+    {
+        return rejectedMetadata(normalized, 'command', reason, reader);
+    }
+
+    return {
+        ...normalized,
+        ...(command.summary !== undefined ? { summary: command.summary } : {}),
+        ...(command.effect !== undefined ? { effect: command.effect } : {}),
+    };
+}
+
+function rejectedMetadata(
+    normalized: SurfaceCommandDescriptor,
+    metadata: 'module' | 'command',
+    reason: string,
+    reader: ManifestReader,
+): SurfaceCommandDescriptor
+{
+    reader.warn(
+        `Ignoring ${metadata} metadata for command "${plain(normalized.name)}": ${reason}. `
+        + 'Its effect is unknown, so treat it as destructive.',
+        { kind: 'metadata', command: normalized.name, metadata, reason },
+    );
+
+    return { ...normalized, metadataRejected: true };
+}
+
+/**
+ * Why an app command's own metadata cannot be used, or null when it can. Both
+ * fields are optional — an app command on `/_ops` may declare neither — but
+ * one that is present is held to the limits a module command's is.
+ */
+function unusableAppMetadataBecause(command: SurfaceCommandDescriptor): string | null
+{
+    if (command.summary !== undefined && !isUsableSummary(command.summary))
+    {
+        return 'its summary is empty or too long';
+    }
+    if (command.effect !== undefined && !EFFECTS.has(command.effect))
+    {
+        return 'its effect is unknown';
+    }
+
+    return null;
+}
+
+function isUsableSummary(summary: unknown): boolean
+{
+    return typeof summary === 'string' && summary.length > 0 && summary.length <= MAX_SUMMARY_LENGTH;
 }
 
 function unusableModuleMetadataBecause(
@@ -167,15 +257,6 @@ function unusableModuleMetadataBecause(
     reader: ManifestReader,
 ): string | null
 {
-    const carriesMetadata = command.module !== undefined
-        || command.summary !== undefined
-        || command.effect !== undefined
-        || command.scopes !== undefined;
-
-    if (!carriesMetadata)
-    {
-        return null;
-    }
     if (typeof command.module !== 'string' || !moduleIds.has(command.module))
     {
         return 'it names no usable module';
@@ -188,8 +269,7 @@ function unusableModuleMetadataBecause(
     {
         return 'its path is outside the module namespace';
     }
-    if (typeof command.summary !== 'string' || command.summary.length === 0
-        || command.summary.length > MAX_SUMMARY_LENGTH)
+    if (!isUsableSummary(command.summary))
     {
         return 'its summary is missing or too long';
     }

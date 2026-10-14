@@ -24,6 +24,7 @@ import { defineSurface } from '@spfn/core/surface';
 import { fetchOpsManifest } from '../../utils/ops/client.js';
 import { buildCommandPath } from '../command-path.js';
 import { createSurfaceClient, SurfaceManifestError } from '../client.js';
+import type { SurfaceWarning } from '../manifest-trust.js';
 
 const SURFACE_DIR = fileURLToPath(new URL('..', import.meta.url));
 
@@ -46,10 +47,18 @@ function testApp(): Hono
     const appSurface = surface.router({
         pageAdd: surface.route.post('/pages')
             .input({ body: Type.Object({ title: Type.String() }) })
+            .effect('write')
+            .summary('Add a page')
             .handler(async (c) => ({ added: (await c.data()).body.title })),
         pageGet: surface.route.get('/pages/:id')
             .input({ params: Type.Object({ id: Type.String() }) })
+            .effect('read')
             .handler(async (c) => ({ id: (await c.data()).params.id })),
+        pageDrop: surface.route.delete('/pages/:id')
+            .input({ params: Type.Object({ id: Type.String() }) })
+            .effect('destructive')
+            .summary('Drop a page for good')
+            .handler(async (c) => ({ dropped: (await c.data()).params.id })),
     });
     const opsSurface = createOpsRouter({
         listSignups: opsRoute.get('/signups').handler(async () => ({ items: [] })),
@@ -119,6 +128,7 @@ describe('createSurfaceClient on /_app', () =>
         const manifest = await client.manifest();
         expect(manifest.commands.map(command => [command.name, command.method, command.path])).toEqual([
             ['pageAdd', 'POST', '/_app/pages'],
+            ['pageDrop', 'DELETE', '/_app/pages/:id'],
             ['pageGet', 'GET', '/_app/pages/:id'],
         ]);
 
@@ -149,6 +159,23 @@ describe('createSurfaceClient on /_app', () =>
         expect(() => client.describe({ manifestVersion: 1, commands: [] }, 'pageAdd')).toThrow(/Unknown command/);
     });
 
+    it('22 — lists each command with the effect and summary its route declared', async () =>
+    {
+        const onWarning = vi.fn();
+        const client = createSurfaceClient({ appUrl, namespace: '/_app', token: 'app-token', onWarning });
+
+        const manifest = await client.manifest();
+
+        expect(manifest.commands.map(command => [command.name, command.effect, command.summary])).toEqual([
+            ['pageAdd', 'write', 'Add a page'],
+            ['pageDrop', 'destructive', 'Drop a page for good'],
+            ['pageGet', 'read', undefined],
+        ]);
+        expect(manifest.commands.some(command => command.metadataRejected)).toBe(false);
+        expect(onWarning).not.toHaveBeenCalled();
+        expect(client.describe(manifest, 'pageAdd')).toContain('Effect: write');
+    });
+
     it('throws the status when the app refuses the token', async () =>
     {
         const client = createSurfaceClient({ appUrl, namespace: '/_app', token: 'ops-token' });
@@ -167,7 +194,7 @@ describe('two surfaces on one app', () =>
         const appNames = (await appClient.manifest()).commands.map(command => command.name);
         const opsNames = (await fetchOpsManifest(appUrl, 'ops-token')).commands.map(command => command.name);
 
-        expect(appNames).toEqual(['pageAdd', 'pageGet']);
+        expect(appNames).toEqual(['pageAdd', 'pageDrop', 'pageGet']);
         expect(opsNames).toEqual(['listSignups']);
     });
 });
@@ -210,6 +237,13 @@ describe('warnings', () =>
 
         expect(printed).not.toHaveBeenCalled();
         expect(logged).not.toHaveBeenCalled();
+    });
+
+    it('builds a metadata warning without the metadata field', () =>
+    {
+        const warning: SurfaceWarning = { kind: 'metadata', command: 'x', reason: 'r' };
+
+        expect(warning.kind).toBe('metadata');
     });
 });
 

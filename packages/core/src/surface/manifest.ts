@@ -39,8 +39,15 @@ export interface SurfaceCommand
 
     /** Present for commands contributed by an explicitly mounted module. */
     module?: string;
+
+    /**
+     * A module command's from its declaration; an app command's from the
+     * route's `.summary()` and `.effect()`, present only when declared.
+     */
     summary?: string;
     effect?: SurfaceEffect;
+
+    /** Present for module commands only. */
     scopes?: string[];
 
     /** Input sections the route declares, each as JSON Schema. */
@@ -109,8 +116,9 @@ function toCommandInput(input: RouteInput | undefined): SurfaceCommand['input']
 
 /**
  * Walk a routes record (nested routers included) and collect every RouteDef
- * as a command. Validation of paths happens in the surface's `router()`, so
- * nothing here is checked but the uniqueness of names.
+ * as a command, with the summary and effect its route declared. Validation of
+ * paths and of that metadata happens in the surface's `router()`, so nothing
+ * here is checked but the uniqueness of names.
  */
 export function collectSurfaceCommands(
     routes: Record<string, RouteDef<any> | Router<any>>,
@@ -150,6 +158,8 @@ function visit(
             name,
             method: entry.method,
             path: entry.path,
+            ...(entry.summary !== undefined ? { summary: entry.summary } : {}),
+            ...(entry.effect !== undefined ? { effect: entry.effect } : {}),
             input: toCommandInput(entry.input as RouteInput | undefined),
         });
     }

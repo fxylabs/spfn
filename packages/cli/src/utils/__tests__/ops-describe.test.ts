@@ -48,6 +48,50 @@ describe('renderCommandUsage', () =>
         expect(usage).toContain('Scopes: ledger:read');
     });
 
+    it('20 — renders an app command\'s effect without a Scopes line', () =>
+    {
+        const usage = renderCommandUsage({ ...command(), summary: 'List signups', effect: 'write' });
+
+        expect(usage).toBe([
+            'listSignups  GET /_ops/signups',
+            '',
+            '  List signups',
+            '',
+            '  Effect: write',
+            '',
+            '  Takes no input.',
+            '',
+            '  Invoke: spfn ops call listSignups',
+        ].join('\n'));
+        expect(usage).not.toContain('Scopes:');
+    });
+
+    it('20 — renders a module command exactly as before', () =>
+    {
+        const usage = renderCommandUsage({
+            ...command(),
+            name: 'ledger.verify',
+            path: '/_ops/ledger/verify',
+            module: 'ledger',
+            summary: 'Verify ledger invariants',
+            effect: 'read',
+            scopes: ['ledger:read'],
+        });
+
+        expect(usage).toBe([
+            'ledger.verify  GET /_ops/ledger/verify',
+            '',
+            '  Verify ledger invariants',
+            '',
+            '  Effect: read',
+            '  Scopes: ledger:read',
+            '',
+            '  Takes no input.',
+            '',
+            '  Invoke: spfn ops call ledger.verify',
+        ].join('\n'));
+    });
+
     it('marks required and optional fields and names the flag they arrive on', () =>
     {
         const usage = renderCommandUsage(command({

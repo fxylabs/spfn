@@ -691,6 +691,10 @@ The manifest gains a `modules` array and per-command `module`, `summary`, `effec
 `scopes`. All of it is additive — an app that mounts no modules serves exactly the v1
 manifest it served before.
 
+An app's own ops routes may declare `.effect()` and `.summary()` too, and the manifest
+carries both for that command. On `/_ops` they are optional: a route declaring neither is
+announced exactly as before.
+
 ```bash
 spfn ops modules                                      # what is mounted, and from where
 spfn ops list --module ledger                         # just that module's commands
@@ -731,6 +735,8 @@ export const app = defineSurface({
 
 export const pageAdd = app.route.post('/pages')            // POST /_app/pages
     .input({ body: Type.Object({ title: Type.String() }) })
+    .effect('write')                                        // required: read | write | destructive
+    .summary('Add a page to the blueprint')                 // optional, at most 500 characters
     .handler(async (c) => pagesRepository.add((await c.data()).body.title));
 
 // src/server/router.ts — both surfaces, side by side
@@ -754,6 +760,12 @@ export const appRouter = defineRouter({ ... }).packages([app.router({ pageAdd })
   module is mounted. A guard named like `auth` or like one of the command's group or own
   middlewares is refused: registration keeps one middleware per name, so the other one would
   never run.
+- **Effect.** Every app command on a `defineSurface` surface declares `.effect()` on its
+  route; `router()` refuses one that does not, naming the command, so a client never
+  receives a command whose effect it cannot know. `/_ops` routes may declare it and need
+  not. The manifest announces `effect` and `summary` beside the command, and `authorize`
+  receives them on the command it is given. A module command's own declaration wins over its
+  route's: a route `.effect()` that disagrees with it is refused.
 - **Modules.** A module is validated against the namespace of the surface that mounts it —
   its commands must live under `<namespace>/<id>/`. Write one for a surface with
   `defineSurfaceModule(module, '/_app')`; a module written for `/_ops` mounted on `/_app` is

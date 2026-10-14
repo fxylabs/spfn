@@ -14,11 +14,13 @@
  */
 
 import type { RouteDef } from '../route/route-builder';
+import type { RouteEffect } from '../route/types';
 import { SurfaceError } from './error';
 import { routePatternsOverlap } from './route-overlap';
 import { capitalized, SURFACE_WORDING, type SurfaceWording } from './wording';
 
-export type SurfaceEffect = 'read' | 'write' | 'destructive';
+/** One vocabulary for module commands and an app's own: the route's `.effect()`. */
+export type SurfaceEffect = RouteEffect;
 
 export interface SurfaceModuleCommand<TRoute extends RouteDef<any> = RouteDef<any>>
 {
@@ -44,6 +46,12 @@ const COMMAND_NAME = /^[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*$/;
 const CONTRACT_VERSION = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)*$/;
 const EFFECTS = new Set<SurfaceEffect>(['read', 'write', 'destructive']);
 const PATH_BASE = 'https://spfn.invalid';
+
+/** Whether `value` is one of the effects a command can declare. */
+export function isSurfaceEffect(value: unknown): value is SurfaceEffect
+{
+    return EFFECTS.has(value as SurfaceEffect);
+}
 
 function assertText(label: string, value: unknown): asserts value is string
 {

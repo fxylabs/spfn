@@ -207,11 +207,7 @@ export function renderCommandUsage(command: SurfaceCommandDescriptor, invoke?: s
     {
         lines.push(`  ${plain(command.summary)}`, '');
     }
-    if (command.effect || command.scopes)
-    {
-        lines.push(`  Effect: ${command.effect ?? 'unknown'}`);
-        lines.push(`  Scopes: ${command.scopes?.map(plain).join(', ') || '(not declared)'}`, '');
-    }
+    lines.push(...metadataLines(command));
 
     for (const section of SECTIONS)
     {
@@ -242,6 +238,27 @@ export function renderCommandUsage(command: SurfaceCommandDescriptor, invoke?: s
     }
 
     return lines.join('\n').replace(/\n+$/, '');
+}
+
+/**
+ * The effect, and for a module command its scopes. An app command declares
+ * no scopes — its guards are its own middlewares — so it gets no `Scopes:`
+ * line claiming they were "not declared".
+ */
+function metadataLines(command: SurfaceCommandDescriptor): string[]
+{
+    if (!command.effect && !command.scopes)
+    {
+        return [];
+    }
+
+    const lines = [`  Effect: ${command.effect ?? 'unknown'}`];
+    if (command.module !== undefined || command.scopes !== undefined)
+    {
+        lines.push(`  Scopes: ${command.scopes?.map(plain).join(', ') || '(not declared)'}`);
+    }
+
+    return [...lines, ''];
 }
 
 function exampleFlags(command: SurfaceCommandDescriptor): string

@@ -635,6 +635,12 @@ spfn ops list --module ledger                         # just that module's comma
 spfn ops call ledger.compact --yes                    # effect=destructive needs this
 ```
 
+An app's own command can carry an effect and a summary too, declared on its route with
+`.effect()` and `.summary()`; `spfn ops list` and `--describe` show them, and an app command
+announcing `read` or `write` needs no `--yes`. A CLI at 0.3.0-beta.15 or older does not
+know app commands carry them: it warns that such a command "names no usable module" and
+asks for `--yes` on it, so upgrade the CLI together with `@spfn/core`.
+
 `spfn ops call` refuses a command the app declared `effect: destructive` unless `--yes` is
 given. It refuses the same way when the app announced module metadata this CLI could not
 validate: the effect is then unknown rather than absent, and an unknown effect is not
@@ -707,8 +713,10 @@ const answer = await client.call('pageAdd', { params: {}, query: {}, body: { tit
 // answer: { status, body } — the app's answer, relayed
 ```
 
-It keeps every check `spfn ops` makes: the manifest's shape, each command's path staying
-under `<namespace>/`, module metadata, and path parameters that would decode into a dot
+Each command carries the `effect` and `summary` the app declared, so your code can tell a
+read from a write before it calls; `call()` itself makes no decision on them. It keeps
+every check `spfn ops` makes: the manifest's shape, each command's path staying under
+`<namespace>/`, module and command metadata, and path parameters that would decode into a dot
 segment. `appUrl` must be https (`http` only against a loopback host) — refused when the
 client is created, with a thrown `Error`. A manifest request that does not answer 200
 throws a `SurfaceManifestError` carrying the `status`. The library prints nothing and does

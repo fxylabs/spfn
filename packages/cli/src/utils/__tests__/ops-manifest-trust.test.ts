@@ -8,7 +8,9 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { fetchOpsManifest, joinUrl, type OpsCommandDescriptor } from '../ops/client.js';
+import { destructiveConfirmationRequired } from '../../commands/ops/index.js';
+import { trustedManifest, type SurfaceWarning } from '../../surface/manifest-trust.js';
+import { fetchOpsManifest, joinUrl, printOpsWarning, type OpsCommandDescriptor } from '../ops/client.js';
 import { plain, renderCommandUsage } from '../ops/describe.js';
 
 const ESC = String.fromCharCode(27);
@@ -264,5 +266,125 @@ describe('rendering a manifest the app wrote', () =>
         } as unknown as OpsCommandDescriptor;
 
         expect(() => renderCommandUsage(command)).not.toThrow();
+    });
+});
+
+describe('an app command\'s own effect and summary (#128)', () =>
+{
+    const appCommand = { name: 'pageAdd', method: 'POST', path: '/_app/pages', input: {} };
+
+    interface Warned
+    {
+        message: string;
+        warning: SurfaceWarning;
+    }
+
+    function trusted(command: Record<string, unknown>): { kept: OpsCommandDescriptor; warnings: Warned[] }
+    {
+        const warnings: Warned[] = [];
+        const manifest = trustedManifest({ manifestVersion: 1, commands: [command] }, {
+            namespace: '/_app',
+            prefix: '/_app/',
+            warn: (message, warning) => warnings.push({ message, warning }),
+        });
+
+        return { kept: manifest.commands[0]!, warnings };
+    }
+
+    it('15 — carries a valid effect and summary without a warning or a confirmation', () =>
+    {
+        const { kept, warnings } = trusted({ ...appCommand, effect: 'write', summary: 'Add' });
+
+        expect(kept).toEqual({ ...appCommand, summary: 'Add', effect: 'write' });
+        expect(kept.metadataRejected).toBeUndefined();
+        expect(warnings).toEqual([]);
+        expect(destructiveConfirmationRequired(kept, undefined)).toBe(false);
+    });
+
+    it('16 — carries destructive, which then asks for --yes', () =>
+    {
+        const { kept, warnings } = trusted({ ...appCommand, effect: 'destructive' });
+
+        expect(kept.effect).toBe('destructive');
+        expect(warnings).toEqual([]);
+        expect(destructiveConfirmationRequired(kept, undefined)).toBe(true);
+        expect(destructiveConfirmationRequired(kept, true)).toBe(false);
+    });
+
+    it('17 — rejects an unknown effect with the command-metadata warning and asks for --yes', () =>
+    {
+        const { kept, warnings } = trusted({ ...appCommand, effect: 'nuke' });
+
+        expect(kept).toEqual({ ...appCommand, metadataRejected: true });
+        expect(warnings).toHaveLength(1);
+        expect(warnings[0]!.warning).toEqual({
+            kind: 'metadata',
+            command: 'pageAdd',
+            metadata: 'command',
+            reason: 'its effect is unknown',
+        });
+        expect(warnings[0]!.message).toBe('Ignoring command metadata for command "pageAdd": its effect is unknown. '
+            + 'Its effect is unknown, so treat it as destructive.');
+        expect(destructiveConfirmationRequired(kept, undefined)).toBe(true);
+    });
+
+    it.each([
+        ['an empty summary', ''],
+        ['a 501-character summary', 'x'.repeat(501)],
+        ['a summary that is not a string', 7],
+    ])('18 — rejects %s whole, a valid effect included', (_label, summary) =>
+    {
+        const { kept, warnings } = trusted({ ...appCommand, effect: 'read', summary });
+
+        expect(kept).toEqual({ ...appCommand, metadataRejected: true });
+        expect(warnings[0]!.warning).toMatchObject({ metadata: 'command', reason: 'its summary is empty or too long' });
+        expect(warnings[0]!.message).toMatch(/^Ignoring command metadata for command "pageAdd"/);
+        expect(destructiveConfirmationRequired(kept, undefined)).toBe(true);
+    });
+
+    it('18 — accepts a summary of exactly 500 characters', () =>
+    {
+        expect(trusted({ ...appCommand, summary: 'x'.repeat(500) }).kept.metadataRejected).toBeUndefined();
+    });
+
+    it('19 — reads scopes without a module as module metadata, as before', () =>
+    {
+        const { kept, warnings } = trusted({ ...appCommand, effect: 'read', scopes: ['x'] });
+
+        expect(kept.metadataRejected).toBe(true);
+        expect(kept.effect).toBeUndefined();
+        expect(warnings[0]!.warning).toMatchObject({
+            kind: 'metadata',
+            metadata: 'module',
+            reason: 'it names no usable module',
+        });
+        expect(warnings[0]!.message).toMatch(/^Ignoring module metadata for command "pageAdd"/);
+    });
+
+    it('keeps a command announcing no metadata exactly as before', () =>
+    {
+        const { kept, warnings } = trusted(appCommand);
+
+        expect(kept).toEqual(appCommand);
+        expect(Object.keys(kept)).toEqual(['name', 'method', 'path', 'input']);
+        expect(warnings).toEqual([]);
+        expect(destructiveConfirmationRequired(kept, undefined)).toBe(false);
+    });
+
+    it('prints a rejected app command\'s warning in spfn ops\' words, naming it command metadata', async () =>
+    {
+        manifestAnswer([{ name: 'wipe', method: 'POST', path: '/_ops/wipe', input: {}, effect: 'nuke' }]);
+        await fetchOpsManifest('https://api.example.com', 'spfn_ops_x');
+
+        expect(vi.mocked(console.error).mock.calls.flat().join('\n'))
+            .toContain('Ignoring command metadata for ops command "wipe": its effect is unknown. Calling it will require --yes.');
+    });
+
+    it('prints the module noun for a metadata warning missing the optional field', () =>
+    {
+        printOpsWarning('ignored', { kind: 'metadata', command: 'wipe', reason: 'its effect is unknown' });
+
+        expect(vi.mocked(console.error).mock.calls.flat().join('\n'))
+            .toContain('Ignoring module metadata for ops command "wipe": its effect is unknown. Calling it will require --yes.');
     });
 });

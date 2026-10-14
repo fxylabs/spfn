@@ -57,7 +57,7 @@ import {
     type SurfaceManifest,
     type SurfaceModuleDescriptor,
 } from './manifest';
-import { validateSurfaceModule, type SurfaceModule } from './module';
+import { isSurfaceEffect, validateSurfaceModule, type SurfaceModule, type SurfaceModuleCommand } from './module';
 import {
     assertNamespace,
     manifestNameOf,
@@ -74,6 +74,9 @@ type SurfaceMiddleware = NamedMiddleware<string> | MiddlewareHandler;
  * Build the guard for one command, or `undefined` for none. Called once per
  * command when the router is built; the guard runs after `auth` and before the
  * command's own middlewares.
+ *
+ * The command is the manifest entry, so its `effect` is there to read — a
+ * guard can be stricter for a `destructive` command than for a `read`.
  */
 export type SurfaceAuthorize = (command: SurfaceCommand) => SurfaceMiddleware | undefined;
 
@@ -130,7 +133,24 @@ interface Plan
     manifest: 'authenticated' | 'public';
     modules: readonly SurfaceModule[];
     wording: SurfaceWording;
+    requireEffect: boolean;
 }
+
+/** How a surface treats an app command that declares no `.effect()`. Internal to core. */
+export interface SurfaceRules
+{
+    /** `true`: refuse it. `false`: announce it without an effect, as `/_ops` always has. */
+    requireEffect: boolean;
+}
+
+/**
+ * The longest summary a command may announce. The same 500 as the CLI's
+ * `MAX_SUMMARY_LENGTH` in `spfn/surface`'s manifest trust, so a server never
+ * announces a summary its own client would refuse.
+ */
+const MAX_COMMAND_SUMMARY_LENGTH = 500;
+
+const EFFECT_METHOD = ".effect('read' | 'write' | 'destructive')";
 
 interface CompiledModuleRoute
 {
@@ -191,6 +211,83 @@ function assertSurfaceRoute(plan: Plan, name: string, def: RouteDef<any>): void
 }
 
 /**
+ * Refuse an app command whose route declares an effect or summary a client
+ * could not use — or, on a surface that requires it, no effect at all. A
+ * manifest is then never built announcing a command whose effect is unknown,
+ * and a defaulted effect is never put in its place: that would be a claim the
+ * app did not make, in the field a client reads to decide whether to retry.
+ */
+function assertCommandMetadata(plan: Plan, name: string, def: RouteDef<any>): void
+{
+    const label = `${capitalized(plan.wording.noun)} command "${name}"`;
+
+    if (def.effect === undefined && plan.requireEffect)
+    {
+        throw new SurfaceError(
+            `${label} declares no effect. A client reads it to decide whether to call, retry, `
+            + `or ask for confirmation, so ${plan.wording.factory} refuses a command without one. `
+            + `Declare it on the route with ${EFFECT_METHOD}.`,
+        );
+    }
+
+    if (def.effect !== undefined && !isSurfaceEffect(def.effect))
+    {
+        throw new SurfaceError(
+            `${label} has invalid effect ${JSON.stringify(def.effect)}. `
+            + `A client knows no other, so declare it with ${EFFECT_METHOD}.`,
+        );
+    }
+
+    assertCommandSummary(label, def.summary);
+}
+
+/** Refuse a summary the CLI would refuse: blank, or longer than it accepts. */
+function assertCommandSummary(label: string, summary: unknown): void
+{
+    if (summary === undefined)
+    {
+        return;
+    }
+
+    if (typeof summary !== 'string' || summary.trim().length === 0)
+    {
+        throw new SurfaceError(
+            `${label} has an empty summary. A client would list it as a command described by nothing; `
+            + 'give .summary() one line of text, or leave it out.',
+        );
+    }
+
+    if (summary.length > MAX_COMMAND_SUMMARY_LENGTH)
+    {
+        throw new SurfaceError(
+            `${label} has a summary of ${summary.length} characters, over the ${MAX_COMMAND_SUMMARY_LENGTH} `
+            + 'a client accepts — it would drop the command\'s metadata and treat it as destructive. Shorten it.',
+        );
+    }
+}
+
+/**
+ * A module command's effect is the module's declaration; its route's own
+ * `.effect()` is ignored when it agrees and refused when it does not, because
+ * the manifest can announce only one and the route's author meant the other.
+ * The route's `.summary()` is not read at all — the module's wins.
+ */
+function assertModuleRouteEffect(plan: Plan, name: string, definition: SurfaceModuleCommand<any>): void
+{
+    const routeEffect = definition.route.effect;
+
+    if (routeEffect !== undefined && routeEffect !== definition.effect)
+    {
+        throw new SurfaceError(
+            `${capitalized(plan.wording.noun)} command "${name}" is declared ${JSON.stringify(definition.effect)} `
+            + `by its module, but its route says .effect(${JSON.stringify(routeEffect)}). `
+            + 'The manifest announces the module\'s declaration, so the two cannot disagree. '
+            + 'Drop the route\'s .effect() or make it match.',
+        );
+    }
+}
+
+/**
  * The reserved name is checked for every entry, route and nested router
  * alike, because the merge cannot refuse a duplicate key on its own. The
  * manifest is merged in first and the app's entries spread over it, so an
@@ -230,7 +327,7 @@ function rebuildNestedRouter(
     plan: Plan,
     name: string,
     router: Router<any>,
-    guards: ReadonlyMap<string, SurfaceMiddleware | undefined>,
+    commandsByName: ReadonlyMap<string, SurfaceCommand>,
     inherited: ReadonlyArray<NamedMiddleware<string>>,
 ): Router<any>
 {
@@ -245,7 +342,7 @@ function rebuildNestedRouter(
     const handedDown = [...inherited, ...(router._globalMiddlewares ?? [])];
 
     let rebuilt = defineUnmappedRouter(
-        secureRoutes(plan, router.routes, guards, handedDown) as Record<string, RouteDef<any>>,
+        secureRoutes(plan, router.routes, commandsByName, handedDown) as Record<string, RouteDef<any>>,
     );
 
     if (router._contractVersion)
@@ -264,11 +361,16 @@ function rebuildNestedRouter(
  * declaration effective, so `opsTokenAuth` can auto-skip a server-level `auth`
  * middleware exactly as `oneTimeTokenAuth` does — and it is what puts auth
  * ahead of every group guard.
+ *
+ * `authorize` is asked for a command's guard only once its own route has
+ * passed `assertSurfaceRoute` and `assertCommandMetadata` — an `authorize`
+ * written to switch exhaustively on `command.effect` must never be handed one
+ * `defineSurface` would otherwise have refused.
  */
 function secureRoutes(
     plan: Plan,
     routes: Record<string, RouteDef<any> | Router<any>>,
-    guards: ReadonlyMap<string, SurfaceMiddleware | undefined>,
+    commandsByName: ReadonlyMap<string, SurfaceCommand>,
     inherited: ReadonlyArray<NamedMiddleware<string>> = [],
 ): Record<string, RouteDef<any> | Router<any>>
 {
@@ -280,7 +382,7 @@ function secureRoutes(
 
         if (isRouter(entry))
         {
-            secured[name] = rebuildNestedRouter(plan, name, entry, guards, inherited);
+            secured[name] = rebuildNestedRouter(plan, name, entry, commandsByName, inherited);
             continue;
         }
 
@@ -292,9 +394,11 @@ function secureRoutes(
         }
 
         assertSurfaceRoute(plan, name, entry);
+        assertCommandMetadata(plan, name, entry);
+        const guard = plan.authorize?.(commandsByName.get(name)!);
         secured[name] = {
             ...entry,
-            middlewares: commandChain(plan, name, guards.get(name), [...inherited, ...(entry.middlewares ?? [])]),
+            middlewares: commandChain(plan, name, guard, [...inherited, ...(entry.middlewares ?? [])]),
         };
     }
 
@@ -366,15 +470,6 @@ function refuseGuardCollision(
 function middlewareNameOf(middleware: SurfaceMiddleware): string | undefined
 {
     return typeof middleware === 'function' ? undefined : middleware.name;
-}
-
-/** Ask `authorize` once per command, keyed by the command's unique name. */
-function guardsFor(
-    plan: Plan,
-    commands: readonly SurfaceCommand[],
-): Map<string, SurfaceMiddleware | undefined>
-{
-    return new Map(commands.map(command => [command.name, plan.authorize?.(command)]));
 }
 
 /**
@@ -464,6 +559,7 @@ function compileModules(plan: Plan, appCommands: readonly SurfaceCommand[]): Com
                 input: collectSurfaceCommands({ [localName]: definition.route }, plan.wording)[0]!.input,
             };
 
+            assertModuleRouteEffect(plan, command.name, definition);
             assertModuleCommandFree(plan, command, appCommands, claimed);
             compiled.commands.push(command);
             compiled.routes[command.name] = { route: definition.route, command };
@@ -525,7 +621,8 @@ function buildRouter(plan: Plan, routes: Record<string, RouteDef<any> | Router<a
         commands,
     };
 
-    const secured = secureRoutes(plan, routes, guardsFor(plan, appCommands));
+    const commandsByName = new Map(appCommands.map(command => [command.name, command]));
+    const secured = secureRoutes(plan, routes, commandsByName);
     const securedModules = secureModuleRoutes(plan, moduleSurface.routes);
 
     // The manifest goes first, so no route in this object can answer its path.
@@ -555,7 +652,7 @@ function buildRouter(plan: Plan, routes: Record<string, RouteDef<any> | Router<a
     } as Record<string, RouteDef<any>>), '_surfaceNamespace', { value: plan.namespace, enumerable: false });
 }
 
-function planOf(options: SurfaceOptions, wording: SurfaceWording): Plan
+function planOf(options: SurfaceOptions, wording: SurfaceWording, rules: SurfaceRules): Plan
 {
     assertNamespace(options?.namespace);
 
@@ -591,16 +688,19 @@ function planOf(options: SurfaceOptions, wording: SurfaceWording): Plan
         manifest,
         modules,
         wording,
+        requireEffect: rules.requireEffect,
     };
 }
 
 /**
- * `defineSurface` with the words its refusals use. Internal: `@spfn/core/ops`
- * passes its own so an ops refusal reads as it always has.
+ * `defineSurface` with the words its refusals use and the rules it holds app
+ * commands to. Internal: `@spfn/core/ops` passes its own so an ops refusal
+ * reads as it always has, and so an ops route that never declared an effect
+ * boots as it always has.
  */
-export function createSurface(options: SurfaceOptions, wording: SurfaceWording): Surface
+export function createSurface(options: SurfaceOptions, wording: SurfaceWording, rules: SurfaceRules): Surface
 {
-    const plan = planOf(options, wording);
+    const plan = planOf(options, wording, rules);
 
     return {
         namespace: plan.namespace,
@@ -614,11 +714,14 @@ export function createSurface(options: SurfaceOptions, wording: SurfaceWording):
  *
  * The namespace, the auth middleware, and the `authorize` requirement are
  * checked here; routes and modules when `router()` builds the package router.
+ * Every app command must declare its effect with
+ * `.effect('read' | 'write' | 'destructive')` — `router()` refuses one that
+ * does not, so a client is never handed a command it cannot classify.
  * The router is an ordinary `Router` meant to be mounted with `.packages()`,
  * so its routes stay out of the app's client types exactly like other
  * package routes.
  */
 export function defineSurface(options: SurfaceOptions): Surface
 {
-    return createSurface(options, SURFACE_WORDING);
+    return createSurface(options, SURFACE_WORDING, { requireEffect: true });
 }

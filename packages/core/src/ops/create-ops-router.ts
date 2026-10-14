@@ -24,7 +24,10 @@
  * It is the command surface (`@spfn/core/surface`) fixed to `/_ops`, with the
  * scope-factory `authorize` this factory has always taken adapted to the
  * surface's per-command one: applied to module commands only, so every
- * middleware chain is what it was before surfaces existed.
+ * middleware chain is what it was before surfaces existed. An ops route may
+ * declare `.effect()` and `.summary()` and the manifest carries them; unlike
+ * `defineSurface`, a route declaring neither is not refused, so an ops
+ * surface written before they existed boots and announces what it always did.
  *
  * @example
  * ```ts
@@ -117,5 +120,5 @@ export function createOpsRouter<TRoutes extends Record<string, RouteDef<any, any
         auth: options?.auth,
         authorize: moduleScopeGuard(options?.authorize),
         modules: options?.modules,
-    }, OPS_WORDING).router(routes);
+    }, OPS_WORDING, { requireEffect: false }).router(routes);
 }

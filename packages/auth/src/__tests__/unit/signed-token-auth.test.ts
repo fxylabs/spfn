@@ -93,7 +93,7 @@ function buildApp(keys: string = keysUrl, clockSkewSec?: number): Hono
         return c.json({ error: err.message }, status as never);
     });
     registerRoutes(app, surface.router({
-        whoami: surface.route.get('/whoami').handler(async (c) =>
+        whoami: surface.route.get('/whoami').effect('read').handler(async (c) =>
         {
             const token = getSignedToken(c.raw);
 

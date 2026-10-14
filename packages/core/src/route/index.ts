@@ -28,7 +28,7 @@ export { defineMiddleware, defineMiddlewareFactory } from './define-middleware';
 export type { ExtractMiddlewareNames, NamedMiddlewareFactory, NamedMiddleware } from './define-middleware';
 
 // Types
-export type { HttpMethod } from './types';
+export type { HttpMethod, RouteEffect } from './types';
 
 // Helpers
 export { isHttpMethod, Nullable, OptionalNullable } from './helpers';

@@ -9,7 +9,7 @@ import type { NamedMiddleware } from './define-middleware';
 import type { RouteInput } from './route-input';
 import type { RouteBuilderContext } from './context';
 import type { RouteContract } from './contract';
-import type { HttpMethod } from './types';
+import type { HttpMethod, RouteEffect } from './types';
 
 /**
  * Route handler function
@@ -45,6 +45,15 @@ export type RouteDef<
      */
     contract?: RouteContract;
 
+    /**
+     * What invoking this route does. Read by a command surface, which
+     * announces it in its manifest; codegen and the contract ignore it.
+     */
+    effect?: RouteEffect;
+
+    /** One line a command surface announces beside the route; codegen and the contract ignore it. */
+    summary?: string;
+
     handler: RouteHandlerFn<TInput, TInterceptor, TResponse>;
 
     // Type inference helpers
@@ -69,6 +78,8 @@ export class RouteBuilder<
     public _middlewares?: (MiddlewareHandler | NamedMiddleware<string>)[];
     public _skipMiddlewares?: string[] | '*';
     public _contract?: RouteContract;
+    public _effect?: RouteEffect;
+    public _summary?: string;
 
     /**
      * Create a new RouteBuilder with copied properties and optional overrides
@@ -83,6 +94,8 @@ export class RouteBuilder<
             middlewares: (MiddlewareHandler | NamedMiddleware<string>)[];
             skipMiddlewares: string[] | '*';
             contract: RouteContract;
+            effect: RouteEffect;
+            summary: string;
         }>,
     ): RouteBuilder<TNewInput, TNewInterceptor, TResponse>
     {
@@ -94,6 +107,8 @@ export class RouteBuilder<
         builder._middlewares = overrides?.middlewares ?? this._middlewares;
         builder._skipMiddlewares = overrides?.skipMiddlewares ?? this._skipMiddlewares;
         builder._contract = overrides?.contract ?? this._contract;
+        builder._effect = overrides?.effect ?? this._effect;
+        builder._summary = overrides?.summary ?? this._summary;
 
         return builder;
     }
@@ -281,6 +296,53 @@ export class RouteBuilder<
     }
 
     /**
+     * Declare what invoking this route does
+     *
+     * Read by a command surface (`@spfn/core/surface`, `@spfn/core/ops`),
+     * which announces it in its manifest so a machine caller can tell a read
+     * from a write before it calls — `spfn ops call` asks for `--yes` before a
+     * `destructive` command. A surface built with `defineSurface` refuses an
+     * app command that does not declare one; on `/_ops` it is optional.
+     *
+     * Nothing else reads it: codegen, the route map, and the contract are
+     * unaffected, and a route outside any surface simply carries it.
+     *
+     * @example
+     * ```ts
+     * export const pageAdd = app.route.post('/pages')
+     *   .input({ body: PageAddBody })
+     *   .effect('write')
+     *   .summary('Add a page to the blueprint')
+     *   .handler(async (c) => { ... });
+     * ```
+     */
+    effect(effect: RouteEffect): RouteBuilder<TInput, TInterceptor, TResponse>
+    {
+        return this.clone({ effect });
+    }
+
+    /**
+     * Describe this route in one line for a command surface's manifest
+     *
+     * A surface announces it beside the command in `spfn ops list` and
+     * `--describe`, and refuses one that is empty or longer than 500
+     * characters. Codegen, the route map, and the contract ignore it. On a
+     * module command the module's own summary wins.
+     *
+     * @example
+     * ```ts
+     * export const pageAdd = app.route.post('/pages')
+     *   .effect('write')
+     *   .summary('Add a page to the blueprint')
+     *   .handler(async (c) => { ... });
+     * ```
+     */
+    summary(summary: string): RouteBuilder<TInput, TInterceptor, TResponse>
+    {
+        return this.clone({ summary });
+    }
+
+    /**
      * Define handler function
      *
      * Response type is automatically inferred from the return value.
@@ -338,6 +400,8 @@ export class RouteBuilder<
             middlewares: this._middlewares,
             skipMiddlewares: this._skipMiddlewares,
             contract: this._contract,
+            ...(this._effect !== undefined ? { effect: this._effect } : {}),
+            ...(this._summary !== undefined ? { summary: this._summary } : {}),
             handler: fn,
             _input: {} as TInput,
             _interceptor: {} as TInterceptor,

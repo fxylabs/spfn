@@ -4,6 +4,7 @@
  * One `describe` per row of the design's case table (#127): the `/_ops`
  * surface built on it behaves as before, a second surface on its own
  * namespace serves its own manifest, and the refusals hold for any namespace.
+ * Block 13 holds #128's rows: the effect and summary an app command declares.
  */
 
 import { Type } from '@sinclair/typebox';
@@ -170,6 +171,7 @@ describe('3 — /_app, authenticated manifest', () =>
         const app = mount(surface.router({
             pageAdd: surface.route.post('/pages')
                 .input({ body: Type.Object({ title: Type.String() }) })
+                .effect('write')
                 .handler(async () => ({ added: true })),
         }));
 
@@ -193,7 +195,7 @@ describe('4 — /_app, public manifest', () =>
     {
         const surface = defineSurface({ namespace: '/_app', auth: appAuth, manifest: 'public' });
         const router = surface.router({
-            pageAdd: surface.route.post('/pages').handler(async () => ({ added: true })),
+            pageAdd: surface.route.post('/pages').effect('write').handler(async () => ({ added: true })),
         });
 
         const app = new Hono();
@@ -242,8 +244,8 @@ describe('5 — /_app with a per-command authorize', () =>
         });
 
         const router = surface.router({
-            pageAdd: surface.route.post('/pages').use([ownGuard]).handler(async () => ({})),
-            pageList: surface.route.get('/pages').use([ownGuard]).handler(async () => ({})),
+            pageAdd: surface.route.post('/pages').use([ownGuard]).effect('write').handler(async () => ({})),
+            pageList: surface.route.get('/pages').use([ownGuard]).effect('read').handler(async () => ({})),
         });
 
         expect(seen.map(command => [command.name, command.method, command.path])).toEqual([
@@ -261,7 +263,7 @@ describe('5 — /_app with a per-command authorize', () =>
 
         const router = surface.router({
             pages: defineRouter({
-                pageList: surface.route.get('/pages').handler(async () => ({})),
+                pageList: surface.route.get('/pages').effect('read').handler(async () => ({})),
             }).use([ownGuard]),
         });
 
@@ -274,7 +276,7 @@ describe('5 — /_app with a per-command authorize', () =>
         const surface = defineSurface({ namespace: '/_app', auth: appAuth, authorize: () => guardNamed('g') });
 
         const build = () => surface.router({
-            dropAll: surface.route.post('/pages/drop').use([guardNamed('g')]).handler(async () => ({})),
+            dropAll: surface.route.post('/pages/drop').use([guardNamed('g')]).effect('write').handler(async () => ({})),
         });
 
         expect(build).toThrow(SurfaceError);
@@ -287,7 +289,7 @@ describe('5 — /_app with a per-command authorize', () =>
 
         expect(() => surface.router({
             pages: defineRouter({
-                pageList: surface.route.get('/pages').handler(async () => ({})),
+                pageList: surface.route.get('/pages').effect('read').handler(async () => ({})),
             }).use([ownGuard]),
         })).toThrow(/command "pageList" declares a middleware named "ownGuard"/);
     });
@@ -301,7 +303,7 @@ describe('5 — /_app with a per-command authorize', () =>
         });
 
         const build = () => surface.router({
-            pageAdd: surface.route.post('/pages').handler(async () => ({})),
+            pageAdd: surface.route.post('/pages').effect('write').handler(async () => ({})),
         });
 
         expect(build).toThrow(SurfaceError);
@@ -318,7 +320,7 @@ describe('5 — /_app with a per-command authorize', () =>
         });
         const own = countingGuard('ownGuard', counts);
         const router = surface.router({
-            pageAdd: surface.route.post('/pages').use([own]).handler(async () => ({ added: true })),
+            pageAdd: surface.route.post('/pages').use([own]).effect('write').handler(async () => ({ added: true })),
         });
 
         const [, guard] = middlewaresOf(router, 'pageAdd');
@@ -338,7 +340,7 @@ describe('5 — /_app with a per-command authorize', () =>
         });
 
         const router = surface.router({
-            pageList: surface.route.get('/pages').use([ownGuard]).handler(async () => ({})),
+            pageList: surface.route.get('/pages').use([ownGuard]).effect('read').handler(async () => ({})),
         });
 
         expect(middlewaresOf(router, 'pageList')).toEqual([appAuth, ownGuard]);
@@ -419,7 +421,7 @@ describe('6 — /_app and /_ops mounted together', () =>
     {
         const surface = defineSurface({ namespace: '/_app', auth: appAuth });
         const appSurface = surface.router({
-            pageAdd: surface.route.post('/pages').handler(async () => ({})),
+            pageAdd: surface.route.post('/pages').effect('write').handler(async () => ({})),
         });
         const opsSurface = createOpsRouter({
             listSignups: opsRoute.get('/signups').handler(async () => ({})),
@@ -445,8 +447,8 @@ describe('6 — surfaces sharing a namespace or a manifest name', () =>
         const b = defineSurface({ namespace: '/_app', auth: bearerAuth('otherAuth') });
 
         expect(() => defineRouter({}).packages([
-            a.router({ cmdA: a.route.get('/a').handler(async () => ({})) }),
-            b.router({ cmdB: b.route.get('/b').handler(async () => ({})) }),
+            a.router({ cmdA: a.route.get('/a').effect('read').handler(async () => ({})) }),
+            b.router({ cmdB: b.route.get('/b').effect('read').handler(async () => ({})) }),
         ])).toThrow(/two command surfaces on "\/_app"/);
     });
 
@@ -488,8 +490,8 @@ describe('6 — surfaces sharing a namespace or a manifest name', () =>
         const registered = registerRoutes(app, defineRouter({
             ping: route.get('/ping').handler(async () => ({})),
         }).packages([
-            a.router({ x: a.route.get('/x').handler(async () => ({})) }),
-            b.router({ y: b.route.get('/y').handler(async () => ({})) }),
+            a.router({ x: a.route.get('/x').effect('read').handler(async () => ({})) }),
+            b.router({ y: b.route.get('/y').effect('read').handler(async () => ({})) }),
         ]));
 
         expect(registered.map(entry => entry.name)).toEqual(['ping', 'getAppManifest', 'x', 'getappManifest', 'y']);
@@ -584,7 +586,7 @@ describe('10 — /_app given a route outside its namespace', () =>
     {
         const surface = defineSurface({ namespace: '/_app', auth: appAuth });
 
-        expect(surface.route.get('/pages/:id').handler(async () => ({})).path).toBe('/_app/pages/:id');
+        expect(surface.route.get('/pages/:id').effect('read').handler(async () => ({})).path).toBe('/_app/pages/:id');
         expect(() => surface.route.get('pages')).toThrow(/must start with "\/"/);
         expect(() => surface.route.get('/')).toThrow(/names no command/);
     });
@@ -596,9 +598,9 @@ describe('11 — /_app with a command claiming the manifest', () =>
     {
         const surface = defineSurface({ namespace: '/_app', auth: appAuth });
 
-        expect(() => surface.router({ getAppManifest: surface.route.get('/other').handler(async () => ({})) }))
+        expect(() => surface.router({ getAppManifest: surface.route.get('/other').effect('read').handler(async () => ({})) }))
             .toThrow(/"getAppManifest" is reserved for the manifest route/);
-        expect(() => surface.router({ clash: surface.route.get('/_manifest').handler(async () => ({})) }))
+        expect(() => surface.router({ clash: surface.route.get('/_manifest').effect('read').handler(async () => ({})) }))
             .toThrow(/"\/_app\/_manifest", which is reserved for the manifest/);
     });
 });
@@ -609,11 +611,215 @@ describe('12 — /_app with a nested router mounting package routers', () =>
     {
         const surface = defineSurface({ namespace: '/_app', auth: appAuth });
         const nested = defineRouter({
-            pageList: surface.route.get('/pages').handler(async () => ({})),
+            pageList: surface.route.get('/pages').effect('read').handler(async () => ({})),
         }).packages([defineRouter({
             unchecked: route.get('/anywhere').handler(async () => ({})),
         })]);
 
         expect(() => surface.router({ nested })).toThrow(/bypass the prefix check and the auth injection/);
+    });
+});
+
+describe('13 — effect and summary', () =>
+{
+    async function manifestOf(router: Router<any>): Promise<SurfaceManifest>
+    {
+        return await (await mount(router).request('/_app/_manifest', AUTHORIZED)).json() as SurfaceManifest;
+    }
+
+    function pagesModuleWith(effect: 'read' | 'write', routeOf: (path: string) => RouteDef<any>)
+    {
+        const module = pagesModule('/_app');
+
+        return {
+            ...module,
+            commands: {
+                reindex: { ...module.commands.reindex, effect, route: routeOf('/_app/pages/reindex') },
+            },
+        };
+    }
+
+    it('row 1 — announces summary and effect in the order name, method, path, summary, effect, input', async () =>
+    {
+        const surface = defineSurface({ namespace: '/_app', auth: appAuth });
+        const manifest = await manifestOf(surface.router({
+            pageAdd: surface.route.post('/pages')
+                .input({ body: Type.Object({ title: Type.String() }) })
+                .effect('write')
+                .summary('Add a page')
+                .handler(async () => ({ added: true })),
+        }));
+
+        const [entry] = manifest.commands;
+        expect(Object.keys(entry!)).toEqual(['name', 'method', 'path', 'summary', 'effect', 'input']);
+        expect(entry).toMatchObject({ name: 'pageAdd', summary: 'Add a page', effect: 'write' });
+    });
+
+    it('row 2 — announces an effect alone without a summary key', async () =>
+    {
+        const surface = defineSurface({ namespace: '/_app', auth: appAuth });
+        const manifest = await manifestOf(surface.router({
+            pageList: surface.route.get('/pages').effect('read').handler(async () => ({})),
+        }));
+
+        expect(manifest.commands).toEqual([
+            { name: 'pageList', method: 'GET', path: '/_app/pages', effect: 'read', input: {} },
+        ]);
+        expect(manifest.commands[0]).not.toHaveProperty('summary');
+    });
+
+    it('row 3 — refuses a command that declares no effect, naming it and the builder method', () =>
+    {
+        const surface = defineSurface({ namespace: '/_app', auth: appAuth });
+        const build = () => surface.router({
+            pageAdd: surface.route.post('/pages').handler(async () => ({})),
+        });
+
+        expect(build).toThrow(SurfaceError);
+        expect(build).toThrow(/Surface command "pageAdd" declares no effect/);
+        expect(build).toThrow(/\.effect\('read' \| 'write' \| 'destructive'\)/);
+    });
+
+    it('row 4 — refuses a route without effect inside a nested router, naming that route', () =>
+    {
+        const surface = defineSurface({ namespace: '/_app', auth: appAuth });
+        const build = () => surface.router({
+            pages: defineRouter({
+                pageList: surface.route.get('/pages').effect('read').handler(async () => ({})),
+                pageDrop: surface.route.delete('/pages/:id').handler(async () => ({})),
+            }),
+        });
+
+        expect(build).toThrow(/command "pageDrop" declares no effect/);
+        expect(build).not.toThrow(/"pages"/);
+    });
+
+    it('row 5 — refuses an effect a client does not know, naming the value', () =>
+    {
+        const surface = defineSurface({ namespace: '/_app', auth: appAuth });
+
+        expect(() => surface.router({
+            pageDrop: surface.route.delete('/pages/:id').effect('delete' as never).handler(async () => ({})),
+        })).toThrow(/command "pageDrop" has invalid effect "delete"/);
+    });
+
+    it('row 6 — refuses a blank summary', () =>
+    {
+        const surface = defineSurface({ namespace: '/_app', auth: appAuth });
+
+        expect(() => surface.router({
+            pageAdd: surface.route.post('/pages').effect('write').summary('   ').handler(async () => ({})),
+        })).toThrow(/command "pageAdd" has an empty summary/);
+    });
+
+    it('row 7 — refuses a summary over 500 characters and accepts one of exactly 500', () =>
+    {
+        const surface = defineSurface({ namespace: '/_app', auth: appAuth });
+        const withSummary = (summary: string) => surface.router({
+            pageAdd: surface.route.post('/pages').effect('write').summary(summary).handler(async () => ({})),
+        });
+
+        expect(() => withSummary('x'.repeat(501))).toThrow(/command "pageAdd" has a summary of 501 characters/);
+        expect(() => withSummary('x'.repeat(500))).not.toThrow();
+    });
+
+    it('row 8 — refuses a module command whose route contradicts the module\'s effect', () =>
+    {
+        const surface = defineSurface({
+            namespace: '/_app',
+            auth: appAuth,
+            authorize: () => undefined,
+            modules: [pagesModuleWith('read', path => route.post(path).effect('write').handler(async () => ({})))],
+        });
+
+        expect(() => surface.router({})).toThrow(SurfaceError);
+        expect(() => surface.router({}))
+            .toThrow(/command "pages.reindex" is declared "read" by its module, but its route says \.effect\("write"\)/);
+    });
+
+    it('row 9 — mounts a module command whose route agrees, announcing the module\'s summary and effect', async () =>
+    {
+        const surface = defineSurface({
+            namespace: '/_app',
+            auth: appAuth,
+            authorize: () => undefined,
+            modules: [pagesModuleWith('read', path =>
+                route.post(path).effect('read').summary('ignored').handler(async () => ({})))],
+        });
+
+        const manifest = await manifestOf(surface.router({}));
+
+        expect(manifest.commands).toEqual([expect.objectContaining({
+            name: 'pages.reindex',
+            summary: 'Rebuild the page index',
+            effect: 'read',
+        })]);
+    });
+
+    it('row 10 — hands authorize the command with its effect', () =>
+    {
+        const seen: SurfaceCommand[] = [];
+        const surface = defineSurface({
+            namespace: '/_app',
+            auth: appAuth,
+            authorize: command =>
+            {
+                seen.push(command);
+
+                return undefined;
+            },
+        });
+
+        surface.router({
+            pageDrop: surface.route.delete('/pages/:id').effect('destructive').handler(async () => ({})),
+        });
+
+        expect(seen.map(command => [command.name, command.effect])).toEqual([['pageDrop', 'destructive']]);
+    });
+
+    it('row 11 — announces each of the three effects on its own command', async () =>
+    {
+        const surface = defineSurface({ namespace: '/_app', auth: appAuth });
+        const manifest = await manifestOf(surface.router({
+            pageList: surface.route.get('/pages').effect('read').handler(async () => ({})),
+            pageAdd: surface.route.post('/pages').effect('write').handler(async () => ({})),
+            pageDrop: surface.route.delete('/pages/:id').effect('destructive').handler(async () => ({})),
+        }));
+
+        expect(manifest.commands.map(command => [command.name, command.effect])).toEqual([
+            ['pageAdd', 'write'],
+            ['pageDrop', 'destructive'],
+            ['pageList', 'read'],
+        ]);
+    });
+
+    it('row 12 — refuses a missing effect before authorize ever sees the command', () =>
+    {
+        let authorizeCalls = 0;
+        const authorize = (command: SurfaceCommand) =>
+        {
+            authorizeCalls++;
+
+            switch (command.effect)
+            {
+                case 'read':
+                case 'write':
+                    return undefined;
+                case 'destructive':
+                    return ownGuard;
+                default:
+                    throw new Error(`unreachable effect ${String(command.effect)}`);
+            }
+        };
+        const surface = defineSurface({ namespace: '/_app', auth: appAuth, authorize });
+
+        const build = () => surface.router({
+            pageAdd: surface.route.post('/pages').handler(async () => ({})),
+        });
+
+        expect(build).toThrow(SurfaceError);
+        expect(build).toThrow(/command "pageAdd" declares no effect/);
+        expect(build).toThrow(/\.effect\(/);
+        expect(authorizeCalls).toBe(0);
     });
 });
