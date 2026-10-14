@@ -6,6 +6,7 @@ const packageJson = JSON.parse(readFileSync('./package.json', 'utf-8'));
 export default defineConfig({
     entry: {
         index: 'src/index.ts',
+        surface: 'src/surface/index.ts',
     },
     format: ['esm'],
     dts: true,

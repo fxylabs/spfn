@@ -39,6 +39,14 @@ export interface Router<TRoutes extends Record<string, RouteDef<any, any, any> |
     _publishesRouteMap: boolean;
 
     /**
+     * The namespace of the command surface that built this router, absent on
+     * any other. Set by `defineSurface` (and so by `createOpsRouter`) as a
+     * non-enumerable property, so `.packages()` can refuse two surfaces on one
+     * namespace.
+     */
+    readonly _surfaceNamespace?: string;
+
+    /**
      * Register package routers (type-hidden)
      *
      * Package routes are:
@@ -150,6 +158,8 @@ function createRouterInstance<TRoutes extends Record<string, RouteDef<any, any, 
                 }
             }
 
+            assertDistinctSurfaces(newPackageRouters);
+
             return createRouterInstance({ ...state, packageRouters: newPackageRouters });
         },
 
@@ -184,6 +194,38 @@ function assertContractVersion(version: string): void
             `contractVersion("${version}") is not a version of the form major.minor.patch. `
             + 'The released snapshot is named from this value and releases are compared by it.',
         );
+    }
+}
+
+/**
+ * Two command surfaces on one namespace both serve `<namespace>/_manifest`.
+ * The first registered answers it, so the second surface's commands stay
+ * live behind their own auth while no manifest lists them.
+ *
+ * Checked when the routers are mounted: that is the first point that sees
+ * both, and the failure belongs where the app put them side by side.
+ */
+function assertDistinctSurfaces(packageRouters: readonly Router<any>[]): void
+{
+    const namespaces = new Set<string>();
+
+    for (const router of packageRouters)
+    {
+        const namespace = router._surfaceNamespace;
+        if (namespace === undefined)
+        {
+            continue;
+        }
+
+        if (namespaces.has(namespace))
+        {
+            throw new Error(
+                `.packages() mounts two command surfaces on "${namespace}". `
+                + `Both serve ${namespace}/_manifest, so the second one's commands would answer `
+                + 'while no manifest lists them. Mount one router per namespace.',
+            );
+        }
+        namespaces.add(namespace);
     }
 }
 

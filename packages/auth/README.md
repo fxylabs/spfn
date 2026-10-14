@@ -2913,6 +2913,70 @@ unauthenticated request here.
 
 `opsOrUser` is available from **0.3.0-beta.11**.
 
+## Signed tokens (`signedTokenAuth`)
+
+The machine credential for a command surface whose caller holds a token some *other*
+service signed ([`@spfn/core/surface`](../core/README.md#can-a-second-surface-sit-beside-_ops)).
+The issuer publishes its public keys as a JWKS and signs a short-lived JWT with EdDSA; the
+caller presents it as `Authorization: Bearer <jwt>`. Nothing is stored on this side — no
+table, no migration.
+
+```typescript
+import { defineSurface } from '@spfn/core/surface';
+import { signedTokenAuth, getSignedToken } from '@spfn/auth/server';
+
+export const app = defineSurface({
+    namespace: '/_app',
+    auth: signedTokenAuth({
+        keysUrl: 'https://issuer.example/.well-known/keys',  // JWKS, looked up by kid
+        iss: 'https://issuer.example',
+        aud: 'my-app',
+        clockSkewSec: 30,                                      // default
+    }),
+});
+
+export const pageAdd = app.route.post('/pages').handler(async (c) =>
+{
+    const { kid, claims } = getSignedToken(c.raw)!;           // claims.sub, claims.scope, …
+});
+```
+
+- **One key set per instance**, created when `signedTokenAuth(...)` is called. An unknown
+  `kid` re-reads the key set at most once a minute (jose's `cooldownDuration: 60_000`), so a
+  stream of forged `kid`s cannot turn the middleware into a fetch loop against the issuer.
+- **EdDSA only, `kid` required, `exp` and `iat` required.** A header without `kid` is
+  refused before any key lookup, and an `iat` later than now (beyond the skew) is refused
+  too — jose checks `iat` only under `maxTokenAge`.
+- **`keysUrl` must be https**; `http:` is accepted only against a loopback host, and
+  anything else throws at construction. Keys fetched in the clear can be swapped on the
+  wire, and every token signed by the swapped key would then verify.
+- **Not a user.** The verified token lands in its own context key, read with
+  `getSignedToken(c)`. `AuthContext` stays unset and `getAuth(c)` keeps returning app users
+  only — the [machine principal](#machine-principals-registermachineverifier) rule.
+- **Auto-skips** the server-level `auth` middleware, like `opsTokenAuth`. It is standalone:
+  it is not registered on the `machineAuth` registry.
+
+Every invalid token answers the same 401 message; the reason goes to `authLogger` at warn,
+without the token text.
+
+| Token | Answer |
+| --- | --- |
+| missing `Authorization`, or not `Bearer` | 401 `Signed token required: Authorization: Bearer <token>` |
+| valid signature, `iss`, `aud`, `exp`, `iat` within skew | 200, `getSignedToken(c)` carries `{ kid, claims }` |
+| wrong `aud` | 401 `Invalid signed token` |
+| wrong `iss` | 401 `Invalid signed token` |
+| `exp` in the past beyond skew | 401 `Invalid signed token` |
+| `exp` in the past within skew | 200 |
+| `iat` in the future beyond skew | 401 `Invalid signed token` |
+| missing `exp` or `iat` | 401 `Invalid signed token` |
+| no `kid` in the header | 401 `Invalid signed token`, no key-set fetch |
+| `alg` other than `EdDSA` (RS256, HS256, none) | 401 `Invalid signed token` |
+| tampered payload or signature | 401 `Invalid signed token` |
+| unknown `kid`, present after one key-set re-read | 200 |
+| unknown `kid`, absent after one re-read | 401 `Invalid signed token` |
+| another unknown `kid` within 60 s | 401 `Invalid signed token`, no further fetch |
+| `keysUrl` unreachable | 401 `Invalid signed token`, reason logged |
+
 ## Mobile clientProofV1 (`@spfn/auth/client-proof`)
 
 Server side of the spfn-mobile native SDK auth profile (issue #46; asymmetric revision in

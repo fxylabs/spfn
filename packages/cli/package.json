@@ -7,6 +7,19 @@
     "spfn": "bin/spfn.js"
   },
   "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.js"
+    },
+    "./surface": {
+      "types": "./dist/surface.d.ts",
+      "import": "./dist/surface.js",
+      "require": "./dist/surface.js"
+    },
+    "./package.json": "./package.json"
+  },
   "files": [
     "dist",
     "bin"

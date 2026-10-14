@@ -79,6 +79,11 @@
             "import": "./dist/ops/index.js",
             "require": "./dist/ops/index.js"
         },
+        "./surface": {
+            "types": "./dist/surface/index.d.ts",
+            "import": "./dist/surface/index.js",
+            "require": "./dist/surface/index.js"
+        },
         "./env": {
             "types": "./dist/env/index.d.ts",
             "import": "./dist/env/index.js",

@@ -5,27 +5,13 @@
  */
 
 import chalk from 'chalk';
+import { transportRefusalOf } from '../../surface/transport.js';
 import { keychainSupported, loadOpsToken } from '../../utils/ops/keychain.js';
 
 export interface OpsTargetOptions
 {
     app?: string;
     token?: string;
-}
-
-/**
- * Where `http` is not a mistake: a machine talking to itself, which has no
- * certificate to present and no network for anyone to listen on.
- *
- * The scaffold's own API runs on `http://localhost:8790`, so local development
- * has to keep working — but that is the whole of the exception.
- */
-function isLoopback(hostname: string): boolean
-{
-    return hostname === 'localhost'
-        || hostname === '127.0.0.1'
-        || hostname === '[::1]'
-        || hostname.endsWith('.localhost');
 }
 
 /**
@@ -36,15 +22,20 @@ function isLoopback(hostname: string): boolean
  * token. A stale `SPFN_OPS_APP` left over from a local run, or a typo'd
  * `--app`, is enough to put either on the wire unencrypted — and nothing about
  * the command's output would say so.
+ *
+ * The rule is the surface client's (`transportRefusalOf`), which throws on the
+ * same URL; this renders its answer before any client is created.
  */
 function assertTransportSafe(parsed: URL, appUrl: string): void
 {
-    if (parsed.protocol === 'https:' || (parsed.protocol === 'http:' && isLoopback(parsed.hostname)))
+    const refusal = transportRefusalOf(parsed);
+
+    if (refusal === null)
     {
         return;
     }
 
-    if (parsed.protocol === 'http:')
+    if (refusal === 'cleartext-http')
     {
         console.error(chalk.red(`❌ Refusing to talk to ${appUrl} over http.`));
         console.error(chalk.gray('   An administrator password and an ops token cross this connection, and http sends both in the clear.'));

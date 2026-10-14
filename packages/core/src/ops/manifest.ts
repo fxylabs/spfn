@@ -1,111 +1,32 @@
 /**
  * Ops Manifest
  *
- * The server's self-description of its ops surface: every command an app
- * exposes under `/_ops`, with each command's input schemas as plain JSON
- * Schema. The ops CLI fetches this from the running server, so command
- * discovery needs neither the app's source nor a generated artifact on the
- * operator's machine.
- *
- * The router is loaded and walked (the contract collector's approach) rather
- * than parsed from source: route schemas built from imported values resolve,
- * and TypeBox schemas serialize to JSON Schema by construction.
+ * The ops surface's self-description: every command an app exposes under
+ * `/_ops`, with each command's input schemas as plain JSON Schema. The
+ * `spfn ops` CLI fetches it from the running server. The collector and the
+ * shapes are the command surface's (`@spfn/core/surface`); these are their
+ * ops names, kept so existing imports read as they always did.
  */
 
-import type { JsonSchema } from '../contract/types';
 import type { RouteDef } from '../route/route-builder';
-import type { RouteInput } from '../route/route-input';
 import type { Router } from '../route/router';
-import type { HttpMethod } from '../route/types';
-import { OpsRouterError } from './error';
-import type { OpsEffect } from './module';
+import {
+    collectSurfaceCommands,
+    type SurfaceCommand,
+    type SurfaceManifest,
+    type SurfaceModuleDescriptor,
+} from '../surface/manifest';
+import { OPS_WORDING } from './wording';
 export { OpsRouterError } from './error';
 
 /** One explicitly mounted capability module, as the CLI sees it. */
-export interface OpsModuleDescriptor
-{
-    id: string;
-    source: string;
-    contractVersion: string;
-    summary: string;
-}
+export type OpsModuleDescriptor = SurfaceModuleDescriptor;
 
 /** One invokable ops command, as the CLI sees it. */
-export interface OpsCommand
-{
-    name: string;
-    method: HttpMethod;
-    path: string;
-
-    /** Present for commands contributed by an explicitly mounted ops module. */
-    module?: string;
-    summary?: string;
-    effect?: OpsEffect;
-    scopes?: string[];
-
-    /** Input sections the route declares, each as JSON Schema. */
-    input: {
-        params?: JsonSchema;
-        query?: JsonSchema;
-        body?: JsonSchema;
-    };
-}
+export type OpsCommand = SurfaceCommand;
 
 /** What `GET /_ops/_manifest` answers. */
-export interface OpsManifest
-{
-    manifestVersion: 1;
-    /** Additive module metadata. Omitted for an app-only v1 surface. */
-    modules?: OpsModuleDescriptor[];
-    commands: OpsCommand[];
-}
-
-function isRouter(value: unknown): value is Router<any>
-{
-    return value !== null
-        && typeof value === 'object'
-        && 'routes' in value
-        && '_routes' in value;
-}
-
-function isRouteDef(value: unknown): value is RouteDef<any>
-{
-    return value !== null
-        && typeof value === 'object'
-        && 'handler' in value;
-}
-
-/**
- * Strip TypeBox's symbol-keyed metadata and hand back plain JSON — the same
- * round trip the contract collector uses.
- */
-function toJsonSchema(schema: unknown): JsonSchema
-{
-    return JSON.parse(JSON.stringify(schema)) as JsonSchema;
-}
-
-const INPUT_SECTIONS = ['params', 'query', 'body'] as const;
-
-function toCommandInput(input: RouteInput | undefined): OpsCommand['input']
-{
-    const sections: OpsCommand['input'] = {};
-
-    if (!input)
-    {
-        return sections;
-    }
-
-    for (const section of INPUT_SECTIONS)
-    {
-        const schema = input[section];
-        if (schema)
-        {
-            sections[section] = toJsonSchema(schema);
-        }
-    }
-
-    return sections;
-}
+export type OpsManifest = SurfaceManifest;
 
 /**
  * Walk a routes record (nested routers included) and collect every RouteDef
@@ -116,60 +37,5 @@ export function collectOpsCommands(
     routes: Record<string, RouteDef<any> | Router<any>>,
 ): OpsCommand[]
 {
-    const commands: OpsCommand[] = [];
-    visit(routes, commands, new Map<string, string>());
-    commands.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
-
-    return commands;
-}
-
-function visit(
-    routes: Record<string, RouteDef<any> | Router<any>>,
-    commands: OpsCommand[],
-    claimed: Map<string, string>,
-): void
-{
-    for (const [name, entry] of Object.entries(routes))
-    {
-        if (isRouter(entry))
-        {
-            visit(entry.routes, commands, claimed);
-            continue;
-        }
-
-        if (!isRouteDef(entry) || !entry.method || !entry.path)
-        {
-            continue;
-        }
-
-        assertUnclaimedName(name, entry.path, claimed);
-
-        commands.push({
-            name,
-            method: entry.method,
-            path: entry.path,
-            input: toCommandInput(entry.input as RouteInput | undefined),
-        });
-    }
-}
-
-/**
- * Nested routers flatten into one command list, so two routes keyed alike in
- * different routers would both be announced under the same command name. The
- * CLI resolves a name to the first match, which means an operator asking for
- * one command silently invokes the other — refuse it at definition time.
- */
-function assertUnclaimedName(name: string, path: string, claimed: Map<string, string>): void
-{
-    const existing = claimed.get(name);
-    if (existing !== undefined)
-    {
-        throw new OpsRouterError(
-            `Two ops routes are named "${name}" ("${existing}" and "${path}"). `
-            + 'Command names are flattened across nested routers, so each must be unique '
-            + 'for the CLI to resolve the one an operator asked for.',
-        );
-    }
-
-    claimed.set(name, path);
+    return collectSurfaceCommands(routes, OPS_WORDING);
 }

@@ -685,6 +685,39 @@ Because the package is the app's, it is resolved **from the directory the comman
 Run `spfn ops token` from the app's root; running it elsewhere reports the package as
 missing, and the message names the directory it looked in.
 
+#### Can I call a surface from my own code?
+
+Yes — the client `spfn ops` runs on is a library export, `spfn/surface`, and it reaches any
+namespace a [`defineSurface`](../core/README.md#can-a-second-surface-sit-beside-_ops)
+serves, not only `/_ops`:
+
+```typescript
+import { createSurfaceClient } from 'spfn/surface';
+
+const client = createSurfaceClient({
+    appUrl: 'https://app.example',
+    namespace: '/_app',                               // manifest at /_app/_manifest
+    token: async () => issueToken(),                  // string | () => Promise<string>
+    onWarning: message => console.error(message),    // dropped commands; default: silent
+});
+
+const manifest = await client.manifest();
+const usage = client.describe(manifest, 'pageAdd');  // the --describe text
+const answer = await client.call('pageAdd', { params: {}, query: {}, body: { title: 'Hello' } });
+// answer: { status, body } — the app's answer, relayed
+```
+
+It keeps every check `spfn ops` makes: the manifest's shape, each command's path staying
+under `<namespace>/`, module metadata, and path parameters that would decode into a dot
+segment. `appUrl` must be https (`http` only against a loopback host) — refused when the
+client is created, with a thrown `Error`. A manifest request that does not answer 200
+throws a `SurfaceManifestError` carrying the `status`. The library prints nothing and does
+not load the CLI's terminal stack; `spfn ops` is this client on `/_ops` with its own
+printer.
+
+The `spfn` package has an `exports` map: `spfn` (the CLI's index), `spfn/surface`, and
+`spfn/package.json`. No other path inside the package is importable.
+
 ### `spfn kit`
 
 Install, verify and update a **Superfunction Kit** — a licensed product that ships as a

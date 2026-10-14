@@ -71,7 +71,7 @@ function remainingStaticPath(segments: RouteSegment[], from: number): string | n
  * cannot be established from static material, composition is refused: scope
  * middleware must never depend on registration order.
  */
-export function opsRoutePatternsOverlap(firstPath: string, secondPath: string): boolean
+export function routePatternsOverlap(firstPath: string, secondPath: string): boolean
 {
     const first = routeSegments(firstPath);
     const second = routeSegments(secondPath);

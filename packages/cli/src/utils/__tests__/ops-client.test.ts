@@ -2,8 +2,8 @@
  * Ops client unit tests — the pure request-building logic.
  */
 
-import { describe, expect, it } from 'vitest';
-import { buildCommandPath, type OpsCommandDescriptor } from '../ops/client.js';
+import { describe, expect, it, vi } from 'vitest';
+import { buildCommandPath, invokeOpsCommand, type OpsCommandDescriptor } from '../ops/client.js';
 
 function command(path: string): OpsCommandDescriptor
 {
@@ -12,6 +12,24 @@ function command(path: string): OpsCommandDescriptor
 
 describe('buildCommandPath', () =>
 {
+    it('refuses a path outside /_ops/ in the ops wording', () =>
+    {
+        expect(() => buildCommandPath(command('/_app/x'), {}, {}))
+            .toThrow(/^Refusing ops command path "\/_app\/x" because it .*outside \/_ops\//);
+    });
+
+    it('refuses the same path in the ops wording when invoking, before any request', async () =>
+    {
+        const fetchSpy = vi.spyOn(globalThis, 'fetch');
+
+        await expect(invokeOpsCommand('https://app.example', 'token', command('/_app/x'), {
+            params: {}, query: {}, body: undefined,
+        })).rejects.toThrow(/^Refusing ops command path "\/_app\/x"/);
+        expect(fetchSpy).not.toHaveBeenCalled();
+
+        fetchSpy.mockRestore();
+    });
+
     it('substitutes and encodes path parameters', () =>
     {
         expect(buildCommandPath(command('/_ops/orders/:id/items/:sku'), { id: '42', sku: 'a b' }, {}))

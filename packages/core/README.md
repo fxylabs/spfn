@@ -356,6 +356,7 @@ Each module has its own README with the API detail.
 | `@spfn/core/codegen` | The codegen orchestrator and the built-in generators: `@spfn/core:route-map` for the proxy's route map, `@spfn/core:contract` for the client contract. | [src/codegen](./src/codegen/README.md) |
 | `@spfn/core/contract` | Route contracts for clients that ship separately: collect, snapshot, and the build gate that refuses a breaking change. | [src/contract](./src/contract/README.md) |
 | `@spfn/core/ops` | The operations surface `spfn ops` drives: `opsRoute`, `createOpsRouter`, `defineOpsModule`, and the manifest the CLI discovers commands from. Structure only — the router is always authenticated, and token verification lives in `@spfn/auth`. | [How do I operate the app from the terminal?](#how-do-i-operate-the-app-from-the-terminal) |
+| `@spfn/core/surface` | `defineSurface`: a command surface on any namespace — the same authenticated router, manifest and modules `@spfn/core/ops` is on `/_ops`, for a caller other than an operator. | [Can a second surface sit beside `/_ops`?](#can-a-second-surface-sit-beside-_ops) |
 
 `db/manager`, `db/schema` and `db/transaction` are **not** package subpaths of their own.
 They are internal modules re-exported by `@spfn/core/db` — import their symbols from
@@ -702,6 +703,66 @@ scoped, revocable, hash-stored, issued with `spfn ops token issue` against the r
 CLI keeps the token in the keychain (`spfn ops token store`), and resolution order is
 `--token` → `SPFN_OPS_TOKEN` → keychain. The `--app` URL must be https, since every command
 carries a secret; `http` is accepted only against a loopback host.
+
+### Can a second surface sit beside `/_ops`?
+
+Yes. `/_ops` is one command surface; `defineSurface` from `@spfn/core/surface` builds
+another on a namespace of your choosing, for a caller that is not an operator — a service
+holding a token some issuer signed, say. It is the same structure: a `route` with the
+namespace applied, auth injected into every command, a manifest at `<namespace>/_manifest`
+registered first, and modules mounted only when you name them. `createOpsRouter` is
+`defineSurface({ namespace: '/_ops', ... }).router(...)`.
+
+```typescript
+// src/server/app-surface.ts
+import { Type } from '@sinclair/typebox';
+import { defineSurface } from '@spfn/core/surface';
+import { signedTokenAuth } from '@spfn/auth/server';
+
+export const app = defineSurface({
+    namespace: '/_app',                                     // required
+    auth: signedTokenAuth({                                 // required
+        keysUrl: 'https://issuer.example/.well-known/keys',
+        iss: 'https://issuer.example',
+        aud: 'my-app',
+    }),
+    manifest: 'public',                                     // 'authenticated' (default) | 'public'
+});
+
+export const pageAdd = app.route.post('/pages')            // POST /_app/pages
+    .input({ body: Type.Object({ title: Type.String() }) })
+    .handler(async (c) => pagesRepository.add((await c.data()).body.title));
+
+// src/server/router.ts — both surfaces, side by side
+export const appRouter = defineRouter({ ... }).packages([app.router({ pageAdd }), opsRouter]);
+```
+
+- **Namespace.** An absolute path of `[A-Za-z0-9_-]` segments with no trailing slash —
+  `/_app`, `/machine/v1`. Anything else (`app`, `/_app/`, `/`, a `%`, a `:param`) is refused
+  at `defineSurface`.
+- **Manifest.** Served at `<namespace>/_manifest` under the reserved route name
+  `get<Namespace>Manifest` — `getAppManifest` for `/_app`, `getOpsManifest` for `/_ops`,
+  `getappManifest` for `/app`. The namespace is encoded one-to-one (`_x` → `X`; any other
+  `_`, `-`, `/` or uppercase letter is escaped with `_`), so two surfaces never register one
+  name. Two surfaces on one namespace are refused by `.packages()`. `manifest: 'public'`
+  drops `auth` from that one route and skips a server-level `auth` middleware on it, so a
+  caller can discover commands before it holds a token; every command stays behind `auth`
+  regardless.
+- **`authorize`.** Optional, `(command) => middleware | undefined`, called once per command
+  (module commands included) when the router is built. The middleware runs after `auth` and
+  before the command's own: `[auth, authorize?, ...group, ...own]`. Required as soon as a
+  module is mounted. A guard named like `auth` or like one of the command's group or own
+  middlewares is refused: registration keeps one middleware per name, so the other one would
+  never run.
+- **Modules.** A module is validated against the namespace of the surface that mounts it —
+  its commands must live under `<namespace>/<id>/`. Write one for a surface with
+  `defineSurfaceModule(module, '/_app')`; a module written for `/_ops` mounted on `/_app` is
+  refused, and the message names the namespace.
+- **Errors.** Every refusal is a `SurfaceError`. `@spfn/core/ops` exports the same class as
+  `OpsRouterError`, so `instanceof` holds under either name.
+
+The client for any surface is the CLI's library export,
+[`spfn/surface`](../cli/README.md#can-i-call-a-surface-from-my-own-code).
 
 ---
 

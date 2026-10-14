@@ -1,9 +1,5 @@
-/** Thrown when a route or module cannot be part of an ops surface. */
-export class OpsRouterError extends Error
-{
-    constructor(message: string)
-    {
-        super(message);
-        this.name = 'OpsRouterError';
-    }
-}
+/**
+ * The ops surface's error is the command surface's own: one class, so
+ * `instanceof OpsRouterError` and `instanceof SurfaceError` agree.
+ */
+export { SurfaceError as OpsRouterError } from '../surface/error';
