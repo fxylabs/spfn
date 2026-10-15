@@ -196,7 +196,7 @@ async function admitForRenewal(expiredKeyId: string): Promise<{ key: UserPublicK
         throw new SessionRenewalRefusedError();
     }
 
-    const user = await usersRepository.findById(key.userId);
+    const user = await usersRepository.findByIdOnPrimary(key.userId);
 
     if (!user || user.status !== 'active')
     {
