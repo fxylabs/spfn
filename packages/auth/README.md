@@ -905,8 +905,10 @@ await authApi.revokeAllKeys.call({ body: { includeCurrent: true } });   // every
   never a session. See [Device-code login](#device-code-login).
 - **A key id you do not own answers 404** (`KeyNotFoundError`). Every lookup is scoped by user, so
   the answer is only ever "not yours" and reveals nothing about other accounts.
-- **Revocation takes effect immediately.** `authenticate` reads the key from the database on every
-  request with no cache in front of it.
+- **Revocation takes effect immediately.** `authenticate`, `optionalAuth` and clientProofV1
+  admission read the key and the account status from the database on every request with no cache
+  in front of it, and they read the write primary: a read replica (`DATABASE_READ_URL`) does not
+  delay a revocation or a suspension, nor refuse a key registered a moment ago.
 - **`includeRevoked: true` shows what was already cut off**, with `revokedAt`. The default is only
   keys that can still sign.
 

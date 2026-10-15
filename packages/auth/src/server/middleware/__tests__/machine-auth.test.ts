@@ -31,11 +31,11 @@ vi.mock('@spfn/auth/server', async (importOriginal) =>
         decodeToken: vi.fn(),
         verifyClientToken: vi.fn(),
         keysRepository: {
-            findActiveByKeyId: vi.fn(),
-            findByKeyId: vi.fn(),
+            findActiveByKeyIdOnPrimary: vi.fn(),
+            findByKeyIdOnPrimary: vi.fn(),
             updateLastUsedById: vi.fn().mockResolvedValue(undefined),
         },
-        findUserWithEffectiveRole: vi.fn(),
+        findUserWithEffectiveRoleOnPrimary: vi.fn(),
         userProfilesRepository: { findLocaleByUserId: vi.fn().mockResolvedValue('en') },
         getPendingDeletionInfo: vi.fn(),
     };
@@ -55,7 +55,7 @@ import { CLIENT_PROOF_HEADERS } from '@/server/client-proof/admission';
 import { CONTRACT_SUPPORTED_RANGE, CONTRACT_VERSION } from '@/server/client-proof/contract-bundle';
 import { SERVER_CONTRACT_HEADERS } from '@/server/client-proof/wire-headers';
 import { authLogger } from '@/server/logger';
-import { decodeToken, verifyClientToken, keysRepository, findUserWithEffectiveRole } from '@spfn/auth/server';
+import { decodeToken, verifyClientToken, keysRepository, findUserWithEffectiveRoleOnPrimary } from '@spfn/auth/server';
 import type { Context, Next } from 'hono';
 
 const USER_ID = 7;
@@ -310,7 +310,7 @@ describe('the machine-principal case table', () =>
     {
         vi.clearAllMocks();
         vi.mocked(keysRepository.updateLastUsedById).mockResolvedValue(undefined as never);
-        vi.mocked(findUserWithEffectiveRole).mockResolvedValue({
+        vi.mocked(findUserWithEffectiveRoleOnPrimary).mockResolvedValue({
             user: { id: USER_ID, email: 'machine-table@example.com', status: 'active' },
             role: { name: 'user' },
         } as never);
@@ -320,7 +320,7 @@ describe('the machine-principal case table', () =>
     function admitUserToken(): void
     {
         vi.mocked(decodeToken).mockReturnValue({ keyId: KEY_ID } as never);
-        vi.mocked(keysRepository.findActiveByKeyId).mockResolvedValue(validKeyRecord() as never);
+        vi.mocked(keysRepository.findActiveByKeyIdOnPrimary).mockResolvedValue(validKeyRecord() as never);
         vi.mocked(verifyClientToken).mockReturnValue({ keyId: KEY_ID } as never);
     }
 
@@ -368,7 +368,7 @@ describe('the machine-principal case table', () =>
             expect(refusal.status).toBe(401);
             expect(refusal.message).toBe('Invalid token: missing keyId');
             expect(decodeToken).not.toHaveBeenCalled();
-            expect(keysRepository.findActiveByKeyId).not.toHaveBeenCalled();
+            expect(keysRepository.findActiveByKeyIdOnPrimary).not.toHaveBeenCalled();
             expect(driven.authOf()).toBeUndefined();
             expect(driven.next).not.toHaveBeenCalled();
         });

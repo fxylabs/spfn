@@ -11,6 +11,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 const { keysRepository } = vi.hoisted(() => ({
     keysRepository: {
+        findByKeyIdOnPrimary: vi.fn(),
         findByKeyId: vi.fn(),
         findActiveByKeyId: vi.fn(),
         create: vi.fn(async () => undefined),
@@ -107,7 +108,7 @@ describe('registerPublicKeyService - keyId collisions', () =>
 
     it('registers the key when the keyId is unused', async () =>
     {
-        keysRepository.findByKeyId.mockResolvedValue(null);
+        keysRepository.findByKeyIdOnPrimary.mockResolvedValue(null);
 
         await registerPublicKeyService(params());
 
@@ -117,7 +118,7 @@ describe('registerPublicKeyService - keyId collisions', () =>
     it('is a no-op success when the same user re-registers their own active key', async () =>
     {
         // 한 기기에서 반복 로그인하는 정상 경로. 네이티브·웹 양쪽이 여기에 기댄다.
-        keysRepository.findByKeyId.mockResolvedValue(keyRow());
+        keysRepository.findByKeyIdOnPrimary.mockResolvedValue(keyRow());
 
         await expect(registerPublicKeyService(params())).resolves.toMatchObject({ binding: 'none' });
 
@@ -126,7 +127,7 @@ describe('registerPublicKeyService - keyId collisions', () =>
 
     it('refuses reuse of the same user\'s revoked keyId instead of failing on the unique index', async () =>
     {
-        keysRepository.findByKeyId.mockResolvedValue(keyRow({
+        keysRepository.findByKeyIdOnPrimary.mockResolvedValue(keyRow({
             isActive: false,
             revokedAt: new Date(),
             revokedReason: 'Replaced by new key on login',
@@ -140,7 +141,7 @@ describe('registerPublicKeyService - keyId collisions', () =>
 
     it('refuses another user\'s active keyId with the same error (no existence oracle)', async () =>
     {
-        keysRepository.findByKeyId.mockResolvedValue(keyRow());
+        keysRepository.findByKeyIdOnPrimary.mockResolvedValue(keyRow());
 
         const revoked = registerPublicKeyService(params(OTHER_ID));
 
@@ -150,10 +151,10 @@ describe('registerPublicKeyService - keyId collisions', () =>
 
     it('answers identically for a revoked own key and another user\'s active key', async () =>
     {
-        keysRepository.findByKeyId.mockResolvedValue(keyRow({ isActive: false, revokedAt: new Date() }));
+        keysRepository.findByKeyIdOnPrimary.mockResolvedValue(keyRow({ isActive: false, revokedAt: new Date() }));
         const ownRevoked = await registerPublicKeyService(params()).catch((e: Error) => e);
 
-        keysRepository.findByKeyId.mockResolvedValue(keyRow());
+        keysRepository.findByKeyIdOnPrimary.mockResolvedValue(keyRow());
         const otherActive = await registerPublicKeyService(params(OTHER_ID)).catch((e: Error) => e);
 
         expect((ownRevoked as Error).name).toBe((otherActive as Error).name);
@@ -164,7 +165,7 @@ describe('registerPublicKeyService - keyId collisions', () =>
     {
         // 만료는 isActive를 뒤집지 않는다. 그냥 무시하고 반환하면 로그인은 200인데
         // authenticate가 KeyExpiredError로 모든 요청을 막아, 회복할 방법이 없어진다.
-        keysRepository.findByKeyId.mockResolvedValue(keyRow({
+        keysRepository.findByKeyIdOnPrimary.mockResolvedValue(keyRow({
             expiresAt: new Date(Date.now() - 86_400_000),
         }));
 
@@ -180,7 +181,7 @@ describe('registerPublicKeyService - keyId collisions', () =>
 
     it('does not touch the expiry of a key that has not expired', async () =>
     {
-        keysRepository.findByKeyId.mockResolvedValue(keyRow({
+        keysRepository.findByKeyIdOnPrimary.mockResolvedValue(keyRow({
             expiresAt: new Date(Date.now() + 86_400_000),
         }));
 
@@ -191,7 +192,7 @@ describe('registerPublicKeyService - keyId collisions', () =>
 
     it('does not resurrect an expired key that was also revoked', async () =>
     {
-        keysRepository.findByKeyId.mockResolvedValue(keyRow({
+        keysRepository.findByKeyIdOnPrimary.mockResolvedValue(keyRow({
             isActive: false,
             revokedAt: new Date(),
             expiresAt: new Date(Date.now() - 86_400_000),
@@ -205,13 +206,24 @@ describe('registerPublicKeyService - keyId collisions', () =>
 
     it('looks the keyId up without an isActive filter', async () =>
     {
-        keysRepository.findByKeyId.mockResolvedValue(null);
+        keysRepository.findByKeyIdOnPrimary.mockResolvedValue(null);
 
         await registerPublicKeyService(params());
 
         // 활성 필터가 걸린 조회로 되돌아가면 폐기 행을 다시 놓친다.
-        expect(keysRepository.findByKeyId).toHaveBeenCalledWith(KEY_ID);
+        expect(keysRepository.findByKeyIdOnPrimary).toHaveBeenCalledWith(KEY_ID);
         expect(keysRepository.findActiveByKeyId).not.toHaveBeenCalled();
+    });
+
+    it('P5: reads the existing key from the write primary, not a replica (replica-lag guard, #133)', async () =>
+    {
+        keysRepository.findByKeyIdOnPrimary.mockResolvedValue(null);
+
+        await registerPublicKeyService(params());
+
+        // replica가 한 커밋 뒤처져 있으면 방금 등록된 키를 못 보고 insert가 unique에 걸린다.
+        expect(keysRepository.findByKeyIdOnPrimary).toHaveBeenCalledWith(KEY_ID);
+        expect(keysRepository.findByKeyId).not.toHaveBeenCalled();
     });
 });
 
@@ -225,7 +237,7 @@ describe('key type must match the declared algorithm', () =>
     beforeEach(() =>
     {
         vi.clearAllMocks();
-        keysRepository.findByKeyId.mockResolvedValue(null);
+        keysRepository.findByKeyIdOnPrimary.mockResolvedValue(null);
         keysRepository.create.mockResolvedValue(keyRow() as never);
     });
 

@@ -5,13 +5,17 @@
  * BaseRepository를 상속받아 자동 트랜잭션 컨텍스트 지원 및 Read/Write 분리
  */
 
-import { eq, and, inArray, sql } from 'drizzle-orm';
-import { BaseRepository } from '@spfn/core/db';
+import { eq, and, inArray, sql, type EmptyRelations } from 'drizzle-orm';
+import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js';
+import { BaseRepository, type RepositoryDatabase } from '@spfn/core/db';
 import { EntityNotFoundError, NotFoundError } from '@spfn/core/errors';
 
 import { rolePermissions, roles, NewUser, users, permissions } from '../entities';
 import type { UserStatus } from '../types';
 import { normalizeEmail, normalizeOptionalEmail } from '../helpers/email';
+
+/** Either handle a repository method reads through: `this.db` or `this.readDb`. */
+type Database = RepositoryDatabase<PostgresJsDatabase<EmptyRelations>>;
 
 /**
  * Users Repository 클래스
@@ -206,11 +210,29 @@ export class UsersRepository extends BaseRepository
      * ID로 사용자 + Role 조회 (leftJoin)
      * Read replica 사용
      *
-     * roleId가 null인 유저는 role: null 반환
+     * roleId가 null인 유저는 role: null 반환.
+     * 요청의 admission을 판정하는 호출자는 `findByIdWithRoleOnPrimary`를 쓸 것.
      */
     async findByIdWithRole(id: number)
     {
-        const result = await this.readDb
+        return this.selectByIdWithRole(this.readDb, id);
+    }
+
+    /**
+     * ID로 사용자 + Role 조회 (leftJoin) — Write primary에서 직접 읽는다.
+     *
+     * 복제 지연 창에서 status 전이(예: 정지)를 놓치면 안 되는 admission 게이트
+     * (clientProofV1, authenticate, optionalAuth)가 사용한다. 일반 조회는
+     * `findByIdWithRole`(replica)를 계속 사용할 것.
+     */
+    async findByIdWithRoleOnPrimary(id: number)
+    {
+        return this.selectByIdWithRole(this.db, id);
+    }
+
+    private async selectByIdWithRole(db: Database, id: number)
+    {
+        const result = await db
             .select({
                 user: users,
                 roleId: roles.id,

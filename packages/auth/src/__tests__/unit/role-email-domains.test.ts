@@ -6,8 +6,9 @@
  * test — or an operator — changing it needs no reset.
  *
  * The last block is a source scan: no middleware may load a principal's role
- * except through `findUserWithEffectiveRole`, so a middleware added later
- * cannot skip the policy by calling the repository itself.
+ * except through `findUserWithEffectiveRole` (or its primary-read twin
+ * `findUserWithEffectiveRoleOnPrimary`), so a middleware added later cannot
+ * skip the policy by calling the repository itself.
  */
 
 import { describe, it, expect, afterEach } from 'vitest';
@@ -168,7 +169,7 @@ describe('source scan: role resolution goes through findUserWithEffectiveRole', 
     {
         const resolving = readdirSync(MIDDLEWARE_DIR)
             .filter(file => file.endsWith('.ts'))
-            .filter(file => readFileSync(join(MIDDLEWARE_DIR, file), 'utf8').includes('findUserWithEffectiveRole('));
+            .filter(file => /findUserWithEffectiveRole(OnPrimary)?\(/.test(readFileSync(join(MIDDLEWARE_DIR, file), 'utf8')));
 
         expect(resolving.sort()).toEqual([
             'auth-profiles.ts',

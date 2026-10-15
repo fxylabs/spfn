@@ -41,7 +41,7 @@ import type { User } from '@spfn/auth/server';
 import {
     authLogger,
     keysRepository,
-    findUserWithEffectiveRole,
+    findUserWithEffectiveRoleOnPrimary,
     userProfilesRepository,
     getPendingDeletionInfo,
 } from '@spfn/auth/server';
@@ -143,7 +143,7 @@ export async function resolveAuthenticatedUser(userId: number): Promise<{
 } & ProfileLocale>
 {
     const [result, chosenLocale] = await Promise.all([
-        findUserWithEffectiveRole(userId),
+        findUserWithEffectiveRoleOnPrimary(userId),
         userProfilesRepository.findLocaleByUserId(userId),
     ]);
     if (!result)
@@ -331,7 +331,7 @@ async function verifyClientProofProfile(c: Context): Promise<AuthContext>
     //    it falls through to the proof step and shares PROOF_INVALID with a
     //    failed signature, so whether a keyId exists is not inferable from
     //    the refusal (the same non-disclosure the dev surface keeps).
-    const keyRecord = await keysRepository.findByKeyId(credentials.keyId);
+    const keyRecord = await keysRepository.findByKeyIdOnPrimary(credentials.keyId);
     if (keyRecord !== null)
     {
         if (!keyRecord.isActive)

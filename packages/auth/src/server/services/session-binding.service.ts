@@ -106,7 +106,7 @@ export async function keySessionBindingService(
     keyId: string,
 ): Promise<{ sessionBinding?: SessionBindingType; keyExpiresAtMillis?: number }>
 {
-    const key = await keysRepository.findByKeyId(keyId);
+    const key = await keysRepository.findByKeyIdOnPrimary(keyId);
 
     if (key?.binding !== 'passkey' || !key.expiresAt)
     {

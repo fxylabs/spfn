@@ -25,7 +25,7 @@ import { defineMiddleware } from '@spfn/core/route';
 import { UnauthorizedError } from '@spfn/core/errors';
 
 import type { KeyAlgorithmType, User } from '@spfn/auth/server';
-import { verifyClientToken, decodeToken, authLogger, keysRepository, findUserWithEffectiveRole, userProfilesRepository } from '@spfn/auth/server';
+import { verifyClientToken, decodeToken, authLogger, keysRepository, findUserWithEffectiveRoleOnPrimary, userProfilesRepository } from '@spfn/auth/server';
 import {
     InvalidTokenError,
     TokenExpiredError,
@@ -139,7 +139,7 @@ export async function admitBearerKey(
     }
 
     // isActive = true is part of the lookup, so a revoked key is an unknown one.
-    const key = await keysRepository.findActiveByKeyId(decoded.keyId as string);
+    const key = await keysRepository.findActiveByKeyIdOnPrimary(decoded.keyId as string);
 
     if (!key)
     {
@@ -430,7 +430,7 @@ export const optionalAuth = defineMiddleware('optionalAuth', async (c, next) =>
 
         const keyId = decoded.keyId as string;
 
-        const keyRecord = await keysRepository.findActiveByKeyId(keyId);
+        const keyRecord = await keysRepository.findActiveByKeyIdOnPrimary(keyId);
 
         if (!keyRecord)
         {
@@ -458,7 +458,7 @@ export const optionalAuth = defineMiddleware('optionalAuth', async (c, next) =>
         );
 
         const [result, chosenLocale] = await Promise.all([
-            findUserWithEffectiveRole(keyRecord.userId),
+            findUserWithEffectiveRoleOnPrimary(keyRecord.userId),
             userProfilesRepository.findLocaleByUserId(keyRecord.userId),
         ]);
 

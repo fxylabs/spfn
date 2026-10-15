@@ -22,10 +22,14 @@ vi.mock('@spfn/auth/server', async (importOriginal) =>
         decodeToken: vi.fn(),
         verifyClientToken: vi.fn(),
         keysRepository: {
+            findActiveByKeyIdOnPrimary: vi.fn(),
+            findByKeyIdOnPrimary: vi.fn(),
+            // Replica reads: admission must never reach them (replica-lag guards).
             findActiveByKeyId: vi.fn(),
             findByKeyId: vi.fn(),
             updateLastUsedById: vi.fn().mockResolvedValue(undefined),
         },
+        findUserWithEffectiveRoleOnPrimary: vi.fn(),
         findUserWithEffectiveRole: vi.fn(),
         userProfilesRepository: { findLocaleByUserId: vi.fn().mockResolvedValue('en') },
         getPendingDeletionInfo: vi.fn(),
@@ -37,9 +41,11 @@ import {
     decodeToken,
     verifyClientToken,
     keysRepository,
+    findUserWithEffectiveRoleOnPrimary,
     findUserWithEffectiveRole,
     getPendingDeletionInfo,
 } from '@spfn/auth/server';
+import { resolveAuthenticatedUser } from '@/server/middleware/auth-profiles';
 import { CLIENT_PROOF_HEADERS } from '@/server/client-proof/admission';
 import { encodeCanonicalJson, type CanonicalValue } from '@/server/client-proof/canonical-json';
 import { ABSENT_BODY_SHA256, sha256Hex, signClientProof } from '@/server/client-proof/proof';
@@ -247,8 +253,8 @@ describe('auth profile branch (case table G)', () =>
         vi.clearAllMocks();
         configureClientProofReplayStore(new MemoryReplayStore());
         vi.mocked(keysRepository.updateLastUsedById).mockResolvedValue(undefined as never);
-        vi.mocked(keysRepository.findByKeyId).mockResolvedValue(validKeyRecord() as never);
-        vi.mocked(findUserWithEffectiveRole).mockResolvedValue(activeUser() as never);
+        vi.mocked(keysRepository.findByKeyIdOnPrimary).mockResolvedValue(validKeyRecord() as never);
+        vi.mocked(findUserWithEffectiveRoleOnPrimary).mockResolvedValue(activeUser() as never);
     });
 
     describe('G1 — Bearer only: the web path, untouched', () =>
@@ -256,20 +262,20 @@ describe('auth profile branch (case table G)', () =>
         it('G1 authenticate: a valid Bearer token authenticates with scheme bearer', async () =>
         {
             vi.mocked(decodeToken).mockReturnValue({ keyId: TEST_KEY_ID } as never);
-            vi.mocked(keysRepository.findActiveByKeyId).mockResolvedValue(validKeyRecord() as never);
+            vi.mocked(keysRepository.findActiveByKeyIdOnPrimary).mockResolvedValue(validKeyRecord() as never);
             vi.mocked(verifyClientToken).mockReturnValue({ keyId: TEST_KEY_ID } as never);
 
             const driven = contextFor({ headers: { Authorization: 'Bearer valid-token' } });
             expect(await run(authenticate, driven)).toBeNull();
             expect(driven.next).toHaveBeenCalled();
             expect(driven.authOf()).toMatchObject({ userId: String(USER_ID), scheme: 'bearer' });
-            expect(keysRepository.findByKeyId).not.toHaveBeenCalled();
+            expect(keysRepository.findByKeyIdOnPrimary).not.toHaveBeenCalled();
         });
 
         it('G1 optionalAuth: a valid Bearer token authenticates with scheme bearer', async () =>
         {
             vi.mocked(decodeToken).mockReturnValue({ keyId: TEST_KEY_ID } as never);
-            vi.mocked(keysRepository.findActiveByKeyId).mockResolvedValue(validKeyRecord() as never);
+            vi.mocked(keysRepository.findActiveByKeyIdOnPrimary).mockResolvedValue(validKeyRecord() as never);
             vi.mocked(verifyClientToken).mockReturnValue({ keyId: TEST_KEY_ID } as never);
 
             const driven = contextFor({ headers: { Authorization: 'Bearer valid-token' } });
@@ -331,7 +337,7 @@ describe('auth profile branch (case table G)', () =>
             const driven = contextFor({ headers: proofHeaders({ profile: 'someFutureProfile' }) });
             await expectRefusal(await run(middleware, driven), 400, 'PROFILE_REJECTED');
             expect(driven.next).not.toHaveBeenCalled();
-            expect(keysRepository.findByKeyId).not.toHaveBeenCalled();
+            expect(keysRepository.findByKeyIdOnPrimary).not.toHaveBeenCalled();
         });
     });
 
@@ -344,8 +350,8 @@ describe('auth profile branch (case table G)', () =>
             });
             await expectRefusal(await run(middleware, driven), 400, 'PROFILE_REJECTED');
             expect(driven.next).not.toHaveBeenCalled();
-            expect(keysRepository.findByKeyId).not.toHaveBeenCalled();
-            expect(keysRepository.findActiveByKeyId).not.toHaveBeenCalled();
+            expect(keysRepository.findByKeyIdOnPrimary).not.toHaveBeenCalled();
+            expect(keysRepository.findActiveByKeyIdOnPrimary).not.toHaveBeenCalled();
         });
     });
 
@@ -380,7 +386,7 @@ describe('auth profile branch (case table G)', () =>
     {
         it('a revoked key answers SESSION_REVOKED before the proof is examined', async () =>
         {
-            vi.mocked(keysRepository.findByKeyId).mockResolvedValue(
+            vi.mocked(keysRepository.findByKeyIdOnPrimary).mockResolvedValue(
                 validKeyRecord({ isActive: false }) as never,
             );
             const driven = contextFor({ headers: proofHeaders() });
@@ -392,7 +398,7 @@ describe('auth profile branch (case table G)', () =>
         {
             const past = new Date();
             past.setDate(past.getDate() - 1);
-            vi.mocked(keysRepository.findByKeyId).mockResolvedValue(
+            vi.mocked(keysRepository.findByKeyIdOnPrimary).mockResolvedValue(
                 validKeyRecord({ expiresAt: past }) as never,
             );
             const driven = contextFor({ headers: proofHeaders() });
@@ -401,7 +407,7 @@ describe('auth profile branch (case table G)', () =>
 
         it('an unregistered keyId shares PROOF_INVALID with a bad signature (non-disclosure)', async () =>
         {
-            vi.mocked(keysRepository.findByKeyId).mockResolvedValue(null as never);
+            vi.mocked(keysRepository.findByKeyIdOnPrimary).mockResolvedValue(null as never);
             const driven = contextFor({ headers: proofHeaders({ keyId: 'key-never-registered' }) });
             await expectRefusal(await run(middleware, driven), 401, 'PROOF_INVALID');
         });
@@ -413,7 +419,7 @@ describe('auth profile branch (case table G)', () =>
         {
             // User B (id 8) owns the key; the proof is validly signed with
             // B's private key, but presented under user A's clientId ('7').
-            vi.mocked(keysRepository.findByKeyId).mockResolvedValue(
+            vi.mocked(keysRepository.findByKeyIdOnPrimary).mockResolvedValue(
                 validKeyRecord({ userId: 8 }) as never,
             );
             const driven = contextFor({ headers: proofHeaders({ clientId: OWNER_CLIENT_ID }) });
@@ -424,12 +430,12 @@ describe('auth profile branch (case table G)', () =>
 
         it('the ownership refusal is byte-identical to the unregistered-key refusal (no key existence leak)', async () =>
         {
-            vi.mocked(keysRepository.findByKeyId).mockResolvedValue(
+            vi.mocked(keysRepository.findByKeyIdOnPrimary).mockResolvedValue(
                 validKeyRecord({ userId: 8 }) as never,
             );
             const mismatch = await run(middleware, contextFor({ headers: proofHeaders() })) as Response;
 
-            vi.mocked(keysRepository.findByKeyId).mockResolvedValue(null as never);
+            vi.mocked(keysRepository.findByKeyIdOnPrimary).mockResolvedValue(null as never);
             const unregistered = await run(middleware, contextFor({ headers: proofHeaders() })) as Response;
 
             expect(mismatch.status).toBe(unregistered.status);
@@ -450,7 +456,7 @@ describe('auth profile branch (case table G)', () =>
     {
         it('an inactive account is refused as AccountDisabledError', async () =>
         {
-            vi.mocked(findUserWithEffectiveRole).mockResolvedValue(
+            vi.mocked(findUserWithEffectiveRoleOnPrimary).mockResolvedValue(
                 activeUser({ status: 'inactive' }) as never,
             );
             const driven = contextFor({ headers: proofHeaders() });
@@ -461,7 +467,7 @@ describe('auth profile branch (case table G)', () =>
 
         it('a pending_deletion account carries purgeScheduledAt, as on the web path', async () =>
         {
-            vi.mocked(findUserWithEffectiveRole).mockResolvedValue(
+            vi.mocked(findUserWithEffectiveRoleOnPrimary).mockResolvedValue(
                 activeUser({ status: 'pending_deletion' }) as never,
             );
             const purgeScheduledAt = new Date('2030-01-01T00:00:00.000Z');
@@ -471,6 +477,50 @@ describe('auth profile branch (case table G)', () =>
             const error = await run(authenticate, driven) as { name: string; details: Record<string, unknown> };
             expect(error.name).toBe('AccountPendingDeletionError');
             expect(error.details).toMatchObject({ purgeScheduledAt: purgeScheduledAt.toISOString() });
+        });
+    });
+
+    // #133: every read that decides admission reads the write primary. The
+    // factory gives each replica twin a vi.fn() so that falling back to it
+    // shows up as a call, not as a missing export.
+    describe('replica-lag guards — admission reads the write primary', () =>
+    {
+        it.each(EACH_MIDDLEWARE)('P1 %s: clientProofV1 reads the key with findByKeyIdOnPrimary', async (_name, middleware) =>
+        {
+            const driven = contextFor({ headers: proofHeaders() });
+            expect(await run(middleware, driven)).toBeNull();
+            expect(keysRepository.findByKeyIdOnPrimary).toHaveBeenCalledWith(TEST_KEY_ID);
+            expect(keysRepository.findByKeyId).not.toHaveBeenCalled();
+        });
+
+        it('P3 optionalAuth: the Bearer path reads the key and the account from the primary', async () =>
+        {
+            vi.mocked(decodeToken).mockReturnValue({ keyId: TEST_KEY_ID } as never);
+            vi.mocked(keysRepository.findActiveByKeyIdOnPrimary).mockResolvedValue(validKeyRecord() as never);
+            vi.mocked(verifyClientToken).mockReturnValue({ keyId: TEST_KEY_ID } as never);
+
+            const driven = contextFor({ headers: { Authorization: 'Bearer valid-token' } });
+            expect(await run(optionalAuth, driven)).toBeNull();
+            expect(driven.authOf()).toMatchObject({ userId: String(USER_ID) });
+            expect(keysRepository.findActiveByKeyIdOnPrimary).toHaveBeenCalledWith(TEST_KEY_ID);
+            expect(keysRepository.findActiveByKeyId).not.toHaveBeenCalled();
+            expect(findUserWithEffectiveRoleOnPrimary).toHaveBeenCalledWith(USER_ID);
+            expect(findUserWithEffectiveRole).not.toHaveBeenCalled();
+        });
+
+        it('P4 resolveAuthenticatedUser: reads the account with findUserWithEffectiveRoleOnPrimary', async () =>
+        {
+            await expect(resolveAuthenticatedUser(USER_ID)).resolves.toMatchObject({ role: 'user' });
+            expect(findUserWithEffectiveRoleOnPrimary).toHaveBeenCalledWith(USER_ID);
+            expect(findUserWithEffectiveRole).not.toHaveBeenCalled();
+        });
+
+        it.each(EACH_MIDDLEWARE)('P4 %s: clientProofV1 admission resolves the account from the primary', async (_name, middleware) =>
+        {
+            const driven = contextFor({ headers: proofHeaders() });
+            expect(await run(middleware, driven)).toBeNull();
+            expect(findUserWithEffectiveRoleOnPrimary).toHaveBeenCalledWith(USER_ID);
+            expect(findUserWithEffectiveRole).not.toHaveBeenCalled();
         });
     });
 
@@ -531,8 +581,8 @@ describe('replay ledger through the middleware (case table H)', () =>
         vi.clearAllMocks();
         configureClientProofReplayStore(new MemoryReplayStore());
         vi.mocked(keysRepository.updateLastUsedById).mockResolvedValue(undefined as never);
-        vi.mocked(keysRepository.findByKeyId).mockResolvedValue(validKeyRecord() as never);
-        vi.mocked(findUserWithEffectiveRole).mockResolvedValue(activeUser() as never);
+        vi.mocked(keysRepository.findByKeyIdOnPrimary).mockResolvedValue(validKeyRecord() as never);
+        vi.mocked(findUserWithEffectiveRoleOnPrimary).mockResolvedValue(activeUser() as never);
     });
 
     it('H1/H2: a nonce is admitted once, and its reuse is PROOF_REPLAYED', async () =>

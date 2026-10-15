@@ -48,18 +48,40 @@ async function fallbackRole(): Promise<UserWithEffectiveRole['role']>
  * Load a user and the role that applies to them now.
  *
  * The one place a principal's role is resolved: every authenticating
- * middleware and every permission-service reader goes through here, so the
- * policy cannot be skipped by a caller that forgets it. The rule is evaluated
- * on the row already loaded, so an account inside the policy costs no query
- * beyond today's; only a downgrade reads the `user` role. Should that role not
- * exist, the account resolves with no role and therefore no permissions.
+ * middleware and every permission-service reader goes through here (or through
+ * `findUserWithEffectiveRoleOnPrimary`), so the policy cannot be skipped by a
+ * caller that forgets it. The rule is evaluated on the row already loaded, so
+ * an account inside the policy costs no query beyond today's; only a downgrade
+ * reads the `user` role. Should that role not exist, the account resolves with
+ * no role and therefore no permissions.
+ *
+ * Reads the replica. A caller that decides whether a request is admitted uses
+ * `findUserWithEffectiveRoleOnPrimary`.
  *
  * @returns null when no such user exists
  */
 export async function findUserWithEffectiveRole(userId: number): Promise<UserWithEffectiveRole | null>
 {
-    const result = await usersRepository.findByIdWithRole(userId);
+    return applyRoleEmailDomainPolicy(await usersRepository.findByIdWithRole(userId));
+}
 
+/**
+ * `findUserWithEffectiveRole` over a read of the write primary.
+ *
+ * For the admission gates (clientProofV1, `authenticate`, `optionalAuth`): an
+ * account suspended a moment ago must be refused on the next request, not
+ * once a read replica catches up.
+ *
+ * @returns null when no such user exists
+ */
+export async function findUserWithEffectiveRoleOnPrimary(userId: number): Promise<UserWithEffectiveRole | null>
+{
+    return applyRoleEmailDomainPolicy(await usersRepository.findByIdWithRoleOnPrimary(userId));
+}
+
+/** Resolve a loaded user's stored role through the email-domain policy. */
+async function applyRoleEmailDomainPolicy(result: UserWithEffectiveRole | null): Promise<UserWithEffectiveRole | null>
+{
     if (!result?.role || isEmailAllowedForRole(result.user, result.role.name))
     {
         return result;

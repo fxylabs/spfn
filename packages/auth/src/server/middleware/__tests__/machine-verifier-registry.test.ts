@@ -27,11 +27,11 @@ vi.mock('@spfn/auth/server', async (importOriginal) =>
         decodeToken: vi.fn(),
         verifyClientToken: vi.fn(),
         keysRepository: {
-            findActiveByKeyId: vi.fn(),
-            findByKeyId: vi.fn(),
+            findActiveByKeyIdOnPrimary: vi.fn(),
+            findByKeyIdOnPrimary: vi.fn(),
             updateLastUsedById: vi.fn().mockResolvedValue(undefined),
         },
-        findUserWithEffectiveRole: vi.fn(),
+        findUserWithEffectiveRoleOnPrimary: vi.fn(),
         userProfilesRepository: { findLocaleByUserId: vi.fn().mockResolvedValue('en') },
         getPendingDeletionInfo: vi.fn(),
     };

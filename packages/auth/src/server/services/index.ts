@@ -242,6 +242,7 @@ export {
 // Role Email-Domain Policy
 export {
     findUserWithEffectiveRole,
+    findUserWithEffectiveRoleOnPrimary,
     listRoleEmailDomainViolations,
     demoteRoleEmailDomainViolations,
     assertRoleEmailDomainPolicy,
