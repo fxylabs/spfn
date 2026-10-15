@@ -25,11 +25,11 @@ vi.mock('@spfn/auth/server', async (importOriginal) =>
         decodeToken: vi.fn(),
         verifyClientToken: vi.fn(),
         keysRepository: {
-            findActiveByKeyId: vi.fn(),
-            findByKeyId: vi.fn(),
+            findActiveByKeyIdOnPrimary: vi.fn(),
+            findByKeyIdOnPrimary: vi.fn(),
             updateLastUsedById: vi.fn().mockResolvedValue(undefined),
         },
-        findUserWithEffectiveRole: vi.fn(),
+        findUserWithEffectiveRoleOnPrimary: vi.fn(),
         userProfilesRepository: { findLocaleByUserId: vi.fn().mockResolvedValue('en') },
         getPendingDeletionInfo: vi.fn(),
     };
@@ -38,7 +38,7 @@ vi.mock('@spfn/auth/server', async (importOriginal) =>
 import { authenticate, optionalAuth } from '@/server/middleware/authenticate';
 import { registerAuthProfile, type AuthContext, type AuthProfileVerifier } from '@/server/middleware/auth-profiles';
 import { UnauthorizedError } from '@spfn/core/errors';
-import { decodeToken, verifyClientToken, keysRepository, findUserWithEffectiveRole } from '@spfn/auth/server';
+import { decodeToken, verifyClientToken, keysRepository, findUserWithEffectiveRoleOnPrimary } from '@spfn/auth/server';
 import type { User } from '@spfn/auth/server';
 import { CLIENT_PROOF_HEADERS } from '@/server/client-proof/admission';
 import { CLIENT_PROOF_PROFILE } from '@/server/client-proof/proof';
@@ -189,7 +189,7 @@ describe('registerAuthProfile — the dispatch around a registered verifier', ()
     {
         vi.clearAllMocks();
         vi.mocked(keysRepository.updateLastUsedById).mockResolvedValue(undefined as never);
-        vi.mocked(findUserWithEffectiveRole).mockResolvedValue(activeUser() as never);
+        vi.mocked(findUserWithEffectiveRoleOnPrimary).mockResolvedValue(activeUser() as never);
     });
 
     describe('1/2 — no profile header: the Bearer path, untouched', () =>
@@ -197,7 +197,7 @@ describe('registerAuthProfile — the dispatch around a registered verifier', ()
         beforeEach(() =>
         {
             vi.mocked(decodeToken).mockReturnValue({ keyId: TEST_KEY_ID } as never);
-            vi.mocked(keysRepository.findActiveByKeyId).mockResolvedValue(validKeyRecord() as never);
+            vi.mocked(keysRepository.findActiveByKeyIdOnPrimary).mockResolvedValue(validKeyRecord() as never);
             vi.mocked(verifyClientToken).mockReturnValue({ keyId: TEST_KEY_ID } as never);
         });
 
@@ -313,7 +313,7 @@ describe('registerAuthProfile — the dispatch around a registered verifier', ()
             const driven = contextFor({ headers: { [CLIENT_PROOF_HEADERS.profile]: profileId } });
             expect(await run(middleware, driven)).toBeNull();
             expect(decodeToken).not.toHaveBeenCalled();
-            expect(keysRepository.findActiveByKeyId).not.toHaveBeenCalled();
+            expect(keysRepository.findActiveByKeyIdOnPrimary).not.toHaveBeenCalled();
         });
     });
 

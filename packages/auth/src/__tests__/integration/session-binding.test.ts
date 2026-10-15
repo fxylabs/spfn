@@ -730,7 +730,7 @@ describe.skipIf(!dbAvailable)('session binding (case tables 6a, 6b, 6g)', () =>
             // The instance `authenticate` holds, which it imports through the
             // package entry rather than from the source tree.
             const { keysRepository } = await import('@spfn/auth/server');
-            const find = vi.spyOn(keysRepository, 'findActiveByKeyId');
+            const find = vi.spyOn(keysRepository, 'findActiveByKeyIdOnPrimary');
             const write = vi.spyOn(keysRepository, 'updateLastUsedById');
 
             const session = await signIn();

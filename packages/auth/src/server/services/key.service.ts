@@ -329,7 +329,7 @@ async function decideStepUp(params: RegisterPublicKeyParams): Promise<MfaChallen
  * @throws KeyIdAlreadyRegisteredError
  */
 async function answerForExistingKey(
-    existing: NonNullable<Awaited<ReturnType<typeof keysRepository.findByKeyId>>>,
+    existing: NonNullable<Awaited<ReturnType<typeof keysRepository.findByKeyIdOnPrimary>>>,
     userId: number,
 ): Promise<RegisterPublicKeyResult>
 {
@@ -374,7 +374,7 @@ export async function registerPublicKeyService(
     const { userId, keyId, publicKey, fingerprint, algorithm = DEFAULT_KEY_ALGORITHM, deviceName, platform } = params;
     const binding = params.binding ?? 'none';
 
-    const existing = await keysRepository.findByKeyId(keyId);
+    const existing = await keysRepository.findByKeyIdOnPrimary(keyId);
     if (existing)
     {
         return await answerForExistingKey(existing, userId);

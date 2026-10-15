@@ -30,6 +30,7 @@ import {
     assertRoleEmailDomainPolicy,
     demoteRoleEmailDomainViolations,
     findUserWithEffectiveRole,
+    findUserWithEffectiveRoleOnPrimary,
     listRoleEmailDomainViolations,
 } from '@/server/services/role-email-domain.service';
 import { RoleEmailDomainNotAllowedError } from '@spfn/auth/errors';
@@ -501,6 +502,18 @@ describe.skipIf(!dbAvailable)('Per-role email-domain policy', () =>
 
             const response = await call('GET', '/probe/user-permission', authorization);
             expect((await response.json()).role).toBe('user');
+        });
+
+        it('R5 (#133) the primary-read resolver applies the same policy: out of it resolves as user', async () =>
+        {
+            const admin = await seed('staff@gmail.test', 'admin');
+            setPolicy('admin=example.com');
+
+            const onPrimary = await findUserWithEffectiveRoleOnPrimary(admin.id);
+
+            expect(onPrimary?.role?.name).toBe('user');
+            expect(onPrimary).toEqual(await findUserWithEffectiveRole(admin.id));
+            expect(await storedRoleOf(admin.id)).toBe(await roleId('admin'));
         });
 
         it('fallback role missing: resolves to no role and no permissions rather than throwing', async () =>

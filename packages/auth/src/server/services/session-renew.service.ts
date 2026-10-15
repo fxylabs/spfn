@@ -180,7 +180,7 @@ export async function finishSessionRenewService(
  */
 async function admitForRenewal(expiredKeyId: string): Promise<{ key: UserPublicKey; user: User }>
 {
-    const key = expiredKeyId ? await keysRepository.findByKeyId(expiredKeyId) : null;
+    const key = expiredKeyId ? await keysRepository.findByKeyIdOnPrimary(expiredKeyId) : null;
 
     if (!key || !key.isActive || key.binding !== 'passkey' || !key.expiresAt)
     {
@@ -196,7 +196,7 @@ async function admitForRenewal(expiredKeyId: string): Promise<{ key: UserPublicK
         throw new SessionRenewalRefusedError();
     }
 
-    const user = await usersRepository.findById(key.userId);
+    const user = await usersRepository.findByIdOnPrimary(key.userId);
 
     if (!user || user.status !== 'active')
     {

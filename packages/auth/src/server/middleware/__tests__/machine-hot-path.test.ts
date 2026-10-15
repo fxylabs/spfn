@@ -20,11 +20,11 @@ vi.mock('@spfn/auth/server', async (importOriginal) =>
         decodeToken: vi.fn(),
         verifyClientToken: vi.fn(),
         keysRepository: {
-            findActiveByKeyId: vi.fn(),
-            findByKeyId: vi.fn(),
+            findActiveByKeyIdOnPrimary: vi.fn(),
+            findByKeyIdOnPrimary: vi.fn(),
             updateLastUsedById: vi.fn().mockResolvedValue(undefined),
         },
-        findUserWithEffectiveRole: vi.fn(),
+        findUserWithEffectiveRoleOnPrimary: vi.fn(),
         userProfilesRepository: { findLocaleByUserId: vi.fn().mockResolvedValue('en') },
         getPendingDeletionInfo: vi.fn(),
     };
@@ -41,7 +41,7 @@ import { decodeProtectedHeader } from 'jose';
 
 import { authenticate, optionalAuth } from '@/server/middleware/authenticate';
 import { findMachineVerifier } from '@/server/middleware/machine-principals';
-import { decodeToken, verifyClientToken, keysRepository, findUserWithEffectiveRole } from '@spfn/auth/server';
+import { decodeToken, verifyClientToken, keysRepository, findUserWithEffectiveRoleOnPrimary } from '@spfn/auth/server';
 import type { Context, Next } from 'hono';
 
 const USER_ID = 11;
@@ -126,7 +126,7 @@ describe('with no machine verifier registered', () =>
     {
         vi.clearAllMocks();
         vi.mocked(keysRepository.updateLastUsedById).mockResolvedValue(undefined as never);
-        vi.mocked(findUserWithEffectiveRole).mockResolvedValue({
+        vi.mocked(findUserWithEffectiveRoleOnPrimary).mockResolvedValue({
             user: { id: USER_ID, email: 'hot@example.com', status: 'active' },
             role: { name: 'user' },
         } as never);
@@ -167,7 +167,7 @@ describe('with no machine verifier registered', () =>
     it('authenticate still admits a valid user token', async () =>
     {
         vi.mocked(decodeToken).mockReturnValue({ keyId: KEY_ID } as never);
-        vi.mocked(keysRepository.findActiveByKeyId).mockResolvedValue(validKeyRecord() as never);
+        vi.mocked(keysRepository.findActiveByKeyIdOnPrimary).mockResolvedValue(validKeyRecord() as never);
         vi.mocked(verifyClientToken).mockReturnValue({ keyId: KEY_ID } as never);
         const driven = contextFor({ Authorization: 'Bearer user-token' });
 

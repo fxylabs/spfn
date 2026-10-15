@@ -20,7 +20,13 @@ vi.mock('@spfn/auth/server', async (importOriginal) =>
         ...actual,
         decodeToken: vi.fn(),
         verifyClientToken: vi.fn(),
-        keysRepository: { findActiveByKeyId: vi.fn(), updateLastUsedById: vi.fn().mockResolvedValue(undefined) },
+        keysRepository: {
+            findActiveByKeyIdOnPrimary: vi.fn(),
+            // Replica read: admission must never reach it (replica-lag guard).
+            findActiveByKeyId: vi.fn(),
+            updateLastUsedById: vi.fn().mockResolvedValue(undefined),
+        },
+        findUserWithEffectiveRoleOnPrimary: vi.fn(),
         findUserWithEffectiveRole: vi.fn(),
         userProfilesRepository: { findLocaleByUserId: vi.fn().mockResolvedValue('en') },
         getPendingDeletionInfo: vi.fn(),
@@ -32,6 +38,7 @@ import {
     decodeToken,
     verifyClientToken,
     keysRepository,
+    findUserWithEffectiveRoleOnPrimary,
     findUserWithEffectiveRole,
     userProfilesRepository,
     getPendingDeletionInfo,
@@ -40,7 +47,7 @@ import type { Context, Next } from 'hono';
 
 const KEY_ID = 'test-key-id';
 
-/** A valid, unexpired key record as returned by keysRepository.findActiveByKeyId. */
+/** A valid, unexpired key record as returned by keysRepository.findActiveByKeyIdOnPrimary. */
 function validKeyRecord(overrides: Record<string, unknown> = {})
 {
     const futureDate = new Date();
@@ -133,7 +140,7 @@ describe('Authenticate Middleware', () =>
 
         it('rejects an invalid or revoked key', async () =>
         {
-            vi.mocked(keysRepository.findActiveByKeyId).mockResolvedValue(null as never);
+            vi.mocked(keysRepository.findActiveByKeyIdOnPrimary).mockResolvedValue(null as never);
 
             await expect(authenticate.handler(mockContext as Context, mockNext))
                 .rejects.toThrow('Invalid or revoked key');
@@ -144,7 +151,7 @@ describe('Authenticate Middleware', () =>
         {
             const expiredDate = new Date();
             expiredDate.setDate(expiredDate.getDate() - 1);
-            vi.mocked(keysRepository.findActiveByKeyId).mockResolvedValue(
+            vi.mocked(keysRepository.findActiveByKeyIdOnPrimary).mockResolvedValue(
                 validKeyRecord({ expiresAt: expiredDate }) as never,
             );
 
@@ -160,14 +167,14 @@ describe('Authenticate Middleware', () =>
         {
             withBearer();
             vi.mocked(decodeToken).mockReturnValue({ keyId: KEY_ID } as never);
-            vi.mocked(keysRepository.findActiveByKeyId).mockResolvedValue(validKeyRecord() as never);
+            vi.mocked(keysRepository.findActiveByKeyIdOnPrimary).mockResolvedValue(validKeyRecord() as never);
             // Signature verification passes for these tests
             vi.mocked(verifyClientToken).mockReturnValue({ keyId: KEY_ID, iss: 'spfn-client' } as never);
         });
 
         it('rejects when the user is not found', async () =>
         {
-            vi.mocked(findUserWithEffectiveRole).mockResolvedValue(null as never);
+            vi.mocked(findUserWithEffectiveRoleOnPrimary).mockResolvedValue(null as never);
 
             await expect(authenticate.handler(mockContext as Context, mockNext))
                 .rejects.toThrow('User not found');
@@ -176,7 +183,7 @@ describe('Authenticate Middleware', () =>
 
         it('rejects when the user account is inactive', async () =>
         {
-            vi.mocked(findUserWithEffectiveRole).mockResolvedValue({
+            vi.mocked(findUserWithEffectiveRoleOnPrimary).mockResolvedValue({
                 user: { id: 1, email: 'test@example.com', status: 'inactive' },
                 role: null,
             } as never);
@@ -188,7 +195,7 @@ describe('Authenticate Middleware', () =>
 
         it('rejects when the user account is suspended', async () =>
         {
-            vi.mocked(findUserWithEffectiveRole).mockResolvedValue({
+            vi.mocked(findUserWithEffectiveRoleOnPrimary).mockResolvedValue({
                 user: { id: 1, email: 'test@example.com', status: 'suspended' },
                 role: null,
             } as never);
@@ -200,7 +207,7 @@ describe('Authenticate Middleware', () =>
 
         it('rejects a pending_deletion account with AccountPendingDeletionError, carrying purgeScheduledAt', async () =>
         {
-            vi.mocked(findUserWithEffectiveRole).mockResolvedValue({
+            vi.mocked(findUserWithEffectiveRoleOnPrimary).mockResolvedValue({
                 user: { id: 1, email: 'test@example.com', status: 'pending_deletion' },
                 role: null,
             } as never);
@@ -224,9 +231,9 @@ describe('Authenticate Middleware', () =>
         {
             withBearer();
             vi.mocked(decodeToken).mockReturnValue({ keyId: KEY_ID } as never);
-            vi.mocked(keysRepository.findActiveByKeyId).mockResolvedValue(validKeyRecord() as never);
+            vi.mocked(keysRepository.findActiveByKeyIdOnPrimary).mockResolvedValue(validKeyRecord() as never);
             vi.mocked(verifyClientToken).mockReturnValue({ keyId: KEY_ID, iss: 'spfn-client' } as never);
-            vi.mocked(findUserWithEffectiveRole).mockResolvedValue({
+            vi.mocked(findUserWithEffectiveRoleOnPrimary).mockResolvedValue({
                 user: { id: 1, email: 'test@example.com', status: 'active' },
                 role: { name: 'user' },
             } as never);
@@ -251,9 +258,9 @@ describe('Authenticate Middleware', () =>
         {
             withBearer();
             vi.mocked(decodeToken).mockReturnValue({ keyId: KEY_ID } as never);
-            vi.mocked(keysRepository.findActiveByKeyId).mockResolvedValue(validKeyRecord() as never);
+            vi.mocked(keysRepository.findActiveByKeyIdOnPrimary).mockResolvedValue(validKeyRecord() as never);
             vi.mocked(verifyClientToken).mockReturnValue({ keyId: KEY_ID, iss: 'spfn-client' } as never);
-            vi.mocked(findUserWithEffectiveRole).mockResolvedValue({
+            vi.mocked(findUserWithEffectiveRoleOnPrimary).mockResolvedValue({
                 user: { id: 1, email: 'test@example.com', status: 'active' },
                 role: { name: 'user' },
             } as never);
@@ -262,6 +269,31 @@ describe('Authenticate Middleware', () =>
             await authenticate.handler(mockContext as Context, mockNext);
 
             expect(mockContext.set).toHaveBeenCalledWith('auth', expect.objectContaining({ locale, chosenLocale }));
+        });
+    });
+
+    describe('Replica-lag guard', () =>
+    {
+        // P2 (#133): a key registered or revoked a moment ago must be judged as
+        // the primary sees it, not as a replica one commit behind does.
+        it('P2: reads the key and the account from the write primary, not a replica', async () =>
+        {
+            withBearer();
+            vi.mocked(decodeToken).mockReturnValue({ keyId: KEY_ID } as never);
+            vi.mocked(keysRepository.findActiveByKeyIdOnPrimary).mockResolvedValue(validKeyRecord() as never);
+            vi.mocked(verifyClientToken).mockReturnValue({ keyId: KEY_ID, iss: 'spfn-client' } as never);
+            vi.mocked(findUserWithEffectiveRoleOnPrimary).mockResolvedValue({
+                user: { id: 1, email: 'test@example.com', status: 'active' },
+                role: { name: 'user' },
+            } as never);
+
+            await authenticate.handler(mockContext as Context, mockNext);
+
+            expect(mockNext).toHaveBeenCalled();
+            expect(keysRepository.findActiveByKeyIdOnPrimary).toHaveBeenCalledWith(KEY_ID);
+            expect(keysRepository.findActiveByKeyId).not.toHaveBeenCalled();
+            expect(findUserWithEffectiveRoleOnPrimary).toHaveBeenCalledWith(1);
+            expect(findUserWithEffectiveRole).not.toHaveBeenCalled();
         });
     });
 });

@@ -16,6 +16,7 @@ const { keysRepository, deviceAuthorizationsRepository, deviceLinksRepository, r
         revokeAllActiveByUserId: vi.fn(),
         revokeAllActiveByUserIdExcept: vi.fn(),
         findByKeyIdAndUserId: vi.fn(),
+        findByKeyIdOnPrimary: vi.fn(),
         findByKeyId: vi.fn(),
         create: vi.fn(),
     },

@@ -421,10 +421,11 @@ export class KeysRepository extends BaseRepository
     }
 
     /**
-     * Key ID로 공개키 조회 — 활성 여부 무관 (clientProofV1 admission의 revocation 판정용)
+     * Key ID로 공개키 조회 — 활성 여부 무관
      *
-     * 폐기(isActive=false)·만료(expiresAt 경과)를 SESSION_REVOKED로, 미등록을
-     * PROOF_INVALID로 구분해야 하므로 활성 필터 없이 조회한다. keyId는 UNIQUE.
+     * 폐기(isActive=false)와 미등록을 구분해야 하는 조회용으로, 활성 필터 없이 읽는다.
+     * keyId는 UNIQUE. 요청의 admission을 판정하는 호출자는 `findByKeyIdOnPrimary`를
+     * 쓸 것 — 방금 등록·폐기된 키를 replica가 아직 모를 수 있다.
      * Read replica 사용
      */
     async findByKeyId(keyId: string)
@@ -439,7 +440,31 @@ export class KeysRepository extends BaseRepository
     }
 
     /**
-     * Key ID로 활성 공개키 조회 (authenticate용)
+     * Key ID로 공개키 조회 — 활성 여부 무관, Write primary에서 직접 읽는다.
+     *
+     * clientProofV1 admission의 revocation 판정, 키 등록의 기존 키 확인, 세션 바인딩과
+     * 갱신 admission이 사용한다. 폐기(isActive=false)·만료(expiresAt 경과)를
+     * SESSION_REVOKED로, 미등록을 PROOF_INVALID로 구분해야 하므로 활성 필터 없이 조회한다.
+     * replica는 커밋 하나 뒤처질 수 있어, 방금 등록된 키를 미등록으로(PROOF_INVALID —
+     * 클라이언트가 키를 지운다), 방금 폐기된 키를 활성으로 읽는다. 일반 조회는
+     * `findByKeyId`(replica)를 계속 사용할 것.
+     */
+    async findByKeyIdOnPrimary(keyId: string)
+    {
+        const result = await this.db
+            .select()
+            .from(userPublicKeys)
+            .where(eq(userPublicKeys.keyId, keyId))
+            .limit(1);
+
+        return result[0] ?? null;
+    }
+
+    /**
+     * Key ID로 활성 공개키 조회
+     *
+     * 요청의 admission을 판정하는 호출자(authenticate, optionalAuth)는
+     * `findActiveByKeyIdOnPrimary`를 쓸 것.
      * Read replica 사용
      */
     async findActiveByKeyId(keyId: string)
@@ -447,15 +472,36 @@ export class KeysRepository extends BaseRepository
         const result = await this.readDb
             .select()
             .from(userPublicKeys)
-            .where(
-                and(
-                    eq(userPublicKeys.keyId, keyId),
-                    eq(userPublicKeys.isActive, true),
-                ),
-            )
+            .where(this.activeKeyCondition(keyId))
             .limit(1);
 
         return result[0] ?? null;
+    }
+
+    /**
+     * Key ID로 활성 공개키 조회 — Write primary에서 직접 읽는다 (authenticate·optionalAuth용)
+     *
+     * 복제 지연 창에서 로그인 직후 등록된 키를 못 찾아 401을 내거나, 로그아웃으로
+     * 폐기된 키를 아직 활성으로 읽어 통과시키면 안 되는 admission 게이트가 사용한다.
+     * 일반 조회는 `findActiveByKeyId`(replica)를 계속 사용할 것.
+     */
+    async findActiveByKeyIdOnPrimary(keyId: string)
+    {
+        const result = await this.db
+            .select()
+            .from(userPublicKeys)
+            .where(this.activeKeyCondition(keyId))
+            .limit(1);
+
+        return result[0] ?? null;
+    }
+
+    private activeKeyCondition(keyId: string)
+    {
+        return and(
+            eq(userPublicKeys.keyId, keyId),
+            eq(userPublicKeys.isActive, true),
+        );
     }
 
     /**
