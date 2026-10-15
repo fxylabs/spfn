@@ -373,6 +373,157 @@ export function createRedisPubSubCache(
     };
 }
 
+// ── Subscription control channel (grant / revoke across pods) ─────
+
+/**
+ * The channel `grant` / `revoke` travel on, published through the same
+ * {@link PubSubCache} as events (so `<prefix>$control` on Redis — same timeouts,
+ * breaker and warn throttling, no second connection). Event channels are
+ * `<prefix><event name>`; an event named `control` would collide with a bare
+ * `control`, and `$` never appears in a dotted event name, so it can't.
+ */
+const CONTROL_CHANNEL = '$control';
+
+/** What one `grant` / `revoke` publishes. */
+export interface SubscriptionControlMessage
+{
+    kind: 'grant' | 'revoke';
+
+    /** The event's wire name (`defineEvent(name)`) — router keys differ per pod's router. */
+    event: string;
+
+    subject: string;
+
+    /** The publishing binding, so a pod skips its own echo (it applied the change locally first). */
+    origin: string;
+}
+
+/** Applies one control message to the local registries of one event. */
+export type SubscriptionControlApply = (kind: SubscriptionControlMessage['kind'], subject: string) => void;
+
+interface ControlBinding
+{
+    origin: string;
+    events: Map<string, Set<SubscriptionControlApply>>;
+    subscribing: Promise<void> | undefined;
+}
+
+/** One binding per cache: in production one per process, in tests one per simulated pod. */
+const controlBindings = new WeakMap<PubSubCache, ControlBinding>();
+
+function ensureControlBinding(cache: PubSubCache): ControlBinding
+{
+    let binding = controlBindings.get(cache);
+    if (!binding)
+    {
+        binding = {
+            origin: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`,
+            events: new Map(),
+            subscribing: undefined,
+        };
+        controlBindings.set(cache, binding);
+    }
+
+    return binding;
+}
+
+function isControlMessage(message: unknown): message is SubscriptionControlMessage
+{
+    const candidate = message as Partial<SubscriptionControlMessage> | null;
+
+    return !!candidate
+        && (candidate.kind === 'grant' || candidate.kind === 'revoke')
+        && typeof candidate.event === 'string'
+        && typeof candidate.subject === 'string'
+        && typeof candidate.origin === 'string';
+}
+
+function dispatchControl(binding: ControlBinding, message: unknown): void
+{
+    if (!isControlMessage(message))
+    {
+        transportLogger.debug('Malformed subscription control message ignored');
+
+        return;
+    }
+
+    if (message.origin === binding.origin)
+    {
+        return;
+    }
+
+    const appliers = binding.events.get(message.event);
+    if (!appliers)
+    {
+        transportLogger.debug('Subscription control for an event this pod does not serve ignored', {
+            event: message.event,
+        });
+
+        return;
+    }
+
+    appliers.forEach(apply => apply(message.kind, message.subject));
+}
+
+/**
+ * Let `grant` / `revoke` published by other pods reach an event on this pod.
+ *
+ * Called by `EventDef.useCache`. Subscribes the control channel once per cache;
+ * a failed subscribe is warned and retried by the next event's bind — inbound
+ * control then stays local until it succeeds, never failing `useCache`.
+ */
+export async function bindSubscriptionControl(
+    cache: PubSubCache,
+    eventName: string,
+    apply: SubscriptionControlApply,
+): Promise<void>
+{
+    const binding = ensureControlBinding(cache);
+    const appliers = binding.events.get(eventName) ?? new Set<SubscriptionControlApply>();
+    appliers.add(apply);
+    binding.events.set(eventName, appliers);
+
+    binding.subscribing ??= cache
+        .subscribe(CONTROL_CHANNEL, (message) => dispatchControl(binding, message))
+        .catch((err: unknown) =>
+        {
+            binding.subscribing = undefined;
+            throttledWarn('control-subscribe-failed', 'Subscription control subscribe failed — grant/revoke from other pods not received', {
+                error: err instanceof Error ? err.message : String(err),
+            });
+        });
+
+    await binding.subscribing;
+}
+
+/**
+ * Tell every other pod about a `grant` / `revoke` this pod already applied.
+ * A failure is warned (throttled) and swallowed: the change stays local, and
+ * the next connect re-reads permission anyway.
+ */
+export async function publishSubscriptionControl(
+    cache: PubSubCache,
+    kind: SubscriptionControlMessage['kind'],
+    eventName: string,
+    subject: string,
+): Promise<void>
+{
+    const message: SubscriptionControlMessage = {
+        kind,
+        event: eventName,
+        subject,
+        origin: ensureControlBinding(cache).origin,
+    };
+
+    await cache.publish(CONTROL_CHANNEL, message).catch((err: unknown) =>
+    {
+        throttledWarn('control-publish-failed', 'Subscription control publish failed — applied on this pod only', {
+            event: eventName,
+            error: err instanceof Error ? err.message : String(err),
+        });
+    });
+}
+
 /**
  * Options controlling event cache transport wiring.
  */

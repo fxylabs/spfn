@@ -18,11 +18,16 @@
 
 import type { Context } from 'hono';
 import { streamSSE } from 'hono/streaming';
+import type { SSEStreamingApi } from 'hono/streaming';
 import { logger } from '@spfn/core/logger';
-import type { EventRouterDef, InferEventNames } from '../router';
+import type { EventRouterDef } from '../router';
+import type { EventDef, SubscribeContext, SubscribeRequest } from '../types';
 import type { SSEHandlerConfig, SSEHandlerAuthConfig } from './types';
 import type { SSETokenManager } from './token-manager';
 import { createBoundedWriter } from './bounded-writer';
+import type { BoundedWriter } from './bounded-writer';
+import { createConnectionRegistry, unsubscribeAll } from './connection-registry';
+import type { ConnectionRegistry, PendingAdmission, SSEConnection } from './connection-registry';
 
 const sseLogger = logger.child('@spfn/core:sse');
 
@@ -79,6 +84,13 @@ declare module 'hono'
  * - events: Comma-separated list of event names to subscribe
  * - token: One-time auth token (when auth is enabled)
  *
+ * Who receives what, in order: the global `authorize` (once, at connect) →
+ * each requested event's `.canSubscribe()` (once per event, at connect) → the
+ * global `filter` map and the event's `.filter()` (sync, per frame). An event
+ * denied at connect stays in `deniedEvents`, so `EventDef.grant` can activate
+ * it later; `EventDef.revoke` deactivates an allowed one. The handler
+ * registers that control on every event of the router.
+ *
  * @example
  * ```typescript
  * app.get('/events/stream', createSSEHandler(eventRouter, {
@@ -101,185 +113,536 @@ export function createSSEHandler<TRouter extends EventRouterDef<any>>(
         maxQueue = DEFAULT_MAX_QUEUE,
     } = config;
 
-    return async (c: Context) =>
+    const registry = createConnectionRegistry();
+    registerSubscriptionControls(router, registry);
+
+    const streamConfig: StreamConfig = { router, authConfig, registry, pingInterval, maxQueue };
+
+    const handler = async (c: Context) =>
     {
-        // ── 1. Token Authentication ──
-        const subject = await authenticateToken(c, tokenManager);
-        if (subject === false)
+        const admission = await admitConnection(c, streamConfig, tokenManager);
+        if (admission instanceof Response)
         {
-            return c.json({ error: 'Missing token parameter' }, 401);
-        }
-        if (subject === null)
-        {
-            return c.json({ error: 'Invalid or expired token' }, 401);
-        }
-        if (subject)
-        {
-            c.set('sseSubject', subject);
+            return admission;
         }
 
-        // ── 2. Parse events from query parameter ──
-        const requestedEvents = parseRequestedEvents(c);
-        if (!requestedEvents)
+        if (c.req.raw.signal.aborted)
         {
-            return c.json({ error: 'Missing events parameter' }, 400);
+            // The client left during admission: nobody reads this response.
+            // Its abort listener already cancelled `pending`; cancel is idempotent.
+            admission.pending?.cancel();
+
+            return new Response(null, { status: 499 });
         }
 
-        // ── 3. Validate event names ──
-        const validEventNames = router.eventNames as string[];
-        const invalidEvents = requestedEvents.filter(e => !validEventNames.includes(e));
-
-        if (invalidEvents.length > 0)
-        {
-            return c.json({
-                error: 'Invalid event names',
-                invalidEvents,
-                validEvents: validEventNames,
-            }, 400);
-        }
-
-        // ── 4. Subscription Authorization ──
-        const allowedEvents = await authorizeEvents(subject, requestedEvents, authConfig);
-        if (allowedEvents === null)
-        {
-            return c.json({ error: 'Not authorized for any requested events' }, 403);
-        }
-
-        sseLogger.debug('SSE connection requested', {
-            events: allowedEvents,
-            subject: subject || undefined,
-            clientIp: c.req.header('x-forwarded-for') || c.req.header('x-real-ip'),
-        });
-
-        // ── 5. SSE Stream ──
+        // ── 6. SSE Stream ──
         c.header('X-Accel-Buffering', 'no');
 
-        return streamSSE(c, async (stream) =>
-        {
-            const unsubscribes: (() => void)[] = [];
-            let messageId = 0;
-            let connectionDead = false;
-            let pingTimer: ReturnType<typeof setInterval>;
-            let writer: ReturnType<typeof createBoundedWriter>;
-            // Resolves the disconnect wait below when the connection is closed
-            // server-side (overflow/error), so teardown doesn't wait for the loop.
-            let onClosed: (() => void) | undefined;
-
-            const cleanup = (reason?: string) =>
-            {
-                if (connectionDead) return;
-                connectionDead = true;
-                clearInterval(pingTimer);
-                unsubscribes.forEach(fn => fn());
-                writer?.close();
-                onClosed?.();
-                sseLogger.info('SSE dead connection cleaned up', {
-                    events: allowedEvents,
-                    reason,
-                });
-            };
-
-            // All writes go through one bounded, backpressure-aware drain loop so a
-            // slow client can't pile frames up in memory (it's closed on overflow).
-            writer = createBoundedWriter(stream, maxQueue, (reason) =>
-            {
-                sseLogger.warn('SSE connection closed', { events: allowedEvents, reason });
-                cleanup(reason);
-            });
-
-            // Send initial connection message (first frame in the queue).
-            writer.enqueue({
-                event: 'connected',
-                data: JSON.stringify({
-                    subscribedEvents: allowedEvents,
-                    timestamp: Date.now(),
-                }),
-            });
-
-            for (const eventName of allowedEvents as InferEventNames<TRouter>[])
-            {
-                const eventDef = router.events[eventName];
-
-                if (!eventDef)
-                {
-                    continue;
-                }
-
-                const unsubscribe = eventDef.subscribe((payload: unknown) =>
-                {
-                    if (connectionDead) return;
-
-                    // ── Payload Filtering ──
-                    if (subject && authConfig?.filter?.[eventName as string])
-                    {
-                        if (!authConfig.filter[eventName as string](subject, payload))
-                        {
-                            return;
-                        }
-                    }
-
-                    messageId++;
-
-                    sseLogger.debug('SSE sending event', {
-                        event: eventName,
-                        messageId,
-                    });
-
-                    writer.enqueue({
-                        id: String(messageId),
-                        event: eventName as string,
-                        data: serializeFrame(eventName as string, payload),
-                    });
-                });
-
-                unsubscribes.push(unsubscribe);
-            }
-
-            sseLogger.info('SSE connection established', {
-                events: allowedEvents,
-                subscriptionCount: unsubscribes.length,
-            });
-
-            // Keep-alive ping
-            pingTimer = setInterval(() =>
-            {
-                if (connectionDead) return;
-
-                writer.enqueue({
-                    event: 'ping',
-                    data: JSON.stringify({ timestamp: Date.now() }),
-                });
-            }, pingInterval);
-
-            // Wait for client disconnect (abort) or a server-side close. Waiting on
-            // the abort event instead of polling sleep(pingInterval) means a dropped
-            // client is torn down immediately, not up to one ping interval later.
-            const abortSignal = c.req.raw.signal;
-
-            if (!abortSignal.aborted && !connectionDead)
-            {
-                await new Promise<void>((resolve) =>
-                {
-                    const onAbort = () => resolve();
-                    abortSignal.addEventListener('abort', onAbort, { once: true });
-                    // Server-side close (cleanup) resolves the wait and drops the listener.
-                    onClosed = () =>
-                    {
-                        abortSignal.removeEventListener('abort', onAbort);
-                        resolve();
-                    };
-                });
-            }
-
-            // Cleanup (normal disconnect path; idempotent if already closed)
-            cleanup();
-        }, async (err: Error) =>
+        return streamSSE(c, stream => runStream(c, stream, admission, streamConfig), async (err: Error) =>
         {
             sseLogger.error('SSE stream error', {
                 error: err.message,
             });
         });
     };
+
+    return Object.assign(handler, {
+        /** @internal Open registered connections of a subject (tests). */
+        _openConnections: (subject: string): number => registry.count(subject),
+
+        /** @internal Connects of a subject still in admission (tests). */
+        _pendingAdmissions: (subject: string): number => registry.pendingCount(subject),
+    });
+}
+
+// ============================================================================
+// Connect
+// ============================================================================
+
+/** What a request that passed every connect check opens the stream with. */
+interface Admission
+{
+    subject: string | undefined;
+    requested: string[];
+    allowed: string[];
+    denied: string[];
+    request: SubscribeRequest;
+
+    /** Registered before the first app-data read; `runStream` opens it. Absent without a subject. */
+    pending?: PendingAdmission;
+}
+
+/** What every stream of one handler shares. */
+interface StreamConfig
+{
+    router: EventRouterDef<any>;
+    authConfig: SSEHandlerAuthConfig | undefined;
+    registry: ConnectionRegistry;
+    pingInterval: number;
+    maxQueue: number;
+}
+
+/**
+ * Let `EventDef.grant` / `revoke` reach this handler's connections, once per
+ * router key (an event under two keys gets two controls, each naming its key).
+ */
+function registerSubscriptionControls(router: EventRouterDef<any>, registry: ConnectionRegistry): void
+{
+    for (const eventName of router.eventNames as string[])
+    {
+        router.events[eventName]._registerSubscriptionControl({
+            grant: (subject: string) => registry.grant(subject, eventName),
+            revoke: (subject: string) => registry.revoke(subject, eventName),
+        });
+    }
+}
+
+/**
+ * Run the connect checks; a `Response` is the refusal to return.
+ */
+async function admitConnection(
+    c: Context,
+    config: StreamConfig,
+    tokenManager: SSETokenManager | undefined,
+): Promise<Admission | Response>
+{
+    const { router, authConfig, registry } = config;
+
+    // ── 1. Token Authentication ──
+    const subject = await authenticateToken(c, tokenManager);
+    if (subject === false)
+    {
+        return c.json({ error: 'Missing token parameter' }, 401);
+    }
+    if (subject === null)
+    {
+        return c.json({ error: 'Invalid or expired token' }, 401);
+    }
+    if (subject)
+    {
+        c.set('sseSubject', subject);
+    }
+
+    // ── 2-3. Requested events, validated against the router ──
+    const requested = parseRequestedEvents(c);
+    if (!requested)
+    {
+        return c.json({ error: 'Missing events parameter' }, 400);
+    }
+
+    const validEventNames = router.eventNames as string[];
+    const invalidEvents = requested.filter(e => !validEventNames.includes(e));
+    if (invalidEvents.length > 0)
+    {
+        return c.json({
+            error: 'Invalid event names',
+            invalidEvents,
+            validEvents: validEventNames,
+        }, 400);
+    }
+
+    return whilePending(
+        subject ? registry.beginAdmission(subject, c.req.raw.signal) : undefined,
+        () => authorizeConnection(c, router, authConfig, subject, requested),
+    );
+}
+
+/**
+ * Run the app-data checks with the admission already registered — `pending`
+ * is written synchronously, before the first `await`, so a `grant` / `revoke`
+ * issued meanwhile is recorded on it. A refusal or a throw unregisters it; a
+ * client abort already did, the moment it happened; an admitted connection
+ * carries it to `runStream`.
+ */
+async function whilePending(
+    pending: PendingAdmission | undefined,
+    check: () => Promise<Admission | Response>,
+): Promise<Admission | Response>
+{
+    let outcome: Admission | Response | undefined;
+
+    try
+    {
+        outcome = await check();
+
+        return outcome instanceof Response ? outcome : { ...outcome, pending };
+    }
+    finally
+    {
+        if (!outcome || outcome instanceof Response)
+        {
+            pending?.cancel();
+        }
+    }
+}
+
+/**
+ * Steps 4-5: the global `authorize`, then the principal and each event's
+ * `canSubscribe`. Only an empty `authorize` result or a failed principal
+ * refuses; a `canSubscribe` denial only lands the event in `denied`.
+ */
+async function authorizeConnection(
+    c: Context,
+    router: EventRouterDef<any>,
+    authConfig: SSEHandlerAuthConfig | undefined,
+    subject: string | undefined,
+    requested: string[],
+): Promise<Admission | Response>
+{
+    // ── 4. Subscription Authorization ──
+    const authorized = await authorizeEvents(subject, requested, authConfig);
+    if (authorized === null)
+    {
+        return c.json({ error: 'Not authorized for any requested events' }, 403);
+    }
+
+    // ── 5. Principal + per-event canSubscribe ──
+    const request: SubscribeRequest = { query: c.req.query(), headers: c.req.header() };
+    const resolved = await resolveConnectionPrincipal(subject, request, authConfig);
+    if (!resolved)
+    {
+        return c.json({ error: 'Principal could not be resolved' }, 403);
+    }
+
+    const allowed = subject
+        ? await checkCanSubscribe(router, authorized, { subject, principal: resolved.principal, request })
+        : authorized;
+    const denied = requested.filter(e => !allowed.includes(e));
+
+    sseLogger.debug('SSE connection requested', {
+        events: allowed,
+        deniedEvents: denied,
+        subject: subject || undefined,
+        clientIp: c.req.header('x-forwarded-for') || c.req.header('x-real-ip'),
+    });
+
+    return { subject, requested, allowed, denied, request };
+}
+
+/**
+ * Resolve the principal once per connection; `null` refuses the connection.
+ * The warning names the subject only — never the thrown error's text, which
+ * may carry what the resolver read.
+ */
+async function resolveConnectionPrincipal(
+    subject: string | undefined,
+    request: SubscribeRequest,
+    authConfig: SSEHandlerAuthConfig | undefined,
+): Promise<{ principal: unknown } | null>
+{
+    if (!subject || !authConfig?.resolvePrincipal)
+    {
+        return { principal: undefined };
+    }
+
+    try
+    {
+        return { principal: await authConfig.resolvePrincipal(subject, request) };
+    }
+    catch
+    {
+        sseLogger.warn('SSE principal could not be resolved — connection refused', { subject });
+
+        return null;
+    }
+}
+
+/**
+ * Ask each authorized event's `canSubscribe`, in parallel; returns the events
+ * it allows. An event without a predicate is allowed.
+ */
+async function checkCanSubscribe(
+    router: EventRouterDef<any>,
+    events: string[],
+    ctx: SubscribeContext,
+): Promise<string[]>
+{
+    const verdicts = await Promise.all(events.map(eventName => askCanSubscribe(eventName, router.events[eventName], ctx)));
+
+    return events.filter((_, i) => verdicts[i]);
+}
+
+/**
+ * `true` → allowed; `false` or a throw → denied. A throw is warned with the
+ * event name and never fails the connection.
+ */
+async function askCanSubscribe(
+    eventName: string,
+    eventDef: EventDef<any> | undefined,
+    ctx: SubscribeContext,
+): Promise<boolean>
+{
+    if (!eventDef)
+    {
+        return false;
+    }
+
+    if (!eventDef._canSubscribe)
+    {
+        return true;
+    }
+
+    try
+    {
+        return await eventDef._canSubscribe(ctx) === true;
+    }
+    catch
+    {
+        sseLogger.warn('SSE canSubscribe threw — event denied on this connection', {
+            event: eventName,
+            subject: ctx.subject,
+        });
+
+        return false;
+    }
+}
+
+// ============================================================================
+// Stream
+// ============================================================================
+
+/**
+ * The life of one open connection: connected frame, subscriptions, registry
+ * entry, keep-alive, and teardown on disconnect or a server-side close.
+ */
+async function runStream(
+    c: Context,
+    stream: SSEStreamingApi,
+    admission: Admission,
+    config: StreamConfig,
+): Promise<void>
+{
+    const { allowed, denied, subject, request } = admission;
+    let connectionDead = false;
+    let pingTimer: ReturnType<typeof setInterval> | undefined;
+    // Resolves the disconnect wait below when the connection is closed
+    // server-side (overflow/error), so teardown doesn't wait for the loop.
+    let onClosed: (() => void) | undefined;
+
+    const cleanup = (reason?: string) =>
+    {
+        if (connectionDead) return;
+        connectionDead = true;
+        clearInterval(pingTimer);
+        unsubscribeAll(connection);
+        config.registry.remove(connection);
+        writer.close();
+        onClosed?.();
+        sseLogger.info('SSE dead connection cleaned up', {
+            events: [...connection.allowed],
+            reason,
+        });
+    };
+
+    // All writes go through one bounded, backpressure-aware drain loop so a
+    // slow client can't pile frames up in memory (it's closed on overflow).
+    const writer = createBoundedWriter(stream, config.maxQueue, (reason) =>
+    {
+        sseLogger.warn('SSE connection closed', { events: [...connection.allowed], reason });
+        cleanup(reason);
+    });
+
+    const connection: SSEConnection = {
+        subject,
+        requested: admission.requested,
+        allowed: new Set(allowed),
+        denied: new Set(denied),
+        unsubscribes: new Map(),
+        request,
+        subscribe: createEventSubscriber({
+            router: config.router,
+            authConfig: config.authConfig,
+            subject,
+            request,
+            writer,
+            isDead: () => connectionDead,
+        }),
+        notify: (frame, eventName) =>
+        {
+            if (connectionDead) return;
+
+            // A small literal — not routed through serializeFrame's per-payload cache.
+            writer.enqueue({ event: frame, data: JSON.stringify({ event: eventName }) });
+        },
+    };
+
+    // Synchronously before the `connected` frame: the changes recorded during
+    // admission land in `allowed` / `denied` first, and the entry turns open.
+    // A cancelled admission (the client left) opens nothing and sends no frame.
+    // Defensive: unreachable today, since `streamSSE` runs this synchronously up
+    // to here; the handler's `signal.aborted` → 499 check is the real path.
+    if (admission.pending?.open(connection) === false)
+    {
+        cleanup('aborted during admission');
+
+        return;
+    }
+
+    openSubscriptions(connection, writer);
+
+    // Keep-alive ping
+    pingTimer = setInterval(() =>
+    {
+        if (connectionDead) return;
+
+        writer.enqueue({
+            event: 'ping',
+            data: JSON.stringify({ timestamp: Date.now() }),
+        });
+    }, config.pingInterval);
+
+    await waitForDisconnect(c.req.raw.signal, () => connectionDead, (resolve) =>
+    {
+        onClosed = resolve;
+    });
+
+    // Cleanup (normal disconnect path; idempotent if already closed)
+    cleanup();
+}
+
+/**
+ * Send the `connected` frame (first in the queue) and subscribe every allowed event.
+ */
+function openSubscriptions(connection: SSEConnection, writer: BoundedWriter): void
+{
+    writer.enqueue({
+        event: 'connected',
+        data: JSON.stringify({
+            subscribedEvents: [...connection.allowed],
+            deniedEvents: [...connection.denied],
+            timestamp: Date.now(),
+        }),
+    });
+
+    for (const eventName of connection.allowed)
+    {
+        connection.unsubscribes.set(eventName, connection.subscribe(eventName));
+    }
+
+    sseLogger.info('SSE connection established', {
+        events: [...connection.allowed],
+        deniedEvents: [...connection.denied],
+        subscriptionCount: connection.unsubscribes.size,
+    });
+}
+
+/**
+ * Wait for client disconnect (abort) or a server-side close. Waiting on the
+ * abort event instead of polling sleep(pingInterval) means a dropped client is
+ * torn down immediately, not up to one ping interval later.
+ */
+async function waitForDisconnect(
+    abortSignal: AbortSignal,
+    isDead: () => boolean,
+    onServerClose: (resolve: () => void) => void,
+): Promise<void>
+{
+    if (abortSignal.aborted || isDead())
+    {
+        return;
+    }
+
+    await new Promise<void>((resolve) =>
+    {
+        const onAbort = () => resolve();
+        abortSignal.addEventListener('abort', onAbort, { once: true });
+        // Server-side close (cleanup) resolves the wait and drops the listener.
+        onServerClose(() =>
+        {
+            abortSignal.removeEventListener('abort', onAbort);
+            resolve();
+        });
+    });
+}
+
+/** What the per-event subscribe of one connection closes over. */
+interface SubscriberContext
+{
+    router: EventRouterDef<any>;
+    authConfig: SSEHandlerAuthConfig | undefined;
+    subject: string | undefined;
+    request: SubscribeRequest;
+    writer: BoundedWriter;
+    isDead: () => boolean;
+}
+
+/**
+ * The per-event subscribe of one connection, used at connect and by `grant`
+ * alike, so filter order and `messageId` numbering are one code path.
+ *
+ * The returned unsubscribe also deactivates the callback, so a frame of an
+ * `emit` already fanning out when `revoke` lands is not enqueued after it.
+ */
+function createEventSubscriber(ctx: SubscriberContext): (eventName: string) => () => void
+{
+    let messageId = 0;
+
+    return (eventName: string) =>
+    {
+        const eventDef = ctx.router.events[eventName];
+        let active = true;
+
+        const unsubscribe = eventDef.subscribe((payload: unknown) =>
+        {
+            if (!active || ctx.isDead() || !passesFrameFilters(eventName, eventDef, payload, ctx))
+            {
+                return;
+            }
+
+            messageId++;
+
+            sseLogger.debug('SSE sending event', {
+                event: eventName,
+                messageId,
+            });
+
+            ctx.writer.enqueue({
+                id: String(messageId),
+                event: eventName,
+                data: serializeFrame(eventName, payload),
+            });
+        });
+
+        return () =>
+        {
+            active = false;
+            unsubscribe();
+        };
+    };
+}
+
+/**
+ * The global `filter` map (with a subject, as before) and the event's own
+ * `.filter()` — both must pass.
+ */
+function passesFrameFilters(
+    eventName: string,
+    eventDef: EventDef<any>,
+    payload: unknown,
+    ctx: SubscriberContext,
+): boolean
+{
+    const globalFilter = ctx.authConfig?.filter?.[eventName];
+    if (ctx.subject && globalFilter && !globalFilter(ctx.subject, payload))
+    {
+        return false;
+    }
+
+    if (!eventDef._filter)
+    {
+        return true;
+    }
+
+    try
+    {
+        return eventDef._filter(payload, { subject: ctx.subject, request: ctx.request }) === true;
+    }
+    catch
+    {
+        sseLogger.warn('SSE event filter threw — frame dropped', { event: eventName, subject: ctx.subject });
+
+        return false;
+    }
 }
 
 // ============================================================================
@@ -321,7 +684,8 @@ function parseRequestedEvents(c: Context): string[] | null
         return null;
     }
 
-    return eventsParam.split(',').map(e => e.trim());
+    // Deduplicated: one subscription per event, keyed by name in the registry.
+    return [...new Set(eventsParam.split(',').map(e => e.trim()))];
 }
 
 /**

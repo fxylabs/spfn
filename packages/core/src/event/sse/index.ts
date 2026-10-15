@@ -46,6 +46,7 @@ export type {
     SSEEventHandler,
     SSEEventHandlers,
     SSESubscribeOptions,
+    SSESubscriptionChange,
     SSEConnectionState,
     SSEUnsubscribe,
 } from './types';

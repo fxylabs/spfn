@@ -27,7 +27,17 @@
 
 import type { TSchema, Static } from '@sinclair/typebox';
 import { logger } from '@spfn/core/logger';
-import type { EventContract, EventDef, EventHandler, JobQueueSender, PubSubCache } from './types';
+import { bindSubscriptionControl, publishSubscriptionControl } from './cache-transport';
+import type {
+    EventContract,
+    EventDef,
+    EventHandler,
+    FramePredicate,
+    JobQueueSender,
+    PubSubCache,
+    SubscribePredicate,
+    SubscriptionControl,
+} from './types';
 
 const eventLogger = logger.child('@spfn/core:event');
 
@@ -137,6 +147,61 @@ function createJobQueueManager(name: string)
 }
 
 /**
+ * Create the registry of SSE handlers' subscription controls for one event.
+ *
+ * `grant` / `revoke` apply to every registered control (an event may sit under
+ * two router keys, or in two handlers in one process), then — when the event is
+ * bound to a cache — publish once so every other pod applies it too.
+ */
+function createSubscriptionControls(name: string, getCache: () => PubSubCache | undefined)
+{
+    const controls: Set<SubscriptionControl> = new Set();
+
+    const applyLocal = (kind: 'grant' | 'revoke', subject: string): void =>
+    {
+        controls.forEach(control => control[kind](subject));
+    };
+
+    const change = (kind: 'grant' | 'revoke') => async (subject: string): Promise<void> =>
+    {
+        applyLocal(kind, subject);
+
+        const cache = getCache();
+        if (cache)
+        {
+            await publishSubscriptionControl(cache, kind, name, subject);
+        }
+    };
+
+    return {
+        applyLocal,
+        grant: change('grant'),
+        revoke: change('revoke'),
+        register: (control: SubscriptionControl): (() => void) =>
+        {
+            controls.add(control);
+
+            return () => controls.delete(control);
+        },
+    };
+}
+
+/**
+ * Throw when a set-once declaration of a shared event is made a second time.
+ */
+function assertDeclaredOnce(name: string, method: string, declared: boolean): void
+{
+    if (declared)
+    {
+        throw new Error(
+            `Event "${name}" already declares .${method}(). `
+            + 'An event is defined once and shared, so a second declaration would silently replace the first. '
+            + `Declare .${method}() once, where the event is defined.`,
+        );
+    }
+}
+
+/**
  * Internal: Create event implementation
  */
 function createEventImpl<TPayload>(
@@ -148,6 +213,7 @@ function createEventImpl<TPayload>(
     const jobQueueManager = createJobQueueManager(name);
     let cache: PubSubCache | undefined;
     let cacheSubscribed = false;
+    const subscriptionControls = createSubscriptionControls(name, () => cache);
 
     const emit = async (payload?: TPayload): Promise<void> =>
     {
@@ -193,6 +259,8 @@ function createEventImpl<TPayload>(
         cache = newCache;
         cacheSubscribed = true;
 
+        await bindSubscriptionControl(newCache, name, subscriptionControls.applyLocal);
+
         eventLogger.debug(`Cache subscription ready for event: ${name}`);
 
         return self;
@@ -226,6 +294,25 @@ function createEventImpl<TPayload>(
         return self;
     };
 
+    let canSubscribe: SubscribePredicate<any> | undefined;
+    let filter: FramePredicate<TPayload> | undefined;
+
+    const declareCanSubscribe = <P>(predicate: SubscribePredicate<P>): EventDef<TPayload> =>
+    {
+        assertDeclaredOnce(name, 'canSubscribe', !!canSubscribe);
+        canSubscribe = predicate;
+
+        return self;
+    };
+
+    const declareFilter = (predicate: FramePredicate<TPayload>): EventDef<TPayload> =>
+    {
+        assertDeclaredOnce(name, 'filter', !!filter);
+        filter = predicate;
+
+        return self;
+    };
+
     const self: EventDef<TPayload> = {
         name,
         schema,
@@ -234,6 +321,19 @@ function createEventImpl<TPayload>(
             return contract;
         },
         contract: declareContract,
+        get _canSubscribe()
+        {
+            return canSubscribe;
+        },
+        canSubscribe: declareCanSubscribe,
+        get _filter()
+        {
+            return filter;
+        },
+        filter: declareFilter,
+        grant: subscriptionControls.grant,
+        revoke: subscriptionControls.revoke,
+        _registerSubscriptionControl: subscriptionControls.register,
         subscribe: handlerManager.add,
         unsubscribeAll: handlerManager.clear,
         emit: emit as EventDef<TPayload>['emit'],

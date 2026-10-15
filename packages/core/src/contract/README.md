@@ -235,7 +235,8 @@ throws instead of one declaration silently winning. A router `streamPath` that d
   a client must exchange a token first;
 - a contracted event without a payload schema (`defineEvent(name)`) — its frame carries no `data`;
   declare `Type.Object({})` and emit `{}` instead;
-- a contracted event under the key `connected` or `ping` — those are the stream's own frames;
+- a contracted event under the key `connected`, `ping`, `subscription.granted` or
+  `subscription.revoked` — those are the stream's own frames;
 - a contracted event with no `since`.
 
 **What a reader of the document needs.**
@@ -254,8 +255,9 @@ throws instead of one declaration silently winning. A router `streamPath` that d
   `EventDef` registered under two keys is two items.
 - A frame's `data` is the JSON `{ "event": name, "data": payload }`, with `payload` matching the
   item's schema.
-- `connected` (once, when the stream opens) and `ping` (keep-alive) frames are the stream's own and
-  are not items.
+- `connected` (once, when the stream opens), `ping` (keep-alive), `subscription.granted` and
+  `subscription.revoked` (an event activated or deactivated on the open connection) frames are the
+  stream's own and are not items.
 - With `auth: "tokenExchange"` the client first posts to `tokenPath`, then opens
   `streamPath?events=…&token=…`. `tokenPath` is derived from `streamPath` exactly as the server
   derives it.

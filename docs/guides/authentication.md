@@ -431,6 +431,8 @@ export default defineServerConfig()
 
 > **Why a function?** `getOneTimeTokenManager()` requires `createAuthLifecycle()` to run first (during `afterInfrastructure`). At module load time the manager doesn't exist yet. A lazy resolver `() => getOneTimeTokenManager()` defers the call to server startup, when the manager is ready.
 
+**Who may subscribe.** The stream request carries the token's subject, not an `AuthContext`. Beside the router-wide `authorize` hook, an event can declare its own rule with `.canSubscribe(({ subject, principal, request }) => …)`, fed by `auth.resolvePrincipal(subject, request)` (called once per connection), and `event.revoke(subject)` / `event.grant(subject)` change an open connection when membership changes. See [SSE authentication — Per-event permission](../../packages/core/src/event/README.md#per-event-permission-cansubscribe-filter-grant--revoke).
+
 ### API Endpoint
 
 | Route | Method | Auth | Purpose |

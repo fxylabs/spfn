@@ -182,7 +182,7 @@ export function createSSEClient<TRouter extends EventRouterDef<any>>(
 
     function subscribe(options: SSESubscribeOptions<TRouter>): SSEUnsubscribe
     {
-        const { events, handlers, onOpen, onError, onReconnect, onClose } = options;
+        const { events, handlers, onOpen, onError, onReconnect, onClose, onSubscriptionChange } = options;
 
         // A new subscription supersedes any previous one on this client.
         if (active)
@@ -235,6 +235,7 @@ export function createSSEClient<TRouter extends EventRouterDef<any>>(
                 });
 
                 setupEventHandlers(conn.eventSource, eventNames, handlers, onOpen, onError);
+                setupSubscriptionChange(conn.eventSource, onSubscriptionChange);
                 setupReconnect(onReconnect);
             };
 
@@ -313,6 +314,40 @@ export function createSSEClient<TRouter extends EventRouterDef<any>>(
                     {
                         console.error(`[SSE] Failed to parse event "${eventName}":`, err);
                     }
+                });
+            }
+        }
+
+        // The server's grant/revoke frames (data `{ event }`); ignored without a callback.
+        function setupSubscriptionChange(
+            es: EventSource,
+            onChange?: SSESubscribeOptions<TRouter>['onSubscriptionChange'],
+        )
+        {
+            if (!onChange)
+            {
+                return;
+            }
+
+            const frames = { 'subscription.granted': 'granted', 'subscription.revoked': 'revoked' } as const;
+
+            for (const [frame, status] of Object.entries(frames))
+            {
+                es.addEventListener(frame, (e: MessageEvent) =>
+                {
+                    let event: InferEventNames<TRouter>;
+                    try
+                    {
+                        ({ event } = JSON.parse(e.data));
+                    }
+                    catch (err)
+                    {
+                        console.error(`[SSE] Failed to parse "${frame}" frame:`, err);
+
+                        return;
+                    }
+
+                    onChange({ event, status });
                 });
             }
         }

@@ -220,7 +220,7 @@ function addOperation(name: string, routeDef: RouteDef<any>, trail: string[], fo
  * `ping` as keep-alive. An event under either key would be indistinguishable
  * from them on the wire.
  */
-const RESERVED_EVENT_NAMES = new Set(['connected', 'ping']);
+const RESERVED_EVENT_NAMES = new Set(['connected', 'ping', 'subscription.granted', 'subscription.revoked']);
 
 function byName<T extends { name: string }>(a: T, b: T): number
 {
@@ -235,7 +235,8 @@ function toContractEvent(name: string, eventDef: EventDef<any>): ContractEvent
     {
         throw new ContractCollectionError(
             `Contracted event "${name}" uses a reserved frame name. `
-            + 'The stream itself sends "connected" and "ping" frames, so a client could not tell this event from them. '
+            + 'The stream itself sends "connected", "ping", "subscription.granted" and "subscription.revoked" frames, '
+            + 'so a client could not tell this event from them. '
             + 'Register the event under another key.',
         );
     }

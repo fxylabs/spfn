@@ -72,7 +72,12 @@ export type {
     EventContract,
     EventDef,
     EventHandler,
+    FrameContext,
+    FramePredicate,
     InferEventPayload,
     PubSubCache,
     JobQueueSender,
+    SubscribeContext,
+    SubscribePredicate,
+    SubscribeRequest,
 } from './types';

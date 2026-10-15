@@ -6,6 +6,7 @@
 
 import type { Context } from 'hono';
 import type { EventRouterDef, InferEventNames, InferEventPayload } from '../router';
+import type { SubscribeRequest } from '../types';
 import type { SSETokenStore, SSETokenManager } from './token-manager';
 
 /**
@@ -94,6 +95,18 @@ export interface SSEHandlerAuthConfig
      * Return false to skip sending the event to this user.
      */
     filter?: Record<string, (subject: string, payload: unknown) => boolean>;
+
+    /**
+     * Resolve the principal every `.canSubscribe()` of a connection receives
+     * (called once per connection, after the subject is known).
+     *
+     * The stream request carries no `AuthContext`: the subject comes from the
+     * one-time token, and the stream is mounted without the app's middleware.
+     * So an app that decides on roles or memberships loads them here, once,
+     * instead of in every predicate. Absent → predicates see
+     * `principal: undefined`. A throw refuses the connection with 403.
+     */
+    resolvePrincipal?: (subject: string, request: SubscribeRequest) => unknown | Promise<unknown>;
 }
 
 /**
@@ -137,6 +150,7 @@ export interface SSEAuthConfig<TRouter extends EventRouterDef<any>>
             payload: InferEventPayload<TRouter, K>,
         ) => boolean;
     };
+    resolvePrincipal?: (subject: string, request: SubscribeRequest) => unknown | Promise<unknown>;
 }
 
 // ============================================================================
@@ -326,6 +340,22 @@ export interface SSESubscribeOptions<TRouter extends EventRouterDef<any>>
      * Called when reconnecting
      */
     onReconnect?: (attempt: number) => void;
+
+    /**
+     * Called when the server grants or revokes one event on the open connection
+     * (`subscription.granted` / `subscription.revoked` frames). Only events in
+     * `events` can change: an event never requested cannot be granted.
+     */
+    onSubscriptionChange?: (change: SSESubscriptionChange<TRouter>) => void;
+}
+
+/**
+ * A `grant` / `revoke` the server applied to the open connection.
+ */
+export interface SSESubscriptionChange<TRouter extends EventRouterDef<any>>
+{
+    event: InferEventNames<TRouter>;
+    status: 'granted' | 'revoked';
 }
 
 /**

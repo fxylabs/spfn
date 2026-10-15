@@ -50,6 +50,78 @@ export interface EventContract
 }
 
 /**
+ * What the stream request asked for, copied once at connect.
+ *
+ * A plain snapshot, never the live Hono context, so a frame filter can read it
+ * on every frame long after the request object is gone. Header names are
+ * lowercased. It may hold `cookie` and `authorization` values — never log it.
+ */
+export interface SubscribeRequest
+{
+    /** Query parameters of the stream URL (`events`, `token` and any the app adds). */
+    query: Record<string, string>;
+
+    /** Request headers, names lowercased. */
+    headers: Record<string, string>;
+}
+
+/**
+ * What `.canSubscribe()` decides on, once per connection per requested event.
+ *
+ * `P` is whatever the SSE auth config's `resolvePrincipal` returns — core never
+ * knows what a principal is.
+ */
+export interface SubscribeContext<P = unknown>
+{
+    /** The subject the one-time token was issued to. */
+    subject: string;
+
+    /** The value `resolvePrincipal` returned for this connection, `undefined` without one. */
+    principal: P | undefined;
+
+    /** The connect request snapshot. */
+    request: SubscribeRequest;
+}
+
+/**
+ * Decides at connect whether a subject may receive an event. `false` or a
+ * throw denies the event on that connection; the connection stays open.
+ */
+export type SubscribePredicate<P = unknown> = (ctx: SubscribeContext<P>) => boolean | Promise<boolean>;
+
+/**
+ * What a per-event `.filter()` sees on every frame.
+ */
+export interface FrameContext
+{
+    /** The connection's subject, `undefined` when the stream runs without auth. */
+    subject: string | undefined;
+
+    /** The connect request snapshot. */
+    request: SubscribeRequest;
+}
+
+/**
+ * Decides per frame whether one connection receives one payload. Sync: it runs
+ * for every connection on every emit, so it matches the payload against what
+ * the connection asked for and never reads storage.
+ */
+export type FramePredicate<TPayload> = (payload: TPayload, ctx: FrameContext) => boolean;
+
+/**
+ * How an SSE handler lets `grant` / `revoke` reach its open connections.
+ * Each handler registers one per router key of the event.
+ */
+export interface SubscriptionControl
+{
+    /** Activate the event on every open connection of `subject` where it is denied. */
+    grant: (subject: string) => void;
+
+    /** Deactivate the event on every open connection of `subject` where it is allowed. */
+    revoke: (subject: string) => void;
+}
+
+/**
  * Event definition interface
  */
 export interface EventDef<TPayload = void>
@@ -83,6 +155,47 @@ export interface EventDef<TPayload = void>
     contract: (contract: EventContract) => EventDef<TPayload>;
 
     /**
+     * The predicate declared with `.canSubscribe()`, absent when any subject
+     * that passes the global `authorize` may subscribe.
+     */
+    readonly _canSubscribe?: SubscribePredicate<any>;
+
+    /**
+     * Declare who may subscribe to this event over SSE.
+     *
+     * Runs once per connection, after the global `authorize`, only when the
+     * connection has a subject. `P` is the type of the principal the SSE auth
+     * config's `resolvePrincipal` returns. Set once: a second call throws.
+     *
+     * @example
+     * ```typescript
+     * export const auditLogged = defineEvent('audit.logged', payload)
+     *     .canSubscribe<AuthPrincipal>(({ principal }) => principal?.role === 'admin');
+     * ```
+     */
+    canSubscribe: <P = unknown>(predicate: SubscribePredicate<P>) => EventDef<TPayload>;
+
+    /**
+     * The per-frame predicate declared with `.filter()`.
+     */
+    readonly _filter?: FramePredicate<TPayload>;
+
+    /**
+     * Declare which frames of this event a connection receives.
+     *
+     * Runs per frame on every connection subscribed to the event, with or
+     * without a subject, beside the global `filter` map (both must pass). Sync.
+     * Set once: a second call throws.
+     *
+     * @example
+     * ```typescript
+     * export const runtimeChanged = defineEvent('runtime.changed', payload)
+     *     .filter((payload, { request }) => payload.workspaceId === request.query.workspaceId);
+     * ```
+     */
+    filter: (predicate: FramePredicate<TPayload>) => EventDef<TPayload>;
+
+    /**
      * Subscribe to this event (in-memory handler)
      */
     subscribe: (handler: EventHandler<TPayload>) => () => void;
@@ -100,6 +213,25 @@ export interface EventDef<TPayload = void>
         : (payload: TPayload) => Promise<void>;
 
     /**
+     * Activate this event on every open SSE connection of `subject` where it is
+     * denied — by `canSubscribe` or `authorize` at connect, or by a `revoke`.
+     *
+     * Reaches every pod when the cache transport is attached. Never re-runs
+     * `canSubscribe`: it is an operator's statement about an open connection.
+     * An event the connection never requested cannot be granted.
+     */
+    grant: (subject: string) => Promise<void>;
+
+    /**
+     * Deactivate this event on every open SSE connection of `subject` where it
+     * is allowed; the client receives a `subscription.revoked` frame.
+     *
+     * Reaches every pod when the cache transport is attached. Affects open
+     * connections only — the next connect asks `canSubscribe` afresh.
+     */
+    revoke: (subject: string) => Promise<void>;
+
+    /**
      * Enable cache-based pub/sub for multi-instance support
      * Must await before emitting events to ensure subscription is ready
      */
@@ -110,6 +242,13 @@ export interface EventDef<TPayload = void>
      * Called by job registration system
      */
     _registerJobQueue: (queueName: string, sender: JobQueueSender) => void;
+
+    /**
+     * Internal: Let an SSE handler's connection registry receive `grant` /
+     * `revoke`. Called by `createSSEHandler` once per router key; every
+     * registered control receives every call. Returns the unregister function.
+     */
+    _registerSubscriptionControl: (control: SubscriptionControl) => () => void;
 
     /**
      * Internal: Drop the cache binding (cache + subscribed flag).

@@ -15,6 +15,7 @@ import { Type } from '@sinclair/typebox';
 import { defineEvent } from '../event';
 import { defineEventRouter } from '../router';
 import { createRedisPubSubCache, wireEventRouterCache, closeEventTransport } from '../cache-transport';
+import { FakeBus, FakeRedis } from './fake-redis';
 
 // Mock the cache module so wireEventRouterCache's dynamic getCache() is steerable.
 // Defaults to "no cache" (in-process); individual tests opt into a fake client.
@@ -38,78 +39,6 @@ afterEach(async () =>
     await closeEventTransport();
     (getCache as unknown as Mock).mockReturnValue(undefined);
 });
-
-// ── Fake Redis bus (shared backend for several client connections) ──
-
-class FakeBus
-{
-    private channels = new Map<string, Set<(channel: string, message: string) => void>>();
-
-    publish(channel: string, message: string): number
-    {
-        const subs = this.channels.get(channel);
-        if (!subs)
-        {
-            return 0;
-        }
-
-        for (const cb of subs)
-        {
-            cb(channel, message);
-        }
-
-        return subs.size;
-    }
-
-    subscribe(channel: string, cb: (channel: string, message: string) => void): void
-    {
-        let set = this.channels.get(channel);
-        if (!set)
-        {
-            set = new Set();
-            this.channels.set(channel, set);
-        }
-
-        set.add(cb);
-    }
-}
-
-class FakeRedis
-{
-    private listeners: ((channel: string, message: string) => void)[] = [];
-
-    constructor(private bus: FakeBus)
-    {}
-
-    async publish(channel: string, message: string): Promise<number>
-    {
-        return this.bus.publish(channel, message);
-    }
-
-    duplicate(): FakeRedis
-    {
-        return new FakeRedis(this.bus);
-    }
-
-    async subscribe(channel: string): Promise<void>
-    {
-        this.bus.subscribe(channel, (ch, msg) =>
-        {
-            for (const l of this.listeners)
-            {
-                l(ch, msg);
-            }
-        });
-    }
-
-    on(event: string, listener: (channel: string, message: string) => void): void
-    {
-        if (event === 'message')
-        {
-            this.listeners.push(listener);
-        }
-    }
-}
 
 const flush = () => new Promise(resolve => setImmediate(resolve));
 

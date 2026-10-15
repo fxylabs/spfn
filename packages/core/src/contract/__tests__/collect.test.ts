@@ -322,6 +322,30 @@ describe('collecting contracted SSE events', () =>
         expect(() => collectContractDocument(appRouter, eventRouter)).toThrow(/"ping"/);
     });
 
+    it('R1 refuses a contracted event under the reserved key subscription.granted, naming it', () =>
+    {
+        const eventRouter = defineEventRouter({ 'subscription.granted': contracted() }).contract({ auth: 'none' });
+
+        expect(() => collectContractDocument(appRouter, eventRouter)).toThrow(ContractCollectionError);
+        expect(() => collectContractDocument(appRouter, eventRouter)).toThrow(/"subscription\.granted" uses a reserved/);
+    });
+
+    it('R2 refuses a contracted event under the reserved key subscription.revoked, naming it', () =>
+    {
+        const eventRouter = defineEventRouter({ 'subscription.revoked': contracted() }).contract({ auth: 'none' });
+
+        expect(() => collectContractDocument(appRouter, eventRouter)).toThrow(ContractCollectionError);
+        expect(() => collectContractDocument(appRouter, eventRouter)).toThrow(/"subscription\.revoked" uses a reserved/);
+    });
+
+    it('R3 does not refuse a contracted event under the camel-case key subscriptionGranted', () =>
+    {
+        const eventRouter = defineEventRouter({ subscriptionGranted: contracted() }).contract({ auth: 'none' });
+
+        expect(collectContractDocument(appRouter, eventRouter).events!.items.map(item => item.name))
+            .toEqual(['subscriptionGranted']);
+    });
+
     it('C7 refuses a contracted event with no since version', () =>
     {
         const eventRouter = defineEventRouter({ sessionActivity: contracted({ since: '' }) })

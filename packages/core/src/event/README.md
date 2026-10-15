@@ -45,8 +45,12 @@ From `@spfn/core/event`:
 - `.contract({ since, deprecatedIn?, removedIn? })` on an event and `.contract({ auth, streamPath? })`
   on an event router — publish the event in `contracts/current.json` (see
   [Contracted events](#contracted-events-for-separately-compiled-clients))
+- `.canSubscribe(predicate)`, `.filter(predicate)`, `.grant(subject)`, `.revoke(subject)` on an
+  event — who may subscribe over SSE, which frames a connection receives, and changing an open
+  connection (see [Per-event permission](#per-event-permission-cansubscribe-filter-grant--revoke))
 - Types: `EventDef`, `EventHandler`, `InferEventPayload`, `PubSubCache`, `JobQueueSender`,
-  `EventContract`, `EventRouterContract`,
+  `EventContract`, `EventRouterContract`, `SubscribePredicate`, `SubscribeContext`,
+  `SubscribeRequest`, `FramePredicate`, `FrameContext`,
   `EventRouterDef`, `InferEventNames`, `InferEventPayloads`,
   `InferRouterEventPayload` (the two-arg router variant — see note)
 
@@ -56,8 +60,8 @@ From `@spfn/core/event/sse`:
 - `SSETokenManager` (class), `CacheTokenStore` (class)
 - Types: `SSEToken`, `SSETokenStore`, `SSETokenManagerConfig`, `SSEMessage`,
   `SSEHandlerConfig`, `SSEHandlerAuthConfig`, `SSEAuthConfig`, `SSEClientConfig`,
-  `SSEEventHandler`, `SSEEventHandlers`, `SSESubscribeOptions`, `SSEConnectionState`,
-  `SSEUnsubscribe`
+  `SSEEventHandler`, `SSEEventHandlers`, `SSESubscribeOptions`, `SSESubscriptionChange`,
+  `SSEConnectionState`, `SSEUnsubscribe`
 
 From `@spfn/core/event/sse/client`:
 
@@ -133,10 +137,16 @@ Promise<void>` otherwise. Handlers run via `Promise.allSettled` — see
 | `emit(payload?)` | `Promise<void>` | fan-out to handlers (or cache) + job queues |
 | `useCache(cache)` | `(PubSubCache) => Promise<EventDef>` | enable cross-instance broadcast (must `await`) |
 | `contract(contract)` | `(EventContract) => EventDef` | publish in the contract; returns the same event; a second call throws |
+| `canSubscribe(predicate)` | `<P>(SubscribePredicate<P>) => EventDef` | who may subscribe over SSE (once per connection); a second call throws |
+| `filter(predicate)` | `(FramePredicate<TPayload>) => EventDef` | which frames a connection receives (sync, per frame); a second call throws |
+| `grant(subject)` | `Promise<void>` | activate the event on the subject's open SSE connections where it is denied |
+| `revoke(subject)` | `Promise<void>` | deactivate the event on the subject's open SSE connections where it is allowed |
 
-> `_registerJobQueue` and `_payload` exist on the interface but are **internal** —
-> `_registerJobQueue` is called by `@spfn/core/job` when a job does `.on(event)`; `_payload`
-> is a type-inference carrier (always `undefined` at runtime). Don't call them.
+> `_registerJobQueue`, `_registerSubscriptionControl` and `_payload` exist on the interface but
+> are **internal** — `_registerJobQueue` is called by `@spfn/core/job` when a job does
+> `.on(event)`; `_registerSubscriptionControl` by `createSSEHandler` so `grant` / `revoke` reach
+> its connections; `_payload` is a type-inference carrier (always `undefined` at runtime). Don't
+> call them.
 
 ---
 
@@ -262,8 +272,10 @@ Client                              Server
   │  GET /events/stream?token=…&events=…
   │ ───────────────────────────────► │  verify+consume token (one-time)
   │                                   │  → authorize(subject, events)
-  │  ◄═══════════════════════════════ │  SSE stream opens
-  │  event: <name> / data: {…}        │  ← filter(subject, payload) per emission
+  │                                   │  → resolvePrincipal(subject, request)   (once)
+  │                                   │  → event.canSubscribe(ctx)              (once per event)
+  │  ◄═══════════════════════════════ │  SSE stream opens (connected: subscribed + denied)
+  │  event: <name> / data: {…}        │  ← filter(subject, payload) + event.filter(payload, ctx) per emission
 ```
 
 Enable it with `auth: { enabled: true }`:
@@ -381,6 +393,101 @@ Return `false` to skip. Payload is typed per event.
 })
 ```
 
+### Per-event permission (`canSubscribe`, `filter`, `grant` / `revoke`)
+
+The global hooks above are one function for the whole router. When the rule belongs to one event,
+declare it where the event is defined:
+
+```typescript
+export const auditLogged = defineEvent('audit.logged', payload)
+    .canSubscribe<AuthPrincipal>(({ subject, principal, request }) => principal?.role === 'admin');
+
+export const runtimeChanged = defineEvent('runtime.changed', payload)
+    .filter((payload, { subject, request }) => payload.workspaceId === request.query.workspaceId);
+```
+
+- **`canSubscribe(ctx)`** — once per connection per requested event, only when the connection has a
+  subject. `true` allows; `false` or a throw denies (a throw is logged at warn with the event name).
+  A denial never refuses the connection: an event denied here is listed in the `connected` frame's
+  `deniedEvents`, and a connection whose every event is denied stays open with zero subscriptions,
+  so a later `grant` can activate one. May be async.
+- **`filter(payload, ctx)`** — per frame, with or without a subject; it matches the payload against
+  the connect request. It runs beside the global `filter` map — both must return `true`. Sync. A
+  throw drops that frame (warn) and leaves the connection alive.
+- **`request`** in both is a snapshot taken once at connect: `{ query, headers }` with lowercased
+  header names — never the live Hono context. It is the connect request as sent: it holds the
+  `cookie` / `authorization` headers and the consumed one-time `token` in `query`, so the app must
+  never log the snapshot.
+- Both are set once per event: an `EventDef` is a shared singleton, so a second call throws.
+
+**`resolvePrincipal` — why the stream has no `AuthContext`.** The subject comes from the one-time
+token, and the stream is mounted without the app's middleware, so there is no request auth object
+to hand a predicate. `auth.resolvePrincipal(subject, request)` loads it instead, **once per
+connection**, after the subject is known and before any `canSubscribe`; every predicate of that
+connection receives the same value as `principal` (type it with `.canSubscribe<P>()`). Absent →
+`principal: undefined`. A throw refuses the connection with `403 { error: 'Principal could not be
+resolved' }`.
+
+```typescript
+.events(eventRouter, {
+    auth: {
+        enabled: true,
+        resolvePrincipal: async (subject) => principalsRepository.findBySubject(subject),
+    },
+})
+```
+
+**Order.** `authorize` (an empty result is still `403`) → `canSubscribe` of each event `authorize`
+kept → per frame, the global `filter` and the event's `filter`. An event `authorize` dropped is
+never asked and counts as denied too.
+
+**Cost.** At connect: one predicate call per requested event (plus one `resolvePrincipal`). Per
+frame: sync filters only — never storage. The handler sets no timeout on them: a hanging
+`canSubscribe` or `resolvePrincipal` holds the connect open, so the app owns the timeout. A
+client that leaves meanwhile is forgotten at once; the late verdict opens nothing.
+
+**`grant` / `revoke` — changing an open connection.**
+
+```typescript
+await workspaceRuntime.revoke(userId);   // membership ended
+await workspaceRuntime.grant(userId);    // membership restored
+```
+
+- `revoke(subject)` — on every open connection of the subject where the event is allowed: drop the
+  subscription and send a `subscription.revoked` frame `{ event }` (the router key). `grant(subject)`
+  — where it is denied: subscribe (the same code path as at connect, with the stored request
+  snapshot) and send `subscription.granted`. Anything else is a no-op, and no connection resolves
+  without error.
+- With the cache transport attached (`CACHE_URL`), the call applies on this pod and is published
+  once on the control channel `<channelPrefix>$control`; every other pod applies it to its own
+  connections. Without a cache it is local only.
+- Three rules:
+  1. **Open connections only.** Neither re-runs `canSubscribe` or `authorize` — they are an
+     operator's statement about connections that exist now.
+  2. **Permission lives in app data.** The next connect asks `canSubscribe` afresh, so a missed
+     call delays until the client reconnects; it never produces a wrong answer after. A call that
+     lands while a connect is still in `authorize` / `resolvePrincipal` / `canSubscribe` is not
+     missed: it is recorded and applied over the predicates' verdict when that connection opens
+     (the last call wins; no frame — the `connected` frame already lists the result).
+  3. **An event never requested cannot be granted.** The connection only knows the events in its
+     `?events=` list — request every event the page may need, and let `canSubscribe` deny.
+- A frame already enqueued before a `revoke` may still be written; none after it is.
+- WebSocket routers are not covered.
+
+`subscription.granted` and `subscription.revoked` are stream-owned frames like `connected` and
+`ping`: not in the contract, and reserved as router keys of contracted events. On the client:
+
+```typescript
+client.subscribe({
+    events: ['runtimeChanged'],
+    handlers: { runtimeChanged: (p) => update(p) },
+    onSubscriptionChange: ({ event, status }) =>
+    {
+        // event: 'runtimeChanged' (typed); status: 'granted' | 'revoked'
+    },
+});
+```
+
 ### SSE auth config (`SSEAuthConfig<TRouter>`)
 
 | Option | Type | Default | Description |
@@ -392,6 +499,7 @@ Return `false` to skip. Payload is typed per event.
 | `getSubject` | `(c: Context) => string \| null` | `c.get('auth')?.userId ?? null` | extract subject on the token endpoint |
 | `authorize` | `(subject, events[]) => events[] \| Promise<…>` | — | subscription authorization (once on connect) |
 | `filter` | `{ [event]?: (subject, payload) => boolean }` | — | per-event payload filter |
+| `resolvePrincipal` | `(subject, request) => unknown \| Promise<unknown>` | — | principal for every `canSubscribe` (once per connection); a throw ⇒ `403` |
 
 ---
 
@@ -742,7 +850,19 @@ interface EventDef<TPayload = void> {
     useCache: (cache: PubSubCache) => Promise<EventDef<TPayload>>;
     readonly _contract?: EventContract;
     contract: (contract: EventContract) => EventDef<TPayload>;
+    readonly _canSubscribe?: SubscribePredicate<any>;
+    canSubscribe: <P = unknown>(predicate: SubscribePredicate<P>) => EventDef<TPayload>;
+    readonly _filter?: FramePredicate<TPayload>;
+    filter: (predicate: FramePredicate<TPayload>) => EventDef<TPayload>;
+    grant: (subject: string) => Promise<void>;
+    revoke: (subject: string) => Promise<void>;
 }
+
+interface SubscribeRequest { query: Record<string, string>; headers: Record<string, string>; }
+interface SubscribeContext<P = unknown> { subject: string; principal: P | undefined; request: SubscribeRequest; }
+type SubscribePredicate<P = unknown> = (ctx: SubscribeContext<P>) => boolean | Promise<boolean>;
+interface FrameContext { subject: string | undefined; request: SubscribeRequest; }
+type FramePredicate<TPayload> = (payload: TPayload, ctx: FrameContext) => boolean;
 
 interface EventContract { since: string; deprecatedIn?: string; removedIn?: string; }
 
