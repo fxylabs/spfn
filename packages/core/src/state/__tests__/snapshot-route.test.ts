@@ -11,13 +11,23 @@
  * | N4  | no subject                                | 401                                                          |
  * | N5  | one `read` throws                         | whole request fails with that error                          |
  * | N6  | each `read()` observes the clock          | the response `at` ≤ the time each `read()` started           |
+ * | N7  | `GET /state`                              | `manifest` in declaration order with `key` and `write`, built once at router build |
  */
 
 import { describe, expect, it, vi } from 'vitest';
 import { ConflictError } from '../../errors/http-errors';
 import { defineState } from '../state-builder';
 import { defineStateRouter } from '../state-router';
+import { stateManifest } from '../state-routes';
 import { consentState, ISO, memberState, request, Runtime, serve } from './state-harness';
+
+// The manifest builder, spied so N7 can count how often it runs.
+vi.mock('../state-routes', async (importOriginal) =>
+{
+    const routes = await importOriginal<typeof import('../state-routes')>();
+
+    return { ...routes, stateManifest: vi.fn(routes.stateManifest) };
+});
 
 /** A keyless runtime state, beside the keyless consent of N1. */
 function keylessRuntime(canRead: () => boolean = () => true)
@@ -54,6 +64,7 @@ describe('snapshot route', () =>
         expect(body).toEqual({
             at: expect.stringMatching(ISO),
             states: { runtime: { value: 'ready' }, consent: { value: 'agreed', data: { marketing: true } } },
+            manifest: { runtime: { key: [], write: false }, consent: { key: [], write: true } },
         });
         expect(Object.keys(body.states)).toEqual(['runtime', 'consent']);
         expect(JSON.stringify(body.states)).not.toContain('"at"');
@@ -142,5 +153,24 @@ describe('snapshot route', () =>
         {
             expect(Date.parse(body.at)).toBeLessThanOrEqual(time);
         }
+    });
+
+    it('N7 the snapshot carries the manifest in declaration order, built once when the router is built', async () =>
+    {
+        vi.mocked(stateManifest).mockClear();
+        const states = defineStateRouter({ member: memberState().state, consent: consentState().state, runtime: keylessRuntime().state });
+        const app = await serve(states);
+
+        const first = await (await request(app, 's').get('/state')).json();
+        const second = await (await request(app, 's').get('/state?workspaceId=w1')).json();
+
+        expect(first.manifest).toEqual({
+            member: { key: ['workspaceId'], write: false },
+            consent: { key: [], write: true },
+            runtime: { key: [], write: false },
+        });
+        expect(Object.keys(first.manifest)).toEqual(['member', 'consent', 'runtime']);
+        expect(second.manifest).toEqual(first.manifest);
+        expect(stateManifest).toHaveBeenCalledTimes(1);
     });
 });

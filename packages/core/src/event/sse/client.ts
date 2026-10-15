@@ -66,6 +66,34 @@ export interface SSEClient<TRouter extends EventRouterDef<any>>
 }
 
 /**
+ * Connect-query names the stream itself reads; a `query` entry may not shadow them.
+ */
+const RESERVED_QUERY_NAMES = ['events', 'token'];
+
+/**
+ * The `query` option as `&name=value` pairs, both sides encoded. A reserved
+ * name is refused before anything connects: the server would read it as the
+ * event list or the token.
+ */
+function connectQuery(query: Record<string, string> = {}): string
+{
+    const reserved = Object.keys(query).filter(name => RESERVED_QUERY_NAMES.includes(name));
+
+    if (reserved.length > 0)
+    {
+        throw new Error(
+            `SSE subscribe: query names ${reserved.map(name => `"${name}"`).join(', ')} are reserved. `
+            + `The stream reads ${RESERVED_QUERY_NAMES.map(name => `"${name}"`).join(' and ')} from its connect query itself. `
+            + 'Rename the field.',
+        );
+    }
+
+    return Object.entries(query)
+        .map(([name, value]) => `&${encodeURIComponent(name)}=${encodeURIComponent(value)}`)
+        .join('');
+}
+
+/**
  * Default SSE configuration
  */
 const SSE_DEFAULTS = {
@@ -183,6 +211,7 @@ export function createSSEClient<TRouter extends EventRouterDef<any>>(
     function subscribe(options: SSESubscribeOptions<TRouter>): SSEUnsubscribe
     {
         const { events, handlers, onOpen, onError, onReconnect, onClose, onSubscriptionChange } = options;
+        const queryParam = connectQuery(options.query);
 
         // A new subscription supersedes any previous one on this client.
         if (active)
@@ -228,7 +257,7 @@ export function createSSEClient<TRouter extends EventRouterDef<any>>(
                     return;
                 }
 
-                const streamUrl = `${baseUrl}?events=${eventNames.join(',')}${tokenParam}`;
+                const streamUrl = `${baseUrl}?events=${eventNames.join(',')}${queryParam}${tokenParam}`;
 
                 conn.eventSource = new EventSource(streamUrl, {
                     withCredentials,

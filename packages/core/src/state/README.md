@@ -10,17 +10,21 @@ declaration the read route, the write route, its entry in a snapshot route and t
 The server is the single source of truth: every value a client receives is what `read()`
 returned, read on the server; the browser never computes one.
 
-This is the server half. The browser client and the React hook (`@spfn/core/state/client`,
-`@spfn/core/state/react`) are a separate release.
+The browser side — `@spfn/core/state/client` and the React hook `@spfn/core/state/react` —
+is described under [Browser](#browser).
 
 ## Import paths
 
-One entry point, server only.
-
 ```typescript
+// server
 import { defineState, defineStateRouter } from '@spfn/core/state';
 import type { InferStateValue, InferStateKey, InferStateInput } from '@spfn/core/state';
 import { Type } from '@sinclair/typebox';   // for .key() / .value() / .data() / .write() schemas
+
+// browser — the router by type only
+import { createStateClient } from '@spfn/core/state/client';
+import { useServerState } from '@spfn/core/state/react';
+import type { states } from '@/server/states';
 ```
 
 ---
@@ -32,7 +36,7 @@ From `@spfn/core/state`:
 - Builder: `defineState(id)` → `StateBuilder`
 - Router: `defineStateRouter(states, { path?, subject? })` → `StateRouter`
 - Types: `StateBuilder`, `StateRouter`, `StateRouterOptions`, `StateRoutes`, `StateEvents`,
-  `StatesSnapshot`, `SubjectResolver`, `InferStateValue`, `InferStateKey`, `InferStateInput`,
+  `StatesSnapshot`, `StatesManifest`, `SubjectResolver`, `InferStateValue`, `InferStateKey`, `InferStateInput`,
   `StateShape`, `StateValue`, `StateKey`, `StateResult`, `StateSnapshot`, `StateFrame`,
   `ReadContext`, `PermissionContext`, `WriteContext`, `ChangedPayload`, `GrantTarget`,
   `RevokeTarget`, `StateContract`, `StateWriteOptions`, `RoutableState`
@@ -180,7 +184,11 @@ SSE `getSubject` default. No subject → `UnauthorizedError` (401). The principa
 - **Snapshot** `GET <path>`: subject → one `at` → for each state, in declaration order: a keyed
   state whose key fields are not all in the query is omitted; `canRead` false → omitted;
   otherwise `read()`. A keyed state left out never stops a later keyless one. A `read()` that
-  throws fails the whole request — an error is not a permission.
+  throws fails the whole request — an error is not a permission. The answer is
+  `{ at, states, manifest }`: `manifest` is `{ [id]: { key: string[]; write: boolean } }` for
+  every state in declaration order — the key fields (`[]` when keyless) and whether it has a
+  write — built once when the router is built. It is what the [browser client](#browser)
+  knows of the router at runtime.
 
 Every `read()` result is checked against `{ value, data }` as declared — `data` exactly when
 `.data()` is, no other field — with a schema built once per state when the router is built.
@@ -334,8 +342,188 @@ change" by the client (implemented in the client half). There is no version coun
 - the SSE event `state.<id>.changed` with `since` / `deprecatedIn` / `removedIn`.
 
 A state without `.contract()` appears nowhere, like a route without one. The snapshot route is
-not contracted. A `value` literal removed later is `response.type-changed` on the read
+not contracted, its `manifest` included. A `value` literal removed later is `response.type-changed` on the read
 operation and `event.payload.type-changed` on the event, as any route and event.
+
+---
+
+## Browser
+
+`@spfn/core/state/client` is the browser side of a state router: it calls the derived read,
+write and snapshot routes, keeps one SSE stream open for every state, and decides per
+`(id, key)` which of a snapshot, a frame, a read or a write answer is current.
+`@spfn/core/state/react` puts one state into a component. The router is known **by type
+only** — `import type { states }` — so no server code reaches the browser bundle;
+`@spfn/core/state/client` imports nothing from `@spfn/core/state` at runtime.
+
+```typescript
+// src/client/state.ts
+import { createStateClient } from '@spfn/core/state/client';
+import { createAuthSSEClient } from '@spfn/core/event/sse/client';
+import type { states } from '@/server/states';                     // type only
+
+export const state = createStateClient<typeof states>({
+    sse: createAuthSSEClient(),                                     // the state client's own
+    api: { baseUrl: '/api/rpc' },                                   // passed to createApi
+});
+```
+
+```tsx
+'use client';
+import { useServerState } from '@spfn/core/state/react';
+import { state } from '@/client/state';
+
+function Shell({ workspaceId }: { workspaceId: string })
+{
+    const consent = useServerState(state, 'consent');                 // keyless
+    const runtime = useServerState(state, 'runtime', { workspaceId }); // keyed
+
+    if (consent.status === 'loading' || runtime.status === 'loading')
+    {
+        return <Spinner />;
+    }
+
+    return consent.value === 'pending'
+        ? <Terms onAgree={marketing => consent.write({ termsVersion: '2026-10', marketing })} />
+        : <Workspace runtime={runtime.value} />;
+}
+```
+
+### The manifest
+
+A type cannot be read at runtime, and the client needs three facts the router type carries:
+every state id (the stream requests every state event), each keyed state's key fields (to tell
+which key a snapshot entry belongs to) and which states have a write. The snapshot route
+answers them as `manifest`, so the app declares the router once, on the server.
+
+The first `subscribe` — or `get`, `write`, `snapshot` — therefore reads the snapshot **first**:
+the client installs its manifest, then applies its states, then opens the stream with
+`events=` from the manifest, in its order. Until then a `subscribe` waits (it never throws),
+and `current()` is `undefined`; a `subscribe` while that snapshot is in flight is served by it,
+not by a second read. Once the manifest is known, a `subscribe` whose id it does not name, or
+whose key fields differ from the state's, is refused: the error, naming the state and both sets
+of fields, goes to `onError`, and the subscription is dropped without reopening the stream. A
+`write` on a state the manifest marks `write: false` rejects naming the state, before any
+request. A first snapshot that fails goes to `onError` (or rejects the call that needed it).
+While subscriptions wait on it, it is read again every `retryDelay` (default 3000 ms, the SSE
+client's `reconnectDelay`), each failure to `onError`, until it succeeds, `close()` runs, or
+nothing is subscribed; a `get`, `write` or `snapshot` that reads it first serves the waiting
+subscriptions too — whichever call brings the manifest opens the stream. `close()` while it is
+in flight discards its answer, and a `get` or `write` waiting on it rejects: the client was
+closed.
+
+### `createStateClient<typeof states>({ sse, api?, onError?, retryDelay? })`
+
+| Member | Behaviour |
+| --- | --- |
+| `get(id, key?)` | `GET` `get<Id>State`, key fields in the query. The answer is applied under the ordering rule and returned |
+| `snapshot(query?)` | `GET getStates`, by default with the stream's query. Each state in the answer is applied, and each subscribed state it omits is marked `'revoked'` (below); the snapshot is returned. A rejected fetch rejects and changes nothing |
+| `subscribe(id, key?, listener)` | Registers the listener for `(id, key)` and returns its unsubscribe (idempotent). The client's first subscriber reads the snapshot, then opens the stream (below) |
+| `write(id, input, key?)` | `put<Id>State` with the input as the body, key fields in the query. The answer is applied at once — before the frame the write also sends — and returned. Typed only for a state with a write, and requires the key on a keyed one |
+| `current(id, key?)` | Synchronous: `{ at, value, data?, status }`, `{ status: 'revoked' }` for a state revoked before any value arrived, or `undefined`. The same frozen object until a change is applied |
+| `close()` | Closes the stream, drops every listener. Idempotent |
+
+`onError` receives a failure of something the client ran on its own — the first snapshot, the
+snapshot after the stream opened, the read after a grant — and a refused `subscribe` (default
+`console.error`). Calls the app makes reject.
+
+A listener that throws is logged at warn with the state id and does not stop the others.
+
+Give the state client an `SSEClient` of its own: an `SSEClient` holds one subscription, and
+the state client's supersedes any other made on it.
+
+### Ordering
+
+Per `(id, key)`, every arrival — a snapshot entry, a frame, a read or a write answer — goes
+through one rule. `at` is the time the server's read started, so a larger `at` is a later value.
+
+| Arrival | Result |
+| --- | --- |
+| no current entry, or `at` newer than the current | applied, listeners notified |
+| `at` equal to the current | one read stamps one `at`, so this is the same value: applied and notified only when `value` or `data` differ (deep-equal) or the entry is `'revoked'` |
+| `at` older than the current | dropped |
+| a snapshot older than one state's entry | that state keeps its entry; the others take the snapshot |
+| a write answer | applied like a frame — its own frame, arriving later with the same `at` and value, changes nothing |
+| a frame for a key not subscribed here | dropped (the server already filters by the connect query; this is the second guard) |
+
+The ordering rule decides the value; the status is decided apart (next section): an arrival
+on a revoked `(id, key)` supplies its value and leaves it `'revoked'`.
+
+An applied change replaces the entry with a new frozen object; nothing else does. That is
+what `useSyncExternalStore` needs: `getSnapshot` returns the same reference while nothing
+changed.
+
+### The stream
+
+- **One stream per client**, opened when the first subscriber arrives and closed when the last
+  leaves. Subscriptions made in the same task (components mounting together, a StrictMode
+  unmount-remount) are batched into one change.
+- **Snapshot first**: the first stream opens after the first snapshot, whose manifest it needs.
+- **Every event requested**: `events=` lists `state.<id>.changed` for every state of the
+  manifest, in its order, never only the subscribed ones. The server's `grant` activates only an event the
+  connection requested, so a state subscribed later would otherwise be ungrantable.
+- **Keys in the query**: the connect query is the union of the subscribed keys' fields (SSE
+  `subscribe({ query })`). A new key value, or the last subscriber of one leaving, closes the
+  stream and opens it with the new query.
+- **Snapshot on every open** — the first, a reconnect, a reopen on a key change. A frame sent
+  while no stream was open is lost, whether its key changed or not; the snapshot read after
+  the open covers that gap. (It runs on the stream's `open`, not at `onReconnect`: a snapshot
+  read before the new stream is live would leave the same gap.)
+- **One value per key field per connection.** A connect query carries one `workspaceId`; when
+  two subscribed keys disagree on a field, the most recently subscribed key is carried. A key
+  the stream does not carry is read once (`get`) when the stream opens and receives no frames
+  until it is carried again. A screen that must follow two workspaces live uses a second
+  state client.
+
+### `'revoked'` — the server does not serve this to you
+
+One status says the server stopped serving a `(id, key)` to this subject, however the client
+learned it. The mark is kept per `(id, key)` apart from the value, so it holds even when no
+value has arrived yet.
+
+| Arrival | Client |
+| --- | --- |
+| `subscription.revoked` for `state.<id>.changed` | the entry of `id` for **the key the connection carries** (keyless: its one entry) gets `status: 'revoked'`, value kept, listeners notified. The server scopes a revoke by the connect query, so a shadowed key of the same state is untouched |
+| a snapshot that omits a subscribed state — keyless, or keyed with its key in the query | `'revoked'`, value kept if one exists, listeners notified. This is also a state denied at connect (`canRead` false, absent from the snapshot), and a reconnect after access was lost while the stream was down, when no revoke could arrive. A keyed state whose key the query did not carry is not marked |
+| a frame, a read or a snapshot started before the revoke | supplies its value under the ordering rule; the status stays `'revoked'` |
+| `subscription.granted` for it | clears the mark for the carried key and reads it once (`get`); the server also sends a frame, before or after the control frame. Both arrive `'ready'`, and either order ends at the latest value |
+| the snapshot of a connection opened after the revoke, holding the state | clears the mark: that connection's own connect check served it |
+| the read of a shadowed key when a connection opened after the revoke, answered | clears the mark the same way: the read route served it |
+| an answer of such a read older than the entry — a frame or a `write()` answer of the new connection landed first | its value is dropped under the ordering rule, while the mark is still lifted: the lift goes by the connection, not by `at` |
+
+Every automatic read is tagged with the connection it was started for, which is how a
+snapshot in flight across a revoke is told from one read after it.
+
+### `useServerState(client, id, key?)`
+
+```typescript
+// → { status: 'loading' | 'ready' | 'revoked'; at?: string; value?: V; data?: D; write?: (input) => Promise<StateFrame> }
+```
+
+- Built on `useSyncExternalStore`: `subscribe` is `client.subscribe(id, key, cb)`,
+  `getSnapshot` is `client.current(id, key)`, and the server snapshot is `undefined` — a
+  server render is `'loading'` and opens nothing.
+- The key is compared by its fields (stable-stringified), so `{ workspaceId }` written inline
+  does not resubscribe on every render; another `workspaceId` unsubscribes and subscribes. A
+  key never seen is `'loading'` until it has an entry; a key seen before shows its cached
+  entry as `'ready'` until the reopen snapshot lands (entries are not evicted).
+- `write` is typed only for a state with a write, bound to the hook's key. At runtime it is on
+  every result — the type decides, so no render waits on the manifest — and on a state
+  without a write it rejects naming the state.
+- `react` (`^18 || ^19`) is an **optional peer** of `@spfn/core`: only `@spfn/core/state/react`
+  imports it. `@spfn/core/state/client` is framework-neutral.
+
+A page's first paint still comes from a server component reading the state's route with the
+app's `api.` client; the hook takes over in the browser.
+
+### Types
+
+From `@spfn/core/state/client`: `createStateClient`, `StateClient<TStates>`,
+`StateClientConfig`, `StateFrame<V, D>`, `StateEntry<V, D>` (a frame plus `status`, or
+`{ status: 'revoked' }` alone), `StateListener`, `StateId`, `StateKeyArgs`, `WritableStateId`,
+`StateCatalog`, `StateFrameOf`, `InferStateData`, and — re-exported type-only from the server
+module — `InferStateValue`, `InferStateKey`, `InferStateInput`. From `@spfn/core/state/react`:
+`useServerState`, `ServerState<TStates, Id>`.
 
 ---
 
@@ -343,8 +531,9 @@ operation and `event.payload.type-changed` on the event, as any route and event.
 
 - Browser-only state (an open panel, a draft), session and network state.
 - Optimistic updates: the client applies what the server read, never a guess.
-- The browser client and the React hook — `@spfn/core/state/client`, `@spfn/core/state/react`,
-  a separate release.
+- In the browser client: optimistic updates, offline queueing of writes, more than one SSE
+  connection per client, WebSocket, and Next.js server components (a server component reads
+  the route with the app's `api.` client as any other initial data).
 - De-duplicating `read()` across subscribers of a per-subject keyed state (each subject has
   its own value; a shared key is read once).
 - A route-level "refuse until state X is Y" gate.

@@ -29,6 +29,8 @@ export default defineConfig({
         'event/ws/index': 'src/event/ws/index.ts',
         'event/ws/client': 'src/event/ws/client.ts',
         'state/index': 'src/state/index.ts',
+        'state/client': 'src/state/client.ts',
+        'state/react': 'src/state/react.tsx',
     },
     format: ['esm'],
     dts: true,
@@ -73,5 +75,7 @@ export default defineConfig({
         'next',
         'next/server',
         'next/headers',
+        'react',
+        'react-dom',
     ],
 });

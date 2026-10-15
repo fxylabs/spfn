@@ -1,6 +1,6 @@
 {
     "name": "@spfn/core",
-    "version": "0.3.0-beta.25",
+    "version": "0.3.0-beta.26",
     "description": "Full-stack TypeScript backend for Next.js: file-based typed routes, Drizzle entities and repositories, PostgreSQL transactions and a generated end-to-end client, in one fixed vertical slice per feature",
     "type": "module",
     "exports": {
@@ -124,6 +124,16 @@
             "import": "./dist/state/index.js",
             "require": "./dist/state/index.js"
         },
+        "./state/client": {
+            "types": "./dist/state/client.d.ts",
+            "import": "./dist/state/client.js",
+            "require": "./dist/state/client.js"
+        },
+        "./state/react": {
+            "types": "./dist/state/react.d.ts",
+            "import": "./dist/state/react.js",
+            "require": "./dist/state/react.js"
+        },
         "./event/sse": {
             "types": "./dist/event/sse/index.d.ts",
             "import": "./dist/event/sse/index.js",
@@ -230,21 +240,30 @@
         "@electric-sql/pglite": "0.5.4",
         "@types/micromatch": "^4.0.9",
         "@types/node": "^20.11.0",
+        "@types/react": "^19.0.0",
+        "@types/react-dom": "^19.0.0",
         "@types/ws": "^8.18.1",
         "@vitest/coverage-v8": "^4.0.6",
         "drizzle-kit": "1.0.0-rc.4",
         "drizzle-orm": "1.0.0-rc.4",
+        "jsdom": "^27.0.0",
         "madge": "^8.0.0",
         "next": "^16.3.8",
+        "react": "^19.2.1",
+        "react-dom": "^19.2.1",
         "tsup": "^8.5.0",
         "vitest": "^4.0.6"
     },
     "peerDependencies": {
         "drizzle-orm": ">=1.0.0-rc.4 <2",
-        "next": "^16.3.8"
+        "next": "^16.3.8",
+        "react": "^18.0.0 || ^19.0.0"
     },
     "peerDependenciesMeta": {
         "next": {
+            "optional": true
+        },
+        "react": {
             "optional": true
         }
     },

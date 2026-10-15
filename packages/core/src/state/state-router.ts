@@ -12,7 +12,7 @@ import { defineRouter } from '@spfn/core/route';
 import type { RouteDef, Router } from '@spfn/core/route';
 import { bindState, stateBinding } from './state-binding';
 import { changedPayloadSchema, stateEventName, subscribeChangeSignals } from './state-event';
-import { defaultSubject, readRoute, snapshotRoute, stateRouteName, writeRoute } from './state-routes';
+import { defaultSubject, readRoute, snapshotRoute, stateManifest, stateRouteName, writeRoute } from './state-routes';
 import type { SubjectResolver } from './state-routes';
 import type { RoutableState, StateFrame, StateKey, StateResult, StateSnapshot, StateValue } from './types';
 
@@ -45,10 +45,15 @@ type WriteRoutes<S extends Record<string, RoutableState>> = {
     [K in keyof S as Shape<S[K]>['input'] extends TSchema ? `put${Capitalize<S[K]['id']>}State` : never]: RouteDef<WriteInput<S[K]>, {}, StateSnapshot<Shape<S[K]>>>;
 };
 
-/** What `GET <path>` answers: every state the subject may read and whose key the query carries. */
+/**
+ * What `GET <path>` answers: every state the subject may read and whose key
+ * the query carries, and the manifest of every state — its key fields and
+ * whether it has a write — in declaration order.
+ */
 export type StatesSnapshot<S extends Record<string, RoutableState>> = {
     at: string;
     states: { [K in keyof S as S[K]['id']]?: StateResult<Shape<S[K]>> };
+    manifest: { [K in keyof S as S[K]['id']]: { key: string[]; write: boolean } };
 };
 
 /** The routes one state router derives, typed for `createApi` and the route map. */
@@ -135,7 +140,7 @@ function deriveRoutes(states: RoutableState[], path: string, resolveSubject: Sub
         }
     }
 
-    routes.getStates = snapshotRoute(states, path, resolveSubject);
+    routes.getStates = snapshotRoute(states, stateManifest(states), path, resolveSubject);
 
     return routes;
 }

@@ -28,7 +28,10 @@
             "@spfn/core/config": ["./src/config/index.ts"],
             "@spfn/core/job": ["./src/job/index.ts"],
             "@spfn/core/event": ["./src/event/index.ts"],
-            "@spfn/core/state": ["./src/state/index.ts"]
+            "@spfn/core/event/sse": ["./src/event/sse/index.ts"],
+            "@spfn/core/event/sse/client": ["./src/event/sse/client.ts"],
+            "@spfn/core/state": ["./src/state/index.ts"],
+            "@spfn/core/state/client": ["./src/state/client.ts"]
         }
     },
     "include": ["src/**/*"],

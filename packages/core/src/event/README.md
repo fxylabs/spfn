@@ -557,6 +557,27 @@ unsubscribe();      // same as close() for that subscription
 | `withCredentials` | `boolean` | `false` | send cookies with the EventSource request |
 | `acquireToken` | `() => Promise<string>` | — | mint a token before each (re)connect; appended as `?token=…` |
 
+### Connect-query fields (`query`)
+
+`subscribe({ …, query })` appends extra fields to the stream URL — the key a keyed state
+event is filtered on, say. Each entry goes after `events=` and before `token=`, both name and
+value `encodeURIComponent`-ed, and every reconnect reuses the same query. The server reads
+them as `request.query` in `canSubscribe` and `filter`.
+
+```typescript
+client.subscribe({
+    events: ['state.runtime.changed'],
+    handlers: { 'state.runtime.changed': (frame) => apply(frame) },
+    query: { workspaceId: 'w 1' },   // → /events/stream?events=state.runtime.changed&workspaceId=w%201
+});
+```
+
+`events` and `token` are reserved — the stream reads them itself — and `subscribe` throws
+naming the field before anything connects. Without `query` the URL is exactly what it was.
+The query belongs to the subscription: to change it, subscribe again (a new subscription
+supersedes the client's previous one). `@spfn/core/state/client` does this when its set of
+subscribed keys changes.
+
 ### `createAuthSSEClient(config?)` — with auth (recommended)
 
 Wraps `createSSEClient` and wires `acquireToken` to fetch a one-time token from the RPC

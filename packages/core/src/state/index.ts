@@ -35,7 +35,7 @@ export type {
     StateRoutes,
     StatesSnapshot,
 } from './state-router';
-export type { SubjectResolver } from './state-routes';
+export type { StatesManifest, SubjectResolver } from './state-routes';
 
 // Types
 export type {

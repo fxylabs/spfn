@@ -44,6 +44,7 @@ Next.js owns the frontend, Drizzle owns the SQL, and your services own the rules
 ```bash
 pnpm add @spfn/core@beta drizzle-orm@1.0.0-rc.4 postgres pg
 # optional peer: next ^16.3.8   (only for the Next.js bridge)
+# optional peer: react ^18 || ^19 (only for @spfn/core/state/react)
 ```
 
 Node `>=20.0.0`. ESM only.
@@ -353,7 +354,9 @@ Each module has its own README with the API detail.
 | `@spfn/core/event/sse/client` | Browser SSE client (`EventSource`). | [src/event](./src/event/README.md) |
 | `@spfn/core/event/ws` | Server-side WebSocket handler. Server only; needs the optional `ws` dependency. | [src/event](./src/event/README.md) |
 | `@spfn/core/event/ws/client` | Browser WebSocket client. | [src/event](./src/event/README.md) |
-| `@spfn/core/state` | A server-owned state declared once (`defineState`, `defineStateRouter`) derives its read, write and snapshot routes and its SSE event; the app emits `state.changed` after a commit. Server half — the browser client is a later release. | [src/state](./src/state/README.md) |
+| `@spfn/core/state` | A server-owned state declared once (`defineState`, `defineStateRouter`) derives its read, write and snapshot routes and its SSE event; the app emits `state.changed` after a commit. Server only. | [src/state](./src/state/README.md) |
+| `@spfn/core/state/client` | The browser side of a state router, typed from `typeof states` (type-only import) and told the rest by the snapshot's manifest: `createStateClient` reads, writes and snapshots through the derived routes, keeps one SSE stream for every state, and orders snapshots against frames by `at`. Framework-neutral, no React. | [src/state](./src/state/README.md#browser) |
+| `@spfn/core/state/react` | `useServerState(client, id, key?)` — a component's view of one state through `useSyncExternalStore`, with `write` on a state that has one. Needs the optional `react` peer. | [src/state](./src/state/README.md#browser) |
 | `@spfn/core/codegen` | The codegen orchestrator and the built-in generators: `@spfn/core:route-map` for the proxy's route map, `@spfn/core:contract` for the client contract. | [src/codegen](./src/codegen/README.md) |
 | `@spfn/core/contract` | Route contracts for clients that ship separately: collect, snapshot, and the build gate that refuses a breaking change. | [src/contract](./src/contract/README.md) |
 | `@spfn/core/ops` | The operations surface `spfn ops` drives: `opsRoute`, `createOpsRouter`, `defineOpsModule`, and the manifest the CLI discovers commands from. Structure only — the router is always authenticated, and token verification lives in `@spfn/auth`. | [How do I operate the app from the terminal?](#how-do-i-operate-the-app-from-the-terminal) |

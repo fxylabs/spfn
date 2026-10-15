@@ -317,6 +317,14 @@ export interface SSESubscribeOptions<TRouter extends EventRouterDef<any>>
     handlers: SSEEventHandlers<TRouter>;
 
     /**
+     * Extra connect-query fields, e.g. the key a state event is filtered on
+     * (`{ workspaceId: 'w1' }`). Appended to the stream URL after `events=`,
+     * both sides URI-encoded, and reused on every reconnect. `events` and
+     * `token` are reserved: subscribe throws naming them.
+     */
+    query?: Record<string, string>;
+
+    /**
      * Called when connection opens
      */
     onOpen?: () => void;

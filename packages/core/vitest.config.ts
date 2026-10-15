@@ -18,7 +18,7 @@ export default defineConfig({
     test: {
         globals: true,
         environment: 'node',
-        include: ['src/**/*.{test,spec}.{js,ts}'],
+        include: ['src/**/*.{test,spec}.{js,ts,tsx}'],
 
         // Sequential execution to reduce memory usage and avoid global state conflicts
         fileParallelism: false,

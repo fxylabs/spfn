@@ -177,8 +177,23 @@ async function snapshotEntry(def: StateDefinition, subject: string, principal: u
     return def.data ? { value, data } : { value };
 }
 
-/** `GET <path>`: one `at`, then every readable state in declaration order. A `read()` that throws fails it all. */
-export function snapshotRoute(states: RoutableState[], path: string, resolveSubject: SubjectResolver): RouteDef<any, any, any>
+/** What the browser cannot read from a type: every state, in declaration order, its key fields and whether it has a write. */
+export type StatesManifest = Record<string, { key: string[]; write: boolean }>;
+
+/** The snapshot's `manifest`. It is static: the router builds it once and every snapshot answers the same object. */
+export function stateManifest(states: RoutableState[]): StatesManifest
+{
+    return Object.fromEntries(states.map(state => [state.id, {
+        key: Object.keys(state._definition.key?.properties ?? {}),
+        write: state._definition.write !== undefined,
+    }]));
+}
+
+/**
+ * `GET <path>`: one `at`, then every readable state in declaration order, and
+ * the router's `manifest`. A `read()` that throws fails it all.
+ */
+export function snapshotRoute(states: RoutableState[], manifest: StatesManifest, path: string, resolveSubject: SubjectResolver): RouteDef<any, any, any>
 {
     return route.get(path).input({ query: snapshotQuery(states) }).handler(async (c) =>
     {
@@ -193,6 +208,7 @@ export function snapshotRoute(states: RoutableState[], path: string, resolveSubj
             states: Object.fromEntries(states
                 .map((state, index) => [state.id, entries[index]])
                 .filter(([, entry]) => entry !== undefined)),
+            manifest,
         };
     });
 }
