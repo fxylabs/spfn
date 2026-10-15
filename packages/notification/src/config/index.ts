@@ -28,6 +28,13 @@ export interface NotificationConfig
         provider?: 'aws-ses' | 'sendgrid' | 'smtp';
         from?: string;
         replyTo?: string;
+        /**
+         * SES configuration set every email send names, so SES publishes that
+         * send's events (delivery, bounce, complaint, …) to the set's event
+         * destinations (falls back to SPFN_NOTIFICATION_SES_CONFIGURATION_SET).
+         * SES only: a provider passed to `registerEmailProvider` never sees it.
+         */
+        configurationSetName?: string;
     };
     sms?: {
         provider?: 'aws-sns' | 'twilio';
@@ -127,6 +134,14 @@ export function getNotificationConfig(): NotificationConfig
 export function getEmailFrom(): string
 {
     return globalConfig.email?.from || env.SPFN_NOTIFICATION_EMAIL_FROM || 'noreply@example.com';
+}
+
+/**
+ * Get the SES configuration set every email send names (config → env)
+ */
+export function getSesConfigurationSetName(): string | undefined
+{
+    return globalConfig.email?.configurationSetName || env.SPFN_NOTIFICATION_SES_CONFIGURATION_SET || undefined;
 }
 
 /**
