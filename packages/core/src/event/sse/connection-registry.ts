@@ -7,7 +7,8 @@
  *
  * Neither operation consults `canSubscribe` or `authorize`: they are an
  * operator's statement about an open connection. Permission lives in app data
- * and is re-read at the next connect.
+ * and is re-read at the next connect. A `match` narrows either to the
+ * connections whose connect query carries its fields.
  *
  * A connect still reading app data (`authorize`, `resolvePrincipal`,
  * `canSubscribe`) is a pending admission: a `grant` / `revoke` that lands then
@@ -16,7 +17,7 @@
  */
 
 import { logger } from '@spfn/core/logger';
-import type { SubscribeRequest } from '../types';
+import type { SubscribeRequest, SubscriptionMatch } from '../types';
 
 const registryLogger = logger.child('@spfn/core:sse');
 
@@ -71,8 +72,16 @@ export interface PendingAdmission
     readonly cancel: () => void;
 }
 
-/** The changes recorded on one pending admission: event → last call (last one wins). */
-type RecordedChanges = Map<string, SubscriptionChange>;
+/** One `grant` / `revoke` recorded on a pending admission. */
+interface RecordedChange
+{
+    kind: SubscriptionChange;
+    eventName: string;
+    match?: SubscriptionMatch;
+}
+
+/** The changes recorded on one pending admission, in call order (the last one wins). */
+type RecordedChanges = RecordedChange[];
 
 /**
  * Create the registry of one SSE handler, keyed by subject → open connections
@@ -89,7 +98,7 @@ export function createConnectionRegistry()
      */
     const beginAdmission = (subject: string, signal: AbortSignal): PendingAdmission =>
     {
-        const changes: RecordedChanges = new Map();
+        const changes: RecordedChanges = [];
         addToSet(pendingBySubject, subject, changes);
         const end = endOnce(signal, () => removeFromSet(pendingBySubject, subject, changes));
 
@@ -110,12 +119,18 @@ export function createConnectionRegistry()
         };
     };
 
-    const change = (kind: SubscriptionChange, subject: string, eventName: string): void =>
+    const change = (kind: SubscriptionChange, subject: string, eventName: string, match?: SubscriptionMatch): void =>
     {
         const pending = pendingBySubject.get(subject);
         const connections = bySubject.get(subject);
-        pending?.forEach(changes => changes.set(eventName, kind));
-        connections?.forEach(connection => (kind === 'grant' ? grantOn : revokeOn)(connection, eventName));
+        pending?.forEach(changes => changes.push({ kind, eventName, match }));
+        connections?.forEach(connection =>
+        {
+            if (matchesRequest(match, connection.request))
+            {
+                (kind === 'grant' ? grantOn : revokeOn)(connection, eventName);
+            }
+        });
 
         if (!pending && !connections)
         {
@@ -142,9 +157,11 @@ export function createConnectionRegistry()
 
         pendingCount: (subject: string): number => pendingBySubject.get(subject)?.size ?? 0,
 
-        grant: (subject: string, eventName: string): void => change('grant', subject, eventName),
+        grant: (subject: string, eventName: string, match?: SubscriptionMatch): void =>
+            change('grant', subject, eventName, match),
 
-        revoke: (subject: string, eventName: string): void => change('revoke', subject, eventName),
+        revoke: (subject: string, eventName: string, match?: SubscriptionMatch): void =>
+            change('revoke', subject, eventName, match),
     };
 }
 
@@ -200,14 +217,31 @@ function removeFromSet<T>(map: Map<string, Set<T>>, key: string, value: T): void
 }
 
 /**
+ * Whether `match` reaches a connection: every named field equals the connect
+ * query's value, string to string. A field the connection never declared
+ * never matches, not even an empty string. No `match` reaches every one.
+ */
+export function matchesRequest(match: SubscriptionMatch | undefined, request: SubscribeRequest): boolean
+{
+    return match === undefined || Object.entries(match.query).every(([field, value]) =>
+        Object.hasOwn(request.query, field) && request.query[field] === value);
+}
+
+/**
  * Apply what was recorded during admission to a connection that has not
  * opened yet: move the event between `allowed` and `denied`, no frame. An
- * event the connection never requested is in neither set and stays out.
+ * event the connection never requested is in neither set and stays out; a
+ * change whose `match` the connection's query does not meet is skipped.
  */
 function applyRecorded(connection: SSEConnection, changes: RecordedChanges): void
 {
-    changes.forEach((kind, eventName) =>
+    changes.forEach(({ kind, eventName, match }) =>
     {
+        if (!matchesRequest(match, connection.request))
+        {
+            return;
+        }
+
         const [from, to] = kind === 'grant'
             ? [connection.denied, connection.allowed]
             : [connection.allowed, connection.denied];

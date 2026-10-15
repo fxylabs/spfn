@@ -498,6 +498,114 @@ describe('createRedisPubSubCache', () =>
     });
 });
 
+/**
+ * | #  | situation                                                        | expected                                         |
+ * |----|------------------------------------------------------------------|--------------------------------------------------|
+ * | C6 | `subscribe(h, { localOnly: true })` on pod B; pod A emits         | `h` not called; a plain handler on B is called   |
+ * | C7 | a `localOnly` handler on the emitting pod                         | called once                                      |
+ * | C7'| a `localOnly` handler with no cache attached                      | called once per emit, as any handler             |
+ * | C8 | `unsubscribeAll()`                                                | clears plain and `localOnly` handlers            |
+ * | C11| a `localOnly` handler; the cache's `publish` rejects (local fallback) | called once per emit; a plain handler once per emit |
+ */
+describe('subscribe({ localOnly })', () =>
+{
+    const schema = Type.Object({ n: Type.Number() });
+
+    async function twoPods()
+    {
+        const bus = new FakeBus();
+        const podA = defineEvent('test.local', schema);
+        const podB = defineEvent('test.local', schema);
+        await podA.useCache(createRedisPubSubCache(new FakeRedis(bus), 'spfn:sse:'));
+        await podB.useCache(createRedisPubSubCache(new FakeRedis(bus), 'spfn:sse:'));
+
+        return { podA, podB };
+    }
+
+    it('C6 a localOnly handler on pod B is not called for pod A\'s emit; a plain handler on B is', async () =>
+    {
+        const { podA, podB } = await twoPods();
+        const local = vi.fn();
+        const plain = vi.fn();
+        podB.subscribe(local, { localOnly: true });
+        podB.subscribe(plain);
+
+        await podA.emit({ n: 1 });
+        await flush();
+
+        expect(plain).toHaveBeenCalledWith({ n: 1 });
+        expect(local).not.toHaveBeenCalled();
+    });
+
+    it('C7 a localOnly handler on the emitting pod is called once', async () =>
+    {
+        const { podA } = await twoPods();
+        const local = vi.fn();
+        const plain = vi.fn();
+        podA.subscribe(local, { localOnly: true });
+        podA.subscribe(plain);
+
+        await podA.emit({ n: 1 });
+        await flush();
+
+        expect(local).toHaveBeenCalledTimes(1);
+        expect(local).toHaveBeenCalledWith({ n: 1 });
+        expect(plain).toHaveBeenCalledTimes(1);
+    });
+
+    it('C7\' without a cache a localOnly handler runs on every emit, as any handler', async () =>
+    {
+        const event = defineEvent('test.local', schema);
+        const local = vi.fn();
+        event.subscribe(local, { localOnly: true });
+
+        await event.emit({ n: 1 });
+        await event.emit({ n: 2 });
+
+        expect(local.mock.calls).toEqual([[{ n: 1 }], [{ n: 2 }]]);
+    });
+
+    it('C8 unsubscribeAll clears plain and localOnly handlers', async () =>
+    {
+        const { podA } = await twoPods();
+        const local = vi.fn();
+        const plain = vi.fn();
+        podA.subscribe(local, { localOnly: true });
+        podA.subscribe(plain);
+
+        podA.unsubscribeAll();
+        await podA.emit({ n: 1 });
+        await flush();
+
+        expect(local).not.toHaveBeenCalled();
+        expect(plain).not.toHaveBeenCalled();
+    });
+
+    it('C11 when publish fails and delivery falls back to local, a localOnly handler still runs once per emit', async () =>
+    {
+        const client = {
+            publish: vi.fn().mockRejectedValue(new Error('redis down')),
+            duplicate: vi.fn().mockReturnValue({ subscribe: vi.fn().mockResolvedValue(undefined), on: vi.fn() }),
+            subscribe: vi.fn(),
+            on: vi.fn(),
+        };
+        const event = defineEvent('test.local', schema);
+        await event.useCache(createRedisPubSubCache(client as any, 'spfn:sse:'));
+        const local = vi.fn();
+        const plain = vi.fn();
+        event.subscribe(local, { localOnly: true });
+        event.subscribe(plain);
+
+        await event.emit({ n: 1 });
+        await event.emit({ n: 2 });
+        await flush();
+
+        expect(client.publish).toHaveBeenCalled();
+        expect(local.mock.calls).toEqual([[{ n: 1 }], [{ n: 2 }]]);
+        expect(plain.mock.calls).toEqual([[{ n: 1 }], [{ n: 2 }]]);
+    });
+});
+
 describe('wireEventRouterCache', () =>
 {
     it('stays in-process when multiInstance is disabled', async () =>

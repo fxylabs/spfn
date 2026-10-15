@@ -13,7 +13,7 @@
 
 import { logger } from '@spfn/core/logger';
 import type { EventRouterBase } from './router';
-import type { PubSubCache } from './types';
+import type { PubSubCache, SubscriptionMatch } from './types';
 
 const transportLogger = logger.child('@spfn/core:event-transport');
 
@@ -394,12 +394,19 @@ export interface SubscriptionControlMessage
 
     subject: string;
 
+    /** Which of the subject's connections it reaches; absent → every one. */
+    match?: SubscriptionMatch;
+
     /** The publishing binding, so a pod skips its own echo (it applied the change locally first). */
     origin: string;
 }
 
 /** Applies one control message to the local registries of one event. */
-export type SubscriptionControlApply = (kind: SubscriptionControlMessage['kind'], subject: string) => void;
+export type SubscriptionControlApply = (
+    kind: SubscriptionControlMessage['kind'],
+    subject: string,
+    match?: SubscriptionMatch,
+) => void;
 
 interface ControlBinding
 {
@@ -435,7 +442,25 @@ function isControlMessage(message: unknown): message is SubscriptionControlMessa
         && (candidate.kind === 'grant' || candidate.kind === 'revoke')
         && typeof candidate.event === 'string'
         && typeof candidate.subject === 'string'
-        && typeof candidate.origin === 'string';
+        && typeof candidate.origin === 'string'
+        && (candidate.match === undefined || isSubscriptionMatch(candidate.match));
+}
+
+/**
+ * `{ query: { [field]: string } }` with at least one field, and nothing looser:
+ * a bad match must not widen a grant, and an empty `query` matches every
+ * connection of the subject.
+ */
+export function isSubscriptionMatch(match: unknown): match is SubscriptionMatch
+{
+    const query = (match as Partial<SubscriptionMatch> | null)?.query;
+
+    return typeof match === 'object'
+        && typeof query === 'object'
+        && query !== null
+        && !Array.isArray(query)
+        && Object.keys(query).length > 0
+        && Object.values(query).every(value => typeof value === 'string');
 }
 
 function dispatchControl(binding: ControlBinding, message: unknown): void
@@ -462,7 +487,7 @@ function dispatchControl(binding: ControlBinding, message: unknown): void
         return;
     }
 
-    appliers.forEach(apply => apply(message.kind, message.subject));
+    appliers.forEach(apply => apply(message.kind, message.subject, message.match));
 }
 
 /**
@@ -506,12 +531,14 @@ export async function publishSubscriptionControl(
     kind: SubscriptionControlMessage['kind'],
     eventName: string,
     subject: string,
+    match?: SubscriptionMatch,
 ): Promise<void>
 {
     const message: SubscriptionControlMessage = {
         kind,
         event: eventName,
         subject,
+        ...(match ? { match } : {}),
         origin: ensureControlBinding(cache).origin,
     };
 

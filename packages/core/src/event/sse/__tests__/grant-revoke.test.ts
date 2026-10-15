@@ -26,6 +26,12 @@
  * | G16''| `$control` message without `origin` while `s` is open with E    | E still delivered; no `subscription.revoked`; debug "Malformed"        |
  * | G17  | pod A holds `s` with E; A `revoke`s then `grant`s; its own echoes arrive after both | exactly one revoked then one granted; E allowed; emit delivered once |
  * | G18  | same queued bus; pod B's `revoke(s)` arrives at A               | applied (not mistaken for an echo)                                     |
+ * | G19  | `grant(s, { query: { workspaceId: 'w1' } })`, tabs on w1, w2 and one without the field | only the w1 tab activated; the others get no frame and no delivery |
+ * | G20  | control message with `match: { query: 5 }`; and a well-formed `match` for an unknown event | malformed, ignored: E stays denied, no frame; the unknown event is ignored as without `match` |
+ * | G21  | `grant(s, match)` on pod A, tabs on pod B on w1 and w2          | pod B applies the same query rule: only the w1 tab activated           |
+ * | G22  | `grant(s, { query: { workspaceId: undefined } })`, `s` tabs on two pods | rejects; neither pod grants                                     |
+ * | G23  | `grant(s, { query: {} })`                                       | rejects locally; nothing published                                     |
+ * | G24  | control message with `match: { query: { workspaceId: 5 } }`, and with `match: { query: {} }` | malformed, ignored                       |
  *
  * During admission — a `grant` / `revoke` while the connect still awaits app data:
  *
@@ -50,6 +56,7 @@
  * | A16  | two tabs admitting; `revoke` of a never-requested event and of one `canSubscribe` denied | both open independently; `deniedEvents` lists the denied one once, never the unrequested one |
  * | A17  | the request is already aborted when admission begins; `canSubscribe` never settles | no pending entry (predicate not released); no open connection |
  * | A18  | global `authorize` never settles; the client aborts             | same as A9                                                             |
+ * | G25  | `grant(s, { query: w1 })` while `s`'s w1 and w2 tabs are both admitting (`canSubscribe` → `false`) | the w2 tab opens without E; the w1 tab opens with it |
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
@@ -537,10 +544,160 @@ describe('SSE grant / revoke', () =>
         expect((await stream.frame(REVOKED)).data).toEqual({ event: 'e' });
         expect(stream.named('e')).toEqual([]);
     });
+
+    it('G19 grant with a query match activates only the matching connection', async () =>
+    {
+        const { e, router } = events();
+        e.canSubscribe(() => false);
+        const app = createStreamApp(router);
+        const onW1 = await app.connect('s', { query: 'events=e&workspaceId=w1' });
+        const onW2 = await app.connect('s', { query: 'events=e&workspaceId=w2' });
+        const keyless = await app.connect('s', { query: 'events=e' });
+        await Promise.all([onW1.frame('connected'), onW2.frame('connected'), keyless.frame('connected')]);
+
+        await e.grant('s', { query: { workspaceId: 'w1' } });
+        await onW1.frame(GRANTED);
+        await e.emit({ n: 1 });
+        await onW1.frame('e');
+
+        expect(onW2.frames.map(frame => frame.event)).toEqual(['connected']);
+        expect(keyless.frames.map(frame => frame.event)).toEqual(['connected']);
+    });
+
+    it('G20 a control message whose match query is not a string record is malformed and ignored', async () =>
+    {
+        const bus = new FakeBus();
+        const { e, f, router } = events();
+        e.canSubscribe(() => false);
+        await e.useCache(createRedisPubSubCache(new FakeRedis(bus), 'test:'));
+        const stream = await createStreamApp(router).connect('s', { query: 'events=e,f&workspaceId=w1' });
+        await stream.frame('connected');
+
+        bus.publish('test:$control', JSON.stringify({ origin: 'other-pod', kind: 'grant', event: 'test.e', subject: 's', match: { query: 5 } }));
+        bus.publish('test:$control', JSON.stringify({ origin: 'other-pod', kind: 'grant', event: 'no.such.event', subject: 's', match: { query: { workspaceId: 'w1' } } }));
+        await e.emit({ n: 1 });
+        await f.emit({ n: 2 });
+        await stream.frame('f');
+
+        expect(stream.frames.map(frame => frame.event)).toEqual(['connected', 'f']);
+        expect(logger.debug).toHaveBeenCalledWith(expect.stringContaining('Malformed'));
+        expect(logger.debug).toHaveBeenCalledWith(expect.stringContaining('does not serve'), { event: 'no.such.event' });
+    });
+
+    it('G21 a match published by pod A is applied by pod B with the same query rule', async () =>
+    {
+        const bus = new FakeBus();
+        const podA = events();
+        const podB = events();
+        podB.e.canSubscribe(() => false);
+        await podA.e.useCache(createRedisPubSubCache(new FakeRedis(bus), 'test:'));
+        await podB.e.useCache(createRedisPubSubCache(new FakeRedis(bus), 'test:'));
+        createStreamApp(podA.router);
+        const appB = createStreamApp(podB.router);
+        const onW1 = await appB.connect('s', { query: 'events=e,f&workspaceId=w1' });
+        const onW2 = await appB.connect('s', { query: 'events=e,f&workspaceId=w2' });
+        await Promise.all([onW1.frame('connected'), onW2.frame('connected')]);
+
+        await podA.e.grant('s', { query: { workspaceId: 'w1' } });
+        await onW1.frame(GRANTED);
+        await podB.f.emit({ n: 1 });
+        await onW2.frame('f');
+
+        expect(onW2.named(GRANTED)).toEqual([]);
+    });
+});
+
+describe('SSE grant / revoke: a match never widens', () =>
+{
+    it('G22 a match with an undefined value rejects, and neither pod grants', async () =>
+    {
+        const bus = new FakeBus();
+        const podA = events();
+        const podB = events();
+        podA.e.canSubscribe(() => false);
+        podB.e.canSubscribe(() => false);
+        await podA.e.useCache(createRedisPubSubCache(new FakeRedis(bus), 'test:'));
+        await podB.e.useCache(createRedisPubSubCache(new FakeRedis(bus), 'test:'));
+        const onA = await createStreamApp(podA.router).connect('s', { query: 'events=e,f&workspaceId=w2' });
+        const onB = await createStreamApp(podB.router).connect('s', { query: 'events=e,f&workspaceId=w2' });
+        await Promise.all([onA.frame('connected'), onB.frame('connected')]);
+
+        await expect(podA.e.grant('s', { query: { workspaceId: undefined as unknown as string } }))
+            .rejects.toThrow('Event "test.e" .grant() refused its match');
+        await podA.f.emit({ n: 1 });
+        await podB.f.emit({ n: 1 });
+        await Promise.all([onA.frame('f'), onB.frame('f')]);
+
+        expect(onA.named(GRANTED)).toEqual([]);
+        expect(onB.named(GRANTED)).toEqual([]);
+    });
+
+    it('G23 a match with an empty query rejects locally and publishes nothing', async () =>
+    {
+        const bus = new FakeBus();
+        const { e, f, router } = events();
+        e.canSubscribe(() => false);
+        await e.useCache(createRedisPubSubCache(new FakeRedis(bus), 'test:'));
+        const stream = await createStreamApp(router).connect('s', { query: 'events=e,f&workspaceId=w1' });
+        await stream.frame('connected');
+        const publish = vi.spyOn(bus, 'publish');
+
+        await expect(e.grant('s', { query: {} })).rejects.toThrow('match.query must name at least one field');
+        await expect(e.revoke('s', { query: {} })).rejects.toThrow('Event "test.e" .revoke() refused its match');
+        expect(publish).not.toHaveBeenCalled();
+        await f.emit({ n: 1 });
+        await stream.frame('f');
+
+        expect(stream.frames.map(frame => frame.event)).toEqual(['connected', 'f']);
+    });
+
+    it('G24 a control message whose match query holds a non-string value, or no field, is malformed and ignored', async () =>
+    {
+        const bus = new FakeBus();
+        const { e, f, router } = events();
+        e.canSubscribe(() => false);
+        await e.useCache(createRedisPubSubCache(new FakeRedis(bus), 'test:'));
+        const stream = await createStreamApp(router).connect('s', { query: 'events=e,f&workspaceId=w1' });
+        await stream.frame('connected');
+
+        bus.publish('test:$control', JSON.stringify({ origin: 'other-pod', kind: 'grant', event: 'test.e', subject: 's', match: { query: { workspaceId: 5 } } }));
+        bus.publish('test:$control', JSON.stringify({ origin: 'other-pod', kind: 'grant', event: 'test.e', subject: 's', match: { query: {} } }));
+        await e.emit({ n: 1 });
+        await f.emit({ n: 2 });
+        await stream.frame('f');
+
+        expect(stream.frames.map(frame => frame.event)).toEqual(['connected', 'f']);
+        expect(vi.mocked(logger.debug).mock.calls.filter(([message]) => String(message).includes('Malformed'))).toHaveLength(2);
+    });
 });
 
 describe('SSE grant / revoke during admission', () =>
 {
+    it('G25 a matched grant during admission opens only the matching tab with E', async () =>
+    {
+        const { e, f, router } = events();
+        const { predicate, releases, admitting } = pendingVerdicts();
+        e.canSubscribe(predicate);
+        const app = createStreamApp(router);
+        const connectingW1 = app.connect('s', { query: 'events=e,f&workspaceId=w1' });
+        const connectingW2 = app.connect('s', { query: 'events=e,f&workspaceId=w2' });
+        await admitting(2);
+
+        await e.grant('s', { query: { workspaceId: 'w1' } });
+        releases.forEach(release => release(false));
+        const [onW1, onW2] = await Promise.all([connectingW1, connectingW2]);
+        const [connectedW1, connectedW2] = await Promise.all([onW1.frame('connected'), onW2.frame('connected')]);
+        await e.emit({ n: 1 });
+        await f.emit({ n: 2 });
+        await Promise.all([onW1.frame('f'), onW2.frame('f')]);
+
+        expect(connectedW1.data.deniedEvents).toEqual([]);
+        expect(connectedW2.data.deniedEvents).toEqual(['e']);
+        expect(onW1.named('e')).toHaveLength(1);
+        expect(onW2.named('e')).toEqual([]);
+        expect([...onW1.named(GRANTED), ...onW2.named(GRANTED)]).toEqual([]);
+    });
+
     it('A1 revoke while canSubscribe is pending (will say true): opens with E denied, no frame, emit delivers nothing', async () =>
     {
         const { e, f, router } = events();

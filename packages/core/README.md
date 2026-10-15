@@ -353,6 +353,7 @@ Each module has its own README with the API detail.
 | `@spfn/core/event/sse/client` | Browser SSE client (`EventSource`). | [src/event](./src/event/README.md) |
 | `@spfn/core/event/ws` | Server-side WebSocket handler. Server only; needs the optional `ws` dependency. | [src/event](./src/event/README.md) |
 | `@spfn/core/event/ws/client` | Browser WebSocket client. | [src/event](./src/event/README.md) |
+| `@spfn/core/state` | A server-owned state declared once (`defineState`, `defineStateRouter`) derives its read, write and snapshot routes and its SSE event; the app emits `state.changed` after a commit. Server half — the browser client is a later release. | [src/state](./src/state/README.md) |
 | `@spfn/core/codegen` | The codegen orchestrator and the built-in generators: `@spfn/core:route-map` for the proxy's route map, `@spfn/core:contract` for the client contract. | [src/codegen](./src/codegen/README.md) |
 | `@spfn/core/contract` | Route contracts for clients that ship separately: collect, snapshot, and the build gate that refuses a breaking change. | [src/contract](./src/contract/README.md) |
 | `@spfn/core/ops` | The operations surface `spfn ops` drives: `opsRoute`, `createOpsRouter`, `defineOpsModule`, and the manifest the CLI discovers commands from. Structure only — the router is always authenticated, and token verification lives in `@spfn/auth`. | [How do I operate the app from the terminal?](#how-do-i-operate-the-app-from-the-terminal) |

@@ -48,7 +48,7 @@ From `@spfn/core/event`:
 - `.canSubscribe(predicate)`, `.filter(predicate)`, `.grant(subject)`, `.revoke(subject)` on an
   event — who may subscribe over SSE, which frames a connection receives, and changing an open
   connection (see [Per-event permission](#per-event-permission-cansubscribe-filter-grant--revoke))
-- Types: `EventDef`, `EventHandler`, `InferEventPayload`, `PubSubCache`, `JobQueueSender`,
+- Types: `EventDef`, `EventHandler`, `EventSubscribeOptions`, `InferEventPayload`, `PubSubCache`, `JobQueueSender`,
   `EventContract`, `EventRouterContract`, `SubscribePredicate`, `SubscribeContext`,
   `SubscribeRequest`, `FramePredicate`, `FrameContext`,
   `EventRouterDef`, `InferEventNames`, `InferEventPayloads`,
@@ -132,15 +132,15 @@ Promise<void>` otherwise. Handlers run via `Promise.allSettled` — see
 |--------|-----------|-------|
 | `name` | `readonly string` | event name (e.g. `'user.created'`) |
 | `schema` | `readonly TSchema?` | the TypeBox schema, if provided |
-| `subscribe(handler)` | `(payload) => void \| Promise<void>` ⇒ returns `() => void` | in-memory; returns unsubscribe |
-| `unsubscribeAll()` | `() => void` | drop all in-memory handlers |
+| `subscribe(handler, options?)` | `(payload) => void \| Promise<void>`, `{ localOnly?: boolean }` ⇒ returns `() => void` | in-memory; returns unsubscribe. `localOnly`: runs for this process's `emit` only, never for a cache delivery from another pod |
+| `unsubscribeAll()` | `() => void` | drop all in-memory handlers, `localOnly` ones included |
 | `emit(payload?)` | `Promise<void>` | fan-out to handlers (or cache) + job queues |
 | `useCache(cache)` | `(PubSubCache) => Promise<EventDef>` | enable cross-instance broadcast (must `await`) |
 | `contract(contract)` | `(EventContract) => EventDef` | publish in the contract; returns the same event; a second call throws |
 | `canSubscribe(predicate)` | `<P>(SubscribePredicate<P>) => EventDef` | who may subscribe over SSE (once per connection); a second call throws |
 | `filter(predicate)` | `(FramePredicate<TPayload>) => EventDef` | which frames a connection receives (sync, per frame); a second call throws |
-| `grant(subject)` | `Promise<void>` | activate the event on the subject's open SSE connections where it is denied |
-| `revoke(subject)` | `Promise<void>` | deactivate the event on the subject's open SSE connections where it is allowed |
+| `grant(subject, match?)` | `Promise<void>` | activate the event on the subject's open SSE connections (those matching `match`, when given) where it is denied |
+| `revoke(subject, match?)` | `Promise<void>` | deactivate the event on the subject's open SSE connections (those matching `match`, when given) where it is allowed |
 
 > `_registerJobQueue`, `_registerSubscriptionControl` and `_payload` exist on the interface but
 > are **internal** — `_registerJobQueue` is called by `@spfn/core/job` when a job does
@@ -458,9 +458,22 @@ await workspaceRuntime.grant(userId);    // membership restored
   — where it is denied: subscribe (the same code path as at connect, with the stored request
   snapshot) and send `subscription.granted`. Anything else is a no-op, and no connection resolves
   without error.
+- `match: { query: Record<string, string> }` narrows either call to the connections whose connect
+  query carries every named field with exactly that value — string to string, over the request
+  snapshot. A connection that declared no such field never matches, not even against `''`.
+  Without `match`, every connection of the subject is reached.
+
+  ```typescript
+  // the tab on w1 only; a tab of the same user on w2 stays denied
+  await workspaceRuntime.grant(userId, { query: { workspaceId: 'w1' } });
+  ```
+
 - With the cache transport attached (`CACHE_URL`), the call applies on this pod and is published
   once on the control channel `<channelPrefix>$control`; every other pod applies it to its own
-  connections. Without a cache it is local only.
+  connections, with the same `match` rule. `grant` / `revoke` reject a `match` whose `query` is
+  empty or holds a non-string value (an `undefined` field would vanish in JSON and widen the call
+  on every other pod) before applying or publishing it. A control message whose `match` is not an
+  object with a non-empty string-to-string `query` is malformed and ignored. Without a cache it is local only.
 - Three rules:
   1. **Open connections only.** Neither re-runs `canSubscribe` or `authorize` — they are an
      operator's statement about connections that exist now.
@@ -627,7 +640,10 @@ export default defineServerConfig()
 Mechanics (from `event.ts`): once a cache is wired, `emit` calls `cache.publish(name,
 payload)` **instead of** triggering local handlers directly — local handlers (including the
 SSE stream on the same pod) fire when the message comes back through the pub/sub `subscribe`
-callback. Auth `filter` still runs per-subscriber on the **receiving** pod's SSE handler —
+callback. A handler subscribed with `{ localOnly: true }` is the exception: `emit` runs it directly
+on the emitting pod, and a delivery through the cache never does — use it for work that must
+happen once per emit, not once per pod. Without a cache it runs on every `emit` like any handler.
+Auth `filter` still runs per-subscriber on the **receiving** pod's SSE handler —
 the transport only fans out by event name. Job queues receive the payload on every emit
 regardless of cache.
 
@@ -844,7 +860,7 @@ are reaped instead of lingering with their subscriptions and buffers.
 interface EventDef<TPayload = void> {
     readonly name: string;
     readonly schema?: TSchema;
-    subscribe: (handler: EventHandler<TPayload>) => () => void;
+    subscribe: (handler: EventHandler<TPayload>, options?: { localOnly?: boolean }) => () => void;
     unsubscribeAll: () => void;
     emit: TPayload extends void ? () => Promise<void> : (payload: TPayload) => Promise<void>;
     useCache: (cache: PubSubCache) => Promise<EventDef<TPayload>>;
@@ -854,10 +870,11 @@ interface EventDef<TPayload = void> {
     canSubscribe: <P = unknown>(predicate: SubscribePredicate<P>) => EventDef<TPayload>;
     readonly _filter?: FramePredicate<TPayload>;
     filter: (predicate: FramePredicate<TPayload>) => EventDef<TPayload>;
-    grant: (subject: string) => Promise<void>;
-    revoke: (subject: string) => Promise<void>;
+    grant: (subject: string, match?: SubscriptionMatch) => Promise<void>;
+    revoke: (subject: string, match?: SubscriptionMatch) => Promise<void>;
 }
 
+interface SubscriptionMatch { query: Record<string, string>; }
 interface SubscribeRequest { query: Record<string, string>; headers: Record<string, string>; }
 interface SubscribeContext<P = unknown> { subject: string; principal: P | undefined; request: SubscribeRequest; }
 type SubscribePredicate<P = unknown> = (ctx: SubscribeContext<P>) => boolean | Promise<boolean>;

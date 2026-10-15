@@ -1,6 +1,6 @@
 {
     "name": "@spfn/core",
-    "version": "0.3.0-beta.24",
+    "version": "0.3.0-beta.25",
     "description": "Full-stack TypeScript backend for Next.js: file-based typed routes, Drizzle entities and repositories, PostgreSQL transactions and a generated end-to-end client, in one fixed vertical slice per feature",
     "type": "module",
     "exports": {
@@ -118,6 +118,11 @@
             "types": "./dist/event/index.d.ts",
             "import": "./dist/event/index.js",
             "require": "./dist/event/index.js"
+        },
+        "./state": {
+            "types": "./dist/state/index.d.ts",
+            "import": "./dist/state/index.js",
+            "require": "./dist/state/index.js"
         },
         "./event/sse": {
             "types": "./dist/event/sse/index.d.ts",

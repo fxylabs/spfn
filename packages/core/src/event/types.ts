@@ -26,6 +26,20 @@ export interface PubSubCache
 export type EventHandler<TPayload> = (payload: TPayload) => void | Promise<void>;
 
 /**
+ * Options for `EventDef.subscribe`.
+ */
+export interface EventSubscribeOptions
+{
+    /**
+     * Run only for an `emit` made in this process, never for a delivery the
+     * cache transport received from another pod. For a handler whose work must
+     * happen once per emit, not once per pod (it would otherwise run on every
+     * pod the event is cached to). Without a cache it runs on every `emit`.
+     */
+    localOnly?: boolean;
+}
+
+/**
  * Job queue sender function type (used by job module)
  */
 export type JobQueueSender = (queueName: string, payload: unknown) => Promise<void>;
@@ -109,16 +123,27 @@ export interface FrameContext
 export type FramePredicate<TPayload> = (payload: TPayload, ctx: FrameContext) => boolean;
 
 /**
+ * Which of a subject's connections a `grant` / `revoke` reaches: those whose
+ * connect query carries every named field with exactly that value. A
+ * connection that declared no such field never matches. Plain JSON, so it
+ * travels to other pods unchanged.
+ */
+export interface SubscriptionMatch
+{
+    query: Record<string, string>;
+}
+
+/**
  * How an SSE handler lets `grant` / `revoke` reach its open connections.
  * Each handler registers one per router key of the event.
  */
 export interface SubscriptionControl
 {
-    /** Activate the event on every open connection of `subject` where it is denied. */
-    grant: (subject: string) => void;
+    /** Activate the event on every open connection of `subject` (matching `match`, when given) where it is denied. */
+    grant: (subject: string, match?: SubscriptionMatch) => void;
 
-    /** Deactivate the event on every open connection of `subject` where it is allowed. */
-    revoke: (subject: string) => void;
+    /** Deactivate the event on every open connection of `subject` (matching `match`, when given) where it is allowed. */
+    revoke: (subject: string, match?: SubscriptionMatch) => void;
 }
 
 /**
@@ -196,12 +221,14 @@ export interface EventDef<TPayload = void>
     filter: (predicate: FramePredicate<TPayload>) => EventDef<TPayload>;
 
     /**
-     * Subscribe to this event (in-memory handler)
+     * Subscribe to this event (in-memory handler). With the cache transport a
+     * handler runs on every pod for every emit, unless `{ localOnly: true }`
+     * keeps it to emits made in this process.
      */
-    subscribe: (handler: EventHandler<TPayload>) => () => void;
+    subscribe: (handler: EventHandler<TPayload>, options?: EventSubscribeOptions) => () => void;
 
     /**
-     * Unsubscribe all handlers
+     * Unsubscribe all handlers, `localOnly` ones included
      */
     unsubscribeAll: () => void;
 
@@ -219,8 +246,11 @@ export interface EventDef<TPayload = void>
      * Reaches every pod when the cache transport is attached. Never re-runs
      * `canSubscribe`: it is an operator's statement about an open connection.
      * An event the connection never requested cannot be granted.
+     *
+     * With `match`, only the connections whose connect query carries every
+     * field of `match.query` with that value are activated.
      */
-    grant: (subject: string) => Promise<void>;
+    grant: (subject: string, match?: SubscriptionMatch) => Promise<void>;
 
     /**
      * Deactivate this event on every open SSE connection of `subject` where it
@@ -228,8 +258,11 @@ export interface EventDef<TPayload = void>
      *
      * Reaches every pod when the cache transport is attached. Affects open
      * connections only — the next connect asks `canSubscribe` afresh.
+     *
+     * With `match`, only the connections whose connect query carries every
+     * field of `match.query` with that value are deactivated.
      */
-    revoke: (subject: string) => Promise<void>;
+    revoke: (subject: string, match?: SubscriptionMatch) => Promise<void>;
 
     /**
      * Enable cache-based pub/sub for multi-instance support

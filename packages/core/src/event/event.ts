@@ -27,16 +27,18 @@
 
 import type { TSchema, Static } from '@sinclair/typebox';
 import { logger } from '@spfn/core/logger';
-import { bindSubscriptionControl, publishSubscriptionControl } from './cache-transport';
+import { bindSubscriptionControl, isSubscriptionMatch, publishSubscriptionControl } from './cache-transport';
 import type {
     EventContract,
     EventDef,
     EventHandler,
+    EventSubscribeOptions,
     FramePredicate,
     JobQueueSender,
     PubSubCache,
     SubscribePredicate,
     SubscriptionControl,
+    SubscriptionMatch,
 } from './types';
 
 const eventLogger = logger.child('@spfn/core:event');
@@ -157,19 +159,20 @@ function createSubscriptionControls(name: string, getCache: () => PubSubCache | 
 {
     const controls: Set<SubscriptionControl> = new Set();
 
-    const applyLocal = (kind: 'grant' | 'revoke', subject: string): void =>
+    const applyLocal = (kind: 'grant' | 'revoke', subject: string, match?: SubscriptionMatch): void =>
     {
-        controls.forEach(control => control[kind](subject));
+        controls.forEach(control => control[kind](subject, match));
     };
 
-    const change = (kind: 'grant' | 'revoke') => async (subject: string): Promise<void> =>
+    const change = (kind: 'grant' | 'revoke') => async (subject: string, match?: SubscriptionMatch): Promise<void> =>
     {
-        applyLocal(kind, subject);
+        assertMatch(name, kind, match);
+        applyLocal(kind, subject, match);
 
         const cache = getCache();
         if (cache)
         {
-            await publishSubscriptionControl(cache, kind, name, subject);
+            await publishSubscriptionControl(cache, kind, name, subject, match);
         }
     };
 
@@ -184,6 +187,24 @@ function createSubscriptionControls(name: string, getCache: () => PubSubCache | 
             return () => controls.delete(control);
         },
     };
+}
+
+/**
+ * Refuse a `match` before it is applied or published. JSON drops an
+ * `undefined` field, so `{ workspaceId: undefined }` would open nothing here
+ * and every connection of the subject on every other pod; an empty `query`
+ * would open every connection everywhere.
+ */
+function assertMatch(name: string, kind: 'grant' | 'revoke', match: SubscriptionMatch | undefined): void
+{
+    if (match !== undefined && !isSubscriptionMatch(match))
+    {
+        throw new Error(
+            `Event "${name}" .${kind}() refused its match: match.query must name at least one field, each with a string value. `
+            + 'A match only ever narrows a grant or revoke to the connections that declared those values; '
+            + 'omit match to reach every connection of the subject.',
+        );
+    }
 }
 
 /**
@@ -210,6 +231,8 @@ function createEventImpl<TPayload>(
 ): EventDef<TPayload>
 {
     const handlerManager = createHandlerManager<TPayload>(name);
+    // `localOnly` handlers: run by this process's emit, never by a cache delivery.
+    const localHandlerManager = createHandlerManager<TPayload>(name);
     const jobQueueManager = createJobQueueManager(name);
     let cache: PubSubCache | undefined;
     let cacheSubscribed = false;
@@ -232,6 +255,8 @@ function createEventImpl<TPayload>(
             await handlerManager.trigger(payload as TPayload);
         }
 
+        await localHandlerManager.trigger(payload as TPayload);
+
         await jobQueueManager.send(payload);
         eventLogger.debug(`Event emitted: ${name}`);
     };
@@ -250,6 +275,8 @@ function createEventImpl<TPayload>(
         // false — so emit keeps delivering locally and a later useCache can retry.
         // Setting these before the await would latch a half-broken state: emit
         // would publish to a channel this instance never subscribed to.
+        // A delivery from the cache — this pod's own emit echoed back, or another
+        // pod's — reaches the plain handlers only; `localOnly` ones ran in emit.
         await newCache.subscribe(name, async (message: unknown) =>
         {
             eventLogger.debug(`Received event from cache: ${name}`);
@@ -313,6 +340,15 @@ function createEventImpl<TPayload>(
         return self;
     };
 
+    const subscribe = (handler: EventHandler<TPayload>, options?: EventSubscribeOptions): (() => void) =>
+        (options?.localOnly ? localHandlerManager : handlerManager).add(handler);
+
+    const unsubscribeAll = (): void =>
+    {
+        handlerManager.clear();
+        localHandlerManager.clear();
+    };
+
     const self: EventDef<TPayload> = {
         name,
         schema,
@@ -334,8 +370,8 @@ function createEventImpl<TPayload>(
         grant: subscriptionControls.grant,
         revoke: subscriptionControls.revoke,
         _registerSubscriptionControl: subscriptionControls.register,
-        subscribe: handlerManager.add,
-        unsubscribeAll: handlerManager.clear,
+        subscribe,
+        unsubscribeAll,
         emit: emit as EventDef<TPayload>['emit'],
         useCache,
         _registerJobQueue: jobQueueManager.register,

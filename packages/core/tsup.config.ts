@@ -28,6 +28,7 @@ export default defineConfig({
         'event/sse/client': 'src/event/sse/client.ts',
         'event/ws/index': 'src/event/ws/index.ts',
         'event/ws/client': 'src/event/ws/client.ts',
+        'state/index': 'src/state/index.ts',
     },
     format: ['esm'],
     dts: true,

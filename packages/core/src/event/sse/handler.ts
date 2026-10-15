@@ -21,7 +21,7 @@ import { streamSSE } from 'hono/streaming';
 import type { SSEStreamingApi } from 'hono/streaming';
 import { logger } from '@spfn/core/logger';
 import type { EventRouterDef } from '../router';
-import type { EventDef, SubscribeContext, SubscribeRequest } from '../types';
+import type { EventDef, SubscribeContext, SubscribeRequest, SubscriptionMatch } from '../types';
 import type { SSEHandlerConfig, SSEHandlerAuthConfig } from './types';
 import type { SSETokenManager } from './token-manager';
 import { createBoundedWriter } from './bounded-writer';
@@ -191,8 +191,8 @@ function registerSubscriptionControls(router: EventRouterDef<any>, registry: Con
     for (const eventName of router.eventNames as string[])
     {
         router.events[eventName]._registerSubscriptionControl({
-            grant: (subject: string) => registry.grant(subject, eventName),
-            revoke: (subject: string) => registry.revoke(subject, eventName),
+            grant: (subject: string, match?: SubscriptionMatch) => registry.grant(subject, eventName, match),
+            revoke: (subject: string, match?: SubscriptionMatch) => registry.revoke(subject, eventName, match),
         });
     }
 }

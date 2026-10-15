@@ -72,6 +72,7 @@ export type {
     EventContract,
     EventDef,
     EventHandler,
+    EventSubscribeOptions,
     FrameContext,
     FramePredicate,
     InferEventPayload,
@@ -80,4 +81,5 @@ export type {
     SubscribeContext,
     SubscribePredicate,
     SubscribeRequest,
+    SubscriptionMatch,
 } from './types';

@@ -27,7 +27,8 @@
             "@spfn/core/logger": ["./src/logger/index.ts"],
             "@spfn/core/config": ["./src/config/index.ts"],
             "@spfn/core/job": ["./src/job/index.ts"],
-            "@spfn/core/event": ["./src/event/index.ts"]
+            "@spfn/core/event": ["./src/event/index.ts"],
+            "@spfn/core/state": ["./src/state/index.ts"]
         }
     },
     "include": ["src/**/*"],
