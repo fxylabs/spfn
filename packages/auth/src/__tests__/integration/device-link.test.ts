@@ -16,21 +16,28 @@
  * | R1 | — | issue (issuer) | linkId, userCode, expiresAtMillis | issued |
  * | R2 | issued | issue again (same key) | previous → expired | issued |
  * | R3 | issued | redeem (device) | deviceCode, matchNumber, expiresAtMillis, intervalMillis | redeemed |
- * | R4 | redeemed / approved / denied / consumed | redeem | 404 | unchanged |
+ * | R4 | redeemed / approved / denied (either reason) / consumed | redeem | 404 | unchanged |
  * | R5 | unknown / expired | redeem | 404 / 400 | unchanged |
  * | R6 | issued | status | issued | unchanged |
  * | R7 | redeemed | status | redeemed + device + three fixed choices | unchanged |
+ * | R7 | denied (wrong_match) | status | denied, as a refusal answers — no reason, no new status | unchanged |
  * | R8 | redeemed | confirm, right number | 200 | approved |
- * | R9 | redeemed | confirm, wrong number | 400, no second pick | denied |
- * | R10 | redeemed | deny | 200 | denied |
+ * | R9 | redeemed | confirm, wrong number | 400, no second pick | denied (wrong_match) |
+ * | R10 | redeemed | deny | 200 | denied (refused) |
  * | R11 | any | status / confirm / deny / cancel by another key or account | 404 | unchanged |
  * | R12 | approved | poll | login; key registered under the issuer's account | consumed |
  * | R13 | redeemed | poll | pending + intervalMillis | unchanged |
- * | R14 | denied | poll | 403 | unchanged |
+ * | R14a | denied (wrong_match) | poll | 400 WrongMatch, no key registered | unchanged |
+ * | R14b | denied (refused) | poll | 403 Denied, never WrongMatch | unchanged |
+ * | R14c | denied (no reason — a row denied before the column) | poll | 403 Denied | unchanged |
  * | R15 | past expiry | any call | 400 expired | expired |
  * | R16 | issued / redeemed | issuer's key revoked or signed out | expired at the next call | expired |
  * | R17 | issued / redeemed | cancel | 200 | expired |
  * | R18 | approved | two polls at once | one registers the key, the other 404 | consumed |
+ *
+ * Two races sit beside R9 and R10: a right and a wrong pick landing together, and
+ * a wrong pick and a deny landing together. Exactly one moves the link, and the
+ * reason left on it is the winner's — the loser never writes over it.
  */
 
 import { describe, it, expect, vi, beforeAll, afterAll, beforeEach } from 'vitest';
@@ -291,6 +298,21 @@ describe.skipIf(!dbAvailable)('Device link', () =>
         return redeemed;
     }
 
+    /** Redeemed, then the issuer picked a number the device does not show. */
+    async function mismatchedLink()
+    {
+        const redeemed = await redeemedLink();
+        const { choices } = await (await status(redeemed.link.linkId, redeemed.issuer)).json();
+
+        await expectError(
+            await confirm(redeemed.link.linkId, wrongChoice(choices, redeemed.device.matchNumber), redeemed.issuer),
+            400,
+            'DeviceLinkWrongMatchError',
+        );
+
+        return redeemed;
+    }
+
     async function consumedLink()
     {
         const approved = await approvedLink();
@@ -377,6 +399,7 @@ describe.skipIf(!dbAvailable)('Device link', () =>
                 ['redeemed', redeemedLink],
                 ['approved', approvedLink],
                 ['denied', deniedLink],
+                ['denied by a wrong pick', mismatchedLink],
                 ['consumed', consumedLink],
             ] as const;
 
@@ -461,6 +484,17 @@ describe.skipIf(!dbAvailable)('Device link', () =>
             expect(first).not.toHaveProperty('matchNumber');
         });
 
+        it('R7 status of a link denied by a wrong pick answers denied, exactly as a refusal does', async () =>
+        {
+            const { issuer, link } = await mismatchedLink();
+
+            const answer = await (await status(link.linkId, issuer)).json();
+
+            expect(answer.status).toBe('denied');
+            expect(answer).not.toHaveProperty('deniedReason');
+            expect(answer).not.toHaveProperty('choices');
+        });
+
         it('R8 confirm with the number the device shows approves the link', async () =>
         {
             const { issuer, link, device } = await redeemedLink();
@@ -489,14 +523,14 @@ describe.skipIf(!dbAvailable)('Device link', () =>
                 'DeviceLinkWrongMatchError',
             );
 
-            expect((await readLink(link.linkId)).status).toBe('denied');
+            expect(await readLink(link.linkId)).toMatchObject({ status: 'denied', deniedReason: 'wrong_match' });
 
             await expectError(
                 await confirm(link.linkId, device.matchNumber, issuer),
                 409,
                 'DeviceLinkAlreadyHandledError',
             );
-            await expectError(await poll(device.deviceCode), 403, 'DeviceLinkDeniedError');
+            await expectError(await poll(device.deviceCode), 400, 'DeviceLinkWrongMatchError');
             expect(await keysOf(device.keyId)).toHaveLength(0);
         });
 
@@ -508,7 +542,7 @@ describe.skipIf(!dbAvailable)('Device link', () =>
 
             expect(answer.status).toBe(200);
             expect((await answer.json()).status).toBe('denied');
-            expect((await readLink(link.linkId)).status).toBe('denied');
+            expect(await readLink(link.linkId)).toMatchObject({ status: 'denied', deniedReason: 'refused' });
         });
 
         describe('R11 another key or account is answered as if the link did not exist', () =>
@@ -611,9 +645,39 @@ describe.skipIf(!dbAvailable)('Device link', () =>
             expect(await answer.json()).toEqual({ status: 'pending', intervalMillis: DEFAULT_DEVICE_AUTH_INTERVAL_MS });
         });
 
-        it('R14 poll on a denied link is refused 403, and registers nothing', async () =>
+        it('R14a poll on a link denied by a wrong pick says so, 400, and registers nothing', async () =>
+        {
+            const { issuer, link, device } = await redeemedLink();
+            const { choices } = await (await status(link.linkId, issuer)).json();
+            const wrong = await confirm(link.linkId, wrongChoice(choices, device.matchNumber), issuer);
+            const issuerMessage = (await wrong.json()).message;
+
+            const answer = await poll(device.deviceCode);
+            const body = await answer.json();
+
+            expect(answer.status).toBe(400);
+            expect(body.error.code).toBe('DeviceLinkWrongMatchError');
+            // The issuer's words tell it to show a new code; the new device has none to show.
+            expect(body.message).not.toBe(issuerMessage);
+            expect(await keysOf(device.keyId)).toHaveLength(0);
+            expect(await readLink(link.linkId)).toMatchObject({ status: 'denied', deniedReason: 'wrong_match' });
+        });
+
+        it('R14b poll on a refused link is 403 denied, never wrong match, and registers nothing', async () =>
         {
             const { device } = await deniedLink();
+
+            await expectError(await poll(device.deviceCode), 403, 'DeviceLinkDeniedError');
+            expect(await keysOf(device.keyId)).toHaveLength(0);
+        });
+
+        it('R14c poll on a link denied before the reason was recorded reads as a refusal', async () =>
+        {
+            const { link, device } = await deniedLink();
+            await getTestDb()
+                .update(deviceLinks)
+                .set({ deniedReason: null })
+                .where(eq(deviceLinks.linkId, link.linkId));
 
             await expectError(await poll(device.deviceCode), 403, 'DeviceLinkDeniedError');
             expect(await keysOf(device.keyId)).toHaveLength(0);
@@ -622,14 +686,15 @@ describe.skipIf(!dbAvailable)('Device link', () =>
         describe('R15 past expiry every call is refused as expired, whatever the state', () =>
         {
             const cases = [
-                ['redeemed', redeemedLink],
-                ['approved', approvedLink],
-                ['denied', deniedLink],
+                ['redeemed', 'redeemed', redeemedLink],
+                ['approved', 'approved', approvedLink],
+                ['denied', 'denied', deniedLink],
+                ['denied by a wrong pick', 'denied', mismatchedLink],
             ] as const;
 
-            for (const [state, arrange] of cases)
+            for (const [label, state, arrange] of cases)
             {
-                it(`R15 ${state}: redeem, status, confirm, deny, cancel and poll are all 400, and no key is registered`, async () =>
+                it(`R15 ${label}: redeem, status, confirm, deny, cancel and poll are all 400, and no key is registered`, async () =>
                 {
                     const { issuer, link, device } = await arrange();
                     await expire(link.linkId);
@@ -820,23 +885,55 @@ describe.skipIf(!dbAvailable)('Device link', () =>
                 confirm(link.linkId, wrongChoice(choices, device.matchNumber), issuer),
             ]);
 
-            const { status: ending } = await readLink(link.linkId);
+            const { status: ending, deniedReason } = await readLink(link.linkId);
 
             if (ending === 'approved')
             {
                 expect(right.status).toBe(200);
                 await expectError(wrong, 409, 'DeviceLinkAlreadyHandledError');
+                expect(deniedReason).toBeNull();
                 expect((await poll(device.deviceCode)).status).toBe(200);
                 expect(await keysOf(device.keyId)).toHaveLength(1);
             }
             else
             {
                 expect(ending).toBe('denied');
+                expect(deniedReason).toBe('wrong_match');
                 await expectError(wrong, 400, 'DeviceLinkWrongMatchError');
                 await expectError(right, 409, 'DeviceLinkAlreadyHandledError');
-                await expectError(await poll(device.deviceCode), 403, 'DeviceLinkDeniedError');
+                await expectError(await poll(device.deviceCode), 400, 'DeviceLinkWrongMatchError');
                 expect(await keysOf(device.keyId)).toHaveLength(0);
             }
+        });
+
+        it('a wrong pick and a deny at once: the reason left is the winner\'s, and poll answers by it', async () =>
+        {
+            const { issuer, link, device } = await redeemedLink();
+            const { choices } = await (await status(link.linkId, issuer)).json();
+
+            const [wrong, refused] = await Promise.all([
+                confirm(link.linkId, wrongChoice(choices, device.matchNumber), issuer),
+                deny(link.linkId, issuer),
+            ]);
+
+            const record = await readLink(link.linkId);
+            expect(record.status).toBe('denied');
+
+            if (record.deniedReason === 'wrong_match')
+            {
+                await expectError(wrong, 400, 'DeviceLinkWrongMatchError');
+                await expectError(refused, 409, 'DeviceLinkAlreadyHandledError');
+                await expectError(await poll(device.deviceCode), 400, 'DeviceLinkWrongMatchError');
+            }
+            else
+            {
+                expect(record.deniedReason).toBe('refused');
+                expect(refused.status).toBe(200);
+                await expectError(wrong, 409, 'DeviceLinkAlreadyHandledError');
+                await expectError(await poll(device.deviceCode), 403, 'DeviceLinkDeniedError');
+            }
+
+            expect(await keysOf(device.keyId)).toHaveLength(0);
         });
 
         it('the issuer signing out between redeem and confirm makes confirm impossible, even from its own session', async () =>

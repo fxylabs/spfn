@@ -25,7 +25,7 @@
  */
 
 import { deviceLinks, userPublicKeys } from '../entities';
-import type { DeviceLink, DeviceLinkStatus, NewDeviceLink } from '../entities';
+import type { DeviceLink, DeviceLinkDeniedReason, DeviceLinkStatus, NewDeviceLink } from '../entities';
 import { BaseRepository } from '@spfn/core/db';
 import { eq, and, gt, or, isNull, inArray, exists, getTableColumns, sql, type SQL } from 'drizzle-orm';
 import { announceDeviceLinkMoved } from '../lib/device-link-waiters';
@@ -132,17 +132,19 @@ export class DeviceLinksRepository extends BaseRepository
     }
 
     /**
-     * Refuse a redeemed link — the issuer said no, or picked the wrong number.
+     * Refuse a redeemed link — the issuer said no, or picked the wrong number —
+     * and record which in the same statement, so of a wrong pick and a deny
+     * landing together the reason that stays is the one that moved the link.
      *
      * No issuing-key condition: refusing is always safe, and a signed-out issuer's
      * link is refused anyway.
      *
      * @returns the updated row, or null if it was no longer redeemed, or expired
      */
-    async deny(id: number): Promise<DeviceLink | null>
+    async deny(id: number, reason: DeviceLinkDeniedReason): Promise<DeviceLink | null>
     {
         return this.transition(
-            { status: 'denied' },
+            { status: 'denied', deniedReason: reason },
             and(eq(deviceLinks.id, id), eq(deviceLinks.status, 'redeemed'), notExpired()),
         );
     }

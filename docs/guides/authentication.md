@@ -1377,7 +1377,7 @@ full design.
 | `/_auth/device/link/confirm` | POST | Required (issuing key) | Pick the number the new device shows; a wrong pick denies the link |
 | `/_auth/device/link/deny` | POST | Required (issuing key) | Refuse the new device |
 | `/_auth/device/link/cancel` | POST | Required (issuing key) | Close the link before anyone is let in |
-| `/_auth/device/link/poll` | POST | — | Ask whether the issuer picked; collects the login. `waitMillis` long-polls |
+| `/_auth/device/link/poll` | POST | — | Ask whether the issuer picked; collects the login. A wrong pick answers `DeviceLinkWrongMatchError`, a refusal `DeviceLinkDeniedError`. `waitMillis` long-polls |
 
 > **Device-code login** signs in a device that has no key on file yet — a TV, a console, a
 > headless CLI. It shows a short `XXXX-XXXX` code from `start`; the account owner enters that

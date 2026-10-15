@@ -517,6 +517,10 @@ export class DeviceLinkAlreadyHandledError extends ConflictError
  * with three choices a second try would make a blind guess two in three, and a
  * wrong pick most often means the device that redeemed the code is not the one
  * in the issuer's hand.
+ *
+ * The redeeming device's next poll answers it too, with a message of its own,
+ * so that device can say the numbers did not match rather than that it was
+ * refused.
  */
 export class DeviceLinkWrongMatchError extends ValidationError
 {
@@ -533,9 +537,9 @@ export class DeviceLinkWrongMatchError extends ValidationError
 /**
  * Device Link Denied Error (403)
  *
- * Thrown when the redeeming device polls a link its issuer refused, or on which
- * the issuer picked the wrong number. The device stops polling and says so
- * rather than timing out.
+ * Thrown when the redeeming device polls a link its issuer refused. The device
+ * stops polling and says so rather than timing out. A link that ended on a
+ * wrong pick answers `DeviceLinkWrongMatchError` instead.
  */
 export class DeviceLinkDeniedError extends ForbiddenError
 {

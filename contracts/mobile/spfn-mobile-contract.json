@@ -4,7 +4,7 @@
   "originStatement": "Generated from the route and contract definitions in SPFN primitives (packages/auth/src/server/client-proof) and published from that repository. This file is generated output: edit the source modules and re-export, never this file.",
   "contractName": "spfn-mobile-contract",
   "contractMajor": 0,
-  "contractVersion": "0.13.2",
+  "contractVersion": "0.13.3",
   "supportedRange": ">=0.13.0 <0.14.0",
   "exporterVersion": "@spfn/auth/contract-bundle@6.1.0",
   "authProfiles": { "allowed": ["clientProofV1"], "unknownProfilePolicy": "reject", "mixingWithinSession": "prohibited" },
@@ -69,7 +69,7 @@
     "issuerOperations": "issue, status, confirm, deny and cancel are not on this surface. They run on the signed-in device that shows the code, and they are bound to the key that signed issue: another device of the same account is answered as if the link did not exist",
     "algorithmDefaultRule": "algorithm is optional in RedeemDeviceLinkRequest, and an omitted one is ES256, as in StartDeviceAuthRequest: the value is fixed when the key is parked and no later request can correct it",
     "matchRule": "matchNumber is a whole number from 10 to 99. The new device shows it and nothing else about the link; the signed-in device picks it from three distinct numbers. One wrong pick denies the link, so a pick made without looking at this device succeeds one time in three and is never retried",
-    "pollRule": "poll answers PollDeviceAuthResponse, read exactly as deviceAuthorization.pollStatusRule and pendingRule say: status \"pending\" with intervalMillis while the signed-in device has not picked, status \"approved\" with the login once it has. DeviceLinkDeniedError, DeviceLinkExpiredError and DeviceLinkNotFoundError are the device-link outcomes that end the wait, alongside the rest of the set pendingRule names",
+    "pollRule": "poll answers PollDeviceAuthResponse, read exactly as deviceAuthorization.pollStatusRule and pendingRule say: status \"pending\" with intervalMillis while the signed-in device has not picked, status \"approved\" with the login once it has. DeviceLinkDeniedError, DeviceLinkWrongMatchError, DeviceLinkExpiredError and DeviceLinkNotFoundError are the device-link outcomes that end the wait, alongside the rest of the set pendingRule names. DeviceLinkDeniedError is a refusal and DeviceLinkWrongMatchError a wrong pick, so a client can say which one happened",
     "redeemRefusalRule": "a code that was never issued, one another device already redeemed, and one already spent all answer DeviceLinkNotFoundError. Only a code that died — its TTL, a cancel, a newer code from the same device, or that device signing out — answers DeviceLinkExpiredError",
     "userCodeRule": "the userCode is folded as deviceAuthorization.userCodeRule states"
   },
@@ -894,7 +894,14 @@
       "code": "DeviceLinkDeniedError",
       "httpStatus": 403,
       "retryable": false,
-      "summary": "the signed-in device refused this one, or picked a number that was not the one shown here; the new device stops polling instead of timing out",
+      "summary": "the signed-in device refused this one; the new device stops polling instead of timing out",
+      "surface": "rest"
+    },
+    {
+      "code": "DeviceLinkWrongMatchError",
+      "httpStatus": 400,
+      "retryable": false,
+      "summary": "the signed-in device picked a number that was not the one shown here, which ends the link — there is no second pick. The new device stops polling and starts again from a fresh code",
       "surface": "rest"
     },
     {

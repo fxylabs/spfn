@@ -1,0 +1,1 @@
+ALTER TABLE "spfn_auth"."device_links" ADD COLUMN "denied_reason" text;

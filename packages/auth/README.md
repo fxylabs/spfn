@@ -756,9 +756,10 @@ which way in it took. Its key is registered under the issuer's account with chan
 | state ↓ call → | redeem | status | confirm | deny | cancel | poll |
 | --- | --- | --- | --- | --- | --- | --- |
 | issued | → redeemed | `issued` | 409 NotRedeemed | 409 NotRedeemed | → expired | — |
-| redeemed | 404 | device + `choices` | right number → approved; wrong → denied + 400 WrongMatch | → denied | → expired | `pending` |
+| redeemed | 404 | device + `choices` | right number → approved; wrong → denied (`wrong_match`) + 400 WrongMatch | → denied (`refused`) | → expired | `pending` |
 | approved | 404 | `approved` | 409 AlreadyHandled | 409 AlreadyHandled | 409 AlreadyHandled | login, → consumed |
-| denied | 404 | `denied` | 409 AlreadyHandled | 409 AlreadyHandled | 409 AlreadyHandled | 403 Denied |
+| denied (`wrong_match`) | 404 | `denied` | 409 AlreadyHandled | 409 AlreadyHandled | 409 AlreadyHandled | 400 WrongMatch |
+| denied (`refused`) | 404 | `denied` | 409 AlreadyHandled | 409 AlreadyHandled | 409 AlreadyHandled | 403 Denied |
 | consumed | 404 | `consumed` | 409 AlreadyHandled | 409 AlreadyHandled | 409 AlreadyHandled | 404 |
 | dead (TTL, cancelled, replaced, issuer signed out) | 400 Expired | 400 Expired | 400 Expired | 400 Expired | 400 Expired | 400 Expired |
 | unknown, or another key's link | 404 | 404 | 404 | 404 | 404 | 404 |
@@ -767,6 +768,12 @@ Error names are `DeviceLink` + the cell: `DeviceLinkNotFoundError` (404),
 `DeviceLinkExpiredError` (400), `DeviceLinkWrongMatchError` (400), `DeviceLinkDeniedError` (403),
 `DeviceLinkNotRedeemedError` (409), `DeviceLinkAlreadyHandledError` (409). A consumed link stays
 404 to the new device after its TTL, for device-code login's reason.
+
+A denied link records why in `denied_reason`, and only the new device's poll reads it: a wrong pick
+answers `DeviceLinkWrongMatchError`, with a message written for the new device, so its screen can say
+the numbers did not match; a refusal answers `DeviceLinkDeniedError`. The issuer's `status` answers
+`denied` for both — it already heard `DeviceLinkWrongMatchError` from its own confirm. A link denied
+before `@spfn/auth` 0.3.0-beta.39 has no reason recorded and answers as a refusal.
 
 - **Single use.** A code is redeemed once, by one device: redeem moves the link from `issued` and
   nowhere else, so of two devices sending the same code exactly one parks its key, and the other
@@ -790,8 +797,9 @@ Error names are `DeviceLink` + the cell: `DeviceLinkNotFoundError` (404),
   redeemed the code: someone who read the code off the issuer's screen redeems it on a phone the
   issuer cannot see, so the issuer has no number to match. **A person who taps without looking at
   the new device picks the right number one time in three.** That is the whole of the odds, because
-  one wrong pick denies the link — there is no second try, and the new device is told it was refused.
-  Typing the number would be stronger; three to tap is the trade taken for a flow people finish.
+  one wrong pick denies the link — there is no second try, and the new device is told the numbers did
+  not match. Typing the number would be stronger; three to tap is the trade taken for a flow people
+  finish.
 - **The new device's key is registered only after a confirm.** It is parked in
   `spfn_auth.device_links`, not in `user_public_keys`, until the poll after the right pick moves it
   over. A key parked on a link that was denied, cancelled, or expired can never sign anything and
@@ -823,8 +831,9 @@ createAuthLifecycle({
 ```
 
 The mobile contract carries the new device's half — `auth.deviceLink.redeem` and
-`auth.deviceLink.poll`, since contract 0.13.2. The issuer's five routes run on the signed-in
-device and are not on that surface.
+`auth.deviceLink.poll`, since contract 0.13.2; since 0.13.3 the poll answers a wrong pick with
+`DeviceLinkWrongMatchError` rather than `DeviceLinkDeniedError`. The issuer's five routes run on the
+signed-in device and are not on that surface.
 
 ### Registered devices (key management)
 

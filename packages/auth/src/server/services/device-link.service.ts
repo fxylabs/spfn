@@ -12,9 +12,10 @@
  * | state ↓ op → | redeem | status | confirm | deny | cancel | poll |
  * | --- | --- | --- | --- | --- | --- | --- |
  * | issued | device parked, → redeemed | issued | NotRedeemed | NotRedeemed | → expired | — |
- * | redeemed | NotFound | device + choices | match: → approved; else → denied, WrongMatch | → denied | → expired | pending |
+ * | redeemed | NotFound | device + choices | match: → approved; else → denied (wrong_match), WrongMatch | → denied (refused) | → expired | pending |
  * | approved | NotFound | approved | AlreadyHandled | AlreadyHandled | AlreadyHandled | key registered, → consumed |
- * | denied | NotFound | denied | AlreadyHandled | AlreadyHandled | AlreadyHandled | Denied |
+ * | denied (wrong_match) | NotFound | denied | AlreadyHandled | AlreadyHandled | AlreadyHandled | WrongMatch |
+ * | denied (refused, or no reason) | NotFound | denied | AlreadyHandled | AlreadyHandled | AlreadyHandled | Denied |
  * | consumed | NotFound | consumed | AlreadyHandled | AlreadyHandled | AlreadyHandled | NotFound |
  * | dead | Expired | Expired | Expired | Expired | Expired | Expired |
  * | unknown | NotFound | NotFound | NotFound | NotFound | NotFound | NotFound |
@@ -24,6 +25,11 @@
  * revoked or run out — whatever state it was in. Expiry outranks state, with one
  * exception on the new device's side, for device-code login's reason: a spent
  * link answers redeem and poll as unknown even once its TTL has run out.
+ *
+ * The two ways a link ends `denied` answer the issuer alike and the new device
+ * apart: the issuer already heard WrongMatch from its own confirm, while the new
+ * device would otherwise say "refused" to a person whose issuer pressed the
+ * wrong number. A row denied before `deniedReason` existed reads as a refusal.
  *
  * Status, confirm, deny and cancel belong to the issuing key alone. A link
  * another key issued — another account's, or another device of the same
@@ -53,7 +59,7 @@ import {
 import { getShutdownManager } from '@spfn/core/server';
 
 import { deviceLinksRepository, type DeviceLinkRecord } from '../repositories';
-import type { DeviceLink, DeviceLinkStatus } from '../entities/device-links';
+import type { DeviceLink, DeviceLinkDeniedReason, DeviceLinkStatus } from '../entities/device-links';
 import { type KeyAlgorithmType, type KeyPlatformType } from '../types';
 import { getDeviceAuthConfig } from '../lib/device-auth-config';
 import { getDeviceLinkConfig } from '../lib/device-link-config';
@@ -431,7 +437,7 @@ export async function confirmDeviceLinkService(params: ConfirmDeviceLinkParams):
 
     if (params.choice !== record.matchNumber)
     {
-        await refuse(record);
+        await refuse(record, 'wrong_match');
 
         throw new DeviceLinkWrongMatchError();
     }
@@ -459,12 +465,12 @@ export async function denyDeviceLinkService(params: DeviceLinkParams): Promise<D
 
     assertAwaitingDecision(record);
 
-    return describeLink(await refuse(record));
+    return describeLink(await refuse(record, 'refused'));
 }
 
-async function refuse(record: DeviceLinkRecord): Promise<DeviceLink>
+async function refuse(record: DeviceLinkRecord, reason: DeviceLinkDeniedReason): Promise<DeviceLink>
 {
-    const denied = await deviceLinksRepository.deny(record.id);
+    const denied = await deviceLinksRepository.deny(record.id, reason);
 
     if (!denied)
     {
@@ -520,7 +526,7 @@ export async function pollDeviceLinkService(params: PollDeviceLinkParams): Promi
 
     if (record.status === 'denied')
     {
-        throw new DeviceLinkDeniedError();
+        throw refusalFor(record);
     }
 
     if (record.status === 'redeemed')
@@ -552,6 +558,19 @@ export async function pollDeviceLinkService(params: PollDeviceLinkParams): Promi
             missingAccount: () => new DeviceLinkNotFoundError(),
         }),
     };
+}
+
+/** What the new device is told about a denied link, by the reason the denial recorded. */
+function refusalFor(record: DeviceLink): Error
+{
+    if (record.deniedReason === 'wrong_match')
+    {
+        return new DeviceLinkWrongMatchError({
+            message: 'The number picked on the signed-in device was not the one shown here. Scan a new code to try again.',
+        });
+    }
+
+    return new DeviceLinkDeniedError();
 }
 
 /**

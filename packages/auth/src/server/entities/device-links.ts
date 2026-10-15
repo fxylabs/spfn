@@ -33,13 +33,23 @@ import { authSchema } from './schema';
  *
  * `issued -> redeemed -> approved -> consumed` is the only path to a registered
  * key. `denied` is a refusal the new device is told about — the issuer said no,
- * or picked the wrong number. `expired` is a link its issuer abandoned: a newer
- * one issued from the same key, a cancel, or a global revocation of the account.
+ * or picked the wrong number, which `deniedReason` tells apart. `expired` is a
+ * link its issuer abandoned: a newer one issued from the same key, a cancel, or
+ * a global revocation of the account.
  * A link whose TTL ran out, or whose issuing key was revoked, is judged expired
  * on read without the status having to say so.
  */
 export const DEVICE_LINK_STATUSES = ['issued', 'redeemed', 'approved', 'denied', 'consumed', 'expired'] as const;
 export type DeviceLinkStatus = typeof DEVICE_LINK_STATUSES[number];
+
+/**
+ * Why a link ended `denied`: the issuer refused the device, or picked a number
+ * that was not the one it showed. The new device is told which, because the two
+ * call for different words on its screen — "refused" is not what happened to a
+ * person whose issuer pressed the wrong number.
+ */
+export const DEVICE_LINK_DENIED_REASONS = ['refused', 'wrong_match'] as const;
+export type DeviceLinkDeniedReason = typeof DEVICE_LINK_DENIED_REASONS[number];
 
 export const deviceLinks = authSchema.table('device_links',
     {
@@ -92,6 +102,10 @@ export const deviceLinks = authSchema.table('device_links',
         choices: integer('choices').array(),
 
         status: enumText('status', DEVICE_LINK_STATUSES).notNull().default('issued'),
+
+        // Set with `denied`, in the same statement, and null in every other status
+        // A row denied before the column existed is null too, and reads as a refusal
+        deniedReason: enumText('denied_reason', DEVICE_LINK_DENIED_REASONS),
 
         // Expiry — 5 minutes from issue by default
         // Judged on read and in every transition; no job clears the row

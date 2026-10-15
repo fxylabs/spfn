@@ -370,7 +370,7 @@ describe.skipIf(!dbAvailable)('Device-link long polls', () =>
             expect(elapsed).toBeLessThan(200 + WOKEN_WITHIN_MS);
         });
 
-        it('a wrong number wakes it with a refusal', async () =>
+        it('a wrong number wakes it with wrong match, not a refusal', async () =>
         {
             const { issuer, link, device } = await redeemedLink();
             const wrong = device.matchNumber === 99 ? 98 : device.matchNumber + 1;
@@ -379,9 +379,10 @@ describe.skipIf(!dbAvailable)('Device-link long polls', () =>
             await sleep(200);
             expect((await confirm(link.linkId, wrong, issuer)).status).toBe(400);
 
-            const { response, elapsed } = await waiting;
+            const { response, body, elapsed } = await waiting;
 
-            expect(response.status).toBe(403);
+            expect(response.status).toBe(400);
+            expect(body.error.code).toBe('DeviceLinkWrongMatchError');
             expect(elapsed).toBeLessThan(200 + WOKEN_WITHIN_MS);
         });
 

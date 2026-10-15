@@ -32,6 +32,7 @@ import {
     DeviceLinkDeniedError,
     DeviceLinkExpiredError,
     DeviceLinkNotFoundError,
+    DeviceLinkWrongMatchError,
     KeyAlgorithmMismatchError,
 } from '../../../errors/auth-errors';
 import { CLIENT_PROOF_CONTENT_TYPE, CLIENT_PROOF_HEADERS } from '../admission';
@@ -1315,16 +1316,17 @@ describe('declared errors match the refusals', () =>
         }
     });
 
-    it('the three device-link refusals carry the status their error class carries', () =>
+    it('the four device-link refusals carry the status their error class carries', () =>
     {
         // Added in 0.13.2 — the refusals a new device can meet on redeem and
-        // poll. The issuer-only ones (wrong match, not redeemed, already
-        // handled) are not on this surface, because the issuer's operations
-        // are not.
+        // poll — and wrong match in 0.13.3, once poll told it apart from a
+        // refusal. The issuer-only ones (not redeemed, already handled) are not
+        // on this surface, because the issuer's operations are not.
         const thrown = [
             new DeviceLinkNotFoundError(),
             new DeviceLinkExpiredError(),
             new DeviceLinkDeniedError(),
+            new DeviceLinkWrongMatchError(),
         ];
 
         for (const error of thrown)
@@ -1340,6 +1342,7 @@ describe('declared errors match the refusals', () =>
             'DeviceLinkDeniedError',
             'DeviceLinkExpiredError',
             'DeviceLinkNotFoundError',
+            'DeviceLinkWrongMatchError',
         ]);
     });
 
@@ -1363,7 +1366,7 @@ describe('declared errors match the refusals', () =>
         // that retried on them would poll a code that will never move.
         const deviceErrors = declared.filter((error) => error.code.startsWith('Device'));
 
-        expect(deviceErrors).toHaveLength(7);
+        expect(deviceErrors).toHaveLength(8);
 
         for (const error of deviceErrors)
         {
@@ -1476,9 +1479,9 @@ describe('declared proof rules match the implementation', () =>
         replayWindowMillis: number;
     };
 
-    it('the contract line is the revision that adds device link\'s new-device operations', () =>
+    it('the contract line is the revision that tells a device link\'s wrong pick apart from a refusal', () =>
     {
-        expect(bundle.contractVersion).toBe('0.13.2');
+        expect(bundle.contractVersion).toBe('0.13.3');
     });
 
     it('the supported range floor is the current minor, as the 0.x rule has it', () =>

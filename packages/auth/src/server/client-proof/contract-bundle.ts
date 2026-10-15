@@ -321,8 +321,18 @@ import { CLIENT_IDENTITY_HEADERS, CLIENT_KINDS, SERVER_CONTRACT_HEADERS } from '
  * already open (`unlistedCodes`), as `KeyAlgorithmMismatchError` did in 0.10.1.
  * A consumer generated against 0.13.0 or 0.13.1 keeps matching the server, so
  * the supported range does not move.
+ *
+ * 0.13.3 lets `auth.deviceLink.poll` answer `DeviceLinkWrongMatchError` (400)
+ * when the signed-in device picked a number that was not the one this device
+ * shows. Until now that ending answered `DeviceLinkDeniedError`, the refusal's
+ * code, so the new device told its person "refused" when the issuer had only
+ * pressed the wrong number; `DeviceLinkDeniedError` now means a refusal alone.
+ * A patch, by 0.10.1's rule: one code joins the open list, and no operation,
+ * type or enum changes shape. A consumer generated against 0.13.2 meets the
+ * code as an unlisted one, and pendingRule already ends the wait on any error
+ * response, so the supported range does not move.
  */
-export const CONTRACT_VERSION = '0.13.2';
+export const CONTRACT_VERSION = '0.13.3';
 export const CONTRACT_MAJOR = 0;
 export const CONTRACT_NAME = 'spfn-mobile-contract';
 
@@ -1030,7 +1040,9 @@ interface RestSurfaceError
  *
  * The device-link operations add three codes (contract 0.13.2) and reuse the
  * rest on the same terms — the redeem body is the start body with a code in
- * front, and the poll's approved branch is the same login.
+ * front, and the poll's approved branch is the same login. A fourth,
+ * `DeviceLinkWrongMatchError`, joins them in 0.13.3: the issuer's wrong pick,
+ * which the poll now answers apart from a refusal.
  *
  * `auth.mfa.*` is the third enumerated family (contract 0.13.0) and adds exactly
  * one code. Everything `auth.mfa.verify` can refuse with is one of two things: a
@@ -1174,8 +1186,15 @@ const REST_SURFACE_ERRORS: readonly RestSurfaceError[] = [
         httpStatus: 403,
         retryable: false,
         summary:
-            'the signed-in device refused this one, or picked a number that was not the one shown here; the new '
-            + 'device stops polling instead of timing out',
+            'the signed-in device refused this one; the new device stops polling instead of timing out',
+    },
+    {
+        code: 'DeviceLinkWrongMatchError',
+        httpStatus: 400,
+        retryable: false,
+        summary:
+            'the signed-in device picked a number that was not the one shown here, which ends the link — there '
+            + 'is no second pick. The new device stops polling and starts again from a fresh code',
     },
     {
         code: 'DeviceLinkNotFoundError',
@@ -1373,9 +1392,10 @@ export function buildMobileContractBundle(): MobileContractBundle
             pollRule:
                 'poll answers PollDeviceAuthResponse, read exactly as deviceAuthorization.pollStatusRule and pendingRule '
                 + 'say: status "pending" with intervalMillis while the signed-in device has not picked, status '
-                + '"approved" with the login once it has. DeviceLinkDeniedError, DeviceLinkExpiredError and '
-                + 'DeviceLinkNotFoundError are the device-link outcomes that end the wait, alongside the rest of the '
-                + 'set pendingRule names',
+                + '"approved" with the login once it has. DeviceLinkDeniedError, DeviceLinkWrongMatchError, '
+                + 'DeviceLinkExpiredError and DeviceLinkNotFoundError are the device-link outcomes that end the wait, '
+                + 'alongside the rest of the set pendingRule names. DeviceLinkDeniedError is a refusal and '
+                + 'DeviceLinkWrongMatchError a wrong pick, so a client can say which one happened',
             redeemRefusalRule:
                 'a code that was never issued, one another device already redeemed, and one already spent all answer '
                 + 'DeviceLinkNotFoundError. Only a code that died — its TTL, a cancel, a newer code from the same '
