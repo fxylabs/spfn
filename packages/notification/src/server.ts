@@ -33,6 +33,7 @@ export {
     getNotificationConfig,
     getEmailFrom,
     getEmailReplyTo,
+    getSesConfigurationSetName,
     getSmsDefaultCountryCode,
     getAppName,
     type NotificationConfig,

@@ -23,6 +23,14 @@ export const notificationEnvSchema = defineEnvSchema({
         }),
     },
 
+    SPFN_NOTIFICATION_SES_CONFIGURATION_SET: {
+        ...envString({
+            description: 'SES configuration set every email send names, so SES publishes its delivery, bounce and complaint events (SES only)',
+            required: false,
+            examples: ['mail-events'],
+        }),
+    },
+
     // SMS
     SPFN_NOTIFICATION_SMS_PROVIDER: {
         ...envString({

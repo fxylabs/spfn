@@ -2,9 +2,10 @@
  * @spfn/notification - AWS SES v2 Email Provider
  */
 
+import type { SendEmailCommandInput } from '@aws-sdk/client-sesv2';
 import type { EmailProvider, InternalSendEmailParams } from '../types';
 import type { SendResult } from '../../types';
-import { env } from '../../../config';
+import { env, getSesConfigurationSetName } from '../../../config';
 import { maskRecipients, scrubProviderError } from '../../../privacy';
 import { logger } from '@spfn/core/logger';
 
@@ -50,6 +51,55 @@ async function getSESClient()
 }
 
 /**
+ * Build the message content: the subject and whichever of the HTML and text
+ * bodies the send carries
+ */
+function buildContent(params: InternalSendEmailParams): SendEmailCommandInput['Content']
+{
+    return {
+        Simple: {
+            Subject: {
+                Charset: 'UTF-8',
+                Data: params.subject,
+            },
+            Body: {
+                ...(params.html && {
+                    Html: {
+                        Charset: 'UTF-8',
+                        Data: params.html,
+                    },
+                }),
+                ...(params.text && {
+                    Text: {
+                        Charset: 'UTF-8',
+                        Data: params.text,
+                    },
+                }),
+            },
+        },
+    };
+}
+
+/**
+ * Build the SendEmailCommand input. `ConfigurationSetName` is present only when
+ * a configuration set is configured, so without one the request is unchanged.
+ */
+function buildSendEmailInput(params: InternalSendEmailParams): SendEmailCommandInput
+{
+    const configurationSetName = getSesConfigurationSetName();
+
+    return {
+        FromEmailAddress: params.from,
+        Destination: {
+            ToAddresses: params.to,
+        },
+        ReplyToAddresses: params.replyTo ? [params.replyTo] : undefined,
+        Content: buildContent(params),
+        ...(configurationSetName && { ConfigurationSetName: configurationSetName }),
+    };
+}
+
+/**
  * AWS SES v2 Email Provider
  */
 export const awsSesProvider: EmailProvider = {
@@ -62,37 +112,7 @@ export const awsSesProvider: EmailProvider = {
             const client = await getSESClient();
             const { SendEmailCommand } = await import('@aws-sdk/client-sesv2');
 
-            const command = new SendEmailCommand({
-                FromEmailAddress: params.from,
-                Destination: {
-                    ToAddresses: params.to,
-                },
-                ReplyToAddresses: params.replyTo ? [params.replyTo] : undefined,
-                Content: {
-                    Simple: {
-                        Subject: {
-                            Charset: 'UTF-8',
-                            Data: params.subject,
-                        },
-                        Body: {
-                            ...(params.html && {
-                                Html: {
-                                    Charset: 'UTF-8',
-                                    Data: params.html,
-                                },
-                            }),
-                            ...(params.text && {
-                                Text: {
-                                    Charset: 'UTF-8',
-                                    Data: params.text,
-                                },
-                            }),
-                        },
-                    },
-                },
-            });
-
-            const response = await client.send(command);
+            const response = await client.send(new SendEmailCommand(buildSendEmailInput(params)));
 
             return {
                 success: true,

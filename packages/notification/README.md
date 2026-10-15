@@ -75,6 +75,8 @@ await sendSMS({
 # Email
 SPFN_NOTIFICATION_EMAIL_PROVIDER=aws-ses
 SPFN_NOTIFICATION_EMAIL_FROM=noreply@example.com
+# SES only: configuration set every send names, so SES publishes its delivery/bounce/complaint events
+SPFN_NOTIFICATION_SES_CONFIGURATION_SET=mail-events
 
 # SMS
 SPFN_NOTIFICATION_SMS_PROVIDER=aws-sns
@@ -103,6 +105,8 @@ configureNotification({
         provider: 'aws-ses',
         from: 'noreply@example.com',
         replyTo: 'support@example.com',
+        // SES only: configuration set every send names, so SES publishes its delivery/bounce/complaint events
+        configurationSetName: 'mail-events',
     },
     sms: {
         provider: 'aws-sns',
