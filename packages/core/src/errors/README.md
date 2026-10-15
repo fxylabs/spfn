@@ -276,6 +276,22 @@ const maybe = registry.tryDeserialize(body); // null if __type missing/unknown (
 `getRegisteredTypes()`. Constructor accepts an array mixing single classes, arrays of
 classes, and other `ErrorRegistry` instances (`ErrorRegistryInput[]`).
 
+### Minified browser bundles
+
+A production browser bundle renames classes — `PaymentFailedError` becomes `Q` — but keeps the
+string a constructor assigns to `this.name`. The server is not minified, so `__type` still
+carries the original class name. `append()` therefore keys each class by its constructor name
+and also by the `name` its instances set for themselves, read once by building the class with
+`{}`. A lookup tries the constructor name first, so an unminified registry resolves exactly as
+it always has.
+
+For a class to be restored in a minified browser:
+
+- **Set `this.name` to the class name in the constructor.** A class that leaves it unset only
+  inherits its parent's name, and is not keyed under it — that key belongs to the parent.
+- **Let the constructor build with `{}`.** One that throws without its fields is keyed by its
+  constructor name only.
+
 ---
 
 ## Custom errors

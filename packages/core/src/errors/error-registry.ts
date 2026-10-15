@@ -21,6 +21,43 @@ export type ErrorRegistryInput =
     | ErrorRegistry;
 
 /**
+ * Build `ErrorClass` once with no data and read the `name` the instance carries.
+ * A constructor that cannot be built without its fields has no name to offer.
+ */
+function probeName(ErrorClass: SerializableErrorConstructor): string | undefined
+{
+    try
+    {
+        return new ErrorClass({}).name;
+    }
+    catch
+    {
+        return undefined;
+    }
+}
+
+/**
+ * The name instances of `ErrorClass` set for themselves, or undefined when they
+ * only inherit one.
+ *
+ * A minified browser bundle renames the class binding (`Q`, `eA`, …) but keeps
+ * the string the constructor assigns to `this.name`, while the server — which is
+ * not minified — sends `__type` as the class name that string repeats. So in the
+ * browser this name is the one that still matches `__type`.
+ *
+ * A name equal to the parent's is inherited: a subclass that never sets
+ * `this.name` answers with its parent's, and keying it there would let the
+ * subclass stand in for the parent.
+ */
+function ownInstanceName(ErrorClass: SerializableErrorConstructor): string | undefined
+{
+    const name = probeName(ErrorClass);
+    const Parent = Object.getPrototypeOf(ErrorClass) as SerializableErrorConstructor;
+
+    return name !== undefined && name !== probeName(Parent) ? name : undefined;
+}
+
+/**
  * Error registry for serialization/deserialization
  *
  * @example
@@ -52,6 +89,14 @@ export type ErrorRegistryInput =
 export class ErrorRegistry
 {
     private errors = new Map<string, SerializableErrorConstructor>();
+
+    /**
+     * The same classes keyed by the name their instances set for themselves.
+     * Consulted only when no class is registered under the constructor name, so
+     * an unminified registry resolves exactly as before and a minified one —
+     * whose constructor names are `Q`, `eA`, … — still resolves `__type`.
+     */
+    private instanceNames = new Map<string, SerializableErrorConstructor>();
 
     constructor(initialErrors?: ErrorRegistryInput[])
     {
@@ -99,19 +144,28 @@ export class ErrorRegistry
      */
     append(input: SerializableErrorConstructor | SerializableErrorConstructor[]): this
     {
-        if (Array.isArray(input))
+        for (const ErrorClass of Array.isArray(input) ? input : [input])
         {
-            for (const ErrorClass of input)
-            {
-                this.errors.set(ErrorClass.name, ErrorClass);
-            }
-        }
-        else
-        {
-            this.errors.set(input.name, input);
+            this.register(ErrorClass);
         }
 
         return this;
+    }
+
+    /**
+     * Key `ErrorClass` by its constructor name and, when its instances set one of
+     * their own, by that name too.
+     */
+    private register(ErrorClass: SerializableErrorConstructor): void
+    {
+        this.errors.set(ErrorClass.name, ErrorClass);
+
+        const name = ownInstanceName(ErrorClass);
+
+        if (name !== undefined)
+        {
+            this.instanceNames.set(name, ErrorClass);
+        }
     }
 
     /**
@@ -127,17 +181,31 @@ export class ErrorRegistry
             this.errors.set(name, ErrorClass);
         }
 
+        for (const [name, ErrorClass] of registry.instanceNames)
+        {
+            this.instanceNames.set(name, ErrorClass);
+        }
+
         return this;
+    }
+
+    /**
+     * The class registered for `type`: by constructor name first, then by the
+     * name its instances carry.
+     */
+    private find(type: string): SerializableErrorConstructor | undefined
+    {
+        return this.errors.get(type) ?? this.instanceNames.get(type);
     }
 
     /**
      * Check if error type is registered
      *
-     * @param name - Error class name
+     * @param name - Error class name, or the name its instances carry
      */
     has(name: string): boolean
     {
-        return this.errors.has(name);
+        return this.find(name) !== undefined;
     }
 
     /**
@@ -149,7 +217,7 @@ export class ErrorRegistry
      */
     deserialize(data: { __type: string; [key: string]: any }): SerializableError
     {
-        const ErrorClass = this.errors.get(data.__type);
+        const ErrorClass = this.find(data.__type);
 
         if (!ErrorClass)
         {
@@ -194,6 +262,6 @@ export class ErrorRegistry
      */
     getRegisteredTypes(): string[]
     {
-        return Array.from(this.errors.keys());
+        return [...new Set([...this.errors.keys(), ...this.instanceNames.keys()])];
     }
 }
