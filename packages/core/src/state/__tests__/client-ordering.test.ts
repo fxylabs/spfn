@@ -1,7 +1,8 @@
 /**
- * State client — store and ordering. Per `(id, key)` an arrival replaces the
- * entry only when its `at` is newer, or equal and saying something different;
- * an applied change replaces the frozen entry and notifies, nothing else does.
+ * State client — store and ordering. Per `(id, key)` an ordering stamp holds
+ * the newest `at` seen: an arrival older than it is dropped; any other
+ * advances it, and replaces the frozen entry and notifies only when `status`,
+ * `value` or `data` changed — a newer `at` alone is not a change.
  * One keyless state `consent`, one keyed `runtime`, one two-field key `seat`.
  * Listener counts start after the stream opened (the snapshots it read).
  *
@@ -17,10 +18,21 @@
  * | O8 | `current()` returns the same reference between changes | `Object.is` holds across two calls; changes after a frame |
  * | O9 | a two-field key subscribed in one field order, a frame carrying the other | one entry; listener called once |
  * | O10 | two listeners, the first throws                     | the second is called; no throw escapes the frame        |
+ * | N1 | reconnect: snapshot re-read with a newer `at`, same `value`/`data` | listener not called; `current()` the same reference, its `at` unchanged |
+ * | N2 | reconnect snapshot with a newer `at`, different `value` | listener called once; new entry with the new `at`      |
+ * | N3 | frame(at 2) same value as the entry(at 1); then frame(at 1.5) different value | first: not called, same reference; second: dropped (older than the stamp) |
+ * | N4 | `runtime` revoked; grant re-read(at 2) with the same value | called once (status changed); `at` stays the entry's |
+ * | N5 | write answer(at 2) same value as the entry(at 1); then its frame(at 2) | neither calls the listener                |
+ * | N7 | entry revoked before any value (`at` undefined); a frame of any `at` | applied and called                         |
+ * | N8 | stream reopen on a key change; the other subscribed states' snapshot entries are equal | their listeners not called |
+ * | N9 | `runtime` on `w1` and `w2`; frame `w1`(at 5) then frame `w2`(at 3), changed value | `w2` takes it: the stamp is per `(id, key)`; called once |
+ * | N10 | `consent` frame whose `data` holds an array; then a newer `at`, same `value`, one element changed | listener called once; new reference |
+ *
+ * N6 — `useServerState` does not re-render on such a reconnect — is in `react.test.tsx`.
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { at, FakeEventSource, harness, opened, routes, settle } from './client-harness';
+import { at, FakeEventSource, harness, opened, reconnect, routes, servedStates, settle } from './client-harness';
 
 // The api client reads the request's cookies and host on the server-side arm; there is no request here.
 vi.mock('next/headers', () => ({
@@ -30,6 +42,15 @@ vi.mock('next/headers', () => ({
 
 const w1 = { workspaceId: 'w1' };
 const w2 = { workspaceId: 'w2' };
+const runtimeEvent = { event: 'state.runtime.changed' };
+
+/** A `getStates` responder answering as the server would, each read one second later than the one before. */
+function clockedSnapshot(): (input: Record<string, any>) => unknown
+{
+    let reads = 0;
+
+    return input => ({ at: at(++reads), states: servedStates(input.query) });
+}
 
 describe('state client — ordering', () =>
 {
@@ -214,6 +235,178 @@ describe('state client — ordering', () =>
         expect(warn).toHaveBeenCalledTimes(1);
         expect(warn.mock.calls[0][0]).toBe('[state] A listener of state "consent" threw:');
         warn.mockRestore();
+        h.client.close();
+    });
+
+    it('N1 a reconnect re-reading equal entries with a newer at: no listener call, the same entry', async () =>
+    {
+        const h = harness({ getStates: clockedSnapshot() });
+        const listener = vi.fn();
+        h.client.subscribe('consent', listener);
+        const es = await opened();
+        const before = h.client.current('consent');
+        listener.mockClear();
+
+        await reconnect(es);
+
+        expect(routes(h)).toEqual(['getStates', 'getStates', 'getStates']);
+        expect(listener).not.toHaveBeenCalled();
+        expect(Object.is(h.client.current('consent'), before)).toBe(true);
+        expect(before?.at).toBe(at(1));
+        h.client.close();
+    });
+
+    it('N2 a reconnect snapshot with a newer at and another value: called once, the new entry', async () =>
+    {
+        const h = harness({ getStates: () => ({ at: at(1), states: servedStates() }) });
+        const listener = vi.fn();
+        h.client.subscribe('consent', listener);
+        const es = await opened();
+        listener.mockClear();
+
+        h.responders.getStates = () => ({ at: at(3), states: { consent: { value: 'agreed', data: { marketing: false } } } });
+        await reconnect(es);
+
+        expect(listener).toHaveBeenCalledTimes(1);
+        expect(h.client.current('consent')).toEqual({ at: at(3), value: 'agreed', data: { marketing: false }, status: 'ready' });
+        h.client.close();
+    });
+
+    it('N3 an equal frame with a newer at advances the stamp: an older frame after it is dropped', async () =>
+    {
+        const h = harness({ getStates: () => ({ at: at(1), states: servedStates() }) });
+        const listener = vi.fn();
+        h.client.subscribe('consent', listener);
+        const es = await opened();
+        const before = h.client.current('consent');
+        listener.mockClear();
+
+        es.emit('state.consent.changed', { at: at(2), value: 'pending', data: { marketing: false }, subject: 'u1' });
+        expect(listener).not.toHaveBeenCalled();
+        expect(h.client.current('consent')).toBe(before);
+
+        es.emit('state.consent.changed', { at: at(1.5), value: 'agreed', data: { marketing: true }, subject: 'u1' });
+        expect(listener).not.toHaveBeenCalled();
+        expect(h.client.current('consent')).toBe(before);
+        expect(before).toMatchObject({ at: at(1), value: 'pending' });
+        h.client.close();
+    });
+
+    it('N4 a grant re-read with an equal value lifts revoked: called once, a new entry, at unchanged', async () =>
+    {
+        const h = harness({
+            getStates: () => ({ at: at(1), states: { runtime: { value: 'ready' } } }),
+            getRuntimeState: () => ({ at: at(2), value: 'ready' }),
+        });
+        const listener = vi.fn();
+        h.client.subscribe('runtime', w1, listener);
+        const es = await opened();
+        es.control('subscription.revoked', runtimeEvent);
+        const revokedEntry = h.client.current('runtime', w1);
+        listener.mockClear();
+
+        es.control('subscription.granted', runtimeEvent);
+        await settle();
+        es.emit('state.runtime.changed', { at: at(2), value: 'ready', key: w1 });
+
+        expect(listener).toHaveBeenCalledTimes(1);
+        expect(h.client.current('runtime', w1)).not.toBe(revokedEntry);
+        expect(h.client.current('runtime', w1)).toEqual({ at: at(1), value: 'ready', status: 'ready' });
+        h.client.close();
+    });
+
+    it('N5 a write answer equal to the entry, then its frame with the same at: no listener call', async () =>
+    {
+        const h = harness({
+            getStates: () => ({ at: at(1), states: servedStates() }),
+            putConsentState: () => ({ at: at(2), value: 'pending', data: { marketing: false } }),
+        });
+        const listener = vi.fn();
+        h.client.subscribe('consent', listener);
+        const es = await opened();
+        const before = h.client.current('consent');
+        listener.mockClear();
+
+        await h.client.write('consent', { termsVersion: '2026-10', marketing: false });
+        es.emit('state.consent.changed', { at: at(2), value: 'pending', data: { marketing: false }, subject: 'u1' });
+
+        expect(listener).not.toHaveBeenCalled();
+        expect(h.client.current('consent')).toBe(before);
+        h.client.close();
+    });
+
+    it('N7 an entry revoked before any value takes an arrival of any at, and notifies', async () =>
+    {
+        const h = harness({ getStates: () => ({ at: at(1), states: {} }) });
+        const listener = vi.fn();
+        h.client.subscribe('consent', listener);
+        const es = await opened();
+        expect(h.client.current('consent')).toEqual({ status: 'revoked' });
+        listener.mockClear();
+
+        es.emit('state.consent.changed', { at: at(0), value: 'agreed', data: { marketing: true }, subject: 'u1' });
+
+        expect(listener).toHaveBeenCalledTimes(1);
+        expect(h.client.current('consent')).toEqual({ at: at(0), value: 'agreed', data: { marketing: true }, status: 'revoked' });
+        h.client.close();
+    });
+
+    it('N8 a reopen on a key change re-reads equal entries: the other states\' listeners are not called', async () =>
+    {
+        const h = harness({ getStates: clockedSnapshot() });
+        const consent = vi.fn();
+        const runtime = vi.fn();
+        h.client.subscribe('consent', consent);
+        h.client.subscribe('runtime', w1, runtime);
+        await opened();
+        const before = [h.client.current('consent'), h.client.current('runtime', w1)];
+        consent.mockClear();
+        runtime.mockClear();
+
+        h.client.subscribe('seat', { workspaceId: 'w1', teamId: 't1' }, () => undefined);
+        await opened();
+
+        expect(FakeEventSource.instances).toHaveLength(2);
+        expect(routes(h).filter(route => route === 'getStates').length).toBeGreaterThan(2);
+        expect(consent).not.toHaveBeenCalled();
+        expect(runtime).not.toHaveBeenCalled();
+        expect(h.client.current('consent')).toBe(before[0]);
+        expect(h.client.current('runtime', w1)).toBe(before[1]);
+        h.client.close();
+    });
+
+    it('N9 the stamp is per (id, key): a newer at on w1 does not drop an older-at change on w2', async () =>
+    {
+        const h = harness();
+        h.client.subscribe('runtime', w1, () => undefined);
+        const listener = vi.fn();
+        h.client.subscribe('runtime', w2, listener);
+        const es = await opened();
+        listener.mockClear();
+
+        es.emit('state.runtime.changed', { at: at(5), value: 'ready', key: w1 });
+        es.emit('state.runtime.changed', { at: at(3), value: 'ready', key: w2 });
+
+        expect(h.client.current('runtime', w2)).toMatchObject({ at: at(3), value: 'ready' });
+        expect(listener).toHaveBeenCalledTimes(1);
+        h.client.close();
+    });
+
+    it('N10 a changed element of an array inside data notifies', async () =>
+    {
+        const h = harness();
+        const listener = vi.fn();
+        h.client.subscribe('consent', listener);
+        const es = await opened();
+        es.emit('state.consent.changed', { at: at(1), value: 'agreed', data: { marketing: true, channels: ['email', 'sms'] }, subject: 'u1' });
+        const before = h.client.current('consent');
+        listener.mockClear();
+
+        es.emit('state.consent.changed', { at: at(2), value: 'agreed', data: { marketing: true, channels: ['email', 'push'] }, subject: 'u1' });
+
+        expect(listener).toHaveBeenCalledTimes(1);
+        expect(h.client.current('consent')).not.toBe(before);
+        expect(h.client.current('consent')?.data).toEqual({ marketing: true, channels: ['email', 'push'] });
         h.client.close();
     });
 });

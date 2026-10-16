@@ -12,6 +12,7 @@
  * | H5 | key changes to another `workspaceId`, never seen before | unsubscribe then subscribe; status back to `'loading'` until the entry exists |
  * | H6 | `write` typed only for a state with a write             | `expectTypeOf` positive and negative; at runtime a function on every state — decided by the type, never by the manifest's arrival — and `member`'s rejects naming it |
  * | H7 | server render (`renderToStaticMarkup`)                  | renders with status `'loading'`, no `EventSource` constructed  |
+ * | N6 | mounted; reconnect re-reads the same value with a newer `at` | no re-render; after a frame with a new value, one re-render |
  */
 
 import { act, StrictMode } from 'react';
@@ -20,7 +21,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { afterEach, beforeEach, describe, expect, expectTypeOf, it } from 'vitest';
 import type { StateClient } from '../client';
 import { useServerState, type ServerState } from '../react';
-import { at, FakeEventSource, harness, opened, type FixtureStates } from './client-harness';
+import { at, FakeEventSource, harness, opened, reconnect, servedStates, type FixtureStates } from './client-harness';
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -212,5 +213,30 @@ describe('useServerState', () =>
         expect(markup).toBe('<span>loading:undefined</span>');
         expect(log).toEqual([]);
         expect(FakeEventSource.instances).toHaveLength(0);
+    });
+
+    it('N6 a reconnect re-reading the same value with a newer at does not re-render; a new value re-renders once', async () =>
+    {
+        let reads = 0;
+        const h = harness({ getStates: input => ({ at: at(++reads), states: servedStates(input.query) }) });
+        await render(<Consent client={h.client} />);
+        const es = await act(async () => opened());
+        const renders = seen.length;
+
+        await act(async () =>
+        {
+            await reconnect(es);
+        });
+
+        expect(reads).toBe(3);
+        expect(seen.length).toBe(renders);
+
+        await act(async () =>
+        {
+            FakeEventSource.last.emit('state.consent.changed', { at: at(9), value: 'agreed', data: { marketing: false }, subject: 'u1' });
+        });
+
+        expect(seen.length).toBe(renders + 1);
+        expect(container.textContent).toBe('ready:agreed');
     });
 });

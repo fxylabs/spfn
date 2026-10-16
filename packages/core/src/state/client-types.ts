@@ -63,9 +63,10 @@ export interface StateFrame<V = unknown, D = unknown>
 }
 
 /**
- * What the client holds for one `(id, key)`: the latest frame and whether the
- * server still serves it. A state the server stopped serving before any value
- * arrived is `{ status: 'revoked' }` alone.
+ * What the client holds for one `(id, key)`: the frame that last changed
+ * `status`, `value` or `data` — its `at` is that read's, not the newest `at`
+ * the client has seen — and whether the server still serves it. A state the
+ * server stopped serving before any value arrived is `{ status: 'revoked' }` alone.
  */
 export type StateEntry<V = unknown, D = unknown> =
     | Readonly<StateFrame<V, D> & { status: 'ready' | 'revoked' }>

@@ -13,7 +13,7 @@
  */
 
 import { Type } from '@sinclair/typebox';
-import { vi } from 'vitest';
+import { expect, vi } from 'vitest';
 import { createSSEClient } from '../../event/sse/client';
 import { FakeEventSource } from '../../event/sse/__tests__/fake-event-source';
 import { createStateClient } from '../client';
@@ -161,6 +161,19 @@ export async function opened(): Promise<FakeEventSource>
     await settle();
 
     return FakeEventSource.last;
+}
+
+/** Fails the stream, opens the one that replaces it, and returns it: the next connection generation. */
+export async function reconnect(es: FakeEventSource): Promise<FakeEventSource>
+{
+    const before = FakeEventSource.instances.length;
+    es.fail();
+    await vi.waitFor(() => expect(FakeEventSource.instances).toHaveLength(before + 1));
+    const next = FakeEventSource.last;
+    next.open();
+    await settle();
+
+    return next;
 }
 
 /** The query fields of an `EventSource` URL, without `events`. */

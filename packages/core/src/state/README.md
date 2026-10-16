@@ -492,7 +492,7 @@ closed.
 | --- | --- |
 | `get(id, key?)` | `GET` `get<Id>State`, key fields in the query. The answer is applied under the ordering rule and returned |
 | `snapshot(query?)` | `GET getStates`, by default with the stream's query. Each state in the answer is applied, and each subscribed state it omits is marked `'revoked'` (below); the snapshot is returned. A rejected fetch rejects and changes nothing |
-| `subscribe(id, key?, listener)` | Registers the listener for `(id, key)` and returns its unsubscribe (idempotent). The client's first subscriber reads the snapshot, then opens the stream (below) |
+| `subscribe(id, key?, listener)` | Registers the listener for `(id, key)` and returns its unsubscribe (idempotent). The listener is called when the entry's `status`, `value` or `data` changes — never for an arrival that differs only by a newer `at` (Ordering, below). The client's first subscriber reads the snapshot, then opens the stream (below) |
 | `write(id, input, key?)` | `put<Id>State` with the input as the body, key fields in the query. The answer is applied at once — before the frame the write also sends — and returned. Typed only for a state with a write, and requires the key on a keyed one |
 | `current(id, key?)` | Synchronous: `{ at, value, data?, status }`, `{ status: 'revoked' }` for a state revoked before any value arrived, or `undefined`. The same frozen object until a change is applied |
 | `close()` | Closes the stream, drops every listener. Idempotent |
@@ -510,15 +510,22 @@ the state client's supersedes any other made on it.
 
 Per `(id, key)`, every arrival — a snapshot entry, a frame, a read or a write answer — goes
 through one rule. `at` is the time the server's read started, so a larger `at` is a later value.
+The client keeps, per `(id, key)`, an ordering stamp — the newest `at` seen — apart from the
+entry, and compares each arrival against it.
 
 | Arrival | Result |
 | --- | --- |
-| no current entry, or `at` newer than the current | applied, listeners notified |
-| `at` equal to the current | one read stamps one `at`, so this is the same value: applied and notified only when `value` or `data` differ (deep-equal) or the entry is `'revoked'` |
-| `at` older than the current | dropped |
-| a snapshot older than one state's entry | that state keeps its entry; the others take the snapshot |
+| no current entry, or `at` newer than the stamp | the ordering stamp advances; applied and notified only when `status`, `value` or `data` differ (deep-equal) |
+| `at` equal to the stamp | one read stamps one `at`, so this is the same value: applied and notified only when `value` or `data` differ (deep-equal), or its status differs from the entry's |
+| `at` older than the stamp | dropped |
+| a snapshot older than one state's stamp | that state keeps its entry; the others take the snapshot |
 | a write answer | applied like a frame — its own frame, arriving later with the same `at` and value, changes nothing |
 | a frame for a key not subscribed here | dropped (the server already filters by the connect query; this is the second guard) |
+
+Every stream open — the first, a reconnect, a reopen on a key change — re-reads the snapshot
+with a newer `at`, and a listener hears it only when `status`, `value` or `data` changed. The
+`at` of `current()` is the `at` of the read that last changed the value; a later read that repeats
+it advances only the stamp, so an older arrival after it is still dropped.
 
 The ordering rule decides the value; the status is decided apart (next section): an arrival
 on a revoked `(id, key)` supplies its value and leaves it `'revoked'`.
@@ -563,7 +570,7 @@ value has arrived yet.
 | `subscription.granted` for it | clears the mark for the carried key and reads it once (`get`); the server also sends a frame, before or after the control frame. Both arrive `'ready'`, and either order ends at the latest value |
 | the snapshot of a connection opened after the revoke, holding the state | clears the mark: that connection's own connect check served it |
 | the read of a shadowed key when a connection opened after the revoke, answered | clears the mark the same way: the read route served it |
-| an answer of such a read older than the entry — a frame or a `write()` answer of the new connection landed first | its value is dropped under the ordering rule, while the mark is still lifted: the lift goes by the connection, not by `at` |
+| an answer of such a read older than the stamp — a frame or a `write()` answer of the new connection landed first | its value is dropped under the ordering rule, while the mark is still lifted: the lift goes by the connection, not by `at` |
 
 Every automatic read is tagged with the connection it was started for, which is how a
 snapshot in flight across a revoke is told from one read after it.

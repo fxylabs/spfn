@@ -3,9 +3,10 @@
  *
  * One frozen entry per `(id, key)` and the ordering rule that decides whether
  * an arrival — a snapshot entry, a frame, a read or a write answer — replaces
- * it. An entry is replaced only on an applied change, so `current()` returns
- * the same object until then: `useSyncExternalStore` compares by reference
- * and would re-render forever on a fresh object per call.
+ * it. An entry is replaced only when its status, value or data changes, so
+ * `current()` returns the same object until then: `useSyncExternalStore`
+ * compares by reference and would re-render forever on a fresh object per
+ * call. A newer `at` alone advances the slot's ordering stamp, not the entry.
  */
 
 import type { StateEntry, StateFrame, StateListener } from './client-types';
@@ -51,24 +52,22 @@ function sameJson(a: unknown, b: unknown): boolean
 }
 
 /**
- * The ordering rule for the value. A newer `at` replaces; an older one is
- * dropped; an equal one is by design the same value (one read stamps one
- * `at`), so it replaces only when it says something different. An entry
- * marked revoked before any value arrived has no `at`: anything replaces it.
+ * The ordering rule for the value: an arrival older than the slot's stamp —
+ * the newest `at` seen — is dropped. An equal `at` is by design the same
+ * value (one read stamps one `at`), so it is not older and `changes` decides.
  */
-function supersedes(current: StateEntry | undefined, arrival: StateFrame): boolean
+function isOlder(stamp: string | undefined, arrival: StateFrame): boolean
 {
-    if (current?.at === undefined || arrival.at > current.at)
-    {
-        return true;
-    }
+    return stamp !== undefined && arrival.at < stamp;
+}
 
-    if (arrival.at < current.at)
-    {
-        return false;
-    }
-
-    return !sameJson(current.value, arrival.value) || !sameJson(current.data, arrival.data);
+/**
+ * Whether an arrival says something the entry does not. An entry marked
+ * revoked before any value arrived has no `at`: anything changes it.
+ */
+function changes(current: StateEntry | undefined, arrival: StateFrame): boolean
+{
+    return current?.at === undefined || !sameJson(current.value, arrival.value) || !sameJson(current.data, arrival.data);
 }
 
 function entryOf(frame: StateFrame, status: StateStatus): StateEntry
@@ -83,6 +82,14 @@ type StateStatus = StateEntry['status'];
 export class StateStore
 {
     private readonly entries = new Map<string, StateEntry>();
+
+    /**
+     * The newest `at` seen per slot, kept apart from the entry: an arrival
+     * that changes nothing still orders the ones after it, while the entry's
+     * `at` stays the `at` of the read that last changed the value.
+     */
+    private readonly stamps = new Map<string, string>();
+
     private readonly listeners = new Map<string, Set<StateListener>>();
 
     /**
@@ -106,20 +113,26 @@ export class StateStore
 
     /**
      * Apply an arrival: the value under the ordering rule, the status from the
-     * revoked mark. Listeners hear only an applied change.
+     * revoked mark. Listeners hear only a changed status, value or data.
      */
     apply(slot: string, frame: StateFrame): void
     {
         const current = this.entries.get(slot);
         const status: StateStatus = this.revoked.has(slot) ? 'revoked' : 'ready';
+        const ordered = !isOlder(this.stamps.get(slot), frame);
 
-        if (supersedes(current, frame))
+        if (ordered)
+        {
+            this.stamps.set(slot, frame.at);
+        }
+
+        if (ordered && changes(current, frame))
         {
             this.replace(slot, entryOf(frame, status));
         }
         else if (current!.status !== status)
         {
-            // Not superseded, so the current entry has a value: only its status changes.
+            // Not applied, so the current entry has a value: only its status changes.
             this.replace(slot, entryOf(current as StateFrame, status));
         }
     }

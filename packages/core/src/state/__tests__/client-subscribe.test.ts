@@ -27,7 +27,7 @@
  * | L16' | reconnect: `runtime` w1 `'ready'`; the reopen snapshot omits it | `'revoked'`, the old value kept                        |
  * | L17 | keyed state whose key the snapshot query did not carry | not marked revoked                                              |
  * | L18 | snapshot in flight; `subscription.revoked`; snapshot resolves | `{ at, value, status: 'revoked' }`                       |
- * | L19 | L18, then `subscription.granted` and its frame         | `'ready'`                                                       |
+ * | L19 | L18, then `subscription.granted` and its frame         | `'ready'`; `at` stays the snapshot's — the grant read and the frame repeat its value |
  * | L20 | revoke, then a frame with a newer `at`                 | value applied, status stays `'revoked'`                         |
  * | L21 | key change: the old connection's revoke lands before the queued reopen; the reopen snapshot in flight; the old key's read refused | the old key revoked, the new key `'ready'` |
  * | L22 | `runtime` w1 and w2 subscribed, the stream carries w2; `subscription.revoked` | w2 `'revoked'`, w1 stays `'ready'`    |
@@ -50,7 +50,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { ALL_EVENTS, at, FakeEventSource, harness, opened, routes, servedStates, settle, streamQuery } from './client-harness';
+import { ALL_EVENTS, at, FakeEventSource, harness, opened, reconnect, routes, servedStates, settle, streamQuery } from './client-harness';
 
 // The api client reads the request's cookies and host on the server-side arm; there is no request here.
 vi.mock('next/headers', () => ({
@@ -115,19 +115,6 @@ function heldReads(): { responder: (input: Record<string, any>) => unknown; rele
             : new Promise(resolve => held.push(resolve)),
         release: (n, body) => held[n - 1](body),
     };
-}
-
-/** Fails the stream, opens the one that replaces it, and returns it: the next connection generation. */
-async function reconnect(es: FakeEventSource): Promise<FakeEventSource>
-{
-    const before = FakeEventSource.instances.length;
-    es.fail();
-    await vi.waitFor(() => expect(FakeEventSource.instances).toHaveLength(before + 1));
-    const next = FakeEventSource.last;
-    next.open();
-    await settle();
-
-    return next;
 }
 
 describe('state client — subscription lifecycle', () =>
@@ -541,7 +528,7 @@ describe('state client — subscription lifecycle', () =>
         h.client.close();
     });
 
-    it('L19 then subscription.granted and its frame: ready', async () =>
+    it('L19 then subscription.granted and its frame: ready, at the snapshot\'s at', async () =>
     {
         const hold = holdAfterFirst();
         const h = harness({ getStates: hold.responder, getRuntimeState: () => ({ at: at(2), value: 'ready' }) });
@@ -555,7 +542,7 @@ describe('state client — subscription lifecycle', () =>
         es.emit('state.runtime.changed', { at: at(2), value: 'ready', key: w1 });
         await settle();
 
-        expect(h.client.current('runtime', w1)).toEqual({ at: at(2), value: 'ready', status: 'ready' });
+        expect(h.client.current('runtime', w1)).toEqual({ at: at(1), value: 'ready', status: 'ready' });
         h.client.close();
     });
 
