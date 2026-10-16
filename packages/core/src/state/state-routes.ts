@@ -8,10 +8,10 @@
  */
 
 import { Type, type TObject, type TSchema } from '@sinclair/typebox';
-import type { Context } from 'hono';
+import type { Context, MiddlewareHandler } from 'hono';
 import { ForbiddenError, UnauthorizedError } from '@spfn/core/errors';
 import { route } from '@spfn/core/route';
-import type { RouteContract, RouteDef, RouteInput } from '@spfn/core/route';
+import type { NamedMiddleware, RouteContract, RouteDef, RouteInput } from '@spfn/core/route';
 import {
     permissionContext,
     pickKey,
@@ -19,7 +19,7 @@ import {
     readContext,
     readSnapshot,
 } from './state-event';
-import type { RoutableState, StateCallContext, StateDefinition } from './types';
+import type { RoutableState, StateCallContext, StateContract, StateDefinition } from './types';
 
 /** Who a request is for. `null` answers 401. */
 export type SubjectResolver = (c: Context) => string | null;
@@ -48,6 +48,25 @@ function requireSubject(c: Context, resolveSubject: SubjectResolver): string
     return subject;
 }
 
+/**
+ * The write route's principal, `c.get('auth')`. A state that declared
+ * `.principal()` types `canWrite` / `write` without `undefined`, so a request
+ * whose `auth` is `undefined` or `null` is refused here, before either runs.
+ */
+function writePrincipal(def: StateDefinition, c: Context): unknown
+{
+    const principal = c.get('auth');
+
+    if (def.principal && principal == null)
+    {
+        throw new UnauthorizedError({
+            message: `State "${def.id}" declares .principal(), and this request carries none`,
+        });
+    }
+
+    return principal;
+}
+
 async function assertPermitted(def: StateDefinition, can: 'canRead' | 'canWrite', ctx: StateCallContext): Promise<void>
 {
     const predicate = can === 'canWrite' ? def.canWrite ?? def.canRead : def.canRead;
@@ -58,13 +77,18 @@ async function assertPermitted(def: StateDefinition, can: 'canRead' | 'canWrite'
     }
 }
 
-function responseSchema(def: StateDefinition): TObject
+/** `{ value, data? }` as declared: one state's response without `at`, and its entry in the snapshot. */
+function resultSchema(def: StateDefinition): TObject
 {
     return Type.Object({
-        at: Type.String(),
         value: def.value!,
         ...(def.data ? { data: def.data } : {}),
     });
+}
+
+function responseSchema(def: StateDefinition): TObject
+{
+    return Type.Object({ at: Type.String(), ...resultSchema(def).properties });
 }
 
 /**
@@ -119,7 +143,7 @@ export function readRoute(state: RoutableState, path: string, resolveSubject: Su
     });
 }
 
-/** `PUT <path>/<id>`: subject → key → `canWrite ?? canRead` → `write()` → `at` → `read()` → one frame. */
+/** `PUT <path>/<id>`: subject → principal (with `.principal()`) → key → `canWrite ?? canRead` → `write()` → `at` → `read()` → one frame. */
 export function writeRoute(state: RoutableState, path: string, resolveSubject: SubjectResolver): RouteDef<any, any, any>
 {
     const def = state._definition;
@@ -128,7 +152,7 @@ export function writeRoute(state: RoutableState, path: string, resolveSubject: S
     return stateRoute(def, 'put', `${path}/${def.id}`, { body: write.input, ...keyInput(def) }).handler(async (c) =>
     {
         const subject = requireSubject(c.raw, resolveSubject);
-        const principal = c.raw.get('auth');
+        const principal = writePrincipal(def, c.raw);
         const { body, query } = await c.data();
         const key = def.key ? pickKey(def.key, query) : undefined;
         await assertPermitted(def, 'canWrite', permissionContext(def, subject, principal, key));
@@ -177,6 +201,23 @@ async function snapshotEntry(def: StateDefinition, subject: string, principal: u
     return def.data ? { value, data } : { value };
 }
 
+/**
+ * What the router gives the snapshot route `GET <path>` alone. A per-state
+ * route keeps its own state's `.use()` / `.skip()` / `.contract()`, and the
+ * SSE stream runs none of them.
+ */
+export interface SnapshotRouteOptions
+{
+    /** Middleware for the snapshot route only. Not authorization: the stream never runs it (see README). */
+    use?: (MiddlewareHandler | NamedMiddleware<string>)[];
+
+    /** Server-level named middlewares the snapshot route skips; `'*'` skips every one. */
+    skip?: string[] | '*';
+
+    /** Publishes the snapshot route in the contract; the response schema is derived. */
+    contract?: StateContract;
+}
+
 /** What the browser cannot read from a type: every state, in declaration order, its key fields and whether it has a write. */
 export type StatesManifest = Record<string, { key: string[]; write: boolean }>;
 
@@ -190,12 +231,51 @@ export function stateManifest(states: RoutableState[]): StatesManifest
 }
 
 /**
+ * The snapshot's response: `at`, one optional `{ value, data? }` per state and
+ * one required manifest entry per state, in declaration order. Fresh objects,
+ * so no per-state schema is touched.
+ */
+function snapshotResponseSchema(states: RoutableState[]): TObject
+{
+    const manifestEntry = Type.Object({ key: Type.Array(Type.String()), write: Type.Boolean() });
+
+    return Type.Object({
+        at: Type.String(),
+        states: Type.Object(Object.fromEntries(states.map(state => [state.id, Type.Optional(resultSchema(state._definition))]))),
+        manifest: Type.Object(Object.fromEntries(states.map(state => [state.id, manifestEntry]))),
+    });
+}
+
+/**
+ * `route.get(path)` with the router's snapshot options. Each is applied only
+ * when given — an empty `use` counts as not given — so a router without them
+ * derives the route it always did. The
+ * contract is built here, once, when the router is built.
+ */
+function snapshotBuilder(states: RoutableState[], path: string, options: SnapshotRouteOptions)
+{
+    const builder = route.get(path).input({ query: snapshotQuery(states) });
+    const used = options.use?.length ? builder.use(options.use) : builder;
+    const skipped = options.skip ? used.skip(options.skip) : used;
+
+    return options.contract
+        ? skipped.contract(stripUndefined({ ...options.contract, response: snapshotResponseSchema(states) }) as RouteContract)
+        : skipped;
+}
+
+/**
  * `GET <path>`: one `at`, then every readable state in declaration order, and
  * the router's `manifest`. A `read()` that throws fails it all.
  */
-export function snapshotRoute(states: RoutableState[], manifest: StatesManifest, path: string, resolveSubject: SubjectResolver): RouteDef<any, any, any>
+export function snapshotRoute(
+    states: RoutableState[],
+    manifest: StatesManifest,
+    path: string,
+    resolveSubject: SubjectResolver,
+    options: SnapshotRouteOptions = {},
+): RouteDef<any, any, any>
 {
-    return route.get(path).input({ query: snapshotQuery(states) }).handler(async (c) =>
+    return snapshotBuilder(states, path, options).handler(async (c) =>
     {
         const subject = requireSubject(c.raw, resolveSubject);
         const principal = c.raw.get('auth');

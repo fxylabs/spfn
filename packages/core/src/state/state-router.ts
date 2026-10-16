@@ -13,10 +13,15 @@ import type { RouteDef, Router } from '@spfn/core/route';
 import { bindState, stateBinding } from './state-binding';
 import { changedPayloadSchema, stateEventName, subscribeChangeSignals } from './state-event';
 import { defaultSubject, readRoute, snapshotRoute, stateManifest, stateRouteName, writeRoute } from './state-routes';
-import type { SubjectResolver } from './state-routes';
+import type { SnapshotRouteOptions, SubjectResolver } from './state-routes';
 import type { RoutableState, StateFrame, StateKey, StateResult, StateSnapshot, StateValue } from './types';
 
-export interface StateRouterOptions
+/**
+ * Where the router mounts, whom a request is for, and the snapshot route's own
+ * `use` / `skip` / `contract` (`SnapshotRouteOptions`) — those reach `GET <path>`
+ * only, never a per-state route or the SSE stream.
+ */
+export interface StateRouterOptions extends SnapshotRouteOptions
 {
     /**
      * Where the routes are mounted: `GET <path>`, `GET|PUT <path>/<id>`.
@@ -113,6 +118,7 @@ export function defineStateRouter<S extends Record<string, RoutableState>>(
 
     assertPath(path);
     list.forEach(assertRoutable);
+    assertSnapshotMiddlewareIsNotAuthorization(list, options);
     assertDistinctIds(list);
     list.forEach(state => assertNotRouted(state, path));
 
@@ -120,14 +126,15 @@ export function defineStateRouter<S extends Record<string, RoutableState>>(
     list.forEach(subscribeChangeSignals);
 
     return {
-        router: defineRouter(deriveRoutes(list, path, options.subject ?? defaultSubject)) as Router<StateRoutes<S>>,
+        router: defineRouter(deriveRoutes(list, path, options)) as Router<StateRoutes<S>>,
         events: Object.fromEntries(list.map(state => [stateEventName(state.id), state._event])) as StateEvents<S>,
         states,
     };
 }
 
-function deriveRoutes(states: RoutableState[], path: string, resolveSubject: SubjectResolver): Record<string, RouteDef<any, any, any>>
+function deriveRoutes(states: RoutableState[], path: string, options: StateRouterOptions): Record<string, RouteDef<any, any, any>>
 {
+    const resolveSubject = options.subject ?? defaultSubject;
     const routes: Record<string, RouteDef<any, any, any>> = {};
 
     for (const state of states)
@@ -140,7 +147,7 @@ function deriveRoutes(states: RoutableState[], path: string, resolveSubject: Sub
         }
     }
 
-    routes.getStates = snapshotRoute(states, stateManifest(states), path, resolveSubject);
+    routes.getStates = snapshotRoute(states, stateManifest(states), path, resolveSubject, options);
 
     return routes;
 }
@@ -211,6 +218,26 @@ function assertMiddlewareIsNotAuthorization(state: RoutableState): void
             + 'snapshot route or the SSE stream — so it cannot authorize. Authorization belongs in .canRead(), which is '
             + 'enforced on the read route, the snapshot and the stream. A state that needs middleware only for, say, rate '
             + 'limiting declares .canRead(() => true) to say so.',
+        );
+    }
+}
+
+/**
+ * The router's `use` / `skip` reach the snapshot route only — never the SSE
+ * stream, which serves the same states — so, as for a state's own `.use()`,
+ * every state must authorize with `canRead`. A `contract` alone runs nothing.
+ */
+function assertSnapshotMiddlewareIsNotAuthorization(states: RoutableState[], options: StateRouterOptions): void
+{
+    const unguarded = states.find(state => !state._definition.canRead);
+
+    if (((options.use?.length ?? 0) > 0 || options.skip) && unguarded)
+    {
+        throw new Error(
+            `defineStateRouter: the router gives the snapshot route use or skip, but state "${unguarded.id}" declares no `
+            + '.canRead(). The snapshot\'s middleware never reaches the SSE stream, which serves the same state, so it '
+            + 'cannot authorize. Authorization belongs in .canRead(); a state readable by every subject declares '
+            + '.canRead(() => true) to say so.',
         );
     }
 }

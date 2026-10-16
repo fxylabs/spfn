@@ -35,7 +35,7 @@ export type {
     StateRoutes,
     StatesSnapshot,
 } from './state-router';
-export type { StatesManifest, SubjectResolver } from './state-routes';
+export type { SnapshotRouteOptions, StatesManifest, SubjectResolver } from './state-routes';
 
 // Types
 export type {
@@ -54,4 +54,5 @@ export type {
     StateValue,
     StateWriteOptions,
     WriteContext,
+    WritePermissionContext,
 } from './types';

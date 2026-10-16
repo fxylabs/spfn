@@ -193,7 +193,7 @@ describe('change signal', () =>
         await s.frame(CONSENT);
 
         expect(warn).toHaveBeenCalledWith(
-            'State "consent" could not be re-read on its change signal; no frame was sent',
+            'State "consent" could not be re-read or published on its change signal; no frame was sent',
             { state: 'consent', error: 'db down' },
         );
         expect(consent.read).toHaveBeenCalledTimes(2);

@@ -30,6 +30,7 @@ import type {
     StateWriter,
     WithShape,
     WriteContext,
+    WritePermissionContext,
 } from './types';
 
 /** A state id becomes part of a route name (`get<Id>State`) and of an event name (`state.<id>.changed`). */
@@ -91,6 +92,19 @@ export class StateBuilder<TId extends string, T extends StateShape>
     }
 
     /**
+     * Declare who the callbacks' `principal` is — what the app's auth
+     * middleware sets as `c.get('auth')`. Type-only, but for one rule: the write
+     * route refuses a request without a principal (401), so `.canWrite()` and
+     * `.write()` receive `P`; `.read()` and `.canRead()` receive `P | undefined`.
+     */
+    principal<P>(): StateBuilder<TId, WithShape<T, { principal: P }>>
+    {
+        this.assertOnce('principal', this._definition.principal);
+
+        return this.with({ principal: true });
+    }
+
+    /**
      * Middleware for the two per-state routes, `get<Id>State` / `put<Id>State`.
      * Not authorization: the snapshot and the SSE stream cannot run it, so a
      * state with `.use()` must declare `.canRead()`. Calls add up.
@@ -128,7 +142,7 @@ export class StateBuilder<TId extends string, T extends StateShape>
     }
 
     /** Who may write. Absent → `canRead` decides. */
-    canWrite(predicate: (ctx: PermissionContext<T>) => boolean | Promise<boolean>): StateBuilder<TId, T>
+    canWrite(predicate: (ctx: WritePermissionContext<T>) => boolean | Promise<boolean>): StateBuilder<TId, T>
     {
         this.assertOnce('canWrite', !!this._definition.canWrite);
 
@@ -355,5 +369,5 @@ export function defineState<TId extends string>(id: TId): StateBuilder<TId, Empt
         );
     }
 
-    return new StateBuilder(id, { id, shared: false, middlewares: [] });
+    return new StateBuilder(id, { id, shared: false, principal: false, middlewares: [] });
 }

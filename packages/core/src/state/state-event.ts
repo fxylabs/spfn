@@ -10,6 +10,7 @@
 
 import { Type, type TObject, type TSchema } from '@sinclair/typebox';
 import { Value } from '@sinclair/typebox/value';
+import { getTransactionContext, onAfterCommit } from '@spfn/core/db';
 import { defineEvent } from '@spfn/core/event';
 import type { EventDef, FramePredicate, SubscribePredicate } from '@spfn/core/event';
 import { logger } from '@spfn/core/logger';
@@ -148,7 +149,17 @@ function toFrame(def: StateDefinition, snapshot: Snapshot, subject: string | und
     return frame;
 }
 
-/** Read the value for one subject and key, send it as one frame, and return the snapshot. */
+/**
+ * Read the value for one subject and key, send it as one frame, and return the
+ * snapshot. Inside a transaction the frame is published after the root
+ * transaction commits, and never when the root rolls back; it still carries the
+ * value read inside it. A nested transaction (a savepoint) that rolls back
+ * while the root commits still publishes the frame read inside it, because
+ * after-commit callbacks belong to the root: emit the signal from the outer
+ * transaction, or after it, when an inner one may roll back. Outside a
+ * transaction the frame is sent here and awaited, so an emit that throws fails
+ * the caller — `onAfterCommit` would only log it.
+ */
 export async function readAndPublish(
     def: StateDefinition,
     event: EventDef<any>,
@@ -158,7 +169,16 @@ export async function readAndPublish(
 ): Promise<Snapshot>
 {
     const snapshot = await readSnapshot(def, readContext(def, subject, principal, key));
-    await event.emit(toFrame(def, snapshot, subject, key));
+    const frame = toFrame(def, snapshot, subject, key);
+
+    if (getTransactionContext())
+    {
+        onAfterCommit(() => event.emit(frame));
+    }
+    else
+    {
+        await event.emit(frame);
+    }
 
     return snapshot;
 }
@@ -310,7 +330,7 @@ async function onSignal(state: RoutableState, payload: Record<string, unknown>):
     }
     catch (error)
     {
-        stateLogger.warn(`State "${state.id}" could not be re-read on its change signal; no frame was sent`, {
+        stateLogger.warn(`State "${state.id}" could not be re-read or published on its change signal; no frame was sent`, {
             state: state.id,
             error: error instanceof Error ? error.message : String(error),
         });

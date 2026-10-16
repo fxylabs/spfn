@@ -34,11 +34,11 @@ import type { states } from '@/server/states';
 From `@spfn/core/state`:
 
 - Builder: `defineState(id)` → `StateBuilder`
-- Router: `defineStateRouter(states, { path?, subject? })` → `StateRouter`
-- Types: `StateBuilder`, `StateRouter`, `StateRouterOptions`, `StateRoutes`, `StateEvents`,
+- Router: `defineStateRouter(states, { path?, subject?, use?, skip?, contract? })` → `StateRouter`
+- Types: `StateBuilder`, `StateRouter`, `StateRouterOptions`, `SnapshotRouteOptions`, `StateRoutes`, `StateEvents`,
   `StatesSnapshot`, `StatesManifest`, `SubjectResolver`, `InferStateValue`, `InferStateKey`, `InferStateInput`,
   `StateShape`, `StateValue`, `StateKey`, `StateResult`, `StateSnapshot`, `StateFrame`,
-  `ReadContext`, `PermissionContext`, `WriteContext`, `ChangedPayload`, `GrantTarget`,
+  `ReadContext`, `PermissionContext`, `WritePermissionContext`, `WriteContext`, `ChangedPayload`, `GrantTarget`,
   `RevokeTarget`, `StateContract`, `StateWriteOptions`, `RoutableState`
 
 `StateBuilder` methods — immutable, every call returns a new builder, order free, no terminal
@@ -49,10 +49,11 @@ method:
 | `.key(schema, { shared? })` | Key fields: one value per key. `shared: true` — the value does not depend on the subject | a non-object schema; a field that is not a required `Type.String()`; a field named `events` or `token`; a second call |
 | `.value(schema)` | The value. Required | a second call |
 | `.data(schema)` | Data attached to the value. Optional | a second call |
+| `.principal<P>()` | Type-only: who the callbacks' `principal` is — what the app's auth middleware sets as `c.get('auth')`. The write route then refuses a request whose `auth` is `undefined` or `null` (401) | a second call |
 | `.use(mws)` / `.skip(names)` | Middleware for the two per-state routes, `get<Id>State` / `put<Id>State`; calls add up. **Not authorization** — the snapshot and the SSE stream cannot run it; authorize with `.canRead()` (see [Permissions](#permissions)) | at `defineStateRouter`, when the state declares no `.canRead()` |
 | `.contract({ since, auth?, requiresSession?, deprecatedIn?, removedIn? })` | Publishes the read route, the write route and the event | a second call |
 | `.canRead(fn)` | `({ subject, principal, key? }) => boolean \| Promise<boolean>`. Required on a keyed state | a second call |
-| `.canWrite(fn)` | Same shape. Absent → `canRead` decides | a second call |
+| `.canWrite(fn)` | Same shape; `principal` without `undefined` (below). Absent → `canRead` decides | a second call |
 | `.read(fn)` | The only source of a value. Required. Returns `{ value }`, or `{ value, data }` with `.data` — checked against the declaration on every path | a second call |
 | `.write(input, fn, { since?, deprecatedIn?, removedIn? })` | Derives the write route. `fn` gets the read context plus `input` and returns nothing | a second call |
 | `.changedBy(events)` | Domain events whose payload is read like the change signal's (see [The change signal](#the-change-signal)) | a second call; at `defineStateRouter`, an event whose payload schema lacks a required field |
@@ -63,9 +64,48 @@ keyed state only, and required there), `.revoke({ subject, key? })`, `.id`.
 `StateRouter`: `.router` (a `Router` from `defineRouter`), `.events` (`Record` of the SSE
 events keyed by wire name), `.states` (the declarations as given).
 
+`defineStateRouter` options:
+
+| Option | Effect |
+| --- | --- |
+| `path` | Where the routes are mounted, default `/state` |
+| `subject` | Who an HTTP request is for, default `c => c.get('auth')?.userId ?? null` |
+| `use` | Middleware for the snapshot route `GET <path>` only. **Not authorization**; refused when a state declares no `.canRead()`. An empty `use` is not a middleware and is not refused |
+| `skip` | Server-level named middlewares the snapshot route skips; `'*'` skips every one. Refused like `use` |
+| `contract` | `{ since, auth?, requiresSession?, deprecatedIn?, removedIn? }` — publishes the snapshot route; its response schema is derived |
+
+`use`, `skip` and `contract` reach the snapshot route only. A per-state route keeps exactly its
+own state's `.use()` / `.skip()` / `.contract()`; nothing is merged either way. A server that
+gates every request behind a named middleware (say `'requirements'`: "finish your onboarding")
+lets the onboarding states `.skip(['requirements'])` and the router `skip: ['requirements']`, so
+the shell's first snapshot is served to exactly the people it routes. The router does not infer
+the snapshot's skips from its states'.
+
 The types of `.read()`, `.write()`, `.canRead()` and `.canWrite()` contexts and of `R` are
 computed from the schemas declared *before* the call — runtime order is free, but declare
-`.key()`, `.value()` and `.data()` first to have the functions checked against them.
+`.key()`, `.value()`, `.data()` and `.principal()` first to have the functions checked against them.
+
+`principal` in each callback, with `.principal<P>()` declared:
+
+| Context | `principal` | Why |
+| --- | --- | --- |
+| `ReadContext` (`.read`) | `P \| undefined` | the change signal's re-read has no request, so none |
+| `PermissionContext` (`.canRead`) | `P \| undefined` | SSE connect passes what `resolvePrincipal` returned, possibly `undefined` |
+| `WritePermissionContext` (`.canWrite`) | `P` | asked on `PUT <path>/<id>` only, which refuses a request whose `auth` is `undefined` or `null` |
+| `WriteContext` (`.write`) | `P` | the same route |
+
+Without `.principal()` every one is `unknown`. `defineState<AuthContext>('consent')` is not the
+form: an explicit type argument would default the id to `string` and lose the route-name
+literals. Nor is a router option: the router cannot retype callbacks declared before it.
+
+```typescript
+export const consent = defineState('consent')
+    .principal<AuthContext>()
+    .value(Consent)
+    .canWrite(({ principal }) => principal.user.verified)          // AuthContext
+    .read(({ subject }) => consentService.current(subject))
+    .write(Input, ({ principal, input }) => consentService.record(principal.user.email, input));
+```
 
 ---
 
@@ -160,7 +200,8 @@ Route names are `get<Id>State` / `put<Id>State` with the id's first letter upper
 id must match `^[a-z][a-zA-Z0-9]*$` — `defineState` refuses another.
 
 `defineStateRouter` refuses, naming the state: no `.value()` or `.read()`; a keyed state
-without `.canRead()`; a state with `.use()` or `.skip()` but no `.canRead()`; a
+without `.canRead()`; a state with `.use()` or `.skip()` but no `.canRead()`; a router `use`
+or `skip` while any state declares no `.canRead()` (the first such state is named); a
 `.changedBy()` event whose payload schema lacks a field the signal needs; two states with one
 id; a `.write(…, { since })` on a state without `.contract()`; a state already grouped by
 another router (each router subscribes the change signal, so every change would be read and
@@ -173,12 +214,17 @@ sent twice). A builder without `.value()` or
 
 The subject comes from `options.subject(c)`, default `c.get('auth')?.userId ?? null` — the
 SSE `getSubject` default. No subject → `UnauthorizedError` (401). The principal on HTTP is
-`c.get('auth')` as the app's middleware set it.
+`c.get('auth')` as the app's middleware set it. A state that declared `.principal()` refuses a
+write whose request's `auth` is `undefined` or `null` with `UnauthorizedError` (401), after the subject and before
+`canWrite`; the read and snapshot routes never refuse on a missing principal.
 
 - **Read** `GET <path>/<id>`: subject → key (query, validated) → `canRead` (false → 403) →
   `at` → `read()` → `{ at, value, data }`.
-- **Write** `PUT <path>/<id>`: subject → key → `canWrite ?? canRead` (false → 403, `write` not
-  called) → `write({ …, input })` → `at` → `read()` → one SSE frame → `{ at, value, data }`.
+- **Write** `PUT <path>/<id>`: subject → principal (whose `auth` is `undefined` or `null` → 401) → key →
+  `canWrite ?? canRead` (false → 403, `write` not called) → `write({ …, input })` → `at` →
+  `read()` → one SSE frame → `{ at, value, data }`.
+  When the handler runs inside a transaction (`.use([Transactional()])`), the frame is
+  published after that transaction commits (see [Frames and transactions](#frames-and-transactions)).
   A `write` that throws propagates; nothing is read and no frame is sent. The input is a
   command, never the value: what the route answers is re-read.
 - **Snapshot** `GET <path>`: subject → one `at` → for each state, in declaration order: a keyed
@@ -196,15 +242,17 @@ A result that does not match fails the read, write and snapshot routes with an `
 naming the state and the first validation message, never the value; on the change signal it
 is logged at warn and sends nothing; `grant` rejects with the same error and sends nothing.
 
-A write that committed and then failed to read — `read()` threw or returned an undeclared
-result — answers 500 and sends no frame, although the write ran. There is no value to report;
-the next signal or read brings the client up to date.
+A write whose `read()` then fails — it threw or returned an undeclared result — answers 500
+and sends no frame. Without a transaction the write has already committed: there is no value
+to report, and the next signal or read brings the client up to date. Under
+`.use([Transactional()])` the failed read rolls the write back with it, so nothing changed.
 
 The derived routes are ordinary `RouteDef`s registered by `registerRoutes`, so `.use()`
 middleware runs inside the route's own chain, after the app's global middleware — it sees the
-`auth` the app set. It runs on the two per-state routes only: the snapshot route and the SSE
-stream carry no state's `.use()`. That is why `.use()` / `.skip()` require `.canRead()` — a
-guard in middleware would hold on `GET <path>/<id>` and leak through `GET <path>` and the
+`auth` the app set. A state's `.use()` / `.skip()` / `.contract()` reach its two per-state
+routes only; the router's `use` / `skip` / `contract` reach the snapshot route only. The SSE
+stream runs neither. That is why `.use()` / `.skip()` — the state's and the router's — require
+`.canRead()`: a guard in middleware would hold on one route and leak through the others and the
 stream. A state that needs middleware only for, say, rate limiting declares
 `.canRead(() => true)` to say so.
 
@@ -213,8 +261,10 @@ stream. A state that needs middleware only for, say, rate limiting declares
 ## The change signal
 
 The app emits `state.changed` **after the commit** that changed the value — from
-`onAfterCommit` (`@spfn/core/db`), not inside the transaction. The module never reads on its
-own: no polling, no database trigger. On each signal it reads and sends one frame:
+`onAfterCommit` (`@spfn/core/db`), not inside the transaction. An emit made inside a
+transaction anyway reads there and sends its frame at the commit (see
+[Frames and transactions](#frames-and-transactions)). The module never reads on its own: no
+polling, no database trigger. On each signal it reads and sends one frame:
 
 | State | Read | Frame |
 | --- | --- | --- |
@@ -257,6 +307,27 @@ module attaches nothing to the event — no `canSubscribe`, no `filter`; it only
 `read()`'s result is copied into the frame, so neither a handler mutating what it returned nor
 a subscriber mutating the payload changes the other.
 
+### Frames and transactions
+
+Every frame — of the write route, of the change signal and of `grant` — is sent by one rule:
+
+| Where the read ran | Frame |
+| --- | --- |
+| outside a transaction | emitted at once and awaited; an emit that throws fails the write or `grant`; on the change signal it is logged at warn and `changed.emit` resolves |
+| inside a transaction | queued with `onAfterCommit` and published after the root transaction commits; never when the root rolls back |
+
+- The frame carries the value read inside the transaction, with that read's `at`; nothing is
+  read again after the commit. The response is the same snapshot.
+- So a `changed.emit` or a `grant` made inside a transaction is deferred to its commit, like a
+  write.
+- The queue belongs to the root transaction: a `Transactional()` nested in an outer
+  `runInTransaction` publishes at the outer commit.
+- A nested transaction (a savepoint) that rolls back while the root commits still publishes
+  the frame read inside it, because after-commit callbacks belong to the root; emit the signal
+  from the outer transaction, or after it, when an inner one may roll back.
+- A deferred emit runs outside the transaction context; an error it throws is logged by the
+  transaction runner and reaches nobody.
+
 ---
 
 ## Permissions
@@ -266,7 +337,7 @@ a subscriber mutating the payload changes the other.
 | `canRead` | `GET <path>/<id>` | 403 |
 | `canRead` | `GET <path>` | that state omitted |
 | `canRead` | SSE connect (`canSubscribe`), with the key from the connect query | that event in `connected.deniedEvents` |
-| `canWrite ?? canRead` | `PUT <path>/<id>` | 403 |
+| `canWrite ?? canRead` | `PUT <path>/<id>` | 403; with `.principal()` declared, a request whose `auth` is `undefined` or `null` is 401 before it is asked |
 
 On SSE the connection declares its key in the connect query —
 `/events/stream?events=state.runtime.changed&workspaceId=w1&token=…`. The module sets each
@@ -342,7 +413,10 @@ change" by the client (implemented in the client half). There is no version coun
 - the SSE event `state.<id>.changed` with `since` / `deprecatedIn` / `removedIn`.
 
 A state without `.contract()` appears nowhere, like a route without one. The snapshot route is
-not contracted, its `manifest` included. A `value` literal removed later is `response.type-changed` on the read
+contracted by the router's own `contract` option, never by a state's: response
+`{ at, states: { [id]?: { value, data? } }, manifest: { [id]: { key: string[], write: boolean } } }`,
+each `states` entry optional and each `manifest` entry required, in declaration order — built
+once when the router is built. Without that option it appears nowhere. A `value` literal removed later is `response.type-changed` on the read
 operation and `event.payload.type-changed` on the event, as any route and event.
 
 ---
