@@ -44,7 +44,7 @@ From `@spfn/core/db`:
 - `runInTransaction(callback, options?)` — run a callback in a transaction (scripts/CLI; no Hono).
 - `onBeforeCommit(callback)` — run work inside the root transaction, just before it commits.
 - `onAfterCommit(callback)` — defer a side effect until after the root transaction commits.
-- `onAfterRollback(callback)` — compensate after the root transaction rolled back.
+- `onAfterRollback(callback)` — compensate after the work it was registered with rolled back.
 - `getTransaction()` — current transaction `TransactionDB`, or `null`.
 - `getTransactionContext()` — current `TransactionContext` (`tx`, `txId`, `level`, callbacks), or `null`.
 - `runWithTransaction(tx, txId, callback)` — bind a `tx` into `AsyncLocalStorage` for a callback.
@@ -305,9 +305,12 @@ Behavior to know:
   against a row the outer transaction locked.
 - **One commit.** Nested writes are durable only when the **root** commits. There is no
   intermediate commit at a savepoint boundary.
-- The inner level shares **all three of the root's** hook queues, so a hook registered in
-  a nested call fires at the **root's** boundary, not the savepoint's. See
-  [Transaction hooks](#transaction-hooks).
+- The inner level has **hook queues of its own**: a hook belongs to the savepoint that
+  registered it. A savepoint that resolves hands its hooks to its parent; one that rolls
+  back runs its `onAfterRollback` callbacks right there — inside the **parent's** context,
+  the root still open — and drops its `onBeforeCommit` / `onAfterCommit` callbacks, even
+  when the root goes on to commit. See
+  [Hooks belong to the frame that registered them](#hooks-belong-to-the-frame-that-registered-them).
 - **One at a time.** Nested calls made off the same transaction are serialized: a frame
   opens only after the previous frame on that connection has closed. See
   [Concurrent nested calls](#concurrent-nested-calls-are-serialized).
@@ -453,23 +456,25 @@ logging the SQL it emits — worth knowing before nesting deeply or in a loop:
 
 ## Transaction hooks
 
-Three hooks attach work to the **root** transaction's lifecycle. All three take
+Three hooks attach work to a transaction's lifecycle. All three take
 `() => void | Promise<void>`, are registered the same way from anywhere inside the async
-call chain, and queue on the root context (`BeforeCommitCallback`, `AfterCommitCallback`,
-`AfterRollbackCallback` are the exported type aliases).
+call chain, and queue on the **frame** — root or savepoint — they were registered in
+(`BeforeCommitCallback`, `AfterCommitCallback`, `AfterRollbackCallback` are the exported
+type aliases). A frame's queues reach the root only through savepoints that resolved; see
+[Hooks belong to the frame that registered them](#hooks-belong-to-the-frame-that-registered-them).
 
 | Hook | Runs | Still inside the tx? | If the callback throws |
 |------|------|----------------------|------------------------|
 | `onBeforeCommit(cb)` | after the root callback resolves, **before** `COMMIT` | **yes** — may run statements | aborts: later callbacks skipped, transaction rolls back, error propagates, `afterRollback` fires |
 | `onAfterCommit(cb)` | after the root transaction committed | no | logged, never thrown |
-| `onAfterRollback(cb)` | after the root transaction rolled back | no | logged, never thrown; the **original** error keeps propagating unchanged |
+| `onAfterRollback(cb)` | after the root transaction rolled back — or, registered in a savepoint that rolled back, right after that savepoint did | no after a root rollback; after a savepoint rollback it runs inside the **parent's** still-open transaction | logged, never thrown; the **original** error keeps propagating unchanged |
 
 Registration context:
 
 | Context | `onBeforeCommit` | `onAfterCommit` | `onAfterRollback` |
 |---------|------------------|-----------------|-------------------|
 | Inside root transaction | Queued; runs before the root's commit | Queued; runs after the root commits | Queued; runs if the root rolls back |
-| Inside a nested transaction | Queued on the **root** queue | Queued on the **root** queue | Queued on the **root** queue |
+| Inside a nested transaction | Queued on the savepoint; passed to the parent if it resolves, dropped if it rolls back | Queued on the savepoint; passed to the parent if it resolves, dropped if it rolls back | Queued on the savepoint; passed to the parent if it resolves, **run at once** if it rolls back |
 | Outside any transaction | Runs immediately on a microtask **+ `warn` log** — nothing left to commit, so a throw aborts nothing | Runs immediately on a microtask (already "committed") | **No-op + `warn` log** — there is no rollback to wait for |
 
 ### `onBeforeCommit(callback)`
@@ -567,11 +572,16 @@ async function importAvatar(userId: string, file: Blob)
 
 - Fires on **any** root rollback: a thrown handler error, a thrown `onBeforeCommit`
   callback, a statement timeout, a constraint violation.
-- Callbacks run **outside** the transaction context (`getTransaction()` is `null`), after
-  the driver rolled back — DB work in them uses a fresh connection, like `onAfterCommit`.
+- Registered inside a savepoint, it fires when **that savepoint** rolls back — at that
+  moment, whatever the root does afterwards — and not again at the root.
+- After a **root** rollback, callbacks run **outside** the transaction context
+  (`getTransaction()` is `null`) — DB work in them uses a fresh connection, like
+  `onAfterCommit`. After a **savepoint** rollback the root is still open and they run
+  inside the **parent's** context: `getTransaction()` is the parent's `tx`, and DB work in
+  them joins the parent transaction — it commits only if the parent does.
 - They are **awaited**, in registration order, before the causing error leaves
-  `runInTransaction` / the middleware. A callback that hangs delays that error, so keep
-  them short.
+  `runInTransaction` / the middleware (for a savepoint: the nested call). A callback that
+  hangs delays that error, so keep them short.
 - Errors are logged and swallowed: a failing callback never replaces the error that caused
   the rollback, never stops the remaining callbacks, and neither does a failure of the log
   call itself.
@@ -580,28 +590,41 @@ async function importAvatar(userId: string, file: Blob)
   to the client, and these callbacks fire — so a compensation should be idempotent and
   safe to run against data that did, in the end, land.
 
-### Hooks are scoped to the root transaction
+### Hooks belong to the frame that registered them
 
-Every queue lives on the root context and nested contexts share it, so the **root's** fate
-decides everything:
+Every frame — the root and each savepoint — has queues of its own, and its **own** fate
+decides what happens to the hooks registered in it:
 
-- A nested transaction that rolls back while the **root commits** fires **no**
-  `afterRollback` callbacks — not the ones registered nested, not the ones registered at the
-  root. The hooks answer "did the root transaction survive?", and it did. Compensating for a
-  nested failure the outer code deliberately caught and recovered from is that code's job.
-- Conversely, hooks registered in a nested call fire exactly once, at the root's boundary —
-  never once per nesting level.
-- **Registering compensations from a nested call is correct for the root's fate — and only
-  for it.** A nested call is a SAVEPOINT: its writes are durable only if the root commits,
-  so when the nested call *succeeded* and the root later rolls back, an `onAfterRollback`
-  registered inside it fires exactly when the work it compensates for disappears, and stays
-  silent when the root commits that work.
-  It is **not** a general "fires when my writes disappear" hook: in the caught-rollback case
-  above, the nested writes are gone and no hook fires at all. Code that catches a nested
-  failure and carries on must compensate **in the catch block**, at the moment it decides to
-  recover; deferring that to `onAfterRollback` compensates for nothing.
-- A `requiresNew: true` call is the exception, because it is a root: hooks registered inside
-  it belong to it and fire on its own commit or rollback.
+- **A savepoint that resolves** appends its three queues to its parent's, after what the
+  parent registered before the nested call and before what it registers after. Its hooks
+  now share the parent's fate: `onBeforeCommit` still runs before the **root's** `COMMIT`
+  (not at the savepoint — the driver never releases one), `onAfterCommit` after the root
+  commits, `onAfterRollback` if the root rolls back. Promotion repeats level by level, so a
+  hook fires exactly once, and only if every savepoint between it and the root resolved.
+- **A savepoint that rolls back** drops its `onBeforeCommit` and `onAfterCommit`
+  callbacks — the work they guard or announce is gone — and runs its `onAfterRollback`
+  callbacks immediately, awaited before the error leaves the nested call, inside the
+  parent's still-open transaction. Hooks promoted into it from savepoints nested inside it
+  go the same way. A compensation may call `runInTransaction` itself: that opens a savepoint
+  on the parent, and a hook the compensation registers belongs to the parent.
+- **A statement that fails inside a savepoint's `onAfterRollback` aborts the parent.** The
+  root-rollback pass runs outside any transaction, so a failing statement there touches
+  nothing; the savepoint pass runs inside the parent's transaction, so a failing statement
+  puts it into the aborted state (`25P02`). The callback's error is logged and swallowed as
+  always, but the root's next statement then fails with `25P02` (current transaction is
+  aborted). If the root runs none, its `COMMIT` fails with the callback's error. Either way,
+  everything the root wrote rolls back. Wrap DB work in a compensation in its own
+  `runInTransaction` (a savepoint) when it may fail.
+- **The root** runs whatever reached it. A savepoint failure the root catches and survives
+  fires none of the **root's** own `afterRollback` callbacks: the root did not roll back.
+- A `requiresNew: true` call is a root on its own connection: hooks registered inside it
+  belong to it and fire on its own commit or rollback, never handed to the outer
+  transaction.
+- **A hook registered after its frame has settled is dropped**, the same as one registered
+  after a root has settled. A frame's queues are handed on (or discarded) once, at the
+  moment it settles; detached work it started — a `setTimeout`, an un-awaited promise —
+  that registers a hook later appends to a queue nobody reads again. Register hooks in the
+  awaited call chain of the frame they belong to.
 
 ### Why there is no `onBeforeRollback`
 

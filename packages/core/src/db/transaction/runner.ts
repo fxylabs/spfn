@@ -55,8 +55,10 @@ import { logger } from '@spfn/core/logger';
 import { getDatabase } from '../manager';
 import {
     asyncContext,
+    createNestedFrameGate,
     runWithTransaction,
     getTransactionContext,
+    type TransactionContext,
     type TransactionDB,
     type AfterCommitCallback,
     type BeforeCommitCallback,
@@ -119,7 +121,10 @@ async function runBeforeCommitCallbacks(callbacks: BeforeCommitCallback[]): Prom
 }
 
 /**
- * Run the afterRollback callbacks, in registration order, outside the transaction
+ * Run the afterRollback callbacks, in registration order, after a rollback
+ *
+ * For a root that is outside any transaction context; for a savepoint frame it
+ * is inside the parent's (see discardFrameHooks). Nothing here depends on which.
  *
  * The rollback error is already on its way to the caller, so nothing here may
  * replace it: each callback's failure is logged through logSafely, so neither a
@@ -157,6 +162,67 @@ async function runAfterRollbackCallbacks(
                 });
             }));
     }
+}
+
+/**
+ * The three hook queues of one transaction frame — root or savepoint
+ */
+type FrameHooks = Pick<
+    TransactionContext,
+    'beforeCommitCallbacks' | 'afterCommitCallbacks' | 'afterRollbackCallbacks'
+>;
+
+/**
+ * Hand a resolved savepoint frame's hooks to the frame it was opened off
+ *
+ * A savepoint that resolved is only as durable as its parent: its writes now
+ * stand or fall with the parent's, so its hooks do too. Appending — rather than
+ * merging by time — puts them after everything the parent registered before
+ * the nested call and before anything it registers after, which is the order a
+ * reader of the call chain expects. Promotion repeats at every level, so a hook
+ * reaches the root only if every frame between them resolved.
+ */
+function promoteFrameHooks(frame: FrameHooks, parent: FrameHooks): void
+{
+    parent.beforeCommitCallbacks.push(...frame.beforeCommitCallbacks);
+    parent.afterCommitCallbacks.push(...frame.afterCommitCallbacks);
+    parent.afterRollbackCallbacks.push(...frame.afterRollbackCallbacks);
+}
+
+/**
+ * Settle a savepoint frame that rolled back to its SAVEPOINT
+ *
+ * Its writes are gone NOW, whatever the root does next, so its afterRollback
+ * callbacks run now — awaited, failures logged, exactly like a root's. Its
+ * beforeCommit and afterCommit callbacks are dropped: the work they guard or
+ * announce will never commit. The parent transaction is still open here, so a
+ * callback runs inside the parent's context and its DB work joins the parent.
+ * The original error is rethrown, never replaced.
+ *
+ * The pass runs in a CLONE of the parent's context with a fresh frame gate.
+ * This code runs inside the frame's own gated run on the parent's gate, so a
+ * compensation that calls runInTransaction would otherwise queue a savepoint
+ * behind the very frame waiting for it, and the root would hang. The clone
+ * keeps the parent's tx, level and hook arrays — shared by the spread, so a
+ * hook the compensation registers lands on the parent's queues — while its
+ * nested calls open off a gate nobody holds. The pass itself still runs inside
+ * the outer gated run, so the next sibling waits until it has finished.
+ */
+async function discardFrameHooks(
+    frame: FrameHooks,
+    parent: TransactionContext,
+    error: unknown,
+    txId: string,
+    context: string,
+    enableLogging: boolean,
+): Promise<never>
+{
+    await asyncContext.run(
+        { ...parent, nestedFrames: createNestedFrameGate() },
+        () => runAfterRollbackCallbacks(frame.afterRollbackCallbacks, txId, context, enableLogging),
+    ).catch(() => undefined);
+
+    throw error;
 }
 
 /**
@@ -472,15 +538,15 @@ export async function runInTransaction<T, TDatabase extends DrizzleDatabase = De
     // Start timing from actual transaction execution
     const startTime = Date.now();
 
-    // Hook queues of the root transaction context.
+    // Hook queues of THIS call's frame — root or savepoint.
     //
-    // These are ALIASES of the arrays inside the context, not copies, and they
-    // are bound on entry to the transaction closure — before the user callback
-    // can throw. That is what makes them reachable from the catch below, where
-    // the AsyncLocalStorage context is already gone: a throw can never lose a
-    // registered rollback callback. Callbacks registered later (including from
-    // nested transactions, which share the root's arrays) mutate these same
-    // arrays, so the runner always sees the complete queue.
+    // These are ALIASES of the arrays inside the frame's context, not copies,
+    // and they are bound on entry to the transaction closure — before the user
+    // callback can throw. That is what makes them reachable once the frame has
+    // settled, where the AsyncLocalStorage context is already gone: a throw can
+    // never lose a registered rollback callback. Callbacks registered later
+    // (including hooks promoted from savepoint frames that resolved inside this
+    // one) mutate these same arrays, so the runner always sees the full queue.
     let beforeCommitCallbacks: BeforeCommitCallback[] = [];
     let afterCommitCallbacks: AfterCommitCallback[] = [];
     let afterRollbackCallbacks: AfterRollbackCallback[] = [];
@@ -496,7 +562,11 @@ export async function runInTransaction<T, TDatabase extends DrizzleDatabase = De
      *   outer context's frame gate, which holds the frame back until the
      *   previous frame opened off the SAME context has closed: two concurrent
      *   siblings on one connection would otherwise overlap, and the first
-     *   `ROLLBACK TO` would take the other sibling's rows with it.
+     *   `ROLLBACK TO` would take the other sibling's rows with it. The frame's
+     *   hooks are settled INSIDE the gated run — promoted to the owner, or
+     *   their afterRollback callbacks run — so the next sibling never opens
+     *   onto a half-promoted queue or alongside a compensation still writing
+     *   on the shared connection.
      * - `requiresNew`: a real BEGIN, and it must enter as a root. Run through
      *   `asyncContext.exit` so the ambient context is invisible to it: otherwise
      *   `runWithTransaction` would hand it the outer transaction's hook queues
@@ -508,8 +578,23 @@ export async function runInTransaction<T, TDatabase extends DrizzleDatabase = De
     {
         if (savepointOwner)
         {
-            return savepointOwner.nestedFrames.run(
-                () => savepointOwner.tx.transaction(body as never) as Promise<T>,
+            return savepointOwner.nestedFrames.run(() =>
+                (savepointOwner.tx.transaction(body as never) as Promise<T>).then(
+                    (result) =>
+                    {
+                        promoteFrameHooks({ beforeCommitCallbacks, afterCommitCallbacks, afterRollbackCallbacks }, savepointOwner);
+
+                        return result;
+                    },
+                    (error: unknown) => discardFrameHooks(
+                        { beforeCommitCallbacks, afterCommitCallbacks, afterRollbackCallbacks },
+                        savepointOwner,
+                        error,
+                        txId,
+                        context,
+                        enableLogging,
+                    ),
+                ),
             );
         }
 
@@ -549,24 +634,24 @@ export async function runInTransaction<T, TDatabase extends DrizzleDatabase = De
             // Store transaction in AsyncLocalStorage
             return await runWithTransaction(transaction, txId, async () =>
             {
-                // Bind the hook queues before running user code, so they survive
-                // a throw (see the declarations above)
-                if (!isNested)
+                // Bind the frame's hook queues before running user code, so they
+                // survive a throw (see the declarations above). Nested frames
+                // need this as much as the root: their queues are their own now
+                const ctx = getTransactionContext();
+                if (ctx)
                 {
-                    const ctx = getTransactionContext();
-                    if (ctx)
-                    {
-                        beforeCommitCallbacks = ctx.beforeCommitCallbacks;
-                        afterCommitCallbacks = ctx.afterCommitCallbacks;
-                        afterRollbackCallbacks = ctx.afterRollbackCallbacks;
-                    }
+                    beforeCommitCallbacks = ctx.beforeCommitCallbacks;
+                    afterCommitCallbacks = ctx.afterCommitCallbacks;
+                    afterRollbackCallbacks = ctx.afterRollbackCallbacks;
                 }
 
                 const innerResult = await callback(transaction);
 
                 // beforeCommit hooks run here: the user callback resolved, so the
                 // transaction is still usable, and we are still inside its context
-                // and before drizzle issues COMMIT
+                // and before drizzle issues COMMIT. A savepoint frame's queue is
+                // promoted instead and runs here at the root: the driver never
+                // releases a savepoint, so there is no earlier boundary to run at
                 if (!isNested && beforeCommitCallbacks.length > 0)
                 {
                     if (enableLogging)
@@ -689,10 +774,9 @@ export async function runInTransaction<T, TDatabase extends DrizzleDatabase = De
         // Awaited so they complete before the error leaves the runner, and run
         // outside the transaction context — getTransactionContext() is null here,
         // so DB work inside them uses a fresh connection like afterCommit does.
-        // Nested calls skip this: only the root's fate fires rollback hooks. A
-        // nested throw the caller catches unwinds to the SAVEPOINT and the root
-        // still commits — nothing to compensate for. One that propagates rolls
-        // the root back, and the root's catch fires the shared queue once.
+        // Nested calls skip this: a savepoint frame already ran its own queue
+        // inside the gate (discardFrameHooks), while the parent was still open,
+        // and a frame that resolved handed its queue to the parent instead.
         if (!isNested && afterRollbackCallbacks.length > 0)
         {
             // Last backstop: nothing in this stage — not a callback, not a log

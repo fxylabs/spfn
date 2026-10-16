@@ -314,17 +314,15 @@ Every frame — of the write route, of the change signal and of `grant` — is s
 | Where the read ran | Frame |
 | --- | --- |
 | outside a transaction | emitted at once and awaited; an emit that throws fails the write or `grant`; on the change signal it is logged at warn and `changed.emit` resolves |
-| inside a transaction | queued with `onAfterCommit` and published after the root transaction commits; never when the root rolls back |
+| inside a transaction | queued with `onAfterCommit` and published after the root transaction commits; never when the transaction that read it, or any transaction around it, rolls back |
 
 - The frame carries the value read inside the transaction, with that read's `at`; nothing is
   read again after the commit. The response is the same snapshot.
 - So a `changed.emit` or a `grant` made inside a transaction is deferred to its commit, like a
   write.
-- The queue belongs to the root transaction: a `Transactional()` nested in an outer
-  `runInTransaction` publishes at the outer commit.
-- A nested transaction (a savepoint) that rolls back while the root commits still publishes
-  the frame read inside it, because after-commit callbacks belong to the root; emit the signal
-  from the outer transaction, or after it, when an inner one may roll back.
+- A `Transactional()` nested in an outer `runInTransaction` is a savepoint: its frame is
+  handed to the outer transaction and published at the outer commit, or dropped if the
+  handler throws.
 - A deferred emit runs outside the transaction context; an error it throws is logged by the
   transaction runner and reaches nobody.
 

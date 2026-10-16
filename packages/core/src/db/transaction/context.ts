@@ -60,11 +60,11 @@ export type TransactionContext<TDatabase extends DrizzleDatabase = DrizzleDataba
     /** Unique transaction ID for logging and tracing */
     txId: string;
     level: number;
-    /** Callbacks to execute before the root transaction commits (still inside it) */
+    /** beforeCommit callbacks registered in THIS frame (root or savepoint) */
     beforeCommitCallbacks: BeforeCommitCallback[];
-    /** Callbacks to execute after root transaction commits */
+    /** afterCommit callbacks registered in THIS frame (root or savepoint) */
     afterCommitCallbacks: AfterCommitCallback[];
-    /** Callbacks to execute after the root transaction rolled back */
+    /** afterRollback callbacks registered in THIS frame (root or savepoint) */
     afterRollbackCallbacks: AfterRollbackCallback[];
     /** Serializes the savepoint frames opened directly off THIS context */
     nestedFrames: NestedFrameGate;
@@ -230,17 +230,16 @@ export function runWithTransaction<T, TDatabase extends DrizzleDatabase = Defaul
         txLogger.debug('Root transaction context set', { txId, level: newLevel });
     }
 
-    // Nested transactions share the root's hook queues. All three hooks are
-    // scoped to the ROOT transaction's outcome, so a SAVEPOINT never owns a
-    // queue of its own: a callback registered in a nested call fires at the
-    // root's commit/rollback boundary, not the savepoint's.
-    const beforeCommitCallbacks = existingContext?.beforeCommitCallbacks ?? [];
-    const afterCommitCallbacks = existingContext?.afterCommitCallbacks ?? [];
-    const afterRollbackCallbacks = existingContext?.afterRollbackCallbacks ?? [];
-
     // Store transaction, new ID, and the current nesting level.
     //
-    // The frame gate is the one field that is NOT inherited: it serializes the
+    // Every context gets hook queues of its OWN — a savepoint does not share
+    // the root's. A hook belongs to the frame that registered it, because that
+    // frame's outcome decides whether the work it guards survives: the runner
+    // hands a resolved savepoint's queues to its parent, and a savepoint that
+    // rolls back runs its afterRollback queue and drops the other two. Shared
+    // queues would fire a rolled-back savepoint's hooks at the root's commit.
+    //
+    // The frame gate is per-context for its own reason: it serializes the
     // frames opened off THIS context, so every level needs its own or a nested
     // call would wait on the gate its own parent is holding.
     return asyncContext.run(
@@ -248,9 +247,9 @@ export function runWithTransaction<T, TDatabase extends DrizzleDatabase = Defaul
             tx,
             txId,
             level: newLevel,
-            beforeCommitCallbacks,
-            afterCommitCallbacks,
-            afterRollbackCallbacks,
+            beforeCommitCallbacks: [],
+            afterCommitCallbacks: [],
+            afterRollbackCallbacks: [],
             nestedFrames: createNestedFrameGate(),
         } as TransactionContext,
         callback,
@@ -262,7 +261,12 @@ export function runWithTransaction<T, TDatabase extends DrizzleDatabase = Defaul
  *
  * - Inside a transaction: queued and executed after root transaction commits
  * - Outside a transaction: executed immediately (already "committed")
- * - Nested transactions: callbacks bubble up to root transaction
+ * - Nested transactions: the callback belongs to the savepoint that registered
+ *   it. It reaches the root only if that savepoint (and every one around it)
+ *   resolved; a savepoint that rolls back drops it, even when the root commits
+ * - A hook registered after its frame (root or savepoint) has settled is
+ *   dropped: the frame's queue was handed on, or discarded, when it settled.
+ *   Register hooks in the awaited call chain, not from detached work
  * - Callbacks run outside transaction context (new connection for DB access)
  * - Errors are logged but never thrown (commit already succeeded)
  *
@@ -310,7 +314,13 @@ export function onAfterCommit(callback: AfterCommitCallback): void
  * - Outside a transaction: executed immediately with a WARNING (same rationale as
  *   onAfterCommit — there is nothing left to commit), and the abort semantics
  *   below do not apply: there is no transaction for a throw to roll back
- * - Nested transactions: callbacks bubble up to root transaction
+ * - Nested transactions: the callback belongs to the savepoint that registered
+ *   it. A savepoint that resolved hands it to the root, where it still runs
+ *   before the root's COMMIT (never at the savepoint); one that rolls back
+ *   drops it, and the root commits without it
+ * - A hook registered after its frame (root or savepoint) has settled is
+ *   dropped: the frame's queue was handed on, or discarded, when it settled.
+ *   Register hooks in the awaited call chain, not from detached work
  * - Callbacks run in registration order, inside the transaction context
  *   (getTransaction() returns the live tx)
  * - The queue is snapshot before the pass, so a callback registered BY a
@@ -369,13 +379,30 @@ export function onBeforeCommit(callback: BeforeCommitCallback): void
 /**
  * Register a callback to run after the current transaction rolled back
  *
- * - Inside a transaction: queued and executed after the ROOT transaction rolled
- *   back, before the causing error leaves runInTransaction / the middleware
+ * - Inside a transaction: queued and executed once the work registered with it
+ *   is rolled back, before the causing error leaves runInTransaction / the
+ *   middleware
  * - Outside a transaction: no-op with a warning — there is no rollback to wait for
- * - Nested transactions: callbacks bubble up to root transaction. A nested
- *   rollback that the root survives does NOT fire them; these hooks are about
- *   the root transaction's fate, not a savepoint's
- * - Callbacks run outside the transaction context (new connection for DB access)
+ * - Nested transactions: the callback belongs to the savepoint that registered
+ *   it. If that savepoint rolls back, the callback runs right then, awaited
+ *   before the error leaves the nested runInTransaction, and never again — the
+ *   root's own afterRollback callbacks do not run when the root commits. If the
+ *   savepoint resolved, the callback passes to the root and runs only if the
+ *   root rolls back
+ * - After a ROOT rollback, callbacks run outside any transaction context (new
+ *   connection for DB access). After a SAVEPOINT rollback the root is still
+ *   open: getTransactionContext() is the parent's, so DB work in the callback
+ *   joins the parent transaction and commits or rolls back with it
+ * - A statement that FAILS in a savepoint's callback aborts the parent
+ *   transaction: the error is logged and swallowed here, but the root's next
+ *   statement then fails with 25P02 (current transaction is aborted). If the
+ *   root runs none, its COMMIT fails with the callback's error. Either way,
+ *   everything the root wrote rolls back. A compensation may call
+ *   runInTransaction itself — that opens a savepoint on the parent, which
+ *   contains such a failure — and hooks it registers belong to the parent
+ * - A hook registered after its frame (root or savepoint) has settled is
+ *   dropped: the frame's queue was handed on, or discarded, when it settled.
+ *   Register hooks in the awaited call chain, not from detached work
  * - Errors are logged but never thrown: the original error keeps propagating
  *   unchanged, never replaced by a callback failure
  *

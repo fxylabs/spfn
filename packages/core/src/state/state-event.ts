@@ -152,13 +152,10 @@ function toFrame(def: StateDefinition, snapshot: Snapshot, subject: string | und
 /**
  * Read the value for one subject and key, send it as one frame, and return the
  * snapshot. Inside a transaction the frame is published after the root
- * transaction commits, and never when the root rolls back; it still carries the
- * value read inside it. A nested transaction (a savepoint) that rolls back
- * while the root commits still publishes the frame read inside it, because
- * after-commit callbacks belong to the root: emit the signal from the outer
- * transaction, or after it, when an inner one may roll back. Outside a
- * transaction the frame is sent here and awaited, so an emit that throws fails
- * the caller — `onAfterCommit` would only log it.
+ * transaction commits, and never when the transaction that read it, or any
+ * transaction around it, rolls back; it still carries the value read inside
+ * it. Outside a transaction the frame is sent here and awaited, so an emit
+ * that throws fails the caller — `onAfterCommit` would only log it.
  */
 export async function readAndPublish(
     def: StateDefinition,

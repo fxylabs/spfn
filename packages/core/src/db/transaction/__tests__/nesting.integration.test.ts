@@ -190,7 +190,7 @@ describe('Nested transactions (Integration)', () =>
 
     describe('ambient: yes | requiresNew: no | nested throws, caller catches', () =>
     {
-        it('rolls back to the savepoint, keeps prior outer writes, commits the root, and stays silent on afterRollback', async () =>
+        it('rolls back to the savepoint, keeps prior outer writes, commits the root, and fires only the nested afterRollback', async () =>
         {
             if (!dbFixture.isAvailable) return;
 
@@ -232,8 +232,9 @@ describe('Nested transactions (Integration)', () =>
             // ROLLBACK TO savepoint dropped only the nested write
             expect(await storedLabels()).toEqual(['root-before', 'root-after']);
 
-            // The root survived, so no rollback hook fired at either level
-            expect(fired).toEqual(['afterCommit']);
+            // The savepoint rolled back, so its own afterRollback fired there;
+            // the root survived, so the root's stayed silent
+            expect(fired).toEqual(['nested afterRollback', 'afterCommit']);
         });
 
         it('leaves the root able to issue statements after a failed STATEMENT inside the savepoint (25P02)', async () =>
@@ -309,8 +310,9 @@ describe('Nested transactions (Integration)', () =>
             expect(nestedPid).toBe(rootPid);
             expect(await storedLabels()).toEqual([]);
 
-            // Once per callback on the shared queue, not once per nesting level
-            expect(fired).toEqual(['root', 'nested']);
+            // Once per callback, not once per nesting level: the savepoint ran
+            // its own queue as it rolled back, then the root ran its own
+            expect(fired).toEqual(['nested', 'root']);
         });
     });
 
@@ -712,7 +714,7 @@ describe('Nested transactions (Integration)', () =>
 
     describe('depth 3 | mixed', () =>
     {
-        it('nests a savepoint inside a savepoint on one connection, with hooks still root-only', async () =>
+        it('nests a savepoint inside a savepoint on one connection, promoting resolved hooks to the root', async () =>
         {
             if (!dbFixture.isAvailable) return;
 
@@ -742,7 +744,8 @@ describe('Nested transactions (Integration)', () =>
                         onAfterCommit(() => void fired.push('afterCommit'));
                     }, quiet);
 
-                    // Neither inner level fired a hook of its own
+                    // Neither inner level fired a hook: each resolved, so each
+                    // handed its queue one level up
                     expect(fired).toEqual([]);
                 }, quiet);
 
@@ -758,7 +761,7 @@ describe('Nested transactions (Integration)', () =>
             // Savepoint depth counts up, root = 1
             expect(levels).toEqual([1, 2, 3]);
 
-            // Registered at depth 3, fired once at the root boundary
+            // Registered at depth 3, promoted twice, fired once at the root boundary
             expect(fired).toEqual(['beforeCommit', 'afterCommit']);
 
             expect(await storedLabels()).toEqual(['level-1', 'level-2', 'level-3']);

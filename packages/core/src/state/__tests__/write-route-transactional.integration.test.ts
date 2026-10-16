@@ -8,7 +8,7 @@
  * | T4 | PUT, `write` inserts a row                                   | one frame, received after the commit: at emit time a second connection already sees the row |
  * | T5 | same, `write` registers `onBeforeCommit(() => { throw … })`  | 500; no frame ever; the row is absent on a second connection |
  * | T6 | same as T4 but `read` throws after the write                 | 500; no frame; the row is rolled back                       |
- * | T8 | (documented limit) `changed.emit` inside a savepoint that rolls back, the root commits | one frame `{ value: 'agreed' }` is published; no row exists |
+ * | T8 | `changed.emit` inside a savepoint that rolls back, the root commits | no frame is published; no row exists                        |
  *
  * `Transactional`, `getTransaction` and `onBeforeCommit` come from
  * `@spfn/core/db`, the entry `state-event.ts` reads the transaction context
@@ -149,9 +149,7 @@ describe('frames after commit, through Transactional()', () =>
         expect(await visibleRows()).toBe(0);
     });
 
-    // This row flips the day `db/` scopes after-commit queues to the savepoint;
-    // the README's savepoint sentence under "Frames and transactions" goes with it.
-    it('T8 (documented limit) a change signal inside a savepoint that rolls back is still published when the root commits', async () =>
+    it('T8 a change signal inside a savepoint that rolls back is not published when the root commits', async () =>
     {
         const consent = defineState('consent').value(Consent).read(async () => ({ value: 'agreed' as const }));
         const states = defineStateRouter({ consent });
@@ -173,6 +171,6 @@ describe('frames after commit, through Transactional()', () =>
         await settle();
 
         expect(await visibleRows()).toBe(0);
-        expect(frames).toEqual([{ at: expect.any(String), subject: 's', value: 'agreed' }]);
+        expect(frames).toEqual([]);
     });
 });
