@@ -12,7 +12,7 @@ import { Type, type TObject, type TSchema } from '@sinclair/typebox';
 import { Value } from '@sinclair/typebox/value';
 import { getTransactionContext, onAfterCommit } from '@spfn/core/db';
 import { defineEvent } from '@spfn/core/event';
-import type { EventDef, FramePredicate, SubscribePredicate } from '@spfn/core/event';
+import type { EventDef, FramePredicate, InitialProducer, SubscribePredicate } from '@spfn/core/event';
 import { logger } from '@spfn/core/logger';
 import { stateBinding, type StateBinding } from './state-binding';
 import type { RoutableState, StateCallContext, StateDefinition } from './types';
@@ -231,12 +231,37 @@ function framePredicate(def: StateDefinition): FramePredicate<FramePayload>
         && (payload.subject === undefined || payload.subject === subject);
 }
 
-/** The SSE event `state.<id>.changed`, its permissions and contract set once, here. */
+/**
+ * The current frame a connection receives right after `connected`: one read
+ * for its subject and the key its query declares, at the read's start like any
+ * frame. Asked only after `subscribePredicate` allowed the connection; a keyed
+ * state whose key the query lacks was denied there, and is never read here. A
+ * read that throws or returns an undeclared result is the handler's to warn.
+ */
+function initialProducer(def: StateDefinition): InitialProducer<FramePayload>
+{
+    return async ({ subject, principal, request }) =>
+    {
+        const key = def.key ? pickKey(def.key, request.query) : undefined;
+
+        if (def.key && !key)
+        {
+            return [];
+        }
+
+        const snapshot = await readSnapshot(def, readContext(def, subject, principal, key));
+
+        return [toFrame(def, snapshot, subject, key)];
+    };
+}
+
+/** The SSE event `state.<id>.changed`, its permissions, initial frame and contract set once, here. */
 export function createStateEvent(def: StateDefinition): EventDef<any>
 {
     const event = defineEvent(stateEventName(def.id), framePayloadSchema(def))
         .canSubscribe(subscribePredicate(def))
-        .filter(framePredicate(def) as FramePredicate<unknown>);
+        .filter(framePredicate(def) as FramePredicate<unknown>)
+        .initial(initialProducer(def) as InitialProducer<any>);
 
     if (def.contract)
     {

@@ -355,6 +355,26 @@ export interface SSESubscribeOptions<TRouter extends EventRouterDef<any>>
      * `events` can change: an event never requested cannot be granted.
      */
     onSubscriptionChange?: (change: SSESubscriptionChange<TRouter>) => void;
+
+    /**
+     * Called with the server's `connected` frame on every connection — the
+     * first open and each reconnect — after `onOpen`.
+     */
+    onConnected?: (payload: ConnectedPayload) => void;
+}
+
+/**
+ * The `connected` frame, the first a connection receives: which requested
+ * events it is subscribed to, which are denied, and which were served their
+ * initial frames (written right after this one). `initial` is absent from a
+ * server that predates it.
+ */
+export interface ConnectedPayload
+{
+    subscribedEvents: string[];
+    deniedEvents: string[];
+    initial?: string[];
+    timestamp: number;
 }
 
 /**

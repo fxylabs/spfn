@@ -15,7 +15,7 @@
 import { Type } from '@sinclair/typebox';
 import { expect, vi } from 'vitest';
 import { createSSEClient } from '../../event/sse/client';
-import { FakeEventSource } from '../../event/sse/__tests__/fake-event-source';
+import { FakeEventSource, type FakeConnected } from '../../event/sse/__tests__/fake-event-source';
 import { createStateClient } from '../client';
 import type { StateClient, StateClientInitial } from '../client';
 import { defineState } from '../state-builder';
@@ -162,24 +162,27 @@ export async function settle(): Promise<void>
     }
 }
 
-/** Let the first snapshot and the queued stream open land, fire its `onopen`, and let the snapshot it triggers land. */
-export async function opened(): Promise<FakeEventSource>
+/**
+ * Let the first snapshot and the queued stream open land, fire its `onopen` and its `connected` frame
+ * (`initial` absent unless `connected` names it), and let the snapshot it triggers land.
+ */
+export async function opened(connected?: FakeConnected): Promise<FakeEventSource>
 {
     await settle();
-    FakeEventSource.last.open();
+    FakeEventSource.last.open(connected);
     await settle();
 
     return FakeEventSource.last;
 }
 
 /** Fails the stream, opens the one that replaces it, and returns it: the next connection generation. */
-export async function reconnect(es: FakeEventSource): Promise<FakeEventSource>
+export async function reconnect(es: FakeEventSource, connected?: FakeConnected): Promise<FakeEventSource>
 {
     const before = FakeEventSource.instances.length;
     es.fail();
     await vi.waitFor(() => expect(FakeEventSource.instances).toHaveLength(before + 1));
     const next = FakeEventSource.last;
-    next.open();
+    next.open(connected);
     await settle();
 
     return next;

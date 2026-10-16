@@ -45,12 +45,13 @@ From `@spfn/core/event`:
 - `.contract({ since, deprecatedIn?, removedIn? })` on an event and `.contract({ auth, streamPath? })`
   on an event router — publish the event in `contracts/current.json` (see
   [Contracted events](#contracted-events-for-separately-compiled-clients))
-- `.canSubscribe(predicate)`, `.filter(predicate)`, `.grant(subject)`, `.revoke(subject)` on an
-  event — who may subscribe over SSE, which frames a connection receives, and changing an open
-  connection (see [Per-event permission](#per-event-permission-cansubscribe-filter-grant--revoke))
+- `.canSubscribe(predicate)`, `.filter(predicate)`, `.initial(producer)`, `.grant(subject)`,
+  `.revoke(subject)` on an event — who may subscribe over SSE, which frames a connection receives,
+  the frames it receives right after `connected`, and changing an open connection (see
+  [Per-event permission](#per-event-permission-cansubscribe-filter-initial-grant--revoke))
 - Types: `EventDef`, `EventHandler`, `EventSubscribeOptions`, `InferEventPayload`, `PubSubCache`, `JobQueueSender`,
   `EventContract`, `EventRouterContract`, `SubscribePredicate`, `SubscribeContext`,
-  `SubscribeRequest`, `FramePredicate`, `FrameContext`,
+  `SubscribeRequest`, `FramePredicate`, `FrameContext`, `InitialProducer`,
   `EventRouterDef`, `InferEventNames`, `InferEventPayloads`,
   `InferRouterEventPayload` (the two-arg router variant — see note)
 
@@ -61,7 +62,7 @@ From `@spfn/core/event/sse`:
 - Types: `SSEToken`, `SSETokenStore`, `SSETokenManagerConfig`, `SSEMessage`,
   `SSEHandlerConfig`, `SSEHandlerAuthConfig`, `SSEAuthConfig`, `SSEClientConfig`,
   `SSEEventHandler`, `SSEEventHandlers`, `SSESubscribeOptions`, `SSESubscriptionChange`,
-  `SSEConnectionState`, `SSEUnsubscribe`
+  `SSEConnectionState`, `SSEUnsubscribe`, `ConnectedPayload`
 
 From `@spfn/core/event/sse/client`:
 
@@ -139,6 +140,7 @@ Promise<void>` otherwise. Handlers run via `Promise.allSettled` — see
 | `contract(contract)` | `(EventContract) => EventDef` | publish in the contract; returns the same event; a second call throws |
 | `canSubscribe(predicate)` | `<P>(SubscribePredicate<P>) => EventDef` | who may subscribe over SSE (once per connection); a second call throws |
 | `filter(predicate)` | `(FramePredicate<TPayload>) => EventDef` | which frames a connection receives (sync, per frame); a second call throws |
+| `initial(producer)` | `<P>(InitialProducer<TPayload, P>) => EventDef` | the frames a connection receives right after `connected`, before any live frame (once per connection with a subject); a second call throws |
 | `grant(subject, match?)` | `Promise<void>` | activate the event on the subject's open SSE connections (those matching `match`, when given) where it is denied |
 | `revoke(subject, match?)` | `Promise<void>` | deactivate the event on the subject's open SSE connections (those matching `match`, when given) where it is allowed |
 
@@ -274,7 +276,9 @@ Client                              Server
   │                                   │  → authorize(subject, events)
   │                                   │  → resolvePrincipal(subject, request)   (once)
   │                                   │  → event.canSubscribe(ctx)              (once per event)
-  │  ◄═══════════════════════════════ │  SSE stream opens (connected: subscribed + denied)
+  │                                   │  → event.initial(ctx)                   (once per allowed event; live frames held)
+  │  ◄═══════════════════════════════ │  SSE stream opens (connected: subscribed + denied + initial)
+  │  event: <name> / data: {…}        │  ← each initial frame, then the held live frames
   │  event: <name> / data: {…}        │  ← filter(subject, payload) + event.filter(payload, ctx) per emission
 ```
 
@@ -393,7 +397,7 @@ Return `false` to skip. Payload is typed per event.
 })
 ```
 
-### Per-event permission (`canSubscribe`, `filter`, `grant` / `revoke`)
+### Per-event permission (`canSubscribe`, `filter`, `initial`, `grant` / `revoke`)
 
 The global hooks above are one function for the whole router. When the rule belongs to one event,
 declare it where the event is defined:
@@ -403,7 +407,8 @@ export const auditLogged = defineEvent('audit.logged', payload)
     .canSubscribe<AuthPrincipal>(({ subject, principal, request }) => principal?.role === 'admin');
 
 export const runtimeChanged = defineEvent('runtime.changed', payload)
-    .filter((payload, { subject, request }) => payload.workspaceId === request.query.workspaceId);
+    .filter((payload, { subject, request }) => payload.workspaceId === request.query.workspaceId)
+    .initial(async ({ request }) => [await runtimes.current(request.query.workspaceId)]);
 ```
 
 - **`canSubscribe(ctx)`** — once per connection per requested event, only when the connection has a
@@ -414,11 +419,26 @@ export const runtimeChanged = defineEvent('runtime.changed', payload)
 - **`filter(payload, ctx)`** — per frame, with or without a subject; it matches the payload against
   the connect request. It runs beside the global `filter` map — both must return `true`. Sync. A
   throw drops that frame (warn) and leaves the connection alive.
-- **`request`** in both is a snapshot taken once at connect: `{ query, headers }` with lowercased
+- **`initial(ctx)`** — the event's current frames for one connection, written right after the
+  `connected` frame and before any live frame, so a client that opens the stream needs no read of
+  its own. It runs once per connection **with a subject**, only for an event `canSubscribe` allowed,
+  with the same `{ subject, principal, request }`; the producers of one connection run in
+  parallel, and their frames are written in the order the events were requested. It returns an
+  array of payloads (`[]` sends nothing but still counts as served). Its frames skip both filters —
+  they were produced for this connection — so the producer must return only what this subject may
+  see: neither the global `filter` nor `.filter()` runs on its frames. They number their
+  `messageId`s like any frame. The
+  `connected` frame's `initial` lists exactly the events whose producer returned; a producer that
+  throws or rejects is logged at warn with the event name (never the error) and sends nothing,
+  and the stream stays open. While the producers run, live frames — and `grant` / `revoke` frames
+  and pings — are held, then written after the initial frames in arrival order; a `revoke` landing
+  meanwhile still stops the subscription at once. A `grant` later never runs it. A connection
+  without a subject, or with no allowed event that declares it, gets `initial: []`.
+- **`request`** in all three is a snapshot taken once at connect: `{ query, headers }` with lowercased
   header names — never the live Hono context. It is the connect request as sent: it holds the
   `cookie` / `authorization` headers and the consumed one-time `token` in `query`, so the app must
   never log the snapshot.
-- Both are set once per event: an `EventDef` is a shared singleton, so a second call throws.
+- Each is set once per event: an `EventDef` is a shared singleton, so a second call throws.
 
 **`resolvePrincipal` — why the stream has no `AuthContext`.** The subject comes from the one-time
 token, and the stream is mounted without the app's middleware, so there is no request auth object
@@ -441,10 +461,17 @@ resolved' }`.
 kept → per frame, the global `filter` and the event's `filter`. An event `authorize` dropped is
 never asked and counts as denied too.
 
-**Cost.** At connect: one predicate call per requested event (plus one `resolvePrincipal`). Per
-frame: sync filters only — never storage. The handler sets no timeout on them: a hanging
-`canSubscribe` or `resolvePrincipal` holds the connect open, so the app owns the timeout. A
-client that leaves meanwhile is forgotten at once; the late verdict opens nothing.
+**Cost.** At connect: one predicate call per requested event (plus one `resolvePrincipal`), and
+one `initial` producer call per allowed event that declares one. Per frame: sync filters only —
+never storage. The handler sets no timeout on them: a hanging `canSubscribe` or
+`resolvePrincipal` holds the connect open, and a hanging `initial` holds the `connected` frame and
+every live frame behind it, so the app owns the timeout. A client that leaves meanwhile is
+forgotten at once; the late verdict opens nothing, and late initial frames are not written. The
+initial frames and the held live frames go through the connection's bounded queue like any frame:
+a held frame counts against `maxQueue` from the moment it is held, together with the frames
+already queued, and past it the connection is closed as a slow consumer — while the producers
+still run, too — and the client reconnects. A producer's duration thus counts as the client's
+slowness: frames that pile up while it runs count as frames the client has not read.
 
 **`grant` / `revoke` — changing an open connection.**
 
@@ -497,6 +524,22 @@ client.subscribe({
     onSubscriptionChange: ({ event, status }) =>
     {
         // event: 'runtimeChanged' (typed); status: 'granted' | 'revoked'
+    },
+});
+```
+
+The `connected` frame — always the first of a connection — carries
+`{ subscribedEvents, deniedEvents, initial, timestamp }` (`ConnectedPayload`; `initial` is absent
+from a server that predates `.initial()`). `onConnected` receives it on every connection, the first
+and each reconnect, after `onOpen`:
+
+```typescript
+client.subscribe({
+    events: ['runtimeChanged'],
+    handlers: { runtimeChanged: (p) => update(p) },
+    onConnected: ({ deniedEvents, initial }) =>
+    {
+        // initial: the events whose current frames follow this one; read the others yourself
     },
 });
 ```
@@ -891,6 +934,8 @@ interface EventDef<TPayload = void> {
     canSubscribe: <P = unknown>(predicate: SubscribePredicate<P>) => EventDef<TPayload>;
     readonly _filter?: FramePredicate<TPayload>;
     filter: (predicate: FramePredicate<TPayload>) => EventDef<TPayload>;
+    readonly _initial?: InitialProducer<TPayload, any>;
+    initial: <P = unknown>(producer: InitialProducer<TPayload, P>) => EventDef<TPayload>;
     grant: (subject: string, match?: SubscriptionMatch) => Promise<void>;
     revoke: (subject: string, match?: SubscriptionMatch) => Promise<void>;
 }
@@ -901,6 +946,8 @@ interface SubscribeContext<P = unknown> { subject: string; principal: P | undefi
 type SubscribePredicate<P = unknown> = (ctx: SubscribeContext<P>) => boolean | Promise<boolean>;
 interface FrameContext { subject: string | undefined; request: SubscribeRequest; }
 type FramePredicate<TPayload> = (payload: TPayload, ctx: FrameContext) => boolean;
+type InitialProducer<TPayload, P = unknown> = (ctx: SubscribeContext<P>) => TPayload[] | Promise<TPayload[]>;
+interface ConnectedPayload { subscribedEvents: string[]; deniedEvents: string[]; initial?: string[]; timestamp: number; }
 
 interface EventContract { since: string; deprecatedIn?: string; removedIn?: string; }
 

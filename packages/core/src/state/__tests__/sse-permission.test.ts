@@ -38,7 +38,7 @@ import { closeAllStreams, createStreamApp } from '../../event/sse/__tests__/stre
 import type { SSEHandlerConfig } from '../../event/sse/types';
 import { defineState } from '../state-builder';
 import { defineStateRouter } from '../state-router';
-import { Consent, consentState, ISO, runtimeState } from './state-harness';
+import { afterInitial, Consent, consentState, ISO, runtimeState } from './state-harness';
 
 const CONSENT = 'state.consent.changed';
 const RUNTIME = 'state.runtime.changed';
@@ -52,7 +52,7 @@ function streamApp(states: ReturnType<typeof defineStateRouter<any>>, config: SS
     return async (subject: string, query: string) =>
     {
         const stream = await app.connect(subject, { query });
-        const connected = await stream.frame('connected');
+        const connected = await afterInitial(stream);
 
         return { stream, connected: connected.data };
     };
@@ -69,7 +69,7 @@ function pingedStreamApp(states: ReturnType<typeof defineStateRouter<any>>, auth
     const connect = async (subject: string | undefined, query: string) =>
     {
         const stream = await app.connect(subject, { query: query.replace(/events=([^&]*)/, 'events=$1,ping') });
-        await stream.frame('connected');
+        await afterInitial(stream);
 
         return stream;
     };

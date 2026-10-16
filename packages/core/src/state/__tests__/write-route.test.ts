@@ -23,7 +23,7 @@ import { closeAllStreams, createStreamApp } from '../../event/sse/__tests__/stre
 import { defineState } from '../state-builder';
 import { defineStateRouter } from '../state-router';
 import type { StateRouter } from '../state-router';
-import { Consent, ConsentData, ConsentInput, consentState, ISO, request, Role, serve, WorkspaceKey } from './state-harness';
+import { afterInitial, Consent, ConsentData, ConsentInput, consentState, ISO, request, Role, serve, WorkspaceKey } from './state-harness';
 
 const input = { termsVersion: '2026-10', marketing: true };
 
@@ -65,7 +65,9 @@ describe('write route', () =>
             });
         const states = defineStateRouter({ consent });
         const stream = await createStreamApp(defineEventRouter(states.events)).connect('s', { query: 'events=state.consent.changed' });
-        await stream.frame('connected');
+        await afterInitial(stream);
+        // The connect's own read, for its initial frame: this row counts the write's.
+        order.length = 0;
         const app = await serve(states);
 
         const res = await request(app, 's').put('/state/consent', input);
@@ -155,7 +157,7 @@ describe('write route', () =>
         const ping = defineEvent('test.ping', Type.Object({ n: Type.Number() }));
         const onW2 = await createStreamApp(defineEventRouter({ ...states.events, ping }))
             .connect('s', { query: 'events=state.member.changed,ping&workspaceId=w2' });
-        await onW2.frame('connected');
+        await afterInitial(onW2);
 
         const res = await request(app, 's').put('/state/member?workspaceId=w1', { role: 'admin' });
         await ping.emit({ n: 1 });

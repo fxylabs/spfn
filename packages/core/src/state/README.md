@@ -191,7 +191,7 @@ With the default `path` `/state`:
 | `getConsentState` | `GET /state/consent` → `{ at, value, data }`. Keyed: key fields in the query, validated by the route (missing → 400) |
 | `putConsentState` | `PUT /state/consent`, only when `.write()` exists. Body = the input schema, keyed: key fields in the query. → `{ at, value, data }` |
 | `getStates` | `GET /state` → `{ at, states: { consent: { value, data }, … } }` in declaration order — one for all states of the router |
-| `states.events['state.consent.changed']` | the SSE event, payload `{ at, value, data, key?, subject? }` — `key` on a keyed state, `subject` unless shared |
+| `states.events['state.consent.changed']` | the SSE event, payload `{ at, value, data, key?, subject? }` — `key` on a keyed state, `subject` unless shared. It declares `.canSubscribe` and `.filter` from `canRead` and the key, and `.initial`: a connection it allows receives the state's current frame — one `read()` for its subject and the key in its connect query — right after `connected` |
 | `consent.changed` | the change signal, payload keyless `{ subject }`, keyed `{ ...keyFields, subject }`, shared `{ ...keyFields }` |
 
 `data` is present exactly when `.data()` is declared, in every response and frame.
@@ -240,7 +240,11 @@ Every `read()` result is checked against `{ value, data }` as declared — `data
 `.data()` is, no other field — with a schema built once per state when the router is built.
 A result that does not match fails the read, write and snapshot routes with an `Error` (500)
 naming the state and the first validation message, never the value; on the change signal it
-is logged at warn and sends nothing; `grant` rejects with the same error and sends nothing.
+is logged at warn and sends nothing; `grant` rejects with the same error and sends nothing. On
+the stream's connect it is logged at warn naming the state's event (never the error), the state
+is left out of `connected.initial` and sends no initial frame. The client's snapshot read then
+fails too — the snapshot route reads every state — so the entry keeps its last value, `onError`
+is called, and the state recovers with its next frame or the next connect.
 
 A write whose `read()` then fails — it threw or returned an undeclared result — answers 500
 and sends no frame. Without a transaction the write has already committed: there is no value
@@ -428,6 +432,10 @@ write and snapshot routes, keeps one SSE stream open for every state, and decide
 only** — `import type { states }` — so no server code reaches the browser bundle;
 `@spfn/core/state/client` imports nothing from `@spfn/core/state` at runtime.
 
+A page load costs one snapshot read, and the server makes it: the server component's render,
+handed to the client as `initial`. The browser makes no snapshot `GET` of its own — the stream
+serves each allowed state's current frame on connect ([The stream](#the-stream)).
+
 ```typescript
 // src/client/state.ts
 import { createStateClient } from '@spfn/core/state/client';
@@ -495,7 +503,6 @@ and the query it was read with (default `{}`). The client installs its manifest 
 state it holds at construction, keyed states under the query's key, so `current()` answers at once
 and the first `subscribe` opens the stream without reading the snapshot first. Nothing is marked
 `'revoked'` from it: an omission in the render's snapshot is not a denial by the stream. The
-stream's open still re-reads the snapshot (part B of fxylabs/spfn#140 removes that read). The
 snapshot type is the router's own — another router's does not compile — and comes from the router
 type parameter: without `<typeof states>` the client is untyped, as before. Pass what
 `api.getStates` answered, not a hand-built snapshot: one whose manifest names a state the server
@@ -557,8 +564,9 @@ entry, and compares each arrival against it.
 | a write answer | applied like a frame — its own frame, arriving later with the same `at` and value, changes nothing |
 | a frame for a key not subscribed here | dropped (the server already filters by the connect query; this is the second guard) |
 
-Every stream open — the first, a reconnect, a reopen on a key change — re-reads the snapshot
-with a newer `at`, and a listener hears it only when `status`, `value` or `data` changed. The
+Every stream open — the first, a reconnect, a reopen on a key change — brings each state's
+current value with a newer `at`: the stream's initial frame, or the snapshot re-read when the
+stream did not serve it. A listener hears it only when `status`, `value` or `data` changed. The
 `at` of `current()` is the `at` of the read that last changed the value; a later read that repeats
 it advances only the stamp, so an older arrival after it is still dropped.
 
@@ -582,10 +590,17 @@ changed.
 - **Keys in the query**: the connect query is the union of the subscribed keys' fields (SSE
   `subscribe({ query })`). A new key value, or the last subscriber of one leaving, closes the
   stream and opens it with the new query.
-- **Snapshot on every open** — the first, a reconnect, a reopen on a key change. A frame sent
-  while no stream was open is lost, whether its key changed or not; the snapshot read after
-  the open covers that gap. (It runs on the stream's `open`, not at `onReconnect`: a snapshot
-  read before the new stream is live would leave the same gap.)
+- **Current frames on every open** — the first, a reconnect, a reopen on a key change. A frame
+  sent while no stream was open is lost, whether its key changed or not. The server covers that
+  gap: right after the `connected` frame it writes each allowed state's current frame — one
+  `read()` for the subject and the carried key, its `at` the read's start — before any live
+  frame, and `connected.initial` names the states it served. They are ordinary frames under the
+  ordering rule, so whatever changed between the render and the open arrives as a newer `at`.
+  The client reads the snapshot only when a state it requested is neither in `initial` nor in
+  `deniedEvents` — a state whose read threw on the server — or when `initial` is absent (a
+  server before it); a state in `deniedEvents` it watches on the carried key is `'revoked'`.
+  (It all runs on the stream's `connected`, not at `onReconnect`: a read before the new stream
+  is live would leave the same gap.)
 - **One value per key field per connection.** A connect query carries one `workspaceId`; when
   two subscribed keys disagree on a field, the most recently subscribed key is carried. A key
   the stream does not carry is read once (`get`) when the stream opens and receives no frames
@@ -601,10 +616,11 @@ value has arrived yet.
 | Arrival | Client |
 | --- | --- |
 | `subscription.revoked` for `state.<id>.changed` | the entry of `id` for **the key the connection carries** (keyless: its one entry) gets `status: 'revoked'`, value kept, listeners notified. The server scopes a revoke by the connect query, so a shadowed key of the same state is untouched |
+| `connected.deniedEvents` names a subscribed state — keyless, or keyed on the key the connection carries | `'revoked'`, value kept, listeners notified: the connect check (`canRead` false, or the key absent) denied it. A shadowed key of the same state is untouched |
 | a snapshot that omits a subscribed state — keyless, or keyed with its key in the query | `'revoked'`, value kept if one exists, listeners notified. This is also a state denied at connect (`canRead` false, absent from the snapshot), and a reconnect after access was lost while the stream was down, when no revoke could arrive. A keyed state whose key the query did not carry is not marked |
 | a frame, a read or a snapshot started before the revoke | supplies its value under the ordering rule; the status stays `'revoked'` |
 | `subscription.granted` for it | clears the mark for the carried key and reads it once (`get`); the server also sends a frame, before or after the control frame. Both arrive `'ready'`, and either order ends at the latest value |
-| the snapshot of a connection opened after the revoke, holding the state | clears the mark: that connection's own connect check served it |
+| a frame — the initial one included — or the snapshot of a connection opened after the revoke, holding the state | clears the mark: that connection's own connect check served it |
 | the read of a shadowed key when a connection opened after the revoke, answered | clears the mark the same way: the read route served it |
 | an answer of such a read older than the stamp — a frame or a `write()` answer of the new connection landed first | its value is dropped under the ordering rule, while the mark is still lifted: the lift goes by the connection, not by `at` |
 
@@ -625,7 +641,7 @@ snapshot in flight across a revoke is told from one read after it.
 - The key is compared by its fields (stable-stringified), so `{ workspaceId }` written inline
   does not resubscribe on every render; another `workspaceId` unsubscribes and subscribes. A
   key never seen is `'loading'` until it has an entry; a key seen before shows its cached
-  entry as `'ready'` until the reopen snapshot lands (entries are not evicted).
+  entry as `'ready'` until the reopen's frame or snapshot lands (entries are not evicted).
 - `write` is typed only for a state with a write, bound to the hook's key. At runtime it is on
   every result — the type decides, so no render waits on the manifest — and on a state
   without a write it rejects naming the state.
@@ -634,7 +650,8 @@ snapshot in flight across a revoke is told from one read after it.
 
 A page's first paint still comes from a server component reading the snapshot with the app's
 `api.` client; handed to the client as `initial`, the same read serves the hook's first render
-and the client's first subscribe, and the hook takes over in the browser.
+and the client's first subscribe, the stream's initial frames bring anything newer, and the
+hook takes over in the browser.
 
 ### Types
 

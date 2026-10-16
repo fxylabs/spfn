@@ -49,4 +49,5 @@ export type {
     SSESubscriptionChange,
     SSEConnectionState,
     SSEUnsubscribe,
+    ConnectedPayload,
 } from './types';

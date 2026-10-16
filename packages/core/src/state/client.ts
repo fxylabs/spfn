@@ -19,7 +19,7 @@
  * ```
  */
 
-import type { SSESubscriptionChange } from '@spfn/core/event/sse';
+import type { ConnectedPayload, SSESubscriptionChange } from '@spfn/core/event/sse';
 import { createApi } from '@spfn/core/nextjs';
 import { stableKey, StateStore, type StateKeyFields } from './client-store';
 import type {
@@ -94,6 +94,12 @@ interface ReadTag
 function routeName(method: 'get' | 'put', id: string): string
 {
     return `${method}${id[0].toUpperCase()}${id.slice(1)}State`;
+}
+
+/** The wire name of a state's SSE event, as the server derives it. */
+function stateEventName(id: string): string
+{
+    return `state.${id}.changed`;
 }
 
 /** Whether `query` carries every field of `key` with its value. */
@@ -370,9 +376,9 @@ class BrowserStateClient
      * generation alone — a frame or a write answer of the new connection may
      * land first with a newer `at` — and the ordering rule decides only the value.
      */
-    private serve(slot: string, frame: StateFrame, tag: ReadTag): void
+    private serve(slot: string, frame: StateFrame, generation: number): void
     {
-        if ((this.store.revokedBy(slot) ?? Infinity) < tag.generation)
+        if ((this.store.revokedBy(slot) ?? Infinity) < generation)
         {
             this.store.allow(slot);
         }
@@ -392,7 +398,7 @@ class BrowserStateClient
         {
             if (this.manifest![id]?.key.every(field => field in query))
             {
-                this.serve(this.slot(id, this.keyIn(id, query)), { at: snapshot.at, ...result }, tag);
+                this.serve(this.slot(id, this.keyIn(id, query)), { at: snapshot.at, ...result }, tag.generation);
             }
         }
     }
@@ -555,17 +561,14 @@ class BrowserStateClient
         const ids = Object.keys(this.manifest!);
         const stream: Stream = { query, text: stableKey(query), generation: 0, close: () => undefined };
         stream.close = this.config.sse.subscribe({
-            events: ids.map(id => `state.${id}.changed`),
-            handlers: Object.fromEntries(ids.map(id => [`state.${id}.changed`, (frame: WireFrame) => this.onFrame(id, frame)])),
+            events: ids.map(stateEventName),
+            handlers: Object.fromEntries(ids.map(id => [stateEventName(id), (frame: WireFrame) => this.onFrame(id, frame, stream)])),
             query,
-            // Every open — the first, a reconnect, a reopen on a key change — re-reads the
-            // snapshot. A frame sent while no stream was open is lost, whether its key
-            // changed or not; the snapshot read after the open covers that gap.
             onOpen: () =>
             {
                 stream.generation = ++this.generation;
-                this.refresh(query);
             },
+            onConnected: connected => this.onConnected(connected, stream),
             onSubscriptionChange: change => this.onSubscriptionChange(change, stream),
         });
 
@@ -578,11 +581,62 @@ class BrowserStateClient
         this.stream = undefined;
     }
 
+    /**
+     * Every connection — the first, a reconnect, a reopen on a key change —
+     * must cover the frames sent while no stream was open. The server says in
+     * `connected` which states it served their current frame right after it;
+     * the snapshot is read only when one it did not serve is neither denied
+     * nor served — or when the server predates `initial`. A denied state the
+     * client watches is `'revoked'`, as an omission from that snapshot would
+     * be. A connection already replaced is ignored.
+     */
+    private onConnected(connected: ConnectedPayload, stream: Stream): void
+    {
+        if (stream !== this.stream || stream.generation !== this.generation)
+        {
+            return;
+        }
+
+        const denied = new Set(connected.deniedEvents);
+        const served = new Set(connected.initial ?? []);
+        const unserved = Object.keys(this.manifest!).map(stateEventName).filter(name => !denied.has(name) && !served.has(name));
+
+        this.revokeDenied(denied, stream);
+
+        if (connected.initial && unserved.length === 0)
+        {
+            this.readShadowedKeys(stream.query);
+        }
+        else
+        {
+            this.refresh(stream.query);
+        }
+    }
+
+    /** Each watched state the connection denies, on the key it carries, marked `'revoked'` by it. */
+    private revokeDenied(denied: Set<string>, stream: Stream): void
+    {
+        for (const id of Object.keys(this.manifest!))
+        {
+            const slot = this.slot(id, this.keyIn(id, stream.query));
+
+            if (denied.has(stateEventName(id)) && this.watched.has(slot))
+            {
+                this.store.revoke(slot, stream.generation);
+            }
+        }
+    }
+
     /** The snapshot for the stream's query, and one read for each subscribed key the query shadows. */
     private refresh(query: StateKeyFields): void
     {
         this.readSnapshot(query, this.tag()).catch(this.reportError);
+        this.readShadowedKeys(query);
+    }
 
+    /** One read for each subscribed key the query shadows: the stream serves one key per field. */
+    private readShadowedKeys(query: StateKeyFields): void
+    {
         for (const watch of this.watched.values())
         {
             if (watch.key && !carries(query, watch.key))
@@ -599,17 +653,22 @@ class BrowserStateClient
     private async readShadowed(id: string, key: StateKeyFields, tag: ReadTag): Promise<void>
     {
         const frame = await this.api[routeName('get', id)].call({ query: key }) as StateFrame;
-        this.serve(this.slot(id, key), frame, tag);
+        this.serve(this.slot(id, key), frame, tag.generation);
     }
 
-    /** A frame for a key nobody here subscribed is dropped — the server's filter is the first guard, this the second. */
-    private onFrame(id: string, frame: WireFrame): void
+    /**
+     * A frame for a key nobody here subscribed is dropped — the server's filter
+     * is the first guard, this the second. A frame is served under its
+     * connection's generation: the server sends one only on a connection that
+     * allows the state, so a newer connection's frame lifts an older revoke.
+     */
+    private onFrame(id: string, frame: WireFrame, stream: Stream): void
     {
         const slot = this.slot(id, frame.key);
 
         if (this.watched.has(slot))
         {
-            this.store.apply(slot, frame);
+            this.serve(slot, frame, stream.generation);
         }
     }
 

@@ -22,12 +22,33 @@
  * | I13 | I1, `close()`, then `subscribe('consent')` again       | the manifest kept: the stream reopens with no `getStates` before it; the hydrated entries kept, as `close()` keeps every entry |
  * | I14 | `initial` omitting `consent` (denied at render), then `subscribe('consent')` and an open re-read omitting it too | undefined after construction, not `'revoked'`; `'revoked'` after the stream's own read |
  *
+ * Part B — the stream serves each allowed state's current frame right after
+ * `connected`, and `connected.initial` names them; the client reads the
+ * snapshot only when a state it requested is neither served nor denied.
+ * `servedBy(query)` answers `connected` as the server would: a keyed state
+ * whose key fields the query lacks denied, every other one served.
+ *
+ * | #   | situation                                              | expected                                                        |
+ * |-----|--------------------------------------------------------|-----------------------------------------------------------------|
+ * | K1  | `connected` with `initial` naming every requested state event | no `getStates` fetch after the open (before B: one)       |
+ * | K2  | `initial` missing one requested, non-denied event      | one `getStates` fetch, as today                                 |
+ * | K3  | `connected.deniedEvents` names a subscribed `consent`  | `'revoked'`, listener called; no fetch when the rest are in `initial` |
+ * | K4  | `connected` without `initial` (older server)           | one `getStates` fetch; every existing L, O, N, I, H row unchanged |
+ * | K5  | `runtime` subscribed for w1 and w2, stream carries w2, `initial` complete | no `getStates`; one `getRuntimeState` read for the shadowed w1 |
+ * | K6  | reconnect; initial frames with a newer `at` and the same values | listeners not called; a changed value → called once    |
+ * | K7  | A + B: built with `initial`, first `subscribe`, `connected` with complete `initial` | zero `getStates` in total, one `EventSource`, entries `'ready'` |
+ * | K8  | `subscription.revoked` for `consent`, then a reconnect whose initial frame carries it | `'ready'` — the new generation's frame lifts the mark |
+ * | K9  | `connected.deniedEvents` names `runtime` while the query carries w1 | w1 `'revoked'`; w2 (subscribed, shadowed) untouched     |
+ * | K10 | a `connected` the prior connection queued, delivered after the reconnect, denying `consent` | ignored: the new stream open, `consent` `'ready'` |
+ * | K11 | a revoke, a reconnect, then a frame the prior connection queued | ignored: `consent` stays `'revoked'`                  |
+ *
  * I9, I10 (`useServerState` on the server and at hydration) are in `react.test.tsx`; I11 is every
  * existing row of `client-subscribe`, `client-ordering` and `react` passing unchanged; I12 (the
  * snapshot's type) is in `client-types.test.ts`.
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { FakeConnected } from '../../event/sse/__tests__/fake-event-source';
 import { ALL_EVENTS, at, FakeEventSource, harness, initialOf, manifest, opened, reconnect, routes, settle, streamQuery } from './client-harness';
 
 // The api client reads the request's cookies and host on the server-side arm; there is no request here.
@@ -38,6 +59,20 @@ vi.mock('next/headers', () => ({
 
 const w1 = { workspaceId: 'w1' };
 const w2 = { workspaceId: 'w2' };
+
+/** `connected` as the server answers `query`: a keyed state whose key fields it lacks denied, the rest served. */
+function servedBy(query: Record<string, string>): Required<FakeConnected>
+{
+    const ids = Object.keys(manifest);
+    const denied = ids.filter(id => !manifest[id].key.every(field => field in query));
+    const name = (id: string) => `state.${id}.changed`;
+
+    return {
+        subscribedEvents: ids.filter(id => !denied.includes(id)).map(name),
+        deniedEvents: denied.map(name),
+        initial: ids.filter(id => !denied.includes(id)).map(name),
+    };
+}
 
 /** A client started from the render's snapshot for `w1`. */
 function hydrated(responders: Parameters<typeof harness>[0] = {}): ReturnType<typeof harness>
@@ -236,6 +271,175 @@ describe('state client — initial', () =>
         await opened();
 
         expect(h.client.current('consent')).toEqual({ status: 'revoked' });
+        h.client.close();
+    });
+
+    it('K1 connected names every requested state in initial: no getStates after the open', async () =>
+    {
+        const h = hydrated();
+        h.client.subscribe('consent', () => undefined);
+
+        await opened(servedBy({}));
+
+        expect(routes(h)).toEqual([]);
+        h.client.close();
+    });
+
+    it('K2 initial misses one requested state that is not denied: one getStates, as today', async () =>
+    {
+        const h = hydrated();
+        h.client.subscribe('consent', () => undefined);
+        const connected = servedBy({});
+
+        await opened({ ...connected, initial: connected.initial.filter(event => event !== 'state.consent.changed') });
+
+        expect(routes(h)).toEqual(['getStates']);
+        h.client.close();
+    });
+
+    it('K3 deniedEvents names a subscribed consent: revoked, listener called; no fetch, the rest served', async () =>
+    {
+        const h = hydrated();
+        const listener = vi.fn();
+        h.client.subscribe('consent', listener);
+        h.client.subscribe('runtime', w1, () => undefined);
+        const connected = servedBy(w1);
+
+        await opened({
+            deniedEvents: [...connected.deniedEvents, 'state.consent.changed'],
+            initial: connected.initial.filter(event => event !== 'state.consent.changed'),
+        });
+
+        expect(h.client.current('consent')).toEqual({ at: at(1), value: 'pending', data: { marketing: false }, status: 'revoked' });
+        expect(listener).toHaveBeenCalledTimes(1);
+        expect(routes(h)).toEqual([]);
+        h.client.close();
+    });
+
+    it('K4 connected without initial (an older server): one getStates', async () =>
+    {
+        const h = hydrated();
+        h.client.subscribe('consent', () => undefined);
+
+        await opened({ deniedEvents: servedBy({}).deniedEvents });
+
+        expect(routes(h)).toEqual(['getStates']);
+        h.client.close();
+    });
+
+    it('K5 runtime w1 and w2, the stream on w2, initial complete: no getStates, one read for the shadowed w1', async () =>
+    {
+        const h = hydrated();
+        h.client.subscribe('runtime', w1, () => undefined);
+        h.client.subscribe('runtime', w2, () => undefined);
+
+        const es = await opened(servedBy(w2));
+
+        expect(streamQuery(es)).toEqual(w2);
+        expect(h.calls).toEqual([{ route: 'getRuntimeState', input: { query: w1 } }]);
+        h.client.close();
+    });
+
+    it('K6 a reconnect\'s initial frame with a newer at and the same value is silent; a changed value notifies once', async () =>
+    {
+        const h = hydrated();
+        const listener = vi.fn();
+        h.client.subscribe('consent', listener);
+        const es = await opened(servedBy({}));
+
+        const second = await reconnect(es, servedBy({}));
+        second.emit('state.consent.changed', { at: at(2), value: 'pending', data: { marketing: false }, subject: 'u1' });
+
+        expect(listener).not.toHaveBeenCalled();
+
+        const third = await reconnect(second, servedBy({}));
+        third.emit('state.consent.changed', { at: at(3), value: 'agreed', data: { marketing: true }, subject: 'u1' });
+
+        expect(listener).toHaveBeenCalledTimes(1);
+        expect(routes(h)).toEqual([]);
+        h.client.close();
+    });
+
+    it('K7 A + B: built with initial, first subscribe, complete initial — no getStates at all, one EventSource, ready', async () =>
+    {
+        const h = hydrated();
+        h.client.subscribe('consent', () => undefined);
+        h.client.subscribe('runtime', w1, () => undefined);
+
+        const es = await opened(servedBy(w1));
+        es.emit('state.consent.changed', { at: at(2), value: 'pending', data: { marketing: false }, subject: 'u1' });
+        es.emit('state.runtime.changed', { at: at(2), value: 'provisioning', key: w1 });
+
+        expect(h.calls).toEqual([]);
+        expect(FakeEventSource.instances).toHaveLength(1);
+        expect(h.client.current('consent')?.status).toBe('ready');
+        expect(h.client.current('runtime', w1)?.status).toBe('ready');
+        h.client.close();
+    });
+
+    it('K8 after a revoke, a reconnect whose initial frame carries consent makes it ready again', async () =>
+    {
+        const h = hydrated();
+        h.client.subscribe('consent', () => undefined);
+        const es = await opened(servedBy({}));
+        es.control('subscription.revoked', { event: 'state.consent.changed' });
+
+        expect(h.client.current('consent')?.status).toBe('revoked');
+
+        const next = await reconnect(es, servedBy({}));
+        next.emit('state.consent.changed', { at: at(2), value: 'pending', data: { marketing: false }, subject: 'u1' });
+
+        expect(h.client.current('consent')).toMatchObject({ value: 'pending', status: 'ready' });
+        expect(routes(h)).toEqual([]);
+        h.client.close();
+    });
+
+    it('K9 deniedEvents names runtime while the query carries w1: w1 revoked, the shadowed w2 untouched', async () =>
+    {
+        const h = hydrated({ getRuntimeState: () => ({ at: at(2), value: 'ready' }) });
+        h.client.subscribe('runtime', w2, () => undefined);
+        h.client.subscribe('runtime', w1, () => undefined);
+        const connected = servedBy(w1);
+
+        const es = await opened({
+            deniedEvents: [...connected.deniedEvents, 'state.runtime.changed'],
+            initial: connected.initial.filter(event => event !== 'state.runtime.changed'),
+        });
+
+        expect(streamQuery(es)).toEqual(w1);
+        expect(h.client.current('runtime', w1)).toEqual({ at: at(1), value: 'provisioning', status: 'revoked' });
+        expect(h.client.current('runtime', w2)).toEqual({ at: at(2), value: 'ready', status: 'ready' });
+        expect(routes(h)).toEqual(['getRuntimeState']);
+        h.client.close();
+    });
+
+    it('K10 a connected the prior connection queued, delivered after the reconnect, is ignored', async () =>
+    {
+        const h = hydrated();
+        h.client.subscribe('consent', () => undefined);
+        const first = await opened(servedBy({}));
+        const oldConnected = (first as any).listeners.get('connected')[0];
+        const second = await reconnect(first, servedBy({}));
+
+        oldConnected({ data: JSON.stringify({ subscribedEvents: [], deniedEvents: ['state.consent.changed'], initial: [], timestamp: 0 }) });
+
+        expect(second.readyState).toBe(FakeEventSource.OPEN);
+        expect(h.client.current('consent')?.status).toBe('ready');
+        h.client.close();
+    });
+
+    it('K11 a frame the prior connection queued cannot lift its revoke after the reconnect', async () =>
+    {
+        const h = hydrated();
+        h.client.subscribe('consent', () => undefined);
+        const first = await opened(servedBy({}));
+        const oldFrame = (first as any).listeners.get('state.consent.changed')[0];
+        first.control('subscription.revoked', { event: 'state.consent.changed' });
+        await reconnect(first, servedBy({}));
+
+        oldFrame({ data: JSON.stringify({ event: 'state.consent.changed', data: { at: at(2), value: 'pending', data: { marketing: false }, subject: 'u1' } }) });
+
+        expect(h.client.current('consent')?.status).toBe('revoked');
         h.client.close();
     });
 });

@@ -30,6 +30,16 @@ export interface BoundedWriter
     /** Queue a frame for delivery; closes the connection if the queue overflows. */
     enqueue(frame: SSEFrame): void;
 
+    /**
+     * Count one frame held outside the queue against `maxQueue`, until
+     * `clearReserved()`; closes the connection as a slow consumer when it does
+     * not fit. `false` when it did not fit or the writer is closed.
+     */
+    reserve(): boolean;
+
+    /** Stop counting the reserved frames — their writer is about to enqueue them. */
+    clearReserved(): void;
+
     /** Stop draining and drop any queued frames (called on connection cleanup). */
     close(): void;
 
@@ -54,7 +64,23 @@ export function createBoundedWriter(
 {
     const pending: SSEFrame[] = [];
     let flushing = false;
+    let reserved = 0;
     let closed = false;
+
+    // Slow consumer: the drain loop can't keep up, so the queue — with the frames
+    // reserved for it — grew past the bound. Close rather than buffer unboundedly
+    // or drop silently.
+    const overflows = (): boolean =>
+    {
+        if (pending.length + reserved <= maxQueue)
+        {
+            return false;
+        }
+
+        onClose('outbound queue overflow (slow consumer)');
+
+        return true;
+    };
 
     const flush = async (): Promise<void> =>
     {
@@ -94,16 +120,27 @@ export function createBoundedWriter(
 
             pending.push(frame);
 
-            // Slow consumer: the drain loop can't keep up, so the queue grew past
-            // the bound. Close rather than buffer unboundedly or drop silently.
-            if (pending.length > maxQueue)
+            if (!overflows())
             {
-                onClose('outbound queue overflow (slow consumer)');
+                void flush();
+            }
+        },
 
-                return;
+        reserve(): boolean
+        {
+            if (closed)
+            {
+                return false;
             }
 
-            void flush();
+            reserved++;
+
+            return !overflows();
+        },
+
+        clearReserved(): void
+        {
+            reserved = 0;
         },
 
         close(): void

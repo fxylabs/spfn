@@ -76,6 +76,7 @@ export type {
     FrameContext,
     FramePredicate,
     InferEventPayload,
+    InitialProducer,
     PubSubCache,
     JobQueueSender,
     SubscribeContext,

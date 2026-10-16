@@ -168,6 +168,9 @@ interface Admission
     denied: string[];
     request: SubscribeRequest;
 
+    /** What `resolvePrincipal` returned, for the initial pass; never logged. */
+    principal: unknown;
+
     /** Registered before the first app-data read; `runStream` opens it. Absent without a subject. */
     pending?: PendingAdmission;
 }
@@ -316,7 +319,7 @@ async function authorizeConnection(
         clientIp: c.req.header('x-forwarded-for') || c.req.header('x-real-ip'),
     });
 
-    return { subject, requested, allowed, denied, request };
+    return { subject, requested, allowed, denied, request, principal: resolved.principal };
 }
 
 /**
@@ -402,8 +405,9 @@ async function askCanSubscribe(
 // ============================================================================
 
 /**
- * The life of one open connection: connected frame, subscriptions, registry
- * entry, keep-alive, and teardown on disconnect or a server-side close.
+ * The life of one open connection: connected frame, subscriptions, initial
+ * frames, registry entry, keep-alive, and teardown on disconnect or a
+ * server-side close.
  */
 async function runStream(
     c: Context,
@@ -442,6 +446,19 @@ async function runStream(
         cleanup(reason);
     });
 
+    // Every write after `connected` goes through `hold`, so the initial pass can
+    // put `connected` and its frames ahead of whatever arrives while it runs.
+    const hold = createFrameHold(writer);
+    const subscriberContext: SubscriberContext = {
+        router: config.router,
+        authConfig: config.authConfig,
+        subject,
+        request,
+        writeFrame: createFrameWriter(writer),
+        send: hold.send,
+        isDead: () => connectionDead,
+    };
+
     const connection: SSEConnection = {
         subject,
         requested: admission.requested,
@@ -449,20 +466,13 @@ async function runStream(
         denied: new Set(denied),
         unsubscribes: new Map(),
         request,
-        subscribe: createEventSubscriber({
-            router: config.router,
-            authConfig: config.authConfig,
-            subject,
-            request,
-            writer,
-            isDead: () => connectionDead,
-        }),
+        subscribe: createEventSubscriber(subscriberContext),
         notify: (frame, eventName) =>
         {
             if (connectionDead) return;
 
             // A small literal — not routed through serializeFrame's per-payload cache.
-            writer.enqueue({ event: frame, data: JSON.stringify({ event: eventName }) });
+            hold.send(() => writer.enqueue({ event: frame, data: JSON.stringify({ event: eventName }) }));
         },
     };
 
@@ -478,17 +488,21 @@ async function runStream(
         return;
     }
 
-    openSubscriptions(connection, writer);
+    // Not awaited: a producer that hangs holds the frames, never the disconnect wait.
+    void openSubscriptions(connection, writer, hold, {
+        ...subscriberContext,
+        principal: admission.principal,
+    });
 
     // Keep-alive ping
     pingTimer = setInterval(() =>
     {
         if (connectionDead) return;
 
-        writer.enqueue({
+        hold.send(() => writer.enqueue({
             event: 'ping',
             data: JSON.stringify({ timestamp: Date.now() }),
-        });
+        }));
     }, config.pingInterval);
 
     await waitForDisconnect(c.req.raw.signal, () => connectionDead, (resolve) =>
@@ -501,19 +515,66 @@ async function runStream(
 }
 
 /**
- * Send the `connected` frame (first in the queue) and subscribe every allowed event.
+ * Send the `connected` frame (first in the queue) and subscribe every allowed
+ * event. For a connection with a subject whose allowed events declare
+ * `.initial()`, `connected` waits for their frames and is followed by them;
+ * live frames arriving meanwhile are held and follow both. Without one, all of
+ * it happens synchronously, as before.
  */
-function openSubscriptions(connection: SSEConnection, writer: BoundedWriter): void
+async function openSubscriptions(
+    connection: SSEConnection,
+    writer: BoundedWriter,
+    hold: FrameHold,
+    ctx: InitialContext,
+): Promise<void>
+{
+    const connected = { subscribedEvents: [...connection.allowed], deniedEvents: [...connection.denied] };
+    const producing = connected.subscribedEvents.filter(eventName => ctx.router.events[eventName]._initial);
+
+    if (!ctx.subject || producing.length === 0)
+    {
+        enqueueConnected(writer, { ...connected, initial: [] });
+        subscribeAllowed(connection);
+
+        return;
+    }
+
+    hold.hold();
+    subscribeAllowed(connection);
+
+    const served = await produceInitialFrames(producing, ctx.router, {
+        subject: ctx.subject,
+        principal: ctx.principal,
+        request: ctx.request,
+    });
+    if (ctx.isDead())
+    {
+        return;
+    }
+
+    enqueueConnected(writer, { ...connected, initial: served.map(({ eventName }) => eventName) });
+    served.forEach(({ eventName, frames }) => frames.forEach(data => ctx.writeFrame(eventName, data)));
+    hold.release();
+}
+
+/** The `connected` frame's data, as the client's `ConnectedPayload` reads it. */
+interface ConnectedFrame
+{
+    subscribedEvents: string[];
+    deniedEvents: string[];
+    initial: string[];
+}
+
+function enqueueConnected(writer: BoundedWriter, connected: ConnectedFrame): void
 {
     writer.enqueue({
         event: 'connected',
-        data: JSON.stringify({
-            subscribedEvents: [...connection.allowed],
-            deniedEvents: [...connection.denied],
-            timestamp: Date.now(),
-        }),
+        data: JSON.stringify({ ...connected, timestamp: Date.now() }),
     });
+}
 
+function subscribeAllowed(connection: SSEConnection): void
+{
     for (const eventName of connection.allowed)
     {
         connection.unsubscribes.set(eventName, connection.subscribe(eventName));
@@ -524,6 +585,123 @@ function openSubscriptions(connection: SSEConnection, writer: BoundedWriter): vo
         deniedEvents: [...connection.denied],
         subscriptionCount: connection.unsubscribes.size,
     });
+}
+
+/** What the initial pass of one connection reads: the subscriber's context and the `canSubscribe` one. */
+type InitialContext = SubscriberContext & { principal: unknown };
+
+/** The serialized initial frames of one event whose producer returned. */
+interface InitialFrames
+{
+    eventName: string;
+    frames: string[];
+}
+
+/**
+ * Ask every producing event for its initial frames, in parallel; returns, in
+ * `events` order, those whose producer returned — an empty list counts.
+ */
+async function produceInitialFrames(
+    events: string[],
+    router: EventRouterDef<any>,
+    ctx: SubscribeContext,
+): Promise<InitialFrames[]>
+{
+    const results = await Promise.all(events.map(eventName => askInitial(eventName, router.events[eventName], ctx)));
+
+    return results.filter((frames): frames is InitialFrames => frames !== null);
+}
+
+/**
+ * One event's producer, its payloads serialized here so that a payload that
+ * cannot be written fails like a throw: warned with the event name — never the
+ * error text — and `null`, so nothing of the event is written.
+ */
+async function askInitial(eventName: string, eventDef: EventDef<any>, ctx: SubscribeContext): Promise<InitialFrames | null>
+{
+    try
+    {
+        const payloads = await eventDef._initial!(ctx);
+
+        return { eventName, frames: payloads.map(payload => serializeFrame(eventName, payload)) };
+    }
+    catch
+    {
+        sseLogger.warn('SSE initial frames could not be produced — none sent for this event', {
+            event: eventName,
+            subject: ctx.subject,
+        });
+
+        return null;
+    }
+}
+
+/**
+ * The writes of one connection, held in arrival order between `hold()` and
+ * `release()`; written at once outside. Released once: `release()` writes the
+ * held ones and every later write goes straight through.
+ *
+ * A held write reserves its place in the writer's queue, so held and queued
+ * frames share one `maxQueue`: a hold that outgrows it closes the connection
+ * as a slow consumer, and what the initial pass enqueues before `release()`
+ * counts the held frames too.
+ */
+interface FrameHold
+{
+    send: (write: () => void) => void;
+    hold: () => void;
+    release: () => void;
+}
+
+function createFrameHold(writer: BoundedWriter): FrameHold
+{
+    let pending: (() => void)[] | null = null;
+
+    return {
+        send: (write) =>
+        {
+            if (!pending)
+            {
+                write();
+            }
+            else if (writer.reserve())
+            {
+                pending.push(write);
+            }
+        },
+        hold: () =>
+        {
+            pending = [];
+        },
+        release: () =>
+        {
+            const held = pending ?? [];
+            pending = null;
+            writer.clearReserved();
+            held.forEach(write => write());
+        },
+    };
+}
+
+/**
+ * Enqueue an event frame with the connection's next `messageId` — one counter
+ * for initial and live frames, numbered in the order they are written.
+ */
+function createFrameWriter(writer: BoundedWriter): (eventName: string, data: string) => void
+{
+    let messageId = 0;
+
+    return (eventName, data) =>
+    {
+        messageId++;
+
+        sseLogger.debug('SSE sending event', {
+            event: eventName,
+            messageId,
+        });
+
+        writer.enqueue({ id: String(messageId), event: eventName, data });
+    };
 }
 
 /**
@@ -562,7 +740,13 @@ interface SubscriberContext
     authConfig: SSEHandlerAuthConfig | undefined;
     subject: string | undefined;
     request: SubscribeRequest;
-    writer: BoundedWriter;
+
+    /** Enqueue an event frame with the next `messageId`. */
+    writeFrame: (eventName: string, data: string) => void;
+
+    /** Write now, or hold until the initial pass ends. */
+    send: (write: () => void) => void;
+
     isDead: () => boolean;
 }
 
@@ -575,8 +759,6 @@ interface SubscriberContext
  */
 function createEventSubscriber(ctx: SubscriberContext): (eventName: string) => () => void
 {
-    let messageId = 0;
-
     return (eventName: string) =>
     {
         const eventDef = ctx.router.events[eventName];
@@ -589,18 +771,8 @@ function createEventSubscriber(ctx: SubscriberContext): (eventName: string) => (
                 return;
             }
 
-            messageId++;
-
-            sseLogger.debug('SSE sending event', {
-                event: eventName,
-                messageId,
-            });
-
-            ctx.writer.enqueue({
-                id: String(messageId),
-                event: eventName,
-                data: serializeFrame(eventName, payload),
-            });
+            const data = serializeFrame(eventName, payload);
+            ctx.send(() => ctx.writeFrame(eventName, data));
         });
 
         return () =>

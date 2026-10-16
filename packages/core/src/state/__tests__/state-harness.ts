@@ -12,6 +12,7 @@
 import { Type } from '@sinclair/typebox';
 import type { MiddlewareHandler } from 'hono';
 import { vi } from 'vitest';
+import type { Frame, OpenStream } from '../../event/sse/__tests__/stream-harness';
 import { defineRouter } from '../../route/router';
 import { defineServerConfig } from '../../server/config-builder';
 import { createServer } from '../../server/create-server';
@@ -105,6 +106,21 @@ export function memberState()
         .read(read);
 
     return { state, read, canRead };
+}
+
+/**
+ * Wait for `connected` and the one initial frame of each state it names, then
+ * drop those initial frames from `stream.frames`: a row about what a signal,
+ * a write or a grant sends counts only the frames after the connect.
+ * `sse-initial.test.ts` covers the initial frames themselves.
+ */
+export async function afterInitial(stream: OpenStream): Promise<Frame>
+{
+    const connected = await stream.frame('connected');
+    const initial = await Promise.all((connected.data.initial as string[]).map(event => stream.frame(event)));
+    initial.forEach(frame => stream.frames.splice(stream.frames.indexOf(frame), 1));
+
+    return connected;
 }
 
 export const ISO = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;

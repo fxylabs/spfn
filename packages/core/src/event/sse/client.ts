@@ -37,6 +37,7 @@
 import type { EventRouterDef, InferEventNames } from '../router';
 import { CSRF_HEADER, csrfHeaderValue, documentCookieEntries } from '../../nextjs/client/csrf';
 import type {
+    ConnectedPayload,
     SSEClientConfig,
     SSESubscribeOptions,
     SSEUnsubscribe,
@@ -210,7 +211,7 @@ export function createSSEClient<TRouter extends EventRouterDef<any>>(
 
     function subscribe(options: SSESubscribeOptions<TRouter>): SSEUnsubscribe
     {
-        const { events, handlers, onOpen, onError, onReconnect, onClose, onSubscriptionChange } = options;
+        const { events, handlers, onOpen, onError, onReconnect, onClose, onSubscriptionChange, onConnected } = options;
         const queryParam = connectQuery(options.query);
 
         // A new subscription supersedes any previous one on this client.
@@ -263,7 +264,7 @@ export function createSSEClient<TRouter extends EventRouterDef<any>>(
                     withCredentials,
                 });
 
-                setupEventHandlers(conn.eventSource, eventNames, handlers, onOpen, onError);
+                setupEventHandlers(conn.eventSource, eventNames, handlers, onOpen, onError, onConnected);
                 setupSubscriptionChange(conn.eventSource, onSubscriptionChange);
                 setupReconnect(onReconnect);
             };
@@ -281,40 +282,61 @@ export function createSSEClient<TRouter extends EventRouterDef<any>>(
             });
         }
 
+        /**
+         * `listener`, run only while `es` is this subscription's live
+         * EventSource: a task an earlier EventSource queued before it was
+         * superseded or closed is ignored, as a browser aborts it.
+         */
+        function whileCurrent<E>(es: EventSource, listener: (event: E) => void): (event: E) => void
+        {
+            return (event) =>
+            {
+                if (!conn.closed && conn.eventSource === es)
+                {
+                    listener(event);
+                }
+            };
+        }
+
         function setupEventHandlers(
             es: EventSource,
             names: string[],
             handlerMap: SSESubscribeOptions<TRouter>['handlers'],
             onOpenCb?: () => void,
             onErrorCb?: (error: Event) => void,
+            onConnectedCb?: (payload: ConnectedPayload) => void,
         )
         {
-            es.onopen = () =>
+            es.onopen = whileCurrent(es, () =>
             {
                 state = 'open';
                 conn.reconnectAttempts = 0;
                 onOpenCb?.();
-            };
+            });
 
-            es.onerror = (error) =>
+            es.onerror = whileCurrent(es, (error: Event) =>
             {
                 state = 'error';
                 onErrorCb?.(error);
-            };
+            });
 
             // Handle connected event (server sends this on connection)
-            es.addEventListener('connected', (e: MessageEvent) =>
+            es.addEventListener('connected', whileCurrent(es, (e: MessageEvent) =>
             {
+                let data: ConnectedPayload;
                 try
                 {
-                    const data = JSON.parse(e.data);
-                    console.debug('[SSE] Connected:', data);
+                    data = JSON.parse(e.data);
                 }
                 catch
                 {
                     // Ignore parse errors
+                    return;
                 }
-            });
+
+                console.debug('[SSE] Connected:', data);
+                onConnectedCb?.(data);
+            }));
 
             // Handle ping (keep-alive)
             es.addEventListener('ping', () =>
@@ -332,7 +354,7 @@ export function createSSEClient<TRouter extends EventRouterDef<any>>(
                     continue;
                 }
 
-                es.addEventListener(eventName, (e: MessageEvent) =>
+                es.addEventListener(eventName, whileCurrent(es, (e: MessageEvent) =>
                 {
                     try
                     {
@@ -343,7 +365,7 @@ export function createSSEClient<TRouter extends EventRouterDef<any>>(
                     {
                         console.error(`[SSE] Failed to parse event "${eventName}":`, err);
                     }
-                });
+                }));
             }
         }
 
@@ -362,7 +384,7 @@ export function createSSEClient<TRouter extends EventRouterDef<any>>(
 
             for (const [frame, status] of Object.entries(frames))
             {
-                es.addEventListener(frame, (e: MessageEvent) =>
+                es.addEventListener(frame, whileCurrent(es, (e: MessageEvent) =>
                 {
                     let event: InferEventNames<TRouter>;
                     try
@@ -377,7 +399,7 @@ export function createSSEClient<TRouter extends EventRouterDef<any>>(
                     }
 
                     onChange({ event, status });
-                });
+                }));
             }
         }
 
@@ -391,7 +413,7 @@ export function createSSEClient<TRouter extends EventRouterDef<any>>(
             const currentEs = conn.eventSource;
             const originalOnError = currentEs.onerror;
 
-            currentEs.onerror = (error) =>
+            currentEs.onerror = whileCurrent(currentEs, (error: Event) =>
             {
                 if (originalOnError)
                 {
@@ -409,7 +431,7 @@ export function createSSEClient<TRouter extends EventRouterDef<any>>(
                 {
                     attemptReconnect(onReconnectCb);
                 }
-            };
+            });
         }
 
         function attemptReconnect(onReconnectCb?: (attempt: number) => void)

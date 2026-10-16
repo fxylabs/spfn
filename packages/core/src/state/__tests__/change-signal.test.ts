@@ -36,7 +36,7 @@ import { closeAllStreams, createStreamApp } from '../../event/sse/__tests__/stre
 import type { OpenStream } from '../../event/sse/__tests__/stream-harness';
 import { defineState } from '../state-builder';
 import { defineStateRouter } from '../state-router';
-import { Consent, Runtime, consentState, ISO, memberState, request, runtimeState, serve } from './state-harness';
+import { afterInitial, Consent, Runtime, consentState, ISO, memberState, request, runtimeState, serve } from './state-harness';
 
 const CONSENT = 'state.consent.changed';
 const MEMBER = 'state.member.changed';
@@ -53,7 +53,9 @@ function setup()
     const connect = async (subject: string, query: string): Promise<OpenStream> =>
     {
         const stream = await app.connect(subject, { query });
-        await stream.frame('connected');
+        await afterInitial(stream);
+        // The connect's own reads, for its initial frames: these rows count the signal's.
+        [consent.read, member.read, runtime.read].forEach(read => read.mockClear());
 
         return stream;
     };
@@ -234,7 +236,8 @@ describe('change signal', () =>
         const states = defineStateRouter({ member: member.state.changedBy([memberJoined]) });
         const app = createStreamApp(defineEventRouter(states.events));
         const s = await app.connect('s', { query: `events=${MEMBER}&workspaceId=w1` });
-        await s.frame('connected');
+        await afterInitial(s);
+        member.read.mockClear();
 
         await memberJoined.emit({ workspaceId: 'w1', subject: 's' });
         await states.states.member.changed.emit({ workspaceId: 'w1', subject: 's' });
@@ -256,7 +259,8 @@ describe('change signal', () =>
         });
         const app = createStreamApp(defineEventRouter(states.events));
         const s = await app.connect('s', { query: `events=${MEMBER},${RUNTIME}&workspaceId=w1` });
-        await s.frame('connected');
+        await afterInitial(s);
+        [member.read, runtime.read].forEach(read => read.mockClear());
 
         await memberJoined.emit({ workspaceId: 'w1', subject: 's' });
         await Promise.all([s.frame(MEMBER), s.frame(RUNTIME)]);

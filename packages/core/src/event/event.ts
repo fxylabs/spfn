@@ -34,6 +34,7 @@ import type {
     EventHandler,
     EventSubscribeOptions,
     FramePredicate,
+    InitialProducer,
     JobQueueSender,
     PubSubCache,
     SubscribePredicate,
@@ -323,6 +324,7 @@ function createEventImpl<TPayload>(
 
     let canSubscribe: SubscribePredicate<any> | undefined;
     let filter: FramePredicate<TPayload> | undefined;
+    let initial: InitialProducer<TPayload, any> | undefined;
 
     const declareCanSubscribe = <P>(predicate: SubscribePredicate<P>): EventDef<TPayload> =>
     {
@@ -336,6 +338,14 @@ function createEventImpl<TPayload>(
     {
         assertDeclaredOnce(name, 'filter', !!filter);
         filter = predicate;
+
+        return self;
+    };
+
+    const declareInitial = <P>(producer: InitialProducer<TPayload, P>): EventDef<TPayload> =>
+    {
+        assertDeclaredOnce(name, 'initial', !!initial);
+        initial = producer;
 
         return self;
     };
@@ -367,6 +377,11 @@ function createEventImpl<TPayload>(
             return filter;
         },
         filter: declareFilter,
+        get _initial()
+        {
+            return initial;
+        },
+        initial: declareInitial,
         grant: subscriptionControls.grant,
         revoke: subscriptionControls.revoke,
         _registerSubscriptionControl: subscriptionControls.register,

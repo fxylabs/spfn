@@ -104,6 +104,13 @@ export interface SubscribeContext<P = unknown>
 export type SubscribePredicate<P = unknown> = (ctx: SubscribeContext<P>) => boolean | Promise<boolean>;
 
 /**
+ * The frames a connection receives right after `connected`, for its own
+ * subject and query. Asked once per connection, after `canSubscribe` allowed
+ * the event; a throw or a rejection sends nothing for the event.
+ */
+export type InitialProducer<TPayload, P = unknown> = (ctx: SubscribeContext<P>) => TPayload[] | Promise<TPayload[]>;
+
+/**
  * What a per-event `.filter()` sees on every frame.
  */
 export interface FrameContext
@@ -219,6 +226,30 @@ export interface EventDef<TPayload = void>
      * ```
      */
     filter: (predicate: FramePredicate<TPayload>) => EventDef<TPayload>;
+
+    /**
+     * The producer declared with `.initial()`, absent when a connection
+     * receives only the frames emitted after it opened.
+     */
+    readonly _initial?: InitialProducer<TPayload, any>;
+
+    /**
+     * Declare the frames a connection receives right after `connected`, before
+     * any live frame — the event's current value for that connection.
+     *
+     * Runs once per connection with a subject, for an event `canSubscribe`
+     * allowed, with the same context `canSubscribe` receives. Its frames skip
+     * the frame filters: they were produced for this connection. A throw sends
+     * nothing for the event and leaves it out of `connected.initial`. Never on
+     * a `grant`. Set once: a second call throws.
+     *
+     * @example
+     * ```typescript
+     * export const runtimeChanged = defineEvent('runtime.changed', payload)
+     *     .initial(async ({ request }) => [await readRuntime(request.query.workspaceId)]);
+     * ```
+     */
+    initial: <P = unknown>(producer: InitialProducer<TPayload, P>) => EventDef<TPayload>;
 
     /**
      * Subscribe to this event (in-memory handler). With the cache transport a
