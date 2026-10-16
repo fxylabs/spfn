@@ -484,7 +484,44 @@ subscriptions too — whichever call brings the manifest opens the stream. `clos
 in flight discards its answer, and a `get` or `write` waiting on it rejects: the client was
 closed.
 
-### `createStateClient<typeof states>({ sse, api?, onError?, retryDelay? })`
+The manifest may also come from `initial` — the snapshot the server rendered with (below). Such a
+client knows it from construction: nothing above waits, a refused `subscribe` goes to `onError` at
+once, and the first `subscribe` opens the stream without reading the snapshot first.
+
+### `createStateClient<typeof states>({ sse, api?, onError?, retryDelay?, initial? })`
+
+`initial: { snapshot, query? }` is the snapshot a server render read — `api.getStates`'s answer —
+and the query it was read with (default `{}`). The client installs its manifest and applies each
+state it holds at construction, keyed states under the query's key, so `current()` answers at once
+and the first `subscribe` opens the stream without reading the snapshot first. Nothing is marked
+`'revoked'` from it: an omission in the render's snapshot is not a denial by the stream. The
+stream's open still re-reads the snapshot (part B of fxylabs/spfn#140 removes that read). The
+snapshot type is the router's own — another router's does not compile — and comes from the router
+type parameter: without `<typeof states>` the client is untyped, as before. Pass what
+`api.getStates` answered, not a hand-built snapshot: one whose manifest names a state the server
+does not serve keeps the stream from opening, as the SSE handler refuses that event. A server component reads
+the snapshot and passes it, with its query, as a prop to the client component that builds the
+client:
+
+```tsx
+// app/[workspaceId]/page.tsx — a server component
+const query = { workspaceId };
+const snapshot = await api.getStates.call({ query });
+
+return <Shell initial={{ snapshot, query }} workspaceId={workspaceId} />;
+```
+
+```tsx
+'use client';
+import type { StateClientInitial } from '@spfn/core/state/client';
+
+export function Shell({ initial, workspaceId }: { initial: StateClientInitial<typeof states>; workspaceId: string })
+{
+    const [state] = useState(() => createStateClient<typeof states>({ sse: createAuthSSEClient(), initial }));
+    useEffect(() => () => state.close(), [state]);
+    // useServerState(state, 'runtime', { workspaceId }) is 'ready' on the first render
+}
+```
 
 | Member | Behaviour |
 | --- | --- |
@@ -537,7 +574,8 @@ changed.
 - **One stream per client**, opened when the first subscriber arrives and closed when the last
   leaves. Subscriptions made in the same task (components mounting together, a StrictMode
   unmount-remount) are batched into one change.
-- **Snapshot first**: the first stream opens after the first snapshot, whose manifest it needs.
+- **Snapshot first**: the first stream opens after the first snapshot, whose manifest it needs —
+  at once on a client built with `initial`, which already holds it.
 - **Every event requested**: `events=` lists `state.<id>.changed` for every state of the
   manifest, in its order, never only the subscribed ones. The server's `grant` activates only an event the
   connection requested, so a state subscribed later would otherwise be ungrantable.
@@ -580,8 +618,10 @@ snapshot in flight across a revoke is told from one read after it.
 ```
 
 - Built on `useSyncExternalStore`: `subscribe` is `client.subscribe(id, key, cb)`,
-  `getSnapshot` is `client.current(id, key)`, and the server snapshot is `undefined` — a
-  server render is `'loading'` and opens nothing.
+  `getSnapshot` is `client.current(id, key)`, and so is the server snapshot. A server render
+  opens nothing; it shows the value when the client was built with `initial`, `'loading'`
+  otherwise. Hydration matches when the server and the browser build their clients from the
+  same `initial`.
 - The key is compared by its fields (stable-stringified), so `{ workspaceId }` written inline
   does not resubscribe on every render; another `workspaceId` unsubscribes and subscribes. A
   key never seen is `'loading'` until it has an entry; a key seen before shows its cached
@@ -592,14 +632,16 @@ snapshot in flight across a revoke is told from one read after it.
 - `react` (`^18 || ^19`) is an **optional peer** of `@spfn/core`: only `@spfn/core/state/react`
   imports it. `@spfn/core/state/client` is framework-neutral.
 
-A page's first paint still comes from a server component reading the state's route with the
-app's `api.` client; the hook takes over in the browser.
+A page's first paint still comes from a server component reading the snapshot with the app's
+`api.` client; handed to the client as `initial`, the same read serves the hook's first render
+and the client's first subscribe, and the hook takes over in the browser.
 
 ### Types
 
 From `@spfn/core/state/client`: `createStateClient`, `StateClient<TStates>`,
-`StateClientConfig`, `StateFrame<V, D>`, `StateEntry<V, D>` (a frame plus `status`, or
-`{ status: 'revoked' }` alone), `StateListener`, `StateId`, `StateKeyArgs`, `WritableStateId`,
+`StateClientConfig<TStates>` (`sse`, `api?`, `onError?`, `retryDelay?`, `initial?`),
+`StateClientInitial<TStates>` (`{ snapshot, query? }`), `StateFrame<V, D>`, `StateEntry<V, D>`
+(a frame plus `status`, or `{ status: 'revoked' }` alone), `StateListener`, `StateId`, `StateKeyArgs`, `WritableStateId`,
 `StateCatalog`, `StateFrameOf`, `InferStateData`, and — re-exported type-only from the server
 module — `InferStateValue`, `InferStateKey`, `InferStateInput`. From `@spfn/core/state/react`:
 `useServerState`, `ServerState<TStates, Id>`.

@@ -12,16 +12,18 @@
  * | H5 | key changes to another `workspaceId`, never seen before | unsubscribe then subscribe; status back to `'loading'` until the entry exists |
  * | H6 | `write` typed only for a state with a write             | `expectTypeOf` positive and negative; at runtime a function on every state — decided by the type, never by the manifest's arrival — and `member`'s rejects naming it |
  * | H7 | server render (`renderToStaticMarkup`)                  | renders with status `'loading'`, no `EventSource` constructed  |
+ * | I9 | server render with a client built with `initial` for `w1`, `consent` beside `runtime` w1 | both render `'ready'` and their value — the keyed one read under its key; no `EventSource` constructed |
+ * | I10 | the same render (`renderToString`) hydrated by a client built from the same `initial` | no `console.error` (no mismatch); after effects `'ready'`, one subscription |
  * | N6 | mounted; reconnect re-reads the same value with a newer `at` | no re-render; after a frame with a new value, one re-render |
  */
 
 import { act, StrictMode } from 'react';
-import { createRoot, type Root } from 'react-dom/client';
-import { renderToStaticMarkup } from 'react-dom/server';
-import { afterEach, beforeEach, describe, expect, expectTypeOf, it } from 'vitest';
+import { createRoot, hydrateRoot, type Root } from 'react-dom/client';
+import { renderToStaticMarkup, renderToString } from 'react-dom/server';
+import { afterEach, beforeEach, describe, expect, expectTypeOf, it, vi } from 'vitest';
 import type { StateClient } from '../client';
 import { useServerState, type ServerState } from '../react';
-import { at, FakeEventSource, harness, opened, reconnect, servedStates, type FixtureStates } from './client-harness';
+import { at, FakeEventSource, harness, initialOf, opened, reconnect, servedStates, type FixtureStates } from './client-harness';
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -213,6 +215,42 @@ describe('useServerState', () =>
         expect(markup).toBe('<span>loading:undefined</span>');
         expect(log).toEqual([]);
         expect(FakeEventSource.instances).toHaveLength(0);
+    });
+
+    it('I9 a server render with a client built with initial shows each value, a keyed one under its key, and constructs no EventSource', () =>
+    {
+        const h = harness({}, { initial: { snapshot: initialOf({ workspaceId: 'w1' }), query: { workspaceId: 'w1' } } });
+        const { log } = track(h.client);
+
+        const markup = renderToStaticMarkup(<><Consent client={h.client} /><Runtime client={h.client} workspaceId="w1" /></>);
+
+        expect(markup).toBe('<span>ready:pending</span><span>ready:provisioning</span>');
+        expect(seen).toMatchObject([{ status: 'ready', at: at(1), value: 'pending' }, { status: 'ready', at: at(1), value: 'provisioning' }]);
+        expect(log).toEqual([]);
+        expect(FakeEventSource.instances).toHaveLength(0);
+    });
+
+    it('I10 hydrating that markup with a client built from the same initial matches; one subscription after effects', async () =>
+    {
+        // renderToString, as a framework's server render: static markup drops the text separators hydration reads.
+        const markup = renderToString(<Consent client={harness({}, { initial: { snapshot: initialOf() } }).client} />);
+        const h = harness({}, { initial: { snapshot: initialOf() } });
+        const { live } = track(h.client);
+        const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+        act(() => root.unmount());
+        container = document.createElement('div');
+        container.innerHTML = markup;
+
+        await act(async () =>
+        {
+            root = hydrateRoot(container, <Consent client={h.client} />);
+        });
+
+        expect(error).not.toHaveBeenCalled();
+        error.mockRestore();
+        expect(container.textContent).toBe('ready:pending');
+        expect(seen.at(-1)).toMatchObject({ status: 'ready', value: 'pending' });
+        expect(live()).toBe(1);
     });
 
     it('N6 a reconnect re-reading the same value with a newer at does not re-render; a new value re-renders once', async () =>

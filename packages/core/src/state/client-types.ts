@@ -75,7 +75,23 @@ export type StateEntry<V = unknown, D = unknown> =
 /** Called after the entry of a subscribed `(id, key)` changed. */
 export type StateListener = () => void;
 
-export interface StateClientConfig
+/**
+ * The snapshot a server render read, for a client to start from (`StateClientConfig.initial`).
+ * Pass what `api.getStates` answered: a snapshot whose manifest names a state the server does not
+ * serve keeps the stream from opening, as the SSE handler refuses that event. The router type
+ * parameter (`StateClientInitial<typeof states>`, `createStateClient<typeof states>`) is what types
+ * `snapshot`; without it the client is untyped, as before.
+ */
+export interface StateClientInitial<TStates extends AnyStateRouter = any>
+{
+    /** What `api.getStates` (or the snapshot route) answered for the render. */
+    snapshot: StatesSnapshot<TStates['states']>;
+
+    /** The query that snapshot was read with; keyed entries are stored under its key. @default {} */
+    query?: Record<string, string>;
+}
+
+export interface StateClientConfig<TStates extends AnyStateRouter = any>
 {
     /**
      * The SSE client the stream is opened on — `createAuthSSEClient()` for an
@@ -102,6 +118,14 @@ export interface StateClientConfig
      * @default 3000
      */
     retryDelay?: number;
+
+    /**
+     * The snapshot the server rendered with. The client installs its manifest
+     * and applies its states at construction, so `current()` answers at once
+     * and the first `subscribe` opens the stream without reading the snapshot
+     * first. The stream's open still re-reads it.
+     */
+    initial?: StateClientInitial<TStates>;
 }
 
 /**
@@ -117,8 +141,8 @@ export interface StateClient<TStates extends AnyStateRouter>
     snapshot(query?: Record<string, string>): Promise<StatesSnapshot<TStates['states']>>;
 
     /**
-     * Watch one `(id, key)`. The first subscriber reads the snapshot, then opens
-     * the stream. A key whose fields are not the state's goes to `onError` once
+     * Watch one `(id, key)`. The first subscriber reads the snapshot — unless
+     * the client was built with `initial` — then opens the stream. A key whose fields are not the state's goes to `onError` once
      * the manifest is known. Returns the unsubscribe.
      */
     subscribe<Id extends StateId<TStates>>(

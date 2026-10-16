@@ -17,9 +17,9 @@ import { expect, vi } from 'vitest';
 import { createSSEClient } from '../../event/sse/client';
 import { FakeEventSource } from '../../event/sse/__tests__/fake-event-source';
 import { createStateClient } from '../client';
-import type { StateClient } from '../client';
+import type { StateClient, StateClientInitial } from '../client';
 import { defineState } from '../state-builder';
-import { defineStateRouter } from '../state-router';
+import { defineStateRouter, type StatesSnapshot } from '../state-router';
 import { stateManifest } from '../state-routes';
 import { Consent, ConsentData, ConsentInput, Role, Runtime, WorkspaceKey } from './state-harness';
 
@@ -117,12 +117,21 @@ export function servedStates(query: Record<string, string> = {}): Record<string,
     return Object.fromEntries(Object.entries(fixtureValues).filter(([id]) => manifest[id].key.every(field => field in query)));
 }
 
+/** The snapshot a server render read with `query`, at `at(1)`: what the real snapshot route answers. */
+export function initialOf(query: Record<string, string> = {}): StatesSnapshot<FixtureStates['states']>
+{
+    return { at: at(1), states: servedStates(query), manifest } as StatesSnapshot<FixtureStates['states']>;
+}
+
 /**
  * A client whose snapshot answers, at `at(0)`, every state whose key the query carries, unless a
  * responder says otherwise. A failed first snapshot is retried after 10 ms, the SSE client's
  * `reconnectDelay` here, unless `config` says otherwise.
  */
-export function harness(responders: Record<string, Responder> = {}, config: { retryDelay?: number } = {}): Harness
+export function harness(
+    responders: Record<string, Responder> = {},
+    config: { retryDelay?: number; initial?: StateClientInitial<FixtureStates> } = {},
+): Harness
 {
     const calls: RpcCall[] = [];
     const all: Record<string, Responder> = { getStates: input => ({ at: at(0), states: servedStates(input.query) }), ...responders };

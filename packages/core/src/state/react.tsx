@@ -18,7 +18,7 @@ type StateWrite<TStates extends AnyStateRouter, Id extends StateId<TStates>> =
 
 /**
  * What `useServerState` returns. `'loading'` until the client holds an entry —
- * and always during a server render. `write` is typed only on a state that
+ * during a server render too, unless the client was built with `initial`. `write` is typed only on a state that
  * declares one, bound to the key the hook was given.
  */
 export type ServerState<TStates extends AnyStateRouter, Id extends StateId<TStates>> = {
@@ -34,12 +34,6 @@ interface LooseClient
     subscribe(id: string, ...args: unknown[]): () => void;
     current(id: string, ...key: unknown[]): StateEntry | undefined;
     write(id: string, input: unknown, ...key: unknown[]): Promise<StateFrame>;
-}
-
-/** A server render has no store: the first client render takes over from `'loading'`. */
-function serverSnapshot(): undefined
-{
-    return undefined;
 }
 
 function keyArgs(keyText: string): [] | [StateKeyFields]
@@ -93,7 +87,9 @@ export function useServerState<TStates extends AnyStateRouter, Id extends StateI
 
     const subscribe = useCallback((onChange: () => void) => loose.subscribe(id, ...args, onChange), [loose, id, args]);
     const getSnapshot = useCallback(() => loose.current(id, ...args), [loose, id, args]);
-    const entry = useSyncExternalStore(subscribe, getSnapshot, serverSnapshot);
+    // The server snapshot is the client's entry too: a client built with `initial`
+    // renders its value on the server, and hydration on the browser matches it.
+    const entry = useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
     const write = useCallback((input: unknown) => loose.write(id, input, ...args), [loose, id, args]);
 
     return useMemo(() => toServerState(entry, write), [entry, write]) as ServerState<TStates, Id>;

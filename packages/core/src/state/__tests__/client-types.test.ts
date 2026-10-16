@@ -11,11 +11,15 @@
  * | T3 | `client.write('consent', { termsVersion, marketing })` compiles; `client.write('member', …)` does not; a keyed write without its key does not |
  * | T4 | `useServerState(client, 'nope')` does not compile                                               |
  * | T5 | the value type of `useServerState(client, 'consent').value` is `'pending' \| 'agreed' \| undefined` |
+ * | I12 | `createStateClient<typeof states>({ initial: { snapshot } })` takes the router's own snapshot; another router's does not compile |
  */
 
 import { describe, expectTypeOf, it } from 'vitest';
-import type { StateClient, StateEntry, StateId, StateListener } from '../client';
+import type { createStateClient, StateClient, StateEntry, StateId, StateListener } from '../client';
 import type { useServerState } from '../react';
+import { Type } from '@sinclair/typebox';
+import { defineState } from '../state-builder';
+import { defineStateRouter, type StatesSnapshot } from '../state-router';
 import type { FixtureStates } from './client-harness';
 
 declare const client: StateClient<FixtureStates>;
@@ -29,6 +33,13 @@ type WriteArgs<I extends 'consent' | 'runtime'> = Parameters<typeof client.write
 type HookArgs = Parameters<typeof useServerState<FixtureStates, Id>>;
 
 type HookResult<I extends Id> = ReturnType<typeof useServerState<FixtureStates, I>>;
+
+/** A router of one other state, `ticket`: its snapshot names none of the fixture's states. */
+const otherStates = defineStateRouter({ ticket: defineState('ticket').value(Type.String()).read(() => ({ value: 'open' })) });
+
+type OtherStates = typeof otherStates;
+
+type Initial = NonNullable<Parameters<typeof createStateClient<FixtureStates>>[0]['initial']>;
 
 describe('state client types', () =>
 {
@@ -67,5 +78,12 @@ describe('state client types', () =>
         expectTypeOf<HookResult<'consent'>['data']>().toEqualTypeOf<{ marketing: boolean } | undefined>();
         expectTypeOf<HookResult<'member'>['value']>().toEqualTypeOf<'owner' | 'admin' | 'member' | undefined>();
         expectTypeOf<ReturnType<typeof client.current<'runtime'>>>().toEqualTypeOf<StateEntry<'provisioning' | 'ready', undefined> | undefined>();
+    });
+
+    it('I12 initial takes the router\'s own snapshot, not another router\'s', () =>
+    {
+        expectTypeOf<{ snapshot: StatesSnapshot<FixtureStates['states']> }>().toMatchTypeOf<Initial>();
+        expectTypeOf<{ snapshot: StatesSnapshot<FixtureStates['states']>; query: { workspaceId: string } }>().toMatchTypeOf<Initial>();
+        expectTypeOf<{ snapshot: StatesSnapshot<OtherStates['states']> }>().not.toMatchTypeOf<Initial>();
     });
 });

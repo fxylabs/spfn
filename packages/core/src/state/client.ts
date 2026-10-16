@@ -26,6 +26,7 @@ import type {
     AnyStateRouter,
     StateClient,
     StateClientConfig,
+    StateClientInitial,
     StateEntry,
     StateFrame,
     StateListener,
@@ -41,6 +42,7 @@ export type {
     InferStateValue,
     StateClient,
     StateClientConfig,
+    StateClientInitial,
     StateEntry,
     StateFrame,
     StateId,
@@ -107,11 +109,13 @@ function sortedFields(fields: string[]): string
 
 /**
  * Build the client for `typeof states`. The first subscription (or call)
- * reads the snapshot, whose manifest names every state; the stream then
+ * reads the snapshot, whose manifest names every state — or takes it from
+ * `initial`, the snapshot the server rendered with; the stream then
  * requests every state event — the server's `grant` can only activate an
- * event the connection requested.
+ * event the connection requested. The router type parameter is what types
+ * `initial.snapshot`; without it the client is untyped, as before.
  */
-export function createStateClient<TStates extends AnyStateRouter>(config: StateClientConfig): StateClient<TStates>
+export function createStateClient<TStates extends AnyStateRouter>(config: StateClientConfig<TStates>): StateClient<TStates>
 {
     return new BrowserStateClient(config) as unknown as StateClient<TStates>;
 }
@@ -147,6 +151,11 @@ class BrowserStateClient
     {
         this.api = createApi<any>(config.api) as unknown as RouteCalls;
         this.reportError = config.onError ?? (error => console.error('[state] A refresh failed:', error));
+
+        if (config.initial)
+        {
+            this.hydrate(config.initial);
+        }
     }
 
     async get(id: string, key?: StateKeyFields): Promise<StateFrame>
@@ -220,6 +229,19 @@ class BrowserStateClient
         this.closeStream();
         this.watched.clear();
         this.store.clearListeners();
+    }
+
+    /**
+     * Start from the snapshot the server rendered with: its manifest, then
+     * each state present, as a read snapshot applies them, under generation 0
+     * — no connection yet. Nothing is marked `'revoked'`: nothing is watched,
+     * and an omission in the render's snapshot is not a denial by the stream.
+     */
+    private hydrate(initial: StateClientInitial): void
+    {
+        const snapshot = initial.snapshot as Snapshot;
+        this.installManifest(snapshot.manifest);
+        this.applyPresent(snapshot, initial.query ?? {}, this.tag());
     }
 
     private slot(id: string, key: StateKeyFields | undefined): string
@@ -358,12 +380,20 @@ class BrowserStateClient
         this.store.apply(slot, frame);
     }
 
-    /** A state present is served, under the generation rule of `serve`. */
+    /**
+     * A state present is served, under the generation rule of `serve`. A state
+     * the manifest does not describe, or a keyed one whose key fields the query
+     * lacks, is skipped: the server never serves either, but a hand-built
+     * `initial` might.
+     */
     private applyPresent(snapshot: Snapshot, query: StateKeyFields, tag: ReadTag): void
     {
         for (const [id, result] of Object.entries(snapshot.states))
         {
-            this.serve(this.slot(id, this.keyIn(id, query)), { at: snapshot.at, ...result }, tag);
+            if (this.manifest![id]?.key.every(field => field in query))
+            {
+                this.serve(this.slot(id, this.keyIn(id, query)), { at: snapshot.at, ...result }, tag);
+            }
         }
     }
 
@@ -428,6 +458,7 @@ class BrowserStateClient
     /**
      * Until the manifest is known, subscriptions wait for the first snapshot;
      * the stream opens after it, never before — its `events=` comes from it.
+     * A client built with `initial` knows it from the start.
      */
     private sync(): void
     {
