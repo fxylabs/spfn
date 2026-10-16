@@ -76,6 +76,20 @@ export type StateEntry<V = unknown, D = unknown> =
 export type StateListener = () => void;
 
 /**
+ * Whether the client's stream is live. `'reconnecting'` until a stream opens and while the SSE
+ * client retries a dropped one — `attempt` is its count, `0` before its first retry;
+ * `'failed'` when the retries are exhausted (the SSE client's `maxReconnectAttempts`, the
+ * client's `maxRetries` for the first snapshot), until `retry()`, a new `subscribe` or `online`.
+ */
+export type ConnectionStatus =
+    | { status: 'connected' }
+    | { status: 'reconnecting'; attempt: number }
+    | { status: 'failed' };
+
+/** Called with the new status after the client's connection status changed. */
+export type ConnectionListener = (status: ConnectionStatus) => void;
+
+/**
  * The snapshot a server render read, for a client to start from (`StateClientConfig.initial`).
  * Pass what `api.getStates` answered: a snapshot whose manifest names a state the server does not
  * serve keeps the stream from opening, as the SSE handler refuses that event. The router type
@@ -118,6 +132,15 @@ export interface StateClientConfig<TStates extends AnyStateRouter = any>
      * @default 3000
      */
     retryDelay?: number;
+
+    /**
+     * How many times a failed first snapshot is read again before the client
+     * gives up: the status turns `'failed'` and no retry is set, until
+     * `retry()`, a new `subscribe` or `online`. The first read is not a retry.
+     * `0` retries until the snapshot succeeds.
+     * @default 0
+     */
+    maxRetries?: number;
 
     /**
      * The snapshot the server rendered with. The client installs its manifest
@@ -163,6 +186,24 @@ export interface StateClient<TStates extends AnyStateRouter>
         ...key: StateKeyArgs<TStates, Id>
     ): StateEntry<StateCatalog<TStates>[Id]['value'], StateCatalog<TStates>[Id]['data']> | undefined;
 
-    /** Close the stream and drop every listener. */
+    /** The connection status, a frozen object: the same reference until it changes. */
+    connection(): ConnectionStatus;
+
+    /**
+     * Call `listener` with the new status on every change of `connection()`.
+     * Returns the unsubscribe (idempotent).
+     */
+    subscribeConnection(listener: ConnectionListener): () => void;
+
+    /**
+     * Restart now when `'failed'` or `'reconnecting'`: the first snapshot is
+     * read again, its retry count reset, or the stream reopened. A no-op when
+     * `'connected'`, while the first snapshot is in flight, or with nothing
+     * subscribed — so after `close()`, until a new `subscribe`, which `retry()`
+     * then restarts as before. `online` is not listened to again after `close()`.
+     */
+    retry(): void;
+
+    /** Close the stream, drop every listener and stop listening to `online`. */
     close(): void;
 }

@@ -15,6 +15,7 @@
  * | I9 | server render with a client built with `initial` for `w1`, `consent` beside `runtime` w1 | both render `'ready'` and their value — the keyed one read under its key; no `EventSource` constructed |
  * | I10 | the same render (`renderToString`) hydrated by a client built from the same `initial` | no `console.error` (no mismatch); after effects `'ready'`, one subscription |
  * | N6 | mounted; reconnect re-reads the same value with a newer `at` | no re-render; after a frame with a new value, one re-render |
+ * | S16 | `useConnectionStatus`: mount, then the stream opens   | renders `reconnecting 0`, then `connected`; a server render (`renderToStaticMarkup`) `reconnecting 0` |
  */
 
 import { act, StrictMode } from 'react';
@@ -22,7 +23,7 @@ import { createRoot, hydrateRoot, type Root } from 'react-dom/client';
 import { renderToStaticMarkup, renderToString } from 'react-dom/server';
 import { afterEach, beforeEach, describe, expect, expectTypeOf, it, vi } from 'vitest';
 import type { StateClient } from '../client';
-import { useServerState, type ServerState } from '../react';
+import { useConnectionStatus, useServerState, type ServerState } from '../react';
 import { at, FakeEventSource, harness, initialOf, opened, reconnect, servedStates, type FixtureStates } from './client-harness';
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -74,6 +75,13 @@ function Member({ client }: { client: Client })
     seen.push(useServerState(client, 'member', { workspaceId: 'w1' }));
 
     return null;
+}
+
+function Connection({ client }: { client: Client })
+{
+    const connection = useConnectionStatus(client);
+
+    return <span>{connection.status === 'reconnecting' ? `reconnecting ${connection.attempt}` : connection.status}</span>;
 }
 
 let container: HTMLElement;
@@ -276,5 +284,26 @@ describe('useServerState', () =>
 
         expect(seen.length).toBe(renders + 1);
         expect(container.textContent).toBe('ready:agreed');
+    });
+
+    it('S16 useConnectionStatus renders reconnecting 0, then connected when the stream opens; a server render is reconnecting 0', async () =>
+    {
+        const h = harness();
+        const subscribeConnection = vi.spyOn(h.client, 'subscribeConnection');
+
+        expect(renderToStaticMarkup(<Connection client={h.client} />)).toBe('<span>reconnecting 0</span>');
+
+        await render(<Connection client={h.client} />);
+        expect(container.textContent).toBe('reconnecting 0');
+
+        h.client.subscribe('consent', () => undefined);
+        await act(async () =>
+        {
+            await opened();
+        });
+
+        expect(container.textContent).toBe('connected');
+        expect(subscribeConnection).toHaveBeenCalledTimes(1);
+        h.client.close();
     });
 });

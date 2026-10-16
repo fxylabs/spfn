@@ -126,22 +126,28 @@ export function initialOf(query: Record<string, string> = {}): StatesSnapshot<Fi
 /**
  * A client whose snapshot answers, at `at(0)`, every state whose key the query carries, unless a
  * responder says otherwise. A failed first snapshot is retried after 10 ms, the SSE client's
- * `reconnectDelay` here, unless `config` says otherwise.
+ * `reconnectDelay` here, unless `config` says otherwise; `maxReconnectAttempts` goes to the SSE client.
  */
 export function harness(
     responders: Record<string, Responder> = {},
-    config: { retryDelay?: number; initial?: StateClientInitial<FixtureStates> } = {},
+    config: {
+        retryDelay?: number;
+        maxRetries?: number;
+        initial?: StateClientInitial<FixtureStates>;
+        maxReconnectAttempts?: number;
+    } = {},
 ): Harness
 {
     const calls: RpcCall[] = [];
     const all: Record<string, Responder> = { getStates: input => ({ at: at(0), states: servedStates(input.query) }), ...responders };
     const onError = vi.fn();
+    const { maxReconnectAttempts, ...clientConfig } = config;
     const client = createStateClient<FixtureStates>({
-        sse: createSSEClient({ url: 'http://test/stream', reconnectDelay: 10 }),
+        sse: createSSEClient({ url: 'http://test/stream', reconnectDelay: 10, maxReconnectAttempts }),
         api: { baseUrl: '/api/rpc', fetch: fakeFetch(calls, all) },
         onError,
         retryDelay: 10,
-        ...config,
+        ...clientConfig,
     });
 
     return { client, calls, responders: all, onError };

@@ -3,6 +3,7 @@ import { useCallback, useMemo, useSyncExternalStore } from 'react';
 // of StateClient there instead of carrying a copy of its own.
 import type {
     AnyStateRouter,
+    ConnectionStatus,
     StateCatalog,
     StateClient,
     StateEntry,
@@ -93,4 +94,34 @@ export function useServerState<TStates extends AnyStateRouter, Id extends StateI
     const write = useCallback((input: unknown) => loose.write(id, input, ...args), [loose, id, args]);
 
     return useMemo(() => toServerState(entry, write), [entry, write]) as ServerState<TStates, Id>;
+}
+
+/** A server render opens nothing: its status is the one a client starts with. */
+const SERVER_CONNECTION: ConnectionStatus = Object.freeze({ status: 'reconnecting', attempt: 0 });
+
+function serverConnection(): ConnectionStatus
+{
+    return SERVER_CONNECTION;
+}
+
+/**
+ * The client's connection status, re-rendered on every change: `'connected'`,
+ * `'reconnecting'` with the attempt, or `'failed'` until `client.retry()`.
+ *
+ * @example
+ * ```tsx
+ * const connection = useConnectionStatus(state);
+ *
+ * if (connection.status === 'failed')
+ * {
+ *     return <Banner onRetry={() => state.retry()}>The server is not answering.</Banner>;
+ * }
+ * ```
+ */
+export function useConnectionStatus(client: StateClient<any>): ConnectionStatus
+{
+    const subscribe = useCallback((onChange: () => void) => client.subscribeConnection(onChange), [client]);
+    const getSnapshot = useCallback(() => client.connection(), [client]);
+
+    return useSyncExternalStore(subscribe, getSnapshot, serverConnection);
 }

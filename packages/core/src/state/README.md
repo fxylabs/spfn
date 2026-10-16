@@ -23,7 +23,7 @@ import { Type } from '@sinclair/typebox';   // for .key() / .value() / .data() /
 
 // browser — the router by type only
 import { createStateClient } from '@spfn/core/state/client';
-import { useServerState } from '@spfn/core/state/react';
+import { useConnectionStatus, useServerState } from '@spfn/core/state/react';
 import type { states } from '@/server/states';
 ```
 
@@ -486,9 +486,11 @@ of fields, goes to `onError`, and the subscription is dropped without reopening 
 `write` on a state the manifest marks `write: false` rejects naming the state, before any
 request. A first snapshot that fails goes to `onError` (or rejects the call that needed it).
 While subscriptions wait on it, it is read again every `retryDelay` (default 3000 ms, the SSE
-client's `reconnectDelay`), each failure to `onError`, until it succeeds, `close()` runs, or
-nothing is subscribed; a `get`, `write` or `snapshot` that reads it first serves the waiting
-subscriptions too — whichever call brings the manifest opens the stream. `close()` while it is
+client's `reconnectDelay`), each failure to `onError`, until it succeeds, `close()` runs,
+nothing is subscribed, or `maxRetries` retries failed too (default `0`: no limit) — then the
+status is `'failed'` and no retry is set ([Connection status](#connection-status)); a `get`,
+`write` or `snapshot` that reads it first serves the waiting subscriptions too — whichever
+call brings the manifest opens the stream. `close()` while it is
 in flight discards its answer, and a `get` or `write` waiting on it rejects: the client was
 closed.
 
@@ -496,7 +498,7 @@ The manifest may also come from `initial` — the snapshot the server rendered w
 client knows it from construction: nothing above waits, a refused `subscribe` goes to `onError` at
 once, and the first `subscribe` opens the stream without reading the snapshot first.
 
-### `createStateClient<typeof states>({ sse, api?, onError?, retryDelay?, initial? })`
+### `createStateClient<typeof states>({ sse, api?, onError?, retryDelay?, maxRetries?, initial? })`
 
 `initial: { snapshot, query? }` is the snapshot a server render read — `api.getStates`'s answer —
 and the query it was read with (default `{}`). The client installs its manifest and applies each
@@ -537,13 +539,17 @@ export function Shell({ initial, workspaceId }: { initial: StateClientInitial<ty
 | `subscribe(id, key?, listener)` | Registers the listener for `(id, key)` and returns its unsubscribe (idempotent). The listener is called when the entry's `status`, `value` or `data` changes — never for an arrival that differs only by a newer `at` (Ordering, below). The client's first subscriber reads the snapshot, then opens the stream (below) |
 | `write(id, input, key?)` | `put<Id>State` with the input as the body, key fields in the query. The answer is applied at once — before the frame the write also sends — and returned. Typed only for a state with a write, and requires the key on a keyed one |
 | `current(id, key?)` | Synchronous: `{ at, value, data?, status }`, `{ status: 'revoked' }` for a state revoked before any value arrived, or `undefined`. The same frozen object until a change is applied |
-| `close()` | Closes the stream, drops every listener. Idempotent |
+| `connection()` | Synchronous: the connection status ([Connection status](#connection-status)), a frozen object, the same reference until it changes |
+| `subscribeConnection(listener)` | Registers `listener(status)`, called with the new status on every change, after `connection()` returns it; returns its unsubscribe (idempotent). The same function subscribed twice is two subscriptions |
+| `retry()` | When `'failed'` or `'reconnecting'`: reads the first snapshot now (its retry count reset), or, once the manifest is known, reopens the stream now. A no-op when `'connected'`, while the first snapshot is in flight, and with nothing subscribed — after `close()` too, until a new `subscribe` |
+| `close()` | Closes the stream, drops every listener — connection listeners too — and stops listening to `online`; the status is back to `'reconnecting'` 0. Idempotent. A `subscribe` after it starts the client again, without `online`: `retry()` restarts it as before |
 
 `onError` receives a failure of something the client ran on its own — the first snapshot, the
 snapshot after the stream opened, the read after a grant — and a refused `subscribe` (default
 `console.error`). Calls the app makes reject.
 
-A listener that throws is logged at warn with the state id and does not stop the others.
+A listener that throws is logged at warn with the state id and does not stop the others; so is
+a connection listener.
 
 Give the state client an `SSEClient` of its own: an `SSEClient` holds one subscription, and
 the state client's supersedes any other made on it.
@@ -607,6 +613,54 @@ changed.
   until it is carried again. A screen that must follow two workspaces live uses a second
   state client.
 
+### Connection status
+
+The client decides the retries — the SSE client's reconnects of the stream, its own of the
+first snapshot — so it says where they stand. `connection()` is one of:
+
+| Status | Holds |
+| --- | --- |
+| `{ status: 'connected' }` | a stream is open (the SSE `onOpen`) |
+| `{ status: 'reconnecting', attempt }` | no stream open — not yet, or nothing subscribed — or the SSE client retrying a dropped one: `attempt` is its count (`onReconnect`), reset when a stream opens; `0` before the first stream opens, while the first snapshot is read or retried, and after `retry()` |
+| `{ status: 'failed' }` | the retries are exhausted: the SSE client's `maxReconnectAttempts` (its `onClose`, the attempts spent), or `maxRetries` for the first snapshot. Nothing more is tried until a restart (below) or, with the manifest unknown, a `get`, `write` or `snapshot` that brings it |
+
+- **Start value** `{ status: 'reconnecting', attempt: 0 }`, a client built with `initial` too:
+  its entries are ready, its stream is not.
+- A stream error alone changes nothing — a reconnect or the end of the attempts follows. A
+  stream the client closes itself — a key change, `close()` — is no failure; a reopen on a
+  key change while connected stays `'connected'`.
+- **Restarts.** `retry()` and the browser's `online` event — listened to from construction
+  where `addEventListener` exists — restart when `'failed'` or `'reconnecting'`; a `subscribe`
+  restarts when `'failed'`, reopening a failed stream even when the query is unchanged. An
+  unsubscribe that leaves subscribers never does: the status stays `'failed'` (the last one:
+  below). With the manifest unknown, any call that brings it — `get`, `write`, `snapshot` —
+  opens the stream; with the manifest known, those calls reopen nothing while `'failed'`. The
+  first snapshot is read now with its count reset (one in flight is not doubled), or the stream
+  is reopened now as a new SSE subscription, whose attempts start from 0 — a pending reconnect
+  timer is superseded. The status is `'reconnecting'` 0 until it opens.
+- **The last unsubscribe** closes the stream: `'reconnecting'` 0, the start value, and the
+  first snapshot's retry count starts over for the next wait.
+- **`close()`** sets `'reconnecting'` 0, drops the connection listeners and removes the
+  `online` listener; its own teardown is not `'failed'`. A `subscribe` after it starts the
+  client again, and `retry()` restarts it; `online` is not listened to again.
+
+```tsx
+const connection = useConnectionStatus(state);
+
+if (connection.status === 'failed')
+{
+    return <Banner action={() => state.retry()}>The server has a problem.</Banner>;
+}
+if (connection.status === 'reconnecting' && connection.attempt > 0)
+{
+    return <Banner>The server is not answering, retrying…</Banner>;
+}
+```
+
+`maxRetries` bounds the first snapshot only; bound the stream's reconnects with the SSE
+client's `maxReconnectAttempts` (`createAuthSSEClient({ maxReconnectAttempts: 5 })`). Both
+default to `0`, retrying forever: the status never turns `'failed'`.
+
 ### `'revoked'` — the server does not serve this to you
 
 One status says the server stopped serving a `(id, key)` to this subject, however the client
@@ -653,15 +707,23 @@ A page's first paint still comes from a server component reading the snapshot wi
 and the client's first subscribe, the stream's initial frames bring anything newer, and the
 hook takes over in the browser.
 
+### `useConnectionStatus(client)`
+
+`connection()` in a component, on `useSyncExternalStore`: `subscribe` is
+`client.subscribeConnection(cb)`, `getSnapshot` is `client.connection()`, both stable per
+client, so a render does not resubscribe. The server snapshot is `{ status: 'reconnecting',
+attempt: 0 }` — what every client starts with, so hydration matches.
+
 ### Types
 
 From `@spfn/core/state/client`: `createStateClient`, `StateClient<TStates>`,
-`StateClientConfig<TStates>` (`sse`, `api?`, `onError?`, `retryDelay?`, `initial?`),
+`StateClientConfig<TStates>` (`sse`, `api?`, `onError?`, `retryDelay?`, `maxRetries?`, `initial?`),
+`ConnectionStatus`, `ConnectionListener`,
 `StateClientInitial<TStates>` (`{ snapshot, query? }`), `StateFrame<V, D>`, `StateEntry<V, D>`
 (a frame plus `status`, or `{ status: 'revoked' }` alone), `StateListener`, `StateId`, `StateKeyArgs`, `WritableStateId`,
 `StateCatalog`, `StateFrameOf`, `InferStateData`, and — re-exported type-only from the server
 module — `InferStateValue`, `InferStateKey`, `InferStateInput`. From `@spfn/core/state/react`:
-`useServerState`, `ServerState<TStates, Id>`.
+`useServerState`, `ServerState<TStates, Id>`, `useConnectionStatus`.
 
 ---
 

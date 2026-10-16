@@ -24,6 +24,8 @@ import { createApi } from '@spfn/core/nextjs';
 import { stableKey, StateStore, type StateKeyFields } from './client-store';
 import type {
     AnyStateRouter,
+    ConnectionListener,
+    ConnectionStatus,
     StateClient,
     StateClientConfig,
     StateClientInitial,
@@ -34,6 +36,8 @@ import type {
 
 export type {
     AnyStateRouter,
+    ConnectionListener,
+    ConnectionStatus,
     InferStateData,
     StateCatalog,
     StateFrameOf,
@@ -74,12 +78,18 @@ interface Watch
     count: number;
 }
 
-/** The stream as one `sse.subscribe` opened it; `generation` names its current connection. */
+/**
+ * The stream as one `sse.subscribe` opened it; `generation` names its current
+ * connection. `closedByClient`: the client closed it itself, so its `onClose`
+ * is no failure; `failed`: the SSE client gave up on it.
+ */
 interface Stream
 {
     query: StateKeyFields;
     text: string;
     generation: number;
+    closedByClient: boolean;
+    failed: boolean;
     close: () => void;
 }
 
@@ -88,6 +98,20 @@ interface ReadTag
 {
     generation: number;
     tick: number;
+}
+
+const CONNECTED: ConnectionStatus = Object.freeze({ status: 'connected' });
+const FAILED: ConnectionStatus = Object.freeze({ status: 'failed' });
+const STARTING: ConnectionStatus = Object.freeze({ status: 'reconnecting', attempt: 0 });
+
+function reconnecting(attempt: number): ConnectionStatus
+{
+    return attempt === 0 ? STARTING : Object.freeze({ status: 'reconnecting', attempt });
+}
+
+function sameStatus(a: ConnectionStatus, b: ConnectionStatus): boolean
+{
+    return a.status === b.status && (a as { attempt?: number }).attempt === (b as { attempt?: number }).attempt;
 }
 
 /** `get<Id>State` / `put<Id>State`, the names the server router derives. */
@@ -137,6 +161,13 @@ class BrowserStateClient
     private stream: Stream | undefined;
     private syncQueued = false;
 
+    private status = STARTING;
+    private readonly connectionListeners = new Set<ConnectionListener>();
+    private readonly onOnline = (): void => this.retry();
+
+    /** The retries of the first snapshot since its last start, against `maxRetries`. */
+    private retries = 0;
+
     /** The lifetime whose subscriptions wait on the first snapshot — its read in flight, or its retry timer set. */
     private waitingLifetime: number | undefined;
     private retryTimer: ReturnType<typeof setTimeout> | undefined;
@@ -161,6 +192,12 @@ class BrowserStateClient
         if (config.initial)
         {
             this.hydrate(config.initial);
+        }
+
+        // Absent in Node and in a server render.
+        if (typeof globalThis.addEventListener === 'function')
+        {
+            globalThis.addEventListener('online', this.onOnline);
         }
     }
 
@@ -227,14 +264,85 @@ class BrowserStateClient
         return this.store.current(this.slot(id, key));
     }
 
+    connection(): ConnectionStatus
+    {
+        return this.status;
+    }
+
+    subscribeConnection(listener: ConnectionListener): () => void
+    {
+        // One wrapper per subscription: the same listener subscribed twice is two subscriptions.
+        const notify: ConnectionListener = status => listener(status);
+        this.connectionListeners.add(notify);
+
+        return () =>
+        {
+            this.connectionListeners.delete(notify);
+        };
+    }
+
+    /**
+     * Restart what gave up or is still retrying, now: the first snapshot
+     * while the manifest is unknown, else the stream — a new `sse.subscribe`,
+     * whose attempt count starts at 0. Nothing to do when connected or with
+     * nothing watched — so after `close()`, until a new `subscribe`.
+     */
+    retry(): void
+    {
+        if (this.status === CONNECTED || this.watched.size === 0)
+        {
+            return;
+        }
+
+        if (this.manifest)
+        {
+            this.openStream(this.streamQuery());
+        }
+        else
+        {
+            this.rereadManifest();
+        }
+    }
+
     close(): void
     {
         this.lifetime++;
         clearTimeout(this.retryTimer);
         this.retryTimer = undefined;
+        this.retries = 0;
         this.closeStream();
         this.watched.clear();
         this.store.clearListeners();
+        this.connectionListeners.clear();
+        this.status = STARTING;
+
+        if (typeof globalThis.removeEventListener === 'function')
+        {
+            globalThis.removeEventListener('online', this.onOnline);
+        }
+    }
+
+    /** The status is `next` from now; each connection listener hears it, a throwing one logged. */
+    private setConnection(next: ConnectionStatus): void
+    {
+        if (sameStatus(next, this.status))
+        {
+            return;
+        }
+
+        this.status = next;
+
+        for (const listener of [...this.connectionListeners])
+        {
+            try
+            {
+                listener(next);
+            }
+            catch (error)
+            {
+                console.warn('[state] A connection listener threw:', error);
+            }
+        }
     }
 
     /**
@@ -440,7 +548,11 @@ class BrowserStateClient
             this.watched.delete(slot);
         }
 
-        this.queueSync();
+        // A removal that leaves subscribers keeps a failed client failed; the last removal closes and resets.
+        if (delta === 1 || this.watched.size === 0 || this.status !== FAILED)
+        {
+            this.queueSync();
+        }
     }
 
     /**
@@ -464,13 +576,17 @@ class BrowserStateClient
     /**
      * Until the manifest is known, subscriptions wait for the first snapshot;
      * the stream opens after it, never before — its `events=` comes from it.
-     * A client built with `initial` knows it from the start.
+     * A client built with `initial` knows it from the start. With nothing
+     * watched the stream closes, the retry count starts over for the next
+     * wait, and the status is the start value: no stream, nothing answered.
      */
     private sync(): void
     {
         if (this.watched.size === 0)
         {
+            this.retries = 0;
             this.closeStream();
+            this.setConnection(STARTING);
 
             return;
         }
@@ -482,9 +598,10 @@ class BrowserStateClient
             return;
         }
 
+        // A stream the SSE client gave up on counts as absent.
         const query = this.streamQuery();
 
-        if (this.stream?.text !== stableKey(query))
+        if (this.stream?.failed || this.stream?.text !== stableKey(query))
         {
             this.openStream(query);
         }
@@ -494,7 +611,8 @@ class BrowserStateClient
      * One waiter per lifetime on the first snapshot. A failure goes to
      * `onError`, and the read is retried after `retryDelay` — the stream that
      * would reconnect on its own does not exist yet. A retry stops on
-     * `close()` or when nothing is watched (`sync` closes instead).
+     * `close()`, when nothing is watched (`sync` closes instead), or after
+     * `maxRetries`; a wait started after that last one restarts the count.
      */
     private awaitManifest(): void
     {
@@ -503,6 +621,12 @@ class BrowserStateClient
         if (this.waitingLifetime === lifetime)
         {
             return;
+        }
+
+        if (this.status === FAILED)
+        {
+            this.retries = 0;
+            this.setConnection(STARTING);
         }
 
         this.waitingLifetime = lifetime;
@@ -527,9 +651,24 @@ class BrowserStateClient
         this.sync();
     }
 
-    /** Read the first snapshot again after `retryDelay`, as the SSE client reconnects a dropped stream. */
+    /**
+     * Read the first snapshot again after `retryDelay`, as the SSE client
+     * reconnects a dropped stream — or, with `maxRetries` spent, give up:
+     * `'failed'`, no timer, no wait.
+     */
     private retryLater(): void
     {
+        const maxRetries = this.config.maxRetries ?? 0;
+
+        if (maxRetries > 0 && this.retries >= maxRetries)
+        {
+            this.waitingLifetime = undefined;
+            this.setConnection(FAILED);
+
+            return;
+        }
+
+        this.retries++;
         this.retryTimer = setTimeout(() =>
         {
             this.retryTimer = undefined;
@@ -537,6 +676,26 @@ class BrowserStateClient
         }, this.config.retryDelay ?? 3000);
         // A timer in Node has `unref`: a pending retry does not keep the process alive.
         (this.retryTimer as { unref?: () => void }).unref?.();
+    }
+
+    /**
+     * `retry()` before the manifest: the count starts over and the first
+     * snapshot is read now, its pending timer cleared. A read in flight is
+     * already the retry; it is not doubled.
+     */
+    private rereadManifest(): void
+    {
+        this.retries = 0;
+
+        if (this.waitingLifetime === this.lifetime && this.retryTimer === undefined)
+        {
+            return;
+        }
+
+        clearTimeout(this.retryTimer);
+        this.retryTimer = undefined;
+        this.setConnection(STARTING);
+        this.resync();
     }
 
     /**
@@ -553,13 +712,21 @@ class BrowserStateClient
      * Open (or reopen) the stream. `events` is every state of the manifest, in
      * its order, never only the subscribed ones: a state subscribed later would
      * otherwise be unrequested, and the server's `grant` cannot activate it.
+     * Unless connected, the status is `'reconnecting'` 0 until it opens: a
+     * new subscription counts its attempts from 0. A reopen on a key change
+     * while connected stays `'connected'`.
      */
     private openStream(query: StateKeyFields): void
     {
         this.closeStream();
 
+        if (this.status !== CONNECTED)
+        {
+            this.setConnection(STARTING);
+        }
+
         const ids = Object.keys(this.manifest!);
-        const stream: Stream = { query, text: stableKey(query), generation: 0, close: () => undefined };
+        const stream: Stream = { query, text: stableKey(query), generation: 0, closedByClient: false, failed: false, close: () => undefined };
         stream.close = this.config.sse.subscribe({
             events: ids.map(stateEventName),
             handlers: Object.fromEntries(ids.map(id => [stateEventName(id), (frame: WireFrame) => this.onFrame(id, frame, stream)])),
@@ -567,7 +734,10 @@ class BrowserStateClient
             onOpen: () =>
             {
                 stream.generation = ++this.generation;
+                this.streamStatus(stream, CONNECTED);
             },
+            onReconnect: attempt => this.streamStatus(stream, reconnecting(attempt)),
+            onClose: () => this.onStreamClose(stream),
             onConnected: connected => this.onConnected(connected, stream),
             onSubscriptionChange: change => this.onSubscriptionChange(change, stream),
         });
@@ -575,10 +745,38 @@ class BrowserStateClient
         this.stream = stream;
     }
 
+    /** Flagged first: the SSE client fires `onClose` on this teardown too, and it is no failure. */
     private closeStream(): void
     {
-        this.stream?.close();
-        this.stream = undefined;
+        if (this.stream)
+        {
+            this.stream.closedByClient = true;
+            this.stream.close();
+            this.stream = undefined;
+        }
+    }
+
+    /** The status of a callback of `stream`, when no other stream replaced it. */
+    private streamStatus(stream: Stream, status: ConnectionStatus): void
+    {
+        if (stream === this.stream)
+        {
+            this.setConnection(status);
+        }
+    }
+
+    /**
+     * The SSE client fires `onClose` on every teardown; one the client did
+     * not start is the reconnect attempts exhausted: `'failed'`, and the
+     * stream counts as absent for the next `sync`.
+     */
+    private onStreamClose(stream: Stream): void
+    {
+        if (!stream.closedByClient && stream === this.stream)
+        {
+            stream.failed = true;
+            this.setConnection(FAILED);
+        }
     }
 
     /**
