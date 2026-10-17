@@ -16,7 +16,7 @@
 
 import { authLogger } from '../../logger';
 
-const PROVIDERS = ['google', 'kakao', 'naver', 'github'] as const;
+const PROVIDERS = ['google', 'kakao', 'naver', 'github', 'apple'] as const;
 
 type Provider = typeof PROVIDERS[number];
 

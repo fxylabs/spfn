@@ -4,6 +4,7 @@
  * OAuth 인증 라우트
  * - GET /_auth/oauth/google: OAuth 시작 (Google로 리다이렉트)
  * - GET /_auth/oauth/google/callback: Google 콜백 처리
+ * - POST /_auth/oauth/:provider/callback: form_post 콜백(Apple)을 GET 콜백으로 303
  * - GET /_auth/oauth/providers: 활성화된 OAuth provider 목록
  */
 
@@ -42,7 +43,7 @@ import { generateOAuthNonce } from '../../lib/oauth/state';
  */
 const providerParams = Type.Object({
     provider: Type.Union(SOCIAL_PROVIDERS.map(p => Type.Literal(p)), {
-        description: 'OAuth provider id (google, github, kakao, naver, superself)',
+        description: 'OAuth provider id (google, apple, github, kakao, naver, superself)',
     }),
 });
 
@@ -51,6 +52,8 @@ interface CallbackQuery
 {
     code?: string;
     state?: string;
+    /** Apple's `user` JSON (the name on a first authorization), carried over by the form_post hop. */
+    user?: string;
     error?: string;
     error_description?: string;
 }
@@ -77,7 +80,7 @@ async function oauthCallbackRedirect(c: Context, provider: SocialProvider, query
 
     try
     {
-        return await completeOAuthCallback(c, provider, query.code, query.state);
+        return await completeOAuthCallback(c, provider, query.code, query.state, query.user);
     }
     catch (err)
     {
@@ -95,7 +98,13 @@ async function oauthCallbackRedirect(c: Context, provider: SocialProvider, query
  * that cookie is expired, and only once it matched — a refused callback expires
  * nothing, so another start in flight in this browser can still finish (#126).
  */
-async function completeOAuthCallback(c: Context, provider: SocialProvider, code: string, state: string): Promise<string>
+async function completeOAuthCallback(
+    c: Context,
+    provider: SocialProvider,
+    code: string,
+    state: string,
+    user: string | undefined,
+): Promise<string>
 {
     const csrf = await matchOAuthCallbackCsrf({ provider, state, cookies: getCookie(c) });
 
@@ -105,6 +114,7 @@ async function completeOAuthCallback(c: Context, provider: SocialProvider, code:
         provider,
         code,
         state,
+        user,
         expectedNonce: csrf.nonce,
         ...deviceProvenance(c),
     });
@@ -486,6 +496,9 @@ export const oauthProviderCallback = route.get('/_auth/oauth/:provider/callback'
             state: Type.Optional(Type.String({
                 description: 'OAuth state parameter',
             })),
+            user: Type.Optional(Type.String({
+                description: 'Apple only: the user JSON (name) of a first authorization, carried over from the form_post callback',
+            })),
             error: Type.Optional(Type.String({
                 description: 'Error code from provider',
             })),
@@ -501,6 +514,74 @@ export const oauthProviderCallback = route.get('/_auth/oauth/:provider/callback'
         const { params, query } = await c.data();
 
         return c.redirect(await oauthCallbackRedirect(c.raw, params.provider, query));
+    });
+
+/** The form fields a form_post callback hands on to the GET callback, in this order. */
+const FORM_POST_FIELDS = ['code', 'state', 'user', 'error', 'error_description'] as const;
+
+/** Apple's `user` JSON carries a name and an email; anything longer is not Apple's. */
+const MAX_FORM_POST_USER_BYTES = 2048;
+
+/**
+ * The GET callback's query for a form_post body: the known string fields only,
+ * `user` dropped when oversized.
+ */
+async function formPostCallbackQuery(raw: Context): Promise<URLSearchParams>
+{
+    const body = await raw.req.parseBody().catch(() => ({} as Record<string, unknown>));
+    const query = new URLSearchParams();
+
+    for (const field of FORM_POST_FIELDS)
+    {
+        const value = body[field];
+
+        if (typeof value !== 'string')
+        {
+            continue;
+        }
+
+        if (field === 'user' && Buffer.byteLength(value, 'utf8') > MAX_FORM_POST_USER_BYTES)
+        {
+            continue;
+        }
+
+        query.set(field, value);
+    }
+
+    return query;
+}
+
+/**
+ * POST /_auth/oauth/:provider/callback - form_post 콜백을 GET 콜백으로 넘긴다
+ *
+ * Apple은 name·email scope를 요청하면 response_mode=form_post를 강제해, 브라우저가 콜백에
+ * cross-site POST로 도착한다. 이 패키지의 OAuth 쿠키(oauth_csrf.*, oauth_pending.*)는
+ * SameSite=Lax라 cross-site POST에는 실리지 않으므로, 여기서는 로그인을 끝내지 않는다.
+ * form 필드를 query로 옮겨 같은 경로의 GET으로 303을 보내면, 브라우저의 top-level GET에는
+ * Lax 쿠키가 실리고 기존 GET 콜백(CSRF 대조 → oauthCallbackService)이 그대로 돈다.
+ *
+ * 쿠키를 읽지도 쓰지도 않고 DB도 건드리지 않는다(Transactional 없음). Location은 상대 경로이고
+ * provider 세그먼트는 검증된 path param에서만 온다 — body 값이 경로를 정하지 않는다.
+ * form_post provider가 아니거나 비활성이면 본문 없는 404다(탐색에 정보를 주지 않는다).
+ *
+ * 경로 충돌: 마지막 세그먼트가 callback이라 POST /_auth/oauth/start(static)와
+ * /:provider/url·/native·/unlink-notify와 겹치지 않는다.
+ */
+export const oauthProviderCallbackPost = route.post('/_auth/oauth/:provider/callback')
+    .input({ params: providerParams })
+    .use([rateLimitPolicy('oauth-callback', { limit: 30, windowMs: 60_000 })])
+    .skip(['auth'])
+    .handler(async (c) =>
+    {
+        const { params } = await c.data();
+        const provider = getOAuthProvider(params.provider);
+
+        if (!provider?.isEnabled() || provider.callbackResponseMode !== 'form_post')
+        {
+            return c.raw.body(null, 404);
+        }
+
+        return c.redirect(`/_auth/oauth/${params.provider}/callback?${await formPostCallbackQuery(c.raw)}`, 303);
     });
 
 /**
@@ -740,6 +821,7 @@ export const oauthRouter = defineRouter({
     oauthFinalize,
     oauthProviderStart,
     oauthProviderCallback,
+    oauthProviderCallbackPost,
     getProviderOAuthUrl,
     oauthNative,
     oauthUnlinkNotify,

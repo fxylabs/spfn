@@ -162,9 +162,15 @@ real secret values out of band, never commit them.
 | `SPFN_AUTH_NAVER_REDIRECT_URI` | `.env.server` | — | default `{NEXT_PUBLIC_SPFN_APP_URL\|\|SPFN_APP_URL}/_auth/oauth/naver/callback`; an override must stay on the web app origin at that path and is **checked at boot** — see [OAuth callback origin](#oauth-callback-origin-web-app-host--rewrite) |
 | `SPFN_AUTH_GITHUB_CLIENT_ID` / `_CLIENT_SECRET` | `.env.server` | — | both values enable GitHub OAuth |
 | `SPFN_AUTH_GITHUB_SCOPES` / `_REDIRECT_URI` | `.env.server` | — | default scopes `read:user,user:email`; callback `/_auth/oauth/github/callback` on the web app origin, **checked at boot** — see [OAuth callback origin](#oauth-callback-origin-web-app-host--rewrite) |
-| `SPFN_AUTH_OAUTH_CALLBACK_ORIGIN_CHECK` | `.env.server` | — | `off` disables the boot check of the four `_REDIRECT_URI` overrides; any other value (unset included) runs it — see [OAuth callback origin](#oauth-callback-origin-web-app-host--rewrite) |
+| `SPFN_AUTH_APPLE_SERVICES_ID` | `.env.server` | — | the Services ID: web `client_id` of Sign in with Apple and the web id_token audience (also accepted as a native audience). With `_TEAM_ID`, `_KEY_ID` and one key variable it enables the Apple web flow (browser and Android); setting any of the five without the rest is **refused at boot** — see [Sign in with Apple](#sign-in-with-apple-web-and-android) |
+| `SPFN_AUTH_APPLE_TEAM_ID` | `.env.server` | — | Apple Developer Team ID; `iss` of the client secret JWT |
+| `SPFN_AUTH_APPLE_KEY_ID` | `.env.server` | — | Key ID of the Sign in with Apple key; `kid` of the client secret JWT |
+| `SPFN_AUTH_APPLE_PRIVATE_KEY` | `.env.server` | — | the `.p8` PEM (sensitive); literal newlines or `\n` both work; must import as an EC P-256 key (**checked at boot**, never logged) |
+| `SPFN_AUTH_APPLE_PRIVATE_KEY_FILE` | `.env.server` | — | absolute path of the `.p8` file instead — set exactly one of the two key variables. A Kubernetes deployment mounts the `.p8` from a Secret volume and names its path here, while `spfn secret` manages the PEM variant. The file is read whenever a client secret is minted (about hourly, when the cached one is within 60 s of expiry), so a replaced key file is picked up without a restart, and a file that becomes unreadable or holds an unusable key after boot fails sign-ins (as `provider_error`), not boot |
+| `SPFN_AUTH_APPLE_REDIRECT_URI` | `.env.server` | — | default `{NEXT_PUBLIC_SPFN_APP_URL\|\|SPFN_APP_URL}/_auth/oauth/apple/callback` (https only — Apple refuses `localhost`); an override must stay on the web app origin at that path and is **checked at boot** — see [OAuth callback origin](#oauth-callback-origin-web-app-host--rewrite) |
+| `SPFN_AUTH_OAUTH_CALLBACK_ORIGIN_CHECK` | `.env.server` | — | `off` disables the boot check of the five `_REDIRECT_URI` overrides; any other value (unset included) runs it — see [OAuth callback origin](#oauth-callback-origin-web-app-host--rewrite) |
 | `SPFN_AUTH_GOOGLE_NATIVE_CLIENT_IDS` | `.env.server` | — | comma-separated client IDs accepted as native id_token audience (iOS/Android/web); enables Google native sign-in |
-| `SPFN_AUTH_APPLE_CLIENT_IDS` | `.env.server` | — | comma-separated Apple client IDs (bundle ID / Services ID); enables Apple native sign-in |
+| `SPFN_AUTH_APPLE_CLIENT_IDS` | `.env.server` | — | comma-separated Apple client IDs (bundle ID / Services ID); enables Apple native sign-in. `SPFN_AUTH_APPLE_SERVICES_ID` is also accepted |
 | `SPFN_AUTH_KAKAO_NATIVE_CLIENT_IDS` | `.env.server` | — | comma-separated Kakao app keys accepted as native id_token audience (native app key); `SPFN_AUTH_KAKAO_CLIENT_ID` is also accepted, so either one enables Kakao native sign-in |
 | `SPFN_AUTH_NAVER_NATIVE_CLIENT_IDS` | `.env.server` | — | comma-separated Naver client IDs accepted as native id_token audience. `SPFN_AUTH_NAVER_CLIENT_ID` is also accepted, so this is only needed for a separate app application |
 | `SPFN_AUTH_OAUTH_SUCCESS_URL` | `.env.server` | — | default `/auth/callback` |
@@ -1856,10 +1862,12 @@ Context helpers from `@spfn/auth/server`: `getAuth`, `getOptionalAuth`, `getUser
 ## OAuth
 
 OAuth uses a **pluggable provider registry** — not hardcoded branches. The built-in `google`,
-`github`, `kakao`, and `naver` web providers self-register on module load; `apple` provides native
-`id_token` sign-in. External packages add providers at runtime with `registerOAuthProvider()`.
-Google, GitHub, and Naver each require their client ID and secret; Kakao requires its REST API
-key (and sends its optional client secret when configured).
+`apple`, `github`, `kakao`, and `naver` web providers self-register on module load; `apple` also
+provides native `id_token` sign-in. External packages add providers at runtime with
+`registerOAuthProvider()`. Google, GitHub, and Naver each require their client ID and secret;
+Kakao requires its REST API key (and sends its optional client secret when configured); Apple
+requires its Services ID, Team ID, Key ID and private key — see
+[Sign in with Apple](#sign-in-with-apple-web-and-android).
 
 Client flow: call `authApi.getGoogleOAuthUrl.call({ body: { returnUrl } })`, redirect the browser
 to the returned `authUrl`, and render `OAuthCallback` on your success page. The Next.js interceptor
@@ -1894,11 +1902,11 @@ const { authUrl } = await authApi.getGoogleOAuthUrl.call({
 window.location.href = authUrl;
 ```
 
-GitHub, Kakao, and Naver use the provider-generic URL route:
+Apple, GitHub, Kakao, and Naver use the provider-generic URL route:
 
 ```typescript
 const { authUrl } = await authApi.getProviderOAuthUrl.call({
-    params: { provider: 'github' }, // or 'kakao', 'naver'
+    params: { provider: 'github' }, // or 'apple', 'kakao', 'naver'
     body: {
         returnUrl: '/dashboard',
         metadata: { birthDate: '2000-01-01', termsAgreed: true },
@@ -1923,7 +1931,8 @@ redirects to its `defaultRedirectUrl` (`/` unless you pass one). The rule is exp
 
 Built-in OAuth routes: `POST /_auth/oauth/google/url`, `GET /_auth/oauth/google` (redirect),
 `GET /_auth/oauth/google/callback`, `POST /_auth/oauth/finalize`, `GET /_auth/oauth/providers`,
-plus the provider-generic `POST /_auth/oauth/start`. `getGoogleAccessToken(userId)` returns a
+plus the provider-generic `POST /_auth/oauth/start`, `GET /_auth/oauth/:provider/callback`, and
+`POST /_auth/oauth/:provider/callback` for a `form_post` provider (Apple). `getGoogleAccessToken(userId)` returns a
 valid Google access token (auto-refreshing via stored refresh token when near expiry; throws if
 no Google account is linked or no refresh token is available).
 
@@ -1937,6 +1946,38 @@ the same trust level as Kakao. Accounts created before this policy (user row wit
 are backfilled on their next login: if the provider reports a verified email and no other account
 owns it, `email` and `emailVerifiedAt` are filled in (best-effort; a conflict skips the backfill
 and the login continues).
+
+### Sign in with Apple (web and Android)
+
+One Apple sign-in serves all three clients: iOS uses [native sign-in](#native-social-sign-in-mobile--web-id_token),
+and the browser and Android use the web flow — Apple ships no native SDK for Android, so an
+Android app opens this same web flow in a Custom Tab / in-app browser. Start it like any other
+provider, with `getProviderOAuthUrl` and `params: { provider: 'apple' }`.
+
+In the Apple Developer console you need:
+
+- an **App ID** with the *Sign in with Apple* capability;
+- a **Services ID** (its identifier is `SPFN_AUTH_APPLE_SERVICES_ID`) with Sign in with Apple
+  enabled, the web app's domain, and `https://<app>/_auth/oauth/apple/callback` as its Return URL;
+- a **Key** with Sign in with Apple enabled — download the `.p8` once
+  (`SPFN_AUTH_APPLE_PRIVATE_KEY`, or its path in `SPFN_AUTH_APPLE_PRIVATE_KEY_FILE`) and note its
+  **Key ID** (`SPFN_AUTH_APPLE_KEY_ID`);
+- your **Team ID** (`SPFN_AUTH_APPLE_TEAM_ID`).
+
+Apple accepts **https Return URLs only, never `localhost`**: local development needs an https
+tunnel domain registered on the Services ID, with the app reached through it.
+
+Apple returns with a `form_post` — a cross-site `POST` to the callback. The OAuth cookies are
+`SameSite=Lax` and a browser does not send them on a cross-site POST, so
+`POST /_auth/oauth/apple/callback` completes nothing: it answers `303 See Other` to
+`GET /_auth/oauth/apple/callback` with the form fields (`code`, `state`, `user`, `error`,
+`error_description`) in the query, and the browser's top-level GET carries the cookies into the
+ordinary callback. The package signs the client secret JWT itself (ES256, one hour, cached) and
+takes the identity from the id_token of the token response — Apple has no userinfo endpoint.
+
+The person's **name arrives only on the first authorization** (Apple's `user` form field); later
+sign-ins carry none. The email is always the id_token's and may be a **private relay address**
+(`…@privaterelay.appleid.com`) when the person chose *Hide My Email*.
 
 ### Several sign-ins at once
 
@@ -1997,7 +2038,7 @@ type. Branch on `reason`; show `error` if you like. The codes are the closed uni
 
 | `reason` | cause | `error` text |
 |---|---|---|
-| `cancelled` | the person declined at the provider (`error=access_denied`) | the provider's `error_description` or `error` |
+| `cancelled` | the person declined at the provider (`error=access_denied`, or Apple's `error=user_cancelled_authorize`) | the provider's `error_description` or `error` |
 | `expired` | the sign-in took longer than ten minutes | a fixed sentence |
 | `invalid_state` | the state does not decrypt, it names another provider, the CSRF cookie holds a different nonce, or the pending cookie does not unseal or holds another key | a fixed sentence |
 | `no_cookie` | the callback or the finalize found none of the cookies the start set: the browser keeps no cookies for the site, or the sign-in began in another browser (added in 0.3.0-beta.38, #129) | a fixed sentence |
@@ -2105,8 +2146,7 @@ about, and `off` is the only value that disables it.
 
 ### Native social sign-in (mobile / web id_token)
 
-For native apps — and for Apple on Android/web, which has no native SDK — the client obtains an
-`id_token` from the platform SDK and posts it to **`POST /_auth/oauth/:provider/native`**. No
+For native apps the client obtains an `id_token` from the platform SDK and posts it to **`POST /_auth/oauth/:provider/native`**. No
 authorization code, no client secret: the server verifies the id_token against the provider's
 JWKS (signature, issuer, audience, expiry, nonce), links/creates the user, and **registers the
 client's public key**. It returns `{ userId, keyId, isNewUser }` — *not* a token. The client mints
@@ -2116,8 +2156,9 @@ server-verifies model as the rest of auth).
 Enable per provider by declaring the accepted audiences: `SPFN_AUTH_GOOGLE_NATIVE_CLIENT_IDS` for
 Google (the web `SPFN_AUTH_GOOGLE_CLIENT_ID` is also accepted), `SPFN_AUTH_APPLE_CLIENT_IDS` for
 Apple, and `SPFN_AUTH_KAKAO_NATIVE_CLIENT_IDS` for Kakao (the REST API key in
-`SPFN_AUTH_KAKAO_CLIENT_ID` is also accepted). Apple is native-only here — its web OAuth
-(code-exchange) methods throw.
+`SPFN_AUTH_KAKAO_CLIENT_ID` is also accepted). `SPFN_AUTH_APPLE_SERVICES_ID` is also accepted as
+an Apple native audience. Apple's web flow — the browser, and Android, which has no Apple SDK —
+completes the code flow instead; see [Sign in with Apple](#sign-in-with-apple-web-and-android).
 
 ```typescript
 await authApi.oauthNative.call({
@@ -2265,6 +2306,11 @@ links to an existing account.
 ### Custom providers
 
 Implement `OAuthProvider` and register it. `SOCIAL_PROVIDERS` is `['google','apple','github','kakao','naver','superself']`. Implement the optional `verifyNativeIdToken(idToken, { nonce })` to support native id_token sign-in.
+A provider without a userinfo endpoint returns the identity its token response established as
+`OAuthTokens.identity`, and the callback skips `getUserInfo()`. `exchangeCodeForTokens()` receives
+`OAuthCodeExchangeOptions.user` — Apple's raw `user` form field (at most 2048 bytes) — beside `state`.
+`callbackResponseMode: 'form_post'` declares a provider that returns with a cross-site POST, which
+`POST /_auth/oauth/:provider/callback` accepts and 303-redirects to the GET callback.
 
 ```typescript
 import {

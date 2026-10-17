@@ -23,7 +23,8 @@ export const OAUTH_ERROR_REASONS = [
 /**
  * Why an OAuth sign-in failed.
  *
- * - `cancelled` — the person declined at the provider (`error=access_denied`)
+ * - `cancelled` — the person declined at the provider (`error=access_denied`, or
+ *   Apple's `user_cancelled_authorize`)
  * - `expired` — the sign-in took longer than ten minutes
  * - `invalid_state` — the sign-in cannot be confirmed as started in this browser
  * - `no_cookie` — the callback found none of the cookies the start set: the
@@ -41,10 +42,13 @@ export function isOAuthErrorReason(value: unknown): value is OAuthErrorReason
     return typeof value === 'string' && (OAUTH_ERROR_REASONS as readonly string[]).includes(value);
 }
 
-/** The reason for a provider's own `error=` parameter (RFC 6749 §4.1.2.1). */
+/**
+ * The reason for a provider's own `error=` parameter (RFC 6749 §4.1.2.1).
+ * Apple reports a declined sign-in with its own `user_cancelled_authorize`.
+ */
 export function providerErrorReason(error: string): OAuthErrorReason
 {
-    return error === 'access_denied' ? 'cancelled' : 'provider_error';
+    return error === 'access_denied' || error === 'user_cancelled_authorize' ? 'cancelled' : 'provider_error';
 }
 
 /**

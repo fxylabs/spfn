@@ -18,7 +18,7 @@ exactly what auth wires in — four small edits and one protected route.
   (`src/app/dashboard/layout.tsx`), `/admin` in `RequireRole roles={['admin','superadmin']}`
   (`src/app/admin/layout.tsx`) — nested pages inherit protection, no per-page checks.
 - The full `authApi` surface (register / login / session / logout / …) mounted at `/_auth/*`.
-- **Real Google, Kakao, and Naver OAuth buttons**, provider-status detection, callback finalization, and logout.
+- **Real Apple, Google, Kakao, and Naver OAuth buttons**, provider-status detection, callback finalization, and logout.
 
 This example is the finished code for the site tutorial
 ([superfunction.xyz/docs/tutorial](https://superfunction.xyz/docs/tutorial), source
@@ -129,6 +129,15 @@ in `next.config.ts`; `/auth/callback` then finalizes the encrypted session cooki
 1. Create a Naver Login application and select the profile fields you want to test.
 2. Register `http://localhost:3890/_auth/oauth/naver/callback` as the callback URL.
 3. Set `SPFN_AUTH_NAVER_CLIENT_ID` and `SPFN_AUTH_NAVER_CLIENT_SECRET`.
+
+### Apple developer console
+
+1. Create a Services ID with Sign in with Apple enabled; register the app domain and
+   `https://<app>/_auth/oauth/apple/callback` as the Return URL.
+2. Create a Sign in with Apple key, download its `.p8` file, and note the Key ID and your Team ID.
+3. Set `SPFN_AUTH_APPLE_SERVICES_ID`, `SPFN_AUTH_APPLE_TEAM_ID`, `SPFN_AUTH_APPLE_KEY_ID`, and
+   `SPFN_AUTH_APPLE_PRIVATE_KEY_FILE` (the `.p8` path).
+4. Apple accepts https Return URLs only (no localhost), so test through an https domain.
 
 Restart `pnpm spfn:server` after changing `.env.server`; keep `pnpm spfn:next` running in the
 other terminal. A configured button becomes enabled on the home page. After provider consent, a

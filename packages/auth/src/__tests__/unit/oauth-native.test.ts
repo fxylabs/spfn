@@ -272,10 +272,13 @@ describe('Native id_token - Apple', () =>
             .rejects.toThrow(/not configured/i);
     });
 
-    it('rejects web oauth methods (native-only provider)', () =>
+    // Native audiences alone do not enable the web flow (#142): it needs the Services ID, Team ID,
+    // Key ID and private key, and says so instead of building a URL Apple would refuse.
+    it('refuses the web flow when only native audiences are configured', () =>
     {
         const apple = getOAuthProvider('apple')!;
-        expect(() => apple.getAuthUrl('state')).toThrow(/native/i);
+        expect(apple.isEnabled()).toBe(false);
+        expect(() => apple.getAuthUrl('state')).toThrow(/SPFN_AUTH_APPLE_SERVICES_ID/);
     });
 });
 

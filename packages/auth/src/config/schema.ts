@@ -713,9 +713,61 @@ export const authEnvSchema = defineEnvSchema({
 
     SPFN_AUTH_OAUTH_CALLBACK_ORIGIN_CHECK: {
         ...envString({
-            description: 'Boot-time check of the four SPFN_AUTH_<PROVIDER>_REDIRECT_URI overrides: each one that is set must sit on the web app origin ({NEXT_PUBLIC_SPFN_APP_URL || SPFN_APP_URL}) at /_auth/oauth/<provider>/callback, because the callback CSRF cookie is host-only. "off" is the only value that disables the check — unset, "on" and anything else all run it.',
+            description: 'Boot-time check of the five SPFN_AUTH_<PROVIDER>_REDIRECT_URI overrides: each one that is set must sit on the web app origin ({NEXT_PUBLIC_SPFN_APP_URL || SPFN_APP_URL}) at /_auth/oauth/<provider>/callback, because the callback CSRF cookie is host-only. "off" is the only value that disables the check — unset, "on" and anything else all run it.',
             required: false,
             examples: ['off'],
+        }),
+    },
+
+    // ============================================================================
+    // OAuth Configuration - Apple (Sign in with Apple, web flow)
+    // ============================================================================
+    SPFN_AUTH_APPLE_SERVICES_ID: {
+        ...envString({
+            description: 'Apple Services ID — the web client_id of Sign in with Apple, and the id_token audience of the web flow. Also accepted as a native id_token audience beside SPFN_AUTH_APPLE_CLIENT_IDS. The web flow (browser and Android) is enabled when this, SPFN_AUTH_APPLE_TEAM_ID, SPFN_AUTH_APPLE_KEY_ID and exactly one of SPFN_AUTH_APPLE_PRIVATE_KEY / SPFN_AUTH_APPLE_PRIVATE_KEY_FILE are set. Checked at boot: setting any of the five without the rest refuses to start.',
+            required: false,
+            examples: ['com.example.app.web'],
+        }),
+    },
+
+    SPFN_AUTH_APPLE_TEAM_ID: {
+        ...envString({
+            description: 'Apple Developer Team ID — the issuer (iss) of the client secret JWT the web flow signs for the token request. Checked at boot together with the other Apple web variables.',
+            required: false,
+            examples: ['ABCDE12345'],
+        }),
+    },
+
+    SPFN_AUTH_APPLE_KEY_ID: {
+        ...envString({
+            description: 'Key ID of the Sign in with Apple key — the kid header of the client secret JWT. Checked at boot together with the other Apple web variables.',
+            required: false,
+            examples: ['XYZ987ABCD'],
+        }),
+    },
+
+    SPFN_AUTH_APPLE_PRIVATE_KEY: {
+        ...envString({
+            description: 'The Sign in with Apple key (.p8, PKCS#8 EC P-256 PEM) that signs the client secret JWT. Literal newlines or the two characters \\n are both accepted. Set exactly one of this and SPFN_AUTH_APPLE_PRIVATE_KEY_FILE. Checked at boot: a value that does not import as an ES256 key refuses to start; the key itself is never logged.',
+            required: false,
+            sensitive: true,
+            examples: ['-----BEGIN PRIVATE KEY-----\\nMIGTAgEAMBMG...\\n-----END PRIVATE KEY-----'],
+        }),
+    },
+
+    SPFN_AUTH_APPLE_PRIVATE_KEY_FILE: {
+        ...envString({
+            description: 'Absolute path of the Sign in with Apple key file (.p8), the file variant of SPFN_AUTH_APPLE_PRIVATE_KEY — set exactly one of the two. A Kubernetes deployment mounts the .p8 from a Secret volume and names its path here, while `spfn secret` manages the PEM variant. The file is read whenever a client secret is minted (about hourly, when the cached one is within 60 s of expiry), so a replaced key file is picked up without a restart, and a file that becomes unreadable or holds an unusable key after boot fails sign-ins (as `provider_error`), not boot. Checked at boot: a relative path, an unreadable file or a key that does not import as ES256 refuses to start.',
+            required: false,
+            examples: ['/var/run/secrets/apple/AuthKey_XYZ987ABCD.p8'],
+        }),
+    },
+
+    SPFN_AUTH_APPLE_REDIRECT_URI: {
+        ...envString({
+            description: 'Apple OAuth callback URL (the Return URL registered on the Services ID). Defaults to {NEXT_PUBLIC_SPFN_APP_URL || SPFN_APP_URL}/_auth/oauth/apple/callback. Apple accepts https Return URLs only, never localhost. The override must stay on the web app origin at this exact path — the CSRF cookie for the callback is host-only and the app rewrites /_auth/:path* to the API, so a callback that lands anywhere else is refused for CSRF. Checked at boot: a value off the web app origin or off the callback path refuses to start, unless SPFN_AUTH_OAUTH_CALLBACK_ORIGIN_CHECK=off.',
+            required: false,
+            examples: ['https://app.example.com/_auth/oauth/apple/callback'],
         }),
     },
 
@@ -738,7 +790,7 @@ export const authEnvSchema = defineEnvSchema({
 
     SPFN_AUTH_APPLE_CLIENT_IDS: {
         ...envString({
-            description: 'Comma-separated Apple client IDs accepted as id_token audience for native sign-in (iOS bundle ID, web/Android Services ID). When set, Apple native sign-in is enabled.',
+            description: 'Comma-separated Apple client IDs accepted as id_token audience for native sign-in (iOS bundle ID, web/Android Services ID). When set, Apple native sign-in is enabled. SPFN_AUTH_APPLE_SERVICES_ID is also accepted automatically.',
             required: false,
             examples: [
                 'com.example.app,com.example.app.service',

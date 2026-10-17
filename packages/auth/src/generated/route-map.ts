@@ -81,6 +81,7 @@ export const routeMap: Record<string, RouteInfo> = {
     oauthFinalize: { method: 'POST', path: '/_auth/oauth/finalize' },
     oauthProviderStart: { method: 'GET', path: '/_auth/oauth/:provider' },
     oauthProviderCallback: { method: 'GET', path: '/_auth/oauth/:provider/callback' },
+    oauthProviderCallbackPost: { method: 'POST', path: '/_auth/oauth/:provider/callback' },
     getProviderOAuthUrl: { method: 'POST', path: '/_auth/oauth/:provider/url' },
     oauthNative: { method: 'POST', path: '/_auth/oauth/:provider/native' },
     oauthUnlinkNotify: { method: 'POST', path: '/_auth/oauth/:provider/unlink-notify' },

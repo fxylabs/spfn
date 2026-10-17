@@ -36,6 +36,11 @@ export interface OAuthTokens
     accessToken: string;
     refreshToken?: string;
     expiresIn: number;
+    /**
+     * The identity the token response itself established (an OIDC id_token), when the provider
+     * has no userinfo endpoint. The callback service uses it and skips getUserInfo.
+     */
+    identity?: NormalizedIdentity;
 }
 
 /**
@@ -62,6 +67,8 @@ export interface OAuthCodeExchangeOptions
 {
     /** Provider가 callback에 돌려준 원본 state. 일부 provider는 token 교환에도 요구한다. */
     state: string;
+    /** Apple only: the `user` JSON Apple posts with the first authorization (name), raw, ≤ 2048 bytes. */
+    user?: string;
 }
 
 /**
@@ -169,6 +176,13 @@ export interface OAuthProvider
      * 네이버는 204 No Content를 요구한다.
      */
     unlinkNotifyAckStatus?: 200 | 204;
+
+    /**
+     * How the provider sends the browser back: 'query' (GET with ?code&state, the default) or
+     * 'form_post' (a cross-site POST with a form body; accepted by POST /_auth/oauth/:provider/callback,
+     * which 303-redirects to the GET callback).
+     */
+    callbackResponseMode?: 'query' | 'form_post';
 }
 
 const registry = new Map<SocialProvider, OAuthProvider>();

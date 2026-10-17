@@ -42,6 +42,8 @@ describe('an unconfigured native provider refuses as a configuration fact', () =
             vi.stubEnv('SPFN_AUTH_GOOGLE_CLIENT_ID', '');
             vi.stubEnv('SPFN_AUTH_KAKAO_CLIENT_ID', '');
             vi.stubEnv('SPFN_AUTH_NAVER_CLIENT_ID', '');
+            // Apple accepts its web Services ID as a native audience too (#142).
+            vi.stubEnv('SPFN_AUTH_APPLE_SERVICES_ID', '');
 
             const verify = provider.verifyNativeIdToken;
             expect(verify, `${name} should implement native sign-in`).toBeDefined();

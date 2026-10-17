@@ -15,6 +15,7 @@ const REDIRECT_URI_VARS = [
     'SPFN_AUTH_KAKAO_REDIRECT_URI',
     'SPFN_AUTH_NAVER_REDIRECT_URI',
     'SPFN_AUTH_GITHUB_REDIRECT_URI',
+    'SPFN_AUTH_APPLE_REDIRECT_URI',
 ];
 
 const PROVIDERS = [
@@ -22,6 +23,7 @@ const PROVIDERS = [
     { provider: 'kakao', variable: 'SPFN_AUTH_KAKAO_REDIRECT_URI' },
     { provider: 'naver', variable: 'SPFN_AUTH_NAVER_REDIRECT_URI' },
     { provider: 'github', variable: 'SPFN_AUTH_GITHUB_REDIRECT_URI' },
+    { provider: 'apple', variable: 'SPFN_AUTH_APPLE_REDIRECT_URI' },
 ];
 
 describe('assertOAuthRedirectUris', () =>
@@ -64,6 +66,14 @@ describe('assertOAuthRedirectUris', () =>
         expect(() => assertOAuthRedirectUris()).toThrow(variable);
         expect(() => assertOAuthRedirectUris()).toThrow(APP_ORIGIN);
         expect(() => assertOAuthRedirectUris()).toThrow(`/_auth/oauth/${provider}/callback`);
+    });
+
+    it('C1: refuses SPFN_AUTH_APPLE_REDIRECT_URI off the app origin (fxylabs/spfn#142)', () =>
+    {
+        vi.stubEnv('SPFN_APP_URL', 'https://app.example.com');
+        vi.stubEnv('SPFN_AUTH_APPLE_REDIRECT_URI', 'https://other.example.com/_auth/oauth/apple/callback');
+
+        expect(() => assertOAuthRedirectUris()).toThrow('SPFN_AUTH_APPLE_REDIRECT_URI');
     });
 
     it('refuses the right origin at the wrong path', () =>

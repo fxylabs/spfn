@@ -70,6 +70,8 @@ export interface OAuthCallbackParams
     provider: SocialProvider;
     code: string;
     state: string;
+    /** Apple only: the raw `user` JSON Apple posts with the first authorization, passed to the code exchange. */
+    user?: string;
     /**
      * Value(s) of the oauth_csrf cookie from the callback request. One of them
      * must equal the nonce bound into the (encrypted) state — otherwise the flow
@@ -199,10 +201,11 @@ export async function oauthCallbackService(
     const oauthProvider = requireEnabledProvider(provider);
 
     // 1. Code를 Token으로 교환
-    const tokens = await fromProvider(() => oauthProvider.exchangeCodeForTokens(code, { state }));
+    const tokens = await fromProvider(() => oauthProvider.exchangeCodeForTokens(code, { state, user: params.user }));
 
     // 2. 사용자 정보 조회 (provider별 응답을 공통 형태로 정규화)
-    const identity = await fromProvider(() => oauthProvider.getUserInfo(tokens.accessToken));
+    //    토큰 응답이 신원을 이미 확정한 provider(Apple의 id_token)는 userinfo 조회를 건너뛴다.
+    const identity = tokens.identity ?? await fromProvider(() => oauthProvider.getUserInfo(tokens.accessToken));
 
     // 3. 기존 소셜 계정 확인
     const existingSocialAccount = await socialAccountsRepository.findByProviderAndProviderId(

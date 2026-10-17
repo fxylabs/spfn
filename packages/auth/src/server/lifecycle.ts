@@ -16,6 +16,7 @@ import { configureDeletion } from './lib/deletion-config';
 import { configureDeviceAuth } from './lib/device-auth-config';
 import { configureDeviceLink } from './lib/device-link-config';
 import { assertOAuthRedirectUris } from './lib/oauth/redirect-uri-check';
+import { assertAppleWebConfig } from './lib/oauth/apple-config-check';
 import {
     assertAuthorizationServerIssuer,
     configureAuthorizationServer,
@@ -333,7 +334,8 @@ export function createAuthLifecycle(options: AuthLifecycleOptions = {}): AuthLif
          *
          * Performs:
          * 0. Refuses boot on an OAuth redirect URI override off the web app origin,
-         *    or on an authorization server issuer no client could use
+         *    on a partial Sign in with Apple web setup, or on an authorization
+         *    server issuer no client could use
          * 1. Ensures admin account exists (creates if missing)
          * 2. Initializes RBAC system with built-in + custom roles/permissions
          * 3. Refuses boot on an SPFN_AUTH_ROLE_EMAIL_DOMAINS policy that cannot work
@@ -349,6 +351,9 @@ export function createAuthLifecycle(options: AuthLifecycleOptions = {}): AuthLif
             // A throw here propagates out of initializeInfrastructure(), before
             // startHttpServer(), so the process exits without ever listening.
             assertOAuthRedirectUris();
+            // Same reasoning; refuses a partial Sign in with Apple web setup or a key that
+            // does not import. Silent when none of its five variables is set.
+            await assertAppleWebConfig();
 
             // Here and not beside configureAuthorizationServer above, for the
             // reason written one line up: a throw from the constructor is

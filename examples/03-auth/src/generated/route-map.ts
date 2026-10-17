@@ -10,7 +10,7 @@
  * The entries under the .packages() line below are not this app's. They belong
  * to the package routers it mounts, copied in as they were when this file was
  * generated:
- *   router.packages[0] — 89 routes under /_auth, /.well-known
+ *   router.packages[0] — 97 routes under /_auth, /.well-known
  *   router.packages[1] — no routes (publishes no route map)
  *
  * A package upgrade reaches them only through a regeneration: `spfn build`
@@ -49,6 +49,13 @@ export const routeMap: Record<string, RouteInfo> = {
     getDeviceAuthInfo: { method: 'POST', path: '/_auth/device/info' },
     approveDeviceAuth: { method: 'POST', path: '/_auth/device/approve' },
     denyDeviceAuth: { method: 'POST', path: '/_auth/device/deny' },
+    issueDeviceLink: { method: 'POST', path: '/_auth/device/link/issue' },
+    redeemDeviceLink: { method: 'POST', path: '/_auth/device/link/redeem' },
+    getDeviceLinkStatus: { method: 'POST', path: '/_auth/device/link/status' },
+    confirmDeviceLink: { method: 'POST', path: '/_auth/device/link/confirm' },
+    denyDeviceLink: { method: 'POST', path: '/_auth/device/link/deny' },
+    cancelDeviceLink: { method: 'POST', path: '/_auth/device/link/cancel' },
+    pollDeviceLink: { method: 'POST', path: '/_auth/device/link/poll' },
     passkeyRegisterOptions: { method: 'POST', path: '/_auth/passkeys/register/options' },
     passkeyRegisterVerify: { method: 'POST', path: '/_auth/passkeys/register/verify' },
     passkeyLoginOptions: { method: 'POST', path: '/_auth/passkeys/login/options' },
@@ -91,6 +98,7 @@ export const routeMap: Record<string, RouteInfo> = {
     oauthFinalize: { method: 'POST', path: '/_auth/oauth/finalize' },
     oauthProviderStart: { method: 'GET', path: '/_auth/oauth/:provider' },
     oauthProviderCallback: { method: 'GET', path: '/_auth/oauth/:provider/callback' },
+    oauthProviderCallbackPost: { method: 'POST', path: '/_auth/oauth/:provider/callback' },
     getProviderOAuthUrl: { method: 'POST', path: '/_auth/oauth/:provider/url' },
     oauthNative: { method: 'POST', path: '/_auth/oauth/:provider/native' },
     oauthUnlinkNotify: { method: 'POST', path: '/_auth/oauth/:provider/unlink-notify' },

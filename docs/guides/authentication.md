@@ -790,6 +790,7 @@ export default function OAuthCallbackPage()
 | `/_auth/oauth/google/url` | POST | Get the Google authorization URL (interceptor path) |
 | `/_auth/oauth/:provider` | GET | Start the flow for any registered provider |
 | `/_auth/oauth/:provider/callback` | GET | Callback for any registered provider |
+| `/_auth/oauth/:provider/callback` | POST | `form_post` callback (Apple): 303 to the GET callback with the form fields in the query |
 | `/_auth/oauth/:provider/url` | POST | Get the authorization URL for any registered provider |
 | `/_auth/oauth/:provider/native` | POST | Native sign-in — verify a provider `id_token` from a mobile/web SDK |
 | `/_auth/oauth/start` | POST | Get OAuth URL (API mode) |
@@ -809,7 +810,11 @@ their own routes and every other provider id falls through to the generic handle
 
 Provider dispatch runs off a registry, so a provider outside the built-in set can be plugged in at
 runtime. The built-in `google`, `kakao`, `naver`, `github` and `apple` register themselves; an
-external package registers with `registerOAuthProvider()`.
+external package registers with `registerOAuthProvider()`. Apple's web flow (the browser, and
+Android through a Custom Tab) needs `SPFN_AUTH_APPLE_SERVICES_ID`, `SPFN_AUTH_APPLE_TEAM_ID`,
+`SPFN_AUTH_APPLE_KEY_ID` and one of `SPFN_AUTH_APPLE_PRIVATE_KEY` /
+`SPFN_AUTH_APPLE_PRIVATE_KEY_FILE` — see
+[Sign in with Apple in the `@spfn/auth` README](../../packages/auth/README.md#sign-in-with-apple-web-and-android).
 
 ```typescript
 import { registerOAuthProvider, type OAuthProvider } from '@spfn/auth/server';
