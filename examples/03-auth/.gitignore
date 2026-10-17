@@ -23,6 +23,9 @@
 # spfn
 /.spfn/
 
+# migrations are committed (the repository root ignores drizzle/)
+!/src/server/drizzle/
+
 # misc
 .DS_Store
 *.pem
