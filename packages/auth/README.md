@@ -230,12 +230,14 @@ routes use `.skip(['auth'])`; the rest require `Authorization: Bearer <client-si
 | `completePasswordReset` | POST `/_auth/password/reset/complete` | setup session | set the new password, sign every other device out, sign this one in |
 | `login` | POST `/_auth/login` | public | password login + new session key |
 | `startDeviceAuth` | POST `/_auth/device/start` | public | begin a device-code login — see [Device-code login](#device-code-login) |
+| `startDeviceAuthWeb` | POST `/_auth/device/start/web` | public | the same from a browser behind the proxy, which supplies the key |
 | `pollDeviceAuth` | POST `/_auth/device/poll` | public | ask whether the request was answered; the approved answer *is* the login |
 | `getDeviceAuthInfo` | POST `/_auth/device/info` | yes | what device is asking, so the approval screen can show it |
 | `approveDeviceAuth` | POST `/_auth/device/approve` | yes | let the waiting device in |
 | `denyDeviceAuth` | POST `/_auth/device/deny` | yes | refuse it |
 | `issueDeviceLink` | POST `/_auth/device/link/issue` | yes | show a code a new device can come in by — see [Device link](#device-link) |
 | `redeemDeviceLink` | POST `/_auth/device/link/redeem` | public | the new device parks its key on that code and gets the match number to show |
+| `redeemDeviceLinkWeb` | POST `/_auth/device/link/redeem/web` | public | the same from a browser behind the proxy, which supplies the key |
 | `getDeviceLinkStatus` | POST `/_auth/device/link/status` | issuing key | where the link stands; the device and three numbers once redeemed |
 | `confirmDeviceLink` | POST `/_auth/device/link/confirm` | issuing key | pick the number the new device shows |
 | `denyDeviceLink` | POST `/_auth/device/link/deny` | issuing key | refuse the new device |
@@ -584,6 +586,22 @@ const answer = await authApi.pollDeviceAuth.call({ body: { deviceCode } });
 // → { status: 'approved', userId, publicId, email?, phone?, passwordChangeRequired }
 ```
 
+Behind the Next.js proxy a browser can be the waiting device. It starts on its own route,
+`device/start/web`, which takes no key material — the proxy makes the key there and seals the
+session on the approved `device/poll`, exactly as it does for [device link](#device-link):
+
+```typescript
+const started = await authApi.startDeviceAuthWeb.call({ body: {} });
+// show started.userCode, then poll until the owner answers
+let answer;
+do answer = await authApi.pollDeviceAuth.call({ body: { deviceCode: started.deviceCode, waitMillis: 20_000 } });
+while (answer.status === 'pending');
+// approved: the proxy has sealed the session cookie
+```
+
+`device/start` itself is unchanged for a CLI or a TV that sends its own key, and the two routes
+share one rate limit.
+
 Or long-poll: send `waitMillis` and the server holds a pending request until the owner
 answers or the wait runs out, so the device learns of an approval the moment it is made
 instead of at its next tick.
@@ -753,6 +771,30 @@ do
 while (answer.status === 'pending');
 // → { status: 'approved', userId, publicId, email?, phone?, passwordChangeRequired }
 ```
+
+**A web browser can be the new device too.** Behind the Next.js proxy the page holds no key, so
+it redeems on its own route, `device/link/redeem/web`, whose body is the user code alone:
+
+```typescript
+const redeemed = await authApi.redeemDeviceLinkWeb.call({ body: { userCode } });
+// show redeemed.matchNumber, then poll until the issuer picks
+let answer;
+do answer = await authApi.pollDeviceLink.call({ body: { deviceCode: redeemed.deviceCode, waitMillis: 20_000 } });
+while (answer.status === 'pending');
+// approved: the proxy has sealed the session cookie
+```
+
+The proxy makes the key pair on that call, sends its public half with `platform: 'web'`
+(overwriting any key material the page sent), and keeps the private half in an HttpOnly pending
+cookie that lives as long as the device code. On the approved poll it seals the session from that
+cookie and expires it, so the browser is signed in as the issuer. The mobile `device/link/redeem`
+is unchanged — a mobile app or a CLI still sends its own key there, and the proxy passes it
+through — and the two routes share one rate limit, so a second route does not double the budget
+for guessing codes. The pending
+cookie names the device code it was made for: a poll from a browser that did not redeem that code
+— no pending cookie, or one for another code — is refused 401 (`SessionPendingExpiredError` or
+`SessionPendingMismatchError`) and seals nothing, and the device it parked has still been
+registered, so it appears on the account's key list until it is revoked.
 
 The approved answer is the one `pollDeviceAuth` and `login` return, produced by the same
 completion — account status checks, key registration, the login event — so a client cannot tell

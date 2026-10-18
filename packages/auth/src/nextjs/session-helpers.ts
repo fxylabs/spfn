@@ -51,6 +51,23 @@ export interface PendingMfaSessionData extends PendingSessionData
 }
 
 /**
+ * Pending device-code session, held between a redeem or start and its approved
+ * poll (#143).
+ *
+ * The same three fields plus `deviceCodeHash`, under an audience of its own. The
+ * extra field is the binding: the approved poll names its device code, and the
+ * proxy seals a session only around the key it parked for that code — so a
+ * browser polling a code it did not redeem gets no session out of it.
+ *
+ * The hash and not the code, for `challengeHash`'s reason: the proxy compares,
+ * and a cookie carrying a spendable device code would be a second copy of it.
+ */
+export interface PendingDeviceSessionData extends PendingSessionData
+{
+    deviceCodeHash: string;
+}
+
+/**
  * Public session information (excludes sensitive data)
  */
 export interface PublicSession
@@ -205,23 +222,32 @@ export async function clearSession(): Promise<void>
 // Pending OAuth Session (for OAuth flow)
 // ============================================================================
 
+/** The flows that hold a pending key, each under its own derivation and audience. */
+type PendingPurpose = 'oauth' | 'mfa' | 'device';
+
 /**
  * Get encryption key for a pending session, derived per purpose.
  *
- * The purpose is in the derivation as well as in the audience, so the OAuth and
- * second-factor cookies cannot be unsealed as each other even if a caller named
- * the wrong audience: two flows may be live in one browser at once, and the
- * whole point of separating them is that neither can seal a session around the
- * other's key.
+ * The purpose is in the derivation as well as in the audience, so the OAuth,
+ * second-factor and device-code cookies cannot be unsealed as each other even if
+ * a caller named the wrong audience: two flows may be live in one browser at
+ * once, and the whole point of separating them is that neither can seal a
+ * session around the other's key.
  */
-async function getPendingSessionKey(purpose: 'oauth' | 'mfa'): Promise<Uint8Array>
+async function getPendingSessionKey(purpose: PendingPurpose): Promise<Uint8Array>
 {
     const secret = env.SPFN_AUTH_SESSION_SECRET;
     const encoder = new TextEncoder();
-    const data = encoder.encode(purpose === 'oauth' ? `oauth-pending:${secret}` : `mfa-pending:${secret}`);
+    const data = encoder.encode(`${purpose}-pending:${secret}`);
     const hashBuffer = await crypto.subtle.digest('SHA-256', data);
 
     return new Uint8Array(hashBuffer);
+}
+
+/** The audience a pending token of `purpose` is sealed for and checked against. */
+function pendingAudience(purpose: PendingPurpose): string
+{
+    return `spfn-${purpose}`;
 }
 
 /**
@@ -256,16 +282,43 @@ export async function sealPendingMfaSession(
     return await sealFor('mfa', data, ttl);
 }
 
-/** The one sealer both pending cookies use, parameterized by purpose. */
-async function sealFor(purpose: 'oauth' | 'mfa', data: PendingSessionData, ttl: number): Promise<string>
+/**
+ * Seal the pending device-code session (#143)
+ *
+ * Takes its data explicitly, for `sealPendingMfaSession`'s reason.
+ *
+ * @param data - privateKey, keyId, algorithm and the hash of the device code they are for
+ * @param ttl - Seconds. The device code's own remaining life
+ */
+export async function sealPendingDeviceSession(
+    data: PendingDeviceSessionData,
+    ttl: number,
+): Promise<string>
+{
+    return await sealFor('device', data, ttl);
+}
+
+/** The one sealer every pending cookie uses, parameterized by purpose. */
+async function sealFor(purpose: PendingPurpose, data: PendingSessionData, ttl: number): Promise<string>
 {
     return await new jose.EncryptJWT({ data })
         .setProtectedHeader({ alg: 'dir', enc: 'A256GCM' })
         .setIssuedAt()
         .setExpirationTime(`${ttl}s`)
         .setIssuer('spfn-auth')
-        .setAudience(purpose === 'oauth' ? 'spfn-oauth' : 'spfn-mfa')
+        .setAudience(pendingAudience(purpose))
         .encrypt(await getPendingSessionKey(purpose));
+}
+
+/** The one unsealer, checking the issuer and the purpose's own audience. */
+async function unsealFor(purpose: PendingPurpose, jwt: string): Promise<unknown>
+{
+    const { payload } = await jose.jwtDecrypt(jwt, await getPendingSessionKey(purpose), {
+        issuer: 'spfn-auth',
+        audience: pendingAudience(purpose),
+    });
+
+    return payload.data;
 }
 
 /**
@@ -275,12 +328,7 @@ async function sealFor(purpose: 'oauth' | 'mfa', data: PendingSessionData, ttl: 
  */
 export async function unsealPendingSession(jwt: string): Promise<PendingSessionData>
 {
-    const { payload } = await jose.jwtDecrypt(jwt, await getPendingSessionKey('oauth'), {
-        issuer: 'spfn-auth',
-        audience: 'spfn-oauth',
-    });
-
-    return payload.data as PendingSessionData;
+    return await unsealFor('oauth', jwt) as PendingSessionData;
 }
 
 /**
@@ -303,12 +351,20 @@ export function isPendingSessionExpired(error: unknown): boolean
  */
 export async function unsealPendingMfaSession(jwt: string): Promise<PendingMfaSessionData>
 {
-    const { payload } = await jose.jwtDecrypt(jwt, await getPendingSessionKey('mfa'), {
-        issuer: 'spfn-auth',
-        audience: 'spfn-mfa',
-    });
+    return await unsealFor('mfa', jwt) as PendingMfaSessionData;
+}
 
-    return payload.data as PendingMfaSessionData;
+/**
+ * Unseal the pending device-code session (#143)
+ *
+ * Throws on an MFA or OAuth pending token presented here, and on anything past
+ * the device code's life.
+ *
+ * @param jwt - Encrypted pending token from `COOKIE_NAMES.DEVICE_PENDING`
+ */
+export async function unsealPendingDeviceSession(jwt: string): Promise<PendingDeviceSessionData>
+{
+    return await unsealFor('device', jwt) as PendingDeviceSessionData;
 }
 
 /** The request's cookie jar as entries, for the start-cookie lookups. */

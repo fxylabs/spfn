@@ -14,16 +14,20 @@
  * 3. loginRegisterInterceptor - Specific (login/register/signup password/reset complete)
  * 4. mfaVerifyInterceptor - Right after it, so the 202 it passed through is still
  *    the response body this rule reads (#95)
- * 5. keyRotationInterceptor - Specific (key rotation only)
- * 6. oauthUrlInterceptor - OAuth URL generation (key generation + state injection)
- * 7. generalAuthInterceptor - General (all authenticated requests)
- * 8. sessionBindingInterceptor - Last, so its re-sealed cookie wins over the
+ * 5. deviceLoginInterceptor - Specific (device link redeem/web and poll,
+ *    device-code start/web and poll); before generalAuthInterceptor, which treats its paths as
+ *    public so the session it seals is the last write (#143)
+ * 6. keyRotationInterceptor - Specific (key rotation only)
+ * 7. oauthUrlInterceptor - OAuth URL generation (key generation + state injection)
+ * 8. generalAuthInterceptor - General (all authenticated requests)
+ * 9. sessionBindingInterceptor - Last, so its re-sealed cookie wins over the
  *    general one: response phases run in this order and the later write of a
  *    cookie name is the one the browser keeps.
  */
 
 import { loginRegisterInterceptor } from './login-register';
 import { mfaVerifyInterceptor } from './mfa-verify';
+import { deviceLoginInterceptor } from './device-login';
 import { generalAuthInterceptor } from './general-auth';
 import { keyRotationInterceptor } from './key-rotation';
 import { oauthUrlInterceptor, oauthFinalizeInterceptor } from './oauth';
@@ -39,17 +43,19 @@ import { sessionBindingInterceptor } from './session-binding';
  * 2. passwordResetInterceptor - Handles password reset (setup secret ↔ HttpOnly cookie)
  * 3. loginRegisterInterceptor - Handles login/register/signup password/reset complete/session renew (key generation + session save)
  * 4. mfaVerifyInterceptor - Handles the second-factor step-up (202 → pending cookie, verify → session)
- * 5. keyRotationInterceptor - Handles key rotation (new key generation + session update)
- * 6. oauthUrlInterceptor - Handles OAuth URL requests (key generation + state injection + pending session)
- * 7. oauthFinalizeInterceptor - Handles OAuth finalize (pending session → full session)
- * 8. generalAuthInterceptor - Handles all authenticated requests (session validation + JWT injection + session renewal)
- * 9. sessionBindingInterceptor - Re-seals the session cookie when the binding setting changes
+ * 5. deviceLoginInterceptor - Handles a browser as the new device (redeem/web, start/web → key + pending cookie, approved poll → session)
+ * 6. keyRotationInterceptor - Handles key rotation (new key generation + session update)
+ * 7. oauthUrlInterceptor - Handles OAuth URL requests (key generation + state injection + pending session)
+ * 8. oauthFinalizeInterceptor - Handles OAuth finalize (pending session → full session)
+ * 9. generalAuthInterceptor - Handles all authenticated requests (session validation + JWT injection + session renewal)
+ * 10. sessionBindingInterceptor - Re-seals the session cookie when the binding setting changes
  */
 export const authInterceptors = [
     signupLinkInterceptor,
     passwordResetInterceptor,
     loginRegisterInterceptor,
     mfaVerifyInterceptor,
+    deviceLoginInterceptor,
     keyRotationInterceptor,
     oauthUrlInterceptor,
     oauthFinalizeInterceptor,
@@ -59,6 +65,7 @@ export const authInterceptors = [
 
 export { loginRegisterInterceptor } from './login-register';
 export { mfaVerifyInterceptor } from './mfa-verify';
+export { deviceLoginInterceptor } from './device-login';
 export { generalAuthInterceptor } from './general-auth';
 export { keyRotationInterceptor } from './key-rotation';
 export { oauthUrlInterceptor, oauthFinalizeInterceptor } from './oauth';

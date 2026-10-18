@@ -45,6 +45,7 @@ import {
     type DeviceLinkIssuer,
 } from '../../services';
 import { Type, type Static } from '@sinclair/typebox';
+import { Value } from '@sinclair/typebox/value';
 import { Transactional } from '@spfn/core/db';
 import { rateLimitPolicy } from '@spfn/core/middleware';
 import { byIpAndAccount, byIpAndTarget, byIpAndCaller } from '../../lib/rate-limit-keys';
@@ -308,6 +309,57 @@ export const login = route.post('/_auth/login')
 // `start` and `poll` are the two unauthenticated ones, and they take plain
 // `.input` bodies rather than `.interceptor` bodies: the caller is a device that
 // may have no Next.js proxy in front of it, so it sends its own key material.
+// A browser behind the proxy starts on `start/web` instead, whose key the proxy
+// injects (#143).
+
+/**
+ * The key a device parks before anyone has agreed to it, as every parking route
+ * bounds it.
+ *
+ * One object, spread into the mobile bodies and checked by the `/web` handlers,
+ * so a bound tightened here cannot leave one caller's route behind.
+ */
+const DeviceKeyBodySchema = Type.Object({
+    publicKey: PublicKeySchema,
+    keyId: KeyIdSchema,
+    fingerprint: FingerprintSchema,
+    algorithm: Type.Optional(Type.Union(
+        KEY_ALGORITHM.map(algo => Type.Literal(algo)),
+        { description: 'Signature algorithm' },
+    )),
+});
+
+/** The proxy-injected fields of the `/web` routes: the key, and a platform the handler ignores. */
+const ProxyDeviceKeyBodySchema = Type.Object({
+    ...DeviceKeyBodySchema.properties,
+    platform: Type.Optional(PlatformSchema),
+});
+
+/**
+ * The proxy's key fields of a `/web` request, held to the mobile routes' bounds.
+ *
+ * `.interceptor` fields reach the handler unvalidated, so this does what the
+ * mobile route's `.input` does — and fails the same way: core's `Invalid request
+ * body` `ValidationError`, with the offending fields. The platform is always
+ * `web`, whatever the body says: these routes exist for the browser alone.
+ */
+function proxyDeviceKey(body: Record<string, unknown>): Static<typeof DeviceKeyBodySchema> & { platform: 'web' }
+{
+    const converted = Value.Convert(DeviceKeyBodySchema, body);
+    const errors = [...Value.Errors(DeviceKeyBodySchema, converted)];
+
+    if (errors.length > 0)
+    {
+        throw new ValidationError({
+            message: 'Invalid request body',
+            fields: errors.map(e => ({ path: e.path, message: e.message, value: e.value })),
+        });
+    }
+
+    const { publicKey, keyId, fingerprint, algorithm } = converted as Static<typeof DeviceKeyBodySchema>;
+
+    return { publicKey, keyId, fingerprint, algorithm, platform: 'web' };
+}
 
 /**
  * POST /_auth/device/start - Begin a device-code login
@@ -323,13 +375,7 @@ export const startDeviceAuth = route.post('/_auth/device/start')
         // with nothing to authenticate and is stored before anyone has agreed to
         // it. Validation refuses an oversize payload before it reaches a row.
         body: Type.Object({
-            publicKey: PublicKeySchema,
-            keyId: KeyIdSchema,
-            fingerprint: FingerprintSchema,
-            algorithm: Type.Optional(Type.Union(
-                KEY_ALGORITHM.map(algo => Type.Literal(algo)),
-                { description: 'Signature algorithm' },
-            )),
+            ...DeviceKeyBodySchema.properties,
             deviceName: Type.Optional(DeviceNameSchema),
             platform: Type.Optional(PlatformSchema),
         }),
@@ -343,6 +389,33 @@ export const startDeviceAuth = route.post('/_auth/device/start')
         const { body } = await c.data();
 
         return await startDeviceAuthService(body);
+    });
+
+/**
+ * POST /_auth/device/start/web - Begin a device-code login from a browser
+ *
+ * `device/start` for a page behind the Next.js proxy: the proxy makes the key,
+ * injects it here, and keeps the private half until the approved poll. A route
+ * of its own so that each caller's generated client says exactly what it sends —
+ * the mobile route's key fields stay required. Shares `device/start`'s rate-limit
+ * policy, so the pair has one budget per IP.
+ */
+export const startDeviceAuthWeb = route.post('/_auth/device/start/web')
+    .input({
+        body: Type.Object({
+            deviceName: Type.Optional(DeviceNameSchema),
+        }),
+    })
+    .interceptor({
+        body: ProxyDeviceKeyBodySchema,
+    })
+    .use([rateLimitPolicy('auth-device-start', { limit: 10, windowMs: 60_000 }), Transactional()])
+    .skip(['auth'])
+    .handler(async (c) =>
+    {
+        const { body } = await c.data();
+
+        return await startDeviceAuthService({ deviceName: body.deviceName, ...proxyDeviceKey(body) });
     });
 
 /**
@@ -487,7 +560,8 @@ export const denyDeviceAuth = route.post('/_auth/device/deny')
 // The issuer's five routes are bound to the key that signed `issue`: the
 // principal's keyId, not only its account, so another device of the same account
 // is answered as if the link did not exist. `redeem` and `poll` are the public
-// two, with plain `.input` bodies for device-code login's reason.
+// two, with plain `.input` bodies for device-code login's reason; a browser
+// behind the proxy redeems on `redeem/web`, whose key the proxy injects (#143).
 
 /** The signed-in device calling, as a link's issuer is recorded and matched. */
 function issuerOf(c: Parameters<typeof getAuth>[0]): DeviceLinkIssuer
@@ -526,13 +600,7 @@ export const redeemDeviceLink = route.post('/_auth/device/link/redeem')
     .input({
         body: Type.Object({
             userCode: UserCodeSchema,
-            publicKey: PublicKeySchema,
-            keyId: KeyIdSchema,
-            fingerprint: FingerprintSchema,
-            algorithm: Type.Optional(Type.Union(
-                KEY_ALGORITHM.map(algo => Type.Literal(algo)),
-                { description: 'Signature algorithm' },
-            )),
+            ...DeviceKeyBodySchema.properties,
             deviceName: Type.Optional(DeviceNameSchema),
             platform: Type.Optional(PlatformSchema),
         }),
@@ -544,6 +612,35 @@ export const redeemDeviceLink = route.post('/_auth/device/link/redeem')
         const { body } = await c.data();
 
         return await redeemDeviceLinkService(body);
+    });
+
+/**
+ * POST /_auth/device/link/redeem/web - Park a browser's key on a shown code
+ *
+ * `device/link/redeem` for a page behind the Next.js proxy: the proxy makes the
+ * key, injects it here, and keeps the private half until the approved poll. A
+ * route of its own so that each caller's generated client says exactly what it
+ * sends — the mobile route's key fields stay required. Shares
+ * `device/link/redeem`'s rate-limit policy, so a second route does not double
+ * the budget for guessing codes.
+ */
+export const redeemDeviceLinkWeb = route.post('/_auth/device/link/redeem/web')
+    .input({
+        body: Type.Object({
+            userCode: UserCodeSchema,
+            deviceName: Type.Optional(DeviceNameSchema),
+        }),
+    })
+    .interceptor({
+        body: ProxyDeviceKeyBodySchema,
+    })
+    .use([rateLimitPolicy('auth-device-link-redeem', { limit: 10, windowMs: 60_000 }), Transactional()])
+    .skip(['auth'])
+    .handler(async (c) =>
+    {
+        const { body } = await c.data();
+
+        return await redeemDeviceLinkService({ userCode: body.userCode, deviceName: body.deviceName, ...proxyDeviceKey(body) });
     });
 
 /**
@@ -893,12 +990,14 @@ export const authRouter = defineRouter({
     register: register,
     login: login,
     startDeviceAuth: startDeviceAuth,
+    startDeviceAuthWeb: startDeviceAuthWeb,
     pollDeviceAuth: pollDeviceAuth,
     getDeviceAuthInfo: getDeviceAuthInfo,
     approveDeviceAuth: approveDeviceAuth,
     denyDeviceAuth: denyDeviceAuth,
     issueDeviceLink: issueDeviceLink,
     redeemDeviceLink: redeemDeviceLink,
+    redeemDeviceLinkWeb: redeemDeviceLinkWeb,
     getDeviceLinkStatus: getDeviceLinkStatus,
     confirmDeviceLink: confirmDeviceLink,
     denyDeviceLink: denyDeviceLink,

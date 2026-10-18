@@ -10,7 +10,7 @@
  * The entries under the .packages() line below are not this app's. They belong
  * to the package routers it mounts, copied in as they were when this file was
  * generated:
- *   router.packages[0] — 97 routes under /_auth, /.well-known
+ *   router.packages[0] — 99 routes under /_auth, /.well-known
  *   router.packages[1] — no routes (publishes no route map)
  *
  * A package upgrade reaches them only through a regeneration: `spfn build`
@@ -45,12 +45,14 @@ export const routeMap: Record<string, RouteInfo> = {
     completePasswordReset: { method: 'POST', path: '/_auth/password/reset/complete' },
     login: { method: 'POST', path: '/_auth/login' },
     startDeviceAuth: { method: 'POST', path: '/_auth/device/start' },
+    startDeviceAuthWeb: { method: 'POST', path: '/_auth/device/start/web' },
     pollDeviceAuth: { method: 'POST', path: '/_auth/device/poll' },
     getDeviceAuthInfo: { method: 'POST', path: '/_auth/device/info' },
     approveDeviceAuth: { method: 'POST', path: '/_auth/device/approve' },
     denyDeviceAuth: { method: 'POST', path: '/_auth/device/deny' },
     issueDeviceLink: { method: 'POST', path: '/_auth/device/link/issue' },
     redeemDeviceLink: { method: 'POST', path: '/_auth/device/link/redeem' },
+    redeemDeviceLinkWeb: { method: 'POST', path: '/_auth/device/link/redeem/web' },
     getDeviceLinkStatus: { method: 'POST', path: '/_auth/device/link/status' },
     confirmDeviceLink: { method: 'POST', path: '/_auth/device/link/confirm' },
     denyDeviceLink: { method: 'POST', path: '/_auth/device/link/deny' },

@@ -86,6 +86,19 @@ export const COOKIE_NAMES = {
         return `spfn_mfa_pending${getCookieSuffix()}`;
     },
     /**
+     * Pending device-code session (privateKey, keyId, deviceCodeHash) (#143)
+     *
+     * The browser's half of device link and device-code login, held from the
+     * redeem or start that parked its key until the approved poll. Its own name
+     * and its own audience, for MFA_PENDING's reason: a step-up and a device
+     * sign-in can both be live in one browser, and neither may seal a session
+     * around the other's key.
+     */
+    get DEVICE_PENDING()
+    {
+        return `spfn_device_pending${getCookieSuffix()}`;
+    },
+    /**
      * OAuth CSRF nonce — double-submit against the (encrypted) state.nonce at callback
      *
      * Legacy fixed name and per-start base, exactly as `OAUTH_PENDING`.

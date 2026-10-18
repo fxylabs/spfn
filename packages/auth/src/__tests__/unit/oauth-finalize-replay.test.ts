@@ -34,7 +34,7 @@ import {
 import type { SetCookie } from '@spfn/core/nextjs';
 import { registerRoutes } from '@spfn/core/route';
 
-import { authInterceptors } from '../../nextjs/interceptors';
+import { authInterceptors, mfaVerifyInterceptor, oauthFinalizeInterceptor, generalAuthInterceptor } from '../../nextjs/interceptors';
 import { runOAuthCallback, type CallbackOptions } from '../../nextjs/components/oauth-callback-flow';
 import { sealPendingSession } from '../../nextjs/session-helpers';
 import { sealSession, unsealSession } from '../../server/lib/session';
@@ -227,13 +227,12 @@ describe('repeated POST /_auth/oauth/finalize (#126 claim 1)', () =>
 
     it('the chain that runs for the finalize path ends finalize, then general-auth', () =>
     {
-        const names = filterMatchingInterceptors(authInterceptors, FINALIZE, 'POST')
-            .map(rule => authInterceptors.indexOf(rule));
+        const matches = filterMatchingInterceptors(authInterceptors, FINALIZE, 'POST');
 
-        // mfaVerifyInterceptor (3, acts on a 202 only), oauthFinalizeInterceptor (6),
-        // generalAuthInterceptor (7). Response phases run in this order, so
+        // mfaVerifyInterceptor acts on a 202 only, then oauthFinalizeInterceptor,
+        // then generalAuthInterceptor. Response phases run in this order, so
         // general-auth sees the status finalize left behind.
-        expect(names).toEqual([3, 6, 7]);
+        expect(matches).toEqual([mfaVerifyInterceptor, oauthFinalizeInterceptor, generalAuthInterceptor]);
     });
 
     it('the backend answers a replayed finalize with 200 again — it keeps no state to refuse it', async () =>

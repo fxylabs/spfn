@@ -1374,12 +1374,14 @@ full design.
 | `/_auth/session` | GET | Required | Get session info |
 | `/_auth/tokens` | POST | Required | Issue one-time token |
 | `/_auth/device/start` | POST | — | Begin device-code login: park a key, get the codes |
+| `/_auth/device/start/web` | POST | — | `device/start` for a browser behind the Next.js proxy, which supplies the key; shares its rate limit |
 | `/_auth/device/poll` | POST | — | Ask whether the request was answered; collects the login. `waitMillis` makes it a long poll |
 | `/_auth/device/info` | POST | Required | Describe the device asking to be let in |
 | `/_auth/device/approve` | POST | Required | Let the waiting device in |
 | `/_auth/device/deny` | POST | Required | Refuse the waiting device |
 | `/_auth/device/link/issue` | POST | Required | Device link: show a code a new device can come in by |
 | `/_auth/device/link/redeem` | POST | — | Park the new device's key on that code; get the match number to show |
+| `/_auth/device/link/redeem/web` | POST | — | `device/link/redeem` for a browser behind the Next.js proxy, which supplies the key; shares its rate limit |
 | `/_auth/device/link/status` | POST | Required (issuing key) | Where the link stands; the device and three numbers once redeemed. `waitMillis` long-polls |
 | `/_auth/device/link/confirm` | POST | Required (issuing key) | Pick the number the new device shows; a wrong pick denies the link |
 | `/_auth/device/link/deny` | POST | Required (issuing key) | Refuse the new device |

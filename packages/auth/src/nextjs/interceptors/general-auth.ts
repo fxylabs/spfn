@@ -40,6 +40,18 @@ function requiresAuth(path: string): boolean
         // one `mfaVerifyInterceptor` just sealed.
         /^\/_auth\/mfa\/verify$/,
         /^\/_auth\/mfa\/verify\/options$/,
+        // A browser as the new device of device link or device-code login
+        // (#143). Public for the same reason — the key the parking call injects
+        // is not on file until the poll succeeds — and public *here* for the same
+        // one more: a browser holding a stale session would otherwise have this
+        // rule refresh or clear that session on the way out, over the fresh one
+        // `deviceLoginInterceptor` just sealed.
+        // Only the browser's `/web` parking routes: the mobile `redeem` and
+        // `start` carry the caller's own key and are left as they always were.
+        /^\/_auth\/device\/link\/redeem\/web$/,
+        /^\/_auth\/device\/link\/poll$/,
+        /^\/_auth\/device\/start\/web$/,
+        /^\/_auth\/device\/poll$/,
     ];
 
     return !publicPaths.some((pattern) => pattern.test(path));
