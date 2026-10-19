@@ -20,8 +20,30 @@
 # Measured on a developer machine with turbo's cache disabled, which is the state
 # a fresh checkout is always in: build 59s, lint 6s, type-check 46s, the two
 # checks 1s, the smoke 4s, the suite 198s.
+#
+# A pull request builds, type-checks and tests only the packages it changes and
+# everything that depends on them. Pipeline 521 changed one line — the `version`
+# of packages/i18n/package.json — and took 33.7 minutes: `verify` 986s (18 builds,
+# none cached, 8m22s; type-check 2m17s) and `test` 1038s (20 test tasks, 16m16s).
+# i18n's own tests take 4.7s and nothing in the workspace depends on @spfn/i18n.
+#
+# The scope comes from `CI_PIPELINE_FILES`, the changed-file list Woodpecker
+# hands the pipeline, and not from a git diff: the clone fetches the pull
+# request's commit alone (`--depth=1`) from a private repository and no later
+# step has credentials, so there is no `origin/main` to diff against. The rule
+# is in scripts/lib/ci-scope.mjs and its tests; in short, any changed path
+# outside packages/<d>/, examples/<d>/ and website/ — the lockfile, a root
+# tsconfig, this file, scripts/ — runs everything, because it can change how
+# anything builds. So does a list Woodpecker leaves out (it does past 500 files).
+#
+# A main push runs this same workflow, and runs all of it: main is where the
+# whole tree has to be known good, and a scoped pull request only proved its own
+# corner. That run reports and does not gate — publish.yml is triggered by the
+# same push and waits for nothing here.
 when:
-    event: pull_request
+    - event: pull_request
+    - event: push
+      branch: main
 
 steps:
     verify:
@@ -68,6 +90,16 @@ steps:
             # that the template is complete, since it is what an adopter follows.
             - pnpm setup:examples
 
+            # The scope, as turbo filters: one `--filter=...<name>` per changed
+            # package (the package and everything depending on it), or nothing
+            # at all for a full run. Steps run their commands as one shell
+            # script — `SOPS_VERSION` and `PGVER` in `test` rely on the same —
+            # so the variable reaches the commands below. Unquoted there on
+            # purpose: several filters are several arguments, and an empty value
+            # is no argument rather than an empty one. The decision line goes to
+            # the log on stderr.
+            - FILTERS="$(node scripts/ci-scope.mjs filters)"
+
             # Build first: several checks import @spfn/core subpaths whose
             # exports point at dist/, and a fresh checkout has none.
             #
@@ -80,10 +112,16 @@ steps:
             # ERR_WORKER_OUT_OF_MEMORY while the website and three example builds
             # ran beside it. Two at a time on a 4 vCPU node, each capped at 3GB,
             # keeps the sum under the limit with room for the toolchain itself.
-            - NODE_OPTIONS=--max-old-space-size=3072 pnpm exec turbo run build --concurrency=2
+            #
+            # `pnpm exec turbo run`, not `pnpm build --filter=…`: pnpm reads a
+            # `--filter` before the script name as its own option.
+            - NODE_OPTIONS=--max-old-space-size=3072 pnpm exec turbo run build --concurrency=2 $FILTERS
 
+            # Lint is formatting only and reads no build output; the two checks
+            # read package.json files and prose. None of them needs a build, so
+            # they stay whole-repo — 7s together, against minutes for a build.
             - pnpm lint
-            - pnpm type-check
+            - pnpm exec turbo run type-check $FILTERS
             - pnpm check:versions
             - pnpm check:exports
 
@@ -96,7 +134,21 @@ steps:
             # Boot examples/01-minimal-api and check it answers what its README
             # promises. It needs no database, no cache and no secrets, which is
             # what lets it run before the services are up.
-            - node scripts/smoke-example-01.mjs
+            #
+            # Only when the scope includes the example — a full run, or a change
+            # to it or to anything it depends on (@spfn/core brings it in). Any
+            # other scope did not build it, and booting a missing build would
+            # fail for a reason the change has nothing to do with. Exit 1 means
+            # "not in scope"; anything else from the check is the check failing,
+            # and fails the step.
+            - |
+                IN_SCOPE=0
+                node scripts/ci-scope.mjs includes 01-minimal-api || IN_SCOPE=$?
+                case "$IN_SCOPE" in
+                    0) node scripts/smoke-example-01.mjs ;;
+                    1) echo "smoke-example-01: skipped, 01-minimal-api is outside this pull request's scope" ;;
+                    *) exit "$IN_SCOPE" ;;
+                esac
 
     test:
         image: node:22
@@ -189,4 +241,8 @@ steps:
             # vitest would otherwise fan out across more workers than the machine
             # has cores; a run that starves itself times out before its
             # assertions get to run.
-            - pnpm test
+            #
+            # Scoped exactly as `verify` scoped the build, computed again because
+            # each step is its own container and shell.
+            - FILTERS="$(node scripts/ci-scope.mjs filters)"
+            - pnpm exec turbo run test --concurrency=1 $FILTERS
