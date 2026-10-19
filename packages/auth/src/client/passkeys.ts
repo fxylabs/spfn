@@ -26,10 +26,10 @@ import {
     type RegistrationResponseJSON,
 } from '@simplewebauthn/browser';
 
-import type { authApi } from '@spfn/auth';
+import type { AuthApi } from '@spfn/auth';
 
-/** The typed auth client these helpers drive. */
-export type AuthApi = typeof authApi;
+/** The typed auth client these helpers drive: `authApi`, or one built with `createAuthApi`. */
+export type { AuthApi };
 
 /**
  * Why a ceremony did not produce a session.

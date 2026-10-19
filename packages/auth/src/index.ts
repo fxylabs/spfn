@@ -3,6 +3,8 @@
 // ============================================================================
 
 import { createApi } from '@spfn/core/nextjs';
+import type { ApiConfig, Client } from '@spfn/core/nextjs';
+import type { ErrorRegistryInput } from '@spfn/core/errors';
 import { mainAuthRouter } from './server/routes';
 import { authErrorRegistry } from './errors';
 
@@ -12,8 +14,47 @@ import { authErrorRegistry } from './errors';
 
 export { routeMap as authRouteMap } from './generated/route-map';
 
+/** The typed auth client: what `authApi` is and what `createAuthApi` returns. */
+export type AuthApi = Client<typeof mainAuthRouter>;
+
 /**
- * Type-safe API client for auth routes
+ * `createApi`'s configuration for the auth client
+ *
+ * `errorRegistry` takes an array only. `createApi` merges its core error registry
+ * into an array, but a bare `ErrorRegistry` instance replaces that default instead —
+ * the core HTTP errors (`NotFoundError`, …) would then no longer be restored.
+ */
+export type AuthApiConfig = Omit<ApiConfig, 'errorRegistry'> & { errorRegistry?: ErrorRegistryInput[] };
+
+/**
+ * Builds the auth client with the app's configuration; auth's error classes are always registered
+ *
+ * `authErrorRegistry` is registered last: the registry keys classes by name and a later
+ * registration wins, so an auth error body restores the auth class even when an app
+ * class carries the same name.
+ *
+ * @example
+ * ```typescript
+ * import { createAuthApi } from '@spfn/auth';
+ *
+ * export const authApi = createAuthApi({
+ *     onOutcome: (outcome) => setServerStatus(outcome.ok ? 'up' : outcome.errorType),
+ *     errorRegistry: [appErrorRegistry],
+ * });
+ * ```
+ */
+export function createAuthApi(config: AuthApiConfig = {}): AuthApi
+{
+    return createApi<typeof mainAuthRouter>({
+        ...config,
+        errorRegistry: [...(config.errorRegistry ?? []), authErrorRegistry],
+    });
+}
+
+/**
+ * Type-safe API client for auth routes, built with no app configuration
+ *
+ * Give the client your own hooks with `createAuthApi(config)`.
  *
  * @example
  * ```typescript
@@ -28,9 +69,7 @@ export { routeMap as authRouteMap } from './generated/route-map';
  * });
  * ```
  */
-export const authApi = createApi<typeof mainAuthRouter>({
-    errorRegistry: [authErrorRegistry],
-});
+export const authApi = createAuthApi();
 
 // Router type for external use
 export type AuthRouter = typeof mainAuthRouter;

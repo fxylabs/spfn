@@ -131,6 +131,39 @@ import { authApi } from '@spfn/auth';
 const session = await authApi.getAuthSession.call({});   // → GET /_auth/session
 ```
 
+### How do I give the auth client my own hooks?
+
+Build it with `createAuthApi(config)`. It takes `createApi`'s configuration — `onOutcome`,
+`onRequest`, `onResponse`, `timeout`, `fetch`, `errorRegistry`, … — and returns the same typed
+client as `authApi`, which is simply `createAuthApi()`.
+
+- **Auth's error registry is always added, last.** The registry keys classes by name and a
+  later registration wins, so an auth error body is restored as the auth class even when one
+  of your classes carries the same name.
+- **`errorRegistry` takes an array.** `createApi` merges its core errors (`NotFoundError`, …)
+  into an array, while a bare `ErrorRegistry` would replace them — so a bare one is a type error.
+- **Hand the client to the browser helpers as `api`**: `useMfaConfirm({ api })` and the passkey
+  helpers (`enrollPasskey(api, …)`, `signInWithPasskey(api, …)`, `renewSession(api)`).
+- **Server guards keep using the package's own `authApi`**: `RequireAuth`, `getSession` and the
+  other session lookups in `@spfn/auth/nextjs/server` do not see your client.
+
+```typescript
+import { createAuthApi } from '@spfn/auth';
+import { renewSession } from '@spfn/auth/client';
+import { errorRegistry as appErrorRegistry } from '@/server/errors';
+import { setServerStatus } from '@/lib/server-status';
+
+export const authApi = createAuthApi({
+    onOutcome: (outcome) => setServerStatus(outcome.ok ? 'up' : outcome.errorType),
+    timeout: 10_000,
+    errorRegistry: [appErrorRegistry],
+});
+
+// in a client component: the passkey helpers drive this client
+const renewed = await renewSession(authApi);
+setServerStatus(renewed.ok ? 'renewed' : renewed.reason);
+```
+
 ## Which environment variables do I need?
 
 Set across **two files** by audience. Server-only secrets go in `.env.server`; values the
