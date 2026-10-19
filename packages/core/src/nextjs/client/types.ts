@@ -5,6 +5,7 @@
 import type { Static, TSchema } from '@sinclair/typebox';
 import type { ErrorRegistry, ErrorRegistryInput } from '@spfn/core/errors';
 import type { RouteDef, RouteInput } from '@spfn/core/route';
+import type { ApiError } from './errors';
 
 /**
  * Convert File types in schema to actual File for client usage
@@ -327,6 +328,22 @@ export type ResponseInterceptor = (
 ) => Promise<{ response: Response; body: any }> | { response: Response; body: any };
 
 /**
+ * How one call ended, as `ApiConfig.onOutcome` is told it
+ *
+ * - `ok: true`: the server answered 2xx; `response` and `body` are what the response
+ *   interceptors left, and `body` is what the call returns
+ * - `'http'`: the server answered with an error status; `error` is the object the call
+ *   throws — the registered class a `__type` body names (`NotFoundError`,
+ *   `UnauthorizedError`, …) or else an `ApiError`, hence `Error`
+ * - `'network'` / `'timeout'` / `'aborted'`: no answer; `error` is the `ApiError` the call
+ *   throws, `status` its status (0, 408, 0)
+ */
+export type ApiOutcome =
+    | { ok: true; response: Response; body: unknown }
+    | { ok: false; errorType: 'http'; status: number; error: Error }
+    | { ok: false; errorType: 'network' | 'timeout' | 'aborted'; status: number; error: ApiError };
+
+/**
  * Client configuration
  */
 export interface ApiConfig {
@@ -364,6 +381,28 @@ export interface ApiConfig {
      * Global response interceptor
      */
     onResponse?: ResponseInterceptor;
+
+    /**
+     * Told once how each call that reached fetch ended — after the response interceptors
+     * ran, before the call returns or throws
+     *
+     * Observed: a transport failure (`'network'`, `'timeout'`, `'aborted'`) and every
+     * answer, error statuses included; `error` is the very object the call then throws.
+     * Not observed: a throw from an `onRequest` or `onResponse` interceptor, or from
+     * building the request — those are the app's own and reach the caller unchanged.
+     *
+     * Called synchronously and never awaited. A throw from it, or a rejection of the
+     * promise it returns, is logged and never changes what the call returns or throws.
+     * Config only: there is no per-call observer.
+     *
+     * @example
+     * ```typescript
+     * const api = createApi<AppRouter>({
+     *   onOutcome: (outcome) => setServerStatus(outcome.ok ? 'up' : outcome.errorType),
+     * });
+     * ```
+     */
+    onOutcome?: (outcome: ApiOutcome) => void;
 
     /**
      * Custom error registry for deserialization

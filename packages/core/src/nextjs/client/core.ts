@@ -43,14 +43,14 @@ import * as debugLogs from './debug-logs';
 import { ApiError } from './errors';
 import {
     fetchInAbortScope,
-    handleErrorResponse,
+    errorFromResponse,
     buildCookieHeader,
     autoDetectServerCookies,
 } from './helpers';
 import { CSRF_HEADER, csrfHeaderValue, documentCookieEntries } from './csrf';
 import { RouteCallBuilder } from './builder';
 import type { ScopedFetchResult } from './helpers';
-import type { ApiConfig, CallOptions } from './types';
+import type { ApiConfig, ApiOutcome, CallOptions } from './types';
 import type { Client } from './builder';
 
 const apiLogger = logger.child('@spfn/core:api-client');
@@ -63,6 +63,28 @@ interface CallSite
     route: string;
     method: string;
     url: string;
+}
+
+/**
+ * A call that got no answer, as both the observer and the caller see it
+ */
+type TransportOutcome = Extract<ApiOutcome, { errorType: 'network' | 'timeout' | 'aborted' }>;
+
+/**
+ * Build the `ApiError` of one transport kind together with its outcome
+ *
+ * Built here rather than read back from `ApiError.errorType`, which is optional, so the
+ * outcome's kind is the one the error was made with — no cast to trust.
+ */
+function transportOutcome(
+    errorType: TransportOutcome['errorType'],
+    message: string,
+    status: number,
+    url: string,
+    options?: { cause?: unknown },
+): TransportOutcome
+{
+    return { ok: false, errorType, status, error: new ApiError(message, status, url, undefined, errorType, options) };
 }
 
 /**
@@ -80,20 +102,20 @@ function transportError(
     failure: Extract<ScopedFetchResult, { ok: false }>,
     site: CallSite,
     timeout: number,
-): ApiError
+): TransportOutcome
 {
     if (failure.cause === 'timeout')
     {
         apiLogger.error('Request timeout', { ...site, timeout });
 
-        return new ApiError(`Request timeout after ${timeout}ms`, 408, site.url, undefined, 'timeout');
+        return transportOutcome('timeout', `Request timeout after ${timeout}ms`, 408, site.url);
     }
 
     if (failure.cause === 'caller')
     {
         apiLogger.debug('Request aborted by caller', site);
 
-        return new ApiError('Request aborted', 0, site.url, undefined, 'aborted', { cause: failure.error });
+        return transportOutcome('aborted', 'Request aborted', 0, site.url, { cause: failure.error });
     }
 
     const { error } = failure;
@@ -102,7 +124,7 @@ function transportError(
     {
         apiLogger.error('Request timeout', { ...site, timeout });
 
-        return new ApiError(`Request timeout after ${timeout}ms`, 408, site.url, undefined, 'timeout');
+        return transportOutcome('timeout', `Request timeout after ${timeout}ms`, 408, site.url);
     }
 
     const errorMessage = error instanceof Error ? error.message : 'Network error';
@@ -112,7 +134,48 @@ function transportError(
         errorName: error instanceof Error ? error.name : 'unknown',
     });
 
-    return new ApiError(errorMessage, 0, site.url, undefined, 'network');
+    return transportOutcome('network', errorMessage, 0, site.url);
+}
+
+/**
+ * Tell the app's observer how a call ended, without letting it change the call
+ *
+ * A synchronous throw is caught here and a returned thenable gets a `.catch`; either is
+ * logged by name and message only — never the request or the body. Nothing is awaited.
+ */
+function notifyOutcome(onOutcome: ApiConfig['onOutcome'], outcome: ApiOutcome): void
+{
+    if (!onOutcome)
+    {
+        return;
+    }
+
+    try
+    {
+        const returned: unknown = onOutcome(outcome);
+
+        if (isThenable(returned))
+        {
+            Promise.resolve(returned).catch(logObserverFailure);
+        }
+    }
+    catch (error)
+    {
+        logObserverFailure(error);
+    }
+}
+
+function isThenable(value: unknown): value is PromiseLike<unknown>
+{
+    return typeof (value as PromiseLike<unknown> | null)?.then === 'function';
+}
+
+function logObserverFailure(error: unknown): void
+{
+    apiLogger.error('onOutcome observer failed; the call result is unchanged', {
+        errorName: error instanceof Error ? error.name : typeof error,
+        errorMessage: error instanceof Error ? error.message : String(error),
+    });
 }
 
 // ============================================================================
@@ -148,6 +211,7 @@ export function createApi<TRouter extends Router<any>>(
         fetch: customFetch = fetch,
         onRequest: globalOnRequest,
         onResponse: globalOnResponse,
+        onOutcome,
         errorRegistry: errorRegistryConfig,
         debug = false,
     } = config;
@@ -358,7 +422,9 @@ export function createApi<TRouter extends Router<any>>(
 
         if (!fetched.ok)
         {
-            throw transportError(fetched, { route: routeName, method, url: fullUrl }, appliedTimeout);
+            const outcome = transportError(fetched, { route: routeName, method, url: fullUrl }, appliedTimeout);
+            notifyOutcome(onOutcome, outcome);
+            throw outcome.error;
         }
 
         let { response, body } = fetched;
@@ -391,11 +457,15 @@ export function createApi<TRouter extends Router<any>>(
             debugLogs.logResponse(apiLogger, routeName, response.status, !!body);
         }
 
-        // Handle error responses
+        // Handle error responses; the observer sees the same error the caller catches
         if (!response.ok)
         {
-            await handleErrorResponse(response, body, fullUrl, errorRegistry, debug, apiLogger);
+            const error = errorFromResponse(response, body, fullUrl, errorRegistry, debug, apiLogger);
+            notifyOutcome(onOutcome, { ok: false, errorType: 'http', status: response.status, error });
+            throw error;
         }
+
+        notifyOutcome(onOutcome, { ok: true, response, body });
 
         return body;
     }

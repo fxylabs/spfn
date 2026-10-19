@@ -40,7 +40,7 @@ import { createRpcProxy, registerInterceptors } from '@spfn/core/nextjs/server';
 From `@spfn/core/nextjs` (client-safe):
 
 - Values: `createApi`, `ApiError`
-- Types: `Client`, `RouteClient`, `ApiConfig`, `CallOptions`, `InferRouteInput`,
+- Types: `Client`, `RouteClient`, `ApiConfig`, `ApiOutcome`, `CallOptions`, `InferRouteInput`,
   `InferRouteOutput`, `RouterInput`, `RouterOutput`, `StructuredInput`,
   `RequestInterceptor`, `ResponseInterceptor`, `CookieOptions`, `SetCookie`
 
@@ -233,6 +233,7 @@ interface ApiConfig {
     fetch?: typeof fetch;                          // custom fetch impl
     onRequest?: RequestInterceptor;                // global, (url, init) => init
     onResponse?: ResponseInterceptor;              // global, (response, body) => { response, body }
+    onOutcome?: (outcome: ApiOutcome) => void;     // told once how each call that reached fetch ended
     errorRegistry?: ErrorRegistry | ErrorRegistryInput[]; // custom error deserialization
     debug?: boolean;                               // default false
 }
@@ -659,12 +660,79 @@ export async function createUser(formData: FormData) {
   Only a failed fetch (`0` / `'network'`), a timed-out one (`408` / `'timeout'`) and one the
   caller aborted (`0` / `'aborted'`) are.
 
+### How do I learn how every call ended?
+
+Give `createApi` an `onOutcome`. It is told once how each call that reached `fetch` ended,
+before that call returns or throws:
+
+```typescript
+type ApiOutcome =
+    | { ok: true; response: Response; body: unknown }
+    | { ok: false; errorType: 'http'; status: number; error: Error }
+    | { ok: false; errorType: 'network' | 'timeout' | 'aborted'; status: number; error: ApiError };
+```
+
+- **Observed**: every answer — `ok: true` with the `response` and `body` your `onResponse`
+  interceptors left, or `'http'` with the final response's status — and every call that got
+  no answer (`'network'` 0, `'timeout'` 408, `'aborted'` 0).
+- **`error` is the object the call throws**: for `'http'`, the registered class a `__type`
+  body names (`NotFoundError`, `UnauthorizedError`, …) or else an `ApiError`, hence `Error`;
+  for the transport kinds, the `ApiError`.
+- **Not observed**: a throw from an `onRequest` or `onResponse` interceptor (`redirect()`,
+  `notFound()`, your own errors) or from building the request. Those are yours and reach the
+  caller unchanged.
+- **The observer cannot change the call.** It is called synchronously and never awaited; a
+  throw or a rejected promise from it is logged (`onOutcome`, the error's name and message)
+  and the call still returns or throws what it would have.
+- **Config only**: there is no per-call `onOutcome`.
+
+```typescript
+import { createApi } from '@spfn/core/nextjs';
+import type { ApiOutcome } from '@spfn/core/nextjs';
+import { UnauthorizedError } from '@spfn/core/errors';
+
+type ServerStatus = 'up' | 'unreachable' | 'failing' | 'signed-out';
+
+let serverStatus: ServerStatus = 'up';
+
+function statusOf(outcome: ApiOutcome): ServerStatus
+{
+    if (outcome.ok)
+    {
+        return 'up';
+    }
+
+    if (outcome.errorType !== 'http')
+    {
+        return outcome.errorType === 'aborted' ? serverStatus : 'unreachable';
+    }
+
+    if (outcome.error instanceof UnauthorizedError)
+    {
+        return 'signed-out';
+    }
+
+    return outcome.status >= 500 ? 'failing' : 'up';
+}
+
+export const api = createApi<AppRouter>({
+    onOutcome: (outcome) =>
+    {
+        serverStatus = statusOf(outcome);
+    },
+});
+```
+
 ---
 
 ## Types reference
 
 ```typescript
 // client (@spfn/core/nextjs)
+type ApiOutcome =
+    | { ok: true; response: Response; body: unknown }
+    | { ok: false; errorType: 'http'; status: number; error: Error }
+    | { ok: false; errorType: 'network' | 'timeout' | 'aborted'; status: number; error: ApiError };
 type RequestInterceptor  = (url: string, init: RequestInit) => Promise<RequestInit> | RequestInit;
 type ResponseInterceptor = (response: Response, body: any)
     => Promise<{ response: Response; body: any }> | { response: Response; body: any };

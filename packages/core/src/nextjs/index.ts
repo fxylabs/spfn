@@ -19,6 +19,7 @@ export type {
     Client,
     RouteClient,
     ApiConfig,
+    ApiOutcome,
     CallOptions,
     InferRouteInput,
     InferRouteOutput,

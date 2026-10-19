@@ -172,46 +172,32 @@ export async function handleErrorResponse(
     logger: Logger,
 ): Promise<never>
 {
+    throw errorFromResponse(response, body, fullUrl, errorRegistry, debug, logger);
+}
+
+/**
+ * The error an answered, non-2xx call ends with — what `handleErrorResponse` throws
+ *
+ * A body carrying a registered `__type` comes back as that class; anything else as an
+ * `ApiError` of type `'http'`. Returned rather than thrown, so the caller can report the
+ * very object it is about to throw.
+ */
+export function errorFromResponse(
+    response: Response,
+    body: any,
+    fullUrl: string,
+    errorRegistry: ErrorRegistry | undefined,
+    debug: boolean,
+    logger: Logger,
+): Error
+{
     if (debug)
     {
         debugLogs.logErrorResponse(logger, response.status, body);
     }
 
-    // Try to deserialize error if registry is provided
-    let deserializedError: Error | null = null;
+    const deserializedError = deserializeRegisteredError(body, errorRegistry, debug, logger);
 
-    if (errorRegistry && body && typeof body === 'object' && '__type' in body)
-    {
-        if (debug)
-        {
-            debugLogs.logErrorDeserializationAttempt(logger, body.__type, errorRegistry.getRegisteredTypes());
-        }
-
-        try
-        {
-            deserializedError = errorRegistry.deserialize(body as any);
-
-            if (debug)
-            {
-                debugLogs.logErrorDeserializationSuccess(logger, deserializedError);
-            }
-        }
-        catch (deserializeError)
-        {
-            // Deserialization itself failed (type not found, invalid data, etc.)
-            if (debug)
-            {
-                debugLogs.logErrorDeserializationFailure(logger, deserializeError);
-            }
-            // Fall through to ApiError below
-        }
-    }
-    else if (debug)
-    {
-        debugLogs.logErrorDeserializationSkipped(logger, errorRegistry, body);
-    }
-
-    // If deserialization succeeded, throw the deserialized error
     if (deserializedError)
     {
         if (debug)
@@ -219,10 +205,66 @@ export async function handleErrorResponse(
             debugLogs.logThrowingDeserializedError(logger, deserializedError);
         }
 
-        throw deserializedError;
+        return deserializedError;
     }
 
-    // Fallback to generic ApiError
+    return fallbackApiError(response, body, fullUrl, logger);
+}
+
+/**
+ * Restore the registered error class a body names with `__type`, or null when the body
+ * names none or the registry cannot restore it
+ */
+function deserializeRegisteredError(
+    body: any,
+    errorRegistry: ErrorRegistry | undefined,
+    debug: boolean,
+    logger: Logger,
+): Error | null
+{
+    if (!errorRegistry || !body || typeof body !== 'object' || !('__type' in body))
+    {
+        if (debug)
+        {
+            debugLogs.logErrorDeserializationSkipped(logger, errorRegistry, body);
+        }
+
+        return null;
+    }
+
+    if (debug)
+    {
+        debugLogs.logErrorDeserializationAttempt(logger, body.__type, errorRegistry.getRegisteredTypes());
+    }
+
+    try
+    {
+        const deserializedError = errorRegistry.deserialize(body as any);
+
+        if (debug)
+        {
+            debugLogs.logErrorDeserializationSuccess(logger, deserializedError);
+        }
+
+        return deserializedError;
+    }
+    catch (deserializeError)
+    {
+        // Deserialization itself failed (type not found, invalid data, etc.)
+        if (debug)
+        {
+            debugLogs.logErrorDeserializationFailure(logger, deserializeError);
+        }
+
+        return null;
+    }
+}
+
+/**
+ * The generic `'http'` ApiError for an answer no registered class claims
+ */
+function fallbackApiError(response: Response, body: any, fullUrl: string, logger: Logger): ApiError
+{
     if (response.status === 404 && process.env.NODE_ENV !== 'production')
     {
         logger.warn(
@@ -235,7 +277,7 @@ export async function handleErrorResponse(
         );
     }
 
-    throw new ApiError(
+    return new ApiError(
         body?.message || `HTTP ${response.status}: ${response.statusText}`,
         response.status,
         fullUrl,
