@@ -14,7 +14,7 @@ export default defineConfig({
     splitting: false,
     external: [
         'next',
-        'next/server',
+        /^next\//,
     ],
     treeshake: {
         preset: 'smallest',

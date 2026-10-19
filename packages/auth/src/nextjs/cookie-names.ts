@@ -5,7 +5,7 @@
  * time — this module is the one place an app reads them from.
  */
 
-import { type NextResponse } from 'next/server';
+import { type NextResponse } from 'next/server.js';
 import { COOKIE_NAMES } from '../server/lib/config';
 import { ownStartCookieNames } from '../server/lib/oauth/start-cookies';
 

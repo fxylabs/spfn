@@ -1,6 +1,6 @@
 'use server';
 
-import { cookies } from 'next/headers';
+import { cookies } from 'next/headers.js';
 
 const LOCALE_COOKIE_NAME = 'cms-locale';
 const LOCALE_MAX_AGE = 365 * 24 * 60 * 60; // 1 year

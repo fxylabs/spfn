@@ -4,7 +4,7 @@
  * Helper functions to create OAuth callback route handlers
  */
 
-import { NextRequest, NextResponse } from 'next/server';
+import { NextRequest, NextResponse } from 'next/server.js';
 import { cookies } from 'next/headers.js';
 import { sealSession } from '../server/lib/session';
 import { deriveCsrfToken } from '../server/lib/csrf';

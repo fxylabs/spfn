@@ -252,7 +252,7 @@ export function createApi<TRouter extends Router<any>>(
         {
             try
             {
-                const { headers } = await import('next/headers');
+                const { headers } = await import('next/headers.js');
                 const headersList = await headers();
                 const host = headersList.get('host');
                 const protocol = headersList.get('x-forwarded-proto') || 'http';

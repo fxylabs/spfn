@@ -4,7 +4,7 @@
  * Requires user to have at least one of the specified roles
  */
 
-import { redirect } from 'next/navigation';
+import { redirect } from 'next/navigation.js';
 import { getSession } from '../session-helpers';
 import { hasAnyRole } from './auth-utils';
 import type { ReactNode } from 'react';

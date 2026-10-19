@@ -1,4 +1,4 @@
-import { notFound } from 'next/navigation';
+import { notFound } from 'next/navigation.js';
 import type { Metadata } from 'next';
 import type { ReactElement } from 'react';
 import { loadSite } from '@spfn/pages/server';

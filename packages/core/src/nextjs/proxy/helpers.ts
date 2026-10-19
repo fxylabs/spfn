@@ -2,7 +2,7 @@
  * Helper functions for proxy handler
  * Separates utility logic from main proxy handler for better maintainability
  */
-import { NextRequest } from 'next/server';
+import { NextRequest } from 'next/server.js';
 import type { CookieOptions, SetCookie } from '../client';
 import type { InterceptorRule, RequestInterceptorContext, ResponseInterceptorContext } from './interceptors/types';
 import type { InterceptorRegistry } from './interceptors';

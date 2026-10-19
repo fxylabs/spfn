@@ -25,7 +25,7 @@ export async function autoDetectServerCookies(): Promise<Record<string, string>>
     try
     {
         // Next.js cookies() API is only available in server environment
-        const { cookies } = await import('next/headers');
+        const { cookies } = await import('next/headers.js');
         const cookieStore = await cookies();
         const allCookies = cookieStore.getAll();
 

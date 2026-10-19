@@ -4,7 +4,7 @@
  * Requires user to be authenticated
  */
 
-import { redirect } from 'next/navigation';
+import { redirect } from 'next/navigation.js';
 import { getSession } from '../session-helpers';
 import { getAuthSessionData, RENEWAL_REQUIRED } from './auth-utils';
 import { getSessionRenewPath } from '../../server/lib/config';

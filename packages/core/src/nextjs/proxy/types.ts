@@ -2,7 +2,7 @@
 // Configuration
 // ============================================================================
 
-import { NextRequest } from 'next/server';
+import { NextRequest } from 'next/server.js';
 import { InterceptorRule } from '@spfn/core/nextjs/server';
 
 /**

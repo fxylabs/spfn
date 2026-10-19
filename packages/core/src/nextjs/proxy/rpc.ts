@@ -21,7 +21,7 @@
  * `eventRouteMap` is the exception: a hand-written constant, not a mounted
  * router.
  */
-import { NextRequest, NextResponse } from 'next/server';
+import { NextRequest, NextResponse } from 'next/server.js';
 
 import { env } from '@spfn/core/config';
 import { logger } from '@spfn/core/logger';

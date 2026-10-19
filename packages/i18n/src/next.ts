@@ -1,4 +1,4 @@
-import { NextResponse, type NextRequest } from 'next/server';
+import { NextResponse, type NextRequest } from 'next/server.js';
 import { matchLocale, parseAcceptLanguage } from './internal/accept-language';
 import { normalizePathname } from './internal/path';
 import type { LocalePrefix } from './routing';
