@@ -49,6 +49,17 @@ export type Namespace = NamespaceOf<RegisteredMessages>;
 /** Message keys of one registered namespace, or `string` when nothing is registered. */
 export type MessageKey<N extends Namespace> = MessageKeyOf<RegisteredMessages, N>;
 
+/** `namespace.key` for every namespace of a catalog shape — plain `string` when there is none.
+ *  A namespace whose name contains a dot is left out: a qualified key splits at its first dot. */
+export type QualifiedKeyOf<M> = [M] extends [never]
+    ? string
+    : { [N in NamespaceOf<M>]: N extends `${string}.${string}`
+        ? never
+        : `${N}.${MessageKeyOf<M, N>}` }[NamespaceOf<M>];
+
+/** Qualified keys of this application's registered catalog, or `string` when it registered none. */
+export type QualifiedKey = QualifiedKeyOf<RegisteredMessages>;
+
 export type Translator<K extends string = string> =
     (key: K, variables?: TranslationVariables) => string;
 
@@ -90,6 +101,27 @@ export function interpolate(template: string, variables?: TranslationVariables):
     });
 }
 
+/** A translator over any lookup: a key the lookup does not answer is reported and returned. */
+function createLookupTranslator<K extends string>(
+    lookup: (key: string) => string | undefined,
+    options?: TranslatorOptions,
+): Translator<K>
+{
+    return (key, variables) =>
+    {
+        const template = lookup(key);
+
+        if (template === undefined)
+        {
+            options?.onMissingKey?.(key);
+
+            return interpolate(key, variables);
+        }
+
+        return interpolate(template, variables);
+    };
+}
+
 /**
  * Creates a translator from a primary message dictionary and an optional
  * fallback dictionary. Unknown keys are returned unchanged so that missing
@@ -102,17 +134,29 @@ export function createTranslator<K extends string = string>(
     options?: TranslatorOptions,
 ): Translator<K>
 {
-    return (key, variables) =>
-    {
-        const template = messages[key] ?? fallback?.[key];
+    return createLookupTranslator(key => messages[key] ?? fallback?.[key], options);
+}
 
-        if (template === undefined)
-        {
-            options?.onMissingKey?.(key);
+/** The message a qualified key names: its text up to the first dot is the namespace. */
+function findQualified(messages: NamespacedMessages | undefined, key: string): string | undefined
+{
+    const dot = key.indexOf('.');
 
-            return interpolate(key, variables);
-        }
+    return dot === -1
+        ? undefined
+        : messages?.[key.slice(0, dot)]?.[key.slice(dot + 1)];
+}
 
-        return interpolate(template, variables);
-    };
+/** Like createTranslator, over namespaced messages: the key's text up to its first dot names the
+ *  namespace, the rest is the key in it. */
+export function createQualifiedTranslator<K extends string = string>(
+    messages: NamespacedMessages,
+    fallback?: NamespacedMessages,
+    options?: TranslatorOptions,
+): Translator<K>
+{
+    return createLookupTranslator(
+        key => findQualified(messages, key) ?? findQualified(fallback, key),
+        options,
+    );
 }

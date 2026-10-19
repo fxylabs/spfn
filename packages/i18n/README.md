@@ -153,6 +153,49 @@ A key assembled at runtime cannot be checked, so name the key it stands for:
 t(`pricing.skus.${sku}.name` as 'pricing.skus.pro.name');
 ```
 
+## How do I translate a key that carries its namespace?
+
+Sometimes the place that names a key is not the place that renders it. An app declares its banners once, at the root, and one component renders whichever is active — `network.reconnecting` now, `workspace.session.ended` later. A namespace-scoped translator would need one hook per namespace. A translator over qualified keys takes the namespace from the key instead.
+
+Keep the namespace out of the keys of such a catalog, because the qualified key adds it:
+
+```ts
+export const en = {
+    network: {
+        reconnecting: 'Reconnecting…',
+    },
+    workspace: {
+        'session.ended.allow': 'You can end the session',
+    },
+} as const;
+```
+
+With the prefixed keys of the earlier example, the qualified form of `'checkout.readTerms'` would be `checkout.checkout.readTerms`.
+
+Call `useT()` in a client component or `getT(locale)` on the server, without a namespace:
+
+```tsx
+const t = useT();
+t('network.reconnecting');
+
+const serverT = getT(user.locale);
+serverT('network.reconnecting');
+```
+
+The key splits at its first dot: the text before it is the namespace and the rest is the key in it, so `workspace.session.ended.allow` is the key `session.ended.allow` of the namespace `workspace`. A namespace whose name contains a dot therefore cannot be reached this way, and its keys are absent from `QualifiedKey`; use `useT(namespace)` for it.
+
+`QualifiedKey` types the declaration, so a mistyped key in it is a compile error once the catalog is registered:
+
+```ts
+import type { QualifiedKey } from '@spfn/i18n';
+
+const banners: { key: QualifiedKey }[] = [
+    { key: 'network.reconnecting' },
+];
+```
+
+On the client, `useT()` finds only the namespaces the provider was given, so list every namespace the declarations name in `getClientMessages(locale, namespaces)`. A key that names no namespace it can find, or has no dot at all, is a miss like any other: the whole key is returned and passed to `onMissingKey`.
+
 ## How do I find the keys I missed?
 
 Types cover the keys you wrote; `onMissingKey` covers the ones nobody wrote. It fires when neither the requested locale nor the fallback locale has an entry — a key the fallback answers is not missing — and the lookup still returns the key itself:

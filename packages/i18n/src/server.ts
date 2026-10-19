@@ -1,10 +1,12 @@
 import {
+    createQualifiedTranslator,
     createTranslator,
     type LocaleCatalogs,
     type MessageKey,
     type Messages,
     type Namespace,
     type NamespacedMessages,
+    type QualifiedKey,
     type Translator,
 } from './index';
 
@@ -32,25 +34,47 @@ export function configureI18n(configuration: I18nConfiguration): void
     onMissingKey = configuration.onMissingKey;
 }
 
+function resolveLocale(locale: string): {
+    primary: NamespacedMessages;
+    fallback?: NamespacedMessages;
+}
+{
+    const primary = catalogs[locale] ?? {};
+    const fallback = locale === fallbackLocale
+        ? undefined
+        : catalogs[fallbackLocale];
+
+    return { primary, fallback };
+}
+
 function resolveNamespace(locale: string, namespace: string): {
     primary: Messages;
     fallback?: Messages;
 }
 {
-    const primary = catalogs[locale]?.[namespace] ?? {};
-    const fallback = locale === fallbackLocale
-        ? undefined
-        : catalogs[fallbackLocale]?.[namespace];
+    const { primary, fallback } = resolveLocale(locale);
 
-    return { primary, fallback };
+    return { primary: primary[namespace] ?? {}, fallback: fallback?.[namespace] };
 }
 
-/** Creates a namespace-scoped translator for server components and handlers. */
-export function getT<N extends Namespace>(namespace: N, locale: string): Translator<MessageKey<N>>
-{
-    const { primary, fallback } = resolveNamespace(locale, namespace);
+/** Creates a translator over qualified keys (`namespace.key`) for server components and handlers. */
+export function getT(locale: string): Translator<QualifiedKey>;
 
-    return createTranslator<MessageKey<N>>(primary, fallback, { onMissingKey });
+/** Creates a namespace-scoped translator for server components and handlers. */
+export function getT<N extends Namespace>(namespace: N, locale: string): Translator<MessageKey<N>>;
+
+export function getT(namespaceOrLocale: string, locale?: string): Translator
+{
+    if (locale === undefined)
+    {
+        const { primary, fallback } = resolveLocale(namespaceOrLocale);
+
+        return createQualifiedTranslator(primary, fallback, { onMissingKey });
+    }
+
+    const { primary, fallback } = resolveNamespace(locale, namespaceOrLocale);
+
+    return createTranslator(primary, fallback, { onMissingKey });
 }
 
 /**

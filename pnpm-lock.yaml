@@ -607,6 +607,9 @@ importers:
       '@types/react-dom':
         specifier: ^19
         version: 19.2.2(@types/react@19.2.2)
+      jsdom:
+        specifier: ^27.0.0
+        version: 27.4.0
       madge:
         specifier: ^8.0.0
         version: 8.0.0(typescript@5.9.3)
