@@ -196,6 +196,11 @@ With the default `path` `/state`:
 
 `data` is present exactly when `.data()` is declared, in every response and frame.
 
+The derived router also carries the manifest as a non-enumerable `Router._stateManifest` — the
+object `getStates` answers as `manifest`, carried through `.use()` / `.packages()` /
+`.contractVersion()` — which `@spfn/core:states` reads to write the declared ids
+([Declared ids at runtime](#declared-ids-at-runtime)).
+
 Route names are `get<Id>State` / `put<Id>State` with the id's first letter upper-cased, so an
 id must match `^[a-z][a-zA-Z0-9]*$` — `defineState` refuses another.
 
@@ -497,6 +502,68 @@ closed.
 The manifest may also come from `initial` — the snapshot the server rendered with (below). Such a
 client knows it from construction: nothing above waits, a refused `subscribe` goes to `onError` at
 once, and the first `subscribe` opens the stream without reading the snapshot first.
+
+### Declared ids at runtime
+
+The manifest says what the **server** serves; nothing the browser executes says what the **app**
+declared — `typeof states` is erased at build, and importing the router would pull every state's
+`read()`, with its repositories and database, into the layout. The `@spfn/core:states` generator
+writes those ids and their manifest into a file with no import:
+
+```typescript
+// .spfnrc.ts
+import { defineConfig, defineGenerator } from '@spfn/core/codegen';
+import type { StatesGeneratorConfig } from '@spfn/core/codegen';
+
+export default defineConfig({
+    generators: [
+        defineGenerator<StatesGeneratorConfig>({
+            name: '@spfn/core:states',
+            routerPath: './src/server/router.ts',    // the router route-map reads
+            outputPath: './src/generated/states.ts', // the default
+        }),
+    ],
+});
+```
+
+An app lists its `@spfn/core:route-map` generator in the same `generators` array.
+
+```typescript
+// src/generated/states.ts — DO NOT EDIT
+export const stateIds = ['consent', 'member', 'workspaces'] as const;
+export type StateId = (typeof stateIds)[number];
+export const stateManifest: Readonly<Record<StateId, { readonly key: readonly string[]; readonly write: boolean }>> = {
+    consent: { key: [], write: true },
+    member: { key: ['workspaceId'], write: false },
+    workspaces: { key: [], write: false },
+};
+```
+
+An app root compares it with the snapshot it read before rendering, so a deploy skew between the
+Next.js server and the API is reported there instead of as `state.<id>` being `undefined` in a screen:
+
+```tsx
+const snapshot = await api.getStates.call({ query });
+const skewed = stateIds.filter(id => JSON.stringify(snapshot.manifest[id]) !== JSON.stringify(stateManifest[id]));
+
+if (skewed.length > 0)
+{
+    return <DeploySkew states={skewed} />;
+}
+```
+
+That goes from declared to served. The reverse — an id the server serves that this build lacks —
+indexes `stateManifest` with a `string`, which does not compile under `strict`.
+`Array.prototype.includes` is not a type guard, so declare one:
+
+```typescript
+const isStateId = (id: string): id is StateId => (stateIds as readonly string[]).includes(id);
+
+const unknownToThisBuild = Object.keys(snapshot.manifest).filter(id => !isStateId(id));
+```
+
+The generator refuses a router that mounts no state router, and two state routers declaring one
+id; see [`../codegen/README.md`](../codegen/README.md) → "Built-in: `@spfn/core:states`".
 
 ### `createStateClient<typeof states>({ sse, api?, onError?, retryDelay?, maxRetries?, initial? })`
 

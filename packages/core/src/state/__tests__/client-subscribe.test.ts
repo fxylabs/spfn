@@ -133,9 +133,8 @@ describe('state client — subscription lifecycle', () =>
     {
         const h = harness();
         h.client.subscribe('consent', () => undefined);
-        await settle();
+        await vi.waitFor(() => expect(FakeEventSource.instances).toHaveLength(1));
 
-        expect(FakeEventSource.instances).toHaveLength(1);
         expect(new URL(FakeEventSource.last.url).searchParams.get('events')).toBe(ALL_EVENTS);
         expect(routes(h)).toEqual(['getStates']);
 

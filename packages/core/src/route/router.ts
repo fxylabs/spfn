@@ -47,6 +47,16 @@ export interface Router<TRoutes extends Record<string, RouteDef<any, any, any> |
     readonly _surfaceNamespace?: string;
 
     /**
+     * The manifest of the states that built this router — each state's key
+     * fields and whether it has a write, in declaration order — absent on any
+     * other. Set by `defineStateRouter` on the router it derives as a
+     * non-enumerable property; it is the object the snapshot route answers as
+     * `manifest`, and what `@spfn/core:states` reads to write the app's declared
+     * state ids. Written structurally so the route module does not import state.
+     */
+    readonly _stateManifest?: Readonly<Record<string, { readonly key: readonly string[]; readonly write: boolean }>>;
+
+    /**
      * Register package routers (type-hidden)
      *
      * Package routes are:
@@ -137,7 +147,7 @@ function createRouterInstance<TRoutes extends Record<string, RouteDef<any, any, 
     state: RouterState<TRoutes>,
 ): Router<TRoutes>
 {
-    return {
+    const router: Router<TRoutes> = {
         routes: state.routes,
         _routes: state.routes,
         _packageRouters: state.packageRouters,
@@ -160,24 +170,54 @@ function createRouterInstance<TRoutes extends Record<string, RouteDef<any, any, 
 
             assertDistinctSurfaces(newPackageRouters);
 
-            return createRouterInstance({ ...state, packageRouters: newPackageRouters });
+            return carryMarkers(router, createRouterInstance({ ...state, packageRouters: newPackageRouters }));
         },
 
         use(middlewares: NamedMiddleware<string>[]): Router<TRoutes>
         {
-            return createRouterInstance({
+            return carryMarkers(router, createRouterInstance({
                 ...state,
                 globalMiddlewares: [...state.globalMiddlewares, ...middlewares],
-            });
+            }));
         },
 
         contractVersion(version: string): Router<TRoutes>
         {
             assertContractVersion(version);
 
-            return createRouterInstance({ ...state, contractVersion: version });
+            return carryMarkers(router, createRouterInstance({ ...state, contractVersion: version }));
         },
     };
+
+    return router;
+}
+
+/** The non-enumerable markers a factory sets after `createRouterInstance`, which `RouterState` does not hold. */
+const MARKERS = ['_surfaceNamespace', '_stateManifest'] as const;
+
+/**
+ * Copy the markers of a router onto the one a chainable method rebuilt from it.
+ *
+ * `defineSurface` and `defineStateRouter` set theirs on the router they return,
+ * so the state a rebuild starts from has never seen them: without this,
+ * `states.router.use([...])` would mount a router `@spfn/core:states` cannot
+ * find, and a surface's `.use()` would slip past the one-surface-per-namespace
+ * refusal. They stay non-enumerable, as their factories set them.
+ */
+function carryMarkers<TRoutes extends Record<string, RouteDef<any, any, any> | Router<any>>>(
+    from: Router<TRoutes>,
+    to: Router<TRoutes>,
+): Router<TRoutes>
+{
+    for (const marker of MARKERS)
+    {
+        if (from[marker] !== undefined)
+        {
+            Object.defineProperty(to, marker, { value: from[marker], enumerable: false });
+        }
+    }
+
+    return to;
 }
 
 /**

@@ -13,7 +13,7 @@ import type { RouteDef, Router } from '@spfn/core/route';
 import { bindState, stateBinding } from './state-binding';
 import { changedPayloadSchema, stateEventName, subscribeChangeSignals } from './state-event';
 import { defaultSubject, readRoute, snapshotRoute, stateManifest, stateRouteName, writeRoute } from './state-routes';
-import type { SnapshotRouteOptions, SubjectResolver } from './state-routes';
+import type { SnapshotRouteOptions, StatesManifest, SubjectResolver } from './state-routes';
 import type { RoutableState, StateFrame, StateKey, StateResult, StateSnapshot, StateValue } from './types';
 
 /**
@@ -125,14 +125,30 @@ export function defineStateRouter<S extends Record<string, RoutableState>>(
     list.forEach(state => bindState(state._definition, path));
     list.forEach(subscribeChangeSignals);
 
+    const manifest = stateManifest(list);
+
+    // Non-enumerable, as `_surfaceNamespace` is: the router compares and
+    // spreads as any other, and `@spfn/core:states` reads the same object the
+    // snapshot route answers, so the generated ids and the served manifest
+    // cannot differ.
+    const router = Object.defineProperty(defineRouter(deriveRoutes(list, manifest, path, options)), '_stateManifest', {
+        value: manifest,
+        enumerable: false,
+    });
+
     return {
-        router: defineRouter(deriveRoutes(list, path, options)) as Router<StateRoutes<S>>,
+        router: router as Router<StateRoutes<S>>,
         events: Object.fromEntries(list.map(state => [stateEventName(state.id), state._event])) as StateEvents<S>,
         states,
     };
 }
 
-function deriveRoutes(states: RoutableState[], path: string, options: StateRouterOptions): Record<string, RouteDef<any, any, any>>
+function deriveRoutes(
+    states: RoutableState[],
+    manifest: StatesManifest,
+    path: string,
+    options: StateRouterOptions,
+): Record<string, RouteDef<any, any, any>>
 {
     const resolveSubject = options.subject ?? defaultSubject;
     const routes: Record<string, RouteDef<any, any, any>> = {};
@@ -147,7 +163,7 @@ function deriveRoutes(states: RoutableState[], path: string, options: StateRoute
         }
     }
 
-    routes.getStates = snapshotRoute(states, stateManifest(states), path, resolveSubject, options);
+    routes.getStates = snapshotRoute(states, manifest, path, resolveSubject, options);
 
     return routes;
 }

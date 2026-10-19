@@ -52,14 +52,16 @@ Types:
 - `OrchestratorOptions`
 - `RouteMapGeneratorConfig` (config shape for the built-in route-map generator)
 - `ContractGeneratorConfig` (config shape for the built-in contract generator)
-- `ContractGeneratorError`, `ConditionalRegistrationError`, `assertUnconditionalRegistration`
+- `StatesGeneratorConfig` (config shape for the built-in states generator)
+- `ContractGeneratorError`, `StatesGeneratorError`, `ConditionalRegistrationError`,
+  `assertUnconditionalRegistration`
 - `RouteContractMapping`, `ResourceRoutes`, `ClientGenerationOptions`, `GenerationStats`
   (legacy client-generation types — exported but not used by any shipped generator)
 
 > **Renamed: `defineCodegenConfig` → `defineConfig`.** The old name does **not** exist.
 > Older docs also show an `api-client` / `createApi`-emitting generator and
 > `codegen.config.ts` — those are **removed**. The built-in generators today are
-> `@spfn/core:route-map` and `@spfn/core:contract`, configured in `.spfnrc.ts`. Do not
+> `@spfn/core:route-map`, `@spfn/core:contract` and `@spfn/core:states`, configured in `.spfnrc.ts`. Do not
 > import `defineCodegenConfig` or configure a `name: 'api-client'` generator.
 
 ---
@@ -317,6 +319,83 @@ costs a module import and no infrastructure — `@spfn/auth`'s 43 routes load in
 
 `spfn dev` generates but never refuses — being unable to hold a half-finished route mid-edit would
 make the feature unusable.
+
+---
+
+## Built-in: `@spfn/core:states`
+
+Loads your router and emits the ids and the manifest of every state it mounts —
+`src/generated/states.ts`, a file with no import that a browser root and a server component
+can both execute. `createStateClient<typeof states>` is a type import, erased at build, and
+importing the router itself is not an option (each state's `read()` closes over repositories
+and the database), so this file is the only runtime record of which states the app declared.
+Compare its `stateManifest` with the `manifest` of `GET /state`: an id the server's manifest
+lacks is a deploy skew between the Next.js server and the API, reported at the root instead
+of surfacing as `state.<id>` being `undefined` inside a screen. See
+[`../state/README.md`](../state/README.md) → "Declared ids at runtime".
+
+### `StatesGeneratorConfig`
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `name` | `'@spfn/core:states'` | yes | — | Generator identifier (literal). |
+| `routerPath` | `string` | yes | — | Router file, relative to project root — the one `route-map` reads. Throws at construction if missing. |
+| `outputPath` | `string` | no | `'./src/generated/states.ts'` | Where the file is written (parent dirs auto-created). |
+
+### What it reads
+
+The router module is loaded exactly as `route-map` loads it (`appRouter` → `default` →
+`router`, tsconfig aliases, `NODE_ENV` pinned), then walked:
+
+- **The marker.** `defineStateRouter` sets a non-enumerable `Router._stateManifest` on the
+  router it derives — the very object the snapshot route answers as `manifest` — so the ids
+  written here and the manifest the server serves come from one value. Each state router
+  contributes its entries in declaration order; `key` lists the key fields in schema order.
+- **Mounted routers at every depth.** Every nested router under `routes` and every entry of
+  `_packageRouters`, recursively — app `routes` first, then `_packageRouters` in mount order.
+  A router reached by two trails (`.packages()` copies a mounted router's own package routers
+  up) is collected once: the walk is keyed on the router object.
+- **Chained routers.** `.use()`, `.packages()` and `.contractVersion()` carry the marker onto
+  the router they rebuild, so `states.router.use([audit])` is still found.
+- An id that is not a JS identifier is emitted quoted, through the same key rule `route-map`
+  uses.
+
+### When it refuses
+
+Throws `StatesGeneratorError` (or the loader's and the guard's errors) — logged on `watch`,
+fatal on `build` and on `spfn codegen run`:
+
+- The module will not load, or no router is found under the three export names.
+- The router registers **conditionally** — same `ConditionalRegistrationError` guard as
+  `route-map`.
+- **Two state routers declare the same id.** The message names both trails.
+- **No state router is mounted** anywhere in the walk. The generator is configured but nothing
+  it reads mounts a `defineStateRouter(...).router`; the message names the router path. Mount
+  the state router or drop the generator.
+
+A mounted state router that declares **no state** — `defineStateRouter({})` — is not refused: it
+is an app that has declared none yet. The file is written with `stateIds = [] as const` and an
+empty `stateManifest`, which matches the empty manifest the server serves.
+
+A **missing router file** is only a warning: the generator returns and writes nothing.
+
+### Generated output
+
+```typescript
+// src/generated/states.ts  — DO NOT EDIT (header names the NODE_ENV it was written under)
+export const stateIds = ['consent', 'member', 'workspaces'] as const;
+
+export type StateId = (typeof stateIds)[number];
+
+export const stateManifest: Readonly<Record<StateId, { readonly key: readonly string[]; readonly write: boolean }>> = {
+    consent: { key: [], write: true },
+    member: { key: ['workspaceId'], write: false },
+    workspaces: { key: [], write: false },
+};
+```
+
+`watchPatterns` are `[routerPath, 'src/server/states.ts', 'src/server/states/**/*.ts',
+'src/server/routes/**/*.ts']` and `runOn` is `['watch', 'manual', 'build']`.
 
 ---
 
@@ -625,10 +704,18 @@ interface RouteMapGeneratorConfig
     outputPath?: string;               // default './src/generated/route-map.ts'
     additionalRouteDirs?: string[];   // deprecated: watched, never collected from
 }
+
+interface StatesGeneratorConfig
+{
+    name: '@spfn/core:states';
+    routerPath: string;
+    outputPath?: string;               // default './src/generated/states.ts'
+}
 ```
 
 ## Related
 
 - [@spfn/core/route](../route/README.md) — `route.*` / `defineRouter` (the router loaded and walked)
 - [@spfn/core/nextjs](../nextjs/README.md) — RPC proxy (`createRpcProxy`) that consumes `routeMap`
+- [@spfn/core/state](../state/README.md) — `defineStateRouter`, whose manifest `@spfn/core:states` writes
 - [@spfn/core/env](../env/README.md) — environment configuration
