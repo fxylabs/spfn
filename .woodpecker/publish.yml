@@ -17,6 +17,21 @@
 # No path filter: the real gate is scripts/publish-changed.mjs asking the
 # registry, which makes a push without a version bump a fast no-op — and a path
 # condition kept the manual event from matching any workflow at all.
+#
+# The publish starts only after the `pr` workflow of the same pipeline — the
+# full build, type-check and test of main — has succeeded, and does not run at
+# all when it fails. A manual run on main runs `pr` first too; pr.yml matches
+# that event for exactly this reason. Pipeline 536, the main push of a release
+# commit, ran both workflows at once, and `publish-gitea` died with exit code
+# 137 after 201s, mid-way through `turbo run build`, with no error line: its
+# pod asked for no resources, which makes it BestEffort and the first thing
+# killed when its node runs short of memory, and it built every package with
+# turbo's default fan-out and no heap cap. A rerun of the publish alone (537)
+# succeeded. The pod shape below is the fix for that; waiting means a release
+# never goes out from a main that failed its own check, and the publish never
+# competes with that check for the build pool.
+depends_on: [pr]
+
 when:
     branch: main
     event: [push, manual]
@@ -24,8 +39,32 @@ when:
 steps:
     publish-gitea:
         image: node:22
+        # The same pod shape as pr.yml's `verify` step, where the reasoning is
+        # written down: a memory request so the pod is not BestEffort, and the
+        # tainted `role: build` pool, which needs the toleration beside the
+        # selector. YAML anchors do not cross files, so the block is copied.
+        backend_options:
+            kubernetes:
+                resources:
+                    requests:
+                        cpu: "2"
+                        memory: "4Gi"
+                    limits:
+                        cpu: "4"
+                        memory: "7Gi"
+                nodeSelector:
+                    role: build
+                tolerations:
+                    - key: "role"
+                      operator: "Equal"
+                      value: "build"
+                      effect: "NoSchedule"
         environment:
             GITEA_NPM_TOKEN: { from_secret: primitives_gitea_npm_token }
+            # Each Node process sizes its heap against the pod's one memory
+            # limit; scripts/publish-changed.mjs builds two at a time, each
+            # capped at 3GB, as pr.yml's `verify` does.
+            NODE_OPTIONS: "--max-old-space-size=3072"
         commands:
             - printf '%s\n' '@spfn:registry=https://git.superfunction.xyz/api/packages/superfunction/npm/' "//git.superfunction.xyz/api/packages/superfunction/npm/:_authToken=$GITEA_NPM_TOKEN" > ~/.npmrc
             - corepack enable

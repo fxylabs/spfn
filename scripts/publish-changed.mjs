@@ -141,10 +141,14 @@ function main()
     // Build only packages/* — turbo pulls their workspace dependencies in and orders
     // them. Examples and the website are not published, and their Next.js builds
     // need runtime env (SPFN_API_URL) this pipeline rightly does not have.
+    //
+    // Two at a time for the reason in .woodpecker/pr.yml's `verify` step: under a
+    // pod memory limit every Node process sizes its heap against that one limit,
+    // so turbo's default fan-out runs out of memory together.
     execFileSync("pnpm", ["install", "--frozen-lockfile"], { cwd: ROOT, stdio: "inherit" });
     execFileSync(
         "pnpm",
-        ["exec", "turbo", "run", "build", "--filter=./packages/*"],
+        ["exec", "turbo", "run", "build", "--concurrency=2", "--filter=./packages/*"],
         { cwd: ROOT, stdio: "inherit" },
     );
 

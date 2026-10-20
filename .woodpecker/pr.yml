@@ -38,11 +38,21 @@
 #
 # A main push runs this same workflow, and runs all of it: main is where the
 # whole tree has to be known good, and a scoped pull request only proved its own
-# corner. That run reports and does not gate — publish.yml is triggered by the
-# same push and waits for nothing here.
+# corner. That run gates the publish: publish.yml declares `depends_on: [pr]`,
+# so the Gitea publish of the same pipeline starts only after this workflow
+# succeeded and does not run when it fails.
+#
+# The manual entry exists for that dependency. Woodpecker (3.17.0) drops a
+# workflow whose required `depends_on` names a workflow that did not match the
+# event (`filterMissingDependencies` in pipeline/frontend/builder/utils.go), so
+# without it a manual run on main — the publish backfill — would start nothing
+# at all. It is limited to main so that a manual run on any other branch does
+# not start the full check.
 when:
     - event: pull_request
     - event: push
+      branch: main
+    - event: manual
       branch: main
 
 steps:
