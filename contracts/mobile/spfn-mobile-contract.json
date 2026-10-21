@@ -4,7 +4,7 @@
   "originStatement": "Generated from the route and contract definitions in SPFN primitives (packages/auth/src/server/client-proof) and published from that repository. This file is generated output: edit the source modules and re-export, never this file.",
   "contractName": "spfn-mobile-contract",
   "contractMajor": 0,
-  "contractVersion": "0.13.3",
+  "contractVersion": "0.13.4",
   "supportedRange": ">=0.13.0 <0.14.0",
   "exporterVersion": "@spfn/auth/contract-bundle@6.1.0",
   "authProfiles": { "allowed": ["clientProofV1"], "unknownProfilePolicy": "reject", "mixingWithinSession": "prohibited" },
@@ -337,6 +337,18 @@
       ]
     },
     {
+      "name": "OauthAppleRelayStartRequest",
+      "fields": [
+        { "name": "requestNonce", "type": "string", "optional": false },
+        { "name": "state", "type": "string", "optional": false },
+        { "name": "relayUrl", "type": "string", "optional": false }
+      ]
+    },
+    {
+      "name": "OauthAppleRelayStartResponse",
+      "fields": [{ "name": "authUrl", "type": "string", "optional": false }]
+    },
+    {
       "name": "RotateKeyRequest",
       "fields": [
         { "name": "publicKey", "type": "string", "optional": false },
@@ -566,6 +578,17 @@
       "responseType": "OauthNativeResponse",
       "summary": "Verifies a native/web social id_token server-side and enrolls the client-generated public key.",
       "since": "0.3.0"
+    },
+    {
+      "id": "auth.enroll.oauthAppleRelayStart",
+      "method": "POST",
+      "path": "/_auth/oauth/apple/native/start",
+      "authProfile": "none",
+      "requiresSession": false,
+      "requestType": "OauthAppleRelayStartRequest",
+      "responseType": "OauthAppleRelayStartResponse",
+      "summary": "Starts Sign in with Apple on Android: answers the Apple authorize URL whose callback relays the id_token to a configured App Link, for auth.enroll.oauthNative to enroll.",
+      "since": "0.13.4"
     },
     {
       "id": "auth.mfa.verify",

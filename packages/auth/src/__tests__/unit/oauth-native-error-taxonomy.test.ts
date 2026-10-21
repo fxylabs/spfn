@@ -282,6 +282,36 @@ describe('native sign-in answers each failure path with its own code', () =>
             .toEqual([...table.map(cell => cell.code), ...deviceCodes, ...mfaCodes, ...deviceLinkCodes].sort());
     });
 
+    it('the Android start (auth.enroll.oauthAppleRelayStart, contract 0.13.4) refuses only with listed codes', () =>
+    {
+        // Its whole failure list: a body outside its formats, an Apple web flow or
+        // relay list that is not configured, and a relay URL that is not listed
+        // are ValidationError; the rate limit is TooManyRequestsError; anything
+        // the server does not explain is Error. No code of its own, so the exact
+        // fence above stays as it is.
+        const table = [
+            { code: 'ValidationError', status: 400, retryable: false },
+            { code: 'TooManyRequestsError', status: 429, retryable: true },
+            { code: 'Error', status: 500, retryable: false },
+        ];
+
+        const declared = buildMobileContractBundle().errors as {
+            code: string;
+            httpStatus: number;
+            retryable: boolean;
+            surface: string;
+        }[];
+
+        for (const cell of table)
+        {
+            const entry = declared.find(e => e.code === cell.code && e.surface === 'rest');
+
+            expect(entry, `contract is missing rest error ${cell.code}`).toBeDefined();
+            expect(entry!.httpStatus, `status for ${cell.code}`).toBe(cell.status);
+            expect(entry!.retryable, `retryable for ${cell.code}`).toBe(cell.retryable);
+        }
+    });
+
     it('only the rate limit invites a retry of the same request', () =>
     {
         const declared = buildMobileContractBundle().errors as { code: string; retryable: boolean }[];

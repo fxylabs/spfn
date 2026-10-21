@@ -12,10 +12,10 @@
   },
   "contract": {
     "name": "spfn-mobile-contract",
-    "version": "0.13.3",
+    "version": "0.13.4",
     "major": 0,
     "supportedRange": ">=0.13.0 <0.14.0",
-    "bundleSha256": "40cdc06ddace1ea16cc07c590b949c22ce0dbbf538f65f7919073c09fb8b3f97"
+    "bundleSha256": "a7cab3c8e98f3d83384693a45b5d1754640529636c193afd54ef116e98e47c1a"
   },
   "verification": {
     "digest": "shasum -a 256 contracts/mobile/spfn-mobile-contract.json",

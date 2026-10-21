@@ -8,6 +8,8 @@
  *   콜백은 cross-site POST로 도착한다(POST /_auth/oauth/apple/callback이 GET 콜백으로 303).
  *   Apple에는 userinfo endpoint가 없어, token 응답의 id_token이 곧 신원이다. nonce는 state를
  *   SHA-256(hex)한 값 — 두 흐름의 nonce 입력이 다르므로 섞지 않는다.
+ * - Android relay: the app starts with `getAppleRelayAuthUrl` instead, and the callback relays
+ *   Apple's id_token to a configured App Link; the app then posts it to the native route above.
  *
  * 이 모듈을 import 하는 것만으로 apple provider가 registry에 자기 등록된다.
  */
@@ -189,6 +191,36 @@ function parseAppleUserForm(user: string): AppleUserForm | null
     {
         return null;
     }
+}
+
+/**
+ * The authorize URL of the Android start (`POST /_auth/oauth/apple/native/start`).
+ *
+ * Apple-only rather than a method on `OAuthProvider`: the other providers have
+ * Android SDKs. It differs from `getAuthUrl` in three values. `response_type`
+ * asks for an id_token beside the code, so the callback can relay the token
+ * without exchanging the code. `state` is the sealed relay state. `nonce` is the
+ * app's request nonce as given — the SHA-256 hex of its key fingerprint — so the
+ * id_token's nonce claim is exactly what `POST /_auth/oauth/apple/native`
+ * expects for that key. Same Services ID, same Return URL: no Apple console change.
+ *
+ * @param sealedState - from `createAppleRelayState`
+ * @param requestNonce - 64 lowercase hex, the app's SHA-256 of its key fingerprint
+ */
+export function getAppleRelayAuthUrl(sealedState: string, requestNonce: string): string
+{
+    const config = getAppleWebConfig();
+    const params = new URLSearchParams({
+        client_id: config.servicesId,
+        redirect_uri: config.redirectUri,
+        response_type: 'code id_token',
+        response_mode: 'form_post',
+        scope: APPLE_DEFAULT_SCOPES.join(' '),
+        state: sealedState,
+        nonce: requestNonce,
+    });
+
+    return `${APPLE_AUTH_URL}?${params.toString()}`;
 }
 
 export const appleProvider: OAuthProvider =

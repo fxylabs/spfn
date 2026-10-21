@@ -201,6 +201,9 @@ real secret values out of band, never commit them.
 | `SPFN_AUTH_APPLE_PRIVATE_KEY` | `.env.server` | — | the `.p8` PEM (sensitive); literal newlines or `\n` both work; must import as an EC P-256 key (**checked at boot**, never logged) |
 | `SPFN_AUTH_APPLE_PRIVATE_KEY_FILE` | `.env.server` | — | absolute path of the `.p8` file instead — set exactly one of the two key variables. A Kubernetes deployment mounts the `.p8` from a Secret volume and names its path here, while `spfn secret` manages the PEM variant. The file is read whenever a client secret is minted (about hourly, when the cached one is within 60 s of expiry), so a replaced key file is picked up without a restart, and a file that becomes unreadable or holds an unusable key after boot fails sign-ins (as `provider_error`), not boot |
 | `SPFN_AUTH_APPLE_REDIRECT_URI` | `.env.server` | — | default `{NEXT_PUBLIC_SPFN_APP_URL\|\|SPFN_APP_URL}/_auth/oauth/apple/callback` (https only — Apple refuses `localhost`); an override must stay on the web app origin at that path and is **checked at boot** — see [OAuth callback origin](#oauth-callback-origin-web-app-host--rewrite) |
+| `SPFN_AUTH_APPLE_RELAY_URLS` | `.env.server` | — | comma-separated https App Links an Android sign-in's callback relays the id_token to; a start's `relayUrl` must equal one exactly. Unset, the native start is refused. A non-https URL, userinfo, a query or a fragment, or setting it without the Apple web flow is **refused at boot** — see [Android](#android-native-start-and-the-callback-relay) |
+| `SPFN_AUTH_ANDROID_PACKAGE_NAME` | `.env.server` | — | the Android app's `applicationId`, served in `/.well-known/assetlinks.json`; set together with `_CERT_SHA256` (**checked at boot**) |
+| `SPFN_AUTH_ANDROID_CERT_SHA256` | `.env.server` | — | comma-separated SHA-256 fingerprints (`AA:BB:…`, 32 pairs, any case, served uppercase) of the **Play app-signing key**; set together with `_PACKAGE_NAME` (**checked at boot**) |
 | `SPFN_AUTH_OAUTH_CALLBACK_ORIGIN_CHECK` | `.env.server` | — | `off` disables the boot check of the five `_REDIRECT_URI` overrides; any other value (unset included) runs it — see [OAuth callback origin](#oauth-callback-origin-web-app-host--rewrite) |
 | `SPFN_AUTH_GOOGLE_NATIVE_CLIENT_IDS` | `.env.server` | — | comma-separated client IDs accepted as native id_token audience (iOS/Android/web); enables Google native sign-in |
 | `SPFN_AUTH_APPLE_CLIENT_IDS` | `.env.server` | — | comma-separated Apple client IDs (bundle ID / Services ID); enables Apple native sign-in. `SPFN_AUTH_APPLE_SERVICES_ID` is also accepted |
@@ -2007,7 +2010,9 @@ redirects to its `defaultRedirectUrl` (`/` unless you pass one). The rule is exp
 Built-in OAuth routes: `POST /_auth/oauth/google/url`, `GET /_auth/oauth/google` (redirect),
 `GET /_auth/oauth/google/callback`, `POST /_auth/oauth/finalize`, `GET /_auth/oauth/providers`,
 plus the provider-generic `POST /_auth/oauth/start`, `GET /_auth/oauth/:provider/callback`, and
-`POST /_auth/oauth/:provider/callback` for a `form_post` provider (Apple). `getGoogleAccessToken(userId)` returns a
+`POST /_auth/oauth/:provider/callback` for a `form_post` provider (Apple), and Android's
+`POST /_auth/oauth/apple/native/start` with `GET /.well-known/assetlinks.json`
+([Android](#android-native-start-and-the-callback-relay)). `getGoogleAccessToken(userId)` returns a
 valid Google access token (auto-refreshing via stored refresh token when near expiry; throws if
 no Google account is linked or no refresh token is available).
 
@@ -2026,7 +2031,8 @@ and the login continues).
 
 One Apple sign-in serves all three clients: iOS uses [native sign-in](#native-social-sign-in-mobile--web-id_token),
 and the browser and Android use the web flow — Apple ships no native SDK for Android, so an
-Android app opens this same web flow in a Custom Tab / in-app browser. Start it like any other
+Android app opens this same web flow in a Custom Tab, started by its own
+[native start](#android-native-start-and-the-callback-relay). Start the browser's like any other
 provider, with `getProviderOAuthUrl` and `params: { provider: 'apple' }`.
 
 In the Apple Developer console you need:
@@ -2053,6 +2059,63 @@ takes the identity from the id_token of the token response — Apple has no user
 The person's **name arrives only on the first authorization** (Apple's `user` form field); later
 sign-ins carry none. The email is always the id_token's and may be a **private relay address**
 (`…@privaterelay.appleid.com`) when the person chose *Hide My Email*.
+
+#### Android: native start and the callback relay
+
+The web flow ends in browser cookies an Android app cannot read, and its start mints a key of its
+own. An Android app uses the same Services ID and Return URL through a native start instead:
+
+1. The app posts `{ requestNonce, state, relayUrl }` to `/_auth/oauth/apple/native/start` and opens `authUrl` in a Custom Tab.
+2. Apple's `form_post` to `/_auth/oauth/apple/callback` is answered `303` to `relayUrl` with `id_token`, `user`, `error`, `state`.
+3. The app drops a link whose `state` it did not mint, and maps a missing `id_token` to a failure.
+4. It posts the id_token to `POST /_auth/oauth/apple/native` with `nonce` = its key fingerprint, as on iOS.
+
+`requestNonce` is the SHA-256 hex (64 lowercase) of the fingerprint of the key the app will enroll —
+Apple puts it in the id_token as its nonce claim, so the relayed token enrolls that key and no
+other. `state` is 16–128 characters of `[A-Za-z0-9_-]`. The start and the relay set no cookie and
+touch no database; the start is rate limited like the web start, and it is the mobile contract's
+`auth.enroll.oauthAppleRelayStart` (unproven, since contract 0.13.4).
+
+| variable | value |
+|---|---|
+| `SPFN_AUTH_APPLE_RELAY_URLS` | the App Link(s) the callback may relay to, comma-separated |
+| `SPFN_AUTH_ANDROID_PACKAGE_NAME` | the app's package name — its `applicationId` |
+| `SPFN_AUTH_ANDROID_CERT_SHA256` | the SHA-256 fingerprint(s) of the key that signs the installed app |
+
+The relay URL must be an **https App Link, listed exactly**: the start compares `relayUrl` with each
+entry as a string, without normalising it, and a non-https URL is refused at boot — any app on the
+device could claim it and receive the token of a flow an attacker started. Boot also refuses an
+entry with userinfo, a query or a fragment, and relay URLs without the Apple web flow configured.
+
+Write each entry in canonical form — lower case, an international host in punycode, and the
+default port dropped — since the callback redirects to the URL's normalised form while the start's
+comparison is an exact string match; a non-canonical entry here would never equal what the app
+actually receives. Use the same host the app's manifest declares in `android:host`.
+
+Android trusts the link only when the domain's `/.well-known/assetlinks.json` names the app. With
+both `SPFN_AUTH_ANDROID_*` variables set, the API serves it (`404` when unset):
+
+- the package name is the app's `applicationId`;
+- the fingerprint is the **Play app-signing key**'s, from Play Console → App integrity → App
+  signing — Play re-signs what you upload, so the upload key's fingerprint does not verify an app
+  installed from Play. Never list a debug key on a production domain: the debug keystore is
+  unencrypted, with the fixed password `android`, so anyone can sign an app with it.
+
+`spfn init` writes a `/.well-known/assetlinks.json` → API rewrite beside `/_auth/:path*`. An app
+created before this change adds it to `next.config` by hand:
+
+```ts
+{
+    source: '/.well-known/assetlinks.json',
+    destination: `${process.env.SPFN_API_URL || 'http://localhost:8790'}/.well-known/assetlinks.json`,
+},
+```
+
+Android's verifier accepts a `200` with no redirect only, so a Next.js middleware that redirects
+`/.well-known/*` (to add a locale or a trailing slash, say) breaks verification.
+
+The `user` field — the person's name — arrives only on the **first authorization**, as on the web;
+send it as `/native`'s `profile.name` then, because later sign-ins carry none.
 
 ### Several sign-ins at once
 
@@ -3234,6 +3297,7 @@ Every operation in the exported bundle carries `since` — the contract version 
 | `auth.device.start`, `auth.device.poll`, `auth.device.info`, `auth.device.approve`, `auth.device.deny` | 0.10.0 |
 | `auth.mfa.verify`, `auth.mfa.status` | 0.13.0 |
 | `auth.deviceLink.redeem`, `auth.deviceLink.poll` | 0.13.2 |
+| `auth.enroll.oauthAppleRelayStart` | 0.13.4 |
 
 - **This is history, not policy.** The mobile contract's compatibility policy is `allOrNothing`: one
   contract version passes or refuses the whole surface, so these three fields change no verdict here.

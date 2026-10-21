@@ -5,6 +5,8 @@
  * - GET /_auth/oauth/google: OAuth 시작 (Google로 리다이렉트)
  * - GET /_auth/oauth/google/callback: Google 콜백 처리
  * - POST /_auth/oauth/:provider/callback: form_post 콜백(Apple)을 GET 콜백으로 303
+ *   (an Android sign-in's relay state: 303 to the configured App Link instead)
+ * - POST /_auth/oauth/apple/native/start: Sign in with Apple on Android, the native start
  * - GET /_auth/oauth/providers: 활성화된 OAuth provider 목록
  */
 
@@ -36,7 +38,8 @@ import {
     keySessionBindingService,
 } from '../../services';
 import { isGoogleOAuthEnabled, getGoogleAuthUrl, getOAuthProvider, UnlinkNotifyRejection } from '../../lib/oauth';
-import { generateOAuthNonce } from '../../lib/oauth/state';
+import { APPLE_RELAY_APP_STATE_PATTERN, generateOAuthNonce } from '../../lib/oauth/state';
+import { appleRelayLocation, startAppleRelay } from '../../lib/oauth/apple-relay';
 
 /**
  * path param의 provider 타입 (등록 가능한 모든 소셜 provider)
@@ -523,12 +526,21 @@ const FORM_POST_FIELDS = ['code', 'state', 'user', 'error', 'error_description']
 const MAX_FORM_POST_USER_BYTES = 2048;
 
 /**
+ * The form_post body, read once: Hono caches `parseBody`, and the relay and the
+ * hand-on to the GET callback both read this one copy. A body that does not
+ * parse is an empty form.
+ */
+async function readFormPostBody(raw: Context): Promise<Record<string, unknown>>
+{
+    return await raw.req.parseBody().catch(() => ({} as Record<string, unknown>));
+}
+
+/**
  * The GET callback's query for a form_post body: the known string fields only,
  * `user` dropped when oversized.
  */
-async function formPostCallbackQuery(raw: Context): Promise<URLSearchParams>
+function formPostCallbackQuery(body: Record<string, unknown>): URLSearchParams
 {
-    const body = await raw.req.parseBody().catch(() => ({} as Record<string, unknown>));
     const query = new URLSearchParams();
 
     for (const field of FORM_POST_FIELDS)
@@ -564,6 +576,13 @@ async function formPostCallbackQuery(raw: Context): Promise<URLSearchParams>
  * provider 세그먼트는 검증된 path param에서만 온다 — body 값이 경로를 정하지 않는다.
  * form_post provider가 아니거나 비활성이면 본문 없는 404다(탐색에 정보를 주지 않는다).
  *
+ * Sign in with Apple on Android: when the posted `state` opens as a relay state
+ * (`POST /_auth/oauth/apple/native/start` sealed it) and the App Link it names is
+ * still configured, the answer is a `303` to that absolute https URL with
+ * `id_token`, `user`, `error` and the app's `state` (`appleRelayLocation`).
+ * Still no cookie and no DB. Any other state — a web state, garbage, a relay to
+ * a URL no longer configured — gets the hand-on above, unchanged.
+ *
  * 경로 충돌: 마지막 세그먼트가 callback이라 POST /_auth/oauth/start(static)와
  * /:provider/url·/native·/unlink-notify와 겹치지 않는다.
  */
@@ -581,7 +600,15 @@ export const oauthProviderCallbackPost = route.post('/_auth/oauth/:provider/call
             return c.raw.body(null, 404);
         }
 
-        return c.redirect(`/_auth/oauth/${params.provider}/callback?${await formPostCallbackQuery(c.raw)}`, 303);
+        const body = await readFormPostBody(c.raw);
+        const relay = params.provider === 'apple' ? await appleRelayLocation(body) : null;
+
+        if (relay)
+        {
+            return c.redirect(relay, 303);
+        }
+
+        return c.redirect(`/_auth/oauth/${params.provider}/callback?${formPostCallbackQuery(body)}`, 303);
     });
 
 /**
@@ -630,6 +657,56 @@ export const getProviderOAuthUrl = route.post('/_auth/oauth/:provider/url')
         }
 
         return { authUrl: provider.getAuthUrl(body.state) };
+    });
+
+/**
+ * POST /_auth/oauth/apple/native/start - Sign in with Apple on Android, the native start
+ *
+ * Apple ships no Android SDK, so the app runs Apple's web flow in a Custom Tab.
+ * This start carries the app's values instead of minting a key: `requestNonce`
+ * (the SHA-256 hex of the app's key fingerprint) goes to Apple as the nonce, and
+ * the app's `state` is sealed with `relayUrl` into the state Apple returns.
+ * Apple's form_post to the usual Return URL is then relayed to `relayUrl`
+ * (`oauthProviderCallbackPost`), and the app posts the id_token to
+ * `POST /_auth/oauth/apple/native` with the same key, exactly as on iOS.
+ *
+ * `relayUrl` must equal one entry of `SPFN_AUTH_APPLE_RELAY_URLS` exactly. Sets no
+ * cookie, mints no key, touches no database.
+ *
+ * 경로 충돌: 다섯 세그먼트라 /:provider/native(네 세그먼트)와 겹치지 않는다.
+ */
+export const oauthAppleNativeStart = route.post('/_auth/oauth/apple/native/start')
+    .input({
+        body: Type.Object({
+            requestNonce: Type.String({
+                pattern: '^[0-9a-f]{64}$',
+                description: 'SHA-256 (64 lowercase hex) of the fingerprint of the key the app will enroll; '
+                    + 'Apple puts it in the id_token as its nonce claim.',
+            }),
+            state: Type.String({
+                pattern: APPLE_RELAY_APP_STATE_PATTERN,
+                description: 'The app\'s own state, 16–128 characters of [A-Za-z0-9_-]; the relay hands it back.',
+            }),
+            relayUrl: Type.String({
+                description: 'The https App Link to relay to — one entry of SPFN_AUTH_APPLE_RELAY_URLS, exactly.',
+            }),
+        }),
+    })
+    .use([rateLimitPolicy('oauth-start', { limit: 20, windowMs: 60_000 })])
+    .skip(['auth'])
+    .handler(async (c) =>
+    {
+        const { body } = await c.data();
+
+        requireEnabledProvider('apple');
+
+        return {
+            authUrl: await startAppleRelay({
+                appState: body.state,
+                relayUrl: body.relayUrl,
+                requestNonce: body.requestNonce,
+            }),
+        };
     });
 
 /**
@@ -824,6 +901,7 @@ export const oauthRouter = defineRouter({
     oauthProviderCallbackPost,
     getProviderOAuthUrl,
     oauthNative,
+    oauthAppleNativeStart,
     oauthUnlinkNotify,
     oauthUnlinkNotifyGet,
 });

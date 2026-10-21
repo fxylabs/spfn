@@ -772,6 +772,33 @@ export const authEnvSchema = defineEnvSchema({
     },
 
     // ============================================================================
+    // Sign in with Apple on Android (native start + callback relay, assetlinks.json)
+    // ============================================================================
+    SPFN_AUTH_APPLE_RELAY_URLS: {
+        ...envString({
+            description: 'Comma-separated https App Links that POST /_auth/oauth/apple/native/start may name as its relayUrl. Apple\'s form_post to the Return URL of an Android sign-in is answered with a 303 to that URL carrying id_token, user, error and the app\'s state; the app then posts the id_token to POST /_auth/oauth/apple/native. A start\'s relayUrl must equal one entry exactly. Unset: the native start is refused. Checked at boot: an entry that is not an absolute https URL, or carries userinfo, a query or a fragment, refuses to start, and so does setting this while the Apple web flow (SPFN_AUTH_APPLE_SERVICES_ID, _TEAM_ID, _KEY_ID and one key variable) is not configured.',
+            required: false,
+            examples: ['https://app.example.com/_auth/apple-relay'],
+        }),
+    },
+
+    SPFN_AUTH_ANDROID_PACKAGE_NAME: {
+        ...envString({
+            description: 'The Android app\'s package name (its applicationId), the package_name of the delegate_permission/common.handle_all_urls statement GET /.well-known/assetlinks.json serves. Set together with SPFN_AUTH_ANDROID_CERT_SHA256; with both unset the file is not served (404). Checked at boot: one without the other, or a value that is not a package name, refuses to start.',
+            required: false,
+            examples: ['com.example.app'],
+        }),
+    },
+
+    SPFN_AUTH_ANDROID_CERT_SHA256: {
+        ...envString({
+            description: 'Comma-separated SHA-256 fingerprints (32 colon-separated hex pairs, case-insensitive, served uppercase) of the certificates that sign the Android app — the Play app-signing key from Play Console → App integrity → App signing, never a debug key on a production domain. Listed in configured order as sha256_cert_fingerprints in GET /.well-known/assetlinks.json. Checked at boot: a malformed fingerprint, or one of this and SPFN_AUTH_ANDROID_PACKAGE_NAME without the other, refuses to start.',
+            required: false,
+            examples: ['14:6D:E9:83:C5:73:06:50:D8:EE:B9:95:2F:34:FC:64:16:A0:83:42:E6:1D:BE:A8:8A:04:96:B2:3F:CF:44:E5'],
+        }),
+    },
+
+    // ============================================================================
     // Native Social Login (mobile/web id_token verification)
     //
     // 네이티브 SDK가 받은 id_token을 서버가 JWKS로 검증하는 경로 전용 설정.

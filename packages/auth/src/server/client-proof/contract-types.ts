@@ -26,6 +26,7 @@ export interface ContractOperation
         | 'auth.enroll.register'
         | 'auth.enroll.login'
         | 'auth.enroll.oauthNative'
+        | 'auth.enroll.oauthAppleRelayStart'
         | 'auth.mfa.verify'
         | 'auth.mfa.status'
         | 'auth.keys.rotate'
@@ -241,6 +242,18 @@ export const AUTH_SURFACE_OPERATIONS: readonly ContractOperation[] = [
         responseType: 'OauthNativeResponse',
         summary: 'Verifies a native/web social id_token server-side and enrolls the client-generated public key.',
         since: '0.3.0',
+    },
+    {
+        id: 'auth.enroll.oauthAppleRelayStart',
+        method: 'POST',
+        path: '/_auth/oauth/apple/native/start',
+        authProfile: 'none',
+        requiresSession: false,
+        requestType: 'OauthAppleRelayStartRequest',
+        responseType: 'OauthAppleRelayStartResponse',
+        summary: 'Starts Sign in with Apple on Android: answers the Apple authorize URL whose callback relays the '
+            + 'id_token to a configured App Link, for auth.enroll.oauthNative to enroll.',
+        since: '0.13.4',
     },
     {
         id: 'auth.mfa.verify',

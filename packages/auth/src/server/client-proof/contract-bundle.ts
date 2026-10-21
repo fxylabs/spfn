@@ -331,8 +331,20 @@ import { CLIENT_IDENTITY_HEADERS, CLIENT_KINDS, SERVER_CONTRACT_HEADERS } from '
  * type or enum changes shape. A consumer generated against 0.13.2 meets the
  * code as an unlisted one, and pendingRule already ends the wait on any error
  * response, so the supported range does not move.
+ *
+ * 0.13.4 adds `auth.enroll.oauthAppleRelayStart`, Sign in with Apple on
+ * Android's start, with `OauthAppleRelayStartRequest` and
+ * `OauthAppleRelayStartResponse`. Apple ships no Android SDK, so the app opens
+ * the answered URL in a Custom Tab, receives the id_token on its App Link and
+ * enrolls with `auth.enroll.oauthNative` unchanged. Unproven, like the other
+ * enrollment operations: no key exists yet to sign it with. Its refusals —
+ * `ValidationError` for a malformed body, an unconfigured flow or a relay URL
+ * that is not listed, and the rate limit — are codes already listed. A patch,
+ * by 0.4.1's rule: an operation added with the types it carries, and no
+ * existing operation, type or enum touched, so the supported range does not
+ * move.
  */
-export const CONTRACT_VERSION = '0.13.3';
+export const CONTRACT_VERSION = '0.13.4';
 export const CONTRACT_MAJOR = 0;
 export const CONTRACT_NAME = 'spfn-mobile-contract';
 
@@ -756,6 +768,28 @@ export const CONTRACT_TYPES: readonly TypeDeclaration[] = [
             optional('isNewUser', 'boolean'),
         ],
     },
+    /**
+     * The Android start of Sign in with Apple, called before any key exists.
+     * `requestNonce` is the SHA-256 hex of the fingerprint of the key the app
+     * will enroll — the id_token's nonce claim, which `auth.enroll.oauthNative`
+     * checks against that key. `state` is the app's own (16–128 characters of
+     * `[A-Za-z0-9_-]`), handed back on the relay; `relayUrl` must equal one
+     * configured App Link exactly.
+     */
+    {
+        name: 'OauthAppleRelayStartRequest',
+        fields: [
+            required('requestNonce', 'string'),
+            required('state', 'string'),
+            required('relayUrl', 'string'),
+        ],
+    },
+    {
+        name: 'OauthAppleRelayStartResponse',
+        fields: [
+            required('authUrl', 'string'),
+        ],
+    },
     {
         name: 'RotateKeyRequest',
         fields: [
@@ -1052,6 +1086,11 @@ interface RestSurfaceError
  * `TooManyRequestsError` and already listed above. A body naming two proofs or
  * none is `ValidationError`, also already listed. `auth.mfa.status` refuses only
  * by the admission rules every proven operation shares.
+ *
+ * `auth.enroll.oauthAppleRelayStart` (contract 0.13.4) adds no code. A body
+ * outside its formats, an Apple web flow or relay list that is not configured,
+ * and a relay URL that is not listed are all `ValidationError`; the rate limit
+ * is `TooManyRequestsError`.
  */
 const REST_SURFACE_ERRORS: readonly RestSurfaceError[] = [
     {

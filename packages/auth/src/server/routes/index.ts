@@ -91,9 +91,11 @@ import {
     oauthProviderCallbackPost,
     getProviderOAuthUrl,
     oauthNative,
+    oauthAppleNativeStart,
     oauthUnlinkNotify,
     oauthUnlinkNotifyGet,
 } from './oauth';
+import { androidAssetLinks } from './well-known';
 import {
     listRoles,
     createAdminRole,
@@ -124,6 +126,7 @@ import { oauth2Token, oauth2Revoke } from './oauth2/token';
  * - Deletion: /_auth/deletion/request, /_auth/deletion/cancel
  * - Admin: /_auth/admin/* (superadmin only)
  * - OAuth 2.1 authorization server: /_auth/oauth2/*, /.well-known/oauth-authorization-server
+ * - Android App Link verification: /.well-known/assetlinks.json
  */
 export const mainAuthRouter = defineRouter({
     // Auth routes
@@ -208,8 +211,12 @@ export const mainAuthRouter = defineRouter({
     oauthProviderCallbackPost,
     getProviderOAuthUrl,
     oauthNative,
+    // Sign in with Apple on Android: the native start (the callback relay is oauthProviderCallbackPost)
+    oauthAppleNativeStart,
     oauthUnlinkNotify,
     oauthUnlinkNotifyGet,
+    // Android Digital Asset Links; 404 unless SPFN_AUTH_ANDROID_* is set
+    androidAssetLinks,
     // Invitation routes
     getInvitation,
     acceptInvitation,

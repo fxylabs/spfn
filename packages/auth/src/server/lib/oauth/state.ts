@@ -7,6 +7,10 @@
  * - provider: OAuth provider (google, github 등)
  * - publicKey, keyId, fingerprint, algorithm: 클라이언트 키 정보
  * - expiresAt: state 만료 시간
+ *
+ * The Android start of Sign in with Apple seals a second kind of state —
+ * `createAppleRelayState` / `verifyAppleRelayState` — under its own key, so
+ * neither verifier accepts the other's.
  */
 
 import * as jose from 'jose';
@@ -27,16 +31,25 @@ export interface OAuthState
 }
 
 /**
+ * A state key derived from the session secret under `label`.
+ *
+ * Each kind of state has its own label, so a state sealed for one flow does
+ * not decrypt as another's: the web start's verifier never accepts a relay
+ * state, and the relay never accepts a web state.
+ */
+async function deriveStateKey(label: string): Promise<Uint8Array>
+{
+    const data = new TextEncoder().encode(`${label}:${env.SPFN_AUTH_SESSION_SECRET}`);
+
+    return new Uint8Array(await crypto.subtle.digest('SHA-256', data));
+}
+
+/**
  * Get encryption key derived from session secret
  */
 async function getStateKey(): Promise<Uint8Array>
 {
-    const secret = env.SPFN_AUTH_SESSION_SECRET;
-    const encoder = new TextEncoder();
-    const data = encoder.encode(`oauth-state:${secret}`);
-    const hashBuffer = await crypto.subtle.digest('SHA-256', data);
-
-    return new Uint8Array(hashBuffer);
+    return await deriveStateKey('oauth-state');
 }
 
 /**
@@ -140,4 +153,90 @@ export async function verifyOAuthState(encryptedState: string): Promise<OAuthSta
 function stateRefusal(cause: unknown): Error
 {
     return cause instanceof jose.errors.JWTExpired ? new OAuthStateExpiredError() : new OAuthStateInvalidError();
+}
+
+/**
+ * What the Android start of Sign in with Apple seals into the `state` it hands
+ * Apple: the app's own state, which the relay gives back to the app, and the
+ * App Link the callback relays to.
+ */
+export interface AppleRelayState
+{
+    appState: string;
+    relayUrl: string;
+}
+
+/**
+ * A relay state that decrypted with the relay key. `expired` is true past the
+ * ten minutes — the payload is still the authenticated one, so the relay can
+ * tell the app why.
+ */
+export interface VerifiedAppleRelayState
+{
+    relay: AppleRelayState;
+    expired: boolean;
+}
+
+/** The app's state, as the native start accepts it (P3). */
+export const APPLE_RELAY_APP_STATE_PATTERN = '^[A-Za-z0-9_-]{16,128}$';
+
+async function getAppleRelayStateKey(): Promise<Uint8Array>
+{
+    return await deriveStateKey('oauth-relay-state');
+}
+
+/**
+ * Seal the Android start's state, ten minutes like the web start's.
+ *
+ * The JWE compact form is URL-safe, so unlike `createOAuthState` the result is
+ * not percent-encoded: it travels as a query value to Apple and comes back as a
+ * form field.
+ */
+export async function createAppleRelayState(relay: AppleRelayState): Promise<string>
+{
+    return await new jose.EncryptJWT({ relay: { appState: relay.appState, relayUrl: relay.relayUrl } })
+        .setProtectedHeader({ alg: 'dir', enc: 'A256GCM' })
+        .setIssuedAt()
+        .setExpirationTime('10m')
+        .encrypt(await getAppleRelayStateKey());
+}
+
+/**
+ * Open a relay state, or null when it is not one.
+ *
+ * Null for anything that does not decrypt with the relay key — a web state, a
+ * forged or truncated value — and for a payload that is not a relay. An expired
+ * state is read only from the `JWTExpired` jose throws after the authenticated
+ * decryption succeeded, so a value that never decrypted is never parsed.
+ */
+export async function verifyAppleRelayState(sealed: string): Promise<VerifiedAppleRelayState | null>
+{
+    const key = await getAppleRelayStateKey();
+    const opened = await jose.jwtDecrypt(sealed, key)
+        .then(({ payload }) => ({ payload, expired: false }))
+        .catch((cause: unknown) => (cause instanceof jose.errors.JWTExpired
+            ? { payload: cause.payload, expired: true }
+            : null));
+
+    if (!opened)
+    {
+        return null;
+    }
+
+    const relay = appleRelayOf(opened.payload);
+
+    return relay ? { relay, expired: opened.expired } : null;
+}
+
+function appleRelayOf(payload: jose.JWTPayload): AppleRelayState | null
+{
+    const relay = payload.relay as Partial<AppleRelayState> | undefined;
+
+    if (typeof relay?.appState !== 'string' || typeof relay.relayUrl !== 'string'
+        || !new RegExp(APPLE_RELAY_APP_STATE_PATTERN).test(relay.appState))
+    {
+        return null;
+    }
+
+    return { appState: relay.appState, relayUrl: relay.relayUrl };
 }

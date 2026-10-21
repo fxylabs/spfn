@@ -17,6 +17,7 @@ import { configureDeviceAuth } from './lib/device-auth-config';
 import { configureDeviceLink } from './lib/device-link-config';
 import { assertOAuthRedirectUris } from './lib/oauth/redirect-uri-check';
 import { assertAppleWebConfig } from './lib/oauth/apple-config-check';
+import { assertAndroidAssetLinks, assertAppleRelayUrls } from './lib/oauth/android-config-check';
 import {
     assertAuthorizationServerIssuer,
     configureAuthorizationServer,
@@ -334,7 +335,8 @@ export function createAuthLifecycle(options: AuthLifecycleOptions = {}): AuthLif
          *
          * Performs:
          * 0. Refuses boot on an OAuth redirect URI override off the web app origin,
-         *    on a partial Sign in with Apple web setup, or on an authorization
+         *    on a partial Sign in with Apple web setup, on an Android relay or
+         *    assetlinks.json setup that cannot work, or on an authorization
          *    server issuer no client could use
          * 1. Ensures admin account exists (creates if missing)
          * 2. Initializes RBAC system with built-in + custom roles/permissions
@@ -354,6 +356,11 @@ export function createAuthLifecycle(options: AuthLifecycleOptions = {}): AuthLif
             // Same reasoning; refuses a partial Sign in with Apple web setup or a key that
             // does not import. Silent when none of its five variables is set.
             await assertAppleWebConfig();
+            // Same reasoning; refuses an Android relay URL that is not an https App Link,
+            // relay URLs without the Apple web flow, and a partial or malformed
+            // assetlinks.json pair. Silent when none of the three variables is set.
+            assertAppleRelayUrls();
+            assertAndroidAssetLinks();
 
             // Here and not beside configureAuthorizationServer above, for the
             // reason written one line up: a throw from the constructor is

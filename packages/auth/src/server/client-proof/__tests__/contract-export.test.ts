@@ -213,6 +213,7 @@ describe('operations describe the routes the server answers', () =>
         expect(byId.get('auth.enroll.register')?.path).toBe('/_auth/register');
         expect(byId.get('auth.enroll.login')?.path).toBe('/_auth/login');
         expect(byId.get('auth.enroll.oauthNative')?.path).toBe('/_auth/oauth/{provider}/native');
+        expect(byId.get('auth.enroll.oauthAppleRelayStart')?.path).toBe('/_auth/oauth/apple/native/start');
         expect(byId.get('auth.keys.rotate')?.path).toBe('/_auth/keys/rotate');
         expect(byId.get('auth.keys.list')?.path).toBe('/_auth/keys/list');
         expect(byId.get('auth.keys.revoke')?.path).toBe('/_auth/keys/revoke');
@@ -280,6 +281,7 @@ describe('operations describe the routes the server answers', () =>
             'auth.deviceLink.poll',
             'auth.deviceLink.redeem',
             'auth.enroll.login',
+            'auth.enroll.oauthAppleRelayStart',
             'auth.enroll.oauthNative',
             'auth.enroll.register',
             'auth.mfa.verify',
@@ -579,6 +581,7 @@ describe('every operation records when it became available', () =>
      * | auth.device.{start,poll,info,approve,deny} | 1a5d6fd6 (#171), exported here | 0.10.0 |
      * | auth.mfa.{verify,status} | #95 PR 2, exported here | 0.13.0 |
      * | auth.deviceLink.{redeem,poll} | device link, exported here | 0.13.2 |
+     * | auth.enroll.oauthAppleRelayStart | Sign in with Apple on Android (#149), exported here | 0.13.4 |
      */
     const RECORDED_HISTORY: Record<string, string> = {
         'auth.clientProof.handshake': '0.1.0',
@@ -587,6 +590,7 @@ describe('every operation records when it became available', () =>
         'auth.enroll.register': '0.3.0',
         'auth.enroll.login': '0.3.0',
         'auth.enroll.oauthNative': '0.3.0',
+        'auth.enroll.oauthAppleRelayStart': '0.13.4',
         'auth.keys.rotate': '0.3.0',
         'auth.keys.list': '0.4.1',
         'auth.keys.revoke': '0.4.1',
@@ -1479,9 +1483,9 @@ describe('declared proof rules match the implementation', () =>
         replayWindowMillis: number;
     };
 
-    it('the contract line is the revision that tells a device link\'s wrong pick apart from a refusal', () =>
+    it('the contract line is the revision that adds Sign in with Apple on Android\'s start', () =>
     {
-        expect(bundle.contractVersion).toBe('0.13.3');
+        expect(bundle.contractVersion).toBe('0.13.4');
     });
 
     it('the supported range floor is the current minor, as the 0.x rule has it', () =>
