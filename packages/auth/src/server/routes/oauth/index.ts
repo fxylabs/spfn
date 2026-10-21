@@ -19,7 +19,7 @@ import { rateLimitPolicy } from '@spfn/core/middleware';
 import { defineRouter, route } from '@spfn/core/route';
 
 import { KEY_ALGORITHM, SOCIAL_PROVIDERS, type SessionBindingType, type SocialProvider } from '../../types';
-import { DeviceNameSchema, PlatformSchema } from '../schema';
+import { DeviceNameSchema, OAuthNativeProfileSchema, PlatformSchema } from '../schema';
 import { buildStartCookieName, namesEvictedByStart } from '../../lib/oauth/start-cookies';
 import { providerErrorReason } from '../../../lib/oauth-error-reason';
 import { byIpAndIdToken } from '../../lib/rate-limit-keys';
@@ -743,11 +743,7 @@ export const oauthNative = route.post('/_auth/oauth/:provider/native')
             }),
             deviceName: Type.Optional(DeviceNameSchema),
             platform: Type.Optional(PlatformSchema),
-            profile: Type.Optional(Type.Object({
-                name: Type.Optional(Type.String()),
-            }, {
-                description: 'Optional profile. Apple provides name only on first sign-in.',
-            })),
+            profile: Type.Optional(OAuthNativeProfileSchema),
             metadata: Type.Optional(Type.Record(Type.String(), Type.Unknown(), {
                 description: 'Custom metadata passed to auth events (e.g. referral code, UTM params)',
             })),

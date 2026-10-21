@@ -59,7 +59,7 @@ import {
     encodeListItemsResponse,
 } from '../contract-types';
 import { ClientProofRefusal, type ClientProofErrorCode } from '../refusal';
-import { DeviceAuthPollResponseSchema } from '../../routes/schema';
+import { DeviceAuthPollResponseSchema, OAuthNativeProfileSchema } from '../../routes/schema';
 import { DEFAULT_KEY_ALGORITHM } from '../../services/key.service';
 import type { PollDeviceAuthResult } from '../../services/device-auth.service';
 
@@ -1091,6 +1091,42 @@ describe('declared response types match the encoders', () =>
     });
 });
 
+describe('the native sign-in profile is the schema /native validates (#150)', () =>
+{
+    const profileName = OAuthNativeProfileSchema.properties.name;
+
+    it('OauthNativeRequest carries profile as an optional OauthNativeProfile', () =>
+    {
+        expect(typeNamed('OauthNativeRequest').fields).toContainEqual(
+            { name: 'profile', type: 'OauthNativeProfile', optional: true },
+        );
+    });
+
+    it('OauthNativeProfile declares exactly the route schema\'s fields, each with its optionality', () =>
+    {
+        // The declaration is written by hand, so this holds it to the schema the
+        // route validates. A field added to the route, or one made required,
+        // fails here instead of leaving a generated client unable to send it.
+        const required = new Set(OAuthNativeProfileSchema.required ?? []);
+        const fromSchema = Object.entries(OAuthNativeProfileSchema.properties).map(([name, property]) => ({
+            name,
+            type: (property as { type: string }).type,
+            optional: !required.has(name),
+        }));
+
+        expect(typeNamed('OauthNativeProfile').fields).toEqual(fromSchema);
+    });
+
+    it('the route bounds the name by nothing, so the contract states no bound', () =>
+    {
+        // The grammar has no way to state a length. A bound added to the route
+        // refuses a value the contract still says is fine, so it fails here
+        // until the contract can carry it.
+        expect(profileName).not.toHaveProperty('maxLength');
+        expect(profileName).not.toHaveProperty('minLength');
+    });
+});
+
 describe('the poll answer keeps a union inside a grammar that has none', () =>
 {
     const poll = typeNamed('PollDeviceAuthResponse');
@@ -1483,9 +1519,9 @@ describe('declared proof rules match the implementation', () =>
         replayWindowMillis: number;
     };
 
-    it('the contract line is the revision that adds Sign in with Apple on Android\'s start', () =>
+    it('the contract line is the revision that declares the native sign-in profile', () =>
     {
-        expect(bundle.contractVersion).toBe('0.13.4');
+        expect(bundle.contractVersion).toBe('0.13.5');
     });
 
     it('the supported range floor is the current minor, as the 0.x rule has it', () =>

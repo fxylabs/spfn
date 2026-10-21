@@ -343,8 +343,20 @@ import { CLIENT_IDENTITY_HEADERS, CLIENT_KINDS, SERVER_CONTRACT_HEADERS } from '
  * by 0.4.1's rule: an operation added with the types it carries, and no
  * existing operation, type or enum touched, so the supported range does not
  * move.
+ *
+ * 0.13.5 declares `OauthNativeRequest.profile`, an optional `OauthNativeProfile`
+ * whose one optional field is `name` (#150). The route has accepted it since
+ * native sign-in shipped, and Apple sends a person's name once, on the first
+ * authorization, beside the id_token rather than inside it — so a client
+ * generated from this contract had the name and no field to send it in. The
+ * server keeps it as the display name when the social account is first
+ * attached and the account has no profile yet. No length is declared because
+ * the route enforces none. A patch, on 0.13.1's reasoning: an optional field a
+ * client may send, so a consumer generated against 0.13.4 never sends it and
+ * gets exactly the answers it got before, and the supported range does not
+ * move.
  */
-export const CONTRACT_VERSION = '0.13.4';
+export const CONTRACT_VERSION = '0.13.5';
 export const CONTRACT_MAJOR = 0;
 export const CONTRACT_NAME = 'spfn-mobile-contract';
 
@@ -444,7 +456,8 @@ type ReferencedTypeName =
     | 'KeyBinding'
     | 'MfaChallenge'
     | 'MfaMethod'
-    | 'DeviceAuthPollStatus';
+    | 'DeviceAuthPollStatus'
+    | 'OauthNativeProfile';
 
 type ElementTypeName = ScalarTypeName | DecimalTypeName | ReferencedTypeName;
 
@@ -552,9 +565,11 @@ function coreTimeResponseDeclaration(): TypeDeclaration
  * The `/_auth` surface types mirror the TypeBox route schemas (input body +
  * Next.js interceptor body merged, since a mobile client sends the whole
  * body itself) and the service result interfaces. The optional free-form
- * extension fields (`metadata`, `profile`) are deliberately not declared:
- * they are outside this grammar, the server tolerates their absence, and a
- * consumer generated from this contract never needs to send them.
+ * `metadata` is deliberately not declared: it is outside this grammar, the
+ * server tolerates its absence, and a consumer generated from this contract
+ * never needs to send it. `profile` was left out on the same terms until
+ * 0.13.5; it carries one string, so it fits the grammar, and Apple's
+ * first-authorization name has no other way to reach the server.
  */
 export const CONTRACT_TYPES: readonly TypeDeclaration[] = [
     coreTimeResponseDeclaration(),
@@ -750,6 +765,20 @@ export const CONTRACT_TYPES: readonly TypeDeclaration[] = [
             required('keyId', 'string'),
             required('fingerprint', 'string'),
             required('algorithm', 'KeyAlgorithm'),
+            optional('profile', 'OauthNativeProfile'),
+        ],
+    },
+    /**
+     * What the provider handed the app outside the id_token — Apple's `user`
+     * name, sent on the first authorization only. Display-only and unverified:
+     * the server keeps it as the display name when the social account is first
+     * attached and the account has no profile yet, never overwrites one, and
+     * prefers a name the id_token itself carries.
+     */
+    {
+        name: 'OauthNativeProfile',
+        fields: [
+            optional('name', 'string'),
         ],
     },
     /**

@@ -1964,6 +1964,13 @@ callback carries `?mfaChallenge=` instead of `userId` and no session is created 
 that challenge is spent — see [the web OAuth path](#the-web-oauth-path). Both the
 `createOAuthCallbackHandler` route and the `OAuthCallback` page flow are handled.
 
+The name a provider reports becomes the account's display name once. When a social account is
+first attached — to a new account, or to an existing one matched by verified email — and that
+account has no `user_profiles` row yet, the name is stored as `displayName`, trimmed; a blank name
+is skipped. An existing profile is never overwritten and a later sign-in writes nothing, so a name
+the person changed stays changed. An app that creates the profile row itself on `auth.register`
+should upsert it rather than insert, because the row may already be there.
+
 ```tsx
 // app/auth/callback/page.tsx
 export { OAuthCallback as default } from '@spfn/auth/nextjs/client';
@@ -2057,7 +2064,8 @@ ordinary callback. The package signs the client secret JWT itself (ES256, one ho
 takes the identity from the id_token of the token response — Apple has no userinfo endpoint.
 
 The person's **name arrives only on the first authorization** (Apple's `user` form field); later
-sign-ins carry none. The email is always the id_token's and may be a **private relay address**
+sign-ins carry none. It is kept as the display name on that first sign-in — see
+[OAuth](#oauth). The email is always the id_token's and may be a **private relay address**
 (`…@privaterelay.appleid.com`) when the person chose *Hide My Email*.
 
 #### Android: native start and the callback relay
@@ -2115,7 +2123,8 @@ Android's verifier accepts a `200` with no redirect only, so a Next.js middlewar
 `/.well-known/*` (to add a locale or a trailing slash, say) breaks verification.
 
 The `user` field — the person's name — arrives only on the **first authorization**, as on the web;
-send it as `/native`'s `profile.name` then, because later sign-ins carry none.
+send it as `/native`'s `profile.name` then, because later sign-ins carry none. The mobile contract
+declares it as `OauthNativeRequest.profile` since 0.13.5.
 
 ### Several sign-ins at once
 
@@ -2325,8 +2334,9 @@ tell the eleven ways this call fails apart:
 | `Error` | 500 | generic failure |
 
 The `nonce` is the **raw** nonce the client used; Apple hashes it (SHA-256) into the token, so send
-the raw value for any provider. `profile.name` captures the name Apple returns only on first
-sign-in. Trade-off: skipping code exchange means no Apple refresh token / server-side revoke —
+the raw value for any provider. `profile.name` carries the name Apple returns only on first
+sign-in; it is used when the id_token has no name of its own, and kept as the display name as
+described under [OAuth](#oauth). Trade-off: skipping code exchange means no Apple refresh token / server-side revoke —
 revoke SPFN access by revoking the registered key instead.
 
 > **The nonce must be the `fingerprint` of the key being registered.** Since contract 0.4.0 the

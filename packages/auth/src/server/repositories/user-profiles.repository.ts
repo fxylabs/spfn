@@ -68,6 +68,26 @@ export class UserProfilesRepository extends BaseRepository
     }
 
     /**
+     * 프로필이 없을 때만 생성
+     *
+     * 조회 후 생성이 아니라 `user_id` 충돌 시 아무것도 하지 않는 insert다. 호출하는 OAuth
+     * 로그인이 트랜잭션 안에서 돌 수 있는데, 거기서 unique 위반이 나면 이후 문장이 모두
+     * 실패한다. 같은 계정의 첫 로그인 둘이 겹치면 먼저 들어간 프로필이 남는다.
+     *
+     * @returns 생성된 행, 이미 프로필이 있었으면 null
+     */
+    async createIfAbsent(data: NewUserProfile)
+    {
+        const result = await this.db
+            .insert(userProfiles)
+            .values(data)
+            .onConflictDoNothing({ target: userProfiles.userId })
+            .returning();
+
+        return result[0] ?? null;
+    }
+
+    /**
      * 프로필 업데이트 (by ID)
      */
     async updateById(id: number, data: Partial<NewUserProfile>)

@@ -42,6 +42,20 @@ export const PlatformSchema = Type.Union(
 );
 
 /**
+ * What a provider handed a native app outside the id_token (#150).
+ *
+ * Apple sends the person's name on the first authorization only, beside the
+ * id_token rather than inside it, so the app forwards it here. Display only and
+ * unverified. Exported so the mobile contract's `OauthNativeProfile` is checked
+ * against this schema rather than transcribed from it.
+ */
+export const OAuthNativeProfileSchema = Type.Object({
+    name: Type.Optional(Type.String()),
+}, {
+    description: 'Optional profile. Apple provides name only on first sign-in.',
+});
+
+/**
  * Key material as a device sends it, bounded.
  *
  * The bounds exist for the one route that takes this material from a caller who

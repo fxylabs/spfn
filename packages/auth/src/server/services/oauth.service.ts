@@ -20,7 +20,7 @@ import {
     UnverifiedEmailLinkError,
 } from '@spfn/auth/errors';
 
-import { usersRepository, socialAccountsRepository } from '../repositories';
+import { usersRepository, socialAccountsRepository, userProfilesRepository } from '../repositories';
 import { authLogger } from '../logger';
 import { isSafeReturnPath } from '../../lib/return-path';
 import { withOAuthErrorReason, type OAuthErrorReason } from '../../lib/oauth-error-reason';
@@ -635,7 +635,28 @@ export async function createOrLinkUser(
         tokenExpiresAt: tokens ? tokenExpiryDate(tokens.expiresIn) : null,
     });
 
+    await recordProviderName(userId, identity.name);
+
     return { userId, isNewUser };
+}
+
+/**
+ * provider가 알려 준 이름을 표시 이름으로 남긴다 — 프로필이 아직 없을 때만 (#150)
+ *
+ * 소셜 계정을 처음 연결할 때만 불린다. Apple은 이름을 첫 인가에만 보내므로 이때가 아니면
+ * 받을 기회가 없다. 이미 있는 프로필은 사람이나 앱이 정한 값이라 덮어쓰지 않는다. 이름은
+ * 검증되지 않은 표시용 값이고, 공백뿐이면 남기지 않는다.
+ */
+async function recordProviderName(userId: number, name: string | undefined): Promise<void>
+{
+    const displayName = name?.trim();
+
+    if (!displayName)
+    {
+        return;
+    }
+
+    await userProfilesRepository.createIfAbsent({ userId, displayName });
 }
 
 /**

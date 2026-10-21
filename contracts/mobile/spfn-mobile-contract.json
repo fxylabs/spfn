@@ -4,7 +4,7 @@
   "originStatement": "Generated from the route and contract definitions in SPFN primitives (packages/auth/src/server/client-proof) and published from that repository. This file is generated output: edit the source modules and re-export, never this file.",
   "contractName": "spfn-mobile-contract",
   "contractMajor": 0,
-  "contractVersion": "0.13.4",
+  "contractVersion": "0.13.5",
   "supportedRange": ">=0.13.0 <0.14.0",
   "exporterVersion": "@spfn/auth/contract-bundle@6.1.0",
   "authProfiles": { "allowed": ["clientProofV1"], "unknownProfilePolicy": "reject", "mixingWithinSession": "prohibited" },
@@ -323,9 +323,11 @@
         { "name": "publicKey", "type": "string", "optional": false },
         { "name": "keyId", "type": "string", "optional": false },
         { "name": "fingerprint", "type": "string", "optional": false },
-        { "name": "algorithm", "type": "KeyAlgorithm", "optional": false }
+        { "name": "algorithm", "type": "KeyAlgorithm", "optional": false },
+        { "name": "profile", "type": "OauthNativeProfile", "optional": true }
       ]
     },
+    { "name": "OauthNativeProfile", "fields": [{ "name": "name", "type": "string", "optional": true }] },
     {
       "name": "OauthNativeResponse",
       "fields": [
