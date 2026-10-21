@@ -3,7 +3,8 @@
  * Publish every packages/* version the private Gitea registry does not have yet,
  * in an order that puts each package after the ones it depends on.
  *
- * Runs in Woodpecker on a main push (see .woodpecker/publish.yml). The registry
+ * Runs in Woodpecker on a main push that changes a package manifest, and on a
+ * manual run (see .woodpecker/publish.yml). The registry
  * itself is the idempotency guard: a version already published is skipped, so
  * re-running the pipeline is safe and a push that changed a package.json without
  * bumping the version publishes nothing.

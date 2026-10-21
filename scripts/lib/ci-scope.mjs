@@ -127,9 +127,11 @@ function owningPackages(files, packageDirs)
 /**
  * The scope of one pipeline.
  *
- * - `event` is `CI_PIPELINE_EVENT`. Only a pull request is ever scoped: a main
- *   push sets `CI_PIPELINE_FILES` too, but main is where the whole tree has to
- *   be known good, so it runs everything regardless.
+ * - `event` is `CI_PIPELINE_EVENT`. Only a pull request is ever scoped. A main
+ *   push reaches this pipeline only when it changes a package manifest, which
+ *   is the push that publishes; it sets `CI_PIPELINE_FILES` too, but main has
+ *   to be known good as a whole before a release, so it runs everything
+ *   regardless.
  * - `rawFiles` is `CI_PIPELINE_FILES` exactly as found in the environment,
  *   undefined included.
  * - `packageDirs` maps a package directory (`packages/i18n`, `website`) to the

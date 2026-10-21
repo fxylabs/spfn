@@ -36,22 +36,44 @@
 # tsconfig, this file, scripts/ — runs everything, because it can change how
 # anything builds. So does a list Woodpecker leaves out (it does past 500 files).
 #
-# A main push runs this same workflow, and runs all of it: main is where the
-# whole tree has to be known good, and a scoped pull request only proved its own
+# A main push runs this same workflow only when it changes a package manifest
+# (`packages/*/package.json`), because that is the push that publishes. There
+# it runs all of it: main is where the whole tree has to be known good before
+# anything goes to the registry, and a scoped pull request only proved its own
 # corner. That run gates the publish: publish.yml declares `depends_on: [pr]`,
 # so the Gitea publish of the same pipeline starts only after this workflow
-# succeeded and does not run when it fails.
+# succeeded and does not run when it fails. A feature merge changes no
+# manifest and runs nothing: its pull request was already checked, and the
+# next release's main run checks the whole tree before it publishes. What that
+# gives up: a feature merge whose pull-request CI ran before main moved under
+# it is first checked as a whole at the next release, not at its merge.
+#
+# A pull request that changes only package manifests — a release PR — runs
+# nothing either. Its merge is a main push that changes a manifest, and that
+# push runs the full check before the publish; running the scoped check first
+# would build and test the same packages twice for one release. Pipeline 521
+# above was such a run. The cost is that a manifest-only change which is
+# not a version bump (an `exports` edit, say) is checked at its merge, not in
+# its pull request.
+#
+# The glob is `packages/*/package.json`: `*` does not cross a `/`, and an
+# example's or the website's manifest is not a release.
 #
 # The manual entry exists for that dependency. Woodpecker (3.17.0) drops a
 # workflow whose required `depends_on` names a workflow that did not match the
 # event (`filterMissingDependencies` in pipeline/frontend/builder/utils.go), so
 # without it a manual run on main — the publish backfill — would start nothing
 # at all. It is limited to main so that a manual run on any other branch does
-# not start the full check.
+# not start the full check. It carries no path condition: a manual run has no
+# changed-file list.
 when:
     - event: pull_request
+      path:
+          exclude: ['packages/*/package.json']
     - event: push
       branch: main
+      path:
+          include: ['packages/*/package.json']
     - event: manual
       branch: main
 
