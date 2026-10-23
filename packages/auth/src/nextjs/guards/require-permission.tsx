@@ -4,7 +4,7 @@
  * Requires user to have at least one of the specified permissions
  */
 
-import { redirect } from 'next/navigation.js';
+import { redirect } from 'next/navigation';
 import { getSession } from '../session-helpers';
 import { hasAnyPermission } from './auth-utils';
 import type { ReactNode } from 'react';
