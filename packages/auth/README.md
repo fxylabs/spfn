@@ -2543,6 +2543,19 @@ export default async function AdminPage()
 Also exported: `getAuthSessionData`, `getUserRole`, `getUserPermissions`, `hasAnyRole`,
 `hasAnyPermission`, the OAuth pending-session helpers, and `createOAuthCallbackHandler`.
 
+#### Loading the entry outside Next (tests)
+
+The guards import the bare `next/navigation`: in a route handler, Next swaps only that
+spelling for its server build, and `next/navigation.js` breaks `next build` (#151). Node's own
+loader cannot resolve a bare `next/*` subpath, so a vitest suite that reaches this entry
+inlines it and lets vite resolve the import. Its `server-only` import still needs the suite's
+own stub, as any server-only module does.
+
+```typescript
+// vitest.config.ts
+test: { server: { deps: { inline: [/\/@spfn\/auth\/dist\/nextjs\//] } } },
+```
+
 #### The guards' timeout
 
 Every guard and helper above asks the backend for the session through one call,

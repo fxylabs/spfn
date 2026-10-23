@@ -1,18 +1,19 @@
 /**
- * `node --test scripts/lib/` — `next/*` specifiers name their file (#147).
+ * `node --test scripts/lib/` — `next/*` specifiers are spelled the way their
+ * subpath needs: the file form (#147), except a bare `next/navigation` (#151).
  *
- * | #  | target                 | expected                                              |
- * |----|------------------------|-------------------------------------------------------|
- * | N2 | src of every package   | zero bare `next/*` specifiers                         |
- * | N3 | the scanner            | each bare fixture reported                            |
- * | N4 | the scanner            | `.js` form, root `next`, other packages, comment: none |
+ * | #  | target                 | expected                                                          |
+ * |----|------------------------|-------------------------------------------------------------------|
+ * | N2 | src of every package   | zero misspelled `next/*` specifiers                               |
+ * | N3 | the scanner            | each bare fixture and each `next/navigation` file form reported   |
+ * | N4 | the scanner            | `.js` form, bare navigation, root `next`, other packages, comment: none |
  */
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
 import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
-import { bareNextSpecifiers } from "./next-specifiers.mjs";
+import { misspelledNextSpecifiers } from "./next-specifiers.mjs";
 
 const repositoryRoot = fileURLToPath(new URL("../../", import.meta.url));
 
@@ -41,28 +42,30 @@ function shippedSources()
         .map((path) => relative(repositoryRoot, path));
 }
 
-test("N2: no package source imports a bare next/* specifier", () =>
+test("N2: no package source misspells a next/* specifier", () =>
 {
     const found = shippedSources().flatMap((path) =>
-        bareNextSpecifiers(readFileSync(join(repositoryRoot, path), "utf8"))
+        misspelledNextSpecifiers(readFileSync(join(repositoryRoot, path), "utf8"))
             .map((specifier) => `${path}: ${specifier}`));
 
     assert.deepEqual(found, []);
 });
 
-test("N3: each bare next/* specifier is reported", () =>
+test("N3: each bare next/* specifier and each next/navigation file form is reported", () =>
 {
-    assert.deepEqual(bareNextSpecifiers("import { NextResponse } from 'next/server';"), ["next/server"]);
-    assert.deepEqual(bareNextSpecifiers("const { headers } = await import('next/headers');"), ["next/headers"]);
-    assert.deepEqual(bareNextSpecifiers("import type { NextRequest } from 'next/server';"), ["next/server"]);
-    assert.deepEqual(bareNextSpecifiers("import { redirect } from \"next/navigation\";"), ["next/navigation"]);
+    assert.deepEqual(misspelledNextSpecifiers("import { NextResponse } from 'next/server';"), ["next/server"]);
+    assert.deepEqual(misspelledNextSpecifiers("const { headers } = await import('next/headers');"), ["next/headers"]);
+    assert.deepEqual(misspelledNextSpecifiers("import type { NextRequest } from 'next/server';"), ["next/server"]);
+    assert.deepEqual(misspelledNextSpecifiers("import { redirect } from \"next/navigation.js\";"), ["next/navigation.js"]);
+    assert.deepEqual(misspelledNextSpecifiers("const { notFound } = await import('next/navigation.mjs');"), ["next/navigation.mjs"]);
 });
 
-test("N4: file-form, root, other-package and comment mentions are not reported", () =>
+test("N4: file-form, bare navigation, root, other-package and comment mentions are not reported", () =>
 {
     const fixtures = [
         "import { NextResponse } from 'next/server.js';",
         "const { headers } = await import('next/headers.js');",
+        "import { redirect } from 'next/navigation';",
         "import type { NextConfig } from 'next';",
         "import { getTranslations } from 'next-intl/server';",
         "import { thing } from '@scope/next/server';",
@@ -72,6 +75,6 @@ test("N4: file-form, root, other-package and comment mentions are not reported",
 
     for (const fixture of fixtures)
     {
-        assert.deepEqual(bareNextSpecifiers(fixture), [], fixture);
+        assert.deepEqual(misspelledNextSpecifiers(fixture), [], fixture);
     }
 });
