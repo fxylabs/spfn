@@ -43,11 +43,12 @@ Next.js owns the frontend, Drizzle owns the SQL, and your services own the rules
 
 ```bash
 pnpm add @spfn/core@beta drizzle-orm@1.0.0-rc.4 postgres pg
-# optional peer: next ^16.3.8   (only for the Next.js bridge)
+# optional peer: next ^16.4.1   (only for the Next.js bridge)
 # optional peer: react ^18 || ^19 (only for @spfn/core/state/react)
 ```
 
-Node `>=20.0.0`. ESM only.
+Node `^22.23.4 || ^24.22.1 || >=26.12.1` — earlier releases lack the fix for
+CVE-2026-111497, and Node 20 reached end of life without one. ESM only.
 
 > **Declare Drizzle and the Postgres drivers in your own app, not just in SPFN.**
 > `@spfn/core` takes `drizzle-orm` as a peer dependency, and Drizzle changes how it
@@ -855,7 +856,7 @@ There is no `.` entry in `exports` — by design. Subpaths keep server-only code
 client bundles, which a single barrel file cannot do.
 
 **Which Node version?**
-`>=20.0.0`. The package is ESM only.
+`^22.23.4 || ^24.22.1 || >=26.12.1`. The package is ESM only.
 
 **Where do my business rules go?**
 In services and repositories, not in route handlers. A handler validates, calls, and

@@ -526,19 +526,23 @@ changed for it.
 
 ## Requirements
 
-Node ≥ 20.19. The constraint is `require(esm)`. This package ships ESM only, and
+Node 22.23.4+ (or 24.22.1+, 26.12.1+), the range every SPFN package declares: earlier releases
+lack the fix for CVE-2026-111497, and Node 20 reached end of life without one.
+
+The package's own constraint is lower: `require(esm)`. This package ships ESM only, and
 `scripts/check-exports-require.mjs` requires every subpath to declare a `require` condition
 so a CommonJS consumer — `spfn dev` loads `server.config.ts` through tsx's CJS register —
 can resolve it. Both conditions point at the same ESM file, and `require()`-ing ESM is what
-Node supports from 20.19. Nothing in the cryptography needs a recent Node: Ed25519 and
+Node supports from 20.19 and 22.12. Nothing in the cryptography needs a recent Node: Ed25519 and
 `dsaEncoding: 'ieee-p1363'`, which is how ES256 signatures come out in JOSE form without a
 WebCrypto detour, have both been there since Node 12.
 
-`engines` says `>=20.0.0`, which is the floor for the package's *code*; 20.19 is the floor
-for the `require()` interop the repository tests. Node 20 left maintenance on 2026-04-30,
-so 22 is the line to be on.
-
 ## Changelog
+
+### 0.1.0-alpha.3
+
+Changed: `engines.node` is `^22.23.4 || ^24.22.1 || >=26.12.1`. Node 20 is no longer supported: it
+reached end of life without the fix for CVE-2026-111497.
 
 ### 0.1.0-alpha.2
 

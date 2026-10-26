@@ -24,7 +24,7 @@ pnpm dlx spfn@beta <command>
 Or add it as a project dependency (`spfn init`/`spfn create` do this for you), then
 call it via `pnpm spfn <command>` / `npm run spfn:<script>`.
 
-Requirements: Node.js 20+ in both modes, Next.js 16.3.8+ (App Router, `src/` dir),
+Requirements: Node.js 22.23.4+ (or 24.22.1+, 26.12.1+) in both modes, Next.js 16.4.1+ (App Router, `src/` dir),
 PostgreSQL 14+ (Redis optional). Next.js 15
 is not supported — see [the root README](../../README.md#what-do-i-need-installed).
 
@@ -958,9 +958,10 @@ uncomment `SPFN_AUTH_ADMIN_ACCOUNTS` in `.env.server` and restart before
 
 `init` also patches `package.json` (scripts: `spfn:dev`, `spfn:server`, `spfn:next`,
 `spfn:build`, `spfn:start`, `codegen`; deps: `@spfn/core`, `spfn`, `drizzle-orm`,
-`@sinclair/typebox`, `concurrently`, etc.; full also adds `@spfn/auth`, `@spfn/i18n`,
-auth's `@spfn/notification` peer, and a Node `>=20.0.0` engine when the
-existing range still permits older Node versions), excludes `src/server` from the root
+`@sinclair/typebox`, `concurrently`, etc.; full also adds `@spfn/auth`, `@spfn/i18n` and
+auth's `@spfn/notification` peer; both modes set the Node engine to
+`^22.23.4 || ^24.22.1 || >=26.12.1` unless the existing range admits only releases that carry
+the CVE-2026-111497 fix), excludes `src/server` from the root
 `tsconfig.json` (Vercel compat), and adds `.spfn/`, `.env.local`, `.env.server` to
 `.gitignore`.
 

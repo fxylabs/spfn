@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { setupPackageJson } from '../steps/package.js';
+import { NODE_ENGINE_RANGE } from '../steps/node-engine.js';
 import type { PackageJson } from '../steps/validate.js';
 
 const mocks = vi.hoisted(() => ({
@@ -62,10 +63,10 @@ describe('setupPackageJson', () =>
         });
     });
 
-    it('sets the Node 20 floor in bare mode too', async () =>
+    it('sets the patched Node range in bare mode too', async () =>
     {
-        // @spfn/core runs on @hono/node-server 2, which declares engines.node >= 20,
-        // so the floor is not something only full mode's @spfn/auth brings.
+        // The range is about the Node runtime itself (CVE-2026-111497), so it is not
+        // something only full mode's @spfn/auth brings.
         testDirectory = await mkdtemp(join(tmpdir(), 'spfn-init-package-bare-node-'));
         const packageJsonPath = join(testDirectory, 'package.json');
         const packageJson: PackageJson = {
@@ -87,7 +88,7 @@ describe('setupPackageJson', () =>
         const generated = JSON.parse(
             await readFile(packageJsonPath, 'utf8'),
         ) as PackageJson;
-        expect(generated.engines?.node).toBe('>=20.0.0');
+        expect(generated.engines?.node).toBe(NODE_ENGINE_RANGE);
         expect(generated.dependencies?.['@spfn/auth']).toBeUndefined();
     });
 
@@ -122,7 +123,7 @@ describe('setupPackageJson', () =>
         // The ops surface ships inside core and auth, so full mode installs no
         // package for it — and no longer installs the MCP server it replaced.
         expect(generated.dependencies?.['@spfn/mcp']).toBeUndefined();
-        expect(generated.engines?.node).toBe('>=20.0.0');
+        expect(generated.engines?.node).toBe(NODE_ENGINE_RANGE);
     });
 
     it('upgrades an existing Node 18 engine for full mode', async () =>
@@ -148,10 +149,10 @@ describe('setupPackageJson', () =>
         const generated = JSON.parse(
             await readFile(packageJsonPath, 'utf8'),
         ) as PackageJson;
-        expect(generated.engines?.node).toBe('>=20.0.0');
+        expect(generated.engines?.node).toBe(NODE_ENGINE_RANGE);
     });
 
-    it('preserves a clearly stricter existing Node engine', async () =>
+    it('preserves an existing range that admits only patched Node releases', async () =>
     {
         testDirectory = await mkdtemp(join(tmpdir(), 'spfn-init-package-node22-'));
         const packageJsonPath = join(testDirectory, 'package.json');
@@ -160,7 +161,7 @@ describe('setupPackageJson', () =>
             dependencies: {},
             devDependencies: {},
             scripts: {},
-            engines: { node: '>=22.0.0 <23 || ^24.0.0' },
+            engines: { node: '^24.22.1' },
         };
 
         await setupPackageJson(
@@ -174,6 +175,6 @@ describe('setupPackageJson', () =>
         const generated = JSON.parse(
             await readFile(packageJsonPath, 'utf8'),
         ) as PackageJson;
-        expect(generated.engines?.node).toBe('>=22.0.0 <23 || ^24.0.0');
+        expect(generated.engines?.node).toBe('^24.22.1');
     });
 });

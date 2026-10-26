@@ -89,7 +89,7 @@
     "@spfn/core": ">=0.3.0-beta.14 <0.4.0",
     "@spfn/auth": ">=0.3.0-beta.1 <0.4.0",
     "drizzle-orm": ">=1.0.0-rc.4 <2",
-    "next": "^16.3.8",
+    "next": "^16.4.1",
     "react": "^19.2.1"
   },
   "dependencies": {

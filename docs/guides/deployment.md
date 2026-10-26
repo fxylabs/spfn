@@ -65,13 +65,15 @@ Minimum versions the framework requires:
 
 | | Minimum | Note |
 |---|---|---|
-| Node.js | 20+ | `@spfn/core` runs on `@hono/node-server` 2, which requires it |
+| Node.js | 22.23.4+ (or 24.22.1+, 26.12.1+) | earlier releases lack the fix for CVE-2026-111497; Node 20 reached end of life without one |
 | PostgreSQL | 14+ | required; not optional |
 | Redis | — | optional, only for features that use it |
 
 The bundled files pin newer versions than the minimum on purpose: the generated Dockerfile
 builds on `node:22-alpine` and the compose file runs `postgres:16-alpine` and Redis 7. Those
-are what SPFN tests against, not a floor you have to meet.
+are what SPFN tests against, not a floor you have to meet. A floating tag such as
+`node:22-alpine` picks up a patched release only when the image is rebuilt, so rebuild and
+redeploy after every Node security release.
 
 For the always-on path you also need Docker and Docker Compose, unless you run
 `spfn build && spfn start` directly on a host.

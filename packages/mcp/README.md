@@ -18,7 +18,7 @@ lifecycle hooks. The official MCP TypeScript SDK handles protocol negotiation, J
 schema validation and legacy compatibility. The public SPFN API exposes no SDK server or
 transport objects, so the SDK can be upgraded without rewriting your routes.
 
-Beta, and requires Node.js 20 or newer. It pins the MCP v2 beta while the `2026-07-28`
+Beta, and requires Node.js 22.23.4 or later (or 24.22.1+, 26.12.1+). It pins the MCP v2 beta while the `2026-07-28`
 protocol release is being finalized.
 
 ## Install

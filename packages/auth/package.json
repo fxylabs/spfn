@@ -136,9 +136,9 @@
     "@vitest/coverage-v8": "^4.0.6",
     "drizzle-kit": "1.0.0-rc.4",
     "drizzle-orm": "1.0.0-rc.4",
-    "hono": "^4.13.5",
+    "hono": "^4.13.11",
     "madge": "^8.0.0",
-    "next": "^16.3.8",
+    "next": "^16.4.1",
     "spfn": "workspace:*",
     "tsup": "^8.5.0",
     "tsx": "^4.20.6",
@@ -149,7 +149,7 @@
     "@spfn/core": ">=0.3.0-beta.18 <0.4.0",
     "@spfn/notification": ">=0.2.0-beta.5 <0.3.0",
     "drizzle-orm": ">=1.0.0-rc.4 <2",
-    "next": "^16.3.8"
+    "next": "^16.4.1"
   },
   "peerDependenciesMeta": {
     "next": {

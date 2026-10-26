@@ -53,8 +53,8 @@ mode; scripts and agents should always pass `--mode full` or `--mode bare` expli
 Already have a Next.js app? `pnpm dlx spfn@beta init --mode full` adds the same foundation
 to it.
 
-Requirements: Node.js 20+, PostgreSQL 14+, and — if you use the Next.js integration —
-Next.js 16.3.8 or later. Redis only when the functions you enable need it.
+Requirements: Node.js 22.23.4+ (or 24.22.1+, 26.12.1+), PostgreSQL 14+, and — if you use the Next.js integration —
+Next.js 16.4.1 or later. Redis only when the functions you enable need it.
 
 Next.js 15 is not supported. Its fixes for the React Server Components vulnerability
 (CVE-2025-66478) shipped separately on each minor line — 15.0.5, 15.1.9, 15.2.6 and so on
