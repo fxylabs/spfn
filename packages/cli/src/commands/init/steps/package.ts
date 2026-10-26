@@ -5,6 +5,7 @@ import { logger } from '../../../utils/logger.js';
 import { getSpfnTag } from '../../../utils/version.js';
 import type { PackageJson } from './validate.js';
 import type { ScaffoldMode } from '../mode.js';
+import { NODE_ENGINE_RANGE, admitsOnlyPatchedNode } from './node-engine.js';
 
 const { writeFileSync } = fse;
 
@@ -47,16 +48,17 @@ export async function setupPackageJson(
     packageJson.dependencies['spfn'] = spfnTag;
     packageJson.dependencies['concurrently'] = '^9.2.5';
 
-    // Node 20 is the floor in both modes: @spfn/core runs on @hono/node-server 2,
-    // which declares engines.node >= 20. Full mode's @spfn/auth needs the same.
+    // Both modes declare the Node releases that carry the CVE-2026-111497 fix
+    // (see node-engine.ts). A range the app already declares is kept only when
+    // every version it admits is one of those.
     packageJson.engines = packageJson.engines || {};
     const existingNodeRange = packageJson.engines.node;
-    if (!existingNodeRange || !requiresNode20OrNewer(existingNodeRange))
+    if (!existingNodeRange || !admitsOnlyPatchedNode(existingNodeRange))
     {
-        packageJson.engines.node = '>=20.0.0';
+        packageJson.engines.node = NODE_ENGINE_RANGE;
         if (existingNodeRange)
         {
-            logger.warn(`Updated engines.node from "${existingNodeRange}" to ">=20.0.0" because @spfn/core requires Node 20`);
+            logger.warn(`Updated engines.node from "${existingNodeRange}" to "${NODE_ENGINE_RANGE}": SPFN requires a Node release with the CVE-2026-111497 fix`);
         }
     }
 
@@ -124,28 +126,4 @@ export async function setupPackageJson(
         logger.error(String(error));
         process.exit(1);
     }
-}
-
-/**
- * Return true only when every alternative has an obvious lower bound of Node
- * 20 or newer. Unknown or upper-bound-only syntax is treated conservatively and
- * upgraded to the full scaffold's supported baseline.
- */
-function requiresNode20OrNewer(range: string): boolean
-{
-    return range
-        .split('||')
-        .map(alternative => alternative.trim())
-        .every((alternative) =>
-        {
-            const lowerBound = alternative.match(/^(?:>=|>|\^|~|=)?\s*v?(\d+)/);
-            if (!lowerBound)
-            {
-                return false;
-            }
-
-            const major = Number(lowerBound[1]);
-
-            return major >= 20;
-        });
 }

@@ -39,7 +39,7 @@ public key. The server never holds a private key.
 
 ## Getting started
 
-> Prerequisites: Node ≥ 20, pnpm, Docker (Postgres).
+> Prerequisites: Node 22.23.4+, pnpm, Docker (Postgres).
 > The example uses `3890` for Next.js and `8890` for the SPFN API. It maps
 > Postgres to `55432` and Redis to `56379` to avoid common port conflicts.
 

@@ -67,7 +67,7 @@
     },
     "homepage": "https://github.com/fxylabs/spfn/tree/main/packages/mcp#readme",
     "engines": {
-        "node": ">=20.0.0"
+        "node": "^22.23.4 || ^24.22.1 || >=26.12.1"
     },
     "dependencies": {
         "@modelcontextprotocol/server": "2.0.0-beta.5"
@@ -83,7 +83,7 @@
     "devDependencies": {
         "@spfn/core": "workspace:*",
         "@types/node": "^20.11.0",
-        "hono": "^4.13.5",
+        "hono": "^4.13.11",
         "madge": "^8.0.0",
         "tsup": "^8.5.0",
         "typescript": "^5.9.3",

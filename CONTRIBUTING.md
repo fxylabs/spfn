@@ -25,7 +25,7 @@ restates their contents.
 
 ## Quick start
 
-Requires Node ≥ 20 and pnpm (see `packageManager` in `package.json`). From the repo root:
+Requires Node 22.23.4+ (or 24.22.1+, 26.12.1+) and pnpm (see `packageManager` in `package.json`). From the repo root:
 
 ```bash
 git clone <your fork>
@@ -71,8 +71,11 @@ pnpm db:generate        # drizzle-kit generate — create a migration from schem
 
 A published `peerDependencies` range is what an adopter resolves against, so a range
 that still admits a vulnerable release ships that vulnerability to every app installing
-the package. `@spfn/*` packages that couple to Next.js require `^16.3.8` — the floor
-that clears GHSA-vcvr-r3jv-pc5j (critical, fixed in 16.3.6) and GHSA-cjq9-62q9-8jv4 (high,
+the package. `@spfn/*` packages that couple to Next.js require `^16.4.1` — the floor
+that clears GHSA-2464-fhr4-w9xw and GHSA-673q-mjm6-r5xr (both critical remote code
+execution, through image optimization of SVG files and through `use cache` functions returning
+typed arrays) and GHSA-p3m5-59mp-jv5r (Server Actions denial of service), all fixed in 16.4.1;
+GHSA-vcvr-r3jv-pc5j (critical, fixed in 16.3.6) and GHSA-cjq9-62q9-8jv4 (high,
 fixed in 16.3.8), and, further back, GHSA-p293-qw3h-jr36 and GHSA-2xp9-vwfh-vxw4 (remote
 code execution through a Windows-hosted server and through image optimization), CVE-2025-66478
 (remote code execution through React Server Components) and the Server Components denial
@@ -83,6 +86,17 @@ Prose says the floor too, and prose drifts. `pnpm check:versions` compares every
 `packages/*/package.json` peer range against every README, `docs/` page and the site's
 own requirements — the packages must agree with each other, and the documentation must
 agree with them. `.github/workflows/check-versions.yml` runs it on every pull request.
+
+Node has a floor for the same reason. The repository root, every package that declares
+`engines.node` and the `package.json` that `spfn init` writes all require
+`^22.23.4 || ^24.22.1 || >=26.12.1`. The releases of 2026-10-21 fixed CVE-2026-111497, remote
+code execution in the Brotli decoder Node bundles, reachable whenever an app decompresses
+Brotli data an attacker supplies — `fetch` does so for any `Content-Encoding: br` response,
+including one `safeFetch` receives from an attacker-chosen URL. Node 20 reached end of life
+before that release and will not be fixed, so it is not supported, and neither are the
+out-of-support odd lines 23 and 25. `pnpm check:versions` compares the Node range the same way:
+one range across the manifests, and every sentence stating a Node requirement names one of
+its floors.
 
 PostgreSQL's floor has a different reason. The code runs on 13 and later, because
 `gen_random_uuid()` is a column default and moved into the server in 13; the stated
@@ -100,6 +114,13 @@ configuration (including the `DRIZZLE_SCHEMA_PATH` environment value) and from t
 `spfn.schemas` field in the `package.json` of installed SPFN packages and direct
 dependencies, and never from a request; remove the entry when braces or micromatch
 ships a fix.
+
+The root `devDependencies` lists `vite` although nothing imports it. vite reaches the
+repository as a peer dependency of vitest, and pnpm keeps an auto-installed peer at the
+version it first resolved — a lockfile update, and even an override, left it on a release
+whose dev server reads files it should refuse. pnpm resolves peers from the workspace root
+first, so the root entry is what moves every package's vitest onto a patched vite. Raise it
+when vite publishes a fix, the same way as any other floor.
 
 ## Running the tests
 

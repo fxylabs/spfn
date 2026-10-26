@@ -38,7 +38,7 @@ server code, so no backend logic leaks into the browser bundle.
 
 ## Getting started
 
-> Prerequisites: Node 20+, pnpm, and Docker (for a local Postgres).
+> Prerequisites: Node 22.23.4+, pnpm, and Docker (for a local Postgres).
 
 From the repository root, install workspace dependencies:
 

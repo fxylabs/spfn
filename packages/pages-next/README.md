@@ -19,7 +19,7 @@ site model into a deployable site. One package, two modes:
 pnpm add @spfn/pages @spfn/pages-next
 ```
 
-Peer deps: `next` (`^16.3.8`), `react` and `react-dom` (`^19.2.1`).
+Peer deps: `next` (`^16.4.1`), `react` and `react-dom` (`^19.2.1`).
 
 ## Self-deploy usage
 

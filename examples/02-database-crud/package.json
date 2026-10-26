@@ -20,7 +20,7 @@
         "concurrently": "^9.2.5",
         "drizzle-orm": "1.0.0-rc.4",
         "drizzle-typebox": "^0.3.3",
-        "next": "^16.3.8",
+        "next": "^16.4.1",
         "react": "19.2.3",
         "react-dom": "19.2.3",
         "spfn": "workspace:*"

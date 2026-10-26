@@ -39,11 +39,9 @@ jobs:
       # Fails the run. Only the production dependency graph counts here: a build-tool
       # advisory does not reach an app that installs @spfn/*.
       #
-      # The level is `high` because the graph has no high finding left to forgive. Two
-      # moderate ones remain and are settled rather than fixed: @hono/node-server's
-      # patched line requires Node 20, which is a decision about the framework's
-      # supported range, and gaxios reaches uuid only through v4 while the advisory is
-      # about v3/v5/v6. Setting `moderate` today would fail every run on those two.
+      # The level is `high` because the graph has no high finding left to forgive. A
+      # moderate one reports below without failing the run, so it is fixed in the next
+      # dependency round rather than blocking every release until then.
       - name: Audit production dependencies
         run: pnpm audit --prod --audit-level=high
 

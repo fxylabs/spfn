@@ -42,7 +42,7 @@
   },
   "homepage": "https://github.com/fxylabs/spfn/tree/main/packages/workflow#readme",
   "engines": {
-    "node": ">=20.0.0"
+    "node": "^22.23.4 || ^24.22.1 || >=26.12.1"
   },
   "dependencies": {
     "@sinclair/typebox": "^0.34.0"
