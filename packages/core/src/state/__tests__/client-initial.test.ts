@@ -48,8 +48,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { FakeConnected } from '../../event/sse/__tests__/fake-event-source';
-import { ALL_EVENTS, at, FakeEventSource, harness, initialOf, manifest, opened, reconnect, routes, settle, streamQuery } from './client-harness';
+import { ALL_EVENTS, at, FakeEventSource, harness, initialOf, manifest, opened, reconnect, routes, servedBy, settle, streamQuery } from './client-harness';
 
 // The api client reads the request's cookies and host on the server-side arm; there is no request here.
 vi.mock('next/headers', () => ({
@@ -59,20 +58,6 @@ vi.mock('next/headers', () => ({
 
 const w1 = { workspaceId: 'w1' };
 const w2 = { workspaceId: 'w2' };
-
-/** `connected` as the server answers `query`: a keyed state whose key fields it lacks denied, the rest served. */
-function servedBy(query: Record<string, string>): Required<FakeConnected>
-{
-    const ids = Object.keys(manifest);
-    const denied = ids.filter(id => !manifest[id].key.every(field => field in query));
-    const name = (id: string) => `state.${id}.changed`;
-
-    return {
-        subscribedEvents: ids.filter(id => !denied.includes(id)).map(name),
-        deniedEvents: denied.map(name),
-        initial: ids.filter(id => !denied.includes(id)).map(name),
-    };
-}
 
 /** A client started from the render's snapshot for `w1`. */
 function hydrated(responders: Parameters<typeof harness>[0] = {}): ReturnType<typeof harness>

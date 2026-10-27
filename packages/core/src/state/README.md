@@ -602,7 +602,7 @@ export function Shell({ initial, workspaceId }: { initial: StateClientInitial<ty
 | Member | Behaviour |
 | --- | --- |
 | `get(id, key?)` | `GET` `get<Id>State`, key fields in the query. The answer is applied under the ordering rule and returned |
-| `snapshot(query?)` | `GET getStates`, by default with the stream's query. Each state in the answer is applied, and each subscribed state it omits is marked `'revoked'` (below); the snapshot is returned. A rejected fetch rejects and changes nothing |
+| `snapshot(query?)` | `GET getStates`, by default with the stream's query. Each state in the answer is applied, and each state it omits whose key the query carries — subscribed or not — is marked `'revoked'` (below); the snapshot is returned. A rejected fetch rejects and changes nothing |
 | `subscribe(id, key?, listener)` | Registers the listener for `(id, key)` and returns its unsubscribe (idempotent). The listener is called when the entry's `status`, `value` or `data` changes — never for an arrival that differs only by a newer `at` (Ordering, below). The client's first subscriber reads the snapshot, then opens the stream (below) |
 | `write(id, input, key?)` | `put<Id>State` with the input as the body, key fields in the query. The answer is applied at once — before the frame the write also sends — and returned. Typed only for a state with a write, and requires the key on a keyed one |
 | `current(id, key?)` | Synchronous: `{ at, value, data?, status }`, `{ status: 'revoked' }` for a state revoked before any value arrived, or `undefined`. The same frozen object until a change is applied |
@@ -635,7 +635,12 @@ entry, and compares each arrival against it.
 | `at` older than the stamp | dropped |
 | a snapshot older than one state's stamp | that state keeps its entry; the others take the snapshot |
 | a write answer | applied like a frame — its own frame, arriving later with the same `at` and value, changes nothing |
-| a frame for a key not subscribed here | dropped (the server already filters by the connect query; this is the second guard) |
+| a frame for a key the stream's query does not carry | dropped (the server already filters by the connect query; this is the second guard) |
+
+Frames for every state the stream's query carries — keyless, or keyed on the key the query carries
+— are applied whether or not anything here subscribes to them. A later subscribe that does not
+reopen the stream (a keyless state, or a key the query already carries) is then served the newest
+value — never the older snapshot, never nothing.
 
 Every stream open — the first, a reconnect, a reopen on a key change — brings each state's
 current value with a newer `at`: the stream's initial frame, or the snapshot re-read when the
@@ -671,7 +676,7 @@ changed.
   ordering rule, so whatever changed between the render and the open arrives as a newer `at`.
   The client reads the snapshot only when a state it requested is neither in `initial` nor in
   `deniedEvents` — a state whose read threw on the server — or when `initial` is absent (a
-  server before it); a state in `deniedEvents` it watches on the carried key is `'revoked'`.
+  server before it); a state in `deniedEvents` is `'revoked'` on the carried key, watched or not.
   (It all runs on the stream's `connected`, not at `onReconnect`: a read before the new stream
   is live would leave the same gap.)
 - **One value per key field per connection.** A connect query carries one `workspaceId`; when
@@ -737,8 +742,8 @@ value has arrived yet.
 | Arrival | Client |
 | --- | --- |
 | `subscription.revoked` for `state.<id>.changed` | the entry of `id` for **the key the connection carries** (keyless: its one entry) gets `status: 'revoked'`, value kept, listeners notified. The server scopes a revoke by the connect query, so a shadowed key of the same state is untouched |
-| `connected.deniedEvents` names a subscribed state — keyless, or keyed on the key the connection carries | `'revoked'`, value kept, listeners notified: the connect check (`canRead` false, or the key absent) denied it. A shadowed key of the same state is untouched |
-| a snapshot that omits a subscribed state — keyless, or keyed with its key in the query | `'revoked'`, value kept if one exists, listeners notified. This is also a state denied at connect (`canRead` false, absent from the snapshot), and a reconnect after access was lost while the stream was down, when no revoke could arrive. A keyed state whose key the query did not carry is not marked |
+| `connected.deniedEvents` names a state — keyless, or keyed on the key the connection carries — subscribed or not | `'revoked'`, value kept, listeners notified: the connect check (`canRead` false) denied it. A state denied because the query lacks one of its key fields is not marked under any key; a shadowed key of the same state is untouched |
+| a snapshot that omits a state — keyless, or keyed with its key in the query — subscribed or not | `'revoked'`, value kept if one exists, listeners notified. This is also a state denied at connect (`canRead` false, absent from the snapshot), and a reconnect after access was lost while the stream was down, when no revoke could arrive. A keyed state whose key the query did not carry is not marked |
 | a frame, a read or a snapshot started before the revoke | supplies its value under the ordering rule; the status stays `'revoked'` |
 | `subscription.granted` for it | clears the mark for the carried key and reads it once (`get`); the server also sends a frame, before or after the control frame. Both arrive `'ready'`, and either order ends at the latest value |
 | a frame — the initial one included — or the snapshot of a connection opened after the revoke, holding the state | clears the mark: that connection's own connect check served it |

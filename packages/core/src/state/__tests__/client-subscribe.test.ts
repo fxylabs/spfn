@@ -50,7 +50,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { ALL_EVENTS, at, FakeEventSource, harness, opened, reconnect, routes, servedStates, settle, streamQuery } from './client-harness';
+import { ALL_EVENTS, at, deferred, FakeEventSource, harness, opened, reconnect, routes, servedStates, settle, streamQuery } from './client-harness';
 
 // The api client reads the request's cookies and host on the server-side arm; there is no request here.
 vi.mock('next/headers', () => ({
@@ -62,18 +62,6 @@ const w1 = { workspaceId: 'w1' };
 const w2 = { workspaceId: 'w2' };
 const revoked = { event: 'state.runtime.changed' };
 const consentEvent = { event: 'state.consent.changed' };
-
-/** A promise and the function that resolves it. */
-function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void }
-{
-    let resolve!: (value: T) => void;
-    const promise = new Promise<T>(done =>
-    {
-        resolve = done;
-    });
-
-    return { promise, resolve };
-}
 
 /** A `getStates` responder whose first `failures` reads reject as a dropped network would. */
 function failingFirst(failures: number): (input: Record<string, any>) => unknown
