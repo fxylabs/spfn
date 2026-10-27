@@ -19,9 +19,11 @@ import { applyKeyClose } from './key-close';
  * a key revocation commits. A close this pod cannot publish while the
  * transport's breaker is open, or whose publish fails, is re-sent when the
  * breaker cooldown ends and whenever the next publish succeeds; while it is
- * pending, the key's streams on other pods stay open. Only a Redis outage that
- * never recovers leaves them open until they disconnect, and their next token
- * mint is refused on every pod.
+ * pending, the key's streams on other pods stay open. A held close is lost
+ * only when the Redis outage outlasts this pod (its shutdown disposes held
+ * closes) or when more than 1000 closes are held (the oldest are dropped);
+ * those streams then stay open until they disconnect, and their next token
+ * mint is refused.
  *
  * @example
  * ```typescript
