@@ -153,6 +153,32 @@ export function harness(
     return { client, calls, responders: all, onError };
 }
 
+/** `connected` as the server answers `query`: a keyed state whose key fields it lacks denied, the rest served. */
+export function servedBy(query: Record<string, string>): Required<FakeConnected>
+{
+    const ids = Object.keys(manifest);
+    const denied = ids.filter(id => !manifest[id].key.every(field => field in query));
+    const name = (id: string) => `state.${id}.changed`;
+
+    return {
+        subscribedEvents: ids.filter(id => !denied.includes(id)).map(name),
+        deniedEvents: denied.map(name),
+        initial: ids.filter(id => !denied.includes(id)).map(name),
+    };
+}
+
+/** A promise and the function that resolves it. */
+export function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void }
+{
+    let resolve!: (value: T) => void;
+    const promise = new Promise<T>(done =>
+    {
+        resolve = done;
+    });
+
+    return { promise, resolve };
+}
+
 /** The routes called so far, in order. */
 export function routes(h: Harness): string[]
 {

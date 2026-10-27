@@ -376,6 +376,12 @@ class BrowserStateClient
         return fields.length ? Object.fromEntries(fields.map(field => [field, query[field]])) : undefined;
     }
 
+    /** The slot of state `id` on the key `query` carries; `undefined` when the query lacks one of its key fields. */
+    private carriedSlot(id: string, query: StateKeyFields): string | undefined
+    {
+        return this.manifest![id].key.every(field => field in query) ? this.slot(id, this.keyIn(id, query)) : undefined;
+    }
+
     /** Why the manifest refuses `subscribe(id, key)` — an unknown id, or key fields not the state's. */
     private refusal(id: string, key: StateKeyFields | undefined): Error | undefined
     {
@@ -512,9 +518,10 @@ class BrowserStateClient
     }
 
     /**
-     * A watched state whose key the query carried (or a keyless one) and that
-     * the snapshot omits is not served to this subject: `'revoked'`. Not when
-     * a newer connection exists, nor when a grant came after the read started.
+     * Every state the snapshot omits whose key the query carried (or a keyless
+     * one), watched or not, is not served to this subject: `'revoked'` on that
+     * key. Not when a newer connection exists, nor when a grant came after the
+     * read started. Every watched slot the query carries is one of these.
      */
     private applyOmitted(snapshot: Snapshot, query: StateKeyFields, tag: ReadTag): void
     {
@@ -523,12 +530,12 @@ class BrowserStateClient
             return;
         }
 
-        for (const [slot, watch] of this.watched)
+        for (const id of Object.keys(this.manifest!))
         {
-            const asked = !watch.key || carries(query, watch.key);
-            const grantedSince = (this.grants.get(slot) ?? 0) > tag.tick;
+            const slot = this.carriedSlot(id, query);
+            const grantedSince = slot !== undefined && (this.grants.get(slot) ?? 0) > tag.tick;
 
-            if (asked && !(watch.id in snapshot.states) && !grantedSince)
+            if (slot !== undefined && !(id in snapshot.states) && !grantedSince)
             {
                 this.store.revoke(slot, tag.generation);
             }
@@ -784,9 +791,9 @@ class BrowserStateClient
      * must cover the frames sent while no stream was open. The server says in
      * `connected` which states it served their current frame right after it;
      * the snapshot is read only when one it did not serve is neither denied
-     * nor served — or when the server predates `initial`. A denied state the
-     * client watches is `'revoked'`, as an omission from that snapshot would
-     * be. A connection already replaced is ignored.
+     * nor served — or when the server predates `initial`. A denied state whose
+     * key the stream carries is `'revoked'`, watched or not, as an omission
+     * from that snapshot would be. A connection already replaced is ignored.
      */
     private onConnected(connected: ConnectedPayload, stream: Stream): void
     {
@@ -811,14 +818,18 @@ class BrowserStateClient
         }
     }
 
-    /** Each watched state the connection denies, on the key it carries, marked `'revoked'` by it. */
+    /**
+     * Each state the connection denies, on the key its query carries, marked
+     * `'revoked'` by it, watched or not. A keyed state denied because the query
+     * lacks one of its key fields has no carried key, so nothing is marked.
+     */
     private revokeDenied(denied: Set<string>, stream: Stream): void
     {
         for (const id of Object.keys(this.manifest!))
         {
-            const slot = this.slot(id, this.keyIn(id, stream.query));
+            const slot = this.carriedSlot(id, stream.query);
 
-            if (denied.has(stateEventName(id)) && this.watched.has(slot))
+            if (slot !== undefined && denied.has(stateEventName(id)))
             {
                 this.store.revoke(slot, stream.generation);
             }
@@ -855,8 +866,10 @@ class BrowserStateClient
     }
 
     /**
-     * A frame for a key nobody here subscribed is dropped — the server's filter
-     * is the first guard, this the second. A frame is served under its
+     * A frame on the key the stream's query carries is applied, watched or not,
+     * so a later subscribe that does not reopen the stream is served the newest
+     * value; a frame for any other key is dropped unless watched — the server's
+     * filter is the first guard, this the second. A frame is served under its
      * connection's generation: the server sends one only on a connection that
      * allows the state, so a newer connection's frame lifts an older revoke.
      */
@@ -864,7 +877,7 @@ class BrowserStateClient
     {
         const slot = this.slot(id, frame.key);
 
-        if (this.watched.has(slot))
+        if (slot === this.carriedSlot(id, stream.query) || this.watched.has(slot))
         {
             this.serve(slot, frame, stream.generation);
         }
