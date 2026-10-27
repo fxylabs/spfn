@@ -15,12 +15,20 @@
  * const subject = await manager.verify(token); // 'user-123'
  * const again = await manager.verify(token);   // null (already consumed)
  *
+ * // A token tagged with the device key it was minted for is refused at
+ * // consume once `verifyKey` says that key is gone
+ * const tagged = await manager.issue('user-123', { keyId: 'key-1' });
+ * const data = await manager.consume(tagged); // { subject, keyId, expiresAt } | null
+ *
  * // Cleanup on shutdown
  * manager.destroy();
  * ```
  */
 
 import { randomBytes, createHash } from 'crypto';
+import { logger } from '@spfn/core/logger';
+
+const tokenLogger = logger.child('@spfn/core:sse');
 
 /**
  * Hash a token for storage. The raw token is a bearer secret — storing it at rest
@@ -54,7 +62,16 @@ export interface SSEToken
 {
     subject: string;
     expiresAt: number;
+
+    /** The device key the token was minted with; absent → an untagged token. */
+    keyId?: string;
 }
+
+/**
+ * Whether the device key a token was minted with still holds; `false` or a
+ * throw refuses the token.
+ */
+export type SSEKeyVerifier = (keyId: string) => boolean | Promise<boolean>;
 
 /**
  * Token storage interface
@@ -94,6 +111,15 @@ export interface SSETokenManagerConfig
      * @default 60000
      */
     cleanupInterval?: number;
+
+    /**
+     * Re-check, when a token is consumed, the device key it was minted with —
+     * a token minted before its key was revoked is then refused at open.
+     * Runs only for a token that carries a `keyId`; `false` or a throw
+     * refuses it. The token is consumed first, so a refused one is never
+     * retried. `@spfn/auth`'s one-time token manager supplies it.
+     */
+    verifyKey?: SSEKeyVerifier;
 }
 
 // ============================================================================
@@ -218,12 +244,14 @@ export class SSETokenManager
 {
     private store: SSETokenStore;
     private ttl: number;
+    private verifyKey: SSEKeyVerifier | undefined;
     private cleanupTimer: ReturnType<typeof setInterval> | null = null;
 
     constructor(config?: SSETokenManagerConfig)
     {
         this.ttl = config?.ttl ?? 30000;
         this.store = config?.store ?? new InMemoryTokenStore();
+        this.verifyKey = config?.verifyKey;
 
         const cleanupInterval = config?.cleanupInterval ?? 60000;
         this.cleanupTimer = setInterval(() => void this.store.cleanup(), cleanupInterval);
@@ -242,16 +270,19 @@ export class SSETokenManager
     }
 
     /**
-     * Issue a new one-time-use token for the given subject
+     * Issue a new one-time-use token for the given subject. `keyId` tags it
+     * with the device key it is minted for; an empty one leaves it untagged.
      */
-    async issue(subject: string): Promise<string>
+    async issue(subject: string, options?: { keyId?: string }): Promise<string>
     {
         const token = randomBytes(32).toString('hex');
+        const keyId = options?.keyId || undefined;
 
         // The store keys by sha256(token); the raw token is never persisted.
         await this.store.set(token, {
             subject,
             expiresAt: Date.now() + this.ttl,
+            ...(keyId ? { keyId } : {}),
         });
 
         return token;
@@ -263,14 +294,57 @@ export class SSETokenManager
      */
     async verify(token: string): Promise<string | null>
     {
+        return (await this.consume(token))?.subject ?? null;
+    }
+
+    /**
+     * Consume a token and answer what it was minted with: `null` when it is
+     * unknown, expired, already consumed, or its key no longer holds
+     * (`verifyKey`). The token is gone either way. `take` + `checkKey`.
+     */
+    async consume(token: string): Promise<SSEToken | null>
+    {
+        const data = await this.take(token);
+
+        return data && await this.checkKey(data) ? data : null;
+    }
+
+    /**
+     * The store half of `consume`: take the token out of the store and answer
+     * what it was minted with, `null` when it is unknown, expired or already
+     * consumed — its key is not checked yet (`checkKey`). For a caller that
+     * has to register the connection before the key check, so a revocation
+     * landing during the check reaches it.
+     */
+    async take(token: string): Promise<SSEToken | null>
+    {
         const data = await this.store.consume(token);
 
-        if (!data || data.expiresAt <= Date.now())
+        return data && data.expiresAt > Date.now() ? data : null;
+    }
+
+    /**
+     * The key half of `consume`: `verifyKey` on a tagged token; an untagged
+     * one, or no verifier, holds without a call. A throw refuses and is warned
+     * without its text — it may carry what the verifier read.
+     */
+    async checkKey(data: SSEToken): Promise<boolean>
+    {
+        if (!data.keyId || !this.verifyKey)
         {
-            return null;
+            return true;
         }
 
-        return data.subject;
+        try
+        {
+            return await this.verifyKey(data.keyId) === true;
+        }
+        catch
+        {
+            tokenLogger.warn('SSE token key check threw — token refused');
+
+            return false;
+        }
     }
 
     /**

@@ -14,6 +14,11 @@
  * `canSubscribe`) is a pending admission: a `grant` / `revoke` that lands then
  * is recorded on it and applied, without a frame, when the connection opens —
  * so a call the app made is never lost to that window.
+ *
+ * Connections are also indexed by the device key their token was minted with,
+ * so `closeByKey` ends every stream of a revoked key. A close that lands on a
+ * pending admission of that key is recorded the same way, and the connection
+ * never opens.
  */
 
 import { logger } from '@spfn/core/logger';
@@ -38,6 +43,9 @@ export interface SSEConnection
 {
     /** `undefined` when the stream runs without auth — such a connection is never registered. */
     readonly subject: string | undefined;
+
+    /** The device key its token was minted with; `undefined` for an untagged token — never closed by key. */
+    readonly keyId: string | undefined;
     readonly requested: readonly string[];
     readonly allowed: Set<string>;
     readonly denied: Set<string>;
@@ -49,11 +57,20 @@ export interface SSEConnection
 
     /** Enqueue a protocol frame about one event (dropped once the connection is dead). */
     readonly notify: (frame: SubscriptionFrame, eventName: string) => void;
+
+    /** End the stream server-side: unsubscribe, leave the registry, close the writer (idempotent). */
+    readonly close: (reason: string) => void;
 }
 
 export type ConnectionRegistry = ReturnType<typeof createConnectionRegistry>;
 
 type SubscriptionChange = 'grant' | 'revoke';
+
+/** Why a pending admission does not open: the client left, or its key was revoked meanwhile. */
+export type AdmissionRefusal = 'aborted during admission' | 'key revoked';
+
+/** The reason `closeByKey` closes a connection with. */
+const KEY_REVOKED = 'key revoked';
 
 /**
  * A connect of one subject between its first app-data read and its open.
@@ -64,43 +81,49 @@ export interface PendingAdmission
 {
     /**
      * Apply the recorded changes to `connection`, then swap this entry for the
-     * open connection. `false`, with nothing applied or registered, once cancelled.
+     * open connection; `null` once open. Once cancelled, or after a recorded
+     * key close, nothing is applied or registered and the answer is why.
      */
-    readonly open: (connection: SSEConnection) => boolean;
+    readonly open: (connection: SSEConnection) => AdmissionRefusal | null;
 
     /** Drop this entry (refused, aborted, or thrown); idempotent. */
     readonly cancel: () => void;
 }
 
-/** One `grant` / `revoke` recorded on a pending admission. */
-interface RecordedChange
-{
-    kind: SubscriptionChange;
-    eventName: string;
-    match?: SubscriptionMatch;
-}
+/** One `grant` / `revoke` recorded on a pending admission, or a close of its key. */
+type RecordedChange =
+    | { kind: SubscriptionChange; eventName: string; match?: SubscriptionMatch }
+    | { kind: 'close' };
 
 /** The changes recorded on one pending admission, in call order (the last one wins). */
 type RecordedChanges = RecordedChange[];
 
 /**
  * Create the registry of one SSE handler, keyed by subject → open connections
- * (a subject with two tabs has two).
+ * (a subject with two tabs has two), and by device key → open connections.
  */
 export function createConnectionRegistry()
 {
     const bySubject = new Map<string, Set<SSEConnection>>();
+    const byKey = new Map<string, Set<SSEConnection>>();
     const pendingBySubject = new Map<string, Set<RecordedChanges>>();
+    const pendingByKey = new Map<string, Set<RecordedChanges>>();
 
     /**
-     * Register a pending admission of `subject`; `signal` is the connect's
-     * abort signal, listened to until the admission ends either way.
+     * Register a pending admission of `subject` (its token minted with
+     * `keyId`, if any); `signal` is the connect's abort signal, listened to
+     * until the admission ends either way.
      */
-    const beginAdmission = (subject: string, signal: AbortSignal): PendingAdmission =>
+    const beginAdmission = (subject: string, keyId: string | undefined, signal: AbortSignal): PendingAdmission =>
     {
         const changes: RecordedChanges = [];
         addToSet(pendingBySubject, subject, changes);
-        const end = endOnce(signal, () => removeFromSet(pendingBySubject, subject, changes));
+        addToOptionalSet(pendingByKey, keyId, changes);
+        const end = endOnce(signal, () =>
+        {
+            removeFromSet(pendingBySubject, subject, changes);
+            removeFromOptionalSet(pendingByKey, keyId, changes);
+        });
 
         return {
             cancel: end,
@@ -108,13 +131,19 @@ export function createConnectionRegistry()
             {
                 if (!end())
                 {
-                    return false;
+                    return 'aborted during admission';
+                }
+
+                if (changes.some(change => change.kind === 'close'))
+                {
+                    return KEY_REVOKED;
                 }
 
                 applyRecorded(connection, changes);
                 addToSet(bySubject, subject, connection);
+                addToOptionalSet(byKey, connection.keyId, connection);
 
-                return true;
+                return null;
             },
         };
     };
@@ -141,8 +170,23 @@ export function createConnectionRegistry()
         }
     };
 
+    /**
+     * Close every open connection whose token was minted with `keyId`, and
+     * record the close on its pending admissions; answers how many open ones
+     * it closed. Iterates a copy: each close removes its connection.
+     */
+    const closeByKey = (keyId: string): number =>
+    {
+        const connections = [...byKey.get(keyId) ?? []];
+        pendingByKey.get(keyId)?.forEach(changes => changes.push({ kind: 'close' }));
+        connections.forEach(connection => connection.close(KEY_REVOKED));
+
+        return connections.length;
+    };
+
     return {
         beginAdmission,
+        closeByKey,
 
         remove: (connection: SSEConnection): void =>
         {
@@ -150,10 +194,15 @@ export function createConnectionRegistry()
             {
                 removeFromSet(bySubject, connection.subject, connection);
             }
+
+            removeFromOptionalSet(byKey, connection.keyId, connection);
         },
 
         /** Open connections only — a pending admission is not counted. */
         count: (subject: string): number => bySubject.get(subject)?.size ?? 0,
+
+        /** Open connections whose token was minted with `keyId`. */
+        countByKey: (keyId: string): number => byKey.get(keyId)?.size ?? 0,
 
         pendingCount: (subject: string): number => pendingBySubject.get(subject)?.size ?? 0,
 
@@ -204,6 +253,23 @@ function addToSet<T>(map: Map<string, Set<T>>, key: string, value: T): void
     map.set(key, set);
 }
 
+/** `addToSet` under a key that may be absent (an untagged token): absent → not indexed. */
+function addToOptionalSet<T>(map: Map<string, Set<T>>, key: string | undefined, value: T): void
+{
+    if (key)
+    {
+        addToSet(map, key, value);
+    }
+}
+
+function removeFromOptionalSet<T>(map: Map<string, Set<T>>, key: string | undefined, value: T): void
+{
+    if (key)
+    {
+        removeFromSet(map, key, value);
+    }
+}
+
 /** Remove `value` and drop the key once its set is empty, so neither map grows on reconnects. */
 function removeFromSet<T>(map: Map<string, Set<T>>, key: string, value: T): void
 {
@@ -235,13 +301,14 @@ export function matchesRequest(match: SubscriptionMatch | undefined, request: Su
  */
 function applyRecorded(connection: SSEConnection, changes: RecordedChanges): void
 {
-    changes.forEach(({ kind, eventName, match }) =>
+    changes.forEach((change) =>
     {
-        if (!matchesRequest(match, connection.request))
+        if (change.kind === 'close' || !matchesRequest(change.match, connection.request))
         {
             return;
         }
 
+        const { kind, eventName } = change;
         const [from, to] = kind === 'grant'
             ? [connection.denied, connection.allowed]
             : [connection.allowed, connection.denied];

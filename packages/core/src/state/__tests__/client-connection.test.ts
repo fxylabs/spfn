@@ -32,12 +32,14 @@
  * | S24 | two subscribers, `failed`; one unsubscribes; a subscribe | no new `EventSource` nor read, still `failed`; the subscribe reopens; the same with the manifest unknown |
  * | S25 | `failed` stream, the last unsubscribe; a subscribe     | `reconnecting 0`, heard once; no new `EventSource`; the subscribe reopens → `connected` |
  * | S25b | `maxRetries: 1`, `failed` first snapshot, the last unsubscribe; a subscribe | `reconnecting 0`, no read; the subscribe gets one read and one retry |
+ * | R17 | the stream drops; the SSE client's token mint answers 401 | `{ status: 'closed', reason: 'unauthorized' }`; no retry timer; neither `online` nor a new `subscribe` reopens it; the app's `retry()` does |
  *
  * S16 (`useConnectionStatus`) is in `react.test.tsx`.
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ConnectionStatus } from '../client';
+import { UnauthorizedError } from '../../errors/http-errors';
 import { at, FakeEventSource, harness, initialOf, opened, servedStates, settle } from './client-harness';
 
 // The api client reads the request's cookies and host on the server-side arm; there is no request here.
@@ -569,6 +571,37 @@ describe('state client — connection status', () =>
         await vi.waitFor(() => expect(h.client.connection()).toEqual({ status: 'failed' }), { interval: 1 });
         await new Promise(resolve => setTimeout(resolve, 30));
         expect(times).toHaveLength(4);
+        h.client.close();
+    });
+
+    it('R17 a 401 token mint is closed / unauthorized: no retry timer, online and a new subscribe open nothing, retry() reopens', async () =>
+    {
+        const acquireToken = vi.fn().mockResolvedValueOnce('first-token').mockRejectedValue(new UnauthorizedError());
+        const listener = vi.fn();
+        const h = harness({}, { acquireToken });
+        h.client.subscribe('runtime', w1, () => undefined);
+        const es = await opened();
+        h.client.subscribeConnection(listener);
+
+        es.fail();
+        await vi.waitFor(() => expect(acquireToken).toHaveBeenCalledTimes(2));
+        await new Promise(resolve => setTimeout(resolve, 50));   // five times the SSE reconnectDelay
+
+        expect(h.client.connection()).toEqual({ status: 'closed', reason: 'unauthorized' });
+        expect(heard(listener)).toEqual([{ status: 'reconnecting', attempt: 1 }, { status: 'closed', reason: 'unauthorized' }]);
+        expect(acquireToken).toHaveBeenCalledTimes(2);
+        expect(FakeEventSource.instances).toHaveLength(1);
+
+        globalThis.dispatchEvent(new Event('online'));
+        h.client.subscribe('member', w1, () => undefined);
+        await settle();
+        expect(acquireToken).toHaveBeenCalledTimes(2);
+        expect(h.client.connection()).toEqual({ status: 'closed', reason: 'unauthorized' });
+
+        acquireToken.mockResolvedValue('after-sign-in');
+        h.client.retry();
+        await vi.waitFor(() => expect(FakeEventSource.instances).toHaveLength(2));
+        expect(h.client.connection()).toEqual(starting);
         h.client.close();
     });
 });

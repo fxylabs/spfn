@@ -9,9 +9,11 @@ import { NewUserPublicKey, userPublicKeys } from '../entities/user-public-keys';
 import { users } from '../entities/users';
 import { mfaChallenges } from '../entities/mfa-challenges';
 import type { ClientIdentity } from '../client-proof/wire-version';
-import { BaseRepository } from '@spfn/core/db';
+import { BaseRepository, onAfterCommit } from '@spfn/core/db';
+import { closeSSEConnectionsByKey } from '@spfn/core/event/sse';
 import { eq, and, or, isNull, lt, desc, sql } from 'drizzle-orm';
 import { getConcurrentUseWindowMs } from '../lib/config';
+import { authLogger } from '../logger';
 
 /**
  * Throttle window for lastUsedAt writes. The column is for audit / inactive-key
@@ -30,6 +32,21 @@ const LAST_USED_THROTTLE_MS = 60_000;
 export interface RevokedKey
 {
     keyId: string;
+}
+
+/**
+ * Close the SSE streams each revoked key opened, once the revocation commits —
+ * at once outside a transaction, never after a rollback. Every revocation ends
+ * in one of the two statements below, so no revoke path can forget it. A
+ * failed close is logged by count and never reaches the caller or the other
+ * after-commit callbacks.
+ */
+function closeStreamsAfterCommit(keyIds: string[]): void
+{
+    keyIds.forEach(keyId => onAfterCommit(() => closeSSEConnectionsByKey(keyId).catch(() =>
+    {
+        authLogger.session.warn('SSE streams of a revoked key could not be closed', { count: 1 });
+    })));
 }
 
 /**
@@ -159,6 +176,7 @@ export class KeysRepository extends BaseRepository
      * 일어났다고 읽는다. 로그인 경로가 그 값으로 "기기 교체인가 새 기기인가"를
      * 가르므로, 죽은 키를 들이밀어 새 기기 알림을 끄는 길이 된다.
      * 폐기 시각·사유도 덮어쓰지 않는다 — 처음 끊긴 순간이 답이다.
+     * 폐기된 키가 연 SSE 스트림은 커밋 뒤에 닫힌다 (`closeStreamsAfterCommit`).
      * Write primary 사용
      */
     async revokeByKeyIdAndUserId(
@@ -182,6 +200,8 @@ export class KeysRepository extends BaseRepository
                 ),
             )
             .returning();
+
+        closeStreamsAfterCommit(result.map(row => row.keyId));
 
         return result[0] ?? null;
     }
@@ -256,6 +276,9 @@ export class KeysRepository extends BaseRepository
      * row and an active row are disjoint sets, so the two statements never
      * contend for the same row.
      *
+     * The SSE streams of every revoked key close after commit, for the same
+     * "no caller can forget" reason (`closeStreamsAfterCommit`).
+     *
      * Write primary 사용
      */
     private async revokeActive(userId: number, reason: string, keepKeyId?: string): Promise<RevokedKey[]>
@@ -288,8 +311,11 @@ export class KeysRepository extends BaseRepository
               AND t.is_active = true${spare}
             RETURNING t.key_id AS "keyId"
         `);
+        const revoked = rows as unknown as RevokedKey[];
 
-        return rows as unknown as RevokedKey[];
+        closeStreamsAfterCommit(revoked.map(row => row.keyId));
+
+        return revoked;
     }
 
     /**

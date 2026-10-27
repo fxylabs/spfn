@@ -280,6 +280,19 @@ shared, any token from auth's own endpoint also opens the socket, so `acquireTok
 `() => authApi.issueOneTimeToken.call().then(r => r.token)` (the generated route map holds
 that route once the app router mounts `authRouter` with `.packages()`).
 
+#### Revoked device keys: SSE closes, WebSocket does not yet
+
+The SSE token endpoint tags each token with the caller's device key (`getKeyId`, default
+`c.get('auth')?.keyId`), and `@spfn/auth` closes a key's SSE streams on every pod once its
+revocation commits — "sign out this device" ends that device's stream, and a token it minted
+before the sign-out is refused at open. A 401 from the next token mint stops the SSE client
+(`onClose('unauthorized')`). See *Closing the streams of a revoked device key* in
+`@spfn/core/event`'s README.
+
+The WebSocket endpoint does not take part: its tokens are untagged and an open socket is not
+closed when the key that opened it is revoked. Its next connect needs a fresh token, which a
+revoked session cannot mint. Use SSE for a stream that must end with the device's session.
+
 ### Authorization
 
 #### `authorize` — Subscription authorization (once on connect)

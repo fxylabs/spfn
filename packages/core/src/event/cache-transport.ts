@@ -14,6 +14,7 @@
 import { logger } from '@spfn/core/logger';
 import type { EventRouterBase } from './router';
 import type { PubSubCache, SubscriptionMatch } from './types';
+import { applyKeyClose } from './sse/key-close';
 
 const transportLogger = logger.child('@spfn/core:event-transport');
 
@@ -38,6 +39,15 @@ const WARN_THROTTLE_MS = 30000;
  * chunk during a sustained outage (50 chunks × 5s = minutes of request hang).
  */
 const PUBLISH_BREAKER_COOLDOWN_MS = 10000;
+
+/**
+ * A key close the transport could not publish is re-sent after this long: just past the
+ * breaker's cooldown, so the retry is the half-open probe rather than another skip.
+ */
+const KEY_CLOSE_RETRY_MS = PUBLISH_BREAKER_COOLDOWN_MS + 500;
+
+/** Cap on key closes waiting to be re-sent; past it the oldest is dropped. */
+const PENDING_KEY_CLOSE_CAP = 1000;
 
 /**
  * Reject if `promise` doesn't settle within `ms`. ioredis has no command timeout by
@@ -95,6 +105,16 @@ function throttledWarn(key: string, message: string, fields: Record<string, unkn
 }
 
 /**
+ * Forget every throttle stamp, so a test's warnings do not depend on the ones before it.
+ *
+ * @internal Exported for tests
+ */
+export function _resetWarnThrottle(): void
+{
+    warnThrottle.clear();
+}
+
+/**
  * Minimal pub/sub client interface (compatible with ioredis Redis | Cluster).
  * A duplicated connection is required for SUBSCRIBE — ioredis puts a connection
  * into subscriber mode, where regular commands are rejected.
@@ -130,6 +150,9 @@ interface TransportState
     subscriber: PubSubClient | undefined;
     channelPrefix: string | undefined;
     wired: Map<string, WirableEvent>;
+
+    /** Each Redis-backed cache's key closes waiting to be re-sent, so shutdown can drop them. */
+    keyCloseDeferrals: Map<PubSubCache, KeyCloseDeferral>;
 }
 
 const STATE_KEY = Symbol.for('@spfn/core:event-transport');
@@ -139,7 +162,132 @@ const state: TransportState = ((globalThis as any)[STATE_KEY] ??= {
     subscriber: undefined,
     channelPrefix: undefined,
     wired: new Map<string, WirableEvent>(),
+    keyCloseDeferrals: new Map<PubSubCache, KeyCloseDeferral>(),
 });
+
+// ── Deferred key closes ───────────────────────────────────────────
+// A `$control` close skipped by the open breaker, or whose publish failed, must
+// not be lost: no other pod has anything else that ends a revoked key's stream.
+
+interface KeyCloseDeferral
+{
+    /** Hold a close for re-sending (once per key id) and arm the retry. */
+    defer(message: KeyCloseControlMessage): void;
+
+    /** Re-send every held close through the cache's `publish`; one that fails again is held again. */
+    flush(): Promise<void>;
+
+    /** Drop every held close and the retry, for good. */
+    dispose(): void;
+
+    /** The held key ids, oldest first. */
+    keyIds(): string[];
+}
+
+function createKeyCloseDeferral(resend: (message: KeyCloseControlMessage) => Promise<void>): KeyCloseDeferral
+{
+    const pending = new Map<string, KeyCloseControlMessage>();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let flushing = false;
+    let disposed = false;
+
+    const arm = (): void =>
+    {
+        if (timer || disposed)
+        {
+            return;
+        }
+
+        timer = setTimeout(() =>
+        {
+            timer = undefined;
+            void flush();
+        }, KEY_CLOSE_RETRY_MS);
+        timer.unref?.();
+    };
+
+    const disarm = (): void =>
+    {
+        clearTimeout(timer);
+        timer = undefined;
+    };
+
+    const flush = async (): Promise<void> =>
+    {
+        // A resend that succeeds flushes again: the flag keeps that from recursing.
+        if (flushing || pending.size === 0)
+        {
+            return;
+        }
+
+        flushing = true;
+        const snapshot = [...pending.values()];
+        pending.clear();
+        for (const message of snapshot)
+        {
+            await resend(message);
+        }
+        flushing = false;
+
+        if (pending.size > 0)
+        {
+            arm();
+        }
+        else
+        {
+            disarm();
+        }
+    };
+
+    return {
+        defer: (message) =>
+        {
+            if (disposed)
+            {
+                return;
+            }
+
+            pending.delete(message.keyId);
+            pending.set(message.keyId, message);
+            dropOldestPastCap(pending);
+            throttledWarn('key-close-deferred', 'SSE key close deferred — re-sent when the pub/sub transport recovers', {
+                channel: CONTROL_CHANNEL,
+                pending: pending.size,
+            });
+            arm();
+        },
+        flush,
+        dispose: () =>
+        {
+            disposed = true;
+            disarm();
+            pending.clear();
+        },
+        keyIds: () => [...pending.keys()],
+    };
+}
+
+function dropOldestPastCap(pending: Map<string, KeyCloseControlMessage>): void
+{
+    const dropped = pending.size - PENDING_KEY_CLOSE_CAP;
+    if (dropped <= 0)
+    {
+        return;
+    }
+
+    [...pending.keys()].slice(0, dropped).forEach(keyId => pending.delete(keyId));
+    throttledWarn('key-close-dropped', 'SSE key closes dropped — too many waiting to be re-sent', { dropped });
+}
+
+/**
+ * The key ids a cache holds for re-sending, oldest first.
+ *
+ * @internal Exported for tests
+ */
+export function _pendingKeyCloses(cache: PubSubCache): string[]
+{
+    return state.keyCloseDeferrals.get(cache)?.keyIds() ?? [];
+}
 
 /**
  * Resolve the channel prefix: explicit option → env override → default.
@@ -155,6 +303,9 @@ function resolveChannelPrefix(override?: string): string
  * One duplicated connection is created lazily and shared across every channel.
  * Publish failures are logged and swallowed — SSE is lossy (at-most-once), so a
  * dropped event during a Redis blip must never crash `emit` or kill a stream.
+ * The warning names the channel alone, nothing derived from the error: a client's
+ * error can echo the command, and with it any published payload (an event's as
+ * much as a control message's).
  */
 export function createRedisPubSubCache(
     client: PubSubClient,
@@ -238,7 +389,19 @@ export function createRedisPubSubCache(
         }
     };
 
-    return {
+    // Set below, once `cache` exists: the deferral re-sends through its `publish`.
+    let keyCloses: KeyCloseDeferral;
+
+    // A key close Redis did not take is held for re-sending; every other message stays dropped (lossy).
+    const deferIfKeyClose = (name: string, message: unknown): void =>
+    {
+        if (name === CONTROL_CHANNEL && isKeyCloseMessage(message))
+        {
+            keyCloses.defer(message);
+        }
+    };
+
+    const cache: PubSubCache = {
         publish: async (name: string, message: unknown): Promise<void> =>
         {
             const channel = channelPrefix + name;
@@ -291,6 +454,7 @@ export function createRedisPubSubCache(
             if (!ready || (degradedUntil > 0 && now < degradedUntil))
             {
                 // Not connected, or breaker open → skip Redis, deliver locally.
+                deferIfKeyClose(name, message);
                 deliverLocal(channel, JSON.parse(serialized));
 
                 return;
@@ -311,6 +475,7 @@ export function createRedisPubSubCache(
                 // forever and hang `emit` (and the request that called it).
                 await withTimeout(client.publish(channel, serialized), PUBLISH_TIMEOUT_MS, 'pub/sub publish');
                 degradedUntil = 0; // success → close the breaker
+                void keyCloses.flush(); // Redis is back: re-send the key closes it missed
 
                 // Publish reached Redis (remote pods get it via their echo), but if THIS
                 // pod's subscriber socket is down its echo won't arrive — cover same-pod
@@ -324,19 +489,19 @@ export function createRedisPubSubCache(
                     deliverLocal(channel, JSON.parse(serialized));
                 }
             }
-            catch (err)
+            catch
             {
                 // Redis blip/timeout: open the breaker so subsequent emits fast-path to
                 // local delivery instead of each paying the timeout. The cross-pod echo
                 // won't arrive, so deliver to this pod's subscribers directly. Parse the
                 // serialized copy so handlers see the SAME shape as the echo path (a JSON
                 // round-trip), never the live mutable object. Throttled WARN — a sustained
-                // outage emits one line per window, not one per chunk.
+                // outage emits one line per window, not one per chunk; the channel alone
+                // (see the JSDoc above). Keyed by channel, so one channel's failure never
+                // silences another's — a key close on `$control` behind an event's.
                 degradedUntil = Date.now() + PUBLISH_BREAKER_COOLDOWN_MS;
-                throttledWarn('publish-failed', 'Pub/sub publish failed — local delivery only', {
-                    channel,
-                    error: err instanceof Error ? err.message : String(err),
-                });
+                throttledWarn(`publish-failed:${channel}`, 'Pub/sub publish failed — local delivery only', { channel });
+                deferIfKeyClose(name, message);
                 deliverLocal(channel, JSON.parse(serialized));
             }
         },
@@ -371,12 +536,17 @@ export function createRedisPubSubCache(
             handlers.set(channel, handler);
         },
     };
+
+    keyCloses = createKeyCloseDeferral(message => cache.publish(CONTROL_CHANNEL, message));
+    state.keyCloseDeferrals.set(cache, keyCloses);
+
+    return cache;
 }
 
-// ── Subscription control channel (grant / revoke across pods) ─────
+// ── Subscription control channel (grant / revoke / key close across pods) ─────
 
 /**
- * The channel `grant` / `revoke` travel on, published through the same
+ * The channel `grant` / `revoke` and key closes travel on, published through the same
  * {@link PubSubCache} as events (so `<prefix>$control` on Redis — same timeouts,
  * breaker and warn throttling, no second connection). Event channels are
  * `<prefix><event name>`; an event named `control` would collide with a bare
@@ -400,6 +570,19 @@ export interface SubscriptionControlMessage
     /** The publishing binding, so a pod skips its own echo (it applied the change locally first). */
     origin: string;
 }
+
+/** What one key close publishes: close the SSE streams that device key opened. */
+export interface KeyCloseControlMessage
+{
+    kind: 'close';
+    keyId: string;
+
+    /** The publishing binding, so a pod skips its own echo (it closed locally first). */
+    origin: string;
+}
+
+/** Everything the control channel carries. */
+export type ControlMessage = SubscriptionControlMessage | KeyCloseControlMessage;
 
 /** Applies one control message to the local registries of one event. */
 export type SubscriptionControlApply = (
@@ -434,7 +617,23 @@ function ensureControlBinding(cache: PubSubCache): ControlBinding
     return binding;
 }
 
-function isControlMessage(message: unknown): message is SubscriptionControlMessage
+function isControlMessage(message: unknown): message is ControlMessage
+{
+    return isSubscriptionControlMessage(message) || isKeyCloseMessage(message);
+}
+
+function isKeyCloseMessage(message: unknown): message is KeyCloseControlMessage
+{
+    const candidate = message as Partial<KeyCloseControlMessage> | null;
+
+    return !!candidate
+        && candidate.kind === 'close'
+        && typeof candidate.keyId === 'string'
+        && candidate.keyId !== ''
+        && typeof candidate.origin === 'string';
+}
+
+function isSubscriptionControlMessage(message: unknown): message is SubscriptionControlMessage
 {
     const candidate = message as Partial<SubscriptionControlMessage> | null;
 
@@ -474,6 +673,14 @@ function dispatchControl(binding: ControlBinding, message: unknown): void
 
     if (message.origin === binding.origin)
     {
+        return;
+    }
+
+    // Not an event: a key close reaches every handler of this pod, whatever events it serves.
+    if (message.kind === 'close')
+    {
+        applyKeyClose(message.keyId);
+
         return;
     }
 
@@ -542,13 +749,43 @@ export async function publishSubscriptionControl(
         origin: ensureControlBinding(cache).origin,
     };
 
-    await cache.publish(CONTROL_CHANNEL, message).catch((err: unknown) =>
+    await cache.publish(CONTROL_CHANNEL, message).catch(() =>
     {
+        // Nothing from the error: an app-supplied cache's error can echo the command, and with it the subject.
         throttledWarn('control-publish-failed', 'Subscription control publish failed — applied on this pod only', {
             event: eventName,
-            error: err instanceof Error ? err.message : String(err),
         });
     });
+}
+
+/**
+ * Tell every other pod to close the SSE streams of a device key this pod
+ * already closed locally. A failure is warned (throttled) and swallowed. On a
+ * cache from {@link createRedisPubSubCache}, a close Redis did not take is held
+ * and re-sent after the breaker cooldown or with the next successful publish;
+ * on any other cache it stays local. Neither the key id nor the error's subject is logged.
+ */
+export async function publishKeyClose(cache: PubSubCache, keyId: string): Promise<void>
+{
+    const message: KeyCloseControlMessage = { kind: 'close', keyId, origin: ensureControlBinding(cache).origin };
+
+    await cache.publish(CONTROL_CHANNEL, message).catch(() =>
+    {
+        // Nothing from the error: its message and name can both echo the command, and with it the key id.
+        throttledWarn('key-close-publish-failed', 'SSE key close publish failed — closed on this pod only', {
+            channel: CONTROL_CHANNEL,
+        });
+    });
+}
+
+/**
+ * The pub/sub cache the event transport publishes on: the one wiring already
+ * resolved, else resolved now from `@spfn/core/cache` (`getCache()`); undefined
+ * without a cache. For a publisher that may run on a pod serving no events.
+ */
+export async function resolveEventPubSubCache(): Promise<PubSubCache | undefined>
+{
+    return state.pubSubCache ?? await resolvePubSubCache();
 }
 
 /**
@@ -752,6 +989,10 @@ export async function closeEventTransport(): Promise<void>
     {
         event._resetCache?.();
     }
+
+    // A held close would otherwise be re-sent by a transport that is shutting down.
+    state.keyCloseDeferrals.forEach(deferral => deferral.dispose());
+    state.keyCloseDeferrals.clear();
 
     state.subscriber = undefined;
     state.pubSubCache = undefined;

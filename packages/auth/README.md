@@ -993,6 +993,18 @@ await authApi.revokeAllKeys.call({ body: { includeCurrent: true } });   // every
   admission read the key and the account status from the database on every request with no cache
   in front of it, and they read the write primary: a read replica (`DATABASE_READ_URL`) does not
   delay a revocation or a suspension, nor refuse a key registered a moment ago.
+- **Revocation closes the key's live streams, after commit.** Every path that revokes a key —
+  `revokeKey`, `revokeAllKeys`, `logout`, a password change or reset, an account deletion request,
+  the sign-out-everywhere link, and the replacements (rotation, session renewal, a re-login with
+  `oldKeyId`) — ends in the keys repository, which calls `closeSSEConnectionsByKey` from
+  `@spfn/core/event/sse` for each revoked key once the transaction commits (at once outside one;
+  never after a rollback). The SSE streams that key opened close on every pod, and a token it
+  minted before the revocation is refused at open: the one-time token manager re-checks the key
+  (active, not expired, read on the primary) when the token is consumed. A device whose key was
+  replaced reconnects with the new one; a signed-out device's token mint answers 401 and its
+  client stops. An app that shares the manager with `.events()`
+  (`tokenManager: () => getOneTimeTokenManager()`) gets this with no change. A failed close is
+  logged by count and never fails the revocation.
 - **`includeRevoked: true` shows what was already cut off**, with `revokedAt`. The default is only
   keys that can still sign.
 

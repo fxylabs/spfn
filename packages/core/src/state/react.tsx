@@ -106,7 +106,9 @@ function serverConnection(): ConnectionStatus
 
 /**
  * The client's connection status, re-rendered on every change: `'connected'`,
- * `'reconnecting'` with the attempt, or `'failed'` until `client.retry()`.
+ * `'reconnecting'` with the attempt, `'failed'` until `client.retry()`, or
+ * `'closed'` with reason `'unauthorized'` once the token mint answered 401 —
+ * the status reaches the hook unchanged, and only `client.retry()` reopens it.
  *
  * @example
  * ```tsx

@@ -642,6 +642,8 @@ async function registerSSEEndpoint(app: Hono, config?: ServerConfig): Promise<vo
         const mwHandlers = resolveEndpointMiddlewares(config).map(mw => mw.handler);
         const getSubject = authConfig.getSubject
             ?? ((c: Context) => (c.get('auth') as Record<string, string> | undefined)?.userId ?? null);
+        const getKeyId = authConfig.getKeyId
+            ?? ((c: Context) => (c.get('auth') as Record<string, string> | undefined)?.keyId);
 
         app.on(['POST'], [tokenPath], ...mwHandlers, async (c: Context) =>
         {
@@ -651,7 +653,7 @@ async function registerSSEEndpoint(app: Hono, config?: ServerConfig): Promise<vo
                 return c.json({ error: 'Unable to identify subject' }, 401);
             }
 
-            const token = await tokenManager!.issue(subject);
+            const token = await tokenManager!.issue(subject, { keyId: getKeyId(c) ?? undefined });
 
             return c.json({ token });
         });

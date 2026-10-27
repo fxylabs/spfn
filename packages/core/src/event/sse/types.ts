@@ -83,6 +83,15 @@ export interface SSEHandlerAuthConfig
     getSubject?: (c: Context) => string | null;
 
     /**
+     * Extract the device key the token is minted for, so that revoking the key
+     * closes the streams it opened (`closeSSEConnectionsByKey`) and refuses a
+     * token minted before the revocation (`SSETokenManagerConfig.verifyKey`).
+     * Empty, `null` or `undefined` → an untagged token, never closed by key.
+     * @default (c) => c.get('auth')?.keyId
+     */
+    getKeyId?: (c: Context) => string | null | undefined;
+
+    /**
      * Subscription authorization hook (called once on connect)
      *
      * Return allowed events subset. Empty array = 403 rejection.
@@ -140,6 +149,7 @@ export interface SSEAuthConfig<TRouter extends EventRouterDef<any>>
     store?: SSETokenStore;
     tokenManager?: SSETokenManager | (() => SSETokenManager);
     getSubject?: (c: Context) => string | null;
+    getKeyId?: (c: Context) => string | null | undefined;
     authorize?: (
         subject: string,
         events: InferEventNames<TRouter>[],
@@ -265,7 +275,9 @@ export interface SSEClientConfig
      * Acquire a one-time SSE token before connecting.
      *
      * Called on every (re)connect. The returned token is appended
-     * to the SSE URL as `?token=...`.
+     * to the SSE URL as `?token=...`. A rejection whose `statusCode` or
+     * `status` is 401 closes the subscription (`onClose('unauthorized')`)
+     * instead of reconnecting; any other rejection reconnects.
      *
      * For automatic token acquisition via RPC proxy, use `createAuthSSEClient` instead.
      *
@@ -341,8 +353,11 @@ export interface SSESubscribeOptions<TRouter extends EventRouterDef<any>>
      * - unsubscribe() is called
      * - client.close() is called
      * - Max reconnect attempts exceeded
+     * - `acquireToken` rejected with a 401 (`statusCode` or `status`): reason
+     *   `'unauthorized'`. The session that minted tokens is gone — e.g. its
+     *   device key was revoked — so the client stops instead of reconnecting.
      */
-    onClose?: () => void;
+    onClose?: (reason?: 'unauthorized') => void;
 
     /**
      * Called when reconnecting

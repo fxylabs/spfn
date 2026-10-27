@@ -80,11 +80,15 @@ export type StateListener = () => void;
  * client retries a dropped one — `attempt` is its count, `0` before its first retry;
  * `'failed'` when the retries are exhausted (the SSE client's `maxReconnectAttempts`, the
  * client's `maxRetries` for the first snapshot), until `retry()`, a new `subscribe` or `online`.
+ * `'closed'` with reason `'unauthorized'` when the stream's token mint answered 401 — the
+ * session is gone (e.g. its device key was revoked): no retry is set, and neither `online` nor
+ * a new `subscribe` reopens it; only the app's own `retry()` (after signing in again) does.
  */
 export type ConnectionStatus =
     | { status: 'connected' }
     | { status: 'reconnecting'; attempt: number }
-    | { status: 'failed' };
+    | { status: 'failed' }
+    | { status: 'closed'; reason: 'unauthorized' };
 
 /** Called with the new status after the client's connection status changed. */
 export type ConnectionListener = (status: ConnectionStatus) => void;
@@ -196,7 +200,8 @@ export interface StateClient<TStates extends AnyStateRouter>
     subscribeConnection(listener: ConnectionListener): () => void;
 
     /**
-     * Restart now when `'failed'` or `'reconnecting'`: the first snapshot is
+     * Restart now when `'failed'`, `'reconnecting'` or `'closed'` (unauthorized —
+     * call it once the app signed in again): the first snapshot is
      * read again, its retry count reset, or the stream reopened. A no-op when
      * `'connected'`, while the first snapshot is in flight, or with nothing
      * subscribed — so after `close()`, until a new `subscribe`, which `retry()`

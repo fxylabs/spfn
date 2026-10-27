@@ -59,7 +59,9 @@ From `@spfn/core/event/sse`:
 
 - `createSSEHandler(router, config?, tokenManager?)` — Hono GET handler
 - `SSETokenManager` (class), `CacheTokenStore` (class)
-- Types: `SSEToken`, `SSETokenStore`, `SSETokenManagerConfig`, `SSEMessage`,
+- `closeSSEConnectionsByKey(keyId)` — close the streams a device key opened, on every pod
+  (see [Closing the streams of a revoked device key](#closing-the-streams-of-a-revoked-device-key))
+- Types: `SSEToken`, `SSETokenStore`, `SSETokenManagerConfig`, `SSEKeyVerifier`, `SSEMessage`,
   `SSEHandlerConfig`, `SSEHandlerAuthConfig`, `SSEAuthConfig`, `SSEClientConfig`,
   `SSEEventHandler`, `SSEEventHandlers`, `SSESubscribeOptions`, `SSESubscriptionChange`,
   `SSEConnectionState`, `SSEUnsubscribe`, `ConnectedPayload`
@@ -269,10 +271,10 @@ can't ride along on the stream request. SPFN uses a **token exchange**: an authe
 ```
 Client                              Server
   │  POST /events/token (Bearer JWT) │  ← protected by config.middlewares (e.g. authenticate)
-  │ ───────────────────────────────► │  getSubject(c) → issue one-time token
+  │ ───────────────────────────────► │  getSubject(c), getKeyId(c) → issue one-time token
   │  ◄─────────────────────────────  │  { token: "..." }   (default TTL 30s)
   │  GET /events/stream?token=…&events=…
-  │ ───────────────────────────────► │  verify+consume token (one-time)
+  │ ───────────────────────────────► │  consume token (one-time) → verifyKey(keyId) when tagged
   │                                   │  → authorize(subject, events)
   │                                   │  → resolvePrincipal(subject, request)   (once)
   │                                   │  → event.canSubscribe(ctx)              (once per event)
@@ -295,7 +297,7 @@ export default defineServerConfig()
         auth: { enabled: true },
     })
     .build();
-// → POST /events/token   (mints token; subject = c.get('auth').userId by default)
+// → POST /events/token   (mints token; subject = c.get('auth').userId, keyId = c.get('auth').keyId by default)
 // → GET  /events/stream?token=…&events=…
 ```
 
@@ -359,6 +361,53 @@ export default defineServerConfig()
 ```
 
 When `tokenManager` is provided, `store`/`tokenTtl` are ignored (the external manager owns them).
+`@spfn/auth`'s manager also checks the device key at consume (`verifyKey`, below), so sharing it
+is what makes a token minted before a sign-out useless after it.
+
+### Closing the streams of a revoked device key
+
+A stream outlives the token that opened it: the token is checked once, at open, and pings keep
+the stream alive. So the token carries the **device key** it was minted for, and revoking that
+key ends what it opened.
+
+- **The token is tagged.** The token endpoint passes `getKeyId(c)` (default
+  `c.get('auth')?.keyId`; an app without `auth` is fine) to `issue(subject, { keyId })`. An
+  empty, `null` or `undefined` key leaves the token untagged — such a stream is never closed by
+  key. A non-device value (`'service'`) is stored as given; nothing asks to close it.
+- **A token minted before the revocation is refused at open.** `SSETokenManagerConfig.verifyKey`
+  runs when a tagged token is consumed; `false` or a throw refuses it (`401`). The token is
+  consumed first, so a refused token is never retried. The throw is warned without its text.
+- **`closeSSEConnectionsByKey(keyId)` ends the open ones.** It closes, on this process, every
+  stream whose token carried `keyId` — every `createSSEHandler` of the process, not one — and a
+  connect of that key still in admission ends at open, with no `connected` frame and no
+  subscription. With a cache (resolved lazily from `getCache()`, so a pod serving no events
+  publishes too) it then publishes `{ kind: 'close', keyId }` on the same control channel as
+  `grant` / `revoke`, `<channelPrefix>$control`
+  ([Multi-instance broadcast](#multi-instance-broadcast-cross-pod-fan-out)), so every other pod
+  whose events are wired through the cache closes its own — whatever events it serves; a pod
+  skips its own echo, and a close without a string `keyId` is malformed and ignored. A failed publish is warned and swallowed: the promise
+  always resolves. A close this pod cannot publish while the transport's breaker is open, or
+  whose publish fails, closes this pod's streams at once and is re-sent when the breaker
+  cooldown ends and whenever the next publish succeeds; while it is pending, the key's streams on
+  other pods stay open. Only a Redis outage that never recovers leaves them open until they
+  disconnect, and their next token mint is refused on every pod. At most 1000 closes wait; past
+  that the oldest is dropped, with a warning that gives the count. The log says how many closed and why — never the key id.
+
+```typescript
+import { closeSSEConnectionsByKey } from '@spfn/core/event/sse';
+import { onAfterCommit } from '@spfn/core/db';
+
+// after your own revocation statement
+onAfterCommit(() => closeSSEConnectionsByKey(revokedKeyId));
+```
+
+`@spfn/auth` does this for every key revocation (sign out one device, sign out everywhere,
+logout, password change and reset, account deletion, rotation, renewal, re-login): an app on
+`tokenManager: () => getOneTimeTokenManager()` gets it with no configuration change. The client
+whose stream closed reconnects within `reconnectDelay`; its token mint then answers `401` and
+it stops (`onClose('unauthorized')`, see the [client](#createauthsseclientconfig--with-auth-recommended)).
+A device whose key was *replaced* (rotation, renewal) reconnects with the new key, which the
+response installed meanwhile.
 
 ### Authorization hooks
 
@@ -553,6 +602,7 @@ client.subscribe({
 | `store` | `SSETokenStore` | auto (Cache → InMemory) | token storage backend |
 | `tokenManager` | `SSETokenManager \| () => SSETokenManager` | — | reuse an external manager (lazy resolver recommended); overrides `store`/`tokenTtl` |
 | `getSubject` | `(c: Context) => string \| null` | `c.get('auth')?.userId ?? null` | extract subject on the token endpoint |
+| `getKeyId` | `(c: Context) => string \| null \| undefined` | `c.get('auth')?.keyId` | the device key the token is tagged with; empty → untagged ([revoked keys](#closing-the-streams-of-a-revoked-device-key)) |
 | `authorize` | `(subject, events[]) => events[] \| Promise<…>` | — | subscription authorization (once on connect) |
 | `filter` | `{ [event]?: (subject, payload) => boolean }` | — | per-event payload filter |
 | `resolvePrincipal` | `(subject, request) => unknown \| Promise<unknown>` | — | principal for every `canSubscribe` (once per connection); a throw ⇒ `403` |
@@ -659,6 +709,13 @@ export const { GET, POST } = createRpcProxy({
 });
 ```
 
+**A `401` from the token mint is final.** When `acquireToken` rejects with an error whose
+`statusCode` (a registered class such as `UnauthorizedError`) or `status` (the api client's
+`ApiError`, and `createAuthSSEClient`'s own error) is `401`, the client closes the
+subscription and calls `onClose('unauthorized')` once, instead of reconnecting — the session
+is gone (its device key was revoked), and retrying would mint and fail every `reconnectDelay`
+forever. Any other rejection reconnects as before. `onClose` stays assignable from `() => void`.
+
 ### `subscribeToEvents(events, handlers, config?)` — one-shot helper
 
 ```typescript
@@ -742,7 +799,8 @@ payload can't serialize, the event is **still delivered to this pod's own subscr
 asymmetric case where the publish succeeds but **this pod's subscriber socket is down** (its
 echo — the only path to same-pod streams — wouldn't arrive). A sustained publish outage trips
 a short circuit breaker so emits fast-path to local instead of each paying the publish timeout.
-A publish never crashes `emit` or kills a stream. ioredis auto-reconnects and re-subscribes
+A publish never crashes `emit` or kills a stream. Events are not re-sent; a key close is (see
+`closeSSEConnectionsByKey`). ioredis auto-reconnects and re-subscribes
 (autoResubscribe, default true). A per-event SUBSCRIBE failure at
 startup degrades that event to in-process (logged) rather than aborting boot. Same-pod
 delivery costs one Redis round-trip — for a single-replica deploy with a cache, prefer
@@ -848,7 +906,8 @@ fully decoupled.
   this: on error with `acquireToken` set, it closes and reconnects through its own path to
   mint a fresh token. Don't disable `reconnect` expecting native retry to work with auth.
 - **Stream-time errors aren't subscription errors.** `authorize` returning `[]` ⇒ `403` at
-  connect; invalid event names ⇒ `400`; missing/expired token ⇒ `401`. `onError` on the
+  connect; invalid event names ⇒ `400`; missing/expired token, or one whose key `verifyKey`
+  refuses ⇒ `401`. `onError` on the
   client fires for transport-level drops, not for these HTTP rejections — check the network
   response when a connection never opens.
 - **Subject default.** Without a custom `getSubject`, the token endpoint reads

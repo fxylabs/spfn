@@ -153,7 +153,20 @@ interface SSEConnection
     reconnectTimer: ReturnType<typeof setTimeout> | null;
     reconnectAttempts: number;
     closed: boolean;
-    onClose?: () => void;
+    onClose?: (reason?: 'unauthorized') => void;
+}
+
+/**
+ * Whether a failed token mint was answered 401: the session behind it is gone
+ * (its key revoked), so no later mint will succeed. Both shapes the api client
+ * throws carry it — a registered error class (`UnauthorizedError`) as
+ * `statusCode`, the generic `ApiError` as `status`.
+ */
+function isUnauthorized(error: unknown): boolean
+{
+    const answered = error as { statusCode?: unknown; status?: unknown } | null;
+
+    return answered?.statusCode === 401 || answered?.status === 401;
 }
 
 export function createSSEClient<TRouter extends EventRouterDef<any>>(
@@ -179,7 +192,7 @@ export function createSSEClient<TRouter extends EventRouterDef<any>>(
 
     // Idempotent teardown: closes the connection, fires onClose exactly once,
     // and clears the active slot if this was the live connection.
-    function closeConn(conn: SSEConnection)
+    function closeConn(conn: SSEConnection, reason?: 'unauthorized')
     {
         if (conn.closed)
         {
@@ -206,7 +219,7 @@ export function createSSEClient<TRouter extends EventRouterDef<any>>(
             state = 'closed';
         }
 
-        conn.onClose?.();
+        conn.onClose?.(reason);
     }
 
     function subscribe(options: SSESubscribeOptions<TRouter>): SSEUnsubscribe
@@ -269,11 +282,19 @@ export function createSSEClient<TRouter extends EventRouterDef<any>>(
                 setupReconnect(onReconnect);
             };
 
-            init().catch(() =>
+            init().catch((error: unknown) =>
             {
                 // Don't resurrect a torn-down subscription via reconnect.
                 if (conn.closed)
                 {
+                    return;
+                }
+
+                // A refused mint is final: retrying would mint-and-401 every reconnectDelay forever.
+                if (isUnauthorized(error))
+                {
+                    closeConn(conn, 'unauthorized');
+
                     return;
                 }
 
@@ -609,7 +630,8 @@ export function createAuthSSEClient<TRouter extends EventRouterDef<any>>(
 
             if (!res.ok)
             {
-                throw new Error(`Failed to acquire SSE token: ${res.status}`);
+                // `status` read by the client: a 401 stops it instead of reconnecting.
+                throw Object.assign(new Error(`Failed to acquire SSE token: ${res.status}`), { status: res.status });
             }
 
             const data = await res.json();

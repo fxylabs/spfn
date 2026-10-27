@@ -608,7 +608,7 @@ export function Shell({ initial, workspaceId }: { initial: StateClientInitial<ty
 | `current(id, key?)` | Synchronous: `{ at, value, data?, status }`, `{ status: 'revoked' }` for a state revoked before any value arrived, or `undefined`. The same frozen object until a change is applied |
 | `connection()` | Synchronous: the connection status ([Connection status](#connection-status)), a frozen object, the same reference until it changes |
 | `subscribeConnection(listener)` | Registers `listener(status)`, called with the new status on every change, after `connection()` returns it; returns its unsubscribe (idempotent). The same function subscribed twice is two subscriptions |
-| `retry()` | When `'failed'` or `'reconnecting'`: reads the first snapshot now (its retry count reset), or, once the manifest is known, reopens the stream now. A no-op when `'connected'`, while the first snapshot is in flight, and with nothing subscribed — after `close()` too, until a new `subscribe` |
+| `retry()` | When `'failed'`, `'reconnecting'` or `'closed'` (unauthorized — after the user signed in again): reads the first snapshot now (its retry count reset), or, once the manifest is known, reopens the stream now. A no-op when `'connected'`, while the first snapshot is in flight, and with nothing subscribed — after `close()` too, until a new `subscribe` |
 | `close()` | Closes the stream, drops every listener — connection listeners too — and stops listening to `online`; the status is back to `'reconnecting'` 0. Idempotent. A `subscribe` after it starts the client again, without `online`: `retry()` restarts it as before |
 
 `onError` receives a failure of something the client ran on its own — the first snapshot, the
@@ -695,6 +695,7 @@ first snapshot — so it says where they stand. `connection()` is one of:
 | `{ status: 'connected' }` | a stream is open (the SSE `onOpen`) |
 | `{ status: 'reconnecting', attempt }` | no stream open — not yet, or nothing subscribed — or the SSE client retrying a dropped one: `attempt` is its count (`onReconnect`), reset when a stream opens; `0` before the first stream opens, while the first snapshot is read or retried, and after `retry()` |
 | `{ status: 'failed' }` | the retries are exhausted: the SSE client's `maxReconnectAttempts` (its `onClose`, the attempts spent), or `maxRetries` for the first snapshot. Nothing more is tried until a restart (below) or, with the manifest unknown, a `get`, `write` or `snapshot` that brings it |
+| `{ status: 'closed', reason: 'unauthorized' }` | the stream's token mint answered `401` (the SSE client's `onClose('unauthorized')`): the session is gone — its device key was revoked, e.g. "sign out this device" from another one. No retry is set, and neither `online` nor a `subscribe` reopens it; only the app's own `retry()`, once the user signed in again, does |
 
 - **Start value** `{ status: 'reconnecting', attempt: 0 }`, a client built with `initial` too:
   its entries are ready, its stream is not.
@@ -715,10 +716,17 @@ first snapshot — so it says where they stand. `connection()` is one of:
 - **`close()`** sets `'reconnecting'` 0, drops the connection listeners and removes the
   `online` listener; its own teardown is not `'failed'`. A `subscribe` after it starts the
   client again, and `retry()` restarts it; `online` is not listened to again.
+- **`'closed'` / `'unauthorized'`** is not a network failure, so nothing restarts it on its
+  own: not `online`, not a `subscribe`. `retry()` reopens the stream (`'reconnecting'` 0); the
+  last unsubscribe resets the client to the start value, as from any status.
 
 ```tsx
 const connection = useConnectionStatus(state);
 
+if (connection.status === 'closed')
+{
+    return <Banner>You were signed out on this device.</Banner>;   // connection.reason === 'unauthorized'
+}
 if (connection.status === 'failed')
 {
     return <Banner action={() => state.retry()}>The server has a problem.</Banner>;

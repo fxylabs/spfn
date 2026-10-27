@@ -4,12 +4,12 @@
  *
  * | #   | situation                                                       | expected                                                               |
  * |-----|-----------------------------------------------------------------|------------------------------------------------------------------------|
- * | CR1 | `beginAdmission` with an already-aborted signal                 | ended at once; listener count 0; `open()` returns `false`; nothing registered |
- * | CR2 | cancelled, then `open()`                                        | `false`; nothing applied, notified or registered                       |
+ * | CR1 | `beginAdmission` with an already-aborted signal                 | ended at once; listener count 0; `open()` returns `'aborted during admission'`; nothing registered |
+ * | CR2 | cancelled, then `open()`                                        | `'aborted during admission'`; nothing applied, notified or registered                       |
  * | CR3 | opened, then `cancel()`; then `grant`                           | stays registered; one frame                                            |
  * | CR4 | signal aborts twice                                             | `end` runs once; listener removed                                      |
  * | CR5 | one subject: open + pending + cancelled; `revoke`               | open one notified once; pending one records; cancelled one records nothing; counts 2 open / 0 pending after the pending opens |
- * | CR6 | a `grant` recorded on a pending handle, then `cancel()`, then `open()` | `false`; the recorded change is discarded                       |
+ * | CR6 | a `grant` recorded on a pending handle, then `cancel()`, then `open()` | `'aborted during admission'`; the recorded change is discarded                       |
  */
 
 import { describe, it, expect, vi } from 'vitest';
@@ -28,6 +28,7 @@ function connection(subject: string, e: 'allowed' | 'denied'): SSEConnection
 {
     return {
         subject,
+        keyId: undefined,
         requested: ['e'],
         allowed: new Set(e === 'allowed' ? ['e'] : []),
         denied: new Set(e === 'denied' ? ['e'] : []),
@@ -35,6 +36,7 @@ function connection(subject: string, e: 'allowed' | 'denied'): SSEConnection
         request: { query: {}, headers: {} },
         subscribe: () => () => undefined,
         notify: vi.fn(),
+        close: vi.fn(),
     };
 }
 
@@ -70,13 +72,13 @@ describe('SSE connection registry: pending admission', () =>
         aborted.abort();
         const { signal, live } = countedSignal(aborted);
 
-        const pending = registry.beginAdmission('s', signal);
+        const pending = registry.beginAdmission('s', undefined, signal);
         registry.grant('s', 'e');
         const conn = connection('s', 'denied');
 
         expect(registry.pendingCount('s')).toBe(0);
         expect(live.size).toBe(0);
-        expect(pending.open(conn)).toBe(false);
+        expect(pending.open(conn)).toBe('aborted during admission');
         expect(conn.allowed.size).toBe(0);
         expect(registry.count('s')).toBe(0);
     });
@@ -85,7 +87,7 @@ describe('SSE connection registry: pending admission', () =>
     {
         const registry = createConnectionRegistry();
         const { signal, live } = countedSignal();
-        const pending = registry.beginAdmission('s', signal);
+        const pending = registry.beginAdmission('s', undefined, signal);
         expect(live.size).toBe(1);
 
         pending.cancel();
@@ -93,7 +95,7 @@ describe('SSE connection registry: pending admission', () =>
         const conn = connection('s', 'denied');
 
         expect(live.size).toBe(0);
-        expect(pending.open(conn)).toBe(false);
+        expect(pending.open(conn)).toBe('aborted during admission');
         expect(conn.allowed.size).toBe(0);
         expect(conn.notify).not.toHaveBeenCalled();
         expect(registry.count('s')).toBe(0);
@@ -104,10 +106,10 @@ describe('SSE connection registry: pending admission', () =>
     {
         const registry = createConnectionRegistry();
         const { signal, live } = countedSignal();
-        const pending = registry.beginAdmission('s', signal);
+        const pending = registry.beginAdmission('s', undefined, signal);
         const conn = connection('s', 'denied');
 
-        expect(pending.open(conn)).toBe(true);
+        expect(pending.open(conn)).toBeNull();
         expect(live.size).toBe(0);
         pending.cancel();
         registry.grant('s', 'e');
@@ -121,16 +123,16 @@ describe('SSE connection registry: pending admission', () =>
     {
         const registry = createConnectionRegistry();
         const { controller, signal, live } = countedSignal();
-        const pending = registry.beginAdmission('s', signal);
-        const other = registry.beginAdmission('s', new AbortController().signal);
+        const pending = registry.beginAdmission('s', undefined, signal);
+        const other = registry.beginAdmission('s', undefined, new AbortController().signal);
 
         controller.abort();
         controller.abort();
 
         expect(live.size).toBe(0);
         expect(registry.pendingCount('s')).toBe(1);
-        expect(pending.open(connection('s', 'denied'))).toBe(false);
-        expect(other.open(connection('s', 'denied'))).toBe(true);
+        expect(pending.open(connection('s', 'denied'))).toBe('aborted during admission');
+        expect(other.open(connection('s', 'denied'))).toBeNull();
         expect(registry.count('s')).toBe(1);
     });
 
@@ -138,11 +140,11 @@ describe('SSE connection registry: pending admission', () =>
     {
         const registry = createConnectionRegistry();
         const cancelled = new AbortController();
-        const openHandle = registry.beginAdmission('s', new AbortController().signal);
-        const pendingHandle = registry.beginAdmission('s', new AbortController().signal);
-        const cancelledHandle = registry.beginAdmission('s', cancelled.signal);
+        const openHandle = registry.beginAdmission('s', undefined, new AbortController().signal);
+        const pendingHandle = registry.beginAdmission('s', undefined, new AbortController().signal);
+        const cancelledHandle = registry.beginAdmission('s', undefined, cancelled.signal);
         const openConn = connection('s', 'allowed');
-        expect(openHandle.open(openConn)).toBe(true);
+        expect(openHandle.open(openConn)).toBeNull();
         cancelled.abort();
         expect(registry.pendingCount('s')).toBe(1);
 
@@ -152,10 +154,10 @@ describe('SSE connection registry: pending admission', () =>
 
         expect(openConn.denied.has('e')).toBe(true);
         expect(openConn.notify).toHaveBeenCalledTimes(1);
-        expect(cancelledHandle.open(late)).toBe(false);
+        expect(cancelledHandle.open(late)).toBe('aborted during admission');
         expect(late.allowed.has('e')).toBe(true);
         expect(late.notify).not.toHaveBeenCalled();
-        expect(pendingHandle.open(second)).toBe(true);
+        expect(pendingHandle.open(second)).toBeNull();
         expect(second.denied.has('e')).toBe(true);
         expect(second.notify).not.toHaveBeenCalled();
         expect(registry.count('s')).toBe(2);
@@ -165,13 +167,13 @@ describe('SSE connection registry: pending admission', () =>
     it('CR6 a grant recorded on a pending handle, then cancel(), then open(): false, the recorded change discarded', () =>
     {
         const registry = createConnectionRegistry();
-        const pending = registry.beginAdmission('s', new AbortController().signal);
+        const pending = registry.beginAdmission('s', undefined, new AbortController().signal);
         registry.grant('s', 'e');
 
         pending.cancel();
         const conn = connection('s', 'denied');
 
-        expect(pending.open(conn)).toBe(false);
+        expect(pending.open(conn)).toBe('aborted during admission');
         expect(conn.denied.has('e')).toBe(true);
         expect(conn.allowed.size).toBe(0);
         expect(registry.count('s')).toBe(0);

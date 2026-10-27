@@ -14,6 +14,7 @@ import { Hono } from 'hono';
 import { vi } from 'vitest';
 import { createSSEHandler } from '../handler';
 import { SSETokenManager } from '../token-manager';
+import type { SSETokenManagerConfig } from '../token-manager';
 import type { SSEHandlerConfig } from '../types';
 import type { EventRouterDef } from '../../router';
 import type { EventDef } from '../../types';
@@ -37,6 +38,9 @@ export interface OpenStream
     /** Frames named `event` received so far. */
     named: (event: string) => Frame[];
 
+    /** Whether the server ended the body (always `true` for a refusal). */
+    ended: () => boolean;
+
     /** Disconnect as a client would (aborts the request). */
     close: () => Promise<void>;
 }
@@ -48,6 +52,9 @@ export interface ConnectOptions
 
     /** Abort the request through this controller (a client leaving before the stream opens). */
     controller?: AbortController;
+
+    /** The device key the token is minted with; absent → an untagged token. */
+    keyId?: string;
 }
 
 const openStreams: OpenStream[] = [];
@@ -60,24 +67,29 @@ export async function closeAllStreams(): Promise<void>
 
 /**
  * A Hono app serving one SSE handler. `auth: false` mounts it without a token
- * manager, so connections have no subject.
+ * manager, so connections have no subject; `manager` configures the one it mounts.
  */
-export function createStreamApp(router: EventRouterDef<any>, config: SSEHandlerConfig = {}, auth = true)
+export function createStreamApp(
+    router: EventRouterDef<any>,
+    config: SSEHandlerConfig = {},
+    auth = true,
+    manager: SSETokenManagerConfig = {},
+)
 {
     const app = new Hono();
-    const tokenManager = auth ? new SSETokenManager({ ttl: 5000 }) : undefined;
+    const tokenManager = auth ? new SSETokenManager({ ttl: 5000, ...manager }) : undefined;
     const handler = createSSEHandler(router, { ...config, auth: { enabled: auth, ...config.auth } }, tokenManager);
     app.get('/events/stream', handler);
 
     const connect = async (subject: string | undefined, options: ConnectOptions = {}): Promise<OpenStream> =>
     {
-        const token = subject && tokenManager ? await tokenManager.issue(subject) : undefined;
+        const token = subject && tokenManager ? await tokenManager.issue(subject, { keyId: options.keyId }) : undefined;
         const query = `${options.query ?? 'events=a'}${token ? `&token=${token}` : ''}`;
 
         return openStream(app, `/events/stream?${query}`, options.headers, options.controller);
     };
 
-    return { app, handler, connect };
+    return { app, handler, connect, tokenManager };
 }
 
 /**
@@ -94,10 +106,14 @@ export async function openStream(
     const frames: Frame[] = [];
     const listeners = new Set<() => void>();
     const isStream = res.status === 200;
+    let ended = !isStream;
 
     if (isStream)
     {
-        void pump(res.body!.getReader(), frames, listeners);
+        void pump(res.body!.getReader(), frames, listeners).then(() =>
+        {
+            ended = true;
+        });
     }
 
     const named = (event: string) => frames.filter(f => f.event === event);
@@ -106,6 +122,7 @@ export async function openStream(
         body: isStream ? undefined : await res.json().catch(() => null),
         frames,
         named,
+        ended: () => ended,
         frame: (event, nth = 1) => waitForFrame(() => named(event)[nth - 1], listeners, event),
         close: async () =>
         {

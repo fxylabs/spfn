@@ -23,10 +23,11 @@ import { logger } from '@spfn/core/logger';
 import type { EventRouterDef } from '../router';
 import type { EventDef, SubscribeContext, SubscribeRequest, SubscriptionMatch } from '../types';
 import type { SSEHandlerConfig, SSEHandlerAuthConfig } from './types';
-import type { SSETokenManager } from './token-manager';
+import type { SSEToken, SSETokenManager } from './token-manager';
 import { createBoundedWriter } from './bounded-writer';
 import type { BoundedWriter } from './bounded-writer';
 import { createConnectionRegistry, unsubscribeAll } from './connection-registry';
+import { registerKeyCloseRegistry } from './key-close';
 import type { ConnectionRegistry, PendingAdmission, SSEConnection } from './connection-registry';
 
 const sseLogger = logger.child('@spfn/core:sse');
@@ -115,6 +116,7 @@ export function createSSEHandler<TRouter extends EventRouterDef<any>>(
 
     const registry = createConnectionRegistry();
     registerSubscriptionControls(router, registry);
+    registerKeyCloseRegistry(registry);
 
     const streamConfig: StreamConfig = { router, authConfig, registry, pingInterval, maxQueue };
 
@@ -152,6 +154,9 @@ export function createSSEHandler<TRouter extends EventRouterDef<any>>(
 
         /** @internal Connects of a subject still in admission (tests). */
         _pendingAdmissions: (subject: string): number => registry.pendingCount(subject),
+
+        /** @internal Open registered connections whose token was minted with a key (tests). */
+        _openConnectionsByKey: (keyId: string): number => registry.countByKey(keyId),
     });
 }
 
@@ -163,6 +168,9 @@ export function createSSEHandler<TRouter extends EventRouterDef<any>>(
 interface Admission
 {
     subject: string | undefined;
+
+    /** The device key the token was minted with; never logged. */
+    keyId: string | undefined;
     requested: string[];
     allowed: string[];
     denied: string[];
@@ -201,7 +209,10 @@ function registerSubscriptionControls(router: EventRouterDef<any>, registry: Con
 }
 
 /**
- * Run the connect checks; a `Response` is the refusal to return.
+ * Run the connect checks; a `Response` is the refusal to return. The admission
+ * is registered right after the token leaves the store, before its key check
+ * awaits — a key close landing while `verifyKey` reads is recorded on it, and
+ * `open` refuses the stream.
  */
 async function admitConnection(
     c: Context,
@@ -209,24 +220,71 @@ async function admitConnection(
     tokenManager: SSETokenManager | undefined,
 ): Promise<Admission | Response>
 {
-    const { router, authConfig, registry } = config;
-
-    // ── 1. Token Authentication ──
-    const subject = await authenticateToken(c, tokenManager);
-    if (subject === false)
+    // ── 1. Token Authentication (the store half) ──
+    const token = await takeToken(c, tokenManager);
+    if (token === false)
     {
         return c.json({ error: 'Missing token parameter' }, 401);
     }
-    if (subject === null)
+    if (token === null)
     {
-        return c.json({ error: 'Invalid or expired token' }, 401);
+        return invalidToken(c);
     }
+
+    // Synchronously after the take: no `await` between it and the registration.
+    return whilePending(
+        token?.subject ? config.registry.beginAdmission(token.subject, token.keyId, c.req.raw.signal) : undefined,
+        () => checkConnection(c, config, token, tokenManager),
+    );
+}
+
+/** The refusal of a token that is unknown, expired, consumed, or whose key is gone. */
+function invalidToken(c: Context): Response
+{
+    return c.json({ error: 'Invalid or expired token' }, 401);
+}
+
+/**
+ * The checks that run with the admission registered: the token's key, the
+ * requested events against the router, then authorization.
+ */
+async function checkConnection(
+    c: Context,
+    config: StreamConfig,
+    token: SSEToken | undefined,
+    tokenManager: SSETokenManager | undefined,
+): Promise<Omit<Admission, 'pending'> | Response>
+{
+    // ── 1. Token Authentication (the key half) ──
+    if (token && tokenManager && !await tokenManager.checkKey(token))
+    {
+        return invalidToken(c);
+    }
+
+    const subject = token?.subject;
     if (subject)
     {
         c.set('sseSubject', subject);
     }
 
     // ── 2-3. Requested events, validated against the router ──
+    const requested = validateRequestedEvents(c, config.router);
+    if (requested instanceof Response)
+    {
+        return requested;
+    }
+
+    const authorized = await authorizeConnection(c, config.router, config.authConfig, subject, requested);
+
+    return authorized instanceof Response ? authorized : { ...authorized, keyId: token?.keyId };
+}
+
+/**
+ * Steps 2-3: the requested events, each known to the router; a `Response` is
+ * the 400 to return.
+ */
+function validateRequestedEvents(c: Context, router: EventRouterDef<any>): string[] | Response
+{
     const requested = parseRequestedEvents(c);
     if (!requested)
     {
@@ -244,25 +302,22 @@ async function admitConnection(
         }, 400);
     }
 
-    return whilePending(
-        subject ? registry.beginAdmission(subject, c.req.raw.signal) : undefined,
-        () => authorizeConnection(c, router, authConfig, subject, requested),
-    );
+    return requested;
 }
 
 /**
- * Run the app-data checks with the admission already registered — `pending`
+ * Run the key and app-data checks with the admission already registered — `pending`
  * is written synchronously, before the first `await`, so a `grant` / `revoke`
- * issued meanwhile is recorded on it. A refusal or a throw unregisters it; a
+ * or a key close issued meanwhile is recorded on it. A refusal or a throw unregisters it; a
  * client abort already did, the moment it happened; an admitted connection
  * carries it to `runStream`.
  */
 async function whilePending(
     pending: PendingAdmission | undefined,
-    check: () => Promise<Admission | Response>,
+    check: () => Promise<Omit<Admission, 'pending'> | Response>,
 ): Promise<Admission | Response>
 {
-    let outcome: Admission | Response | undefined;
+    let outcome: Omit<Admission, 'pending'> | Response | undefined;
 
     try
     {
@@ -290,7 +345,7 @@ async function authorizeConnection(
     authConfig: SSEHandlerAuthConfig | undefined,
     subject: string | undefined,
     requested: string[],
-): Promise<Admission | Response>
+): Promise<Omit<Admission, 'keyId' | 'pending'> | Response>
 {
     // ── 4. Subscription Authorization ──
     const authorized = await authorizeEvents(subject, requested, authConfig);
@@ -461,6 +516,7 @@ async function runStream(
 
     const connection: SSEConnection = {
         subject,
+        keyId: admission.keyId,
         requested: admission.requested,
         allowed: new Set(allowed),
         denied: new Set(denied),
@@ -474,16 +530,19 @@ async function runStream(
             // A small literal — not routed through serializeFrame's per-payload cache.
             hold.send(() => writer.enqueue({ event: frame, data: JSON.stringify({ event: eventName }) }));
         },
+        close: cleanup,
     };
 
     // Synchronously before the `connected` frame: the changes recorded during
     // admission land in `allowed` / `denied` first, and the entry turns open.
-    // A cancelled admission (the client left) opens nothing and sends no frame.
-    // Defensive: unreachable today, since `streamSSE` runs this synchronously up
-    // to here; the handler's `signal.aborted` → 499 check is the real path.
-    if (admission.pending?.open(connection) === false)
+    // A refused admission opens nothing and sends no frame: its key was
+    // revoked meanwhile, or the client left (defensive — unreachable today,
+    // since `streamSSE` runs this synchronously up to here; the handler's
+    // `signal.aborted` → 499 check is the real path).
+    const refusal = admission.pending?.open(connection);
+    if (refusal)
     {
-        cleanup('aborted during admission');
+        cleanup(refusal);
 
         return;
     }
@@ -822,14 +881,15 @@ function passesFrameFilters(
 // ============================================================================
 
 /**
- * Authenticate via one-time token
- * @returns subject string if authenticated, undefined if no auth required,
- *          false if token missing, null if token invalid/expired
+ * Take the one-time token out of the store — its key is checked later, with
+ * the admission registered (`checkConnection`)
+ * @returns what the token was minted with, undefined if no auth required,
+ *          false if token missing, null if token invalid/expired/consumed
  */
-async function authenticateToken(
+async function takeToken(
     c: Context,
     tokenManager?: SSETokenManager,
-): Promise<string | undefined | false | null>
+): Promise<SSEToken | undefined | false | null>
 {
     if (!tokenManager)
     {
@@ -842,7 +902,7 @@ async function authenticateToken(
         return false;
     }
 
-    return await tokenManager.verify(token);
+    return tokenManager.take(token);
 }
 
 /**

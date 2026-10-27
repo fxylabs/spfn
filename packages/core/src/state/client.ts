@@ -102,6 +102,7 @@ interface ReadTag
 
 const CONNECTED: ConnectionStatus = Object.freeze({ status: 'connected' });
 const FAILED: ConnectionStatus = Object.freeze({ status: 'failed' });
+const UNAUTHORIZED: ConnectionStatus = Object.freeze({ status: 'closed', reason: 'unauthorized' });
 const STARTING: ConnectionStatus = Object.freeze({ status: 'reconnecting', attempt: 0 });
 
 function reconnecting(attempt: number): ConnectionStatus
@@ -163,7 +164,14 @@ class BrowserStateClient
 
     private status = STARTING;
     private readonly connectionListeners = new Set<ConnectionListener>();
-    private readonly onOnline = (): void => this.retry();
+    // A refused session is not a network blip: coming back online does not reopen it.
+    private readonly onOnline = (): void =>
+    {
+        if (this.status !== UNAUTHORIZED)
+        {
+            this.retry();
+        }
+    };
 
     /** The retries of the first snapshot since its last start, against `maxRetries`. */
     private retries = 0;
@@ -605,6 +613,12 @@ class BrowserStateClient
             return;
         }
 
+        // A refused session stays closed until the app's own `retry()`.
+        if (this.status === UNAUTHORIZED)
+        {
+            return;
+        }
+
         // A stream the SSE client gave up on counts as absent.
         const query = this.streamQuery();
 
@@ -744,7 +758,7 @@ class BrowserStateClient
                 this.streamStatus(stream, CONNECTED);
             },
             onReconnect: attempt => this.streamStatus(stream, reconnecting(attempt)),
-            onClose: () => this.onStreamClose(stream),
+            onClose: reason => this.onStreamClose(stream, reason),
             onConnected: connected => this.onConnected(connected, stream),
             onSubscriptionChange: change => this.onSubscriptionChange(change, stream),
         });
@@ -774,15 +788,16 @@ class BrowserStateClient
 
     /**
      * The SSE client fires `onClose` on every teardown; one the client did
-     * not start is the reconnect attempts exhausted: `'failed'`, and the
+     * not start is the reconnect attempts exhausted — `'failed'` — or the
+     * token mint answered 401 — `'closed'` / `'unauthorized'`. Either way the
      * stream counts as absent for the next `sync`.
      */
-    private onStreamClose(stream: Stream): void
+    private onStreamClose(stream: Stream, reason?: 'unauthorized'): void
     {
         if (!stream.closedByClient && stream === this.stream)
         {
             stream.failed = true;
-            this.setConnection(FAILED);
+            this.setConnection(reason === 'unauthorized' ? UNAUTHORIZED : FAILED);
         }
     }
 

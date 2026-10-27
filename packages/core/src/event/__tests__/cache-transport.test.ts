@@ -7,14 +7,14 @@
  * than dropping or crashing, and that router wiring dedups + degrades gracefully.
  */
 
-import { describe, it, expect, vi, afterEach, type Mock } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach, type Mock } from 'vitest';
 import { Type } from '@sinclair/typebox';
 // Import from src (not the '@spfn/core/event' package specifier, which resolves to
 // built dist) so these tests exercise the current source and share ONE event-module
 // instance with cache-transport — no stale-dist false confidence, no dual singleton.
 import { defineEvent } from '../event';
 import { defineEventRouter } from '../router';
-import { createRedisPubSubCache, wireEventRouterCache, closeEventTransport } from '../cache-transport';
+import { _resetWarnThrottle, createRedisPubSubCache, wireEventRouterCache, closeEventTransport } from '../cache-transport';
 import { FakeBus, FakeRedis } from './fake-redis';
 
 // Mock the cache module so wireEventRouterCache's dynamic getCache() is steerable.
@@ -31,6 +31,12 @@ vi.mock('@spfn/core/logger', () =>
     return { logger: sink };
 });
 import { logger } from '@spfn/core/logger';
+
+// The warn-throttle stamps are module state: each test starts with none.
+beforeEach(() =>
+{
+    _resetWarnThrottle();
+});
 
 // Reset the global transport singleton between tests (wired set, cached pubSubCache).
 afterEach(async () =>
@@ -331,7 +337,6 @@ describe('createRedisPubSubCache', () =>
         await cache.subscribe('x', () => undefined);
 
         const warn = (logger as unknown as { warn: Mock }).warn;
-        vi.advanceTimersByTime(31000); // expire any throttle state from earlier tests
         warn.mockClear();
 
         await cache.publish('x', { n: 1 }); // attempt → fail → WARN #1 (also opens breaker for 10s)
@@ -342,6 +347,7 @@ describe('createRedisPubSubCache', () =>
         // open breaker — otherwise a lengthened cooldown would silently pass this test).
         expect(client.publish).toHaveBeenCalledTimes(2);
         expect(warn).toHaveBeenCalledTimes(1);
+        expect(warn).toHaveBeenCalledWith('Pub/sub publish failed — local delivery only', { channel: 'spfn:sse:x' });
     });
 
     it('admits a single probe after cooldown — concurrent emits do not each re-probe', async () =>
