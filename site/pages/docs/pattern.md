@@ -149,7 +149,7 @@ Type safety is one guardrail here, not the point. The others:
 
 - [Get started](../docs.md) — create a project and run it.
 - [Prototype to Production](./prototype-to-production.md) — the same slice, all the way
-  through deploy and MCP operations.
+  through deploy and `spfn ops` operations.
 - [Packages](./packages.md) — what ships beyond the core.
 - [Runnable examples](https://github.com/fxylabs/spfn/tree/main/examples) — the
   pattern end to end, from minimal API to auth.

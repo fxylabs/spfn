@@ -92,7 +92,7 @@ Next.js reads these variables. `SPFN_AUTH_SESSION_SECRET` is **required** for co
 
 ```bash
 # ── Required ─────────────────────────────────────────────────────────
-DATABASE_URL=postgresql://user:pass@localhost:5432/myapp_dev
+# No DATABASE_URL here: the Next.js process never talks to the database.
 SPFN_API_URL=http://localhost:8790
 
 # Session secret (minimum 32 characters, AES-256 encryption)

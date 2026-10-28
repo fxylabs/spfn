@@ -2,7 +2,7 @@
 
 > **이 프로젝트는 레지스트리 두 곳에 배포한다** (2026-07-22 이후).
 > 둘 다 버전 범프 커밋이 `main` 에 닿으면 자동으로 나간다 (2026-08-05 이후):
-> 비공개 Gitea 레지스트리는 Woodpecker(`.woodpecker.yml` →
+> 비공개 Gitea 레지스트리는 Woodpecker(`.woodpecker/publish.yml` →
 > `scripts/publish-changed.mjs`)가, 공개 npmjs 는 GitHub 미러의 패키지별
 > Actions 워크플로우가 맡는다. 레지스트리에 이미 있는 버전은 양쪽 다 건너뛴다.
 > 아래 로컬 수동 절차는 파이프라인이 못 돌 때의 fallback 이다.

@@ -52,11 +52,9 @@ Then, inside this directory:
 # 1. Start a local Postgres (and optional Valkey/Redis)
 docker compose up -d
 
-# 2. Configure environment — create .env.local with the docker-compose defaults
-cat > .env.local <<'EOF'
-DATABASE_URL=postgresql://spfn:spfn@localhost:5432/spfn_dev
-CACHE_URL=redis://localhost:6379
-EOF
+# 2. Configure environment — copy the committed templates (their values match docker-compose.yml)
+cp -n .env.local.example .env.local      # Next.js: SPFN_API_URL
+cp -n .env.server.example .env.server    # SPFN server only: DATABASE_URL, CACHE_URL
 
 # 3. Generate the route metadata the client imports
 pnpm codegen
@@ -75,15 +73,17 @@ can also run them separately with `pnpm spfn:server` (backend only) and
 
 ### Environment variables
 
-This example ships no `.env` example file — `.gitignore` excludes `.env*`. Write your
-own `.env.local` (step 2 above); these are the variables the app reads:
+The example ships two committed templates, split by the process that reads them:
+`.env.local.example` for Next.js and `.env.server.example` for the SPFN server only.
+Step 2 copies them; `pnpm setup:examples` from the repository root does the same for every
+example and leaves an existing file alone. These are the variables the app reads:
 
 | Variable | Required | Notes |
 | --- | --- | --- |
-| `DATABASE_URL` | Yes | Postgres connection; the value in step 2 matches `docker-compose.yml` |
-| `CACHE_URL` | No | Redis/Valkey |
-| `SPFN_API_URL` | No | Where the Next.js proxy forwards requests; defaults to `http://localhost:8790`, which is the port in `src/server/server.config.ts` |
-| `SPFN_LOG_LEVEL` | No | `debug`, `info`, … |
+| `DATABASE_URL` | Yes | `.env.server`. Postgres connection; the template's value matches `docker-compose.yml` |
+| `CACHE_URL` | No | `.env.server`. Redis/Valkey |
+| `SPFN_API_URL` | No | `.env.local`. Where the Next.js proxy forwards requests; defaults to `http://localhost:8790`, the API port set in `spfn.config.js` |
+| `SPFN_LOG_LEVEL` | No | `.env.server`. `debug`, `info`, … |
 
 ## Project layout
 

@@ -332,20 +332,21 @@ agent instead of a terminal, add [`@spfn/mcp`](./packages/mcp/README.md) with
 
 ## Which packages exist, and what does each do?
 
-In the default setup:
+In the default setup (`spfn create --mode full`):
 
 | Package | Stage | Description |
 |---------|-------|-------------|
-| [@spfn/core](./packages/core) | Beta | Routing, database, transactions, typed client |
-| [@spfn/auth](./packages/auth) | Beta | Sessions, social login, RBAC |
+| [@spfn/core](./packages/core) | Beta | Routing, database, transactions, typed client, server-owned state, the ops surface |
+| [@spfn/auth](./packages/auth) | Beta | Sessions, social login, RBAC, ops tokens |
 | [@spfn/i18n](./packages/i18n) | Beta | Server and React internationalization runtime |
-| [@spfn/mcp](./packages/mcp) | Beta | MCP route adapter built on the official SDK |
-| [spfn](./packages/cli) | Beta | CLI and dev tools |
+| [@spfn/notification](./packages/notification) | Beta | Email, SMS, Slack, push — installed as a peer of `@spfn/auth` |
+| [spfn](./packages/cli) | Beta | CLI and dev tools, including `spfn ops` |
 
 Install when you need them:
 
 | Package | Stage | Description |
 |---------|-------|-------------|
+| [@spfn/mcp](./packages/mcp) | Beta | Expose operations as MCP tools for an agent outside the terminal |
 | [@spfn/storage](./packages/storage) | Beta | Object storage (S3 / GCS / local) |
 | [@spfn/notification](./packages/notification) | Beta | Email, SMS, Slack, push |
 | [@spfn/cms](./packages/cms) | Beta | Content management |
@@ -470,7 +471,7 @@ PostgreSQL 14 or later. Redis is optional and only needed by some features.
 
 - [superfunction.xyz](https://superfunction.xyz) — the documentation site
 - [Architecture drift](https://superfunction.xyz/architecture-drift) — the problem this framework is shaped around, and where fixing the shape stops helping
-- [Prototype to Production](https://superfunction.xyz/docs/prototype-to-production) — the whole loop, scaffold to MCP operations
+- [Prototype to Production](https://superfunction.xyz/docs/prototype-to-production) — the whole loop, scaffold to `spfn ops` operations
 - [Full-stack tutorial](https://superfunction.xyz/docs/tutorial) — from `spfn create` to auth-guarded pages
 - [Examples](./examples/README.md) — a step-by-step ladder, start at `01-minimal-api`
 - [CONTRIBUTING.md](./CONTRIBUTING.md) — setup, the SPFN pattern, the hard rules, and the contract for AI coding agents

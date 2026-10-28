@@ -25,10 +25,10 @@
     a { color: inherit; text-decoration: none; }
     .inner { max-width: 1120px; margin: 0 auto; padding: 0 24px; }
     header { border-bottom: 1px solid var(--ink); }
-    .nav { display: flex; align-items: center; height: 64px; }
+    .nav { display: flex; align-items: center; min-height: 64px; }
     .brand { display: inline-flex; align-items: center; gap: 9px; font-size: 17px; font-weight: 800; }
     .brand svg { width: auto; height: 19px; color: var(--cobalt); }
-    .nav nav { display: flex; gap: 28px; margin-left: auto; font-size: 14.5px; font-weight: 600; }
+    .nav nav { display: flex; gap: 28px; margin-left: auto; font-size: 14.5px; font-weight: 600; flex-wrap: wrap; justify-content: flex-end; row-gap: 6px; }
     .nav nav a:hover { color: var(--cobalt); }
     .hero { padding: 72px 0 0; }
     .kicker { margin-bottom: 26px; font: 500 12px/1.4 var(--mono); letter-spacing: 0.12em; }
@@ -81,7 +81,7 @@
     .btn-outline-w { color: var(--white); border: 1px solid var(--white); }
     .btn-outline-w:hover { color: var(--cobalt); background: var(--white); }
     footer { padding: 34px 0; color: var(--white); background: var(--ink); }
-    footer .inner { display: flex; align-items: center; gap: 26px; font: 12px var(--mono); letter-spacing: 0.06em; }
+    footer .inner { display: flex; align-items: center; gap: 26px; font: 12px var(--mono); letter-spacing: 0.06em; flex-wrap: wrap; row-gap: 10px; }
     footer a { text-decoration: underline; text-underline-offset: 3px; }
     footer .dim { margin-left: auto; color: #6d747c; }
     @media (max-width: 900px)
@@ -91,7 +91,8 @@
     }
     @media (max-width: 600px)
     {
-        .nav nav { gap: 12px; font-size: 12px; }
+        .nav { padding-top: 12px; padding-bottom: 12px; }
+        .nav nav { column-gap: 12px; font-size: 12px; }
         .brand { font-size: 0; }
         .mod-grid { grid-template-columns: 1fr; }
         section { padding: 80px 0 0; }
@@ -107,7 +108,7 @@
     <header>
         <div class="inner nav">
             <a class="brand" href="/"><svg viewBox="0 0 166 192" fill="none" aria-hidden="true"><path d="M137.954 26.8921C133.611 24.0908 129.082 22.0243 124.451 20.6696C120.622 15.8133 116.032 11.5655 110.752 8.16724C84.6518 -8.64033 51.2852 1.32481 36.2178 30.4281C21.1606 59.5313 30.1043 96.7514 56.2048 113.559C61.4948 116.969 67.0937 119.265 72.7645 120.539C57.728 101.481 54.4757 73.1244 66.4864 49.9221C78.4972 26.7313 102.128 15.687 124.451 20.6811C141.412 39.8077 145.58 69.9098 132.942 94.329L158.033 110.494C173.183 81.2182 164.198 43.7915 137.954 26.8921Z" fill="currentColor"/><path d="M108.874 78.4409C103.584 75.0312 97.9952 72.7236 92.314 71.4492C107.351 90.5185 110.603 118.876 98.5921 142.078C86.5814 165.28 62.951 176.324 40.6278 171.33C23.7798 152.284 19.7042 122.239 32.3427 97.8201L7.39499 81.7473C-7.75478 111.023 1.1169 148.369 27.207 165.177H27.1967C31.5194 167.955 36.0272 169.999 40.6278 171.342C44.4564 176.187 49.0466 180.423 54.3264 183.833C80.4268 200.64 113.793 190.675 128.861 161.572C143.918 132.469 134.974 95.2485 108.874 78.4409Z" fill="currentColor"/></svg>Superfunction</a>
-            <nav><a href="/docs">Docs</a><a href="/functions">Functions</a><a href="/about">About</a><a href="https://github.com/fxylabs/spfn" target="_blank" rel="noopener">GitHub</a></nav>
+            <nav><a href="/docs">Docs</a><a href="/functions">Functions</a><a href="/compare">Compare</a><a href="/architecture-drift">Architecture drift</a><a href="/about">About</a><a href="https://github.com/fxylabs/spfn" target="_blank" rel="noopener">GitHub</a></nav>
         </div>
     </header>
     <div class="hero">
@@ -115,9 +116,10 @@
             <div class="kicker"><a href="/functions">FUNCTIONS</a> / @SPFN/MCP — MODEL CONTEXT PROTOCOL</div>
             <h1 class="display">Your app,<br><span class="inkline">callable.</span></h1>
             <p class="sub">The second gate between a working prototype and a product: the day after you
-               deploy, someone has to refund an order or retry a failed job. <code>@spfn/mcp</code> answers
-               it without an admin dashboard — one application-defined set of tools, resources, and prompts
-               served over authenticated Streamable HTTP or local stdio. The official SDK owns the protocol;
+               deploy, someone has to refund an order or retry a failed job. In a terminal, <code>spfn ops</code>
+               answers it. For an agent in a chat client, <code>@spfn/mcp</code> answers it without an admin
+               dashboard — one application-defined set of tools, resources, and prompts served over
+               authenticated Streamable HTTP or local stdio. The official SDK owns the protocol;
                your application supplies identity and owns policy, context, and business logic.</p>
             <div class="cta-row">
                 <a class="btn btn-cobalt" href="/docs/packages/mcp">Read the reference</a>
@@ -140,7 +142,7 @@
         <div class="inner">
             <div class="sec-head"><span class="idx">02</span><div class="rule"></div><span class="name">Choose the boundary</span></div>
             <h2 class="sec-title">Network trust.<br>Local <em>trust.</em></h2>
-            <p class="premise-copy">Use HTTP when clients connect over a network and need OAuth plus Host and Origin validation. Use stdio when an Agent host starts a local child process; the executable, arguments, and process configuration become the capability boundary.</p>
+            <p class="premise-copy">Use HTTP when clients connect over a network and need OAuth plus Host and Origin validation; <code>@spfn/auth</code> can be the OAuth 2.1 authorization server, so Claude Code and Codex sign in as the user. Use stdio when an Agent host starts a local child process; the executable, arguments, and process configuration become the capability boundary.</p>
             <div class="transport-stack">
                 <div class="transport-row"><div class="transport-label">REMOTE</div><div class="wireflow"><div class="wnode">network client</div><div class="wwire"></div><div class="wnode">application auth</div><div class="wwire"></div><div class="wnode">Streamable HTTP</div><div class="wwire tohot"></div><div class="wnode hot">dispatcher</div></div></div>
                 <div class="transport-row"><div class="transport-label">LOCAL</div><div class="wireflow"><div class="wnode">Agent host</div><div class="wwire"></div><div class="wnode">spawn authority</div><div class="wwire"></div><div class="wnode">stdio bridge</div><div class="wwire tohot"></div><div class="wnode hot">dispatcher</div></div></div>
@@ -165,6 +167,6 @@
         </div>
     </section>
     <div class="cta-band"><div class="inner"><h2>Choose the transport.</h2><div class="btns"><a class="btn btn-white" href="/docs/packages/mcp">Full reference</a><a class="btn btn-outline-w" href="/docs/packages/mcp#local-stdio">Local stdio</a></div></div></div>
-    <footer><div class="inner"><span>SUPERFUNCTION</span><a href="/docs">DOCS</a><a href="/functions">FUNCTIONS</a><a href="/about">ABOUT</a><a href="https://github.com/fxylabs/spfn" target="_blank" rel="noopener">GITHUB</a><span class="dim">© 2026 FXY INC. · @SPFN/MCP — BETA</span></div></footer>
+    <footer><div class="inner"><span>SUPERFUNCTION</span><a href="/docs">DOCS</a><a href="/functions">FUNCTIONS</a><a href="/compare">COMPARE</a><a href="/architecture-drift">ARCHITECTURE DRIFT</a><a href="/about">ABOUT</a><a href="https://github.com/fxylabs/spfn" target="_blank" rel="noopener">GITHUB</a><span class="dim">© 2026 FXY INC. · @SPFN/MCP — BETA</span></div></footer>
 </body>
 </html>

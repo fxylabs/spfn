@@ -37,9 +37,9 @@ export default {
   /**
    * Ports the two processes bind.
    *
-   * This is the only place either number is written. The Dockerfile, the
-   * compose file and \`spfn dev\` / \`spfn start\` all read it, so changing a
-   * port here changes it everywhere.
+   * \`spfn dev\` and \`spfn start\` read them here. The Dockerfile and the
+   * compose file cannot read this file and repeat the two numbers, so change
+   * them there too.
    *
    * Overridable per environment with NEXT_PORT and SPFN_PORT — a container
    * setting one of those wins over what is written here.

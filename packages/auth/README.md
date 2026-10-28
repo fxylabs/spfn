@@ -13,12 +13,14 @@ for the people who use your product, and once for the people who operate it.
 
 The second half is what usually becomes a second application: an admin dashboard with its
 own auth, its own screens, and its own maintenance, growing for as long as the product
-does. Attach [`@spfn/mcp`](../mcp/README.md) instead and those operations become tools an
-AI agent runs, gated by the same roles — see
+does. Write those operations as ops routes instead and run them with `spfn ops`, behind the
+[ops tokens](#ops-tokens-spfn-ops) this package issues — or attach
+[`@spfn/mcp`](../mcp/README.md) and write them as MCP tools an AI agent in a chat client runs,
+gated by the same roles. See
 [Can I operate the app without building an admin dashboard?](#can-i-operate-the-app-without-building-an-admin-dashboard).
 
 Underneath: asymmetric client-signed JWTs (ES256/RS256), OTP verification, OAuth 2.0
-through a pluggable provider registry (Google, GitHub, Kakao and Naver built in), session
+through a pluggable provider registry (Google, Apple, GitHub, Kakao and Naver built in), session
 cookies for Next.js, and runtime RBAC. Routes mount under `/_auth/*` and are reached
 through a typed `authApi` client. Requires `@spfn/core`; Next.js is an optional peer
 (`^16.4.1`).

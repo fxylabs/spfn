@@ -1,0 +1,268 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>@spfn/signing — one signer, three places a key can live · Superfunction</title>
+<meta name="description" content="Token signing for SPFN — one Signer interface over a local key, Google Cloud KMS, or AWS KMS. Signs EdDSA and ES256; verifies those and RS256 with a dependency-free verifier.">
+<meta property="og:title" content="@spfn/signing — the key can move to a KMS, the code stays">
+<meta property="og:description" content="One Signer interface over local keys, GCP KMS and AWS KMS — the token on the wire does not change, and the verifier imports nothing but node:crypto.">
+<meta property="og:image" content="https://superfunction.xyz/og.png">
+<meta property="og:url" content="https://superfunction.xyz/functions/signing">
+<meta property="og:type" content="website">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<style>
+    /* @spfn/signing package landing — design system "Poster" v2 (site/design/system.md) */
+    * { margin: 0; padding: 0; box-sizing: border-box; border-radius: 0; }
+    :root
+    {
+        --cobalt: #1d34f3;
+        --ink: #10161a;
+        --white: #ffffff;
+        --signal: #ff3b1f;
+        --gray: #8a9096;
+        --gray-line: #d9dce0;
+        --grotesk: -apple-system, 'Helvetica Neue', Arial, sans-serif;
+        --mono: ui-monospace, 'SF Mono', Menlo, monospace;
+    }
+    html { scroll-behavior: smooth; }
+    body { background: var(--white); color: var(--ink); font-family: var(--grotesk); }
+    a { text-decoration: none; color: inherit; }
+    .inner { max-width: 1120px; margin: 0 auto; padding: 0 24px; }
+
+    /* header */
+    header { border-bottom: 1px solid var(--ink); }
+    .nav { display: flex; align-items: center; min-height: 64px; }
+    .brand { display: inline-flex; align-items: center; gap: 9px; font-size: 17px; font-weight: 800; letter-spacing: -0.01em; }
+    .brand svg { height: 19px; width: auto; color: var(--cobalt); }
+    .nav nav { margin-left: auto; display: flex; gap: 28px; font-size: 14.5px; font-weight: 600; flex-wrap: wrap; justify-content: flex-end; row-gap: 6px; }
+    .nav nav a:hover { color: var(--cobalt); }
+
+    /* hero */
+    .hero { padding: 72px 0 0; }
+    .kicker { font-family: var(--mono); font-size: 12px; font-weight: 500; letter-spacing: 0.12em; margin-bottom: 26px; }
+    .kicker a { color: var(--cobalt); }
+    .display
+    {
+        font-size: clamp(44px, 7vw, 88px);
+        font-weight: 800; letter-spacing: -0.03em; line-height: 0.98; text-transform: uppercase;
+        color: var(--cobalt);
+    }
+    .display .inkline { color: var(--ink); }
+    .hero .sub { margin-top: 26px; font-size: 17px; line-height: 1.6; max-width: 58ch; }
+    .cta-row { margin-top: 34px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+    .btn { display: inline-block; padding: 14px 28px; font-size: 15px; font-weight: 700; }
+    .btn-cobalt { background: var(--cobalt); color: var(--white); }
+    .btn-cobalt:hover { background: var(--ink); }
+    .btn-outline { border: 1px solid var(--ink); }
+    .btn-outline:hover { border-color: var(--cobalt); color: var(--cobalt); }
+    .codebar { background: var(--ink); color: var(--white); font-family: var(--mono); font-size: 13px; padding: 14px 18px; }
+    .strip { margin-top: 56px; height: 14px; display: flex; }
+    .strip .s1 { flex: 2.5; background: var(--cobalt); }
+    .strip .s2 { flex: 1.2; background: var(--ink); }
+    .strip .s3 { flex: 0.35; background: var(--signal); }
+
+    /* sections */
+    section { padding: 120px 0 0; }
+    section:last-of-type { padding-bottom: 120px; }
+    .sec-head { display: flex; align-items: center; gap: 14px; margin-bottom: 44px; }
+    .sec-head .idx { font-family: var(--mono); font-size: 12px; font-weight: 500; letter-spacing: 0.1em; }
+    .sec-head .rule { flex: 1; height: 1px; background: var(--ink); }
+    .sec-head .name { font-family: var(--mono); font-size: 12px; font-weight: 500; letter-spacing: 0.1em; text-transform: uppercase; }
+    .sec-title { font-size: clamp(28px, 3.4vw, 40px); font-weight: 800; letter-spacing: -0.02em; line-height: 1.08; margin-bottom: 40px; }
+    .sec-title em { font-style: normal; color: var(--cobalt); }
+
+    /* premise */
+    .premise-copy { font-size: 17px; line-height: 1.65; max-width: 62ch; margin-bottom: 44px; }
+    .premise-copy code { font-family: var(--mono); font-size: 14.5px; }
+    .wireflow { display: flex; align-items: center; font-family: var(--mono); font-size: 12px; }
+    .wnode { border: 1px solid var(--ink); padding: 9px 14px; white-space: nowrap; }
+    .wnode.hot { border-color: var(--cobalt); color: var(--cobalt); font-weight: 600; }
+    .wwire { flex: 1; min-width: 18px; height: 1px; background: var(--ink); position: relative; }
+    .wwire::after { content: ''; position: absolute; right: 0; top: -2px; width: 5px; height: 5px; background: var(--ink); }
+    .wwire.tohot::after { background: var(--cobalt); }
+    .flow-note { margin-top: 28px; font-family: var(--mono); font-size: 11px; letter-spacing: 0.1em; color: var(--gray); }
+
+    /* capability grid */
+    .mod-grid { display: grid; grid-template-columns: repeat(4, 1fr); border-top: 1px solid var(--ink); border-left: 1px solid var(--ink); }
+    .mod { border-right: 1px solid var(--ink); border-bottom: 1px solid var(--ink); padding: 20px 20px 24px; min-height: 118px; }
+    .mod:hover { background: var(--cobalt); color: var(--white); }
+    .mod:hover p { color: var(--white); }
+    .mod .mname { font-family: var(--mono); font-size: 13px; font-weight: 600; }
+    .mod p { margin-top: 8px; font-size: 12.5px; line-height: 1.55; color: #3c4248; }
+
+    /* CTA band */
+    .cta-band { background: var(--cobalt); color: var(--white); padding: 56px 0; }
+    .cta-band .inner { display: flex; align-items: center; gap: 28px; flex-wrap: wrap; }
+    .cta-band h2 { font-size: clamp(28px, 3.6vw, 44px); font-weight: 800; letter-spacing: -0.025em; text-transform: uppercase; }
+    .cta-band .btns { margin-left: auto; display: flex; gap: 12px; }
+    .btn-white { background: var(--white); color: var(--cobalt); }
+    .btn-white:hover { background: var(--ink); color: var(--white); }
+    .btn-outline-w { border: 1px solid var(--white); color: var(--white); }
+    .btn-outline-w:hover { background: var(--white); color: var(--cobalt); }
+
+    /* footer */
+    footer { background: var(--ink); color: var(--white); padding: 34px 0; }
+    footer .inner { display: flex; align-items: center; gap: 26px; font-family: var(--mono); font-size: 12px; letter-spacing: 0.06em; flex-wrap: wrap; row-gap: 10px; }
+    footer a { text-decoration: underline; text-underline-offset: 3px; }
+    footer .dim { color: #6d747c; margin-left: auto; }
+
+    @media (max-width: 900px)
+    {
+        .mod-grid { grid-template-columns: 1fr 1fr; }
+        .wireflow { flex-wrap: wrap; row-gap: 10px; }
+    }
+    @media (max-width: 600px)
+    {
+        .nav nav { column-gap: 12px; font-size: 12px; }
+        .brand { font-size: 0; }
+        .nav { padding-top: 12px; padding-bottom: 12px; }
+        .mod-grid { grid-template-columns: 1fr; }
+        section { padding: 80px 0 0; }
+        section:last-of-type { padding-bottom: 80px; }
+        .hero { padding-top: 56px; }
+    }
+</style>
+<script>(function(){var s=document.createElement('script');s.async=true;s.crossOrigin='anonymous';s.src='https://us-assets.i.posthog.com/static/array.js';s.onload=function(){window.posthog&&window.posthog.init('phc_sg3X7M6CtErmTgKkAk5ajcJbJyCCZsFkmVhikdjr4SLt',{api_host:'https://us.i.posthog.com',defaults:'2025-05-24'})};document.head.appendChild(s)})();</script>
+</head>
+<body>
+
+    <header>
+        <div class="inner nav">
+            <a class="brand" href="/"><svg viewBox="0 0 166 192" fill="none" aria-hidden="true"><path d="M137.954 26.8921C133.611 24.0908 129.082 22.0243 124.451 20.6696C120.622 15.8133 116.032 11.5655 110.752 8.16724C84.6518 -8.64033 51.2852 1.32481 36.2178 30.4281C21.1606 59.5313 30.1043 96.7514 56.2048 113.559C61.4948 116.969 67.0937 119.265 72.7645 120.539C57.728 101.481 54.4757 73.1244 66.4864 49.9221C78.4972 26.7313 102.128 15.687 124.451 20.6811C141.412 39.8077 145.58 69.9098 132.942 94.329L158.033 110.494C173.183 81.2182 164.198 43.7915 137.954 26.8921Z" fill="currentColor"/><path d="M108.874 78.4409C103.584 75.0312 97.9952 72.7236 92.314 71.4492C107.351 90.5185 110.603 118.876 98.5921 142.078C86.5814 165.28 62.951 176.324 40.6278 171.33C23.7798 152.284 19.7042 122.239 32.3427 97.8201L7.39499 81.7473C-7.75478 111.023 1.1169 148.369 27.207 165.177H27.1967C31.5194 167.955 36.0272 169.999 40.6278 171.342C44.4564 176.187 49.0466 180.423 54.3264 183.833C80.4268 200.64 113.793 190.675 128.861 161.572C143.918 132.469 134.974 95.2485 108.874 78.4409Z" fill="currentColor"/></svg>Superfunction</a>
+            <nav>
+                <a href="/docs">Docs</a>
+                <a href="/functions">Functions</a>
+                <a href="/compare">Compare</a>
+                <a href="/architecture-drift">Architecture drift</a>
+                <a href="/about">About</a>
+                <a href="https://github.com/fxylabs/spfn" target="_blank" rel="noopener">GitHub</a>
+            </nav>
+        </div>
+    </header>
+
+    <div class="hero">
+        <div class="inner">
+            <div class="kicker"><a href="/functions">FUNCTIONS</a> / @SPFN/SIGNING — TOKEN SIGNING OVER LOCAL KEYS AND KMS</div>
+            <h1 class="display">One signer.<br><span class="inkline">Three key homes.</span></h1>
+            <p class="sub"><code>@spfn/signing</code> is the <code>Signer</code> interface and the providers behind it.
+               The private key may live in this process, in Google Cloud KMS, or in AWS KMS; the caller's
+               code does not change, and the token on the wire does not change. It signs EdDSA and ES256,
+               and verifies those two and RS256.
+               Alpha — the API may move more than the beta packages.</p>
+            <div class="cta-row">
+                <a class="btn btn-cobalt" href="/docs/packages/signing">Read the reference</a>
+                <a class="btn btn-outline" href="/docs">Get started</a>
+                <span class="codebar">$ pnpm add @spfn/signing</span>
+            </div>
+        </div>
+        <div class="strip"><div class="s1"></div><div class="s2"></div><div class="s3"></div></div>
+    </div>
+
+    <section>
+        <div class="inner">
+            <div class="sec-head"><span class="idx">01</span><div class="rule"></div><span class="name">The premise</span></div>
+            <h2 class="sec-title">The key moves.<br>The code <em>doesn't.</em></h2>
+            <p class="premise-copy">Signing code usually assumes the private key is a string sitting in the
+               process. That assumption does not survive a cloud KMS, where the key never leaves the service.
+               <code>createSigner()</code> takes a provider — <code>local</code>, <code>gcp-kms</code>, or
+               <code>aws-kms</code> — and returns the same <code>Signer</code> either way. EdDSA (Ed25519) is the
+               default; ES256 stays fully supported for anything downstream that only speaks ECDSA. The KMS SDKs
+               are optional peer dependencies, installed only for the provider you name.</p>
+            <div class="wireflow">
+                <div class="wnode">createSigner({ provider })</div><div class="wwire"></div>
+                <div class="wnode">local · gcp-kms · aws-kms</div><div class="wwire"></div>
+                <div class="wnode">signer.sign(claims)</div><div class="wwire tohot"></div>
+                <div class="wnode hot">compact JWS</div>
+            </div>
+            <div class="flow-note">FIG 01 — ONE INTERFACE · THREE PROVIDERS · EDDSA BY DEFAULT, ES256 SUPPORTED</div>
+        </div>
+    </section>
+
+    <section>
+        <div class="inner">
+            <div class="sec-head"><span class="idx">02</span><div class="rule"></div><span class="name">Core technique</span></div>
+            <h2 class="sec-title">The algorithm comes<br>from the <em>key.</em></h2>
+            <p class="premise-copy">Verification lives in its own entry point, <code>@spfn/signing/verify</code>,
+               a single file whose only import is <code>node:crypto</code> — so it can run inside a tenant container
+               with nothing else shipped beside it. <code>verifyJws()</code> never throws on token input: a malformed
+               token is a verdict, not an exception. The token's <code>kid</code> selects the key, and that key's
+               algorithm is the algorithm; the header's <code>alg</code> is only checked for equality with it. That is
+               what turns algorithm confusion, <code>alg: "none"</code> included, into an <code>alg-mismatch</code>
+               verdict instead of a decision.</p>
+            <div class="wireflow">
+                <div class="wnode">token</div><div class="wwire"></div>
+                <div class="wnode">kid → key</div><div class="wwire"></div>
+                <div class="wnode">alg must equal the key's</div><div class="wwire tohot"></div>
+                <div class="wnode hot">verdict, never a throw</div>
+            </div>
+            <div class="flow-note">FIG 02 — VERIFY IMPORTS ONLY NODE:CRYPTO · KID PICKS THE KEY · HEADER ALG IS CHECKED, NOT TRUSTED</div>
+        </div>
+    </section>
+
+    <section>
+        <div class="inner">
+            <div class="sec-head"><span class="idx">03</span><div class="rule"></div><span class="name">What's inside</span></div>
+            <h2 class="sec-title">Sign, verify,<br>and <em>rotate.</em></h2>
+            <div class="mod-grid">
+                <a class="mod" href="/docs/packages/signing#providers">
+                    <div class="mname">providers</div>
+                    <p>local, gcp-kms and aws-kms behind one Signer; KMS SDKs optional.</p>
+                </a>
+                <a class="mod" href="/docs/packages/signing#the-two-entry-points">
+                    <div class="mname">two entry points</div>
+                    <p>@spfn/signing to issue tokens; @spfn/signing/verify, node:crypto only, to check them.</p>
+                </a>
+                <a class="mod" href="/docs/packages/signing#verification">
+                    <div class="mname">verifyJws</div>
+                    <p>Clock skew, max age, issuer and audience options; a reason on every refusal.</p>
+                </a>
+                <a class="mod" href="/docs/packages/signing#verifying-tokens-you-did-not-sign">
+                    <div class="mname">RS256 &amp; JWK Sets</div>
+                    <p>Verify an OIDC issuer's RS256 tokens; parseJwks reads its key set. Fetching it is yours.</p>
+                </a>
+                <a class="mod" href="/docs/packages/signing#purposes">
+                    <div class="mname">purposes</div>
+                    <p>definePurposes keeps each token kind's keys and audience out of the others' verifiers.</p>
+                </a>
+                <a class="mod" href="/docs/packages/signing#rotation">
+                    <div class="mname">key rotation</div>
+                    <p>A KeyRing of public keys, rotated add → switch → wait → remove.</p>
+                </a>
+                <a class="mod" href="/docs/packages/signing#key-formats">
+                    <div class="mname">key formats</div>
+                    <p>Public keys as a pasteable kid:base64url list — Ed25519, P-256, or SPKI.</p>
+                </a>
+                <a class="mod" href="/docs/packages/signing#test-vectors">
+                    <div class="mname">test vectors</div>
+                    <p>Forty committed tokens with the verdict each must produce, for any implementation.</p>
+                </a>
+            </div>
+        </div>
+    </section>
+
+    <div class="cta-band">
+        <div class="inner">
+            <h2>Keep the key where it belongs.</h2>
+            <div class="btns">
+                <a class="btn btn-white" href="/docs/packages/signing">Full reference</a>
+                <a class="btn btn-outline-w" href="/docs">Get started</a>
+            </div>
+        </div>
+    </div>
+
+    <footer>
+        <div class="inner">
+            <span>SUPERFUNCTION</span>
+            <a href="/docs">DOCS</a>
+            <a href="/functions">FUNCTIONS</a>
+            <a href="/compare">COMPARE</a>
+            <a href="/architecture-drift">ARCHITECTURE DRIFT</a>
+            <a href="/about">ABOUT</a>
+            <a href="https://github.com/fxylabs/spfn" target="_blank" rel="noopener">GITHUB</a>
+            <span class="dim">© 2026 FXY INC. · @SPFN/SIGNING — ALPHA</span>
+        </div>
+    </footer>
+
+</body>
+</html>

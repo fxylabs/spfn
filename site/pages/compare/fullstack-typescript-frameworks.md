@@ -176,14 +176,16 @@ The set available today:
 | [@spfn/cms](../docs/packages/cms.md) | content models, entries, and the routes over them |
 | [@spfn/storage](../docs/packages/storage.md) | file upload and object storage |
 | [@spfn/notification](../docs/packages/notification.md) | outbound messages and templates |
-| [@spfn/workflow](../docs/packages/workflow.md) | long-running and scheduled work |
+| [@spfn/workflow](../docs/packages/workflow.md) | long-running and scheduled work (alpha) |
 | [@spfn/i18n](../docs/packages/i18n.md) | translations across server and client |
-| [@spfn/monitor](../docs/packages/monitor.md) | operational metrics and health |
-| [@spfn/migrate](../docs/packages/migrate.md) | schema migration for all of the above |
+| [@spfn/monitor](../docs/packages/monitor.md) | error tracking, persisted logs, and an admin dashboard |
+| [@spfn/migrate](../docs/packages/migrate.md) | data migrations — backfills that run exactly once |
 | [@spfn/mcp](../docs/packages/mcp.md) | your app exposed to an AI agent over the Model Context Protocol |
 
-That last one is the answer to operations. Instead of building an admin dashboard, you
-let an agent read and act on the app through a typed interface you already declared.
+Operations need no package of their own. `@spfn/core` serves ops commands under `/_ops`,
+and `spfn ops` runs them from the terminal; with `@spfn/mcp` you write the same operations
+as MCP tools, over the same services, for an agent in a chat client. Instead of building an admin dashboard, you let an operator or an
+agent act on the app through a typed interface you already declared.
 
 The honest limit: this only pays off if the slices fit what you need. A first-party
 package you have to fight is worse than a third-party service that fits, and the vendors

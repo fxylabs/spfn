@@ -2,7 +2,7 @@
 title: Prototype to Production
 navTitle: Prototype to Production
 order: 1
-description: Scaffold the full SPFN foundation, build it with an AI coding agent, deploy it, and operate the product through MCP instead of an admin dashboard.
+description: Scaffold the full SPFN foundation, build it with an AI coding agent, deploy it, and operate the product with spfn ops instead of an admin dashboard.
 ---
 
 ## The whole loop
@@ -10,7 +10,7 @@ description: Scaffold the full SPFN foundation, build it with an AI coding agent
 Superfunction is designed for one continuous path:
 
 ```text
-idea → full scaffold → vertical slices → production build → deploy → MCP operations
+idea → full scaffold → vertical slices → production build → deploy → spfn ops
 ```
 
 The point is that the first version and the production version are the same application.
@@ -51,7 +51,11 @@ Full mode installs and wires the baseline as one application:
 - `@spfn/core` for the server, database, routes, codegen, and typed client,
 - `@spfn/auth` for sessions, social login, and authorization,
 - `@spfn/i18n` for application-owned translation catalogs, and
-- `@spfn/mcp` for authenticated agent access to application operations.
+- the ops surface — `src/server/routes/ops.ts`, served under `/_ops` and run with
+  `spfn ops` from the terminal.
+
+The ops surface adds no dependency: the router comes from `@spfn/core/ops` and the tokens
+from `@spfn/auth`. `@spfn/mcp` is not part of full mode; step 6 shows when to add it.
 
 Use `--mode bare` when you deliberately want only the core architecture. The
 interactive prompt recommends full mode. Automated runs should pass the mode
@@ -155,51 +159,73 @@ events, and the periodic database health check all need this path.
 Either way, apply generated database migrations as a deliberate release step rather than
 writing production SQL by hand.
 
-## 5. Turn domain operations into MCP tools
+## 5. Turn domain operations into ops commands
 
-Do not expose tables as generic CRUD tools. Expose the operations an operator is
-actually allowed to perform, using the same repositories and services as the product:
+Do not expose tables as generic CRUD. Expose the operations an operator is actually
+allowed to perform, using the same repositories and services as the product:
 
 ```text
-customers.list
-orders.refund
-content.publish
-workflow.retry
+listCustomers
+refundOrder
+publishContent
+retryWorkflow
 ```
 
-Each tool should have a narrow input schema, a clear authorization rule, and safe error
-output. Mark read-only and destructive behavior accurately. Keep approval in front of
-high-impact actions such as refunds, deletion, permission changes, or bulk updates.
+An ops command is a route like any other, written with `opsRoute` so it lives under
+`/_ops`. The full scaffold starts you with `src/server/routes/ops.ts`, which holds two
+read commands and the router `src/server/router.ts` mounts:
 
-`@spfn/mcp` serves the application-owned contract over authenticated Streamable HTTP.
-The full scaffold starts with a generated `SPFN_MCP_API_KEY` Bearer token for first-party
-operator access. This is separate from the social OAuth flow used to sign people into the
-application. The protocol adapter handles MCP; your app still owns policy and business
-logic. Read the [`@spfn/mcp` reference](./packages/mcp.md) before adding tools.
+```ts
+import { createOpsRouter, opsRoute } from '@spfn/core/ops';
+import { opsTokenAuth, requireOpsScope } from '@spfn/auth/server';
 
-The operator key is the current baseline, not a permanent requirement. Replace the
-generated `validateToken` implementation with your OAuth access-token validator when you
-need third-party clients, delegated identity, or finer-grained scopes.
+const countExamples = opsRoute.get('/examples/count')     // GET /_ops/examples/count
+    .use([requireOpsScope('example:read')])
+    .handler(async () => ({ count: await exampleRepo.countAll() }));
 
-## 6. Connect the deployed app to an agent
+export const opsRouter = createOpsRouter({ countExamples }, { auth: opsTokenAuth });
+```
 
-After deployment:
+`createOpsRouter` puts the auth middleware on every command, so there is no
+unauthenticated variant, and serves `GET /_ops/_manifest`, the self-description the CLI
+reads. Give each command a narrow input schema and its own scope. Declare what it does
+with `.effect('read' | 'write' | 'destructive')` and `.summary('…')`: `spfn ops` shows
+both, and refuses a destructive command unless the operator passes `--yes`. Read the
+[`@spfn/core` ops section](./packages/core.md#how-do-i-operate-the-app-from-the-terminal) before adding commands.
 
-1. Keep `SPFN_MCP_API_KEY` in the deployment platform's server-side secret manager.
-2. Give the MCP client the HTTPS endpoint exposed by the app, normally `/mcp`.
-3. Configure the client to send the operator key as an `Authorization: Bearer` token.
-4. Start with the generated read-only `app_status` tool and verify its result.
-5. Add mutating tools one at a time, with explicit authorization and approval policy.
+## 6. Operate the deployed app
 
-Rotate the operator key like any production credential and never expose it to browser
-code. Application users continue to sign in through the separately configured OAuth
-providers. If the MCP endpoint later serves third-party clients, replace the key validator
-with OAuth and grant only the scopes each client needs.
+Issuing the first token signs in as an administrator, so seed one before you start:
+set `SPFN_AUTH_ADMIN_ACCOUNTS` in `.env.server` locally, and in the deployment
+platform's server-side secrets in production. Then, from the app's root directory:
 
-The result is an operating surface tailored to your product. An agent can inspect users,
-publish content, or run a workflow without a separate administrator dashboard. Build a
-dashboard later when a recurring human workflow benefits from one — not as a prerequisite
-for operating the first production version.
+```bash
+export SPFN_OPS_APP=https://api.example.com                 # or pass --app to each command
+spfn ops token issue --name laptop --scopes 'example:read' --to-keychain
+spfn ops list                                               # what can this app do?
+spfn ops call listRecentExamples --describe                 # what does it take?
+spfn ops call listRecentExamples --query limit=20
+```
+
+The app URL must be HTTPS; plain HTTP is accepted only against a loopback host. Only the
+token's SHA-256 hash is stored. `--to-keychain` (macOS only) delivers the secret without
+printing it; elsewhere, leave it out, and the secret is printed once to set as
+`SPFN_OPS_TOKEN`. Revoke a token with `spfn ops token revoke <id>` like any production credential.
+Application users keep signing in through the separately configured OAuth providers.
+
+`spfn ops` reads the commands from the running app, so nothing is generated or configured
+on the operator's machine, and a coding agent in the same terminal can run the same
+commands. When operators work outside a terminal, add [`@spfn/mcp`](./packages/mcp.md)
+and write the same operations as MCP tools, calling the same repositories and services the
+ops routes call. `@spfn/auth` can act as the OAuth 2.1
+authorization server those clients expect, so Claude Code and Codex connect to `/mcp`
+as the signed-in user; [Connecting MCP clients](../../../docs/guides/mcp-clients.md)
+walks through it.
+
+The result is an operating surface tailored to your product. An operator or an agent can
+look up users, publish content, or retry a workflow without a separate administrator
+dashboard. Build a dashboard later when a recurring human workflow benefits from one, not
+as a prerequisite for operating the first production version.
 
 ## Production checklist
 
@@ -208,10 +234,10 @@ for operating the first production version.
 - Codegen output and schema-generated migrations are current.
 - Build, tests, and lint pass from a clean checkout.
 - OAuth callbacks and public origins use production HTTPS URLs.
-- The MCP operator key stays server-side and has a rotation path.
-- MCP tools are task-specific, scoped, and safe by default.
-- Destructive tools require an explicit authorization and approval path.
-- Logs and tool results never expose secrets or sensitive internals.
+- Ops tokens carry only the scopes each operator needs, and have a revocation path.
+- Ops commands are task-specific, scoped, and declare their effect.
+- Destructive commands are declared `destructive`, so `spfn ops` asks for `--yes`.
+- Logs and command results never expose secrets or sensitive internals.
 
 Next, use the [full-stack auth tutorial](./tutorial.md) to understand the generated auth
 boundary or browse [Packages](./packages.md) to add storage, notifications,
