@@ -93,6 +93,7 @@ curl -s https://registry.npmjs.org/@spfn%2Fauth
 - unscoped `spfn` CLI 워크플로우는 publish 직전에 `publishConfig.registry` 를 지운다.
   그래야 npmjs 로 나가고, 배포된 아티팩트에 내부 레지스트리 주소가 박히지 않는다.
 
-`.github/workflows/publish.yml` (`v*` 태그로 전 패키지 일괄 배포) 은 옛 경로다.
-모든 패키지를 `alpha` 태그로 밀어버리므로 쓰지 않는다 — 패키지별 워크플로우가 대체했다.
+`v*` 태그로 전 패키지를 일괄 배포하던 `.github/workflows/publish.yml` 은 지웠다.
+모든 패키지를 `alpha` 태그로 배포하는 경로라 패키지별 워크플로우가 대체했고, 같은 일을
+하던 루트 `package.json` 의 `publish:packages` · `publish:alpha` 스크립트도 함께 지웠다.
 `RELEASE.md` 본문의 태그 기반 릴리스 절차도 같은 구 방식이라 더 이상 유효하지 않다.

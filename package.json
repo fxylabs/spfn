@@ -21,9 +21,6 @@
     "test:scripts": "node --test scripts/lib/*.test.mjs",
     "audit": "pnpm audit --prod --audit-level=high",
     "audit:all": "pnpm audit --audit-level=high",
-    "test:init": "node scripts/test-init.mjs",
-    "publish:packages": "pnpm build --filter=\"!./apps/*\" && pnpm --filter \"./packages/*\" publish --tag alpha --access public",
-    "publish:alpha": "pnpm publish:packages",
     "version:bump": "pnpm --filter \"./packages/*\" version"
   },
   "devDependencies": {
