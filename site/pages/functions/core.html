@@ -32,10 +32,10 @@
 
     /* header */
     header { border-bottom: 1px solid var(--ink); }
-    .nav { display: flex; align-items: center; height: 64px; }
+    .nav { display: flex; align-items: center; min-height: 64px; }
     .brand { display: inline-flex; align-items: center; gap: 9px; font-size: 17px; font-weight: 800; letter-spacing: -0.01em; }
     .brand svg { height: 19px; width: auto; color: var(--cobalt); }
-    .nav nav { margin-left: auto; display: flex; gap: 28px; font-size: 14.5px; font-weight: 600; }
+    .nav nav { margin-left: auto; display: flex; gap: 28px; font-size: 14.5px; font-weight: 600; flex-wrap: wrap; justify-content: flex-end; row-gap: 6px; }
     .nav nav a:hover { color: var(--cobalt); }
 
     /* hero */
@@ -101,7 +101,7 @@
 
     /* footer */
     footer { background: var(--ink); color: var(--white); padding: 34px 0; }
-    footer .inner { display: flex; align-items: center; gap: 26px; font-family: var(--mono); font-size: 12px; letter-spacing: 0.06em; }
+    footer .inner { display: flex; align-items: center; gap: 26px; font-family: var(--mono); font-size: 12px; letter-spacing: 0.06em; flex-wrap: wrap; row-gap: 10px; }
     footer a { text-decoration: underline; text-underline-offset: 3px; }
     footer .dim { color: #6d747c; margin-left: auto; }
 
@@ -112,6 +112,9 @@
     }
     @media (max-width: 600px)
     {
+        .nav nav { gap: 12px; font-size: 12px; }
+        .brand { font-size: 0; }
+        .nav { padding-top: 12px; padding-bottom: 12px; }
         .mod-grid { grid-template-columns: 1fr; }
         section { padding: 80px 0 0; }
         section:last-of-type { padding-bottom: 80px; }
@@ -128,6 +131,8 @@
             <nav>
                 <a href="/docs">Docs</a>
                 <a href="/functions">Functions</a>
+                <a href="/compare">Compare</a>
+                <a href="/architecture-drift">Architecture drift</a>
                 <a href="/about">About</a>
                 <a href="https://github.com/fxylabs/spfn" target="_blank" rel="noopener">GitHub</a>
             </nav>
@@ -139,8 +144,8 @@
             <div class="kicker"><a href="/functions">FUNCTIONS</a> / @SPFN/CORE — THE FRAMEWORK KERNEL</div>
             <h1 class="display">The <span class="inkline">kernel.</span></h1>
             <p class="sub">Everything an SPFN backend runs on: the HTTP server, the typed route DSL,
-               Drizzle data access, codegen, validated env, background jobs, events, cache, and the
-               Next.js RPC client. The only required package — everything else is opt-in.
+               Drizzle data access, codegen, validated env, background jobs, events, server-owned state,
+               the ops surface, cache, and the Next.js RPC client. The only required package — everything else is opt-in.
                It is the shape an AI coding agent fills in — the same four files per feature, every time.</p>
             <div class="cta-row">
                 <a class="btn btn-cobalt" href="/docs/packages/core">Read the reference</a>
@@ -168,7 +173,7 @@
     <section>
         <div class="inner">
             <div class="sec-head"><span class="idx">02</span><div class="rule"></div><span class="name">Modules</span></div>
-            <h2 class="sec-title">Fourteen modules.<br>Documented <em>on-site.</em></h2>
+            <h2 class="sec-title">Twenty modules.<br>Documented <em>on-site.</em></h2>
             <div class="mod-grid">
                 <a class="mod" href="/docs/packages/core/server">
                     <div class="mname">server</div>
@@ -208,7 +213,7 @@
                 </a>
                 <a class="mod" href="/docs/packages/core/event">
                     <div class="mname">event</div>
-                    <p>Decoupled pub/sub events and SSE streaming.</p>
+                    <p>Pub/sub events over SSE and WebSocket, with subscribe grants.</p>
                 </a>
                 <a class="mod" href="/docs/packages/core/job">
                     <div class="mname">job</div>
@@ -225,6 +230,30 @@
                 <a class="mod" href="/docs/packages/core/security">
                     <div class="mname">security</div>
                     <p>Safe outbound requests — SSRF-hardened safeFetch.</p>
+                </a>
+                <a class="mod" href="/docs/packages/core/state">
+                    <div class="mname">state</div>
+                    <p>A server-owned state declared once, kept in sync in the browser.</p>
+                </a>
+                <a class="mod" href="/docs/packages/core/contract">
+                    <div class="mname">contract</div>
+                    <p>Route contracts and the build gate for separately shipped clients.</p>
+                </a>
+                <a class="mod" href="/docs/packages/core#how-do-i-operate-the-app-from-the-terminal">
+                    <div class="mname">ops</div>
+                    <p>The operations surface spfn ops discovers and runs.</p>
+                </a>
+                <a class="mod" href="/docs/packages/core#can-a-second-surface-sit-beside-_ops">
+                    <div class="mname">surface</div>
+                    <p>A command surface on any namespace, beside /_ops.</p>
+                </a>
+                <a class="mod" href="/docs/packages/core#which-import-path-do-i-use-for-what">
+                    <div class="mname">authz</div>
+                    <p>Ownership guards — load a resource, check it belongs to the caller.</p>
+                </a>
+                <a class="mod" href="/docs/packages/core#which-import-path-do-i-use-for-what">
+                    <div class="mname">app-config</div>
+                    <p>Reads spfn.config.js — the app's ports and host, in one place.</p>
                 </a>
             </div>
         </div>
@@ -245,6 +274,8 @@
             <span>SUPERFUNCTION</span>
             <a href="/docs">DOCS</a>
             <a href="/functions">FUNCTIONS</a>
+            <a href="/compare">COMPARE</a>
+            <a href="/architecture-drift">ARCHITECTURE DRIFT</a>
             <a href="/about">ABOUT</a>
             <a href="https://github.com/fxylabs/spfn" target="_blank" rel="noopener">GITHUB</a>
             <span class="dim">© 2026 FXY INC. · @SPFN/CORE — BETA</span>

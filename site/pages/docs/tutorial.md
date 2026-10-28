@@ -38,7 +38,7 @@ cd my-app
 docker compose up -d       # Postgres + Redis
 ```
 
-For a product baseline with core, auth, i18n, and MCP already connected, use
+For a product baseline with core, auth, i18n, and the `spfn ops` surface already connected, use
 `npx spfn@beta create my-app --mode full` instead — everything in sections 2 and 3 below
 arrives done.
 
@@ -67,7 +67,6 @@ import { createAuthLifecycle } from '@spfn/auth/server';
 import { appRouter } from '@/server/router';
 
 export default defineServerConfig()
-    .port(8890)
     .routes(appRouter)
     .lifecycle(createAuthLifecycle())
     .build();
@@ -123,19 +122,26 @@ pnpm spfn db migrate
 
 ## 3. Environment variables — which file gets what
 
-SPFN splits env by *who* may read it. This is the most common setup stumble:
+SPFN splits env by *who* reads it. A key's file follows the process that needs it,
+not whether it is secret. This is the most common setup stumble:
 
 | File | Read by | Holds |
 | --- | --- | --- |
-| `.env.local` | Next.js **and** SPFN | `DATABASE_URL`, `SPFN_API_URL`, `SPFN_AUTH_SESSION_SECRET` (encrypts the session cookie) |
-| `.env.server` | SPFN server **only** | backend secrets: token/encryption keys, **admin seeding**, OAuth credentials |
+| `.env.local` | the Next.js process (the SPFN server loads it too) | `SPFN_API_URL`, `NEXT_PUBLIC_SPFN_APP_URL`, `SPFN_AUTH_SESSION_SECRET` (encrypts the session cookie) |
+| `.env.server` | SPFN server **only**, never Next.js | `DATABASE_URL`, `CACHE_URL`, token/encryption keys, **admin seeding**, OAuth credentials |
+
+`DATABASE_URL` belongs in `.env.server` alone: the Next.js process never talks to the
+database. The example ships both files as `.env.local.example` and
+`.env.server.example`; its ports come from `spfn.config.js` (Next.js 3890, API 8890) and
+its compose file maps PostgreSQL to 55432. A freshly scaffolded app uses 3790, 8790 and
+5432 instead.
 
 Minimum for this tutorial (generate real secrets with `openssl rand -base64 32`):
 
 ```bash
 # .env.local
-DATABASE_URL=postgresql://spfn:spfn@localhost:55432/spfn_dev
 SPFN_API_URL=http://localhost:8890
+NEXT_PUBLIC_SPFN_APP_URL=http://localhost:3890
 SPFN_AUTH_SESSION_SECRET=<32+ char random secret>
 
 # .env.server
@@ -370,8 +376,8 @@ Then walk the same loop this example was verified with:
 ## Where next
 
 The first gate is cleared. The second one — operating the thing after it ships — is what
-[Prototype to Production](./prototype-to-production.md) covers, with MCP tools in place of
-an admin dashboard.
+[Prototype to Production](./prototype-to-production.md) covers, with `spfn ops` commands in
+place of an admin dashboard.
 
 - [The SPFN pattern](./pattern.md) — the entity → route → typed client loop this
   app is built on.

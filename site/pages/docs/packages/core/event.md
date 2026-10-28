@@ -1,6 +1,6 @@
 ---
 title: "@spfn/core/event"
 navTitle: event
-description: "Decoupled pub/sub events + SSE streaming"
+description: "Pub/sub events over SSE and WebSocket, with subscribe grants"
 source: packages/core/src/event/README.md
 ---

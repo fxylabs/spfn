@@ -196,53 +196,51 @@ CMD ["pnpm", "run", "spfn:start"]
 
 ## Environment Configuration
 
-Create separate environment files for different stages:
+A key's file follows the process that reads it, not whether it is secret. `.env.local` is
+for the Next.js process; `.env.server` is for the SPFN server only and is never loaded by
+Next.js. `spfn create` and `spfn init` generate both and keep them out of git, and
+[ENV_VARIABLES.md](../../ENV_VARIABLES.md) lists every variable the framework reads.
 
-### Development (.env.local)
+Ports are not environment variables by default: they come from `spfn.config.js`
+(Next.js 3790, API 8790 in a scaffolded app), which the Dockerfile, the compose file and
+`spfn dev` / `spfn start` all read. `NEXT_PORT` and `SPFN_PORT` override them per
+environment.
+
+### Development
 
 ```bash
-# Database
-DATABASE_URL="postgresql://spfn:spfn@localhost:5432/spfn_dev"
-
-# Redis (Optional - remove if not needed)
-REDIS_URL="redis://localhost:6379"
-
-# API
-NEXT_PUBLIC_API_URL="http://localhost:8790"
-APP_PORT=3790
-API_PORT=8790
-
-# Next.js
+# .env.server — SPFN server only
 NODE_ENV=development
+DATABASE_URL="postgresql://spfn:spfn@localhost:5432/spfn_dev"
+CACHE_URL="redis://localhost:6379"      # optional — only for features that need a cache
+
+# .env.local — the Next.js process
+SPFN_API_URL="http://localhost:8790"    # where the RPC proxy forwards
 ```
 
-### Production (.env.production)
+### Production
 
 ```bash
-# Database (use production credentials)
-DATABASE_URL="postgresql://user:password@postgres-host:5432/spfn_prod"
-
-# Redis (Optional - remove if not needed)
-REDIS_URL="redis://redis-host:6379"
-
-# API
-NEXT_PUBLIC_API_URL="https://api.yourdomain.com"
-APP_PORT=3790
-API_PORT=8790
-
-# Next.js
+# SPFN server (API)
 NODE_ENV=production
+DATABASE_URL="postgresql://user:password@postgres-host:5432/spfn_prod"
+CACHE_URL="redis://redis-host:6379"     # optional
+SPFN_LOG_LEVEL=info
 
-# Proxy → backend trust (see "Client IP behind a proxy" below).
+# Next.js (app)
+NODE_ENV=production
+SPFN_API_URL="https://api.yourdomain.com"
+
+# Both — proxy → backend trust (see "Client IP behind a proxy" below).
 # Set the SAME value on the Next.js app and the API backend.
 SPFN_PROXY_SECRET=your-shared-proxy-secret
 # Number of trusted proxies in front (LB + nginx = 2). Default 1.
 TRUSTED_PROXY_HOPS=1
-
-# Optional: Monitoring
-SENTRY_DSN=your-sentry-dsn
-LOG_LEVEL=info
 ```
+
+The cache variable was once `REDIS_URL` and the public API URL `NEXT_PUBLIC_API_URL`. No
+code reads the old names, and nothing fails when they are left in place — the cache simply
+stays disabled — so rename them in an existing deployment.
 
 > **⚠️ Warning:** Security Warning
 >
@@ -288,7 +286,6 @@ shows only names and the layer each came from. Mode 0600 is not enforced on Wind
 # Build Docker image
 docker build -t spfn-app:latest \
   --build-arg CI_BOT_TOKEN=${CI_BOT_TOKEN} \
-  --build-arg APP_PORT=3790 \
   .
 
 # Run container
@@ -297,7 +294,7 @@ docker run -d \
   --network spfn-network \
   -p 3790:3790 \
   -e DATABASE_URL="postgresql://spfn:spfn@spfn-postgres:5432/spfn_dev" \
-  -e REDIS_URL="redis://spfn-redis:6379" \
+  -e CACHE_URL="redis://spfn-redis:6379" \
   spfn-app:latest
 
 # Check logs
@@ -345,13 +342,12 @@ services:
       dockerfile: Dockerfile
       args:
         CI_BOT_TOKEN: ${CI_BOT_TOKEN}
-        APP_PORT: 3790
     container_name: spfn-app
     ports:
       - "3790:3790"
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-spfn}:${POSTGRES_PASSWORD:-spfn}@postgres:5432/${POSTGRES_DB:-spfn_prod}
-      REDIS_URL: redis://redis:6379
+      CACHE_URL: redis://redis:6379
       NODE_ENV: production
     depends_on:
       postgres:

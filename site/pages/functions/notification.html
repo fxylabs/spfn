@@ -32,10 +32,10 @@
 
     /* header */
     header { border-bottom: 1px solid var(--ink); }
-    .nav { display: flex; align-items: center; height: 64px; }
+    .nav { display: flex; align-items: center; min-height: 64px; }
     .brand { display: inline-flex; align-items: center; gap: 9px; font-size: 17px; font-weight: 800; letter-spacing: -0.01em; }
     .brand svg { height: 19px; width: auto; color: var(--cobalt); }
-    .nav nav { margin-left: auto; display: flex; gap: 28px; font-size: 14.5px; font-weight: 600; }
+    .nav nav { margin-left: auto; display: flex; gap: 28px; font-size: 14.5px; font-weight: 600; flex-wrap: wrap; justify-content: flex-end; row-gap: 6px; }
     .nav nav a:hover { color: var(--cobalt); }
 
     /* hero */
@@ -103,7 +103,7 @@
 
     /* footer */
     footer { background: var(--ink); color: var(--white); padding: 34px 0; }
-    footer .inner { display: flex; align-items: center; gap: 26px; font-family: var(--mono); font-size: 12px; letter-spacing: 0.06em; }
+    footer .inner { display: flex; align-items: center; gap: 26px; font-family: var(--mono); font-size: 12px; letter-spacing: 0.06em; flex-wrap: wrap; row-gap: 10px; }
     footer a { text-decoration: underline; text-underline-offset: 3px; }
     footer .dim { color: #6d747c; margin-left: auto; }
 
@@ -114,6 +114,9 @@
     }
     @media (max-width: 600px)
     {
+        .nav nav { gap: 12px; font-size: 12px; }
+        .brand { font-size: 0; }
+        .nav { padding-top: 12px; padding-bottom: 12px; }
         .mod-grid { grid-template-columns: 1fr; }
         section { padding: 80px 0 0; }
         section:last-of-type { padding-bottom: 80px; }
@@ -130,6 +133,8 @@
             <nav>
                 <a href="/docs">Docs</a>
                 <a href="/functions">Functions</a>
+                <a href="/compare">Compare</a>
+                <a href="/architecture-drift">Architecture drift</a>
                 <a href="/about">About</a>
                 <a href="https://github.com/fxylabs/spfn" target="_blank" rel="noopener">GitHub</a>
             </nav>
@@ -138,9 +143,9 @@
 
     <div class="hero">
         <div class="inner">
-            <div class="kicker"><a href="/functions">FUNCTIONS</a> / @SPFN/NOTIFICATION — EMAIL, SMS &amp; SLACK</div>
+            <div class="kicker"><a href="/functions">FUNCTIONS</a> / @SPFN/NOTIFICATION — EMAIL, SMS, SLACK &amp; PUSH</div>
             <h1 class="display">One send(),<br><span class="inkline">every channel.</span></h1>
-            <p class="sub">Email, SMS, Slack — <code>@spfn/notification</code> gives each channel the
+            <p class="sub">Email, SMS, Slack, native push — <code>@spfn/notification</code> gives each channel the
                same call shape: recipient, template, data in; a <code>SendResult</code> back, never a
                throw. Providers plug in, templates render with filters, and pg-boss carries the
                scheduled and the bulk.
@@ -166,7 +171,7 @@
                default, with <code>configureNotification</code> for code-level overrides, and every
                send resolves to a <code>SendResult</code> you check instead of an exception you catch.</p>
             <div class="wireflow">
-                <div class="wnode">sendEmail / sendSMS / sendSlack</div><div class="wwire"></div>
+                <div class="wnode">sendEmail / sendSMS / sendSlack / sendPush</div><div class="wwire"></div>
                 <div class="wnode">template + filters</div><div class="wwire"></div>
                 <div class="wnode">provider</div><div class="wwire tohot"></div>
                 <div class="wnode hot">SendResult</div>
@@ -203,11 +208,11 @@
             <div class="mod-grid">
                 <a class="mod" href="/docs/packages/notification#sending-notifications">
                     <div class="mname">multi-channel send</div>
-                    <p>sendEmail, sendSMS, sendSlack — template or direct content, phone numbers normalized to E.164.</p>
+                    <p>sendEmail, sendSMS, sendSlack, sendPush — template or direct content, phone numbers normalized to E.164.</p>
                 </a>
                 <a class="mod" href="/docs/packages/notification#custom-providers">
                     <div class="mname">providers</div>
-                    <p>AWS SES and SNS built in as optional deps; register your own with name + send().</p>
+                    <p>AWS SES and SNS, and FCM for push, built in as optional deps; register your own with name + send().</p>
                 </a>
                 <a class="mod" href="/docs/packages/notification#template-system">
                     <div class="mname">templates &amp; filters</div>
@@ -215,7 +220,7 @@
                 </a>
                 <a class="mod" href="/docs/packages/notification#scheduled-notifications">
                     <div class="mname">scheduled delivery</div>
-                    <p>scheduleEmail and scheduleSMS via pg-boss; cancel by notification id.</p>
+                    <p>scheduleEmail and scheduleSMS via pg-boss; a cancelled send is never sent.</p>
                 </a>
                 <a class="mod" href="/docs/packages/notification#bulk-sending">
                     <div class="mname">bulk sending</div>
@@ -232,6 +237,22 @@
                 <a class="mod" href="/docs/packages/notification#logging--error-handling">
                     <div class="mname">results, not throws</div>
                     <p>send* returns a SendResult instead of throwing; logs tagged per channel via @spfn/core/logger.</p>
+                </a>
+                <a class="mod" href="/docs/packages/notification#push-fcm">
+                    <div class="mname">native push</div>
+                    <p>sendPush over FCM to Android, iOS and web — every device of a user, or a chosen few.</p>
+                </a>
+                <a class="mod" href="/docs/packages/notification#localised-templates">
+                    <div class="mname">localised templates</div>
+                    <p>One template, content per locale; a send picks one with locale.</p>
+                </a>
+                <a class="mod" href="/docs/packages/notification#retries-without-duplicates-idempotency-keys">
+                    <div class="mname">idempotency keys</div>
+                    <p>Retry a send safely — the same key returns the first result without a second delivery.</p>
+                </a>
+                <a class="mod" href="/docs/packages/notification#send-guards--send-this-later-unless-it-no-longer-applies">
+                    <div class="mname">send guards</div>
+                    <p>A scheduled send asks the app, at send time, whether it still applies.</p>
                 </a>
             </div>
         </div>
@@ -252,6 +273,8 @@
             <span>SUPERFUNCTION</span>
             <a href="/docs">DOCS</a>
             <a href="/functions">FUNCTIONS</a>
+            <a href="/compare">COMPARE</a>
+            <a href="/architecture-drift">ARCHITECTURE DRIFT</a>
             <a href="/about">ABOUT</a>
             <a href="https://github.com/fxylabs/spfn" target="_blank" rel="noopener">GITHUB</a>
             <span class="dim">© 2026 FXY INC. · @SPFN/NOTIFICATION — BETA</span>

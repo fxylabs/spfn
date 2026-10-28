@@ -1,6 +1,8 @@
 # Changelog
 
-All notable changes to the SPFN CLI will be documented in this file.
+> **Not maintained after 0.1.0-alpha.88.** Changes to the `spfn` CLI from 0.3.0 on are
+> recorded in the repository's [CHANGELOG.md](../../CHANGELOG.md), under `spfn (CLI)`. This
+> file is kept for the alpha history below.
 
 ## [0.1.0-alpha.88] - 2025-11-10
 

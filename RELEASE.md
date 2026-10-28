@@ -2,10 +2,11 @@
 
 > ⚠️ **OUTDATED — current process differs.** This guide describes a **tag-triggered**
 > release (`git tag @spfn/core@X.Y.Z` / `vX.Y.Z`, then push), and nothing is triggered by
-> a tag any more. Packages now go to **two registries**: manually to the private Gitea
-> registry via the `publish:*` scripts, and automatically to public npmjs via the
-> per-package GitHub Actions workflows, which fire on a `packages/<pkg>/package.json`
-> version change landing on `main`. See **[.github/PUBLISHING.md](./.github/PUBLISHING.md)**
+> a tag any more. Packages now go to **two registries**, both automatically when a
+> `packages/<pkg>/package.json` version change lands on `main`: the private Gitea registry
+> through Woodpecker (`.woodpecker/publish.yml` → `scripts/publish-changed.mjs`), and public
+> npmjs through the per-package GitHub Actions workflows. The `publish:*` scripts remain as
+> the local fallback. See **[.github/PUBLISHING.md](./.github/PUBLISHING.md)**
 > for the real process. The steps below are kept for historical reference only.
 
 Release guide for @spfn/core, @spfn/auth, @spfn/cms, and spfn CLI packages.

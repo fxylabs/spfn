@@ -11,7 +11,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+#### Dependencies (all packages)
+
+- **BREAKING: Node 20 is no longer supported, and Next.js `^16.4.1` is required** (#282).
+  `engines.node` is `^22.23.4 || ^24.22.1 || >=26.12.1` in every package: Node 20 reached end
+  of life without the fix for CVE-2026-111497 (remote code execution in the bundled Brotli
+  decoder). Every package that couples to Next.js requires `^16.4.1`, the release that clears
+  the 2026-10-14 advisories (two critical remote code executions and a Server Actions denial of
+  service); #244 had raised the floor from `^16.3.3` to `^16.3.8` two weeks earlier.
+  `@spfn/core` also moves to `undici` `^7.30.1`, `zod` `^4.6.6` and `hono` `^4.13.11`.
+    - **Migration**: upgrade Node and Next.js first; nothing else in an app changes.
+    - core 0.3.0-beta.31, auth 0.3.0-beta.47, cms 0.3.0-beta.6, i18n 0.2.0-beta.10, monitor
+      0.2.0-beta.5, pages-next 0.1.0-beta.12, spfn 0.3.0-beta.19, mcp 0.3.0-beta.4, signing
+      0.1.0-alpha.3, workflow 0.2.0-alpha.2.
+
+#### @spfn/notification
+
+- **BREAKING: a cancelled scheduled email or SMS is never sent** (#112). `cancelNotification`
+  moves the history row from `scheduled` to `cancelled` in one status-guarded update, and the
+  scheduled job sends only a row it can move to `pending`, so a cancel holds even when it races
+  the send time. It answers `{ success, jobCancelled }`: `jobCancelled: false` means the queued
+  job could not be removed, and the send is still stopped. A send in progress or already sent
+  is refused with `success: false`. `notification` 0.2.0-beta.6.
+    - **Migration**: `cancelScheduledNotification` is renamed `markNotificationCancelled`. It
+      only updates the record and does not touch the queue; call `cancelNotification` to stop
+      a send.
+
 #### @spfn/auth
+
+- **Behaviour change: `SPFN_AUTH_SESSION_TTL` takes effect** (#126). The variable was ignored
+  and every session lasted seven days; a malformed value is now refused when the environment
+  is validated. See the README's "Migration — `SPFN_AUTH_SESSION_TTL` takes effect".
+  `auth` 0.3.0-beta.33.
+- **Behaviour change: no localhost defaults for the app and API URLs** (#119). `@spfn/core`
+  alone declares `SPFN_API_URL`, `NEXT_PUBLIC_SPFN_API_URL` and `SPFN_APP_URL`; an app-origin
+  reader in `@spfn/auth` (OAuth callbacks, the OAuth 2.1 authorize URL, invitation links)
+  throws naming `NEXT_PUBLIC_SPFN_APP_URL` and `SPFN_APP_URL` when neither is set, where it
+  used to fall back to localhost in production. `auth` 0.3.0-beta.32.
+- **Behaviour change: a chosen locale is told apart from none** (#110). `user_profiles.locale`
+  no longer defaults to `'en'`; NULL means the person never picked a language, and
+  `getChosenLocale(c)` / `ProfileInfo.chosenLocale` answer it. See the README's "Migration —
+  tell a chosen locale from none". `auth` 0.3.0-beta.31.
 
 - **BREAKING: the package ships no HTML screens** (#108). `createRevokeAllPageHandlers` and
   `createOAuth2AuthorizeHandlers` are removed from `@spfn/auth/nextjs/server`, with
@@ -84,6 +124,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 #### @spfn/core
 
+- **Behaviour change: the server checks the environment at boot** (#119). `startServer` runs
+  `validateAllEnv` over `@spfn/core`'s registry plus the registries the app passes with
+  `defineServerConfig().env({ registries })`. A missing or invalid variable is logged by key
+  and reason, never by value, and the process exits 1 before a port is bound;
+  `createServerlessApp` rejects instead. `SKIP_ENV_VALIDATION` does not apply. `core`
+  0.3.0-beta.16.
+- **Behaviour change: a job's `retryDelay` is milliseconds, as documented** (#233). It was
+  handed to pg-boss, which reads seconds, unconverted, so `retryDelay: 5000` waited 83
+  minutes. A job that passed seconds to work around it now retries far sooner. `core`
+  0.3.0-beta.15.
+
 - **BREAKING: a nested `runInTransaction` / `Transactional()` call is now a `SAVEPOINT` on the
   outer transaction's connection, not an independent transaction on a second one** (#82). It
   sees the outer transaction's uncommitted writes, takes no second connection from the pool,
@@ -154,7 +205,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
       still resolve nowhere, and an app owning one of their names gets a build refusal
       describing a merge that no longer exists.
 
-#### @spfn/cli
+#### spfn (CLI)
+
+- **Behaviour change: an env entry without `layer` may come from any layer** (#124). An unset
+  `layer` was read as `environment`, so a value a package declares without one (each
+  instance's own session secret) could not come from an instance secrets file or a `--with`
+  file. `spfn` 0.3.0-beta.14.
 
 - **Behaviour change: `spfn codegen run` exits 1 when a generator refuses** (#97), and stops at
   the generator that refused. It used to log the failure, print `✓ Code generation completed`
@@ -166,7 +222,76 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+#### @spfn/i18n
+
+- **A translator over qualified keys** (#145): `useT()` and `getT(locale)` take the namespace
+  from the key. `i18n` 0.2.0-beta.8.
+- **`negotiateLocale` and `localeCookie`** in `@spfn/i18n/next` (#226) pick the locale for an
+  app behind sign-in, with no locale in the URL. `i18n` 0.2.0-beta.6.
+
+#### @spfn/notification
+
+- **Native push over FCM** (#232): `sendPush` reaches Android, iOS and web, to every device
+  of a user or a chosen few (`notification` 0.2.0-beta.10). A malformed token is retired with
+  the reason `invalid_token` (0.2.0-beta.11).
+- **An SES configuration set named once** (#132) — `SPFN_NOTIFICATION_SES_CONFIGURATION_SET`
+  or `configurationSetName` — reaches every email send. `notification` 0.2.0-beta.12.
+- **Localised templates** (#231): a template carries content per locale and a send picks one
+  with `locale`. `notification` 0.2.0-beta.9.
+- **Send guards** (#230): a scheduled send names a guard the job asks at send time whether the
+  send still applies. `notification` 0.2.0-beta.8.
+- **Idempotency keys** (#229): a retried send with the same key, channel and recipient
+  returns the first result without calling the provider. `notification` 0.2.0-beta.7.
+- `./config` exports its schema as `envSchema`, so `spfn env` lists the package's variables
+  (#119). `notification` 0.2.0-beta.11.
+
+#### @spfn/core
+
+- **A server-owned state, declared once** (#134). `defineState` / `defineStateRouter` in
+  `@spfn/core/state` derive a state's read, write and snapshot routes and its SSE event; the
+  app emits `state.changed` after a commit. `@spfn/core/state/client` (`createStateClient`)
+  and `@spfn/core/state/react` (`useServerState`) keep a browser in sync. `core`
+  0.3.0-beta.25 and 0.3.0-beta.26. Since then:
+    - the client starts from the server-rendered snapshot, and the stream serves current
+      frames on connect, so a page load makes no browser snapshot read (#140, 0.3.0-beta.28);
+    - the client exposes its connection status, bounds its snapshot retry, and restarts on
+      `retry()`, a new subscribe or `online` (#141, 0.3.0-beta.28);
+    - codegen emits the declared state ids and manifest in `src/generated/states.ts`, so a
+      browser root can compare them with the snapshot manifest (#144, 0.3.0-beta.29).
+- **An SSE event declares who may subscribe** (#135). `.canSubscribe(predicate)` runs once per
+  connection, and `.grant(subject)` / `.revoke(subject)` change an open connection.
+  `core` 0.3.0-beta.24.
+- **`contracts/current.json` describes the contracted SSE events** (#239).
+  `defineEvent(...).contract({ since })` and `defineEventRouter(...).contract({ auth,
+  streamPath? })` publish names, payload schemas, stream and token paths and the auth mode;
+  the compatibility gate refuses a breaking event change. `core` 0.3.0-beta.19.
+- **`createApi({ onOutcome })`** (#146): one observer told once how each call that reached
+  `fetch` ended. `core` 0.3.0-beta.30.
+- **`defineSurface`: a command surface on any namespace** (#127), the same authenticated
+  router, manifest and modules `@spfn/core/ops` serves on `/_ops`, which is now built on it.
+  An app's own surface command declares `.effect()` and `.summary()` (#128). `core`
+  0.3.0-beta.20 and 0.3.0-beta.21.
+
 #### @spfn/auth
+
+- **Sign in with Apple on the web and Android** (#142). The `apple` provider completes the
+  OAuth code flow and the `form_post` callback is accepted (`auth` 0.3.0-beta.41). On Android
+  the callback relays the token to an App Link listed in `SPFN_AUTH_APPLE_RELAY_URLS` (#149,
+  0.3.0-beta.44).
+- **A web browser can be the new device of a device link** (#143): `/web` routes take the
+  proxy's key, and the approved poll seals the session. `auth` 0.3.0-beta.42.
+- **`createAuthApi(config)`** (#148) builds the auth client with the app's own `createApi`
+  configuration (`onOutcome`, `onRequest`, `onResponse`, `timeout`, …); `authApi` is
+  `createAuthApi()`. `auth`
+  0.3.0-beta.43.
+- **The mobile contract declares `OauthNativeRequest.profile`**, and a provider's name is kept
+  on first link (#150). `auth` 0.3.0-beta.45.
+- **`signedTokenAuth`** (#127): the machine credential for a command surface whose caller
+  holds a short-lived EdDSA JWT another service signed and publishes keys for as a JWKS.
+  `auth` 0.3.0-beta.36.
+- **`SPFN_AUTH_GUARD_TIMEOUT`** (#237) bounds the session lookup behind `RequireAuth`,
+  `RequireRole`, `RequirePermission` and the server helpers, which waited the client-wide
+  120 s before. Unset, nothing changes. `auth` 0.3.0-beta.34.
 
 - **Roles can be restricted to email domains** (#106). `SPFN_AUTH_ROLE_EMAIL_DOMAINS`
   (`admin=example.com;support=example.com,partner.example`) lets a listed role be held only by an
@@ -373,6 +498,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 #### @spfn/signing
 
+- **0.1.0-alpha.2** (#118): RS256 verification, JWK Set input (`parseJwks`), `audience`,
+  `issuer` and `issuedWithinSec` options with their own refusal reasons, and a purpose
+  registry (`definePurposes`, `purposeVerifier`) that keeps each token kind's keys and
+  audience apart. The package README's changelog has the detail.
+
 - New package: one `Signer` interface with three key providers behind it — `local` (key
   material from an environment variable, a file or a `KeyObject`), `gcp-kms` and `aws-kms`.
   `sign()` returns a promise on every provider, including `local`, so moving a key into a
@@ -413,6 +543,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 #### spfn (CLI)
 
+- **One whole-app env list** (#119): `spfn env` and `spfn secret` read the app's schema
+  modules named in `spfn.config.js` `env.schemas`, then every installed `@spfn/*` package's
+  `envSchema`. A key declared differently by two sources is an error. `spfn` 0.3.0-beta.13.
+- **`spfn secret export`** (#120) merges an environment file, an optional instance file and
+  plaintext `--with` files into one dotenv file created 0600; `--instance` on the other
+  `secret` subcommands; `secret set --stdin`. `spfn` 0.3.0-beta.13.
+- **`spfn env audit`** (#121) reports direct `process.env` reads outside the schema modules and
+  declared names nothing reads. `spfn` 0.3.0-beta.13.
+- **`spfn/surface`** (#127): `createSurfaceClient`, the client `spfn ops` runs on, as a
+  library export for any namespace a `defineSurface` serves. `spfn ops` shows the effect and
+  summary an app command declares (#128). `spfn` 0.3.0-beta.15 and 0.3.0-beta.16.
+
 - `spfn kit` — the generic installer for licensed Superfunction Kits: `install`, `restore`,
   `status`, `check`, `plan`, `update`, `resume` and `abandon`. It hard-codes no product;
   which Kit, which packages and which files are managed all come from the signed setup
@@ -434,7 +576,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+#### examples
+
+- The example migration folders use the drizzle-kit 1.0 journal layout, so `spfn db migrate`
+  applies them again (#261).
+
 #### @spfn/auth
+
+- **`next/navigation` stays a bare import**, so a route handler builds under Turbopack (#151).
+  `auth` 0.3.0-beta.46, `pages-next` 0.1.0-beta.11.
+- **Admission reads keys and account status from the write primary** (#133), so a read
+  replica neither delays a revocation nor refuses a key registered a moment ago. `auth`
+  0.3.0-beta.40.
+- **A device link's poll tells a wrong pick apart from a refusal** (#130). `auth`
+  0.3.0-beta.39.
+- **A callback that finds no cookie at all is refused with `reason=no_cookie`** (#129). `auth`
+  0.3.0-beta.38.
+- **Every OAuth start keeps its own cookies, and the error redirect names a reason** (#238), so
+  a person who opens the sign-in in two tabs can finish both, in either order. `auth` 0.3.0-beta.35.
+- **A repeated OAuth finalize keeps the session** (#126): a reload of the callback page after
+  the sign-in finished is answered with success and writes no cookie. `auth` 0.3.0-beta.33.
 
 - **The OAuth2 consent POST is CSRF-checked in every mode** (#108). `POST
   /_auth/oauth2/authorize` issues an authorization code on the strength of the session
@@ -501,6 +662,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
       endpoints by URL and no client names them.
 
 #### @spfn/core
+
+- **Revoking a device key closes the SSE streams it opened, and the clients stop on 401**
+  (#153). `core` 0.3.0-beta.33, `auth` 0.3.0-beta.48.
+- **A state client applies every frame its stream carries**, so a later subscribe never gets
+  an older value (#152, 0.3.0-beta.32). Earlier state fixes: frames go out after the commit,
+  snapshot route options, a typed principal (#136, #137, #138, 0.3.0-beta.27), and a listener
+  hears a change rather than a newer `at` (#139, 0.3.0-beta.28).
+- **Transaction hooks belong to the savepoint that registered them** (#255), so a rolled-back
+  savepoint fires nothing at the root commit. `core` 0.3.0-beta.28.
+- **`ErrorRegistry` restores a class by the name its instances carry** (#131). `core`
+  0.3.0-beta.23.
+- **The Next.js client applies a per-call timeout and honours a caller's abort signal**
+  (#125). The route builder gains `.timeout(ms)`; a caller's abort is `ApiError` `'aborted'`,
+  status 0. `core` 0.3.0-beta.18.
+- **`next/*` imports name their file** (#147), so a package's dist entries load under plain
+  Node. `core` 0.3.0-beta.30, `auth` 0.3.0-beta.43, `cms` 0.3.0-beta.5, `i18n`
+  0.2.0-beta.9, `pages-next` 0.1.0-beta.10.
+- `undici` `^7.29.1` clears two high advisories in the production audit (#123). `core`
+  0.3.0-beta.17.
 
 - **BREAKING: a response interceptor could not redirect, and the caller was handed a network
   failure that never happened** (#104). The client ran `onResponse` inside the `try` that wraps

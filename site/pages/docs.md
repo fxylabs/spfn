@@ -31,9 +31,11 @@ up a user, publish a change, retry a failed job. That is a second application wi
 own auth, screens, and maintenance — and it grows for as long as the product does.
 
 Neither gate is your product, and both have a known correct shape. Building with an agent
-puts an explicit price on them, measured in tokens. `@spfn/auth` clears the first;
-`@spfn/mcp` clears the second by exposing your operations as tools the agent already
-uses, instead of a dashboard you have to build.
+puts an explicit price on them, measured in tokens. `@spfn/auth` clears the first. The
+ops surface clears the second: you write each operation as a route under `/_ops`, and
+`spfn ops` runs it from the terminal you already have open, instead of a dashboard you
+have to build. Add `@spfn/mcp` when the same operations should also be tools for an
+agent outside the terminal.
 
 ## Create a project
 
@@ -44,8 +46,8 @@ docker compose up -d            # PostgreSQL + Redis
 pnpm spfn:dev                   # Next.js :3790 + SPFN API :8790
 ```
 
-Full mode wires `@spfn/core`, `@spfn/auth`, `@spfn/i18n`, and `@spfn/mcp` into one
-application. Connect the provider keys your product needs, then give your agent the
+Full mode wires `@spfn/core`, `@spfn/auth`, `@spfn/i18n`, and the ops surface
+(`src/server/routes/ops.ts`, driven by `spfn ops`) into one application. Connect the provider keys your product needs, then give your agent the
 product brief. Env files are generated for you — server-only secrets go in `.env.server`.
 
 Want only the framework kernel? Use `--mode bare`. The interactive prompt recommends full
@@ -102,7 +104,7 @@ the periodic database health check need the always-on path.
 ## Go deeper
 
 - [Prototype to Production](./docs/prototype-to-production.md) — the whole loop: scaffold
-  the foundation, build in vertical slices, deploy, and operate through MCP
+  the foundation, build in vertical slices, deploy, and operate with `spfn ops`
 - [Tutorial: Full-Stack Auth](./docs/tutorial.md) — the auth wiring in depth: seeded
   admin, login form, social login, and layout guards, running locally
 - [The SPFN pattern](./docs/pattern.md) — slice anatomy, codegen, the typed client loop

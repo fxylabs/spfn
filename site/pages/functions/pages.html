@@ -32,10 +32,10 @@
 
     /* header */
     header { border-bottom: 1px solid var(--ink); }
-    .nav { display: flex; align-items: center; height: 64px; }
+    .nav { display: flex; align-items: center; min-height: 64px; }
     .brand { display: inline-flex; align-items: center; gap: 9px; font-size: 17px; font-weight: 800; letter-spacing: -0.01em; }
     .brand svg { height: 19px; width: auto; color: var(--cobalt); }
-    .nav nav { margin-left: auto; display: flex; gap: 28px; font-size: 14.5px; font-weight: 600; }
+    .nav nav { margin-left: auto; display: flex; gap: 28px; font-size: 14.5px; font-weight: 600; flex-wrap: wrap; justify-content: flex-end; row-gap: 6px; }
     .nav nav a:hover { color: var(--cobalt); }
 
     /* hero */
@@ -103,7 +103,7 @@
 
     /* footer */
     footer { background: var(--ink); color: var(--white); padding: 34px 0; }
-    footer .inner { display: flex; align-items: center; gap: 26px; font-family: var(--mono); font-size: 12px; letter-spacing: 0.06em; }
+    footer .inner { display: flex; align-items: center; gap: 26px; font-family: var(--mono); font-size: 12px; letter-spacing: 0.06em; flex-wrap: wrap; row-gap: 10px; }
     footer a { text-decoration: underline; text-underline-offset: 3px; }
     footer .dim { color: #6d747c; margin-left: auto; }
 
@@ -114,6 +114,9 @@
     }
     @media (max-width: 600px)
     {
+        .nav nav { gap: 12px; font-size: 12px; }
+        .brand { font-size: 0; }
+        .nav { padding-top: 12px; padding-bottom: 12px; }
         .mod-grid { grid-template-columns: 1fr; }
         section { padding: 80px 0 0; }
         section:last-of-type { padding-bottom: 80px; }
@@ -130,6 +133,8 @@
             <nav>
                 <a href="/docs">Docs</a>
                 <a href="/functions">Functions</a>
+                <a href="/compare">Compare</a>
+                <a href="/architecture-drift">Architecture drift</a>
                 <a href="/about">About</a>
                 <a href="https://github.com/fxylabs/spfn" target="_blank" rel="noopener">GitHub</a>
             </nav>
@@ -253,6 +258,8 @@
             <span>SUPERFUNCTION</span>
             <a href="/docs">DOCS</a>
             <a href="/functions">FUNCTIONS</a>
+            <a href="/compare">COMPARE</a>
+            <a href="/architecture-drift">ARCHITECTURE DRIFT</a>
             <a href="/about">ABOUT</a>
             <a href="https://github.com/fxylabs/spfn" target="_blank" rel="noopener">GITHUB</a>
             <span class="dim">© 2026 FXY INC. · @SPFN/PAGES — BETA</span>

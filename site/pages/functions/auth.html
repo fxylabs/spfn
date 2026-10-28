@@ -32,10 +32,10 @@
 
     /* header */
     header { border-bottom: 1px solid var(--ink); }
-    .nav { display: flex; align-items: center; height: 64px; }
+    .nav { display: flex; align-items: center; min-height: 64px; }
     .brand { display: inline-flex; align-items: center; gap: 9px; font-size: 17px; font-weight: 800; letter-spacing: -0.01em; }
     .brand svg { height: 19px; width: auto; color: var(--cobalt); }
-    .nav nav { margin-left: auto; display: flex; gap: 28px; font-size: 14.5px; font-weight: 600; }
+    .nav nav { margin-left: auto; display: flex; gap: 28px; font-size: 14.5px; font-weight: 600; flex-wrap: wrap; justify-content: flex-end; row-gap: 6px; }
     .nav nav a:hover { color: var(--cobalt); }
 
     /* hero */
@@ -90,6 +90,7 @@
     .mod:hover p { color: var(--white); }
     .mod .mname { font-family: var(--mono); font-size: 13px; font-weight: 600; }
     .mod p { margin-top: 8px; font-size: 12.5px; line-height: 1.55; color: #3c4248; }
+    .mod code { font-family: var(--mono); font-size: 12px; }
 
     /* CTA band */
     .cta-band { background: var(--cobalt); color: var(--white); padding: 56px 0; }
@@ -103,7 +104,7 @@
 
     /* footer */
     footer { background: var(--ink); color: var(--white); padding: 34px 0; }
-    footer .inner { display: flex; align-items: center; gap: 26px; font-family: var(--mono); font-size: 12px; letter-spacing: 0.06em; }
+    footer .inner { display: flex; align-items: center; gap: 26px; font-family: var(--mono); font-size: 12px; letter-spacing: 0.06em; flex-wrap: wrap; row-gap: 10px; }
     footer a { text-decoration: underline; text-underline-offset: 3px; }
     footer .dim { color: #6d747c; margin-left: auto; }
 
@@ -114,6 +115,9 @@
     }
     @media (max-width: 600px)
     {
+        .nav nav { gap: 12px; font-size: 12px; }
+        .brand { font-size: 0; }
+        .nav { padding-top: 12px; padding-bottom: 12px; }
         .mod-grid { grid-template-columns: 1fr; }
         section { padding: 80px 0 0; }
         section:last-of-type { padding-bottom: 80px; }
@@ -130,6 +134,8 @@
             <nav>
                 <a href="/docs">Docs</a>
                 <a href="/functions">Functions</a>
+                <a href="/compare">Compare</a>
+                <a href="/architecture-drift">Architecture drift</a>
                 <a href="/about">About</a>
                 <a href="https://github.com/fxylabs/spfn" target="_blank" rel="noopener">GitHub</a>
             </nav>
@@ -143,8 +149,8 @@
             <p class="sub">The first gate between a working prototype and a product: nothing ships until
                people can sign in, and getting it subtly wrong is a security incident rather than a bug.
                <code>@spfn/auth</code> ships the whole surface — client-signed JWT, OTP, OAuth with
-               pluggable providers, Next.js sessions and guards, runtime RBAC — as one package, wired
-               into the SPFN slice.</p>
+               pluggable providers, a second factor, device link, Next.js sessions and guards, runtime
+               RBAC, and the tokens <code>spfn ops</code> runs on — as one package, wired into the SPFN slice.</p>
             <div class="cta-row">
                 <a class="btn btn-cobalt" href="/docs/packages/auth">Read the reference</a>
                 <a class="btn btn-outline" href="/docs/tutorial">Follow the tutorial</a>
@@ -207,13 +213,13 @@
                 </a>
                 <a class="mod" href="/docs/packages/auth#oauth">
                     <div class="mname">oauth</div>
-                    <p>Pluggable provider registry — Google, Kakao, Naver built in.</p>
+                    <p>Pluggable provider registry — Google, Apple, GitHub, Kakao, Naver built in.</p>
                 </a>
-                <a class="mod" href="/docs/packages/auth#sessions-nextjs">
+                <a class="mod" href="/docs/packages/auth#how-do-i-read-the-session-in-a-nextjs-page">
                     <div class="mname">sessions &amp; guards</div>
-                    <p>Cookie sessions for Next.js — RequireAuth, RequireRole, getSession.</p>
+                    <p>Cookie sessions for Next.js — RequireAuth, RequireRole, getSession, opt-in session binding.</p>
                 </a>
-                <a class="mod" href="/docs/packages/auth#rbac">
+                <a class="mod" href="/docs/packages/auth#how-do-i-define-roles-and-permissions">
                     <div class="mname">rbac</div>
                     <p>Runtime roles and permissions, seeded at boot, checked per route.</p>
                 </a>
@@ -232,6 +238,22 @@
                 <a class="mod" href="/docs/packages/auth#account-deletion--recovery">
                     <div class="mname">deletion &amp; recovery</div>
                     <p>Grace-period account deletion with a recovery window.</p>
+                </a>
+                <a class="mod" href="/docs/packages/auth#second-factor-mfa">
+                    <div class="mname">second factor</div>
+                    <p>TOTP or a passkey, plus recovery codes — asked only of accounts that enrolled.</p>
+                </a>
+                <a class="mod" href="/docs/packages/auth#device-link">
+                    <div class="mname">device link</div>
+                    <p>A signed-in device shows a code; a new phone or browser reads it and signs in.</p>
+                </a>
+                <a class="mod" href="/docs/packages/auth#ops-tokens-spfn-ops">
+                    <div class="mname">ops tokens</div>
+                    <p>Scoped, revocable tokens that <code>spfn ops</code> commands answer to.</p>
+                </a>
+                <a class="mod" href="/docs/packages/auth#authorization-server-for-mcp-clients">
+                    <div class="mname">mcp authorization</div>
+                    <p>OAuth 2.1 server, so Claude Code and Codex connect to /mcp as the user.</p>
                 </a>
             </div>
         </div>
@@ -252,6 +274,8 @@
             <span>SUPERFUNCTION</span>
             <a href="/docs">DOCS</a>
             <a href="/functions">FUNCTIONS</a>
+            <a href="/compare">COMPARE</a>
+            <a href="/architecture-drift">ARCHITECTURE DRIFT</a>
             <a href="/about">ABOUT</a>
             <a href="https://github.com/fxylabs/spfn" target="_blank" rel="noopener">GITHUB</a>
             <span class="dim">© 2026 FXY INC. · @SPFN/AUTH — BETA</span>

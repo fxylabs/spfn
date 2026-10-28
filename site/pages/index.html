@@ -6,7 +6,7 @@
 <title>Superfunction — Prototype to production with AI</title>
 <meta name="description" content="The AI-native full-stack architecture for going from prototype to production — scaffold, build, deploy, and operate one structured Next.js app.">
 <meta property="og:title" content="Superfunction — Prototype to production">
-<meta property="og:description" content="Scaffold a working full stack, give your agent a structure it can extend, and operate the deployed product through MCP.">
+<meta property="og:description" content="Scaffold a working full stack, give your agent a structure it can extend, and operate the deployed product from the terminal.">
 <meta property="og:image" content="https://superfunction.xyz/og.png">
 <meta property="og:url" content="https://superfunction.xyz/">
 <meta property="og:type" content="website">
@@ -32,10 +32,10 @@
 
     /* header */
     header { border-bottom: 1px solid var(--ink); }
-    .nav { display: flex; align-items: center; height: 64px; }
+    .nav { display: flex; align-items: center; min-height: 64px; }
     .brand { display: inline-flex; align-items: center; gap: 9px; font-size: 17px; font-weight: 800; letter-spacing: -0.01em; }
     .brand svg { height: 19px; width: auto; color: var(--cobalt); }
-    .nav nav { margin-left: auto; display: flex; gap: 28px; font-size: 14.5px; font-weight: 600; }
+    .nav nav { margin-left: auto; display: flex; gap: 28px; font-size: 14.5px; font-weight: 600; flex-wrap: wrap; justify-content: flex-end; row-gap: 6px; }
     .nav nav a:hover { color: var(--cobalt); }
 
     /* hero */
@@ -126,6 +126,7 @@
     .op-row .step { color: var(--cobalt); font-family: var(--mono); font-size: 11px; letter-spacing: 0.08em; }
     .op-row h3 { font-size: 17px; margin-bottom: 6px; }
     .op-row p { color: #3c4248; font-size: 13px; line-height: 1.55; }
+    .op-row code, .ops-copy code { font-family: var(--mono); font-size: 0.9em; }
 
     /* packages */
     .pkg-grid { display: grid; grid-template-columns: repeat(4, 1fr); border-top: 1px solid var(--ink); border-left: 1px solid var(--ink); }
@@ -147,7 +148,7 @@
 
     /* footer */
     footer { background: var(--ink); color: var(--white); padding: 34px 0; }
-    footer .inner { display: flex; align-items: center; gap: 26px; font-family: var(--mono); font-size: 12px; letter-spacing: 0.06em; }
+    footer .inner { display: flex; align-items: center; gap: 26px; font-family: var(--mono); font-size: 12px; letter-spacing: 0.06em; flex-wrap: wrap; row-gap: 10px; }
     footer a { text-decoration: underline; text-underline-offset: 3px; }
     footer .dim { color: #6d747c; margin-left: auto; }
 
@@ -166,6 +167,7 @@
     }
     @media (max-width: 600px)
     {
+        .nav { padding-top: 12px; padding-bottom: 12px; }
         .why-grid { grid-template-columns: 1fr; }
         .why { border-left: none; border-top: 1px solid var(--ink); }
         .why:first-child { border-top: none; }
@@ -192,6 +194,8 @@
             <nav>
                 <a href="/docs">Docs</a>
                 <a href="/functions">Functions</a>
+                <a href="/compare">Compare</a>
+                <a href="/architecture-drift">Architecture drift</a>
                 <a href="/about">About</a>
                 <a href="https://github.com/fxylabs/spfn" target="_blank" rel="noopener">GitHub</a>
             </nav>
@@ -202,7 +206,7 @@
         <div class="inner">
             <div class="kicker">SUPERFUNCTION — AI-NATIVE FULL-STACK ARCHITECTURE</div>
             <h1 class="display">Prototype<br>to <span class="inkline">production.</span></h1>
-            <p class="sub">Scaffold a working Next.js product with backend, auth, i18n, and MCP in one command.
+            <p class="sub">Scaffold a working Next.js product with backend, auth, i18n, and an operations CLI in one command.
                Give your agent a structure it can understand, extend, deploy, and operate.</p>
             <div class="cta-row">
                 <a class="btn btn-cobalt" href="/docs/prototype-to-production">Follow the guide</a>
@@ -221,7 +225,7 @@
                 <div class="why">
                     <div class="num">01</div>
                     <h3>One scaffold</h3>
-                    <p>Next.js, the SPFN backend, database wiring, auth, i18n, and MCP arrive as one
+                    <p>Next.js, the SPFN backend, database wiring, auth, i18n, and ops commands arrive as one
                        working full-stack foundation.</p>
                 </div>
                 <div class="why">
@@ -255,14 +259,14 @@
                 <div class="wnode">scaffold</div><div class="wwire"></div>
                 <div class="wnode">vertical slices</div><div class="wwire"></div>
                 <div class="wnode">deploy</div><div class="wwire tohot"></div>
-                <div class="wnode hot">MCP operations</div>
+                <div class="wnode hot">terminal operations</div>
             </div>
             <div class="code-cols">
                 <div class="code-col">
                     <div class="clabel">01 — scaffold</div>
                     <div class="codeblock">$ pnpm dlx spfn@beta create my-app <span class="hot">--mode full</span>
 
-<span class="dim"># core · auth · i18n · MCP</span>
+<span class="dim"># core · auth · i18n · ops</span>
 $ cd my-app &amp;&amp; docker compose up -d
 $ pnpm spfn:dev</div>
                 </div>
@@ -278,14 +282,14 @@ $ pnpm spfn:dev</div>
                 </div>
                 <div class="code-col">
                     <div class="clabel">03 — operate what shipped</div>
-                    <div class="codeblock">agent → Bearer key → /mcp
+                    <div class="codeblock">$ spfn ops list --app <span class="hot">&lt;url&gt;</span>
 
-tools/
-├── <span class="str">customers.list</span>
-├── <span class="str">orders.refund</span>
-└── <span class="str">content.publish</span>
+/_ops/
+├── <span class="str">listCustomers</span>
+├── <span class="str">refundOrder</span>
+└── <span class="str">publishContent</span>
 
-<span class="dim"># your tools · your policy</span></div>
+<span class="dim"># your commands · your policy</span></div>
                 </div>
             </div>
             <div class="flow-note">FIG 01 — ONE APP · ONE REPEATABLE PATTERN · ONE AGENT-ACCESSIBLE OPERATING SURFACE</div>
@@ -305,7 +309,7 @@ tools/
                         <li>@spfn/core</li>
                         <li>@spfn/auth</li>
                         <li>@spfn/i18n</li>
-                        <li>@spfn/mcp</li>
+                        <li>ops surface · spfn ops</li>
                     </ul>
                 </div>
                 <div class="mode">
@@ -326,17 +330,17 @@ tools/
 
     <section>
         <div class="inner">
-            <div class="sec-head"><span class="idx">04</span><div class="rule"></div><span class="name">Operate with MCP</span></div>
+            <div class="sec-head"><span class="idx">04</span><div class="rule"></div><span class="name">Operate from the terminal</span></div>
             <h2 class="sec-title">Deploy the product.<br>Keep the agent <em>on the team.</em></h2>
             <div class="ops-grid">
                 <div class="ops-copy">
-                    <p>Expose the application operations you choose as authenticated MCP tools. Connect your agent after deployment and handle routine work through the same domain layer — without building a separate admin dashboard first.</p>
+                    <p>Write the operations you allow as routes under <code>/_ops</code> and run them with <code>spfn ops</code>, in the same terminal your coding agent already works in. Each command has its own input schema and authorization rule. No admin dashboard to build first. When operators work outside a terminal, <code>@spfn/mcp</code> serves the same operations as MCP tools.</p>
                     <a class="btn btn-cobalt" href="/docs/prototype-to-production">Read the full guide</a>
                 </div>
                 <div class="ops-list">
-                    <div class="op-row"><span class="step">01 / BUILD</span><div><h3>Domain operations stay in the app</h3><p>Routes and MCP tools call the same repositories and services instead of duplicating business rules.</p></div></div>
-                    <div class="op-row"><span class="step">02 / SECURE</span><div><h3>Identity and policy remain explicit</h3><p>The generated operator key protects MCP today. Tool schemas and application authorization still define what an agent can do.</p></div></div>
-                    <div class="op-row"><span class="step">03 / RUN</span><div><h3>Operate through conversation</h3><p>Inspect customers, publish content, or run workflows with auditable tools tailored to your product.</p></div></div>
+                    <div class="op-row"><span class="step">01 / BUILD</span><div><h3>Domain operations stay in the app</h3><p>Ops routes call the same repositories and services as the product instead of duplicating business rules.</p></div></div>
+                    <div class="op-row"><span class="step">02 / SECURE</span><div><h3>Identity and policy remain explicit</h3><p>Every command answers only to a scoped, revocable ops token from <code>@spfn/auth</code>. A command the app marks destructive needs <code>--yes</code>.</p></div></div>
+                    <div class="op-row"><span class="step">03 / RUN</span><div><h3>Discovered from the running app</h3><p><code>spfn ops list</code> reads what the deployed app exposes, and <code>--describe</code> prints each command's usage from the app's own schemas.</p></div></div>
                 </div>
             </div>
         </div>
@@ -357,7 +361,7 @@ tools/
                 </a>
                 <a class="pkg" href="/functions/storage">
                     <div class="pname">@spfn/storage</div>
-                    <p>File uploads — local and GCS drivers.</p>
+                    <p>Object storage — S3-compatible, GCS, and local disk.</p>
                 </a>
                 <a class="pkg" href="/functions/notification">
                     <div class="pname">@spfn/notification</div>
@@ -365,7 +369,7 @@ tools/
                 </a>
                 <a class="pkg" href="/functions/monitor">
                     <div class="pname">@spfn/monitor</div>
-                    <p>Health checks, metrics, request tracing.</p>
+                    <p>Error tracking, logs, and a ready-made admin dashboard.</p>
                 </a>
                 <a class="pkg" href="/functions/cms">
                     <div class="pname">@spfn/cms</div>
@@ -373,7 +377,7 @@ tools/
                 </a>
                 <a class="pkg" href="/functions/workflow">
                     <div class="pname">@spfn/workflow</div>
-                    <p>Background jobs and step workflows.</p>
+                    <p>Pipelines of background jobs, with resume and rollback.</p>
                 </a>
                 <a class="pkg" href="/functions/pages">
                     <div class="pname">@spfn/pages</div>
@@ -386,6 +390,14 @@ tools/
                 <a class="pkg" href="/functions/i18n">
                     <div class="pname">@spfn/i18n</div>
                     <p>Translation catalogs and React context, application-owned.</p>
+                </a>
+                <a class="pkg" href="/functions/migrate">
+                    <div class="pname">@spfn/migrate</div>
+                    <p>Data migrations in TypeScript that run exactly once.</p>
+                </a>
+                <a class="pkg" href="/functions/signing">
+                    <div class="pname">@spfn/signing</div>
+                    <p>One signer over local keys, GCP KMS, and AWS KMS.</p>
                 </a>
             </div>
         </div>
@@ -406,6 +418,8 @@ tools/
             <span>SUPERFUNCTION</span>
             <a href="/docs">DOCS</a>
             <a href="/functions">FUNCTIONS</a>
+            <a href="/compare">COMPARE</a>
+            <a href="/architecture-drift">ARCHITECTURE DRIFT</a>
             <a href="/about">ABOUT</a>
             <a href="https://github.com/fxylabs/spfn" target="_blank" rel="noopener">GITHUB</a>
             <span class="dim">© 2026 FXY INC. · @SPFN/* — BETA</span>

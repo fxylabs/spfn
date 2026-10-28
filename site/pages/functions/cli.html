@@ -32,10 +32,10 @@
 
     /* header */
     header { border-bottom: 1px solid var(--ink); }
-    .nav { display: flex; align-items: center; height: 64px; }
+    .nav { display: flex; align-items: center; min-height: 64px; }
     .brand { display: inline-flex; align-items: center; gap: 9px; font-size: 17px; font-weight: 800; letter-spacing: -0.01em; }
     .brand svg { height: 19px; width: auto; color: var(--cobalt); }
-    .nav nav { margin-left: auto; display: flex; gap: 28px; font-size: 14.5px; font-weight: 600; }
+    .nav nav { margin-left: auto; display: flex; gap: 28px; font-size: 14.5px; font-weight: 600; flex-wrap: wrap; justify-content: flex-end; row-gap: 6px; }
     .nav nav a:hover { color: var(--cobalt); }
 
     /* hero */
@@ -103,7 +103,7 @@
 
     /* footer */
     footer { background: var(--ink); color: var(--white); padding: 34px 0; }
-    footer .inner { display: flex; align-items: center; gap: 26px; font-family: var(--mono); font-size: 12px; letter-spacing: 0.06em; }
+    footer .inner { display: flex; align-items: center; gap: 26px; font-family: var(--mono); font-size: 12px; letter-spacing: 0.06em; flex-wrap: wrap; row-gap: 10px; }
     footer a { text-decoration: underline; text-underline-offset: 3px; }
     footer .dim { color: #6d747c; margin-left: auto; }
 
@@ -114,6 +114,9 @@
     }
     @media (max-width: 600px)
     {
+        .nav nav { gap: 12px; font-size: 12px; }
+        .brand { font-size: 0; }
+        .nav { padding-top: 12px; padding-bottom: 12px; }
         .mod-grid { grid-template-columns: 1fr; }
         section { padding: 80px 0 0; }
         section:last-of-type { padding-bottom: 80px; }
@@ -130,6 +133,8 @@
             <nav>
                 <a href="/docs">Docs</a>
                 <a href="/functions">Functions</a>
+                <a href="/compare">Compare</a>
+                <a href="/architecture-drift">Architecture drift</a>
                 <a href="/about">About</a>
                 <a href="https://github.com/fxylabs/spfn" target="_blank" rel="noopener">GitHub</a>
             </nav>
@@ -141,7 +146,7 @@
             <div class="kicker"><a href="/functions">FUNCTIONS</a> / SPFN CLI — THE BACKEND LAYER FOR NEXT.JS</div>
             <h1 class="display">One binary,<br><span class="inkline">whole lifecycle.</span></h1>
             <p class="sub">The <code>spfn</code> CLI scaffolds and runs a Hono-based backend that lives inside
-               your Next.js project. Choose <code>full</code> for core, auth, i18n, and MCP already wired, or
+               your Next.js project. Choose <code>full</code> for core, auth, i18n, and the ops surface already wired, or
                <code>bare</code> for the core-only kernel. It then drives the dev/build/start lifecycle, manages
                the database with Drizzle Kit, generates the RPC route map, and validates environment variables.
                No global install — run it through <code>npx</code> or your package manager's dlx.
@@ -162,7 +167,7 @@
             <p class="premise-copy">SPFN doesn't put your API in a second repo. <code>spfn create --mode full</code>
                runs <code>create-next-app</code> with SPFN-recommended flags and then <code>init</code> — which lays
                down the server templates, wires the RPC proxy route, adds the Docker and codegen config, and
-               patches <code>package.json</code>. Full mode adds auth, i18n, and MCP on top of core; use
+               patches <code>package.json</code>. Full mode adds auth, i18n, and an ops surface run with <code>spfn ops</code> on top of core; use
                <code>--mode bare</code> when you deliberately want only the kernel. From there one binary covers every phase:
                <code>spfn dev</code> runs the SPFN server and Next.js together, <code>spfn build</code> compiles
                both, <code>spfn start</code> serves the built output. The server must report ready before
@@ -203,7 +208,7 @@
     <section>
         <div class="inner">
             <div class="sec-head"><span class="idx">03</span><div class="rule"></div><span class="name">What's inside</span></div>
-            <h2 class="sec-title">Eleven commands,<br>one <em>surface.</em></h2>
+            <h2 class="sec-title">Scaffold to operations,<br>one <em>binary.</em></h2>
             <div class="mod-grid">
                 <a class="mod" href="/docs/packages/cli#spfn-create-name">
                     <div class="mname">create</div>
@@ -237,6 +242,22 @@
                     <div class="mname">env · key · secret</div>
                     <p>Schema-driven env files and checks, generated keys, keychain + SOPS secrets.</p>
                 </a>
+                <a class="mod" href="/docs/packages/cli#spfn-ops">
+                    <div class="mname">ops</div>
+                    <p>Discovers and runs the running app's ops commands; issues and revokes ops tokens.</p>
+                </a>
+                <a class="mod" href="/docs/packages/cli#spfn-contract">
+                    <div class="mname">contract</div>
+                    <p>Snapshots the route contract and fails a breaking change for shipped clients.</p>
+                </a>
+                <a class="mod" href="/docs/packages/cli#spfn-cloud">
+                    <div class="mname">cloud</div>
+                    <p>Vercel Hobby + Supabase Free: limits, live usage, keep-alive, env sync.</p>
+                </a>
+                <a class="mod" href="/docs/packages/cli#spfn-kit">
+                    <div class="mname">kit</div>
+                    <p>Installs, verifies and updates a signed Superfunction Kit release.</p>
+                </a>
             </div>
         </div>
     </section>
@@ -256,6 +277,8 @@
             <span>SUPERFUNCTION</span>
             <a href="/docs">DOCS</a>
             <a href="/functions">FUNCTIONS</a>
+            <a href="/compare">COMPARE</a>
+            <a href="/architecture-drift">ARCHITECTURE DRIFT</a>
             <a href="/about">ABOUT</a>
             <a href="https://github.com/fxylabs/spfn" target="_blank" rel="noopener">GITHUB</a>
             <span class="dim">© 2026 FXY INC. · SPFN CLI — BETA</span>

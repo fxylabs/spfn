@@ -97,10 +97,11 @@ key-exchange flow, OAuth, and RBAC.
 
 Auth secrets are split by audience (see `packages/auth/README.md`):
 
-- `.env.local` — `SPFN_AUTH_SESSION_SECRET` (≥32 chars, validated), `DATABASE_URL`,
-  `SPFN_API_URL`, `NEXT_PUBLIC_SPFN_APP_URL`, `CACHE_URL`, `NODE_ENV`, `SPFN_LOG_LEVEL`
-- `.env.server` — verification/token-encryption secrets, `DATABASE_URL`, admin seed
-  account, provider credentials (Google, Kakao, Naver, GitHub)
+- `.env.local` — the Next.js process: `SPFN_AUTH_SESSION_SECRET` (≥32 chars, validated),
+  `SPFN_API_URL`, `NEXT_PUBLIC_SPFN_APP_URL`
+- `.env.server` — the SPFN server only: `NODE_ENV`, `SPFN_LOG_LEVEL`, `DATABASE_URL`,
+  `CACHE_URL`, verification/token-encryption secrets, the admin seed account, provider
+  credentials (Google, Kakao, Naver, GitHub, Apple)
 
 ## End-to-end social login (Google · Kakao · Naver)
 
