@@ -339,6 +339,7 @@ In the default setup (`spfn create --mode full`):
 | [@spfn/core](./packages/core) | Beta | Routing, database, transactions, typed client, server-owned state, the ops surface |
 | [@spfn/auth](./packages/auth) | Beta | Sessions, social login, RBAC, ops tokens |
 | [@spfn/i18n](./packages/i18n) | Beta | Server and React internationalization runtime |
+| [@spfn/notification](./packages/notification) | Beta | Email, SMS, Slack, push — installed as a peer of `@spfn/auth` |
 | [spfn](./packages/cli) | Beta | CLI and dev tools, including `spfn ops` |
 
 Install when you need them:

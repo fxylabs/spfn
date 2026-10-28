@@ -197,14 +197,14 @@ CMD ["pnpm", "run", "spfn:start"]
 ## Environment Configuration
 
 A key's file follows the process that reads it, not whether it is secret. `.env.local` is
-for the Next.js process; `.env.server` is for the SPFN server only and is never loaded by
-Next.js. `spfn create` and `spfn init` generate both and keep them out of git, and
+for the Next.js process, and the SPFN server loads it too; `.env.server` is for the SPFN
+server only and is never loaded by Next.js. `spfn create` and `spfn init` generate both and keep them out of git, and
 [ENV_VARIABLES.md](../../ENV_VARIABLES.md) lists every variable the framework reads.
 
-Ports are not environment variables by default: they come from `spfn.config.js`
-(Next.js 3790, API 8790 in a scaffolded app), which the Dockerfile, the compose file and
-`spfn dev` / `spfn start` all read. `NEXT_PORT` and `SPFN_PORT` override them per
-environment.
+Ports are not environment variables by default: `spfn dev` and `spfn start` read them from
+`spfn.config.js` (Next.js 3790, API 8790 in a scaffolded app). The Dockerfile and the
+compose file cannot read that file, so they repeat the two numbers; keep them in step.
+`NEXT_PORT` and `SPFN_PORT` override the ports per environment.
 
 ### Development
 
@@ -229,6 +229,9 @@ SPFN_LOG_LEVEL=info
 
 # Next.js (app)
 NODE_ENV=production
+
+# Both — the API's public origin. Required on the SPFN server too: it names its own
+# origin with it, and the boot check stops the server when it is missing.
 SPFN_API_URL="https://api.yourdomain.com"
 
 # Both — proxy → backend trust (see "Client IP behind a proxy" below).

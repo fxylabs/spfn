@@ -15,8 +15,8 @@ The second half is what usually becomes a second application: an admin dashboard
 own auth, its own screens, and its own maintenance, growing for as long as the product
 does. Write those operations as ops routes instead and run them with `spfn ops`, behind the
 [ops tokens](#ops-tokens-spfn-ops) this package issues — or attach
-[`@spfn/mcp`](../mcp/README.md) so an AI agent in a chat client runs them, gated by the same
-roles. See
+[`@spfn/mcp`](../mcp/README.md) and write them as MCP tools an AI agent in a chat client runs,
+gated by the same roles. See
 [Can I operate the app without building an admin dashboard?](#can-i-operate-the-app-without-building-an-admin-dashboard).
 
 Underneath: asymmetric client-signed JWTs (ES256/RS256), OTP verification, OAuth 2.0

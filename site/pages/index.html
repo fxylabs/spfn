@@ -174,7 +174,7 @@
         .mode-grid { grid-template-columns: 1fr; }
         .mode + .mode { border-top: 1px solid var(--ink); border-left: 0; }
         .pkg-grid { grid-template-columns: 1fr; }
-        .nav nav { gap: 12px; font-size: 12px; }
+        .nav nav { column-gap: 12px; font-size: 12px; }
         .brand { font-size: 0; }
         .op-row { grid-template-columns: 1fr; gap: 8px; }
         footer .inner { align-items: flex-start; flex-wrap: wrap; }
@@ -334,7 +334,7 @@ $ pnpm spfn:dev</div>
             <h2 class="sec-title">Deploy the product.<br>Keep the agent <em>on the team.</em></h2>
             <div class="ops-grid">
                 <div class="ops-copy">
-                    <p>Write the operations you allow as routes under <code>/_ops</code> and run them with <code>spfn ops</code>, in the same terminal your coding agent already works in. Each command has its own input schema and authorization rule. No admin dashboard to build first. When operators work outside a terminal, <code>@spfn/mcp</code> serves the same operations as MCP tools.</p>
+                    <p>Write the operations you allow as routes under <code>/_ops</code> and run them with <code>spfn ops</code>, in the same terminal your coding agent already works in. Each command has its own input schema and authorization rule. No admin dashboard to build first. When operators work outside a terminal, write the same operations as MCP tools with <code>@spfn/mcp</code>, over the same services.</p>
                     <a class="btn btn-cobalt" href="/docs/prototype-to-production">Read the full guide</a>
                 </div>
                 <div class="ops-list">

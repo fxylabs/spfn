@@ -208,14 +208,16 @@ spfn ops call listRecentExamples --query limit=20
 ```
 
 The app URL must be HTTPS; plain HTTP is accepted only against a loopback host. Only the
-token's SHA-256 hash is stored, and `--to-keychain` delivers the secret without printing
-it. Revoke a token with `spfn ops token revoke <id>` like any production credential.
+token's SHA-256 hash is stored. `--to-keychain` (macOS only) delivers the secret without
+printing it; elsewhere, leave it out, and the secret is printed once to set as
+`SPFN_OPS_TOKEN`. Revoke a token with `spfn ops token revoke <id>` like any production credential.
 Application users keep signing in through the separately configured OAuth providers.
 
 `spfn ops` reads the commands from the running app, so nothing is generated or configured
 on the operator's machine, and a coding agent in the same terminal can run the same
 commands. When operators work outside a terminal, add [`@spfn/mcp`](./packages/mcp.md)
-and serve the same operations as MCP tools. `@spfn/auth` can act as the OAuth 2.1
+and write the same operations as MCP tools, calling the same repositories and services the
+ops routes call. `@spfn/auth` can act as the OAuth 2.1
 authorization server those clients expect, so Claude Code and Codex connect to `/mcp`
 as the signed-in user; [Connecting MCP clients](../../../docs/guides/mcp-clients.md)
 walks through it.

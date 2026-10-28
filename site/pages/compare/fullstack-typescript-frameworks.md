@@ -183,8 +183,8 @@ The set available today:
 | [@spfn/mcp](../docs/packages/mcp.md) | your app exposed to an AI agent over the Model Context Protocol |
 
 Operations need no package of their own. `@spfn/core` serves ops commands under `/_ops`,
-and `spfn ops` runs them from the terminal; `@spfn/mcp` serves the same operations to an
-agent in a chat client. Instead of building an admin dashboard, you let an operator or an
+and `spfn ops` runs them from the terminal; with `@spfn/mcp` you write the same operations
+as MCP tools, over the same services, for an agent in a chat client. Instead of building an admin dashboard, you let an operator or an
 agent act on the app through a typed interface you already declared.
 
 The honest limit: this only pays off if the slices fit what you need. A first-party

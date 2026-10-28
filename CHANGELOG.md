@@ -14,7 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 #### Dependencies (all packages)
 
 - **BREAKING: Node 20 is no longer supported, and Next.js `^16.4.1` is required** (#282).
-  `engines.node` is `^22.23.4 || ^24.22.1 || >=26.12.1` in every package: Node 20 reached end
+  `engines.node` is `^22.23.4 || ^24.22.1 || >=26.12.1` in the repository root and in every
+  package that declares `engines` (core, spfn, i18n, mcp, signing, workflow): Node 20 reached end
   of life without the fix for CVE-2026-111497 (remote code execution in the bundled Brotli
   decoder). Every package that couples to Next.js requires `^16.4.1`, the release that clears
   the 2026-10-14 advisories (two critical remote code executions and a Server Actions denial of
@@ -33,9 +34,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the send time. It answers `{ success, jobCancelled }`: `jobCancelled: false` means the queued
   job could not be removed, and the send is still stopped. A send in progress or already sent
   is refused with `success: false`. `notification` 0.2.0-beta.6.
-    - **Migration**: `cancelScheduledNotification` is renamed `markNotificationCancelled`. It
-      only updates the record and does not touch the queue; call `cancelNotification` to stop
-      a send.
+    - **Migration**: `cancelScheduledNotification` is renamed `markNotificationCancelled`, and
+      it now returns `Promise<boolean>` (whether it updated the row) instead of the updated
+      `Notification` or `null`. It only updates the record and does not touch the queue; call
+      `cancelNotification` to stop a send.
 
 #### @spfn/auth
 
@@ -45,8 +47,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `auth` 0.3.0-beta.33.
 - **Behaviour change: no localhost defaults for the app and API URLs** (#119). `@spfn/core`
   alone declares `SPFN_API_URL`, `NEXT_PUBLIC_SPFN_API_URL` and `SPFN_APP_URL`; an app-origin
-  reader in `@spfn/auth` (OAuth callbacks, the OAuth 2.1 authorize URL, invitation links)
-  throws naming `NEXT_PUBLIC_SPFN_APP_URL` and `SPFN_APP_URL` when neither is set, where it
+  reader in `@spfn/auth` (OAuth callbacks, the OAuth 2.1 authorize URL, the emailed signup
+  confirmation, password reset and sign-out-everywhere links) throws naming `NEXT_PUBLIC_SPFN_APP_URL` and `SPFN_APP_URL` when neither is set, where it
   used to fall back to localhost in production. `auth` 0.3.0-beta.32.
 - **Behaviour change: a chosen locale is told apart from none** (#110). `user_profiles.locale`
   no longer defaults to `'en'`; NULL means the person never picked a language, and

@@ -1,8 +1,9 @@
 # Branching Strategy
 
-`main` is the only long-lived branch. Every change reaches it through a pull request,
-and a pull request is squash-merged, so each change lands on `main` as one commit whose
-message is the pull request's title.
+`main` is the only long-lived branch. Every code and documentation change reaches it
+through a pull request, and a pull request is squash-merged, so each change lands on `main`
+as one commit titled with the pull request's title. The one exception is the daily
+adoption-metrics row, which `scripts/adoption-metrics/run-daily.sh` commits directly.
 
 ## Branches
 
