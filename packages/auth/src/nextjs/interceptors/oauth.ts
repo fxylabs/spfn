@@ -434,3 +434,65 @@ export const oauthFinalizeInterceptor: InterceptorRule = {
         await next();
     },
 };
+
+/**
+ * OAuth Link Interceptor (#154)
+ *
+ * POST /_auth/oauth/:provider/link — a signed-in user starting to attach a
+ * provider identity. Checks the returnUrl here for the reason a sign-in start
+ * does, then injects a CSRF nonce and a start id and, on success, sets the CSRF
+ * cookie under that id. No key pair and no pending cookie: a link registers no
+ * device key, the session it is made from stays the session.
+ *
+ * Runs before `generalAuthInterceptor`, which signs the request with the
+ * session's key — the route is authenticated, unlike the sign-in starts.
+ */
+export const oauthLinkInterceptor: InterceptorRule = {
+    pathPattern: /^\/_auth\/oauth\/\w+\/link$/,
+    method: 'POST',
+
+    request: async (ctx, next) =>
+    {
+        const returnUrl = ctx.body?.returnUrl || '/';
+
+        if (typeof returnUrl !== 'string' || !isSafeReturnPath(returnUrl))
+        {
+            authLogger.interceptor.oauth?.warn?.('OAuth link refused: returnUrl is not a path within the app', {
+                provider: ctx.path.split('/')[3],
+            });
+            ctx.abort = refuseUnsafeReturnUrl();
+
+            return;
+        }
+
+        const linkStart = { nonce: generateOAuthNonce(), startId: generateOAuthNonce() };
+
+        ctx.body = { ...(ctx.body ?? {}), returnUrl, ...linkStart };
+        ctx.metadata.oauthLinkStart = linkStart;
+
+        await next();
+    },
+
+    response: async (ctx, next) =>
+    {
+        if (ctx.response.ok && ctx.metadata.oauthLinkStart)
+        {
+            pushLinkCsrfCookie(ctx);
+        }
+
+        await next();
+    },
+};
+
+/** The link start's CSRF cookie, under the start-cookie cap a sign-in start keeps. */
+function pushLinkCsrfCookie(ctx: ResponseInterceptorContext): void
+{
+    const { nonce, startId } = ctx.metadata.oauthLinkStart;
+
+    for (const name of namesEvictedByStart('csrf', ctx.cookies))
+    {
+        ctx.setCookies.push(lockedCookie(name, '', 0));
+    }
+
+    ctx.setCookies.push(lockedCookie(buildStartCookieName('csrf', startId), nonce, START_COOKIE_TTL_SECONDS));
+}

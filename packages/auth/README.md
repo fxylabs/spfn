@@ -197,6 +197,8 @@ real secret values out of band, never commit them.
 | `SPFN_AUTH_NAVER_REDIRECT_URI` | `.env.server` | — | default `{NEXT_PUBLIC_SPFN_APP_URL\|\|SPFN_APP_URL}/_auth/oauth/naver/callback`; an override must stay on the web app origin at that path and is **checked at boot** — see [OAuth callback origin](#oauth-callback-origin-web-app-host--rewrite) |
 | `SPFN_AUTH_GITHUB_CLIENT_ID` / `_CLIENT_SECRET` | `.env.server` | — | both values enable GitHub OAuth |
 | `SPFN_AUTH_GITHUB_SCOPES` / `_REDIRECT_URI` | `.env.server` | — | default scopes `read:user,user:email`; callback `/_auth/oauth/github/callback` on the web app origin, **checked at boot** — see [OAuth callback origin](#oauth-callback-origin-web-app-host--rewrite) |
+| `SPFN_AUTH_BATTLENET_CLIENT_ID` / `_CLIENT_SECRET` | `.env.server` | — | both values enable Battle.net OAuth — see [Battle.net](#battlenet) |
+| `SPFN_AUTH_BATTLENET_REGION` / `_SCOPES` / `_REDIRECT_URI` | `.env.server` | `global` / `openid` | `cn` for the China host; callback `/_auth/oauth/battlenet/callback` on the web app origin, **checked at boot** |
 | `SPFN_AUTH_APPLE_SERVICES_ID` | `.env.server` | — | the Services ID: web `client_id` of Sign in with Apple and the web id_token audience (also accepted as a native audience). With `_TEAM_ID`, `_KEY_ID` and one key variable it enables the Apple web flow (browser and Android); setting any of the five without the rest is **refused at boot** — see [Sign in with Apple](#sign-in-with-apple-web-and-android) |
 | `SPFN_AUTH_APPLE_TEAM_ID` | `.env.server` | — | Apple Developer Team ID; `iss` of the client secret JWT |
 | `SPFN_AUTH_APPLE_KEY_ID` | `.env.server` | — | Key ID of the Sign in with Apple key; `kid` of the client secret JWT |
@@ -1954,9 +1956,9 @@ Context helpers from `@spfn/auth/server`: `getAuth`, `getOptionalAuth`, `getUser
 ## OAuth
 
 OAuth uses a **pluggable provider registry** — not hardcoded branches. The built-in `google`,
-`apple`, `github`, `kakao`, and `naver` web providers self-register on module load; `apple` also
+`apple`, `github`, `kakao`, `naver`, and `battlenet` web providers self-register on module load; `apple` also
 provides native `id_token` sign-in. External packages add providers at runtime with
-`registerOAuthProvider()`. Google, GitHub, and Naver each require their client ID and secret;
+`registerOAuthProvider()`. Google, GitHub, Naver, and [Battle.net](#battlenet) each require their client ID and secret;
 Kakao requires its REST API key (and sends its optional client secret when configured); Apple
 requires its Services ID, Team ID, Key ID and private key — see
 [Sign in with Apple](#sign-in-with-apple-web-and-android).
@@ -2001,11 +2003,11 @@ const { authUrl } = await authApi.getGoogleOAuthUrl.call({
 window.location.href = authUrl;
 ```
 
-Apple, GitHub, Kakao, and Naver use the provider-generic URL route:
+Apple, GitHub, Kakao, Naver, and Battle.net use the provider-generic URL route:
 
 ```typescript
 const { authUrl } = await authApi.getProviderOAuthUrl.call({
-    params: { provider: 'github' }, // or 'apple', 'kakao', 'naver'
+    params: { provider: 'github' }, // or 'apple', 'kakao', 'naver', 'battlenet'
     body: {
         returnUrl: '/dashboard',
         metadata: { birthDate: '2000-01-01', termsAgreed: true },
@@ -2031,9 +2033,11 @@ redirects to its `defaultRedirectUrl` (`/` unless you pass one). The rule is exp
 Built-in OAuth routes: `POST /_auth/oauth/google/url`, `GET /_auth/oauth/google` (redirect),
 `GET /_auth/oauth/google/callback`, `POST /_auth/oauth/finalize`, `GET /_auth/oauth/providers`,
 plus the provider-generic `POST /_auth/oauth/start`, `GET /_auth/oauth/:provider/callback`, and
-`POST /_auth/oauth/:provider/callback` for a `form_post` provider (Apple), and Android's
+`POST /_auth/oauth/:provider/callback` for a `form_post` provider (Apple), Android's
 `POST /_auth/oauth/apple/native/start` with `GET /.well-known/assetlinks.json`
-([Android](#android-native-start-and-the-callback-relay)). `getGoogleAccessToken(userId)` returns a
+([Android](#android-native-start-and-the-callback-relay)), and the signed-in
+`POST /_auth/oauth/:provider/link` and `POST /_auth/oauth/:provider/unlink`
+([linking](#linking-a-provider-to-a-signed-in-account)). `getGoogleAccessToken(userId)` returns a
 valid Google access token (auto-refreshing via stored refresh token when near expiry; throws if
 no Google account is linked or no refresh token is available).
 
@@ -2047,6 +2051,125 @@ the same trust level as Kakao. Accounts created before this policy (user row wit
 are backfilled on their next login: if the provider reports a verified email and no other account
 owns it, `email` and `emailVerifiedAt` are filled in (best-effort; a conflict skips the backfill
 and the login continues).
+
+### Battle.net
+
+`battlenet` is a web provider for Blizzard's Battle.net OAuth. Create an API client at
+develop.battle.net and register the callback `{app origin}/_auth/oauth/battlenet/callback` as its
+redirect URL.
+
+| Variable | Required | Meaning |
+| --- | --- | --- |
+| `SPFN_AUTH_BATTLENET_CLIENT_ID` | yes | API client ID. With the secret, the provider is enabled |
+| `SPFN_AUTH_BATTLENET_CLIENT_SECRET` | yes | API client secret, sent to the token endpoint as HTTP Basic |
+| `SPFN_AUTH_BATTLENET_REGION` | no | `global` (default, `https://oauth.battle.net`) or `cn` (`https://oauth.battlenet.com.cn`) |
+| `SPFN_AUTH_BATTLENET_SCOPES` | no | Comma-separated; defaults to `openid`. Add game scopes such as `sc2.profile` here |
+| `SPFN_AUTH_BATTLENET_REDIRECT_URI` | no | Override of the callback URL, held to the web app origin like the other providers |
+
+With `openid` alone Battle.net releases the account id and the BattleTag — no email and no name.
+That decides how a Battle.net sign-in behaves:
+
+- The provider user id is the Battle.net **account id**, never the BattleTag. A BattleTag can be
+  changed (a paid name change); the id cannot.
+- A Battle.net sign-in never reaches an existing account by email, because there is none. Each
+  Battle.net identity signs in to the account it is attached to, or makes a new one with no email.
+  To attach it to an account that already exists, the person signs in that account first and
+  [links Battle.net from the session](#linking-a-provider-to-a-signed-in-account).
+- The BattleTag is the account's display name once, at sign-up, like any provider-reported name.
+- The **current** BattleTag is kept on the social account as `providerHandle` and replaced on
+  every sign-in and link, and `auth.login` / `auth.register` carry it as `providerHandle` beside
+  `providerUserId`. Read it there, not from the display name.
+
+An app that wants Battle.net only as a linked identity, never as a way to sign up, refuses it in
+[`beforeRegister`](#registration-gate-beforeregister):
+
+```typescript
+configureAuth({
+    beforeRegister: ({ channel, provider }) =>
+    {
+        if (channel === 'oauth' && provider === 'battlenet')
+        {
+            throw new RegistrationRejectedError({ message: 'Sign in first, then connect Battle.net.' });
+        }
+    },
+});
+```
+
+A Battle.net identity already linked to an account still signs in to that account; the hook only
+runs for a new one.
+
+### Linking a provider to a signed-in account
+
+A signed-in person can attach a provider identity to their own account and detach it again. This is
+how an identity with no email — Battle.net — reaches an account that already exists, and it works
+for every web provider.
+
+```typescript
+import { authApi } from '@spfn/auth';
+import { isOAuthLinkOutcome } from '@spfn/auth/nextjs/client';
+
+// on the settings page
+const { authUrl } = await authApi.oauthLinkStart.call({
+    params: { provider: 'battlenet' },
+    body: { returnUrl: '/settings/connections' },
+});
+window.location.href = authUrl;
+
+// back on /settings/connections?oauthLink=linked&provider=battlenet
+const outcome = new URLSearchParams(location.search).get('oauthLink');
+if (isOAuthLinkOutcome(outcome)) showLinkResult(outcome);
+
+// detaching it
+await authApi.oauthUnlink.call({ params: { provider: 'battlenet' }, body: {} });
+```
+
+The provider returns to the same `GET /_auth/oauth/:provider/callback` a sign-in uses, so the
+provider needs no second redirect URL. The state a link start seals opens only as a link, and a
+sign-in state only as a sign-in. A link registers no device key and emits no `auth.login`: the
+session it started from stays the session.
+
+Both routes are authenticated and gated like a [passkey](#passkeys-webauthn) change, because a
+linked identity is one more way into the account:
+
+- an account with a [second factor](#second-factor-mfa) must have stepped up on this device within
+  its window (`403 STEP_UP_REQUIRED`);
+- the session's device key must be younger than `SPFN_AUTH_PASSKEY_RECENT_AUTH_MINUTES`
+  (default 10), or the body carries `currentPassword` (`403 RECENT_AUTH_REQUIRED`).
+
+An account holds at most one identity per provider: a start for a provider the account already
+holds is `409 OAUTH_PROVIDER_ALREADY_LINKED`. The Next.js interceptor `oauthLinkInterceptor`
+checks `returnUrl`, injects the CSRF nonce, and sets the CSRF cookie the callback checks, exactly
+as a sign-in start does — a link finished in a browser that did not start it is refused.
+
+The callback sends the browser back to `returnUrl` with `oauthLink=<outcome>&provider=<id>`:
+
+| `oauthLink` | Meaning |
+| --- | --- |
+| `linked` | The identity is on this account (also when it already was; its tokens and handle are refreshed) |
+| `cancelled` | The person declined at the provider |
+| `linked_elsewhere` | The identity belongs to another account. Neither account changed — nothing is merged |
+| `provider_already_linked` | The account gained another identity of this provider meanwhile |
+| `account_unavailable` | The account is disabled, pending deletion, or gone |
+| `provider_error` | The provider reported an error or could not be reached |
+| `failed` | Anything else |
+
+A link that cannot be confirmed as this browser's — expired after ten minutes, a missing or
+mismatched CSRF cookie, a state brought to another provider's callback — goes to the
+[OAuth error page](#the-error-page-reason-codes) with its `reason` instead. The codes are
+exported as `OAUTH_LINK_OUTCOMES` / `isOAuthLinkOutcome` from `@spfn/auth`, `@spfn/auth/server`
+and `@spfn/auth/nextjs/client`.
+
+`POST /_auth/oauth/:provider/unlink` deletes the social account and its stored tokens. It is a
+POST because the body may carry `currentPassword`. It is refused with
+`409 LAST_RECOVERY_CREDENTIAL` when the identity is the account's last way in — no password, no
+verified email, no passkey and no other social account — and with `404` when the account holds
+no identity of that provider. It does not need the provider to be configured.
+
+Two events, both after commit: `oauthLinkedEvent` (`auth.oauth.linked`: `userId`, `provider`,
+`providerUserId`, `providerHandle?`) when an identity is newly attached, and
+`oauthLinkRemovedEvent` (`auth.oauth.link_removed`: `userId`, `provider`, `providerUserId`) when
+one is detached. A detach never emits `auth.oauth.unlinked` — that event means the provider
+withdrew the connection, and its documented subscriber starts an account deletion.
 
 ### Sign in with Apple (web and Android)
 
@@ -2467,7 +2590,10 @@ links to an existing account.
 
 ### Custom providers
 
-Implement `OAuthProvider` and register it. `SOCIAL_PROVIDERS` is `['google','apple','github','kakao','naver','superself']`. Implement the optional `verifyNativeIdToken(idToken, { nonce })` to support native id_token sign-in.
+Implement `OAuthProvider` and register it. `SOCIAL_PROVIDERS` is `['google','apple','github','kakao','naver','superself','battlenet']`. Implement the optional `verifyNativeIdToken(idToken, { nonce })` to support native id_token sign-in.
+`NormalizedIdentity.handle` is the name the provider shows for the account (a BattleTag); it is
+stored as the social account's `providerHandle`, replaced on every sign-in and link, and carried on
+the sign-in events.
 A provider without a userinfo endpoint returns the identity its token response established as
 `OAuthTokens.identity`, and the callback skips `getUserInfo()`. `exchangeCodeForTokens()` receives
 `OAuthCodeExchangeOptions.user` — Apple's raw `user` form field (at most 2048 bytes) — beside `state`.
@@ -2912,6 +3038,12 @@ and a passkey has to be enrolled from a session that already exists, so neither 
 `passkeyEnrolledEvent` (`auth.passkey.enrolled`) and `passkeyRevokedEvent`
 (`auth.passkey.revoked`) fire after commit when a passkey is added or retired.
 
+On an OAuth sign-in, web or native, `authLoginEvent` and `authRegisterEvent` also carry
+`providerUserId` and, when the provider reports one, `providerHandle` — the current
+[BattleTag](#battlenet). `oauthLinkedEvent` (`auth.oauth.linked`) and `oauthLinkRemovedEvent`
+(`auth.oauth.link_removed`) fire after commit when a signed-in person
+[links or unlinks](#linking-a-provider-to-a-signed-in-account) a provider identity.
+
 `authPasswordResetEvent` (`auth.password.reset`: `userId`, `email`) fires after commit when a
 [password reset](#password-reset-verified-email) completes. Distinct from a password
 *change*, which is made from a session that already proved itself: this one is made by
@@ -2950,7 +3082,8 @@ Payload types: `AuthLoginPayload`, `AuthRegisterPayload`, `AuthPasswordResetPayl
 `AuthDeviceRegisteredPayload`, `InvitationCreatedPayload`,
 `InvitationAcceptedPayload`, `AuthDeletionRequestedPayload`, `AuthDeletionCancelledPayload`,
 `AuthDeletionCompletedPayload`, `OAuthUnlinkedPayload` (`auth.oauth.unlinked` — provider-side
-disconnect, see the OAuth unlink-notify section), `PasskeyEnrolledPayload`,
+disconnect, see the OAuth unlink-notify section), `OAuthLinkedPayload`, `OAuthLinkRemovedPayload`,
+`PasskeyEnrolledPayload`,
 `PasskeyRevokedPayload`. `AuthLoginPayload` and `AuthDeviceRegisteredPayload` both gained
 `mfaEnrolled` in 0.3.0-beta.23. These events also bind to `@spfn/core/job`
 jobs via `.on(event)`.

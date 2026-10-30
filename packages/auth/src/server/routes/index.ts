@@ -94,6 +94,8 @@ import {
     oauthAppleNativeStart,
     oauthUnlinkNotify,
     oauthUnlinkNotifyGet,
+    oauthLinkStart,
+    oauthUnlink,
 } from './oauth';
 import { androidAssetLinks } from './well-known';
 import {
@@ -215,6 +217,9 @@ export const mainAuthRouter = defineRouter({
     oauthAppleNativeStart,
     oauthUnlinkNotify,
     oauthUnlinkNotifyGet,
+    // Session-initiated link and unlink of a provider identity (#154)
+    oauthLinkStart,
+    oauthUnlink,
     // Android Digital Asset Links; 404 unless SPFN_AUTH_ANDROID_* is set
     androidAssetLinks,
     // Invitation routes

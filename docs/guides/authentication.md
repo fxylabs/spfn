@@ -15,7 +15,7 @@ available: true
 - **Session Management** - HttpOnly cookie sessions with configurable TTL
 - **Role-Based Access Control** - Roles, permissions, and middleware guards
 - **One-Time Tokens** - Direct API access for file uploads, SSE, streaming
-- **OAuth** - Google, Kakao, Naver, GitHub built in; extensible via a provider registry
+- **OAuth** - Google, Apple, Kakao, Naver, GitHub, Battle.net built in; extensible via a provider registry; a signed-in user can link and unlink a provider identity
 - **Second factor** - Optional TOTP or passkey, with a step-up when a new device signs in
 - **Registered devices** - A per-device key list, an event when one is added, and a mailed sign-out-everywhere link
 - **Session binding** - Opt-in: a web session runs on a short-lived key only a passkey can renew
@@ -82,8 +82,8 @@ SPFN_AUTH_GOOGLE_CLIENT_SECRET=GOCSPX-...
 SPFN_AUTH_TOKEN_ENCRYPTION_KEYS=v1:<base64-encoded-32-byte-key>
 ```
 
-Kakao, Naver and GitHub follow the same `SPFN_AUTH_<PROVIDER>_CLIENT_ID` /
-`_CLIENT_SECRET` shape; see the [`@spfn/auth` README env table](../../packages/auth/README.md#which-environment-variables-do-i-need)
+Kakao, Naver, GitHub and Battle.net follow the same `SPFN_AUTH_<PROVIDER>_CLIENT_ID` /
+`_CLIENT_SECRET` shape (Battle.net adds `SPFN_AUTH_BATTLENET_REGION=cn` for the China host); see the [`@spfn/auth` README env table](../../packages/auth/README.md#which-environment-variables-do-i-need)
 for the full list including native (mobile `id_token`) sign-in.
 
 #### `.env.local` (Next.js Frontend)
@@ -797,6 +797,8 @@ export default function OAuthCallbackPage()
 | `/_auth/oauth/providers` | GET | List enabled providers |
 | `/_auth/oauth/finalize` | POST | Finalize OAuth session, or answer 202 with a second-factor challenge |
 | `/_auth/oauth/:provider/unlink-notify` | GET/POST | Receives a provider-initiated unlink webhook — register it as Kakao's unlink webhook or Naver's disconnect callback URL. Once the signature verifies, the social link and its stored tokens are deleted |
+| `/_auth/oauth/:provider/link` | POST | Signed in: start attaching a provider identity to this account. The provider returns to the usual callback, which sends the browser back to `returnUrl?oauthLink=<outcome>` |
+| `/_auth/oauth/:provider/unlink` | POST | Signed in: detach this account's identity of a provider, refused when it is the last way in |
 
 Hono matches literal segments before `:provider`, so `/google` and `/providers` are taken by
 their own routes and every other provider id falls through to the generic handlers.
@@ -809,7 +811,7 @@ their own routes and every other provider id falls through to the generic handle
 ### Custom Providers (Pluggable)
 
 Provider dispatch runs off a registry, so a provider outside the built-in set can be plugged in at
-runtime. The built-in `google`, `kakao`, `naver`, `github` and `apple` register themselves; an
+runtime. The built-in `google`, `kakao`, `naver`, `github`, `apple` and `battlenet` register themselves; an
 external package registers with `registerOAuthProvider()`. Apple's web flow (the browser, and
 Android through a Custom Tab) needs `SPFN_AUTH_APPLE_SERVICES_ID`, `SPFN_AUTH_APPLE_TEAM_ID`,
 `SPFN_AUTH_APPLE_KEY_ID` and one of `SPFN_AUTH_APPLE_PRIVATE_KEY` /
@@ -834,7 +836,12 @@ Once it is registered, `POST /_auth/oauth/start`, `GET /_auth/oauth/:provider` a
 `GET /_auth/oauth/:provider/callback` handle that provider automatically — you do not write a
 callback route of your own. The generic callback is already wrapped in `Transactional()`, so a
 failure part-way through leaves no orphan user behind. The provider id has to be a member of the
-`SOCIAL_PROVIDERS` enum (`google`, `apple`, `github`, `kakao`, `naver`, `superself`).
+`SOCIAL_PROVIDERS` enum (`google`, `apple`, `github`, `kakao`, `naver`, `superself`, `battlenet`).
+
+Battle.net never releases an email, so a Battle.net identity reaches an existing account only
+through a link made from that account's session — see
+[Battle.net](../../packages/auth/README.md#battlenet) and
+[Linking a provider to a signed-in account](../../packages/auth/README.md#linking-a-provider-to-a-signed-in-account).
 
 > The full interface specification (`OAuthProvider` / `NormalizedIdentity` / `OAuthTokens`) is under
 > [Custom providers in the `@spfn/auth` README](../../packages/auth/README.md#custom-providers).

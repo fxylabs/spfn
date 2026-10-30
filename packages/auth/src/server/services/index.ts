@@ -298,6 +298,7 @@ export {
     oauthStartService,
     oauthCallbackService,
     matchOAuthCallbackCsrf,
+    matchOAuthLinkCsrf,
     buildOAuthErrorUrl,
     oauthErrorReason,
     isOAuthProviderEnabled,
@@ -314,6 +315,20 @@ export type {
     OAuthCallbackResult,
     UnlinkNotifyResult,
 } from './oauth.service';
+
+// OAuth Link Service (#154)
+export {
+    startOAuthLinkService,
+    oauthLinkCallbackService,
+    oauthLinkResultUrl,
+    unlinkOAuthService,
+} from './oauth-link.service';
+
+export type {
+    StartOAuthLinkParams,
+    OAuthLinkCallbackParams,
+    UnlinkOAuthParams,
+} from './oauth-link.service';
 
 // Native Social Login Service
 export {

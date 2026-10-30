@@ -89,6 +89,8 @@ export const routeMap: Record<string, RouteInfo> = {
     oauthAppleNativeStart: { method: 'POST', path: '/_auth/oauth/apple/native/start' },
     oauthUnlinkNotify: { method: 'POST', path: '/_auth/oauth/:provider/unlink-notify' },
     oauthUnlinkNotifyGet: { method: 'GET', path: '/_auth/oauth/:provider/unlink-notify' },
+    oauthLinkStart: { method: 'POST', path: '/_auth/oauth/:provider/link' },
+    oauthUnlink: { method: 'POST', path: '/_auth/oauth/:provider/unlink' },
     androidAssetLinks: { method: 'GET', path: '/.well-known/assetlinks.json' },
     getInvitation: { method: 'GET', path: '/_auth/invitations/:token' },
     acceptInvitation: { method: 'POST', path: '/_auth/invitations/accept' },

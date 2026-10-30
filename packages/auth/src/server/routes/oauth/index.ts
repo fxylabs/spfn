@@ -8,6 +8,8 @@
  *   (an Android sign-in's relay state: 303 to the configured App Link instead)
  * - POST /_auth/oauth/apple/native/start: Sign in with Apple on Android, the native start
  * - GET /_auth/oauth/providers: 활성화된 OAuth provider 목록
+ * - POST /_auth/oauth/:provider/link: 로그인한 사용자가 provider 신원 연결을 시작 (#154)
+ * - POST /_auth/oauth/:provider/unlink: 로그인한 사용자가 provider 신원 연결을 해제 (#154)
  */
 
 import { Type } from '@sinclair/typebox';
@@ -17,17 +19,21 @@ import { Transactional } from '@spfn/core/db';
 import { ValidationError } from '@spfn/core/errors';
 import { rateLimitPolicy } from '@spfn/core/middleware';
 import { defineRouter, route } from '@spfn/core/route';
+import { OAuthProviderError } from '@spfn/auth/errors';
 
 import { KEY_ALGORITHM, SOCIAL_PROVIDERS, type SessionBindingType, type SocialProvider } from '../../types';
 import { DeviceNameSchema, OAuthNativeProfileSchema, PlatformSchema } from '../schema';
 import { buildStartCookieName, namesEvictedByStart } from '../../lib/oauth/start-cookies';
 import { providerErrorReason } from '../../../lib/oauth-error-reason';
-import { byIpAndIdToken } from '../../lib/rate-limit-keys';
+import { byIpAndCaller, byIpAndIdToken } from '../../lib/rate-limit-keys';
+import { getAuth } from '../../helpers';
+import { type OAuthLinkOutcome } from '../../../lib/oauth-link-outcome';
 import { deviceProvenance } from '../../lib/device-provenance';
 import {
     oauthStartService,
     oauthCallbackService,
     matchOAuthCallbackCsrf,
+    matchOAuthLinkCsrf,
     oauthErrorReason,
     oauthNativeService,
     oauthUnlinkNotifyService,
@@ -36,9 +42,18 @@ import {
     requireEnabledProvider,
     isSafeReturnPath,
     keySessionBindingService,
+    startOAuthLinkService,
+    oauthLinkCallbackService,
+    oauthLinkResultUrl,
+    unlinkOAuthService,
 } from '../../services';
 import { isGoogleOAuthEnabled, getGoogleAuthUrl, getOAuthProvider, UnlinkNotifyRejection } from '../../lib/oauth';
-import { APPLE_RELAY_APP_STATE_PATTERN, generateOAuthNonce } from '../../lib/oauth/state';
+import {
+    APPLE_RELAY_APP_STATE_PATTERN,
+    generateOAuthNonce,
+    openOAuthLinkState,
+    type OAuthLinkState,
+} from '../../lib/oauth/state';
 import { appleRelayLocation, startAppleRelay } from '../../lib/oauth/apple-relay';
 
 /**
@@ -46,7 +61,7 @@ import { appleRelayLocation, startAppleRelay } from '../../lib/oauth/apple-relay
  */
 const providerParams = Type.Object({
     provider: Type.Union(SOCIAL_PROVIDERS.map(p => Type.Literal(p)), {
-        description: 'OAuth provider id (google, apple, github, kakao, naver, superself)',
+        description: 'OAuth provider id (google, apple, github, kakao, naver, superself, battlenet)',
     }),
 });
 
@@ -69,6 +84,22 @@ interface CallbackQuery
  */
 async function oauthCallbackRedirect(c: Context, provider: SocialProvider, query: CallbackQuery): Promise<string>
 {
+    // A link started from a session (#154) comes back to this same route; its
+    // state opens only under the link key, and an expired one is refused here.
+    try
+    {
+        const link = query.state ? await openOAuthLinkState(query.state) : null;
+
+        if (link)
+        {
+            return await oauthLinkCallbackRedirect(c, provider, query, link);
+        }
+    }
+    catch (err)
+    {
+        return buildOAuthErrorUrl(err instanceof Error ? err.message : 'OAuth link failed', oauthErrorReason(err));
+    }
+
     // provider에서 에러가 반환된 경우
     if (query.error)
     {
@@ -123,6 +154,54 @@ async function completeOAuthCallback(
     });
 
     return result.redirectUrl;
+}
+
+/**
+ * Where a link's callback sends the browser (#154).
+ *
+ * The CSRF gate runs first and its refusals go to the OAuth error URL, as a
+ * sign-in's do: the state names the page to return to, but a browser that did
+ * not start this link is not owed that page. Past the gate every outcome — the
+ * provider's own error included — returns to the page the link started on.
+ *
+ * Throws only the CSRF refusals; the caller turns them into the error URL.
+ */
+async function oauthLinkCallbackRedirect(
+    c: Context,
+    provider: SocialProvider,
+    query: CallbackQuery,
+    link: OAuthLinkState,
+): Promise<string>
+{
+    const csrfName = matchOAuthLinkCsrf({ provider, link, cookies: getCookie(c) });
+
+    deleteCookie(c, csrfName, { path: '/' });
+
+    if (query.error)
+    {
+        return oauthLinkResultUrl(link, providerErrorReason(query.error) === 'cancelled' ? 'cancelled' : 'provider_error');
+    }
+
+    if (!query.code || !query.state)
+    {
+        return oauthLinkResultUrl(link, 'failed');
+    }
+
+    const outcome = await oauthLinkCallbackService({ provider, code: query.code, state: query.state, link })
+        .catch((err: unknown) => linkOutcomeOf(err));
+
+    return oauthLinkResultUrl(link, outcome);
+}
+
+/** A failed link's outcome, by the error's type — the same classes a sign-in's reason reads. */
+function linkOutcomeOf(err: unknown): OAuthLinkOutcome
+{
+    if (err instanceof OAuthProviderError)
+    {
+        return 'provider_error';
+    }
+
+    return oauthErrorReason(err) === 'account_unavailable' ? 'account_unavailable' : 'failed';
 }
 
 /**
@@ -851,6 +930,104 @@ async function processUnlinkNotify(
     }
 }
 
+/** The account password, for a session that proved itself longer ago than the recent-authentication window. */
+const LinkCurrentPasswordSchema = Type.String({
+    minLength: 1,
+    description: 'Account password, needed when the session proved itself longer ago than the recent-authentication window',
+});
+
+/** What `oauthLinkInterceptor` injects: 32 hex, the shape `generateOAuthNonce` makes. */
+function linkStartToken(description: string)
+{
+    return Type.String({ pattern: '^[0-9a-f]{32}$', description });
+}
+
+/**
+ * POST /_auth/oauth/:provider/link - Start linking a provider identity to the signed-in account (#154)
+ *
+ * Authenticated: the account is the session's. Gated like a passkey change —
+ * step-up for an enrolled account, then recent authentication — because a linked
+ * identity is one more way to sign in. The Next.js interceptor
+ * (`oauthLinkInterceptor`) injects `nonce` and `startId` and sets the matching
+ * CSRF cookie; the provider then returns to the ordinary callback route, which
+ * tells a link state from a sign-in state by the key it opens under.
+ *
+ * @example
+ * const { authUrl } = await authApi.oauthLinkStart.call({
+ *     params: { provider: 'battlenet' },
+ *     body: { returnUrl: '/settings/connections' },
+ * });
+ * window.location.href = authUrl;
+ * // back on /settings/connections?oauthLink=linked&provider=battlenet
+ */
+export const oauthLinkStart = route.post('/_auth/oauth/:provider/link')
+    .input({
+        params: providerParams,
+        body: Type.Object({
+            returnUrl: Type.Optional(Type.String({
+                description: 'Path within the app the browser returns to, with oauthLink=<outcome>',
+            })),
+            currentPassword: Type.Optional(LinkCurrentPasswordSchema),
+            nonce: Type.Optional(linkStartToken('CSRF nonce (injected by interceptor)')),
+            startId: Type.Optional(linkStartToken('Names the CSRF cookie (injected by interceptor)')),
+        }),
+    })
+    .use([rateLimitPolicy('oauth-link', { limit: 10, windowMs: 60_000, by: byIpAndCaller({ ipLimit: 100 }) })])
+    .handler(async (c) =>
+    {
+        const { params, body } = await c.data();
+        const { userId, keyId } = getAuth(c);
+
+        if (!body.nonce || !body.startId)
+        {
+            throw new ValidationError({
+                message: 'OAuth link nonce is required. Ensure the OAuth interceptor is configured.',
+            });
+        }
+
+        return await startOAuthLinkService({
+            provider: params.provider,
+            userId: Number(userId),
+            keyId,
+            currentPassword: body.currentPassword,
+            returnUrl: body.returnUrl || '/',
+            nonce: body.nonce,
+            startId: body.startId,
+        });
+    });
+
+/**
+ * POST /_auth/oauth/:provider/unlink - Detach the signed-in account's identity of a provider (#154)
+ *
+ * Gated like the link. Refused with `LAST_RECOVERY_CREDENTIAL` when the identity
+ * is the account's last way to sign in. A POST rather than a DELETE because the
+ * body may carry `currentPassword`, and the RPC proxy forwards no body on DELETE.
+ * Emits `auth.oauth.link_removed`, never the provider-initiated `auth.oauth.unlinked`.
+ */
+export const oauthUnlink = route.post('/_auth/oauth/:provider/unlink')
+    .input({
+        params: providerParams,
+        body: Type.Object({
+            currentPassword: Type.Optional(LinkCurrentPasswordSchema),
+        }),
+    })
+    .use([
+        rateLimitPolicy('oauth-unlink', { limit: 10, windowMs: 60_000, by: byIpAndCaller({ ipLimit: 100 }) }),
+        Transactional(),
+    ])
+    .handler(async (c) =>
+    {
+        const { params, body } = await c.data();
+        const { userId, keyId } = getAuth(c);
+
+        return await unlinkOAuthService({
+            provider: params.provider,
+            userId: Number(userId),
+            keyId,
+            currentPassword: body.currentPassword,
+        });
+    });
+
 /**
  * POST /_auth/oauth/:provider/unlink-notify - provider발 연동 해제 알림 수신
  *
@@ -900,6 +1077,8 @@ export const oauthRouter = defineRouter({
     oauthAppleNativeStart,
     oauthUnlinkNotify,
     oauthUnlinkNotifyGet,
+    oauthLinkStart,
+    oauthUnlink,
 });
 
 export default oauthRouter;

@@ -84,6 +84,7 @@ export * from './server/rbac';
 
 // OAuth error redirect reason codes (#126) — `reason=` on the error URL
 export { OAUTH_ERROR_REASONS, isOAuthErrorReason, type OAuthErrorReason } from './lib/oauth-error-reason';
+export { OAUTH_LINK_OUTCOMES, isOAuthLinkOutcome, type OAuthLinkOutcome } from './lib/oauth-link-outcome';
 
 // ============================================================================
 // Types & Constants (Single Source of Truth)

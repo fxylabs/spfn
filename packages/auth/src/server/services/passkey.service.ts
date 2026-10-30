@@ -179,25 +179,33 @@ export async function assertRecentAuthentication(params: RecentAuthenticationPar
     throw new RecentAuthenticationRequiredError();
 }
 
+/** The credential a removal takes away: one passkey, or one linked social account (#154). */
+export type RemovedCredential = 'passkey' | 'social';
+
 /**
  * Refuse to remove the only thing an account can sign in with (D6).
  *
- * The recovery paths are: another live passkey, a password, a linked social
- * account, and a verified email address. The last one is new — a password reset
- * now exists in this package, and an account that can be reset by email can
- * always get a password back, so the refusal has nothing left to protect.
+ * The recovery paths are: a live passkey, a password, a linked social account,
+ * and a verified email address. The last one is new — a password reset now
+ * exists in this package, and an account that can be reset by email can always
+ * get a password back, so the refusal has nothing left to protect.
  *
- * What remains refused is the account with none of the four: no other passkey,
- * no password, no social account, and no verified email — a phone-only account
- * among them. Nobody, support included, could undo that state.
+ * `removing` names the one being taken away, which is not counted: removing a
+ * passkey needs another live passkey, and unlinking a social account needs
+ * another social account. What remains refused is the account with none of the
+ * four left — a phone-only account among them. Nobody, support included, could
+ * undo that state.
  *
  * @throws LastRecoveryCredentialError
  */
-export async function assertNotLastRecoveryCredential(userId: number): Promise<void>
+export async function assertNotLastRecoveryCredential(
+    userId: number,
+    removing: RemovedCredential = 'passkey',
+): Promise<void>
 {
     const live = await passkeysRepository.listLiveByUserId(userId);
 
-    if (live.length > 1)
+    if (live.length > (removing === 'passkey' ? 1 : 0))
     {
         return;
     }
@@ -216,7 +224,7 @@ export async function assertNotLastRecoveryCredential(userId: number): Promise<v
 
     const socialAccounts = await socialAccountsRepository.findByUserId(userId);
 
-    if (socialAccounts.length > 0)
+    if (socialAccounts.length > (removing === 'social' ? 1 : 0))
     {
         return;
     }

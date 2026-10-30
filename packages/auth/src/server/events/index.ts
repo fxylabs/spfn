@@ -22,6 +22,19 @@ export const AuthProviderSchema = Type.Union([
     ...SOCIAL_PROVIDERS.map(p => Type.Literal(p)),
 ]);
 
+/**
+ * The social account an OAuth sign-in came through (#154).
+ *
+ * Present on `auth.login` and `auth.register` when the door was an OAuth
+ * provider, web or native. `providerHandle` is the name the provider shows for
+ * the account as of this sign-in — a Battle.net BattleTag — and is absent for a
+ * provider that reports none. Display material: the account is `providerUserId`.
+ */
+const ProviderAccountFields = {
+    providerUserId: Type.Optional(Type.String()),
+    providerHandle: Type.Optional(Type.String()),
+};
+
 /** The doors `auth.login` can name, as a type. */
 export type AuthLoginProvider = Static<typeof AuthLoginProviderSchema>;
 
@@ -78,6 +91,7 @@ export const authLoginEvent = defineEvent(
         email: Type.Optional(Type.String()),
         phone: Type.Optional(Type.String()),
         mfaEnrolled: Type.Boolean(),
+        ...ProviderAccountFields,
     }),
 );
 
@@ -178,6 +192,7 @@ export const authRegisterEvent = defineEvent(
         email: Type.Optional(Type.String()),
         phone: Type.Optional(Type.String()),
         metadata: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
+        ...ProviderAccountFields,
     }),
 );
 
@@ -368,6 +383,54 @@ export const oauthUnlinkedEvent = defineEvent(
 );
 
 /**
+ * auth.oauth.linked — a signed-in user attached a provider identity to their account (#154)
+ *
+ * 발행 시점:
+ * - `POST /_auth/oauth/:provider/link`로 시작한 연결의 콜백이 새 소셜 계정 연결을 커밋한 직후
+ *
+ * Not on a repeat link of an identity the account already holds, and not on a
+ * sign-in: an OAuth sign-up announces itself as `auth.register`. The identity is
+ * now also a way to sign in to this account, so this is the event an app hangs a
+ * "Battle.net was connected" notice on.
+ *
+ * @example
+ * ```typescript
+ * oauthLinkedEvent.subscribe(async ({ userId, provider, providerHandle }) => {
+ *     if (provider === 'battlenet') await claimProfile(userId, providerHandle);
+ * });
+ * ```
+ */
+export const oauthLinkedEvent = defineEvent(
+    'auth.oauth.linked',
+    Type.Object({
+        userId: Type.String(),
+        provider: AuthProviderSchema,
+        providerUserId: Type.String(),
+        providerHandle: Type.Optional(Type.String()),
+    }),
+);
+
+/**
+ * auth.oauth.link_removed — a signed-in user detached a provider identity from their account (#154)
+ *
+ * 발행 시점:
+ * - `POST /_auth/oauth/:provider/unlink`가 소셜 계정 연결과 저장 토큰을 삭제하고 커밋한 직후
+ *
+ * Deliberately not `auth.oauth.unlinked`: that event means the provider withdrew
+ * the connection, and its documented subscriber starts an account deletion. A
+ * person disconnecting Battle.net from a settings page has asked for nothing of
+ * the kind.
+ */
+export const oauthLinkRemovedEvent = defineEvent(
+    'auth.oauth.link_removed',
+    Type.Object({
+        userId: Type.String(),
+        provider: AuthProviderSchema,
+        providerUserId: Type.String(),
+    }),
+);
+
+/**
  * auth.password.reset — an account's password was replaced through a reset link
  *
  * 발행 시점:
@@ -408,3 +471,5 @@ export type AuthDeletionRequestedPayload = typeof authDeletionRequestedEvent._pa
 export type AuthDeletionCancelledPayload = typeof authDeletionCancelledEvent._payload;
 export type AuthDeletionCompletedPayload = typeof authDeletionCompletedEvent._payload;
 export type OAuthUnlinkedPayload = typeof oauthUnlinkedEvent._payload;
+export type OAuthLinkedPayload = typeof oauthLinkedEvent._payload;
+export type OAuthLinkRemovedPayload = typeof oauthLinkRemovedEvent._payload;
