@@ -711,9 +711,53 @@ export const authEnvSchema = defineEnvSchema({
         }),
     },
 
+    // ============================================================================
+    // OAuth Configuration - Battle.net
+    // ============================================================================
+    SPFN_AUTH_BATTLENET_CLIENT_ID: {
+        ...envString({
+            description: 'Battle.net API client ID (develop.battle.net). When set together with the secret, Battle.net OAuth is enabled.',
+            required: false,
+            examples: ['your-battlenet-client-id'],
+        }),
+    },
+
+    SPFN_AUTH_BATTLENET_CLIENT_SECRET: {
+        ...envString({
+            description: 'Battle.net API client secret.',
+            required: false,
+            sensitive: true,
+            examples: ['your-battlenet-client-secret'],
+        }),
+    },
+
+    SPFN_AUTH_BATTLENET_REGION: {
+        ...envString({
+            description: 'Which Battle.net OAuth host the provider talks to: "global" (https://oauth.battle.net, the default) or "cn" (https://oauth.battlenet.com.cn). Any other value refuses the first Battle.net request.',
+            required: false,
+            examples: ['global', 'cn'],
+        }),
+    },
+
+    SPFN_AUTH_BATTLENET_SCOPES: {
+        ...envString({
+            description: 'Comma-separated Battle.net OAuth scopes. Defaults to "openid", which releases the account id and the BattleTag and nothing else. Game scopes (e.g. "sc2.profile") are added here.',
+            required: false,
+            examples: ['openid', 'openid,sc2.profile'],
+        }),
+    },
+
+    SPFN_AUTH_BATTLENET_REDIRECT_URI: {
+        ...envString({
+            description: 'Battle.net OAuth callback URL. Defaults to {NEXT_PUBLIC_SPFN_APP_URL || SPFN_APP_URL}/_auth/oauth/battlenet/callback. The override must stay on the web app origin at this exact path — the CSRF cookie for the callback is host-only and the app rewrites /_auth/:path* to the API, so a callback that lands anywhere else is refused for CSRF. Checked at boot: a value off the web app origin or off the callback path refuses to start.',
+            required: false,
+            examples: ['https://app.example.com/_auth/oauth/battlenet/callback'],
+        }),
+    },
+
     SPFN_AUTH_OAUTH_CALLBACK_ORIGIN_CHECK: {
         ...envString({
-            description: 'Boot-time check of the five SPFN_AUTH_<PROVIDER>_REDIRECT_URI overrides: each one that is set must sit on the web app origin ({NEXT_PUBLIC_SPFN_APP_URL || SPFN_APP_URL}) at /_auth/oauth/<provider>/callback, because the callback CSRF cookie is host-only. "off" is the only value that disables the check — unset, "on" and anything else all run it.',
+            description: 'Boot-time check of the six SPFN_AUTH_<PROVIDER>_REDIRECT_URI overrides: each one that is set must sit on the web app origin ({NEXT_PUBLIC_SPFN_APP_URL || SPFN_APP_URL}) at /_auth/oauth/<provider>/callback, because the callback CSRF cookie is host-only. "off" is the only value that disables the check — unset, "on" and anything else all run it.',
             required: false,
             examples: ['off'],
         }),

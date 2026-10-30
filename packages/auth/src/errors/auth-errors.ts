@@ -1059,9 +1059,49 @@ export class RecentAuthenticationRequiredError extends ForbiddenError
 }
 
 /**
+ * OAuth Provider Already Linked Error (409)
+ *
+ * A signed-in user started linking a provider (#154) while the account already
+ * holds an identity of that provider. One per provider per account: the existing
+ * one is unlinked first. Clients branch on `code`.
+ */
+export class OAuthProviderAlreadyLinkedError extends ConflictError
+{
+    readonly code = 'OAUTH_PROVIDER_ALREADY_LINKED';
+
+    constructor(data: { message?: string; details?: Record<string, any> } = {})
+    {
+        super({
+            message: data.message || 'This account already has an identity from this provider. Unlink it first.',
+            details: data.details,
+        });
+        this.name = 'OAuthProviderAlreadyLinkedError';
+    }
+}
+
+/**
+ * OAuth Link Not Found Error (404)
+ *
+ * An unlink (#154) named a provider the caller's account holds no identity of.
+ * The lookup is owner-scoped, so the answer says nothing about other accounts.
+ */
+export class OAuthLinkNotFoundError extends NotFoundError
+{
+    constructor(data: { message?: string; details?: Record<string, any> } = {})
+    {
+        super({
+            message: data.message || 'No identity from this provider is linked to this account',
+            details: data.details,
+        });
+        this.name = 'OAuthLinkNotFoundError';
+    }
+}
+
+/**
  * Last Recovery Credential Error (409)
  *
- * Thrown when revoking a passkey would leave the account with no way back in:
+ * Thrown when revoking a passkey or unlinking a social account (#154) would leave
+ * the account with no way back in:
  * no other live passkey, no password, and no linked social account. There is no
  * password reset in this package, so that state is not recoverable by support
  * either — the refusal is the only thing standing between the owner and a

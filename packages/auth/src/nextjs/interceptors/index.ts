@@ -30,7 +30,7 @@ import { mfaVerifyInterceptor } from './mfa-verify';
 import { deviceLoginInterceptor } from './device-login';
 import { generalAuthInterceptor } from './general-auth';
 import { keyRotationInterceptor } from './key-rotation';
-import { oauthUrlInterceptor, oauthFinalizeInterceptor } from './oauth';
+import { oauthUrlInterceptor, oauthFinalizeInterceptor, oauthLinkInterceptor } from './oauth';
 import { signupLinkInterceptor } from './signup-link';
 import { passwordResetInterceptor } from './password-reset';
 import { sessionBindingInterceptor } from './session-binding';
@@ -47,8 +47,9 @@ import { sessionBindingInterceptor } from './session-binding';
  * 6. keyRotationInterceptor - Handles key rotation (new key generation + session update)
  * 7. oauthUrlInterceptor - Handles OAuth URL requests (key generation + state injection + pending session)
  * 8. oauthFinalizeInterceptor - Handles OAuth finalize (pending session → full session)
- * 9. generalAuthInterceptor - Handles all authenticated requests (session validation + JWT injection + session renewal)
- * 10. sessionBindingInterceptor - Re-seals the session cookie when the binding setting changes
+ * 9. oauthLinkInterceptor - Handles a signed-in link start (returnUrl check + CSRF nonce injection + CSRF cookie)
+ * 10. generalAuthInterceptor - Handles all authenticated requests (session validation + JWT injection + session renewal)
+ * 11. sessionBindingInterceptor - Re-seals the session cookie when the binding setting changes
  */
 export const authInterceptors = [
     signupLinkInterceptor,
@@ -59,6 +60,7 @@ export const authInterceptors = [
     keyRotationInterceptor,
     oauthUrlInterceptor,
     oauthFinalizeInterceptor,
+    oauthLinkInterceptor,
     generalAuthInterceptor,
     sessionBindingInterceptor,
 ];
@@ -68,7 +70,7 @@ export { mfaVerifyInterceptor } from './mfa-verify';
 export { deviceLoginInterceptor } from './device-login';
 export { generalAuthInterceptor } from './general-auth';
 export { keyRotationInterceptor } from './key-rotation';
-export { oauthUrlInterceptor, oauthFinalizeInterceptor } from './oauth';
+export { oauthUrlInterceptor, oauthFinalizeInterceptor, oauthLinkInterceptor } from './oauth';
 export { signupLinkInterceptor } from './signup-link';
 export { passwordResetInterceptor } from './password-reset';
 export { sessionBindingInterceptor, bindingSessionFields } from './session-binding';

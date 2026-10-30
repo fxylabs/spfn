@@ -3,13 +3,14 @@
 import { authApi } from '@spfn/auth';
 import { useEffect, useState } from 'react';
 
-type DemoProvider = 'apple' | 'google' | 'kakao' | 'naver';
+type DemoProvider = 'apple' | 'google' | 'kakao' | 'naver' | 'battlenet';
 
 const PROVIDERS: Array<{ id: DemoProvider; label: string; color: string; textColor: string; border?: string }> = [
     { id: 'apple', label: 'Continue with Apple', color: '#000000', textColor: '#FFFFFF' },
     { id: 'google', label: 'Continue with Google', color: '#FFFFFF', textColor: '#1F1F1F', border: '1px solid #d4d4d4' },
     { id: 'kakao', label: 'Continue with Kakao', color: '#FEE500', textColor: '#191919' },
     { id: 'naver', label: 'Continue with Naver', color: '#03C75A', textColor: '#FFFFFF' },
+    { id: 'battlenet', label: 'Continue with Battle.net', color: '#148EFF', textColor: '#FFFFFF' },
 ];
 
 const DEMO_PROVIDER_IDS: readonly string[] = PROVIDERS.map(provider => provider.id);

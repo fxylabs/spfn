@@ -1,6 +1,7 @@
 import Link from 'next/link';
 import { api } from '@/lib/api-client';
 import { LogoutButton } from '@/app/components/logout-button';
+import { ConnectedAccounts } from '@/app/components/connected-accounts';
 
 export const dynamic = 'force-dynamic';
 
@@ -23,6 +24,8 @@ export default async function DashboardPage()
                 </p>
                 <LogoutButton />
             </section>
+
+            <ConnectedAccounts connections={me.connections} />
 
             <p style={{ marginTop: '1.5rem', color: '#666' }}>
                 <Link href="/admin">Admin area</Link> — only the <code>admin</code>/<code>superadmin</code> roles

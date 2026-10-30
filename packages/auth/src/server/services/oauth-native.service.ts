@@ -21,6 +21,7 @@ import { verifyKeyFingerprint } from '../helpers/jwt';
 import { socialAccountsRepository } from '../repositories';
 import { type SocialProvider, type KeyAlgorithmType, type KeyPlatformType } from '../types';
 import { getOAuthProvider, type NormalizedIdentity } from '../lib/oauth';
+import { providerAccountFields } from '../lib/oauth/provider-account';
 import { createOrLinkUser, assertActiveForOAuthSession, backfillVerifiedEmail } from './oauth.service';
 import { registerPublicKeyService } from './key.service';
 import type { MfaChallengeHandle } from './login-result';
@@ -198,6 +199,7 @@ async function persistNativeLogin(
             provider: params.provider,
             email: identity.email || undefined,
             metadata: params.metadata,
+            ...providerAccountFields(identity),
         };
 
         const registered = await registerPublicKeyService({
@@ -211,7 +213,12 @@ async function persistNativeLogin(
             channel: 'oauth-native',
             ip: params.ip,
             userAgent: params.userAgent,
-            loginEvent: { provider: params.provider, email: identity.email || undefined, metadata: params.metadata },
+            loginEvent: {
+                provider: params.provider,
+                email: identity.email || undefined,
+                metadata: params.metadata,
+                ...providerAccountFields(identity),
+            },
         });
 
         // An enrolled account on a device it has never seen answers a challenge

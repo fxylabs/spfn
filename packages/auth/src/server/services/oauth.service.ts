@@ -38,8 +38,10 @@ import {
     type OAuthProvider,
     type OAuthTokens,
     type NormalizedIdentity,
+    type OAuthLinkState,
     type UnlinkNotification,
 } from '../lib/oauth';
+import { providerAccountFields } from '../lib/oauth/provider-account';
 import { registerPublicKeyService } from './key.service';
 import { decideKeyBinding } from '../lib/key-policy';
 import { updateLastLoginService } from './user.service';
@@ -136,7 +138,7 @@ export function requireEnabledProvider(provider: SocialProvider): OAuthProvider
 /**
  * provider가 돌려준 만료 초(seconds)를 만료 시각으로 변환 (방어적 검증)
  */
-function tokenExpiryDate(expiresIn: number): Date
+export function tokenExpiryDate(expiresIn: number): Date
 {
     if (!Number.isFinite(expiresIn))
     {
@@ -225,6 +227,7 @@ export async function oauthCallbackService(
             accessToken: tokens.accessToken,
             refreshToken: tokens.refreshToken ?? existingSocialAccount.refreshToken,
             tokenExpiresAt: tokenExpiryDate(tokens.expiresIn),
+            providerHandle: identity.handle ?? existingSocialAccount.providerHandle,
         });
 
         await backfillVerifiedEmail(userId, identity);
@@ -266,6 +269,7 @@ export async function oauthCallbackService(
             email: user?.email || undefined,
             phone: user?.phone || undefined,
             metadata: stateData.metadata,
+            ...providerAccountFields(identity),
         },
     });
 
@@ -327,6 +331,7 @@ export async function oauthCallbackService(
         email: user?.email || undefined,
         phone: user?.phone || undefined,
         metadata: stateData.metadata,
+        ...providerAccountFields(identity),
     };
 
     if (isNewUser)
@@ -393,6 +398,43 @@ export async function matchOAuthCallbackCsrf(params: {
     return { name: match.name, nonce: match.value };
 }
 
+/**
+ * The link start's CSRF cookie, proven to hold the link state's nonce (#154) — its name, to expire.
+ *
+ * The double-submit `matchOAuthCallbackCsrf` runs for a sign-in, keyed by the
+ * start id the link state carries instead of a keyId. A link start writes only
+ * per-start cookies, so the legacy fixed name is never a candidate.
+ *
+ * @throws OAuthStateInvalidError, OAuthCookieMissingError
+ */
+export function matchOAuthLinkCsrf(params: {
+    provider: SocialProvider;
+    link: OAuthLinkState;
+    cookies: Record<string, string>;
+}): string
+{
+    if (params.link.provider !== params.provider)
+    {
+        throw new OAuthStateInvalidError();
+    }
+
+    const candidates = findStartCookies('csrf', params.cookies, params.link.startId);
+
+    if (candidates.length === 0)
+    {
+        throw new OAuthCookieMissingError();
+    }
+
+    const match = cookieHoldingNonce(candidates, params.link.nonce);
+
+    if (!match)
+    {
+        throw new OAuthStateInvalidError();
+    }
+
+    return match.name;
+}
+
 /** The CSRF candidates for `keyId`, refused with `OAuthCookieMissingError` when there are none. */
 function presentCsrfCandidates(keyId: string, cookies: Record<string, string>): { name: string; value: string }[]
 {
@@ -443,7 +485,7 @@ function nonceMatches(nonce: string, expected: string | string[] | undefined): b
  * Whatever the provider or its HTTP client threw stays in the log; the redirect
  * carries `OAuthProviderError` and `reason=provider_error` (#126).
  */
-async function fromProvider<T>(call: () => Promise<T>): Promise<T>
+export async function fromProvider<T>(call: () => Promise<T>): Promise<T>
 {
     return await Promise.resolve()
         .then(call)
@@ -630,6 +672,7 @@ export async function createOrLinkUser(
         provider,
         providerUserId: identity.providerUserId,
         providerEmail: identity.email,
+        providerHandle: identity.handle ?? null,
         accessToken: tokens?.accessToken ?? null,
         refreshToken: tokens?.refreshToken ?? null,
         tokenExpiresAt: tokens ? tokenExpiryDate(tokens.expiresIn) : null,
@@ -659,9 +702,6 @@ async function recordProviderName(userId: number, name: string | undefined): Pro
     await userProfilesRepository.createIfAbsent({ userId, displayName });
 }
 
-/**
- * 리다이렉트 URL 생성
- */
 /**
  * The two binding facts, as query parameters, or nothing.
  *

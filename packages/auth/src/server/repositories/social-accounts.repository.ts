@@ -28,7 +28,9 @@ export class SocialAccountsRepository extends BaseRepository
      * self-healing 마이그레이션을 수행한다. 호출자에게는 항상 평문이 반환되어
      * 외부 API 계약(평문 토큰)이 유지된다.
      */
-    private async decryptAccount(account: UserSocialAccount | null)
+    private async decryptAccount(account: UserSocialAccount): Promise<UserSocialAccount>;
+    private async decryptAccount(account: UserSocialAccount | null): Promise<UserSocialAccount | null>;
+    private async decryptAccount(account: UserSocialAccount | null): Promise<UserSocialAccount | null>
     {
         if (!account)
         {
@@ -92,6 +94,28 @@ export class SocialAccountsRepository extends BaseRepository
     }
 
     /**
+     * 저장할 row의 토큰을 암호화한 사본
+     */
+    private async withEncryptedTokens(data: NewUserSocialAccount): Promise<NewUserSocialAccount>
+    {
+        const context = (tokenType: OAuthTokenContext['tokenType']): OAuthTokenContext => ({
+            provider: data.provider,
+            providerUserId: data.providerUserId,
+            tokenType,
+        });
+
+        return {
+            ...data,
+            accessToken: data.accessToken
+                ? await encryptToken(data.accessToken, context('access'))
+                : data.accessToken,
+            refreshToken: data.refreshToken
+                ? await encryptToken(data.refreshToken, context('refresh'))
+                : data.refreshToken,
+        };
+    }
+
+    /**
      * provider와 providerUserId로 소셜 계정 조회
      * Read replica 사용
      */
@@ -151,27 +175,32 @@ export class SocialAccountsRepository extends BaseRepository
      */
     async create(data: NewUserSocialAccount)
     {
-        const context = (tokenType: OAuthTokenContext['tokenType']): OAuthTokenContext => ({
-            provider: data.provider,
-            providerUserId: data.providerUserId,
-            tokenType,
-        });
-        const created = await this._create(userSocialAccounts, {
-            ...data,
-            accessToken: data.accessToken
-                ? await encryptToken(data.accessToken, context('access'))
-                : data.accessToken,
-            refreshToken: data.refreshToken
-                ? await encryptToken(data.refreshToken, context('refresh'))
-                : data.refreshToken,
-        });
+        const created = await this._create(userSocialAccounts, await this.withEncryptedTokens(data));
 
         // repo 외부 계약을 "토큰은 항상 평문"으로 통일 (read/update 경로와 일관)
         return this.decryptAccount(created);
     }
 
     /**
-     * 토큰 정보 업데이트
+     * 소셜 계정 생성 — (provider, providerUserId)가 이미 있으면 아무것도 쓰지 않고 null
+     *
+     * 세션에서 시작한 연결(#154)이 쓴다. 두 계정이 같은 provider 신원을 동시에 연결해도
+     * unique 위반으로 트랜잭션이 깨지지 않고, 진 쪽은 null을 받아 소유자를 다시 읽는다.
+     * Write primary 사용
+     */
+    async createIfAbsent(data: NewUserSocialAccount)
+    {
+        const result = await this.db
+            .insert(userSocialAccounts)
+            .values(await this.withEncryptedTokens(data))
+            .onConflictDoNothing({ target: [userSocialAccounts.provider, userSocialAccounts.providerUserId] })
+            .returning();
+
+        return this.decryptAccount(result[0] ?? null);
+    }
+
+    /**
+     * 토큰 정보 업데이트 (provider가 보고한 handle 포함)
      * Write primary 사용
      */
     async updateTokens(
@@ -180,6 +209,7 @@ export class SocialAccountsRepository extends BaseRepository
             accessToken?: string | null;
             refreshToken?: string | null;
             tokenExpiresAt?: Date | null;
+            providerHandle?: string | null;
         },
     )
     {

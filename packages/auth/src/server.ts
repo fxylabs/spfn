@@ -72,6 +72,7 @@ export * from './server/lib';
 export * from './server/logger';
 // `buildOAuthErrorUrl(error, reason)` takes one of these (#126)
 export { OAUTH_ERROR_REASONS, isOAuthErrorReason, type OAuthErrorReason } from './lib/oauth-error-reason';
+export { OAUTH_LINK_OUTCOMES, isOAuthLinkOutcome, type OAuthLinkOutcome } from './lib/oauth-link-outcome';
 
 // ============================================================================
 // Lifecycle Hooks
@@ -116,6 +117,8 @@ export {
     authDeletionCancelledEvent,
     authDeletionCompletedEvent,
     oauthUnlinkedEvent,
+    oauthLinkedEvent,
+    oauthLinkRemovedEvent,
     AuthProviderSchema,
 } from './server/events';
 
@@ -131,4 +134,6 @@ export type {
     AuthDeletionCancelledPayload,
     AuthDeletionCompletedPayload,
     OAuthUnlinkedPayload,
+    OAuthLinkedPayload,
+    OAuthLinkRemovedPayload,
 } from './server/events';

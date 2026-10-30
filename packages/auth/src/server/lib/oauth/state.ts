@@ -156,6 +156,76 @@ function stateRefusal(cause: unknown): Error
 }
 
 /**
+ * What a session-initiated link (#154) seals into the `state` it hands the
+ * provider: whose account the identity is attached to, where the browser goes
+ * back to, and the CSRF pair.
+ *
+ * Sealed under its own key, so a link state never opens as a sign-in state and
+ * a sign-in state never opens as a link — one callback route serves both, and
+ * the key is what tells them apart.
+ */
+export interface OAuthLinkState
+{
+    provider: string;
+    userId: string;
+    returnUrl: string;
+    nonce: string;
+    /** Names the CSRF cookie the link start set, standing where a sign-in's keyId does. */
+    startId: string;
+}
+
+async function getLinkStateKey(): Promise<Uint8Array>
+{
+    return await deriveStateKey('oauth-link-state');
+}
+
+/**
+ * Seal a link state, ten minutes like the sign-in state, percent-encoded the same
+ * way so the callback reads both alike.
+ */
+export async function createOAuthLinkState(link: OAuthLinkState): Promise<string>
+{
+    const jwe = await new jose.EncryptJWT({ link: { ...link } })
+        .setProtectedHeader({ alg: 'dir', enc: 'A256GCM' })
+        .setIssuedAt()
+        .setExpirationTime('10m')
+        .encrypt(await getLinkStateKey());
+
+    return encodeURIComponent(jwe);
+}
+
+/**
+ * Open a link state, or null when the value is not one.
+ *
+ * Null for anything that does not decrypt with the link key — a sign-in state, a
+ * forged or truncated value — and for a payload that is not a link. Expiry is
+ * read only from the `JWTExpired` jose throws after the authenticated decryption
+ * succeeded, so only a genuine link state is ever refused as expired.
+ *
+ * @throws OAuthStateExpiredError for a link state past its ten minutes
+ */
+export async function openOAuthLinkState(sealed: string): Promise<OAuthLinkState | null>
+{
+    const key = await getLinkStateKey();
+    const payload = await Promise.resolve()
+        .then(() => jose.jwtDecrypt(decodeURIComponent(sealed), key))
+        .then(({ payload: opened }) => opened)
+        .catch((cause: unknown) => (cause instanceof jose.errors.JWTExpired
+            ? Promise.reject(new OAuthStateExpiredError())
+            : null));
+
+    return payload ? linkStateOf(payload) : null;
+}
+
+function linkStateOf(payload: jose.JWTPayload): OAuthLinkState | null
+{
+    const link = payload.link as Partial<OAuthLinkState> | undefined;
+    const fields = [link?.provider, link?.userId, link?.returnUrl, link?.nonce, link?.startId];
+
+    return fields.every(field => typeof field === 'string') ? link as OAuthLinkState : null;
+}
+
+/**
  * What the Android start of Sign in with Apple seals into the `state` it hands
  * Apple: the app's own state, which the relay gives back to the app, and the
  * App Link the callback relays to.

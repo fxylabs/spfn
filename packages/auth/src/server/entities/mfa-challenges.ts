@@ -62,6 +62,9 @@ export interface DeferredLoginEvent
     email?: string;
     phone?: string;
     metadata?: Record<string, unknown>;
+    /** The social account an OAuth sign-in came through (#154), carried onto `auth.login`. */
+    providerUserId?: string;
+    providerHandle?: string;
 }
 
 export const mfaChallenges = authSchema.table('mfa_challenges',

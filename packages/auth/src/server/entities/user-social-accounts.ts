@@ -40,6 +40,12 @@ export const userSocialAccounts = authSchema.table('user_social_accounts',
         // Used for: account linking, user verification
         providerEmail: text('provider_email'),
 
+        // The name the provider shows for this account (Battle.net: the BattleTag)
+        // Replaced on every sign-in and link, so it is the current one
+        // Display material only — the account is identified by providerUserId
+        // Null for providers that report none
+        providerHandle: text('provider_handle'),
+
         // OAuth access token
         // ⚠️ SECURITY CRITICAL:
         // - MUST be encrypted at rest in production

@@ -24,6 +24,14 @@ export interface NormalizedIdentity
     emailVerified: boolean;
     name?: string;
     avatar?: string;
+    /**
+     * The name the provider shows for this account — a Battle.net BattleTag.
+     *
+     * Kept on the social account as `providerHandle` and replaced on every sign-in
+     * and link, unlike `name`, which seeds the display name once. Display material:
+     * the account is still identified by `providerUserId` alone.
+     */
+    handle?: string;
 }
 
 /**

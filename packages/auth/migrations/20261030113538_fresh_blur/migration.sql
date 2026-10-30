@@ -1,0 +1,1 @@
+ALTER TABLE "spfn_auth"."user_social_accounts" ADD COLUMN "provider_handle" text;
