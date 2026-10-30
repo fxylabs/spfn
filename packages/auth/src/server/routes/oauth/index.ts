@@ -19,7 +19,7 @@ import { Transactional } from '@spfn/core/db';
 import { ValidationError } from '@spfn/core/errors';
 import { rateLimitPolicy } from '@spfn/core/middleware';
 import { defineRouter, route } from '@spfn/core/route';
-import { OAuthProviderError } from '@spfn/auth/errors';
+import { OAuthProviderError, OAuthProviderLinkOnlyError } from '@spfn/auth/errors';
 
 import { KEY_ALGORITHM, SOCIAL_PROVIDERS, type SessionBindingType, type SocialProvider } from '../../types';
 import { DeviceNameSchema, OAuthNativeProfileSchema, PlatformSchema } from '../schema';
@@ -39,7 +39,7 @@ import {
     oauthUnlinkNotifyService,
     buildOAuthErrorUrl,
     getEnabledOAuthProviders,
-    requireEnabledProvider,
+    requireSignInProvider,
     isSafeReturnPath,
     keySessionBindingService,
     startOAuthLinkService,
@@ -47,6 +47,7 @@ import {
     oauthLinkResultUrl,
     unlinkOAuthService,
 } from '../../services';
+import { assertSignInProvider, isSignInProvider } from '../../lib/config';
 import { isGoogleOAuthEnabled, getGoogleAuthUrl, getOAuthProvider, UnlinkNotifyRejection } from '../../lib/oauth';
 import {
     APPLE_RELAY_APP_STATE_PATTERN,
@@ -64,6 +65,12 @@ const providerParams = Type.Object({
         description: 'OAuth provider id (google, apple, github, kakao, naver, superself, battlenet)',
     }),
 });
+
+/** The error page for a sign-in start that named a link-only provider (#157). */
+function linkOnlyErrorUrl(): string
+{
+    return buildOAuthErrorUrl(new OAuthProviderLinkOnlyError().message, 'link_only');
+}
 
 /** What a provider's redirect back to a callback route carries. */
 interface CallbackQuery
@@ -229,6 +236,11 @@ export const oauthGoogleStart = route.get('/_auth/oauth/google')
             return c.redirect(buildOAuthErrorUrl('Google OAuth is not configured'));
         }
 
+        if (!isSignInProvider('google'))
+        {
+            return c.redirect(linkOnlyErrorUrl());
+        }
+
         const authUrl = getGoogleAuthUrl(query.state);
 
         return c.redirect(authUrl);
@@ -347,14 +359,19 @@ function setStartCsrfCookie(c: Context, keyId: string, nonce: string): void
 /**
  * GET /_auth/oauth/providers - 활성화된 OAuth provider 목록
  *
- * 클라이언트에서 어떤 OAuth provider를 사용할 수 있는지 확인
+ * 클라이언트에서 어떤 OAuth provider를 사용할 수 있는지 확인.
+ * `providers`는 로그인 버튼을 그릴 provider, `linkOnly`는 로그인한 계정에
+ * 연결만 되는 provider(#157)다. 연결 화면은 둘을 합쳐 읽는다.
  */
 export const oauthProviders = route.get('/_auth/oauth/providers')
     .skip(['auth'])
     .handler(async () =>
     {
+        const enabled = getEnabledOAuthProviders();
+
         return {
-            providers: getEnabledOAuthProviders(),
+            providers: enabled.filter(isSignInProvider),
+            linkOnly: enabled.filter(provider => !isSignInProvider(provider)),
         };
     });
 
@@ -393,6 +410,8 @@ export const getGoogleOAuthUrl = route.post('/_auth/oauth/google/url')
         {
             throw new ValidationError({ message: 'Google OAuth is not configured' });
         }
+
+        assertSignInProvider('google');
 
         if (!body.state)
         {
@@ -557,6 +576,11 @@ export const oauthProviderStart = route.get('/_auth/oauth/:provider')
         if (!provider?.isEnabled())
         {
             return c.redirect(buildOAuthErrorUrl(`OAuth provider '${params.provider}' is not configured`));
+        }
+
+        if (!isSignInProvider(params.provider))
+        {
+            return c.redirect(linkOnlyErrorUrl());
         }
 
         return c.redirect(provider.getAuthUrl(query.state));
@@ -726,7 +750,8 @@ export const getProviderOAuthUrl = route.post('/_auth/oauth/:provider/url')
         const { params, body } = await c.data();
 
         // 미등록/비활성을 구분해 ValidationError를 던진다(인터셉터가 던졌을 plain Error 대신).
-        const provider = requireEnabledProvider(params.provider);
+        // 연결 전용 provider(#157)는 OAuthProviderLinkOnlyError.
+        const provider = requireSignInProvider(params.provider);
 
         if (!body.state)
         {
@@ -777,7 +802,7 @@ export const oauthAppleNativeStart = route.post('/_auth/oauth/apple/native/start
     {
         const { body } = await c.data();
 
-        requireEnabledProvider('apple');
+        requireSignInProvider('apple');
 
         return {
             authUrl: await startAppleRelay({

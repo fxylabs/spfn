@@ -608,10 +608,10 @@ describe('OAuthCallback page flow reason codes (#126)', () =>
     it('R9 (types): the codes are a closed union, and the error outcome carries one', () =>
     {
         expectTypeOf<OAuthErrorReason>()
-            .toEqualTypeOf<'cancelled' | 'expired' | 'invalid_state' | 'no_cookie' | 'provider_error' | 'account_unavailable' | 'failed'>();
+            .toEqualTypeOf<'cancelled' | 'expired' | 'invalid_state' | 'no_cookie' | 'provider_error' | 'account_unavailable' | 'link_only' | 'failed'>();
         expectTypeOf<'unknown_reason'>().not.toMatchTypeOf<OAuthErrorReason>();
         expectTypeOf<Extract<CallbackOutcome, { kind: 'error' }>['reason']>().toEqualTypeOf<OAuthErrorReason>();
-        expect(OAUTH_ERROR_REASONS).toHaveLength(7);
+        expect(OAUTH_ERROR_REASONS).toHaveLength(8);
     });
 });
 

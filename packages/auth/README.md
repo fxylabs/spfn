@@ -1221,7 +1221,7 @@ configuration for a one-origin app.
 | `SPFN_AUTH_PASSKEY_ORIGINS` | `.env.server` | comma-separated full origins allowed to run a ceremony. Default: the app URL's origin |
 | `SPFN_AUTH_PASSKEY_USER_VERIFICATION` | `.env.server` | `preferred` (default) or `required`. `discouraged` refuses boot |
 | `SPFN_AUTH_PASSKEY_CHALLENGE_TTL_SECONDS` | `.env.server` | default `300` — one ceremony at the authenticator, not an abandoned tab |
-| `SPFN_AUTH_PASSKEY_RECENT_AUTH_MINUTES` | `.env.server` | default `10` — see [the recent-authentication gate](#the-recent-authentication-gate) |
+| `SPFN_AUTH_PASSKEY_RECENT_AUTH_MINUTES` | `.env.server` | default `10` — see [the recent-authentication gate](#the-recent-authentication-gate). Also the provider link window when `oauthLink.recentAuthMinutes` is unset |
 
 Two rules on those origins, **checked at boot** and refused with `PasskeyConfigError`:
 
@@ -2080,23 +2080,21 @@ That decides how a Battle.net sign-in behaves:
   every sign-in and link, and `auth.login` / `auth.register` carry it as `providerHandle` beside
   `providerUserId`. Read it there, not from the display name.
 
-An app that wants Battle.net only as a linked identity, never as a way to sign up, refuses it in
-[`beforeRegister`](#registration-gate-beforeregister):
+An app that wants Battle.net only as a linked identity — the person signs in another way and
+connects Battle.net from their settings — makes it [link-only](#link-only-providers-and-recent-authentication):
 
 ```typescript
 configureAuth({
-    beforeRegister: ({ channel, provider }) =>
-    {
-        if (channel === 'oauth' && provider === 'battlenet')
-        {
-            throw new RegistrationRejectedError({ message: 'Sign in first, then connect Battle.net.' });
-        }
+    oauthProviders: {
+        battlenet: { signIn: false },
     },
 });
 ```
 
-A Battle.net identity already linked to an account still signs in to that account; the hook only
-runs for a new one.
+Every Battle.net sign-in is then refused with `reason=link_only`, including one by an identity
+already linked to an account, and `GET /_auth/oauth/providers` lists Battle.net under `linkOnly`
+rather than `providers`. Refusing Battle.net in [`beforeRegister`](#registration-gate-beforeregister)
+is not the same: the hook runs only for a new account, so an identity already linked still signs in.
 
 ### Linking a provider to a signed-in account
 
@@ -2133,8 +2131,10 @@ linked identity is one more way into the account:
 
 - an account with a [second factor](#second-factor-mfa) must have stepped up on this device within
   its window (`403 STEP_UP_REQUIRED`);
-- the session's device key must be younger than `SPFN_AUTH_PASSKEY_RECENT_AUTH_MINUTES`
-  (default 10), or the body carries `currentPassword` (`403 RECENT_AUTH_REQUIRED`).
+- the session's device key must be younger than the link window, or the body carries
+  `currentPassword` (`403 RECENT_AUTH_REQUIRED`). The window is `oauthLink.recentAuthMinutes`,
+  else `SPFN_AUTH_PASSKEY_RECENT_AUTH_MINUTES`, else 10 minutes. The app can turn this rule off
+  per provider; [see below](#link-only-providers-and-recent-authentication).
 
 An account holds at most one identity per provider: a start for a provider the account already
 holds is `409 OAUTH_PROVIDER_ALREADY_LINKED`. The Next.js interceptor `oauthLinkInterceptor`
@@ -2163,13 +2163,63 @@ and `@spfn/auth/nextjs/client`.
 POST because the body may carry `currentPassword`. It is refused with
 `409 LAST_RECOVERY_CREDENTIAL` when the identity is the account's last way in — no password, no
 verified email, no passkey and no other social account — and with `404` when the account holds
-no identity of that provider. It does not need the provider to be configured.
+no identity of that provider. It does not need the provider to be configured. A
+[link-only](#link-only-providers-and-recent-authentication) provider's identity is never a way in,
+so its unlink is never refused as the last one, and it does not count as the other way in when a
+password-less account removes a passkey or unlinks another provider.
 
 Two events, both after commit: `oauthLinkedEvent` (`auth.oauth.linked`: `userId`, `provider`,
 `providerUserId`, `providerHandle?`) when an identity is newly attached, and
 `oauthLinkRemovedEvent` (`auth.oauth.link_removed`: `userId`, `provider`, `providerUserId`) when
 one is detached. A detach never emits `auth.oauth.unlinked` — that event means the provider
 withdrew the connection, and its documented subscriber starts an account deletion.
+
+#### Link-only providers and recent authentication
+
+Two settings in `configureAuth`, both off by default — with neither set, sign-in and linking
+behave as in 0.3.0-beta.49:
+
+```typescript
+configureAuth({
+    oauthProviders: {
+        battlenet: {
+            signIn: false,                              // link-only (#157)
+            recentAuth: { link: false, unlink: true },  // this provider's rule (#155)
+        },
+    },
+    oauthLink: {
+        recentAuth: { link: true, unlink: true },       // the rule for every other provider
+        recentAuthMinutes: 10,                           // the link window, apart from the passkey one
+    },
+});
+```
+
+A **link-only** provider (`signIn: false`) can be linked to and unlinked from a signed-in account
+and is never a way in:
+
+| Where | A link-only provider |
+| --- | --- |
+| `getProviderOAuthUrl`, `POST /_auth/oauth/start`, Google's `POST /_auth/oauth/google/url`, `POST /_auth/oauth/:provider/native`, `POST /_auth/oauth/apple/native/start` | `403 OAUTH_PROVIDER_LINK_ONLY` (`OAuthProviderLinkOnlyError`) |
+| `GET /_auth/oauth/:provider`, `GET /_auth/oauth/google` | redirect to the error page with `reason=link_only` |
+| the callback, for a sign-in | error page with `reason=link_only` before the code is exchanged: no account, no key. A sign-in started before the setting is refused too |
+| link and unlink | unchanged |
+| `GET /_auth/oauth/providers` | listed in `linkOnly`, not in `providers` — draw sign-in buttons from `providers`, connect buttons from both |
+| the last-way-in check | not counted |
+
+**Recent authentication on link and unlink** is decided per provider and action:
+`oauthProviders[p].recentAuth.link`, else `oauthLink.recentAuth.link`, else `true` — and the same
+for `unlink`. Turned off, a link or unlink goes through from any valid session; an account with a
+second factor still steps up. The window it uses when on is `oauthLink.recentAuthMinutes`, else
+`SPFN_AUTH_PASSKEY_RECENT_AUTH_MINUTES` (the window 0.3.0-beta.49 used), else 10 minutes. The link
+path reads that variable as a number and never resolves the passkey configuration, so linking
+works in an app with no `SPFN_AUTH_PASSKEY_*` set.
+
+> **Turn `recentAuth` off only for a link-only provider.** On a provider people sign in with, a
+> stolen session could attach the thief's own identity, and that identity keeps signing in after
+> the session is revoked. A link-only identity signs in to nothing, so the rule has nothing left
+> to protect.
+
+The mobile contract lists `OAuthProviderLinkOnlyError` since 0.13.6.
 
 ### Sign in with Apple (web and Android)
 
@@ -2328,6 +2378,7 @@ type. Branch on `reason`; show `error` if you like. The codes are the closed uni
 | `no_cookie` | the callback or the finalize found none of the cookies the start set: the browser keeps no cookies for the site, or the sign-in began in another browser (added in 0.3.0-beta.38, #129) | a fixed sentence |
 | `provider_error` | any other provider `error=…`, or the token exchange / user-info call failed | the provider's text; a fixed sentence for a library failure |
 | `account_unavailable` | the account is disabled, pending deletion, or gone | unchanged |
+| `link_only` | the app made this provider [link-only](#link-only-providers-and-recent-authentication): it can be connected from a signed-in account, never used to sign in (added in 0.3.0-beta.50, #157) | a fixed sentence |
 | `failed` | anything else — missing `code`/`state`, an unverified email that would link an account, a missing role | unchanged |
 
 `SPFN_AUTH_OAUTH_ERROR_URL` takes `{reason}` beside `{error}`
@@ -2454,7 +2505,7 @@ await authApi.oauthNative.call({
 
 Every refusal names itself. The response body carries `error.code` — the server's error class
 name — alongside the usual `__type`, so a client that has no TypeScript error registry can still
-tell the eleven ways this call fails apart:
+tell the twelve ways this call fails apart:
 
 | `error.code` | HTTP | What the client does |
 | --- | --- | --- |
@@ -2466,6 +2517,7 @@ tell the eleven ways this call fails apart:
 | `InvalidSocialTokenError` | 401 | obtain a fresh id_token |
 | `AccountDisabledError` | 403 | show the account status |
 | `AccountPendingDeletionError` | 403 | offer restore |
+| `OAuthProviderLinkOnlyError` | 403 | hide that provider's sign-in button — the app made it [link-only](#link-only-providers-and-recent-authentication) |
 | `KeyIdAlreadyRegisteredError` | 409 | generate a new keyId and retry |
 | `TooManyRequestsError` | 429 | **the only retry-the-same-request code** |
 | `Error` | 500 | generic failure |

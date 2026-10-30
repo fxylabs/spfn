@@ -10,7 +10,7 @@
  * 서버가 실제로 내는 코드를 모르는 채로 생성된다.
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createHash, generateKeyPairSync } from 'node:crypto';
 
 const {
@@ -79,8 +79,10 @@ import {
     KeyIdAlreadyRegisteredError,
     NativeSignInUnsupportedError,
     NonceKeyBindingError,
+    OAuthProviderLinkOnlyError,
     UnverifiedEmailLinkError,
 } from '@spfn/auth/errors';
+import { configureAuth } from '../../server/lib/config';
 
 /** 클라이언트가 만드는 것과 같은 모양의 키 한 벌 — Base64 DER(SPKI)과 그 SHA-256 hex. */
 function generateClientKey(): { publicKey: string; fingerprint: string }
@@ -132,6 +134,11 @@ describe('native sign-in answers each failure path with its own code', () =>
         provider.verifyNativeIdToken = verifyNativeIdToken;
     });
 
+    afterEach(() =>
+    {
+        configureAuth({ oauthProviders: undefined });
+    });
+
     it('cell 2 — provider without native sign-in: NativeSignInUnsupportedError 400', async () =>
     {
         delete provider.verifyNativeIdToken;
@@ -140,6 +147,17 @@ describe('native sign-in answers each failure path with its own code', () =>
         await expect(oauthNativeService(paramsFor(key))).rejects.toThrow(NativeSignInUnsupportedError);
         expect(await refusalOf(() => oauthNativeService(paramsFor(key))))
             .toEqual({ code: 'NativeSignInUnsupportedError', status: 400 });
+    });
+
+    it('cell 2b — the app made the provider link-only (#157): OAuthProviderLinkOnlyError 403, before the id_token', async () =>
+    {
+        configureAuth({ oauthProviders: { kakao: { signIn: false } } });
+        const key = generateClientKey();
+
+        await expect(oauthNativeService(paramsFor(key))).rejects.toThrow(OAuthProviderLinkOnlyError);
+        expect(await refusalOf(() => oauthNativeService(paramsFor(key))))
+            .toEqual({ code: 'OAuthProviderLinkOnlyError', status: 403 });
+        expect(verifyNativeIdToken).not.toHaveBeenCalled();
     });
 
     it('cell 3 — nonce is not the key fingerprint: NonceKeyBindingError 400', async () =>
@@ -225,6 +243,7 @@ describe('native sign-in answers each failure path with its own code', () =>
             { code: 'AccountDisabledError', status: 403, retryable: false },
             { code: 'AccountPendingDeletionError', status: 403, retryable: false },
             { code: 'RegistrationRejectedError', status: 403, retryable: false },
+            { code: 'OAuthProviderLinkOnlyError', status: 403, retryable: false },
             { code: 'KeyIdAlreadyRegisteredError', status: 409, retryable: false },
             { code: 'TooManyRequestsError', status: 429, retryable: true },
             { code: 'Error', status: 500, retryable: false },
@@ -286,11 +305,13 @@ describe('native sign-in answers each failure path with its own code', () =>
     {
         // Its whole failure list: a body outside its formats, an Apple web flow or
         // relay list that is not configured, and a relay URL that is not listed
-        // are ValidationError; the rate limit is TooManyRequestsError; anything
-        // the server does not explain is Error. No code of its own, so the exact
-        // fence above stays as it is.
+        // are ValidationError; Apple made link-only is OAuthProviderLinkOnlyError
+        // (0.13.6, shared with native sign-in); the rate limit is
+        // TooManyRequestsError; anything the server does not explain is Error.
+        // No code of its own, so the exact fence above stays as it is.
         const table = [
             { code: 'ValidationError', status: 400, retryable: false },
+            { code: 'OAuthProviderLinkOnlyError', status: 403, retryable: false },
             { code: 'TooManyRequestsError', status: 429, retryable: true },
             { code: 'Error', status: 500, retryable: false },
         ];

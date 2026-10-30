@@ -794,7 +794,7 @@ export default function OAuthCallbackPage()
 | `/_auth/oauth/:provider/url` | POST | Get the authorization URL for any registered provider |
 | `/_auth/oauth/:provider/native` | POST | Native sign-in — verify a provider `id_token` from a mobile/web SDK |
 | `/_auth/oauth/start` | POST | Get OAuth URL (API mode) |
-| `/_auth/oauth/providers` | GET | List enabled providers |
+| `/_auth/oauth/providers` | GET | List enabled providers: `providers` to sign in with, `linkOnly` for the link-only ones |
 | `/_auth/oauth/finalize` | POST | Finalize OAuth session, or answer 202 with a second-factor challenge |
 | `/_auth/oauth/:provider/unlink-notify` | GET/POST | Receives a provider-initiated unlink webhook — register it as Kakao's unlink webhook or Naver's disconnect callback URL. Once the signature verifies, the social link and its stored tokens are deleted |
 | `/_auth/oauth/:provider/link` | POST | Signed in: start attaching a provider identity to this account. The provider returns to the usual callback, which sends the browser back to `returnUrl?oauthLink=<outcome>` |
@@ -842,6 +842,13 @@ Battle.net never releases an email, so a Battle.net identity reaches an existing
 through a link made from that account's session — see
 [Battle.net](../../packages/auth/README.md#battlenet) and
 [Linking a provider to a signed-in account](../../packages/auth/README.md#linking-a-provider-to-a-signed-in-account).
+
+An app that wants a provider only as a linked identity makes it link-only with
+`configureAuth({ oauthProviders: { battlenet: { signIn: false } } })`: every sign-in with it is
+refused (`OAuthProviderLinkOnlyError`, `reason=link_only`) while linking and unlinking work as
+before. The recent-authentication rule on link and unlink can be turned off per provider in the
+same object (`recentAuth: { link: false }`) — only safe for a link-only provider. See
+[Link-only providers and recent authentication](../../packages/auth/README.md#link-only-providers-and-recent-authentication).
 
 > The full interface specification (`OAuthProvider` / `NormalizedIdentity` / `OAuthTokens`) is under
 > [Custom providers in the `@spfn/auth` README](../../packages/auth/README.md#custom-providers).
@@ -1486,6 +1493,7 @@ catch (error)
 | `InvalidVerificationCodeError` | 400 | Wrong verification code |
 | `InvalidVerificationTokenError` | 400 | Invalid verification token |
 | `RegistrationRejectedError` | 403 | A `beforeRegister` hook rejected the signup |
+| `OAuthProviderLinkOnlyError` | 403 | A sign-in used a provider the app made link-only |
 | `ReservedUsernameError` | 400 | Username is reserved |
 | `UsernameAlreadyTakenError` | 409 | Username already in use |
 

@@ -355,8 +355,15 @@ import { CLIENT_IDENTITY_HEADERS, CLIENT_KINDS, SERVER_CONTRACT_HEADERS } from '
  * client may send, so a consumer generated against 0.13.4 never sends it and
  * gets exactly the answers it got before, and the supported range does not
  * move.
+ *
+ * 0.13.6 lists `OAuthProviderLinkOnlyError` (403) (#157). An app can make a
+ * provider link-only — linked to a signed-in account, never a way in — and
+ * `auth.enroll.oauthNative` and `auth.enroll.oauthAppleRelayStart` then refuse
+ * that provider with this code before any id_token is verified. A patch, by
+ * 0.10.1's rule: one code joins the open list, and no operation, type or enum
+ * changes shape, so the supported range does not move.
  */
-export const CONTRACT_VERSION = '0.13.5';
+export const CONTRACT_VERSION = '0.13.6';
 export const CONTRACT_MAJOR = 0;
 export const CONTRACT_NAME = 'spfn-mobile-contract';
 
@@ -1120,6 +1127,10 @@ interface RestSurfaceError
  * outside its formats, an Apple web flow or relay list that is not configured,
  * and a relay URL that is not listed are all `ValidationError`; the rate limit
  * is `TooManyRequestsError`.
+ *
+ * `OAuthProviderLinkOnlyError` (contract 0.13.6) is the one refusal both
+ * enrollment starts share: the app made the provider link-only (#157), so it
+ * can be linked from a signed-in web session but never signs anyone in.
  */
 const REST_SURFACE_ERRORS: readonly RestSurfaceError[] = [
     {
@@ -1183,6 +1194,14 @@ const REST_SURFACE_ERRORS: readonly RestSurfaceError[] = [
         summary:
             'the app refused this sign-up in its own beforeRegister check — reached only when the identity would '
             + 'create a new account, never when it links to an existing one',
+    },
+    {
+        code: 'OAuthProviderLinkOnlyError',
+        httpStatus: 403,
+        retryable: false,
+        summary:
+            'the app made this provider link-only: it can be linked to a signed-in account, never used to sign in '
+            + '— a server configuration fact, not a user error',
     },
     {
         code: 'KeyIdAlreadyRegisteredError',

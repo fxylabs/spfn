@@ -303,6 +303,7 @@ export {
     oauthErrorReason,
     isOAuthProviderEnabled,
     requireEnabledProvider,
+    requireSignInProvider,
     getEnabledOAuthProviders,
     getGoogleAccessToken,
     oauthUnlinkNotifyService,

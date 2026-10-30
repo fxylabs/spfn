@@ -36,7 +36,7 @@ import {
     RecentAuthenticationRequiredError,
 } from '@spfn/auth/errors';
 import { authLogger } from '../logger';
-import { getPasskeyConfig } from '../lib/config';
+import { getPasskeyConfig, isSignInProvider } from '../lib/config';
 import { mintChallenge, presentedChallenge, spendChallenge } from './webauthn-challenge.service';
 import {
     buildAuthenticationOptions,
@@ -153,13 +153,19 @@ export interface RecentAuthenticationParams
  * "no password on file" costs exactly what "wrong password" costs. Skipping it
  * would turn response time into an oracle for which accounts are OAuth-only.
  *
+ * @param windowMs - The window to hold the key's age to. Omitted, it is the
+ *                   passkey window; a provider link passes its own (#155), so
+ *                   that path never resolves the passkey configuration.
  * @throws RecentAuthenticationRequiredError
  */
-export async function assertRecentAuthentication(params: RecentAuthenticationParams): Promise<void>
+export async function assertRecentAuthentication(
+    params: RecentAuthenticationParams,
+    windowMs?: number,
+): Promise<void>
 {
     const key = await keysRepository.findByKeyIdAndUserId(params.keyId, params.userId);
 
-    if (key && Date.now() - key.createdAt.getTime() <= getPasskeyConfig().recentAuthMs)
+    if (key && Date.now() - key.createdAt.getTime() <= (windowMs ?? getPasskeyConfig().recentAuthMs))
     {
         return;
     }
@@ -192,7 +198,8 @@ export type RemovedCredential = 'passkey' | 'social';
  *
  * `removing` names the one being taken away, which is not counted: removing a
  * passkey needs another live passkey, and unlinking a social account needs
- * another social account. What remains refused is the account with none of the
+ * another social account. A social account of a link-only provider (#157) is
+ * never counted, since nobody can sign in with it. What remains refused is the account with none of the
  * four left — a phone-only account among them. Nobody, support included, could
  * undo that state.
  *
@@ -222,7 +229,9 @@ export async function assertNotLastRecoveryCredential(
         return;
     }
 
-    const socialAccounts = await socialAccountsRepository.findByUserId(userId);
+    // A link-only provider's identity (#157) is no way in, so it does not count.
+    const socialAccounts = (await socialAccountsRepository.findByUserId(userId))
+        .filter(account => isSignInProvider(account.provider));
 
     if (socialAccounts.length > (removing === 'social' ? 1 : 0))
     {

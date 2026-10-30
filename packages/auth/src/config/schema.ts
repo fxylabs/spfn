@@ -444,7 +444,7 @@ export const authEnvSchema = defineEnvSchema({
 
     SPFN_AUTH_PASSKEY_RECENT_AUTH_MINUTES: {
         ...envNumber({
-            description: 'How recently the calling device key must have been registered for enrolling or revoking a passkey to go through without the current password. Older than this and the request needs `currentPassword`; an account with no password has to sign in again.',
+            description: 'How recently the calling device key must have been registered for enrolling or revoking a passkey to go through without the current password. Older than this and the request needs `currentPassword`; an account with no password has to sign in again. Also the window for linking and unlinking a provider when configureAuth({ oauthLink: { recentAuthMinutes } }) is not set.',
             default: 10,
             required: false,
             examples: [5, 10, 30],
