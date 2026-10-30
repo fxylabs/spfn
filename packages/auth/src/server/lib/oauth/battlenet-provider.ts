@@ -95,21 +95,23 @@ function basicAuthorization(clientId: string, clientSecret: string): string
 }
 
 /**
- * The provider user id: userinfo's numeric `id`, else `sub`.
+ * The provider user id: userinfo's `sub`, else its numeric `id`. Never the BattleTag.
  *
- * Both name the same account; `id` is a number and `sub` its string form. Never
- * the BattleTag.
+ * Both name the same account; `sub` is the string form and is preferred because
+ * a JSON number past 2^53 has already lost digits by the time it is parsed — two
+ * accounts would collapse into one id. A numeric `id` is used only when it is a
+ * safe integer.
  */
 function accountIdOf(body: BattlenetUserInfo): string
 {
-    if (typeof body.id === 'number' || (typeof body.id === 'string' && body.id !== ''))
-    {
-        return String(body.id);
-    }
-
     if (typeof body.sub === 'string' && body.sub !== '')
     {
         return body.sub;
+    }
+
+    if (Number.isSafeInteger(body.id) || (typeof body.id === 'string' && body.id !== ''))
+    {
+        return String(body.id);
     }
 
     throw new Error('Battle.net user-info response is missing the account id');

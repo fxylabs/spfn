@@ -104,7 +104,7 @@ describe('Battle.net OAuth provider', () =>
         await expect(battlenetProvider.exchangeCodeForTokens('code', { state: 'state' })).rejects.toThrow(/invalid/);
     });
 
-    it('normalizes userinfo: the numeric id is the provider user id, the BattleTag is the handle and the name', async () =>
+    it('normalizes userinfo: sub is the provider user id, the BattleTag is the handle and the name', async () =>
     {
         const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ sub: '123456789', id: 123456789, battletag: 'Flash#1234' }));
         vi.stubGlobal('fetch', fetchMock);
@@ -122,11 +122,23 @@ describe('Battle.net OAuth provider', () =>
         expect((request.headers as Record<string, string>).Authorization).toBe('Bearer bnet-access');
     });
 
-    it('falls back to sub when the body has no numeric id', async () =>
+    it('falls back to a numeric id when the body has no sub', async () =>
     {
-        vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse({ sub: '987', battletag: 'Jaedong#5678' })));
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse({ id: 987, battletag: 'Jaedong#5678' })));
 
         expect((await battlenetProvider.getUserInfo('t')).providerUserId).toBe('987');
+    });
+
+    it('never uses a numeric id past 2^53: sub wins, and without sub the response is refused', async () =>
+    {
+        // Raw JSON: 9007199254740993 parses to 9007199254740992, so two accounts would share an id.
+        const raw = (body: string) => new Response(body, { headers: { 'Content-Type': 'application/json' } });
+
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue(raw('{"id":9007199254740993,"sub":"9007199254740993"}')));
+        expect((await battlenetProvider.getUserInfo('t')).providerUserId).toBe('9007199254740993');
+
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue(raw('{"id":9007199254740993}')));
+        await expect(battlenetProvider.getUserInfo('t')).rejects.toThrow(/missing the account id/);
     });
 
     it('reports no handle and no name when the body has no BattleTag', async () =>

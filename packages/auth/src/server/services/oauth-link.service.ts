@@ -103,9 +103,10 @@ export interface OAuthLinkCallbackParams
 /**
  * Finish a link whose state opened and whose CSRF cookie matched.
  *
- * The account is locked for the rest of the transaction, so two links finishing
- * at once for one account are decided one after the other. Runs under the
- * callback route's `Transactional()`.
+ * The account is locked for the rest of the transaction before its status is
+ * read, so two links finishing at once for one account are decided one after
+ * the other, and a deletion request that commits meanwhile is seen. Runs under
+ * the callback route's `Transactional()`.
  *
  * @throws OAuthProviderError when the provider fails; the account-status errors
  *   when the account can no longer sign in
@@ -117,8 +118,11 @@ export async function oauthLinkCallbackService(params: OAuthLinkCallbackParams):
     const identity = tokens.identity ?? await fromProvider(() => oauthProvider.getUserInfo(tokens.accessToken));
     const userId = Number(params.link.userId);
 
-    await assertActiveForOAuthSession(userId, () => new OAuthAccountNotFoundError());
+    // Lock first, then read the status: a status change that commits between an
+    // earlier read and the lock would otherwise attach the identity to an
+    // account that is already pending deletion.
     await usersRepository.lockById(userId);
+    await assertActiveForOAuthSession(userId, () => new OAuthAccountNotFoundError());
 
     return await attachIdentity(userId, params.provider, identity, tokens);
 }
