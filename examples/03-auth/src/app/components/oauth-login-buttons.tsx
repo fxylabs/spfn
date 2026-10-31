@@ -18,14 +18,18 @@ const DEMO_PROVIDER_IDS: readonly string[] = PROVIDERS.map(provider => provider.
 export function OAuthLoginButtons()
 {
     const [enabled, setEnabled] = useState<DemoProvider[]>([]);
+    // Link-only providers are connected from the dashboard, never signed in with.
+    // Null until the listing arrives, so no button is drawn and then taken away.
+    const [linkOnly, setLinkOnly] = useState<string[] | null>(null);
     const [pending, setPending] = useState<DemoProvider | null>(null);
     const [status, setStatus] = useState('Checking provider configuration...');
 
     useEffect(() =>
     {
         authApi.oauthProviders.call({})
-            .then(({ providers }) =>
+            .then(({ providers, linkOnly }) =>
             {
+                setLinkOnly(linkOnly);
                 const configured = providers.filter(
                     (provider): provider is DemoProvider => DEMO_PROVIDER_IDS.includes(provider),
                 );
@@ -63,7 +67,7 @@ export function OAuthLoginButtons()
 
     return (
         <div style={{ display: 'grid', gap: '0.75rem' }}>
-            {PROVIDERS.map(provider =>
+            {linkOnly && PROVIDERS.filter(provider => !linkOnly.includes(provider.id)).map(provider =>
             {
                 const isEnabled = enabled.includes(provider.id);
                 const isPending = pending === provider.id;

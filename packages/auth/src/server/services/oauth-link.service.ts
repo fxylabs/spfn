@@ -30,11 +30,16 @@ import {
     type OAuthLinkState,
     type OAuthTokens,
 } from '../lib/oauth';
+import { getOAuthLinkRecentAuthMs, isSignInProvider, linkNeedsRecentAuth } from '../lib/config';
 import { type SocialProvider } from '../types';
 import { type UserSocialAccount } from '../entities';
 import { oauthLinkedEvent, oauthLinkRemovedEvent } from '../events';
 import { assertStepUp } from './mfa.service';
-import { assertNotLastRecoveryCredential, assertRecentAuthentication } from './passkey.service';
+import {
+    assertNotLastRecoveryCredential,
+    assertRecentAuthentication,
+    type RecentAuthenticationParams,
+} from './passkey.service';
 import {
     assertActiveForOAuthSession,
     fromProvider,
@@ -60,7 +65,8 @@ export interface StartOAuthLinkParams
  * Begin a link: check the caller may add a way in, then seal a link state.
  *
  * @throws ValidationError for a provider that is not configured or a returnUrl off the app
- * @throws StepUpRequiredError, RecentAuthenticationRequiredError
+ * @throws StepUpRequiredError
+ * @throws RecentAuthenticationRequiredError unless the app turned the rule off for this provider (#155)
  * @throws OAuthProviderAlreadyLinkedError when the account already holds an identity of the provider
  */
 export async function startOAuthLinkService(params: StartOAuthLinkParams): Promise<{ authUrl: string }>
@@ -73,7 +79,7 @@ export async function startOAuthLinkService(params: StartOAuthLinkParams): Promi
     }
 
     await assertStepUp(params);
-    await assertRecentAuthentication(params);
+    await assertLinkRecentAuthentication(params, 'link');
 
     if (await socialAccountsRepository.findByUserIdAndProvider(params.userId, params.provider))
     {
@@ -222,20 +228,22 @@ export interface UnlinkOAuthParams
 /**
  * Detach the account's identity of `provider`, with its stored tokens.
  *
- * Refused when it is the account's last way to sign in. The account is locked
+ * Refused when it is the account's last way to sign in; a link-only provider's
+ * identity (#157) is never a way in, so its removal is never refused. The account is locked
  * before anything is read, so two unlinks at once cannot both count the other's
  * identity as the one that remains. Runs under the route's `Transactional()`.
  *
  * Does not depend on the provider being configured: an operator who removed a
  * provider's settings has not taken away the owner's right to detach it.
  *
- * @throws StepUpRequiredError, RecentAuthenticationRequiredError
+ * @throws StepUpRequiredError
+ * @throws RecentAuthenticationRequiredError unless the app turned the rule off for this provider (#155)
  * @throws OAuthLinkNotFoundError, LastRecoveryCredentialError
  */
 export async function unlinkOAuthService(params: UnlinkOAuthParams): Promise<{ provider: SocialProvider }>
 {
     await assertStepUp(params);
-    await assertRecentAuthentication(params);
+    await assertLinkRecentAuthentication(params, 'unlink');
     await usersRepository.lockById(params.userId);
 
     const account = await socialAccountsRepository.findByUserIdAndProvider(params.userId, params.provider);
@@ -245,7 +253,12 @@ export async function unlinkOAuthService(params: UnlinkOAuthParams): Promise<{ p
         throw new OAuthLinkNotFoundError({ details: { provider: params.provider } });
     }
 
-    await assertNotLastRecoveryCredential(params.userId, 'social');
+    // A link-only identity (#157) is no way in, so removing it strands nobody.
+    if (isSignInProvider(params.provider))
+    {
+        await assertNotLastRecoveryCredential(params.userId, 'social');
+    }
+
     await socialAccountsRepository.deleteById(account.id);
 
     onAfterCommit(() => oauthLinkRemovedEvent.emit({
@@ -255,4 +268,20 @@ export async function unlinkOAuthService(params: UnlinkOAuthParams): Promise<{ p
     }));
 
     return { provider: params.provider };
+}
+
+/**
+ * The recent-authentication rule on a link or unlink, unless the app turned it
+ * off for this provider and action (#155). Held to the link window, which never
+ * reads the passkey configuration.
+ */
+async function assertLinkRecentAuthentication(
+    params: RecentAuthenticationParams & { provider: SocialProvider },
+    action: 'link' | 'unlink',
+): Promise<void>
+{
+    if (linkNeedsRecentAuth(params.provider, action))
+    {
+        await assertRecentAuthentication(params, getOAuthLinkRecentAuthMs());
+    }
 }

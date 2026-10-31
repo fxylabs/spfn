@@ -1039,8 +1039,9 @@ export class PasskeyAlreadyRegisteredError extends ConflictError
 /**
  * Recent Authentication Required Error (403)
  *
- * Thrown when enrolling or revoking a passkey from a session that proved itself
- * too long ago and carried no password. Clients branch on `code` to know to
+ * Thrown when enrolling or revoking a passkey, or linking or unlinking a
+ * provider (#154), from a session that proved itself too long ago and carried
+ * no password. The message names neither, since both reach it. Clients branch on `code` to know to
  * prompt for the password rather than to show a generic refusal, so the code is
  * a stable field rather than a message they would have to match on.
  */
@@ -1051,7 +1052,7 @@ export class RecentAuthenticationRequiredError extends ForbiddenError
     constructor(data: { message?: string; details?: Record<string, any> } = {})
     {
         super({
-            message: data.message || 'Confirm it is you before changing passkeys. Sign in again or send your current password.',
+            message: data.message || 'Confirm it is you before making this change. Sign in again or send your current password.',
             details: data.details,
         });
         this.name = 'RecentAuthenticationRequiredError';
@@ -1094,6 +1095,28 @@ export class OAuthLinkNotFoundError extends NotFoundError
             details: data.details,
         });
         this.name = 'OAuthLinkNotFoundError';
+    }
+}
+
+/**
+ * OAuth Provider Link Only Error (403)
+ *
+ * A sign-in was started or finished with a provider the app configured as
+ * link-only (`oauthProviders[p].signIn: false`, #157). The provider can be
+ * linked to and unlinked from a signed-in account; it is never a way in.
+ * Clients branch on `code`; the OAuth error page carries `reason=link_only`.
+ */
+export class OAuthProviderLinkOnlyError extends ForbiddenError
+{
+    readonly code = 'OAUTH_PROVIDER_LINK_ONLY';
+
+    constructor(data: { message?: string; details?: Record<string, any> } = {})
+    {
+        super({
+            message: data.message || 'This provider can only be linked to a signed-in account, not used to sign in',
+            details: data.details,
+        });
+        this.name = 'OAuthProviderLinkOnlyError';
     }
 }
 

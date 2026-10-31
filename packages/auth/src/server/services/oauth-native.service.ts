@@ -22,6 +22,7 @@ import { socialAccountsRepository } from '../repositories';
 import { type SocialProvider, type KeyAlgorithmType, type KeyPlatformType } from '../types';
 import { getOAuthProvider, type NormalizedIdentity } from '../lib/oauth';
 import { providerAccountFields } from '../lib/oauth/provider-account';
+import { assertSignInProvider } from '../lib/config';
 import { createOrLinkUser, assertActiveForOAuthSession, backfillVerifiedEmail } from './oauth.service';
 import { registerPublicKeyService } from './key.service';
 import type { MfaChallengeHandle } from './login-result';
@@ -87,11 +88,15 @@ export interface OAuthNativeResult
 /**
  * native id_token 로그인 처리
  *
+ * @throws OAuthProviderLinkOnlyError 앱이 연결 전용으로 설정한 provider일 때 (#157)
  * @throws NativeSignInUnsupportedError provider가 native sign-in을 지원하지 않을 때
  * @throws InvalidSocialTokenError id_token 검증 실패 시
  */
 export async function oauthNativeService(params: OAuthNativeParams): Promise<OAuthNativeResult>
 {
+    // 연결 전용 provider(#157)는 id_token 검증(외부 JWKS 조회) 전에 거절
+    assertSignInProvider(params.provider);
+
     const oauthProvider = getOAuthProvider(params.provider);
 
     if (!oauthProvider?.verifyNativeIdToken)

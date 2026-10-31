@@ -5,7 +5,7 @@
  */
 
 import { env } from '@spfn/auth/config';
-import { PasskeyConfigError } from '@spfn/auth/errors';
+import { OAuthProviderLinkOnlyError, PasskeyConfigError } from '@spfn/auth/errors';
 
 import type { SocialProvider } from '../types';
 import { BOUND_KEY_RENEW_GRACE_HOURS, BOUND_KEY_TTL_HOURS, CONCURRENT_USE_WINDOW_MS } from './key-policy';
@@ -200,6 +200,60 @@ export interface AuthCsrfConfig
 }
 
 /**
+ * Whether linking or unlinking a provider from a signed-in session needs a
+ * recent authentication: a session key younger than the link window, or the
+ * current password. The MFA step-up runs either way.
+ */
+export interface OAuthLinkRecentAuth
+{
+    /** @default true */
+    link?: boolean;
+    /** @default true */
+    unlink?: boolean;
+}
+
+/**
+ * What one social provider is allowed to do (#155, #157)
+ */
+export interface OAuthProviderPolicy
+{
+    /**
+     * Whether the provider is a way to sign in.
+     *
+     * `false` makes it link-only: it can be linked to and unlinked from a
+     * signed-in account, every sign-in start and sign-in callback for it is
+     * refused with `OAuthProviderLinkOnlyError` (`reason=link_only`), it is
+     * listed under `linkOnly` instead of `providers`, and a linked identity of
+     * it does not count as a way into the account when another credential is
+     * removed.
+     *
+     * @default true
+     */
+    signIn?: boolean;
+
+    /** Overrides `oauthLink.recentAuth` for this provider. */
+    recentAuth?: OAuthLinkRecentAuth;
+}
+
+/**
+ * Settings for linking a provider to a signed-in account
+ */
+export interface OAuthLinkConfig
+{
+    /** The default for every provider; `oauthProviders[p].recentAuth` overrides it. */
+    recentAuth?: OAuthLinkRecentAuth;
+
+    /**
+     * How young the session key must be for a link or unlink to go through
+     * without the current password, in minutes.
+     *
+     * @default `SPFN_AUTH_PASSKEY_RECENT_AUTH_MINUTES` when set (the window
+     *          0.3.0-beta.49 used), else 10
+     */
+    recentAuthMinutes?: number;
+}
+
+/**
  * Auth configuration
  */
 export interface AuthConfig
@@ -256,6 +310,27 @@ export interface AuthConfig
      * ```
      */
     csrf?: AuthCsrfConfig;
+
+    /**
+     * Per-provider rules. A provider not named here signs in and links as before.
+     *
+     * Turning `recentAuth` off for a provider people can sign in with lets a
+     * stolen session attach its own identity, which keeps signing in after the
+     * session is revoked. Turn it off only for a link-only provider.
+     *
+     * @example
+     * ```typescript
+     * configureAuth({
+     *     oauthProviders: {
+     *         battlenet: { signIn: false, recentAuth: { link: false } },
+     *     },
+     * });
+     * ```
+     */
+    oauthProviders?: Partial<Record<SocialProvider, OAuthProviderPolicy>>;
+
+    /** Linking a provider to a signed-in account */
+    oauthLink?: OAuthLinkConfig;
 }
 
 /**
@@ -817,4 +892,53 @@ function mfaIssuerFromAppUrl(): string | null
     {
         return null;
     }
+}
+
+// ============================================================================
+// Social provider policy (#155, #157)
+// ============================================================================
+
+/** Whether a provider may be used to sign in — false for a link-only one. */
+export function isSignInProvider(provider: SocialProvider): boolean
+{
+    return globalConfig.oauthProviders?.[provider]?.signIn !== false;
+}
+
+/**
+ * Refuse a sign-in with a provider the app configured as link-only.
+ *
+ * Every sign-in start and the sign-in callback reach this; a link start never
+ * does, since linking is what a link-only provider is for.
+ *
+ * @throws OAuthProviderLinkOnlyError
+ */
+export function assertSignInProvider(provider: SocialProvider): void
+{
+    if (!isSignInProvider(provider))
+    {
+        throw new OAuthProviderLinkOnlyError({ details: { provider } });
+    }
+}
+
+/** Whether linking or unlinking this provider needs a recent authentication. */
+export function linkNeedsRecentAuth(provider: SocialProvider, action: keyof OAuthLinkRecentAuth): boolean
+{
+    return globalConfig.oauthProviders?.[provider]?.recentAuth?.[action]
+        ?? globalConfig.oauthLink?.recentAuth?.[action]
+        ?? true;
+}
+
+/**
+ * The recent-authentication window for a link or unlink.
+ *
+ * Falls back to the passkey variable because 0.3.0-beta.49 used the passkey
+ * window here, and reads that one variable as a plain number rather than through
+ * `getPasskeyConfig()`, which refuses to resolve for an app with no passkeys.
+ * A value that is not a positive number falls back, as the step-up window does.
+ */
+export function getOAuthLinkRecentAuthMs(): number
+{
+    const fallback = minutesOr(process.env.SPFN_AUTH_PASSKEY_RECENT_AUTH_MINUTES, DEFAULT_RECENT_AUTH_MINUTES);
+
+    return minutesOr(String(globalConfig.oauthLink?.recentAuthMinutes), fallback) * 60_000;
 }

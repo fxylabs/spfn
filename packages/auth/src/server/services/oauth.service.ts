@@ -15,6 +15,7 @@ import {
     OAuthAccountNotFoundError,
     OAuthCookieMissingError,
     OAuthProviderError,
+    OAuthProviderLinkOnlyError,
     OAuthStateExpiredError,
     OAuthStateInvalidError,
     UnverifiedEmailLinkError,
@@ -26,7 +27,7 @@ import { isSafeReturnPath } from '../../lib/return-path';
 import { withOAuthErrorReason, type OAuthErrorReason } from '../../lib/oauth-error-reason';
 import { timingSafeEqualString } from '../lib/csrf';
 import { findStartCookies, legacyStartCookies } from '../lib/oauth/start-cookies';
-import { runBeforeRegister } from '../lib/config';
+import { assertSignInProvider, runBeforeRegister } from '../lib/config';
 import { resolveAppUrl } from '../lib/app-url';
 import { type SocialProvider, type KeyAlgorithmType, type SessionBindingType } from '../types';
 import {
@@ -136,6 +137,23 @@ export function requireEnabledProvider(provider: SocialProvider): OAuthProvider
 }
 
 /**
+ * `requireEnabledProvider`, then refuse a link-only provider (#157).
+ *
+ * Every sign-in start and the sign-in callback go through this. A link start
+ * takes `requireEnabledProvider` alone: linking is what a link-only provider is for.
+ *
+ * @throws OAuthProviderLinkOnlyError
+ */
+export function requireSignInProvider(provider: SocialProvider): OAuthProvider
+{
+    const oauthProvider = requireEnabledProvider(provider);
+
+    assertSignInProvider(provider);
+
+    return oauthProvider;
+}
+
+/**
  * provider가 돌려준 만료 초(seconds)를 만료 시각으로 변환 (방어적 검증)
  */
 export function tokenExpiryDate(expiresIn: number): Date
@@ -161,7 +179,7 @@ export async function oauthStartService(
 {
     const { provider, returnUrl, publicKey, keyId, fingerprint, algorithm, metadata, nonce } = params;
 
-    const oauthProvider = requireEnabledProvider(provider);
+    const oauthProvider = requireSignInProvider(provider);
 
     const state = await createOAuthState({
         provider,
@@ -200,7 +218,9 @@ export async function oauthCallbackService(
         throw new OAuthStateInvalidError();
     }
 
-    const oauthProvider = requireEnabledProvider(provider);
+    // A link-only provider (#157) is refused before its code is spent: a sign-in
+    // state issued before the app turned sign-in off still opens here.
+    const oauthProvider = requireSignInProvider(provider);
 
     // 1. Code를 Token으로 교환
     const tokens = await fromProvider(() => oauthProvider.exchangeCodeForTokens(code, { state, user: params.user }));
@@ -762,6 +782,7 @@ const REASON_BY_ERROR: [abstract new (...args: never[]) => Error, OAuthErrorReas
     [OAuthStateInvalidError, 'invalid_state'],
     [OAuthCookieMissingError, 'no_cookie'],
     [OAuthProviderError, 'provider_error'],
+    [OAuthProviderLinkOnlyError, 'link_only'],
     [AccountDisabledError, 'account_unavailable'],
     [AccountPendingDeletionError, 'account_unavailable'],
     [OAuthAccountNotFoundError, 'account_unavailable'],

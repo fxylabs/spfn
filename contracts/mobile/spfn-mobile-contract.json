@@ -4,7 +4,7 @@
   "originStatement": "Generated from the route and contract definitions in SPFN primitives (packages/auth/src/server/client-proof) and published from that repository. This file is generated output: edit the source modules and re-export, never this file.",
   "contractName": "spfn-mobile-contract",
   "contractMajor": 0,
-  "contractVersion": "0.13.5",
+  "contractVersion": "0.13.6",
   "supportedRange": ">=0.13.0 <0.14.0",
   "exporterVersion": "@spfn/auth/contract-bundle@6.1.0",
   "authProfiles": { "allowed": ["clientProofV1"], "unknownProfilePolicy": "reject", "mixingWithinSession": "prohibited" },
@@ -850,6 +850,13 @@
       "httpStatus": 403,
       "retryable": false,
       "summary": "the app refused this sign-up in its own beforeRegister check — reached only when the identity would create a new account, never when it links to an existing one",
+      "surface": "rest"
+    },
+    {
+      "code": "OAuthProviderLinkOnlyError",
+      "httpStatus": 403,
+      "retryable": false,
+      "summary": "the app made this provider link-only: it can be linked to a signed-in account, never used to sign in — a server configuration fact, not a user error",
       "surface": "rest"
     },
     {
