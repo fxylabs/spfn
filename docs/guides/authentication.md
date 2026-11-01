@@ -752,6 +752,8 @@ codes are the closed union `OAuthErrorReason`:
 | `no_cookie` | the browser kept none of the cookies the start set — it keeps no cookies for the site, or the sign-in began in another browser |
 | `provider_error` | any other provider error, or the token exchange / user-info call failed |
 | `account_unavailable` | the account is disabled, pending deletion, or gone |
+| `link_only` | the app made this provider link-only (#157) |
+| `email_in_use` | a first sign-in reported an existing account's email and the app set `oauthEmailMatch: 'reject'` (#156) |
 | `failed` | anything else |
 
 For `expired`, `invalid_state`, `no_cookie` and a library failure behind `provider_error` the `error` text is a
@@ -849,6 +851,18 @@ refused (`OAuthProviderLinkOnlyError`, `reason=link_only`) while linking and unl
 before. The recent-authentication rule on link and unlink can be turned off per provider in the
 same object (`recentAuth: { link: false }`) — only safe for a link-only provider. See
 [Link-only providers and recent authentication](../../packages/auth/README.md#link-only-providers-and-recent-authentication).
+
+The first sign-in with a provider identity may report an email an existing account already has.
+`configureAuth({ oauthEmailMatch })` decides what happens, for every provider, web and native:
+`'attach'` (the default, as in 0.3.0-beta.50) links a verified email to that account and refuses an
+unverified one with `UnverifiedEmailLinkError`; `'reject'` refuses either way
+(`OAuthEmailInUseError`, `reason=email_in_use`, native 409) and changes neither account;
+`'separate'` makes a new account without the email, running `beforeRegister` as any sign-up does.
+An identity already linked signs in to its account in every mode. So someone who signed up with
+Google and later signs in with Kakao on the same email lands in the Google account (`'attach'`),
+sees the error page where the app can tell them to sign in with Google and connect Kakao
+(`'reject'`), or gets a Kakao-only account (`'separate'`). See
+[When a first sign-in's email matches an existing account](../../packages/auth/README.md#when-a-first-sign-ins-email-matches-an-existing-account).
 
 > The full interface specification (`OAuthProvider` / `NormalizedIdentity` / `OAuthTokens`) is under
 > [Custom providers in the `@spfn/auth` README](../../packages/auth/README.md#custom-providers).
@@ -1494,6 +1508,7 @@ catch (error)
 | `InvalidVerificationTokenError` | 400 | Invalid verification token |
 | `RegistrationRejectedError` | 403 | A `beforeRegister` hook rejected the signup |
 | `OAuthProviderLinkOnlyError` | 403 | A sign-in used a provider the app made link-only |
+| `OAuthEmailInUseError` | 409 | A first social sign-in's email belongs to an existing account and `oauthEmailMatch` is `'reject'` |
 | `ReservedUsernameError` | 400 | Username is reserved |
 | `UsernameAlreadyTakenError` | 409 | Username already in use |
 

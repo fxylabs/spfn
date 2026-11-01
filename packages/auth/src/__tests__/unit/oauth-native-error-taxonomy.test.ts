@@ -79,6 +79,7 @@ import {
     KeyIdAlreadyRegisteredError,
     NativeSignInUnsupportedError,
     NonceKeyBindingError,
+    OAuthEmailInUseError,
     OAuthProviderLinkOnlyError,
     UnverifiedEmailLinkError,
 } from '@spfn/auth/errors';
@@ -198,6 +199,18 @@ describe('native sign-in answers each failure path with its own code', () =>
             .toEqual({ code: 'UnverifiedEmailLinkError', status: 400 });
     });
 
+    it('cell 6b — the app refuses a first sign-in on an email an existing account holds (#156): OAuthEmailInUseError 409', async () =>
+    {
+        const refusal = new OAuthEmailInUseError({ details: { provider: 'kakao' } });
+        createOrLinkUser.mockRejectedValueOnce(refusal).mockRejectedValueOnce(refusal);
+        const key = generateClientKey();
+
+        await expect(oauthNativeService(paramsFor(key))).rejects.toMatchObject({ code: 'OAUTH_EMAIL_IN_USE' });
+        expect(await refusalOf(() => oauthNativeService(paramsFor(key))))
+            .toEqual({ code: 'OAuthEmailInUseError', status: 409 });
+        expect(registerPublicKeyService).not.toHaveBeenCalled();
+    });
+
     it('cell 7 — account not active: AccountDisabledError 403', async () =>
     {
         assertActiveForOAuthSession.mockRejectedValueOnce(new AccountDisabledError({ status: 'suspended' }));
@@ -245,6 +258,8 @@ describe('native sign-in answers each failure path with its own code', () =>
             { code: 'RegistrationRejectedError', status: 403, retryable: false },
             { code: 'OAuthProviderLinkOnlyError', status: 403, retryable: false },
             { code: 'KeyIdAlreadyRegisteredError', status: 409, retryable: false },
+            // Added in contract 0.13.7 (#156), cell 6b.
+            { code: 'OAuthEmailInUseError', status: 409, retryable: false },
             { code: 'TooManyRequestsError', status: 429, retryable: true },
             { code: 'Error', status: 500, retryable: false },
         ];
