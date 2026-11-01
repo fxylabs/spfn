@@ -774,6 +774,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 #### @spfn/core
 
+- **An app role that cannot read the migrations table is no longer told every migration is
+  pending** (#158, #299). The boot migration check looked its bookkeeping tables up in
+  `information_schema`, which lists only the tables the current role holds a privilege on. An
+  app role without rights on schema `drizzle` — the normal case once the owner role of #296
+  owns the tables — saw none, counted every migration as pending and refused to boot with
+  `PendingMigrationsError`. The check now finds the tables through `pg_catalog`; a table it
+  cannot read logs one warning naming the cause (`permission denied for schema drizzle`) and
+  the server starts unchecked. The db README's "Database roles" now grants the app role
+  `USAGE` and `SELECT` on `drizzle`, and row privileges on every package schema (`spfn_auth`,
+  …). `core` 0.3.0-beta.35.
 - **Revoking a device key closes the SSE streams it opened, and the clients stop on 401**
   (#153). `core` 0.3.0-beta.33, `auth` 0.3.0-beta.48.
 - **A state client applies every frame its stream carries**, so a later subscribe never gets

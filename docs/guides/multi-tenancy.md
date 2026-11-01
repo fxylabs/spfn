@@ -475,7 +475,7 @@ request. A table with only `tenantKey()` (no policy) skips R1–R3 and keeps R5 
 | The policy error from a script or job | a hand-written query, or a call outside a transaction bound to a tenant | use `TenantRepository` methods, or wrap the work in `runInTransaction(fn, { tenant })` |
 | Every query sees every tenant | the app role owns the tables, or is a superuser / `BYPASSRLS` | connect as `app_user`; move ownership with `ALTER TABLE … OWNER TO app_owner` or `REASSIGN OWNED BY app_user TO app_owner` |
 | `permission denied for table …` after a migration | the app role has no privilege on a new table | set the default privileges of step 1, or grant on the table |
-| The server reports every migration as pending | the app role cannot read the `drizzle` schema | grant `USAGE` on schema `drizzle` and `SELECT` on its tables to the app role |
+| The server logs `permission denied for schema drizzle` at boot and starts without checking migrations | the app role cannot read the `drizzle` schema, where migrations are recorded | grant `USAGE` on schema `drizzle` and `SELECT` on its tables to the app role |
 | `spfn db backup` or `restore` fails on a tenancy table | it ran as the app role, to which the policy applies | set `DATABASE_OWNER_URL` |
 | A workspace with notes cannot be deleted | the tenant foreign key is `NO ACTION` | delete or move the tenant's rows first |
 | An author cannot be deleted | an optional reference still points at it | clear the reference first |
