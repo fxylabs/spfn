@@ -9,13 +9,16 @@
  * 1. the target tables' columns are the manifest's
  * 2. the tenant is in its tenant list table (an app with `tenantKey()`-only
  *    tables has none, and skips this)
- * 3. without `--replace`, the tenant has no rows yet; with it, its rows are
- *    deleted, referencing tables first
+ * 3. without `--replace`, the tenant has no rows yet; with it, no foreign key
+ *    from a table outside the plan cascades, sets null or sets a default on
+ *    delete into a plan table — that would change rows the import never
+ *    restores — and the tenant's rows are deleted, referencing tables first
  * 4. each file is copied into a temporary table, refused if a row belongs to
  *    another tenant, and inserted, referenced tables first
  * 5. each table received the manifest's row count
  * 6. every sequence behind a tenant table column moves forward to the largest
- *    id imported — never backwards: other tenants draw from it too
+ *    id imported — never backwards: other tenants draw from it too — and each
+ *    move is reported
  *
  * Connects as the table owner (`DATABASE_OWNER_URL`, else `DATABASE_URL`), as
  * `restore` does: `setval` needs a privilege the app role lacks. Row-level
@@ -50,6 +53,20 @@ export interface ImportedTable
     rows: number;
 }
 
+/** A sequence the import moved forward; `from` is null for one never drawn from. */
+export interface SequenceMove
+{
+    sequence: string;
+    from: string | null;
+    to: string;
+}
+
+export interface ImportResult
+{
+    tables: ImportedTable[];
+    sequences: SequenceMove[];
+}
+
 /** The command: check the folder, connect as the owner, confirm a remote target, import, report. */
 export async function dbTenantImport(directory: string, options: { replace?: boolean } = {}): Promise<void>
 {
@@ -68,9 +85,14 @@ export async function dbTenantImport(directory: string, options: { replace?: boo
     const imported = await importTenant(prepared, { url, replace: options.replace === true })
         .catch((error) => fail(`Tenant import failed, nothing was written: ${describeError(error, url)}`));
 
-    for (const { table, rows } of imported)
+    for (const { table, rows } of imported.tables)
     {
         console.log(chalk.gray(`   ${tableKey(table)}: ${rows} rows`));
+    }
+
+    for (const { sequence, from, to } of imported.sequences)
+    {
+        console.log(chalk.yellow(`   ${sequence}: ${from ?? 'unused'} → ${to}`));
     }
 
     console.log(chalk.green(`\n✅ Tenant ${tenantId} imported`));
@@ -88,7 +110,7 @@ export async function prepareImport(directory: string, plan: TenantPlan): Promis
 }
 
 /** Run the import in one transaction on one connection. */
-export async function importTenant(prepared: PreparedImport, options: { url: string; replace: boolean }): Promise<ImportedTable[]>
+export async function importTenant(prepared: PreparedImport, options: { url: string; replace: boolean }): Promise<ImportResult>
 {
     const sql = openConnection(options.url);
 
@@ -102,7 +124,7 @@ export async function importTenant(prepared: PreparedImport, options: { url: str
     }
 }
 
-async function runImport(tx: TenantTransaction, prepared: PreparedImport, replace: boolean): Promise<ImportedTable[]>
+async function runImport(tx: TenantTransaction, prepared: PreparedImport, replace: boolean): Promise<ImportResult>
 {
     const tenantId = prepared.manifest.tenantId;
 
@@ -111,6 +133,7 @@ async function runImport(tx: TenantTransaction, prepared: PreparedImport, replac
 
     if (replace)
     {
+        await assertNoCascadeFromOutside(tx, prepared.plan);
         await deleteTenantRows(tx, prepared.plan, tenantId);
     }
     else
@@ -120,19 +143,20 @@ async function runImport(tx: TenantTransaction, prepared: PreparedImport, replac
 
     await tx`select set_config('app.tenant_id', ${String(tenantId)}, true)`;
 
-    const imported: ImportedTable[] = [];
+    const tables: ImportedTable[] = [];
+    const sequences: SequenceMove[] = [];
 
     for (const [index, table] of prepared.plan.tables.entries())
     {
-        imported.push({ table, rows: await importTable(tx, prepared, index) });
+        tables.push({ table, rows: await importTable(tx, prepared, index) });
     }
 
     for (const table of prepared.plan.tables)
     {
-        await advanceSequences(tx, table, tenantId);
+        sequences.push(...await advanceSequences(tx, table, tenantId));
     }
 
-    return imported;
+    return { tables, sequences };
 }
 
 /** Each target table's stored columns must be the manifest's, as a set. */
@@ -213,6 +237,34 @@ async function assertNoTenantRows(tx: TenantTransaction, plan: TenantPlan, tenan
     }
 }
 
+/**
+ * A delete in a plan table must change no row outside the plan: a foreign key
+ * from a table outside it — a function package's, a table without tenants —
+ * with `ON DELETE CASCADE`, `SET NULL` or `SET DEFAULT` would, and the import
+ * restores none of those rows. `NO ACTION` and `RESTRICT` need no check: the
+ * delete fails on them, naming the constraint.
+ */
+async function assertNoCascadeFromOutside(tx: TenantTransaction, plan: TenantPlan): Promise<void>
+{
+    const cascades = await tx.unsafe<{ name: string; referencing: string; referenced: string; action: string }[]>(
+        `WITH plan AS (SELECT to_regclass(name) AS oid FROM unnest($1::text[]) AS name)
+         SELECT conname AS name, conrelid::regclass::text AS referencing, confrelid::regclass::text AS referenced,
+                CASE confdeltype WHEN 'c' THEN 'CASCADE' WHEN 'n' THEN 'SET NULL' ELSE 'SET DEFAULT' END AS action
+         FROM pg_constraint
+         WHERE contype = 'f' AND confdeltype IN ('c', 'n', 'd')
+           AND confrelid IN (SELECT oid FROM plan) AND conrelid NOT IN (SELECT oid FROM plan WHERE oid IS NOT NULL)
+         ORDER BY referencing, name`,
+        [plan.tables.map(qualifiedName)],
+    );
+
+    if (cascades.length > 0)
+    {
+        const listed = cascades.map((fk) => `${fk.name} on ${fk.referencing} (ON DELETE ${fk.action} into ${fk.referenced})`);
+
+        throw new Error(`--replace would change rows outside the export through foreign key(s) from tables outside it:\n  ${listed.join('\n  ')}`);
+    }
+}
+
 /** Referencing tables first, so a foreign key between tenant tables never blocks a delete. */
 async function deleteTenantRows(tx: TenantTransaction, plan: TenantPlan, tenantId: number): Promise<void>
 {
@@ -256,10 +308,11 @@ async function stageFile(tx: TenantTransaction, prepared: PreparedImport, table:
     const tenantId = prepared.manifest.tenantId;
 
     await tx.unsafe(`CREATE TEMP TABLE ${staging} (LIKE ${qualifiedName(table)}) ON COMMIT DROP`);
-    await pipeline(
-        createReadStream(path.join(prepared.directory, table.file)),
-        await tx.unsafe(`COPY ${staging} (${columnList(table)}) FROM STDIN`).writable(),
-    );
+    // The COPY first: a file opened before it could fail — removed since its
+    // sha256 was checked — with no listener yet, an uncaught error
+    const copy = await tx.unsafe(`COPY ${staging} (${columnList(table)}) FROM STDIN`).writable();
+
+    await pipeline(createReadStream(path.join(prepared.directory, table.file)), copy);
 
     const [{ count }] = await tx.unsafe<{ count: number }[]>(
         `SELECT count(*)::int AS count FROM ${staging} WHERE ${quoteIdent(table.tenantColumn)} IS DISTINCT FROM $1`,
@@ -274,11 +327,13 @@ async function stageFile(tx: TenantTransaction, prepared: PreparedImport, table:
 
 /**
  * Move each sequence behind a column of `table` to the largest value the
- * tenant now has there, unless it is already past it. A table the tenant has
- * no rows in is left alone.
+ * tenant now has there, unless it is already past it; returns the moves. A
+ * table the tenant has no rows in is left alone.
  */
-async function advanceSequences(tx: TenantTransaction, table: PlanTable, tenantId: number): Promise<void>
+async function advanceSequences(tx: TenantTransaction, table: PlanTable, tenantId: number): Promise<SequenceMove[]>
 {
+    const moves: SequenceMove[] = [];
+
     for (const column of table.columns)
     {
         const [{ sequence }] = await tx.unsafe<{ sequence: string | null }[]>(
@@ -288,13 +343,15 @@ async function advanceSequences(tx: TenantTransaction, table: PlanTable, tenantI
 
         if (sequence)
         {
-            await tx.unsafe(
-                `SELECT setval(sequence, greatest(max_value, pg_sequence_last_value(sequence)))
-                 FROM (SELECT $1::regclass AS sequence,
+            moves.push(...(await tx.unsafe<{ from: string | null; to: string }[]>(
+                `SELECT last_value::text AS "from", setval(sequence, max_value)::text AS "to"
+                 FROM (SELECT $1::regclass AS sequence, pg_sequence_last_value($1::regclass) AS last_value,
                               (SELECT max(${quoteIdent(column)}) FROM ${qualifiedName(table)} WHERE ${quoteIdent(table.tenantColumn)} = $2) AS max_value) AS current
-                 WHERE max_value IS NOT NULL`,
+                 WHERE max_value > last_value OR (max_value IS NOT NULL AND last_value IS NULL)`,
                 [sequence, tenantId],
-            );
+            )).map((move) => ({ sequence, ...move })));
         }
     }
+
+    return moves;
 }

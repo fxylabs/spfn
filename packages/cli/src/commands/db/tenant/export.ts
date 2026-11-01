@@ -13,7 +13,7 @@
 
 import { createWriteStream, promises as fs } from 'fs';
 import path from 'path';
-import { pipeline } from 'stream/promises';
+import { finished, pipeline } from 'stream/promises';
 import type { Readable } from 'stream';
 import { createHash } from 'crypto';
 import chalk from 'chalk';
@@ -93,7 +93,8 @@ export async function exportTenant(options: TenantExportOptions): Promise<Manife
     {
         if (!manifest)
         {
-            await fs.rm(options.directory, { recursive: true, force: true });
+            // A folder that cannot be removed must not hide why the export failed
+            await fs.rm(options.directory, { recursive: true, force: true }).catch(() => undefined);
         }
     }
 }
@@ -159,24 +160,46 @@ async function copyTable(tx: TenantTransaction, table: PlanTable, options: Tenan
     return { schema: table.schema, name: table.name, tenantColumn: table.tenantColumn, columns: table.columns, file: table.file, rows, sha256 };
 }
 
-/** Stream COPY text output to `file`; its rows are its newlines — COPY escapes those inside values. */
+/**
+ * Stream COPY text output to `file`; its rows are its newlines — COPY escapes
+ * those inside values. A failed write rejects with its own error once the rest
+ * of the COPY is read and discarded: destroying the stream instead would leave
+ * postgres.js's socket paused for good, with the server blocked mid-COPY, the
+ * ROLLBACK never answered and the snapshot held open.
+ */
 async function writeCopyFile(stream: Readable, file: string): Promise<{ rows: number; sha256: string }>
 {
     const hash = createHash('sha256');
     let rows = 0;
 
-    await pipeline(stream, async function* (source: AsyncIterable<Buffer>)
+    const failure = await pipeline(async function* ()
     {
-        for await (const chunk of source)
+        for await (const chunk of stream.iterator({ destroyOnReturn: false }) as AsyncIterable<Buffer>)
         {
             hash.update(chunk);
             rows += countNewlines(chunk);
             yield chunk;
         }
-    }, createWriteStream(file, { flags: 'wx' }));
+    }, createWriteStream(file, { flags: 'wx' })).then(
+        () => undefined,
+        (error: unknown) => discardRest(stream).then(() => ({ error })),
+    );
+
     resumeConnection(stream);
 
+    if (failure)
+    {
+        throw failure.error;
+    }
+
     return { rows, sha256: hash.digest('hex') };
+}
+
+/** Read `stream` to its end, dropping what it holds; one that already failed is left as it is. */
+async function discardRest(stream: Readable): Promise<void>
+{
+    stream.resume();
+    await finished(stream).catch(() => undefined);
 }
 
 /**

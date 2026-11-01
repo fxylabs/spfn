@@ -1,6 +1,7 @@
 /**
- * `spfn db tenant import` against a real PostgreSQL — rows M1–M15 of the #158
- * part 3 design case table, and the M-input rows for a folder that lies
+ * `spfn db tenant import` against a real PostgreSQL — rows M1–M18 of the #158
+ * part 3 design case table, the M-input rows for a folder that lies, and
+ * M-file-gone
  *
  * Each row exports tenant 7 from the seeded source schema as the app role, then
  * recreates the target schema — "migrations only" — in the state the row needs
@@ -167,7 +168,7 @@ describe('spfn db tenant import (integration)', () =>
 
         const imported = await runImport(directory);
 
-        expect(imported.map(({ table, rows }) => [table.name, rows])).toEqual([['memos', 2], ['writers', 2], ['notes', 3]]);
+        expect(imported.tables.map(({ table, rows }) => [table.name, rows])).toEqual([['memos', 2], ['writers', 2], ['notes', 3]]);
 
         for (const table of manifest.tables)
         {
@@ -406,6 +407,81 @@ describe('spfn db tenant import (integration)', () =>
         await migrateTarget();
 
         await expectRefused(() => runImport(directory), /format 2; this spfn reads format 1/);
+    });
+
+    it('M16 a manifest row count changed, the file and its sha256 untouched: refused, nothing written', async () =>
+    {
+        if (!available) return;
+
+        const directory = await exportSource();
+
+        editManifest(directory, (manifest) =>
+        {
+            manifest.tables[0].rows += 1;
+        });
+        await migrateTarget();
+
+        await expectRefused(() => runImport(directory), /memos received 2 rows; spfn_cli_tenant_import\.memos\.copy should hold 3/);
+    });
+
+    it('M17 a table outside the plan whose foreign keys cascade or set null into plan tables: --replace refused naming each, nothing deleted anywhere', async () =>
+    {
+        if (!available) return;
+
+        const directory = await exportSource();
+        const bookmarks = async () => (await target.unsafe(
+            `SELECT count(*)::int AS rows, md5(string_agg(t::text, '|' ORDER BY t::text)) AS checksum FROM ${SCHEMA}.bookmarks t`,
+        ))[0];
+
+        await createSchema(target, fixtures, appRole);
+        await seed(target, SCHEMA);
+        await target.unsafe(`CREATE TABLE ${SCHEMA}.bookmarks (
+            id integer PRIMARY KEY,
+            note_id bigint CONSTRAINT bookmarks_note_fk REFERENCES ${SCHEMA}.notes (id) ON DELETE CASCADE,
+            writer_id bigint CONSTRAINT bookmarks_writer_fk REFERENCES ${SCHEMA}.writers (id) ON DELETE SET NULL)`);
+        // Note 2 and writer 3 are tenant 7's
+        await target.unsafe(`INSERT INTO ${SCHEMA}.bookmarks (id, note_id, writer_id) VALUES (1, 2, 3)`);
+
+        const before = await bookmarks();
+
+        await expectRefused(
+            () => runImport(directory, true),
+            new RegExp('--replace would change rows outside the export.*'
+                + 'bookmarks_note_fk on spfn_cli_tenant_import\\.bookmarks \\(ON DELETE CASCADE into spfn_cli_tenant_import\\.notes\\).*'
+                + 'bookmarks_writer_fk on spfn_cli_tenant_import\\.bookmarks \\(ON DELETE SET NULL into spfn_cli_tenant_import\\.writers\\)', 's'),
+        );
+        expect(await bookmarks()).toEqual(before);
+    });
+
+    it('M18 the import prints each sequence it moves, from → to, and nothing for one it leaves', async () =>
+    {
+        if (!available) return;
+
+        const directory = await exportSource();
+
+        await migrateTarget();
+        await target.unsafe(`SELECT setval(pg_get_serial_sequence('${SCHEMA}.notes', 'id'), 500)`);
+        process.env.DATABASE_OWNER_URL = TARGET_URL;
+        await dbTenantImport(directory);
+
+        const text = output.join('\n');
+
+        expect(text).toContain(`${SCHEMA}.writers_id_seq: unused → 3`);
+        expect(text).toContain(`${SCHEMA}.memos_id_seq: unused → 2`);
+        expect(text).not.toContain('notes_id_seq');
+    });
+
+    it('M-file-gone a file removed after its sha256 was checked: refused with ENOENT, nothing written, no uncaught error', async () =>
+    {
+        if (!available) return;
+
+        const directory = await exportSource();
+        const prepared = await prepareImport(directory, plan);
+
+        rmSync(join(directory, `${SCHEMA}.writers.copy`));
+        await migrateTarget();
+
+        await expectRefused(() => importTenant(prepared, { url: TARGET_URL, replace: false }), /ENOENT/);
     });
 
     it('M-input-tenant-id a manifest tenantId "1 OR 1=1" is refused before a connection, through the command too', async () =>

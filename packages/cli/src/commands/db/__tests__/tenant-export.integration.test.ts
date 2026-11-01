@@ -5,18 +5,26 @@
  * The owner (TEST_DATABASE_URL) creates and seeds the fixture schema; the export
  * runs as the app role, which owns nothing and is neither superuser nor
  * BYPASSRLS — the first test proves it, or X7 would test nothing. Skips without
- * a database, except in CI. See helpers/test-database.ts for the URLs.
+ * a database, except in CI. See helpers/test-database.ts for the URLs. X12 is
+ * last: it drops the fixture schema, and builds it again.
  */
 
 import { createHash } from 'crypto';
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { join } from 'path';
+import { Writable } from 'stream';
 import postgres from 'postgres';
 import { describe, it, expect, beforeAll, beforeEach, afterEach, afterAll, vi } from 'vitest';
 import { appUrl, OWNER_URL, requireDatabase } from './helpers/test-database';
 import { createSchema, createTenantFixtures, seed } from './helpers/tenant-fixtures';
 
 vi.mock('@spfn/core/server', () => ({ loadEnv: vi.fn() }));
+vi.mock('fs', async (importOriginal) =>
+{
+    const original = await importOriginal<typeof import('fs')>();
+
+    return { ...original, createWriteStream: vi.fn(original.createWriteStream) };
+});
 vi.mock('../tenant/schema', async (importOriginal) => ({
     ...await importOriginal<typeof import('../tenant/schema')>(),
     loadAppSchema: vi.fn(),
@@ -25,6 +33,7 @@ vi.mock('../tenant/schema', async (importOriginal) => ({
 const { dbTenantExport, exportTenant } = await import('../tenant/export');
 const { buildTenantPlan } = await import('../tenant/plan');
 const { loadAppSchema } = await import('../tenant/schema');
+const { createWriteStream } = await import('fs');
 
 const SCHEMA = 'spfn_cli_tenant_export';
 const UNREACHABLE_URL = 'postgresql://nobody:unused@127.0.0.1:1/nowhere';
@@ -36,6 +45,31 @@ const plan = buildTenantPlan(fixtures.imports);
 function readRows(file: string): string[][]
 {
     return readFileSync(file, 'utf-8').split('\n').filter((line) => line !== '').map((line) => line.split('\t'));
+}
+
+/** A file stream that takes `chunks` writes, then fails each one as a full disk does. */
+function fullDisk(chunks: number): Writable
+{
+    let written = 0;
+
+    return new Writable({
+        write(_chunk, _encoding, callback)
+        {
+            written++;
+            callback(written > chunks
+                ? Object.assign(new Error('ENOSPC: no space left on device, write'), { code: 'ENOSPC', syscall: 'write' })
+                : null);
+        },
+    });
+}
+
+/** `promise`, or a rejection naming `label` once `ms` have passed without it settling. */
+function within<T>(promise: Promise<T>, ms: number, label: string): Promise<T>
+{
+    return Promise.race([
+        promise,
+        new Promise<never>((_, reject) => setTimeout(() => reject(new Error(`${label} did not settle within ${ms} ms`)), ms).unref()),
+    ]);
 }
 
 /** The tenant column of every row of a plan table's file. */
@@ -299,4 +333,61 @@ describe('spfn db tenant export (integration)', () =>
             expect(text).not.toContain(secret);
         }
     });
+
+    it('X10b a closed port, an unresolvable host and a wrong password each fail naming neither the host, the user nor the password', async () =>
+    {
+        if (!available) return;
+
+        const real = new URL(appUrl());
+        const closedPort = 'postgresql://x10b-user:x10b-secret@localhost:1/nowhere';
+        const unresolvable = 'postgresql://x10b-user:x10b-secret@x10b-no-such-host.invalid:5432/nowhere';
+        const wrongPassword = new URL(appUrl());
+
+        wrongPassword.password = 'x10b-secret';
+
+        for (const url of [closedPort, unresolvable, wrongPassword.toString()])
+        {
+            output = [];
+            process.env.DATABASE_URL = url;
+
+            await expect(dbTenantExport('7')).rejects.toThrow('exit 1');
+
+            const text = output.join('\n');
+
+            expect(text).toMatch(/Tenant export failed: (could not reach the database|authentication failed) \(/);
+
+            for (const secret of ['localhost', 'x10b-no-such-host', real.hostname, 'x10b-user', decodeURIComponent(real.username), 'x10b-secret'])
+            {
+                expect(text).not.toContain(secret);
+            }
+        }
+    });
+
+    it('X12 a write error mid-COPY of 100,000 rows rejects the export with that error within 10 s, and leaves no lock or folder behind', async () =>
+    {
+        if (!available) return;
+
+        const directory = join(workDir, 'x12');
+
+        await owner.unsafe(`INSERT INTO ${SCHEMA}.memos (id, tenant_id, body) OVERRIDING SYSTEM VALUE SELECT g, 7, repeat('m', 40) FROM generate_series(1000, 100999) g`);
+        // memos is the plan's first table: its file takes two writes, then the disk is full
+        vi.mocked(createWriteStream).mockImplementationOnce((() => fullDisk(2)) as never);
+
+        await expect(within(exportTenant({ tenantId: 7, plan, url: appUrl(), directory }), 10_000, 'the export'))
+            .rejects.toThrow('ENOSPC: no space left on device');
+        expect(existsSync(directory)).toBe(false);
+
+        const dropper = postgres(OWNER_URL, { max: 1, onnotice: () => undefined, connection: { lock_timeout: 2_000 } });
+
+        try
+        {
+            await within(dropper.unsafe(`DROP SCHEMA ${SCHEMA} CASCADE`), 5_000, 'DROP SCHEMA');
+        }
+        finally
+        {
+            await dropper.end({ timeout: 0 });
+        }
+
+        await createSchema(owner, fixtures, appRole);
+    }, 30_000);
 });
