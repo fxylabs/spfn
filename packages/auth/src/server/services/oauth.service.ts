@@ -23,7 +23,7 @@ import {
     UnverifiedEmailLinkError,
 } from '@spfn/auth/errors';
 
-import { usersRepository, socialAccountsRepository, userProfilesRepository } from '../repositories';
+import { usersRepository, socialAccountsRepository, userProfilesRepository, type FoldedEmailMatch } from '../repositories';
 import { authLogger } from '../logger';
 import { isSafeReturnPath } from '../../lib/return-path';
 import { withOAuthErrorReason, type OAuthErrorReason } from '../../lib/oauth-error-reason';
@@ -589,8 +589,11 @@ export async function backfillVerifiedEmail(
         return;
     }
 
-    const emailOwner = await usersRepository.findByEmail(identity.email);
-    if (emailOwner && emailOwner.id !== userId)
+    // Any account the address folds onto, case variants included: the email
+    // already belongs to someone, or to several someones the operator has yet
+    // to settle
+    const emailOwner = await usersRepository.findByFoldedEmail(identity.email);
+    if (emailOwner.kind === 'ambiguous' || (emailOwner.kind === 'account' && emailOwner.user.id !== userId))
     {
         return;
     }
@@ -620,8 +623,11 @@ export async function backfillVerifiedEmail(
  * 없으므로 생략하며, social account의 토큰 컬럼은 null로 저장된다.
  * metadata는 앱이 OAuth 시작 시 실은 값 — 신규 가입일 때만 beforeRegister 훅에 전달된다.
  * 이메일이 같은 기존 계정이 있으면 `oauthEmailMatch`(#156)가 연결·거절·별도 가입을 정한다.
+ * 대소문자만 다른 행도 같은 이메일로 본다 — 소문자 행이 있으면 그 행, 없으면 하나뿐인 행이
+ * 그 계정이고, 소문자 행 없이 여럿이면 어느 계정인지 정할 수 없다.
  *
- * @throws OAuthEmailInUseError `oauthEmailMatch: 'reject'`이고 이메일이 같은 계정이 있을 때
+ * @throws OAuthEmailInUseError `oauthEmailMatch: 'reject'`이고 이메일이 같은 계정이 있을 때,
+ * 또는 `'attach'`이고 소문자 행 없이 대소문자만 다른 계정이 여럿일 때
  * @throws UnverifiedEmailLinkError `'attach'`(기본)이고 provider가 이메일을 검증하지 않았을 때
  */
 export async function createOrLinkUser(
@@ -631,23 +637,25 @@ export async function createOrLinkUser(
     metadata?: Record<string, unknown>,
 ): Promise<{ userId: number; isNewUser: boolean }>
 {
-    // 이메일로 기존 사용자 검색
-    const existingUser = identity.email
-        ? await usersRepository.findByEmail(identity.email)
-        : null;
-    const emailMatch = existingUser ? getOAuthEmailMatch() : 'attach';
+    // 이메일로 기존 사용자 검색 — 대소문자만 다른 행 포함
+    const match: FoldedEmailMatch = identity.email
+        ? await usersRepository.findByFoldedEmail(identity.email)
+        : { kind: 'none' };
+    const emailMatch = match.kind === 'none' ? 'attach' : getOAuthEmailMatch();
 
     // 'reject' (#156) writes nothing and says nothing about the existing account —
     // thrown before the attach branch would touch it and before the session check
-    // would reveal its status
-    if (emailMatch === 'reject')
+    // would reveal its status. 'attach' to case variants it cannot choose between
+    // is refused the same way: attaching to the wrong one would hand a sign-in
+    // method to an account that is not the person's
+    if (emailMatch === 'reject' || (emailMatch === 'attach' && match.kind === 'ambiguous'))
     {
         throw new OAuthEmailInUseError({ details: { provider } });
     }
 
-    const { userId, isNewUser } = existingUser && emailMatch === 'attach'
-        ? { userId: await attachByEmail(existingUser, identity), isNewUser: false }
-        : { userId: await registerOAuthUser(provider, identity, metadata, !existingUser), isNewUser: true };
+    const { userId, isNewUser } = match.kind === 'account' && emailMatch === 'attach'
+        ? { userId: await attachByEmail(match.user, identity), isNewUser: false }
+        : { userId: await registerOAuthUser(provider, identity, metadata, match.kind === 'none'), isNewUser: true };
 
     // 소셜 계정 생성 (native 흐름은 provider 토큰이 없어 null로 저장)
     await socialAccountsRepository.create({

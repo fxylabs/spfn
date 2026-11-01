@@ -9,14 +9,25 @@
  * existing mixed-case row unreachable; normalizing only the write leaves the
  * duplicate open. Each test below therefore drives a real flow rather than
  * calling the helper.
+ *
+ * Rows F2, F3, F6 and F8-F10 of the #156 follow-up O1 case table are here (an
+ * address left in another case by an install the boot backfill could not
+ * fold); F1 and F7 are in oauth-email-match.test.ts, F4 and F5 in
+ * verified-email-signup.test.ts.
  */
 
 import { describe, it, expect, beforeAll, afterAll, afterEach, beforeEach, vi } from 'vitest';
 import { Hono } from 'hono';
-import { and, desc, eq } from 'drizzle-orm';
+import { and, desc, eq, sql } from 'drizzle-orm';
+import { readdirSync, readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { ConflictError } from '@spfn/core/errors';
+import { AccountAlreadyExistsError } from '@spfn/auth/errors';
 import { setupTestDb, teardownTestDb, clearTables, getTestDb, isDatabaseAvailable } from '../helpers/db';
-import { users, verificationCodes } from '@/server/entities';
+import { passwordResetTokens, users, verificationCodes } from '@/server/entities';
 import { generateKeyPair } from '@/server/lib/crypto';
+import { hashPassword } from '@/server/helpers/password';
 
 vi.mock('@spfn/notification/server', async (importOriginal) =>
 {
@@ -35,11 +46,14 @@ const { ErrorHandler } = await import('@spfn/core/middleware');
 const { initializeAuth } = await import('@/server/services/rbac.service');
 const { normalizeStoredEmails } = await import('@/server/services/email-normalization.service');
 const { usersRepository } = await import('@/server/repositories');
+const { createVerifiedAccount } = await import('@/server/services/auth.service');
+const { createInvitation } = await import('@/server/services/invitation.service');
 
 const dbAvailable = await isDatabaseAvailable();
 
 const JSON_HEADERS = { 'Content-Type': 'application/json' };
 const PASSWORD = 'SecurePassword123!';
+const MIGRATIONS_FOLDER = fileURLToPath(new URL('../../../migrations', import.meta.url));
 
 describe.skipIf(!dbAvailable)('Email normalization', () =>
 {
@@ -122,6 +136,17 @@ describe.skipIf(!dbAvailable)('Email normalization', () =>
             fingerprint: key.fingerprint,
             algorithm: key.algorithm,
         });
+    }
+
+    /** Write a row straight to the table, bypassing the repository. */
+    async function insertRaw(email: string, passwordHash: string | null = null)
+    {
+        const db = getTestDb();
+        const [row] = await db.insert(users)
+            .values({ email, status: 'active', roleId: userRoleId, passwordHash })
+            .returning();
+
+        return row;
     }
 
     describe('writing', () =>
@@ -212,17 +237,6 @@ describe.skipIf(!dbAvailable)('Email normalization', () =>
 
     describe('backfilling rows written before this', () =>
     {
-        /** Write a row straight to the table, bypassing the repository. */
-        async function insertRaw(email: string)
-        {
-            const db = getTestDb();
-            const [row] = await db.insert(users)
-                .values({ email, status: 'active', roleId: userRoleId })
-                .returning();
-
-            return row;
-        }
-
         it('rewrites a mixed-case row so its owner can sign in again', async () =>
         {
             const raw = await insertRaw('Legacy@Example.com');
@@ -427,6 +441,162 @@ describe.skipIf(!dbAvailable)('Email normalization', () =>
             // A denylist or domain allowlist keyed on the canonical address must
             // not be walked past by capitalizing it.
             expect(seen).toEqual(['gate.case@example.com']);
+        });
+    });
+
+    describe('#156 O1: an address left in another case', () =>
+    {
+        /** The committed migration that builds the folded-email index. */
+        function foldedIndexMigration(): string
+        {
+            const sources = readdirSync(MIGRATIONS_FOLDER, { withFileTypes: true })
+                .filter(entry => entry.isDirectory())
+                .map(entry => readFileSync(resolve(MIGRATIONS_FOLDER, entry.name, 'migration.sql'), 'utf8'))
+                .filter(source => source.includes('users_email_folded_idx'));
+
+            expect(sources).toHaveLength(1);
+
+            return sources[0]!;
+        }
+
+        /** The SQL `findByFoldedEmail` sends, captured without running it. */
+        async function foldedLookupQuery(email: string): Promise<{ sql: string; params: unknown[] }>
+        {
+            let captured: { sql: string; params: unknown[] } | undefined;
+            const recording = (builder: object): object => new Proxy(builder, {
+                get(target, property)
+                {
+                    if (property === 'then')
+                    {
+                        captured = (target as { toSQL(): { sql: string; params: unknown[] } }).toSQL();
+
+                        return (resolveRows: (rows: unknown[]) => void) => resolveRows([]);
+                    }
+
+                    const value = Reflect.get(target, property);
+
+                    return typeof value === 'function'
+                        ? (...args: unknown[]) => recording(value.apply(target, args))
+                        : value;
+                },
+            });
+
+            Object.defineProperty(usersRepository, 'readDb', {
+                configurable: true,
+                get: () => ({ select: (...args: Parameters<ReturnType<typeof getTestDb>['select']>) => recording(getTestDb().select(...args)) }),
+            });
+
+            try
+            {
+                await usersRepository.findByFoldedEmail(email);
+            }
+            finally
+            {
+                delete (usersRepository as unknown as { readDb?: unknown }).readDb;
+            }
+
+            return captured!;
+        }
+
+        it('F2: an email signup is refused when the address is stored in another case', async () =>
+        {
+            await insertRaw('Owner@Example.com');
+            const key = generateKeyPair('ES256');
+
+            await expect(createVerifiedAccount({
+                email: 'owner@example.com',
+                password: PASSWORD,
+                publicKey: key.publicKey,
+                keyId: key.keyId,
+                fingerprint: key.fingerprint,
+                algorithm: key.algorithm,
+                channel: 'register',
+            })).rejects.toBeInstanceOf(AccountAlreadyExistsError);
+            expect(await getTestDb().select().from(users)).toHaveLength(1);
+        });
+
+        it('F3: a registration code for an address stored in another case is answered as for an existing account', async () =>
+        {
+            await insertRaw('exact@example.com');
+            await insertRaw('Variant@Example.com');
+            const lifetimes = new Map<string, number>();
+
+            for (const target of ['exact@example.com', 'variant@example.com', 'nobody@example.com'])
+            {
+                const response = await post('/_auth/codes', { target, targetType: 'email', purpose: 'registration' });
+                const [row] = await getTestDb().select().from(verificationCodes).where(eq(verificationCodes.target, target));
+
+                expect(response.status).toBe(200);
+                expect(Object.keys(await response.json()).sort()).toEqual(['expiresAt', 'success']);
+                lifetimes.set(target, Math.round((row!.expiresAt.getTime() - row!.createdAt.getTime()) / 60_000));
+            }
+
+            // The account-exists branch keeps a dedupe marker, not a code: its
+            // lifetime is the notice window, not the code expiry
+            expect(lifetimes.get('variant@example.com')).toBe(lifetimes.get('exact@example.com'));
+            expect(lifetimes.get('variant@example.com')).not.toBe(lifetimes.get('nobody@example.com'));
+        });
+
+        it('F6: an invitation to an address stored in another case is a conflict', async () =>
+        {
+            const inviter = await insertRaw('inviter@example.com');
+            await insertRaw('Owner@Example.com');
+
+            const invite = createInvitation({ email: 'owner@example.com', roleId: userRoleId, invitedBy: inviter!.id });
+
+            await expect(invite).rejects.toBeInstanceOf(ConflictError);
+            await expect(invite).rejects.toMatchObject({ message: 'User with this email already exists' });
+        });
+
+        it('F8: the folded-email migration applies to a database holding case variants', async () =>
+        {
+            await insertRaw('Owner@Example.com');
+            await insertRaw('OWNER@example.com');
+            await getTestDb().execute(sql`DROP INDEX spfn_auth.users_email_folded_idx`);
+
+            const statements = foldedIndexMigration().split('--> statement-breakpoint').map(s => s.trim()).filter(Boolean);
+            await getTestDb().transaction(async (tx) =>
+            {
+                for (const statement of statements)
+                {
+                    await tx.execute(sql.raw(statement));
+                }
+            });
+
+            const indexes = await getTestDb().execute(sql`SELECT indexdef FROM pg_indexes
+                WHERE schemaname = 'spfn_auth' AND indexname = 'users_email_folded_idx'`);
+            expect(indexes).toHaveLength(1);
+        });
+
+        it('F9: the generated migration builds a non-unique index on lower(btrim(email))', () =>
+        {
+            const source = foldedIndexMigration();
+
+            expect(source).toContain('CREATE INDEX "users_email_folded_idx" ON "spfn_auth"."users" (lower(btrim("email")));');
+            expect(source).not.toMatch(/UNIQUE/i);
+        });
+
+        it('F9b: the folded lookup is served by the folded-email index', async () =>
+        {
+            const query = await foldedLookupQuery('Owner@Example.com');
+
+            const plan = await getTestDb().$client.begin(async (tx) =>
+            {
+                await tx.unsafe('SET LOCAL enable_seqscan = off');
+
+                return tx.unsafe(`EXPLAIN ${query.sql}`, query.params as string[]);
+            });
+
+            expect(plan.map(row => row['QUERY PLAN']).join('\n')).toContain('users_email_folded_idx');
+        });
+
+        it('F10: login and password reset still miss an address stored only in another case', async () =>
+        {
+            await insertRaw('Stale@Example.com', await hashPassword(PASSWORD));
+
+            expect((await login('stale@example.com')).status).toBe(401);
+            expect((await post('/_auth/password/reset', { email: 'stale@example.com' })).status).toBe(200);
+            expect(await getTestDb().select().from(passwordResetTokens)).toEqual([]);
         });
     });
 });

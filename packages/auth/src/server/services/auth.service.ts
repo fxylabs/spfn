@@ -213,10 +213,8 @@ export async function createVerifiedAccount(
         throw new ValidationError({ message: 'Device key material is required to register' });
     }
 
-    // Check if user already exists
-    const existingUser = await usersRepository.findByEmailOrPhone(email, phone);
-
-    if (existingUser)
+    // Check if user already exists — an address stored in another case counts
+    if (await accountExists(email, phone))
     {
         const identifierType = email ? 'email' : 'phone';
         throw new AccountAlreadyExistsError({ identifier: email || phone!, identifierType });
@@ -288,6 +286,23 @@ export async function createVerifiedAccount(
     }));
 
     return result;
+}
+
+/**
+ * Whether an account already holds the email or phone a signup names.
+ *
+ * The email is looked up in any stored case, unlike `findByEmailOrPhone`, which
+ * login and account deletion share and which must keep finding exactly one
+ * account to act as.
+ */
+async function accountExists(email?: string, phone?: string): Promise<boolean>
+{
+    if (email)
+    {
+        return (await usersRepository.findByFoldedEmail(email)).kind !== 'none';
+    }
+
+    return phone ? !!(await usersRepository.findByPhone(phone)) : false;
 }
 
 /**

@@ -13,6 +13,7 @@
  */
 
 import { SESSION_BINDINGS, USER_STATUSES } from '../types';
+import { sql } from 'drizzle-orm';
 import { text, boolean, index, integer, uuid } from 'drizzle-orm/pg-core';
 import { id, timestamps, enumText, utcTimestamp, foreignKey, softDelete } from '@spfn/core/db';
 import { roles } from './roles';
@@ -111,6 +112,11 @@ export const users = authSchema.table('users',
         // Indexes for query optimization
         index('users_public_id_idx').on(table.publicId),
         index('users_email_idx').on(table.email),
+        // The folded form, for lookups that must find an address whatever case
+        // it was stored in. Not unique: an install can still hold rows that
+        // differ only by case (the boot backfill leaves those to the operator),
+        // and a unique index would fail to build there
+        index('users_email_folded_idx').on(sql`lower(btrim(${table.email}))`),
         index('users_phone_idx').on(table.phone),
         index('users_username_idx').on(table.username),
         index('users_status_idx').on(table.status),

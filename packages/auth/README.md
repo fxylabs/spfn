@@ -2089,17 +2089,21 @@ The refusal says nothing about the existing account: its details name the provid
 comes before the account-status check, so a suspended or deleting account is answered
 `email_in_use` too, never `account_unavailable`.
 
-The match compares the normalised email: `createOrLinkUser` looks the identity's address up with
-`usersRepository.findByEmail`, the same lookup every sign-in uses. A row still stored in an older,
-unnormalised form (say, `Owner@Example.com` from before email normalization) is not matched in any
-mode — `reject` and `separate` both miss it and a second account is created, the same gap `attach`
-already had before this policy. `usersRepository.findByEmailInAnyStoredForm` finds such a row
-regardless of how it is stored; the startup backfill normalizes most of them automatically and
-logs the ones it cannot as capitalization conflicts — see [the FAQ](#faq).
+The match finds the address whatever case it is stored in. The startup backfill folds stored emails
+to lower case, but leaves alone rows that differ only by case and logs their user ids as
+capitalization conflicts (see [the FAQ](#faq)); a row an older instance wrote after the backfill
+can also remain. A row stored in lower case wins over its case variants, as before. Without one, a
+single variant such as `Owner@Example.com` is that account in every mode: `'attach'` links to it,
+`'reject'` refuses, `'separate'` makes a new account without the email. Two or more variants with no
+lower-case row (`Owner@Example.com` and `OWNER@Example.com`) cannot be told apart, so `'attach'`
+refuses them with the same `409 OAUTH_EMAIL_IN_USE` (`reason=email_in_use`) as `'reject'`, rather
+than link the identity to the wrong one; `'separate'` still makes a new account. The operator settles
+those accounts; sign-up, the registration code, the signup link and invitations treat any variant as
+an existing account the same way. Password login and reset still look up the exact lower-case address.
 
 | Error | HTTP | `code` | When |
 | --- | --- | --- | --- |
-| `OAuthEmailInUseError` | 409 | `OAUTH_EMAIL_IN_USE` | `oauthEmailMatch: 'reject'` and the first sign-in's email belongs to an existing account |
+| `OAuthEmailInUseError` | 409 | `OAUTH_EMAIL_IN_USE` | `oauthEmailMatch: 'reject'` and the first sign-in's email belongs to an existing account, or `'attach'` and it belongs to several accounts stored in different cases |
 
 The mobile contract lists `OAuthEmailInUseError` since 0.13.7.
 
@@ -2430,7 +2434,7 @@ type. Branch on `reason`; show `error` if you like. The codes are the closed uni
 | `provider_error` | any other provider `error=…`, or the token exchange / user-info call failed | the provider's text; a fixed sentence for a library failure |
 | `account_unavailable` | the account is disabled, pending deletion, or gone | unchanged |
 | `link_only` | the app made this provider [link-only](#link-only-providers-and-recent-authentication): it can be connected from a signed-in account, never used to sign in (added in 0.3.0-beta.50, #157) | a fixed sentence |
-| `email_in_use` | a first sign-in with this provider reported the email of an existing account and the app set [`oauthEmailMatch: 'reject'`](#when-a-first-sign-ins-email-matches-an-existing-account) (added in 0.3.0-beta.51, #156) | a fixed sentence |
+| `email_in_use` | a first sign-in with this provider reported the email of an existing account and the app set [`oauthEmailMatch: 'reject'`](#when-a-first-sign-ins-email-matches-an-existing-account), or `'attach'` found that email on several accounts stored in different cases (added in 0.3.0-beta.51, #156) | a fixed sentence |
 | `failed` | anything else — missing `code`/`state`, an unverified email that would link an account (`oauthEmailMatch` unset or `'attach'`), a missing role | unchanged |
 
 `SPFN_AUTH_OAUTH_ERROR_URL` takes `{reason}` beside `{error}`

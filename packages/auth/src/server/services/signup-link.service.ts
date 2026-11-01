@@ -70,9 +70,8 @@ export async function requestSignupLinkService(
     const returnPath = params.returnPath;
     const expiresAt = new Date(Date.now() + (env.SPFN_AUTH_SIGNUP_LINK_TTL_MINUTES ?? 30) * 60_000);
 
-    const existingUser = await usersRepository.findByEmail(email);
-
-    if (existingUser)
+    // An address stored in another case counts as an account
+    if ((await usersRepository.findByFoldedEmail(email)).kind !== 'none')
     {
         await noticeAccountExistsOnce(email, 'email');
 
@@ -169,7 +168,7 @@ export async function confirmSignupLinkService(
     // Between issuing the link and opening it, the address may have gained an
     // account through another path. Letting the link through here would hand a
     // password-setup session for an address that is already owned.
-    if (await usersRepository.findByEmail(row.email))
+    if ((await usersRepository.findByFoldedEmail(row.email)).kind !== 'none')
     {
         authLogger.service.warn('Signup link refused', { reason: 'account created meanwhile' });
 

@@ -33,8 +33,7 @@ const {
 
     return {
         usersRepository: {
-            findByEmailOrPhone: vi.fn(),
-            findByEmail: vi.fn(),
+            findByFoldedEmail: vi.fn(),
             create: vi.fn(),
             updateById: vi.fn(),
         },
@@ -126,8 +125,7 @@ describe('beforeRegister hook', () =>
             target: 'kid@example.com',
             targetType: 'email',
         });
-        usersRepository.findByEmailOrPhone.mockResolvedValue(null);
-        usersRepository.findByEmail.mockResolvedValue(null);
+        usersRepository.findByFoldedEmail.mockResolvedValue({ kind: 'none' });
         usersRepository.create.mockResolvedValue({
             id: 10,
             publicId: 'pub-10',
@@ -174,7 +172,7 @@ describe('beforeRegister hook', () =>
         {
             const { hook } = rejectAll();
             configureAuth({ beforeRegister: hook });
-            usersRepository.findByEmailOrPhone.mockResolvedValue({ id: 1 });
+            usersRepository.findByFoldedEmail.mockResolvedValue({ kind: 'account', user: { id: 1 } });
 
             await expect(registerService(registerParams))
                 .rejects.toBeInstanceOf(AccountAlreadyExistsError);
@@ -258,7 +256,7 @@ describe('beforeRegister hook', () =>
         {
             const { hook } = rejectAll();
             configureAuth({ beforeRegister: hook });
-            usersRepository.findByEmail.mockResolvedValue({ id: 7, emailVerifiedAt: new Date() });
+            usersRepository.findByFoldedEmail.mockResolvedValue({ kind: 'account', user: { id: 7, emailVerifiedAt: new Date() } });
 
             const result = await createOrLinkUser('google', identity);
 
