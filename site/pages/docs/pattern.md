@@ -72,6 +72,11 @@ export class TodoRepository extends BaseRepository
 }
 ```
 
+A table that many tenants share declares a `tenantKey()` column, and its repository extends
+`TenantRepository` instead. The helpers keep their names and take the tenant id first —
+`this._findMany(tenantId, notes)` — and every query they build carries the tenant condition.
+See [TenantRepository](./packages/core/db.md#tenantrepository-tenant--tables-shared-by-many-tenants).
+
 ## Route
 
 Routes declare their contract with TypeBox. The schema validates at runtime and types the
