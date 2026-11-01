@@ -17,8 +17,10 @@
  */
 
 import { sql } from 'drizzle-orm';
+import type { Column } from 'drizzle-orm';
 import type { PgColumn } from 'drizzle-orm/pg-core';
 import { bigserial, bigint as pgBigint, timestamp, text, uuid as pgUuid, jsonb } from 'drizzle-orm/pg-core';
+import { registerTenantColumn } from '../tenant/registry';
 
 /**
  * Standard auto-incrementing primary key
@@ -36,6 +38,48 @@ import { bigserial, bigint as pgBigint, timestamp, text, uuid as pgUuid, jsonb }
 export function id()
 {
     return bigserial('id', { mode: 'number' }).primaryKey();
+}
+
+/**
+ * Tenant column for a table that many tenants share
+ *
+ * A not-null bigint holding the tenant's id. Declaring it is what makes the table
+ * tenant-aware: TenantRepository requires it, adds `tenant = $id` to every query
+ * it builds, and the development query warning checks hand-written queries for
+ * it. A table may declare one.
+ *
+ * It does not create an index — a drizzle column cannot. Declare the table's
+ * indexes in its third argument, each starting with the tenant column, so a
+ * query that filters on the tenant reads only that tenant's part of the index.
+ *
+ * @param name - Column name (default `tenant_id`)
+ * @returns not-null bigint column (JS `number`)
+ *
+ * @example
+ * ```typescript
+ * export const notes = schema.table('notes', {
+ *     id: id(),
+ *     tenantId: tenantKey(),
+ *     title: text('title').notNull(),
+ * }, (t) => [index('notes_tenant_id_idx').on(t.tenantId, t.id)]);
+ * ```
+ */
+export function tenantKey(name: string = 'tenant_id')
+{
+    const builder = pgBigint(name, { mode: 'number' }).notNull();
+    const buildable = builder as unknown as { build: (table: object) => Column };
+    const build = buildable.build;
+
+    buildable.build = function (this: unknown, table: object): Column
+    {
+        const column = build.call(this, table);
+
+        registerTenantColumn(table, column);
+
+        return column;
+    };
+
+    return builder;
 }
 
 /**

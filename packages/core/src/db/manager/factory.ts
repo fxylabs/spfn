@@ -10,8 +10,10 @@ import { env } from '@spfn/core/config';
 import { logger } from '@spfn/core/logger';
 import { createDatabaseConnection } from './connection';
 import { getPoolConfig, getRetryConfig, type DatabaseOptions, type DatabaseClients, type PoolConfig, type RetryConfig } from './config';
+import { createDevelopmentQueryLogger } from '../tenant/query-warning';
 
 const dbLogger = logger.child('@spfn/core:database');
+const tenantLogger = logger.child('@spfn/core:tenant');
 
 // ============================================================================
 // Types
@@ -100,6 +102,23 @@ function detectDatabasePattern(): DatabasePattern
 }
 
 /**
+ * Wrap a postgres.js client in drizzle
+ *
+ * In local and development runs it also attaches the tenant query warning,
+ * which reports a query that reads or writes a tenant-aware table without its
+ * tenant condition. Other environments get no logger and pay nothing.
+ */
+function createDrizzle(client: Sql)
+{
+    const queryLogger = createDevelopmentQueryLogger(env.NODE_ENV, (message, warning) =>
+    {
+        tenantLogger.warn(message, { tables: warning.tables, sql: warning.sql });
+    });
+
+    return queryLogger ? drizzle({ client, logger: queryLogger }) : drizzle({ client });
+}
+
+/**
  * Create write and read database clients
  *
  * Write connection is required and will throw if it fails.
@@ -144,8 +163,8 @@ async function createWriteReadClients(
         readClient = await createDatabaseConnection(readUrl, readPoolConfig, retryConfig);
 
         return {
-            write: drizzle({ client: writeClient }),
-            read: drizzle({ client: readClient }),
+            write: createDrizzle(writeClient),
+            read: createDrizzle(readClient),
             writeClient,
             readClient,
         };
@@ -166,8 +185,8 @@ async function createWriteReadClients(
 
         // Use write connection for both read and write
         return {
-            write: drizzle({ client: writeClient }),
-            read: drizzle({ client: writeClient }),
+            write: createDrizzle(writeClient),
+            read: createDrizzle(writeClient),
             writeClient,
             readClient: writeClient,
         };
@@ -189,7 +208,7 @@ async function createSingleClient(
 ): Promise<DatabaseClients>
 {
     const client = await createDatabaseConnection(url, poolConfig, retryConfig);
-    const db = drizzle({ client });
+    const db = createDrizzle(client);
 
     return {
         write: db,

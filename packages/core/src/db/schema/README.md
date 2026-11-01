@@ -11,7 +11,7 @@ re-exported from `@spfn/core/db`. Import from there.
 ```typescript
 import {
     id, uuid, timestamps,
-    foreignKey, optionalForeignKey,
+    foreignKey, optionalForeignKey, tenantKey,
     auditFields, publishingFields, softDelete,
     verificationTimestamp, utcTimestamp, enumText, typedJsonb,
     createSchema, packageNameToSchema, getSchemaInfo,
@@ -36,6 +36,7 @@ Column helpers (`entity-helper.ts`):
 - `timestamps()` — `createdAt` + `updatedAt` (timestamptz, not null, both written by the database clock)
 - `foreignKey(name, reference, options?)` — required FK (bigint, cascade by default)
 - `optionalForeignKey(name, reference, options?)` — nullable FK (set null by default)
+- `tenantKey(name?)` — not-null bigint tenant column that makes a table tenant-aware (`tenant_id` by default)
 - `auditFields()` — `createdBy` + `updatedBy` (text, nullable)
 - `publishingFields()` — `publishedAt` (timestamptz, nullable) + `publishedBy` (text)
 - `softDelete()` — `deletedAt` (timestamptz, nullable) + `deletedBy` (text)
@@ -140,6 +141,23 @@ categoryId: optionalForeignKey('category', () => cats.id), // category_id BIGINT
   `foreignKey` → `'cascade'`, `optionalForeignKey` → `'set null'`.
 - There is **no** `onUpdate` option on these helpers. For `onUpdate` (or FK to a uuid PK),
   use drizzle's table-level `foreignKey({ columns, foreignColumns, onUpdate })` instead.
+
+### `tenantKey(name?)`
+
+The tenant column of a table that many tenants share: a not-null `bigint` (JS `number`),
+named `tenant_id` unless you pass a name. Declaring it makes the table tenant-aware —
+`TenantRepository` requires it and scopes every query to one tenant (see the
+[db README](../README.md#tenantrepository-tenant--tables-shared-by-many-tenants)). One per
+table; a second throws when the schema module loads. It creates no index — declare indexes
+in the table's third argument, each starting with the tenant column:
+
+```typescript
+export const notes = schema.table('notes', {
+    id: id(),
+    tenantId: tenantKey(),
+    title: text('title').notNull(),
+}, (t) => [index('notes_tenant_id_idx').on(t.tenantId, t.id)]);
+```
 
 ### `auditFields()`, `publishingFields()`, `softDelete()`
 
