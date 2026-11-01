@@ -285,9 +285,29 @@ loaded `.env` chain.
 | `db backup:list` | List backups |
 | `db backup:clean` | Prune backups (`-k, --keep <n>`, `-o, --older-than <days>`) |
 | `db reindex` | Convert sequential migration prefixes to timestamps (`--dry-run`) |
+| `db tenant export <tenantId>` | Write one tenant's rows of every tenant table to `backups/tenant-<id>-<time>/`: one `COPY` file per table and a `manifest.json`, read in one snapshot as the app (`DATABASE_READ_URL`, else `DATABASE_URL`) |
+| `db tenant import <dir>` | Put an export's rows back in one transaction as the owner (`DATABASE_OWNER_URL`, else `DATABASE_URL`). Refuses when the tenant already has rows; `--replace` deletes them first |
 
 > `db push` is for development. For production, use `db generate` + `db migrate` to keep
 > migration history.
+
+**One tenant out and back in.** `db tenant export` and `db tenant import` move the rows of
+one tenant across every tenant table — a `tenancy.table` and a `tenantKey()`-only table
+alike — and nothing else: not the tenant list row, not auth data.
+
+```bash
+spfn db tenant export 42
+# → backups/tenant-42-2026-11-01_100000/  manifest.json, acme_notes.authors.copy, acme_notes.notes.copy
+spfn db tenant import backups/tenant-42-2026-11-01_100000            # into a database without tenant 42's rows
+spfn db tenant import backups/tenant-42-2026-11-01_100000 --replace  # replacing them
+```
+
+The import refuses, writing nothing, when a file does not match its sha256, the target
+tables' columns differ from the export's, the tenant is not in its tenant list table
+(create it first), a row belongs to another tenant, or a foreign key fails. Sequences move
+forward past the imported ids, never back. To put one tenant back to an earlier point in
+time: restore a copy of the database to that point (outside spfn), export the tenant from
+the copy, then `import --replace` into production; the other tenants' rows stay as they are.
 
 **Which files are the schema.** `db push`, `db generate` and `db studio` resolve the
 project schema in the same order:

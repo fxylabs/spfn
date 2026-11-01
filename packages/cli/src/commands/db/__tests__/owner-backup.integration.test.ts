@@ -14,6 +14,7 @@ import { mkdirSync, mkdtempSync, rmSync } from 'fs';
 import { join } from 'path';
 import postgres from 'postgres';
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
+import { appUrl, OWNER_URL } from './helpers/test-database';
 
 vi.mock('@spfn/core/server', () => ({ loadEnv: vi.fn() }));
 vi.mock('prompts', () => ({ default: vi.fn(async () => ({ confirm: true })) }));
@@ -21,30 +22,7 @@ vi.mock('prompts', () => ({ default: vi.fn(async () => ({ confirm: true })) }));
 const { dbBackup } = await import('../backup');
 const { dbRestore } = await import('../restore');
 
-const OWNER_URL = process.env.TEST_DATABASE_URL || 'postgresql://testuser:testpass@localhost:5432/spfn_test';
 const SCHEMA = 'spfn_cli_owner_o4';
-
-/** The non-superuser roles scripts/test-services.sh creates on every machine. */
-const TEST_ROLES = [
-    { user: 'testuser', password: 'testpass' },
-    { user: 'authtest', password: 'authtest123' },
-];
-
-function appUrl(): string
-{
-    if (process.env.TEST_APP_DATABASE_URL)
-    {
-        return process.env.TEST_APP_DATABASE_URL;
-    }
-
-    const url = new URL(OWNER_URL);
-    const app = TEST_ROLES.find((role) => role.user !== decodeURIComponent(url.username))!;
-
-    url.username = app.user;
-    url.password = app.password;
-
-    return url.toString();
-}
 
 function hasClientTools(): boolean
 {

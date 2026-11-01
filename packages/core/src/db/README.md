@@ -591,8 +591,8 @@ to a write route — in either order: the first repository call binds the transa
 
 | Role | URL | Used by | Owns the tables |
 |------|-----|---------|-----------------|
-| owner | `DATABASE_OWNER_URL` | `spfn db migrate`, `backup`, `restore`, `drop` | yes — row-level security does not apply to it |
-| app | `DATABASE_URL` / `DATABASE_WRITE_URL` / `DATABASE_READ_URL` | the running app | no; not superuser, not `BYPASSRLS` |
+| owner | `DATABASE_OWNER_URL` | `spfn db migrate`, `backup`, `restore`, `drop`, `tenant import` | yes — row-level security does not apply to it |
+| app | `DATABASE_URL` / `DATABASE_WRITE_URL` / `DATABASE_READ_URL` | the running app, `spfn db tenant export` | no; not superuser, not `BYPASSRLS` |
 
 PostgreSQL skips row-level security for a table's owner (and roles inheriting its
 privileges), superusers and `BYPASSRLS` roles. Without `DATABASE_OWNER_URL` the four commands
@@ -621,6 +621,17 @@ ALTER TABLE acme_notes.notes OWNER TO app_owner;   -- per table, sequences follo
 -- or everything app_user owns in this database:
 REASSIGN OWNED BY app_user TO app_owner;
 ```
+
+**One tenant at a time.** `spfn db tenant export <id>` writes one tenant's rows of every
+tenant table to a folder, in one snapshot, as the app role — so the policy admits that
+tenant's rows only, behind the command's own `WHERE`. `spfn db tenant import <dir>
+[--replace]` puts them back in one transaction as the owner, which the policy does not
+apply to: it checks every row's tenant column itself, and moves the sequences forward past
+the imported ids. Restoring one tenant to a point in time is: restore a copy of the
+database to that point, export the tenant from the copy, `import --replace` into
+production. The CLI finds tenant tables through the `Symbol.for('spfn.tenant.column')` and
+`Symbol.for('spfn.tenancy.table')` markers, so it reads them through any copy of
+`@spfn/core` the app's schema loads.
 
 **Boot check.** When the app declares tenancy tables, the server checks the role of its
 write and read connections at startup: a role that owns a tenancy table, or is a superuser
