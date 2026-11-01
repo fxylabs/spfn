@@ -12,7 +12,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 const { usersRepository, socialAccountsRepository } = vi.hoisted(() => ({
     usersRepository: {
         findById: vi.fn(),
-        findByEmail: vi.fn(),
+        findByFoldedEmail: vi.fn(),
         updateById: vi.fn(),
     },
     socialAccountsRepository: {
@@ -46,7 +46,7 @@ describe('backfillVerifiedEmail', () =>
     it('fills users.email and emailVerifiedAt when the account has no email', async () =>
     {
         usersRepository.findById.mockResolvedValue({ id: 1, email: null });
-        usersRepository.findByEmail.mockResolvedValue(null);
+        usersRepository.findByFoldedEmail.mockResolvedValue({ kind: 'none' });
 
         await backfillVerifiedEmail(1, verifiedIdentity);
 
@@ -77,7 +77,17 @@ describe('backfillVerifiedEmail', () =>
     it('skips when another account already owns the email', async () =>
     {
         usersRepository.findById.mockResolvedValue({ id: 1, email: null });
-        usersRepository.findByEmail.mockResolvedValue({ id: 2, email: 'member@example.com' });
+        usersRepository.findByFoldedEmail.mockResolvedValue({ kind: 'account', user: { id: 2, email: 'member@example.com' } });
+
+        await backfillVerifiedEmail(1, verifiedIdentity);
+
+        expect(usersRepository.updateById).not.toHaveBeenCalled();
+    });
+
+    it('skips when case variants of the email are held by accounts it cannot choose between (#156)', async () =>
+    {
+        usersRepository.findById.mockResolvedValue({ id: 1, email: null });
+        usersRepository.findByFoldedEmail.mockResolvedValue({ kind: 'ambiguous' });
 
         await backfillVerifiedEmail(1, verifiedIdentity);
 

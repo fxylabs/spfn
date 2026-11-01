@@ -304,17 +304,18 @@ async function sendVerificationSMS(
 
 /**
  * Whether an account already exists for the given target.
+ *
+ * An address counts in any stored case, so a row the boot backfill left in
+ * another case still answers "exists".
  */
 async function accountExistsForTarget(
     target: string,
     targetType: VerificationTargetType,
 ): Promise<boolean>
 {
-    const user = targetType === 'email'
-        ? await usersRepository.findByEmail(target)
-        : await usersRepository.findByPhone(target);
-
-    return !!user;
+    return targetType === 'email'
+        ? (await usersRepository.findByFoldedEmail(target)).kind !== 'none'
+        : !!(await usersRepository.findByPhone(target));
 }
 
 /**

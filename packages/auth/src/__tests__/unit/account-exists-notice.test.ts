@@ -19,7 +19,7 @@ vi.mock('@spfn/notification/server', () => ({ sendEmail, sendSMS }));
 
 vi.mock('../../server/repositories', () => ({
     usersRepository: {
-        findByEmail: vi.fn(),
+        findByFoldedEmail: vi.fn(),
         findByPhone: vi.fn(),
     },
     verificationCodesRepository: {
@@ -40,7 +40,7 @@ describe('sendVerificationCodeService — account-exists notice', () =>
 
     it('notifies the owner (account-exists template) and returns a uniform response for an existing account', async () =>
     {
-        vi.mocked(usersRepository.findByEmail).mockResolvedValue({ id: 1 } as any);
+        vi.mocked(usersRepository.findByFoldedEmail).mockResolvedValue({ kind: 'account', user: { id: 1 } } as any);
         vi.mocked(verificationCodesRepository.findValidByTargetAndPurpose).mockResolvedValue(null as any);
 
         const res = await sendVerificationCodeService(reg);
@@ -56,7 +56,7 @@ describe('sendVerificationCodeService — account-exists notice', () =>
 
     it('dedupes: a recent notice suppresses re-sending', async () =>
     {
-        vi.mocked(usersRepository.findByEmail).mockResolvedValue({ id: 1 } as any);
+        vi.mocked(usersRepository.findByFoldedEmail).mockResolvedValue({ kind: 'account', user: { id: 1 } } as any);
         vi.mocked(verificationCodesRepository.findValidByTargetAndPurpose).mockResolvedValue({ id: 9 } as any);
 
         const res = await sendVerificationCodeService(reg);
@@ -69,7 +69,7 @@ describe('sendVerificationCodeService — account-exists notice', () =>
 
     it('sends the normal verification code for a new (non-existent) account', async () =>
     {
-        vi.mocked(usersRepository.findByEmail).mockResolvedValue(null as any);
+        vi.mocked(usersRepository.findByFoldedEmail).mockResolvedValue({ kind: 'none' });
 
         await sendVerificationCodeService({ ...reg, target: 'new@example.com' });
 

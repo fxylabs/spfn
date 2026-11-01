@@ -12,13 +12,17 @@
  * the fields the interceptor would inject (`setupSecret`, the device key) are
  * supplied directly in the body. The interceptor's own behaviour is covered in
  * unit/signup-link-interceptor.test.ts.
+ *
+ * F4 and F5 are rows of the #156 follow-up O1 case table: an account whose
+ * address is stored in another case, written straight to the table as only an
+ * install the boot backfill could not fold holds it.
  */
 
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
 import { Hono } from 'hono';
 import { and, desc, eq } from 'drizzle-orm';
 import { setupTestDb, teardownTestDb, clearTables, getTestDb, isDatabaseAvailable } from '../helpers/db';
-import { signupLinkTokens, verificationCodes } from '@/server/entities';
+import { signupLinkTokens, users, verificationCodes } from '@/server/entities';
 import { generateKeyPair } from '@/server/lib/crypto';
 
 const sendEmail = vi.fn().mockResolvedValue({ success: true });
@@ -38,6 +42,7 @@ const { mainAuthRouter } = await import('@/server/routes');
 const { registerRoutes } = await import('@spfn/core/route');
 const { ErrorHandler, resetMemoryRateLimitStore } = await import('@spfn/core/middleware');
 const { initializeAuth } = await import('@/server/services/rbac.service');
+const { getRoleByName } = await import('@/server/services/role.service');
 
 const dbAvailable = await isDatabaseAvailable();
 
@@ -682,6 +687,42 @@ describe.skipIf(!dbAvailable)('Verified-email signup', () =>
             });
 
             expect(wrongPassword.status).toBe(401);
+        });
+    });
+
+    describe('#156 O1: an address stored in another case', () =>
+    {
+        /** An account holding this stored email, written past the repository's normalisation. */
+        async function insertRaw(email: string): Promise<void>
+        {
+            const userRole = await getRoleByName('user');
+            await getTestDb().insert(users).values({ email, status: 'active', roleId: userRole!.id });
+        }
+
+        it('F4: a link request takes the account-exists branch, answered as for an unknown address', async () =>
+        {
+            await insertRaw('F4@Example.com');
+
+            const known = await post('/_auth/signup/email', { email: 'f4@example.com' });
+            const unknown = await post('/_auth/signup/email', { email: 'f4-unknown@example.com' });
+
+            expect(known.status).toBe(200);
+            expect(unknown.status).toBe(200);
+            expect(Object.keys(await known.json()).sort()).toEqual(Object.keys(await unknown.json()).sort());
+            expect(sentTemplates()).toEqual(['account-exists', 'signup-link']);
+            expect((await getTestDb().select().from(signupLinkTokens)).map(row => row.email)).toEqual(['f4-unknown@example.com']);
+        });
+
+        it('F5: a link is refused when an account stored in another case appeared after it was issued', async () =>
+        {
+            const token = await requestLink('f5@example.com');
+            await insertRaw('F5@Example.com');
+
+            const res = await post('/_auth/signup/email/confirm', { token });
+
+            expect(res.status).toBe(400);
+            const [row] = await getTestDb().select().from(signupLinkTokens).where(eq(signupLinkTokens.email, 'f5@example.com'));
+            expect(row!.setupSecretHash).toBeNull();
         });
     });
 });

@@ -10,12 +10,38 @@ import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js';
 import { BaseRepository, type RepositoryDatabase } from '@spfn/core/db';
 import { EntityNotFoundError, NotFoundError } from '@spfn/core/errors';
 
-import { rolePermissions, roles, NewUser, users, permissions } from '../entities';
+import { rolePermissions, roles, NewUser, users, permissions, type User } from '../entities';
 import type { UserStatus } from '../types';
 import { normalizeEmail, normalizeOptionalEmail } from '../helpers/email';
 
 /** Either handle a repository method reads through: `this.db` or `this.readDb`. */
 type Database = RepositoryDatabase<PostgresJsDatabase<EmptyRelations>>;
+
+/**
+ * What a case-insensitive email lookup found.
+ *
+ * - `none`: no row holds the address in any case
+ * - `account`: one account is the address — the row stored in canonical form
+ *   when there is one, else the only row that folds onto it
+ * - `ambiguous`: two or more rows fold onto the address and none is stored in
+ *   canonical form, so no one of them can be chosen as its owner
+ */
+export type FoldedEmailMatch =
+    | { kind: 'none' }
+    | { kind: 'account'; user: User }
+    | { kind: 'ambiguous' };
+
+/**
+ * `users.email` folded, compared with an address already normalised.
+ *
+ * Written exactly as the expression `users_email_folded_idx` is built on, so
+ * the planner can use that index; `lower(email)` alone would not match it.
+ * `lower(btrim(...))` is the SQL spelling of `normalizeEmail`.
+ */
+function foldedEmailEquals(normalizedEmail: string)
+{
+    return sql`lower(btrim(${users.email})) = ${normalizedEmail}`;
+}
 
 /**
  * Users Repository 클래스
@@ -128,19 +154,57 @@ export class UsersRepository extends BaseRepository
      * account for a person who already has one, and the unique constraint
      * cannot object because the two stored strings differ.
      *
-     * Folding in the predicate means no index on `email` applies, so this is for
-     * the few addresses a caller decides about — admin seeding — not for a
-     * request path. Write primary: the answer decides whether to insert.
+     * The predicate is served by `users_email_folded_idx`. Admin seeding keeps
+     * this method rather than `findByFoldedEmail` because it reads the write
+     * primary — the answer decides whether to insert — and takes any one row:
+     * a seeded admin whose address is held by several case variants is skipped
+     * either way.
      */
     async findByEmailInAnyStoredForm(email: string)
     {
         const result = await this.db
             .select()
             .from(users)
-            .where(sql`lower(btrim(${users.email})) = ${normalizeEmail(email)}`)
+            .where(foldedEmailEquals(normalizeEmail(email)))
             .limit(1);
 
         return result[0] ?? null;
+    }
+
+    /**
+     * Which account an address belongs to, whatever case it is stored in.
+     *
+     * For the checks that answer "no account" by creating one or letting a
+     * signup proceed: `findByEmail` misses a row the boot backfill left in
+     * another case, and the caller would make a second account for a person
+     * who already has one. Callers that act *as* an account (login, password
+     * reset) keep the exact lookup.
+     *
+     * A row stored in canonical form wins over its case variants, as the exact
+     * lookup always chose it; without one, a single variant is the account and
+     * two or more are `ambiguous`. One query: canonical row first, then by id,
+     * and two rows are enough to tell the cases apart.
+     *
+     * Read replica, like `findByEmail` — inside a transaction, the transaction.
+     */
+    async findByFoldedEmail(email: string): Promise<FoldedEmailMatch>
+    {
+        const normalizedEmail = normalizeEmail(email);
+        const [first, second] = await this.readDb
+            .select()
+            .from(users)
+            .where(foldedEmailEquals(normalizedEmail))
+            .orderBy(sql`(${users.email} = ${normalizedEmail}) DESC`, users.id)
+            .limit(2);
+
+        if (!first)
+        {
+            return { kind: 'none' };
+        }
+
+        return !second || first.email === normalizedEmail
+            ? { kind: 'account', user: first }
+            : { kind: 'ambiguous' };
     }
 
     /**

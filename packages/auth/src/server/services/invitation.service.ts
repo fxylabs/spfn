@@ -79,10 +79,8 @@ export async function createInvitation(params: {
         throw new BadRequestError({ message: 'Invalid email format' });
     }
 
-    // Check if user already exists
-    const existingUser = await usersRepository.findByEmail(email);
-
-    if (existingUser)
+    // Check if user already exists — an address stored in another case counts
+    if ((await usersRepository.findByFoldedEmail(email)).kind !== 'none')
     {
         throw new ConflictError({ message: 'User with this email already exists' });
     }

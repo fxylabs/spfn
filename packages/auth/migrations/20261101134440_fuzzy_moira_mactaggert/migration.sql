@@ -1,0 +1,1 @@
+CREATE INDEX "users_email_folded_idx" ON "spfn_auth"."users" (lower(btrim("email")));

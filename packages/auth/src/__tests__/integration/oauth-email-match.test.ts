@@ -5,6 +5,11 @@
  * One test per row of the #156 design's case table §6: E for the web callback,
  * N for native sign-in. Rows S1-S3 are in unit/oauth-email-match-config.test.ts.
  *
+ * F rows are the #156 follow-up O1 (an address stored in another case): F1 is
+ * one test per cell of its §3 table, F7 the verified-email backfill. The rows
+ * in another case are written straight to the table, as only an install the
+ * boot backfill could not fold holds them.
+ *
  * Driven the same way as oauth-link-policy.test.ts: real requests against the
  * mounted auth router and the real `createOrLinkUser`, Kakao a stand-in whose
  * authorization codes (and native id_tokens) name the identity they establish.
@@ -16,7 +21,7 @@
 
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
 import type { Hono } from 'hono';
-import { eq } from 'drizzle-orm';
+import { eq, inArray } from 'drizzle-orm';
 
 import { setupTestDb, teardownTestDb, clearTables, getTestDb, isDatabaseAvailable } from '../helpers/db';
 import { mountAuthApp, resetMemoryRateLimitStore } from '../helpers/oauth2';
@@ -461,6 +466,137 @@ describe.skipIf(!dbAvailable)('First social sign-in on an email an existing acco
             expect(await userRow(ownerId)).toEqual(before.owner);
             expect(beforeRegister).toHaveBeenCalledTimes(1);
             expect(registers.map(payload => payload.userId)).toEqual([body.userId]);
+        });
+    });
+
+    // ========================================================================
+    // #156 O1. The address stored in another case
+    // ========================================================================
+
+    describe('O1 case variants', () =>
+    {
+        type Outcome = { kind: 'new'; email: string | null } | { kind: 'attach'; row: number } | { kind: 'in-use' };
+
+        const NEW_WITH_EMAIL: Outcome = { kind: 'new', email: OWNER_EMAIL };
+        const NEW_WITHOUT_EMAIL: Outcome = { kind: 'new', email: null };
+        const IN_USE: Outcome = { kind: 'in-use' };
+
+        // Section 3 of the design, row by row. Rows are inserted in the order
+        // listed, so in the fourth the variant has the lower id.
+        const TABLE: { rows: string[]; outcomes: Record<OAuthEmailMatch, Outcome> }[] = [
+            { rows: [], outcomes: { reject: NEW_WITH_EMAIL, attach: NEW_WITH_EMAIL, separate: NEW_WITH_EMAIL } },
+            { rows: [OWNER_EMAIL], outcomes: { reject: IN_USE, attach: { kind: 'attach', row: 0 }, separate: NEW_WITHOUT_EMAIL } },
+            { rows: ['Owner@em156.test'], outcomes: { reject: IN_USE, attach: { kind: 'attach', row: 0 }, separate: NEW_WITHOUT_EMAIL } },
+            { rows: ['Owner@em156.test', OWNER_EMAIL], outcomes: { reject: IN_USE, attach: { kind: 'attach', row: 1 }, separate: NEW_WITHOUT_EMAIL } },
+            { rows: ['Owner@em156.test', 'OWNER@em156.test'], outcomes: { reject: IN_USE, attach: IN_USE, separate: NEW_WITHOUT_EMAIL } },
+        ];
+
+        beforeEach(async () =>
+        {
+            await getTestDb().delete(users).where(eq(users.id, ownerId));
+        });
+
+        /** Accounts holding these stored emails, written past the repository's normalisation. */
+        async function insertRows(emails: string[], status: 'active' | 'suspended' = 'active'): Promise<number[]>
+        {
+            const userRole = await getRoleByName('user');
+            const ids: number[] = [];
+
+            for (const email of emails)
+            {
+                const [row] = await getTestDb().insert(users)
+                    .values({ email, roleId: userRole!.id, status })
+                    .returning({ id: users.id });
+                ids.push(Number(row!.id));
+            }
+
+            return ids;
+        }
+
+        async function expectOutcome(response: Response, outcome: Outcome, ids: number[]): Promise<void>
+        {
+            const body = await response.json();
+
+            if (outcome.kind === 'in-use')
+            {
+                expect(response.status).toBe(409);
+                expect(body.code).toBe('OAUTH_EMAIL_IN_USE');
+                expect(body.details).toEqual({ provider: 'kakao' });
+                expect(await getTestDb().select().from(users)).toHaveLength(ids.length);
+                expect(await socialRows()).toEqual([]);
+
+                return;
+            }
+
+            expect(response.status, JSON.stringify(body)).toBe(200);
+            expect((await socialRows()).map(row => Number(row.userId))).toEqual([Number(body.userId)]);
+
+            if (outcome.kind === 'attach')
+            {
+                expect(Number(body.userId)).toBe(ids[outcome.row]);
+                expect(body.isNewUser).toBe(false);
+
+                return;
+            }
+
+            expect(ids).not.toContain(Number(body.userId));
+            expect(body.isNewUser).toBe(true);
+            expect((await userRow(Number(body.userId)))!.email).toBe(outcome.email);
+        }
+
+        for (const { rows, outcomes } of TABLE)
+        {
+            for (const mode of MODES)
+            {
+                it(`F1 ${rows.length ? rows.join(' + ') : 'none'} ${mode}`, async () =>
+                {
+                    const ids = await insertRows(rows);
+                    configureAuth({ oauthEmailMatch: mode });
+
+                    await expectOutcome(await nativeSignIn('code-verified'), outcomes[mode], ids);
+                });
+            }
+        }
+
+        it('F1-status: attach to a suspended row stored in another case answers as for the exact row', async () =>
+        {
+            const answers: { status: number; code: string }[] = [];
+
+            for (const email of [OWNER_EMAIL, 'Owner@em156.test'])
+            {
+                const ids = await insertRows([email], 'suspended');
+
+                const response = await nativeSignIn('code-verified');
+                answers.push({ status: response.status, code: (await response.json()).code });
+
+                expect(await getTestDb().select().from(userPublicKeys)).toEqual([]);
+                await getTestDb().delete(userSocialAccounts);
+                await getTestDb().delete(users).where(inArray(users.id, ids));
+            }
+
+            expect(answers[0]!.status).toBe(403);
+            expect(answers[1]).toEqual(answers[0]);
+        });
+
+        it('F7: a re-login does not backfill an email another account holds in another case', async () =>
+        {
+            const userRole = await getRoleByName('user');
+            const [returning] = await getTestDb().insert(users)
+                .values({ email: null, roleId: userRole!.id })
+                .returning({ id: users.id });
+            const returningId = Number(returning!.id);
+            await getTestDb().insert(userSocialAccounts).values({
+                userId: returningId, provider: 'kakao', providerUserId: VERIFIED.providerUserId, providerEmail: null,
+            });
+            const [variantId] = await insertRows(['Owner@em156.test']);
+
+            expect((await nativeSignIn('code-verified')).status).toBe(200);
+            expect((await userRow(returningId))!.email).toBeNull();
+
+            // The same sign-in fills it once the variant is gone, so the path ran
+            await getTestDb().delete(users).where(eq(users.id, variantId!));
+            expect((await nativeSignIn('code-verified')).status).toBe(200);
+            expect((await userRow(returningId))!.email).toBe(OWNER_EMAIL);
         });
     });
 });
