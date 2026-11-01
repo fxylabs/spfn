@@ -77,6 +77,19 @@ export function resetMigrationSnapshot(): void
     cache = null;
 }
 
+/**
+ * The database's own words for why the check failed. drizzle wraps a driver
+ * error in one whose message is the failed SQL ("Failed query: …"), which names
+ * the statement but not the problem — "permission denied for schema drizzle"
+ * lives in its cause.
+ */
+function failureReason(error: unknown): string
+{
+    const cause = error instanceof Error && error.cause instanceof Error ? error.cause : error;
+
+    return cause instanceof Error ? cause.message : String(cause);
+}
+
 async function inspect(cwd: string, db?: MigrationStatusDb): Promise<MigrationSnapshot>
 {
     const checkedAt = new Date().toISOString();
@@ -108,11 +121,7 @@ async function inspect(cwd: string, db?: MigrationStatusDb): Promise<MigrationSn
     }
     catch (error)
     {
-        return {
-            state: 'unavailable',
-            checkedAt,
-            reason: error instanceof Error ? error.message : String(error),
-        };
+        return { state: 'unavailable', checkedAt, reason: failureReason(error) };
     }
 }
 

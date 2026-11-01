@@ -601,7 +601,9 @@ to its role, and PostgreSQL refuses `COPY FROM` into one — so backup and resto
 owner too. `FORCE ROW LEVEL SECURITY` is not used: it would subject the owner, and break
 both, and any data migration across tenants.
 
-Grant the app role its row privileges once, as the owner:
+Grant the app role its row privileges once, as the owner, on every schema the app uses —
+its own (`acme_notes` below) and each function package's (`spfn_auth`, and any other
+package that ships migrations):
 
 ```sql
 GRANT USAGE ON SCHEMA acme_notes TO app_user;
@@ -611,7 +613,29 @@ ALTER DEFAULT PRIVILEGES FOR ROLE app_owner IN SCHEMA acme_notes
     GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO app_user;
 ALTER DEFAULT PRIVILEGES FOR ROLE app_owner IN SCHEMA acme_notes
     GRANT USAGE ON SEQUENCES TO app_user;
+
+GRANT USAGE ON SCHEMA spfn_auth TO app_user;
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA spfn_auth TO app_user;
+GRANT USAGE ON ALL SEQUENCES IN SCHEMA spfn_auth TO app_user;
+ALTER DEFAULT PRIVILEGES FOR ROLE app_owner IN SCHEMA spfn_auth
+    GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO app_user;
+ALTER DEFAULT PRIVILEGES FOR ROLE app_owner IN SCHEMA spfn_auth
+    GRANT USAGE ON SEQUENCES TO app_user;
 ```
+
+The server's boot migration check reads the bookkeeping tables in schema `drizzle`
+(`__drizzle_migrations` and one table per function package) through the app role, so grant
+it read access there too:
+
+```sql
+GRANT USAGE ON SCHEMA drizzle TO app_user;
+GRANT SELECT ON ALL TABLES IN SCHEMA drizzle TO app_user;
+ALTER DEFAULT PRIVILEGES FOR ROLE app_owner IN SCHEMA drizzle
+    GRANT SELECT ON TABLES TO app_user;
+```
+
+Without it the check cannot read them: it logs one warning (`permission denied for schema
+drizzle`) and the server starts unchecked.
 
 An app already deployed with the app role as owner moves the tables once (nothing does it
 automatically), as a superuser or the current owner:
