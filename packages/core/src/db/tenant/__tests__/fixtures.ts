@@ -33,6 +33,14 @@ export const countries = schema.table('countries', {
     code: text('code').notNull(),
 });
 
+/** A database view over every tenant's notes, declared as an app would declare one. */
+export const notesView = schema.view('notes_v', {
+    id: bigint('id', { mode: 'number' }),
+    tenantId: bigint('tenant_id', { mode: 'number' }),
+    authorId: bigint('author_id', { mode: 'number' }),
+    title: text('title'),
+}).existing();
+
 export const CREATE_TABLES = [
     `DROP SCHEMA IF EXISTS ${TEST_SCHEMA} CASCADE`,
     `CREATE SCHEMA ${TEST_SCHEMA}`,
@@ -47,6 +55,7 @@ export const CREATE_TABLES = [
     )`,
     `CREATE UNIQUE INDEX notes_tenant_slug_idx ON ${TEST_SCHEMA}.notes (tenant_id, slug)`,
     `CREATE TABLE ${TEST_SCHEMA}.countries (id bigint PRIMARY KEY, code text NOT NULL)`,
+    `CREATE VIEW ${TEST_SCHEMA}.notes_v AS SELECT id, tenant_id, author_id, title FROM ${TEST_SCHEMA}.notes`,
 ];
 
 /**

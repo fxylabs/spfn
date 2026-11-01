@@ -405,7 +405,10 @@ where "notes"."tenant_id" = $2
 - **Joined tables get the condition in ON, not WHERE.** In WHERE, a left join's unmatched
   rows would be filtered out and it would behave as an inner join. `_select` scopes
   `innerJoin` and `leftJoin` (aliases included); `rightJoin`, `fullJoin`, `crossJoin`, the
-  lateral joins and set operators (`union`, …) throw — write those on `this.readDb`.
+  lateral joins and set operators (`union`, … — the methods and the standalone functions)
+  throw — write those on `this.readDb`.
+- **A view cannot be joined.** A view's columns are its own, so `_select` cannot tell which
+  holds the tenant; joining one throws, as `.from(view)` does. Join the underlying table.
 - **The upsert target must include the tenant column.** With `target: [table.id]`, an insert
   could collide with another tenant's row and update it.
 - **Update and delete still need a where of their own,** as in `BaseRepository`: the tenant

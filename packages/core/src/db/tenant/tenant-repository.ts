@@ -150,8 +150,8 @@ export abstract class TenantRepository<
     /**
      * A select whose `from` table and every joined tenant-aware table carry the
      * tenant condition: the `from` table in WHERE, a joined one in its ON clause.
-     * `innerJoin` and `leftJoin` are scoped; right, full, cross and lateral joins
-     * and set operators throw.
+     * `innerJoin` and `leftJoin` are scoped; right, full, cross and lateral joins,
+     * set operators and a joined view throw.
      */
     protected _select(tenantId: number): PgAsyncSelectBuilder<undefined>;
     protected _select<TSelection extends SelectedFields>(tenantId: number, fields: TSelection): PgAsyncSelectBuilder<TSelection>;

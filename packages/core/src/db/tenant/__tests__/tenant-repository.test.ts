@@ -8,12 +8,12 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 import { asc, eq, sql } from 'drizzle-orm';
 import type { InferInsertModel, SQL } from 'drizzle-orm';
-import { alias, union } from 'drizzle-orm/pg-core';
+import { alias, pgView, union } from 'drizzle-orm/pg-core';
 import type { PgColumn } from 'drizzle-orm/pg-core';
 import { createDbTestFixture } from '../../__tests__/helpers/db-fixture';
 import { BaseRepository } from '../../repository';
 import { TenantRepository } from '../tenant-repository';
-import { authors, countries, notes, CREATE_TABLES, SEED_ROWS, TEST_SCHEMA } from './fixtures';
+import { authors, countries, notes, notesView, CREATE_TABLES, SEED_ROWS, TEST_SCHEMA } from './fixtures';
 
 type NewNote = InferInsertModel<typeof notes>;
 
@@ -448,7 +448,22 @@ describe('TenantRepository (integration)', () =>
             expect((await query).map((row) => row.notes.id).sort()).toEqual([1, 5]);
         });
 
-        it.each(['rightJoin', 'fullJoin', 'crossJoin', 'leftJoinLateral', 'union'])('row 25: %s is refused', (method) =>
+        it('row 24: a view over a tenant table is refused as a join source (review rv158 B1)', async () =>
+        {
+            if (!dbFixture.isAvailable) return;
+
+            const builtView = pgView('notes_built_v').as((qb) => qb.select().from(notes));
+
+            expect(() => repo.selectAll(1).from(notes).innerJoin(notesView, eq(notesView.authorId, notes.authorId)))
+                .toThrow(/A view cannot be joined/);
+            expect(() => repo.selectAll(1).from(notes).leftJoin(notesView, eq(notesView.authorId, notes.authorId)))
+                .toThrow(/A view cannot be joined/);
+            expect(() => repo.selectAll(1).from(notes).innerJoin(builtView, eq(builtView.id, notes.id)))
+                .toThrow(/A view cannot be joined/);
+            expect(() => repo.selectAll(1).from(notesView as never)).toThrow(/has no tenantKey\(\) column/);
+        });
+
+        it.each(['rightJoin', 'fullJoin', 'crossJoin', 'leftJoinLateral', 'union', 'createJoin', 'createSetOperator'])('row 25: %s is refused', (method) =>
         {
             if (!dbFixture.isAvailable) return;
 

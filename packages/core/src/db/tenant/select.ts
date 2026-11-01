@@ -16,6 +16,7 @@
  * @internal
  */
 
+import { is, View } from 'drizzle-orm';
 import type { SQL } from 'drizzle-orm';
 import type { PgTable } from 'drizzle-orm/pg-core';
 import { optionalTenantCondition, tenantCondition, withCondition, type ConditionInput } from './condition';
@@ -24,8 +25,12 @@ import { optionalTenantCondition, tenantCondition, withCondition, type Condition
  * A right or full join keeps rows the `from` table's tenant condition would
  * drop, a cross or lateral join has no ON clause to carry the condition, and a
  * set operator appends a query this wrapper never saw.
+ *
+ * select-members.test.ts lists every function member drizzle's select query
+ * builder has and fails when one is neither scoped, refused here, nor known to
+ * be unable to add rows — so a drizzle upgrade cannot add a way around this list.
  */
-const REFUSED_METHODS = new Set([
+export const REFUSED_SELECT_MEMBERS: ReadonlySet<string> = new Set([
     'rightJoin',
     'fullJoin',
     'crossJoin',
@@ -41,6 +46,11 @@ const REFUSED_METHODS = new Set([
     // The standalone union(a, b) / intersect / except functions from
     // drizzle-orm/pg-core call this on the left query instead of the methods above.
     'addSetOperators',
+    // The factories behind the join and set operator methods. TypeScript marks
+    // them private, but at runtime they are reachable and return drizzle's raw
+    // closures, which would add a join or a query unscoped.
+    'createJoin',
+    'createSetOperator',
 ]);
 
 const SCOPED_JOINS = new Set(['innerJoin', 'leftJoin']);
@@ -85,7 +95,7 @@ interface ScopeState
 
 function scopedMember(target: AnyBuilder, prop: PropertyKey, state: ScopeState): unknown
 {
-    if (typeof prop === 'string' && REFUSED_METHODS.has(prop))
+    if (typeof prop === 'string' && REFUSED_SELECT_MEMBERS.has(prop))
     {
         return () =>
         {
@@ -101,10 +111,29 @@ function scopedMember(target: AnyBuilder, prop: PropertyKey, state: ScopeState):
     if (typeof prop === 'string' && SCOPED_JOINS.has(prop))
     {
         return (table: unknown, on: ConditionInput) =>
-            chain(target[prop](table, withCondition(on, optionalTenantCondition(table, state.tenantId))), target, state);
+        {
+            assertNotView(table);
+
+            return chain(target[prop](table, withCondition(on, optionalTenantCondition(table, state.tenantId))), target, state);
+        };
     }
 
     return passThrough(target, prop, state);
+}
+
+/**
+ * A view looks like a table at the call site, but its columns are its own, so
+ * the wrapper cannot tell which of them holds the tenant — a view over a
+ * tenant-aware table would join every tenant's rows. `from(view)` already throws.
+ */
+function assertNotView(source: unknown): void
+{
+    if (is(source, View))
+    {
+        throw new Error(
+            'A view cannot be joined on a TenantRepository _select; join the underlying table, or write this query on this.readDb',
+        );
+    }
 }
 
 /** Keep chaining on the proxy when drizzle returns the builder itself. */
