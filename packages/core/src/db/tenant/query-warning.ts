@@ -52,26 +52,44 @@ export function createDevelopmentQueryLogger(
     return nodeEnv && WARNING_ENVIRONMENTS.has(nodeEnv) ? createTenantQueryLogger({ warn }) : undefined;
 }
 
-/** A drizzle logger that warns once per SQL text about an unscoped tenant table. */
+/**
+ * A drizzle logger that warns once per SQL text about an unscoped tenant table.
+ *
+ * drizzle calls `logQuery` synchronously before it sends the statement, so an
+ * error thrown here would fail the query. The check and the `warn` callback run
+ * inside a catch that drops any failure: a diagnostic never fails what it inspects.
+ */
 export function createTenantQueryLogger(options: TenantQueryLoggerOptions): Logger
 {
     const warned = new Set<string>();
     const tables = options.tables ?? listTenantTables;
 
+    function warnIfUnscoped(query: string): void
+    {
+        if (warned.has(query))
+        {
+            return;
+        }
+
+        const unscoped = findUnscopedTenantTables(query, tables());
+
+        if (unscoped.length > 0)
+        {
+            warned.add(query);
+            options.warn('Query on a tenant-aware table without a tenant condition', { tables: unscoped, sql: query });
+        }
+    }
+
     return {
         logQuery(query: string)
         {
-            if (warned.has(query))
+            try
             {
-                return;
+                warnIfUnscoped(query);
             }
-
-            const unscoped = findUnscopedTenantTables(query, tables());
-
-            if (unscoped.length > 0)
+            catch
             {
-                warned.add(query);
-                options.warn('Query on a tenant-aware table without a tenant condition', { tables: unscoped, sql: query });
+                // Dropped on purpose: see the function comment.
             }
         },
     };

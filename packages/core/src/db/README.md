@@ -418,11 +418,12 @@ where "notes"."tenant_id" = $2
   column, e.g. `(tenant_id, id)` for keyset pages.
 - **`this.db` / `this.readDb` remain available and are not scoped,** nor is a subquery you
   pass as a condition or join source. In local and development runs (`NODE_ENV` `local` or
-  `development`), the database connection logs a warning — once per SQL text, with the SQL —
-  when a query reads, updates or deletes a tenant-aware table without a condition on its
-  tenant column. It reads SQL text, so it is a development aid, not isolation: an alias it
-  cannot resolve, a raw `sql` template or an unusual shape can make it miss a query or warn
-  about a scoped one. Other environments attach no logger.
+  `development`; an unset `NODE_ENV` is `local`), the database connection logs a warning —
+  once per SQL text, with the SQL — when a query reads, updates or deletes a tenant-aware
+  table without a condition on its tenant column. It reads SQL text, so it is a development
+  aid, not isolation: an alias it cannot resolve, a raw `sql` template or an unusual shape can
+  make it miss a query or warn about a scoped one. A failure inside the check never fails the
+  query. Other environments attach no logger.
 
 ---
 

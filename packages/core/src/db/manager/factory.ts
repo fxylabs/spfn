@@ -106,7 +106,9 @@ function detectDatabasePattern(): DatabasePattern
  *
  * In local and development runs it also attaches the tenant query warning,
  * which reports a query that reads or writes a tenant-aware table without its
- * tenant condition. Other environments get no logger and pay nothing.
+ * tenant condition. Other environments get no logger and pay nothing. An unset
+ * NODE_ENV is `local` (core's config default), so a deployment leaves the
+ * warning off by setting NODE_ENV to `production` or `staging`.
  */
 function createDrizzle(client: Sql)
 {

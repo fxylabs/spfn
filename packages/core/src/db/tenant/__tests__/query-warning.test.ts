@@ -139,6 +139,27 @@ describe('createTenantQueryLogger', () =>
         expect(warn).toHaveBeenCalledTimes(1);
     });
 
+    it('row 41: a warn callback that throws does not escape logQuery', () =>
+    {
+        const warn = vi.fn(() =>
+        {
+            throw new Error('broken warning sink');
+        });
+        const text = sqlOf(mock.select().from(notes));
+
+        expect(() => createTenantQueryLogger({ warn }).logQuery(text, [])).not.toThrow();
+        expect(warn).toHaveBeenCalledTimes(1);
+    });
+
+    it('row 41: a table list that throws does not escape logQuery', () =>
+    {
+        const tables = () =>
+        {
+            throw new Error('broken registry');
+        };
+
+        expect(() => createTenantQueryLogger({ warn: vi.fn(), tables }).logQuery('select 1', [])).not.toThrow();
+    });
 });
 
 describe('createDevelopmentQueryLogger', () =>
@@ -251,5 +272,19 @@ describe('tenant query warning on a live database (integration)', () =>
 
         expect(warn).toHaveBeenCalledTimes(1);
         expect(warn.mock.calls[0][1].tables).toEqual(['authors']);
+    });
+
+    it('row 41: a warn callback that throws does not fail the query', async () =>
+    {
+        if (!client) return;
+
+        const failingWarn = () =>
+        {
+            throw new Error('broken warning sink');
+        };
+        const db = drizzle({ client, logger: createTenantQueryLogger({ warn: failingWarn }) });
+        const rows = await db.select().from(notes);
+
+        expect(rows.length).toBeGreaterThan(0);
     });
 });
