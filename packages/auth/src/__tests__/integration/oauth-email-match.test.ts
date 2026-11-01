@@ -404,19 +404,22 @@ describe.skipIf(!dbAvailable)('First social sign-in on an email an existing acco
             expect((await snapshot()).users).toBe(before.users);
         });
 
-        it('E11: reject answers email_in_use, not account_unavailable, when the matching account is suspended', async () =>
+        for (const status of ['suspended', 'pending_deletion'] as const)
         {
-            await getTestDb().update(users).set({ status: 'suspended' }).where(eq(users.id, ownerId));
-            configureAuth({ oauthEmailMatch: 'reject' });
-            const before = await snapshot();
+            it(`E11 (${status}): reject answers email_in_use, not account_unavailable, when the matching account is ${status}`, async () =>
+            {
+                await getTestDb().update(users).set({ status }).where(eq(users.id, ownerId));
+                configureAuth({ oauthEmailMatch: 'reject' });
+                const before = await snapshot();
 
-            const location = await signIn('code-verified');
+                const location = await signIn('code-verified');
 
-            expect(errorReasonOf(location)).toBe('email_in_use');
-            expect([...location.searchParams.keys()]).toEqual(['error', 'reason']);
-            expectNoEnumeration(location.toString());
-            expect(await snapshot()).toEqual(before);
-        });
+                expect(errorReasonOf(location)).toBe('email_in_use');
+                expect([...location.searchParams.keys()]).toEqual(['error', 'reason']);
+                expectNoEnumeration(location.toString());
+                expect(await snapshot()).toEqual(before);
+            });
+        }
     });
 
     // ========================================================================

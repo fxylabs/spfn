@@ -2089,6 +2089,14 @@ The refusal says nothing about the existing account: its details name the provid
 comes before the account-status check, so a suspended or deleting account is answered
 `email_in_use` too, never `account_unavailable`.
 
+The match compares the normalised email: `createOrLinkUser` looks the identity's address up with
+`usersRepository.findByEmail`, the same lookup every sign-in uses. A row still stored in an older,
+unnormalised form (say, `Owner@Example.com` from before email normalization) is not matched in any
+mode — `reject` and `separate` both miss it and a second account is created, the same gap `attach`
+already had before this policy. `usersRepository.findByEmailInAnyStoredForm` finds such a row
+regardless of how it is stored; the startup backfill normalizes most of them automatically and
+logs the ones it cannot as capitalization conflicts — see [the FAQ](#faq).
+
 | Error | HTTP | `code` | When |
 | --- | --- | --- | --- |
 | `OAuthEmailInUseError` | 409 | `OAUTH_EMAIL_IN_USE` | `oauthEmailMatch: 'reject'` and the first sign-in's email belongs to an existing account |
