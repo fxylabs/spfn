@@ -23,6 +23,55 @@ const NO_TENANT = /app\.tenant_id|invalid input syntax for type bigint/;
 const isBegin = (statement: string) => /^begin\b/i.test(statement);
 const isSetConfig = (statement: string) => statement.includes('set_config');
 
+/** A nested runInTransaction held open until `close()`, which settles it. */
+interface HeldSavepoint
+{
+    /** Settles once the savepoint is open and `inside` has run in it */
+    open: Promise<void>;
+    /** Let the savepoint finish — released, or rolled back by a throw — and wait for it */
+    close(): Promise<void>;
+}
+
+/**
+ * Open a savepoint off the calling frame and hold it, so a test can run a call
+ * from the outer frame while it is open — the `Promise.all` shape, made
+ * deterministic.
+ */
+function holdSavepoint(outcome: 'release' | 'rollback', inside?: () => Promise<void>): HeldSavepoint
+{
+    let opened!: () => void;
+    let finish!: () => void;
+    const open = new Promise<void>((resolve) =>
+    {
+        opened = resolve;
+    });
+    const finishing = new Promise<void>((resolve) =>
+    {
+        finish = resolve;
+    });
+    const settled = runInTransaction(async () =>
+    {
+        await inside?.();
+        opened();
+        await finishing;
+
+        if (outcome === 'rollback')
+        {
+            throw new Error('undo the savepoint');
+        }
+    }).catch(() => undefined);
+
+    return {
+        open,
+        close: () =>
+        {
+            finish();
+
+            return settled;
+        },
+    };
+}
+
 /** The database's message for a query that failed; drizzle wraps it as the cause. */
 async function failureOf(query: PromiseLike<unknown>): Promise<string>
 {
@@ -266,6 +315,97 @@ describe('tenancy execution rules (app role, integration)', () =>
         expect(result.afterRollback.tenant ?? '').toBe('');
         expect(ids(result.rows)).toEqual([3]);
         expect(result.session.tenant).toBe('9');
+    });
+
+    it('L11c a tenant set from the root while a savepoint is open is set again after that savepoint rolls back', async () =>
+    {
+        if (!db.isAvailable) return;
+
+        const result = await runInTransaction(async () =>
+        {
+            const savepoint = holdSavepoint('rollback');
+
+            await savepoint.open;
+            const during = await noteRepository.list(7);
+            await savepoint.close();
+
+            return { during, after: await noteRepository.list(7), session: await noteRepository.session() };
+        });
+
+        expect(ids(result.during)).toEqual([1, 2]);
+        expect(ids(result.after)).toEqual([1, 2]);
+        expect(result.session.tenant).toBe('7');
+        expect(db.writeLog.filter(isSetConfig)).toHaveLength(2);
+    });
+
+    it('L11d a tenant set from the root while a savepoint is open stands when that savepoint releases', async () =>
+    {
+        if (!db.isAvailable) return;
+
+        const rows = await runInTransaction(async () =>
+        {
+            const savepoint = holdSavepoint('release');
+
+            await savepoint.open;
+            await noteRepository.list(7);
+            await savepoint.close();
+
+            return noteRepository.list(7);
+        });
+
+        expect(ids(rows)).toEqual([1, 2]);
+        expect(db.writeLog.filter(isSetConfig)).toHaveLength(1);
+
+        // The released savepoint is closed: a tenant set after it belongs to the
+        // root, and a later sibling's rollback leaves it alone
+        const sent = db.writeLog.length;
+        const later = await runInTransaction(async () =>
+        {
+            await holdSavepoint('release').close();
+            await noteRepository.list(7);
+            await holdSavepoint('rollback').close();
+
+            return noteRepository.list(7);
+        });
+
+        expect(ids(later)).toEqual([1, 2]);
+        expect(db.writeLog.slice(sent).filter(isSetConfig)).toHaveLength(1);
+    });
+
+    it('L11e a tenant set from the root under two open savepoints follows whichever of them rolls back', async () =>
+    {
+        if (!db.isAvailable) return;
+
+        const underTwo = (innerOutcome: 'release' | 'rollback', outerOutcome: 'release' | 'rollback') =>
+            runInTransaction(async () =>
+            {
+                let inner!: HeldSavepoint;
+                const outer = holdSavepoint(outerOutcome, async () =>
+                {
+                    inner = holdSavepoint(innerOutcome);
+                    await inner.open;
+                });
+
+                await outer.open;
+                await noteRepository.list(7);
+                await inner.close();
+                await outer.close();
+
+                return { rows: await noteRepository.list(7), session: await noteRepository.session() };
+            });
+
+        const innerRolledBack = await underTwo('rollback', 'release');
+
+        expect(ids(innerRolledBack.rows)).toEqual([1, 2]);
+        expect(innerRolledBack.session.tenant).toBe('7');
+        expect(db.writeLog.filter(isSetConfig)).toHaveLength(2);
+
+        const sent = db.writeLog.length;
+        const outerRolledBack = await underTwo('release', 'rollback');
+
+        expect(ids(outerRolledBack.rows)).toEqual([1, 2]);
+        expect(outerRolledBack.session.tenant).toBe('7');
+        expect(db.writeLog.slice(sent).filter(isSetConfig)).toHaveLength(2);
     });
 
     it('L13 requiresNew with tenant 9 inside tenant 7 runs on its own connection; the outer tenant stays 7', async () =>

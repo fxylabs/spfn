@@ -70,6 +70,7 @@ import {
     assertTransactionTenant,
     claimTransactionTenant,
     discardTenantClaim,
+    openTenantFrame,
     promoteTenantClaim,
     setTenantSetting,
 } from './tenant';
@@ -624,7 +625,10 @@ export async function runInTransaction<T, TDatabase extends DrizzleDatabase = De
         if (savepointOwner)
         {
             return savepointOwner.nestedFrames.run(() =>
-                (savepointOwner.tx.transaction(body as never) as Promise<T>).then(
+            {
+                openTenantFrame(savepointOwner.tenant, savepointOwner.level + 1);
+
+                return (savepointOwner.tx.transaction(body as never) as Promise<T>).then(
                     (result) =>
                     {
                         promoteFrameHooks({ beforeCommitCallbacks, afterCommitCallbacks, afterRollbackCallbacks }, savepointOwner);
@@ -645,8 +649,8 @@ export async function runInTransaction<T, TDatabase extends DrizzleDatabase = De
                             enableLogging,
                         );
                     },
-                ),
-            );
+                );
+            });
         }
 
         if (requiresNew)

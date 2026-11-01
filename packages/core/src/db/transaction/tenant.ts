@@ -15,6 +15,12 @@
  * `ROLLBACK TO` restores the previous value. `promoteTenantClaim` and
  * `discardTenantClaim` keep the record in step with that.
  *
+ * The savepoint a setting lands in is the innermost one OPEN on the connection,
+ * not the one the calling code runs in: a root-level call that runs beside a
+ * nested `runInTransaction` (`Promise.all`) still sends its `set_config` into
+ * that savepoint. So the runner reports every savepoint it opens
+ * (`openTenantFrame`) and closes, and a claim records `openLevel`.
+ *
  * @internal
  */
 
@@ -66,7 +72,7 @@ export async function claimTransactionTenant(context: TransactionContext, tenant
     if (state.id === null)
     {
         state.id = tenantId;
-        state.level = context.level;
+        state.level = state.openLevel;
         state.ready = setTenantSetting(context.tx, tenantId);
     }
 
@@ -76,11 +82,24 @@ export async function claimTransactionTenant(context: TransactionContext, tenant
 }
 
 /**
+ * A savepoint frame at `level` is about to open: from its SAVEPOINT on, a
+ * setting made on the connection is local to it. Called before the SAVEPOINT is
+ * sent, so a claim queued behind it is never recorded at the parent's level;
+ * a SAVEPOINT that fails to open still settles through `discardTenantClaim`.
+ */
+export function openTenantFrame(state: TransactionTenant, level: number): void
+{
+    state.openLevel = level;
+}
+
+/**
  * A savepoint frame at `parentLevel + 1` resolved: a setting made inside it now
  * stands or falls with the parent.
  */
 export function promoteTenantClaim(state: TransactionTenant, parentLevel: number): void
 {
+    state.openLevel = parentLevel;
+
     if (state.level > parentLevel)
     {
         state.level = parentLevel;
@@ -94,6 +113,8 @@ export function promoteTenantClaim(state: TransactionTenant, parentLevel: number
  */
 export function discardTenantClaim(state: TransactionTenant, parentLevel: number): void
 {
+    state.openLevel = parentLevel;
+
     if (state.id !== null && state.level > parentLevel)
     {
         state.id = null;

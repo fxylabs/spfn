@@ -165,11 +165,14 @@ export async function startServer(config?: ServerConfig): Promise<ServerInstance
         // a missing column — refuse here instead, where the fix is one command.
         await runMigrationBootGate(finalConfig);
 
+        const app = await createServer(finalConfig);
+
         // A tenancy table is isolated only if the app's role is subject to its
         // row-level security policy — refuse a production boot where it is not.
+        // After createServer, which imports a custom app.ts and with it the
+        // tables its routes use; before anything listens.
         await runTenancyBootGate();
 
-        const app = await createServer(finalConfig);
         const server = startHttpServer(app, host, port);
 
         // Initialize WebSocket server if configured

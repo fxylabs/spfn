@@ -1,7 +1,8 @@
 /**
- * Tenancy boot check — rows B1–B6 of the #158 part 2 design case table
+ * Tenancy boot check — rows B1–B7 of the #158 part 2 design case table
  *
- * B5 runs first, before this file defines any tenancy table. The rows that
+ * B5 and B7 run first, before this file defines any tenancy table; B7 defines
+ * them during `createServer`, as an app whose `app.ts` imports its routes does. The rows that
  * read a real role (B1, B2, B4) use the tenancy test database — the owner
  * connection stands in for an app that connects as the owner — and skip when
  * it is not available; B3 and B6 use a stub, since the test roles cannot be
@@ -10,9 +11,34 @@
 
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
 import { drizzle } from 'drizzle-orm/postgres-js';
+import { serve } from '@hono/node-server';
+import { closeDatabase, listTenancyTables } from '../../db';
+import { createServer } from '../create-server';
 import { serverLogger } from '../logger';
+import { startServer } from '../start-server';
 import { runTenancyBootGate, TenancyRoleError, type TenancyGateDb } from '../tenancy-gate';
 import type { TenancyDb } from '../../db/tenant/__tests__/tenancy-db';
+
+vi.mock('@hono/node-server', () => ({
+    serve: vi.fn(),
+}));
+
+// An app whose custom app.ts imports its routes: the tenancy tables those
+// routes use are defined only while createServer builds the app
+vi.mock('../create-server', async (importOriginal) =>
+{
+    const actual = await importOriginal<typeof import('../create-server')>();
+
+    return {
+        ...actual,
+        createServer: vi.fn(async (config?: Parameters<typeof actual.createServer>[0]) =>
+        {
+            await import('../../db/tenant/__tests__/tenancy-fixtures');
+
+            return actual.createServer(config);
+        }),
+    };
+});
 
 /** A database whose role query answers `row`. */
 function stubDb(row: { role: string; superuser: boolean; bypass_rls: boolean; owned: string[] }): TenancyGateDb
@@ -45,6 +71,35 @@ describe('tenancy boot check', () =>
         expect(await runTenancyBootGate([db])).toEqual({ state: 'skipped', reason: 'no tenancy tables' });
         expect(db.execute).not.toHaveBeenCalled();
         expect(warn).not.toHaveBeenCalled();
+    });
+
+    it('B7 tables defined only while the server is built still refuse a production boot before it listens', async () =>
+    {
+        process.env.NODE_ENV = 'production';
+        vi.stubEnv('SPFN_API_URL', 'http://localhost:8790');
+
+        const owner = stubDb({ role: 'app', superuser: false, bypass_rls: false, owned: ['spfn_tenancy_test.notes'] });
+
+        expect(listTenancyTables()).toEqual([]);
+
+        try
+        {
+            await expect(startServer({
+                host: '127.0.0.1',
+                port: 39996,
+                infrastructure: { database: true, redis: false },
+                database: { provider: { kind: 'test-provider', write: owner as never, close: async () => undefined } },
+            })).rejects.toThrow(TenancyRoleError);
+        }
+        finally
+        {
+            vi.unstubAllEnvs();
+            await closeDatabase();
+        }
+
+        expect(createServer).toHaveBeenCalledTimes(1);
+        expect(listTenancyTables()).not.toEqual([]);
+        expect(serve).not.toHaveBeenCalled();
     });
 
     describe('with tenancy tables', () =>

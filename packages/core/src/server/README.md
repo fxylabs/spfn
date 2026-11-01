@@ -214,11 +214,14 @@ Its startup sequence:
 5. **Migration boot gate** — refuses to go further when a function package (or
    `src/server/drizzle`) has migrations the database has not applied (see below)
 6. `createServer(config)` builds the Hono app (middleware pipeline below)
-7. `serve()` starts listening; WebSocket handler attached if `.websockets()`
-8. Apply HTTP server timeouts + global `fetch()` (undici) timeouts
-9. Print banner, register process handlers (`SIGTERM`, `SIGINT`, `uncaughtException`,
+7. **Tenancy boot check** — with tenancy tables, refuses a production boot whose database
+   role escapes their row-level security policy (see "Tenancy" in the db README). It runs
+   after step 6, which imports a custom `app.ts` and the tables its routes use
+8. `serve()` starts listening; WebSocket handler attached if `.websockets()`
+9. Apply HTTP server timeouts + global `fetch()` (undici) timeouts
+10. Print banner, register process handlers (`SIGTERM`, `SIGINT`, `uncaughtException`,
    `unhandledRejection`)
-10. `lifecycle.afterStart(instance)`
+11. `lifecycle.afterStart(instance)`
 
 `createServer(config?)` only does step 6 — it returns a configured `Hono` app **without
 listening** and without infrastructure/shutdown. Use it for integration tests

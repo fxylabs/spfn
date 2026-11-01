@@ -63,6 +63,12 @@ export type TransactionTenant = {
     id: number | null;
     /** The innermost open frame whose rollback would undo the setting */
     level: number;
+    /**
+     * The innermost frame open on the connection right now — the root's level,
+     * or the deepest savepoint not yet released or rolled back. A `set_config`
+     * lands there whichever frame's context issued it.
+     */
+    openLevel: number;
     /** Settles once the `set_config` that bound `id` has run */
     ready: Promise<void>;
 };
@@ -283,7 +289,7 @@ export function runWithTransaction<T, TDatabase extends DrizzleDatabase = Defaul
 
 function rootTenant(tenant: number | undefined, level: number): TransactionTenant
 {
-    return { id: tenant ?? null, level: tenant === undefined ? 0 : level, ready: Promise.resolve() };
+    return { id: tenant ?? null, level: tenant === undefined ? 0 : level, openLevel: level, ready: Promise.resolve() };
 }
 
 /**
