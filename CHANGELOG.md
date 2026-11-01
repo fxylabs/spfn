@@ -298,7 +298,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     - **`DATABASE_OWNER_URL`**: PostgreSQL skips row-level security for a table's owner, so the
       app must connect as a role that owns nothing. `spfn db migrate`, `backup`, `restore` and
       `drop` connect with this URL, falling back to `DATABASE_URL`; `spfn add` and `db push`
-      keep `DATABASE_URL`.
+      keep `DATABASE_URL`. `spfn` 0.3.0-beta.21 raises its `@spfn/core` peer floor to
+      0.3.0-beta.35: an older core does not know `DATABASE_OWNER_URL`, and the commands would
+      fall back to `DATABASE_URL` without saying so.
     - **Behaviour change**: with tenancy tables declared, the server checks its write and read
       connections' role at boot. A role that owns a tenancy table, or is a superuser or
       `BYPASSRLS`, refuses a production boot (`TenancyRoleError`) and logs one warning
