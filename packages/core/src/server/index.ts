@@ -44,6 +44,8 @@ export { getShutdownManager } from './shutdown-manager';
 // Migration boot gate
 export { getMigrationSnapshot, resetMigrationSnapshot, PendingMigrationsError } from './migration-gate';
 export type { MigrationSnapshot } from './migration-gate';
+export { TenancyRoleError } from './tenancy-gate';
+export type { TenancyGateResult, TenancyRoleFinding } from './tenancy-gate';
 
 // Config builder
 export { defineServerConfig } from './config-builder';

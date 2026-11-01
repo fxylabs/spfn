@@ -48,6 +48,11 @@ Everything re-exported from `@spfn/core/db` (`src/db/index.ts`):
 `BaseRepository` (abstract class), `TenantRepository` (abstract class, tables shared by many
 tenants), `RepositoryError` (class), `RepositoryDatabase` (type), `CountOptions` (type)
 
+**Tenancy** (`tenant/tenancy.ts` — see [Tenancy](#tenancy-definetenancy--tenant-tables-enforced-by-the-database)):
+`defineTenancy`, `TenantMismatchError` (class), `listTenancyTables` (internal: the boot check)
+Types: `Tenancy`, `TenancyOptions`, `TenancyGuardOptions`, `TenancyReferenceOptions`,
+`TenantListTable`, `TenantSource`
+
 **PostgreSQL error mapping** (`postgres-errors.ts`):
 `fromPostgresError`
 
@@ -61,7 +66,8 @@ Types: `DatabaseClients`, `DatabaseInitOptions`, `DatabaseOptions`, `DatabasePro
 `DatabaseTransaction`, `DefaultDatabase`, `DrizzleDatabase`, `PoolConfig`, `RetryConfig`,
 `DrizzleConfigOptions`
 
-**Transactions** (sub-module — see [transaction/README](./transaction/README.md)):
+**Transactions** (sub-module — see [transaction/README](./transaction/README.md);
+`runInTransaction(fn, { tenant })` binds a transaction to a tenant, see [Tenancy](#tenancy-definetenancy--tenant-tables-enforced-by-the-database)):
 `Transactional`, `getTransaction`, `runWithTransaction`, `runInTransaction`,
 `onBeforeCommit`, `onAfterCommit`, `onAfterRollback`
 Types: `TransactionContext`, `TransactionDB`, `TransactionalOptions`,
@@ -424,6 +430,204 @@ where "notes"."tenant_id" = $2
   aid, not isolation: an alias it cannot resolve, a raw `sql` template or an unusual shape can
   make it miss a query or warn about a scoped one. A failure inside the check never fails the
   query. Other environments attach no logger.
+- **Tenancy tables add rules R1–R6.** For a table made with `tenancy.table` (next section)
+  every method also decides where the query runs and refuses a mismatched tenant; a
+  `tenantKey()`-only table keeps the behaviour above, plus the two mismatch checks.
+
+---
+
+## Tenancy (`defineTenancy`) — tenant tables enforced by the database
+
+`TenantRepository` keeps the queries it builds inside one tenant. A tenancy makes the
+database enforce it as well, for every query: declare the tenant list once, build the tenant
+tables from it, and each table gets composite foreign keys and a row-level security policy.
+
+```typescript
+// server/entities/tenancy.ts
+import { createSchema, defineTenancy, id, timestamps } from '@spfn/core/db';
+import { getAuth } from '@spfn/auth/server';
+import { text } from 'drizzle-orm/pg-core';
+
+const schema = createSchema('@acme/notes');
+
+export const workspaces = schema.table('workspaces', {
+    id: id(),
+    name: text('name').notNull(),
+});
+
+export const tenancy = defineTenancy({
+    tenants: workspaces,                     // or `users` from @spfn/auth/server: tenant = user
+    authorize: async (c, tenantId) => memberRepository.isMember(tenantId, Number(getAuth(c).userId)),
+    // column: 'workspace_id',               // default 'tenant_id'
+});
+
+export const authors = tenancy.table(schema, 'authors', {
+    id: id(),                                // required
+    name: text('name').notNull(),
+});
+
+export const notes = tenancy.table(schema, 'notes', {
+    id: id(),
+    authorId: tenancy.reference('author', () => authors),                      // required
+    reviewerId: tenancy.reference('reviewer', () => authors, { optional: true }),
+    title: text('title').notNull(),
+    ...timestamps(),
+});
+```
+
+```typescript
+// server/routes/notes.ts
+export const listNotes = route.get('/workspaces/:workspaceId/notes')
+    .use([tenancy.guard({ param: 'workspaceId' })])
+    .handler(async (c) => noteRepository.list(tenancy.of(c)));
+
+export const createNote = route.post('/workspaces/:workspaceId/notes')
+    .input({ body: Type.Object({ authorId: Type.Number(), title: Type.String() }) })
+    .use([tenancy.guard({ param: 'workspaceId' }), Transactional()])
+    .handler(async (c) =>
+    {
+        const { body } = await c.data();
+
+        return noteRepository.create(tenancy.of(c), body);
+    });
+
+// Personal data: the tenant is the signed-in user
+export const listDiaries = route.get('/me/diaries')
+    .use([tenancy.guard({ resolve: (c) => Number(getAuth(c).userId) })])
+    .handler(async (c) => diaryRepository.list(tenancy.of(c)));
+
+// Outside a request (a script, a job)
+await runInTransaction(() => noteRepository.archiveOld(42), { tenant: 42 });
+```
+
+`spfn db generate` writes, for `notes`:
+
+```sql
+CREATE TABLE "acme_notes"."notes" (
+    "id" bigserial PRIMARY KEY,
+    "tenant_id" bigint NOT NULL,
+    "author_id" bigint NOT NULL,
+    "reviewer_id" bigint,
+    "title" text NOT NULL,
+    "created_at" timestamp with time zone DEFAULT now() NOT NULL,
+    "updated_at" timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT "notes_tenant_id_id_key" UNIQUE("tenant_id","id")
+);
+ALTER TABLE "acme_notes"."notes" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE "acme_notes"."notes" ADD CONSTRAINT "notes_tenant_id_fk" FOREIGN KEY ("tenant_id") REFERENCES "acme_notes"."workspaces"("id");
+ALTER TABLE "acme_notes"."notes" ADD CONSTRAINT "notes_author_fk" FOREIGN KEY ("tenant_id","author_id") REFERENCES "acme_notes"."authors"("tenant_id","id") ON DELETE CASCADE;
+ALTER TABLE "acme_notes"."notes" ADD CONSTRAINT "notes_reviewer_fk" FOREIGN KEY ("tenant_id","reviewer_id") REFERENCES "acme_notes"."authors"("tenant_id","id");
+CREATE POLICY "notes_tenant_isolation" ON "acme_notes"."notes" AS PERMISSIVE FOR ALL TO public
+    USING ("tenant_id" = current_setting('app.tenant_id')::bigint)
+    WITH CHECK ("tenant_id" = current_setting('app.tenant_id')::bigint);
+```
+
+- **`unique (tenant_id, id)`** is what the composite foreign keys point at, and doubles as the
+  `(tenant_id, id)` index keyset pages need.
+- **A reference cannot cross tenants.** `(tenant_id, author_id) → authors (tenant_id, id)`:
+  a tenant 7 note pointing at a tenant 9 author is refused by the database. A required
+  reference is `ON DELETE CASCADE`; an optional one is `NO ACTION` — the author cannot be
+  deleted while a note names it (`SET NULL` would null `tenant_id` too, and the column-list
+  form needs PostgreSQL 15). A null optional reference is not checked (`MATCH SIMPLE`).
+- **A tenant with rows cannot be deleted**: the tenant foreign key is `NO ACTION`.
+- **A connection that set no tenant gets an error, not rows**: the policy reads
+  `current_setting('app.tenant_id')` without `missing_ok`.
+- **The tenant column is added for you** (`tenantId`, column `tenant_id` or
+  `defineTenancy({ column })`); declaring it in `columns` throws, and so does a table
+  without `id`. The third argument adds your own indexes and constraints after these.
+- **`tenancy.reference` points at a `tenancy.table` of the same tenancy only** — anything
+  else throws when drizzle reads the table (`getTableConfig`, `spfn db generate`). The target
+  is a function, so it may name a table defined later; a reference to its own table spells
+  out the return type, as drizzle's `.references()` does: `(): PgTable => notes`.
+- **Constraint names are fixed**: `<table>_tenant_id_id_key`, `<table>_tenant_id_fk`,
+  `<table>_<reference>_fk`, `<table>_tenant_isolation`. A name over PostgreSQL's 63-byte
+  limit becomes its first 54 bytes, `_`, and 8 hex digits of a hash of the whole name.
+
+### Where a TenantRepository query runs (R1–R6)
+
+| # | Situation | What happens |
+|---|-----------|--------------|
+| R1 | no open transaction, read method | `BEGIN` + `SET TRANSACTION READ ONLY` on the **read** connection → `set_config('app.tenant_id', t, true)` → query → `COMMIT` |
+| R2 | no open transaction, write method | `BEGIN` on the write connection → `set_config` → query → `COMMIT` |
+| R3 | in a transaction with no tenant yet | `set_config(t)` in it first, and the transaction is bound to `t` |
+| R4 | in a transaction bound to `t` | the query |
+| R5 | in a transaction bound to another tenant | `TenantMismatchError`, no SQL |
+| R6 | `tenancy.guard()` authorized another tenant for this request | `TenantMismatchError`, no SQL |
+
+- The tenant id is a bound parameter; no SQL text is built from it. `set_config(..., true)`
+  ends with the transaction, so a pooled connection never carries it further.
+- The short transactions of R1/R2 are invisible to the transaction context: no hooks, no
+  nesting, and code after the call sees no transaction.
+- The binding lives on the **root** transaction; a savepoint shares it. A savepoint that set
+  it and then rolled back undoes it, and the next call sets it again.
+- `runInTransaction(fn, { tenant })` sets it right after `BEGIN`. A nested call naming
+  another tenant throws before its `SAVEPOINT`; `requiresNew: true` is a root on its own
+  connection and may name its own tenant.
+- `_select` applies R1–R6 when the builder runs (`await`, `.then`, `.execute()`), not when
+  it is built; `toSQL()` is unchanged. `.prepare()` on a query that reads a tenancy table
+  throws — the statement would run later, outside these rules.
+- **`tenantKey()`-only tables** (no policy) keep part 1's behaviour — no short transaction,
+  no `set_config` — with R5 and R6 added.
+- **Hand-written queries** (`this.db`, `this.readDb`) get no rule: inside a transaction bound
+  to a tenant the policy shows that tenant's rows only; anywhere else they fail.
+
+### `tenancy.guard` and `tenancy.of`
+
+`tenancy.guard({ param: 'workspaceId' })` reads the route parameter, `tenancy.guard({ resolve })`
+calls your function — exactly one of the two, checked when `guard()` is called.
+
+1. The id must be a positive safe integer: anything else answers **400** (`ValidationError`)
+   and `authorize` does not run. An error thrown by `resolve` propagates unchanged.
+2. `authorize(c, tenantId)`: anything but `true` answers **403** (`ForbiddenError`); a throw
+   propagates unchanged.
+3. The rest of the request runs bound to the tenant (an `AsyncLocalStorage`, so concurrent
+   requests never see each other's); `tenancy.of(c)` returns it, and throws on a route
+   without the guard.
+
+The guard opens no transaction, so reads keep using the read replica. Add `Transactional()`
+to a write route — in either order: the first repository call binds the transaction.
+
+### Database roles
+
+| Role | URL | Used by | Owns the tables |
+|------|-----|---------|-----------------|
+| owner | `DATABASE_OWNER_URL` | `spfn db migrate`, `backup`, `restore`, `drop` | yes — row-level security does not apply to it |
+| app | `DATABASE_URL` / `DATABASE_WRITE_URL` / `DATABASE_READ_URL` | the running app | no; not superuser, not `BYPASSRLS` |
+
+PostgreSQL skips row-level security for a table's owner (and roles inheriting its
+privileges), superusers and `BYPASSRLS` roles. Without `DATABASE_OWNER_URL` the four commands
+use `DATABASE_URL`, as before. `pg_dump` stops with an error on a table whose policy applies
+to its role, and PostgreSQL refuses `COPY FROM` into one — so backup and restore need the
+owner too. `FORCE ROW LEVEL SECURITY` is not used: it would subject the owner, and break
+both, and any data migration across tenants.
+
+Grant the app role its row privileges once, as the owner:
+
+```sql
+GRANT USAGE ON SCHEMA acme_notes TO app_user;
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA acme_notes TO app_user;
+GRANT USAGE ON ALL SEQUENCES IN SCHEMA acme_notes TO app_user;
+ALTER DEFAULT PRIVILEGES FOR ROLE app_owner IN SCHEMA acme_notes
+    GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO app_user;
+ALTER DEFAULT PRIVILEGES FOR ROLE app_owner IN SCHEMA acme_notes
+    GRANT USAGE ON SEQUENCES TO app_user;
+```
+
+An app already deployed with the app role as owner moves the tables once (nothing does it
+automatically), as a superuser or the current owner:
+
+```sql
+ALTER TABLE acme_notes.notes OWNER TO app_owner;   -- per table, sequences follow their table
+-- or everything app_user owns in this database:
+REASSIGN OWNED BY app_user TO app_owner;
+```
+
+**Boot check.** When the app declares tenancy tables, the server checks the role of its
+write and read connections at startup: a role that owns a tenancy table, or is a superuser
+or `BYPASSRLS`, refuses to boot in production (`NODE_ENV=production`) and logs one warning
+line elsewhere — local development usually runs as the `postgres` superuser. A check that
+cannot run logs one warning and the server starts. An app without tenancy tables sends no
+query.
 
 ---
 

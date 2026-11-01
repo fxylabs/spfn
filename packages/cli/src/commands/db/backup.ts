@@ -3,7 +3,7 @@ import path from 'path';
 import { spawn } from 'child_process';
 import chalk from 'chalk';
 import ora from 'ora';
-import { parseDatabaseUrl } from './utils/database.js';
+import { OWNER_URL_MISSING, ownerDatabaseUrl, parseDatabaseUrl } from './utils/database.js';
 import { formatBytes, formatTimestamp } from './utils/formatters.js';
 import { ensureBackupDir } from './utils/backup-files.js';
 import {
@@ -12,11 +12,14 @@ import {
     saveBackupMetadata,
     type BackupMetadata,
 } from './utils/metadata.js';
-import { env } from '@spfn/core/config';
 import { loadEnv } from '@spfn/core/server';
 
 /**
  * Backup database to file
+ *
+ * Connects as the table owner (DATABASE_OWNER_URL, else DATABASE_URL):
+ * pg_dump stops with an error on a table whose row-level security policy
+ * applies to the role it runs as.
  */
 export async function dbBackup(options: {
     format?: 'sql' | 'custom';
@@ -31,10 +34,10 @@ export async function dbBackup(options: {
     console.log(chalk.blue('💾 Creating database backup...\n'));
 
     loadEnv();
-    const dbUrl = env.DATABASE_URL;
+    const dbUrl = ownerDatabaseUrl();
     if (!dbUrl)
     {
-        console.error(chalk.red('❌ DATABASE_URL not found in environment'));
+        console.error(chalk.red(OWNER_URL_MISSING));
         console.log(chalk.yellow('\n💡 Tip: Add DATABASE_URL to your .env file'));
         process.exit(1);
     }

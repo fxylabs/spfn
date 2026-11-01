@@ -97,4 +97,12 @@ export type { RepositoryDatabase } from './repository';
 export type { CountOptions } from './query-utils';
 
 // Tenant-aware layer (tenantKey() is exported with the schema helpers)
-export { TenantRepository } from './tenant';
+export { TenantRepository, defineTenancy, TenantMismatchError, listTenancyTables } from './tenant';
+export type {
+    Tenancy,
+    TenancyOptions,
+    TenancyGuardOptions,
+    TenancyReferenceOptions,
+    TenantListTable,
+    TenantSource,
+} from './tenant';

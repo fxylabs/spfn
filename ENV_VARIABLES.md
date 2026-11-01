@@ -104,6 +104,13 @@ Verified against the source on 2026-08-05. The authoritative definition is
 - **Description**: Read (replica) database URL in the master–replica setup
 - **Location**: `packages/core/src/config/schema.ts:70`
 
+### `DATABASE_OWNER_URL`
+- **Type**: `string` (PostgreSQL connection URL)
+- **Required**: No
+- **Default**: `DATABASE_URL`
+- **Description**: The table owner's URL. `spfn db migrate`, `backup`, `restore` and `drop` connect with it; the app never does. With `defineTenancy` tables the app must connect as a role that owns no table, because PostgreSQL skips row-level security for the owner
+- **Location**: `packages/core/src/config/schema.ts:78`
+
 ### `DRIZZLE_SCHEMA_PATH`
 - **Type**: `string`
 - **Required**: No

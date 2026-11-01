@@ -65,6 +65,15 @@ import {
     type AfterRollbackCallback,
 } from './context';
 import { TransactionError } from '@spfn/core/errors';
+import { isTenantId } from '../tenant/condition';
+import {
+    assertTransactionTenant,
+    claimTransactionTenant,
+    discardTenantClaim,
+    openTenantFrame,
+    promoteTenantClaim,
+    setTenantSetting,
+} from './tenant';
 import { env } from '@spfn/core/config';
 import type { DefaultDatabase, DrizzleDatabase } from '../manager/types';
 
@@ -342,6 +351,28 @@ export interface RunInTransactionOptions
      * ```
      */
     requiresNew?: boolean;
+
+    /**
+     * Bind the transaction to a tenant, for tables made with `tenancy.table`.
+     *
+     * A root transaction runs `set_config('app.tenant_id', tenant, true)` right
+     * after its `BEGIN`, so the tenancy policy admits that tenant's rows only and
+     * every TenantRepository call inside must name the same tenant — another
+     * throws `TenantMismatchError` before any SQL runs.
+     *
+     * A nested call shares the outer transaction's connection and therefore its
+     * tenant: the same tenant is accepted, another throws before the SAVEPOINT.
+     * A `requiresNew: true` call is a root and may name its own.
+     *
+     * Without it, the first TenantRepository call on a tenancy table binds the
+     * transaction to that call's tenant.
+     *
+     * @example
+     * ```typescript
+     * await runInTransaction(() => noteRepository.archiveOld(42), { tenant: 42 });
+     * ```
+     */
+    tenant?: number;
 }
 
 /**
@@ -385,6 +416,7 @@ export async function runInTransaction<T, TDatabase extends DrizzleDatabase = De
         enableLogging = true,
         context = 'transaction',
         requiresNew = false,
+        tenant,
     } = options;
 
     // Handle timeout: null/undefined → default, 0 → disabled, N → N milliseconds
@@ -483,6 +515,13 @@ export async function runInTransaction<T, TDatabase extends DrizzleDatabase = De
         { txId, context, idleTimeout, maxTimeout: MAX_TIMEOUT_MS },
     );
 
+    validateAndThrow(
+        tenant !== undefined && !isTenantId(tenant),
+        `Invalid tenant value: ${tenant}. Must be a positive safe integer.`,
+        'Invalid tenant',
+        { txId, context, tenant },
+    );
+
     // Get write database instance (after all input validations)
     const writeDb = getDatabase<TDatabase>('write');
     if (!writeDb)
@@ -514,6 +553,13 @@ export async function runInTransaction<T, TDatabase extends DrizzleDatabase = De
     // timeouts and the hook queues of one.
     const savepointOwner = requiresNew ? null : getTransactionContext<TDatabase>();
     const isNested = savepointOwner !== null;
+
+    // A savepoint shares the outer transaction's tenant: refuse another one
+    // before the SAVEPOINT is taken
+    if (savepointOwner && tenant !== undefined)
+    {
+        assertTransactionTenant(savepointOwner, tenant);
+    }
 
     // Warn only when the caller passed a timeout explicitly: the 30s default
     // would warn on every nested call and bury the case that matters — an
@@ -579,23 +625,32 @@ export async function runInTransaction<T, TDatabase extends DrizzleDatabase = De
         if (savepointOwner)
         {
             return savepointOwner.nestedFrames.run(() =>
-                (savepointOwner.tx.transaction(body as never) as Promise<T>).then(
+            {
+                openTenantFrame(savepointOwner.tenant, savepointOwner.level + 1);
+
+                return (savepointOwner.tx.transaction(body as never) as Promise<T>).then(
                     (result) =>
                     {
                         promoteFrameHooks({ beforeCommitCallbacks, afterCommitCallbacks, afterRollbackCallbacks }, savepointOwner);
+                        promoteTenantClaim(savepointOwner.tenant, savepointOwner.level);
 
                         return result;
                     },
-                    (error: unknown) => discardFrameHooks(
-                        { beforeCommitCallbacks, afterCommitCallbacks, afterRollbackCallbacks },
-                        savepointOwner,
-                        error,
-                        txId,
-                        context,
-                        enableLogging,
-                    ),
-                ),
-            );
+                    (error: unknown) =>
+                    {
+                        discardTenantClaim(savepointOwner.tenant, savepointOwner.level);
+
+                        return discardFrameHooks(
+                            { beforeCommitCallbacks, afterCommitCallbacks, afterRollbackCallbacks },
+                            savepointOwner,
+                            error,
+                            txId,
+                            context,
+                            enableLogging,
+                        );
+                    },
+                );
+            });
         }
 
         if (requiresNew)
@@ -631,6 +686,13 @@ export async function runInTransaction<T, TDatabase extends DrizzleDatabase = De
                 await transaction.execute(sql.raw(`SET LOCAL idle_in_transaction_session_timeout = ${idleTimeout}`));
             }
 
+            // The tenant (root only): a savepoint claims it below, once its
+            // context exists, because it may share a tenant already set
+            if (tenant !== undefined && !isNested)
+            {
+                await setTenantSetting(transaction, tenant);
+            }
+
             // Store transaction in AsyncLocalStorage
             return await runWithTransaction(transaction, txId, async () =>
             {
@@ -643,6 +705,11 @@ export async function runInTransaction<T, TDatabase extends DrizzleDatabase = De
                     beforeCommitCallbacks = ctx.beforeCommitCallbacks;
                     afterCommitCallbacks = ctx.afterCommitCallbacks;
                     afterRollbackCallbacks = ctx.afterRollbackCallbacks;
+
+                    if (tenant !== undefined && isNested)
+                    {
+                        await claimTransactionTenant(ctx, tenant);
+                    }
                 }
 
                 const innerResult = await callback(transaction);
@@ -669,7 +736,7 @@ export async function runInTransaction<T, TDatabase extends DrizzleDatabase = De
                 }
 
                 return innerResult;
-            });
+            }, isNested ? undefined : tenant);
         });
 
         // Transaction successful (committed)

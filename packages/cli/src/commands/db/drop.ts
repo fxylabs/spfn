@@ -1,25 +1,29 @@
 import chalk from 'chalk';
 import prompts from 'prompts';
-import { env } from '@spfn/core/config';
 import { loadEnv } from '@spfn/core/server';
 import { runWithSpinner } from './utils/drizzle.js';
-import { parseDatabaseUrl, confirmDangerousTarget } from './utils/database.js';
+import { OWNER_URL_MISSING, ownerDatabaseUrl, parseDatabaseUrl, confirmDangerousTarget } from './utils/database.js';
 
 /**
  * Drop all database tables (dangerous!)
+ *
+ * Connects as the table owner (DATABASE_OWNER_URL, else DATABASE_URL): only
+ * the owner may drop the tables.
  */
 export async function dbDrop(): Promise<void>
 {
     loadEnv();
 
-    if (!env.DATABASE_URL)
+    const databaseUrl = ownerDatabaseUrl();
+
+    if (!databaseUrl)
     {
-        console.error(chalk.red('❌ DATABASE_URL not found in environment'));
+        console.error(chalk.red(OWNER_URL_MISSING));
         console.log(chalk.yellow('\n💡 Tip: Add DATABASE_URL to your .env file'));
         process.exit(1);
     }
 
-    const dbInfo = parseDatabaseUrl(env.DATABASE_URL);
+    const dbInfo = parseDatabaseUrl(databaseUrl);
 
     console.log(chalk.yellow('⚠️  WARNING: This will drop all tables in your database!'));
     console.log(chalk.dim(`   Target: ${dbInfo.database} @ ${dbInfo.host}:${dbInfo.port}\n`));
@@ -45,5 +49,6 @@ export async function dbDrop(): Promise<void>
         'drop',
         'All tables dropped',
         'Failed to drop tables',
+        databaseUrl,
     );
 }

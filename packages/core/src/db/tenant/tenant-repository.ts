@@ -15,6 +15,16 @@
  * as a condition or a join source; the development query warning reports one
  * that leaves a tenant-aware table without its tenant condition.
  *
+ * Where each query runs follows rules R1–R6 (see session.ts). For a table made
+ * with `tenancy.table`, outside a transaction a read runs in a short
+ * `READ ONLY` transaction on the read database and a write in a short
+ * transaction on the write database, each setting `app.tenant_id` for the
+ * row-level security policy; inside a transaction the first call binds it to
+ * its tenant. A call for a tenant other than the transaction's, or other than
+ * the one `tenancy.guard()` authorized, throws `TenantMismatchError` before any
+ * SQL runs. A `tenantKey()`-only table has no policy and runs as in part 1,
+ * with the two mismatch checks added.
+ *
  * @example
  * ```typescript
  * export class NoteRepository extends TenantRepository
@@ -38,11 +48,12 @@ import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js';
 import type { AnyRelations, EmptyRelations, InferInsertModel, InferSelectModel, SQL } from 'drizzle-orm';
 import { and, asc, desc, gt, lt } from 'drizzle-orm';
 import type { PgAsyncSelectBuilder, PgColumn, PgTable, SelectedFields } from 'drizzle-orm/pg-core';
-import { RepositoryCore } from '../repository-core';
+import { RepositoryCore, type RepositoryDatabase } from '../repository-core';
 import { buildWhereClause, clampRowLimit, countRows, type CountOptions } from '../query-utils';
 import type { DrizzleDatabase } from '../manager/types';
 import { assertTenantId, requireTenantColumn, tenantCondition } from './condition';
 import { scopeSelectBuilder } from './select';
+import { runTenantQuery, type TenantAccess } from './session';
 
 type WhereInput = Record<string, any> | SQL | undefined;
 
@@ -67,7 +78,7 @@ export abstract class TenantRepository<
     ): Promise<InferSelectModel<T> | null>
     {
         const condition = this.requiredWhere(tenantId, table, where, 'findOne');
-        const rows = await this.readDb.select().from(table as any).where(condition).limit(1);
+        const rows = await this.runQuery('read', tenantId, table, (db) => db.select().from(table as any).where(condition).limit(1));
 
         return (rows[0] as InferSelectModel<T>) ?? null;
     }
@@ -84,26 +95,30 @@ export abstract class TenantRepository<
         },
     ): Promise<InferSelectModel<T>[]>
     {
-        let query = this.readDb.select().from(table as any).where(this.tenantWhere(tenantId, table, options?.where));
-
-        if (options?.orderBy)
-        {
-            query = query.orderBy(...(Array.isArray(options.orderBy) ? options.orderBy : [options.orderBy])) as any;
-        }
-
+        const condition = this.tenantWhere(tenantId, table, options?.where);
         const limit = clampRowLimit(options?.limit && options.limit > 0 ? options.limit : undefined);
 
-        if (limit)
+        return this.runQuery('read', tenantId, table, (db) =>
         {
-            query = query.limit(limit) as any;
-        }
+            let query = db.select().from(table as any).where(condition);
 
-        if (options?.offset)
-        {
-            query = query.offset(options.offset) as any;
-        }
+            if (options?.orderBy)
+            {
+                query = query.orderBy(...(Array.isArray(options.orderBy) ? options.orderBy : [options.orderBy])) as any;
+            }
 
-        return query as unknown as Promise<InferSelectModel<T>[]>;
+            if (limit)
+            {
+                query = query.limit(limit) as any;
+            }
+
+            if (options?.offset)
+            {
+                query = query.offset(options.offset) as any;
+            }
+
+            return query as unknown as Promise<InferSelectModel<T>[]>;
+        });
     }
 
     /**
@@ -126,12 +141,12 @@ export abstract class TenantRepository<
         const cursor = after === undefined
             ? undefined
             : (order === 'desc' ? lt(cursorColumn, after as any) : gt(cursorColumn, after as any));
-        const query = this.readDb.select().from(table as any)
-            .where(and(this.tenantWhere(tenantId, table, options.where), cursor))
-            .orderBy(order === 'desc' ? desc(cursorColumn) : asc(cursorColumn))
-            .limit(clampRowLimit(options.limit) as number);
+        const condition = and(this.tenantWhere(tenantId, table, options.where), cursor);
 
-        return query as unknown as Promise<InferSelectModel<T>[]>;
+        return this.runQuery('read', tenantId, table, (db) => db.select().from(table as any)
+            .where(condition)
+            .orderBy(order === 'desc' ? desc(cursorColumn) : asc(cursorColumn))
+            .limit(clampRowLimit(options.limit) as number) as unknown as Promise<InferSelectModel<T>[]>);
     }
 
     /** Number of the tenant's rows; with `cap`, at most `cap + 1` ("more than cap"). */
@@ -144,7 +159,7 @@ export abstract class TenantRepository<
     {
         const condition = this.tenantWhere(tenantId, table, where);
 
-        return countRows(this.readDb, table, condition, options);
+        return this.runQuery('read', tenantId, table, (db) => countRows(db, table, condition, options));
     }
 
     /**
@@ -159,7 +174,11 @@ export abstract class TenantRepository<
     {
         assertTenantId(tenantId);
 
-        return scopeSelectBuilder(fields ? this.readDb.select(fields) : this.readDb.select(), tenantId);
+        return scopeSelectBuilder(
+            fields ? this.readDb.select(fields) : this.readDb.select(),
+            tenantId,
+            (tables, execute) => runTenantQuery('read', tenantId, tables, this.readDb, execute),
+        );
     }
 
     // ============================================================================
@@ -174,7 +193,7 @@ export abstract class TenantRepository<
     ): Promise<InferSelectModel<T>>
     {
         const values = this.withTenantValue(tenantId, table, data);
-        const rows = await this.db.insert(table).values(values as any).returning();
+        const rows = await this.runQuery('write', tenantId, table, (db) => db.insert(table).values(values as any).returning());
 
         return (rows as unknown as InferSelectModel<T>[])[0];
     }
@@ -187,7 +206,7 @@ export abstract class TenantRepository<
     ): Promise<InferSelectModel<T>[]>
     {
         const values = data.map((row) => this.withTenantValue(tenantId, table, row));
-        const rows = await this.db.insert(table).values(values as any).returning();
+        const rows = await this.runQuery('write', tenantId, table, (db) => db.insert(table).values(values as any).returning());
 
         return rows as unknown as InferSelectModel<T>[];
     }
@@ -212,11 +231,11 @@ export abstract class TenantRepository<
         this.assertTargetHasTenant(table, options.target);
         this.assertTenantUnchanged(table, options.set);
 
-        const rows = await this.db
+        const rows = await this.runQuery('write', tenantId, table, (db) => db
             .insert(table)
             .values(values as any)
             .onConflictDoUpdate({ target: options.target, set: (options.set || values) as any })
-            .returning();
+            .returning());
 
         return (rows as unknown as InferSelectModel<T>[])[0];
     }
@@ -283,7 +302,7 @@ export abstract class TenantRepository<
 
         this.assertTenantUnchanged(table, data);
 
-        const rows = await this.db.update(table).set(data as any).where(condition).returning();
+        const rows = await this.runQuery('write', tenantId, table, (db) => db.update(table).set(data as any).where(condition).returning());
 
         return rows as unknown as InferSelectModel<T>[];
     }
@@ -296,9 +315,20 @@ export abstract class TenantRepository<
     ): Promise<InferSelectModel<T>[]>
     {
         const condition = this.requiredWhere(tenantId, table, where, method);
-        const rows = await this.db.delete(table).where(condition).returning();
+        const rows = await this.runQuery('write', tenantId, table, (db) => db.delete(table).where(condition).returning());
 
         return rows as unknown as InferSelectModel<T>[];
+    }
+
+    /** Run `query` on the database rules R1–R6 pick for `table` (see session.ts). */
+    private runQuery<TResult>(
+        access: TenantAccess,
+        tenantId: number,
+        table: PgTable,
+        query: (db: RepositoryDatabase<TDatabase>) => PromiseLike<TResult>,
+    ): Promise<TResult>
+    {
+        return runTenantQuery(access, tenantId, [table], access === 'read' ? this.readDb : this.db, query);
     }
 
     /** `tenant condition AND where`, after checking the tenant id and the table. */

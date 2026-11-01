@@ -33,6 +33,7 @@ import {
 } from './helpers';
 import { runEnvBootCheck } from './env-boot-check';
 import { runMigrationBootGate } from './migration-gate';
+import { runTenancyBootGate } from './tenancy-gate';
 import { getShutdownManager, resetShutdownManager } from './shutdown-manager';
 
 import type { ServerConfig, ServerInstance } from './types';
@@ -165,6 +166,13 @@ export async function startServer(config?: ServerConfig): Promise<ServerInstance
         await runMigrationBootGate(finalConfig);
 
         const app = await createServer(finalConfig);
+
+        // A tenancy table is isolated only if the app's role is subject to its
+        // row-level security policy — refuse a production boot where it is not.
+        // After createServer, which imports a custom app.ts and with it the
+        // tables its routes use; before anything listens.
+        await runTenancyBootGate();
+
         const server = startHttpServer(app, host, port);
 
         // Initialize WebSocket server if configured
