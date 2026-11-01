@@ -315,6 +315,8 @@ describe('spfn db tenant export (integration)', () =>
         const url = new URL(appUrl());
         const wrong = new URL(appUrl());
 
+        // A role that does not exist fails under any auth method — `trust` (CI) checks no password
+        wrong.username = 'x10-no-such-role';
         wrong.password = 'x10-not-the-password';
         process.env.DATABASE_URL = wrong.toString();
 
@@ -328,24 +330,33 @@ describe('spfn db tenant export (integration)', () =>
         expect(text).toMatch(/Tenant export failed/);
         expect(text).toMatch(/Tenant 7 exported/);
 
-        for (const secret of [wrong.toString(), url.toString(), 'x10-not-the-password', decodeURIComponent(url.password), `${url.username}@`])
+        for (const secret of [wrong.toString(), url.toString(), 'x10-not-the-password', 'x10-no-such-role', decodeURIComponent(url.password), `${url.username}@`])
         {
             expect(text).not.toContain(secret);
         }
     });
 
-    it('X10b a closed port, an unresolvable host and a wrong password each fail naming neither the host, the user nor the password', async () =>
+    /** A wrong password connects under `trust` auth (CI), so it is a unit row of tenant-connection.test.ts. */
+    it('X10b a closed port, an unresolvable host and a role that does not exist each fail naming neither the host, the user nor the password', async () =>
     {
         if (!available) return;
 
         const real = new URL(appUrl());
         const closedPort = 'postgresql://x10b-user:x10b-secret@localhost:1/nowhere';
         const unresolvable = 'postgresql://x10b-user:x10b-secret@x10b-no-such-host.invalid:5432/nowhere';
-        const wrongPassword = new URL(appUrl());
+        const missingRole = new URL(appUrl());
 
-        wrongPassword.password = 'x10b-secret';
+        missingRole.username = 'x10b-user';
+        missingRole.password = 'x10b-secret';
 
-        for (const url of [closedPort, unresolvable, wrongPassword.toString()])
+        // A missing role is 28000 under `trust`; password auth answers 28P01 so as not to tell which roles exist
+        const cases: [string, RegExp][] = [
+            [closedPort, /Tenant export failed: could not reach the database \(/],
+            [unresolvable, /Tenant export failed: could not reach the database \(/],
+            [missingRole.toString(), /Tenant export failed: authentication failed \((28000|28P01)\)/],
+        ];
+
+        for (const [url, failure] of cases)
         {
             output = [];
             process.env.DATABASE_URL = url;
@@ -354,7 +365,7 @@ describe('spfn db tenant export (integration)', () =>
 
             const text = output.join('\n');
 
-            expect(text).toMatch(/Tenant export failed: (could not reach the database|authentication failed) \(/);
+            expect(text).toMatch(failure);
 
             for (const secret of ['localhost', 'x10b-no-such-host', real.hostname, 'x10b-user', decodeURIComponent(real.username), 'x10b-secret'])
             {
