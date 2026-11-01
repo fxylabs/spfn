@@ -9,6 +9,7 @@
 
 import { env } from '@spfn/auth/config';
 import { ValidationError } from '@spfn/core/errors';
+import { onAfterCommit } from '@spfn/core/db';
 import {
     AccountDisabledError,
     AccountPendingDeletionError,
@@ -356,17 +357,18 @@ export async function oauthCallbackService(
         ...providerAccountFields(identity),
     };
 
-    if (isNewUser)
-    {
-        await authRegisterEvent.emit(eventPayload);
-    }
-    else
-    {
-        // `mfaEnrolled` is on the login event only: a brand-new account cannot
-        // have a second factor, and the register event is where an app decides
-        // what to offer a user it has just met.
-        await authLoginEvent.emit({ ...eventPayload, mfaEnrolled: await mfaEnrolledForUser(userId) });
-    }
+    // After the commit, never inline: both callback routes run under
+    // `Transactional()`, so an inline emit would announce a user that another
+    // connection cannot read yet, or one a rollback then erased.
+    // `mfaEnrolled` is on the login event only: a brand-new account cannot
+    // have a second factor, and the register event is where an app decides
+    // what to offer a user it has just met. Read before the callback is queued,
+    // so the callback stays synchronous and lands when consumers expect it to.
+    const mfaEnrolled = isNewUser ? false : await mfaEnrolledForUser(userId);
+
+    onAfterCommit(() => (isNewUser
+        ? authRegisterEvent.emit(eventPayload)
+        : authLoginEvent.emit({ ...eventPayload, mfaEnrolled })));
 
     return {
         redirectUrl,

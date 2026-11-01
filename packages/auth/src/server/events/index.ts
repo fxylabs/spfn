@@ -70,6 +70,11 @@ export const AuthLoginProviderSchema = Type.Union([
  * - OAuth 기존 사용자 로그인 시
  * - 기기 코드 승인이 소비되어 새 기기 키가 등록될 때 (provider: 'device')
  *
+ * Published after the transaction that signed the user in commits, never
+ * inside it: a subscriber can read the account from any connection, and a
+ * sign-in that rolls back announces nothing. A subscriber that throws is
+ * logged and cannot fail the request.
+ *
  * `mfaEnrolled` is computed as the event is emitted (#95) and is the whole of
  * the package's opinion about the second factor: it never blocks an account
  * that has none, and this is the hook an app uses to offer enrolment at a first
@@ -177,6 +182,11 @@ export const authDeviceRegisteredEvent = defineEvent(
  * - 이메일/전화 회원가입 성공 시
  * - OAuth 신규 사용자 가입 시
  *
+ * Published after the transaction that created the account commits, never
+ * inside it: a subscriber can read the account from any connection, and a
+ * sign-up that rolls back announces nothing. A subscriber that throws is
+ * logged and cannot fail the request.
+ *
  * @example
  * ```typescript
  * authRegisterEvent.subscribe(async (payload) => {
@@ -280,6 +290,11 @@ export const invitationCreatedEvent = defineEvent(
  *
  * 발행 시점:
  * - acceptInvitation() 성공 시
+ *
+ * Published after the transaction that accepted the invitation commits, never
+ * inside it: a subscriber can read the account from any connection, and an
+ * acceptance that rolls back announces nothing. A subscriber that throws is
+ * logged and cannot fail the request.
  *
  * @example
  * ```typescript
