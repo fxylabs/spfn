@@ -18,6 +18,7 @@ export const OAUTH_ERROR_REASONS = [
     'provider_error',
     'account_unavailable',
     'link_only',
+    'email_in_use',
     'failed',
 ] as const;
 
@@ -35,6 +36,9 @@ export const OAUTH_ERROR_REASONS = [
  * - `account_unavailable` — the account is disabled, pending deletion, or gone
  * - `link_only` — the app made this provider link-only (#157): it can be linked
  *   to a signed-in account from settings, never used to sign in
+ * - `email_in_use` — a first sign-in with this provider reported the email of
+ *   an existing account and the app set `oauthEmailMatch: 'reject'` (#156); the
+ *   person can sign in to that account and link the provider from settings
  * - `failed` — anything else
  */
 export type OAuthErrorReason = typeof OAUTH_ERROR_REASONS[number];

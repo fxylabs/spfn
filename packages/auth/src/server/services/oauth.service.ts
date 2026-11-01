@@ -14,6 +14,7 @@ import {
     AccountPendingDeletionError,
     OAuthAccountNotFoundError,
     OAuthCookieMissingError,
+    OAuthEmailInUseError,
     OAuthProviderError,
     OAuthProviderLinkOnlyError,
     OAuthStateExpiredError,
@@ -27,9 +28,10 @@ import { isSafeReturnPath } from '../../lib/return-path';
 import { withOAuthErrorReason, type OAuthErrorReason } from '../../lib/oauth-error-reason';
 import { timingSafeEqualString } from '../lib/csrf';
 import { findStartCookies, legacyStartCookies } from '../lib/oauth/start-cookies';
-import { assertSignInProvider, runBeforeRegister } from '../lib/config';
+import { assertSignInProvider, getOAuthEmailMatch, runBeforeRegister } from '../lib/config';
 import { resolveAppUrl } from '../lib/app-url';
 import { type SocialProvider, type KeyAlgorithmType, type SessionBindingType } from '../types';
+import type { User } from '../entities/users';
 import {
     refreshAccessToken,
     createOAuthState,
@@ -615,6 +617,10 @@ export async function backfillVerifiedEmail(
  * tokens는 web(code 교환) 흐름에서만 전달된다. native id_token 흐름은 provider 토큰이
  * 없으므로 생략하며, social account의 토큰 컬럼은 null로 저장된다.
  * metadata는 앱이 OAuth 시작 시 실은 값 — 신규 가입일 때만 beforeRegister 훅에 전달된다.
+ * 이메일이 같은 기존 계정이 있으면 `oauthEmailMatch`(#156)가 연결·거절·별도 가입을 정한다.
+ *
+ * @throws OAuthEmailInUseError `oauthEmailMatch: 'reject'`이고 이메일이 같은 계정이 있을 때
+ * @throws UnverifiedEmailLinkError `'attach'`(기본)이고 provider가 이메일을 검증하지 않았을 때
  */
 export async function createOrLinkUser(
     provider: SocialProvider,
@@ -627,64 +633,19 @@ export async function createOrLinkUser(
     const existingUser = identity.email
         ? await usersRepository.findByEmail(identity.email)
         : null;
+    const emailMatch = existingUser ? getOAuthEmailMatch() : 'attach';
 
-    let userId: number;
-    let isNewUser = false;
-
-    if (existingUser)
+    // 'reject' (#156) writes nothing and says nothing about the existing account —
+    // thrown before the attach branch would touch it and before the session check
+    // would reveal its status
+    if (emailMatch === 'reject')
     {
-        // 미검증 이메일로는 기존 계정 연결 차단 (계정 탈취 방지)
-        if (!identity.emailVerified)
-        {
-            throw new UnverifiedEmailLinkError();
-        }
-
-        // 기존 사용자에 소셜 계정 연결
-        userId = existingUser.id;
-
-        // 이메일 인증 상태 업데이트 (provider의 검증된 이메일 기준)
-        if (!existingUser.emailVerifiedAt)
-        {
-            await usersRepository.updateById(existingUser.id, {
-                emailVerifiedAt: new Date(),
-            });
-        }
+        throw new OAuthEmailInUseError({ details: { provider } });
     }
-    else
-    {
-        // 앱 주입 사전 검증 훅 — throw 시 가입 거부 (기존 계정 연결에는 적용 안 함)
-        // email은 provider가 보고한 값 그대로 — 미검증이면 계정에는 null로 저장되므로
-        // 이메일 기반 정책이 판별할 수 있게 emailVerified를 함께 넘긴다
-        await runBeforeRegister({
-            channel: 'oauth',
-            provider,
-            email: identity.email ?? undefined,
-            emailVerified: identity.emailVerified,
-            metadata,
-        });
 
-        // 신규 사용자 생성
-        const { getRoleByName } = await import('./role.service');
-        const userRole = await getRoleByName('user');
-
-        if (!userRole)
-        {
-            throw new Error('Default user role not found. Run initializeAuth() first.');
-        }
-
-        const newUser = await usersRepository.create({
-            email: identity.emailVerified ? identity.email : null,
-            phone: null,
-            passwordHash: null,  // OAuth 사용자는 비밀번호 없음
-            passwordChangeRequired: false,
-            roleId: userRole.id,
-            status: 'active',
-            emailVerifiedAt: identity.emailVerified ? new Date() : null,
-        });
-
-        userId = newUser.id;
-        isNewUser = true;
-    }
+    const { userId, isNewUser } = existingUser && emailMatch === 'attach'
+        ? { userId: await attachByEmail(existingUser, identity), isNewUser: false }
+        : { userId: await registerOAuthUser(provider, identity, metadata, !existingUser), isNewUser: true };
 
     // 소셜 계정 생성 (native 흐름은 provider 토큰이 없어 null로 저장)
     await socialAccountsRepository.create({
@@ -701,6 +662,76 @@ export async function createOrLinkUser(
     await recordProviderName(userId, identity.name);
 
     return { userId, isNewUser };
+}
+
+/**
+ * 소셜 계정을 이메일이 같은 기존 계정에 붙인다 (`oauthEmailMatch: 'attach'`)
+ *
+ * 미검증 이메일로는 연결하지 않는다(계정 탈취 방지). provider가 검증한 이메일이므로
+ * 기존 계정의 이메일 인증 상태도 채운다.
+ *
+ * @throws UnverifiedEmailLinkError
+ */
+async function attachByEmail(existingUser: User, identity: NormalizedIdentity): Promise<number>
+{
+    if (!identity.emailVerified)
+    {
+        throw new UnverifiedEmailLinkError();
+    }
+
+    if (!existingUser.emailVerifiedAt)
+    {
+        await usersRepository.updateById(existingUser.id, {
+            emailVerifiedAt: new Date(),
+        });
+    }
+
+    return existingUser.id;
+}
+
+/**
+ * 소셜 신원으로 새 계정을 만든다
+ *
+ * 앱 주입 사전 검증 훅이 먼저 돈다 — throw 시 가입 거부. email은 provider가 보고한
+ * 값 그대로 넘기고, 미검증이면 계정에는 null로 저장되므로 emailVerified를 함께 넘긴다.
+ * keepEmail이 false면(`oauthEmailMatch: 'separate'`로 기존 계정과 이메일이 같을 때, #156)
+ * 이메일은 다른 계정이 가지므로 검증됐어도 새 계정에 싣지 않는다.
+ */
+async function registerOAuthUser(
+    provider: SocialProvider,
+    identity: NormalizedIdentity,
+    metadata: Record<string, unknown> | undefined,
+    keepEmail: boolean,
+): Promise<number>
+{
+    await runBeforeRegister({
+        channel: 'oauth',
+        provider,
+        email: identity.email ?? undefined,
+        emailVerified: identity.emailVerified,
+        metadata,
+    });
+
+    const { getRoleByName } = await import('./role.service');
+    const userRole = await getRoleByName('user');
+
+    if (!userRole)
+    {
+        throw new Error('Default user role not found. Run initializeAuth() first.');
+    }
+
+    const storesEmail = keepEmail && identity.emailVerified;
+    const newUser = await usersRepository.create({
+        email: storesEmail ? identity.email : null,
+        phone: null,
+        passwordHash: null,  // OAuth 사용자는 비밀번호 없음
+        passwordChangeRequired: false,
+        roleId: userRole.id,
+        status: 'active',
+        emailVerifiedAt: storesEmail ? new Date() : null,
+    });
+
+    return newUser.id;
 }
 
 /**
@@ -783,6 +814,7 @@ const REASON_BY_ERROR: [abstract new (...args: never[]) => Error, OAuthErrorReas
     [OAuthCookieMissingError, 'no_cookie'],
     [OAuthProviderError, 'provider_error'],
     [OAuthProviderLinkOnlyError, 'link_only'],
+    [OAuthEmailInUseError, 'email_in_use'],
     [AccountDisabledError, 'account_unavailable'],
     [AccountPendingDeletionError, 'account_unavailable'],
     [OAuthAccountNotFoundError, 'account_unavailable'],

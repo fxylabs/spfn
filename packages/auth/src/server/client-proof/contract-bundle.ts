@@ -362,8 +362,14 @@ import { CLIENT_IDENTITY_HEADERS, CLIENT_KINDS, SERVER_CONTRACT_HEADERS } from '
  * that provider with this code before any id_token is verified. A patch, by
  * 0.10.1's rule: one code joins the open list, and no operation, type or enum
  * changes shape, so the supported range does not move.
+ *
+ * 0.13.7 lists `OAuthEmailInUseError` (409) (#156). An app can set
+ * `oauthEmailMatch: 'reject'`, and `auth.enroll.oauthNative` then refuses a
+ * first sign-in whose email an existing account already holds with this code.
+ * A patch, by 0.10.1's rule: one code joins the open list, and no operation,
+ * type or enum changes shape, so the supported range does not move.
  */
-export const CONTRACT_VERSION = '0.13.6';
+export const CONTRACT_VERSION = '0.13.7';
 export const CONTRACT_MAJOR = 0;
 export const CONTRACT_NAME = 'spfn-mobile-contract';
 
@@ -1131,6 +1137,9 @@ interface RestSurfaceError
  * `OAuthProviderLinkOnlyError` (contract 0.13.6) is the one refusal both
  * enrollment starts share: the app made the provider link-only (#157), so it
  * can be linked from a signed-in web session but never signs anyone in.
+ *
+ * `OAuthEmailInUseError` (contract 0.13.7) is native sign-in's alone: the app
+ * refuses a first sign-in whose email an existing account holds (#156).
  */
 const REST_SURFACE_ERRORS: readonly RestSurfaceError[] = [
     {
@@ -1208,6 +1217,14 @@ const REST_SURFACE_ERRORS: readonly RestSurfaceError[] = [
         httpStatus: 409,
         retryable: false,
         summary: 'that keyId is taken or was revoked — generate a fresh keyId and retry',
+    },
+    {
+        code: 'OAuthEmailInUseError',
+        httpStatus: 409,
+        retryable: false,
+        summary:
+            'a first sign-in with this provider reported the email of an existing account and the app refuses it '
+            + '— sign in to that account another way and link the provider from settings',
     },
     {
         code: 'MfaVerificationFailedError',

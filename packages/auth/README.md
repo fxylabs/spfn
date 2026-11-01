@@ -1981,7 +1981,8 @@ that challenge is spent — see [the web OAuth path](#the-web-oauth-path). Both 
 `createOAuthCallbackHandler` route and the `OAuthCallback` page flow are handled.
 
 The name a provider reports becomes the account's display name once. When a social account is
-first attached — to a new account, or to an existing one matched by verified email — and that
+first attached — to a new account, or to an existing one matched by verified email
+([`oauthEmailMatch`](#when-a-first-sign-ins-email-matches-an-existing-account)) — and that
 account has no `user_profiles` row yet, the name is stored as `displayName`, trimmed; a blank name
 is skipped. An existing profile is never overwritten and a later sign-in writes nothing, so a name
 the person changed stays changed. An app that creates the profile row itself on `auth.register`
@@ -2047,10 +2048,52 @@ link an existing SPFN account. GitHub uses the primary email from `/user/emails`
 scope it falls back to the public profile email, unverified. Naver's profile email is either the
 Naver account email or a contact email that passed Naver's own verification, so a present email
 is treated as verified — it is stored on the user row and may link an existing account by email,
-the same trust level as Kakao. Accounts created before this policy (user row with `email` null)
+the same trust level as Kakao. Whether a verified email links at all is the app's choice:
+see [`oauthEmailMatch`](#when-a-first-sign-ins-email-matches-an-existing-account). Accounts created before this policy (user row with `email` null)
 are backfilled on their next login: if the provider reports a verified email and no other account
 owns it, `email` and `emailVerifiedAt` are filled in (best-effort; a conflict skips the backfill
 and the login continues).
+
+### When a first sign-in's email matches an existing account
+
+The first sign-in with a provider identity — one no social row holds yet — may report an email an
+existing account already has. `configureAuth({ oauthEmailMatch })` decides what happens, for every
+provider and on both the web callback and `POST /_auth/oauth/:provider/native` (#156). Unset, it is
+`'attach'`, the behavior of 0.3.0-beta.50:
+
+| `oauthEmailMatch` | Result |
+| --- | --- |
+| unset or `'attach'` | a verified email links the identity to the existing account and signs in to it; an unverified one is refused with `UnverifiedEmailLinkError` (`reason=failed`) |
+| `'reject'` | refused whether verified or not: the web error page with `reason=email_in_use`, native `409 OAUTH_EMAIL_IN_USE`. Neither account changes — no account, no social row, no key |
+| `'separate'` | a new account, with no email because the other account holds it. `beforeRegister` runs with the provider's email and `emailVerified` as for any sign-up, `auth.register` fires, and the social row keeps the provider's email as `providerEmail` |
+
+```typescript
+configureAuth({
+    oauthEmailMatch: 'reject',   // 'attach' (default) | 'reject' | 'separate'
+});
+```
+
+Someone who signed up with Google later signs in with Kakao, and Kakao reports the same email:
+
+| Setting | What they see |
+| --- | --- |
+| `'attach'` | the Google account, with no notice (the default) |
+| `'reject'` | the error page; on `reason=email_in_use` the app can say "sign in with Google, then connect Kakao in settings" |
+| `'separate'` | a new account of its own, signed in with Kakao |
+
+An identity that is already linked signs in to its account in every mode — `'reject'` never stops
+it — and a sign-in whose email no account holds makes a new account as before. A `'separate'`
+account stays without an email: the re-login backfill skips an email another account owns.
+
+The refusal says nothing about the existing account: its details name the provider only, and it
+comes before the account-status check, so a suspended or deleting account is answered
+`email_in_use` too, never `account_unavailable`.
+
+| Error | HTTP | `code` | When |
+| --- | --- | --- | --- |
+| `OAuthEmailInUseError` | 409 | `OAUTH_EMAIL_IN_USE` | `oauthEmailMatch: 'reject'` and the first sign-in's email belongs to an existing account |
+
+The mobile contract lists `OAuthEmailInUseError` since 0.13.7.
 
 ### Battle.net
 
@@ -2379,7 +2422,8 @@ type. Branch on `reason`; show `error` if you like. The codes are the closed uni
 | `provider_error` | any other provider `error=…`, or the token exchange / user-info call failed | the provider's text; a fixed sentence for a library failure |
 | `account_unavailable` | the account is disabled, pending deletion, or gone | unchanged |
 | `link_only` | the app made this provider [link-only](#link-only-providers-and-recent-authentication): it can be connected from a signed-in account, never used to sign in (added in 0.3.0-beta.50, #157) | a fixed sentence |
-| `failed` | anything else — missing `code`/`state`, an unverified email that would link an account, a missing role | unchanged |
+| `email_in_use` | a first sign-in with this provider reported the email of an existing account and the app set [`oauthEmailMatch: 'reject'`](#when-a-first-sign-ins-email-matches-an-existing-account) (added in 0.3.0-beta.51, #156) | a fixed sentence |
+| `failed` | anything else — missing `code`/`state`, an unverified email that would link an account (`oauthEmailMatch` unset or `'attach'`), a missing role | unchanged |
 
 `SPFN_AUTH_OAUTH_ERROR_URL` takes `{reason}` beside `{error}`
 (`/auth/error?error={error}&code={reason}`); a template without `{reason}` gets `reason` as a query
@@ -2505,7 +2549,7 @@ await authApi.oauthNative.call({
 
 Every refusal names itself. The response body carries `error.code` — the server's error class
 name — alongside the usual `__type`, so a client that has no TypeScript error registry can still
-tell the twelve ways this call fails apart:
+tell the thirteen ways this call fails apart:
 
 | `error.code` | HTTP | What the client does |
 | --- | --- | --- |
@@ -2519,6 +2563,7 @@ tell the twelve ways this call fails apart:
 | `AccountPendingDeletionError` | 403 | offer restore |
 | `OAuthProviderLinkOnlyError` | 403 | hide that provider's sign-in button — the app made it [link-only](#link-only-providers-and-recent-authentication) |
 | `KeyIdAlreadyRegisteredError` | 409 | generate a new keyId and retry |
+| `OAuthEmailInUseError` | 409 | tell the user an account with this email exists: sign in to it and link this provider — the app set [`oauthEmailMatch: 'reject'`](#when-a-first-sign-ins-email-matches-an-existing-account) |
 | `TooManyRequestsError` | 429 | **the only retry-the-same-request code** |
 | `Error` | 500 | generic failure |
 

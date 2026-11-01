@@ -1121,6 +1121,29 @@ export class OAuthProviderLinkOnlyError extends ForbiddenError
 }
 
 /**
+ * OAuth Email In Use Error (409)
+ *
+ * A first sign-in with a provider reported an email that an existing account
+ * already holds, and the app set `oauthEmailMatch: 'reject'` (#156). Neither
+ * account changes. The details name the provider only — nothing about the
+ * existing account or how it signs in. Clients branch on `code`; the OAuth
+ * error page carries `reason=email_in_use`.
+ */
+export class OAuthEmailInUseError extends ConflictError
+{
+    readonly code = 'OAUTH_EMAIL_IN_USE';
+
+    constructor(data: { message?: string; details?: Record<string, any> } = {})
+    {
+        super({
+            message: data.message || 'An account with this email already exists. Sign in to it and link this provider from settings',
+            details: data.details,
+        });
+        this.name = 'OAuthEmailInUseError';
+    }
+}
+
+/**
  * Last Recovery Credential Error (409)
  *
  * Thrown when revoking a passkey or unlinking a social account (#154) would leave

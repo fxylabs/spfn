@@ -34,6 +34,7 @@ import {
     DeviceLinkNotFoundError,
     DeviceLinkWrongMatchError,
     KeyAlgorithmMismatchError,
+    OAuthEmailInUseError,
     OAuthProviderLinkOnlyError,
 } from '../../../errors/auth-errors';
 import { CLIENT_PROOF_CONTENT_TYPE, CLIENT_PROOF_HEADERS } from '../admission';
@@ -1415,6 +1416,20 @@ describe('declared errors match the refusals', () =>
         expect(entry?.surface).toBe('rest');
     });
 
+    it('C2: the email-in-use refusal carries the status its error class carries', () =>
+    {
+        // Added in 0.13.7 (#156), compared with its class for the same reason
+        // as the key-algorithm refusal above.
+        const thrown = new OAuthEmailInUseError();
+        const entry = declared.find((candidate) => candidate.code === thrown.name);
+
+        expect(entry).toBeDefined();
+        expect(entry?.httpStatus).toBe(thrown.statusCode);
+        expect(entry?.httpStatus).toBe(409);
+        expect(entry?.retryable).toBe(false);
+        expect(entry?.surface).toBe('rest');
+    });
+
     it('no device refusal is retryable: the same request cannot be answered differently', () =>
     {
         // Every one of them is a fact about the record, not about load. A client
@@ -1534,9 +1549,9 @@ describe('declared proof rules match the implementation', () =>
         replayWindowMillis: number;
     };
 
-    it('the contract line is the revision that lists the link-only refusal', () =>
+    it('C2: the contract line is the revision that lists the email-in-use refusal', () =>
     {
-        expect(bundle.contractVersion).toBe('0.13.6');
+        expect(bundle.contractVersion).toBe('0.13.7');
     });
 
     it('the supported range floor is the current minor, as the 0.x rule has it', () =>

@@ -254,6 +254,19 @@ export interface OAuthLinkConfig
 }
 
 /**
+ * What a first sign-in with a provider does when its email matches an
+ * existing account (#156)
+ *
+ * - `'attach'` — link the identity to that account when the provider verified
+ *   the email; refuse an unverified one with `UnverifiedEmailLinkError`
+ * - `'reject'` — refuse with `OAuthEmailInUseError` (`reason=email_in_use`),
+ *   verified or not; neither account changes
+ * - `'separate'` — create a new account without an email, since the other
+ *   account holds it
+ */
+export type OAuthEmailMatch = 'attach' | 'reject' | 'separate';
+
+/**
  * Auth configuration
  */
 export interface AuthConfig
@@ -331,6 +344,20 @@ export interface AuthConfig
 
     /** Linking a provider to a signed-in account */
     oauthLink?: OAuthLinkConfig;
+
+    /**
+     * What a first sign-in with a provider does when its email matches an
+     * existing account, for every provider. A sign-in whose identity is
+     * already linked is never affected.
+     *
+     * @default 'attach' (the 0.3.0-beta.50 behavior)
+     *
+     * @example
+     * ```typescript
+     * configureAuth({ oauthEmailMatch: 'reject' });
+     * ```
+     */
+    oauthEmailMatch?: OAuthEmailMatch;
 }
 
 /**
@@ -941,4 +968,17 @@ export function getOAuthLinkRecentAuthMs(): number
     const fallback = minutesOr(process.env.SPFN_AUTH_PASSKEY_RECENT_AUTH_MINUTES, DEFAULT_RECENT_AUTH_MINUTES);
 
     return minutesOr(String(globalConfig.oauthLink?.recentAuthMinutes), fallback) * 60_000;
+}
+
+/**
+ * How a first sign-in whose email matches an existing account is handled (#156).
+ *
+ * Read on every call, so a later `configureAuth` takes effect. Anything other
+ * than `'reject'` or `'separate'` is `'attach'`.
+ */
+export function getOAuthEmailMatch(): OAuthEmailMatch
+{
+    const configured = globalConfig.oauthEmailMatch;
+
+    return configured === 'reject' || configured === 'separate' ? configured : 'attach';
 }
