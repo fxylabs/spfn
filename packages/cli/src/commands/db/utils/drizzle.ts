@@ -150,7 +150,7 @@ export function validateDatabasePrerequisites(): void
  * Generate temporary drizzle.config.ts and run drizzle-kit command
  * Uses spawn to support interactive prompts from drizzle-kit
  */
-export async function runDrizzleCommand(command: string): Promise<void>
+export async function runDrizzleCommand(command: string, databaseUrl?: string): Promise<void>
 {
     const hasUserConfig = existsSync('./drizzle.config.ts');
     const tempConfigPath = `./drizzle.config.${process.pid}.${Date.now()}.temp.ts`;
@@ -167,7 +167,7 @@ export async function runDrizzleCommand(command: string): Promise<void>
             process.exit(1);
         }
 
-        writeFileSync(tempConfigPath, await generateTempConfigOrExit({ reconcile: command === 'generate' }));
+        writeFileSync(tempConfigPath, await generateTempConfigOrExit({ reconcile: command === 'generate', databaseUrl }));
     }
 
     // Run drizzle-kit command with spawn to support interactive prompts
@@ -179,7 +179,7 @@ export async function runDrizzleCommand(command: string): Promise<void>
         const drizzleProcess = spawn('drizzle-kit', args, {
             stdio: 'inherit', // Allow interactive input
             shell: true,
-            env: shouldRelaxDbTls(env.DATABASE_URL)
+            env: shouldRelaxDbTls(databaseUrl ?? env.DATABASE_URL)
                 ? { ...process.env, NODE_TLS_REJECT_UNAUTHORIZED: '0' }
                 : { ...process.env },
         });
@@ -216,12 +216,16 @@ export async function runDrizzleCommand(command: string): Promise<void>
 
 /**
  * Helper: Run drizzle command with spinner
+ *
+ * `databaseUrl` replaces DATABASE_URL in the generated config — the owner
+ * connection, for a command that needs it.
  */
 export async function runWithSpinner(
     spinnerText: string,
     command: string,
     successMessage: string,
     failMessage: string,
+    databaseUrl?: string,
 ): Promise<void>
 {
     const spinner = ora(spinnerText).start();
@@ -229,7 +233,7 @@ export async function runWithSpinner(
     try
     {
         spinner.stop();
-        await runDrizzleCommand(command);
+        await runDrizzleCommand(command, databaseUrl);
         console.log(chalk.green(`✅ ${successMessage}`));
     }
     catch (error)
@@ -469,13 +473,14 @@ async function resolveTempConfigSchema(config: DrizzleConfig, cwd: string, recon
  * `reconcile` loads the entity modules to settle folder versus registry; pass it
  * for a command that reads the schema.
  */
-export async function generateTempConfig(options: { reconcile: boolean }): Promise<string>
+export async function generateTempConfig(options: { reconcile: boolean; databaseUrl?: string }): Promise<string>
 {
     loadEnv();
 
     const cwd = process.cwd();
     const config = getDrizzleConfig({
         cwd,
+        databaseUrl: options.databaseUrl,
         // Exclude package schemas to avoid .ts/.js mixing (packages use migrations instead)
         disablePackageDiscovery: true,
         expandGlobs: true,
@@ -493,7 +498,7 @@ export async function generateTempConfig(options: { reconcile: boolean }): Promi
  * generateTempConfig, ending the command with the resolver's message instead
  * of a stack when the folder and the registry disagree
  */
-export async function generateTempConfigOrExit(options: { reconcile: boolean }): Promise<string>
+export async function generateTempConfigOrExit(options: { reconcile: boolean; databaseUrl?: string }): Promise<string>
 {
     try
     {

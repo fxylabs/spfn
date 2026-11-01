@@ -75,6 +75,14 @@ export const coreEnvSchema = defineEnvSchema({
         examples: ['postgresql://user:password@replica:5432/dbname'],
     }),
 
+    DATABASE_OWNER_URL: envString({
+        description: 'Owner role URL for `spfn db migrate`, `backup`, `restore` and `drop` (falls back to DATABASE_URL). The app itself never uses it: the app role must not own the tables, or row-level security does not apply to it',
+        required: false,
+        sensitive: true,
+        validator: parsePostgresUrl,
+        examples: ['postgresql://app_owner:password@localhost:5432/dbname'],
+    }),
+
     // ========================================================================
     // Database - Connection Pool
     // ========================================================================

@@ -204,17 +204,20 @@ function createPostgresJsMigrationDb(client: any): MigrationDb
  */
 export async function executeFunctionMigrations(
     plans: FunctionMigrationPlan[],
+    databaseUrl?: string,
 ): Promise<number>
 {
     const postgres = await import('postgres');
 
     loadEnv();
-    if (!env.DATABASE_URL)
+    const url = databaseUrl ?? env.DATABASE_URL;
+
+    if (!url)
     {
         throw new Error('DATABASE_URL not found in environment');
     }
 
-    const connection = postgres.default(env.DATABASE_URL, { max: 1 });
+    const connection = postgres.default(url, { max: 1 });
     const db = createPostgresJsMigrationDb(connection);
     let appliedCount = 0;
 

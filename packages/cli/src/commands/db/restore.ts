@@ -3,9 +3,8 @@ import { spawn } from 'child_process';
 import chalk from 'chalk';
 import ora from 'ora';
 import prompts from 'prompts';
-import { env } from '@spfn/core/config';
 import { loadEnv } from '@spfn/core/server';
-import { parseDatabaseUrl, confirmDangerousTarget } from './utils/database.js';
+import { OWNER_URL_MISSING, ownerDatabaseUrl, parseDatabaseUrl, confirmDangerousTarget } from './utils/database.js';
 import { listBackupFiles } from './utils/backup-files.js';
 import {
     loadBackupMetadata,
@@ -15,16 +14,20 @@ import {
 
 /**
  * Restore database from backup file
+ *
+ * Connects as the table owner (DATABASE_OWNER_URL, else DATABASE_URL):
+ * PostgreSQL refuses `COPY FROM` into a table whose row-level security policy
+ * applies to the role, and the restored tables must belong to the owner.
  */
 export async function dbRestore(backupFile?: string, options: { drop?: boolean; schema?: string; dataOnly?: boolean; schemaOnly?: boolean; verbose?: boolean } = {}): Promise<void>
 {
     console.log(chalk.blue('♻️  Restoring database from backup...\n'));
 
     loadEnv();
-    const dbUrl = env.DATABASE_URL;
+    const dbUrl = ownerDatabaseUrl();
     if (!dbUrl)
     {
-        console.error(chalk.red('❌ DATABASE_URL not found in environment'));
+        console.error(chalk.red(OWNER_URL_MISSING));
         console.log(chalk.yellow('\n💡 Tip: Add DATABASE_URL to your .env file'));
         process.exit(1);
     }

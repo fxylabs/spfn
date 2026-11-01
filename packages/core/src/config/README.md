@@ -131,6 +131,7 @@ validator **throw on access** if the value is present but malformed.
 | `DATABASE_URL` | `string` | No | `parsePostgresUrl` |
 | `DATABASE_WRITE_URL` | `string` | No | `parsePostgresUrl` |
 | `DATABASE_READ_URL` | `string` | No | `parsePostgresUrl` |
+| `DATABASE_OWNER_URL` | `string` | No | `parsePostgresUrl` — the table owner, used only by `spfn db migrate` / `backup` / `restore` / `drop`; falls back to `DATABASE_URL` |
 
 ### Database — connection pool
 

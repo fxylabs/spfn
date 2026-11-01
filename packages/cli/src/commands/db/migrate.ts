@@ -1,10 +1,9 @@
 import chalk from 'chalk';
 import { join } from 'path';
 import { existsSync } from 'fs';
-import { validateDatabasePrerequisites } from './utils/drizzle.js';
 import { dbBackup } from './backup.js';
+import { OWNER_URL_MISSING, ownerDatabaseUrl } from './utils/database.js';
 
-import { env } from '@spfn/core/config';
 import { loadEnv } from '@spfn/core/server';
 
 /**
@@ -18,17 +17,19 @@ const PROJECT_MIGRATIONS_TABLE = '__drizzle_migrations';
  * This command applies migrations created by `spfn db generate`.
  * Also applies function package migrations if available.
  * Use this in both development and production environments.
+ *
+ * Connects as the table owner: DATABASE_OWNER_URL, else DATABASE_URL.
  */
 export async function dbMigrate(options: { withBackup?: boolean } = {}): Promise<void>
 {
     // Validate prerequisites before starting any migrations
-    try
+    loadEnv();
+    const databaseUrl = ownerDatabaseUrl();
+
+    if (!databaseUrl)
     {
-        validateDatabasePrerequisites();
-    }
-    catch (error)
-    {
-        // Error already logged in validateDatabasePrerequisites
+        console.error(chalk.red(OWNER_URL_MISSING));
+        console.log(chalk.yellow('\n💡 Tip: Add DATABASE_URL (and DATABASE_OWNER_URL for the table owner) to your .env file'));
         process.exit(1);
     }
 
@@ -48,13 +49,6 @@ export async function dbMigrate(options: { withBackup?: boolean } = {}): Promise
     const { migrate } = await import('drizzle-orm/postgres-js/migrator');
     const postgres = await import('postgres');
 
-    loadEnv();
-    if (!env.DATABASE_URL)
-    {
-        console.error(chalk.red('❌ DATABASE_URL not found in environment'));
-        process.exit(1);
-    }
-
     // First, execute function package migrations (per-package tables)
     const { discoverFunctionMigrations, loadFunctionMigrationPlans, executeFunctionMigrations } =
         await import('../../utils/function-migrations.js');
@@ -68,7 +62,7 @@ export async function dbMigrate(options: { withBackup?: boolean } = {}): Promise
             console.log(chalk.dim(`  - ${func.packageName}`));
         });
 
-        await executeFunctionMigrations(loadFunctionMigrationPlans(functions));
+        await executeFunctionMigrations(loadFunctionMigrationPlans(functions), databaseUrl);
         console.log(chalk.green('✅ Function migrations applied\n'));
     }
 
@@ -76,7 +70,7 @@ export async function dbMigrate(options: { withBackup?: boolean } = {}): Promise
     const projectMigrationsDir = join(process.cwd(), 'src/server/drizzle');
     if (existsSync(projectMigrationsDir))
     {
-        const projConn = postgres.default(env.DATABASE_URL, { max: 1 });
+        const projConn = postgres.default(databaseUrl, { max: 1 });
         const projDb = drizzle({ client: projConn });
 
         try

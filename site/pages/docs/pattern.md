@@ -72,10 +72,24 @@ export class TodoRepository extends BaseRepository
 }
 ```
 
-A table that many tenants share declares a `tenantKey()` column, and its repository extends
-`TenantRepository` instead. The helpers keep their names and take the tenant id first —
-`this._findMany(tenantId, notes)` — and every query they build carries the tenant condition.
-See [TenantRepository](./packages/core/db.md#tenantrepository-tenant--tables-shared-by-many-tenants).
+Before you create a table, decide who owns its rows:
+
+| Rows owned by | Table |
+| --- | --- |
+| an organization (a workspace, a team) | `tenancy.table` — the tenant is the workspace |
+| one person | `tenancy.table` — the tenant is the user (`defineTenancy({ tenants: users })`) |
+| several people (an order's buyer and seller) | an ordinary table; the service checks access |
+| nobody in particular (public) | an ordinary table |
+
+A tenancy is declared once with `defineTenancy({ tenants, authorize })`. Its tables come from
+`tenancy.table(schema, name, columns)` and point at each other with
+`tenancy.reference('author', () => authors)`; the database enforces the tenant with composite
+foreign keys and a row-level security policy. Their repositories extend `TenantRepository`,
+whose helpers take the tenant id first — `this._findMany(tenantId, notes)`. A route adds
+`tenancy.guard({ param: 'workspaceId' })` and reads the tenant with `tenancy.of(c)`. The app
+connects as a role that owns no table; `spfn db migrate` runs as the owner through
+`DATABASE_OWNER_URL`.
+See [Tenancy](./packages/core/db.md#tenancy-definetenancy--tenant-tables-enforced-by-the-database).
 
 ## Route
 

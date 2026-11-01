@@ -33,6 +33,7 @@ import {
 } from './helpers';
 import { runEnvBootCheck } from './env-boot-check';
 import { runMigrationBootGate } from './migration-gate';
+import { runTenancyBootGate } from './tenancy-gate';
 import { getShutdownManager, resetShutdownManager } from './shutdown-manager';
 
 import type { ServerConfig, ServerInstance } from './types';
@@ -163,6 +164,10 @@ export async function startServer(config?: ServerConfig): Promise<ServerInstance
         // Pending migrations become an opaque 500 on the first request that touches
         // a missing column — refuse here instead, where the fix is one command.
         await runMigrationBootGate(finalConfig);
+
+        // A tenancy table is isolated only if the app's role is subject to its
+        // row-level security policy — refuse a production boot where it is not.
+        await runTenancyBootGate();
 
         const app = await createServer(finalConfig);
         const server = startHttpServer(app, host, port);

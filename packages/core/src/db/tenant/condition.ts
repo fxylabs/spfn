@@ -20,10 +20,16 @@ export type ConditionInput = SQL | undefined | ((...args: any[]) => SQL | undefi
  */
 export function assertTenantId(tenantId: unknown): asserts tenantId is number
 {
-    if (typeof tenantId !== 'number' || !Number.isSafeInteger(tenantId) || tenantId <= 0)
+    if (!isTenantId(tenantId))
     {
         throw new TypeError(`Tenant id must be a positive safe integer, received ${String(tenantId)}`);
     }
+}
+
+/** Whether `value` is a valid tenant id: a positive safe integer. */
+export function isTenantId(value: unknown): value is number
+{
+    return typeof value === 'number' && Number.isSafeInteger(value) && value > 0;
 }
 
 /** The tenant column of `table`, or an error when the table has none. */

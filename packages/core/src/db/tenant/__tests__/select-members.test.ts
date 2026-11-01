@@ -7,20 +7,25 @@
  * factories (`createJoin`, `createSetOperator`) that the named-method list
  * missed. This test reads the members from the installed drizzle and fails on
  * any it does not know, so an upgrade that adds one has to be classified here.
+ *
+ * Since #158 part 2 the members that execute or prepare the query are their
+ * own classes: executing ones run through the tenant rules (R1–R6), preparing
+ * ones are refused on a query that reads a tenancy table. A new member that
+ * executes the query would bypass those rules unless it is filed with them.
  */
 
 import { describe, it, expect } from 'vitest';
 import { drizzle } from 'drizzle-orm/postgres-js';
-import { REFUSED_SELECT_MEMBERS } from '../select';
+import { EXECUTE_SELECT_MEMBERS, PREPARE_SELECT_MEMBERS, REFUSED_SELECT_MEMBERS } from '../select';
 import { notes } from './fixtures';
 
 /** Members `_select` rewrites so they carry the tenant condition. */
 const SCOPED = new Set(['from', 'where', 'innerJoin', 'leftJoin']);
 
 /**
- * Members that cannot add a source, a join or a query: they order, group,
- * bound, lock, annotate, serialize, prepare or execute the query as it stands,
- * or return `this` (re-wrapped). `builder` is the class drizzle constructs the
+ * Members that cannot add a source, a join or a query and do not run it: they
+ * order, group, bound, lock, annotate or serialize the query as it stands, or
+ * return `this` (re-wrapped). `builder` is the class drizzle constructs the
  * query from; calling it by hand is outside what `_select` guards.
  */
 const NEUTRAL = new Set([
@@ -28,8 +33,10 @@ const NEUTRAL = new Set([
     '$dynamic', '$withCache', 'withoutSelectionCastCodecs',
     'having', 'groupBy', 'orderBy', 'limit', 'offset', 'for', 'comment',
     'as', 'getSQL', 'toSQL', 'getSelectedFields', 'getUsedTables',
-    '_prepare', 'prepare', 'execute', 'then', 'catch', 'finally',
 ]);
+
+/** Names that run the query; none of them may be filed as neutral. */
+const EXECUTING_NAME = /execute|prepare|then|catch|finally|iterator|stream|cursor|run/i;
 
 /** Names that would add a join or a query; none of them may be filed as neutral. */
 const SOURCE_ADDING_NAME = /join|union|intersect|except|setoperator|lateral|from/i;
@@ -66,7 +73,11 @@ function symbolFunctionMembers(object: object): string[]
 
 function unclassified(members: string[]): string[]
 {
-    return members.filter((name) => !SCOPED.has(name) && !REFUSED_SELECT_MEMBERS.has(name) && !NEUTRAL.has(name));
+    return members.filter((name) => !SCOPED.has(name)
+        && !REFUSED_SELECT_MEMBERS.has(name)
+        && !EXECUTE_SELECT_MEMBERS.has(name)
+        && !PREPARE_SELECT_MEMBERS.has(name)
+        && !NEUTRAL.has(name));
 }
 
 describe('drizzle select builder members', () =>
@@ -95,10 +106,16 @@ describe('drizzle select builder members', () =>
         expect([...NEUTRAL].filter((name) => SOURCE_ADDING_NAME.test(name))).toEqual([]);
     });
 
-    it('every refused name is a real member, so a typo cannot leave one open', () =>
+    it('no neutral member is named like one that runs the query', () =>
+    {
+        expect([...NEUTRAL].filter((name) => EXECUTING_NAME.test(name))).toEqual([]);
+    });
+
+    it('every refused, executing or preparing name is a real member, so a typo cannot leave one open', () =>
     {
         const members = new Set(functionMembers(query));
+        const listed = [...REFUSED_SELECT_MEMBERS, ...EXECUTE_SELECT_MEMBERS, ...PREPARE_SELECT_MEMBERS];
 
-        expect([...REFUSED_SELECT_MEMBERS].filter((name) => !members.has(name))).toEqual([]);
+        expect(listed.filter((name) => !members.has(name))).toEqual([]);
     });
 });

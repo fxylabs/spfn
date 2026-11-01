@@ -228,6 +228,7 @@ await runInTransaction<void, AppDatabase>(async (tx) =>
 | `idleTimeout` | `number` | `env.TRANSACTION_IDLE_TIMEOUT` (30000) | see timeout semantics below |
 | `context` | `string` | `'transaction'` | label in logs (the middleware passes `"METHOD /path"`) |
 | `requiresNew` | `boolean` | `false` | run in an independent transaction instead of joining an ambient one — see [Nested transactions](#nested-transactions-savepoints) |
+| `tenant` | `number` | — | bind the transaction to a tenant: `set_config('app.tenant_id', tenant, true)` right after the root `BEGIN`; a nested call naming another tenant throws `TenantMismatchError` before its SAVEPOINT — see [Tenancy](../README.md#tenancy-definetenancy--tenant-tables-enforced-by-the-database) |
 
 ### Timeout semantics
 

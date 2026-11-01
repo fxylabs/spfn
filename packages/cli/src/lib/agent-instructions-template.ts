@@ -49,11 +49,26 @@ export class OrderRepository extends BaseRepository
 
 The scaffold's \`src/server/repositories/\` shows the shape.
 
-**Tenant data.** A table many tenants share declares a \`tenantKey()\`
-column, and its repository extends \`TenantRepository\` instead: every helper
-takes the tenant id first (\`this._findMany(tenantId, notes)\`) and adds the
-tenant condition itself. Never read such a table through \`BaseRepository\` or
-a raw \`this.db\` query — those see every tenant's rows.
+**Who owns a row.** Decide it before you create a table:
+
+- owned by an organization (a workspace, a team) → \`tenancy.table\`, the
+  tenant is the workspace;
+- owned by one person → \`tenancy.table\`, the tenant is the user
+  (\`defineTenancy({ tenants: users })\`);
+- shared by several people (an order's buyer and seller) → an ordinary table,
+  and the service checks access;
+- public → an ordinary table.
+
+A tenancy is declared once, \`defineTenancy({ tenants, authorize })\`; its
+tables come from \`tenancy.table(schema, name, columns)\`, references between
+them from \`tenancy.reference('author', () => authors)\`, and the database
+enforces the tenant with foreign keys and a row-level security policy. Their
+repositories extend \`TenantRepository\`, whose helpers take the tenant id
+first (\`this._findMany(tenantId, notes)\`). The route declares
+\`.use([tenancy.guard({ param: 'workspaceId' })])\` and reads the tenant with
+\`tenancy.of(c)\`. Never read a tenant table through \`BaseRepository\` or a
+raw \`this.db\` query, and never let the app connect as the table owner:
+migrations run through \`DATABASE_OWNER_URL\`.
 
 **Transactions.** Wrap the route in \`Transactional()\`, or call
 \`runInTransaction\` in a service or script. Never accept or pass a \`tx\`

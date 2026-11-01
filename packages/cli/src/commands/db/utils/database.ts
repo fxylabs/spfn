@@ -1,6 +1,24 @@
 import net from 'net';
 import chalk from 'chalk';
 import prompts from 'prompts';
+import { env } from '@spfn/core/config';
+
+/** What the owner-connection commands print when neither URL is set. */
+export const OWNER_URL_MISSING = '❌ Neither DATABASE_OWNER_URL nor DATABASE_URL is set';
+
+/**
+ * The URL `db migrate`, `backup`, `restore` and `drop` connect with: the table
+ * owner's, `DATABASE_OWNER_URL`, else `DATABASE_URL` as before it existed.
+ *
+ * The app connects as a role that owns no table, so row-level security applies
+ * to it; the owner is who creates the tables, and who `pg_dump` (refused for a
+ * role a policy applies to) and `COPY FROM` on restore need. Never log the
+ * value — it carries the owner's password.
+ */
+export function ownerDatabaseUrl(): string | undefined
+{
+    return env.DATABASE_OWNER_URL ?? env.DATABASE_URL;
+}
 
 /**
  * Parse DATABASE_URL into connection info
