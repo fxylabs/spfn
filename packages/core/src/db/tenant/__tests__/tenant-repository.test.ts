@@ -8,7 +8,7 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 import { asc, eq, sql } from 'drizzle-orm';
 import type { InferInsertModel, SQL } from 'drizzle-orm';
-import { alias } from 'drizzle-orm/pg-core';
+import { alias, union } from 'drizzle-orm/pg-core';
 import type { PgColumn } from 'drizzle-orm/pg-core';
 import { createDbTestFixture } from '../../__tests__/helpers/db-fixture';
 import { BaseRepository } from '../../repository';
@@ -455,6 +455,16 @@ describe('TenantRepository (integration)', () =>
             const query = repo.selectAll(1).from(notes) as unknown as Record<string, () => unknown>;
 
             expect(() => query[method]()).toThrow(/is not supported on a TenantRepository _select/);
+        });
+
+        it('row 25: the standalone union() function is refused too', () =>
+        {
+            if (!dbFixture.isAvailable) return;
+
+            const scoped = repo.selectAll(1).from(notes);
+            const other = dbFixture.db.select().from(notes);
+
+            expect(() => union(scoped, other)).toThrow(/addSetOperators\(\) is not supported/);
         });
 
         it('row 26: without where() the from table is still scoped', async () =>

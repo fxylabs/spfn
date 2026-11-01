@@ -38,6 +38,9 @@ const REFUSED_METHODS = new Set([
     'intersectAll',
     'except',
     'exceptAll',
+    // The standalone union(a, b) / intersect / except functions from
+    // drizzle-orm/pg-core call this on the left query instead of the methods above.
+    'addSetOperators',
 ]);
 
 const SCOPED_JOINS = new Set(['innerJoin', 'leftJoin']);
