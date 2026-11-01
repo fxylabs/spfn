@@ -5,6 +5,7 @@
  */
 
 import { ValidationError } from '@spfn/core/errors';
+import { onAfterCommit } from '@spfn/core/db';
 import {
     InvalidCredentialsError,
     AccountDisabledError,
@@ -275,14 +276,16 @@ export async function createVerifiedAccount(
         phone: newUser.phone || undefined,
     };
 
-    // Emit register event
-    await authRegisterEvent.emit({
+    // After the commit: both routes that reach here run under `Transactional()`,
+    // and an inline emit would announce an account another connection cannot
+    // read yet, or one a rollback then erased.
+    onAfterCommit(() => authRegisterEvent.emit({
         userId: result.userId,
         provider: email ? 'email' : 'phone',
         email: result.email,
         phone: result.phone,
         metadata,
-    });
+    }));
 
     return result;
 }
@@ -397,14 +400,17 @@ export async function loginService(
         ...loginBindingFields(registered),
     };
 
-    // Emit login event
-    await authLoginEvent.emit({
+    // After the commit, with `mfaEnrolled` read before the callback is queued
+    // so that the read runs in this transaction and the callback stays synchronous.
+    const mfaEnrolled = await mfaEnrolledForUser(user.id);
+
+    onAfterCommit(() => authLoginEvent.emit({
         userId: String(user.id),
         provider: email ? 'email' : 'phone',
         email: result.email,
         phone: result.phone,
-        mfaEnrolled: await mfaEnrolledForUser(user.id),
-    });
+        mfaEnrolled,
+    }));
 
     return result;
 }

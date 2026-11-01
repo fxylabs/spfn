@@ -5,6 +5,7 @@
  */
 
 import crypto from 'crypto';
+import { onAfterCommit } from '@spfn/core/db';
 import { Invitation } from '../entities/user-invitations';
 import {
     invitationsRepository,
@@ -323,15 +324,17 @@ export async function acceptInvitation(params: {
         new Date(),
     );
 
-    // Emit invitation accepted event
-    await invitationAcceptedEvent.emit({
+    // After the commit, like the device event above: the accept route runs
+    // under `Transactional()`, and the account must be readable by the time a
+    // subscriber hears of it.
+    onAfterCommit(() => invitationAcceptedEvent.emit({
         invitationId: String(invitation.id),
         email: invitation.email,
         userId: String(newUser.id),
         roleId: Number(invitation.roleId),
         invitedBy: String(invitation.invitedBy),
         metadata: invitation.metadata as Record<string, unknown> | undefined,
-    });
+    }));
 
     return {
         userId: newUser.id,
