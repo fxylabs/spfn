@@ -31,22 +31,37 @@ const NEUTRAL = new Set([
     '_prepare', 'prepare', 'execute', 'then', 'catch', 'finally',
 ]);
 
-function functionMembers(object: object): string[]
+/** Names that would add a join or a query; none of them may be filed as neutral. */
+const SOURCE_ADDING_NAME = /join|union|intersect|except|setoperator|lateral|from/i;
+
+function prototypeLevels(object: object): object[]
 {
-    const names = new Set<string>();
+    const levels: object[] = [];
 
     for (let level: object | null = object; level && level !== Object.prototype; level = Object.getPrototypeOf(level))
     {
-        for (const name of Object.getOwnPropertyNames(level))
-        {
-            if (typeof (object as Record<string, unknown>)[name] === 'function')
-            {
-                names.add(name);
-            }
-        }
+        levels.push(level);
     }
 
-    return [...names].sort();
+    return levels;
+}
+
+function functionMembers(object: object): string[]
+{
+    const names = prototypeLevels(object)
+        .flatMap((level) => Object.getOwnPropertyNames(level))
+        .filter((name) => typeof (object as Record<string, unknown>)[name] === 'function');
+
+    return [...new Set(names)].sort();
+}
+
+/** The proxy refuses members by string name, so a symbol-keyed function could not be refused. */
+function symbolFunctionMembers(object: object): string[]
+{
+    return prototypeLevels(object)
+        .flatMap((level) => Object.getOwnPropertySymbols(level))
+        .filter((symbol) => typeof (object as Record<symbol, unknown>)[symbol] === 'function')
+        .map(String);
 }
 
 function unclassified(members: string[]): string[]
@@ -67,6 +82,17 @@ describe('drizzle select builder members', () =>
     it('every member of the query builder is classified', () =>
     {
         expect(unclassified(functionMembers(query))).toEqual([]);
+    });
+
+    it('no symbol-keyed function member exists, since the proxy could not refuse one', () =>
+    {
+        expect(symbolFunctionMembers(builder)).toEqual([]);
+        expect(symbolFunctionMembers(query)).toEqual([]);
+    });
+
+    it('no neutral member is named like one that adds a join or a query', () =>
+    {
+        expect([...NEUTRAL].filter((name) => SOURCE_ADDING_NAME.test(name))).toEqual([]);
     });
 
     it('every refused name is a real member, so a typo cannot leave one open', () =>
