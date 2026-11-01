@@ -287,6 +287,7 @@ describe('renderAgentInstructions', () =>
         expect(block.endsWith(`\n${END_MARKER}`)).toBe(true);
         expect(block).toContain('<!-- spfn CLI v9.9.9 -->');
         expect(block).toContain('class OrderRepository extends BaseRepository');
+        expect(block).toContain('its repository extends `TenantRepository` instead');
         expect(block).toContain('node_modules/@spfn/core/src/db/README.md');
         expect(block).toContain('node_modules/@spfn/auth/README.md');
         expect(block).toContain('https://superfunction.xyz/docs/packages/core/<module>');

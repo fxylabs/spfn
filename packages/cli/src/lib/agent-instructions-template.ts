@@ -49,6 +49,12 @@ export class OrderRepository extends BaseRepository
 
 The scaffold's \`src/server/repositories/\` shows the shape.
 
+**Tenant data.** A table many tenants share declares a \`tenantKey()\`
+column, and its repository extends \`TenantRepository\` instead: every helper
+takes the tenant id first (\`this._findMany(tenantId, notes)\`) and adds the
+tenant condition itself. Never read such a table through \`BaseRepository\` or
+a raw \`this.db\` query — those see every tenant's rows.
+
 **Transactions.** Wrap the route in \`Transactional()\`, or call
 \`runInTransaction\` in a service or script. Never accept or pass a \`tx\`
 parameter: repositories pick the transaction up from the async context. Side
