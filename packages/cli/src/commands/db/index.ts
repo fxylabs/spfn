@@ -17,6 +17,8 @@ import { dbRestore } from './restore.js';
 import { dbBackupList } from './list.js';
 import { dbBackupClean } from './clean.js';
 import { dbReindex } from './reindex.js';
+import { dbTenantExport } from './tenant/export.js';
+import { dbTenantImport } from './tenant/import.js';
 
 /**
  * Database command group
@@ -106,3 +108,18 @@ dbCommand
     .description('Convert migration files from sequential to timestamp prefix')
     .option('--dry-run', 'Show changes without applying')
     .action((options) => dbReindex(options));
+
+const tenantCommand = dbCommand
+    .command('tenant')
+    .description('Move one tenant\'s rows of every tenant table out to a folder and back in');
+
+tenantCommand
+    .command('export <tenantId>')
+    .description('Export one tenant\'s rows to backups/tenant-<id>-<time>/ (one snapshot, app connection)')
+    .action((tenantId: string) => dbTenantExport(tenantId));
+
+tenantCommand
+    .command('import <dir>')
+    .description('Import a tenant export folder in one transaction (owner connection)')
+    .option('--replace', 'Delete the tenant\'s existing rows first instead of refusing')
+    .action((dir: string, options: { replace?: boolean }) => dbTenantImport(dir, { replace: options.replace === true }));
