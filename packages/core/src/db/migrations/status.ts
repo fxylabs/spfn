@@ -108,12 +108,20 @@ function toRows(result: unknown): Record<string, unknown>[]
     return Array.isArray(rows) ? rows as Record<string, unknown>[] : [];
 }
 
+/**
+ * Looked up in `pg_catalog`, which every role can read. `information_schema`
+ * lists only tables the current role owns or holds a privilege on, so an app
+ * role without grants on schema `drizzle` would find no table and be told every
+ * migration is pending. Found here, the table is then read, and a missing
+ * privilege surfaces as a permission error — "could not check", never "pending".
+ */
 async function tableExists(db: MigrationStatusDb, tableName: string): Promise<boolean>
 {
     const rows = toRows(await db.execute(sql`
         SELECT EXISTS (
-            SELECT 1 FROM information_schema.tables
-            WHERE table_schema = 'drizzle' AND table_name = ${tableName}
+            SELECT 1 FROM pg_catalog.pg_class c
+            JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+            WHERE n.nspname = 'drizzle' AND c.relname = ${tableName} AND c.relkind IN ('r', 'p')
         ) AS "exists"`));
 
     return rows[0]?.exists === true;
@@ -122,13 +130,17 @@ async function tableExists(db: MigrationStatusDb, tableName: string): Promise<bo
 /**
  * drizzle-orm 1.0 records a `name` column and treats a migration as applied
  * when its name is present; CLI-owned per-package tables have no such column.
+ * The column is looked up in `pg_catalog` for the same reason as the table.
  */
 async function readAppliedNames(db: MigrationStatusDb, tableName: string): Promise<Set<string>>
 {
     const columnRows = toRows(await db.execute(sql`
         SELECT EXISTS (
-            SELECT 1 FROM information_schema.columns
-            WHERE table_schema = 'drizzle' AND table_name = ${tableName} AND column_name = 'name'
+            SELECT 1 FROM pg_catalog.pg_attribute a
+            JOIN pg_catalog.pg_class c ON c.oid = a.attrelid
+            JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+            WHERE n.nspname = 'drizzle' AND c.relname = ${tableName}
+                AND a.attname = 'name' AND a.attnum > 0 AND NOT a.attisdropped
         ) AS "exists"`));
 
     if (columnRows[0]?.exists !== true)
