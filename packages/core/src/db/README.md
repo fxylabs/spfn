@@ -18,14 +18,14 @@ import {
     findOne, findMany, create, createMany, upsert,
     updateOne, updateMany, deleteOne, deleteMany, count,
     // Repository
-    BaseRepository, RepositoryError,
+    BaseRepository, TenantRepository, RepositoryError,
     // Connection (sub-module: manager/)
     initDatabase, getDatabase, closeDatabase, getDatabaseInfo,
     // Transactions (sub-module: transaction/)
     Transactional, runWithTransaction, getTransaction,
     onBeforeCommit, onAfterCommit, onAfterRollback,
     // Schema helpers (sub-module: schema/)
-    id, uuid, timestamps, foreignKey, enumText, typedJsonb, createSchema,
+    id, uuid, timestamps, foreignKey, tenantKey, enumText, typedJsonb, createSchema,
     // Error mapping
     fromPostgresError,
 } from '@spfn/core/db';
@@ -44,8 +44,9 @@ Everything re-exported from `@spfn/core/db` (`src/db/index.ts`):
 `findOne`, `findMany`, `create`, `createMany`, `upsert`, `updateOne`, `updateMany`,
 `deleteOne`, `deleteMany`, `count`
 
-**Repository** (`repository.ts`):
-`BaseRepository` (abstract class), `RepositoryError` (class), `RepositoryDatabase` (type)
+**Repository** (`repository.ts`, `tenant/`):
+`BaseRepository` (abstract class), `TenantRepository` (abstract class, tables shared by many
+tenants), `RepositoryError` (class), `RepositoryDatabase` (type), `CountOptions` (type)
 
 **PostgreSQL error mapping** (`postgres-errors.ts`):
 `fromPostgresError`
@@ -69,7 +70,7 @@ Types: `TransactionContext`, `TransactionDB`, `TransactionalOptions`,
 
 **Schema helpers** (sub-module — see [schema/README](./schema/README.md), re-exported via
 `export * from './schema'`):
-`id`, `uuid`, `timestamps`, `foreignKey`, `optionalForeignKey`, `auditFields`,
+`id`, `uuid`, `timestamps`, `foreignKey`, `optionalForeignKey`, `tenantKey`, `auditFields`,
 `publishingFields`, `softDelete`, `verificationTimestamp`, `utcTimestamp`, `enumText`,
 `typedJsonb`, `createSchema`, `packageNameToSchema`, `getSchemaInfo`
 
@@ -250,6 +251,7 @@ inside repository methods.
 |--------|---------|
 | `_findOne(table, where)` | `T \| null` |
 | `_findMany(table, options?)` | `T[]` |
+| `_findManyKeyset(table, { cursorColumn, limit, after?, order?, where? })` | `T[]` |
 | `_create(table, data)` | `T` |
 | `_createMany(table, data[])` | `T[]` |
 | `_upsert(table, data, { target, set? })` | `T` |
@@ -257,7 +259,12 @@ inside repository methods.
 | `_updateMany(table, where, data)` | `T[]` |
 | `_deleteOne(table, where)` | `T \| null` |
 | `_deleteMany(table, where)` | `T[]` |
-| `_count(table, where?)` | `number` |
+| `_count(table, where?, { cap? })` | `number` — with `cap`, at most `cap + 1` |
+
+`_count` with `cap` stops counting past `cap` rows: it reads at most `cap + 1` rows through a
+limited subquery, and a result of `cap + 1` means "more than `cap`". A list label such as
+"1,000+" needs nothing more, and the count no longer scans every matching row on each
+request.
 
 These are `protected` — calling `userRepo._findOne(...)` from outside is a TypeScript
 error. Expose a domain method (`findById`) instead.
@@ -321,6 +328,102 @@ export class UserRepository extends BaseRepository<AppRelations, AppDatabase>
     // this.db and this.readDb are AppDatabase
 }
 ```
+
+---
+
+## TenantRepository (`tenant/`) — tables shared by many tenants
+
+For an app that keeps many tenants (workspaces, organizations, customers) in the same
+tables. Mark a table's tenant column with `tenantKey()`; extend `TenantRepository` instead of
+`BaseRepository`. Every method takes the tenant id first and writes the tenant condition
+into the query itself, so a query this class builds cannot reach another tenant's rows.
+Packages that never call `tenantKey()` are unaffected.
+
+```typescript
+import { createSchema, foreignKey, id, tenantKey, timestamps, TenantRepository } from '@spfn/core/db';
+import { index, text } from 'drizzle-orm/pg-core';
+import { eq } from 'drizzle-orm';
+
+const schema = createSchema('@acme/notes');
+
+export const authors = schema.table('authors', {
+    id: id(),
+    tenantId: tenantKey(),                          // tenant_id bigint not null
+    name: text('name').notNull(),
+}, (t) => [index('authors_tenant_id_idx').on(t.tenantId, t.id)]);
+
+export const notes = schema.table('notes', {
+    id: id(),
+    tenantId: tenantKey(),
+    authorId: foreignKey('author', () => authors.id),
+    title: text('title').notNull(),
+    ...timestamps(),
+}, (t) => [index('notes_tenant_id_idx').on(t.tenantId, t.id)]);
+
+export class NoteRepository extends TenantRepository
+{
+    async list(tenantId: number, after?: number)
+    {
+        return this._findManyKeyset(tenantId, notes, { cursorColumn: notes.id, after, limit: 50 });
+    }
+
+    async listWithAuthor(tenantId: number)
+    {
+        return this._select(tenantId, { title: notes.title, author: authors.name })
+            .from(notes)
+            .innerJoin(authors, eq(notes.authorId, authors.id));
+    }
+}
+```
+
+`listWithAuthor(7)` runs:
+
+```sql
+select "notes"."title", "authors"."name"
+from "acme_notes"."notes"
+inner join "acme_notes"."authors"
+    on ("notes"."author_id" = "authors"."id" and "authors"."tenant_id" = $1)
+where "notes"."tenant_id" = $2
+```
+
+| Method | Tenant handling |
+|--------|-----------------|
+| `_findOne(tenantId, table, where)` | added to WHERE |
+| `_findMany(tenantId, table, options?)` | added to WHERE |
+| `_findManyKeyset(tenantId, table, options)` | added to WHERE |
+| `_count(tenantId, table, where?, { cap? })` | added to WHERE |
+| `_create` / `_createMany(tenantId, table, data)` | written to the tenant column; a different tenant value in `data` throws, and `_createMany` checks every row before writing any |
+| `_upsert(tenantId, table, data, { target, set? })` | written to the tenant column; `target` must include the tenant column, `set` must not change it |
+| `_updateOne` / `_updateMany(tenantId, table, where, data)` | added to WHERE; `data` naming the tenant column throws |
+| `_deleteOne` / `_deleteMany(tenantId, table, where)` | added to WHERE |
+| `_select(tenantId, fields?)` | the `from` table in WHERE, each joined tenant-aware table in its ON clause |
+
+- **The tenant id must be a positive safe integer.** Anything else — `0`, `NaN`,
+  `undefined`, a string — throws before a query is built.
+- **Every method takes tenant-aware tables only.** An ordinary table throws; it can still be
+  joined in `_select`, where it gets no tenant condition.
+- **Joined tables get the condition in ON, not WHERE.** In WHERE, a left join's unmatched
+  rows would be filtered out and it would behave as an inner join. `_select` scopes
+  `innerJoin` and `leftJoin` (aliases included); `rightJoin`, `fullJoin`, `crossJoin`, the
+  lateral joins and set operators (`union`, … — the methods and the standalone functions)
+  throw — write those on `this.readDb`.
+- **A view cannot be joined.** A view's columns are its own, so `_select` cannot tell which
+  holds the tenant; joining one throws, as `.from(view)` does. Join the underlying table.
+- **The upsert target must include the tenant column.** With `target: [table.id]`, an insert
+  could collide with another tenant's row and update it.
+- **Update and delete still need a where of their own,** as in `BaseRepository`: the tenant
+  condition alone does not count, so a bare call cannot rewrite or delete a whole tenant.
+- **Index on the tenant column first.** `tenantKey()` cannot create an index (a Drizzle
+  column cannot); declare each index in the table's third argument starting with the tenant
+  column, e.g. `(tenant_id, id)` for keyset pages.
+- **`this.db` / `this.readDb` remain available and are not scoped,** nor is a subquery you
+  pass as a condition or join source. In local and development runs (`NODE_ENV` `local` or
+  `development`; an unset `NODE_ENV` is `local`), the database connection logs a warning —
+  once per SQL text, with the SQL — when a query reads, updates or deletes a tenant-aware
+  table without a condition on its tenant column. It reads SQL text, so it is a development
+  aid, not isolation: an alias it cannot resolve, a raw `sql` template or an unusual shape can
+  make it miss a query or warn about a scoped one. A failure inside the check never fails the
+  query. Other environments attach no logger.
 
 ---
 

@@ -94,3 +94,7 @@ export {
 // Repository Pattern
 export { BaseRepository, RepositoryError } from './repository';
 export type { RepositoryDatabase } from './repository';
+export type { CountOptions } from './query-utils';
+
+// Tenant-aware layer (tenantKey() is exported with the schema helpers)
+export { TenantRepository } from './tenant';

@@ -76,44 +76,14 @@
 
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js';
 import type { AnyRelations, EmptyRelations, InferInsertModel, InferSelectModel, SQL } from 'drizzle-orm';
-import { count as sqlCount, and, gt, lt, asc, desc } from 'drizzle-orm';
-import type { PgAsyncDatabase, PgColumn, PgTable } from 'drizzle-orm/pg-core';
-import { getDatabase } from './manager';
-import { reportDatabaseError } from './manager/reconnect-trigger';
-import { getTransaction } from './transaction';
-import { isSQLWrapper, buildWhereFromObject } from './query-utils';
-import { env } from '@spfn/core/config';
+import { and, gt, lt, asc, desc } from 'drizzle-orm';
+import type { PgColumn, PgTable } from 'drizzle-orm/pg-core';
+import { isSQLWrapper, buildWhereFromObject, buildWhereClause, clampRowLimit, countRows, type CountOptions } from './query-utils';
 import type { DrizzleDatabase } from './manager/types';
+import { RepositoryCore } from './repository-core';
 
-/** Database surface available to repositories inside and outside transactions. */
-export type RepositoryDatabase<TDatabase extends DrizzleDatabase> =
-    TDatabase extends PgAsyncDatabase<infer TQueryResult, infer TRelations>
-        ? PgAsyncDatabase<TQueryResult, TRelations>
-        : never;
-
-/**
- * Enhanced error class that includes repository context
- */
-export class RepositoryError extends Error
-{
-    constructor(
-        message: string,
-        public readonly repository: string,
-        public readonly method?: string,
-        public readonly table?: string,
-        public readonly originalError?: Error,
-    )
-    {
-        super(message);
-        this.name = 'RepositoryError';
-
-        // Preserve original stack trace if available
-        if (originalError?.stack)
-        {
-            this.stack = originalError.stack;
-        }
-    }
-}
+export { RepositoryError } from './repository-core';
+export type { RepositoryDatabase } from './repository-core';
 
 /**
  * Base Repository class for database operations
@@ -132,124 +102,8 @@ export class RepositoryError extends Error
 export abstract class BaseRepository<
     TRelations extends AnyRelations = EmptyRelations,
     TDatabase extends DrizzleDatabase = PostgresJsDatabase<TRelations>,
->
+> extends RepositoryCore<TRelations, TDatabase>
 {
-    /**
-     * Write database instance
-     *
-     * Automatically resolves to:
-     * - Transaction DB if running within transaction context
-     * - Global write (primary) instance otherwise
-     *
-     * Use this for INSERT, UPDATE, DELETE operations.
-     *
-     * @example
-     * ```typescript
-     * async create(data: NewUser) {
-     *     return await this.db.insert(users).values(data).returning();
-     * }
-     * ```
-     */
-    protected get db(): RepositoryDatabase<TDatabase>
-    {
-        // Transaction context takes precedence
-        const txDb = getTransaction<TDatabase>();
-        if (txDb)
-        {
-            return txDb as RepositoryDatabase<TDatabase>;
-        }
-
-        // Fall back to global write instance
-        return getDatabase<TDatabase>('write') as unknown as RepositoryDatabase<TDatabase>;
-    }
-
-    /**
-     * Read database instance
-     *
-     * Automatically resolves to:
-     * - Transaction DB if running within transaction context
-     * - Global read (replica) instance otherwise
-     *
-     * Use this for SELECT operations to leverage read replicas
-     * and reduce load on the primary database.
-     *
-     * @example
-     * ```typescript
-     * async findById(id: string) {
-     *     return await this.readDb
-     *         .select()
-     *         .from(users)
-     *         .where(eq(users.id, id));
-     * }
-     * ```
-     */
-    protected get readDb(): RepositoryDatabase<TDatabase>
-    {
-        // Transaction context takes precedence
-        const txDb = getTransaction<TDatabase>();
-        if (txDb)
-        {
-            return txDb as RepositoryDatabase<TDatabase>;
-        }
-
-        // Fall back to global read instance (uses replica if configured)
-        return getDatabase<TDatabase>('read') as unknown as RepositoryDatabase<TDatabase>;
-    }
-
-    /**
-     * Wrap query execution with repository context
-     *
-     * Enhances error messages with repository information to make debugging easier.
-     * When an error occurs, it will include:
-     * - Repository class name
-     * - Method name
-     * - Table name (if provided)
-     * - Original error details
-     *
-     * @param queryFn - Query function to execute
-     * @param context - Context information (operation name, table name, etc.)
-     * @returns Query result
-     * @throws RepositoryError with enhanced context
-     *
-     * @example
-     * ```typescript
-     * async findById(id: number) {
-     *     return await this.withContext(
-     *         () => this.readDb.select().from(users).where(eq(users.id, id)),
-     *         { method: 'findById', table: 'users' }
-     *     );
-     * }
-     * ```
-     */
-    protected async withContext<T>(
-        queryFn: () => Promise<T>,
-        context: { method?: string; table?: string } = {},
-    ): Promise<T>
-    {
-        try
-        {
-            return await queryFn();
-        }
-        catch (error)
-        {
-            // Feed query errors to the reconnect-trigger so repeated
-            // connection-level failures can force a pool rebuild.
-            reportDatabaseError(error);
-
-            const err = error instanceof Error ? error : new Error(String(error));
-            const repositoryName = this.constructor.name;
-
-            // Create enhanced error with repository context
-            throw new RepositoryError(
-                err.message,
-                repositoryName,
-                context.method,
-                context.table,
-                err,
-            );
-        }
-    }
-
     // ============================================================================
     // CRUD Methods
     // ============================================================================
@@ -337,14 +191,8 @@ export abstract class BaseRepository<
             query = query.orderBy(...orderByArray) as any;
         }
 
-        // Apply limit, with an optional safety ceiling (DB_MAX_ROWS, 0 = off).
-        // When set, an unbounded _findMany is capped and an explicit limit is
-        // clamped — guards against accidentally loading a whole large table.
-        const maxRows = env.DB_MAX_ROWS;
-        const requestedLimit = options?.limit && options.limit > 0 ? options.limit : undefined;
-        const effectiveLimit = maxRows > 0
-            ? Math.min(requestedLimit ?? maxRows, maxRows)
-            : requestedLimit;
+        // Apply limit, with the DB_MAX_ROWS safety ceiling
+        const effectiveLimit = clampRowLimit(options?.limit && options.limit > 0 ? options.limit : undefined);
 
         if (effectiveLimit)
         {
@@ -392,9 +240,8 @@ export abstract class BaseRepository<
     {
         const { cursorColumn, after, order = 'asc', where } = options;
 
-        // Clamp the page size to the same safety ceiling as _findMany (0 = off)
-        const maxRows = env.DB_MAX_ROWS;
-        const limit = maxRows > 0 ? Math.min(options.limit, maxRows) : options.limit;
+        // Clamp the page size to the same safety ceiling as _findMany
+        const limit = clampRowLimit(options.limit) as number;
 
         const baseWhere = where
             ? (isSQLWrapper(where) ? where : buildWhereFromObject(table, where as Record<string, any>))
@@ -655,35 +502,24 @@ export abstract class BaseRepository<
      *
      * @param table - Drizzle table schema
      * @param where - Optional object or SQL condition
-     * @returns Number of records
+     * @param options - `cap` stops counting past that many rows
+     * @returns Number of records; with `cap`, at most `cap + 1`, which means "more than cap"
      *
      * @example
      * ```typescript
      * const total = await this._count(users);
      * const activeUsers = await this._count(users, { active: true });
+     *
+     * // A list label: 1001 reads as "1,000+"
+     * const shown = await this._count(users, undefined, { cap: 1000 });
      * ```
      */
     protected async _count<T extends PgTable>(
         table: T,
         where?: Record<string, any> | SQL | undefined,
+        options?: CountOptions,
     ): Promise<number>
     {
-        let query = this.readDb.select({ count: sqlCount() }).from(table as any);
-
-        if (where)
-        {
-            const whereClause = isSQLWrapper(where)
-                ? where
-                : where ? buildWhereFromObject(table, where as Record<string, any>) : undefined;
-
-            if (whereClause)
-            {
-                query = query.where(whereClause) as any;
-            }
-        }
-
-        const [result] = await query;
-
-        return Number(result?.count ?? 0);
+        return countRows(this.readDb, table, buildWhereClause(table, where), options);
     }
 }
