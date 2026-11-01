@@ -753,7 +753,7 @@ codes are the closed union `OAuthErrorReason`:
 | `provider_error` | any other provider error, or the token exchange / user-info call failed |
 | `account_unavailable` | the account is disabled, pending deletion, or gone |
 | `link_only` | the app made this provider link-only (#157) |
-| `email_in_use` | a first sign-in reported an existing account's email and the app set `oauthEmailMatch: 'reject'` (#156) |
+| `email_in_use` | a first sign-in reported an existing account's email and the app set `oauthEmailMatch: 'reject'`, or `'attach'` found that email on several accounts stored in different cases (#156) |
 | `failed` | anything else |
 
 For `expired`, `invalid_state`, `no_cookie` and a library failure behind `provider_error` the `error` text is a
@@ -861,7 +861,13 @@ unverified one with `UnverifiedEmailLinkError`; `'reject'` refuses either way
 An identity already linked signs in to its account in every mode. So someone who signed up with
 Google and later signs in with Kakao on the same email lands in the Google account (`'attach'`),
 sees the error page where the app can tell them to sign in with Google and connect Kakao
-(`'reject'`), or gets a Kakao-only account (`'separate'`). See
+(`'reject'`), or gets a Kakao-only account (`'separate'`).
+
+The match ignores case: an account stored as `Owner@Example.com` matches a provider that reports
+`owner@example.com`, and a stored lower-case address wins over its case variants. When only
+variants exist and there are several of them (`Owner@Example.com` and `OWNER@Example.com`, left
+over from before email normalization), `'attach'` cannot tell which account is meant and refuses
+with the same 409 `OAuthEmailInUseError` (`reason=email_in_use`) as `'reject'`. See
 [When a first sign-in's email matches an existing account](../../packages/auth/README.md#when-a-first-sign-ins-email-matches-an-existing-account).
 
 > The full interface specification (`OAuthProvider` / `NormalizedIdentity` / `OAuthTokens`) is under

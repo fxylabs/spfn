@@ -3137,6 +3137,14 @@ authRegisterEvent.subscribe(async ({ userId, email, provider, metadata }) =>
 });
 ```
 
+`authRegisterEvent` (`auth.register`), `authLoginEvent` (`auth.login`) and
+`invitationAcceptedEvent` (`auth.invitation.accepted`) fire after the transaction that wrote the
+account commits — on the web OAuth callback, email register, password login and invitation
+accept alike. A subscriber can therefore read the rows the event announces from any connection,
+and nothing fires when the transaction rolls back. A subscriber that throws, or a publish that
+fails, is logged and does not fail the request: the sign-in or sign-up has already committed.
+Before 0.3.0-beta.51 these three were published inside the transaction.
+
 `authLoginEvent`'s `provider` is `'email'`, `'phone'`, a social provider, `'device'` or
 `'passkey'`. `'device'` is a [device-code login](#device-code-login), where the account was
 proven on another device that was already signed in and no credential was presented here;

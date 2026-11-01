@@ -41,6 +41,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 #### @spfn/auth
 
+- **Behaviour change: `auth.register`, `auth.login` and `auth.invitation.accepted` fire after
+  the transaction commits, never on rollback** (#156 follow-up, #295). The web OAuth callback,
+  email register (`/_auth/register`, `/_auth/signup/password`), password login and invitation
+  accept published these events inside their transaction, so a subscriber could run before the
+  account was visible to another connection, and hear about a sign-up that then rolled back. They
+  now go through `onAfterCommit`. A failed publish (say, `cache.publish` rejecting) is logged and
+  no longer turns a committed sign-in into an error and a rollback; a throwing subscriber was
+  already only logged. `auth` 0.3.0-beta.51.
+    - **Migration**: a subscriber that read the new account inside the request's transaction,
+      or relied on its own failure failing the sign-in, must not: the event now arrives after the
+      transaction is over, and its failure is only logged.
+- **Behaviour change: account-existence checks find an address stored in another case, and
+  `oauthEmailMatch: 'attach'` answers 409 for case variants it cannot choose between** (#156,
+  #297). The startup backfill folds stored emails to lower case but leaves alone accounts that
+  differ only by case, and an older instance can write a mixed-case row after it. Social
+  sign-in's email match, the verified-email backfill, email register, the registration code,
+  the signup link and invitation create now look an address up by `lower(btrim(email))`
+  (`usersRepository.findByFoldedEmail`), so a sign-up or a first social sign-in no longer
+  creates a second account next to `Owner@Example.com`. A stored lower-case row still wins over
+  its variants. Login, password reset, `getUserByEmail` and account deletion keep the exact
+  lookup. `auth` 0.3.0-beta.51.
+    - **Behaviour change**: with two or more variants and no lower-case row
+      (`Owner@Example.com` and `OWNER@Example.com`), `'attach'` refuses with
+      `409 OAuthEmailInUseError` (`reason=email_in_use`), as `'reject'` does, rather than link
+      the identity to one of them; an unverified provider email meeting them gets the same 409.
+      `'separate'` still makes a new account.
+    - **Migration**: a new migration, `20261101134440_fuzzy_moira_mactaggert`, adds the
+      non-unique index `users_email_folded_idx` on `lower(btrim(email))`; run `spfn db migrate`.
+      It is a plain `CREATE INDEX` inside the migration transaction, so it locks `users`
+      against writes while it builds. An app that shows `email_in_use` only for `'reject'`
+      should show it for `'attach'` too; settle the accounts the backfill logs as
+      capitalization conflicts.
 - **Behaviour change: `SPFN_AUTH_SESSION_TTL` takes effect** (#126). The variable was ignored
   and every session lasted seven days; a malformed value is now refused when the environment
   is validated. See the README's "Migration — `SPFN_AUTH_SESSION_TTL` takes effect".
@@ -249,6 +281,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 #### @spfn/core
 
+- **`defineTenancy`: tenant tables the database itself keeps apart** (#158 part 2, #296).
+  `defineTenancy({ tenants, authorize, column? })` names the tenant list table (a workspace
+  table, or `users` from `@spfn/auth/server` when the tenant is a person) and who may act for a
+  tenant. `tenancy.table(schema, name, columns, extra?)` adds the `tenant_id` column, a foreign
+  key to the tenant list, `unique (tenant_id, id)` and the row-level security policy
+  `<table>_tenant_isolation`, which `spfn db generate` emits with `ENABLE ROW LEVEL SECURITY`.
+  `tenancy.reference(name, () => table, { optional? })` is a composite foreign key
+  `(tenant_id, x_id) → (tenant_id, id)`, so a row cannot point into another tenant (`ON DELETE
+  CASCADE` when required, `NO ACTION` when optional). `tenancy.guard({ param } | { resolve })`
+  answers 400 for a malformed id and 403 when `authorize` refuses, and binds the request;
+  `tenancy.of(c)` returns its tenant. `TenantRepository` sets `app.tenant_id` for every call on
+  such a table (rules R1–R6), `runInTransaction(fn, { tenant })` binds a transaction, and a call
+  naming another tenant than its transaction or its guard throws `TenantMismatchError` before
+  any SQL. `core` 0.3.0-beta.35, `spfn` 0.3.0-beta.21.
+    - **`DATABASE_OWNER_URL`**: PostgreSQL skips row-level security for a table's owner, so the
+      app must connect as a role that owns nothing. `spfn db migrate`, `backup`, `restore` and
+      `drop` connect with this URL, falling back to `DATABASE_URL`; `spfn add` and `db push`
+      keep `DATABASE_URL`. `spfn` 0.3.0-beta.21 raises its `@spfn/core` peer floor to
+      0.3.0-beta.35: an older core does not know `DATABASE_OWNER_URL`, and the commands would
+      fall back to `DATABASE_URL` without saying so.
+    - **Behaviour change**: with tenancy tables declared, the server checks its write and read
+      connections' role at boot. A role that owns a tenancy table, or is a superuser or
+      `BYPASSRLS`, refuses a production boot (`TenancyRoleError`) and logs one warning
+      elsewhere. An app without tenancy tables sends no query.
+    - **Migration**: none for an app that does not call `defineTenancy`. An app adopting it
+      creates an owner role, sets `DATABASE_OWNER_URL`, grants the app role its row privileges
+      and moves table ownership off it — see "Tenancy → Database roles" in the db README and
+      the new [multi-tenancy guide](./docs/guides/multi-tenancy.md).
+- **`tenantKey()` and `TenantRepository`: every query a repository builds stays in one tenant**
+  (#158 part 1, #292). `tenantKey()` declares a table's `tenant_id bigint not null` column;
+  `TenantRepository` has `BaseRepository`'s protected methods with the tenant id first, writing
+  the tenant into WHERE, into each joined tenant table's ON clause in `_select`, and into the
+  rows `_create` / `_createMany` / `_upsert` write (an upsert target must include the tenant
+  column). `_count` on both repositories takes `{ cap }`. In local
+  and development runs the connection warns once per SQL text about a query on a tenant table
+  without a tenant condition. `core` 0.3.0-beta.34. The pattern page and the AGENTS.md block
+  `spfn dev` writes point at `TenantRepository` for such tables (#293, `spfn` 0.3.0-beta.20).
 - **A server-owned state, declared once** (#134). `defineState` / `defineStateRouter` in
   `@spfn/core/state` derive a state's read, write and snapshot routes and its SSE event; the
   app emits `state.changed` after a commit. `@spfn/core/state/client` (`createStateClient`)
@@ -276,6 +345,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 #### @spfn/auth
 
+- **`configureAuth({ oauthEmailMatch })`: the app decides what a first social sign-in does when
+  its email matches an existing account** (#156, #294), on the web callback and native sign-in.
+  `'attach'` (or unset) is the behaviour before: a verified email links to the account, an
+  unverified one is `UnverifiedEmailLinkError`. `'reject'` refuses before any write with
+  `OAuthEmailInUseError` (409, `OAUTH_EMAIL_IN_USE`, web `reason=email_in_use`). `'separate'`
+  creates a new account without the email. Mobile contract 0.13.7. `auth` 0.3.0-beta.51.
+    - **Migration**: `OAUTH_ERROR_REASONS` gains `email_in_use`; an exhaustive `switch` over the
+      reason needs a case for it.
+- **Link-only providers, and the app chooses the recent-auth rule on links** (#155, #157,
+  #291). `configureAuth({ oauthProviders: { battlenet: { signIn: false } } })` lets a provider
+  be linked and unlinked from a signed-in account but never used to sign in: every sign-in
+  start is refused with `OAuthProviderLinkOnlyError` (403, `reason=link_only`), and
+  `GET /_auth/oauth/providers` lists it under `linkOnly`. The recent-authentication check on
+  link and unlink is `oauthProviders[p].recentAuth.{link,unlink}` over
+  `oauthLink.recentAuth.{link,unlink}` over `true`, with its window in
+  `oauthLink.recentAuthMinutes`; turn it off only for a link-only provider. With nothing set,
+  nothing changes. Mobile contract 0.13.6. `auth` 0.3.0-beta.50.
+    - **Migration**: `OAUTH_ERROR_REASONS` gains `link_only`; an exhaustive `switch` over the
+      reason needs a case for it.
+- **A built-in Battle.net provider, and linking a provider to the signed-in account** (#154,
+  #290). The `battlenet` provider is enabled by `SPFN_AUTH_BATTLENET_CLIENT_ID` and
+  `_CLIENT_SECRET` (`SPFN_AUTH_BATTLENET_REGION=cn` for the China host); its user id is the
+  account id, never the BattleTag, and it reports no email, so it reaches an existing account
+  only through a link. The BattleTag is kept in the new `user_social_accounts.provider_handle`
+  and carried as `providerHandle` on `auth.login` / `auth.register`. `POST
+  /_auth/oauth/:provider/link` and `/unlink` connect or remove a provider from a signed-in
+  account, after MFA step-up and recent authentication; unlink refuses the last way in.
+  `oauthLinkInterceptor` handles the proxy side, and `auth.oauth.linked` /
+  `auth.oauth.link_removed` announce both. `auth` 0.3.0-beta.49.
+    - **Migration**: run `spfn db migrate` for `20261030113538_fresh_blur` (the
+      `provider_handle` column).
 - **Sign in with Apple on the web and Android** (#142). The `apple` provider completes the
   OAuth code flow and the `form_post` callback is accepted (`auth` 0.3.0-beta.41). On Android
   the callback relays the token to an App Link listed in `SPFN_AUTH_APPLE_RELAY_URLS` (#149,
@@ -545,6 +645,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 #### spfn (CLI)
 
+- **`spfn db tenant export <tenantId>` and `spfn db tenant import <dir> [--replace]`** (#158
+  part 3, #298) move one tenant's rows of every tenant table — `tenancy.table` and
+  `tenantKey()` tables alike, not the tenant list row, not auth data — out to
+  `backups/tenant-<id>-<time>/` (a `manifest.json` and one `COPY` file per table) and back in.
+  The export reads one snapshot as the app (`DATABASE_READ_URL`, else `DATABASE_URL`). The
+  import checks the files' sha256 and the target's columns, then writes in one transaction as
+  the owner (`DATABASE_OWNER_URL`, else `DATABASE_URL`): it refuses, writing nothing, when the
+  tenant is missing from its tenant list, already has rows (unless `--replace`), or a row
+  belongs to another tenant, and moves sequences forward only. Restoring a copy of the database
+  to an earlier point, exporting the tenant from it and importing with `--replace` puts that
+  one tenant back in time. `spfn` 0.3.0-beta.21.
 - **One whole-app env list** (#119): `spfn env` and `spfn secret` read the app's schema
   modules named in `spfn.config.js` `env.schemas`, then every installed `@spfn/*` package's
   `envSchema`. A key declared differently by two sources is an error. `spfn` 0.3.0-beta.13.
@@ -665,6 +776,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 #### @spfn/core
 
+- **An app role that cannot read the migrations table is no longer told every migration is
+  pending** (#158, #299). The boot migration check looked its bookkeeping tables up in
+  `information_schema`, which lists only the tables the current role holds a privilege on. An
+  app role without rights on schema `drizzle` — the normal case once the owner role of #296
+  owns the tables — saw none, counted every migration as pending and refused to boot with
+  `PendingMigrationsError`. The check now finds the tables through `pg_catalog`; a table it
+  cannot read logs one warning naming the cause (`permission denied for schema drizzle`) and
+  the server starts unchecked. The db README's "Database roles" now grants the app role
+  `USAGE` and `SELECT` on `drizzle`, and row privileges on every package schema (`spfn_auth`,
+  …). `core` 0.3.0-beta.35.
 - **Revoking a device key closes the SSE streams it opened, and the clients stop on 401**
   (#153). `core` 0.3.0-beta.33, `auth` 0.3.0-beta.48.
 - **A state client applies every frame its stream carries**, so a later subscribe never gets
