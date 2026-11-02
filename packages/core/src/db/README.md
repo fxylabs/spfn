@@ -50,7 +50,7 @@ tenants), `RepositoryError` (class), `RepositoryDatabase` (type), `CountOptions`
 
 **Tenancy** (`tenant/tenancy.ts` — see [Tenancy](#tenancy-definetenancy--tenant-tables-enforced-by-the-database)):
 `defineTenancy`, `TenantMismatchError` (class), `listTenancyTables` (internal: the boot check)
-Types: `Tenancy`, `TenancyOptions`, `TenancyGuardOptions`, `TenancyReferenceOptions`,
+Types: `Tenancy`, `TenancyOptions`, `TenancyGuardOptions`, `TenancyOnDelete`, `TenancyReferenceOptions`,
 `TenantListTable`, `TenantSource`
 
 **PostgreSQL error mapping** (`postgres-errors.ts`):
@@ -459,6 +459,7 @@ export const tenancy = defineTenancy({
     tenants: workspaces,                     // or `users` from @spfn/auth/server: tenant = user
     authorize: async (c, tenantId) => memberRepository.isMember(tenantId, Number(getAuth(c).userId)),
     // column: 'workspace_id',               // default 'tenant_id'
+    // property: 'workspaceId',              // default 'tenantId': the key rows carry it under
 });
 
 export const authors = tenancy.table(schema, 'authors', {
@@ -527,14 +528,25 @@ CREATE POLICY "notes_tenant_isolation" ON "acme_notes"."notes" AS PERMISSIVE FOR
 - **A reference cannot cross tenants.** `(tenant_id, author_id) → authors (tenant_id, id)`:
   a tenant 7 note pointing at a tenant 9 author is refused by the database. A required
   reference is `ON DELETE CASCADE`; an optional one is `NO ACTION` — the author cannot be
-  deleted while a note names it (`SET NULL` would null `tenant_id` too, and the column-list
-  form needs PostgreSQL 15). A null optional reference is not checked (`MATCH SIMPLE`).
+  deleted while a note names it. A null optional reference is not checked (`MATCH SIMPLE`).
+- **`{ onDelete }` chooses another delete action**: `'cascade'`, `'restrict'` or
+  `'no action'`, on a required or an optional reference —
+  `tenancy.reference('session', () => sessions, { onDelete: 'restrict' })` refuses to
+  delete a session while a record still points at it. `SET NULL` and
+  `SET DEFAULT` are not offered: the tenant column is part of the same foreign key, so they
+  would change `tenant_id` too (the column-list form that avoids it needs PostgreSQL 15).
+  Any other value throws when the schema module loads. A cascade that reaches a
+  `restrict` reference refuses the whole delete.
 - **A tenant with rows cannot be deleted**: the tenant foreign key is `NO ACTION`.
 - **A connection that set no tenant gets an error, not rows**: the policy reads
   `current_setting('app.tenant_id')` without `missing_ok`.
-- **The tenant column is added for you** (`tenantId`, column `tenant_id` or
-  `defineTenancy({ column })`); declaring it in `columns` throws, and so does a table
+- **The tenant column is added for you** (property `tenantId` or
+  `defineTenancy({ property })`, column `tenant_id` or `defineTenancy({ column })`);
+  declaring it in `columns`, under its property or its column name, throws, and so does a table
   without `id`. The third argument adds your own indexes and constraints after these.
+  `property` lets an app whose code already reads `row.workspaceId` adopt a tenancy without
+  renaming it; pass a string literal, because the row types are keyed by it, and not `id`.
+  With another property, `tenantId` is an ordinary key a table may use.
 - **`tenancy.reference` points at a `tenancy.table` of the same tenancy only** — anything
   else throws when drizzle reads the table (`getTableConfig`, `spfn db generate`). The target
   is a function, so it may name a table defined later; a reference to its own table spells

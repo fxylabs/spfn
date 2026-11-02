@@ -175,6 +175,20 @@ reference to the table itself (`parentId` above) spells out the return type `():
 | --- | --- | --- |
 | required (default) | `NOT NULL` | the referencing rows are deleted too (`ON DELETE CASCADE`) |
 | `{ optional: true }` | nullable | the delete is refused while a row still points at it (`NO ACTION`) |
+| `{ onDelete: 'restrict' }` | `NOT NULL`, or nullable with `optional: true` | the delete is refused while a row still points at it (`RESTRICT`) |
+
+`onDelete` takes `'cascade'`, `'restrict'` or `'no action'` and works on a required and an
+optional reference alike. Use `'restrict'` for a row that must outlive the delete it blocks — a
+record that points at the session it was created from, say:
+
+```typescript
+sessionId: tenancy.reference('session', () => sessions, { onDelete: 'restrict' }),
+```
+
+A cascade that reaches a `restrict` reference refuses the whole delete: deleting an author whose
+note has such a record fails, and the author, the note and the record stay. `SET NULL` and
+`SET DEFAULT` are not offered, because the tenant column is part of the same foreign key and
+would be cleared too; any other value throws when the schema module loads.
 
 `tenancy.reference` accepts only tables of the same tenancy. To point at an ordinary table, use
 `foreignKey` as usual.
@@ -196,6 +210,22 @@ class MemberRepository extends BaseRepository
 
 export const memberRepository = new MemberRepository();
 ```
+
+**Code that already names the tenant.** If your repositories, services and tests read
+`row.workspaceId`, keep that name: `property` sets the key the tenant column has on every
+tenancy table's rows, and `column` its SQL name. Pass a string literal.
+
+```typescript
+export const tenancy = defineTenancy({
+    tenants: workspaces,
+    authorize: (c, workspaceId) => memberRepository.isMember(workspaceId, Number(getAuth(c).userId)),
+    column: 'workspace_id',     // default 'tenant_id'
+    property: 'workspaceId',    // default 'tenantId'
+});
+```
+
+The rest of this guide uses the defaults; with `property: 'workspaceId'`, read `workspaceId`
+where it says `tenantId`.
 
 **Data owned by one person.** Use `users` as the tenant list, and let the guard (step 5) resolve
 the signed-in user:

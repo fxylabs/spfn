@@ -13,6 +13,7 @@ export type {
     Tenancy,
     TenancyOptions,
     TenancyGuardOptions,
+    TenancyOnDelete,
     TenancyReferenceOptions,
     TenantListTable,
 } from './tenancy';

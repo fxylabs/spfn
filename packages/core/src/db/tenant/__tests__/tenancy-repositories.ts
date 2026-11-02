@@ -34,6 +34,11 @@ export class NoteRepository extends TenantRepository
             .orderBy(asc(notes.id));
     }
 
+    remove(tenantId: number, id: number)
+    {
+        return this._deleteOne(tenantId, notes, { id });
+    }
+
     directNotes()
     {
         return this.db.select().from(notes).orderBy(asc(notes.id));

@@ -8,12 +8,16 @@
  *   gets the tenant column, a foreign key to the tenant list, `unique(tenant, id)`
  *   and a row-level security policy that admits only the rows of the tenant in
  *   the transaction's `app.tenant_id` setting.
- * - `tenancy.reference(name, () => table)` — a column pointing at another
- *   tenancy table through a composite foreign key `(tenant, x_id) → (tenant, id)`,
- *   so the database refuses a row that points into another tenant.
+ * - `tenancy.reference(name, () => table, { optional?, onDelete? })` — a column
+ *   pointing at another tenancy table through a composite foreign key
+ *   `(tenant, x_id) → (tenant, id)`, so the database refuses a row that points
+ *   into another tenant.
  * - `tenancy.guard({ param } | { resolve })` — route middleware that reads the
  *   tenant id, runs `authorize`, and binds the request to that tenant.
  * - `tenancy.of(c)` — the tenant the guard bound.
+ *
+ * The tenant column is the property `tenantId` and the SQL column `tenant_id`;
+ * `defineTenancy({ property, column })` renames either one.
  *
  * Constraint names are fixed so migrations stay readable: `<table>_tenant_id_id_key`,
  * `<table>_tenant_id_fk`, `<table>_<reference>_fk`, `<table>_tenant_isolation`
@@ -68,7 +72,7 @@ import { runWithRequestTenant } from './request-scope';
 /** A table that lists tenants: anything with an `id` column. */
 export type TenantListTable = PgTable & { id: PgColumn };
 
-export interface TenancyOptions<TTenants extends TenantListTable = TenantListTable>
+export interface TenancyOptions<TTenants extends TenantListTable = TenantListTable, TProperty extends string = 'tenantId'>
 {
     /** The table whose rows are the tenants (a workspace table, or the users table). */
     tenants: TTenants;
@@ -82,7 +86,17 @@ export interface TenancyOptions<TTenants extends TenantListTable = TenantListTab
 
     /** Name of the tenant column on every tenancy table. @default 'tenant_id' */
     column?: string;
+
+    /**
+     * Property key of the tenant column on every tenancy table's rows, e.g.
+     * `workspaceId` for an app whose code already reads `row.workspaceId`. Pass a
+     * string literal: the row types are keyed by it. Not `id`. @default 'tenantId'
+     */
+    property?: TProperty;
 }
+
+/** What deleting a referenced row does. `SET NULL` / `SET DEFAULT` would change the tenant column too. */
+export type TenancyOnDelete = 'cascade' | 'restrict' | 'no action';
 
 /** Where `tenancy.guard()` reads the tenant id: exactly one of the two. */
 export type TenancyGuardOptions =
@@ -99,21 +113,26 @@ export type TenancyGuardOptions =
 
 export interface TenancyReferenceOptions
 {
-    /**
-     * Nullable column. Its foreign key is `NO ACTION`: the referenced row cannot
-     * be deleted while this one points at it (`SET NULL` would null the tenant
-     * column too). A required reference is `ON DELETE CASCADE`.
-     */
+    /** Nullable column. A null reference is not checked. */
     optional?: boolean;
+
+    /**
+     * What deleting the referenced row does to this one: `cascade` deletes it,
+     * `restrict` and `no action` refuse the delete while it points there (the
+     * two differ only for a deferred check, and these foreign keys are not
+     * deferrable).
+     * @default 'cascade' for a required reference, 'no action' for an optional one
+     */
+    onDelete?: TenancyOnDelete;
 }
 
-type TenantColumns = { tenantId: ReturnType<typeof tenantKey> };
+type TenantColumns<TProperty extends string> = { [K in TProperty]: ReturnType<typeof tenantKey> };
 
 type RequiredReference = ReturnType<typeof requiredReferenceColumn>;
 
 type OptionalReference = ReturnType<typeof optionalReferenceColumn>;
 
-export interface Tenancy
+export interface Tenancy<TProperty extends string = 'tenantId'>
 {
     /** A table shared by the tenants; `columns` must include `id` and must not include the tenant column. */
     table<
@@ -124,11 +143,11 @@ export interface Tenancy
         schema: PgSchema<TSchema>,
         name: TTableName,
         columns: TColumns,
-        extraConfig?: (self: PgBuildExtraConfigColumns<TColumns & TenantColumns>) => PgTableExtraConfigValue[],
+        extraConfig?: (self: PgBuildExtraConfigColumns<TColumns & TenantColumns<TProperty>>) => PgTableExtraConfigValue[],
     ): PgTableWithColumns<{
         name: TTableName;
         schema: TSchema;
-        columns: PgBuildColumns<TTableName, TColumns & TenantColumns>;
+        columns: PgBuildColumns<TTableName, TColumns & TenantColumns<TProperty>>;
         dialect: 'pg';
     }>;
 
@@ -138,8 +157,8 @@ export interface Tenancy
      * name a table defined later. A reference to its own table needs the return
      * type spelled out, as drizzle's `.references()` does: `(): PgTable => notes`.
      */
-    reference(name: string, target: () => PgTable, options?: { optional?: false }): RequiredReference;
-    reference(name: string, target: () => PgTable, options: { optional: true }): OptionalReference;
+    reference(name: string, target: () => PgTable, options?: { optional?: false; onDelete?: TenancyOnDelete }): RequiredReference;
+    reference(name: string, target: () => PgTable, options: { optional: true; onDelete?: TenancyOnDelete }): OptionalReference;
 
     /** Route middleware: read the tenant id, authorize it, bind the request to it. */
     guard(options: TenancyGuardOptions): MiddlewareHandler;
@@ -152,7 +171,16 @@ interface ReferenceSpec
 {
     readonly name: string;
     readonly target: () => PgTable;
-    readonly optional: boolean;
+    readonly onDelete: TenancyOnDelete;
+}
+
+/** What every table of one tenancy shares. */
+interface TenancyShape
+{
+    readonly tenants: TenantListTable;
+    /** The tenant column's property key on the table. */
+    readonly property: string;
+    readonly marker: TenancyTableMarker;
 }
 
 /** A reference column waiting for the table it is declared in, with its property key. */
@@ -164,6 +192,8 @@ interface PendingReference extends ReferenceSpec
 /** PostgreSQL truncates identifiers to 63 bytes. */
 const MAX_IDENTIFIER_BYTES = 63;
 const HASH_LENGTH = 8;
+
+const ON_DELETE_ACTIONS: readonly TenancyOnDelete[] = ['cascade', 'restrict', 'no action'];
 
 const referenceSpecs = new WeakMap<object, ReferenceSpec>();
 
@@ -178,20 +208,26 @@ const referenceSpecs = new WeakMap<object, ReferenceSpec>();
  * });
  * ```
  */
-export function defineTenancy<TTenants extends TenantListTable>(options: TenancyOptions<TTenants>): Tenancy
+export function defineTenancy<TTenants extends TenantListTable, const TProperty extends string = 'tenantId'>(
+    options: TenancyOptions<TTenants, TProperty>,
+): Tenancy<TProperty>
 {
     assertTenancyOptions(options);
 
-    const marker: TenancyTableMarker = {
-        columnName: options.column ?? 'tenant_id',
-        tenants: { schema: schemaOf(options.tenants), name: getTableName(options.tenants) },
+    const shape: TenancyShape = {
+        tenants: options.tenants,
+        property: options.property ?? 'tenantId',
+        marker: {
+            columnName: options.column ?? 'tenant_id',
+            tenants: { schema: schemaOf(options.tenants), name: getTableName(options.tenants) },
+        },
     };
     const guardedTenants = new WeakMap<Context, number>();
 
     return {
         table: ((schema, name, columns, extraConfig) =>
-            createTenancyTable(schema, name, columns, extraConfig, options.tenants, marker)) as Tenancy['table'],
-        reference: createReference as Tenancy['reference'],
+            createTenancyTable(schema, name, columns, extraConfig, shape)) as Tenancy<TProperty>['table'],
+        reference: createReference as Tenancy<TProperty>['reference'],
         guard: defineMiddlewareFactory('tenancyGuard', (guardOptions: TenancyGuardOptions) =>
             createGuard(tenantReader(guardOptions), options.authorize, guardedTenants)),
         of: (c) => guardedTenant(guardedTenants, c),
@@ -207,20 +243,19 @@ function createTenancyTable(
     name: string,
     columns: Record<string, AnyPgColumnBuilder>,
     extraConfig: ((self: any) => PgTableExtraConfigValue[]) | undefined,
-    tenants: TenantListTable,
-    marker: TenancyTableMarker,
+    shape: TenancyShape,
 ): PgTable
 {
-    assertTableColumns(name, columns, marker.columnName);
+    assertTableColumns(name, columns, shape);
 
     const references = pendingReferences(columns);
     const { id: idColumn, ...rest } = columns;
-    const table = schema.table(name, { id: idColumn, tenantId: tenantKey(marker.columnName), ...rest }, (t: any) => [
-        ...tenancyConstraints(name, t, references, tenants, marker),
+    const table = schema.table(name, { id: idColumn, [shape.property]: tenantKey(shape.marker.columnName), ...rest }, (t: any) => [
+        ...tenancyConstraints(name, t, references, shape),
         ...(extraConfig ? extraConfig(t) : []),
     ]);
 
-    registerTenancyTable(table, marker);
+    registerTenancyTable(table, shape.marker);
 
     return table;
 }
@@ -228,11 +263,31 @@ function createTenancyTable(
 function createReference(name: string, target: () => PgTable, options?: TenancyReferenceOptions): AnyPgColumnBuilder
 {
     const optional = options?.optional === true;
+    const onDelete = referenceOnDelete(name, options?.onDelete, optional);
     const column = optional ? optionalReferenceColumn(name) : requiredReferenceColumn(name);
 
-    referenceSpecs.set(column, { name, target, optional });
+    referenceSpecs.set(column, { name, target, onDelete });
 
     return column;
+}
+
+/** The delete action a reference asked for, or its default; anything else throws. */
+function referenceOnDelete(name: string, onDelete: unknown, optional: boolean): TenancyOnDelete
+{
+    if (onDelete === undefined)
+    {
+        return optional ? 'no action' : 'cascade';
+    }
+
+    if (!ON_DELETE_ACTIONS.includes(onDelete as TenancyOnDelete))
+    {
+        throw new Error(
+            `tenancy.reference('${name}') takes onDelete 'cascade', 'restrict' or 'no action', received ${JSON.stringify(onDelete)}; `
+            + 'SET NULL and SET DEFAULT are not offered because the tenant column is part of the same foreign key',
+        );
+    }
+
+    return onDelete as TenancyOnDelete;
 }
 
 /** The guard middleware: read the tenant, authorize it, run the rest bound to it. */
@@ -279,7 +334,7 @@ function optionalReferenceColumn(name: string)
     return bigint(`${name}_id`, { mode: 'number' });
 }
 
-function assertTenancyOptions(options: TenancyOptions<TenantListTable>): void
+function assertTenancyOptions(options: TenancyOptions<TenantListTable, string>): void
 {
     if (!isTable(options?.tenants) || !(options.tenants as { id?: unknown }).id)
     {
@@ -295,13 +350,19 @@ function assertTenancyOptions(options: TenancyOptions<TenantListTable>): void
     {
         throw new Error('defineTenancy({ column }) takes a non-empty column name');
     }
+
+    if (options.property !== undefined && (typeof options.property !== 'string' || options.property === '' || options.property === 'id'))
+    {
+        throw new Error('defineTenancy({ property }) takes a non-empty property name other than "id"');
+    }
 }
 
-/** `columns` must have `id`, and must leave the tenant column to `tenancy.table`. */
-function assertTableColumns(table: string, columns: Record<string, AnyPgColumnBuilder>, columnName: string): void
+/** `columns` must have `id`, and must leave the tenant column — its property and its SQL name — to `tenancy.table`. */
+function assertTableColumns(table: string, columns: Record<string, AnyPgColumnBuilder>, shape: TenancyShape): void
 {
+    const { property, marker: { columnName } } = shape;
     const declared = Object.entries(columns).find(([key, builder]) =>
-        key === 'tenantId' || key === columnName || columnNameOf(builder) === columnName);
+        key === property || key === columnName || columnNameOf(builder) === columnName);
 
     if (declared)
     {
@@ -341,16 +402,16 @@ function tenancyConstraints(
     table: string,
     t: Record<string, any>,
     references: PendingReference[],
-    tenants: TenantListTable,
-    marker: TenancyTableMarker,
+    shape: TenancyShape,
 ): PgTableExtraConfigValue[]
 {
-    const { columnName } = marker;
+    const { columnName } = shape.marker;
+    const tenantColumn = t[shape.property];
     const isolation = sql`${sql.identifier(columnName)} = current_setting(${sql.raw(`'${TENANT_SETTING}'`)})::bigint`;
     const constraints = [
-        unique(constraintName(table, `${columnName}_id_key`)).on(t.tenantId, t.id),
-        pgForeignKey({ name: constraintName(table, `${columnName}_fk`), columns: [t.tenantId], foreignColumns: [tenants.id] }),
-        ...references.map((reference) => referenceForeignKey(table, t, reference, marker)),
+        unique(constraintName(table, `${columnName}_id_key`)).on(tenantColumn, t.id),
+        pgForeignKey({ name: constraintName(table, `${columnName}_fk`), columns: [tenantColumn], foreignColumns: [shape.tenants.id] }),
+        ...references.map((reference) => referenceForeignKey(table, t, reference, shape)),
         pgPolicy(constraintName(table, 'tenant_isolation'), { using: isolation, withCheck: isolation }),
     ];
 
@@ -359,12 +420,12 @@ function tenancyConstraints(
     return constraints;
 }
 
-function referenceForeignKey(table: string, t: Record<string, any>, reference: PendingReference, marker: TenancyTableMarker)
+function referenceForeignKey(table: string, t: Record<string, any>, reference: PendingReference, shape: TenancyShape)
 {
     const target = reference.target();
     const targetMarker = findTenancyMarker(target);
 
-    if (!targetMarker || !sameTenancy(targetMarker, marker))
+    if (!targetMarker || !sameTenancy(targetMarker, shape.marker))
     {
         throw new Error(
             `tenancy.reference('${reference.name}') on "${table}" points at "${isTable(target) ? getTableName(target) : String(target)}", `
@@ -373,13 +434,12 @@ function referenceForeignKey(table: string, t: Record<string, any>, reference: P
     }
 
     const targetColumns = target as unknown as { id: PgColumn };
-    const builder = pgForeignKey({
-        name: constraintName(table, `${reference.name}_fk`),
-        columns: [t.tenantId, t[reference.key]],
-        foreignColumns: [findTenantColumn(target)!.column as PgColumn, targetColumns.id],
-    });
 
-    return reference.optional ? builder : builder.onDelete('cascade');
+    return pgForeignKey({
+        name: constraintName(table, `${reference.name}_fk`),
+        columns: [t[shape.property], t[reference.key]],
+        foreignColumns: [findTenantColumn(target)!.column as PgColumn, targetColumns.id],
+    }).onDelete(reference.onDelete);
 }
 
 function sameTenancy(left: TenancyTableMarker, right: TenancyTableMarker): boolean

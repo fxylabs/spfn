@@ -1,5 +1,6 @@
 /**
- * Tenancy integrity — rows I1–I7 of the #158 part 2 design case table
+ * Tenancy integrity — rows I1–I7 of the #158 part 2 design case table, and
+ * I8–I10 of the #159/#160 design (a required reference with `onDelete: 'restrict'`)
  *
  * The foreign keys `tenancy.table` and `tenancy.reference` generate, exercised
  * through TenantRepository as the app role. Skips when no test database is
@@ -112,5 +113,34 @@ describe('tenancy integrity (app role, integration)', () =>
         expect(await failureOf(authorRepository.remove(7, 3))).toMatch(/violates foreign key constraint "notes_reviewer_fk"/);
         expect(await rowsOf('authors')).toEqual(['1:7', '2:9', '3:7']);
         expect(await rowsOf('notes')).toEqual(['1:7', '2:7', '3:9']);
+    });
+
+    it('I8 deleting a note a restrict reference points at is refused; note and revision stay', async () =>
+    {
+        if (!db.isAvailable) return;
+
+        expect(await failureOf(noteRepository.remove(9, 3))).toMatch(/violates foreign key constraint "revisions_note_fk"/);
+        expect(await rowsOf('notes')).toEqual(['1:7', '2:7', '3:9']);
+        expect(await rowsOf('revisions')).toEqual(['1:9']);
+    });
+
+    it('I9 deleting a note no revision points at succeeds; other notes and the revision stay', async () =>
+    {
+        if (!db.isAvailable) return;
+
+        await noteRepository.remove(7, 1);
+
+        expect(await rowsOf('notes')).toEqual(['2:7', '3:9']);
+        expect(await rowsOf('revisions')).toEqual(['1:9']);
+    });
+
+    it('I10 a cascade that reaches a restrict reference refuses the whole delete; author, note and revision stay', async () =>
+    {
+        if (!db.isAvailable) return;
+
+        expect(await failureOf(authorRepository.remove(9, 2))).toMatch(/violates foreign key constraint "revisions_note_fk"/);
+        expect(await rowsOf('authors')).toEqual(['1:7', '2:9', '3:7']);
+        expect(await rowsOf('notes')).toEqual(['1:7', '2:7', '3:9']);
+        expect(await rowsOf('revisions')).toEqual(['1:9']);
     });
 });

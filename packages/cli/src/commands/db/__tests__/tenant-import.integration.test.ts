@@ -1,7 +1,7 @@
 /**
  * `spfn db tenant import` against a real PostgreSQL — rows M1–M18 of the #158
- * part 3 design case table, the M-input rows for a folder that lies, and
- * M-file-gone
+ * part 3 design case table, the M-input rows for a folder that lies,
+ * M-file-gone, and C1 of the #159/#160 design (a `restrict` self-reference)
  *
  * Each row exports tenant 7 from the seeded source schema as the app role, then
  * recreates the target schema — "migrations only" — in the state the row needs
@@ -451,6 +451,30 @@ describe('spfn db tenant import (integration)', () =>
                 + 'bookmarks_writer_fk on spfn_cli_tenant_import\\.bookmarks \\(ON DELETE SET NULL into spfn_cli_tenant_import\\.writers\\)', 's'),
         );
         expect(await bookmarks()).toEqual(before);
+    });
+
+    it('C1 --replace over a tenant whose self-reference is onDelete restrict succeeds; other tenants unchanged', async () =>
+    {
+        if (!available) return;
+
+        const restricted = createTenantFixtures(SCHEMA, { parentOnDelete: 'restrict' });
+        const directory = await exportSource();
+
+        await createSchema(target, restricted, appRole);
+        await seed(target, SCHEMA);
+
+        const [parentKey] = await target.unsafe(
+            `SELECT confdeltype FROM pg_constraint WHERE conname = 'notes_parent_fk' AND connamespace = '${SCHEMA}'::regnamespace`,
+        );
+        const tenant9 = await tenantSnapshot(target, SCHEMA, 9);
+
+        // Tenant 7's notes chain 4 → 2 → 1 through parent_id, so one DELETE removes parents and children together
+        expect(parentKey.confdeltype).toBe('r');
+
+        await importTenant(await prepareImport(directory, buildTenantPlan(restricted.imports)), { url: TARGET_URL, replace: true });
+
+        expect(await tenantSnapshot(target, SCHEMA, 7)).toEqual(sourceTenant7);
+        expect(await tenantSnapshot(target, SCHEMA, 9)).toEqual(tenant9);
     });
 
     it('M18 the import prints each sequence it moves, from → to, and nothing for one it leaves', async () =>

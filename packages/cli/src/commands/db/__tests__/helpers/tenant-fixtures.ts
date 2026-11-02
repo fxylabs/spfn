@@ -8,6 +8,9 @@
  * | workspaces | tenant list           | not exported                                                    |
  * | writers    | `tenancy.table`       | referenced by notes; sorts after notes, so file order ≠ FK order |
  * | notes      | `tenancy.table`       | required and optional reference to writers, `parent_id` to itself, a generated column |
+ *
+ * `parentOnDelete` sets the delete action of `parent_id` (#160); left out, it is
+ * the optional reference's default, `no action`.
  * | memos      | `tenantKey()` only    | no policy; `GENERATED ALWAYS AS IDENTITY` id                    |
  *
  * The DDL is what drizzle-kit generates for them, applied by the owner; the app
@@ -17,12 +20,12 @@
 import { sql as drizzleSql } from 'drizzle-orm';
 import { bigint, integer, pgSchema, text, type PgTable } from 'drizzle-orm/pg-core';
 import { generateDrizzleJson, generateMigration } from 'drizzle-kit/api-postgres';
-import { defineTenancy, id, tenantKey } from '@spfn/core/db';
+import { defineTenancy, id, tenantKey, type TenancyOnDelete } from '@spfn/core/db';
 import type postgres from 'postgres';
 
 export type TenantFixtures = ReturnType<typeof createTenantFixtures>;
 
-export function createTenantFixtures(schemaName: string)
+export function createTenantFixtures(schemaName: string, options: { parentOnDelete?: TenancyOnDelete } = {})
 {
     const schema = pgSchema(schemaName);
     const workspaces = schema.table('workspaces', {
@@ -38,7 +41,7 @@ export function createTenantFixtures(schemaName: string)
         id: id(),
         authorId: tenancy.reference('author', () => writers),
         reviewerId: tenancy.reference('reviewer', () => writers, { optional: true }),
-        parentId: tenancy.reference('parent', (): PgTable => notes, { optional: true }),
+        parentId: tenancy.reference('parent', (): PgTable => notes, { optional: true, onDelete: options.parentOnDelete }),
         title: text('title').notNull(),
         titleLength: integer('title_length').generatedAlwaysAs(drizzleSql`length(title)`),
     });
