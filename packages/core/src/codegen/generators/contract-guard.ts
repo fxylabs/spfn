@@ -25,15 +25,12 @@
  * Past it, by construction: a conditional spread inside an imported route
  * module, a router built by a factory, a condition hoisted to a variable
  * (`const extra = flag ? { admin } : {}` spread afterwards), and a
- * `.packages()` list assembled conditionally. `NODE_ENV` is pinned before the
- * router loads, which covers those only when the shell left it unset: the
- * generator then reads the router production gets. `spfn build` pins
- * `production` itself, so the deployed map is right. `spfn dev` sets
- * `development` before it spawns the watcher, which inherits it — a
- * `NODE_ENV === 'development'` condition hoisted to a variable therefore writes
- * a dev-only route into the map the watcher regenerates, and `spfn build` takes
- * it back out. The generated map's header names the `NODE_ENV` it was written
- * under, so that difference shows up in the diff.
+ * `.packages()` list assembled conditionally. For the route map, the
+ * environment probe (`environment-probe.ts`) catches those when the condition
+ * reads the environment: it loads the router again with the keys the first load
+ * read varied, and refuses when the route set changes. This scan stays first
+ * because it names an inline conditional by its line without a second load.
+ * The contract and states generators have this scan only.
  */
 
 import type * as ts from 'typescript';

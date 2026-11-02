@@ -199,13 +199,31 @@ Unlike the old source parser, which dropped what it could not read, the generato
   inside a string are not router source. Only a spread whose expression **reads a
   condition** is refused — a ternary, `&&`, `||`, `??`. A call is allowed
   (`...metadataRoutes(config, resource)`): loading yields exactly the routes it returns.
-  Past the guard, by construction: a conditional spread inside an imported module, a router
+  Past the scan, by construction: a conditional spread inside an imported module, a router
   built by a factory, a condition hoisted to a variable before the spread, and a
-  `.packages()` list assembled conditionally. `NODE_ENV` pinning stands in for the guard on
-  those, but only when the shell left it unset: `spfn build` pins `production`, so what ships
-  is right, while `spfn dev` sets `development` and the watcher regenerates under it. The
-  generated header names the `NODE_ENV` the map was written under, so that difference is a
-  line in the diff rather than a route that vanishes at build.
+  `.packages()` list assembled conditionally. The environment probe (next bullet) is what
+  catches those when the condition reads the environment.
+- The route set **depends on the environment** (#102). While the router loads, the generator
+  records every `process.env` key a project file reads — direct access, destructuring and
+  `in`, and a read through a library such as the `@spfn/core/env` registry, which is
+  attributed to the route module that asked. Reads that jiti, babel or a package make while
+  loading themselves are not counted: a package does not run again on a second load, so
+  varying them could change nothing. With no read, nothing more happens. Otherwise the router
+  is loaded again with every one of those keys varied — `NODE_ENV` between `development` and
+  `production`, a set key deleted, an unset key set to `'true'` — and the route sets (name,
+  method and path, package routes included) are compared. When they differ, or the varied
+  load fails, up to four keys are varied one at a time to say which one changes the set. The
+  refusal names each key, where it was read (`src/server/routes/admin.ts:6`), and the routes
+  it adds, drops or moves; it names a key's values only for `NODE_ENV`, since any other key
+  may hold a secret. A key the router cannot load without (a module-scope
+  `if (!process.env.API_KEY) throw`) is left as it is and logged at info. Cost: one load when
+  nothing in the project reads the environment while loading — the examples in this
+  repository read nothing — two when a key is read and the set does not change, at most six.
+  Not covered: a comparison against one particular value (`=== 'on'`), a key first read under
+  a varied environment, a package's own module scope, and nondeterminism that is not the
+  environment. Each varied load runs the project's module scope again, which is one more
+  reason a route module must be importable without side effects. A key read at module scope
+  for use inside a handler is not refused: the route sets are compared, not the reads.
 - Two routes reach the same name (the message names both places).
 - An **app route and a package route** reach the same name, where that package publishes a
   route map. Both register at runtime, and both want the single entry that name has in this
@@ -312,8 +330,9 @@ costs a module import and no infrastructure — `@spfn/auth`'s 43 routes load in
   `response`.
 - The router the generator was pointed at contains a conditional spread
   (`...(flag ? { route } : {})`), which would make the contract describe whichever way the
-  generator happened to run. Same guard as `route-map` — see its bullet for exactly what is
-  scanned and what is allowed. The event router file gets the same scan for
+  generator happened to run. Same source scan as `route-map` — see its bullet for exactly what
+  is scanned and what is allowed. The environment probe runs in `route-map` only, so a project
+  that runs both generators is refused there. The event router file gets the same scan for
   `defineEventRouter({ ...(flag ? { event } : {}) })`.
 - On the `build` trigger only: the contract breaks the newest released snapshot.
 
@@ -366,8 +385,8 @@ Throws `StatesGeneratorError` (or the loader's and the guard's errors) — logge
 fatal on `build` and on `spfn codegen run`:
 
 - The module will not load, or no router is found under the three export names.
-- The router registers **conditionally** — same `ConditionalRegistrationError` guard as
-  `route-map`.
+- The router registers **conditionally** — same `ConditionalRegistrationError` source scan as
+  `route-map` (the environment probe runs in `route-map` only).
 - **Two state routers declare the same id.** The message names both trails.
 - **No state router is mounted** anywhere in the walk. The generator is configured but nothing
   it reads mounts a `defineStateRouter(...).router`; the message names the router path. Mount

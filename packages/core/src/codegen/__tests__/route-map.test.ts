@@ -15,6 +15,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
+import { types } from 'util';
 import { dirname, join, resolve } from 'path';
 import { createJiti } from 'jiti';
 import { Logger } from '@spfn/core/logger';
@@ -107,6 +108,56 @@ async function warningsOf(call: () => Promise<unknown>): Promise<string>
     finally
     {
         warn.mockRestore();
+    }
+}
+
+/**
+ * Run `call` with the shell environment set to `values` (undefined deletes), and
+ * put every key back afterwards.
+ */
+async function withShellEnv<T>(values: Record<string, string | undefined>, call: () => Promise<T>): Promise<T>
+{
+    const saved = new Map(Object.keys(values).map(key => [key, process.env[key]]));
+    const set = (key: string, value: string | undefined) =>
+    {
+        if (value === undefined)
+        {
+            delete process.env[key];
+        }
+        else
+        {
+            process.env[key] = value;
+        }
+    };
+
+    Object.entries(values).forEach(([key, value]) => set(key, value));
+
+    try
+    {
+        return await call();
+    }
+    finally
+    {
+        saved.forEach((value, key) => set(key, value));
+    }
+}
+
+/** Every info line a generate emitted, joined. */
+async function infoOf(call: () => Promise<unknown>): Promise<string>
+{
+    const info = vi.spyOn(Logger.prototype, 'info').mockImplementation(() =>
+    {
+    });
+
+    try
+    {
+        await call();
+
+        return info.mock.calls.map(([message]) => String(message)).join('\n');
+    }
+    finally
+    {
+        info.mockRestore();
     }
 }
 
@@ -542,31 +593,25 @@ describe('route-map generator - conditional registration', () =>
         expect(entriesOf(await generate())).toEqual(['getRoot: { method: \'GET\', path: \'/\' },']);
     });
 
-    it('pins NODE_ENV so the same router does not load two ways', async () =>
+    it('E8 refuses a path that depends on NODE_ENV, and keeps the pinned value afterwards', async () =>
     {
-        const shellValue = process.env.NODE_ENV;
-        delete process.env.NODE_ENV;
-
-        writeRouter(
-            'const env = route.get(`/${process.env.NODE_ENV}`).handler(async () => ({}));\n\n'
-            + 'export const appRouter = defineRouter({ env });\n',
-        );
-
-        try
+        // Until #102 this router was accepted and written under the pinned
+        // `production`. The probe varies NODE_ENV and sees the path move.
+        await withShellEnv({ NODE_ENV: undefined }, async () =>
         {
-            expect(entriesOf(await generate())).toEqual(['env: { method: \'GET\', path: \'/production\' },']);
-        }
-        finally
-        {
-            if (shellValue === undefined)
-            {
-                delete process.env.NODE_ENV;
-            }
-            else
-            {
-                process.env.NODE_ENV = shellValue;
-            }
-        }
+            writeRouter(
+                'const env = route.get(`/${process.env.NODE_ENV}`).handler(async () => ({}));\n\n'
+                + 'export const appRouter = defineRouter({ env });\n',
+            );
+
+            const error = await generate().then(() => undefined, (reason: Error) => reason);
+
+            expect(error).toBeInstanceOf(ConditionalRegistrationError);
+            expect(error?.message).toContain('NODE_ENV (read at src/server/router.ts');
+            expect(error?.message).toContain('production → development');
+            expect(error?.message).toContain('~ env: GET /production → GET /development');
+            expect(process.env.NODE_ENV).toBe('production');
+        });
     });
 });
 
@@ -1234,5 +1279,254 @@ describe('route-map generator - the routes of the packages an app mounts', () =>
         );
 
         await expect(generate()).rejects.toThrow(/is not an HttpMethod/);
+    });
+});
+
+describe('route-map generator - environment probe (#102)', () =>
+{
+    /** Counts router loads: the fixture router bumps it each time its module runs. */
+    const COUNT_LOAD = '(globalThis as any).__routerLoads = ((globalThis as any).__routerLoads ?? 0) + 1;\n';
+    const ROUTES = 'const getRoot = route.get(\'/\').handler(async () => ({}));\n'
+        + 'const admin = route.get(\'/admin\').handler(async () => ({}));\n';
+    const PROBE_KEYS = ['PROBE_ENABLE_ADMIN', 'PROBE_API_URL', 'PROBE_FEATURE_X', 'PROBE_API_KEY', 'PROBE_FLAG',
+        'PROBE_A', 'PROBE_B', 'PROBE_WITH_PKG', 'PROBE_SECRET', 'PROBE_HANDLER_ONLY',
+        'PROBE_K1', 'PROBE_K2', 'PROBE_K3', 'PROBE_K4', 'PROBE_K5', 'PROBE_K6'];
+
+    let outsideDir = '';
+
+    const loads = () => (globalThis as { __routerLoads?: number }).__routerLoads ?? 0;
+    const refusalOf = () => generate().then(() => undefined, (reason: Error) => reason);
+    const hoisted = (condition: string) => ROUTES
+        + `const extra = ${condition} ? { admin } : {};\n\n`
+        + 'export const appRouter = defineRouter({ getRoot, ...extra });\n';
+
+    beforeEach(() =>
+    {
+        (globalThis as { __routerLoads?: number }).__routerLoads = 0;
+        PROBE_KEYS.forEach(key => delete process.env[key]);
+        outsideDir = mkdtempSync(join(tmpdir(), 'spfn-route-map-outside-'));
+    });
+
+    afterEach(() =>
+    {
+        PROBE_KEYS.forEach(key => delete process.env[key]);
+        rmSync(outsideDir, { recursive: true, force: true });
+    });
+
+    it('E1 a router that reads no environment loads once and writes its map', async () =>
+    {
+        writeRouter(COUNT_LOAD + ROUTES + '\nexport const appRouter = defineRouter({ getRoot, admin });\n');
+
+        expect(entriesOf(await generate())).toHaveLength(2);
+        expect(loads()).toBe(1);
+    });
+
+    it('E2 a key read at module scope for a handler leaves the route set alone: two loads, map written, no warning', async () =>
+    {
+        await withShellEnv({ PROBE_API_URL: 'https://api.example.test' }, async () =>
+        {
+            writeRouter(COUNT_LOAD + 'const apiUrl = process.env.PROBE_API_URL;\n'
+                + 'const getRoot = route.get(\'/\').handler(async () => ({ apiUrl }));\n\n'
+                + 'export const appRouter = defineRouter({ getRoot });\n');
+
+            expect(await warningsOf(generate)).toBe('');
+            expect(entriesOf(readFileSync(join(projectDir, OUTPUT_PATH), 'utf-8'))).toHaveLength(1);
+            expect(loads()).toBe(2);
+        });
+    });
+
+    it('E3 a condition hoisted to a variable is refused, naming the key, the route and where it was read', async () =>
+    {
+        writeRouter(hoisted('process.env.PROBE_ENABLE_ADMIN'));
+
+        const error = await refusalOf();
+
+        expect(error).toBeInstanceOf(ConditionalRegistrationError);
+        expect(error?.message).toMatch(/PROBE_ENABLE_ADMIN \(read at src\/server\/router\.ts:\d+\), unset → set/);
+        expect(error?.message).toContain('+ admin (GET /admin)');
+        expect(existsSync(join(projectDir, OUTPUT_PATH))).toBe(false);
+    });
+
+    it('E3b the same is refused when the shell sets the key, and the key keeps its value', async () =>
+    {
+        await withShellEnv({ PROBE_ENABLE_ADMIN: '1' }, async () =>
+        {
+            writeRouter(hoisted('process.env.PROBE_ENABLE_ADMIN'));
+
+            expect((await refusalOf())?.message).toContain('- admin (GET /admin)');
+            expect(process.env.PROBE_ENABLE_ADMIN).toBe('1');
+        });
+    });
+
+    it('E4 a condition inside an imported route module is refused, naming that module', async () =>
+    {
+        writeFile('src/server/routes/admin.ts', IMPORTS.split('\n')[1] + '\n'
+            + 'const admin = route.get(\'/admin\').handler(async () => ({}));\n'
+            + 'export const adminRoutes = process.env.PROBE_ENABLE_ADMIN ? { admin } : {};\n');
+        writeRouter('import { adminRoutes } from \'./routes/admin\';\n'
+            + 'const getRoot = route.get(\'/\').handler(async () => ({}));\n\n'
+            + 'export const appRouter = defineRouter({ getRoot, ...adminRoutes });\n');
+
+        expect((await refusalOf())?.message).toMatch(/PROBE_ENABLE_ADMIN \(read at src\/server\/routes\/admin\.ts:\d+\)/);
+    });
+
+    it.each(['production', 'development'])('E5 a destructured NODE_ENV that gates a route is refused under %s', async (nodeEnv) =>
+    {
+        await withShellEnv({ NODE_ENV: nodeEnv }, async () =>
+        {
+            writeRouter(ROUTES + 'const { NODE_ENV } = process.env;\n'
+                + 'const devRoutes = NODE_ENV === \'development\' ? { admin } : {};\n\n'
+                + 'export const appRouter = defineRouter({ getRoot, ...devRoutes });\n');
+
+            const error = await refusalOf();
+
+            expect(error?.message).toContain(`NODE_ENV (read at src/server/router.ts`);
+            expect(error?.message).toContain(nodeEnv === 'production' ? 'production → development' : 'development → production');
+            expect(process.env.NODE_ENV).toBe(nodeEnv);
+        });
+    });
+
+    it('E6 a key tested with `in` that gates a route is refused', async () =>
+    {
+        writeRouter(hoisted('\'PROBE_FEATURE_X\' in process.env'));
+
+        expect((await refusalOf())?.message).toContain('PROBE_FEATURE_X (read at src/server/router.ts');
+    });
+
+    it('E7 a key read through a module outside the project, as the env registry reads it, is attributed to the route module', async () =>
+    {
+        writeFileSync(join(outsideDir, 'registry.ts'),
+            'export const env = new Proxy({}, { get: (_target, key) => readRaw(String(key)) });\n'
+            + 'function readRaw(key: string) { return process.env[key]; }\n');
+        writeRouter(`import { env } from '${outsideDir.replace(/\\/g, '/')}/registry';\n`
+            + hoisted('(env as any).PROBE_ENABLE_ADMIN'));
+
+        expect((await refusalOf())?.message).toMatch(/PROBE_ENABLE_ADMIN \(read at src\/server\/router\.ts:\d+\)/);
+    });
+
+    it('E9 two keys that each gate a route are both named, each with its own route', async () =>
+    {
+        writeRouter('const a = route.get(\'/a\').handler(async () => ({}));\n'
+            + 'const b = route.get(\'/b\').handler(async () => ({}));\n'
+            + 'const aRoutes = process.env.PROBE_A ? { a } : {};\n'
+            + 'const bRoutes = process.env.PROBE_B ? { b } : {};\n\n'
+            + 'export const appRouter = defineRouter({ ...aRoutes, ...bRoutes });\n');
+
+        const message = (await refusalOf())?.message ?? '';
+
+        expect(message).toMatch(/PROBE_A \(read at [^)]+\), unset → set\n {4}\+ a \(GET \/a\)/);
+        expect(message).toMatch(/PROBE_B \(read at [^)]+\), unset → set\n {4}\+ b \(GET \/b\)/);
+    });
+
+    it('E10 a key the router cannot load without is left as it is, logged, and the map is written', async () =>
+    {
+        await withShellEnv({ PROBE_API_KEY: 'present' }, async () =>
+        {
+            writeRouter(ROUTES + 'if (!process.env.PROBE_API_KEY) { throw new Error(\'PROBE_API_KEY is required\'); }\n\n'
+                + 'export const appRouter = defineRouter({ getRoot, admin });\n');
+
+            const info = await infoOf(generate);
+
+            expect(info).toContain('Could not vary PROBE_API_KEY while checking the route map against the environment');
+            expect(entriesOf(readFileSync(join(projectDir, OUTPUT_PATH), 'utf-8'))).toHaveLength(2);
+            expect(process.env.PROBE_API_KEY).toBe('present');
+        });
+    });
+
+    it('E11 beside such a key, a key that gates a route is still found and refused', async () =>
+    {
+        await withShellEnv({ PROBE_API_KEY: 'present' }, async () =>
+        {
+            writeRouter(ROUTES + 'if (!process.env.PROBE_API_KEY) { throw new Error(\'PROBE_API_KEY is required\'); }\n'
+                + 'const extra = process.env.PROBE_FLAG ? { admin } : {};\n\n'
+                + 'export const appRouter = defineRouter({ getRoot, ...extra });\n');
+
+            const message = (await refusalOf())?.message ?? '';
+
+            expect(message).toContain('PROBE_FLAG (read at');
+            expect(message).not.toContain('PROBE_API_KEY (read at');
+        });
+    });
+
+    it('E12 when only the joint variation differs, every key is named together and the untried ones are listed', async () =>
+    {
+        writeRouter(ROUTES
+            + 'const read = [process.env.PROBE_K1, process.env.PROBE_K2, process.env.PROBE_K3, process.env.PROBE_K4, process.env.PROBE_K5];\n'
+            + 'const extra = process.env.PROBE_K6 ? { admin } : {};\n\n'
+            + 'void read;\n\n'
+            + 'export const appRouter = defineRouter({ getRoot, ...extra });\n');
+
+        const message = (await refusalOf())?.message ?? '';
+
+        for (const key of ['PROBE_K1', 'PROBE_K2', 'PROBE_K3', 'PROBE_K4', 'PROBE_K5', 'PROBE_K6'])
+        {
+            expect(message).toContain(`${key} (read at`);
+        }
+
+        expect(message).toContain('These keys change it together; none of the 4 varied alone does. PROBE_K5, PROBE_K6 were not varied alone.');
+        expect(message).toContain('+ admin (GET /admin)');
+    });
+
+    it('E13 an inline conditional is refused by the source scan, without a second load', async () =>
+    {
+        writeRouter(COUNT_LOAD + ROUTES + '\nexport const appRouter = defineRouter({ getRoot, ...(process.env.PROBE_FLAG ? { admin } : {}) });\n');
+
+        await expect(generate()).rejects.toThrow(/registers routes conditionally/);
+        expect(loads()).toBe(1);
+    });
+
+    it('E14 the environment is the real object with its own values after a refusal and after a pass', async () =>
+    {
+        writeRouter(hoisted('process.env.PROBE_ENABLE_ADMIN'));
+        await refusalOf();
+
+        expect(types.isProxy(process.env)).toBe(false);
+        expect(Object.hasOwn(process.env, 'PROBE_ENABLE_ADMIN')).toBe(false);
+
+        await withShellEnv({ PROBE_API_URL: 'kept' }, async () =>
+        {
+            writeRouter('const apiUrl = process.env.PROBE_API_URL;\n'
+                + 'const getRoot = route.get(\'/\').handler(async () => ({ apiUrl }));\n\n'
+                + 'export const appRouter = defineRouter({ getRoot });\n');
+            await generate();
+
+            expect(types.isProxy(process.env)).toBe(false);
+            expect(process.env.PROBE_API_URL).toBe('kept');
+        });
+    });
+
+    it('E15 a package router mounted only under a key is refused, naming the package routes', async () =>
+    {
+        writeRouter('const getRoot = route.get(\'/\').handler(async () => ({}));\n'
+            + 'const pkgPing = route.get(\'/_pkg/ping\').handler(async () => ({}));\n'
+            + 'const pkgRouter = defineRouter({ pkgPing });\n'
+            + 'const mounted = process.env.PROBE_WITH_PKG ? [pkgRouter] : [];\n\n'
+            + 'export const appRouter = defineRouter({ getRoot }).packages(mounted);\n');
+
+        expect((await refusalOf())?.message).toContain('+ pkgPing (GET /_pkg/ping)');
+    });
+
+    it('E16 a key read only inside a handler is never read while loading: one load', async () =>
+    {
+        writeRouter(COUNT_LOAD + 'const getRoot = route.get(\'/\').handler(async () => ({ v: process.env.PROBE_HANDLER_ONLY }));\n\n'
+            + 'export const appRouter = defineRouter({ getRoot });\n');
+
+        await generate();
+
+        expect(loads()).toBe(1);
+    });
+
+    it('E17 the refusal names a gating key but never its value', async () =>
+    {
+        await withShellEnv({ PROBE_SECRET: 'sk-live-do-not-print' }, async () =>
+        {
+            writeRouter(hoisted('process.env.PROBE_SECRET'));
+
+            const message = (await refusalOf())?.message ?? '';
+
+            expect(message).toContain('PROBE_SECRET (read at src/server/router.ts');
+            expect(message).toContain('set → unset');
+            expect(message).not.toContain('sk-live-do-not-print');
+        });
     });
 });

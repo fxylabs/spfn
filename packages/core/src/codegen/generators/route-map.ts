@@ -46,6 +46,7 @@ import { logger } from '@spfn/core/logger';
 import type { Generator, GeneratorOptions } from '../core/generator';
 import { assertUnconditionalRegistration } from './contract-guard';
 import { toObjectKey, toStringLiteral } from './emit';
+import { assertRouteSetIndependentOfEnvironment, observeEnvironmentReads, type RouteSet } from './environment-probe';
 import { isRouter, loadRouterModule, pinNodeEnv, resolveRouterExport, type ResolvedRouter } from './router-module';
 
 const genLogger = logger.child('@spfn/core:route-map-generator');
@@ -526,6 +527,12 @@ function collectRouteMap(router: Router<any>): Collection
     return collection;
 }
 
+/** What the map holds per name — `METHOD path` — to compare one load's routes against another's. */
+function routeSetOf(collection: Collection): RouteSet
+{
+    return new Map([...collection.app, ...collection.packages].map(([name, route]) => [name, `${route.method} ${route.path}`]));
+}
+
 // ============================================================================
 // Generator
 // ============================================================================
@@ -701,8 +708,10 @@ export function createRouteMapGenerator(config: RouteMapGeneratorConfig): Genera
             pinNodeEnv();
 
             // Loaded before the guard reads the source, because which router the
-            // guard reads is decided by which export the loader found.
-            const { router, exportName } = loadRouter(cwd, absoluteRouterPath);
+            // guard reads is decided by which export the loader found. Observed,
+            // because the environment probe varies what this load read.
+            const { value: { router, exportName }, reads } =
+                observeEnvironmentReads(cwd, () => loadRouter(cwd, absoluteRouterPath));
 
             assertUnconditionalRegistration({
                 routerPath,
@@ -712,6 +721,17 @@ export function createRouteMapGenerator(config: RouteMapGeneratorConfig): Genera
             });
 
             const collection = collectRouteMap(router);
+
+            // After the scan, which names an inline conditional by its line without
+            // a second load; this catches what the scan cannot see.
+            assertRouteSetIndependentOfEnvironment({
+                cwd,
+                reads,
+                baseline: routeSetOf(collection),
+                routeSet: () => routeSetOf(collectRouteMap(loadRouter(cwd, absoluteRouterPath).router)),
+                subject: 'route map',
+            });
+
             const total = collection.app.size + collection.packages.size;
 
             if (debug)
