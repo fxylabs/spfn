@@ -281,6 +281,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 #### @spfn/core
 
+- **`defineTenancy({ property })` and `tenancy.reference(..., { onDelete })`** (#159, #160, #302).
+  `property` (default `tenantId`) is the key the tenant column has on every tenancy table's
+  rows, so an app whose code already reads `row.workspaceId` adopts a tenancy without renaming
+  it; `column` still names the SQL column, and the generated SQL does not change.
+  `onDelete: 'cascade' | 'restrict' | 'no action'` chooses a reference's delete action, on a
+  required or an optional reference; the defaults stay `CASCADE` and `NO ACTION`, and
+  `'restrict'` refuses to delete a row another still points at. `SET NULL` and `SET DEFAULT`
+  are not offered, because the tenant column is part of the same foreign key; any other value
+  throws when the schema module loads. `core` 0.3.0-beta.36.
+    - **Migration**: none. Changing an existing reference's `onDelete` makes `spfn db generate`
+      drop and re-create that foreign key.
 - **`defineTenancy`: tenant tables the database itself keeps apart** (#158 part 2, #296).
   `defineTenancy({ tenants, authorize, column? })` names the tenant list table (a workspace
   table, or `users` from `@spfn/auth/server` when the tenant is a person) and who may act for a
