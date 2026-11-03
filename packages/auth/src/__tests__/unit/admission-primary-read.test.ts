@@ -37,7 +37,7 @@ vi.mock('../../server/repositories', () => ({
     keysRepository,
     usersRepository,
     passkeysRepository: {},
-    userProfilesRepository: { findLocaleByUserId: vi.fn(async () => 'en') },
+    userSettingsRepository: { findLocaleByUserId: vi.fn(async () => 'en') },
 }));
 vi.mock('../../server/services/passkey.service', () => ({
     assertRecentAuthentication: vi.fn(async () => undefined),

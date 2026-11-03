@@ -6,8 +6,10 @@
  */
 
 import type { UserProfile, ProfileInfo } from '@spfn/auth';
+import { runInTransaction } from '@spfn/core/db';
 import { usersRepository, userProfilesRepository } from '../repositories';
 import { normalizeChosenLocale, profileLocale, type ProfileLocale } from '../lib/profile-locale';
+import { setUserSetting } from './user-settings.service';
 
 /**
  * Profile update parameters
@@ -20,7 +22,9 @@ export interface UpdateProfileParams
     lastName?: string;
     avatarUrl?: string;
     bio?: string;
+    /** @deprecated Written to the `locale` setting; use `setUserSetting` */
     locale?: string;
+    /** @deprecated Written to the `timezone` setting; use `setUserSetting` */
     timezone?: string;
     dateOfBirth?: string;
     gender?: string;
@@ -72,6 +76,8 @@ export async function getUserProfileService(userId: string | number | bigint): P
 /**
  * Update user locale
  *
+ * Writes the built-in `locale` setting; clearing the choice deletes its row.
+ *
  * @param userId - User ID
  * @param locale - Locale code (e.g., 'en', 'ko', 'ja'); `null` or blank clears the choice
  * @returns The stored choice, and the locale it resolves to
@@ -83,7 +89,7 @@ export async function updateLocaleService(
 {
     const chosen = normalizeChosenLocale(locale);
 
-    await userProfilesRepository.upsertByUserId(Number(userId), { locale: chosen });
+    await setUserSetting(userId, 'locale', chosen, { by: userId });
 
     return profileLocale(chosen);
 }
@@ -101,15 +107,79 @@ function emptyToNull<T>(value: T): T | null
     return value;
 }
 
+/** The profile columns a PATCH may write; `metadata` is handled on its own */
+const PROFILE_TEXT_COLUMNS = [
+    'displayName',
+    'firstName',
+    'lastName',
+    'avatarUrl',
+    'bio',
+    'dateOfBirth',
+    'gender',
+    'website',
+    'location',
+    'company',
+    'jobTitle',
+] as const;
+
+function profileColumnUpdates(params: UpdateProfileParams): Record<string, unknown>
+{
+    const updates: Record<string, unknown> = {};
+
+    for (const column of PROFILE_TEXT_COLUMNS)
+    {
+        if (params[column] !== undefined)
+        {
+            updates[column] = emptyToNull(params[column]);
+        }
+    }
+    if (params.metadata !== undefined)
+    {
+        updates.metadata = params.metadata;
+    }
+
+    return updates;
+}
+
+/**
+ * `locale` and `timezone` are settings now (#161); the profile PATCH still
+ * accepts them and writes them there. An empty timezone means UTC, the default.
+ */
+async function writeProfileSettings(userId: number, params: UpdateProfileParams): Promise<void>
+{
+    if (params.locale !== undefined)
+    {
+        await setUserSetting(userId, 'locale', normalizeChosenLocale(params.locale), { by: userId });
+    }
+    if (params.timezone !== undefined)
+    {
+        await setUserSetting(userId, 'timezone', emptyToNull(params.timezone) || 'UTC', { by: userId });
+    }
+}
+
+/** A PATCH that names no column still leaves a profile behind, as it always did */
+async function writeProfileColumns(userId: number, updates: Record<string, unknown>): Promise<void>
+{
+    if (Object.keys(updates).length === 0)
+    {
+        await userProfilesRepository.createIfAbsent({ userId, displayName: 'User' });
+
+        return;
+    }
+    await userProfilesRepository.upsertByUserId(userId, updates);
+}
+
 /**
  * Update user profile (upsert)
  *
  * Creates profile if not exists, updates if exists
  * Empty strings are converted to null
+ * `locale` and `timezone` are written to user settings, in the same transaction
  *
  * @param userId - User ID
  * @param params - Profile fields to update
  * @returns Updated profile info
+ * @throws ValidationError (400) when `timezone` is not an IANA zone name; nothing is written
  *
  * @example
  * ```typescript
@@ -125,73 +195,13 @@ export async function updateUserProfileService(
     params: UpdateProfileParams,
 ): Promise<ProfileInfo>
 {
-    const userIdNum = typeof userId === 'string' ? Number(userId) : Number(userId);
+    const userIdNum = Number(userId);
 
-    // Build update data, converting empty strings to null
-    const updateData: Record<string, any> = {};
+    await runInTransaction(async () =>
+    {
+        await writeProfileSettings(userIdNum, params);
+        await writeProfileColumns(userIdNum, profileColumnUpdates(params));
+    });
 
-    if (params.displayName !== undefined)
-    {
-        updateData.displayName = emptyToNull(params.displayName);
-    }
-    if (params.firstName !== undefined)
-    {
-        updateData.firstName = emptyToNull(params.firstName);
-    }
-    if (params.lastName !== undefined)
-    {
-        updateData.lastName = emptyToNull(params.lastName);
-    }
-    if (params.avatarUrl !== undefined)
-    {
-        updateData.avatarUrl = emptyToNull(params.avatarUrl);
-    }
-    if (params.bio !== undefined)
-    {
-        updateData.bio = emptyToNull(params.bio);
-    }
-    if (params.locale !== undefined)
-    {
-        updateData.locale = normalizeChosenLocale(params.locale);
-    }
-    if (params.timezone !== undefined)
-    {
-        updateData.timezone = emptyToNull(params.timezone) || 'UTC';
-    }
-    if (params.dateOfBirth !== undefined)
-    {
-        updateData.dateOfBirth = emptyToNull(params.dateOfBirth);
-    }
-    if (params.gender !== undefined)
-    {
-        updateData.gender = emptyToNull(params.gender);
-    }
-    if (params.website !== undefined)
-    {
-        updateData.website = emptyToNull(params.website);
-    }
-    if (params.location !== undefined)
-    {
-        updateData.location = emptyToNull(params.location);
-    }
-    if (params.company !== undefined)
-    {
-        updateData.company = emptyToNull(params.company);
-    }
-    if (params.jobTitle !== undefined)
-    {
-        updateData.jobTitle = emptyToNull(params.jobTitle);
-    }
-    if (params.metadata !== undefined)
-    {
-        updateData.metadata = params.metadata;
-    }
-
-    // Upsert profile
-    await userProfilesRepository.upsertByUserId(userIdNum, updateData);
-
-    // Fetch and return updated profile
-    const profile = await userProfilesRepository.fetchProfileData(userIdNum);
-
-    return profile!;
+    return (await userProfilesRepository.fetchProfileData(userIdNum))!;
 }

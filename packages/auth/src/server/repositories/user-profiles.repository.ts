@@ -9,6 +9,7 @@ import { NewUserProfile, userProfiles } from '../entities/user-profiles';
 import { BaseRepository } from '@spfn/core/db';
 import { eq } from 'drizzle-orm';
 import { profileLocale } from '../lib/profile-locale';
+import { userSettingsRepository } from './user-settings.repository';
 
 /**
  * User Profiles Repository 클래스
@@ -30,19 +31,15 @@ export class UserProfilesRepository extends BaseRepository
     }
 
     /**
-     * User ID로 locale 선택값만 조회 (경량)
+     * The stored language choice, or null when none was made
      *
-     * NULL(또는 프로필 없음)은 "고른 적 없음"이다. 기본값으로 바꾸지 않는다.
+     * @deprecated The choice lives in user settings now (#161); this delegates
+     * to `userSettingsRepository.findLocaleByUserId` and goes with the
+     * `locale` column in the next release.
      */
     async findLocaleByUserId(userId: number): Promise<string | null>
     {
-        const result = await this.readDb
-            .select({ locale: userProfiles.locale })
-            .from(userProfiles)
-            .where(eq(userProfiles.userId, userId))
-            .limit(1);
-
-        return result[0]?.locale ?? null;
+        return await userSettingsRepository.findLocaleByUserId(userId);
     }
 
     /**
@@ -170,28 +167,10 @@ export class UserProfilesRepository extends BaseRepository
      */
     async fetchProfileData(userId: number)
     {
-        const profile = await this.readDb
-            .select({
-                profileId: userProfiles.id,
-                displayName: userProfiles.displayName,
-                firstName: userProfiles.firstName,
-                lastName: userProfiles.lastName,
-                avatarUrl: userProfiles.avatarUrl,
-                bio: userProfiles.bio,
-                locale: userProfiles.locale,
-                timezone: userProfiles.timezone,
-                website: userProfiles.website,
-                location: userProfiles.location,
-                company: userProfiles.company,
-                jobTitle: userProfiles.jobTitle,
-                metadata: userProfiles.metadata,
-                createdAt: userProfiles.createdAt,
-                updatedAt: userProfiles.updatedAt,
-            })
-            .from(userProfiles)
-            .where(eq(userProfiles.userId, userId))
-            .limit(1)
-            .then(rows => rows[0] ?? null);
+        const [profile, settings] = await Promise.all([
+            this.findProfileColumns(userId),
+            userSettingsRepository.findLocaleAndTimezone(userId),
+        ]);
 
         if (!profile)
         {
@@ -205,8 +184,8 @@ export class UserProfilesRepository extends BaseRepository
             lastName: profile.lastName,
             avatarUrl: profile.avatarUrl,
             bio: profile.bio,
-            ...profileLocale(profile.locale),
-            timezone: profile.timezone || 'UTC',
+            ...profileLocale(settings.chosenLocale),
+            timezone: settings.timezone,
             website: profile.website,
             location: profile.location,
             company: profile.company,
@@ -215,6 +194,34 @@ export class UserProfilesRepository extends BaseRepository
             createdAt: profile.createdAt,
             updatedAt: profile.updatedAt,
         };
+    }
+
+    /**
+     * The profile columns `fetchProfileData` returns. `locale` and `timezone`
+     * are not among them: settings own both, and the columns are no longer read.
+     */
+    private async findProfileColumns(userId: number)
+    {
+        return await this.readDb
+            .select({
+                profileId: userProfiles.id,
+                displayName: userProfiles.displayName,
+                firstName: userProfiles.firstName,
+                lastName: userProfiles.lastName,
+                avatarUrl: userProfiles.avatarUrl,
+                bio: userProfiles.bio,
+                website: userProfiles.website,
+                location: userProfiles.location,
+                company: userProfiles.company,
+                jobTitle: userProfiles.jobTitle,
+                metadata: userProfiles.metadata,
+                createdAt: userProfiles.createdAt,
+                updatedAt: userProfiles.updatedAt,
+            })
+            .from(userProfiles)
+            .where(eq(userProfiles.userId, userId))
+            .limit(1)
+            .then(rows => rows[0] ?? null);
     }
 }
 

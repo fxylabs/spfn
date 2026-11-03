@@ -6,7 +6,7 @@
  * this class only stores and reads what it was given.
  */
 
-import { and, count, eq, sql } from 'drizzle-orm';
+import { and, count, eq, inArray, sql } from 'drizzle-orm';
 import { BaseRepository } from '@spfn/core/db';
 import { userSettings } from '../entities/user-settings';
 
@@ -57,6 +57,27 @@ export class UserSettingsRepository extends BaseRepository
     }
 
     /**
+     * The two built-in keys the profile response still carries (deprecated
+     * there), in one query: the language choice, null when none was made, and
+     * the timezone, 'UTC' when none was set
+     */
+    async findLocaleAndTimezone(userId: number): Promise<{ chosenLocale: string | null; timezone: string }>
+    {
+        const rows = await this.readDb
+            .select({ key: userSettings.key, value: userSettings.value })
+            .from(userSettings)
+            .where(and(eq(userSettings.userId, userId), inArray(userSettings.key, ['locale', 'timezone'])));
+        const valueOf = (key: string) => rows.find(row => row.key === key)?.value;
+        const locale = valueOf('locale');
+        const timezone = valueOf('timezone');
+
+        return {
+            chosenLocale: typeof locale === 'string' ? locale : null,
+            timezone: typeof timezone === 'string' ? timezone : 'UTC',
+        };
+    }
+
+    /**
      * Every stored setting of one person
      */
     async listByUser(userId: number): Promise<StoredUserSetting[]>
@@ -89,6 +110,16 @@ export class UserSettingsRepository extends BaseRepository
         await this.db
             .delete(userSettings)
             .where(and(eq(userSettings.userId, userId), eq(userSettings.key, key)));
+    }
+
+    /**
+     * Delete every setting of one person (account anonymization)
+     */
+    async deleteAllByUserId(userId: number): Promise<void>
+    {
+        await this.db
+            .delete(userSettings)
+            .where(eq(userSettings.userId, userId));
     }
 
     /**

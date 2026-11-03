@@ -31,6 +31,7 @@ import {
     deviceLinksRepository,
     socialAccountsRepository,
     userProfilesRepository,
+    userSettingsRepository,
     verificationCodesRepository,
     accountDeletionRequestsRepository,
 } from '../repositories';
@@ -501,6 +502,9 @@ async function anonymizeUser(user: User): Promise<void>
         jobTitle: null,
         metadata: null,
     });
+    // How the person used the app goes with who they were: an app may keep
+    // anything in a setting, and nothing reads it for an account nobody can be.
+    await userSettingsRepository.deleteAllByUserId(user.id);
 }
 
 /**

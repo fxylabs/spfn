@@ -5,12 +5,16 @@
  * stored choice itself, `null` when there is none. Each test is one cell of the
  * design's case table, driven against the real schema so the dropped column
  * default is part of what is tested.
+ *
+ * Since #161 the choice is the built-in `locale` setting: a `user_settings` row,
+ * and no row when nothing was chosen. The profile column is neither read nor
+ * written any more, so these tests store and inspect the settings row.
  */
 
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import { setupTestDb, teardownTestDb, clearTables, getTestDb, isDatabaseAvailable } from '../helpers/db';
-import { users, userProfiles } from '@/server/entities';
+import { users, userProfiles, userSettings } from '@/server/entities';
 
 const { initializeAuth } = await import('@/server/services/rbac.service');
 const { getRoleByName } = await import('@/server/services/role.service');
@@ -53,17 +57,22 @@ describe.skipIf(!dbAvailable)('profile locale (case table #110)', () =>
 
     async function storeLocale(locale: string | null)
     {
-        await getTestDb().insert(userProfiles).values({ userId, locale });
+        await getTestDb().insert(userProfiles).values({ userId });
+        if (locale !== null)
+        {
+            await getTestDb().insert(userSettings).values({ userId, key: 'locale', value: locale });
+        }
     }
 
+    /** The stored choice: the settings row's value, null when there is no row */
     async function storedLocale()
     {
         const [row] = await getTestDb()
-            .select({ locale: userProfiles.locale })
-            .from(userProfiles)
-            .where(eq(userProfiles.userId, userId));
+            .select({ value: userSettings.value })
+            .from(userSettings)
+            .where(and(eq(userSettings.userId, userId), eq(userSettings.key, 'locale')));
 
-        return row?.locale;
+        return row ? row.value : null;
     }
 
     async function resolved()
@@ -150,5 +159,20 @@ describe.skipIf(!dbAvailable)('profile locale (case table #110)', () =>
 
         expect(profile).toMatchObject({ locale: 'en', chosenLocale: null });
         expect(await storedLocale()).toBeNull();
+    });
+
+    it('D7: the profile response keeps its shape and values for a user with a chosen locale', async () =>
+    {
+        await storeLocale('ko');
+
+        const profile = (await getUserProfileService(userId)).profile!;
+
+        // The key order is the pre-#161 response's, so the serialized body is byte-identical.
+        expect(Object.keys(profile)).toEqual([
+            'profileId', 'displayName', 'firstName', 'lastName', 'avatarUrl', 'bio',
+            'locale', 'chosenLocale', 'timezone',
+            'website', 'location', 'company', 'jobTitle', 'metadata', 'createdAt', 'updatedAt',
+        ]);
+        expect(profile).toMatchObject({ locale: 'ko', chosenLocale: 'ko', timezone: 'UTC', metadata: null });
     });
 });

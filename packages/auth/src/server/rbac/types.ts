@@ -4,6 +4,8 @@
  * Type definitions for role and permission configuration
  */
 
+import type { InstallableUserSettings } from '../lib/user-settings/registry';
+
 /**
  * Permission category enum values
  * Single source of truth for permission categories
@@ -126,4 +128,18 @@ export interface AuthInitOptions
      * ```
      */
     sessionTtl?: string | number;
+
+    /**
+     * Per-person settings the app declares, from `defineUserSettings`
+     *
+     * Installed once, when auth initializes; a second install, or one after
+     * boot completed, throws. Without it only the built-in keys exist
+     * (`locale`, `timezone`).
+     *
+     * @example
+     * ```typescript
+     * createAuthLifecycle({ userSettings: USER_SETTINGS });
+     * ```
+     */
+    userSettings?: InstallableUserSettings;
 }

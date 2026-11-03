@@ -53,10 +53,24 @@ export interface ProfileInfo
     lastName: string | null;
     avatarUrl: string | null;
     bio: string | null;
-    /** The person's language choice, or `'en'` when they never made one. */
+    /**
+     * The person's language choice, or `'en'` when they never made one.
+     *
+     * @deprecated Read the `locale` setting (`listUserSettings` /
+     * `GET /_auth/users/settings`); removed from the profile in the next release.
+     */
     locale: string;
-    /** The person's language choice, or `null` when they never made one. */
+    /**
+     * The person's language choice, or `null` when they never made one.
+     *
+     * @deprecated Read the `locale` setting; removed from the profile in the next release.
+     */
     chosenLocale: string | null;
+    /**
+     * The person's IANA timezone, `'UTC'` when they never set one.
+     *
+     * @deprecated Read the `timezone` setting; removed from the profile in the next release.
+     */
     timezone: string;
     website: string | null;
     location: string | null;

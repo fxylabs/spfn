@@ -34,3 +34,4 @@ export * from './deletion-config';
 export * from './device-auth-config';
 export * from './device-link-config';
 export * from './device-code';
+export * from './user-settings';

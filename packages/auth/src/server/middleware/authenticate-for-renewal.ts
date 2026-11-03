@@ -31,7 +31,7 @@ import { SessionRenewalRefusedError } from '@spfn/auth/errors';
 
 import { getBoundKeyRenewGraceMs } from '../lib/config';
 import { profileLocale } from '../lib/profile-locale';
-import { userProfilesRepository } from '../repositories';
+import { userSettingsRepository } from '../repositories';
 import { findUserWithEffectiveRole } from '../services/role-email-domain.service';
 import type { UserPublicKey } from '../entities/user-public-keys';
 import { admitBearerKey, bearerAuthContext } from './authenticate';
@@ -104,7 +104,7 @@ async function activeAccount(userId: number)
 {
     const [result, chosenLocale] = await Promise.all([
         findUserWithEffectiveRole(userId),
-        userProfilesRepository.findLocaleByUserId(userId),
+        userSettingsRepository.findLocaleByUserId(userId),
     ]);
 
     if (!result || result.user.status !== 'active')

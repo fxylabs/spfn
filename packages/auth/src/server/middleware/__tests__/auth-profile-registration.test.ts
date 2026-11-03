@@ -30,7 +30,7 @@ vi.mock('@spfn/auth/server', async (importOriginal) =>
             updateLastUsedById: vi.fn().mockResolvedValue(undefined),
         },
         findUserWithEffectiveRoleOnPrimary: vi.fn(),
-        userProfilesRepository: { findLocaleByUserId: vi.fn().mockResolvedValue('en') },
+        userSettingsRepository: { findLocaleByUserId: vi.fn().mockResolvedValue('en') },
         getPendingDeletionInfo: vi.fn(),
     };
 });

@@ -20,6 +20,8 @@ import {
 import type { AuthInitOptions, RoleConfig, PermissionConfig } from '../rbac';
 import { assertPasskeyConfig, configureAuth } from '../lib/config';
 import { authLogger } from '../logger';
+import { installUserSettings, sealUserSettings } from '../lib/user-settings/registry';
+import { reconcileUserSettings } from './user-settings.service';
 import type { RoleEntity } from '../entities/roles';
 import type { PermissionEntity } from '../entities/permissions';
 
@@ -86,6 +88,9 @@ function collectMappings(options: AuthInitOptions): Record<string, string[]>
  *
  * Creates built-in roles, permissions, and custom configurations.
  * Uses hash-based change detection - skips DB operations when config is unchanged.
+ * Installs the app's per-person settings declaration (`options.userSettings`)
+ * and reports stored setting keys nobody declares; once this completes, no
+ * declaration can be installed any more.
  *
  * @param options - Initialization options
  *
@@ -112,6 +117,20 @@ function collectMappings(options: AuthInitOptions): Record<string, string[]>
  * ```
  */
 export async function initializeAuth(options: AuthInitOptions = {}): Promise<void>
+{
+    if (options.userSettings)
+    {
+        installUserSettings(options.userSettings);
+    }
+    await reconcileUserSettings();
+    await applyRbacConfig(options);
+    sealUserSettings();
+}
+
+/**
+ * The RBAC half of `initializeAuth`: roles, permissions and their mappings
+ */
+async function applyRbacConfig(options: AuthInitOptions): Promise<void>
 {
     authLogger.service.info('🔐 Initializing RBAC system...');
 

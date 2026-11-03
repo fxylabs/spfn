@@ -1598,3 +1598,21 @@ export class MfaConfigError extends HttpError
         this.name = 'MfaConfigError';
     }
 }
+
+/**
+ * User Setting Not Declared Error (404)
+ *
+ * Thrown when a per-person setting is read or written under a key that neither
+ * the library nor the app's `defineUserSettings` declares. Nothing is written.
+ */
+export class UserSettingNotDeclaredError extends NotFoundError
+{
+    constructor(data: { message?: string; details?: Record<string, any> } = {})
+    {
+        super({
+            message: data.message || 'User setting not declared',
+            details: data.details,
+        });
+        this.name = 'UserSettingNotDeclaredError';
+    }
+}

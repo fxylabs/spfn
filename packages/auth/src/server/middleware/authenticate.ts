@@ -25,7 +25,7 @@ import { defineMiddleware } from '@spfn/core/route';
 import { UnauthorizedError } from '@spfn/core/errors';
 
 import type { KeyAlgorithmType, User } from '@spfn/auth/server';
-import { verifyClientToken, decodeToken, authLogger, keysRepository, findUserWithEffectiveRoleOnPrimary, userProfilesRepository } from '@spfn/auth/server';
+import { verifyClientToken, decodeToken, authLogger, keysRepository, findUserWithEffectiveRoleOnPrimary, userSettingsRepository } from '@spfn/auth/server';
 import {
     InvalidTokenError,
     TokenExpiredError,
@@ -459,7 +459,7 @@ export const optionalAuth = defineMiddleware('optionalAuth', async (c, next) =>
 
         const [result, chosenLocale] = await Promise.all([
             findUserWithEffectiveRoleOnPrimary(keyRecord.userId),
-            userProfilesRepository.findLocaleByUserId(keyRecord.userId),
+            userSettingsRepository.findLocaleByUserId(keyRecord.userId),
         ]);
 
         if (!result || result.user.status !== 'active')
