@@ -10,7 +10,7 @@ import { runInTransaction } from '@spfn/core/db';
 import { usersRepository, userProfilesRepository } from '../repositories';
 import { normalizeChosenLocale, profileLocale, type ProfileLocale } from '../lib/profile-locale';
 import { setUserSetting } from './user-settings.service';
-import { activeProfileFields, assertProfileFieldsPatch } from '../lib/profile-fields';
+import { activeProfileFields, assertProfileFieldsPatch, assertStorableMetadata } from '../lib/profile-fields';
 import { authLogger } from '../logger';
 
 /**
@@ -79,10 +79,12 @@ export async function getUserProfileService(userId: string | number | bigint): P
  * Update user locale
  *
  * Writes the built-in `locale` setting; clearing the choice deletes its row.
+ * A person without a profile gets one, as before the move to settings.
  *
  * @param userId - User ID
  * @param locale - Locale code (e.g., 'en', 'ko', 'ja'); `null` or blank clears the choice
  * @returns The stored choice, and the locale it resolves to
+ * @throws ValidationError (400) when the trimmed code is longer than 35 characters; nothing is written
  */
 export async function updateLocaleService(
     userId: string | number | bigint,
@@ -91,7 +93,12 @@ export async function updateLocaleService(
 {
     const chosen = normalizeChosenLocale(locale);
 
-    await setUserSetting(userId, 'locale', chosen, { by: userId });
+    await runInTransaction(async () =>
+    {
+        await setUserSetting(userId, 'locale', chosen, { by: userId });
+        // Main's upsert created the profile row; only that is kept — its locale column stays untouched
+        await userProfilesRepository.createIfAbsent({ userId: Number(userId), displayName: 'User' });
+    });
 
     return profileLocale(chosen);
 }
@@ -160,11 +167,20 @@ async function mergeDeclaredMetadata(userId: number, metadata: Record<string, un
     }
 }
 
-/** @throws ValidationError (400) before anything is written, when the patch breaks the declaration */
+/**
+ * @throws ValidationError (400) before anything is written, when the patch is
+ * over 64 KiB, holds a NUL character, or breaks the declaration
+ */
 function assertMetadataPatch(metadata: Record<string, unknown> | undefined): void
 {
+    if (metadata === undefined)
+    {
+        return;
+    }
+    assertStorableMetadata(metadata);
+
     const fields = activeProfileFields();
-    if (fields && metadata !== undefined)
+    if (fields)
     {
         assertProfileFieldsPatch(fields, metadata);
     }

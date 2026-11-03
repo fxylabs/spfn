@@ -66,9 +66,7 @@ export const setSetting = route.put('/_auth/users/settings/:key')
         const { userId } = getAuth(c);
         const { params, body } = await c.data();
 
-        await setUserSetting(userId, params.key, body.value, { by: userId });
-
-        return { key: params.key, value: await getUserSetting(userId, params.key) };
+        return { key: params.key, value: await setUserSetting(userId, params.key, body.value, { by: userId }) };
     });
 
 /**

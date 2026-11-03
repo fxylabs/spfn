@@ -17,7 +17,16 @@ import { Value } from '@sinclair/typebox/value';
 import { getTableColumns } from 'drizzle-orm';
 import { ValidationError } from '@spfn/core/errors';
 import { userProfiles } from '../entities/user-profiles';
-import { createDeclarationSlot, indexDeclaredEntries } from './declared-keys';
+import { authLogger } from '../logger';
+import {
+    containsNul,
+    createDeclarationSlot,
+    indexDeclaredEntries,
+    PROFILE_METADATA_MAX_BYTES,
+    readOnlyEntries,
+    serializedBytes,
+    type DeclaredEntries,
+} from './declared-keys';
 
 export interface ProfileFieldEntry<TKey extends string = string, TValueSchema extends TSchema = TSchema>
 {
@@ -30,7 +39,8 @@ export interface ProfileFieldEntry<TKey extends string = string, TValueSchema ex
 export interface ProfileFieldsDeclaration<TEntries extends readonly ProfileFieldEntry[] = readonly ProfileFieldEntry[]>
 {
     readonly keys: readonly TEntries[number]['key'][];
-    readonly entries: ReadonlyMap<string, ProfileFieldEntry>;
+    /** Read-only: the object has no mutator, and installing copies it */
+    readonly entries: DeclaredEntries<ProfileFieldEntry>;
 }
 
 /**
@@ -74,12 +84,16 @@ export function defineProfileFields<const TEntries extends readonly ProfileField
     });
 }
 
-const slot = createDeclarationSlot<ReadonlyMap<string, ProfileFieldEntry>>('profileFields', 'defineProfileFields');
+const slot = createDeclarationSlot<DeclaredEntries<ProfileFieldEntry>>('profileFields', 'defineProfileFields');
 
-/** @throws Error when a declaration is already installed, or boot already completed */
+/**
+ * The registry keeps its own copy, so nothing the app holds can change what was installed
+ *
+ * @throws Error when a declaration is already installed, or boot already completed
+ */
 export function installProfileFields(declaration: ProfileFieldsDeclaration): void
 {
-    slot.install(declaration.entries);
+    slot.install(readOnlyEntries([...declaration.entries.values()].map(entry => [entry.key, entry])));
 }
 
 export function sealProfileFields(): void
@@ -88,7 +102,7 @@ export function sealProfileFields(): void
 }
 
 /** The installed fields, or null when metadata is free-form */
-export function activeProfileFields(): ReadonlyMap<string, ProfileFieldEntry> | null
+export function activeProfileFields(): DeclaredEntries<ProfileFieldEntry> | null
 {
     return slot.current();
 }
@@ -100,22 +114,55 @@ export function __resetProfileFieldsForTests(): void
 }
 
 /**
+ * What any `metadata` patch must be to be stored, declared fields or not: at
+ * most 64 KiB of JSON, checked on the patch itself before the write (strictly
+ * pre-merge: the merged object is not measured), and no NUL character, which
+ * PostgreSQL `jsonb` refuses.
+ *
+ * @throws ValidationError (400)
+ */
+export function assertStorableMetadata(patch: Record<string, unknown>): void
+{
+    if (serializedBytes(patch) > PROFILE_METADATA_MAX_BYTES)
+    {
+        throw new ValidationError({
+            message: 'Invalid profile metadata',
+            fields: [{ path: '/metadata', message: `must serialize to at most ${PROFILE_METADATA_MAX_BYTES} bytes of JSON` }],
+        });
+    }
+    if (containsNul(patch))
+    {
+        throw new ValidationError({
+            message: 'Invalid profile metadata',
+            fields: [{ path: '/metadata', message: 'must not contain a NUL character' }],
+        });
+    }
+}
+
+function fieldProblems(fields: DeclaredEntries<ProfileFieldEntry>, key: string, value: unknown): Array<{ path: string; message: string }>
+{
+    const entry = fields.get(key);
+    if (!entry)
+    {
+        return [{ path: `/metadata/${key}`, message: 'is not a declared profile field' }];
+    }
+    if (containsNul(value))
+    {
+        return [{ path: `/metadata/${key}`, message: 'must not contain a NUL character' }];
+    }
+
+    return [...Value.Errors(entry.schema, value)].map(error => ({ path: `/metadata/${key}${error.path}`, message: error.message }));
+}
+
+/**
  * Checks a metadata patch against the declaration
  *
- * @throws ValidationError (400) naming every undeclared key and every value that fails its schema
+ * @throws ValidationError (400) naming every undeclared key, every value holding
+ * a NUL character, and every value that fails its schema
  */
-export function assertProfileFieldsPatch(fields: ReadonlyMap<string, ProfileFieldEntry>, patch: Record<string, unknown>): void
+export function assertProfileFieldsPatch(fields: DeclaredEntries<ProfileFieldEntry>, patch: Record<string, unknown>): void
 {
-    const problems = Object.entries(patch).flatMap(([key, value]) =>
-    {
-        const entry = fields.get(key);
-        if (!entry)
-        {
-            return [{ path: `/metadata/${key}`, message: 'is not a declared profile field' }];
-        }
-
-        return [...Value.Errors(entry.schema, value)].map(error => ({ path: `/metadata/${key}${error.path}`, message: error.message }));
-    });
+    const problems = Object.entries(patch).flatMap(([key, value]) => fieldProblems(fields, key, value));
 
     if (problems.length > 0)
     {
@@ -123,10 +170,21 @@ export function assertProfileFieldsPatch(fields: ReadonlyMap<string, ProfileFiel
     }
 }
 
+/** One warning per read, naming the keys and how many — never whose */
+function warnStaleFields(keys: string[]): void
+{
+    if (keys.length > 0)
+    {
+        authLogger.service.warn(
+            `${keys.length} stored profile field value(s) fail the current schema and read as the default: ${keys.join(', ')}`,
+        );
+    }
+}
+
 /**
  * What a reader sees of stored metadata: as stored when nothing is declared;
  * otherwise every declared key with its stored value, or its default when the
- * value is missing or no longer passes, and no undeclared key.
+ * value is missing or no longer passes (with one warning), and no undeclared key.
  */
 export function projectProfileMetadata(stored: Record<string, any> | null): Record<string, any> | null
 {
@@ -137,11 +195,18 @@ export function projectProfileMetadata(stored: Record<string, any> | null): Reco
     }
 
     const projected: Record<string, unknown> = {};
+    const stale: string[] = [];
     for (const entry of fields.values())
     {
         const value = stored?.[entry.key];
-        projected[entry.key] = value !== undefined && Value.Check(entry.schema, value) ? value : entry.default;
+        const valid = value !== undefined && Value.Check(entry.schema, value);
+        projected[entry.key] = valid ? value : entry.default;
+        if (value !== undefined && !valid)
+        {
+            stale.push(entry.key);
+        }
     }
+    warnStaleFields(stale);
 
     return projected;
 }

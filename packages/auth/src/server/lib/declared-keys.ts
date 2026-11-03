@@ -20,6 +20,72 @@ export interface DeclaredEntry
     default?: unknown;
 }
 
+/**
+ * Declared entries by key, with no way to add, replace or remove one.
+ * `ReadonlyMap` would only be a promise of the type: the object behind it
+ * here has no mutator at all, so a declaration installed at boot stays
+ * exactly what boot checked.
+ */
+export interface DeclaredEntries<T>
+{
+    readonly size: number;
+    get(key: string): T | undefined;
+    has(key: string): boolean;
+    keys(): IterableIterator<string>;
+    values(): IterableIterator<T>;
+}
+
+/**
+ * A private copy of the entries behind a frozen read-only facade. Each entry
+ * is copied and frozen too, so no schema can be swapped after the check.
+ */
+export function readOnlyEntries<T extends DeclaredEntry>(source: Iterable<[string, T]>): DeclaredEntries<T>
+{
+    const own = new Map<string, T>([...source].map(([key, entry]) => [key, Object.freeze({ ...entry })]));
+
+    return Object.freeze({
+        size: own.size,
+        get: (key: string) => own.get(key),
+        has: (key: string) => own.has(key),
+        keys: () => own.keys(),
+        values: () => own.values(),
+    });
+}
+
+/** The serialized size cap of one setting value */
+export const SETTING_VALUE_MAX_BYTES = 16 * 1024;
+
+/** The serialized size cap of one profile `metadata` patch */
+export const PROFILE_METADATA_MAX_BYTES = 64 * 1024;
+
+/** The UTF-8 byte length of a value as JSON */
+export function serializedBytes(value: unknown): number
+{
+    return Buffer.byteLength(JSON.stringify(value) ?? '', 'utf8');
+}
+
+/**
+ * Whether a NUL character appears in any string of a JSON value, keys
+ * included. PostgreSQL `jsonb` refuses one, after every schema has passed.
+ */
+export function containsNul(value: unknown): boolean
+{
+    if (typeof value === 'string')
+    {
+        return value.includes('\u0000');
+    }
+    if (Array.isArray(value))
+    {
+        return value.some(containsNul);
+    }
+    if (value !== null && typeof value === 'object')
+    {
+        return Object.entries(value).some(([key, inner]) => key.includes('\u0000') || containsNul(inner));
+    }
+
+    return false;
+}
+
 function assertKeyFormat(label: string, key: string): void
 {
     if (typeof key !== 'string' || key.length > DECLARED_KEY_MAX_LENGTH || !DECLARED_KEY_PATTERN.test(key))
@@ -49,7 +115,7 @@ export function indexDeclaredEntries<T extends DeclaredEntry>(
     label: string,
     entries: readonly T[],
     reservedKeys: ReadonlyMap<string, string>,
-): Map<string, T>
+): DeclaredEntries<T>
 {
     const byKey = new Map<string, T>();
 
@@ -68,7 +134,7 @@ export function indexDeclaredEntries<T extends DeclaredEntry>(
         byKey.set(entry.key, entry);
     }
 
-    return byKey;
+    return readOnlyEntries(byKey);
 }
 
 /**

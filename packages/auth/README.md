@@ -433,12 +433,15 @@ returns; `getChosenLocale` then answers `null`.
 `locale` and `timezone` move from `user_profiles` columns to the built-in settings of the same names
 (see [per-person settings](#how-do-i-declare-per-person-settings-and-profile-fields)).
 
-**1. Run the migration once.** `pnpm spfn db migrate` creates `spfn_auth.user_settings` and copies
-every chosen locale, and every timezone other than `UTC`, into it. Nothing else changes in your
+**1. Run the migration once, before the first boot on this version.** `pnpm spfn db migrate`
+creates `spfn_auth.user_settings` and copies every chosen locale, and every timezone other than
+`UTC` or blank, into it. `initializeAuth` reads `user_settings` at boot (the reconcile below), so a
+process started before the migration fails at boot. Nothing else changes in your
 code: `getLocale(c)`, `getChosenLocale(c)`, `PATCH /_auth/users/locale` and `updateUserProfile({
 locale, timezone })` answer as before, reading and writing settings. Two differences: an invalid
 IANA timezone on the profile PATCH is now a 400 instead of being stored, and anonymizing an account
-deletes its settings.
+deletes its settings. A legacy timezone string that is not an IANA zone (the old column took any
+string) is copied as it was but reads as `'UTC'` after the move, with one `warn` per read.
 
 The `user_profiles.locale` and `timezone` columns stay for one more release but are **neither read
 nor written**: SQL of your own that reads them sees values frozen at the migration. Read
@@ -3184,7 +3187,7 @@ default that fails its own schema. Each is installed once: a second install, or 
 | Function | Does |
 |---|---|
 | `getUserSetting(userId, key)` | the stored value, or the default when there is no row |
-| `setUserSetting(userId, key, value, { by })` | checks the value against the key's schema (`ValidationError`, 400) and stores it; a value equal to the default deletes the row instead |
+| `setUserSetting(userId, key, value, { by })` | checks the value (`ValidationError`, 400, see the limits below) and stores it; a value equal to the default deletes the row instead. Returns the value as stored |
 | `listUserSettings(userId)` | every declared key, built-ins included: `{ key, value, isDefault, updatedAt }`, one query |
 | `resetUserSetting(userId, key)` | deletes the row, so the key reads as its default |
 
@@ -3197,8 +3200,13 @@ changing a default in code reaches everyone who never chose.
 
 | Key | Schema | Default | |
 |---|---|---|---|
-| `locale` | `string \| null` | `null` | the language choice; `null` means "never chose, follow the request". Blank clears it. This is what `getLocale(c)` / `getChosenLocale(c)` read |
-| `timezone` | `string` | `'UTC'` | an IANA zone name, checked when written (`Mars/Olympus` is a 400) |
+| `locale` | `string \| null` (at most 35 characters) | `null` | the language choice; `null` means "never chose, follow the request". Blank clears it. This is what `getLocale(c)` / `getChosenLocale(c)` read |
+| `timezone` | `string` (at most 64 characters) | `'UTC'` | an IANA zone name (`Mars/Olympus` is a 400) |
+
+**One rule for valid.** A value is valid for its key when it passes the schema, a built-in key's
+own check (the IANA zone for `timezone`), and holds no NUL character (`\u0000`, which PostgreSQL
+`jsonb` refuses) in any string. A write that is not valid is a 400; a stored value that is not
+valid reads as the default. A setting value over **16 KiB** of JSON is a 400 before the schema runs.
 
 Without `userSettings`, only these two exist.
 
@@ -3214,9 +3222,13 @@ belongs in settings.
 - **With `profileFields`, `metadata` is strict.** `PATCH /_auth/users/profile` merges `metadata`
   key by key (keys it does not name stay); an undeclared key or a value failing its schema is a
   400 and nothing is written. `ProfileInfo.metadata` carries every declared key with its value or
-  default, and no undeclared key. Undeclared keys already stored are reported once at boot and kept.
+  default, and no undeclared key; a stored value failing its schema reads as the default with one
+  `warn` naming the key. Undeclared keys already stored are reported once at boot and kept. A
+  stored `metadata` that is not an object (a legacy scalar or array) is replaced by the first merge.
 - **Without it, `metadata` is free-form**, as before: any object, replaced wholesale on PATCH.
   Existing apps keep working; declare fields when you want them checked.
+- **Either way**, a `metadata` patch over **64 KiB** of JSON (measured on the patch, before the
+  merge) or holding a NUL character is a 400 and nothing is written.
 
 From a client, the routes below are `authApi.listSettings`, `getSetting`, `setSetting` and
 `resetSetting`; each acts on the signed-in person only — no route names a user:

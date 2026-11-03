@@ -10,6 +10,7 @@ import { BaseRepository } from '@spfn/core/db';
 import { count, eq, sql } from 'drizzle-orm';
 import { profileLocale } from '../lib/profile-locale';
 import { projectProfileMetadata } from '../lib/profile-fields';
+import { builtinUserSettingEntries, readUserSettingRows } from '../lib/user-settings/registry';
 import { userSettingsRepository } from './user-settings.repository';
 
 /**
@@ -117,12 +118,17 @@ export class UserProfilesRepository extends BaseRepository
      * Merge keys into `metadata`, keeping every key the patch does not name
      *
      * One statement, so two concurrent patches of different keys both land.
+     * A stored value that is not an object (NULL, or a legacy scalar or array)
+     * is replaced by the patch: `jsonb || jsonb` would otherwise concatenate
+     * it into an array.
      */
     async mergeMetadataByUserId(userId: number, patch: Record<string, unknown>)
     {
+        const current = sql`CASE WHEN jsonb_typeof(${userProfiles.metadata}) = 'object' THEN ${userProfiles.metadata} ELSE '{}'::jsonb END`;
+
         await this.db
             .update(userProfiles)
-            .set({ metadata: sql`coalesce(${userProfiles.metadata}, '{}'::jsonb) || ${JSON.stringify(patch)}::jsonb` })
+            .set({ metadata: sql`${current} || ${JSON.stringify(patch)}::jsonb` })
             .where(eq(userProfiles.userId, userId));
     }
 
@@ -197,7 +203,7 @@ export class UserProfilesRepository extends BaseRepository
     {
         const [profile, settings] = await Promise.all([
             this.findProfileColumns(userId),
-            userSettingsRepository.findLocaleAndTimezone(userId),
+            this.readBuiltinSettings(userId),
         ]);
 
         if (!profile)
@@ -222,6 +228,20 @@ export class UserProfilesRepository extends BaseRepository
             createdAt: profile.createdAt,
             updatedAt: profile.updatedAt,
         };
+    }
+
+    /**
+     * The two built-in settings the profile response still carries (deprecated
+     * there), in one query, read by the same rule as every settings read: a
+     * stored value that is not valid for its key reads as the default.
+     */
+    private async readBuiltinSettings(userId: number): Promise<{ chosenLocale: string | null; timezone: string }>
+    {
+        const entries = builtinUserSettingEntries();
+        const rows = await userSettingsRepository.listByUserAndKeys(userId, entries.map(entry => entry.key));
+        const value = new Map(readUserSettingRows(entries, rows).map(view => [view.key, view.value]));
+
+        return { chosenLocale: value.get('locale') as string | null, timezone: value.get('timezone') as string };
     }
 
     /**

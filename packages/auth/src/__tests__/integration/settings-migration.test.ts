@@ -63,6 +63,8 @@ describe.skipIf(!dbAvailable)('settings migration backfill (case table #161)', (
             ['chose', 'ko', 'Asia/Seoul'],
             ['english', 'en', 'UTC'],
             ['never', null, null],
+            ['blank', null, ''],
+            ['spaces', null, '  '],
         ];
         for (const [name, locale, timezone] of profiles)
         {
@@ -100,7 +102,7 @@ describe.skipIf(!dbAvailable)('settings migration backfill (case table #161)', (
         expect(backfillStatements()).toHaveLength(2);
     });
 
-    it('S17: a chosen locale (en included) and a non-UTC timezone become rows; UTC and NULL do not', async () =>
+    it('S17: a chosen locale (en included) and a non-UTC timezone become rows; UTC, NULL and a blank timezone do not', async () =>
     {
         await runBackfill();
 

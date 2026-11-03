@@ -3,7 +3,7 @@
  */
 
 import type { Static } from '@sinclair/typebox';
-import { indexDeclaredEntries } from '../declared-keys';
+import { indexDeclaredEntries, type DeclaredEntries } from '../declared-keys';
 import {
     getUserSetting,
     listUserSettings,
@@ -29,7 +29,8 @@ type DeclaredValue<TEntries extends readonly UserSettingEntry[], TKey> =
 export interface UserSettingsDeclaration<TEntries extends readonly UserSettingEntry[] = readonly UserSettingEntry[]>
 {
     readonly keys: readonly DeclaredKey<TEntries>[];
-    readonly entries: ReadonlyMap<string, UserSettingEntry>;
+    /** Read-only: the object has no mutator, and installing copies it */
+    readonly entries: DeclaredEntries<UserSettingEntry>;
     get<TKey extends DeclaredKey<TEntries>>(userId: UserId, key: TKey): Promise<DeclaredValue<TEntries, TKey>>;
     set<TKey extends DeclaredKey<TEntries>>(
         userId: UserId,
@@ -68,14 +69,14 @@ export function defineUserSettings<const TEntries extends readonly UserSettingEn
     entries: TEntries,
 ): UserSettingsDeclaration<TEntries>
 {
-    const byKey = indexDeclaredEntries('defineUserSettings', entries, BUILTIN_USER_SETTING_KEYS);
-
     return Object.freeze({
         keys: Object.freeze(entries.map(entry => entry.key)),
-        entries: byKey,
+        entries: indexDeclaredEntries('defineUserSettings', entries, BUILTIN_USER_SETTING_KEYS),
         get: async (userId: UserId, key: string) => await getUserSetting(userId, key) as never,
         set: async (userId: UserId, key: string, value: unknown, options?: SetUserSettingOptions) =>
-            await setUserSetting(userId, key, value, options),
+        {
+            await setUserSetting(userId, key, value, options);
+        },
         list: async (userId: UserId) => await listUserSettings(userId),
     });
 }

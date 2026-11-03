@@ -57,24 +57,14 @@ export class UserSettingsRepository extends BaseRepository
     }
 
     /**
-     * The two built-in keys the profile response still carries (deprecated
-     * there), in one query: the language choice, null when none was made, and
-     * the timezone, 'UTC' when none was set
+     * The stored settings of one person among the given keys
      */
-    async findLocaleAndTimezone(userId: number): Promise<{ chosenLocale: string | null; timezone: string }>
+    async listByUserAndKeys(userId: number, keys: readonly string[]): Promise<StoredUserSetting[]>
     {
-        const rows = await this.readDb
-            .select({ key: userSettings.key, value: userSettings.value })
+        return await this.readDb
+            .select({ key: userSettings.key, value: userSettings.value, updatedAt: userSettings.updatedAt })
             .from(userSettings)
-            .where(and(eq(userSettings.userId, userId), inArray(userSettings.key, ['locale', 'timezone'])));
-        const valueOf = (key: string) => rows.find(row => row.key === key)?.value;
-        const locale = valueOf('locale');
-        const timezone = valueOf('timezone');
-
-        return {
-            chosenLocale: typeof locale === 'string' ? locale : null,
-            timezone: typeof timezone === 'string' ? timezone : 'UTC',
-        };
+            .where(and(eq(userSettings.userId, userId), inArray(userSettings.key, [...keys])));
     }
 
     /**

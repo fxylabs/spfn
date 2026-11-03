@@ -17,5 +17,5 @@ FROM "spfn_auth"."user_profiles" WHERE "locale" IS NOT NULL
 ON CONFLICT ("user_id", "key") DO NOTHING;--> statement-breakpoint
 INSERT INTO "spfn_auth"."user_settings" ("user_id", "key", "value", "updated_by_id", "created_at", "updated_at")
 SELECT "user_id", 'timezone', to_jsonb("timezone"), "user_id", "updated_at", "updated_at"
-FROM "spfn_auth"."user_profiles" WHERE "timezone" IS NOT NULL AND "timezone" <> 'UTC'
+FROM "spfn_auth"."user_profiles" WHERE NULLIF(btrim("timezone"), '') IS NOT NULL AND "timezone" <> 'UTC'
 ON CONFLICT ("user_id", "key") DO NOTHING;
