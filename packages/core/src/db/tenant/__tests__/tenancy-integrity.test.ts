@@ -83,7 +83,7 @@ describe('tenancy integrity (app role, integration)', () =>
 
         expect(await failureOf(workspaceRepository.remove(7))).toMatch(/violates foreign key constraint "authors_tenant_id_fk"/);
         expect((await db.owner`select id from ${db.owner(TENANCY_SCHEMA)}.workspaces order by id`).map((row) => Number(row.id)))
-            .toEqual([7, 9]);
+            .toEqual([7, 9, 11]);
         expect(await rowsOf('notes')).toEqual(['1:7', '2:7', '3:9']);
     });
 

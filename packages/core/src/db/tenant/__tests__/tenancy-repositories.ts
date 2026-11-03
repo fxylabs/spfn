@@ -6,11 +6,12 @@
  * its own.
  */
 
-import { asc, eq, sql } from 'drizzle-orm';
+import { and, asc, eq, sql } from 'drizzle-orm';
 import type { InferInsertModel } from 'drizzle-orm';
 import { BaseRepository } from '../../repository';
+import { runInTransaction } from '../../transaction';
 import { TenantRepository } from '../tenant-repository';
-import { authors, memos, notes, workspaces } from './tenancy-fixtures';
+import { authors, members, memos, notes, workspaces } from './tenancy-fixtures';
 
 type NewNote = Omit<InferInsertModel<typeof notes>, 'tenantId'>;
 
@@ -54,12 +55,12 @@ export class NoteRepository extends TenantRepository
         return this.db.insert(notes).values(row).returning();
     }
 
-    /** `app.tenant_id` and the backend serving this call; '' or null when unset. */
-    async session(): Promise<{ tenant: string | null; pid: number }>
+    /** `app.tenant_id`, `app.user_id` and the backend serving this call; '' or null when unset. */
+    async session(): Promise<{ tenant: string | null; user: string | null; pid: number }>
     {
-        const rows = await this.db.execute(sql`select current_setting('app.tenant_id', true) as tenant, pg_backend_pid() as pid`);
+        const rows = await this.db.execute(sql`select current_setting('app.tenant_id', true) as tenant, current_setting('app.user_id', true) as user, pg_backend_pid() as pid`);
 
-        return (rows as unknown as { tenant: string | null; pid: number }[])[0];
+        return (rows as unknown as { tenant: string | null; user: string | null; pid: number }[])[0];
     }
 }
 
@@ -84,10 +85,65 @@ export class MemoRepository extends TenantRepository
     }
 }
 
+/** The membership table: by tenant through the inherited methods, by person through `_selectOfUser`. */
+export class MemberRepository extends TenantRepository
+{
+    async isMember(workspaceId: number, userId: number): Promise<boolean>
+    {
+        return await this._findOne(workspaceId, members, { userId, status: 'active' }) !== null;
+    }
+
+    membershipsOf(userId: number)
+    {
+        return this._selectOfUser(userId, { id: members.id, tenantId: members.tenantId })
+            .from(members)
+            .orderBy(asc(members.id));
+    }
+
+    workspacesOf(userId: number)
+    {
+        return this._selectOfUser(userId, { id: workspaces.id, name: workspaces.name })
+            .from(members)
+            .innerJoin(workspaces, eq(members.tenantId, workspaces.id))
+            .orderBy(asc(workspaces.id));
+    }
+
+    /** The bare builders, for the rows that check what they accept. */
+    ofUser(userId: number)
+    {
+        return this._selectOfUser(userId);
+    }
+
+    ofTenant(tenantId: number)
+    {
+        return this._select(tenantId, { id: members.id }).from(members).orderBy(asc(members.id));
+    }
+
+    activeOf(userId: number)
+    {
+        return this._selectOfUser(userId, { id: members.id })
+            .from(members)
+            .where(and(eq(members.status, 'active'), eq(members.role, 'member')))
+            .orderBy(asc(members.id));
+    }
+
+    directMembers()
+    {
+        return this.db.select({ id: members.id }).from(members).orderBy(asc(members.id));
+    }
+}
+
+/** The tenant list: a plain repository. Its update and delete policies need the tenant bound. */
 export class WorkspaceRepository extends BaseRepository
 {
     remove(id: number)
     {
-        return this.db.delete(workspaces).where(eq(workspaces.id, id)).returning();
+        return runInTransaction(() => this.db.delete(workspaces).where(eq(workspaces.id, id)).returning(), { tenant: id });
+    }
+
+    /** Rename on whatever transaction is open — a guarded route binds it to the tenant. */
+    rename(id: number, name: string)
+    {
+        return this.db.update(workspaces).set({ name }).where(eq(workspaces.id, id)).returning({ id: workspaces.id });
     }
 }

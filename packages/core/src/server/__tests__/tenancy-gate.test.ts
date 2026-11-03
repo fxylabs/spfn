@@ -1,5 +1,6 @@
 /**
- * Tenancy boot check — rows B1–B7 of the #158 part 2 design case table
+ * Tenancy boot check — rows B1–B7 of the #158 part 2 design case table, and
+ * O1–O2 of the #162 one (a `visibleThrough` tenant list is checked too)
  *
  * B5 and B7 run first, before this file defines any tenancy table; B7 defines
  * them during `createServer`, as an app whose `app.ts` imports its routes does. The rows that
@@ -11,8 +12,9 @@
 
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
 import { drizzle } from 'drizzle-orm/postgres-js';
+import { pgSchema } from 'drizzle-orm/pg-core';
 import { serve } from '@hono/node-server';
-import { closeDatabase, listTenancyTables } from '../../db';
+import { closeDatabase, defineTenancy, id, listTenancyTables } from '../../db';
 import { createServer } from '../create-server';
 import { serverLogger } from '../logger';
 import { startServer } from '../start-server';
@@ -130,7 +132,7 @@ describe('tenancy boot check', () =>
             const result = runTenancyBootGate([ownerDb()]);
 
             await expect(result).rejects.toThrow(TenancyRoleError);
-            await expect(result).rejects.toThrow(/owns spfn_tenancy_test\.authors, spfn_tenancy_test\.notes/);
+            await expect(result).rejects.toThrow(/owns spfn_tenancy_test\.workspaces, spfn_tenancy_test\.authors, spfn_tenancy_test\.notes/);
             expect(error).toHaveBeenCalledTimes(1);
         });
 
@@ -168,6 +170,36 @@ describe('tenancy boot check', () =>
             expect(await runTenancyBootGate()).toEqual({ state: 'ok' });
             expect(warn).not.toHaveBeenCalled();
             expect(error).not.toHaveBeenCalled();
+        });
+
+        it('O1 an app role that owns the visibleThrough tenant list finds it among the tables', async () =>
+        {
+            if (!tenancyDb.isAvailable) return;
+
+            process.env.NODE_ENV = 'development';
+
+            const result = await runTenancyBootGate([ownerDb()]);
+
+            expect(listTenancyTables()).toContainEqual({ schema: 'spfn_tenancy_test', name: 'workspaces', columnName: 'id' });
+            expect(result.state === 'unprotected' && result.findings[0].ownedTables).toContain('spfn_tenancy_test.workspaces');
+        });
+
+        it('O2 a tenant list declared without visibleThrough is not on the list, as before', async () =>
+        {
+            process.env.NODE_ENV = 'production';
+
+            const schema = pgSchema('spfn_tenancy_o2');
+            const teams = schema.table('teams', { id: id() });
+            const teamTenancy = defineTenancy({ tenants: teams, authorize: () => true });
+
+            teamTenancy.table(schema, 'boards', { id: id() });
+
+            const tables = listTenancyTables().map((table) => `${table.schema}.${table.name}`);
+            const ownsTeams = stubDb({ role: 'app', superuser: false, bypass_rls: false, owned: ['spfn_tenancy_o2.teams'] });
+
+            expect(tables).toContain('spfn_tenancy_o2.boards');
+            expect(tables).not.toContain('spfn_tenancy_o2.teams');
+            expect(await runTenancyBootGate([ownsTeams])).toEqual({ state: 'ok' });
         });
 
         it('B6 a check query that fails logs one warning line and boot continues', async () =>

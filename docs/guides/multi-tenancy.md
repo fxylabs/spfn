@@ -109,44 +109,57 @@ SELECT rolname, rolsuper, rolbypassrls FROM pg_roles WHERE rolname = 'app_user';
 foreign key to the tenant list, a unique key on `(tenant_id, id)` and the RLS policy. Do not
 declare the tenant column yourself; every tenancy table needs an `id`.
 
-Keep the tenant list and the membership table in a module of their own, so the repository that
-`authorize` calls does not import the module that calls it:
+The membership table belongs to a workspace like any tenant table, and a person also reads it
+across workspaces — after sign-in, at the workspace picker. So it is a `tenancy.table` with a
+second key, `visibleTo: 'userId'`, and the tenant list is a `tenantList` whose rows a member sees
+through it. The three refer to each other, so declare them in one module:
 
 ```typescript
-// src/server/entities/workspaces.ts
-import { createSchema, foreignKey, id } from '@spfn/core/db';
-import { users } from '@spfn/auth/server';
-import { text } from 'drizzle-orm/pg-core';
+// src/server/entities/tenancy.ts
+import { createSchema, defineTenancy, enumText, foreignKey, id, tenantList } from '@spfn/core/db';
+import { getAuth, users } from '@spfn/auth/server';
+import { text, unique, type PgTable } from 'drizzle-orm/pg-core';
+import { memberRepository } from '../repositories/member.repository';
 
 export const schema = createSchema('@acme/notes');
 
-// The tenant list: one row per workspace. An ordinary table.
-export const workspaces = schema.table('workspaces', {
+// The tenant list: one row per workspace, visible to its active members
+export const workspaces = tenantList(schema, 'workspaces', {
     id: id(),
     name: text('name').notNull(),
+}, {
+    visibleThrough: { table: (): PgTable => members, where: { status: 'active' } },
 });
-
-// Who belongs to which workspace. Also ordinary: authorize reads it before any tenant is set.
-export const workspaceMembers = schema.table('workspace_members', {
-    id: id(),
-    workspaceId: foreignKey('workspace', () => workspaces.id),
-    userId: foreignKey('user', () => users.id),
-});
-```
-
-```typescript
-// src/server/entities/notes.ts
-import { defineTenancy, id, timestamps } from '@spfn/core/db';
-import { getAuth } from '@spfn/auth/server';
-import { text } from 'drizzle-orm/pg-core';
-import type { PgTable } from 'drizzle-orm/pg-core';
-import { memberRepository } from '../repositories/member.repository';
-import { schema, workspaces } from './workspaces';
 
 export const tenancy = defineTenancy({
     tenants: workspaces,
     authorize: (c, workspaceId) => memberRepository.isMember(workspaceId, Number(getAuth(c).userId)),
 });
+
+// Who belongs to which workspace: by workspace, and by person through userId
+export const members = tenancy.table(schema, 'members', {
+    id: id(),
+    userId: foreignKey('user', () => users.id),
+    role: enumText('role', ['owner', 'member']).notNull(),
+    status: enumText('status', ['active', 'invited']).notNull(),
+}, (t) => [unique('members_workspace_user_key').on(t.tenantId, t.userId)], {
+    visibleTo: 'userId',
+});
+```
+
+`(): PgTable => members` spells out the return type because `members`' type depends on
+`workspaces` through the tenancy, a circle TypeScript cannot infer. In separate modules the
+tenant list's module would import the membership's and the other way round, and whichever
+loads first would read the other's table before it exists. `member.repository.ts` and this
+module do import each other; that is safe, because each uses the other only inside a
+function (`authorize`, the repository's methods).
+
+```typescript
+// src/server/entities/notes.ts
+import { id, timestamps } from '@spfn/core/db';
+import { text } from 'drizzle-orm/pg-core';
+import type { PgTable } from 'drizzle-orm/pg-core';
+import { schema, tenancy } from './tenancy';
 
 export const authors = tenancy.table(schema, 'authors', {
     id: id(),
@@ -193,23 +206,8 @@ would be cleared too; any other value throws when the schema module loads.
 `tenancy.reference` accepts only tables of the same tenancy. To point at an ordinary table, use
 `foreignKey` as usual.
 
-The `memberRepository` used by `authorize` is an ordinary repository:
-
-```typescript
-// src/server/repositories/member.repository.ts
-import { BaseRepository } from '@spfn/core/db';
-import { workspaceMembers } from '../entities/workspaces';
-
-class MemberRepository extends BaseRepository
-{
-    async isMember(workspaceId: number, userId: number): Promise<boolean>
-    {
-        return await this._findOne(workspaceMembers, { workspaceId, userId }) !== null;
-    }
-}
-
-export const memberRepository = new MemberRepository();
-```
+The `memberRepository` used by `authorize` is a `TenantRepository` (step 4): `isMember` reads by
+workspace, in a short transaction bound to it.
 
 **Code that already names the tenant.** If your repositories, services and tests read
 `row.workspaceId`, keep that name: `property` sets the key the tenant column has on every
@@ -259,6 +257,14 @@ pnpm spfn db migrate
 - the policy `<table>_tenant_isolation`, which admits a row only when its `tenant_id` equals
   the connection's `app.tenant_id` setting.
 
+`members` gets four policies instead, one per command: reads admit the workspace's rows or the
+rows of the user in `app.user_id`, writes need the workspace. It also gets the index
+`members_user_id_idx`. `workspaces` gets row-level security and four policies of its own: a
+connection bound to a workspace sees that row, one bound to a user the workspaces of the user's
+active memberships, and renaming or deleting a workspace needs that workspace's binding. The SQL
+is in [A second key](../../packages/core/src/db/README.md#a-second-key-visibleto) and
+[The tenant list](../../packages/core/src/db/README.md#the-tenant-list-tenantlist).
+
 The full SQL for `notes` is in the
 [Tenancy section](../../packages/core/src/db/README.md#tenancy-definetenancy--tenant-tables-enforced-by-the-database)
 of the db README.
@@ -267,8 +273,10 @@ of the db README.
 
 ```sql
 SELECT tablename, policyname FROM pg_policies WHERE schemaname = 'acme_notes';
--- authors | authors_tenant_isolation
--- notes   | notes_tenant_isolation
+-- workspaces | workspaces_tenant_visibility, _tenant_insert, _tenant_update, _tenant_delete
+-- members    | members_tenant_isolation, _tenant_insert, _tenant_update, _tenant_delete
+-- authors    | authors_tenant_isolation
+-- notes      | notes_tenant_isolation
 
 SELECT * FROM acme_notes.notes;
 -- ERROR: unrecognized configuration parameter "app.tenant_id"   ← no tenant set: refused
@@ -333,6 +341,57 @@ Where each call runs depends on whether a transaction is open:
   sets the tenant on that transaction, and every later call must name the same tenant. Naming
   another throws `TenantMismatchError` before any SQL runs.
 
+The membership repository is one too. A question about one workspace takes the workspace first,
+like any tenant read; a question that starts from the person — which workspaces is this user in,
+does this user own any — uses `_selectOfUser(userId)`, which reads the user's rows of a
+`visibleTo` table in every workspace and binds `app.user_id` instead of `app.tenant_id`:
+
+```typescript
+// src/server/repositories/member.repository.ts
+import { TenantRepository } from '@spfn/core/db';
+import { and, eq } from 'drizzle-orm';
+import { members, workspaces } from '../entities/tenancy';
+
+class MemberRepository extends TenantRepository
+{
+    /** The guard's authorize: by workspace, in a short transaction bound to it. */
+    async isMember(workspaceId: number, userId: number): Promise<boolean>
+    {
+        return await this._findOne(workspaceId, members, { userId, status: 'active' }) !== null;
+    }
+
+    /** After sign-in, the workspace picker, account deletion: by person, before any workspace is known. */
+    async listWorkspacesOf(userId: number)
+    {
+        return await this._selectOfUser(userId, { id: workspaces.id, name: workspaces.name, role: members.role })
+            .from(members)
+            .innerJoin(workspaces, eq(members.tenantId, workspaces.id));
+    }
+
+    async ownsActiveWorkspace(userId: number): Promise<boolean>
+    {
+        const rows = await this._selectOfUser(userId, { id: members.id })
+            .from(members)
+            .where(and(eq(members.role, 'owner'), eq(members.status, 'active')))
+            .limit(1);
+
+        return rows.length > 0;
+    }
+
+    async leave(workspaceId: number, userId: number)
+    {
+        return await this._deleteOne(workspaceId, members, { userId });
+    }
+}
+
+export const memberRepository = new MemberRepository();
+```
+
+`_selectOfUser` takes a `visibleTo` table in `from`; it joins another `visibleTo` table with the
+user condition and an ordinary table (`workspaces` here, whose own policy then admits the user's
+active workspaces) with none. Any other tenant table throws — read it by workspace. There are no
+writes by person: a membership is written by workspace.
+
 Outside a request — a script, a job — name the tenant when you open the transaction:
 
 ```typescript
@@ -344,6 +403,17 @@ await runInTransaction(async () =>
 
     await noteRepository.rename(42, note.id, 'Imported (1)');
 }, { tenant: 42 });
+```
+
+A job that starts from a person reads by person, then writes by workspace:
+
+```typescript
+const memberships = await runInTransaction(() => memberRepository.listWorkspacesOf(userId), { user: userId });
+
+for (const { id } of memberships)
+{
+    await runInTransaction(() => memberRepository.leave(id, userId), { tenant: id });
+}
 ```
 
 `this.db` and `this.readDb` are still there for queries the methods cannot express, but nothing
@@ -400,8 +470,23 @@ Register the routes in your router as usual. The guard answers:
 | a handler calls a repository with a tenant other than the guarded one | `TenantMismatchError`, a **500**: a bug in the handler, not in the request |
 
 The guard opens no transaction, so reads keep going to the read replica. Add `Transactional()`
-to routes that write; the order of the two does not matter. Details:
-[`tenancy.guard` and `tenancy.of`](../../packages/core/src/db/README.md#tenancyguard-and-tenancyof).
+to routes that write; the order of the two does not matter: either way the transaction is bound
+to the guarded workspace before the handler runs. That is what lets a plain repository rename the
+workspace itself, whose update policy needs the binding:
+
+```typescript
+export const renameWorkspace = route.patch('/workspaces/:workspaceId')
+    .input({ body: Type.Object({ name: Type.String() }) })
+    .use([tenancy.guard({ param: 'workspaceId' }), Transactional()])
+    .handler(async (c) =>
+    {
+        const { body } = await c.data();
+
+        return workspaceRepository.rename(tenancy.of(c), body.name);   // a BaseRepository
+    });
+```
+
+Details: [`tenancy.guard` and `tenancy.of`](../../packages/core/src/db/README.md#tenancyguard-and-tenancyof).
 
 **Check:** as a member of workspace 1, `GET /workspaces/1/notes` answers your notes,
 `GET /workspaces/2/notes` answers 403, and `GET /workspaces/0/notes` answers 400.
@@ -458,7 +543,8 @@ The checks the import makes are listed in the [CLI README](../../packages/cli/RE
 - [ ] The server's `DATABASE_URL` role owns no table, is not a superuser and has no `BYPASSRLS`;
       `DATABASE_OWNER_URL` points at the owner.
 - [ ] Every table that belongs to a tenant is a `tenancy.table`, and every reference between them
-      is a `tenancy.reference`.
+      is a `tenancy.reference`; the membership table declares `visibleTo`, and the tenant list is
+      a `tenantList` visible through it.
 - [ ] `pg_policies` lists a `<table>_tenant_isolation` policy for each of them.
 - [ ] Their repositories extend `TenantRepository`.
 - [ ] Every route that touches them has `tenancy.guard`, and handlers take the tenant from
@@ -484,7 +570,22 @@ For a `tenancy.table`, each call follows one of six rules
 | R6 | the request's guard authorized another tenant | `TenantMismatchError`, no SQL |
 
 The tenant setting ends with its transaction, so a pooled connection never carries it to the next
-request. A table with only `tenantKey()` (no policy) skips R1–R3 and keeps R5 and R6.
+request. A table with only `tenantKey()` (no policy) skips R1–R3 and keeps R5 and R6. Inside a
+guarded request, a transaction is bound to the guard's tenant as soon as it opens, or as soon as
+the guard runs inside it.
+
+### Where a `_selectOfUser` call runs
+
+The same shape, with the user in `app.user_id`
+([U1–U5 in the db README](../../packages/core/src/db/README.md#a-second-key-visibleto)):
+
+| Rule | When | What happens |
+| --- | --- | --- |
+| U1 | no transaction open | a short read-only transaction on the read connection sets the user, runs the query, commits |
+| U3 | a transaction is open and has no user yet | the user is set on it, beside its tenant if it has one |
+| U4 | the open transaction belongs to this user | the query runs |
+| U5 | the open transaction belongs to another user | `TenantMismatchError` with `key: 'user'`, no SQL |
+| — | the request's guard authorized a workspace | no check: reading by person is allowed in any workspace's request |
 
 ### Errors
 
@@ -493,6 +594,11 @@ request. A table with only `tenantKey()` (no policy) skips R1–R3 and keeps R5 
 | 400 `ValidationError` | `tenancy.guard` | the tenant id is not a positive integer |
 | 403 `ForbiddenError` | `tenancy.guard` | `authorize` did not return `true` |
 | `TenantMismatchError` (500) | `TenantRepository`, `runInTransaction` | a call named a tenant other than its transaction's or its request's; `source` is `'transaction'` or `'guard'` |
+| `TenantMismatchError` with `key: 'user'` (500) | `_selectOfUser`, `runInTransaction({ user })` | a call named a user other than its transaction's |
+| `Table "notes" declares no visibleTo user column` | `_selectOfUser(...).from(notes)` | read that table by workspace with `_select(workspaceId)` |
+| `Table "notes" has a tenant column but no visibleTo user column, …` | `_selectOfUser(...).innerJoin(notes, …)` | the join would read across workspaces; read it by workspace |
+| `tenancy.table "…" { visibleTo: "…" } …` | schema load | `visibleTo` names a declared integer column other than `id` and the tenant column |
+| `tenantList "…" visibleThrough.table() returned "…", …` | `spfn db generate` | the membership table must be a `visibleTo` table of the tenancy over this list |
 | `unrecognized configuration parameter "app.tenant_id"` | PostgreSQL | a query on a tenancy table on a connection that never set a tenant |
 | `invalid input syntax for type bigint: ""` | PostgreSQL | the same, on a pooled connection where an earlier transaction had set one: no tenant is set now |
 | `tenancy.of(c) was called on a route without tenancy.guard()` | `tenancy.of` | add the guard to the route |
@@ -508,6 +614,8 @@ request. A table with only `tenantKey()` (no policy) skips R1–R3 and keeps R5 
 | The server logs `permission denied for schema drizzle` at boot and starts without checking migrations | the app role cannot read the `drizzle` schema, where migrations are recorded | grant `USAGE` on schema `drizzle` and `SELECT` on its tables to the app role |
 | `spfn db backup` or `restore` fails on a tenancy table | it ran as the app role, to which the policy applies | set `DATABASE_OWNER_URL` |
 | A workspace with notes cannot be deleted | the tenant foreign key is `NO ACTION` | delete or move the tenant's rows first |
+| Renaming or deleting a workspace fails with the policy error | the `tenantList` update and delete policies need the workspace's binding | do it on a guarded route with `Transactional()`, or in `runInTransaction(fn, { tenant: id })` |
+| A job that walks every workspace fails reading `workspaces` | a `tenantList` admits no row to a connection bound to neither | read the list through the owner connection, or an all-workspace read the app sets up itself |
 | An author cannot be deleted | an optional reference still points at it | clear the reference first |
 | `.prepare()` throws | a prepared statement would run outside R1–R6 | call the query without `.prepare()` |
 | `rightJoin`, `fullJoin`, `union` … throw in `_select` | the tenant condition cannot be placed safely | write that query on `this.readDb`, inside a transaction bound to the tenant |

@@ -14,7 +14,8 @@
  *   the code under test.
  *
  * Every statement each app pool sends, BEGIN and COMMIT included, is recorded,
- * so a test can say which pool ran what.
+ * so a test can say which pool ran what — and, since a `set_config` names its
+ * setting in a bound parameter, every setting a pool set, with its value.
  */
 
 import postgres from 'postgres';
@@ -53,6 +54,13 @@ export function appDatabaseUrl(ownerUrl: string = TEST_DATABASE_URL): string
     return url.toString();
 }
 
+export interface SettingRecord
+{
+    readonly pool: 'write' | 'read';
+    readonly setting: string;
+    readonly value: string;
+}
+
 export interface TenancyDb
 {
     readonly isAvailable: boolean;
@@ -61,6 +69,8 @@ export interface TenancyDb
     /** Statements the app's write pool and read pool sent, in order. */
     readonly writeLog: string[];
     readonly readLog: string[];
+    /** Every `set_config` either pool sent: the pool, the setting and the value. */
+    readonly settingLog: SettingRecord[];
     readonly appRole: string;
     setup(): Promise<void>;
     seed(): Promise<void>;
@@ -77,11 +87,21 @@ export function createTenancyDb(): TenancyDb
 {
     const writeLog: string[] = [];
     const readLog: string[] = [];
+    const settingLog: SettingRecord[] = [];
+    const record = (pool: SettingRecord['pool'], log: string[]) => (_connection: number, query: string, parameters: unknown[]) =>
+    {
+        log.push(query);
+
+        if (query.includes('set_config'))
+        {
+            settingLog.push({ pool, setting: String(parameters[0]), value: String(parameters[1]) });
+        }
+    };
     const appUrl = appDatabaseUrl();
     const appRole = decodeURIComponent(new URL(appUrl).username);
     const owner = postgres(TEST_DATABASE_URL, { max: 1, onnotice: () => undefined });
-    const appWrite = postgres(appUrl, { max: 2, onnotice: () => undefined, debug: (_c, query) => void writeLog.push(query) });
-    const appRead = postgres(appUrl, { max: 1, onnotice: () => undefined, debug: (_c, query) => void readLog.push(query) });
+    const appWrite = postgres(appUrl, { max: 2, onnotice: () => undefined, debug: record('write', writeLog) });
+    const appRead = postgres(appUrl, { max: 1, onnotice: () => undefined, debug: record('read', readLog) });
     let available = false;
 
     return {
@@ -92,6 +112,7 @@ export function createTenancyDb(): TenancyDb
         owner,
         writeLog,
         readLog,
+        settingLog,
         appRole,
 
         async setup()
@@ -120,6 +141,7 @@ export function createTenancyDb(): TenancyDb
 
             writeLog.length = 0;
             readLog.length = 0;
+            settingLog.length = 0;
         },
 
         async teardown()

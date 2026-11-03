@@ -13,6 +13,10 @@
  * the optional reference's default, `no action`.
  * | memos      | `tenantKey()` only    | no policy; `GENERATED ALWAYS AS IDENTITY` id                    |
  *
+ * `members: true` (#162) adds `members`, a `tenancy.table` with
+ * `visibleTo: 'userId'`, and declares `workspaces` with `tenantList({ visibleThrough })`
+ * over it; `seedMembers` writes its rows.
+ *
  * The DDL is what drizzle-kit generates for them, applied by the owner; the app
  * role gets row privileges, as `spfn db migrate` leaves an app.
  */
@@ -20,18 +24,20 @@
 import { sql as drizzleSql } from 'drizzle-orm';
 import { bigint, integer, pgSchema, text, type PgTable } from 'drizzle-orm/pg-core';
 import { generateDrizzleJson, generateMigration } from 'drizzle-kit/api-postgres';
-import { defineTenancy, id, tenantKey, type TenancyOnDelete } from '@spfn/core/db';
+import { defineTenancy, id, tenantKey, tenantList, type TenancyOnDelete } from '@spfn/core/db';
 import type postgres from 'postgres';
 
 export type TenantFixtures = ReturnType<typeof createTenantFixtures>;
 
-export function createTenantFixtures(schemaName: string, options: { parentOnDelete?: TenancyOnDelete } = {})
+export function createTenantFixtures(schemaName: string, options: { parentOnDelete?: TenancyOnDelete; members?: boolean } = {})
 {
     const schema = pgSchema(schemaName);
-    const workspaces = schema.table('workspaces', {
-        id: id(),
-        name: text('name').notNull(),
-    });
+    const workspaceColumns = { id: id(), name: text('name').notNull() };
+    const workspaces = options.members
+        ? tenantList(schema, 'workspaces', workspaceColumns, {
+            visibleThrough: { table: (): PgTable => members!, where: { status: 'active' } },
+        })
+        : schema.table('workspaces', workspaceColumns);
     const tenancy = defineTenancy({ tenants: workspaces, authorize: () => true });
     const writers = tenancy.table(schema, 'writers', {
         id: id(),
@@ -50,7 +56,14 @@ export function createTenantFixtures(schemaName: string, options: { parentOnDele
         tenantId: tenantKey(),
         body: text('body').notNull(),
     });
-    const imports = { schema, workspaces, writers, notes, memos };
+    const members = options.members
+        ? tenancy.table(schema, 'members', {
+            id: id(),
+            userId: bigint('user_id', { mode: 'number' }).notNull(),
+            status: text('status').notNull(),
+        }, { visibleTo: 'userId' })
+        : undefined;
+    const imports = { schema, workspaces, writers, notes, memos, ...(members ? { members } : {}) };
 
     return { schemaName, imports };
 }
@@ -94,6 +107,18 @@ export async function seed(sql: postgres.Sql, schema: string): Promise<void>
 newline')`);
     await sql.unsafe(`INSERT INTO ${schema}.memos (id, tenant_id, body) OVERRIDING SYSTEM VALUE VALUES (1, 7, 'a'), (2, 7, 'b'), (3, 9, 'c')`);
     await setSequences(sql, schema, 100);
+}
+
+/**
+ * Workspace 11 and the memberships of `members: true`, written by the owner:
+ * (7, user 3, active), (9, user 3, active), (7, user 5, active), (11, user 3, invited).
+ */
+export async function seedMembers(sql: postgres.Sql, schema: string): Promise<void>
+{
+    await sql.unsafe(`INSERT INTO ${schema}.workspaces (id, name) VALUES (11, 'eleven')`);
+    await sql.unsafe(`INSERT INTO ${schema}.members (id, tenant_id, user_id, status) VALUES
+        (1, 7, 3, 'active'), (2, 9, 3, 'active'), (3, 7, 5, 'active'), (4, 11, 3, 'invited')`);
+    await sql.unsafe(`SELECT setval(pg_get_serial_sequence('${schema}.members', 'id'), 100)`);
 }
 
 export async function setSequences(sql: postgres.Sql, schema: string, value: number): Promise<void>

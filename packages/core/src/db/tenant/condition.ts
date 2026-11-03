@@ -9,7 +9,7 @@
 import { and, eq, getTableName } from 'drizzle-orm';
 import type { SQL } from 'drizzle-orm';
 import type { PgTable } from 'drizzle-orm/pg-core';
-import { findTenantColumn, type TenantColumnRef } from './registry';
+import { findTenantColumn, findUserColumn, type TenantColumnRef } from './registry';
 
 /** A condition argument as drizzle's `where` and join `on` accept it. */
 export type ConditionInput = SQL | undefined | ((...args: any[]) => SQL | undefined);
@@ -23,6 +23,15 @@ export function assertTenantId(tenantId: unknown): asserts tenantId is number
     if (!isTenantId(tenantId))
     {
         throw new TypeError(`Tenant id must be a positive safe integer, received ${String(tenantId)}`);
+    }
+}
+
+/** As assertTenantId, for the user id of a `_selectOfUser` call. */
+export function assertUserId(userId: unknown): asserts userId is number
+{
+    if (!isTenantId(userId))
+    {
+        throw new TypeError(`User id must be a positive safe integer, received ${String(userId)}`);
     }
 }
 
@@ -59,6 +68,51 @@ export function optionalTenantCondition(table: unknown, tenantId: number): SQL |
     const ref = findTenantColumn(table);
 
     return ref ? eq(ref.column, tenantId) : undefined;
+}
+
+/**
+ * `table.user = userId` for a tenancy table declared with `visibleTo`; throws
+ * for any other — the `from` table of a `_selectOfUser` query.
+ */
+export function userCondition(table: PgTable, userId: number): SQL
+{
+    const ref = findUserColumn(table);
+
+    if (!ref)
+    {
+        throw new Error(
+            `Table "${getTableName(table)}" declares no visibleTo user column; _selectOfUser reads from a tenancy.table declared with visibleTo — `
+            + 'read this table by tenant with _select(tenantId)',
+        );
+    }
+
+    return eq(ref.column, userId);
+}
+
+/**
+ * The ON condition a table joined into a `_selectOfUser` query gets:
+ * `table.user = userId` for a `visibleTo` table, none for an ordinary table.
+ * Any other tenant-aware table throws — joined without a condition, it would
+ * read across tenants.
+ */
+export function optionalUserCondition(table: unknown, userId: number): SQL | undefined
+{
+    const ref = findUserColumn(table);
+
+    if (ref)
+    {
+        return eq(ref.column, userId);
+    }
+
+    if (findTenantColumn(table))
+    {
+        throw new Error(
+            `Table "${getTableName(table as PgTable)}" has a tenant column but no visibleTo user column, so a _selectOfUser query cannot join it `
+            + 'without reading across tenants; read it by tenant with _select(tenantId)',
+        );
+    }
+
+    return undefined;
 }
 
 /**

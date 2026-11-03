@@ -11,18 +11,24 @@
 import { AsyncLocalStorage } from 'async_hooks';
 import { TenantMismatchError } from './errors';
 
-const requestTenant = new AsyncLocalStorage<number>();
+const requestTenantStore = new AsyncLocalStorage<number>();
 
 /** Run `next` with `tenantId` as the request's tenant. */
 export function runWithRequestTenant<T>(tenantId: number, next: () => Promise<T>): Promise<T>
 {
-    return requestTenant.run(tenantId, next);
+    return requestTenantStore.run(tenantId, next);
+}
+
+/** The tenant a guard authorized this request for, or undefined outside a guarded request. */
+export function requestTenant(): number | undefined
+{
+    return requestTenantStore.getStore();
 }
 
 /** Throw when a guard authorized this request for a tenant other than `tenantId`. */
 export function assertRequestTenant(tenantId: number): void
 {
-    const guarded = requestTenant.getStore();
+    const guarded = requestTenantStore.getStore();
 
     if (guarded !== undefined && guarded !== tenantId)
     {

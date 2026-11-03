@@ -12,12 +12,24 @@
  * own classes: executing ones run through the tenant rules (R1–R6), preparing
  * ones are refused on a query that reads a tenancy table. A new member that
  * executes the query would bypass those rules unless it is filed with them.
+ *
+ * Since #162 `_selectOfUser` builds the same wrapper with the user scope; the
+ * last block holds every classified member to its class on both builders.
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { drizzle } from 'drizzle-orm/postgres-js';
-import { EXECUTE_SELECT_MEMBERS, PREPARE_SELECT_MEMBERS, REFUSED_SELECT_MEMBERS } from '../select';
+import {
+    EXECUTE_SELECT_MEMBERS,
+    PREPARE_SELECT_MEMBERS,
+    REFUSED_SELECT_MEMBERS,
+    scopeSelectBuilder,
+    tenantScope,
+    userScope,
+    type SelectScope,
+} from '../select';
 import { notes } from './fixtures';
+import { members } from './tenancy-fixtures';
 
 /** Members `_select` rewrites so they carry the tenant condition. */
 const SCOPED = new Set(['from', 'where', 'innerJoin', 'leftJoin']);
@@ -117,5 +129,42 @@ describe('drizzle select builder members', () =>
         const listed = [...REFUSED_SELECT_MEMBERS, ...EXECUTE_SELECT_MEMBERS, ...PREPARE_SELECT_MEMBERS];
 
         expect(listed.filter((name) => !members.has(name))).toEqual([]);
+    });
+});
+
+describe.each<[string, SelectScope]>([
+    ['_select', tenantScope(7)],
+    ['_selectOfUser', userScope(3)],
+])('the %s builder over a visibleTo tenancy table', (method, scope) =>
+{
+    const scoped = (execution = vi.fn(async () => [])) =>
+        scopeSelectBuilder(drizzle.mock().select(), scope, execution).from(members) as unknown as Record<string, (...args: unknown[]) => unknown>;
+
+    it('refuses every refused member', () =>
+    {
+        for (const name of REFUSED_SELECT_MEMBERS)
+        {
+            expect(() => scoped()[name](), name).toThrow(`${name}() is not supported on a TenantRepository ${method}`);
+        }
+    });
+
+    it('refuses every preparing member, since the table is a tenancy table', () =>
+    {
+        for (const name of PREPARE_SELECT_MEMBERS)
+        {
+            expect(() => scoped()[name]('q'), name).toThrow(`${name}() is not supported on a TenantRepository ${method} that reads a tenancy table`);
+        }
+    });
+
+    it('runs every executing member through the scoped execution', async () =>
+    {
+        for (const name of EXECUTE_SELECT_MEMBERS)
+        {
+            const execution = vi.fn(async () => []);
+
+            await scoped(execution)[name](() => undefined);
+
+            expect({ name, calls: execution.mock.calls.length }).toEqual({ name, calls: 1 });
+        }
     });
 });
