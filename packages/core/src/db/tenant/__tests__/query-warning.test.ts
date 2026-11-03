@@ -1,7 +1,8 @@
 /**
  * Development tenant query warning
  *
- * Rows 28–35 of the w-h3adm design case table. The SQL comes from drizzle
+ * Rows 28–35 of the w-h3adm design case table, and W1–W3 of the #162 one (a
+ * `visibleTo` table is scoped by its user column too). The SQL comes from drizzle
  * itself (a mock driver's toSQL()), so the matcher is tested against the text
  * drizzle 1.0.0-rc.4 really emits. The last block runs real queries through a
  * logged drizzle instance: TenantRepository's own queries pass the check, and a
@@ -20,6 +21,8 @@ import { createDevelopmentQueryLogger, createTenantQueryLogger, findUnscopedTena
 import { listTenantTables } from '../registry';
 import { TenantRepository } from '../tenant-repository';
 import { authors, countries, notes, CREATE_TABLES, SEED_ROWS, TEST_SCHEMA } from './fixtures';
+import { members as tenancyMembers, notes as tenancyNotes, TENANCY_SCHEMA } from './tenancy-fixtures';
+import { MemberRepository } from './tenancy-repositories';
 
 const plainNotes = pgTable('plain_tenant_notes', {
     id: bigint('id', { mode: 'number' }),
@@ -41,6 +44,34 @@ function unscoped(query: { toSQL: () => { sql: string } }): string[]
 
 describe('findUnscopedTenantTables', () =>
 {
+    it('W1 the SQL _selectOfUser builds, with the user condition only, is not reported', () =>
+    {
+        // The builder only needs a database to build on; drizzle's mock driver is one
+        const repository = Object.defineProperty(new MemberRepository(), 'readDb', { get: () => mock });
+        const query = repository.membershipsOf(3);
+
+        expect(sqlOf(query)).not.toContain('tenant_id" =');
+        expect(unscoped(query)).toEqual([]);
+    });
+
+    it('W2 a visibleTo table with neither its tenant nor its user condition is reported', () =>
+    {
+        expect(unscoped(mock.select().from(tenancyMembers))).toEqual(['members']);
+        expect(unscoped(mock.select().from(tenancyMembers).where(eq(tenancyMembers.userId, 3)))).toEqual([]);
+        expect(unscoped(mock.select().from(tenancyMembers).where(eq(tenancyMembers.tenantId, 7)))).toEqual([]);
+    });
+
+    it('W3 a table without visibleTo is reported on a user condition alone, as before', () =>
+    {
+        const entries = listTenantTables().filter((table) => table.schema === TENANCY_SCHEMA);
+        const sql = `select "id" from "${TENANCY_SCHEMA}"."notes" where "${TENANCY_SCHEMA}"."notes"."user_id" = $1`;
+
+        expect(entries.find((table) => table.name === 'members')?.userColumnName).toBe('user_id');
+        expect(entries.find((table) => table.name === 'notes')?.userColumnName).toBeUndefined();
+        expect(findUnscopedTenantTables(sql, entries)).toEqual(['notes']);
+        expect(unscoped(mock.select().from(tenancyNotes))).toEqual(['notes']);
+    });
+
     it('row 28: a select without the tenant condition is reported', () =>
     {
         expect(unscoped(mock.select().from(notes))).toEqual(['notes']);

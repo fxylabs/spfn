@@ -49,9 +49,10 @@ Everything re-exported from `@spfn/core/db` (`src/db/index.ts`):
 tenants), `RepositoryError` (class), `RepositoryDatabase` (type), `CountOptions` (type)
 
 **Tenancy** (`tenant/tenancy.ts` — see [Tenancy](#tenancy-definetenancy--tenant-tables-enforced-by-the-database)):
-`defineTenancy`, `TenantMismatchError` (class), `listTenancyTables` (internal: the boot check)
+`defineTenancy`, `tenantList`, `TenantMismatchError` (class), `listTenancyTables` (internal: the boot check)
 Types: `Tenancy`, `TenancyOptions`, `TenancyGuardOptions`, `TenancyOnDelete`, `TenancyReferenceOptions`,
-`TenantListTable`, `TenantSource`
+`TenancyTableOptions`, `TenantListOptions`, `TenantListTable`, `TenantListWhereValue`, `TenantBindingKey`,
+`TenantSource`
 
 **PostgreSQL error mapping** (`postgres-errors.ts`):
 `fromPostgresError`
@@ -67,7 +68,7 @@ Types: `DatabaseClients`, `DatabaseInitOptions`, `DatabaseOptions`, `DatabasePro
 `DrizzleConfigOptions`
 
 **Transactions** (sub-module — see [transaction/README](./transaction/README.md);
-`runInTransaction(fn, { tenant })` binds a transaction to a tenant, see [Tenancy](#tenancy-definetenancy--tenant-tables-enforced-by-the-database)):
+`runInTransaction(fn, { tenant, user })` binds a transaction to a tenant and a user, see [Tenancy](#tenancy-definetenancy--tenant-tables-enforced-by-the-database)):
 `Transactional`, `getTransaction`, `runWithTransaction`, `runInTransaction`,
 `onBeforeCommit`, `onAfterCommit`, `onAfterRollback`
 Types: `TransactionContext`, `TransactionDB`, `TransactionalOptions`,
@@ -403,6 +404,7 @@ where "notes"."tenant_id" = $2
 | `_updateOne` / `_updateMany(tenantId, table, where, data)` | added to WHERE; `data` naming the tenant column throws |
 | `_deleteOne` / `_deleteMany(tenantId, table, where)` | added to WHERE |
 | `_select(tenantId, fields?)` | the `from` table in WHERE, each joined tenant-aware table in its ON clause |
+| `_selectOfUser(userId, fields?)` | by person, not by tenant: the `from` table must be a `visibleTo` tenancy table and gets `user = userId` in WHERE, each joined `visibleTo` table in its ON clause; see [A second key](#a-second-key-visibleto) |
 
 - **The tenant id must be a positive safe integer.** Anything else — `0`, `NaN`,
   `undefined`, a string — throws before a query is built.
@@ -555,6 +557,154 @@ CREATE POLICY "notes_tenant_isolation" ON "acme_notes"."notes" AS PERMISSIVE FOR
   `<table>_<reference>_fk`, `<table>_tenant_isolation`. A name over PostgreSQL's 63-byte
   limit becomes its first 54 bytes, `_`, and 8 hex digits of a hash of the whole name.
 
+### A second key: `visibleTo`
+
+A membership table belongs to a tenant like any other, but a person also reads it across
+tenants — after sign-in, at the workspace picker, when deleting an account — before any
+tenant is known. Declare it as a tenancy table with a second key, the column naming the user:
+
+```typescript
+export const members = tenancy.table(schema, 'members', {
+    id: id(),
+    userId: foreignKey('user', () => users.id),
+    role: enumText('role', ['owner', 'member']).notNull(),
+    status: enumText('status', ['active', 'invited']).notNull(),
+}, (t) => [unique('members_workspace_user_key').on(t.workspaceId, t.userId)], {
+    visibleTo: 'userId',                     // last argument; fourth when there is no extra config
+});
+```
+
+It gets the tenancy table's constraints, an index on the user column, and four policies in
+place of `_tenant_isolation` — reads admit the tenant's rows **or** the rows of the user in
+`app.user_id`; inserts, updates and deletes still need the tenant:
+
+```sql
+CREATE INDEX "members_user_id_idx" ON "acme_notes"."members" ("user_id");
+CREATE POLICY "members_tenant_isolation" ON "acme_notes"."members" AS PERMISSIVE FOR SELECT TO public
+    USING ("workspace_id" = (case when nullif(current_setting('app.user_id', true), '') is null
+                                  then current_setting('app.tenant_id')
+                                  else nullif(current_setting('app.tenant_id', true), '') end)::bigint
+        OR "user_id" = nullif(current_setting('app.user_id', true), '')::bigint);
+CREATE POLICY "members_tenant_insert" ON "acme_notes"."members" AS PERMISSIVE FOR INSERT TO public
+    WITH CHECK ("workspace_id" = current_setting('app.tenant_id')::bigint);
+CREATE POLICY "members_tenant_update" ON "acme_notes"."members" AS PERMISSIVE FOR UPDATE TO public
+    USING ("workspace_id" = current_setting('app.tenant_id')::bigint)
+    WITH CHECK ("workspace_id" = current_setting('app.tenant_id')::bigint);
+CREATE POLICY "members_tenant_delete" ON "acme_notes"."members" AS PERMISSIVE FOR DELETE TO public
+    USING ("workspace_id" = current_setting('app.tenant_id')::bigint);
+```
+
+- **`visibleTo` names a declared integer column** (bigint or integer), not `id` and not the
+  tenant column; anything else throws when the schema module loads, naming the table and
+  the key.
+- **A connection bound to neither still gets an error.** The tenant read is lenient only
+  while a user is set; a `CASE` evaluates one branch, which an `OR` of permissive policies
+  does not promise. `nullif(..., '')` because a pooled connection keeps `''` once a
+  transaction that set the value has ended.
+- **One policy per command,** because a `FOR ALL` policy applies to reads too and permissive
+  policies are OR-ed. A write in a transaction bound to the user only fails instead of
+  touching nothing.
+- **The user column index `<table>_<user column>_idx` is created for you**; an app that
+  already has the same index drops its own.
+- **Adding `visibleTo` to an existing tenancy table** generates a migration that drops and
+  recreates `_tenant_isolation` and adds three policies and the index. A table without
+  `visibleTo` generates the same SQL as before.
+
+`TenantRepository._selectOfUser(userId, fields?)` is `_select` by person: rules U1–U5 bind
+`app.user_id` the way R1–R5 bind `app.tenant_id`.
+
+| # | Situation | What happens |
+|---|-----------|--------------|
+| U1 | no open transaction | `BEGIN` + `SET TRANSACTION READ ONLY` on the read connection → `set_config('app.user_id', u, true)` → query → `COMMIT` |
+| U3 | in a transaction with no user yet | `set_config('app.user_id', u)` in it first, and the transaction is bound to `u` — beside its tenant, if it has one |
+| U4 | in a transaction bound to `u` | the query |
+| U5 | in a transaction bound to another user | `TenantMismatchError` (`key: 'user'`), no SQL |
+| — | `tenancy.guard()` authorized a tenant for this request | no check: a read by person is allowed whatever the tenant |
+
+| Table | `from` | `innerJoin` / `leftJoin` |
+|-------|--------|--------------------------|
+| `visibleTo` tenancy table | WHERE `user = u` | `user = u` in ON |
+| tenancy table without `visibleTo`, `tenantKey()`-only table | throws | throws — read it with `_select(tenantId)` |
+| ordinary table (the tenant list, `users`) | throws | no condition; a policy on it still applies |
+
+```typescript
+class MemberRepository extends TenantRepository
+{
+    async isMember(workspaceId: number, userId: number)       // the guard's authorize
+    {
+        return await this._findOne(workspaceId, members, { userId, status: 'active' }) !== null;
+    }
+
+    async listWorkspacesOf(userId: number)
+    {
+        return this._selectOfUser(userId, { id: workspaces.id, name: workspaces.name, role: members.role })
+            .from(members)
+            .innerJoin(workspaces, eq(members.workspaceId, workspaces.id));
+    }
+}
+
+// Outside a request: read by person, then write by tenant
+const memberships = await runInTransaction(() => memberRepository.listWorkspacesOf(userId), { user: userId });
+```
+
+`runInTransaction(fn, { user })` binds a transaction to a user, as `{ tenant }` binds it to a
+tenant; with both, both are set. The same right joins, set operators and `.prepare()` are
+refused as on `_select`. There are no writes by person: rows are written by tenant.
+
+### The tenant list: `tenantList`
+
+With members visible through `visibleTo`, the tenant list itself can carry policies — a
+transaction bound to a tenant sees that tenant's row, one bound to a user the tenants the
+user's memberships point at:
+
+```typescript
+// server/entities/workspaces.ts — declared before the tenancy that names it
+import { createSchema, id, tenantList } from '@spfn/core/db';
+import { text, type PgTable } from 'drizzle-orm/pg-core';
+
+export const workspaces = tenantList(schema, 'workspaces', {
+    id: id(),
+    name: text('name').notNull(),
+}, {
+    visibleThrough: { table: (): PgTable => members, where: { status: 'active' } },
+});
+```
+
+```sql
+CREATE POLICY "workspaces_tenant_visibility" ON "acme_notes"."workspaces" AS PERMISSIVE FOR SELECT TO public
+    USING ("id" = (case when nullif(current_setting('app.user_id', true), '') is null
+                        then current_setting('app.tenant_id')
+                        else nullif(current_setting('app.tenant_id', true), '') end)::bigint
+        OR EXISTS (
+        SELECT 1 FROM "acme_notes"."members" "m"
+        WHERE "m"."workspace_id" = "workspaces"."id"
+          AND "m"."user_id" = nullif(current_setting('app.user_id', true), '')::bigint
+          AND "m"."status" = 'active'));
+CREATE POLICY "workspaces_tenant_insert" ON "acme_notes"."workspaces" AS PERMISSIVE FOR INSERT TO public
+    WITH CHECK (true);
+CREATE POLICY "workspaces_tenant_update" ON "acme_notes"."workspaces" AS PERMISSIVE FOR UPDATE TO public
+    USING ("id" = current_setting('app.tenant_id')::bigint) WITH CHECK ("id" = current_setting('app.tenant_id')::bigint);
+CREATE POLICY "workspaces_tenant_delete" ON "acme_notes"."workspaces" AS PERMISSIVE FOR DELETE TO public
+    USING ("id" = current_setting('app.tenant_id')::bigint);
+```
+
+- **The membership table is a `visibleTo` table of a tenancy over this list.** Its tenant and
+  user columns come from its markers when drizzle reads the table (`spfn db generate`); a table
+  that is no tenancy table, of a tenancy over another list, or without `visibleTo` throws then,
+  naming both tables. Spell out the thunk's return type, `(): PgTable => members`: the
+  membership's type depends on the list through the tenancy, a circle TypeScript cannot infer.
+- **`where` keys are membership properties**, written as their column names; values are
+  strings (quotes doubled), finite numbers, booleans or `null` (`is null`), rendered as
+  literals — the policy lands in a migration file, where a bound parameter cannot.
+- **Creating a tenant needs no binding** (its id comes from the insert); **renaming or
+  deleting one needs that tenant's** — a guarded route with `Transactional()`, or
+  `runInTransaction(fn, { tenant: id })` outside a request.
+- **A connection bound to neither gets an error.** A path that walks every tenant (a
+  reconciler, a cleanup job) reads the list through the owner connection or an explicit
+  all-tenant read of the app's own; it is not offered here.
+- The `exists` reads `members` under its own read policy, so no `SECURITY DEFINER` function
+  is needed, and `members`' policy never reads `workspaces`, so the two never recurse.
+
 ### Where a TenantRepository query runs (R1–R6)
 
 | # | Situation | What happens |
@@ -565,6 +715,15 @@ CREATE POLICY "notes_tenant_isolation" ON "acme_notes"."notes" AS PERMISSIVE FOR
 | R4 | in a transaction bound to `t` | the query |
 | R5 | in a transaction bound to another tenant | `TenantMismatchError`, no SQL |
 | R6 | `tenancy.guard()` authorized another tenant for this request | `TenantMismatchError`, no SQL |
+
+Inside a request `tenancy.guard()` authorized, the guard's tenant binds the transaction as
+early as it can (when the app has tenancy tables): a root transaction opened under the guard
+without `{ tenant }` runs `set_config('app.tenant_id', t, true)` right after its `BEGIN`, and a
+guard that runs inside an open, still unbound transaction binds it. So
+`[tenancy.guard(...), Transactional()]` and `[Transactional(), tenancy.guard(...)]` are both
+bound before the handler's first query, and a write a plain `BaseRepository` sends — renaming
+the tenant in a `tenantList` — runs under the tenant. `runInTransaction(fn, { tenant: 9 })`
+under a guard for 7 binds 9 as asked; its TenantRepository calls are refused by R6, as before.
 
 - The tenant id is a bound parameter; no SQL text is built from it. `set_config(..., true)`
   ends with the transaction, so a pooled connection never carries it further.
@@ -597,7 +756,8 @@ calls your function — exactly one of the two, checked when `guard()` is called
    without the guard.
 
 The guard opens no transaction, so reads keep using the read replica. Add `Transactional()`
-to a write route — in either order: the first repository call binds the transaction.
+to a write route — in either order: the transaction is bound to the guard's tenant before the
+handler runs (see R1–R6 above).
 
 ### Database roles
 
@@ -667,13 +827,15 @@ the imported ids. Restoring one tenant to a point in time is: restore a copy of 
 database to that point, export the tenant from the copy, `import --replace` into
 production. The CLI finds tenant tables through the `Symbol.for('spfn.tenant.column')` and
 `Symbol.for('spfn.tenancy.table')` markers, so it reads them through any copy of
-`@spfn/core` the app's schema loads.
+`@spfn/core` the app's schema loads. A `visibleTo` membership table is exported and imported
+like any tenant table; a `tenantList` is not, as the tenant list never was.
 
 **Boot check.** When the app declares tenancy tables, the server checks the role of its
 write and read connections at startup: a role that owns a tenancy table, or is a superuser
 or `BYPASSRLS`, refuses to boot in production (`NODE_ENV=production`) and logs one warning
-line elsewhere — local development usually runs as the `postgres` superuser. A check that
-cannot run logs one warning and the server starts. An app without tenancy tables sends no
+line elsewhere — local development usually runs as the `postgres` superuser. A
+`tenantList` is checked with them: its policy does not apply to such a role either. A check
+that cannot run logs one warning and the server starts. An app without tenancy tables sends no
 query.
 
 ---

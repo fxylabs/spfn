@@ -5,6 +5,9 @@
  * tenant-aware table without a condition on that table's tenant column. It is
  * attached only in local and development runs, so production pays nothing.
  *
+ * A tenancy table declared with `visibleTo` is scoped by a condition on either
+ * its tenant column or its user column: `_selectOfUser` reads it by person.
+ *
  * Every statement is checked, TenantRepository's included: the queries it builds
  * always carry the tenant condition and pass, while a subquery a caller hands it
  * — in a where condition or as a join source — is checked like any other SQL.
@@ -97,7 +100,8 @@ export function createTenantQueryLogger(options: TenantQueryLoggerOptions): Logg
 
 /**
  * The tenant-aware tables `sql` references without a condition on their tenant
- * column, by the name the query uses for them (the alias when there is one).
+ * column — or on their `visibleTo` user column — by the name the query uses for
+ * them (the alias when there is one).
  */
 export function findUnscopedTenantTables(sql: string, tables: readonly TenantTableEntry[]): string[]
 {
@@ -108,7 +112,7 @@ export function findUnscopedTenantTables(sql: string, tables: readonly TenantTab
 
     return tables.flatMap((table) =>
         referencesOf(sql, table)
-            .filter((reference) => !hasTenantCondition(sql, reference, table.columnName))
+            .filter((reference) => !isScoped(sql, reference, table))
             .map((reference) => reference.label),
     );
 }
@@ -141,7 +145,13 @@ function referencesOf(sql: string, table: TenantTableEntry): TableReference[]
     return [...references.values()];
 }
 
-function hasTenantCondition(sql: string, reference: TableReference, columnName: string): boolean
+function isScoped(sql: string, reference: TableReference, table: TenantTableEntry): boolean
+{
+    return hasCondition(sql, reference, table.columnName)
+        || (table.userColumnName !== undefined && hasCondition(sql, reference, table.userColumnName));
+}
+
+function hasCondition(sql: string, reference: TableReference, columnName: string): boolean
 {
     const condition = new RegExp(`${reference.qualifier}\\."${escapeRegExp(columnName)}"\\s*(?:=|in\\s*\\()`, 'i');
 

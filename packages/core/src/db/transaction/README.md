@@ -228,7 +228,8 @@ await runInTransaction<void, AppDatabase>(async (tx) =>
 | `idleTimeout` | `number` | `env.TRANSACTION_IDLE_TIMEOUT` (30000) | see timeout semantics below |
 | `context` | `string` | `'transaction'` | label in logs (the middleware passes `"METHOD /path"`) |
 | `requiresNew` | `boolean` | `false` | run in an independent transaction instead of joining an ambient one — see [Nested transactions](#nested-transactions-savepoints) |
-| `tenant` | `number` | — | bind the transaction to a tenant: `set_config('app.tenant_id', tenant, true)` right after the root `BEGIN`; a nested call naming another tenant throws `TenantMismatchError` before its SAVEPOINT — see [Tenancy](../README.md#tenancy-definetenancy--tenant-tables-enforced-by-the-database) |
+| `tenant` | `number` | — | bind the transaction to a tenant: `set_config('app.tenant_id', tenant, true)` right after the root `BEGIN`; a nested call naming another tenant throws `TenantMismatchError` before its SAVEPOINT. Left out under `tenancy.guard()`, a root binds to the guard's tenant right after its `BEGIN` — see [Tenancy](../README.md#tenancy-definetenancy--tenant-tables-enforced-by-the-database) |
+| `user` | `number` | — | bind the transaction to a user, for `visibleTo` tables and `tenantList` tables: `set_config('app.user_id', user, true)` right after the root `BEGIN`, beside the tenant when both are given; a nested call naming another user throws `TenantMismatchError` (`key: 'user'`) before its SAVEPOINT; `requiresNew` may name its own — see [A second key](../README.md#a-second-key-visibleto) |
 
 ### Timeout semantics
 

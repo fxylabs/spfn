@@ -10,6 +10,11 @@
  *   join's ON clause. ON, not WHERE: in WHERE a left join's unmatched rows
  *   would be filtered out and it would behave as an inner join.
  *
+ * `_selectOfUser(userId)` builds the same wrapper with the user scope: the
+ * `from` table must be a `visibleTo` tenancy table and gets `user = userId`,
+ * a joined `visibleTo` table gets it in ON, an ordinary table joins without a
+ * condition, and any other tenant-aware table is refused at `from` or `join`.
+ *
  * Joins and set operators that would let rows outside the tenant through are
  * refused. The TypeScript type stays drizzle's own builder type.
  *
@@ -27,7 +32,14 @@
 import { is, View } from 'drizzle-orm';
 import type { SQL } from 'drizzle-orm';
 import type { PgTable } from 'drizzle-orm/pg-core';
-import { optionalTenantCondition, tenantCondition, withCondition, type ConditionInput } from './condition';
+import {
+    optionalTenantCondition,
+    optionalUserCondition,
+    tenantCondition,
+    userCondition,
+    withCondition,
+    type ConditionInput,
+} from './condition';
 import { findTenancyMarker } from './registry';
 
 /**
@@ -85,8 +97,38 @@ export type ScopedExecution = (
     execute: (db: unknown) => Promise<unknown>,
 ) => Promise<unknown>;
 
-/** Wrap `db.select(...)` so its `.from(table)` returns a tenant-scoped query. */
-export function scopeSelectBuilder<TBuilder extends object>(builder: TBuilder, tenantId: number, execution: ScopedExecution): TBuilder
+/** What a select is scoped to: the conditions its tables get, and the method named in its errors. */
+export interface SelectScope
+{
+    readonly method: '_select' | '_selectOfUser';
+    /** The WHERE condition of the `from` table; throws for a table the scope cannot read from. */
+    from(table: PgTable): SQL;
+    /** The ON condition of a joined table, or undefined; throws for a table the scope cannot join. */
+    join(table: unknown): SQL | undefined;
+}
+
+/** `_select(tenantId)`: every tenant-aware table carries `tenant = tenantId`. */
+export function tenantScope(tenantId: number): SelectScope
+{
+    return {
+        method: '_select',
+        from: (table) => tenantCondition(table, tenantId),
+        join: (table) => optionalTenantCondition(table, tenantId),
+    };
+}
+
+/** `_selectOfUser(userId)`: every `visibleTo` table carries `user = userId`. */
+export function userScope(userId: number): SelectScope
+{
+    return {
+        method: '_selectOfUser',
+        from: (table) => userCondition(table, userId),
+        join: (table) => optionalUserCondition(table, userId),
+    };
+}
+
+/** Wrap `db.select(...)` so its `.from(table)` returns a query scoped by `scope`. */
+export function scopeSelectBuilder<TBuilder extends object>(builder: TBuilder, scope: SelectScope, execution: ScopedExecution): TBuilder
 {
     return new Proxy(builder, {
         get(target, prop, receiver)
@@ -96,21 +138,21 @@ export function scopeSelectBuilder<TBuilder extends object>(builder: TBuilder, t
                 return Reflect.get(target, prop, receiver);
             }
 
-            return (source: PgTable) => scopeSelectQuery((target as AnyBuilder).from(source), source, tenantId, execution);
+            return (source: PgTable) => scopeSelectQuery((target as AnyBuilder).from(source), source, scope, execution);
         },
     });
 }
 
-function scopeSelectQuery(query: AnyBuilder, fromTable: PgTable, tenantId: number, execution: ScopedExecution): AnyBuilder
+function scopeSelectQuery(query: AnyBuilder, fromTable: PgTable, scope: SelectScope, execution: ScopedExecution): AnyBuilder
 {
-    const fromCondition = tenantCondition(fromTable, tenantId);
+    const fromCondition = scope.from(fromTable);
 
     query.where(fromCondition);
 
     const proxy: AnyBuilder = new Proxy(query, {
         get: (target, prop) => scopedMember(target, prop, state),
     });
-    const state: ScopeState = { proxy, fromCondition, tenantId, tables: [fromTable], execution };
+    const state: ScopeState = { proxy, fromCondition, scope, tables: [fromTable], execution };
 
     return proxy;
 }
@@ -119,7 +161,7 @@ interface ScopeState
 {
     readonly proxy: AnyBuilder;
     readonly fromCondition: SQL;
-    readonly tenantId: number;
+    readonly scope: SelectScope;
     /** The `from` table and every joined table, in order. */
     readonly tables: PgTable[];
     readonly execution: ScopedExecution;
@@ -131,7 +173,7 @@ function scopedMember(target: AnyBuilder, prop: PropertyKey, state: ScopeState):
     {
         return () =>
         {
-            throw new Error(`${prop}() is not supported on a TenantRepository _select; write this query on this.readDb`);
+            throw new Error(`${prop}() is not supported on a TenantRepository ${state.scope.method}; write this query on this.readDb`);
         };
     }
 
@@ -145,7 +187,7 @@ function scopedMember(target: AnyBuilder, prop: PropertyKey, state: ScopeState):
         return () =>
         {
             throw new Error(
-                `${prop}() is not supported on a TenantRepository _select that reads a tenancy table: the statement would run outside the tenant transaction; await the query instead`,
+                `${prop}() is not supported on a TenantRepository ${state.scope.method} that reads a tenancy table: the statement would run outside the tenant transaction; await the query instead`,
             );
         };
     }
@@ -159,10 +201,13 @@ function scopedMember(target: AnyBuilder, prop: PropertyKey, state: ScopeState):
     {
         return (table: unknown, on: ConditionInput) =>
         {
-            assertNotView(table);
+            assertNotView(table, state.scope);
+
+            const condition = state.scope.join(table);
+
             state.tables.push(table as PgTable);
 
-            return chain(target[prop](table, withCondition(on, optionalTenantCondition(table, state.tenantId))), target, state);
+            return chain(target[prop](table, withCondition(on, condition)), target, state);
         };
     }
 
@@ -174,12 +219,12 @@ function scopedMember(target: AnyBuilder, prop: PropertyKey, state: ScopeState):
  * the wrapper cannot tell which of them holds the tenant — a view over a
  * tenant-aware table would join every tenant's rows. `from(view)` already throws.
  */
-function assertNotView(source: unknown): void
+function assertNotView(source: unknown, scope: SelectScope): void
 {
     if (is(source, View))
     {
         throw new Error(
-            'A view cannot be joined on a TenantRepository _select; join the underlying table, or write this query on this.readDb',
+            `A view cannot be joined on a TenantRepository ${scope.method}; join the underlying table, or write this query on this.readDb`,
         );
     }
 }
@@ -220,7 +265,7 @@ function onSessionOf(query: AnyBuilder, db: unknown): AnyBuilder
 
     if (typeof session?.prepareQuery !== 'function')
     {
-        throw new Error('TenantRepository _select cannot find the session of the database it runs on; drizzle internals changed');
+        throw new Error('TenantRepository cannot find the session of the database a scoped select runs on; drizzle internals changed');
     }
 
     return Object.create(query, { session: { value: session } });

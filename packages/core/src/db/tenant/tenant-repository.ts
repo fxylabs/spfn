@@ -25,6 +25,10 @@
  * SQL runs. A `tenantKey()`-only table has no policy and runs as in part 1,
  * with the two mismatch checks added.
  *
+ * `_selectOfUser(userId)` reads by person instead of by tenant, from a tenancy
+ * table declared with `visibleTo` — every tenant's rows of that user. It binds
+ * `app.user_id` the way the tenant methods bind `app.tenant_id` (rules U1–U5).
+ *
  * @example
  * ```typescript
  * export class NoteRepository extends TenantRepository
@@ -51,8 +55,8 @@ import type { PgAsyncSelectBuilder, PgColumn, PgTable, SelectedFields } from 'dr
 import { RepositoryCore, type RepositoryDatabase } from '../repository-core';
 import { buildWhereClause, clampRowLimit, countRows, type CountOptions } from '../query-utils';
 import type { DrizzleDatabase } from '../manager/types';
-import { assertTenantId, requireTenantColumn, tenantCondition } from './condition';
-import { scopeSelectBuilder } from './select';
+import { assertTenantId, assertUserId, requireTenantColumn, tenantCondition } from './condition';
+import { scopeSelectBuilder, tenantScope, userScope } from './select';
 import { runTenantQuery, type TenantAccess } from './session';
 
 type WhereInput = Record<string, any> | SQL | undefined;
@@ -176,8 +180,31 @@ export abstract class TenantRepository<
 
         return scopeSelectBuilder(
             fields ? this.readDb.select(fields) : this.readDb.select(),
-            tenantId,
-            (tables, execute) => runTenantQuery('read', tenantId, tables, this.readDb, execute),
+            tenantScope(tenantId),
+            (tables, execute) => runTenantQuery('read', { key: 'tenant', id: tenantId }, tables, this.readDb, execute),
+        );
+    }
+
+    /**
+     * `_select` by person: the `from` table must be a tenancy table declared
+     * with `visibleTo` and gets `user = userId` in WHERE, a joined `visibleTo`
+     * table gets it in ON, and an ordinary table — the tenant list, the users
+     * table — joins without a condition. Any other tenant-aware table throws at
+     * `from` or `join`; read it with `_select(tenantId)`. The query runs with
+     * `app.user_id` set (rules U1–U5), so the row-level security policy admits
+     * that user's rows in every tenant. The same joins and members are refused
+     * as on `_select`.
+     */
+    protected _selectOfUser(userId: number): PgAsyncSelectBuilder<undefined>;
+    protected _selectOfUser<TSelection extends SelectedFields>(userId: number, fields: TSelection): PgAsyncSelectBuilder<TSelection>;
+    protected _selectOfUser(userId: number, fields?: SelectedFields): unknown
+    {
+        assertUserId(userId);
+
+        return scopeSelectBuilder(
+            fields ? this.readDb.select(fields) : this.readDb.select(),
+            userScope(userId),
+            (tables, execute) => runTenantQuery('read', { key: 'user', id: userId }, tables, this.readDb, execute),
         );
     }
 
@@ -328,7 +355,7 @@ export abstract class TenantRepository<
         query: (db: RepositoryDatabase<TDatabase>) => PromiseLike<TResult>,
     ): Promise<TResult>
     {
-        return runTenantQuery(access, tenantId, [table], access === 'read' ? this.readDb : this.db, query);
+        return runTenantQuery(access, { key: 'tenant', id: tenantId }, [table], access === 'read' ? this.readDb : this.db, query);
     }
 
     /** `tenant condition AND where`, after checking the tenant id and the table. */

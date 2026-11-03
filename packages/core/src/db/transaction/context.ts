@@ -52,14 +52,14 @@ export type NestedFrameGate = {
 };
 
 /**
- * The tenant a transaction is bound to — see transaction/tenant.ts
+ * One binding of a transaction — its tenant or its user, see transaction/tenant.ts
  *
- * One object per ROOT transaction, shared by reference with every savepoint
- * frame opened off it: a savepoint runs on the root's connection, where the
- * `app.tenant_id` setting is one value for all of them.
+ * One object per ROOT transaction and binding, shared by reference with every
+ * savepoint frame opened off it: a savepoint runs on the root's connection,
+ * where the setting is one value for all of them.
  */
-export type TransactionTenant = {
-    /** The tenant id, or null while no tenant has been set */
+export type TransactionBinding = {
+    /** The bound id, or null while none has been set */
     id: number | null;
     /** The innermost open frame whose rollback would undo the setting */
     level: number;
@@ -91,7 +91,9 @@ export type TransactionContext<TDatabase extends DrizzleDatabase = DrizzleDataba
     /** Serializes the savepoint frames opened directly off THIS context */
     nestedFrames: NestedFrameGate;
     /** The root transaction's tenant, shared by every frame on its connection */
-    tenant: TransactionTenant;
+    tenant: TransactionBinding;
+    /** The root transaction's user (`app.user_id`), shared the same way */
+    user: TransactionBinding;
 };
 
 /** The contention notice is a property of the process, not of a transaction */
@@ -224,6 +226,7 @@ export function getTransactionId(): string | null
  * @param callback - Function to run within transaction context
  * @param tenant - For a root context, the tenant whose `set_config` already
  *   ran on `tx`; a nested context shares its parent's tenant and ignores it
+ * @param user - The same for the user (`app.user_id`)
  * @returns Result of the callback
  */
 export function runWithTransaction<T, TDatabase extends DrizzleDatabase = DefaultDatabase>(
@@ -231,6 +234,7 @@ export function runWithTransaction<T, TDatabase extends DrizzleDatabase = Defaul
     txId: string, // Add txId parameter
     callback: () => Promise<T>,
     tenant?: number,
+    user?: number,
 ): Promise<T>
 {
     const existingContext = getTransactionContext();
@@ -270,8 +274,9 @@ export function runWithTransaction<T, TDatabase extends DrizzleDatabase = Defaul
     // frames opened off THIS context, so every level needs its own or a nested
     // call would wait on the gate its own parent is holding.
     //
-    // The tenant is the opposite: the setting lives on the connection, which
-    // every frame shares, so a savepoint gets its root's tenant object.
+    // The tenant and the user are the opposite: the settings live on the
+    // connection, which every frame shares, so a savepoint gets its root's
+    // binding objects.
     return asyncContext.run(
         {
             tx,
@@ -281,15 +286,16 @@ export function runWithTransaction<T, TDatabase extends DrizzleDatabase = Defaul
             afterCommitCallbacks: [],
             afterRollbackCallbacks: [],
             nestedFrames: createNestedFrameGate(),
-            tenant: existingContext?.tenant ?? rootTenant(tenant, newLevel),
+            tenant: existingContext?.tenant ?? rootBinding(tenant, newLevel),
+            user: existingContext?.user ?? rootBinding(user, newLevel),
         } as TransactionContext,
         callback,
     );
 }
 
-function rootTenant(tenant: number | undefined, level: number): TransactionTenant
+function rootBinding(id: number | undefined, level: number): TransactionBinding
 {
-    return { id: tenant ?? null, level: tenant === undefined ? 0 : level, openLevel: level, ready: Promise.resolve() };
+    return { id: id ?? null, level: id === undefined ? 0 : level, openLevel: level, ready: Promise.resolve() };
 }
 
 /**

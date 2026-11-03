@@ -67,12 +67,13 @@ import {
 import { TransactionError } from '@spfn/core/errors';
 import { isTenantId } from '../tenant/condition';
 import {
-    assertTransactionTenant,
-    claimTransactionTenant,
-    discardTenantClaim,
-    openTenantFrame,
-    promoteTenantClaim,
-    setTenantSetting,
+    assertTransactionBinding,
+    claimTransactionBinding,
+    discardBindingClaims,
+    guardedTransactionTenant,
+    openBindingFrame,
+    promoteBindingClaims,
+    setBindingSetting,
 } from './tenant';
 import { env } from '@spfn/core/config';
 import type { DefaultDatabase, DrizzleDatabase } from '../manager/types';
@@ -364,8 +365,11 @@ export interface RunInTransactionOptions
      * tenant: the same tenant is accepted, another throws before the SAVEPOINT.
      * A `requiresNew: true` call is a root and may name its own.
      *
-     * Without it, the first TenantRepository call on a tenancy table binds the
-     * transaction to that call's tenant.
+     * Without it, a root transaction opened inside a request that
+     * `tenancy.guard()` authorized binds to the guard's tenant right after its
+     * `BEGIN` (when the app has tenancy tables); anywhere else the first
+     * TenantRepository call on a tenancy table binds the transaction to that
+     * call's tenant.
      *
      * @example
      * ```typescript
@@ -373,6 +377,27 @@ export interface RunInTransactionOptions
      * ```
      */
     tenant?: number;
+
+    /**
+     * Bind the transaction to a user, for tables declared with `visibleTo` and
+     * tenant lists declared with `tenantList({ visibleThrough })`.
+     *
+     * A root transaction runs `set_config('app.user_id', user, true)` right after
+     * its `BEGIN`, so a `visibleTo` table's read policy admits that user's rows
+     * — in every tenant — and a tenant list the tenants the user's memberships
+     * point at. Writes still need the tenant. With `tenant` as well, both are set.
+     *
+     * Nested calls and `requiresNew` follow the same rules as `tenant`: another
+     * user throws `TenantMismatchError` (`key: 'user'`) before the SAVEPOINT.
+     * Without it, the first `TenantRepository._selectOfUser(userId)` call binds
+     * the transaction to that user.
+     *
+     * @example
+     * ```typescript
+     * const memberships = await runInTransaction(() => memberRepository.listWorkspacesOf(userId), { user: userId });
+     * ```
+     */
+    user?: number;
 }
 
 /**
@@ -417,6 +442,7 @@ export async function runInTransaction<T, TDatabase extends DrizzleDatabase = De
         context = 'transaction',
         requiresNew = false,
         tenant,
+        user,
     } = options;
 
     // Handle timeout: null/undefined → default, 0 → disabled, N → N milliseconds
@@ -522,6 +548,13 @@ export async function runInTransaction<T, TDatabase extends DrizzleDatabase = De
         { txId, context, tenant },
     );
 
+    validateAndThrow(
+        user !== undefined && !isTenantId(user),
+        `Invalid user value: ${user}. Must be a positive safe integer.`,
+        'Invalid user',
+        { txId, context, user },
+    );
+
     // Get write database instance (after all input validations)
     const writeDb = getDatabase<TDatabase>('write');
     if (!writeDb)
@@ -554,12 +587,21 @@ export async function runInTransaction<T, TDatabase extends DrizzleDatabase = De
     const savepointOwner = requiresNew ? null : getTransactionContext<TDatabase>();
     const isNested = savepointOwner !== null;
 
-    // A savepoint shares the outer transaction's tenant: refuse another one
-    // before the SAVEPOINT is taken
+    // A savepoint shares the outer transaction's tenant and user: refuse
+    // another one before the SAVEPOINT is taken
     if (savepointOwner && tenant !== undefined)
     {
-        assertTransactionTenant(savepointOwner, tenant);
+        assertTransactionBinding(savepointOwner, 'tenant', tenant);
     }
+
+    if (savepointOwner && user !== undefined)
+    {
+        assertTransactionBinding(savepointOwner, 'user', user);
+    }
+
+    // The tenant a root binds to at BEGIN: the one asked for, or else the one
+    // tenancy.guard() authorized this request for
+    const rootTenant = isNested ? undefined : tenant ?? guardedTransactionTenant();
 
     // Warn only when the caller passed a timeout explicitly: the 30s default
     // would warn on every nested call and bury the case that matters — an
@@ -626,19 +668,19 @@ export async function runInTransaction<T, TDatabase extends DrizzleDatabase = De
         {
             return savepointOwner.nestedFrames.run(() =>
             {
-                openTenantFrame(savepointOwner.tenant, savepointOwner.level + 1);
+                openBindingFrame(savepointOwner, savepointOwner.level + 1);
 
                 return (savepointOwner.tx.transaction(body as never) as Promise<T>).then(
                     (result) =>
                     {
                         promoteFrameHooks({ beforeCommitCallbacks, afterCommitCallbacks, afterRollbackCallbacks }, savepointOwner);
-                        promoteTenantClaim(savepointOwner.tenant, savepointOwner.level);
+                        promoteBindingClaims(savepointOwner, savepointOwner.level);
 
                         return result;
                     },
                     (error: unknown) =>
                     {
-                        discardTenantClaim(savepointOwner.tenant, savepointOwner.level);
+                        discardBindingClaims(savepointOwner, savepointOwner.level);
 
                         return discardFrameHooks(
                             { beforeCommitCallbacks, afterCommitCallbacks, afterRollbackCallbacks },
@@ -686,11 +728,16 @@ export async function runInTransaction<T, TDatabase extends DrizzleDatabase = De
                 await transaction.execute(sql.raw(`SET LOCAL idle_in_transaction_session_timeout = ${idleTimeout}`));
             }
 
-            // The tenant (root only): a savepoint claims it below, once its
-            // context exists, because it may share a tenant already set
-            if (tenant !== undefined && !isNested)
+            // The tenant and the user (root only): a savepoint claims them
+            // below, once its context exists, because it may share one already set
+            if (rootTenant !== undefined)
             {
-                await setTenantSetting(transaction, tenant);
+                await setBindingSetting(transaction, 'tenant', rootTenant);
+            }
+
+            if (user !== undefined && !isNested)
+            {
+                await setBindingSetting(transaction, 'user', user);
             }
 
             // Store transaction in AsyncLocalStorage
@@ -708,7 +755,12 @@ export async function runInTransaction<T, TDatabase extends DrizzleDatabase = De
 
                     if (tenant !== undefined && isNested)
                     {
-                        await claimTransactionTenant(ctx, tenant);
+                        await claimTransactionBinding(ctx, 'tenant', tenant);
+                    }
+
+                    if (user !== undefined && isNested)
+                    {
+                        await claimTransactionBinding(ctx, 'user', user);
                     }
                 }
 
@@ -736,7 +788,7 @@ export async function runInTransaction<T, TDatabase extends DrizzleDatabase = De
                 }
 
                 return innerResult;
-            }, isNested ? undefined : tenant);
+            }, rootTenant, isNested ? undefined : user);
         });
 
         // Transaction successful (committed)
