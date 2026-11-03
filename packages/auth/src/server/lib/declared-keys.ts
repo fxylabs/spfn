@@ -70,3 +70,51 @@ export function indexDeclaredEntries<T extends DeclaredEntry>(
 
     return byKey;
 }
+
+/**
+ * Where one active declaration lives: installed once, before boot completes.
+ * The same rule as `registerAuthProfile` — a second install or a late one throws.
+ */
+export interface DeclarationSlot<T>
+{
+    install(declaration: T): void;
+    /** Called when `initializeAuth` completes: from here on nothing may be installed */
+    seal(): void;
+    current(): T | null;
+    /** Test-only: the vitest config runs every file in one fork, so module state outlives a file */
+    reset(): void;
+}
+
+export function createDeclarationSlot<T>(option: string, definer: string): DeclarationSlot<T>
+{
+    let installed: T | null = null;
+    let sealed = false;
+
+    return {
+        install(declaration)
+        {
+            if (installed !== null)
+            {
+                throw new Error(`${option}: a declaration is already installed; pass one ${definer} result to createAuthLifecycle`);
+            }
+            if (sealed)
+            {
+                throw new Error(`${option}: auth has already initialized; declare ${option} on createAuthLifecycle, before boot`);
+            }
+            installed = declaration;
+        },
+        seal()
+        {
+            sealed = true;
+        },
+        current()
+        {
+            return installed;
+        },
+        reset()
+        {
+            installed = null;
+            sealed = false;
+        },
+    };
+}

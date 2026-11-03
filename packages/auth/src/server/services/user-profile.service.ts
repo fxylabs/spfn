@@ -10,6 +10,8 @@ import { runInTransaction } from '@spfn/core/db';
 import { usersRepository, userProfilesRepository } from '../repositories';
 import { normalizeChosenLocale, profileLocale, type ProfileLocale } from '../lib/profile-locale';
 import { setUserSetting } from './user-settings.service';
+import { activeProfileFields, assertProfileFieldsPatch } from '../lib/profile-fields';
+import { authLogger } from '../logger';
 
 /**
  * Profile update parameters
@@ -122,6 +124,11 @@ const PROFILE_TEXT_COLUMNS = [
     'jobTitle',
 ] as const;
 
+/**
+ * The column writes of a PATCH. Free-form `metadata` (no profile fields
+ * declared) is one of them and replaces the stored object; declared fields
+ * are merged separately by `mergeDeclaredMetadata`.
+ */
 function profileColumnUpdates(params: UpdateProfileParams): Record<string, unknown>
 {
     const updates: Record<string, unknown> = {};
@@ -133,12 +140,34 @@ function profileColumnUpdates(params: UpdateProfileParams): Record<string, unkno
             updates[column] = emptyToNull(params[column]);
         }
     }
-    if (params.metadata !== undefined)
+    if (params.metadata !== undefined && !activeProfileFields())
     {
         updates.metadata = params.metadata;
     }
 
     return updates;
+}
+
+/**
+ * With profile fields declared, a `metadata` patch names only declared keys,
+ * each passing its schema, and lands key by key: keys it does not name stay.
+ */
+async function mergeDeclaredMetadata(userId: number, metadata: Record<string, unknown> | undefined): Promise<void>
+{
+    if (activeProfileFields() && metadata !== undefined)
+    {
+        await userProfilesRepository.mergeMetadataByUserId(userId, metadata);
+    }
+}
+
+/** @throws ValidationError (400) before anything is written, when the patch breaks the declaration */
+function assertMetadataPatch(metadata: Record<string, unknown> | undefined): void
+{
+    const fields = activeProfileFields();
+    if (fields && metadata !== undefined)
+    {
+        assertProfileFieldsPatch(fields, metadata);
+    }
 }
 
 /**
@@ -175,11 +204,15 @@ async function writeProfileColumns(userId: number, updates: Record<string, unkno
  * Creates profile if not exists, updates if exists
  * Empty strings are converted to null
  * `locale` and `timezone` are written to user settings, in the same transaction
+ * `metadata` replaces the stored object, unless profile fields are declared
+ * (`defineProfileFields`): then it is merged key by key, and an undeclared key
+ * or a value failing its field's schema is a 400
  *
  * @param userId - User ID
  * @param params - Profile fields to update
  * @returns Updated profile info
- * @throws ValidationError (400) when `timezone` is not an IANA zone name; nothing is written
+ * @throws ValidationError (400) when `timezone` is not an IANA zone name, or `metadata`
+ * breaks the declared profile fields; nothing is written
  *
  * @example
  * ```typescript
@@ -197,11 +230,34 @@ export async function updateUserProfileService(
 {
     const userIdNum = Number(userId);
 
+    assertMetadataPatch(params.metadata);
     await runInTransaction(async () =>
     {
         await writeProfileSettings(userIdNum, params);
         await writeProfileColumns(userIdNum, profileColumnUpdates(params));
+        await mergeDeclaredMetadata(userIdNum, params.metadata);
     });
 
     return (await userProfilesRepository.fetchProfileData(userIdNum))!;
+}
+
+/**
+ * Boot reconcile: with profile fields declared, report stored `metadata` keys
+ * no field declares, once, and keep them. Readers never see them.
+ */
+export async function reconcileProfileFields(): Promise<void>
+{
+    const fields = activeProfileFields();
+    if (!fields)
+    {
+        return;
+    }
+
+    const undeclared = (await userProfilesRepository.countMetadataKeys()).filter(row => !fields.has(row.key));
+    if (undeclared.length > 0)
+    {
+        authLogger.service.warn(
+            `user_profiles.metadata holds keys no profile field declares (kept, not read): ${undeclared.map(row => `${row.key} (${row.count})`).join(', ')}`,
+        );
+    }
 }

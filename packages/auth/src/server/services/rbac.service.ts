@@ -21,7 +21,9 @@ import type { AuthInitOptions, RoleConfig, PermissionConfig } from '../rbac';
 import { assertPasskeyConfig, configureAuth } from '../lib/config';
 import { authLogger } from '../logger';
 import { installUserSettings, sealUserSettings } from '../lib/user-settings/registry';
+import { installProfileFields, sealProfileFields } from '../lib/profile-fields';
 import { reconcileUserSettings } from './user-settings.service';
+import { reconcileProfileFields } from './user-profile.service';
 import type { RoleEntity } from '../entities/roles';
 import type { PermissionEntity } from '../entities/permissions';
 
@@ -88,9 +90,9 @@ function collectMappings(options: AuthInitOptions): Record<string, string[]>
  *
  * Creates built-in roles, permissions, and custom configurations.
  * Uses hash-based change detection - skips DB operations when config is unchanged.
- * Installs the app's per-person settings declaration (`options.userSettings`)
- * and reports stored setting keys nobody declares; once this completes, no
- * declaration can be installed any more.
+ * Installs the app's per-person settings and profile field declarations
+ * (`options.userSettings`, `options.profileFields`) and reports stored keys
+ * neither declares; once this completes, no declaration can be installed any more.
  *
  * @param options - Initialization options
  *
@@ -118,13 +120,24 @@ function collectMappings(options: AuthInitOptions): Record<string, string[]>
  */
 export async function initializeAuth(options: AuthInitOptions = {}): Promise<void>
 {
+    installDeclarations(options);
+    await reconcileUserSettings();
+    await reconcileProfileFields();
+    await applyRbacConfig(options);
+    sealUserSettings();
+    sealProfileFields();
+}
+
+function installDeclarations(options: AuthInitOptions): void
+{
     if (options.userSettings)
     {
         installUserSettings(options.userSettings);
     }
-    await reconcileUserSettings();
-    await applyRbacConfig(options);
-    sealUserSettings();
+    if (options.profileFields)
+    {
+        installProfileFields(options.profileFields);
+    }
 }
 
 /**

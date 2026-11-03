@@ -7,8 +7,9 @@
 
 import { NewUserProfile, userProfiles } from '../entities/user-profiles';
 import { BaseRepository } from '@spfn/core/db';
-import { eq } from 'drizzle-orm';
+import { count, eq, sql } from 'drizzle-orm';
 import { profileLocale } from '../lib/profile-locale';
+import { projectProfileMetadata } from '../lib/profile-fields';
 import { userSettingsRepository } from './user-settings.repository';
 
 /**
@@ -113,6 +114,33 @@ export class UserProfilesRepository extends BaseRepository
     }
 
     /**
+     * Merge keys into `metadata`, keeping every key the patch does not name
+     *
+     * One statement, so two concurrent patches of different keys both land.
+     */
+    async mergeMetadataByUserId(userId: number, patch: Record<string, unknown>)
+    {
+        await this.db
+            .update(userProfiles)
+            .set({ metadata: sql`coalesce(${userProfiles.metadata}, '{}'::jsonb) || ${JSON.stringify(patch)}::jsonb` })
+            .where(eq(userProfiles.userId, userId));
+    }
+
+    /**
+     * Profiles per stored `metadata` key across everyone, for the boot reconcile
+     */
+    async countMetadataKeys(): Promise<Array<{ key: string; count: number }>>
+    {
+        const key = sql<string>`jsonb_object_keys(${userProfiles.metadata})`;
+
+        return await this.readDb
+            .select({ key, count: count() })
+            .from(userProfiles)
+            .where(sql`jsonb_typeof(${userProfiles.metadata}) = 'object'`)
+            .groupBy(key);
+    }
+
+    /**
      * 프로필 삭제 (by ID)
      */
     async deleteById(id: number)
@@ -190,7 +218,7 @@ export class UserProfilesRepository extends BaseRepository
             location: profile.location,
             company: profile.company,
             jobTitle: profile.jobTitle,
-            metadata: profile.metadata,
+            metadata: projectProfileMetadata(profile.metadata),
             createdAt: profile.createdAt,
             updatedAt: profile.updatedAt,
         };

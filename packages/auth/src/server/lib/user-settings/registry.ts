@@ -9,6 +9,7 @@
 
 import { Type, type Static, type TSchema } from '@sinclair/typebox';
 import { normalizeChosenLocale } from '../profile-locale';
+import { createDeclarationSlot } from '../declared-keys';
 
 export interface UserSettingEntry<TKey extends string = string, TValueSchema extends TSchema = TSchema>
 {
@@ -93,8 +94,7 @@ export const BUILTIN_USER_SETTING_KEYS: ReadonlyMap<string, string> = new Map(
     [...BUILTIN_USER_SETTINGS.keys()].map(key => [key, 'is a built-in setting and cannot be redeclared']),
 );
 
-let installed: ReadonlyMap<string, UserSettingEntry> | null = null;
-let sealed = false;
+const slot = createDeclarationSlot<ReadonlyMap<string, UserSettingEntry>>('userSettings', 'defineUserSettings');
 
 /**
  * Makes a declaration the active one
@@ -103,41 +103,29 @@ let sealed = false;
  */
 export function installUserSettings(declaration: InstallableUserSettings): void
 {
-    if (installed !== null)
-    {
-        throw new Error('userSettings: a declaration is already installed; pass one defineUserSettings result to createAuthLifecycle');
-    }
-    if (sealed)
-    {
-        throw new Error('userSettings: auth has already initialized; settings are declared on createAuthLifecycle, before boot');
-    }
-    installed = declaration.entries;
+    slot.install(declaration.entries);
 }
 
 /** Called when `initializeAuth` completes: from here on nothing may be installed */
 export function sealUserSettings(): void
 {
-    sealed = true;
+    slot.seal();
 }
 
 /** The entry for a key, built-in or declared; undefined when nobody declared it */
 export function findUserSettingEntry(key: string): ActiveUserSettingEntry | undefined
 {
-    return BUILTIN_USER_SETTINGS.get(key) ?? installed?.get(key);
+    return BUILTIN_USER_SETTINGS.get(key) ?? slot.current()?.get(key);
 }
 
 /** Every active entry: the built-ins first, then the app's in declaration order */
 export function activeUserSettingEntries(): ActiveUserSettingEntry[]
 {
-    return [...BUILTIN_USER_SETTINGS.values(), ...(installed?.values() ?? [])];
+    return [...BUILTIN_USER_SETTINGS.values(), ...(slot.current()?.values() ?? [])];
 }
 
-/**
- * Test-only: forget the installed declaration and the boot seal. The vitest
- * config runs every file in one fork, so module state outlives a file.
- */
+/** Test-only: forget the installed declaration and the boot seal */
 export function __resetUserSettingsForTests(): void
 {
-    installed = null;
-    sealed = false;
+    slot.reset();
 }

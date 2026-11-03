@@ -5,6 +5,7 @@
  */
 
 import type { InstallableUserSettings } from '../lib/user-settings/registry';
+import type { ProfileFieldsDeclaration } from '../lib/profile-fields';
 
 /**
  * Permission category enum values
@@ -142,4 +143,14 @@ export interface AuthInitOptions
      * ```
      */
     userSettings?: InstallableUserSettings;
+
+    /**
+     * The keys `user_profiles.metadata` may hold, from `defineProfileFields`
+     *
+     * With it, a profile PATCH's `metadata` is merged key by key and checked
+     * against the declaration, and readers see only declared keys. Without it,
+     * `metadata` stays free-form and is replaced wholesale. Installed once,
+     * like `userSettings`.
+     */
+    profileFields?: ProfileFieldsDeclaration;
 }
