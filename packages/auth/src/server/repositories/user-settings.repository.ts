@@ -9,13 +9,7 @@
 import { and, count, eq, inArray, sql } from 'drizzle-orm';
 import { BaseRepository } from '@spfn/core/db';
 import { userSettings } from '../entities/user-settings';
-
-export interface StoredUserSetting
-{
-    key: string;
-    value: unknown;
-    updatedAt: Date;
-}
+import { LOCALE_MAX_LENGTH, type StoredUserSetting } from '../lib/user-settings/registry';
 
 /**
  * A JSON `null` has to be written as the literal: a bare `null` parameter is
@@ -46,14 +40,15 @@ export class UserSettingsRepository extends BaseRepository
      * The stored language choice, or null when none was made
      *
      * The principal's locale is read on every authenticated request, so this is
-     * the one unique-index lookup and nothing else. A stored value that is not
-     * a string reads as "never chose".
+     * the one unique-index lookup and nothing else, with a plain length check
+     * rather than the full schema: a stored value that is not a string, or is
+     * longer than the schema allows, reads as "never chose".
      */
     async findLocaleByUserId(userId: number): Promise<string | null>
     {
         const stored = await this.findValue(userId, 'locale');
 
-        return typeof stored?.value === 'string' ? stored.value : null;
+        return typeof stored?.value === 'string' && stored.value.length <= LOCALE_MAX_LENGTH ? stored.value : null;
     }
 
     /**

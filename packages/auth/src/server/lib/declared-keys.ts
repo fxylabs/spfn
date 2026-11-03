@@ -6,7 +6,7 @@
  * module load, rather than on the first request that reads it.
  */
 
-import type { TSchema } from '@sinclair/typebox';
+import { CloneType, type TSchema } from '@sinclair/typebox';
 import { Value } from '@sinclair/typebox/value';
 
 export const DECLARED_KEY_PATTERN = /^[a-z][a-zA-Z0-9]*(\.[a-z][a-zA-Z0-9]*)*$/;
@@ -36,12 +36,38 @@ export interface DeclaredEntries<T>
 }
 
 /**
+ * Freezes a value and, recursively, every object or array reachable from it
+ * (`Reflect.ownKeys` so a TypeBox schema's `[Kind]`/`[Hint]` symbol keys are
+ * covered too). Leaves anything that is not an object alone.
+ */
+function deepFreeze<T>(value: T): T
+{
+    if (value === null || typeof value !== 'object')
+    {
+        return value;
+    }
+    for (const key of Reflect.ownKeys(value))
+    {
+        deepFreeze((value as Record<PropertyKey, unknown>)[key]);
+    }
+
+    return Object.freeze(value);
+}
+
+/**
  * A private copy of the entries behind a frozen read-only facade. Each entry
- * is copied and frozen too, so no schema can be swapped after the check.
+ * is copied and frozen, with its own deep-frozen clone of the schema and a
+ * clone of the default: neither the caller's schema object nor its default
+ * instance is shared by reference, so nothing the caller still holds can
+ * change what was declared or installed.
  */
 export function readOnlyEntries<T extends DeclaredEntry>(source: Iterable<[string, T]>): DeclaredEntries<T>
 {
-    const own = new Map<string, T>([...source].map(([key, entry]) => [key, Object.freeze({ ...entry })]));
+    const own = new Map<string, T>([...source].map(([key, entry]) => [key, Object.freeze({
+        ...entry,
+        schema: deepFreeze(CloneType(entry.schema)),
+        ...('default' in entry ? { default: Value.Clone(entry.default) } : {}),
+    }) as T]));
 
     return Object.freeze({
         size: own.size,

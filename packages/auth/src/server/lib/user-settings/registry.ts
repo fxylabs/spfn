@@ -9,7 +9,6 @@
 
 import { Type, type Static, type TSchema } from '@sinclair/typebox';
 import { Value } from '@sinclair/typebox/value';
-import type { StoredUserSetting } from '../../repositories/user-settings.repository';
 import { authLogger } from '../../logger';
 import { normalizeChosenLocale } from '../profile-locale';
 import { containsNul, createDeclarationSlot, readOnlyEntries, type DeclaredEntries } from '../declared-keys';
@@ -19,6 +18,14 @@ export interface UserSettingEntry<TKey extends string = string, TValueSchema ext
     readonly key: TKey;
     readonly schema: TValueSchema;
     readonly default: Static<TValueSchema>;
+}
+
+/** One stored row of `spfn_auth.user_settings`, as the repository returns it */
+export interface StoredUserSetting
+{
+    key: string;
+    value: unknown;
+    updatedAt: Date;
 }
 
 /** What a built-in key adds to its schema; app entries never carry either */
@@ -99,9 +106,11 @@ function activeEntry(entry: UserSettingEntry, rules: BuiltinRules = {}): ActiveU
 }
 
 /** BCP 47 tags in use fit in 35 characters; the longest IANA zone names in 32 */
+export const LOCALE_MAX_LENGTH = 35;
+
 const BUILTIN_USER_SETTINGS: ReadonlyMap<string, ActiveUserSettingEntry> = new Map([
     activeEntry(
-        { key: 'locale', schema: Type.Union([Type.String({ maxLength: 35 }), Type.Null()]), default: null },
+        { key: 'locale', schema: Type.Union([Type.String({ maxLength: LOCALE_MAX_LENGTH }), Type.Null()]), default: null },
         { prepare: value => (typeof value === 'string' ? normalizeChosenLocale(value) : value) },
     ),
     activeEntry(
@@ -178,7 +187,7 @@ export function readUserSettingRows(entries: readonly ActiveUserSettingEntry[], 
 
         return stored && entry.isValid(stored.value)
             ? { key: entry.key, value: stored.value, isDefault: false, updatedAt: stored.updatedAt }
-            : { key: entry.key, value: entry.default, isDefault: true, updatedAt: null };
+            : { key: entry.key, value: Value.Clone(entry.default), isDefault: true, updatedAt: null };
     });
 
     warnStale(views.filter(view => view.isDefault && byKey.has(view.key)).map(view => view.key));

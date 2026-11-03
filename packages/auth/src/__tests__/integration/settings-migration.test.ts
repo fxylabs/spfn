@@ -18,6 +18,7 @@ import { userProfiles, userSettings, users } from '@/server/entities';
 
 const { initializeAuth } = await import('@/server/services/rbac.service');
 const { getRoleByName } = await import('@/server/services/role.service');
+const { userSettingsRepository } = await import('@/server/repositories');
 
 const dbAvailable = await isDatabaseAvailable();
 
@@ -65,6 +66,8 @@ describe.skipIf(!dbAvailable)('settings migration backfill (case table #161)', (
             ['never', null, null],
             ['blank', null, ''],
             ['spaces', null, '  '],
+            ['blanklocale', '', null],
+            ['spaceslocale', '  ', null],
         ];
         for (const [name, locale, timezone] of profiles)
         {
@@ -111,6 +114,8 @@ describe.skipIf(!dbAvailable)('settings migration backfill (case table #161)', (
             { userId: ids.chose, key: 'timezone', value: 'Asia/Seoul', updatedBy: ids.chose },
             { userId: ids.english, key: 'locale', value: 'en', updatedBy: ids.english },
         ]);
+        expect(await userSettingsRepository.findLocaleByUserId(ids.blanklocale)).toBeNull();
+        expect(await userSettingsRepository.findLocaleByUserId(ids.spaceslocale)).toBeNull();
     });
 
     it('S18: running the backfill again changes nothing', async () =>

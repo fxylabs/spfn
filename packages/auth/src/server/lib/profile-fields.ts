@@ -200,7 +200,7 @@ export function projectProfileMetadata(stored: Record<string, any> | null): Reco
     {
         const value = stored?.[entry.key];
         const valid = value !== undefined && Value.Check(entry.schema, value);
-        projected[entry.key] = valid ? value : entry.default;
+        projected[entry.key] = valid ? value : Value.Clone(entry.default);
         if (value !== undefined && !valid)
         {
             stale.push(entry.key);

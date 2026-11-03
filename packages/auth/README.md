@@ -434,9 +434,9 @@ returns; `getChosenLocale` then answers `null`.
 (see [per-person settings](#how-do-i-declare-per-person-settings-and-profile-fields)).
 
 **1. Run the migration once, before the first boot on this version.** `pnpm spfn db migrate`
-creates `spfn_auth.user_settings` and copies every chosen locale, and every timezone other than
-`UTC` or blank, into it. `initializeAuth` reads `user_settings` at boot (the reconcile below), so a
-process started before the migration fails at boot. Nothing else changes in your
+creates `spfn_auth.user_settings` and copies every chosen locale that is not blank, and every
+timezone other than `UTC` or blank, into it. `initializeAuth` reads `user_settings` at boot (the
+reconcile below), so a process started before the migration fails at boot. Nothing else changes in your
 code: `getLocale(c)`, `getChosenLocale(c)`, `PATCH /_auth/users/locale` and `updateUserProfile({
 locale, timezone })` answer as before, reading and writing settings. Two differences: an invalid
 IANA timezone on the profile PATCH is now a 400 instead of being stored, and anonymizing an account

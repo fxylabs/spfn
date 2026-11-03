@@ -41,6 +41,7 @@ const {
     updateLocaleService,
     updateUserProfileService,
 } = await import('@/server/services/user-profile.service');
+const { resolveAuthenticatedUser } = await import('@/server/middleware/auth-profiles');
 const { userProfilesRepository } = await import('@/server/repositories');
 const { defineUserSettings } = await import('@/server/lib/user-settings');
 const { __resetUserSettingsForTests } = await import('@/server/lib/user-settings/registry');
@@ -318,7 +319,9 @@ describe.skipIf(!dbAvailable)('review round 1 probes (#161)', () =>
         expect(await storedMetadata(userId)).toEqual({ kept: true });
 
         await expect(updateLocaleService(userId, 'a'.repeat(40))).rejects.toMatchObject({ statusCode: 400 });
-        await expect(setUserSetting(userId, 'timezone', `Asia/${'a'.repeat(60)}`)).rejects.toMatchObject({ statusCode: 400 });
+        // The 64-character timezone cap is proved by C9 (review-probes-161-scoped.test.ts), which
+        // spies on Intl.DateTimeFormat: no string over 64 characters can reach the IANA resolver
+        // regardless of the cap, so a line here could not tell the cap apart from its absence.
         expect((await storedSettings(userId)).map(row => row.key)).toEqual(['itProbe.notes']);
     });
 
@@ -359,5 +362,20 @@ describe.skipIf(!dbAvailable)('review round 1 probes (#161)', () =>
         expect(warn.mock.calls.map(([message]) => message).filter(message => String(message).includes('itFields.level'))).toEqual(
             ['1 stored profile field value(s) fail the current schema and read as the default: itFields.level'],
         );
+    });
+
+    it('R9: an over-long legacy locale row reads as "never chose" on the hot path and the profile alike', async () =>
+    {
+        await initializeAuth();
+        const userId = await seedUser('long-locale@test.com');
+        await getTestDb().insert(userProfiles).values({ userId, displayName: 'X' });
+        await getTestDb().insert(userSettings).values({ userId, key: 'locale', value: 'a'.repeat(40) } as never);
+
+        const resolved = await resolveAuthenticatedUser(userId);
+        expect(resolved.chosenLocale).toBeNull();
+        expect(resolved.locale).toBe('en');
+
+        const { profile } = await getUserProfileService(userId);
+        expect(profile?.chosenLocale).toBeNull();
     });
 });
