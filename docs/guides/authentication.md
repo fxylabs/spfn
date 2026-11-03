@@ -120,7 +120,7 @@ pnpm spfn db generate
 pnpm spfn db migrate
 ```
 
-This creates the `spfn_auth` schema with tables: `users`, `user_profiles`, `user_public_keys`, `user_social_accounts`, `verification_codes`, `user_invitations`, `roles`, `permissions`, `role_permissions`, `user_permissions`, `account_deletion_requests`, `auth_metadata`.
+This creates the `spfn_auth` schema with tables: `users`, `user_profiles`, `user_public_keys`, `user_social_accounts`, `verification_codes`, `user_invitations`, `roles`, `permissions`, `role_permissions`, `user_permissions`, `user_settings`, `account_deletion_requests`, `auth_metadata`.
 
 ### 4. Register Lifecycle in `server.config.ts`
 
@@ -589,6 +589,51 @@ catalogue are `superadmin`-only; reading roles and reassigning a user's role als
 | `/_auth/admin/roles/:id` | PATCH | `superadmin` | Update role |
 | `/_auth/admin/roles/:id` | DELETE | `superadmin` | Delete role |
 | `/_auth/admin/users/:userId/role` | PATCH | `admin` or `superadmin` | Change user role |
+
+---
+
+## Per-Person Settings and Profile Fields
+
+Settings are how a person uses the app — language, timezone, a notification digest. Profile
+fields are who they are beyond the basic columns — a department, a GitHub handle. Declare both on
+the lifecycle, beside roles:
+
+```typescript
+import { defineUserSettings, defineProfileFields } from '@spfn/auth/server';
+import { Type } from '@sinclair/typebox';
+
+export const USER_SETTINGS = defineUserSettings([
+    {
+        key: 'notifications.digest',
+        schema: Type.Union([Type.Literal('daily'), Type.Literal('weekly'), Type.Literal('off')]),
+        default: 'daily',
+    },
+]);
+
+export const PROFILE_FIELDS = defineProfileFields([
+    { key: 'department', schema: Type.String({ maxLength: 80 }) },
+]);
+
+createAuthLifecycle({ userSettings: USER_SETTINGS, profileFields: PROFILE_FIELDS });
+```
+
+Read and write settings on the server with `getUserSetting`, `setUserSetting`,
+`listUserSettings` and `resetUserSetting` (or the typed `USER_SETTINGS.get/set/list`); from a
+client with `authApi.listSettings`, `getSetting`, `setSetting` and `resetSetting`, which act on the
+signed-in person only. An undeclared key is a 404, a value failing its schema a 400, and writing
+the default deletes the stored row, so a new default reaches everyone who never chose.
+
+- **Built-in keys.** `locale` (`string | null`, default `null` — "never chose") and `timezone`
+  (an IANA zone, default `'UTC'`). They exist without any declaration, and they are what
+  `getLocale(c)` and `getChosenLocale(c)` read.
+- **Nothing is deleted at boot.** A stored key no declaration names is reported once in the log
+  and kept; a stored value that no longer passes its schema reads as the default.
+- **Profile fields make `metadata` strict.** With `profileFields`, a profile PATCH merges
+  `metadata` key by key and refuses undeclared keys; without it, `metadata` stays free-form and is
+  replaced wholesale, as before.
+
+Upgrading an app that kept its own settings table, or put preferences in `metadata`: see
+"Migration — settings own locale and timezone" in the `@spfn/auth` README.
 
 ---
 
@@ -1454,7 +1499,11 @@ full design.
 | `/_auth/users/profile` | PATCH | Required | Update user profile |
 | `/_auth/users/username/check` | GET | Required | Check username availability |
 | `/_auth/users/username` | PATCH | Required | Update username |
-| `/_auth/users/locale` | PATCH | Required | Update locale |
+| `/_auth/users/locale` | PATCH | Required | Update locale (the built-in `locale` setting) |
+| `/_auth/users/settings` | GET | Required | List the caller's settings |
+| `/_auth/users/settings/:key` | GET | Required | Read one setting |
+| `/_auth/users/settings/:key` | PUT | Required | Write one setting (`{ value }`) |
+| `/_auth/users/settings/:key` | DELETE | Required | Reset one setting to its default |
 
 ### Invitations
 

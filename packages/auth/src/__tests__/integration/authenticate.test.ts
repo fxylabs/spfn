@@ -28,7 +28,7 @@ vi.mock('@spfn/auth/server', async (importOriginal) =>
         },
         findUserWithEffectiveRoleOnPrimary: vi.fn(),
         findUserWithEffectiveRole: vi.fn(),
-        userProfilesRepository: { findLocaleByUserId: vi.fn().mockResolvedValue('en') },
+        userSettingsRepository: { findLocaleByUserId: vi.fn().mockResolvedValue('en') },
         getPendingDeletionInfo: vi.fn(),
     };
 });
@@ -40,7 +40,7 @@ import {
     keysRepository,
     findUserWithEffectiveRoleOnPrimary,
     findUserWithEffectiveRole,
-    userProfilesRepository,
+    userSettingsRepository,
     getPendingDeletionInfo,
 } from '@spfn/auth/server';
 import type { Context, Next } from 'hono';
@@ -74,7 +74,7 @@ describe('Authenticate Middleware', () =>
     {
         vi.clearAllMocks();
         vi.mocked(keysRepository.updateLastUsedById).mockResolvedValue(undefined as never);
-        vi.mocked(userProfilesRepository.findLocaleByUserId).mockResolvedValue('en' as never);
+        vi.mocked(userSettingsRepository.findLocaleByUserId).mockResolvedValue('en' as never);
 
         mockNext = vi.fn();
         mockContext = {
@@ -264,7 +264,7 @@ describe('Authenticate Middleware', () =>
                 user: { id: 1, email: 'test@example.com', status: 'active' },
                 role: { name: 'user' },
             } as never);
-            vi.mocked(userProfilesRepository.findLocaleByUserId).mockResolvedValue(stored as never);
+            vi.mocked(userSettingsRepository.findLocaleByUserId).mockResolvedValue(stored as never);
 
             await authenticate.handler(mockContext as Context, mockNext);
 

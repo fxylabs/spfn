@@ -290,8 +290,17 @@ export type {
 } from './one-time-token.service';
 
 // User Profile Service (new)
-export { getUserProfileService, updateUserProfileService, updateLocaleService } from './user-profile.service';
+export { getUserProfileService, updateUserProfileService, updateLocaleService, reconcileProfileFields } from './user-profile.service';
 export type { UpdateProfileParams } from './user-profile.service';
+
+// User Settings Service (per-person settings declared in code, #161)
+export {
+    getUserSetting,
+    setUserSetting,
+    listUserSettings,
+    resetUserSetting,
+    reconcileUserSettings,
+} from './user-settings.service';
 
 // OAuth Service
 export {

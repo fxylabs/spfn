@@ -42,7 +42,7 @@ import {
     authLogger,
     keysRepository,
     findUserWithEffectiveRoleOnPrimary,
-    userProfilesRepository,
+    userSettingsRepository,
     getPendingDeletionInfo,
 } from '@spfn/auth/server';
 import { AccountDisabledError, AccountPendingDeletionError } from '@spfn/auth/errors';
@@ -144,7 +144,7 @@ export async function resolveAuthenticatedUser(userId: number): Promise<{
 {
     const [result, chosenLocale] = await Promise.all([
         findUserWithEffectiveRoleOnPrimary(userId),
-        userProfilesRepository.findLocaleByUserId(userId),
+        userSettingsRepository.findLocaleByUserId(userId),
     ]);
     if (!result)
     {

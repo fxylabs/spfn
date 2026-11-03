@@ -9,6 +9,9 @@
 
 export const DEFAULT_LOCALE = 'en';
 
+/** BCP 47 tags in use fit in 35 characters; the longest IANA zone names in 32 */
+export const LOCALE_MAX_LENGTH = 35;
+
 export interface ProfileLocale
 {
     locale: string;

@@ -80,6 +80,7 @@ import {
     MfaConfigError,
     SessionPendingMismatchError,
     SessionPendingExpiredError,
+    UserSettingNotDeclaredError,
 } from './auth-errors';
 
 export {
@@ -159,6 +160,7 @@ export {
     MfaConfigError,
     SessionPendingMismatchError,
     SessionPendingExpiredError,
+    UserSettingNotDeclaredError,
 } from './auth-errors';
 
 export const authErrorRegistry = new ErrorRegistry();
@@ -238,6 +240,7 @@ authErrorRegistry.append([
     MfaConfigError,
     SessionPendingMismatchError,
     SessionPendingExpiredError,
+    UserSettingNotDeclaredError,
 ]);
 
 export * as AuthError from './auth-errors';

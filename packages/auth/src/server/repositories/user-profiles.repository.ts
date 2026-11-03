@@ -7,8 +7,11 @@
 
 import { NewUserProfile, userProfiles } from '../entities/user-profiles';
 import { BaseRepository } from '@spfn/core/db';
-import { eq } from 'drizzle-orm';
+import { count, eq, sql } from 'drizzle-orm';
 import { profileLocale } from '../lib/profile-locale';
+import { projectProfileMetadata } from '../lib/profile-fields';
+import { builtinUserSettingEntries, readUserSettingRows } from '../lib/user-settings/registry';
+import { userSettingsRepository } from './user-settings.repository';
 
 /**
  * User Profiles Repository 클래스
@@ -30,19 +33,15 @@ export class UserProfilesRepository extends BaseRepository
     }
 
     /**
-     * User ID로 locale 선택값만 조회 (경량)
+     * The stored language choice, or null when none was made
      *
-     * NULL(또는 프로필 없음)은 "고른 적 없음"이다. 기본값으로 바꾸지 않는다.
+     * @deprecated The choice lives in user settings now (#161); this delegates
+     * to `userSettingsRepository.findLocaleByUserId` and goes with the
+     * `locale` column in the next release.
      */
     async findLocaleByUserId(userId: number): Promise<string | null>
     {
-        const result = await this.readDb
-            .select({ locale: userProfiles.locale })
-            .from(userProfiles)
-            .where(eq(userProfiles.userId, userId))
-            .limit(1);
-
-        return result[0]?.locale ?? null;
+        return await userSettingsRepository.findLocaleByUserId(userId);
     }
 
     /**
@@ -116,6 +115,38 @@ export class UserProfilesRepository extends BaseRepository
     }
 
     /**
+     * Merge keys into `metadata`, keeping every key the patch does not name
+     *
+     * One statement, so two concurrent patches of different keys both land.
+     * A stored value that is not an object (NULL, or a legacy scalar or array)
+     * is replaced by the patch: `jsonb || jsonb` would otherwise concatenate
+     * it into an array.
+     */
+    async mergeMetadataByUserId(userId: number, patch: Record<string, unknown>)
+    {
+        const current = sql`CASE WHEN jsonb_typeof(${userProfiles.metadata}) = 'object' THEN ${userProfiles.metadata} ELSE '{}'::jsonb END`;
+
+        await this.db
+            .update(userProfiles)
+            .set({ metadata: sql`${current} || ${JSON.stringify(patch)}::jsonb` })
+            .where(eq(userProfiles.userId, userId));
+    }
+
+    /**
+     * Profiles per stored `metadata` key across everyone, for the boot reconcile
+     */
+    async countMetadataKeys(): Promise<Array<{ key: string; count: number }>>
+    {
+        const key = sql<string>`jsonb_object_keys(${userProfiles.metadata})`;
+
+        return await this.readDb
+            .select({ key, count: count() })
+            .from(userProfiles)
+            .where(sql`jsonb_typeof(${userProfiles.metadata}) = 'object'`)
+            .groupBy(key);
+    }
+
+    /**
      * 프로필 삭제 (by ID)
      */
     async deleteById(id: number)
@@ -170,28 +201,10 @@ export class UserProfilesRepository extends BaseRepository
      */
     async fetchProfileData(userId: number)
     {
-        const profile = await this.readDb
-            .select({
-                profileId: userProfiles.id,
-                displayName: userProfiles.displayName,
-                firstName: userProfiles.firstName,
-                lastName: userProfiles.lastName,
-                avatarUrl: userProfiles.avatarUrl,
-                bio: userProfiles.bio,
-                locale: userProfiles.locale,
-                timezone: userProfiles.timezone,
-                website: userProfiles.website,
-                location: userProfiles.location,
-                company: userProfiles.company,
-                jobTitle: userProfiles.jobTitle,
-                metadata: userProfiles.metadata,
-                createdAt: userProfiles.createdAt,
-                updatedAt: userProfiles.updatedAt,
-            })
-            .from(userProfiles)
-            .where(eq(userProfiles.userId, userId))
-            .limit(1)
-            .then(rows => rows[0] ?? null);
+        const [profile, settings] = await Promise.all([
+            this.findProfileColumns(userId),
+            this.readBuiltinSettings(userId),
+        ]);
 
         if (!profile)
         {
@@ -205,16 +218,58 @@ export class UserProfilesRepository extends BaseRepository
             lastName: profile.lastName,
             avatarUrl: profile.avatarUrl,
             bio: profile.bio,
-            ...profileLocale(profile.locale),
-            timezone: profile.timezone || 'UTC',
+            ...profileLocale(settings.chosenLocale),
+            timezone: settings.timezone,
             website: profile.website,
             location: profile.location,
             company: profile.company,
             jobTitle: profile.jobTitle,
-            metadata: profile.metadata,
+            metadata: projectProfileMetadata(profile.metadata),
             createdAt: profile.createdAt,
             updatedAt: profile.updatedAt,
         };
+    }
+
+    /**
+     * The two built-in settings the profile response still carries (deprecated
+     * there), in one query, read by the same rule as every settings read: a
+     * stored value that is not valid for its key reads as the default.
+     */
+    private async readBuiltinSettings(userId: number): Promise<{ chosenLocale: string | null; timezone: string }>
+    {
+        const entries = builtinUserSettingEntries();
+        const rows = await userSettingsRepository.listByUserAndKeys(userId, entries.map(entry => entry.key));
+        const value = new Map(readUserSettingRows(entries, rows).map(view => [view.key, view.value]));
+
+        return { chosenLocale: value.get('locale') as string | null, timezone: value.get('timezone') as string };
+    }
+
+    /**
+     * The profile columns `fetchProfileData` returns. `locale` and `timezone`
+     * are not among them: settings own both, and the columns are no longer read.
+     */
+    private async findProfileColumns(userId: number)
+    {
+        return await this.readDb
+            .select({
+                profileId: userProfiles.id,
+                displayName: userProfiles.displayName,
+                firstName: userProfiles.firstName,
+                lastName: userProfiles.lastName,
+                avatarUrl: userProfiles.avatarUrl,
+                bio: userProfiles.bio,
+                website: userProfiles.website,
+                location: userProfiles.location,
+                company: userProfiles.company,
+                jobTitle: userProfiles.jobTitle,
+                metadata: userProfiles.metadata,
+                createdAt: userProfiles.createdAt,
+                updatedAt: userProfiles.updatedAt,
+            })
+            .from(userProfiles)
+            .where(eq(userProfiles.userId, userId))
+            .limit(1)
+            .then(rows => rows[0] ?? null);
     }
 }
 

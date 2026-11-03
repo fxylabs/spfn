@@ -6,7 +6,7 @@
  * Features:
  * - Display name and personal information
  * - Avatar and bio
- * - Locale and timezone preferences
+ * - Locale and timezone columns: no longer read or written; user settings own both (#161)
  * - Optional demographic data
  * - Social links and professional info
  */
@@ -41,7 +41,9 @@ export const userProfiles = authSchema.table('user_profiles',
         // Short bio/description (max 500 chars recommended)
         bio: text('bio'),
 
-        // Preferences
+        // Preferences — superseded by the built-in `locale` and `timezone` user
+        // settings (#161). The migration copied both into user_settings; the
+        // columns are neither read nor written and go in the next release.
         // Locale/language choice (e.g., 'en', 'ko', 'ja'); NULL = never chose, follow the request
         locale: text('locale'),
 
@@ -69,14 +71,13 @@ export const userProfiles = authSchema.table('user_profiles',
         // Job title
         jobTitle: text('job_title'),
 
-        // Additional metadata (JSONB)
-        // Use cases:
-        // - Custom fields: { department: 'Engineering', employeeId: 'E1234', team: 'Backend' }
-        // - Social links: { twitter: '@user', linkedin: 'linkedin.com/in/user', github: 'username' }
-        // - UI preferences: { theme: 'dark', sidebarCollapsed: true, notificationSound: false }
-        // - Integration data: { slackId: 'U123456', discordId: '987654', zoomPmi: '1234567890' }
-        // - App-specific: { onboardingCompleted: true, tutorialStep: 5, badges: ['early-adopter'] }
-        // Example: { department: 'Engineering', theme: 'dark', twitter: '@user' }
+        // Additional metadata (JSONB): who the person is beyond the columns above
+        // With `defineProfileFields` installed, only declared keys, each checked
+        // against its schema and merged key by key; without one, free-form and
+        // replaced wholesale.
+        // Example: { department: 'Engineering', github: 'username' }
+        // How the person uses the app (theme, onboarding progress) is a user
+        // setting, not profile metadata: see `defineUserSettings`.
         metadata: typedJsonb<Record<string, any>>('metadata'),
 
         ...timestamps(),

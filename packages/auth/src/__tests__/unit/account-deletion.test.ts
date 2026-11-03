@@ -22,6 +22,7 @@ const {
     deviceLinksRepository,
     socialAccountsRepository,
     userProfilesRepository,
+    userSettingsRepository,
     verificationCodesRepository,
     accountDeletionRequestsRepository,
     verifyPassword,
@@ -57,6 +58,9 @@ const {
     userProfilesRepository: {
         updateByUserId: vi.fn(async () => undefined),
     },
+    userSettingsRepository: {
+        deleteAllByUserId: vi.fn(async () => undefined),
+    },
     verificationCodesRepository: {
         deleteByTarget: vi.fn(async () => 0),
     },
@@ -84,6 +88,7 @@ vi.mock('../../server/repositories', () => ({
     deviceLinksRepository,
     socialAccountsRepository,
     userProfilesRepository,
+    userSettingsRepository,
     verificationCodesRepository,
     accountDeletionRequestsRepository,
 }));
@@ -489,6 +494,8 @@ describe('account-deletion.service', () =>
             // Passkeys go with the other credentials — an anonymized row must
             // not keep one that still names this account to an authenticator.
             expect(passkeysRepository.deleteAllByUserId).toHaveBeenCalledWith(user.id);
+            // Settings go with the profile fields the anonymization clears (#161).
+            expect(userSettingsRepository.deleteAllByUserId).toHaveBeenCalledWith(user.id);
             expect(verificationCodesRepository.deleteByTarget).toHaveBeenCalledWith(user.email);
             expect(accountDeletionRequestsRepository.markCompleted).toHaveBeenCalledWith(5, 'anonymize');
         });

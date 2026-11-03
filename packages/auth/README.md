@@ -314,7 +314,11 @@ routes use `.skip(['auth'])`; the rest require `Authorization: Bearer <client-si
 | `getAuthSession` | GET `/_auth/session` | yes | current session/user |
 | `issueOneTimeToken` | POST | yes | short-lived token (e.g. SSE handshake) |
 | `checkUsername` / `updateUsername` / `updateLocale` | — | mixed | username availability/update; set or clear (`null`) the language choice |
-| `getUserProfile` / `updateUserProfile` | — | yes | profile read/update |
+| `getUserProfile` / `updateUserProfile` | — | yes | profile read/update; `metadata` is checked against `defineProfileFields` when declared |
+| `listSettings` | GET `/_auth/users/settings` | yes | every declared setting of the caller, built-ins included — see [per-person settings](#how-do-i-declare-per-person-settings-and-profile-fields) |
+| `getSetting` | GET `/_auth/users/settings/:key` | yes | one setting of the caller; the default when never set; 404 for an undeclared key |
+| `setSetting` | PUT `/_auth/users/settings/:key` | yes | write one (`{ value }`, checked against the key's schema); the default deletes the row |
+| `resetSetting` | DELETE `/_auth/users/settings/:key` | yes | return one to its default (204) |
 | `createInvitation` / `acceptInvitation` / `listInvitations` / `cancelInvitation` / `resendInvitation` / `deleteInvitation` / `getInvitation` | — | mixed | invitation flow |
 | `requestAccountDeletion` | POST `/_auth/deletion/request` | yes | request account deletion (re-auth gated) — see [Account Deletion & Recovery](#account-deletion--recovery) |
 | `cancelAccountDeletion` | POST `/_auth/deletion/cancel` | public | cancel a pending deletion (credential-based recovery) |
@@ -422,6 +426,79 @@ If it did offer one, leave the rows alone.
 
 A profile registered with `registerAuthProfile` may leave `chosenLocale` out of the principal it
 returns; `getChosenLocale` then answers `null`.
+
+### Migration — settings own locale and timezone
+
+**Behaviour change in the `@spfn/auth` release after 0.3.0-beta.51** ([fxylabs/spfn#161](https://github.com/fxylabs/spfn/issues/161)).
+`locale` and `timezone` move from `user_profiles` columns to the built-in settings of the same names
+(see [per-person settings](#how-do-i-declare-per-person-settings-and-profile-fields)).
+
+**1. Run the migration once, before the first boot on this version.** `pnpm spfn db migrate`
+creates `spfn_auth.user_settings` and copies every chosen locale that is not blank, and every
+timezone other than `UTC` or blank, into it. `initializeAuth` reads `user_settings` at boot (the
+reconcile below), so a process started before the migration fails at boot. Nothing else changes in your
+code: `getLocale(c)`, `getChosenLocale(c)`, `PATCH /_auth/users/locale` and `updateUserProfile({
+locale, timezone })` answer as before, reading and writing settings. Two differences: an invalid
+IANA timezone on the profile PATCH is now a 400 instead of being stored, and anonymizing an account
+deletes its settings. A legacy timezone string that is not an IANA zone (the old column took any
+string) is copied as it was but reads as `'UTC'` after the move, with one `warn` per read.
+
+The `user_profiles.locale` and `timezone` columns stay for one more release but are **neither read
+nor written**: SQL of your own that reads them sees values frozen at the migration. Read
+`spfn_auth.user_settings` instead (`value` is JSON: `'"ko"'::jsonb`). The one-off `'en'` reset of
+the previous section becomes:
+
+```sql
+DELETE FROM spfn_auth.user_settings WHERE key = 'locale' AND value = '"en"'::jsonb;
+```
+
+**2. If the app kept its own settings table**, declare those keys with `defineUserSettings`, copy
+the rows over, and drop the table. Per key (the values must pass the declared schema; ones that do
+not read as the default):
+
+```sql
+INSERT INTO spfn_auth.user_settings (user_id, key, value, updated_by_id, created_at, updated_at)
+SELECT user_id, '<new.key>', to_jsonb(value), user_id, now(), now()
+FROM app.user_settings WHERE key = '<old_key>'
+ON CONFLICT (user_id, key) DO NOTHING;
+```
+
+Boot's "keys no declaration names" warning tells you about a key you copied but did not declare.
+
+**3. If the app also kept a language of its own**, do not declare it — merge it into `locale`, and
+pick which side wins where both have one:
+
+```sql
+-- The profile choice wins (the migration already copied it): fill only the gaps
+INSERT INTO spfn_auth.user_settings (user_id, key, value, updated_by_id, created_at, updated_at)
+SELECT user_id, 'locale', to_jsonb(value), user_id, now(), now()
+FROM app.user_settings WHERE key = 'language' AND value IS NOT NULL
+ON CONFLICT (user_id, key) DO NOTHING;
+
+-- The app's value wins
+INSERT INTO spfn_auth.user_settings (user_id, key, value, updated_by_id, created_at, updated_at)
+SELECT user_id, 'locale', to_jsonb(value), user_id, now(), now()
+FROM app.user_settings WHERE key = 'language' AND value IS NOT NULL
+ON CONFLICT (user_id, key) DO UPDATE SET value = EXCLUDED.value, updated_at = now();
+```
+
+**4. If `profile.metadata` held UI preferences**, move each to a declared setting and declare the
+identity fields that stay with `defineProfileFields`:
+
+```sql
+INSERT INTO spfn_auth.user_settings (user_id, key, value, updated_by_id, created_at, updated_at)
+SELECT user_id, 'ui.theme', metadata -> 'theme', user_id, now(), now()
+FROM spfn_auth.user_profiles WHERE metadata ? 'theme'
+ON CONFLICT (user_id, key) DO NOTHING;
+
+UPDATE spfn_auth.user_profiles SET metadata = metadata - 'theme' WHERE metadata ? 'theme';
+```
+
+**5. Deprecated, removed in the next release:** `ProfileInfo.locale`, `chosenLocale` and
+`timezone` (still filled, from settings — the response is unchanged), the `locale`/`timezone`
+inputs of `updateUserProfile`, `userProfilesRepository.findLocaleByUserId` (delegates to
+`userSettingsRepository.findLocaleByUserId`), and the two columns. Move clients to
+`authApi.listSettings` / `setSetting` before then.
 
 ### Migration — `SPFN_AUTH_SESSION_TTL` takes effect
 
@@ -3064,6 +3141,104 @@ const demoted = await demoteRoleEmailDomainViolations();
 
 Ops tokens minted by an account that later falls outside the policy are **not** revoked: a token
 records no owner. Revoke them with `spfn ops` if that matters to you.
+
+## How do I declare per-person settings and profile fields?
+
+A person's **profile** says who they are (name, avatar, bio, company — plus the fields you declare
+below); their **settings** say how they use the app (language, timezone, a notification digest, the
+template they used last). Both are declared in code, on the lifecycle beside roles, and the
+library owns the tables and the migrations
+([fxylabs/spfn#161](https://github.com/fxylabs/spfn/issues/161)).
+
+```typescript
+// src/server/auth-declarations.ts
+import { defineUserSettings, defineProfileFields } from '@spfn/auth/server';
+import { Type } from '@sinclair/typebox';
+
+export const USER_SETTINGS = defineUserSettings([
+    {
+        key: 'notifications.digest',
+        schema: Type.Union([Type.Literal('daily'), Type.Literal('weekly'), Type.Literal('off')]),
+        default: 'daily',
+    },
+    { key: 'editor.lastTemplate', schema: Type.Union([Type.String(), Type.Null()]), default: null },
+]);
+
+export const PROFILE_FIELDS = defineProfileFields([
+    { key: 'department', schema: Type.String({ maxLength: 80 }) },
+    { key: 'github', schema: Type.String({ pattern: '^[A-Za-z0-9-]+$' }) },
+]);
+
+// server.config.ts
+createAuthLifecycle({
+    roles: [/* … */],
+    userSettings: USER_SETTINGS,
+    profileFields: PROFILE_FIELDS,
+});
+```
+
+Both functions check the list when the module loads and throw on a key that does not match
+`^[a-z][a-zA-Z0-9]*(\.[a-z][a-zA-Z0-9]*)*$` (at most 120 characters), a key declared twice, or a
+default that fails its own schema. Each is installed once: a second install, or one after
+`initializeAuth` completed, throws — the same rule as `registerAuthProfile`.
+
+**Reading and writing settings** (`@spfn/auth/server`):
+
+| Function | Does |
+|---|---|
+| `getUserSetting(userId, key)` | the stored value, or the default when there is no row |
+| `setUserSetting(userId, key, value, { by })` | checks the value (`ValidationError`, 400, see the limits below) and stores it; a value equal to the default deletes the row instead. Returns the value as stored |
+| `listUserSettings(userId)` | every declared key, built-ins included: `{ key, value, isDefault, updatedAt }`, one query |
+| `resetUserSetting(userId, key)` | deletes the row, so the key reads as its default |
+
+A key nobody declared is `UserSettingNotDeclaredError` (404) on all four, and nothing is written.
+`USER_SETTINGS.get(userId, 'notifications.digest')` is the same read with the value typed
+(`'daily' | 'weekly' | 'off'`); `.set` and `.list` likewise. A missing row *is* the default, so
+changing a default in code reaches everyone who never chose.
+
+**Built-in keys.** The library declares two, which an app may not redeclare:
+
+| Key | Schema | Default | |
+|---|---|---|---|
+| `locale` | `string \| null` (at most 35 characters) | `null` | the language choice; `null` means "never chose, follow the request". Blank clears it. This is what `getLocale(c)` / `getChosenLocale(c)` read |
+| `timezone` | `string` (at most 64 characters) | `'UTC'` | an IANA zone name (`Mars/Olympus` is a 400) |
+
+**One rule for valid.** A value is valid for its key when it passes the schema, a built-in key's
+own check (the IANA zone for `timezone`), and holds no NUL character (`\u0000`, which PostgreSQL
+`jsonb` refuses) in any string. A write that is not valid is a 400; a stored value that is not
+valid reads as the default. A setting value over **16 KiB** of JSON is a 400 before the schema runs.
+A declared default has no size cap of its own and is cloned on every read that falls back to it, so
+keep defaults small.
+
+Without `userSettings`, only these two exist.
+
+**Reconcile, not delete.** At boot, a stored key that no declaration names is reported in one
+`warn` with its row count, and its rows stay: remove a key from code and declare it again later,
+and the rows read again. A stored value that no longer passes its schema (say a deploy narrowed it)
+reads as the default with one `warn` that names the key but not the person, and is not rewritten.
+
+**Profile fields.** `user_profiles.metadata` holds the declared fields. Basic column names
+(`displayName`, `bio`, `company`, …) and `locale`/`timezone` cannot be fields — a usage preference
+belongs in settings.
+
+- **With `profileFields`, `metadata` is strict.** `PATCH /_auth/users/profile` merges `metadata`
+  key by key (keys it does not name stay); an undeclared key or a value failing its schema is a
+  400 and nothing is written. `ProfileInfo.metadata` carries every declared key with its value or
+  default, and no undeclared key; a stored value failing its schema reads as the default with one
+  `warn` naming the key. Undeclared keys already stored are reported once at boot and kept. A
+  stored `metadata` that is not an object (a legacy scalar or array) is replaced by the first merge.
+- **Without it, `metadata` is free-form**, as before: any object, replaced wholesale on PATCH.
+  Existing apps keep working; declare fields when you want them checked.
+- **Either way**, a `metadata` patch over **64 KiB** of JSON (measured on the patch, before the
+  merge) or holding a NUL character is a 400 and nothing is written.
+
+From a client, the routes below are `authApi.listSettings`, `getSetting`, `setSetting` and
+`resetSetting`; each acts on the signed-in person only — no route names a user:
+
+```typescript
+const { settings } = await authApi.listSettings.call({});
+await authApi.setSetting.call({ params: { key: 'notifications.digest' }, body: { value: 'weekly' } });
+```
 
 ## Can I operate the app without building an admin dashboard?
 

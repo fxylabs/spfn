@@ -6,8 +6,12 @@
  */
 
 import type { UserProfile, ProfileInfo } from '@spfn/auth';
+import { runInTransaction } from '@spfn/core/db';
 import { usersRepository, userProfilesRepository } from '../repositories';
 import { normalizeChosenLocale, profileLocale, type ProfileLocale } from '../lib/profile-locale';
+import { setUserSetting } from './user-settings.service';
+import { activeProfileFields, assertProfileFieldsPatch, assertStorableMetadata } from '../lib/profile-fields';
+import { authLogger } from '../logger';
 
 /**
  * Profile update parameters
@@ -20,7 +24,9 @@ export interface UpdateProfileParams
     lastName?: string;
     avatarUrl?: string;
     bio?: string;
+    /** @deprecated Written to the `locale` setting; use `setUserSetting` */
     locale?: string;
+    /** @deprecated Written to the `timezone` setting; use `setUserSetting` */
     timezone?: string;
     dateOfBirth?: string;
     gender?: string;
@@ -72,9 +78,13 @@ export async function getUserProfileService(userId: string | number | bigint): P
 /**
  * Update user locale
  *
+ * Writes the built-in `locale` setting; clearing the choice deletes its row.
+ * A person without a profile gets one, as before the move to settings.
+ *
  * @param userId - User ID
  * @param locale - Locale code (e.g., 'en', 'ko', 'ja'); `null` or blank clears the choice
  * @returns The stored choice, and the locale it resolves to
+ * @throws ValidationError (400) when the trimmed code is longer than 35 characters; nothing is written
  */
 export async function updateLocaleService(
     userId: string | number | bigint,
@@ -83,7 +93,12 @@ export async function updateLocaleService(
 {
     const chosen = normalizeChosenLocale(locale);
 
-    await userProfilesRepository.upsertByUserId(Number(userId), { locale: chosen });
+    await runInTransaction(async () =>
+    {
+        await setUserSetting(userId, 'locale', chosen, { by: userId });
+        // Main's upsert created the profile row; only that is kept — its locale column stays untouched
+        await userProfilesRepository.createIfAbsent({ userId: Number(userId), displayName: 'User' });
+    });
 
     return profileLocale(chosen);
 }
@@ -101,15 +116,119 @@ function emptyToNull<T>(value: T): T | null
     return value;
 }
 
+/** The profile columns a PATCH may write; `metadata` is handled on its own */
+const PROFILE_TEXT_COLUMNS = [
+    'displayName',
+    'firstName',
+    'lastName',
+    'avatarUrl',
+    'bio',
+    'dateOfBirth',
+    'gender',
+    'website',
+    'location',
+    'company',
+    'jobTitle',
+] as const;
+
+/**
+ * The column writes of a PATCH. Free-form `metadata` (no profile fields
+ * declared) is one of them and replaces the stored object; declared fields
+ * are merged separately by `mergeDeclaredMetadata`.
+ */
+function profileColumnUpdates(params: UpdateProfileParams): Record<string, unknown>
+{
+    const updates: Record<string, unknown> = {};
+
+    for (const column of PROFILE_TEXT_COLUMNS)
+    {
+        if (params[column] !== undefined)
+        {
+            updates[column] = emptyToNull(params[column]);
+        }
+    }
+    if (params.metadata !== undefined && !activeProfileFields())
+    {
+        updates.metadata = params.metadata;
+    }
+
+    return updates;
+}
+
+/**
+ * With profile fields declared, a `metadata` patch names only declared keys,
+ * each passing its schema, and lands key by key: keys it does not name stay.
+ */
+async function mergeDeclaredMetadata(userId: number, metadata: Record<string, unknown> | undefined): Promise<void>
+{
+    if (activeProfileFields() && metadata !== undefined)
+    {
+        await userProfilesRepository.mergeMetadataByUserId(userId, metadata);
+    }
+}
+
+/**
+ * @throws ValidationError (400) before anything is written, when the patch is
+ * over 64 KiB, holds a NUL character, or breaks the declaration
+ */
+function assertMetadataPatch(metadata: Record<string, unknown> | undefined): void
+{
+    if (metadata === undefined)
+    {
+        return;
+    }
+    assertStorableMetadata(metadata);
+
+    const fields = activeProfileFields();
+    if (fields)
+    {
+        assertProfileFieldsPatch(fields, metadata);
+    }
+}
+
+/**
+ * `locale` and `timezone` are settings now (#161); the profile PATCH still
+ * accepts them and writes them there. An empty timezone means UTC, the default.
+ */
+async function writeProfileSettings(userId: number, params: UpdateProfileParams): Promise<void>
+{
+    if (params.locale !== undefined)
+    {
+        await setUserSetting(userId, 'locale', normalizeChosenLocale(params.locale), { by: userId });
+    }
+    if (params.timezone !== undefined)
+    {
+        await setUserSetting(userId, 'timezone', emptyToNull(params.timezone) || 'UTC', { by: userId });
+    }
+}
+
+/** A PATCH that names no column still leaves a profile behind, as it always did */
+async function writeProfileColumns(userId: number, updates: Record<string, unknown>): Promise<void>
+{
+    if (Object.keys(updates).length === 0)
+    {
+        await userProfilesRepository.createIfAbsent({ userId, displayName: 'User' });
+
+        return;
+    }
+    await userProfilesRepository.upsertByUserId(userId, updates);
+}
+
 /**
  * Update user profile (upsert)
  *
  * Creates profile if not exists, updates if exists
  * Empty strings are converted to null
+ * `locale` and `timezone` are written to user settings, in the same transaction
+ * `metadata` replaces the stored object, unless profile fields are declared
+ * (`defineProfileFields`): then it is merged key by key, and an undeclared key
+ * or a value failing its field's schema is a 400
  *
  * @param userId - User ID
  * @param params - Profile fields to update
  * @returns Updated profile info
+ * @throws ValidationError (400) when `timezone` is not an IANA zone name, or `metadata`
+ * breaks the declared profile fields; nothing is written
  *
  * @example
  * ```typescript
@@ -125,73 +244,36 @@ export async function updateUserProfileService(
     params: UpdateProfileParams,
 ): Promise<ProfileInfo>
 {
-    const userIdNum = typeof userId === 'string' ? Number(userId) : Number(userId);
+    const userIdNum = Number(userId);
 
-    // Build update data, converting empty strings to null
-    const updateData: Record<string, any> = {};
+    assertMetadataPatch(params.metadata);
+    await runInTransaction(async () =>
+    {
+        await writeProfileSettings(userIdNum, params);
+        await writeProfileColumns(userIdNum, profileColumnUpdates(params));
+        await mergeDeclaredMetadata(userIdNum, params.metadata);
+    });
 
-    if (params.displayName !== undefined)
+    return (await userProfilesRepository.fetchProfileData(userIdNum))!;
+}
+
+/**
+ * Boot reconcile: with profile fields declared, report stored `metadata` keys
+ * no field declares, once, and keep them. Readers never see them.
+ */
+export async function reconcileProfileFields(): Promise<void>
+{
+    const fields = activeProfileFields();
+    if (!fields)
     {
-        updateData.displayName = emptyToNull(params.displayName);
-    }
-    if (params.firstName !== undefined)
-    {
-        updateData.firstName = emptyToNull(params.firstName);
-    }
-    if (params.lastName !== undefined)
-    {
-        updateData.lastName = emptyToNull(params.lastName);
-    }
-    if (params.avatarUrl !== undefined)
-    {
-        updateData.avatarUrl = emptyToNull(params.avatarUrl);
-    }
-    if (params.bio !== undefined)
-    {
-        updateData.bio = emptyToNull(params.bio);
-    }
-    if (params.locale !== undefined)
-    {
-        updateData.locale = normalizeChosenLocale(params.locale);
-    }
-    if (params.timezone !== undefined)
-    {
-        updateData.timezone = emptyToNull(params.timezone) || 'UTC';
-    }
-    if (params.dateOfBirth !== undefined)
-    {
-        updateData.dateOfBirth = emptyToNull(params.dateOfBirth);
-    }
-    if (params.gender !== undefined)
-    {
-        updateData.gender = emptyToNull(params.gender);
-    }
-    if (params.website !== undefined)
-    {
-        updateData.website = emptyToNull(params.website);
-    }
-    if (params.location !== undefined)
-    {
-        updateData.location = emptyToNull(params.location);
-    }
-    if (params.company !== undefined)
-    {
-        updateData.company = emptyToNull(params.company);
-    }
-    if (params.jobTitle !== undefined)
-    {
-        updateData.jobTitle = emptyToNull(params.jobTitle);
-    }
-    if (params.metadata !== undefined)
-    {
-        updateData.metadata = params.metadata;
+        return;
     }
 
-    // Upsert profile
-    await userProfilesRepository.upsertByUserId(userIdNum, updateData);
-
-    // Fetch and return updated profile
-    const profile = await userProfilesRepository.fetchProfileData(userIdNum);
-
-    return profile!;
+    const undeclared = (await userProfilesRepository.countMetadataKeys()).filter(row => !fields.has(row.key));
+    if (undeclared.length > 0)
+    {
+        authLogger.service.warn(
+            `user_profiles.metadata holds keys no profile field declares (kept, not read): ${undeclared.map(row => `${row.key} (${row.count})`).join(', ')}`,
+        );
+    }
 }

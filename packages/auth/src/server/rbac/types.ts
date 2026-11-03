@@ -4,6 +4,9 @@
  * Type definitions for role and permission configuration
  */
 
+import type { InstallableUserSettings } from '../lib/user-settings/registry';
+import type { ProfileFieldsDeclaration } from '../lib/profile-fields';
+
 /**
  * Permission category enum values
  * Single source of truth for permission categories
@@ -126,4 +129,28 @@ export interface AuthInitOptions
      * ```
      */
     sessionTtl?: string | number;
+
+    /**
+     * Per-person settings the app declares, from `defineUserSettings`
+     *
+     * Installed once, when auth initializes; a second install, or one after
+     * boot completed, throws. Without it only the built-in keys exist
+     * (`locale`, `timezone`).
+     *
+     * @example
+     * ```typescript
+     * createAuthLifecycle({ userSettings: USER_SETTINGS });
+     * ```
+     */
+    userSettings?: InstallableUserSettings;
+
+    /**
+     * The keys `user_profiles.metadata` may hold, from `defineProfileFields`
+     *
+     * With it, a profile PATCH's `metadata` is merged key by key and checked
+     * against the declaration, and readers see only declared keys. Without it,
+     * `metadata` stays free-form and is replaced wholesale. Installed once,
+     * like `userSettings`.
+     */
+    profileFields?: ProfileFieldsDeclaration;
 }
