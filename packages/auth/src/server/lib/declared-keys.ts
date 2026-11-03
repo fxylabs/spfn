@@ -57,16 +57,18 @@ function deepFreeze<T>(value: T): T
 /**
  * A private copy of the entries behind a frozen read-only facade. Each entry
  * is copied and frozen, with its own deep-frozen clone of the schema and a
- * clone of the default: neither the caller's schema object nor its default
- * instance is shared by reference, so nothing the caller still holds can
- * change what was declared or installed.
+ * deep-frozen clone of the default: neither the caller's schema object nor
+ * its default instance is shared by reference, and the stored default
+ * cannot itself be mutated, so nothing the caller still holds can change
+ * what was declared or installed. Reads still hand out `Value.Clone` of
+ * this frozen default, so callers keep getting a value they may change.
  */
 export function readOnlyEntries<T extends DeclaredEntry>(source: Iterable<[string, T]>): DeclaredEntries<T>
 {
     const own = new Map<string, T>([...source].map(([key, entry]) => [key, Object.freeze({
         ...entry,
         schema: deepFreeze(CloneType(entry.schema)),
-        ...('default' in entry ? { default: Value.Clone(entry.default) } : {}),
+        ...('default' in entry ? { default: deepFreeze(Value.Clone(entry.default)) } : {}),
     }) as T]));
 
     return Object.freeze({

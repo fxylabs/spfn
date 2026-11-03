@@ -9,7 +9,8 @@
 import { and, count, eq, inArray, sql } from 'drizzle-orm';
 import { BaseRepository } from '@spfn/core/db';
 import { userSettings } from '../entities/user-settings';
-import { LOCALE_MAX_LENGTH, type StoredUserSetting } from '../lib/user-settings/registry';
+import { LOCALE_MAX_LENGTH } from '../lib/profile-locale';
+import type { StoredUserSetting } from '../lib/user-settings/registry';
 
 /**
  * A JSON `null` has to be written as the literal: a bare `null` parameter is

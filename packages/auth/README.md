@@ -3207,6 +3207,8 @@ changing a default in code reaches everyone who never chose.
 own check (the IANA zone for `timezone`), and holds no NUL character (`\u0000`, which PostgreSQL
 `jsonb` refuses) in any string. A write that is not valid is a 400; a stored value that is not
 valid reads as the default. A setting value over **16 KiB** of JSON is a 400 before the schema runs.
+A declared default has no size cap of its own and is cloned on every read that falls back to it, so
+keep defaults small.
 
 Without `userSettings`, only these two exist.
 

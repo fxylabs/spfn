@@ -10,7 +10,7 @@
 import { Type, type Static, type TSchema } from '@sinclair/typebox';
 import { Value } from '@sinclair/typebox/value';
 import { authLogger } from '../../logger';
-import { normalizeChosenLocale } from '../profile-locale';
+import { LOCALE_MAX_LENGTH, normalizeChosenLocale } from '../profile-locale';
 import { containsNul, createDeclarationSlot, readOnlyEntries, type DeclaredEntries } from '../declared-keys';
 
 export interface UserSettingEntry<TKey extends string = string, TValueSchema extends TSchema = TSchema>
@@ -105,8 +105,7 @@ function activeEntry(entry: UserSettingEntry, rules: BuiltinRules = {}): ActiveU
     });
 }
 
-/** BCP 47 tags in use fit in 35 characters; the longest IANA zone names in 32 */
-export const LOCALE_MAX_LENGTH = 35;
+export { LOCALE_MAX_LENGTH };
 
 const BUILTIN_USER_SETTINGS: ReadonlyMap<string, ActiveUserSettingEntry> = new Map([
     activeEntry(

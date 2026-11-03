@@ -31,11 +31,12 @@ const { initializeAuth } = await import('@/server/services/rbac.service');
 const { getRoleByName } = await import('@/server/services/role.service');
 const { authLogger } = await import('@/server/logger');
 const { getUserSetting, listUserSettings, setUserSetting } = await import('@/server/services/user-settings.service');
-const { updateLocaleService, updateUserProfileService } = await import('@/server/services/user-profile.service');
+const { getUserProfileService, updateLocaleService, updateUserProfileService } = await import('@/server/services/user-profile.service');
 const { userProfilesRepository, userSettingsRepository } = await import('@/server/repositories');
 const { defineUserSettings } = await import('@/server/lib/user-settings');
 const { __resetUserSettingsForTests } = await import('@/server/lib/user-settings/registry');
 const { defineProfileFields, __resetProfileFieldsForTests } = await import('@/server/lib/profile-fields');
+const { resolveAuthenticatedUser } = await import('@/server/middleware/auth-profiles');
 
 const dbAvailable = await isDatabaseAvailable();
 
@@ -388,5 +389,87 @@ describe.skipIf(!dbAvailable)('scoped review probes of 542e9e95 (#161)', () =>
 
         await expect(setUserSetting(userId, 'timezone', `Asia/${'a'.repeat(60)}`)).rejects.toMatchObject({ statusCode: 400 });
         expect(resolver).not.toHaveBeenCalled();
+    });
+
+    // ------------------------------------------------------------------------
+    // Claim 10: the stored default is frozen too (round 3, #161)
+    // ------------------------------------------------------------------------
+
+    it('C10: the facade default is frozen, so nothing mutated between declaration and install is installed', async () =>
+    {
+        const declaration = defineUserSettings([{
+            key: 'itRv.frozenDefault',
+            schema: Type.Object({ tags: Type.Array(Type.String(), { maxItems: 0 }) }),
+            default: { tags: [] },
+        }]);
+
+        expect(Object.isFrozen(declaration.entries.get('itRv.frozenDefault')!.default)).toBe(true);
+        expect(() => (declaration.entries.get('itRv.frozenDefault')!.default as any).tags.push('x')).toThrow(TypeError);
+
+        await initializeAuth({ userSettings: declaration });
+        const userId = await seedUser('frozen-default@test.com');
+
+        expect(await getUserSetting(userId, 'itRv.frozenDefault')).toEqual({ tags: [] });
+    });
+
+    // ------------------------------------------------------------------------
+    // Claim 11: the profile-side clone (round 3, #161)
+    // ------------------------------------------------------------------------
+
+    it('C11: a caller mutating a declared profile field\'s returned default does not change the next read', async () =>
+    {
+        await initializeAuth({
+            profileFields: defineProfileFields([
+                { key: 'itRv.prefs', schema: Type.Object({ tags: Type.Array(Type.String()) }), default: { tags: [] } },
+            ]),
+        });
+        const first = await seedUser('profile-default-first@test.com');
+        const second = await seedUser('profile-default-second@test.com');
+        await getTestDb().insert(userProfiles).values({ userId: first, displayName: 'First' });
+        await getTestDb().insert(userProfiles).values({ userId: second, displayName: 'Second' });
+
+        const firstRead = await userProfilesRepository.fetchProfileData(first);
+        expect(firstRead?.metadata?.['itRv.prefs']).toEqual({ tags: [] });
+        firstRead!.metadata!['itRv.prefs'].tags.push('leaked');
+
+        expect((await userProfilesRepository.fetchProfileData(second))?.metadata?.['itRv.prefs']).toEqual({ tags: [] });
+    });
+
+    // ------------------------------------------------------------------------
+    // Claim 12/13: the 35/36 locale boundary, pinned (round 3, #161)
+    // ------------------------------------------------------------------------
+
+    it('C12: a 35-character locale is accepted on both writes and 36 is refused on both, trimming first', async () =>
+    {
+        await initializeAuth();
+        const userId = await seedUser('locale-boundary@test.com');
+        const at = 'a'.repeat(35);
+        const over = 'a'.repeat(36);
+
+        expect(await updateLocaleService(userId, `  ${at}  `)).toEqual({ locale: at, chosenLocale: at });
+        expect(await setUserSetting(userId, 'locale', at)).toBe(at);
+        await expect(updateLocaleService(userId, over)).rejects.toMatchObject({ statusCode: 400 });
+        await expect(setUserSetting(userId, 'locale', over)).rejects.toMatchObject({ statusCode: 400 });
+        expect(await getUserSetting(userId, 'locale')).toBe(at);
+    });
+
+    it('C13: a stored 35-character locale reads as chosen and a stored 36 as never chose, on the hot path and the profile alike', async () =>
+    {
+        await initializeAuth();
+        const at = await seedUser('locale-stored-35@test.com');
+        const over = await seedUser('locale-stored-36@test.com');
+        for (const [userId, length] of [[at, 35], [over, 36]] as const)
+        {
+            await getTestDb().insert(userProfiles).values({ userId, displayName: 'X' });
+            await getTestDb().insert(userSettings).values({ userId, key: 'locale', value: 'b'.repeat(length) } as never);
+        }
+
+        expect((await resolveAuthenticatedUser(at)).chosenLocale).toBe('b'.repeat(35));
+        expect((await getUserProfileService(at)).profile?.chosenLocale).toBe('b'.repeat(35));
+
+        const hot = await resolveAuthenticatedUser(over);
+        expect([hot.chosenLocale, hot.locale]).toEqual([null, 'en']);
+        const { profile } = await getUserProfileService(over);
+        expect([profile?.chosenLocale, profile?.locale]).toEqual([null, 'en']);
     });
 });
