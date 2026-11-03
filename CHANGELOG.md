@@ -41,6 +41,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 #### @spfn/auth
 
+- **Per-person settings declared in code, and `locale`/`timezone` move out of `user_profiles`**
+  (#161, #305). `spfn_auth.user_settings` is a library-owned table with one row per
+  `(user_id, key)` and a `jsonb` value; no row means the declared default, and writing the
+  default deletes the row, so a changed default reaches everyone who never chose. An app
+  declares its keys once, `defineUserSettings([{ key, schema, default }])`, and installs them
+  with `createAuthLifecycle({ userSettings })`; a duplicate key, a default its own schema
+  rejects, a malformed key or a redeclared built-in throws when the module loads, and nothing
+  can be installed after boot. `getUserSetting`, `setUserSetting`, `listUserSettings` and
+  `resetUserSetting` refuse an undeclared key (404) and a value that fails its schema (400); a
+  stored value that no longer passes reads as the default with one warning. Boot reports stored
+  keys no declaration names and never deletes them. Self-only routes `GET /_auth/users/settings`
+  and `GET|PUT|DELETE /_auth/users/settings/:key` reach the client as `authApi.listSettings`,
+  `getSetting`, `setSetting`, `resetSetting`. `locale` (`string | null`, default `null`) and
+  `timezone` (IANA name, default `'UTC'`) are built-in keys: the profile table says who a
+  person is, settings say how they use the app. `defineProfileFields([{ key, schema, default? }])`
+  declares the keys `user_profiles.metadata` may hold; with a declaration the metadata PATCH is a
+  per-key merge, an undeclared key or a schema failure is a 400, and undeclared stored keys are
+  hidden and reported at boot; without one, metadata stays free-form. Limits: a setting value
+  16 KiB, a metadata patch 64 KiB, `locale` 35 characters, `timezone` 64, no NUL character.
+  `auth` 0.3.0-beta.52.
+    - **Migration**: run `spfn db migrate` before the first boot on this version — the
+      migration creates the table and copies every non-blank `user_profiles.locale` and every
+      non-blank, non-`UTC` `timezone` into it, and `initializeAuth` reads the table at boot.
+      The two columns stay for this release but are no longer read or written; they are dropped
+      in a later release. `PATCH /_auth/users/locale`, `updateUserProfile({ locale, timezone })`
+      and `ProfileInfo.locale` / `chosenLocale` / `timezone` keep working and are deprecated;
+      read them through `listUserSettings` instead. A legacy timezone that is not an IANA zone
+      reads as `'UTC'`, and an invalid timezone on the profile PATCH is now a 400 (any string was
+      stored before). An app that kept its own `user_settings` table declares its keys and moves
+      the rows with the SQL in the auth README ("Migration — settings own locale and timezone").
 - **Behaviour change: `auth.register`, `auth.login` and `auth.invitation.accepted` fire after
   the transaction commits, never on rollback** (#156 follow-up, #295). The web OAuth callback,
   email register (`/_auth/register`, `/_auth/signup/password`), password login and invitation
@@ -281,6 +311,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 #### @spfn/core
 
+- **`tenancy.table(..., { visibleTo })` and `tenantList(..., { visibleThrough })`: a second key
+  per person, and a tenant list its members may read** (#162, #306). `visibleTo` names a declared
+  integer column (not `id`, not the tenant property) as the table's user key; the table gets an
+  index on it and four per-command policies in place of `_tenant_isolation`, so a row is visible
+  through its tenant or through its person. `tenantList(..., { visibleThrough: { table, where? } })`
+  puts the same four policies on the tenant list, reading the membership's tenant and user
+  columns from its markers, and refuses a target that is not a tenancy table, belongs to another
+  list, or has no `visibleTo`. `runInTransaction({ user })` binds `app.user_id` the way `tenant`
+  binds `app.tenant_id` (one binding state, a nested mismatch throws `TenantMismatchError` with
+  `key: 'user'`), `TenantRepository._selectOfUser(userId, fields?)` reads by person (rules
+  U1–U5), a guarded request binds its tenant on the root transaction right after `BEGIN`, and the
+  development query warning counts a condition on either key. A table without `visibleTo` keeps
+  its SQL byte for byte. `core` 0.3.0-beta.37.
+- **Behaviour change: the route-map generator refuses a router whose route set depends on the
+  environment, found by loading it again with the keys it read varied** (#102, #304). While the
+  router loads, `process.env` is a proxy recording reads that reach a project file; when any were
+  made, the router is loaded again with those keys varied together (`NODE_ENV` development ↔
+  production, set → deleted, unset → `'true'`), then up to four keys alone when the route set
+  differs or the load fails — at most six loads. A route set that changes is refused with
+  `ConditionalRegistrationError` naming each gating key, where it was read, and the routes it
+  adds, drops or moves; only `NODE_ENV`'s values are printed, any other key may be a secret.
+  `process.env` is the real object again afterwards. The source scan still runs first and still
+  names an inline conditional by its line. A router that passed the scan with
+  `process.env.X ? { admin } : {}` was accepted and is now refused: register the route
+  unconditionally and gate its behaviour in the handler. The contract and states generators keep
+  the source scan only. `core` 0.3.0-beta.37.
 - **`defineTenancy({ property })` and `tenancy.reference(..., { onDelete })`** (#159, #160, #302).
   `property` (default `tenantId`) is the key the tenant column has on every tenancy table's
   rows, so an app whose code already reads `row.workspaceId` adopts a tenancy without renaming
