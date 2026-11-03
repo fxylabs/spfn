@@ -79,6 +79,7 @@ import {
     deleteInvitation,
 } from './invitations';
 import { getUserProfile, updateUserProfile, checkUsername, updateUsername, updateLocale } from './users';
+import { listSettings, getSetting, setSetting, resetSetting } from './users/settings';
 import {
     oauthGoogleStart,
     oauthGoogleCallback,
@@ -124,7 +125,7 @@ import { oauth2Token, oauth2Revoke } from './oauth2/token';
  * - Auth: /_auth/codes, /_auth/login, /_auth/logout, etc.
  * - OAuth: /_auth/oauth/google, /_auth/oauth/google/callback, etc.
  * - Invitations: /_auth/invitations/*
- * - Users: /_auth/users/*
+ * - Users: /_auth/users/* (profile, username, locale, settings)
  * - Deletion: /_auth/deletion/request, /_auth/deletion/cancel
  * - Admin: /_auth/admin/* (superadmin only)
  * - OAuth 2.1 authorization server: /_auth/oauth2/*, /.well-known/oauth-authorization-server
@@ -236,6 +237,11 @@ export const mainAuthRouter = defineRouter({
     checkUsername,
     updateUsername,
     updateLocale,
+    // Per-person settings routes (#161), self-only
+    listSettings,
+    getSetting,
+    setSetting,
+    resetSetting,
     // Admin routes (superadmin only)
     listRoles,
     createAdminRole,
