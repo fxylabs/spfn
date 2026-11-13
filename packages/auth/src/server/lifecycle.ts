@@ -15,6 +15,7 @@ import { initOneTimeTokenManager } from './lib/one-time-token';
 import { configureDeletion } from './lib/deletion-config';
 import { configureDeviceAuth } from './lib/device-auth-config';
 import { configureDeviceLink } from './lib/device-link-config';
+import { configureChannels, type AuthChannelsOptions } from './lib/channels-config';
 import { assertOAuthRedirectUris } from './lib/oauth/redirect-uri-check';
 import { assertAppleWebConfig } from './lib/oauth/apple-config-check';
 import { assertAndroidAssetLinks, assertAppleRelayUrls } from './lib/oauth/android-config-check';
@@ -305,6 +306,40 @@ export interface AuthLifecycleOptions extends AuthInitOptions
      * ```
      */
     authorizationServer?: AuthorizationServerOptions;
+
+    /**
+     * Which sign-in channels this application offers
+     *
+     * Every key is optional and defaults to `true`, so an application that
+     * passes nothing serves every route it served before. A channel set to
+     * `false` answers 404 on each of its routes, before any rate limit,
+     * transaction or authentication runs — to an anonymous caller and a
+     * signed-in one alike.
+     *
+     * - `signup` — `register`, the verified-email signup link, and a
+     *   verification code with `purpose: 'registration'`. Also refuses the
+     *   account a first social sign-in would create (`SignupDisabledError`,
+     *   403 `SIGNUP_DISABLED`); a sign-in whose identity is linked, or that
+     *   attaches to an existing account under `oauthEmailMatch`, is untouched.
+     * - `passwordReset` — the reset link and a code with `purpose: 'password_reset'`
+     * - `deviceCode` — device-code login
+     * - `deviceLink` — device link
+     *
+     * Password sign-in has no key. Service functions ignore this setting and
+     * stay callable by the application — invitations and admin seeding create
+     * accounts whatever `signup` says.
+     *
+     * @example
+     * ```typescript
+     * createAuthLifecycle({
+     *     channels: {
+     *         signup: false,       // accounts are issued, not taken
+     *         deviceCode: false,
+     *     },
+     * })
+     * ```
+     */
+    channels?: AuthChannelsOptions;
 }
 
 export function createAuthLifecycle(options: AuthLifecycleOptions = {}): AuthLifecycleConfig
@@ -328,6 +363,10 @@ export function createAuthLifecycle(options: AuthLifecycleOptions = {}): AuthLif
     // before this call, so "registered only when configured" is not available —
     // see routes/oauth2/http.ts.
     configureAuthorizationServer(options.authorizationServer);
+
+    // Same again: every gated route reads this at request time and answers 404
+    // for a channel turned off — see routes/channels.ts.
+    configureChannels(options.channels);
 
     return {
         /**

@@ -1121,6 +1121,29 @@ export class OAuthProviderLinkOnlyError extends ForbiddenError
 }
 
 /**
+ * Signup Disabled Error (403)
+ *
+ * A first social sign-in would have created an account, and the app turned
+ * sign-up off (`createAuthLifecycle({ channels: { signup: false } })`). No row
+ * is written. A sign-in whose identity is already linked, and one that attaches
+ * to an existing account, are not refused. Clients branch on `code`; the OAuth
+ * error page carries `reason=signup_disabled`.
+ */
+export class SignupDisabledError extends ForbiddenError
+{
+    readonly code = 'SIGNUP_DISABLED';
+
+    constructor(data: { message?: string; details?: Record<string, any> } = {})
+    {
+        super({
+            message: data.message || 'This application does not create accounts by sign-up',
+            details: data.details,
+        });
+        this.name = 'SignupDisabledError';
+    }
+}
+
+/**
  * OAuth Email In Use Error (409)
  *
  * A first sign-in with a provider reported an email that an existing account

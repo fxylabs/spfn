@@ -368,8 +368,15 @@ import { CLIENT_IDENTITY_HEADERS, CLIENT_KINDS, SERVER_CONTRACT_HEADERS } from '
  * first sign-in whose email an existing account already holds with this code.
  * A patch, by 0.10.1's rule: one code joins the open list, and no operation,
  * type or enum changes shape, so the supported range does not move.
+ *
+ * 0.13.8 lists `SignupDisabledError` (403) (#308). An app can turn sign-up off
+ * with `createAuthLifecycle({ channels: { signup: false } })`, and
+ * `auth.enroll.oauthNative` then refuses a first sign-in that would create an
+ * account with this code. A patch, by 0.10.1's rule: one code joins the open
+ * list, and no operation, type or enum changes shape, so the supported range
+ * does not move.
  */
-export const CONTRACT_VERSION = '0.13.7';
+export const CONTRACT_VERSION = '0.13.8';
 export const CONTRACT_MAJOR = 0;
 export const CONTRACT_NAME = 'spfn-mobile-contract';
 
@@ -1140,6 +1147,9 @@ interface RestSurfaceError
  *
  * `OAuthEmailInUseError` (contract 0.13.7) is native sign-in's alone: the app
  * refuses a first sign-in whose email an existing account holds (#156).
+ *
+ * `SignupDisabledError` (contract 0.13.8) is native sign-in's alone too: the
+ * app turned sign-up off and the sign-in would have created an account (#308).
  */
 const REST_SURFACE_ERRORS: readonly RestSurfaceError[] = [
     {
@@ -1225,6 +1235,14 @@ const REST_SURFACE_ERRORS: readonly RestSurfaceError[] = [
         summary:
             'a first sign-in with this provider reported the email of an existing account and the app refuses it '
             + '— sign in to that account another way and link the provider from settings',
+    },
+    {
+        code: 'SignupDisabledError',
+        httpStatus: 403,
+        retryable: false,
+        summary:
+            'this sign-in would have created an account and the app does not create accounts by sign-up '
+            + '— an account must exist, issued by the operator, before it can be signed in to',
     },
     {
         code: 'MfaVerificationFailedError',

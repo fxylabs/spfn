@@ -116,22 +116,13 @@ import {
 } from './oauth2';
 import { getOAuth2Authorize, createOAuth2AuthorizationCode } from './oauth2/authorize';
 import { oauth2Token, oauth2Revoke } from './oauth2/token';
+import { gateChannels, ROUTE_CHANNELS } from './channels';
 
 /**
- * Main auth router
- * Exports all authentication-related routes
- *
- * Routes:
- * - Auth: /_auth/codes, /_auth/login, /_auth/logout, etc.
- * - OAuth: /_auth/oauth/google, /_auth/oauth/google/callback, etc.
- * - Invitations: /_auth/invitations/*
- * - Users: /_auth/users/* (profile, username, locale, settings)
- * - Deletion: /_auth/deletion/request, /_auth/deletion/cancel
- * - Admin: /_auth/admin/* (superadmin only)
- * - OAuth 2.1 authorization server: /_auth/oauth2/*, /.well-known/oauth-authorization-server
- * - Android App Link verification: /.well-known/assetlinks.json
+ * Every auth route, ungated. Mounted only through `gateChannels`, with
+ * `ROUTE_CHANNELS` (./channels.ts) — every key here must have an entry there.
  */
-export const mainAuthRouter = defineRouter({
+const authRoutes = {
     // Auth routes
     sendVerificationCode,
     verifyCode,
@@ -262,7 +253,26 @@ export const mainAuthRouter = defineRouter({
     listOAuth2Grants,
     revokeOAuth2Grant,
     oauth2AuthorizationServerMetadata,
-});
+};
+
+/**
+ * Main auth router
+ * Exports all authentication-related routes
+ *
+ * Routes:
+ * - Auth: /_auth/codes, /_auth/login, /_auth/logout, etc.
+ * - OAuth: /_auth/oauth/google, /_auth/oauth/google/callback, etc.
+ * - Invitations: /_auth/invitations/*
+ * - Users: /_auth/users/* (profile, username, locale, settings)
+ * - Deletion: /_auth/deletion/request, /_auth/deletion/cancel
+ * - Admin: /_auth/admin/* (superadmin only)
+ * - OAuth 2.1 authorization server: /_auth/oauth2/*, /.well-known/oauth-authorization-server
+ * - Android App Link verification: /.well-known/assetlinks.json
+ *
+ * A route of a sign-in channel the app turned off with
+ * `createAuthLifecycle({ channels })` answers 404 — see ./channels.ts.
+ */
+export const mainAuthRouter = defineRouter(gateChannels(authRoutes, ROUTE_CHANNELS));
 
 // For backward compatibility
 export default mainAuthRouter;

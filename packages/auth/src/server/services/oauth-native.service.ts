@@ -92,6 +92,7 @@ export interface OAuthNativeResult
  * @throws NativeSignInUnsupportedError provider가 native sign-in을 지원하지 않을 때
  * @throws InvalidSocialTokenError id_token 검증 실패 시
  * @throws OAuthEmailInUseError `oauthEmailMatch: 'reject'`이고 이메일이 같은 계정이 있을 때
+ * @throws SignupDisabledError 새 계정을 만들어야 하는데 앱이 `channels.signup`을 끈 경우
  */
 export async function oauthNativeService(params: OAuthNativeParams): Promise<OAuthNativeResult>
 {

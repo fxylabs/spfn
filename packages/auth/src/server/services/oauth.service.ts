@@ -20,6 +20,7 @@ import {
     OAuthProviderLinkOnlyError,
     OAuthStateExpiredError,
     OAuthStateInvalidError,
+    SignupDisabledError,
     UnverifiedEmailLinkError,
 } from '@spfn/auth/errors';
 
@@ -31,6 +32,7 @@ import { timingSafeEqualString } from '../lib/csrf';
 import { findStartCookies, legacyStartCookies } from '../lib/oauth/start-cookies';
 import { assertSignInProvider, getOAuthEmailMatch, runBeforeRegister } from '../lib/config';
 import { resolveAppUrl } from '../lib/app-url';
+import { isChannelEnabled } from '../lib/channels-config';
 import { type SocialProvider, type KeyAlgorithmType, type SessionBindingType } from '../types';
 import type { User } from '../entities/users';
 import {
@@ -629,6 +631,7 @@ export async function backfillVerifiedEmail(
  * @throws OAuthEmailInUseError `oauthEmailMatch: 'reject'`이고 이메일이 같은 계정이 있을 때,
  * 또는 `'attach'`이고 소문자 행 없이 대소문자만 다른 계정이 여럿일 때
  * @throws UnverifiedEmailLinkError `'attach'`(기본)이고 provider가 이메일을 검증하지 않았을 때
+ * @throws SignupDisabledError 새 계정을 만들어야 하는데 앱이 `channels.signup`을 끈 경우
  */
 export async function createOrLinkUser(
     provider: SocialProvider,
@@ -706,6 +709,12 @@ async function attachByEmail(existingUser: User, identity: NormalizedIdentity): 
  * 값 그대로 넘기고, 미검증이면 계정에는 null로 저장되므로 emailVerified를 함께 넘긴다.
  * keepEmail이 false면(`oauthEmailMatch: 'separate'`로 기존 계정과 이메일이 같을 때, #156)
  * 이메일은 다른 계정이 가지므로 검증됐어도 새 계정에 싣지 않는다.
+ *
+ * 앱이 가입을 끄면(`channels: { signup: false }`) 여기서 거절한다 — web 콜백과 native가
+ * 계정을 만드는 유일한 지점이고, 어떤 행도 쓰기 전이다. 서비스 계층이 채널 설정을 읽는
+ * 유일한 곳: 첫 소셜 로그인으로 생기는 계정은 다른 문으로 들어온 가입이기 때문이다.
+ *
+ * @throws SignupDisabledError
  */
 async function registerOAuthUser(
     provider: SocialProvider,
@@ -714,6 +723,11 @@ async function registerOAuthUser(
     keepEmail: boolean,
 ): Promise<number>
 {
+    if (!isChannelEnabled('signup'))
+    {
+        throw new SignupDisabledError({ details: { provider } });
+    }
+
     await runBeforeRegister({
         channel: 'oauth',
         provider,
@@ -825,6 +839,7 @@ const REASON_BY_ERROR: [abstract new (...args: never[]) => Error, OAuthErrorReas
     [OAuthProviderError, 'provider_error'],
     [OAuthProviderLinkOnlyError, 'link_only'],
     [OAuthEmailInUseError, 'email_in_use'],
+    [SignupDisabledError, 'signup_disabled'],
     [AccountDisabledError, 'account_unavailable'],
     [AccountPendingDeletionError, 'account_unavailable'],
     [OAuthAccountNotFoundError, 'account_unavailable'],

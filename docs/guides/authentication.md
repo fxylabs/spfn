@@ -146,6 +146,13 @@ server's `afterInfrastructure` step (once the database is ready):
 Environment variables are not checked here. Each `SPFN_AUTH_*` value is validated the
 first time it is read, against the schema in `@spfn/auth/config`.
 
+`createAuthLifecycle({ channels })` chooses which sign-in channels the app offers — `signup`,
+`passwordReset`, `deviceCode`, `deviceLink`, each `true` unless set to `false`. A channel turned off
+answers 404 on every one of its routes, before any rate limit or authentication; `signup: false` also
+refuses the account a first social sign-in would create (`SignupDisabledError`, 403
+`SIGNUP_DISABLED`, `reason=signup_disabled`). Service functions are not affected. See
+[Which sign-in channels exist](../../packages/auth/README.md#which-sign-in-channels-exist-channels).
+
 ### 5. Register Router and Middleware in `router.ts`
 
 This is the **critical step** that most setups miss. You need three things:
@@ -799,6 +806,7 @@ codes are the closed union `OAuthErrorReason`:
 | `account_unavailable` | the account is disabled, pending deletion, or gone |
 | `link_only` | the app made this provider link-only (#157) |
 | `email_in_use` | a first sign-in reported an existing account's email and the app set `oauthEmailMatch: 'reject'`, or `'attach'` found that email on several accounts stored in different cases (#156) |
+| `signup_disabled` | a first sign-in would have created an account and the app set `channels: { signup: false }` (#308) |
 | `failed` | anything else |
 
 For `expired`, `invalid_state`, `no_cookie` and a library failure behind `provider_error` the `error` text is a
@@ -1564,6 +1572,7 @@ catch (error)
 | `RegistrationRejectedError` | 403 | A `beforeRegister` hook rejected the signup |
 | `OAuthProviderLinkOnlyError` | 403 | A sign-in used a provider the app made link-only |
 | `OAuthEmailInUseError` | 409 | A first social sign-in's email belongs to an existing account and `oauthEmailMatch` is `'reject'` |
+| `SignupDisabledError` | 403 | `SIGNUP_DISABLED`: a first social sign-in would have created an account and `channels.signup` is `false` |
 | `ReservedUsernameError` | 400 | Username is reserved |
 | `UsernameAlreadyTakenError` | 409 | Username already in use |
 
