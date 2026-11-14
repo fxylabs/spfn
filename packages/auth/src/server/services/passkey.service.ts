@@ -61,8 +61,9 @@ import type { WebAuthnChallengeKind } from '../entities/webauthn-challenges';
 import type { User } from '../entities/users';
 import { getDummyPasswordHash, verifyPassword } from '../helpers';
 import type { KeyAlgorithmType, KeyPlatformType } from '../types';
-import { registerPublicKeyService, registeredBinding, revokeKeyService } from './key.service';
+import { registerPublicKeyService, revokeKeyService } from './key.service';
 import { assertStepUp, mfaEnrolledForUser } from './mfa.service';
+import { assertNotLastListedFactor, secondFactorEnrolmentFields } from './second-factor-policy.service';
 import { decideKeyBinding } from '../lib/key-policy';
 import { updateLastLoginService } from './user.service';
 import { getPendingDeletionInfo } from './account-deletion.service';
@@ -593,20 +594,33 @@ async function startSession(user: User, params: FinishPasskeyLoginParams): Promi
         userAgent: params.userAgent,
         binding: decideKeyBinding(user.sessionBinding, params.webProxy),
         replacesKeyId,
+        loginEvent: {
+            provider: 'passkey',
+            email: user.email || undefined,
+            phone: user.phone || undefined,
+        },
     });
+
+    // A passkey sign-in steps up only when the second-factor policy does not
+    // list passkeys: then the assertion is not a second factor, and an enrolled
+    // account on a new device is asked for one like a password sign-in (#309).
+    // Nothing below runs — `verify` does it instead.
+    if (registered.pending)
+    {
+        return { mfaRequired: true, challenge: registered.challenge };
+    }
 
     await updateLastLoginService(user.id);
 
     const result: LoginResult = {
-        // A passkey sign-in never steps up: the assertion is already a second
-        // factor, so this answer is always the session itself (#95).
         mfaRequired: false,
         userId: String(user.id),
         publicId: user.publicId,
         email: user.email || undefined,
         phone: user.phone || undefined,
         passwordChangeRequired: user.passwordChangeRequired,
-        ...loginBindingFields(registeredBinding(registered)),
+        ...loginBindingFields(registered),
+        ...await secondFactorEnrolmentFields(user.id),
     };
 
     const mfaEnrolled = await mfaEnrolledForUser(user.id);
@@ -617,6 +631,7 @@ async function startSession(user: User, params: FinishPasskeyLoginParams): Promi
         email: result.email,
         phone: result.phone,
         mfaEnrolled,
+        secondFactorEnrolmentRequired: result.secondFactorEnrolmentRequired === true,
     }));
 
     return result;
@@ -807,6 +822,7 @@ export async function revokePasskeyService(params: RevokePasskeyParams): Promise
 
     await usersRepository.lockById(params.userId);
     await assertNotLastRecoveryCredential(params.userId);
+    await assertNotLastListedFactor(params.userId, { passkeyId: passkey.id });
 
     const revoked = await passkeysRepository.revokeByIdAndUserId(passkey.id, params.userId, 'Revoked by user');
 

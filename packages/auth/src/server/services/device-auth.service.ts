@@ -69,6 +69,7 @@ import { updateLastLoginService } from './user.service';
 import { getPendingDeletionInfo } from './account-deletion.service';
 import { loginBindingFields, type LoginResult } from './auth.service';
 import { mfaEnrolledForUser } from './mfa.service';
+import { secondFactorEnrolmentFields } from './second-factor-policy.service';
 import { authLoginEvent } from '../events';
 
 export interface StartDeviceAuthParams
@@ -687,6 +688,7 @@ export async function completeDeviceLogin(params: CompleteDeviceLoginParams): Pr
         phone: user.phone || undefined,
         passwordChangeRequired: user.passwordChangeRequired,
         ...loginBindingFields(registeredBinding(registered)),
+        ...await secondFactorEnrolmentFields(user.id),
     };
 
     // After commit, not inline: the poll route is transactional, and a login
@@ -701,6 +703,7 @@ export async function completeDeviceLogin(params: CompleteDeviceLoginParams): Pr
         email: result.email,
         phone: result.phone,
         mfaEnrolled,
+        secondFactorEnrolmentRequired: result.secondFactorEnrolmentRequired === true,
     }));
 
     return result;

@@ -12,6 +12,7 @@ import { BOUND_KEY_RENEW_GRACE_HOURS, BOUND_KEY_TTL_HOURS, CONCURRENT_USE_WINDOW
 import { normalizeOptionalEmail } from '../helpers/email';
 import { parseDuration } from '../../lib/duration';
 import { authLogger } from '../logger';
+import { isPasskeyOnly } from './second-factor-policy';
 
 export { parseDuration };
 
@@ -704,13 +705,22 @@ function assertOriginServesRpId(origin: string, rpId: string): void
     }
 }
 
+/**
+ * `SPFN_AUTH_PASSKEY_USER_VERIFICATION`, or its default.
+ *
+ * The default is `preferred`, raised to `required` by one thing only: a
+ * second-factor policy whose sole method is the passkey, where the assertion is
+ * the second factor and an unverified one would be possession alone. An
+ * explicit value is never overridden — a weaker one beside that policy refuses
+ * boot instead (`assertSecondFactorPolicy`).
+ */
 function resolveUserVerification(env: PasskeyEnvSource): PasskeyUserVerification
 {
     const configured = env.SPFN_AUTH_PASSKEY_USER_VERIFICATION;
 
     if (!configured)
     {
-        return 'preferred';
+        return isPasskeyOnly() ? 'required' : 'preferred';
     }
 
     const normalized = configured.trim().toLowerCase() as PasskeyUserVerification;

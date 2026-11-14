@@ -334,8 +334,27 @@ describe('native sign-in answers each failure path with its own code', () =>
         // Held to its error class in contract-export.test.ts.
         const channelCodes = ['ChannelDisabledError'];
 
+        // The second-factor policy is the sixth (contract 0.14.0, #309): the
+        // enrolment-only refusal every signed-in operation that is not an
+        // enrolment route can answer, the unlisted-method 404, and the
+        // last-factor 409 that completes the vocabulary. None is native
+        // sign-in's: a sign-in of an enrolment-only account answers its
+        // session. Held to their error classes in contract-export.test.ts.
+        const secondFactorCodes = [
+            'SecondFactorEnrolmentRequiredError',
+            'SecondFactorMethodDisabledError',
+            'SecondFactorRequiredError',
+        ];
+
         expect(declared.filter(e => e.surface === 'rest').map(e => e.code).sort())
-            .toEqual([...table.map(cell => cell.code), ...deviceCodes, ...mfaCodes, ...deviceLinkCodes, ...channelCodes].sort());
+            .toEqual([
+                ...table.map(cell => cell.code),
+                ...deviceCodes,
+                ...mfaCodes,
+                ...deviceLinkCodes,
+                ...channelCodes,
+                ...secondFactorCodes,
+            ].sort());
     });
 
     it('the Android start (auth.enroll.oauthAppleRelayStart, contract 0.13.4) refuses only with listed codes', () =>

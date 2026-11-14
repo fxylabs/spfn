@@ -25,19 +25,20 @@ import { defineMiddleware } from '@spfn/core/route';
 import { UnauthorizedError } from '@spfn/core/errors';
 
 import type { KeyAlgorithmType, User } from '@spfn/auth/server';
-import { verifyClientToken, decodeToken, authLogger, keysRepository, findUserWithEffectiveRoleOnPrimary, userSettingsRepository } from '@spfn/auth/server';
+import { verifyClientToken, decodeToken, authLogger, keysRepository } from '@spfn/auth/server';
 import {
     InvalidTokenError,
     TokenExpiredError,
     KeyExpiredError,
+    SecondFactorEnrolmentRequiredError,
 } from '@spfn/auth/errors';
 
 import type { UserPublicKey } from '../entities/user-public-keys';
 import { readContextClientIdentity } from '../client-proof/version-middleware';
 import { attestedClientIp } from '../lib/device-provenance';
-import { resolveAuthenticatedUser, runAuthProfile, type AuthContext } from './auth-profiles';
+import { resolveAuthenticatedUser, runAuthProfile, type AuthContext, type AuthProfileOutcome } from './auth-profiles';
 import { matchesMachineDiscriminator } from './machine-principals';
-import { profileLocale, type ProfileLocale } from '../lib/profile-locale';
+import type { ProfileLocale } from '../lib/profile-locale';
 
 // Auth context type — one principal shape for every scheme (see auth-profiles).
 export type { AuthContext } from './auth-profiles';
@@ -310,7 +311,7 @@ export const authenticate = defineMiddleware('auth', async (c, next) =>
 
     // 5.–6. Load the user and apply the account-status rules — the shared
     // path every scheme takes (see resolveAuthenticatedUser).
-    const resolved = await resolveAuthenticatedUser(keyRecord.userId);
+    const resolved = await resolveAuthenticatedUser(keyRecord.userId, c);
     const { user } = resolved;
 
     // 7. Update last used timestamp (fire-and-forget)
@@ -382,7 +383,7 @@ export const optionalAuth = defineMiddleware('optionalAuth', async (c, next) =>
     // does: credentials that are presented but invalid are refused with the
     // contract envelope, never downgraded to anonymous passage. Only
     // "presented nothing" continues without an auth context.
-    const profile = await runAuthProfile(c);
+    const profile = await optionalProfile(c);
     if (profile.kind === 'refused')
     {
         return profile.response;
@@ -457,38 +458,60 @@ export const optionalAuth = defineMiddleware('optionalAuth', async (c, next) =>
             keyRecord.algorithm as KeyAlgorithmType,
         );
 
-        const [result, chosenLocale] = await Promise.all([
-            findUserWithEffectiveRoleOnPrimary(keyRecord.userId),
-            userSettingsRepository.findLocaleByUserId(keyRecord.userId),
-        ]);
-
-        if (!result || result.user.status !== 'active')
-        {
-            await next();
-
-            return undefined;
-        }
-
-        const { user, role } = result;
+        // The account rules `authenticate` applies, through the one function
+        // that applies them — an account that is not active, and one the
+        // second-factor policy holds to enrolling, throw here and so continue
+        // anonymously, which is this middleware's answer to an unusable principal.
+        const resolved = await resolveAuthenticatedUser(keyRecord.userId, c);
 
         keysRepository.updateLastUsedById(keyRecord.id, readContextClientIdentity(c), attestedClientIp(c))
             .catch((err: unknown) => authLogger.middleware.error('Failed to update lastUsedAt', err));
 
-        c.set('auth', {
-            user,
-            userId: String(user.id),
-            keyId,
-            role: role?.name ?? null,
-            ...profileLocale(chosenLocale),
-            scheme: 'bearer',
-        });
+        c.set('auth', bearerAuthContext(keyId, resolved));
     }
     catch
     {
-        // Invalid token — continue without auth context
+        // Invalid token, or a principal the account rules refuse — continue without auth context
     }
 
     await next();
 
     return undefined;
 }, { skips: ['auth'] });
+
+/**
+ * The profile path, as `optionalAuth` reads it.
+ *
+ * Presented-but-invalid profile credentials are refused, exactly as on
+ * `authenticate`. A person the second-factor policy holds to enrolling is not
+ * an invalid credential, though — it is a principal this route may not use,
+ * which on a route that works signed-out is the anonymous caller the Bearer
+ * path below also continues as.
+ */
+async function optionalProfile(c: Context): Promise<AuthProfileOutcome>
+{
+    try
+    {
+        return await runAuthProfile(c);
+    }
+    catch (err)
+    {
+        if (isEnrolmentRequiredRefusal(err))
+        {
+            return { kind: 'none' };
+        }
+
+        throw err;
+    }
+}
+
+/**
+ * Matched by name as well as by class: `@spfn/auth/errors` can resolve to two
+ * module instances at once — the package entry and the source tree — and
+ * `instanceof` across them is false.
+ */
+function isEnrolmentRequiredRefusal(err: unknown): boolean
+{
+    return err instanceof SecondFactorEnrolmentRequiredError
+        || (err as { name?: unknown } | null)?.name === 'SecondFactorEnrolmentRequiredError';
+}

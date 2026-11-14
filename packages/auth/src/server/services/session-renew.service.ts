@@ -41,6 +41,7 @@ import type { UserPublicKey } from '../entities/user-public-keys';
 import type { User } from '../entities/users';
 import type { KeyAlgorithmType } from '../types';
 import { registerPublicKeyService, registeredBinding, revokeKeyService } from './key.service';
+import { secondFactorEnrolmentFields } from './second-factor-policy.service';
 import { startRenewalCeremonyService, verifyRenewalAssertionService } from './passkey.service';
 import { loginBindingFields, type LoginResult } from './auth.service';
 
@@ -164,6 +165,7 @@ export async function finishSessionRenewService(
         phone: user.phone || undefined,
         passwordChangeRequired: user.passwordChangeRequired,
         ...loginBindingFields(registeredBinding(registered)),
+        ...await secondFactorEnrolmentFields(user.id),
     };
 }
 

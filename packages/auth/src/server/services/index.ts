@@ -184,6 +184,17 @@ export type {
     VerifyMfaChallengeResult,
 } from './mfa.service';
 
+// Second-factor policy, applied to an account
+export {
+    isEnrolledUnderPolicy,
+    secondFactorEnrolmentFields,
+    keySecondFactorEnrolmentFields,
+    assertSecondFactorAdmits,
+    assertNotLastListedFactor,
+} from './second-factor-policy.service';
+
+export type { SecondFactorEnrolmentFields } from './second-factor-policy.service';
+
 // Key Service
 export {
     registerPublicKeyService,

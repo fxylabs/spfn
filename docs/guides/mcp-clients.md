@@ -331,7 +331,11 @@ export const appRouter = defineRouter({ /* your routes */ })
 
 `validateToken: verifyAccessToken` is the whole connection between the two
 packages. It answers `{ clientId, scopes, expiresAt, userId }` or `null`, and
-`null` is a refusal — expired, revoked, or issued for another resource.
+`null` is a refusal — expired, revoked, or issued for another resource. Under a
+required second-factor policy (`createAuthLifecycle({ secondFactor: { required: true } })`)
+a valid token whose account has no listed second factor throws
+`SecondFactorEnrolmentRequiredError` instead; `@spfn/mcp` answers any throw from
+its validator with the same 401 challenge as a `null`.
 
 An MCP access token is not a session. It authorizes the MCP surface for the
 resource it names and is not accepted by ordinary API routes.

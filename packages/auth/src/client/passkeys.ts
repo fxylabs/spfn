@@ -151,6 +151,16 @@ export interface SignInWithPasskeyValue
     email?: string;
     phone?: string;
     passwordChangeRequired: boolean;
+    /**
+     * `true` only under a second-factor policy that does not list passkeys
+     * (#309): the account has a listed factor and this device is new, so the
+     * answer is a challenge rather than a session — the fields above are then
+     * absent. Finish it with `completeMfaWithCode` and `challenge.secret`.
+     */
+    mfaRequired?: boolean;
+    challenge?: { secret: string; expiresAtMillis: number };
+    /** `true` when the session may only enrol a second factor (#309). */
+    secondFactorEnrolmentRequired?: boolean;
 }
 
 /**

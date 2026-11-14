@@ -6,6 +6,12 @@
  * authenticator app, or a passkey the owner already enrolled and has marked as
  * satisfying a step-up. Ten single-use recovery codes come with either.
  *
+ * The application's second-factor policy (`createAuthLifecycle({ secondFactor })`,
+ * #309) narrows all of it: only a listed method counts as enrolled or proves
+ * anything, recovery codes can be turned off, and a required policy makes the
+ * enrolment itself mandatory — that last part is enforced where a person is
+ * authenticated, not here.
+ *
  * The rule the whole feature hangs on is the one in `assertStepUp`: an account
  * that never enrolled is answered exactly as it is today, on every route. That
  * is why the enrolment check comes first and returns, before any passkey
@@ -60,20 +66,28 @@ import type { DeferredLoginEvent, MfaChallenge, MfaChallengeChannel } from '../e
 import type { UserPublicKey } from '../entities/user-public-keys';
 import type { MfaVerificationMethod } from '../entities/mfa-verifications';
 import { mintChallenge, presentedChallenge, spendChallenge } from './webauthn-challenge.service';
+import { isMethodListed } from '../lib/second-factor-policy';
+import {
+    assertNotLastListedFactor,
+    isEnrolledUnderPolicy,
+    secondFactorEnrolmentFields,
+} from './second-factor-policy.service';
 
 /** How long an unconfirmed enrolment is left lying around before the sweep takes it. */
 export const MFA_UNCONFIRMED_TTL_MS = 24 * 60 * 60 * 1000;
 
 /**
- * Does this account have a second factor at all?
+ * Does this account have a second factor — of a method the policy lists?
  *
  * One statement (`repositories/mfa-enrolment.repository.ts`), because every
  * sensitive route and every device registration asks it, including the
- * overwhelming majority that will answer false.
+ * overwhelming majority that will answer false. The policy's reading of it is
+ * `isEnrolledUnderPolicy`; with the default methods that is every second
+ * factor, as it always was.
  */
 export function mfaEnrolledForUser(userId: number): Promise<boolean>
 {
-    return mfaEnrolmentRepository.isEnrolled(userId);
+    return isEnrolledUnderPolicy(userId);
 }
 
 export interface AssertStepUpParams
@@ -308,8 +322,14 @@ async function releaseDeferredAnnouncements(row: MfaChallenge, key: UserPublicKe
     }
 
     const mfaEnrolled = await mfaEnrolledForUser(row.userId);
+    const { secondFactorEnrolmentRequired } = await secondFactorEnrolmentFields(row.userId);
 
-    onAfterCommit(() => authLoginEvent.emit({ ...row.loginEvent!, userId: String(row.userId), mfaEnrolled }));
+    onAfterCommit(() => authLoginEvent.emit({
+        ...row.loginEvent!,
+        userId: String(row.userId),
+        mfaEnrolled,
+        secondFactorEnrolmentRequired: secondFactorEnrolmentRequired === true,
+    }));
 }
 
 /**
@@ -403,6 +423,7 @@ async function settleStepUpLogin(row: MfaChallenge): Promise<LoginResult>
         phone: user.phone || undefined,
         passwordChangeRequired: user.passwordChangeRequired,
         ...loginBindingFields(key),
+        ...await secondFactorEnrolmentFields(row.userId),
     };
 }
 
@@ -502,7 +523,7 @@ export interface ConfirmTotpParams
 
 export interface ConfirmTotpResult
 {
-    /** The ten plaintext codes, shown once. */
+    /** The ten plaintext codes, shown once. Empty when the policy turned recovery codes off. */
     recoveryCodes: string[];
 }
 
@@ -543,7 +564,7 @@ export async function confirmTotpEnrolmentService(params: ConfirmTotpParams): Pr
         await mfaTotpRepository.confirm(params.userId, step);
         await mfaVerificationsRepository.record(params.keyId, params.userId, 'totp');
 
-        return { recoveryCodes: await issueRecoveryCodes(params.userId) };
+        return { recoveryCodes: isMethodListed('recoveryCodes') ? await issueRecoveryCodes(params.userId) : [] };
     }, { context: 'auth:mfa-confirm' });
 }
 
@@ -641,16 +662,23 @@ export interface MarkPasskeyParams
 /**
  * Mark or unmark one of the caller's passkeys as their second factor.
  *
- * Unmarking the last one is allowed, and leaves the account unenrolled. It is
- * deliberately independent of `assertNotLastRecoveryCredential`, which guards
- * `passkeys/revoke`: that rule protects a way *into* the account, and a
- * second-factor mark is not one — the credential still signs the owner in
- * afterwards, unchanged.
+ * Unmarking the last one is allowed, and leaves the account unenrolled — unless
+ * the policy requires a second factor and it is the last listed one
+ * (`SecondFactorRequiredError`). It is deliberately independent of
+ * `assertNotLastRecoveryCredential`, which guards `passkeys/revoke`: that rule
+ * protects a way *into* the account, and a second-factor mark is not one — the
+ * credential still signs the owner in afterwards, unchanged.
  *
  * @throws PasskeyNotFoundError for a credential that is not theirs, or revoked
+ * @throws SecondFactorRequiredError when unmarking would leave no listed factor under a required policy
  */
 export async function markPasskeySecondFactorService(params: MarkPasskeyParams): Promise<MfaStatus>
 {
+    if (!params.secondFactor)
+    {
+        await assertNotLastListedFactor(params.userId, { passkeyId: Number(params.passkeyId) });
+    }
+
     const marked = await passkeysRepository.markSecondFactorByIdAndUserId(
         Number(params.passkeyId),
         params.userId,
@@ -668,10 +696,11 @@ export async function markPasskeySecondFactorService(params: MarkPasskeyParams):
 /** What the account surface shows about the second factor. No secret is in it. */
 export interface MfaStatus
 {
+    /** Whether a listed method is live — the policy's reading of enrolled. */
     enrolled: boolean;
-    /** Which second factors are live: `'totp'`, `'passkey'`, or both. */
+    /** Which listed second factors are live: `'totp'`, `'passkey'`, or both. */
     methods: ('totp' | 'passkey')[];
-    /** Unspent codes of the current generation, for the "2 left" warning. */
+    /** Unspent codes of the current generation, for the "2 left" warning. 0 while the policy turned them off. */
     recoveryCodesRemaining: number;
 }
 
@@ -681,32 +710,35 @@ export interface MfaStatus
  * Carries no secret, no otpauth URI and no recovery code — only the counts and
  * names an account screen needs. An unconfirmed enrolment is not a method: it
  * gates nothing, so reporting it would tell the owner they are protected when
- * they are not.
+ * they are not. A method the policy does not list is not reported either, for
+ * the same reason: it is not accepted as a proof.
  */
 export async function mfaStatusService(userId: number): Promise<MfaStatus>
 {
-    const totp = await mfaTotpRepository.findByUserId(userId);
     const methods: ('totp' | 'passkey')[] = [];
 
-    if (totp?.confirmedAt)
+    if (isMethodListed('totp') && (await mfaTotpRepository.findByUserId(userId))?.confirmedAt)
     {
         methods.push('totp');
     }
 
-    if (await mfaEnrolmentRepository.hasSecondFactorPasskey(userId))
+    if (isMethodListed('passkey') && await mfaEnrolmentRepository.hasSecondFactorPasskey(userId))
     {
         methods.push('passkey');
     }
 
-    const generation = await mfaRecoveryCodesRepository.currentGeneration(userId);
-
     return {
         enrolled: methods.length > 0,
         methods,
-        recoveryCodesRemaining: generation === 0
-            ? 0
-            : await mfaRecoveryCodesRepository.countUnused(userId, generation),
+        recoveryCodesRemaining: isMethodListed('recoveryCodes') ? await unusedRecoveryCodes(userId) : 0,
     };
+}
+
+async function unusedRecoveryCodes(userId: number): Promise<number>
+{
+    const generation = await mfaRecoveryCodesRepository.currentGeneration(userId);
+
+    return generation === 0 ? 0 : await mfaRecoveryCodesRepository.countUnused(userId, generation);
 }
 
 /**
@@ -772,6 +804,11 @@ export async function stepUpService(params: StepUpParams): Promise<void>
  * attempt, and counting it inside a `catch` around the thing that threw would be
  * two control flows for one answer.
  *
+ * A proof of a method the policy does not list — or a recovery code while it
+ * turned them off — is that same failure, before anything is read or spent:
+ * the account may still hold one from before the policy, and it proves nothing
+ * now. Both callers inherit that, the challenge counting it as a wrong proof.
+ *
  * @throws ValidationError when the body names none or more than one input
  */
 export async function attemptSecondFactor(params: StepUpParams): Promise<MfaVerificationMethod | null>
@@ -787,12 +824,15 @@ export async function attemptSecondFactor(params: StepUpParams): Promise<MfaVeri
 
     if (params.code !== undefined)
     {
-        return await verifyTotpProof(params.userId, params.code);
+        return isMethodListed('totp') ? await verifyTotpProof(params.userId, params.code) : null;
     }
 
-    return params.recoveryCode !== undefined
-        ? await verifyRecoveryProof(params.userId, params.recoveryCode)
-        : await verifyPasskeyProof(params.userId, params.response!);
+    if (params.recoveryCode !== undefined)
+    {
+        return isMethodListed('recoveryCodes') ? await verifyRecoveryProof(params.userId, params.recoveryCode) : null;
+    }
+
+    return isMethodListed('passkey') ? await verifyPasskeyProof(params.userId, params.response!) : null;
 }
 
 /**

@@ -9,7 +9,9 @@
  * ```
  *
  * Null for every refusal, and the same null for all of them — unknown, revoked,
- * expired, refresh-kind, grant revoked, wrong resource. The non-disclosure rule
+ * expired, refresh-kind, grant revoked, wrong resource. One exception: a token
+ * that passes all of those, for a person the second-factor policy holds to
+ * enrolling, throws `SecondFactorEnrolmentRequiredError` (403) instead. The non-disclosure rule
  * `verifyOpsTokenService` keeps, for the same reason: this is a public endpoint
  * and the refusal must not tell a caller whether the value it presented was ever
  * real.
@@ -31,6 +33,7 @@ import {
     toEpochSeconds,
 } from '../lib/oauth2/tokens';
 import { authLogger } from '../logger';
+import { assertSecondFactorAdmits } from './second-factor-policy.service';
 
 /** What a verified access token authorizes. */
 export interface VerifiedOAuth2AccessToken
@@ -54,6 +57,7 @@ export interface VerifiedOAuth2AccessToken
  * @param token - The raw bearer value
  * @param resource - The resource being accessed, e.g. `https://api.example.com/mcp`
  * @returns the principal, or null for any reason at all
+ * @throws SecondFactorEnrolmentRequiredError for a valid token whose person may only enrol a second factor
  */
 export async function verifyAccessToken(
     token: string,
@@ -79,6 +83,12 @@ export async function verifyAccessToken(
     {
         return null;
     }
+
+    // The person the token acts for, under the second-factor policy (#309):
+    // an account that may only enrol cannot act through a client either. A
+    // throw rather than the null, so the holder of a real token is told why;
+    // nothing is disclosed to anyone else, since everything above refused first.
+    await assertSecondFactorAdmits(pair.grant.user, null);
 
     oauth2TokensRepository.updateLastUsedById(record.id)
         .catch((err: unknown) => authLogger.service.error('Failed to update OAuth2 token lastUsedAt', err));

@@ -31,6 +31,7 @@ import { route } from '@spfn/core/route';
 import { getAuth } from '../../helpers';
 import { byIpAndCaller } from '../../lib/rate-limit-keys';
 import {
+    assertNotLastListedFactor,
     assertStepUp,
     confirmTotpEnrolmentService,
     disableMfaService,
@@ -136,6 +137,11 @@ export const mfaTotpConfirm = route.post('/_auth/mfa/totp/confirm')
  * 204 whether or not anything was enrolled: "make sure MFA is off" has already
  * succeeded on an account that never turned it on, and answering a 400 there
  * would tell an unauthenticated guess nothing useful and an owner nothing true.
+ *
+ * While the policy requires a second factor this would remove the last listed
+ * one, so it is a 409 `SECOND_FACTOR_REQUIRED` and nothing changes. The
+ * operator's way to re-issue one is `disableMfaService(userId)`, called by the
+ * application, which this rule does not reach.
  */
 export const mfaDisable = route.post('/_auth/mfa/disable')
     .input({
@@ -147,6 +153,7 @@ export const mfaDisable = route.post('/_auth/mfa/disable')
         const { userId, keyId } = getAuth(c);
 
         await assertStepUp({ userId: Number(userId), keyId });
+        await assertNotLastListedFactor(Number(userId), { all: true });
         await disableMfaService(Number(userId));
 
         return c.noContent();
@@ -156,7 +163,8 @@ export const mfaDisable = route.post('/_auth/mfa/disable')
  * POST /_auth/mfa/passkey/mark - Make a passkey count as a second factor
  *
  * Unmarking the last marked credential is allowed and leaves the account
- * unenrolled. Independent of the last-recovery-credential guard on
+ * unenrolled — a 409 `SECOND_FACTOR_REQUIRED` instead while the policy requires
+ * a second factor and no other listed one remains. Independent of the last-recovery-credential guard on
  * `passkeys/revoke`: that one protects a way *into* the account, and this
  * removes a mark rather than a credential.
  */

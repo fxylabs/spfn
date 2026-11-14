@@ -53,6 +53,7 @@ import { decideKeyBinding } from '../lib/key-policy';
 import { updateLastLoginService } from './user.service';
 import { getPendingDeletionInfo } from './account-deletion.service';
 import { mfaEnrolledForUser } from './mfa.service';
+import { secondFactorEnrolmentFields } from './second-factor-policy.service';
 import { authLoginEvent, authRegisterEvent, oauthUnlinkedEvent } from '../events';
 
 export interface OAuthStartParams
@@ -367,10 +368,15 @@ export async function oauthCallbackService(
     // what to offer a user it has just met. Read before the callback is queued,
     // so the callback stays synchronous and lands when consumers expect it to.
     const mfaEnrolled = isNewUser ? false : await mfaEnrolledForUser(userId);
+    const { secondFactorEnrolmentRequired } = await secondFactorEnrolmentFields(userId);
 
     onAfterCommit(() => (isNewUser
         ? authRegisterEvent.emit(eventPayload)
-        : authLoginEvent.emit({ ...eventPayload, mfaEnrolled })));
+        : authLoginEvent.emit({
+            ...eventPayload,
+            mfaEnrolled,
+            secondFactorEnrolmentRequired: secondFactorEnrolmentRequired === true,
+        })));
 
     return {
         redirectUrl,

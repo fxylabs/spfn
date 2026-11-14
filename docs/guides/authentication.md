@@ -151,10 +151,22 @@ first time it is read, against the schema in `@spfn/auth/config`.
 answers 404 `CHANNEL_DISABLED` (`ChannelDisabledError`, `details.channel`) on every one of its routes,
 before the route's rate limit — after the global `auth` middleware, so a signed-in route still answers
 an anonymous caller 401. A later `createAuthLifecycle()` without `channels` does not reopen one, and
-two that state different channels refuse boot. `signup: false` also
+two that state different channels refuse boot — partial ones such as `{ signup: false }` and
+`{ deviceCode: false }` included, since an omitted key means `true`. `signup: false` also
 refuses the account a first social sign-in would create (`SignupDisabledError`, 403
 `SIGNUP_DISABLED`, `reason=signup_disabled`). Service functions are not affected. See
 [Which sign-in channels exist](../../packages/auth/README.md#which-sign-in-channels-exist-channels).
+
+`createAuthLifecycle({ secondFactor })` is the app's second-factor policy: `required` (default
+`false`), `methods` (default `['totp', 'passkey']`) and `recoveryCodes` (default `true`). Omitted,
+nothing changes. With `required: true` an account with no listed factor signs in to a session that
+can only enrol one — its `LoginResult` carries `secondFactorEnrolmentRequired: true`, and every
+other route, the app's included, answers 403 `SECOND_FACTOR_ENROLMENT_REQUIRED` until it enrols, on
+the same session. An unlisted method's routes answer 404 `SECOND_FACTOR_METHOD_DISABLED`, and
+removing the last listed factor is 409 `SECOND_FACTOR_REQUIRED` (`disableMfaService(userId)` is the
+operator's re-issue path). Boot is refused for `methods: []`, for `required` beside `deviceCode` or
+`deviceLink`, and for two lifecycles stating different policies. See
+[Requiring a second factor](../../packages/auth/README.md#requiring-a-second-factor-secondfactor).
 
 ### 5. Register Router and Middleware in `router.ts`
 
@@ -933,8 +945,10 @@ with the same 409 `OAuthEmailInUseError` (`reason=email_in_use`) as `'reject'`. 
 
 ## Second factor (MFA)
 
-Optional, and optional in the strong sense: an account that never enrols behaves exactly as it
-did before, on every route. You turn it on per account, not per app.
+Optional by default, and optional in the strong sense: an account that never enrols behaves
+exactly as it did before, on every route. Each account turns it on for itself — unless the app
+requires one with `createAuthLifecycle({ secondFactor: { required: true } })`, in which case an
+account without one may only enrol (see above).
 
 Two forms — a TOTP authenticator app, or a passkey the person already enrolled and has marked
 as their second factor — and ten single-use recovery codes come with either. Enrolment is
@@ -1577,6 +1591,9 @@ catch (error)
 | `OAuthEmailInUseError` | 409 | A first social sign-in's email belongs to an existing account and `oauthEmailMatch` is `'reject'` |
 | `SignupDisabledError` | 403 | `SIGNUP_DISABLED`: a first social sign-in would have created an account and `channels.signup` is `false` |
 | `ChannelDisabledError` | 404 | `CHANNEL_DISABLED`: a route of a sign-in channel the app turned off with `channels`; `details.channel` names it |
+| `SecondFactorEnrolmentRequiredError` | 403 | `SECOND_FACTOR_ENROLMENT_REQUIRED`: the app requires a second factor and this account has no listed one; only the enrolment routes answer |
+| `SecondFactorMethodDisabledError` | 404 | `SECOND_FACTOR_METHOD_DISABLED`: a route of a method `secondFactor.methods` does not list, or recovery codes turned off; `details.method` names it |
+| `SecondFactorRequiredError` | 409 | `SECOND_FACTOR_REQUIRED`: removing the last listed second factor while one is required |
 | `ReservedUsernameError` | 400 | Username is reserved |
 | `UsernameAlreadyTakenError` | 409 | Username already in use |
 

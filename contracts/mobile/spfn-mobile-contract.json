@@ -4,9 +4,9 @@
   "originStatement": "Generated from the route and contract definitions in SPFN primitives (packages/auth/src/server/client-proof) and published from that repository. This file is generated output: edit the source modules and re-export, never this file.",
   "contractName": "spfn-mobile-contract",
   "contractMajor": 0,
-  "contractVersion": "0.13.8",
-  "supportedRange": ">=0.13.0 <0.14.0",
-  "exporterVersion": "@spfn/auth/contract-bundle@6.2.0",
+  "contractVersion": "0.14.0",
+  "supportedRange": ">=0.14.0 <0.15.0",
+  "exporterVersion": "@spfn/auth/contract-bundle@6.3.0",
   "authProfiles": { "allowed": ["clientProofV1"], "unknownProfilePolicy": "reject", "mixingWithinSession": "prohibited" },
   "operationAuthClasses": {
     "none": "the unproven class: the operation is accepted with neither proof headers nor a session header, because it is called before any proof can be minted (clock synchronization, enrollment, login, and the device-code and device-link operations a device with no key on file calls)",
@@ -246,7 +246,8 @@
         { "name": "userId", "type": "string", "optional": false },
         { "name": "publicId", "type": "string", "optional": false },
         { "name": "email", "type": "string", "optional": true },
-        { "name": "phone", "type": "string", "optional": true }
+        { "name": "phone", "type": "string", "optional": true },
+        { "name": "secondFactorEnrolmentRequired", "type": "boolean", "optional": true }
       ]
     },
     {
@@ -273,7 +274,8 @@
         { "name": "phone", "type": "string", "optional": true },
         { "name": "passwordChangeRequired", "type": "boolean", "optional": true },
         { "name": "sessionBinding", "type": "KeyBinding", "optional": true },
-        { "name": "keyExpiresAtMillis", "type": "integer", "optional": true }
+        { "name": "keyExpiresAtMillis", "type": "integer", "optional": true },
+        { "name": "secondFactorEnrolmentRequired", "type": "boolean", "optional": true }
       ]
     },
     {
@@ -303,7 +305,8 @@
         { "name": "phone", "type": "string", "optional": true },
         { "name": "passwordChangeRequired", "type": "boolean", "optional": true },
         { "name": "sessionBinding", "type": "KeyBinding", "optional": true },
-        { "name": "keyExpiresAtMillis", "type": "integer", "optional": true }
+        { "name": "keyExpiresAtMillis", "type": "integer", "optional": true },
+        { "name": "secondFactorEnrolmentRequired", "type": "boolean", "optional": true }
       ]
     },
     {
@@ -335,7 +338,8 @@
         { "name": "challenge", "type": "MfaChallenge", "optional": true },
         { "name": "userId", "type": "string", "optional": true },
         { "name": "keyId", "type": "string", "optional": true },
-        { "name": "isNewUser", "type": "boolean", "optional": true }
+        { "name": "isNewUser", "type": "boolean", "optional": true },
+        { "name": "secondFactorEnrolmentRequired", "type": "boolean", "optional": true }
       ]
     },
     {
@@ -449,7 +453,8 @@
         { "name": "phone", "type": "string", "optional": true },
         { "name": "passwordChangeRequired", "type": "boolean", "optional": true },
         { "name": "sessionBinding", "type": "KeyBinding", "optional": true },
-        { "name": "keyExpiresAtMillis", "type": "integer", "optional": true }
+        { "name": "keyExpiresAtMillis", "type": "integer", "optional": true },
+        { "name": "secondFactorEnrolmentRequired", "type": "boolean", "optional": true }
       ]
     },
     { "name": "DeviceAuthInfoRequest", "fields": [{ "name": "userCode", "type": "string", "optional": false }] },
@@ -524,7 +529,8 @@
       "requestType": "HandshakeRequest",
       "responseType": "HandshakeResponse",
       "summary": "Presents a client proof and opens a session.",
-      "since": "0.1.0"
+      "since": "0.1.0",
+      "secondFactor": { "enrolmentRequired": { "error": "SecondFactorEnrolmentRequiredError" } }
     },
     {
       "id": "echo.send",
@@ -535,7 +541,8 @@
       "requestType": "EchoRequest",
       "responseType": "EchoResponse",
       "summary": "Authenticated round trip used as the smallest real vertical slice.",
-      "since": "0.1.0"
+      "since": "0.1.0",
+      "secondFactor": { "enrolmentRequired": { "error": "SecondFactorEnrolmentRequiredError" } }
     },
     {
       "id": "items.list",
@@ -546,7 +553,8 @@
       "requestType": "ListItemsRequest",
       "responseType": "ListItemsResponse",
       "summary": "Authenticated paged read covering optional fields and arrays.",
-      "since": "0.1.0"
+      "since": "0.1.0",
+      "secondFactor": { "enrolmentRequired": { "error": "SecondFactorEnrolmentRequiredError" } }
     },
     {
       "id": "auth.enroll.register",
@@ -623,7 +631,8 @@
       "requestType": "RotateKeyRequest",
       "responseType": "RotateKeyResponse",
       "summary": "Replaces the authenticated key with a new client-generated public key before its TTL runs out.",
-      "since": "0.3.0"
+      "since": "0.3.0",
+      "secondFactor": { "enrolmentRequired": { "error": "SecondFactorEnrolmentRequiredError" } }
     },
     {
       "id": "auth.keys.list",
@@ -634,7 +643,8 @@
       "requestType": "ListKeysRequest",
       "responseType": "ListKeysResponse",
       "summary": "Lists the keys registered to the caller, one per device that can sign for them.",
-      "since": "0.4.1"
+      "since": "0.4.1",
+      "secondFactor": { "enrolmentRequired": { "error": "SecondFactorEnrolmentRequiredError" } }
     },
     {
       "id": "auth.keys.revoke",
@@ -645,7 +655,8 @@
       "requestType": "RevokeKeyRequest",
       "responseType": "RevokeKeyResponse",
       "summary": "Revokes one of the caller's keys, signing that device out.",
-      "since": "0.4.1"
+      "since": "0.4.1",
+      "secondFactor": { "enrolmentRequired": { "error": "SecondFactorEnrolmentRequiredError" } }
     },
     {
       "id": "auth.keys.revokeAll",
@@ -656,7 +667,8 @@
       "requestType": "RevokeAllKeysRequest",
       "responseType": "RevokeAllKeysResponse",
       "summary": "Revokes every key the caller has, sparing the calling device unless asked otherwise.",
-      "since": "0.4.1"
+      "since": "0.4.1",
+      "secondFactor": { "enrolmentRequired": { "error": "SecondFactorEnrolmentRequiredError" } }
     },
     {
       "id": "auth.device.start",
@@ -692,7 +704,8 @@
       "responseType": "DeviceAuthInfoResponse",
       "summary": "Describes the device waiting on a user code, so the approver can recognise it before deciding.",
       "since": "0.10.0",
-      "closedChannel": { "channels": ["deviceCode"], "error": "ChannelDisabledError" }
+      "closedChannel": { "channels": ["deviceCode"], "error": "ChannelDisabledError" },
+      "secondFactor": { "enrolmentRequired": { "error": "SecondFactorEnrolmentRequiredError" } }
     },
     {
       "id": "auth.device.approve",
@@ -704,7 +717,8 @@
       "responseType": "DeviceAuthInfoResponse",
       "summary": "Lets the waiting device in, answering with the device it just let in.",
       "since": "0.10.0",
-      "closedChannel": { "channels": ["deviceCode"], "error": "ChannelDisabledError" }
+      "closedChannel": { "channels": ["deviceCode"], "error": "ChannelDisabledError" },
+      "secondFactor": { "enrolmentRequired": { "error": "SecondFactorEnrolmentRequiredError" } }
     },
     {
       "id": "auth.device.deny",
@@ -715,7 +729,8 @@
       "requestType": "DenyDeviceAuthRequest",
       "summary": "Refuses the waiting device. Answers 204 with no body, so it names no response type.",
       "since": "0.10.0",
-      "closedChannel": { "channels": ["deviceCode"], "error": "ChannelDisabledError" }
+      "closedChannel": { "channels": ["deviceCode"], "error": "ChannelDisabledError" },
+      "secondFactor": { "enrolmentRequired": { "error": "SecondFactorEnrolmentRequiredError" } }
     },
     {
       "id": "auth.deviceLink.redeem",
@@ -746,6 +761,12 @@
     "appliesTo": "every operation that carries closedChannel",
     "rule": "an app can turn a sign-in channel off. An operation of a closed channel answers ChannelDisabledError (404) with details.channel naming the channel, before its rate limit or anything else the operation does. A clientProofV1 operation still runs admission first, so a call that fails admission is refused as any failed admission is",
     "closedChannel": "channels lists the channels whose being off closes the operation; error is the code it then answers"
+  },
+  "secondFactor": {
+    "appliesTo": "every operation that carries secondFactor",
+    "rule": "an app can require a second factor. A sign-in then answers secondFactorEnrolmentRequired: true for an account with none of the listed methods, and that session is refused with SecondFactorEnrolmentRequiredError (403) on every operation whose secondFactor names enrolmentRequired, until a factor is enrolled — on the same session, no new sign-in. It is not a signed-out session and must not be cleared. An operation of a second-factor method the app does not list answers SecondFactorMethodDisabledError (404) with details.method",
+    "enrolmentRequired": "error is the code; unlessListed names the method whose being listed makes the operation an enrolment route the session may use",
+    "methodDisabled": "method is what the app must list for the operation to exist; error is the code otherwise"
   },
   "errorEnvelope": {
     "shape": "{\"error\":{\"code\":<string>,\"message\":<string>,\"requestId\":<string>}}",
@@ -898,6 +919,27 @@
       "httpStatus": 404,
       "retryable": false,
       "summary": "the app turned off the sign-in channel this operation belongs to — details.channel names it, and every operation of that channel answers the same until the app turns it back on",
+      "surface": "rest"
+    },
+    {
+      "code": "SecondFactorEnrolmentRequiredError",
+      "httpStatus": 403,
+      "retryable": false,
+      "summary": "the app requires a second factor and this account has none of the listed methods. The session is not gone — it is the one to enrol with; send the person to enrolment, then retry",
+      "surface": "rest"
+    },
+    {
+      "code": "SecondFactorMethodDisabledError",
+      "httpStatus": 404,
+      "retryable": false,
+      "summary": "the app does not offer this second-factor method, or recovery codes — details.method names which",
+      "surface": "rest"
+    },
+    {
+      "code": "SecondFactorRequiredError",
+      "httpStatus": 409,
+      "retryable": false,
+      "summary": "the app requires a second factor and this change would remove the account's last listed one — enrol another first. Nothing changed",
       "surface": "rest"
     },
     {

@@ -291,10 +291,10 @@ routes use `.skip(['auth'])`; the rest require `Authorization: Bearer <client-si
 | `renamePasskey` | POST `/_auth/passkeys/rename` | yes | rename one |
 | `revokePasskey` | POST `/_auth/passkeys/revoke` | yes | retire one (refused if it is the last way in) |
 | `mfaTotpEnroll` | POST `/_auth/mfa/totp/enroll` | yes | mint a TOTP secret — see [Second factor](#second-factor-mfa) |
-| `mfaTotpConfirm` | POST `/_auth/mfa/totp/confirm` | yes | spend the first code; answers the ten recovery codes |
+| `mfaTotpConfirm` | POST `/_auth/mfa/totp/confirm` | yes | spend the first code; answers the ten recovery codes (none under `recoveryCodes: false`) |
 | `mfaDisable` | POST `/_auth/mfa/disable` | yes + step-up | remove the second factor (204 either way) |
 | `mfaMarkPasskey` | POST `/_auth/mfa/passkey/mark` | yes + step-up | mark or unmark a passkey as the second factor |
-| `mfaRegenerateRecoveryCodes` | POST `/_auth/mfa/recovery/regenerate` | yes + step-up | ten fresh codes; every earlier one stops verifying |
+| `mfaRegenerateRecoveryCodes` | POST `/_auth/mfa/recovery/regenerate` | yes + step-up | ten fresh codes; every earlier one stops verifying (404 under `recoveryCodes: false`) |
 | `mfaStatus` | GET `/_auth/mfa/status` | yes | `{ enrolled, methods, recoveryCodesRemaining }`; no secret |
 | `mfaStepUp` | POST `/_auth/mfa/step-up` | yes | re-prove the second factor on this device |
 | `mfaStepUpOptions` | POST `/_auth/mfa/step-up/options` | yes | options for a step-up by passkey |
@@ -362,7 +362,10 @@ startup — either would leave open a channel the app believes it closed.
 A closed channel stays closed until the app itself says otherwise. A second `createAuthLifecycle()`
 that passes no `channels` leaves them as they are. One that states the same channels again is fine;
 one that states different channels refuses boot in `afterInfrastructure` with an error naming the
-channels that differ — and until then every channel either call closed stays closed.
+channels that differ — and until then every channel either call closed stays closed. That includes
+two partial objects such as `{ signup: false }` and `{ deviceCode: false }`: an omitted key means
+`true`, so the first says device-code login is on and the second says sign-up is — a contradiction,
+not a merge.
 
 | channel | its routes |
 |---|---|
@@ -412,6 +415,147 @@ The mobile contract lists `SignupDisabledError` and `ChannelDisabledError` since
 each operation a closed channel answers `ChannelDisabledError` on with `closedChannel`:
 `auth.enroll.register` (`signup`), the five `auth.device.*` (`deviceCode`) and
 `auth.deviceLink.redeem` / `auth.deviceLink.poll` (`deviceLink`).
+
+### Requiring a second factor (`secondFactor`)
+
+By default a second factor is something an account opts into (see
+[Second factor](#second-factor-mfa)). An app that wants every account to have one says so once, in
+`createAuthLifecycle`:
+
+```typescript
+createAuthLifecycle({
+    channels: { deviceCode: false, deviceLink: false },
+    secondFactor: {
+        required: true,          // default false
+        methods: ['passkey'],    // default ['totp', 'passkey']
+        recoveryCodes: false,    // default true
+    },
+})
+```
+
+**Without the option nothing changes** — no route's middleware chain, no answer, no event value, no
+extra query. A key that is not one of these three, a method that is not `totp` or `passkey`, and a
+value of the wrong type are refused when the lifecycle is built. A second `createAuthLifecycle()`
+that omits the option leaves it as it is; one that states a different policy refuses boot in
+`afterInfrastructure`, naming what differs, and the first statement stays in force until then.
+
+#### The enrolment-only state
+
+"Enrolled" means: the account has a live second factor **of a listed method** — a confirmed TOTP
+while `'totp'` is listed, a passkey marked as a second factor while `'passkey'` is. With
+`required: true`, an account that is not enrolled in that sense can do nothing but enrol one. It is
+a property of the account, read on every request, not of the sign-in: there is no stored flag and
+no migration, a session that predates the policy is covered, and the moment the account enrols the
+**same session** works everywhere.
+
+- Its sign-in succeeds as usual — `auth.login` is emitted and `lastLoginAt` moves — and the
+  `LoginResult` carries **`secondFactorEnrolmentRequired: true`**. So does `getAuthSession`.
+- `authenticate` answers every other request **403 `SECOND_FACTOR_ENROLMENT_REQUIRED`**
+  (`SecondFactorEnrolmentRequiredError`), on the package's routes and on every route of the app.
+  403 rather than 401 for the reason `STEP_UP_REQUIRED` is: the session is not gone, and the
+  Next.js proxy keeps it.
+- `optionalAuth` reads the caller as anonymous.
+- A person reaching the app through an OAuth 2.1 access token is refused the same way:
+  `verifyAccessToken` throws `SecondFactorEnrolmentRequiredError` for a valid token whose account
+  may only enrol (`@spfn/mcp` turns any throw from its validator into its 401 challenge). A
+  one-time token is refused too. Ops tokens and machine principals are not people and are untouched.
+
+The enrolment routes — the only ones such a session reaches:
+
+| routes | while |
+|---|---|
+| `passkeyRegisterOptions`, `passkeyRegisterVerify`, `listPasskeys`, `mfaMarkPasskey` | `'passkey'` is listed |
+| `mfaTotpEnroll`, `mfaTotpConfirm` | `'totp'` is listed |
+| `mfaStatus`, `getAuthSession`, `logout` | always |
+
+They still run behind the global `auth` middleware, so every app middleware after it sees the
+principal on them. Only routes of `mainAuthRouter` can be enrolment routes; the classification is
+`ROUTE_ENROLMENT` beside `ROUTE_CHANNELS`, and a route left out of it fails at import.
+
+#### `methods`
+
+Only a listed method counts as enrolled, is reported by `mfa/status`, and is accepted as a proof.
+A proof of an unlisted method — a TOTP code the account enrolled before the policy, say — is a
+failed proof: at `mfa/verify` it counts against the challenge's five attempts exactly as a wrong
+code does, and at `mfa/step-up` it is the uniform 401 and opens no window. An unlisted method's
+enrolment routes answer **404 `SECOND_FACTOR_METHOD_DISABLED`** (`SecondFactorMethodDisabledError`,
+`details.method`): `totp/enroll` and `totp/confirm` for `'totp'`, `passkey/mark` for `'passkey'`.
+Passkey *sign-in* registration stays, since a passkey is also a way in.
+
+`methods: ['passkey']` makes the passkey the second factor, so it raises the effective
+`SPFN_AUTH_PASSKEY_USER_VERIFICATION` to `required` when the variable is unset, and refuses boot
+when it is set to anything else. When `'passkey'` is not listed, a passkey sign-in is no longer a
+second proof: an enrolled account signing in with one on a new device gets the same 202 challenge
+a password sign-in gets, and the proxy handles it the same way.
+
+#### `recoveryCodes: false`
+
+None are issued — `totp/confirm` answers `recoveryCodes: []` and writes no row — and none are
+accepted: a recovery code at `mfa/verify` is a failed proof (counted, and the code is **not**
+spent), at `mfa/step-up` a 401. `recovery/regenerate` answers 404 `SECOND_FACTOR_METHOD_DISABLED`
+with `details.method: 'recoveryCodes'`, and `mfa/status` reports `recoveryCodesRemaining: 0`.
+Rows from before are ignored, not deleted.
+
+#### Removing the last factor
+
+With `required: true`, a route that would remove the account's last listed second factor answers
+**409 `SECOND_FACTOR_REQUIRED`** (`SecondFactorRequiredError`) and changes nothing: `mfa/disable`,
+`passkey/mark` with `secondFactor: false` on the last marked passkey, and `passkeys/revoke` of it.
+Removing one of several is allowed. The operator's way to re-issue a factor — a lost phone — is
+`disableMfaService(userId)`, called by the app: it is not refused, and the account is then in the
+enrolment-only state until its owner enrols again.
+
+#### Boot refusals
+
+In `afterInfrastructure`, beside the channel check:
+
+| configuration | |
+|---|---|
+| `methods: []` | refused — nothing could ever be enrolled |
+| `required: true` with `channels.deviceCode` or `channels.deviceLink` on | refused, naming the channel: an approval signs a device in with no listed factor |
+| `methods: ['passkey']` with `SPFN_AUTH_PASSKEY_USER_VERIFICATION` set but not `required` | refused |
+| `required: true`, `methods: ['totp']`, no `SPFN_AUTH_TOKEN_ENCRYPTION_KEYS` | refused — no TOTP secret could be stored |
+| two lifecycles stating different policies | refused |
+
+| Error | HTTP | `code` | When |
+|---|---|---|---|
+| `SecondFactorEnrolmentRequiredError` | 403 | `SECOND_FACTOR_ENROLMENT_REQUIRED` | a request of an enrolment-only session on a route that is not an enrolment route |
+| `SecondFactorMethodDisabledError` | 404 | `SECOND_FACTOR_METHOD_DISABLED` | a route of an unlisted method, or `recovery/regenerate` with `recoveryCodes: false`; `details.method` |
+| `SecondFactorRequiredError` | 409 | `SECOND_FACTOR_REQUIRED` | removing the last listed factor through a route |
+
+The mobile contract lists the three since 0.14.0 and marks each operation that can answer the
+first with `secondFactor.enrolmentRequired` — every signed-in operation except `auth.mfa.status`.
+
+### Migration — `secondFactorEnrolmentRequired` on a sign-in
+
+**Mobile contract 0.14.0.** `LoginResult` (and `RegisterResponse`, `MfaVerifyResponse`,
+`OauthNativeResponse`, the approved poll, `getAuthSession`) gains an optional
+`secondFactorEnrolmentRequired`. It is present, and `true`, only when the app set
+`secondFactor: { required: true }` and the account has no listed factor; an app without the policy
+never sees it. Check it after narrowing on `mfaRequired`, and send the person to enrolment rather
+than into the app:
+
+```typescript
+const result = await authApi.login.call({ body: { email, password } });
+
+if (result.mfaRequired)
+{
+    router.push('/auth/mfa');
+
+    return;
+}
+
+if (result.secondFactorEnrolmentRequired)
+{
+    router.push('/settings/security/enrol');   // the session is real; only enrolment routes answer
+
+    return;
+}
+```
+
+`authLoginEvent` gains `secondFactorEnrolmentRequired: boolean` — `false` without the policy. The
+contract's minor moves to 0.14 (fields the server sends), so its supported range is now
+`>=0.14.0 <0.15.0`.
 
 ### Migration — narrow a sign-in on `mfaRequired` before reading `userId`
 
@@ -1617,9 +1761,11 @@ Configuration rows C1–C6 are in `src/__tests__/unit/passkey-config.test.ts`.
 
 ### Second factor (MFA)
 
-Optional, and optional in the strong sense: an account that never enrols sees exactly the
-behaviour it saw before this existed, on every route. Nothing here blocks anybody — the
-package asks for a second factor only from people who asked it to.
+Optional by default, and optional in the strong sense: an account that never enrols sees
+exactly the behaviour it saw before this existed, on every route, and the package asks for a
+second factor only from people who asked it to — unless the app requires one with
+[`secondFactor: { required: true }`](#requiring-a-second-factor-secondfactor), which also
+chooses the methods and whether recovery codes exist.
 
 Two forms. A **TOTP** authenticator app (RFC 6238, SHA-1, 30-second steps, six digits, one
 step of drift), or a **passkey** the owner already enrolled through `/_auth/passkeys/*` and
@@ -1727,7 +1873,9 @@ POST /_auth/mfa/verify       → 200 the LoginResult the sign-in would have give
 
 Four channels stop: **password**, **oauth** (web), **oauth-native** and **password-reset** —
 the four where one stolen credential would otherwise be enough. A device-code approval and a
-passkey sign-in do not, because each already carried a second proof; nor does a key rotation,
+passkey sign-in do not, because each already carried a second proof — the passkey only while
+the [policy](#requiring-a-second-factor-secondfactor) lists passkeys; when it does not, a passkey
+sign-in is the fifth channel that stops, and `passkeys/login/verify` answers the same 202; nor does a key rotation,
 a renewal, or any path that is creating the account. A brand-new social account is not stepped
 up either, and needs no exemption to say so: an account that was written a moment ago has
 nothing enrolled.
@@ -1889,8 +2037,11 @@ backend answers both with one body on purpose.
 #### Telling people it exists
 
 `authLoginEvent` and `authDeviceRegisteredEvent` carry **`mfaEnrolled: boolean`**, computed as
-the event is emitted. That is the whole of the package's opinion: subscribe and offer
-enrolment at a first login or when a new device appears. Nothing is ever blocked on it.
+the event is emitted — whether the account has a factor of a listed method. Without a required
+policy that is the whole of the package's opinion: subscribe and offer enrolment at a first login
+or when a new device appears, and nothing is blocked on it. With
+[`secondFactor: { required: true }`](#requiring-a-second-factor-secondfactor) the package blocks
+the session itself, and `authLoginEvent` says so in `secondFactorEnrolmentRequired`.
 
 #### Errors
 
@@ -1899,6 +2050,9 @@ enrolment at a first login or when a new device appears. Nothing is ever blocked
 | `MfaVerificationFailedError` | 401 | — | a wrong or stale code, a spent step, a used / old-generation / foreign recovery code, or an assertion from an unmarked passkey |
 | `MfaNotEnrolledError` | 400 | — | `confirm` with no pending secret (the five-strike deletion included), or `regenerate` on an account with no second factor |
 | `StepUpRequiredError` | 403 | `STEP_UP_REQUIRED` | an enrolled account's device is outside the window |
+| `SecondFactorEnrolmentRequiredError` | 403 | `SECOND_FACTOR_ENROLMENT_REQUIRED` | the app requires a factor and this account has no listed one; every route but the enrolment routes — see [Requiring a second factor](#requiring-a-second-factor-secondfactor) |
+| `SecondFactorMethodDisabledError` | 404 | `SECOND_FACTOR_METHOD_DISABLED` | a route of a method the policy does not list, or `recovery/regenerate` with `recoveryCodes: false` |
+| `SecondFactorRequiredError` | 409 | `SECOND_FACTOR_REQUIRED` | removing the last listed factor through a route while one is required |
 | `MfaAlreadyEnrolledError` | 409 | — | `totp/enroll` on a confirmed enrolment |
 | `MfaConfigError` | 500 | — | `SPFN_AUTH_TOKEN_ENCRYPTION_KEYS` unset, or a stored secret naming a key id no longer in it |
 | `SessionPendingMismatchError` | 401 | `SESSION_PENDING_MISMATCH` | minted by the proxy: a verified step-up whose challenge or key is not the one this browser's pending cookie holds |
@@ -3429,9 +3583,13 @@ Send it with a [sign-out-everywhere link](#the-sign-out-everywhere-link), which 
 notice should offer.
 
 Both `authLoginEvent` and `authDeviceRegisteredEvent` carry `mfaEnrolled: boolean`, computed
-as the event is emitted. It is the hook an app uses to offer a [second
-factor](#second-factor-mfa) at a first login or when a new device appears; the package itself
-never blocks an account that has none.
+as the event is emitted — whether the account has a factor of a method the policy lists. It is
+the hook an app uses to offer a [second factor](#second-factor-mfa) at a first login or when a
+new device appears. Without
+[`secondFactor: { required: true }`](#requiring-a-second-factor-secondfactor) the package never
+blocks an account that has none; with it, the sign-in of such an account still emits
+`authLoginEvent`, with **`secondFactorEnrolmentRequired: true`** (always present, `false`
+otherwise), and its session may only enrol.
 
 A sign-in that answered **202** because the account needs a [step-up on a new
 device](#step-up-on-a-new-device) emits neither event, and does not move `lastLoginAt` either.
@@ -3453,7 +3611,8 @@ Payload types: `AuthLoginPayload`, `AuthRegisterPayload`, `AuthPasswordResetPayl
 disconnect, see the OAuth unlink-notify section), `OAuthLinkedPayload`, `OAuthLinkRemovedPayload`,
 `PasskeyEnrolledPayload`,
 `PasskeyRevokedPayload`. `AuthLoginPayload` and `AuthDeviceRegisteredPayload` both gained
-`mfaEnrolled` in 0.3.0-beta.23. These events also bind to `@spfn/core/job`
+`mfaEnrolled` in 0.3.0-beta.23; `AuthLoginPayload` gained `secondFactorEnrolmentRequired` with
+the second-factor policy (#309). These events also bind to `@spfn/core/job`
 jobs via `.on(event)`.
 
 ## Registration gate (`beforeRegister`)

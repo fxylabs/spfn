@@ -160,6 +160,10 @@ export const passkeyLoginOptions = route.post('/_auth/passkeys/login/options')
  * The device-key fields are injected by the Next.js proxy interceptor, exactly
  * as they are for `login` — a passkey proves who is asking, and the ordinary
  * device key is still what later requests are signed with.
+ *
+ * 202 with a challenge, as `login` answers, in one case only: the
+ * second-factor policy does not list passkeys, and an account enrolled in a
+ * listed method signs in on a device it has never seen.
  */
 export const passkeyLoginVerify = route.post('/_auth/passkeys/login/verify')
     .input({
@@ -184,11 +188,13 @@ export const passkeyLoginVerify = route.post('/_auth/passkeys/login/verify')
     {
         const { body } = await c.data();
 
-        return await finishPasskeyLoginService({
+        const result = await finishPasskeyLoginService({
             ...body,
             ...deviceProvenance(c.raw),
             response: body.response as Parameters<typeof finishPasskeyLoginService>[0]['response'],
         });
+
+        return result.mfaRequired ? c.accepted(result) : result;
     });
 
 /**

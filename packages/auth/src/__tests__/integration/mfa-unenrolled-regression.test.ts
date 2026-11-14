@@ -148,7 +148,7 @@ describe.skipIf(!dbAvailable)('an account with no second factor', () =>
             .toEqual(['email', 'mfaRequired', 'passwordChangeRequired', 'publicId', 'userId']);
     });
 
-    it('announces the login with mfaEnrolled false, and nothing else about the second factor', async () =>
+    it('announces the login with mfaEnrolled false and secondFactorEnrolmentRequired false, and nothing else about the second factor', async () =>
     {
         const seen: Record<string, unknown>[] = [];
         const unsubscribe = authLoginEvent.subscribe(async (payload) => void seen.push(payload));
@@ -159,8 +159,12 @@ describe.skipIf(!dbAvailable)('an account with no second factor', () =>
             await new Promise(resolve => setTimeout(resolve, 30));
 
             expect(seen).toHaveLength(1);
-            expect(Object.keys(seen[0]).sort()).toEqual(['email', 'mfaEnrolled', 'phone', 'provider', 'userId']);
+            // `secondFactorEnrolmentRequired` is the second-factor policy's field
+            // (#309, decision D1): always present, false without a policy.
+            expect(Object.keys(seen[0]).sort())
+                .toEqual(['email', 'mfaEnrolled', 'phone', 'provider', 'secondFactorEnrolmentRequired', 'userId']);
             expect(seen[0].mfaEnrolled).toBe(false);
+            expect(seen[0].secondFactorEnrolmentRequired).toBe(false);
         }
         finally
         {

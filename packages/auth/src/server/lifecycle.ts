@@ -16,6 +16,7 @@ import { configureDeletion } from './lib/deletion-config';
 import { configureDeviceAuth } from './lib/device-auth-config';
 import { configureDeviceLink } from './lib/device-link-config';
 import { assertChannelsConsistent, configureChannels, type AuthChannelsOptions } from './lib/channels-config';
+import { assertSecondFactorPolicy, configureSecondFactor, type SecondFactorOptions } from './lib/second-factor-policy';
 import { assertOAuthRedirectUris } from './lib/oauth/redirect-uri-check';
 import { assertAppleWebConfig } from './lib/oauth/apple-config-check';
 import { assertAndroidAssetLinks, assertAppleRelayUrls } from './lib/oauth/android-config-check';
@@ -345,6 +346,41 @@ export interface AuthLifecycleOptions extends AuthInitOptions
      * ```
      */
     channels?: AuthChannelsOptions;
+
+    /**
+     * The application's second-factor policy
+     *
+     * Omitted, nothing changes: a second factor is something an account opts
+     * into, with either method, and comes with recovery codes.
+     *
+     * - `required` (default `false`) — an account with none of the listed
+     *   methods may only enrol one. Every signed-in route answers it 403
+     *   `SECOND_FACTOR_ENROLMENT_REQUIRED` except the enrolment routes,
+     *   `optionalAuth` reads it as anonymous, and its `LoginResult` carries
+     *   `secondFactorEnrolmentRequired: true`. Removing the last listed factor
+     *   through a route is 409 `SECOND_FACTOR_REQUIRED`; `disableMfaService`
+     *   called by the application is the operator's re-issue path. Boot is
+     *   refused while `channels.deviceCode` or `channels.deviceLink` is on.
+     * - `methods` (default `['totp', 'passkey']`) — only these count as
+     *   enrolled and are accepted as a proof; the others' second-factor routes
+     *   answer 404 `SECOND_FACTOR_METHOD_DISABLED`. `['passkey']` raises passkey
+     *   user verification to `required`. `[]` refuses boot.
+     * - `recoveryCodes` (default `true`) — `false` issues none, accepts none,
+     *   and answers `recovery/regenerate` with that 404.
+     *
+     * A later `createAuthLifecycle()` that omits it leaves it as it is; one
+     * that states a different policy refuses boot in `afterInfrastructure`,
+     * and the first statement stays in force until then.
+     *
+     * @example
+     * ```typescript
+     * createAuthLifecycle({
+     *     channels: { deviceCode: false, deviceLink: false },
+     *     secondFactor: { required: true, methods: ['passkey'], recoveryCodes: false },
+     * })
+     * ```
+     */
+    secondFactor?: SecondFactorOptions;
 }
 
 export function createAuthLifecycle(options: AuthLifecycleOptions = {}): AuthLifecycleConfig
@@ -374,6 +410,11 @@ export function createAuthLifecycle(options: AuthLifecycleOptions = {}): AuthLif
     // leaves an earlier call's channels as they are; a contradicting one is
     // refused below, in afterInfrastructure.
     configureChannels(options.channels);
+
+    // Same again: the enrolment check in `authenticate`, the method gates and
+    // the proof checks read it at request time. Omitted leaves it as it is; a
+    // contradicting statement is refused below, in afterInfrastructure.
+    configureSecondFactor(options.secondFactor);
 
     return {
         /**
@@ -419,6 +460,12 @@ export function createAuthLifecycle(options: AuthLifecycleOptions = {}): AuthLif
             // Same reasoning: two createAuthLifecycle() calls that stated
             // different channels. Silent when at most one stated them.
             assertChannelsConsistent();
+            // Same reasoning, after the channels it reads: a contradicting
+            // second statement, no method listed, a required factor beside a
+            // device channel that proves none, passkey-only beside a weaker
+            // user verification, TOTP-only with no keyring. Silent when no
+            // policy was stated.
+            assertSecondFactorPolicy();
 
             await initializeAuth(options);
             // Before any account is looked up: the repository folds addresses to

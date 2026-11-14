@@ -24,7 +24,13 @@ import {
 
 import type { AuthChannel } from '../lib/channels-config';
 import { KEY_TTL_DAYS } from '../lib/key-policy';
-import { ROUTE_CHANNELS, type RouteChannel } from '../routes/channels';
+import {
+    ROUTE_CHANNELS,
+    ROUTE_ENROLMENT,
+    ROUTE_SECOND_FACTOR_METHODS,
+    type RouteChannel,
+    type RouteEnrolment,
+} from '../routes/channels';
 import { KEY_ALGORITHM, KEY_PLATFORM, SESSION_BINDINGS } from '../types';
 import { CLIENT_PROOF_CONTENT_TYPE, CLIENT_PROOF_HEADERS } from './admission';
 import {
@@ -386,8 +392,29 @@ import { CLIENT_IDENTITY_HEADERS, CLIENT_KINDS, SERVER_CONTRACT_HEADERS } from '
  * table the server gates with. Still a patch: one code joins the list, and
  * `closedChannel` is description beside an operation whose request and
  * response are unchanged.
+ *
+ * 0.14.0 carries the second-factor policy (#309). An app can require a second
+ * factor (`createAuthLifecycle({ secondFactor: { required: true } })`), and an
+ * account with none of the listed methods then signs in to a session that can
+ * do nothing but enrol one. `RegisterResponse`, `LoginResponse`,
+ * `MfaVerifyResponse` and `OauthNativeResponse` gain the optional
+ * `secondFactorEnrolmentRequired`, present and true exactly for such a session.
+ * `PollDeviceAuthResponse` gains it with them, because its approved branch is a
+ * sign-in spread whole — though the policy refuses boot while device-code login
+ * or device link is on, so no approval answers it. Three codes join
+ * the list — `SecondFactorEnrolmentRequiredError` (403),
+ * `SecondFactorMethodDisabledError` (404) and `SecondFactorRequiredError`
+ * (409) — and each operation that can answer the first two says so with
+ * `secondFactor`, read from `ROUTE_ENROLMENT` and `ROUTE_SECOND_FACTOR_METHODS`,
+ * the tables the server gates with.
+ *
+ * A minor, by 0.11.0's rule: optional fields the server sends are new declared
+ * fields every generated decoder meets. Absent without the policy, so a
+ * response from an app that never states one is byte-identical to 0.13.8's;
+ * the range moves with the minor, since its floor is mechanically the current
+ * minor's `.0`.
  */
-export const CONTRACT_VERSION = '0.13.8';
+export const CONTRACT_VERSION = '0.14.0';
 export const CONTRACT_MAJOR = 0;
 export const CONTRACT_NAME = 'spfn-mobile-contract';
 
@@ -398,7 +425,7 @@ export const CONTRACT_NAME = 'spfn-mobile-contract';
  * consumer decodes as required became optional, so that consumer would reject a
  * 202 sign-in outright. A patch leaves the floor where it is; 0.10.1 did.
  */
-export const CONTRACT_SUPPORTED_RANGE = '>=0.13.0 <0.14.0';
+export const CONTRACT_SUPPORTED_RANGE = '>=0.14.0 <0.15.0';
 
 /** What spfn-mobile's validator expects an upstream-exported bundle to name. */
 export const EXPORT_ORIGIN = 'spfn-primitives-ci-export';
@@ -431,8 +458,11 @@ export const EXPORT_ORIGIN = 'spfn-primitives-ci-export';
  *
  * 6.2.0 is a minor for the same reason: it adds the `channels` section and an
  * optional `closedChannel` on an operation, and takes nothing away.
+ *
+ * 6.3.0 is a minor again: the `secondFactor` section and an optional
+ * `secondFactor` on an operation.
  */
-export const EXPORTER_VERSION = '@spfn/auth/contract-bundle@6.2.0';
+export const EXPORTER_VERSION = '@spfn/auth/contract-bundle@6.3.0';
 
 /**
  * The scalars the grammar admits.
@@ -680,6 +710,7 @@ export const CONTRACT_TYPES: readonly TypeDeclaration[] = [
             required('publicId', 'string'),
             optional('email', 'string'),
             optional('phone', 'string'),
+            optional('secondFactorEnrolmentRequired', 'boolean'),
         ],
     },
     {
@@ -718,6 +749,7 @@ export const CONTRACT_TYPES: readonly TypeDeclaration[] = [
             optional('passwordChangeRequired', 'boolean'),
             optional('sessionBinding', 'KeyBinding'),
             optional('keyExpiresAtMillis', 'integer'),
+            optional('secondFactorEnrolmentRequired', 'boolean'),
         ],
     },
     /**
@@ -775,6 +807,7 @@ export const CONTRACT_TYPES: readonly TypeDeclaration[] = [
             optional('passwordChangeRequired', 'boolean'),
             optional('sessionBinding', 'KeyBinding'),
             optional('keyExpiresAtMillis', 'integer'),
+            optional('secondFactorEnrolmentRequired', 'boolean'),
         ],
     },
     /**
@@ -829,6 +862,7 @@ export const CONTRACT_TYPES: readonly TypeDeclaration[] = [
             optional('userId', 'string'),
             optional('keyId', 'string'),
             optional('isNewUser', 'boolean'),
+            optional('secondFactorEnrolmentRequired', 'boolean'),
         ],
     },
     /**
@@ -977,6 +1011,7 @@ export const CONTRACT_TYPES: readonly TypeDeclaration[] = [
             optional('passwordChangeRequired', 'boolean'),
             optional('sessionBinding', 'KeyBinding'),
             optional('keyExpiresAtMillis', 'integer'),
+            optional('secondFactorEnrolmentRequired', 'boolean'),
         ],
     },
     /**
@@ -1100,6 +1135,12 @@ const RETRYABLE = false;
 /** What an operation of a closed sign-in channel answers. */
 const CHANNEL_DISABLED_CODE = 'ChannelDisabledError';
 
+/** What a signed-in operation answers a session that may only enrol a second factor. */
+const SECOND_FACTOR_ENROLMENT_REQUIRED_CODE = 'SecondFactorEnrolmentRequiredError';
+
+/** What a second-factor operation of a method the app does not list answers. */
+const SECOND_FACTOR_METHOD_DISABLED_CODE = 'SecondFactorMethodDisabledError';
+
 interface RestSurfaceError
 {
     code: string;
@@ -1169,6 +1210,12 @@ interface RestSurfaceError
  * app turned sign-up off and the sign-in would have created an account (#308). *
  * `ChannelDisabledError` (contract 0.13.8) is every operation's that carries
  * `closedChannel`: the app turned that sign-in channel off (#308).
+ *
+ * `SecondFactorEnrolmentRequiredError` and `SecondFactorMethodDisabledError`
+ * (contract 0.14.0) are every operation's whose `secondFactor` names them (#309).
+ * `SecondFactorRequiredError` is an account screen's — removing the last listed
+ * factor — and no operation on this surface can meet it; it is listed so the
+ * vocabulary is whole.
  */
 const REST_SURFACE_ERRORS: readonly RestSurfaceError[] = [
     {
@@ -1272,6 +1319,29 @@ const REST_SURFACE_ERRORS: readonly RestSurfaceError[] = [
             + 'every operation of that channel answers the same until the app turns it back on',
     },
     {
+        code: SECOND_FACTOR_ENROLMENT_REQUIRED_CODE,
+        httpStatus: 403,
+        retryable: false,
+        summary:
+            'the app requires a second factor and this account has none of the listed methods. The session is '
+            + 'not gone — it is the one to enrol with; send the person to enrolment, then retry',
+    },
+    {
+        code: SECOND_FACTOR_METHOD_DISABLED_CODE,
+        httpStatus: 404,
+        retryable: false,
+        summary:
+            'the app does not offer this second-factor method, or recovery codes — details.method names which',
+    },
+    {
+        code: 'SecondFactorRequiredError',
+        httpStatus: 409,
+        retryable: false,
+        summary:
+            'the app requires a second factor and this change would remove the account\'s last listed one — '
+            + 'enrol another first. Nothing changed',
+    },
+    {
         code: 'MfaVerificationFailedError',
         httpStatus: 401,
         retryable: false,
@@ -1357,16 +1427,52 @@ const REST_SURFACE_ERRORS: readonly RestSurfaceError[] = [
 
 /**
  * An operation as the bundle states it: without the route key it is matched to
- * the router by, and with `closedChannel` when that route belongs to a channel
- * an app can turn off.
+ * the router by, with `closedChannel` when that route belongs to a channel an
+ * app can turn off, and with `secondFactor` when the second-factor policy can
+ * refuse it.
  */
 function exportedOperation({ route, ...operation }: ContractOperation): Record<string, unknown>
 {
     const channels = route === undefined ? [] : channelsOf(ROUTE_CHANNELS[route]);
+    const secondFactor = secondFactorOf(operation, route);
 
-    return channels.length === 0
-        ? operation
-        : { ...operation, closedChannel: { channels, error: CHANNEL_DISABLED_CODE } };
+    return {
+        ...operation,
+        ...channels.length === 0 ? {} : { closedChannel: { channels, error: CHANNEL_DISABLED_CODE } },
+        ...secondFactor === null ? {} : { secondFactor },
+    };
+}
+
+/**
+ * The second-factor refusals an operation can meet, from the server's own tables.
+ *
+ * Enrolment: every signed-in operation that is not an enrolment route — an
+ * app's own (no route key) included, since an app route is never one. A route
+ * that is an enrolment route only while its method is listed names that method.
+ * Method: the route's own gate, when it has one.
+ */
+function secondFactorOf(
+    operation: Omit<ContractOperation, 'route'>,
+    route: ContractOperation['route'],
+): Record<string, unknown> | null
+{
+    const enrolment: RouteEnrolment = route === undefined ? 'none' : ROUTE_ENROLMENT[route];
+    const method = route === undefined ? undefined : (ROUTE_SECOND_FACTOR_METHODS as Record<string, string>)[route];
+    const refusals: Record<string, unknown> = {};
+
+    if (operation.authProfile === 'clientProofV1' && enrolment !== 'always' && enrolment !== method)
+    {
+        refusals.enrolmentRequired = enrolment === 'none'
+            ? { error: SECOND_FACTOR_ENROLMENT_REQUIRED_CODE }
+            : { error: SECOND_FACTOR_ENROLMENT_REQUIRED_CODE, unlessListed: enrolment };
+    }
+
+    if (method !== undefined)
+    {
+        refusals.methodDisabled = { method, error: SECOND_FACTOR_METHOD_DISABLED_CODE };
+    }
+
+    return Object.keys(refusals).length === 0 ? null : refusals;
 }
 
 function channelsOf(channel: RouteChannel): AuthChannel[]
@@ -1767,6 +1873,20 @@ export function buildMobileContractBundle(): MobileContractBundle
                 + 'a call that fails admission is refused as any failed admission is',
             closedChannel:
                 'channels lists the channels whose being off closes the operation; error is the code it then answers',
+        },
+        secondFactor: {
+            appliesTo: 'every operation that carries secondFactor',
+            rule:
+                'an app can require a second factor. A sign-in then answers secondFactorEnrolmentRequired: true '
+                + 'for an account with none of the listed methods, and that session is refused with '
+                + `${SECOND_FACTOR_ENROLMENT_REQUIRED_CODE} (403) on every operation whose secondFactor names `
+                + 'enrolmentRequired, until a factor is enrolled — on the same session, no new sign-in. It is not '
+                + 'a signed-out session and must not be cleared. An operation of a second-factor method the app '
+                + `does not list answers ${SECOND_FACTOR_METHOD_DISABLED_CODE} (404) with details.method`,
+            enrolmentRequired:
+                'error is the code; unlessListed names the method whose being listed makes the operation an '
+                + 'enrolment route the session may use',
+            methodDisabled: 'method is what the app must list for the operation to exist; error is the code otherwise',
         },
         errorEnvelope: {
             shape: '{"error":{"code":<string>,"message":<string>,"requestId":<string>}}',

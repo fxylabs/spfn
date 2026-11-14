@@ -21,12 +21,13 @@ const { keysRepository } = vi.hoisted(() => ({
     },
 }));
 
-// `emitDeviceRegistered` reads the enrolment flag straight from its repository
-// rather than through the second-factor service, which would put the two in a
-// cycle (#95). Answered false here, as the rest of this file assumes.
+// `emitDeviceRegistered` reads the enrolment flag through the second-factor
+// policy service rather than the MFA service, which would put the two in a
+// cycle (#95) — and that service asks the repository under the listed methods
+// (#309). Answered false here, as the rest of this file assumes.
 vi.mock('../../server/repositories', () => ({
     keysRepository,
-    mfaEnrolmentRepository: { isEnrolled: vi.fn(async () => false) },
+    mfaEnrolmentRepository: { isEnrolledIn: vi.fn(async () => false) },
     usersRepository: { currentKeyEpoch: vi.fn(async () => 0) },
 }));
 // `key.service` now asks the second-factor service two questions — whether the

@@ -28,6 +28,7 @@ import { registerPublicKeyService } from './key.service';
 import type { MfaChallengeHandle } from './login-result';
 import { updateLastLoginService } from './user.service';
 import { mfaEnrolledForUser } from './mfa.service';
+import { secondFactorEnrolmentFields } from './second-factor-policy.service';
 import { authLoginEvent, authRegisterEvent } from '../events';
 
 export interface OAuthNativeParams
@@ -83,6 +84,8 @@ export interface OAuthNativeResult
     userId?: string;
     keyId?: string;
     isNewUser?: boolean;
+    /** As on `LoginResult`: the session may only enrol a second factor. */
+    secondFactorEnrolmentRequired?: boolean;
 }
 
 /**
@@ -244,11 +247,16 @@ async function persistNativeLogin(
         // have a second factor. Read before the callback is queued, so the
         // callback stays synchronous and lands when consumers expect it to.
         const mfaEnrolled = isNewUser ? false : await mfaEnrolledForUser(userId);
+        const enrolment = await secondFactorEnrolmentFields(userId);
 
         onAfterCommit(() => (isNewUser
             ? authRegisterEvent.emit(eventPayload)
-            : authLoginEvent.emit({ ...eventPayload, mfaEnrolled })));
+            : authLoginEvent.emit({
+                ...eventPayload,
+                mfaEnrolled,
+                secondFactorEnrolmentRequired: enrolment.secondFactorEnrolmentRequired === true,
+            })));
 
-        return { mfaRequired: false, userId: String(userId), keyId: params.keyId, isNewUser };
+        return { mfaRequired: false, userId: String(userId), keyId: params.keyId, isNewUser, ...enrolment };
     }, { context: 'auth:oauth-native' });
 }

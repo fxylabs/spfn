@@ -20,6 +20,7 @@ import { assertKeyMatchesAlgorithm, hashPassword } from '../helpers';
 import { invitationCreatedEvent, invitationAcceptedEvent } from '../events';
 import { emitDeviceRegistered } from './device-registration.service';
 import { BadRequestError, NotFoundError, ConflictError } from '@spfn/core/errors';
+import { secondFactorEnrolmentFields } from './second-factor-policy.service';
 
 /**
  * Generate unique invitation token (UUID v4)
@@ -338,6 +339,7 @@ export async function acceptInvitation(params: {
         userId: newUser.id,
         email: newUser.email!,
         role: role.name,
+        ...await secondFactorEnrolmentFields(newUser.id),
     };
 }
 

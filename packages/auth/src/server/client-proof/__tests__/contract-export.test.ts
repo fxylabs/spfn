@@ -26,6 +26,9 @@ import {
 
 import {
     ChannelDisabledError,
+    SecondFactorEnrolmentRequiredError,
+    SecondFactorMethodDisabledError,
+    SecondFactorRequiredError,
     DeviceAuthAlreadyHandledError,
     DeviceAuthDeniedError,
     DeviceAuthExpiredError,
@@ -50,7 +53,7 @@ import {
     renderMobileContractExport,
 } from '../contract-bundle';
 import { KEY_TTL_DAYS } from '../../lib/key-policy';
-import { ROUTE_CHANNELS } from '../../routes/channels';
+import { ROUTE_CHANNELS, ROUTE_ENROLMENT } from '../../routes/channels';
 import {
     AUTH_SURFACE_OPERATIONS,
     CONTRACT_OPERATIONS,
@@ -183,11 +186,27 @@ describe('operations describe the routes the server answers', () =>
     it('the bundle carries exactly the implemented operations', () =>
     {
         // Less the route key each /_auth operation is matched to the router by,
-        // which is not exported; closedChannel is checked on its own below.
+        // which is not exported; closedChannel and secondFactor are checked on
+        // their own below.
         const exported = (bundle.operations as Record<string, unknown>[])
-            .map(({ closedChannel: _closedChannel, ...operation }) => operation);
+            .map(({ closedChannel: _closedChannel, secondFactor: _secondFactor, ...operation }) => operation);
 
         expect(exported).toEqual(ALL_OPERATIONS.map(({ route: _route, ...operation }) => operation));
+    });
+
+    it('#309: an operation carries secondFactor exactly when it is signed in and not an enrolment route', () =>
+    {
+        const marked = (bundle.operations as { id: string; authProfile: string; secondFactor?: unknown }[])
+            .filter((operation) => operation.secondFactor !== undefined);
+
+        expect(marked.map((operation) => operation.id)).toEqual(ALL_OPERATIONS
+            .filter((operation) => operation.authProfile === 'clientProofV1')
+            .filter((operation) => operation.route === undefined || ROUTE_ENROLMENT[operation.route] === 'none')
+            .map((operation) => operation.id));
+        expect(marked.every((operation) => (operation.secondFactor as Record<string, unknown>).enrolmentRequired !== undefined))
+            .toBe(true);
+        expect(marked.map((operation) => operation.secondFactor))
+            .toEqual(marked.map(() => ({ enrolmentRequired: { error: 'SecondFactorEnrolmentRequiredError' } })));
     });
 
     it('#308: an operation carries closedChannel exactly when ROUTE_CHANNELS gates its route', () =>
@@ -1474,6 +1493,22 @@ describe('declared errors match the refusals', () =>
         expect(entry?.surface).toBe('rest');
     });
 
+    it.each([
+        [new SecondFactorEnrolmentRequiredError(), 403, 'SECOND_FACTOR_ENROLMENT_REQUIRED'],
+        [new SecondFactorMethodDisabledError(), 404, 'SECOND_FACTOR_METHOD_DISABLED'],
+        [new SecondFactorRequiredError(), 409, 'SECOND_FACTOR_REQUIRED'],
+    ])('#309: %s carries the status its error class carries', (thrown, status, code) =>
+    {
+        const entry = declared.find((candidate) => candidate.code === thrown.name);
+
+        expect(entry).toBeDefined();
+        expect(entry?.httpStatus).toBe(thrown.statusCode);
+        expect(entry?.httpStatus).toBe(status);
+        expect(thrown.code).toBe(code);
+        expect(entry?.retryable).toBe(false);
+        expect(entry?.surface).toBe('rest');
+    });
+
     it('#308: the channel-disabled refusal carries the status its error class carries', () =>
     {
         // Added in 0.13.8 (#308) beside the signup-disabled refusal, compared
@@ -1608,9 +1643,9 @@ describe('declared proof rules match the implementation', () =>
         replayWindowMillis: number;
     };
 
-    it('#308: the contract line is the revision that lists the signup- and channel-disabled refusals', () =>
+    it('#309: the contract line is the revision that carries the second-factor policy', () =>
     {
-        expect(bundle.contractVersion).toBe('0.13.8');
+        expect(bundle.contractVersion).toBe('0.14.0');
     });
 
     it('the supported range floor is the current minor, as the 0.x rule has it', () =>
@@ -1619,8 +1654,9 @@ describe('declared proof rules match the implementation', () =>
         // the range's floor is mechanically that minor's `.0`. 0.13.0 moves it
         // for the strongest form of the reason: a sign-in's login fields became
         // optional, so a 0.12.x consumer would reject a 202 outright rather than
-        // merely not know about a new field.
-        expect(bundle.supportedRange).toBe('>=0.13.0 <0.14.0');
+        // merely not know about a new field. 0.14.0 moves it on 0.11.0's rule:
+        // fields the server sends, which every generated decoder meets.
+        expect(bundle.supportedRange).toBe('>=0.14.0 <0.15.0');
     });
 
     it('states the rule that binds a native id_token to the key it enrolls', () =>

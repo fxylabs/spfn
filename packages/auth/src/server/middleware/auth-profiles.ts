@@ -69,6 +69,7 @@ import { clientProofRefusalResponse } from '../client-proof/refusal-response';
 import { getClientProofReplayStore } from '../client-proof/replay-store';
 import { readContextClientIdentity } from '../client-proof/version-middleware';
 import { profileLocale, type ProfileLocale } from '../lib/profile-locale';
+import { assertSecondFactorAdmits } from '../services/second-factor-policy.service';
 
 /** What a verified request leaves in the context — one shape for every scheme. */
 export interface AuthContext
@@ -136,8 +137,17 @@ export function selectAuthProfile(c: Context): AuthProfileVerifier | null
  * Loads the user for an authenticated key and applies the account-status
  * rules. One implementation for every scheme: the Bearer path and the profile
  * verifiers call this, so a status added here gates both identically.
+ *
+ * The second-factor policy is one of those rules (#309). While the application
+ * requires a second factor, an account with none of the listed methods is
+ * refused with 403 `SECOND_FACTOR_ENROLMENT_REQUIRED` everywhere but on an
+ * enrolment route of `mainAuthRouter`, which is what `c` is for: the request is
+ * classified by method and path. A caller that passes no context gets no
+ * exemption. Without a required policy nothing is read.
+ *
+ * @throws SecondFactorEnrolmentRequiredError
  */
-export async function resolveAuthenticatedUser(userId: number): Promise<{
+export async function resolveAuthenticatedUser(userId: number, c?: Context): Promise<{
     user: User;
     role: string | null;
 } & ProfileLocale>
@@ -164,6 +174,8 @@ export async function resolveAuthenticatedUser(userId: number): Promise<{
 
         throw new AccountDisabledError({ status: user.status });
     }
+
+    await assertSecondFactorAdmits(user.id, c === undefined ? null : c.req);
 
     return { user, role: role?.name ?? null, ...profileLocale(chosenLocale) };
 }
@@ -387,7 +399,7 @@ async function verifyClientProofProfile(c: Context): Promise<AuthContext>
     }
 
     // 7. The same user-status path the Bearer scheme takes.
-    const { user, role, locale, chosenLocale } = await resolveAuthenticatedUser(keyRecord.userId);
+    const { user, role, locale, chosenLocale } = await resolveAuthenticatedUser(keyRecord.userId, c);
 
     // Fire-and-forget, as the Bearer path does — and with the address under the
     // same rule, so this surface neither erases `last_seen_ip` on every throttle

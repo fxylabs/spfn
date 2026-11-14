@@ -690,7 +690,7 @@ describe.skipIf(!dbAvailable)('session binding (case tables 6a, 6b, 6g)', () =>
             const fieldsOf = (name: string) => bundle.types.find(type => type.name === name)!.fields;
 
             expect(CONTRACT_VERSION.localeCompare('0.13.1', undefined, { numeric: true })).toBeGreaterThanOrEqual(0);
-            expect(CONTRACT_SUPPORTED_RANGE).toBe('>=0.13.0 <0.14.0');
+            expect(CONTRACT_SUPPORTED_RANGE).toBe('>=0.14.0 <0.15.0');
             expect(bundle.enums).toContainEqual({ name: 'KeyBinding', values: ['none', 'passkey'] });
 
             // Optional throughout: a consumer generated against 0.11.x reads
