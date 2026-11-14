@@ -81,6 +81,7 @@ import {
     NonceKeyBindingError,
     OAuthEmailInUseError,
     OAuthProviderLinkOnlyError,
+    SignupDisabledError,
     UnverifiedEmailLinkError,
 } from '@spfn/auth/errors';
 import { configureAuth } from '../../server/lib/config';
@@ -211,6 +212,18 @@ describe('native sign-in answers each failure path with its own code', () =>
         expect(registerPublicKeyService).not.toHaveBeenCalled();
     });
 
+    it('cell 6c — the app turned sign-up off and the sign-in would create an account (#308): SignupDisabledError 403', async () =>
+    {
+        const refusal = new SignupDisabledError({ details: { provider: 'kakao' } });
+        createOrLinkUser.mockRejectedValueOnce(refusal).mockRejectedValueOnce(refusal);
+        const key = generateClientKey();
+
+        await expect(oauthNativeService(paramsFor(key))).rejects.toMatchObject({ code: 'SIGNUP_DISABLED' });
+        expect(await refusalOf(() => oauthNativeService(paramsFor(key))))
+            .toEqual({ code: 'SignupDisabledError', status: 403 });
+        expect(registerPublicKeyService).not.toHaveBeenCalled();
+    });
+
     it('cell 7 — account not active: AccountDisabledError 403', async () =>
     {
         assertActiveForOAuthSession.mockRejectedValueOnce(new AccountDisabledError({ status: 'suspended' }));
@@ -260,6 +273,8 @@ describe('native sign-in answers each failure path with its own code', () =>
             { code: 'KeyIdAlreadyRegisteredError', status: 409, retryable: false },
             // Added in contract 0.13.7 (#156), cell 6b.
             { code: 'OAuthEmailInUseError', status: 409, retryable: false },
+            // Added in contract 0.13.8 (#308), cell 6c.
+            { code: 'SignupDisabledError', status: 403, retryable: false },
             { code: 'TooManyRequestsError', status: 429, retryable: true },
             { code: 'Error', status: 500, retryable: false },
         ];
@@ -312,8 +327,15 @@ describe('native sign-in answers each failure path with its own code', () =>
             'DeviceLinkWrongMatchError',
         ];
 
+        // A closed sign-in channel is the fifth (contract 0.13.8, #308): one code,
+        // answered by every operation that carries closedChannel — sign-up's
+        // register and the device-code and device-link operations, never native
+        // sign-in, whose refusal under signup: false is SignupDisabledError above.
+        // Held to its error class in contract-export.test.ts.
+        const channelCodes = ['ChannelDisabledError'];
+
         expect(declared.filter(e => e.surface === 'rest').map(e => e.code).sort())
-            .toEqual([...table.map(cell => cell.code), ...deviceCodes, ...mfaCodes, ...deviceLinkCodes].sort());
+            .toEqual([...table.map(cell => cell.code), ...deviceCodes, ...mfaCodes, ...deviceLinkCodes, ...channelCodes].sort());
     });
 
     it('the Android start (auth.enroll.oauthAppleRelayStart, contract 0.13.4) refuses only with listed codes', () =>

@@ -15,6 +15,7 @@ import { initOneTimeTokenManager } from './lib/one-time-token';
 import { configureDeletion } from './lib/deletion-config';
 import { configureDeviceAuth } from './lib/device-auth-config';
 import { configureDeviceLink } from './lib/device-link-config';
+import { assertChannelsConsistent, configureChannels, type AuthChannelsOptions } from './lib/channels-config';
 import { assertOAuthRedirectUris } from './lib/oauth/redirect-uri-check';
 import { assertAppleWebConfig } from './lib/oauth/apple-config-check';
 import { assertAndroidAssetLinks, assertAppleRelayUrls } from './lib/oauth/android-config-check';
@@ -305,6 +306,45 @@ export interface AuthLifecycleOptions extends AuthInitOptions
      * ```
      */
     authorizationServer?: AuthorizationServerOptions;
+
+    /**
+     * Which sign-in channels this application offers
+     *
+     * Every key is optional and defaults to `true`, so an application that
+     * passes nothing serves every route it served before. A channel set to
+     * `false` answers 404 `CHANNEL_DISABLED` (`ChannelDisabledError`) on each
+     * of its routes, before the route's rate limit, long poll or transaction
+     * runs. A signed-in route still runs the global `auth` middleware first,
+     * so an anonymous caller there is answered 401 and a signed-in one 404.
+     *
+     * A later `createAuthLifecycle()` that omits `channels` leaves them as
+     * they are; one that states different channels refuses boot in
+     * `afterInfrastructure`, and every channel either call closed stays closed.
+     *
+     * - `signup` — `register`, the verified-email signup link, and a
+     *   verification code with `purpose: 'registration'`. Also refuses the
+     *   account a first social sign-in would create (`SignupDisabledError`,
+     *   403 `SIGNUP_DISABLED`); a sign-in whose identity is linked, or that
+     *   attaches to an existing account under `oauthEmailMatch`, is untouched.
+     * - `passwordReset` — the reset link and a code with `purpose: 'password_reset'`
+     * - `deviceCode` — device-code login
+     * - `deviceLink` — device link
+     *
+     * Password sign-in has no key. Service functions ignore this setting and
+     * stay callable by the application — invitations and admin seeding create
+     * accounts whatever `signup` says.
+     *
+     * @example
+     * ```typescript
+     * createAuthLifecycle({
+     *     channels: {
+     *         signup: false,       // accounts are issued, not taken
+     *         deviceCode: false,
+     *     },
+     * })
+     * ```
+     */
+    channels?: AuthChannelsOptions;
 }
 
 export function createAuthLifecycle(options: AuthLifecycleOptions = {}): AuthLifecycleConfig
@@ -329,6 +369,12 @@ export function createAuthLifecycle(options: AuthLifecycleOptions = {}): AuthLif
     // see routes/oauth2/http.ts.
     configureAuthorizationServer(options.authorizationServer);
 
+    // Same again: every gated route reads this at request time and answers 404
+    // for a channel turned off — see routes/channels.ts. An omitted option
+    // leaves an earlier call's channels as they are; a contradicting one is
+    // refused below, in afterInfrastructure.
+    configureChannels(options.channels);
+
     return {
         /**
          * Initialize auth system after database is ready
@@ -336,8 +382,9 @@ export function createAuthLifecycle(options: AuthLifecycleOptions = {}): AuthLif
          * Performs:
          * 0. Refuses boot on an OAuth redirect URI override off the web app origin,
          *    on a partial Sign in with Apple web setup, on an Android relay or
-         *    assetlinks.json setup that cannot work, or on an authorization
-         *    server issuer no client could use
+         *    assetlinks.json setup that cannot work, on an authorization
+         *    server issuer no client could use, or on two lifecycles that
+         *    stated different channels
          * 1. Ensures admin account exists (creates if missing)
          * 2. Initializes RBAC system with built-in + custom roles/permissions
          * 3. Refuses boot on an SPFN_AUTH_ROLE_EMAIL_DOMAINS policy that cannot work
@@ -369,6 +416,9 @@ export function createAuthLifecycle(options: AuthLifecycleOptions = {}): AuthLif
             // initializeInfrastructure() and the process exits without ever
             // listening. Silent when no authorization server is configured.
             assertAuthorizationServerIssuer();
+            // Same reasoning: two createAuthLifecycle() calls that stated
+            // different channels. Silent when at most one stated them.
+            assertChannelsConsistent();
 
             await initializeAuth(options);
             // Before any account is looked up: the repository folds addresses to

@@ -80,6 +80,7 @@ export { OAUTH_LINK_OUTCOMES, isOAuthLinkOutcome, type OAuthLinkOutcome } from '
 
 export { createAuthLifecycle } from './server/lifecycle';
 export type { AuthLifecycleOptions, AuthLifecycleConfig } from './server/lifecycle';
+export type { AuthChannel, AuthChannelsOptions } from './server/lib/channels-config';
 
 // ============================================================================
 // Jobs

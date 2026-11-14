@@ -22,7 +22,9 @@ import {
     ServerTimeResponseSchema,
 } from '@spfn/core/server';
 
+import type { AuthChannel } from '../lib/channels-config';
 import { KEY_TTL_DAYS } from '../lib/key-policy';
+import { ROUTE_CHANNELS, type RouteChannel } from '../routes/channels';
 import { KEY_ALGORITHM, KEY_PLATFORM, SESSION_BINDINGS } from '../types';
 import { CLIENT_PROOF_CONTENT_TYPE, CLIENT_PROOF_HEADERS } from './admission';
 import {
@@ -30,6 +32,7 @@ import {
     CONTRACT_OPERATIONS,
     CORE_PREREQUISITE_OPERATIONS,
     IMPORTED_CORE_TIME_CONTRACT,
+    type ContractOperation,
 } from './contract-types';
 import {
     CLIENT_PROOF_PROFILE,
@@ -368,8 +371,23 @@ import { CLIENT_IDENTITY_HEADERS, CLIENT_KINDS, SERVER_CONTRACT_HEADERS } from '
  * first sign-in whose email an existing account already holds with this code.
  * A patch, by 0.10.1's rule: one code joins the open list, and no operation,
  * type or enum changes shape, so the supported range does not move.
+ *
+ * 0.13.8 lists `SignupDisabledError` (403) (#308). An app can turn sign-up off
+ * with `createAuthLifecycle({ channels: { signup: false } })`, and
+ * `auth.enroll.oauthNative` then refuses a first sign-in that would create an
+ * account with this code. A patch, by 0.10.1's rule: one code joins the open
+ * list, and no operation, type or enum changes shape, so the supported range
+ * does not move.
+ *
+ * 0.13.8 also lists `ChannelDisabledError` (404, `CHANNEL_DISABLED`) and marks
+ * each operation an app can switch off with `closedChannel`: sign-up closes
+ * `auth.enroll.register`, device-code login closes `auth.device.*`, device
+ * link closes `auth.deviceLink.*`. The set is read from `ROUTE_CHANNELS`, the
+ * table the server gates with. Still a patch: one code joins the list, and
+ * `closedChannel` is description beside an operation whose request and
+ * response are unchanged.
  */
-export const CONTRACT_VERSION = '0.13.7';
+export const CONTRACT_VERSION = '0.13.8';
 export const CONTRACT_MAJOR = 0;
 export const CONTRACT_NAME = 'spfn-mobile-contract';
 
@@ -410,8 +428,11 @@ export const EXPORT_ORIGIN = 'spfn-primitives-ci-export';
  *
  * 6.1.0 is a minor: it adds the `deviceLink` section, and every section and key
  * that was there is still there, meaning what it meant.
+ *
+ * 6.2.0 is a minor for the same reason: it adds the `channels` section and an
+ * optional `closedChannel` on an operation, and takes nothing away.
  */
-export const EXPORTER_VERSION = '@spfn/auth/contract-bundle@6.1.0';
+export const EXPORTER_VERSION = '@spfn/auth/contract-bundle@6.2.0';
 
 /**
  * The scalars the grammar admits.
@@ -1076,6 +1097,9 @@ const ERROR_SUMMARIES: Record<string, string> = {
  */
 const RETRYABLE = false;
 
+/** What an operation of a closed sign-in channel answers. */
+const CHANNEL_DISABLED_CODE = 'ChannelDisabledError';
+
 interface RestSurfaceError
 {
     code: string;
@@ -1140,6 +1164,11 @@ interface RestSurfaceError
  *
  * `OAuthEmailInUseError` (contract 0.13.7) is native sign-in's alone: the app
  * refuses a first sign-in whose email an existing account holds (#156).
+ *
+ * `SignupDisabledError` (contract 0.13.8) is native sign-in's alone too: the
+ * app turned sign-up off and the sign-in would have created an account (#308). *
+ * `ChannelDisabledError` (contract 0.13.8) is every operation's that carries
+ * `closedChannel`: the app turned that sign-in channel off (#308).
  */
 const REST_SURFACE_ERRORS: readonly RestSurfaceError[] = [
     {
@@ -1227,6 +1256,22 @@ const REST_SURFACE_ERRORS: readonly RestSurfaceError[] = [
             + '— sign in to that account another way and link the provider from settings',
     },
     {
+        code: 'SignupDisabledError',
+        httpStatus: 403,
+        retryable: false,
+        summary:
+            'this sign-in would have created an account and the app does not create accounts by sign-up '
+            + '— an account must exist, issued by the operator, before it can be signed in to',
+    },
+    {
+        code: CHANNEL_DISABLED_CODE,
+        httpStatus: 404,
+        retryable: false,
+        summary:
+            'the app turned off the sign-in channel this operation belongs to — details.channel names it, and '
+            + 'every operation of that channel answers the same until the app turns it back on',
+    },
+    {
         code: 'MfaVerificationFailedError',
         httpStatus: 401,
         retryable: false,
@@ -1309,6 +1354,30 @@ const REST_SURFACE_ERRORS: readonly RestSurfaceError[] = [
             + 'already spent. They answer alike on purpose, so a guess that landed cannot be told from one that did not',
     },
 ];
+
+/**
+ * An operation as the bundle states it: without the route key it is matched to
+ * the router by, and with `closedChannel` when that route belongs to a channel
+ * an app can turn off.
+ */
+function exportedOperation({ route, ...operation }: ContractOperation): Record<string, unknown>
+{
+    const channels = route === undefined ? [] : channelsOf(ROUTE_CHANNELS[route]);
+
+    return channels.length === 0
+        ? operation
+        : { ...operation, closedChannel: { channels, error: CHANNEL_DISABLED_CODE } };
+}
+
+function channelsOf(channel: RouteChannel): AuthChannel[]
+{
+    if (channel === 'always')
+    {
+        return [];
+    }
+
+    return typeof channel === 'string' ? [channel] : [...new Set(Object.values(channel))];
+}
 
 export interface MobileContractBundle
 {
@@ -1688,7 +1757,17 @@ export function buildMobileContractBundle(): MobileContractBundle
             ...CORE_PREREQUISITE_OPERATIONS,
             ...CONTRACT_OPERATIONS,
             ...AUTH_SURFACE_OPERATIONS,
-        ].map((operation) => ({ ...operation })),
+        ].map(exportedOperation),
+        channels: {
+            appliesTo: 'every operation that carries closedChannel',
+            rule:
+                'an app can turn a sign-in channel off. An operation of a closed channel answers '
+                + `${CHANNEL_DISABLED_CODE} (404) with details.channel naming the channel, before its rate limit `
+                + 'or anything else the operation does. A clientProofV1 operation still runs admission first, so '
+                + 'a call that fails admission is refused as any failed admission is',
+            closedChannel:
+                'channels lists the channels whose being off closes the operation; error is the code it then answers',
+        },
         errorEnvelope: {
             shape: '{"error":{"code":<string>,"message":<string>,"requestId":<string>}}',
             additionalFields:

@@ -339,6 +339,80 @@ bound to a passkey is the one exception: it lives for hours and a rotation carri
 rather than resetting it, because only `session/renew` may move that window — see
 [Session binding](#session-binding).
 
+### Which sign-in channels exist (`channels`)
+
+Every route above is mounted for every app. An app that offers fewer ways in says so once, in
+`createAuthLifecycle`; it is resolved when the lifecycle is built and read per request:
+
+```typescript
+createAuthLifecycle({
+    channels: {
+        signup: false,          // accounts are issued by an operator, never taken
+        passwordReset: true,
+        deviceCode: false,
+        deviceLink: false,
+    },
+})
+```
+
+Every key is optional and defaults to `true`, so an app that passes nothing serves exactly what it
+served before. A key that is not one of these four, or a value that is not a boolean, is refused at
+startup — either would leave open a channel the app believes it closed.
+
+A closed channel stays closed until the app itself says otherwise. A second `createAuthLifecycle()`
+that passes no `channels` leaves them as they are. One that states the same channels again is fine;
+one that states different channels refuses boot in `afterInfrastructure` with an error naming the
+channels that differ — and until then every channel either call closed stays closed.
+
+| channel | its routes |
+|---|---|
+| `signup` | `register`, `requestSignupLink`, `confirmSignupLink`, `completeSignup`; `sendVerificationCode` and `verifyCode` with `purpose: 'registration'` |
+| `passwordReset` | `requestPasswordReset`, `confirmPasswordReset`, `completePasswordReset`; `sendVerificationCode` and `verifyCode` with `purpose: 'password_reset'` |
+| `deviceCode` | `startDeviceAuth`, `startDeviceAuthWeb`, `pollDeviceAuth`, `getDeviceAuthInfo`, `approveDeviceAuth`, `denyDeviceAuth` |
+| `deviceLink` | `issueDeviceLink`, `redeemDeviceLink`, `redeemDeviceLinkWeb`, `getDeviceLinkStatus`, `confirmDeviceLink`, `denyDeviceLink`, `cancelDeviceLink`, `pollDeviceLink` |
+
+Every other route is always on. There is no key for password sign-in, so no setting leaves an app
+with no way in; whether a second factor is asked for is the second-factor policy's business, not
+this option's.
+
+**A channel turned off answers 404** (`ChannelDisabledError`, code `CHANNEL_DISABLED`,
+`details.channel` naming the channel) on each of its routes, before anything the route itself runs:
+no rate-limit budget is spent, no long poll is held open, no transaction begins and nothing is read
+from the database. The check is the first of the route's own middlewares, so the app's server-level
+middlewares run as they do on any route. On a public route that means every caller gets the 404; on
+a signed-in route (`getDeviceAuthInfo`, `approveDeviceAuth`, `denyDeviceAuth`, and the device-link
+issuer's five) the global `auth` middleware runs first, so an anonymous caller gets its `401` and a
+signed-in one the 404 — as the authorization server's signed-in routes answer when it is not
+configured. The routes still register (registration happens at import, before `createAuthLifecycle`
+runs), so the check is made per request, as the
+[authorization server's](#authorization-server-for-mcp-clients) is. A verification code is judged by
+its `purpose`: with `signup: false`, `purpose: 'password_reset'` is still sent, and the other way
+round.
+
+**`signup: false` also closes the social door.** It means no account exists that an operator did not
+issue, so a first sign-in with a provider that would create an account is refused —
+`SignupDisabledError`, 403, code `SIGNUP_DISABLED`, on the web callback (the error page gets
+`reason=signup_disabled`) and on native sign-in. Nothing is written: no account, no social row, no
+key. A sign-in whose provider identity is already linked signs in as before, and so does one that
+attaches to an existing account under [`oauthEmailMatch`](#when-a-first-sign-ins-email-matches-an-existing-account).
+`oauthEmailMatch: 'separate'` would create an account, so it is refused too.
+
+**Service functions do not read the setting.** `registerService`, `requestSignupLinkService`,
+`startDeviceAuthService` and the rest stay callable by the app, so an operator console that creates
+accounts with `signup: false` keeps working. Invitations (`acceptInvitation`) and
+[admin seeding](#admin-seeding) create accounts whatever `signup` says. The one exception is the
+social path above, because an account made by a first social sign-in is sign-up by another door.
+
+| Error | HTTP | `code` | When |
+|---|---|---|---|
+| `ChannelDisabledError` | 404 | `CHANNEL_DISABLED` | a route of a channel the app turned off; `details.channel` names it |
+| `SignupDisabledError` | 403 | `SIGNUP_DISABLED` | `signup: false`, and a first social sign-in would have created an account |
+
+The mobile contract lists `SignupDisabledError` and `ChannelDisabledError` since 0.13.8, and marks
+each operation a closed channel answers `ChannelDisabledError` on with `closedChannel`:
+`auth.enroll.register` (`signup`), the five `auth.device.*` (`deviceCode`) and
+`auth.deviceLink.redeem` / `auth.deviceLink.poll` (`deviceLink`).
+
 ### Migration — narrow a sign-in on `mfaRequired` before reading `userId`
 
 **Breaking in `@spfn/auth` 0.3.0-beta.25 / mobile contract 0.13.0.** A sign-in no
@@ -2512,6 +2586,7 @@ type. Branch on `reason`; show `error` if you like. The codes are the closed uni
 | `account_unavailable` | the account is disabled, pending deletion, or gone | unchanged |
 | `link_only` | the app made this provider [link-only](#link-only-providers-and-recent-authentication): it can be connected from a signed-in account, never used to sign in (added in 0.3.0-beta.50, #157) | a fixed sentence |
 | `email_in_use` | a first sign-in with this provider reported the email of an existing account and the app set [`oauthEmailMatch: 'reject'`](#when-a-first-sign-ins-email-matches-an-existing-account), or `'attach'` found that email on several accounts stored in different cases (added in 0.3.0-beta.51, #156) | a fixed sentence |
+| `signup_disabled` | a first sign-in with this provider would have created an account, and the app turned sign-up off with [`channels: { signup: false }`](#which-sign-in-channels-exist-channels) (#308) | a fixed sentence |
 | `failed` | anything else — missing `code`/`state`, an unverified email that would link an account (`oauthEmailMatch` unset or `'attach'`), a missing role | unchanged |
 
 `SPFN_AUTH_OAUTH_ERROR_URL` takes `{reason}` beside `{error}`
@@ -2638,7 +2713,7 @@ await authApi.oauthNative.call({
 
 Every refusal names itself. The response body carries `error.code` — the server's error class
 name — alongside the usual `__type`, so a client that has no TypeScript error registry can still
-tell the thirteen ways this call fails apart:
+tell the fourteen ways this call fails apart:
 
 | `error.code` | HTTP | What the client does |
 | --- | --- | --- |
@@ -2653,6 +2728,7 @@ tell the thirteen ways this call fails apart:
 | `OAuthProviderLinkOnlyError` | 403 | hide that provider's sign-in button — the app made it [link-only](#link-only-providers-and-recent-authentication) |
 | `KeyIdAlreadyRegisteredError` | 409 | generate a new keyId and retry |
 | `OAuthEmailInUseError` | 409 | tell the user an account with this email exists: sign in to it and link this provider — the app set [`oauthEmailMatch: 'reject'`](#when-a-first-sign-ins-email-matches-an-existing-account) |
+| `SignupDisabledError` | 403 | `code: 'SIGNUP_DISABLED'` — tell the user this app does not create accounts by sign-in; the app set [`channels: { signup: false }`](#which-sign-in-channels-exist-channels) |
 | `TooManyRequestsError` | 429 | **the only retry-the-same-request code** |
 | `Error` | 500 | generic failure |
 
@@ -3389,6 +3465,10 @@ signup policy (age gate, invite-only domains, block lists) inject a validator wi
 `invitation` (acceptance). Throwing rejects the registration; `RegistrationRejectedError` (403)
 is the recommended error. The hook receives the same `metadata` the app supplied to
 `register` / OAuth start / the invitation — never credentials.
+
+To turn sign-up off altogether rather than filter it, use
+[`channels: { signup: false }`](#which-sign-in-channels-exist-channels): the sign-up routes answer
+404 `CHANNEL_DISABLED` and a first social sign-in is refused with `SIGNUP_DISABLED` before this hook would run.
 
 ```typescript
 import { configureAuth } from '@spfn/auth/server';

@@ -103,6 +103,7 @@ import {
     OAuthEmailInUseError,
     OAuthStateExpiredError,
     OAuthStateInvalidError,
+    SignupDisabledError,
     UnverifiedEmailLinkError,
 } from '@spfn/auth/errors';
 import { ValidationError } from '@spfn/core/errors';
@@ -609,18 +610,25 @@ describe('OAuthCallback page flow reason codes (#126)', () =>
     it('R9 (types): the codes are a closed union, and the error outcome carries one', () =>
     {
         expectTypeOf<OAuthErrorReason>()
-            .toEqualTypeOf<'cancelled' | 'expired' | 'invalid_state' | 'no_cookie' | 'provider_error' | 'account_unavailable' | 'link_only' | 'email_in_use' | 'failed'>();
+            .toEqualTypeOf<'cancelled' | 'expired' | 'invalid_state' | 'no_cookie' | 'provider_error' | 'account_unavailable' | 'link_only' | 'email_in_use' | 'signup_disabled' | 'failed'>();
         expectTypeOf<'unknown_reason'>().not.toMatchTypeOf<OAuthErrorReason>();
         expectTypeOf<Extract<CallbackOutcome, { kind: 'error' }>['reason']>().toEqualTypeOf<OAuthErrorReason>();
-        expect(OAUTH_ERROR_REASONS).toHaveLength(9);
+        expect(OAUTH_ERROR_REASONS).toHaveLength(10);
     });
 
     it('C1 (#156): email_in_use is a reason code, and the email-match refusal maps to it', () =>
     {
-        expect(OAUTH_ERROR_REASONS).toHaveLength(9);
+        expect(OAUTH_ERROR_REASONS).toHaveLength(10);
         expect(OAUTH_ERROR_REASONS).toContain('email_in_use');
         expect(OAUTH_ERROR_REASONS.at(-1)).toBe('failed');
         expect(oauthErrorReason(new OAuthEmailInUseError())).toBe('email_in_use');
+    });
+
+    it('#308: signup_disabled is a reason code, and the sign-up refusal maps to it', () =>
+    {
+        expect(OAUTH_ERROR_REASONS).toContain('signup_disabled');
+        expect(OAUTH_ERROR_REASONS.at(-1)).toBe('failed');
+        expect(oauthErrorReason(new SignupDisabledError())).toBe('signup_disabled');
     });
 });
 

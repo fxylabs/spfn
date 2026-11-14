@@ -19,6 +19,7 @@ export const OAUTH_ERROR_REASONS = [
     'account_unavailable',
     'link_only',
     'email_in_use',
+    'signup_disabled',
     'failed',
 ] as const;
 
@@ -39,6 +40,8 @@ export const OAUTH_ERROR_REASONS = [
  * - `email_in_use` — a first sign-in with this provider reported the email of
  *   an existing account and the app set `oauthEmailMatch: 'reject'` (#156); the
  *   person can sign in to that account and link the provider from settings
+ * - `signup_disabled` — a first sign-in with this provider would have created
+ *   an account, and the app turned sign-up off (`channels: { signup: false }`)
  * - `failed` — anything else
  */
 export type OAuthErrorReason = typeof OAUTH_ERROR_REASONS[number];
