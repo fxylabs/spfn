@@ -9,19 +9,24 @@
  * compile time, at the router.
  *
  * The check is a route-level middleware rather than a call in the handler,
- * because a handler is too late. A disabled channel answers 404 before anything
- * else on the route runs: no rate-limit token is spent, no long poll opens a
- * waiter, no transaction begins, and an anonymous caller is not answered 401.
- * Route-level middlewares run after the server-level ones, so on a route that
- * relies on the global `auth` middleware the gate skips it and authenticates
- * itself, after the check — as `optionalAuth` and `opsOrUser` skip it.
+ * because a handler is too late. The gate is the first of the route's own
+ * middlewares, so a disabled channel answers 404 before anything else the route
+ * runs: no rate-limit token is spent, no long poll opens a waiter, no
+ * transaction begins.
+ *
+ * It does not reach in front of the server-level middlewares, which run before
+ * every route-level one. On a public route nothing there refuses, so every
+ * caller meets the 404. On a signed-in route the global `auth` middleware runs
+ * first, as it does on every signed-in route: an anonymous caller is answered
+ * its 401 and a signed-in one the 404 — the way the oauth2 signed-in routes
+ * answer when no authorization server is configured. An app's server-level
+ * middlewares see the principal exactly as they would without the gate.
  */
 
 import type { Context, MiddlewareHandler } from 'hono';
 import type { NamedMiddleware, RouteDef } from '@spfn/core/route';
 
 import { requireChannel, type AuthChannel } from '../lib/channels-config';
-import { authenticate } from '../middleware/authenticate';
 import type { VerificationPurpose } from './schema';
 
 /** A verification code belongs to the channel its `purpose` serves; other purposes are always on. */
@@ -142,7 +147,7 @@ export const ROUTE_CHANNELS = {
 } as const satisfies Record<string, RouteChannel>;
 
 /**
- * The routes with each one's channel check in front of everything else it runs.
+ * The routes with each one's channel check first among its own middlewares.
  *
  * A route missing from `channels` is refused here too, at import, so an
  * unclassified route cannot reach a running server even past the type check.
@@ -163,42 +168,24 @@ export function gateChannels<TRoutes extends Record<string, RouteDef<any, any, a
 
         return [key, channel === 'always'
             ? route
-            : { ...route, middlewares: [channelGate(channel, route), ...route.middlewares ?? []] }];
+            : { ...route, middlewares: [channelGate(channel), ...route.middlewares ?? []] }];
     })) as TRoutes;
 }
 
-/**
- * The gate for one route. On a route that relies on the global `auth`
- * middleware it skips that middleware and runs `authenticate` itself, after the
- * check, so a signed-in route of a closed channel answers 404 to everyone.
- */
-function channelGate(channel: Exclude<RouteChannel, 'always'>, route: RouteDef<any, any, any>): NamedMiddleware<'authChannel'>
+/** The gate for one route: the channel check, then the rest of the route. */
+function channelGate(channel: Exclude<RouteChannel, 'always'>): NamedMiddleware<'authChannel'>
 {
     const check = typeof channel === 'string'
         ? async () => requireChannel(channel)
         : purposeCheck(channel);
 
-    const publicGate: MiddlewareHandler = async (c, next) =>
+    const handler: MiddlewareHandler = async (c, next) =>
     {
         await check(c);
         await next();
     };
 
-    const authenticatingGate: MiddlewareHandler = async (c, next) =>
-    {
-        await check(c);
-
-        return await authenticate.handler(c, next);
-    };
-
-    return isPublic(route)
-        ? { name: 'authChannel', _name: 'authChannel', handler: publicGate }
-        : { name: 'authChannel', _name: 'authChannel', handler: authenticatingGate, skips: ['auth'] };
-}
-
-function isPublic(route: RouteDef<any, any, any>): boolean
-{
-    return route.skipMiddlewares === '*' || (route.skipMiddlewares ?? []).includes('auth');
+    return { name: 'authChannel', _name: 'authChannel', handler };
 }
 
 /**

@@ -25,6 +25,7 @@ import {
 } from '@spfn/core/server';
 
 import {
+    ChannelDisabledError,
     DeviceAuthAlreadyHandledError,
     DeviceAuthDeniedError,
     DeviceAuthExpiredError,
@@ -49,6 +50,7 @@ import {
     renderMobileContractExport,
 } from '../contract-bundle';
 import { KEY_TTL_DAYS } from '../../lib/key-policy';
+import { ROUTE_CHANNELS } from '../../routes/channels';
 import {
     AUTH_SURFACE_OPERATIONS,
     CONTRACT_OPERATIONS,
@@ -180,7 +182,34 @@ describe('operations describe the routes the server answers', () =>
 
     it('the bundle carries exactly the implemented operations', () =>
     {
-        expect(bundle.operations).toEqual(ALL_OPERATIONS.map((operation) => ({ ...operation })));
+        // Less the route key each /_auth operation is matched to the router by,
+        // which is not exported; closedChannel is checked on its own below.
+        const exported = (bundle.operations as Record<string, unknown>[])
+            .map(({ closedChannel: _closedChannel, ...operation }) => operation);
+
+        expect(exported).toEqual(ALL_OPERATIONS.map(({ route: _route, ...operation }) => operation));
+    });
+
+    it('#308: an operation carries closedChannel exactly when ROUTE_CHANNELS gates its route', () =>
+    {
+        const marked = (bundle.operations as { id: string; closedChannel?: unknown }[])
+            .filter((operation) => operation.closedChannel !== undefined)
+            .map((operation) => [operation.id, operation.closedChannel]);
+        const closedBy = (id: string) =>
+        {
+            const channel = ROUTE_CHANNELS[AUTH_SURFACE_OPERATIONS.find((operation) => operation.id === id)!.route!];
+
+            return { channels: [channel], error: 'ChannelDisabledError' };
+        };
+
+        expect(marked).toEqual([
+            'auth.enroll.register',
+            'auth.device.start', 'auth.device.poll', 'auth.device.info', 'auth.device.approve', 'auth.device.deny',
+            'auth.deviceLink.redeem', 'auth.deviceLink.poll',
+        ].map((id) => [id, closedBy(id)]));
+        expect(marked.map(([, closed]) => (closed as { channels: string[] }).channels[0]))
+            .toEqual(['signup', 'deviceCode', 'deviceCode', 'deviceCode', 'deviceCode', 'deviceCode', 'deviceLink', 'deviceLink']);
+        expect(AUTH_SURFACE_OPERATIONS.every((operation) => operation.route !== undefined)).toBe(true);
     });
 
     it('every operation names types the bundle declares', () =>
@@ -1445,6 +1474,21 @@ describe('declared errors match the refusals', () =>
         expect(entry?.surface).toBe('rest');
     });
 
+    it('#308: the channel-disabled refusal carries the status its error class carries', () =>
+    {
+        // Added in 0.13.8 (#308) beside the signup-disabled refusal, compared
+        // with its class for the same reason as the key-algorithm refusal above.
+        const thrown = new ChannelDisabledError();
+        const entry = declared.find((candidate) => candidate.code === thrown.name);
+
+        expect(entry).toBeDefined();
+        expect(entry?.httpStatus).toBe(thrown.statusCode);
+        expect(entry?.httpStatus).toBe(404);
+        expect(thrown.code).toBe('CHANNEL_DISABLED');
+        expect(entry?.retryable).toBe(false);
+        expect(entry?.surface).toBe('rest');
+    });
+
     it('no device refusal is retryable: the same request cannot be answered differently', () =>
     {
         // Every one of them is a fact about the record, not about load. A client
@@ -1564,7 +1608,7 @@ describe('declared proof rules match the implementation', () =>
         replayWindowMillis: number;
     };
 
-    it('#308: the contract line is the revision that lists the signup-disabled refusal', () =>
+    it('#308: the contract line is the revision that lists the signup- and channel-disabled refusals', () =>
     {
         expect(bundle.contractVersion).toBe('0.13.8');
     });

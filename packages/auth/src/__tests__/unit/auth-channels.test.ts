@@ -13,18 +13,21 @@ import { mainAuthRouter } from '@/server/routes';
 import { ROUTE_CHANNELS } from '@/server/routes/channels';
 import {
     AUTH_CHANNELS,
+    __resetChannelsForTests,
+    assertChannelsConsistent,
     configureChannels,
     isChannelEnabled,
     requireChannel,
     type AuthChannelsOptions,
 } from '@/server/lib/channels-config';
 import { createAuthLifecycle } from '@/server/lifecycle';
+import { AUTH_SURFACE_OPERATIONS } from '@/server/client-proof/contract-types';
 
 describe('channels (#308)', () =>
 {
     afterEach(() =>
     {
-        configureChannels();
+        __resetChannelsForTests();
     });
 
     it('C13: every key of mainAuthRouter is in the classification table', () =>
@@ -32,6 +35,18 @@ describe('channels (#308)', () =>
         const unclassified = Object.keys(mainAuthRouter.routes).filter(key => !Object.hasOwn(ROUTE_CHANNELS, key));
 
         expect(unclassified).toEqual([]);
+    });
+
+    it('each /_auth contract operation names the route that serves it, by method and path', () =>
+    {
+        for (const operation of AUTH_SURFACE_OPERATIONS)
+        {
+            const route = mainAuthRouter.routes[operation.route!] as { method?: string; path?: string } | undefined;
+
+            expect(route, operation.id).toBeDefined();
+            expect(`${route!.method} ${route!.path}`, operation.id)
+                .toBe(`${operation.method} ${operation.path.replace(/\{(\w+)\}/g, ':$1')}`);
+        }
     });
 
     it('C13: the table names no route the router does not have', () =>
@@ -47,22 +62,46 @@ describe('channels (#308)', () =>
         expect(() => AUTH_CHANNELS.forEach(requireChannel)).not.toThrow();
     });
 
-    it('a channel set to false answers 404 and leaves the others on', () =>
+    it('a channel set to false answers 404 CHANNEL_DISABLED naming it, and leaves the others on', () =>
     {
         configureChannels({ deviceCode: false });
 
-        expect(() => requireChannel('deviceCode')).toThrow(expect.objectContaining({ statusCode: 404 }));
+        expect(() => requireChannel('deviceCode')).toThrow(expect.objectContaining({
+            name: 'ChannelDisabledError',
+            statusCode: 404,
+            code: 'CHANNEL_DISABLED',
+            details: { channel: 'deviceCode' },
+        }));
         expect(isChannelEnabled('deviceLink')).toBe(true);
         expect(isChannelEnabled('signup')).toBe(true);
     });
 
-    it('configuring again starts from the defaults rather than from the last setting', () =>
+    it('F3a: a later createAuthLifecycle() without channels does not reopen a closed one', () =>
     {
-        configureChannels({ signup: false });
-        configureChannels({ passwordReset: false });
+        createAuthLifecycle({ channels: { signup: false } });
+        createAuthLifecycle();
 
-        expect(isChannelEnabled('signup')).toBe(true);
-        expect(isChannelEnabled('passwordReset')).toBe(false);
+        expect(isChannelEnabled('signup')).toBe(false);
+        expect(() => assertChannelsConsistent()).not.toThrow();
+    });
+
+    it('F3b: the same channels stated twice are no contradiction', () =>
+    {
+        createAuthLifecycle({ channels: { signup: false, deviceCode: false } });
+        createAuthLifecycle({ channels: { signup: false, deviceCode: false } });
+
+        expect(AUTH_CHANNELS.map(isChannelEnabled)).toEqual([false, true, false, true]);
+        expect(() => assertChannelsConsistent()).not.toThrow();
+    });
+
+    it('F3c: different channels stated twice keep the channel closed, and afterInfrastructure rejects naming it', async () =>
+    {
+        createAuthLifecycle({ channels: { signup: false } });
+        const lifecycle = createAuthLifecycle({ channels: { signup: true } });
+
+        expect(isChannelEnabled('signup')).toBe(false);
+        expect(() => assertChannelsConsistent()).toThrow(/signup/);
+        await expect(lifecycle.afterInfrastructure!()).rejects.toThrow(/different channels in two calls: signup\b/);
     });
 
     it('refuses a key that is not a channel, and a value that is not a boolean', () =>

@@ -342,7 +342,7 @@ rather than resetting it, because only `session/renew` may move that window — 
 ### Which sign-in channels exist (`channels`)
 
 Every route above is mounted for every app. An app that offers fewer ways in says so once, in
-`createAuthLifecycle`; it is read at boot and nowhere else:
+`createAuthLifecycle`; it is resolved when the lifecycle is built and read per request:
 
 ```typescript
 createAuthLifecycle({
@@ -359,6 +359,11 @@ Every key is optional and defaults to `true`, so an app that passes nothing serv
 served before. A key that is not one of these four, or a value that is not a boolean, is refused at
 startup — either would leave open a channel the app believes it closed.
 
+A closed channel stays closed until the app itself says otherwise. A second `createAuthLifecycle()`
+that passes no `channels` leaves them as they are. One that states the same channels again is fine;
+one that states different channels refuses boot in `afterInfrastructure` with an error naming the
+channels that differ — and until then every channel either call closed stays closed.
+
 | channel | its routes |
 |---|---|
 | `signup` | `register`, `requestSignupLink`, `confirmSignupLink`, `completeSignup`; `sendVerificationCode` and `verifyCode` with `purpose: 'registration'` |
@@ -370,11 +375,16 @@ Every other route is always on. There is no key for password sign-in, so no sett
 with no way in; whether a second factor is asked for is the second-factor policy's business, not
 this option's.
 
-**A channel turned off answers 404** (`NotFoundError`) on each of its routes — to an anonymous
-caller and a signed-in one alike, and before anything else on the route runs: no rate-limit budget
-is spent, no long poll is held open, no transaction begins, nothing is read from the database and
-no `401` is answered first. The routes still register (registration happens at import, before
-`createAuthLifecycle` runs), so the check is made per request, as the
+**A channel turned off answers 404** (`ChannelDisabledError`, code `CHANNEL_DISABLED`,
+`details.channel` naming the channel) on each of its routes, before anything the route itself runs:
+no rate-limit budget is spent, no long poll is held open, no transaction begins and nothing is read
+from the database. The check is the first of the route's own middlewares, so the app's server-level
+middlewares run as they do on any route. On a public route that means every caller gets the 404; on
+a signed-in route (`getDeviceAuthInfo`, `approveDeviceAuth`, `denyDeviceAuth`, and the device-link
+issuer's five) the global `auth` middleware runs first, so an anonymous caller gets its `401` and a
+signed-in one the 404 — as the authorization server's signed-in routes answer when it is not
+configured. The routes still register (registration happens at import, before `createAuthLifecycle`
+runs), so the check is made per request, as the
 [authorization server's](#authorization-server-for-mcp-clients) is. A verification code is judged by
 its `purpose`: with `signup: false`, `purpose: 'password_reset'` is still sent, and the other way
 round.
@@ -395,10 +405,13 @@ social path above, because an account made by a first social sign-in is sign-up 
 
 | Error | HTTP | `code` | When |
 |---|---|---|---|
-| `NotFoundError` | 404 | — | a route of a channel the app turned off |
+| `ChannelDisabledError` | 404 | `CHANNEL_DISABLED` | a route of a channel the app turned off; `details.channel` names it |
 | `SignupDisabledError` | 403 | `SIGNUP_DISABLED` | `signup: false`, and a first social sign-in would have created an account |
 
-The mobile contract lists `SignupDisabledError` since 0.13.8.
+The mobile contract lists `SignupDisabledError` and `ChannelDisabledError` since 0.13.8, and marks
+each operation a closed channel answers `ChannelDisabledError` on with `closedChannel`:
+`auth.enroll.register` (`signup`), the five `auth.device.*` (`deviceCode`) and
+`auth.deviceLink.redeem` / `auth.deviceLink.poll` (`deviceLink`).
 
 ### Migration — narrow a sign-in on `mfaRequired` before reading `userId`
 
@@ -3455,7 +3468,7 @@ is the recommended error. The hook receives the same `metadata` the app supplied
 
 To turn sign-up off altogether rather than filter it, use
 [`channels: { signup: false }`](#which-sign-in-channels-exist-channels): the sign-up routes answer
-404 and a first social sign-in is refused with `SIGNUP_DISABLED` before this hook would run.
+404 `CHANNEL_DISABLED` and a first social sign-in is refused with `SIGNUP_DISABLED` before this hook would run.
 
 ```typescript
 import { configureAuth } from '@spfn/auth/server';

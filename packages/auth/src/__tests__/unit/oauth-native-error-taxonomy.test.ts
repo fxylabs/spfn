@@ -327,8 +327,15 @@ describe('native sign-in answers each failure path with its own code', () =>
             'DeviceLinkWrongMatchError',
         ];
 
+        // A closed sign-in channel is the fifth (contract 0.13.8, #308): one code,
+        // answered by every operation that carries closedChannel — sign-up's
+        // register and the device-code and device-link operations, never native
+        // sign-in, whose refusal under signup: false is SignupDisabledError above.
+        // Held to its error class in contract-export.test.ts.
+        const channelCodes = ['ChannelDisabledError'];
+
         expect(declared.filter(e => e.surface === 'rest').map(e => e.code).sort())
-            .toEqual([...table.map(cell => cell.code), ...deviceCodes, ...mfaCodes, ...deviceLinkCodes].sort());
+            .toEqual([...table.map(cell => cell.code), ...deviceCodes, ...mfaCodes, ...deviceLinkCodes, ...channelCodes].sort());
     });
 
     it('the Android start (auth.enroll.oauthAppleRelayStart, contract 0.13.4) refuses only with listed codes', () =>

@@ -6,9 +6,9 @@
  * unit/auth-channels.test.ts.
  *
  * Driven against the mounted auth router with `authenticate` as the
- * server-level middleware, the way a real server mounts it, so a signed-in
- * route of a closed channel is shown to answer 404 rather than the global
- * middleware's 401. Social sign-in uses a Kakao stand-in whose codes and
+ * server-level middleware, the way a real server mounts it: a public route of
+ * a closed channel answers 404 to everyone, a signed-in one answers the global
+ * middleware's 401 to an anonymous caller and 404 to a signed-in one. Social sign-in uses a Kakao stand-in whose codes and
  * id_tokens name the identity they establish, as oauth-email-match.test.ts
  * does; the real Kakao provider is put back after the file.
  *
@@ -41,12 +41,15 @@ import {
     verificationCodes,
 } from '@/server/entities';
 import { generateKeyPair, type KeyPair } from '@/server/lib/crypto';
-import { configureChannels, type AuthChannel } from '@/server/lib/channels-config';
+import { __resetChannelsForTests, configureChannels, type AuthChannel } from '@/server/lib/channels-config';
 import { registerOAuthProvider, type NormalizedIdentity, type OAuthProvider } from '@/server/lib/oauth';
 import { kakaoProvider } from '@/server/lib/oauth/kakao-provider';
 import { buildStartCookieName } from '@/server/lib/oauth/start-cookies';
 import { createOAuthState, generateOAuthNonce } from '@/server/lib/oauth/state';
 import type { VerificationPurpose } from '@/server/routes/schema';
+import { ROUTE_CHANNELS } from '@/server/routes/channels';
+import { AUTH_SURFACE_OPERATIONS } from '@/server/client-proof/contract-types';
+import { buildMobileContractBundle } from '@/server/client-proof/contract-bundle';
 
 const sendEmail = vi.fn().mockResolvedValue({ success: true });
 
@@ -116,26 +119,28 @@ interface GroupRoute
     key: string;
     path: string;
     body: Record<string, unknown>;
+    /** Behind the global `auth` middleware, which answers an anonymous caller first. */
+    signedIn: boolean;
 }
 
 const DEVICE_CODE_ROUTES: GroupRoute[] = [
-    { key: 'startDeviceAuth', path: '/_auth/device/start', body: { ...deviceKeyBody(), deviceName: 'TV', platform: 'desktop' } },
-    { key: 'startDeviceAuthWeb', path: '/_auth/device/start/web', body: {} },
-    { key: 'pollDeviceAuth', path: '/_auth/device/poll', body: { deviceCode: 'unknown-device-code' } },
-    { key: 'getDeviceAuthInfo', path: '/_auth/device/info', body: { userCode: 'BCDF-GHJK' } },
-    { key: 'approveDeviceAuth', path: '/_auth/device/approve', body: { userCode: 'BCDF-GHJK' } },
-    { key: 'denyDeviceAuth', path: '/_auth/device/deny', body: { userCode: 'BCDF-GHJK' } },
+    { key: 'startDeviceAuth', path: '/_auth/device/start', body: { ...deviceKeyBody(), deviceName: 'TV', platform: 'desktop' }, signedIn: false },
+    { key: 'startDeviceAuthWeb', path: '/_auth/device/start/web', body: {}, signedIn: false },
+    { key: 'pollDeviceAuth', path: '/_auth/device/poll', body: { deviceCode: 'unknown-device-code' }, signedIn: false },
+    { key: 'getDeviceAuthInfo', path: '/_auth/device/info', body: { userCode: 'BCDF-GHJK' }, signedIn: true },
+    { key: 'approveDeviceAuth', path: '/_auth/device/approve', body: { userCode: 'BCDF-GHJK' }, signedIn: true },
+    { key: 'denyDeviceAuth', path: '/_auth/device/deny', body: { userCode: 'BCDF-GHJK' }, signedIn: true },
 ];
 
 const DEVICE_LINK_ROUTES: GroupRoute[] = [
-    { key: 'issueDeviceLink', path: '/_auth/device/link/issue', body: {} },
-    { key: 'redeemDeviceLink', path: '/_auth/device/link/redeem', body: { userCode: 'BCDF-GHJK', ...deviceKeyBody() } },
-    { key: 'redeemDeviceLinkWeb', path: '/_auth/device/link/redeem/web', body: { userCode: 'BCDF-GHJK' } },
-    { key: 'getDeviceLinkStatus', path: '/_auth/device/link/status', body: { linkId: UNKNOWN_LINK_ID } },
-    { key: 'confirmDeviceLink', path: '/_auth/device/link/confirm', body: { linkId: UNKNOWN_LINK_ID, choice: 10 } },
-    { key: 'denyDeviceLink', path: '/_auth/device/link/deny', body: { linkId: UNKNOWN_LINK_ID } },
-    { key: 'cancelDeviceLink', path: '/_auth/device/link/cancel', body: { linkId: UNKNOWN_LINK_ID } },
-    { key: 'pollDeviceLink', path: '/_auth/device/link/poll', body: { deviceCode: 'unknown-device-code' } },
+    { key: 'issueDeviceLink', path: '/_auth/device/link/issue', body: {}, signedIn: true },
+    { key: 'redeemDeviceLink', path: '/_auth/device/link/redeem', body: { userCode: 'BCDF-GHJK', ...deviceKeyBody() }, signedIn: false },
+    { key: 'redeemDeviceLinkWeb', path: '/_auth/device/link/redeem/web', body: { userCode: 'BCDF-GHJK' }, signedIn: false },
+    { key: 'getDeviceLinkStatus', path: '/_auth/device/link/status', body: { linkId: UNKNOWN_LINK_ID }, signedIn: true },
+    { key: 'confirmDeviceLink', path: '/_auth/device/link/confirm', body: { linkId: UNKNOWN_LINK_ID, choice: 10 }, signedIn: true },
+    { key: 'denyDeviceLink', path: '/_auth/device/link/deny', body: { linkId: UNKNOWN_LINK_ID }, signedIn: true },
+    { key: 'cancelDeviceLink', path: '/_auth/device/link/cancel', body: { linkId: UNKNOWN_LINK_ID }, signedIn: true },
+    { key: 'pollDeviceLink', path: '/_auth/device/link/poll', body: { deviceCode: 'unknown-device-code' }, signedIn: false },
 ];
 
 describe.skipIf(!dbAvailable)('An app chooses which sign-in channels exist (#308)', () =>
@@ -153,7 +158,7 @@ describe.skipIf(!dbAvailable)('An app chooses which sign-in channels exist (#308
 
     afterAll(async () =>
     {
-        configureChannels();
+        __resetChannelsForTests();
         registerOAuthProvider(kakaoProvider);
         await teardownTestDb();
         delete process.env.SPFN_AUTH_TOKEN_ENCRYPTION_KEYS;
@@ -171,7 +176,7 @@ describe.skipIf(!dbAvailable)('An app chooses which sign-in channels exist (#308
 
     afterEach(() =>
     {
-        configureChannels();
+        __resetChannelsForTests();
         vi.unstubAllEnvs();
     });
 
@@ -219,16 +224,33 @@ describe.skipIf(!dbAvailable)('An app chooses which sign-in channels exist (#308
     }
 
     /**
-     * The channel's 404 — `NotFoundError` itself, so a route that would have
-     * answered its own not-found (an unknown device code) is not mistaken for
-     * a closed one.
+     * The channel's 404 — `ChannelDisabledError` itself, naming the channel, so
+     * a route that would have answered its own not-found (an unknown device
+     * code) is not mistaken for a closed one.
      */
-    async function expectNotFound(response: Response, label: string): Promise<void>
+    async function expectChannelClosed(response: Response, channel: AuthChannel, label: string): Promise<void>
     {
         const body = await response.text();
 
         expect(response.status, `${label}: ${body}`).toBe(404);
-        expect(JSON.parse(body).error.code, label).toBe('NotFoundError');
+        expect(JSON.parse(body), label).toMatchObject({
+            error: { code: 'ChannelDisabledError' },
+            code: 'CHANNEL_DISABLED',
+            details: { channel },
+        });
+    }
+
+    /** What a closed route answers an anonymous caller: the channel's 404 if public, the global 401 if signed in. */
+    async function expectAnonymousRefused(response: Response, route: GroupRoute, channel: AuthChannel): Promise<void>
+    {
+        if (route.signedIn)
+        {
+            expect(response.status, `${route.key} anonymous`).toBe(401);
+        }
+        else
+        {
+            await expectChannelClosed(response, channel, `${route.key} anonymous`);
+        }
     }
 
     /** A whole Kakao sign-in through the real web callback; where it redirected. */
@@ -282,13 +304,13 @@ describe.skipIf(!dbAvailable)('An app chooses which sign-in channels exist (#308
 
     describe('deviceCode: false', () =>
     {
-        it.each(DEVICE_CODE_ROUTES)('C2: $key answers 404 to an anonymous and a signed-in caller, and writes no row', async ({ key, path, body }) =>
+        it.each(DEVICE_CODE_ROUTES)('C2: $key refuses an anonymous caller (404, or 401 when signed in) and answers a signed-in one 404, writing no row', async (route) =>
         {
             const authorization = await signedInCaller();
             configureChannels({ deviceCode: false });
 
-            await expectNotFound(await post(path, body), `${key} anonymous`);
-            await expectNotFound(await post(path, body, authorization), `${key} signed in`);
+            await expectAnonymousRefused(await post(route.path, route.body), route, 'deviceCode');
+            await expectChannelClosed(await post(route.path, route.body, authorization), 'deviceCode', `${route.key} signed in`);
             expect(await getTestDb().select().from(deviceAuthorizations)).toHaveLength(0);
         });
 
@@ -300,10 +322,10 @@ describe.skipIf(!dbAvailable)('An app chooses which sign-in channels exist (#308
 
             for (let attempt = 0; attempt < 12; attempt += 1)
             {
-                await expectNotFound(await post('/_auth/device/start', body, undefined, ip), `attempt ${attempt}`);
+                await expectChannelClosed(await post('/_auth/device/start', body, undefined, ip), 'deviceCode', `attempt ${attempt}`);
             }
 
-            configureChannels();
+            __resetChannelsForTests();
 
             expect((await post('/_auth/device/start', body, undefined, ip)).status).toBe(200);
         });
@@ -322,13 +344,13 @@ describe.skipIf(!dbAvailable)('An app chooses which sign-in channels exist (#308
 
     describe('deviceLink: false', () =>
     {
-        it.each(DEVICE_LINK_ROUTES)('C4: $key answers 404 to an anonymous and a signed-in caller, and writes no row', async ({ key, path, body }) =>
+        it.each(DEVICE_LINK_ROUTES)('C4: $key refuses an anonymous caller (404, or 401 when signed in) and answers a signed-in one 404, writing no row', async (route) =>
         {
             const authorization = await signedInCaller();
             configureChannels({ deviceLink: false });
 
-            await expectNotFound(await post(path, body), `${key} anonymous`);
-            await expectNotFound(await post(path, body, authorization), `${key} signed in`);
+            await expectAnonymousRefused(await post(route.path, route.body), route, 'deviceLink');
+            await expectChannelClosed(await post(route.path, route.body, authorization), 'deviceLink', `${route.key} signed in`);
             expect(await getTestDb().select().from(deviceLinks)).toHaveLength(0);
         });
     });
@@ -344,14 +366,14 @@ describe.skipIf(!dbAvailable)('An app chooses which sign-in channels exist (#308
             configureChannels({ signup: false });
             const before = await countOf(users);
 
-            await expectNotFound(await post('/_auth/register', {
+            await expectChannelClosed(await post('/_auth/register', {
                 email: 'c5@ch308.test', verificationToken: 'token', password: TEST_PASSWORD, ...deviceKeyBody(),
-            }), 'register');
-            await expectNotFound(await post('/_auth/signup/email', { email: 'c5@ch308.test' }), 'requestSignupLink');
-            await expectNotFound(await post('/_auth/signup/email/confirm', { token: 'x'.repeat(32) }), 'confirmSignupLink');
-            await expectNotFound(await post('/_auth/signup/password', {
+            }), 'signup', 'register');
+            await expectChannelClosed(await post('/_auth/signup/email', { email: 'c5@ch308.test' }), 'signup', 'requestSignupLink');
+            await expectChannelClosed(await post('/_auth/signup/email/confirm', { token: 'x'.repeat(32) }), 'signup', 'confirmSignupLink');
+            await expectChannelClosed(await post('/_auth/signup/password', {
                 password: TEST_PASSWORD, setupSecret: 'secret', ...deviceKeyBody(),
-            }), 'completeSignup');
+            }), 'signup', 'completeSignup');
 
             expect(await countOf(users)).toBe(before);
             expect(await getTestDb().select().from(signupLinkTokens)).toHaveLength(0);
@@ -362,12 +384,12 @@ describe.skipIf(!dbAvailable)('An app chooses which sign-in channels exist (#308
         {
             configureChannels({ signup: false });
 
-            await expectNotFound(await post('/_auth/codes', {
+            await expectChannelClosed(await post('/_auth/codes', {
                 target: 'c6@ch308.test', targetType: 'email', purpose: 'registration',
-            }), 'sendVerificationCode');
-            await expectNotFound(await post('/_auth/codes/verify', {
+            }), 'signup', 'sendVerificationCode');
+            await expectChannelClosed(await post('/_auth/codes/verify', {
                 target: 'c6@ch308.test', targetType: 'email', code: '123456', purpose: 'registration',
-            }), 'verifyCode');
+            }), 'signup', 'verifyCode');
 
             expect(await codeRows('registration')).toHaveLength(0);
             expect(sendEmail).not.toHaveBeenCalled();
@@ -462,21 +484,107 @@ describe.skipIf(!dbAvailable)('An app chooses which sign-in channels exist (#308
             await createTestUser('c11@ch308.test', await userRoleId());
             configureChannels({ passwordReset: false });
 
-            await expectNotFound(await post('/_auth/password/reset', { email: 'c11@ch308.test' }), 'requestPasswordReset');
-            await expectNotFound(await post('/_auth/password/reset/confirm', { token: 'x'.repeat(32) }), 'confirmPasswordReset');
-            await expectNotFound(await post('/_auth/password/reset/complete', {
+            await expectChannelClosed(await post('/_auth/password/reset', { email: 'c11@ch308.test' }), 'passwordReset', 'requestPasswordReset');
+            await expectChannelClosed(await post('/_auth/password/reset/confirm', { token: 'x'.repeat(32) }), 'passwordReset', 'confirmPasswordReset');
+            await expectChannelClosed(await post('/_auth/password/reset/complete', {
                 password: TEST_PASSWORD, setupSecret: 'secret', ...deviceKeyBody(),
-            }), 'completePasswordReset');
-            await expectNotFound(await post('/_auth/codes', {
+            }), 'passwordReset', 'completePasswordReset');
+            await expectChannelClosed(await post('/_auth/codes', {
                 target: 'c11@ch308.test', targetType: 'email', purpose: 'password_reset',
-            }), 'sendVerificationCode');
-            await expectNotFound(await post('/_auth/codes/verify', {
+            }), 'passwordReset', 'sendVerificationCode');
+            await expectChannelClosed(await post('/_auth/codes/verify', {
                 target: 'c11@ch308.test', targetType: 'email', code: '123456', purpose: 'password_reset',
-            }), 'verifyCode');
+            }), 'passwordReset', 'verifyCode');
 
             expect(await getTestDb().select().from(passwordResetTokens)).toHaveLength(0);
             expect(await getTestDb().select().from(verificationCodes)).toHaveLength(0);
             expect(sendEmail).not.toHaveBeenCalled();
+        });
+    });
+
+    // ========================================================================
+    // The mobile contract declares what a closed channel answers
+    // ========================================================================
+
+    describe('signup, deviceCode and deviceLink off', () =>
+    {
+        it('every contract operation on a gated route answers a code the bundle lists, and the bundle marks it', async () =>
+        {
+            const bundle = buildMobileContractBundle();
+            const listed = (bundle.errors as { code: string }[]).map(error => error.code);
+            const exported = new Map((bundle.operations as { id: string; closedChannel?: { error: string } }[])
+                .map(operation => [operation.id, operation]));
+            const gated = AUTH_SURFACE_OPERATIONS.filter(operation => ROUTE_CHANNELS[operation.route!] !== 'always');
+            const authorization = await signedInCaller();
+            configureChannels({ signup: false, deviceCode: false, deviceLink: false });
+
+            expect(gated.map(operation => operation.id).sort()).toEqual([
+                'auth.device.approve', 'auth.device.deny', 'auth.device.info', 'auth.device.poll', 'auth.device.start',
+                'auth.deviceLink.poll', 'auth.deviceLink.redeem', 'auth.enroll.register',
+            ]);
+
+            for (const operation of gated)
+            {
+                const signedIn = operation.authProfile !== 'none';
+                const response = await post(operation.path, {}, signedIn ? authorization : undefined);
+                const code: string = JSON.parse(await response.text()).error.code;
+
+                expect(response.status, operation.id).toBe(404);
+                expect(listed, operation.id).toContain(code);
+                expect(exported.get(operation.id)?.closedChannel?.error, operation.id).toBe(code);
+            }
+        });
+    });
+
+    // ========================================================================
+    // The gate leaves the server-level chain as it is
+    // ========================================================================
+
+    describe('no channels option', () =>
+    {
+        /** The auth router behind server-level `[authenticate, actor]`, `actor` recording each path's principal. */
+        async function mountWithActor(seen: Map<string, string | null>): Promise<Hono>
+        {
+            const { Hono: HonoApp } = await import('hono');
+            const { registerRoutes } = await import('@spfn/core/route');
+            const { ErrorHandler } = await import('@spfn/core/middleware');
+            const { mainAuthRouter } = await import('@/server/routes');
+            const { authenticate } = await import('@/server/middleware/authenticate');
+            const actorApp = new HonoApp();
+
+            registerRoutes(actorApp, mainAuthRouter, [
+                { name: authenticate.name, handler: authenticate.handler },
+                {
+                    name: 'actor',
+                    handler: async (c, next) =>
+                    {
+                        seen.set(c.req.path, (c.get('auth') as { userId?: string } | undefined)?.userId ?? null);
+                        await next();
+                    },
+                },
+            ]);
+            actorApp.onError(ErrorHandler());
+
+            return actorApp;
+        }
+
+        it('a server-level middleware after auth sees the principal on a signed-in route, gated or not', async () =>
+        {
+            const seen = new Map<string, string | null>();
+            const actorApp = await mountWithActor(seen);
+            const authorization = await signedInCaller();
+            const paths = ['/_auth/keys/list', '/_auth/device/info', '/_auth/device/link/issue'];
+
+            for (const path of paths)
+            {
+                await actorApp.request(path, {
+                    method: 'POST',
+                    headers: { ...JSON_HEADERS, 'x-forwarded-for': nextIp(), Authorization: authorization },
+                    body: JSON.stringify(path === '/_auth/device/info' ? { userCode: 'BCDF-GHJK' } : {}),
+                });
+            }
+
+            expect(paths.map(path => seen.get(path))).toEqual(paths.map(() => expect.stringMatching(/^\d+$/)));
         });
     });
 

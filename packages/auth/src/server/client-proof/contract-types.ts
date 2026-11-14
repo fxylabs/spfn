@@ -15,6 +15,7 @@ import {
     CORE_TIME_ROUTE,
 } from '@spfn/core/server';
 
+import type { ROUTE_CHANNELS } from '../routes/channels';
 import type { CanonicalObject, CanonicalValue } from './canonical-json';
 
 export interface ContractOperation
@@ -91,6 +92,14 @@ export interface ContractOperation
      * is decided then, not invented in advance.
      */
     removedIn?: string;
+
+    /**
+     * The `mainAuthRouter` key of the route that serves this operation, on the
+     * `/_auth` surface. Not exported as it stands: the bundle reads it against
+     * `ROUTE_CHANNELS` to state which operations a closed sign-in channel
+     * answers `ChannelDisabledError` on, so that set has one source.
+     */
+    route?: keyof typeof ROUTE_CHANNELS;
 }
 
 function importCoreTimeContract()
@@ -214,6 +223,7 @@ export const AUTH_SURFACE_OPERATIONS: readonly ContractOperation[] = [
         id: 'auth.enroll.register',
         method: 'POST',
         path: '/_auth/register',
+        route: 'register',
         authProfile: 'none',
         requiresSession: false,
         requestType: 'RegisterRequest',
@@ -225,6 +235,7 @@ export const AUTH_SURFACE_OPERATIONS: readonly ContractOperation[] = [
         id: 'auth.enroll.login',
         method: 'POST',
         path: '/_auth/login',
+        route: 'login',
         authProfile: 'none',
         requiresSession: false,
         requestType: 'LoginRequest',
@@ -236,6 +247,7 @@ export const AUTH_SURFACE_OPERATIONS: readonly ContractOperation[] = [
         id: 'auth.enroll.oauthNative',
         method: 'POST',
         path: '/_auth/oauth/{provider}/native',
+        route: 'oauthNative',
         authProfile: 'none',
         requiresSession: false,
         requestType: 'OauthNativeRequest',
@@ -247,6 +259,7 @@ export const AUTH_SURFACE_OPERATIONS: readonly ContractOperation[] = [
         id: 'auth.enroll.oauthAppleRelayStart',
         method: 'POST',
         path: '/_auth/oauth/apple/native/start',
+        route: 'oauthAppleNativeStart',
         authProfile: 'none',
         requiresSession: false,
         requestType: 'OauthAppleRelayStartRequest',
@@ -259,6 +272,7 @@ export const AUTH_SURFACE_OPERATIONS: readonly ContractOperation[] = [
         id: 'auth.mfa.verify',
         method: 'POST',
         path: '/_auth/mfa/verify',
+        route: 'mfaVerify',
         authProfile: 'none',
         requiresSession: false,
         requestType: 'MfaVerifyRequest',
@@ -270,6 +284,7 @@ export const AUTH_SURFACE_OPERATIONS: readonly ContractOperation[] = [
         id: 'auth.mfa.status',
         method: 'GET',
         path: '/_auth/mfa/status',
+        route: 'mfaStatus',
         authProfile: 'clientProofV1',
         requiresSession: false,
         responseType: 'MfaStatusResponse',
@@ -280,6 +295,7 @@ export const AUTH_SURFACE_OPERATIONS: readonly ContractOperation[] = [
         id: 'auth.keys.rotate',
         method: 'POST',
         path: '/_auth/keys/rotate',
+        route: 'rotateKey',
         authProfile: 'clientProofV1',
         requiresSession: false,
         requestType: 'RotateKeyRequest',
@@ -291,6 +307,7 @@ export const AUTH_SURFACE_OPERATIONS: readonly ContractOperation[] = [
         id: 'auth.keys.list',
         method: 'POST',
         path: '/_auth/keys/list',
+        route: 'listKeys',
         authProfile: 'clientProofV1',
         requiresSession: false,
         requestType: 'ListKeysRequest',
@@ -302,6 +319,7 @@ export const AUTH_SURFACE_OPERATIONS: readonly ContractOperation[] = [
         id: 'auth.keys.revoke',
         method: 'POST',
         path: '/_auth/keys/revoke',
+        route: 'revokeKey',
         authProfile: 'clientProofV1',
         requiresSession: false,
         requestType: 'RevokeKeyRequest',
@@ -313,6 +331,7 @@ export const AUTH_SURFACE_OPERATIONS: readonly ContractOperation[] = [
         id: 'auth.keys.revokeAll',
         method: 'POST',
         path: '/_auth/keys/revoke-all',
+        route: 'revokeAllKeys',
         authProfile: 'clientProofV1',
         requiresSession: false,
         requestType: 'RevokeAllKeysRequest',
@@ -324,6 +343,7 @@ export const AUTH_SURFACE_OPERATIONS: readonly ContractOperation[] = [
         id: 'auth.device.start',
         method: 'POST',
         path: '/_auth/device/start',
+        route: 'startDeviceAuth',
         authProfile: 'none',
         requiresSession: false,
         requestType: 'StartDeviceAuthRequest',
@@ -335,6 +355,7 @@ export const AUTH_SURFACE_OPERATIONS: readonly ContractOperation[] = [
         id: 'auth.device.poll',
         method: 'POST',
         path: '/_auth/device/poll',
+        route: 'pollDeviceAuth',
         authProfile: 'none',
         requiresSession: false,
         requestType: 'PollDeviceAuthRequest',
@@ -346,6 +367,7 @@ export const AUTH_SURFACE_OPERATIONS: readonly ContractOperation[] = [
         id: 'auth.device.info',
         method: 'POST',
         path: '/_auth/device/info',
+        route: 'getDeviceAuthInfo',
         authProfile: 'clientProofV1',
         requiresSession: false,
         requestType: 'DeviceAuthInfoRequest',
@@ -357,6 +379,7 @@ export const AUTH_SURFACE_OPERATIONS: readonly ContractOperation[] = [
         id: 'auth.device.approve',
         method: 'POST',
         path: '/_auth/device/approve',
+        route: 'approveDeviceAuth',
         authProfile: 'clientProofV1',
         requiresSession: false,
         requestType: 'ApproveDeviceAuthRequest',
@@ -368,6 +391,7 @@ export const AUTH_SURFACE_OPERATIONS: readonly ContractOperation[] = [
         id: 'auth.device.deny',
         method: 'POST',
         path: '/_auth/device/deny',
+        route: 'denyDeviceAuth',
         authProfile: 'clientProofV1',
         requiresSession: false,
         requestType: 'DenyDeviceAuthRequest',
@@ -378,6 +402,7 @@ export const AUTH_SURFACE_OPERATIONS: readonly ContractOperation[] = [
         id: 'auth.deviceLink.redeem',
         method: 'POST',
         path: '/_auth/device/link/redeem',
+        route: 'redeemDeviceLink',
         authProfile: 'none',
         requiresSession: false,
         requestType: 'RedeemDeviceLinkRequest',
@@ -389,6 +414,7 @@ export const AUTH_SURFACE_OPERATIONS: readonly ContractOperation[] = [
         id: 'auth.deviceLink.poll',
         method: 'POST',
         path: '/_auth/device/link/poll',
+        route: 'pollDeviceLink',
         authProfile: 'none',
         requiresSession: false,
         requestType: 'PollDeviceLinkRequest',

@@ -6,7 +6,7 @@
   "contractMajor": 0,
   "contractVersion": "0.13.8",
   "supportedRange": ">=0.13.0 <0.14.0",
-  "exporterVersion": "@spfn/auth/contract-bundle@6.1.0",
+  "exporterVersion": "@spfn/auth/contract-bundle@6.2.0",
   "authProfiles": { "allowed": ["clientProofV1"], "unknownProfilePolicy": "reject", "mixingWithinSession": "prohibited" },
   "operationAuthClasses": {
     "none": "the unproven class: the operation is accepted with neither proof headers nor a session header, because it is called before any proof can be minted (clock synchronization, enrollment, login, and the device-code and device-link operations a device with no key on file calls)",
@@ -557,7 +557,8 @@
       "requestType": "RegisterRequest",
       "responseType": "RegisterResponse",
       "summary": "Registers an account with a verification token and enrolls the client-generated public key.",
-      "since": "0.3.0"
+      "since": "0.3.0",
+      "closedChannel": { "channels": ["signup"], "error": "ChannelDisabledError" }
     },
     {
       "id": "auth.enroll.login",
@@ -666,7 +667,8 @@
       "requestType": "StartDeviceAuthRequest",
       "responseType": "StartDeviceAuthResponse",
       "summary": "Parks a new device's public key and returns the codes it shows and polls with.",
-      "since": "0.10.0"
+      "since": "0.10.0",
+      "closedChannel": { "channels": ["deviceCode"], "error": "ChannelDisabledError" }
     },
     {
       "id": "auth.device.poll",
@@ -677,7 +679,8 @@
       "requestType": "PollDeviceAuthRequest",
       "responseType": "PollDeviceAuthResponse",
       "summary": "Asks whether the request has been answered; the approved answer is the login it produced.",
-      "since": "0.10.0"
+      "since": "0.10.0",
+      "closedChannel": { "channels": ["deviceCode"], "error": "ChannelDisabledError" }
     },
     {
       "id": "auth.device.info",
@@ -688,7 +691,8 @@
       "requestType": "DeviceAuthInfoRequest",
       "responseType": "DeviceAuthInfoResponse",
       "summary": "Describes the device waiting on a user code, so the approver can recognise it before deciding.",
-      "since": "0.10.0"
+      "since": "0.10.0",
+      "closedChannel": { "channels": ["deviceCode"], "error": "ChannelDisabledError" }
     },
     {
       "id": "auth.device.approve",
@@ -699,7 +703,8 @@
       "requestType": "ApproveDeviceAuthRequest",
       "responseType": "DeviceAuthInfoResponse",
       "summary": "Lets the waiting device in, answering with the device it just let in.",
-      "since": "0.10.0"
+      "since": "0.10.0",
+      "closedChannel": { "channels": ["deviceCode"], "error": "ChannelDisabledError" }
     },
     {
       "id": "auth.device.deny",
@@ -709,7 +714,8 @@
       "requiresSession": false,
       "requestType": "DenyDeviceAuthRequest",
       "summary": "Refuses the waiting device. Answers 204 with no body, so it names no response type.",
-      "since": "0.10.0"
+      "since": "0.10.0",
+      "closedChannel": { "channels": ["deviceCode"], "error": "ChannelDisabledError" }
     },
     {
       "id": "auth.deviceLink.redeem",
@@ -720,7 +726,8 @@
       "requestType": "RedeemDeviceLinkRequest",
       "responseType": "RedeemDeviceLinkResponse",
       "summary": "Parks a new device's public key on the code a signed-in device shows, and returns the match number to show.",
-      "since": "0.13.2"
+      "since": "0.13.2",
+      "closedChannel": { "channels": ["deviceLink"], "error": "ChannelDisabledError" }
     },
     {
       "id": "auth.deviceLink.poll",
@@ -731,9 +738,15 @@
       "requestType": "PollDeviceLinkRequest",
       "responseType": "PollDeviceAuthResponse",
       "summary": "Asks whether the issuer picked the match number; the approved answer is the login it produced.",
-      "since": "0.13.2"
+      "since": "0.13.2",
+      "closedChannel": { "channels": ["deviceLink"], "error": "ChannelDisabledError" }
     }
   ],
+  "channels": {
+    "appliesTo": "every operation that carries closedChannel",
+    "rule": "an app can turn a sign-in channel off. An operation of a closed channel answers ChannelDisabledError (404) with details.channel naming the channel, before its rate limit or anything else the operation does. A clientProofV1 operation still runs admission first, so a call that fails admission is refused as any failed admission is",
+    "closedChannel": "channels lists the channels whose being off closes the operation; error is the code it then answers"
+  },
   "errorEnvelope": {
     "shape": "{\"error\":{\"code\":<string>,\"message\":<string>,\"requestId\":<string>}}",
     "additionalFields": "the body carries further top-level fields beside the error object — __type, message, and the error class's own public fields. Only error.code classifies the failure",
@@ -878,6 +891,13 @@
       "httpStatus": 403,
       "retryable": false,
       "summary": "this sign-in would have created an account and the app does not create accounts by sign-up — an account must exist, issued by the operator, before it can be signed in to",
+      "surface": "rest"
+    },
+    {
+      "code": "ChannelDisabledError",
+      "httpStatus": 404,
+      "retryable": false,
+      "summary": "the app turned off the sign-in channel this operation belongs to — details.channel names it, and every operation of that channel answers the same until the app turns it back on",
       "surface": "rest"
     },
     {
