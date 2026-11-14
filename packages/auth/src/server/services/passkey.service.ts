@@ -62,8 +62,9 @@ import type { User } from '../entities/users';
 import { getDummyPasswordHash, verifyPassword } from '../helpers';
 import type { KeyAlgorithmType, KeyPlatformType } from '../types';
 import { registerPublicKeyService, revokeKeyService } from './key.service';
-import { assertStepUp, mfaEnrolledForUser } from './mfa.service';
-import { assertNotLastListedFactor, secondFactorEnrolmentFields } from './second-factor-policy.service';
+import { assertEnrolmentProven, assertStepUp, mfaEnrolledForUser, mfaStatusService, type MfaStatus } from './mfa.service';
+import { assertNotLastListedFactor, isEnrolmentOnly, secondFactorEnrolmentFields } from './second-factor-policy.service';
+import { isMethodListed } from '../lib/second-factor-policy';
 import { decideKeyBinding } from '../lib/key-policy';
 import { updateLastLoginService } from './user.service';
 import { getPendingDeletionInfo } from './account-deletion.service';
@@ -314,6 +315,8 @@ export async function startPasskeyEnrollmentService(
 export interface FinishPasskeyEnrollmentParams
 {
     userId: number;
+    /** The device key this request is signed with — its step-up window is the enrolment proof (#309). */
+    keyId: string;
     response: RegistrationResponseJSON;
     label?: string;
 }
@@ -323,6 +326,13 @@ export interface FinishPasskeyEnrollmentResult
     passkeyId: string;
     label: string | null;
     createdAt: string;
+    /**
+     * The account's second-factor state, present only when this registration
+     * also marked the passkey as its second factor — in the policy's
+     * enrolment-only state (#309). Absent otherwise, so the answer without a
+     * policy is the one it always was.
+     */
+    mfaStatus?: MfaStatus;
 }
 
 /**
@@ -331,11 +341,23 @@ export interface FinishPasskeyEnrollmentResult
  * Runs under `Transactional()`: the challenge is spent and the row written
  * together, so a failure after the spend leaves the challenge live and the
  * ceremony retryable, while a success can never be replayed.
+ *
+ * In the policy's enrolment-only state (#309) with `'passkey'` listed, the new
+ * passkey is marked as the second factor in the same transaction: the ceremony
+ * with user verification is the proof, and the session is ordinary on its next
+ * request. An account that already held a credential reaches this only from a
+ * device that proved it (`assertEnrolmentProven`). With no policy, or outside
+ * that state, nothing is marked.
+ *
+ * @throws StepUpRequiredError | PasskeyChallengeError | PasskeyVerificationError | PasskeyAlreadyRegisteredError
  */
 export async function finishPasskeyEnrollmentService(
     params: FinishPasskeyEnrollmentParams,
 ): Promise<FinishPasskeyEnrollmentResult>
 {
+    await assertEnrolmentProven(params);
+
+    const marksFactor = isMethodListed('passkey') && await isEnrolmentOnly(params.userId);
     const challenge = presentedChallenge(params.response.response.clientDataJSON);
 
     await consumeChallenge(challenge, 'registration', params.userId);
@@ -370,6 +392,7 @@ export async function finishPasskeyEnrollmentService(
         backedUp: verified.backedUp,
         aaguid: verified.aaguid,
         label: params.label ?? null,
+        secondFactor: marksFactor,
     });
 
     onAfterCommit(() => passkeyEnrolledEvent.emit({
@@ -378,7 +401,9 @@ export async function finishPasskeyEnrollmentService(
         label: row.label ?? undefined,
     }));
 
-    return { passkeyId: String(row.id), label: row.label, createdAt: row.createdAt.toISOString() };
+    const enrolled = { passkeyId: String(row.id), label: row.label, createdAt: row.createdAt.toISOString() };
+
+    return marksFactor ? { ...enrolled, mfaStatus: await mfaStatusService(params.userId) } : enrolled;
 }
 
 /**

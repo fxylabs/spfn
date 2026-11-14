@@ -20,9 +20,10 @@
 
 import { BaseRepository, type RepositoryDatabase } from '@spfn/core/db';
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js';
-import { and, eq, isNotNull, isNull, ne } from 'drizzle-orm';
+import { and, eq, inArray, isNotNull, isNull, max, ne } from 'drizzle-orm';
 import { unionAll } from 'drizzle-orm/pg-core';
 
+import { mfaRecoveryCodes } from '../entities/mfa-recovery-codes';
 import { mfaTotp } from '../entities/mfa-totp';
 import { passkeys } from '../entities/passkeys';
 
@@ -122,6 +123,47 @@ export class MfaEnrolmentRepository extends BaseRepository
                 eq(passkeys.secondFactor, true),
                 isNull(passkeys.revokedAt),
                 exceptPasskeyId === undefined ? undefined : ne(passkeys.id, exceptPasskeyId),
+            ));
+    }
+
+    /**
+     * Whether the account holds a credential it could prove itself with,
+     * whatever the policy lists: a live passkey, marked or not; a confirmed
+     * TOTP; and, when `recoveryCodes`, an unspent code of the current
+     * generation. One statement, on the write primary — the enrolment gate
+     * reads it after taking the owner row's lock.
+     */
+    async holdsProofCredentialOnPrimary(userId: number, recoveryCodes: boolean): Promise<boolean>
+    {
+        const held = unionAll(this.confirmedTotp(userId, this.db), this.livePasskeys(userId));
+        const query = recoveryCodes ? unionAll(held, this.unspentRecoveryCodes(userId)) : held;
+
+        return (await query.limit(1)).length > 0;
+    }
+
+    private livePasskeys(userId: number)
+    {
+        return this.db
+            .select({ owner: passkeys.userId })
+            .from(passkeys)
+            .where(and(eq(passkeys.userId, userId), isNull(passkeys.revokedAt)));
+    }
+
+    /** Codes of an earlier generation are left unspent and verify nothing, so only the current one counts. */
+    private unspentRecoveryCodes(userId: number)
+    {
+        const currentGeneration = this.db
+            .select({ generation: max(mfaRecoveryCodes.generation) })
+            .from(mfaRecoveryCodes)
+            .where(eq(mfaRecoveryCodes.userId, userId));
+
+        return this.db
+            .select({ owner: mfaRecoveryCodes.userId })
+            .from(mfaRecoveryCodes)
+            .where(and(
+                eq(mfaRecoveryCodes.userId, userId),
+                isNull(mfaRecoveryCodes.usedAt),
+                inArray(mfaRecoveryCodes.generation, currentGeneration),
             ));
     }
 

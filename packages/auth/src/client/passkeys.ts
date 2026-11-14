@@ -91,6 +91,16 @@ export interface EnrollPasskeyValue
     passkeyId: string;
     label: string | null;
     createdAt: string;
+    /**
+     * Present when the app requires a second factor and this session could only
+     * enrol one: the passkey was also marked as the second factor, and the
+     * session is ordinary from its next request.
+     */
+    mfaStatus?: {
+        enrolled: boolean;
+        methods: ('totp' | 'passkey')[];
+        recoveryCodesRemaining: number;
+    };
 }
 
 /**

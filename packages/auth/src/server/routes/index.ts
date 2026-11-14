@@ -117,9 +117,9 @@ import {
 import { getOAuth2Authorize, createOAuth2AuthorizationCode } from './oauth2/authorize';
 import { oauth2Token, oauth2Revoke } from './oauth2/token';
 import {
-    classifyEnrolmentRoutes,
     gateChannels,
     gateSecondFactorMethods,
+    markEnrolmentRoutes,
     ROUTE_CHANNELS,
     ROUTE_ENROLMENT,
     ROUTE_SECOND_FACTOR_METHODS,
@@ -279,13 +279,14 @@ const authRoutes = {
  * A route of a sign-in channel the app turned off with
  * `createAuthLifecycle({ channels })` answers 404 — see ./channels.ts. So does
  * a second-factor route of a method `createAuthLifecycle({ secondFactor })`
- * does not list, and the enrolment routes are handed to the global
- * `authenticate` from here (`ROUTE_ENROLMENT`, same file).
+ * does not list, and each enrolment route carries the marker the global
+ * `authenticate` recognises it by (`ROUTE_ENROLMENT`, same file).
  */
-classifyEnrolmentRoutes(authRoutes, ROUTE_ENROLMENT);
-
 export const mainAuthRouter = defineRouter(
-    gateChannels(gateSecondFactorMethods(authRoutes, ROUTE_SECOND_FACTOR_METHODS), ROUTE_CHANNELS),
+    gateChannels(
+        gateSecondFactorMethods(markEnrolmentRoutes(authRoutes, ROUTE_ENROLMENT), ROUTE_SECOND_FACTOR_METHODS),
+        ROUTE_CHANNELS,
+    ),
 );
 
 // For backward compatibility

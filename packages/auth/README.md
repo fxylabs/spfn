@@ -453,8 +453,10 @@ no migration, a session that predates the policy is covered, and the moment the 
 - `authenticate` answers every other request **403 `SECOND_FACTOR_ENROLMENT_REQUIRED`**
   (`SecondFactorEnrolmentRequiredError`), on the package's routes and on every route of the app.
   403 rather than 401 for the reason `STEP_UP_REQUIRED` is: the session is not gone, and the
-  Next.js proxy keeps it.
-- `optionalAuth` reads the caller as anonymous.
+  Next.js proxy keeps it. That holds for the principal of every
+  [auth profile](#custom-auth-profiles-registerauthprofile) too — `clientProofV1` and any profile
+  the app registers: the policy is about the person, whichever verifier proved them.
+- `optionalAuth` reads the caller as anonymous, on its Bearer path and on a profile alike.
 - A person reaching the app through an OAuth 2.1 access token is refused the same way:
   `verifyAccessToken` throws `SecondFactorEnrolmentRequiredError` for a valid token whose account
   may only enrol (`@spfn/mcp` turns any throw from its validator into its 401 challenge). A
@@ -466,11 +468,68 @@ The enrolment routes — the only ones such a session reaches:
 |---|---|
 | `passkeyRegisterOptions`, `passkeyRegisterVerify`, `listPasskeys`, `mfaMarkPasskey` | `'passkey'` is listed |
 | `mfaTotpEnroll`, `mfaTotpConfirm` | `'totp'` is listed |
-| `mfaStatus`, `getAuthSession`, `logout` | always |
+| `mfaStatus`, `mfaStepUpOptions`, `mfaStepUp`, `getAuthSession`, `logout` | always |
 
 They still run behind the global `auth` middleware, so every app middleware after it sees the
 principal on them. Only routes of `mainAuthRouter` can be enrolment routes; the classification is
 `ROUTE_ENROLMENT` beside `ROUTE_CHANNELS`, and a route left out of it fails at import.
+
+An enrolment route is recognised by **the route that matched**, not by the request's path: the
+classification puts a marker on each one, and `authenticate` looks for it inside the route chain it
+is running in. So mounting the server under a prefix (`root.route('/api', app)`) changes nothing,
+and nothing an app declares can be taken for one — not an app route at the same path on another
+method, not an app `'*'` middleware, not a path no route matched (404). Only the global
+`authenticate` reads the marker; `optionalAuth`, `opsOrUser` and a one-time token exempt nothing.
+
+The session-renewal pair (`sessionRenewOptions`, `sessionRenewVerify`) is classified on its own,
+`'unchecked'`: it is authenticated by `authenticateForRenewal`, which never asks the policy, so a
+bound enrolment-only session renews — and the renewed key is held to enrolment on its next request.
+
+#### Enrolling when the account already holds a credential
+
+Trust on first use is right for an account that holds nothing, and wrong for one that does: a
+stolen password must not be enough to enrol the thief's factor beside a passkey or an authenticator
+app the owner already has. So in the enrolment-only state, **an account that holds any live
+credential it could prove must prove one on this device before it may enrol**; one that holds none
+enrols on first use.
+
+"Holds" is: a live passkey, marked as a second factor or not; a confirmed TOTP, listed or not; and,
+only while `recoveryCodes` is on, an unspent recovery code. The proof is an ordinary step-up on
+this device key: `mfa/step-up/options` and `mfa/step-up` are enrolment routes, and **only while the
+account is in the enrolment-only state** `mfa/step-up` accepts an assertion from any live passkey of
+the account, a code from a confirmed TOTP whether `'totp'` is listed or not, and a recovery code
+only while `recoveryCodes` is on. It opens the ordinary step-up window. Once the account is
+enrolled an unlisted proof is refused again, at `mfa/step-up` as at `mfa/verify`.
+
+`passkeys/register/options`, `passkeys/register/verify`, `mfa/passkey/mark`, `mfa/totp/enroll` and
+`mfa/totp/confirm` then require that window when the account holds a credential, and answer
+**403 `STEP_UP_REQUIRED`** without it, writing nothing — the code the client already handles. The
+decision is the account's state inside the request, after the owner row's lock. The
+recent-authentication rule on the passkey routes (`RECENT_AUTH_REQUIRED`) runs as it always has.
+
+In the enrolment-only state with `'passkey'` listed, `passkeys/register/verify` **marks the passkey
+it registered as the second factor in the same transaction** — the ceremony with user verification
+is the proof — and its answer carries `mfaStatus` (the `mfa/status` shape), so the session is
+ordinary from its next request without a second call. With no policy, or outside that state, it
+marks nothing and its answer has no `mfaStatus`, as before.
+
+The client flow, by what the account holds (`secondFactorEnrolmentRequired: true` on the sign-in):
+
+| the account holds | flow |
+|---|---|
+| nothing | register a passkey (`enrollPasskey`) — done, it is marked; or `totp/enroll`, `totp/confirm` |
+| a passkey it never marked | `mfa/step-up/options` → assert with that passkey → `mfa/step-up`, then `passkey/mark` with `secondFactor: true` (or register another, which is marked) |
+| a confirmed TOTP the policy does not list | `mfa/step-up` with `{ code }`, then register a passkey — it is marked |
+
+A 403 `STEP_UP_REQUIRED` on any enrolment call means "step up first", exactly as on an enrolled
+account's sensitive change.
+
+When the owner has lost what the account holds, the operator re-issues: `disableMfaService(userId)`
+removes the TOTP, the recovery codes, the step-up verifications and every passkey's second-factor
+mark. A passkey itself is not removed by it, and an unmarked live passkey still counts as held — the
+package has no operator service that revokes a passkey (`revokePasskeyService` is the owner's
+route, behind their own step-up and recent authentication), so the package offers no way today to
+return such an account to enrolling on first use.
 
 #### `methods`
 
@@ -4133,6 +4192,13 @@ x-acme-service-token: <the app's own credential>
   & {})`. The built-in names keep their autocomplete and a registered profile names its own scheme.
   The field stays informational: downstream permission and tenant code takes one principal shape and
   never branches on how it was produced.
+- **A profile that resolves to a user row is a person**, and a person is held to
+  [the second-factor policy](#requiring-a-second-factor-secondfactor) like any other: while
+  `secondFactor.required` holds, an account with no listed factor is refused 403
+  `SECOND_FACTOR_ENROLMENT_REQUIRED` before the handler runs (anonymous under `optionalAuth`),
+  whichever verifier produced it. A credential that is not a person — a service, a job, a runtime —
+  belongs in a [machine principal](#machine-principals-registermachineverifier), which the policy
+  does not touch.
 
 ## Authorization server for MCP clients
 

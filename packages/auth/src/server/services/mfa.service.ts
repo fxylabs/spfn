@@ -69,7 +69,9 @@ import { mintChallenge, presentedChallenge, spendChallenge } from './webauthn-ch
 import { isMethodListed } from '../lib/second-factor-policy';
 import {
     assertNotLastListedFactor,
+    enrolmentNeedsProof,
     isEnrolledUnderPolicy,
+    isEnrolmentOnly,
     secondFactorEnrolmentFields,
 } from './second-factor-policy.service';
 
@@ -109,6 +111,11 @@ export interface AssertStepUpParams
  * the passkey routes' `assertRecentAuthentication` — and they still run it
  * afterwards; this adds a rule for enrolled accounts rather than replacing one.
  *
+ * The one exception is the policy's enrolment-only state (#309): an account
+ * that may only enrol, and already holds a credential, proves it before it
+ * enrols — see `assertEnrolmentProven`, which this runs for an unenrolled
+ * account and which is a no-op unless the policy requires a second factor.
+ *
  * The unenrolled path therefore costs one indexed lookup and touches no passkey
  * configuration, which is what lets an app with no passkeys at all call it.
  *
@@ -118,9 +125,42 @@ export async function assertStepUp(params: AssertStepUpParams): Promise<void>
 {
     if (!await mfaEnrolledForUser(params.userId))
     {
+        await assertEnrolmentProven(params);
+
         return;
     }
 
+    await assertWindowOpen(params);
+}
+
+/**
+ * Refuse creating or marking a second factor in the enrolment-only state until
+ * this device proved a credential the account already holds (#309).
+ *
+ * The proof is an ordinary step-up on this device key — in that state
+ * `mfa/step-up` accepts any credential the account holds, listed or not — so
+ * the refusal is the one `STEP_UP_REQUIRED` the client already handles. An
+ * account holding nothing passes: that is trust on first use, and the
+ * registration ceremony itself is its proof. Outside that state, and with no
+ * policy, nothing is read but the policy.
+ *
+ * Called first by every route that creates or marks a factor — through
+ * `assertStepUp` where the route already has it, directly where it has none
+ * (`passkeys/register/verify`, `mfa/totp/confirm`) — so a refusal writes nothing.
+ *
+ * @throws StepUpRequiredError
+ */
+export async function assertEnrolmentProven(params: AssertStepUpParams): Promise<void>
+{
+    if (await enrolmentNeedsProof(params.userId))
+    {
+        await assertWindowOpen(params);
+    }
+}
+
+/** @throws StepUpRequiredError unless this device verified within the window */
+async function assertWindowOpen(params: AssertStepUpParams): Promise<void>
+{
     const verification = await mfaVerificationsRepository.findByKeyId(params.keyId);
     const window = params.maxAgeMs ?? getMfaConfig().stepUpWindowMs;
 
@@ -539,10 +579,15 @@ export interface ConfirmTotpResult
  * the confirmation, the first verification and the recovery codes have to
  * commit together or not at all.
  *
- * @throws MfaNotEnrolledError | MfaVerificationFailedError
+ * In the policy's enrolment-only state, an account that already holds a
+ * credential confirms only from a device that proved it (`assertEnrolmentProven`).
+ *
+ * @throws StepUpRequiredError | MfaNotEnrolledError | MfaVerificationFailedError
  */
 export async function confirmTotpEnrolmentService(params: ConfirmTotpParams): Promise<ConfirmTotpResult>
 {
+    await assertEnrolmentProven(params);
+
     const row = await mfaTotpRepository.findByUserId(params.userId);
 
     if (!row || row.confirmedAt)
@@ -777,19 +822,60 @@ export interface StepUpParams
  * it, by design, so the session they create would otherwise fail every
  * sensitive change with no way forward.
  *
+ * In the policy's enrolment-only state (#309) it is also how an account proves
+ * a credential it already holds before it may enrol: there, and only there, it
+ * accepts any of them (`heldProofs`). Once the account is enrolled, an
+ * unlisted proof is refused again as it is everywhere.
+ *
  * @throws ValidationError when the body names none or more than one input
  * @throws MfaNotEnrolledError | MfaVerificationFailedError
  */
 export async function stepUpService(params: StepUpParams): Promise<void>
+{
+    const method = await isEnrolmentOnly(params.userId)
+        ? await verifySecondFactor(params, heldProofs())
+        : await verifyEnrolledFactor(params);
+
+    await mfaVerificationsRepository.record(params.keyId, params.userId, method);
+}
+
+async function verifyEnrolledFactor(params: StepUpParams): Promise<MfaVerificationMethod>
 {
     if (!await mfaEnrolledForUser(params.userId))
     {
         throw new MfaNotEnrolledError();
     }
 
-    const method = await verifySecondFactor(params);
+    return await verifySecondFactor(params);
+}
 
-    await mfaVerificationsRepository.record(params.keyId, params.userId, method);
+/** Which proofs a check accepts, and which of the account's passkeys count. */
+export interface AcceptedProofs
+{
+    totp: boolean;
+    recoveryCodes: boolean;
+    /** Marked passkeys only, every live one, or none. */
+    passkeys: 'marked' | 'live' | null;
+}
+
+/** What proves a second factor: the listed methods only. */
+function listedProofs(): AcceptedProofs
+{
+    return {
+        totp: isMethodListed('totp'),
+        recoveryCodes: isMethodListed('recoveryCodes'),
+        passkeys: isMethodListed('passkey') ? 'marked' : null,
+    };
+}
+
+/**
+ * What proves a credential the account holds, in the enrolment-only state: any
+ * live passkey and a confirmed TOTP whatever is listed, and recovery codes only
+ * while they exist at all.
+ */
+function heldProofs(): AcceptedProofs
+{
+    return { totp: true, recoveryCodes: isMethodListed('recoveryCodes'), passkeys: 'live' };
 }
 
 /**
@@ -808,10 +894,15 @@ export async function stepUpService(params: StepUpParams): Promise<void>
  * turned them off — is that same failure, before anything is read or spent:
  * the account may still hold one from before the policy, and it proves nothing
  * now. Both callers inherit that, the challenge counting it as a wrong proof.
+ * `accepts` widens it for the one caller that may: step-up in the
+ * enrolment-only state.
  *
  * @throws ValidationError when the body names none or more than one input
  */
-export async function attemptSecondFactor(params: StepUpParams): Promise<MfaVerificationMethod | null>
+export async function attemptSecondFactor(
+    params: StepUpParams,
+    accepts: AcceptedProofs = listedProofs(),
+): Promise<MfaVerificationMethod | null>
 {
     const presented = [params.code, params.recoveryCode, params.response].filter(value => value !== undefined);
 
@@ -824,15 +915,15 @@ export async function attemptSecondFactor(params: StepUpParams): Promise<MfaVeri
 
     if (params.code !== undefined)
     {
-        return isMethodListed('totp') ? await verifyTotpProof(params.userId, params.code) : null;
+        return accepts.totp ? await verifyTotpProof(params.userId, params.code) : null;
     }
 
     if (params.recoveryCode !== undefined)
     {
-        return isMethodListed('recoveryCodes') ? await verifyRecoveryProof(params.userId, params.recoveryCode) : null;
+        return accepts.recoveryCodes ? await verifyRecoveryProof(params.userId, params.recoveryCode) : null;
     }
 
-    return isMethodListed('passkey') ? await verifyPasskeyProof(params.userId, params.response!) : null;
+    return accepts.passkeys === null ? null : await verifyPasskeyProof(params.userId, params.response!, accepts.passkeys);
 }
 
 /**
@@ -841,9 +932,12 @@ export async function attemptSecondFactor(params: StepUpParams): Promise<MfaVeri
  *
  * @throws ValidationError | MfaVerificationFailedError
  */
-export async function verifySecondFactor(params: StepUpParams): Promise<MfaVerificationMethod>
+export async function verifySecondFactor(
+    params: StepUpParams,
+    accepts: AcceptedProofs = listedProofs(),
+): Promise<MfaVerificationMethod>
 {
-    const method = await attemptSecondFactor(params);
+    const method = await attemptSecondFactor(params, accepts);
 
     if (!method)
     {
@@ -916,17 +1010,21 @@ async function verifyRecoveryProof(userId: number, submitted: string): Promise<M
 }
 
 /**
- * An assertion from a passkey the owner marked as a second factor.
+ * An assertion from a passkey the owner marked as a second factor — or, with
+ * `'live'`, from any live passkey of theirs.
  *
  * A passkey they never marked is refused with the same body as a wrong code:
  * enrolling a credential is not the same decision as making it a second factor,
- * and the surface must not say which of the two is missing.
+ * and the surface must not say which of the two is missing. `'live'` is the
+ * enrolment-only state's step-up, where proving a passkey the account holds is
+ * the point. Another account's passkey is never among the candidates.
  *
  * @returns null when the assertion does not verify
  */
 async function verifyPasskeyProof(
     userId: number,
     response: AuthenticationResponseJSON,
+    candidates: 'marked' | 'live',
 ): Promise<MfaVerificationMethod | null>
 {
     const challenge = presentedChallenge(response.response.clientDataJSON);
@@ -936,8 +1034,10 @@ async function verifyPasskeyProof(
         return null;
     }
 
-    const marked = await passkeysRepository.listLiveSecondFactorByUserId(userId);
-    const passkey = marked.find(row => row.credentialId === response.id);
+    const owned = candidates === 'marked'
+        ? await passkeysRepository.listLiveSecondFactorByUserId(userId)
+        : await passkeysRepository.listLiveByUserId(userId);
+    const passkey = owned.find(row => row.credentialId === response.id);
 
     if (!passkey)
     {

@@ -12,12 +12,13 @@
  * notice: one more import the other way would be a cycle.
  */
 
+import type { Context } from 'hono';
 import { SecondFactorEnrolmentRequiredError, SecondFactorRequiredError } from '@spfn/auth/errors';
 
 import { keysRepository, mfaEnrolmentRepository, passkeysRepository, usersRepository } from '../repositories';
 import type { EnrolmentMethods } from '../repositories/mfa-enrolment.repository';
 import { isMethodListed, isSecondFactorRequired } from '../lib/second-factor-policy';
-import { isEnrolmentRequest } from '../lib/enrolment-routes';
+import { isEnrolmentRoute } from '../lib/enrolment-routes';
 
 function listedMethods(): EnrolmentMethods
 {
@@ -83,24 +84,25 @@ export async function keySecondFactorEnrolmentFields(keyId: string): Promise<Sec
 /**
  * Refuse a person who may only enrol, unless this request is an enrolment.
  *
- * Asked where a person principal is resolved (`resolveAuthenticatedUser`, the
- * OAuth 2.1 access token), so every authenticator built on those inherits it.
- * Not evaluated at all while the policy does not require a second factor: no
+ * Asked at every point a person principal is produced — the global
+ * `authenticate` (its Bearer path and every auth profile, through
+ * `runAuthProfile`), `optionalAuth`, one-time tokens and the OAuth 2.1 access
+ * token — so no principal carrying a user reaches a handler without it. Not
+ * evaluated at all while the policy does not require a second factor: no
  * query, no answer that differs from before.
  *
  * Read on the primary: an account that enrolled on the previous request is
  * admitted on this one, on the same session.
  *
- * @param request - the request's method and path, classified against the
- *   enrolment routes; `null` for a principal that never reaches one
+ * @param route - the request, for the global `authenticate` only: the route it
+ *   matched is looked at for the enrolment marker, from inside the chain that
+ *   middleware runs in. `null` for every other producer — none of them stands
+ *   in front of an enrolment route, and none may exempt one.
  * @throws SecondFactorEnrolmentRequiredError
  */
-export async function assertSecondFactorAdmits(
-    userId: number,
-    request: { method: string; path: string } | null,
-): Promise<void>
+export async function assertSecondFactorAdmits(userId: number, route: Context | null): Promise<void>
 {
-    if (!isSecondFactorRequired() || (request !== null && isEnrolmentRequest(request.method, request.path)))
+    if (!isSecondFactorRequired() || (route !== null && isEnrolmentRoute(route)))
     {
         return;
     }
@@ -111,6 +113,42 @@ export async function assertSecondFactorAdmits(
     }
 
     throw new SecondFactorEnrolmentRequiredError();
+}
+
+/**
+ * Whether the account may only enrol: the policy requires a second factor and
+ * the account has none of the listed methods. Read on the primary, as the
+ * admission is, so it agrees with what `authenticate` just decided. False
+ * without a query while nothing is required.
+ */
+export async function isEnrolmentOnly(userId: number): Promise<boolean>
+{
+    return isSecondFactorRequired() && !await mfaEnrolmentRepository.isEnrolledInOnPrimary(userId, listedMethods());
+}
+
+/**
+ * Whether enrolling on this account needs a proof first (#309): it is in the
+ * enrolment-only state and already holds a credential it could prove itself
+ * with — a live passkey, marked or not, a confirmed TOTP, listed or not, or
+ * while recovery codes are on an unspent one. An account that holds none
+ * enrols on first use. Without this, a stolen password would be enough to
+ * enrol the thief's factor on an account whose owner holds one already.
+ *
+ * Takes the owner row's lock first, so the decision is the account's state as
+ * of this request: two enrolments in flight on one account are decided one
+ * after the other, and the second sees what the first wrote.
+ */
+export async function enrolmentNeedsProof(userId: number): Promise<boolean>
+{
+    if (!isSecondFactorRequired())
+    {
+        return false;
+    }
+
+    await usersRepository.lockById(userId);
+
+    return await isEnrolmentOnly(userId)
+        && await mfaEnrolmentRepository.holdsProofCredentialOnPrimary(userId, isMethodListed('recoveryCodes'));
 }
 
 /**

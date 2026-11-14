@@ -27,7 +27,7 @@ import type { Context, MiddlewareHandler } from 'hono';
 import type { NamedMiddleware, RouteDef } from '@spfn/core/route';
 
 import { requireChannel, type AuthChannel } from '../lib/channels-config';
-import { registerEnrolmentRoutes } from '../lib/enrolment-routes';
+import { enrolmentMarker } from '../lib/enrolment-routes';
 import { requireMethod, type SecondFactorFeature, type SecondFactorMethod } from '../lib/second-factor-policy';
 import type { VerificationPurpose } from './schema';
 
@@ -231,7 +231,7 @@ async function readPurpose(c: Context): Promise<string | undefined>
  *
  * The second classification beside `ROUTE_CHANNELS`, and kept to the same
  * guarantee: every key of `mainAuthRouter` is here, the type says so at
- * compile time and `classifyEnrolmentRoutes` refuses an unclassified one at
+ * compile time and `markEnrolmentRoutes` refuses an unclassified one at
  * import. A route added later and left out would otherwise be one the global
  * `authenticate` has no answer for.
  *
@@ -239,8 +239,12 @@ async function readPurpose(c: Context): Promise<string | undefined>
  * - `'always'` — an enrolment route under every policy
  * - `'none'` — not one: an enrolment-only session is refused it with 403
  *   `SECOND_FACTOR_ENROLMENT_REQUIRED`
+ * - `'unchecked'` — admitted: the route is authenticated by a middleware of
+ *   its own that does not hold a session to enrolment, so the global check
+ *   never runs there. Session renewal is the one: it hands a bound key its
+ *   successor, and that key is held to enrolment on its next request.
  */
-export type RouteEnrolment = SecondFactorMethod | 'always' | 'none';
+export type RouteEnrolment = SecondFactorMethod | 'always' | 'none' | 'unchecked';
 
 export const ROUTE_ENROLMENT = {
     sendVerificationCode: 'none',
@@ -280,8 +284,8 @@ export const ROUTE_ENROLMENT = {
     mfaMarkPasskey: 'passkey',
     mfaRegenerateRecoveryCodes: 'none',
     mfaStatus: 'always',
-    mfaStepUp: 'none',
-    mfaStepUpOptions: 'none',
+    mfaStepUp: 'always',
+    mfaStepUpOptions: 'always',
     mfaVerify: 'none',
     mfaVerifyOptions: 'none',
     logout: 'always',
@@ -296,8 +300,8 @@ export const ROUTE_ENROLMENT = {
     setSessionBinding: 'none',
     getSessionBinding: 'none',
     sessionBindingDisableOptions: 'none',
-    sessionRenewOptions: 'none',
-    sessionRenewVerify: 'none',
+    sessionRenewOptions: 'unchecked',
+    sessionRenewVerify: 'unchecked',
     issueOneTimeToken: 'none',
     requestAccountDeletion: 'none',
     cancelAccountDeletion: 'none',
@@ -367,7 +371,8 @@ export const ROUTE_SECOND_FACTOR_METHODS = {
 } as const satisfies Partial<Record<keyof typeof ROUTE_CHANNELS, SecondFactorFeature>>;
 
 /**
- * Hand the enrolment routes to the global `authenticate`, by method and path.
+ * The routes with each enrolment route carrying its marker, which the global
+ * `authenticate` looks for in the route chain it runs in (lib/enrolment-routes).
  *
  * A method-gated route is an enrolment route whatever the policy lists: while
  * its method is unlisted its own gate answers the 404, which is the answer
@@ -375,12 +380,12 @@ export const ROUTE_SECOND_FACTOR_METHODS = {
  *
  * @throws when a route has no entry in `ROUTE_ENROLMENT`
  */
-export function classifyEnrolmentRoutes<TRoutes extends Record<string, RouteDef<any, any, any>>>(
+export function markEnrolmentRoutes<TRoutes extends Record<string, RouteDef<any, any, any>>>(
     routes: TRoutes,
     classes: Record<keyof TRoutes, RouteEnrolment>,
-): void
+): TRoutes
 {
-    const enrolment = Object.entries(routes).flatMap(([key, route]) =>
+    return Object.fromEntries(Object.entries(routes).map(([key, route]) =>
     {
         const routeClass: RouteEnrolment | undefined = classes[key];
 
@@ -389,14 +394,16 @@ export function classifyEnrolmentRoutes<TRoutes extends Record<string, RouteDef<
             throw new Error(`Route "${key}" has no entry in ROUTE_ENROLMENT. Classify it before mounting it.`);
         }
 
+        if (routeClass === 'none' || routeClass === 'unchecked')
+        {
+            return [key, route];
+        }
+
         const gated = (ROUTE_SECOND_FACTOR_METHODS as Record<string, SecondFactorFeature>)[key] !== undefined;
+        const marker = enrolmentMarker(routeClass === 'always' || gated ? null : routeClass);
 
-        return routeClass === 'none'
-            ? []
-            : [{ method: route.method!, path: route.path!, requires: routeClass === 'always' || gated ? null : routeClass }];
-    });
-
-    registerEnrolmentRoutes(enrolment);
+        return [key, { ...route, middlewares: [marker, ...route.middlewares ?? []] }];
+    })) as TRoutes;
 }
 
 /**

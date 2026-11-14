@@ -1447,7 +1447,8 @@ function exportedOperation({ route, ...operation }: ContractOperation): Record<s
  * The second-factor refusals an operation can meet, from the server's own tables.
  *
  * Enrolment: every signed-in operation that is not an enrolment route — an
- * app's own (no route key) included, since an app route is never one. A route
+ * app's own (no route key) included, since an app route is never one — and
+ * whose authenticator holds a session to enrolment at all. A route
  * that is an enrolment route only while its method is listed names that method.
  * Method: the route's own gate, when it has one.
  */
@@ -1460,7 +1461,7 @@ function secondFactorOf(
     const method = route === undefined ? undefined : (ROUTE_SECOND_FACTOR_METHODS as Record<string, string>)[route];
     const refusals: Record<string, unknown> = {};
 
-    if (operation.authProfile === 'clientProofV1' && enrolment !== 'always' && enrolment !== method)
+    if (operation.authProfile === 'clientProofV1' && enrolment !== 'always' && enrolment !== 'unchecked' && enrolment !== method)
     {
         refusals.enrolmentRequired = enrolment === 'none'
             ? { error: SECOND_FACTOR_ENROLMENT_REQUIRED_CODE }

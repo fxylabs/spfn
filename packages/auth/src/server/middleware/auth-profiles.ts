@@ -138,16 +138,13 @@ export function selectAuthProfile(c: Context): AuthProfileVerifier | null
  * rules. One implementation for every scheme: the Bearer path and the profile
  * verifiers call this, so a status added here gates both identically.
  *
- * The second-factor policy is one of those rules (#309). While the application
- * requires a second factor, an account with none of the listed methods is
- * refused with 403 `SECOND_FACTOR_ENROLMENT_REQUIRED` everywhere but on an
- * enrolment route of `mainAuthRouter`, which is what `c` is for: the request is
- * classified by method and path. A caller that passes no context gets no
- * exemption. Without a required policy nothing is read.
- *
- * @throws SecondFactorEnrolmentRequiredError
+ * The second-factor policy is not one of these rules: it is about the person
+ * a principal stands for, whoever produced it, so it is asked where every
+ * principal passes — `runAuthProfile` for each profile, and the Bearer paths
+ * of `authenticate` and `optionalAuth` — rather than here, where only the
+ * built-in verifiers come.
  */
-export async function resolveAuthenticatedUser(userId: number, c?: Context): Promise<{
+export async function resolveAuthenticatedUser(userId: number): Promise<{
     user: User;
     role: string | null;
 } & ProfileLocale>
@@ -174,8 +171,6 @@ export async function resolveAuthenticatedUser(userId: number, c?: Context): Pro
 
         throw new AccountDisabledError({ status: user.status });
     }
-
-    await assertSecondFactorAdmits(user.id, c === undefined ? null : c.req);
 
     return { user, role: role?.name ?? null, ...profileLocale(chosenLocale) };
 }
@@ -251,8 +246,31 @@ export type AuthProfileOutcome =
  * Bearer path. A refusal comes back as a built response rather than a throw:
  * the answer a proven call gets is the contract's own envelope, and an error
  * handed to the generic error handler is classified by its class name instead.
+ *
+ * The principal any verifier returns — built-in or registered by the app —
+ * stands for a person, and is held to the second-factor policy here, the one
+ * point every profile principal passes (#309). A person who may only enrol is
+ * refused with a throw of 403 `SECOND_FACTOR_ENROLMENT_REQUIRED` — except on an
+ * enrolment route reached through the global `authenticate` — and `optionalAuth`
+ * reads that refusal as anonymous. A credential that is not a person belongs
+ * in a machine principal (`registerMachineVerifier`), which never comes here.
+ *
+ * @throws SecondFactorEnrolmentRequiredError
  */
 export async function runAuthProfile(c: Context): Promise<AuthProfileOutcome>
+{
+    const outcome = await dispatchAuthProfile(c);
+
+    if (outcome.kind === 'authenticated')
+    {
+        await assertSecondFactorAdmits(Number(outcome.auth.userId), c);
+    }
+
+    return outcome;
+}
+
+/** The registered verifier for this request, run, and its refusal answered. */
+async function dispatchAuthProfile(c: Context): Promise<AuthProfileOutcome>
 {
     try
     {
@@ -399,7 +417,7 @@ async function verifyClientProofProfile(c: Context): Promise<AuthContext>
     }
 
     // 7. The same user-status path the Bearer scheme takes.
-    const { user, role, locale, chosenLocale } = await resolveAuthenticatedUser(keyRecord.userId, c);
+    const { user, role, locale, chosenLocale } = await resolveAuthenticatedUser(keyRecord.userId);
 
     // Fire-and-forget, as the Bearer path does — and with the address under the
     // same rule, so this surface neither erases `last_seen_ip` on every throttle

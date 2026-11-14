@@ -162,7 +162,10 @@ refuses the account a first social sign-in would create (`SignupDisabledError`, 
 nothing changes. With `required: true` an account with no listed factor signs in to a session that
 can only enrol one — its `LoginResult` carries `secondFactorEnrolmentRequired: true`, and every
 other route, the app's included, answers 403 `SECOND_FACTOR_ENROLMENT_REQUIRED` until it enrols, on
-the same session. An unlisted method's routes answer 404 `SECOND_FACTOR_METHOD_DISABLED`, and
+the same session — the principal of any auth profile included. An account that holds nothing enrols
+on first use (a passkey registered in that state is marked as the factor at once); one that already
+holds a passkey or a TOTP proves it with `mfa/step-up` first, or its enrolment calls answer 403
+`STEP_UP_REQUIRED`. An unlisted method's routes answer 404 `SECOND_FACTOR_METHOD_DISABLED`, and
 removing the last listed factor is 409 `SECOND_FACTOR_REQUIRED` (`disableMfaService(userId)` is the
 operator's re-issue path). Boot is refused for `methods: []`, for `required` beside `deviceCode` or
 `deviceLink`, and for two lifecycles stating different policies. See

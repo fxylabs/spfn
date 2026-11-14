@@ -1,8 +1,9 @@
 /**
  * @spfn/auth - A second-factor policy (#309)
  *
- * One test per row of the #309 case table — S1–S19, R1–R7, K1–K5 — named for
- * its row. The boot rows B1–B7 and the classification's own guarantees are in
+ * One test per row of the #309 case table — S1–S19, R1–R7, K1–K5 — and of
+ * the first review round — F1, F2 and P1–P12 — named for its row. The boot
+ * rows B1–B7 and the classification's own guarantees (F4 among them) are in
  * unit/second-factor-policy.test.ts.
  *
  * Driven at the routes, on the production path: the auth router and an app
@@ -58,6 +59,7 @@ import {
 
 const { Hono: HonoApp } = await import('hono');
 const { registerRoutes, route, defineRouter } = await import('@spfn/core/route');
+const { registerAuthProfile } = await import('@/server/middleware/auth-profiles');
 const { ErrorHandler, resetMemoryRateLimitStore } = await import('@spfn/core/middleware');
 const { mainAuthRouter } = await import('@/server/routes');
 const { authenticate, optionalAuth } = await import('@/server/middleware/authenticate');
@@ -77,6 +79,11 @@ const RP_ID = 'localhost';
 const ORIGIN = 'http://localhost:3000';
 const ACTIVE_KEY = `active:${Buffer.alloc(32, 7).toString('base64')}`;
 const EMAIL = 'owner@sf309.test';
+const OTHER_EMAIL = 'other@sf309.test';
+
+/** The app-registered profile of F1, and the header its verifier reads the account from. */
+const APP_PROFILE = 'sf309AppProfile';
+const APP_PROFILE_USER_HEADER = 'x-sf309-user';
 
 /** The table's policy. */
 const TABLE_POLICY: SecondFactorOptions = { required: true, methods: ['passkey'], recoveryCodes: false };
@@ -142,7 +149,41 @@ function appRouter()
             return { userId: principal.userId };
         });
 
-    return defineRouter({ whoami, optional, ops, resource });
+    // An app route at an enrolment route's exact path, on another method (F2).
+    const sessionPost = route.post('/_auth/session')
+        .handler(async () =>
+        {
+            handled.push('sessionPost');
+
+            return { ok: true };
+        });
+
+    return defineRouter({ whoami, optional, ops, resource, sessionPost });
+}
+
+/** The app as an application mounts it under a prefix (F2): `root.route('/api', app)`. */
+function mountUnderPrefix(app: Hono): Hono
+{
+    const root = new HonoApp();
+    root.route('/api', app);
+
+    return root;
+}
+
+/**
+ * F1: a profile the app registers, resolving the account its header names —
+ * a person principal like any other, built the way an app builds one.
+ */
+function registerAppProfile(): void
+{
+    registerAuthProfile(APP_PROFILE, {
+        verify: async (c) =>
+        {
+            const [user] = await getTestDb().select().from(users).where(eq(users.id, Number(c.req.header(APP_PROFILE_USER_HEADER))));
+
+            return { user: user!, userId: String(user!.id), keyId: 'sf309-app-profile', role: null, locale: 'en', scheme: APP_PROFILE };
+        },
+    });
 }
 
 function mountApp(): Hono
@@ -170,6 +211,7 @@ function mountApp(): Hono
 describe.skipIf(!dbAvailable)('second-factor policy (#309 case table)', () =>
 {
     let app: Hono;
+    let prefixed: Hono;
     let userId: number;
     let ipCounter = 0;
     const unsubscribers: (() => void)[] = [];
@@ -184,6 +226,8 @@ describe.skipIf(!dbAvailable)('second-factor policy (#309 case table)', () =>
         process.env.SPFN_APP_URL = 'https://app.example.com';
 
         app = mountApp();
+        prefixed = mountUnderPrefix(app);
+        registerAppProfile();
     });
 
     afterAll(async () =>
@@ -237,16 +281,23 @@ describe.skipIf(!dbAvailable)('second-factor policy (#309 case table)', () =>
 
     async function request(method: string, path: string, authorization?: string, body?: unknown): Promise<Response>
     {
+        return await requestWith(app, method, path, authorization ? { Authorization: authorization } : {}, body);
+    }
+
+    async function requestWith(
+        target: Hono,
+        method: string,
+        path: string,
+        headers: Record<string, string>,
+        body?: unknown,
+    ): Promise<Response>
+    {
         ipCounter += 1;
 
-        return await app.request(path, {
+        return await target.request(path, {
             method,
-            headers: {
-                ...JSON_HEADERS,
-                'x-forwarded-for': `198.51.100.${ipCounter % 250}`,
-                ...authorization ? { Authorization: authorization } : {},
-            },
-            body: method === 'GET' ? undefined : JSON.stringify(body ?? {}),
+            headers: { ...JSON_HEADERS, 'x-forwarded-for': `198.51.100.${ipCounter % 250}`, ...headers },
+            body: method === 'GET' || method === 'HEAD' ? undefined : JSON.stringify(body ?? {}),
         });
     }
 
@@ -272,18 +323,18 @@ describe.skipIf(!dbAvailable)('second-factor policy (#309 case table)', () =>
         };
     }
 
-    async function passwordLogin()
+    async function passwordLogin(email = EMAIL)
     {
         const keyPair = generateKeyPair('ES256');
-        const response = await post('/_auth/login', { email: EMAIL, password: PASSWORD, ...deviceKey(keyPair) });
+        const response = await post('/_auth/login', { email, password: PASSWORD, ...deviceKey(keyPair) });
 
         return { response, body: await response.json(), session: signedBy(keyPair) };
     }
 
     /** A password sign-in that answered a session. */
-    async function signIn(): Promise<Session>
+    async function signIn(email = EMAIL): Promise<Session>
     {
-        const { response, session } = await passwordLogin();
+        const { response, session } = await passwordLogin(email);
 
         expect(response.status).toBe(200);
 
@@ -309,18 +360,19 @@ describe.skipIf(!dbAvailable)('second-factor policy (#309 case table)', () =>
         return { secret, recoveryCodes: (await confirmed.json()).recoveryCodes as string[] };
     }
 
-    /** Register a passkey on this session; the authenticator and its id. */
+    /** Register a passkey on this session; the authenticator, its id, and the registration's answer. */
     async function registerPasskey(session: Session)
     {
         const authenticator = await FixtureAuthenticator.create();
         const options = await post('/_auth/passkeys/register/options', {}, session.authorization);
-        expect(options.status).toBe(200);
+        expect(options.status, await options.clone().text()).toBe(200);
         const registered = await post('/_auth/passkeys/register/verify', {
             response: authenticator.attest({ challenge: (await options.json()).challenge, origin: ORIGIN, rpId: RP_ID }),
         }, session.authorization);
         expect(registered.status).toBe(200);
+        const answer = await registered.json();
 
-        return { authenticator, passkeyId: (await registered.json()).passkeyId as string };
+        return { authenticator, passkeyId: answer.passkeyId as string, answer };
     }
 
     function mark(session: Session, passkeyId: string, secondFactor: boolean): Promise<Response>
@@ -328,13 +380,70 @@ describe.skipIf(!dbAvailable)('second-factor policy (#309 case table)', () =>
         return post('/_auth/mfa/passkey/mark', { passkeyId, secondFactor }, session.authorization);
     }
 
-    /** Register a passkey and mark it as the second factor. */
+    /**
+     * Register a passkey as the second factor: an enrolment-only session's
+     * registration marks it itself (P1), any other one marks it after.
+     */
     async function enrolPasskey(session: Session)
     {
         const passkey = await registerPasskey(session);
-        expect((await mark(session, passkey.passkeyId, true)).status).toBe(200);
+
+        if (passkey.answer.mfaStatus === undefined)
+        {
+            expect((await mark(session, passkey.passkeyId, true)).status).toBe(200);
+        }
 
         return passkey;
+    }
+
+    /** Re-prove a confirmed TOTP on this device, opening its step-up window. */
+    function stepUpWithTotp(session: Session, secret: string): Promise<Response>
+    {
+        return post('/_auth/mfa/step-up', { code: codeFor(secret) }, session.authorization);
+    }
+
+    /** A registration verify carrying a well-formed attestation over a challenge nobody minted. */
+    async function registerVerifyUnasked(session: Session): Promise<Response>
+    {
+        const authenticator = await FixtureAuthenticator.create();
+
+        return await post('/_auth/passkeys/register/verify', {
+            response: authenticator.attest({ challenge: 'c2Y5MzA5LXVuYXNrZWQ', origin: ORIGIN, rpId: RP_ID }),
+        }, session.authorization);
+    }
+
+    async function passkeyRows(): Promise<number>
+    {
+        return (await getTestDb().select().from(passkeys).where(eq(passkeys.userId, userId))).length;
+    }
+
+    async function verificationsFor(keyId: string)
+    {
+        return await getTestDb().select().from(mfaVerifications).where(eq(mfaVerifications.keyId, keyId));
+    }
+
+    /** A spent TOTP step is refused as a replay; a row that means a later valid code clears it. */
+    async function forgetUsedTotpStep(): Promise<void>
+    {
+        await getTestDb().update(mfaTotp).set({ lastUsedStep: null });
+    }
+
+    /** The account with one passkey it registered before the policy, never marked; then the table's policy. */
+    async function accountWithUnmarkedPasskey()
+    {
+        const passkey = await registerPasskey(await signIn());
+        usePolicy();
+
+        return { ...passkey, session: await signIn() };
+    }
+
+    /** The account with only a TOTP from before the policy, which the table's policy does not list. */
+    async function accountWithUnlistedTotp()
+    {
+        const totp = await enrolTotp(await signIn());
+        usePolicy();
+
+        return { ...totp, session: await signIn() };
     }
 
     /** Re-prove the passkey on this device, opening its step-up window. */
@@ -422,7 +531,8 @@ describe.skipIf(!dbAvailable)('second-factor policy (#309 case table)', () =>
     /**
      * The account as it stood before the policy: a confirmed TOTP and ten
      * recovery codes, enrolled under the defaults. Then the table's policy, and
-     * a marked passkey enrolled under it.
+     * a marked passkey enrolled under it — after the TOTP it holds is proved on
+     * this device (P6).
      */
     async function accountFromBeforeThePolicy()
     {
@@ -431,6 +541,8 @@ describe.skipIf(!dbAvailable)('second-factor policy (#309 case table)', () =>
 
         usePolicy();
         const session = await signIn();
+        expect((await stepUpWithTotp(session, totp.secret)).status).toBe(204);
+        await forgetUsedTotpStep();
         const passkey = await enrolPasskey(session);
 
         return { session, ...totp, ...passkey };
@@ -496,12 +608,17 @@ describe.skipIf(!dbAvailable)('second-factor policy (#309 case table)', () =>
         expect(authSession.status).toBe(200);
         expect(await authSession.json()).toMatchObject({ userId, secondFactorEnrolmentRequired: true });
 
+        expect((await post('/_auth/passkeys/list', {}, session.authorization)).status).toBe(200);
+        expect((await post('/_auth/mfa/step-up/options', {}, session.authorization)).status).toBe(200);
+        // Reached, and answered by the step-up itself: there is nothing to prove.
+        expect((await post('/_auth/mfa/step-up', { code: '123456' }, session.authorization)).status).toBe(401);
+        // Reached; its own answer for a passkey that is not theirs.
+        expect((await mark(session, '999999', true)).status).toBe(404);
+
         const { passkeyId } = await registerPasskey(session);
         const listed = await post('/_auth/passkeys/list', {}, session.authorization);
         expect(listed.status).toBe(200);
         expect(await listed.json()).toEqual({ passkeys: [expect.objectContaining({ passkeyId })] });
-
-        expect((await mark(session, passkeyId, true)).status).toBe(200);
     });
 
     it('S4: logout reaches an enrolment-only session', async () =>
@@ -530,19 +647,36 @@ describe.skipIf(!dbAvailable)('second-factor policy (#309 case table)', () =>
         expect(await confirm.json()).toMatchObject({ details: { method: 'totp' } });
     });
 
-    it('S6: registering and marking a passkey enrols the account, and the same session then passes', async () =>
+    it('S6/P1: an account with no credential registers a passkey — registered and marked in one call, and the same session then passes', async () =>
     {
         usePolicy();
         const session = await signIn();
 
         await expectRefused(await post('/_auth/keys/list', {}, session.authorization), 403, 'SECOND_FACTOR_ENROLMENT_REQUIRED');
 
-        await enrolPasskey(session);
+        const { passkeyId, answer } = await registerPasskey(session);
 
+        expect(answer).toEqual({
+            passkeyId,
+            label: null,
+            createdAt: expect.any(String),
+            mfaStatus: { enrolled: true, methods: ['passkey'], recoveryCodesRemaining: 0 },
+        });
+        expect(await liveMarkedPasskeys()).toBe(1);
         expect((await post('/_auth/keys/list', {}, session.authorization)).status).toBe(200);
         expect((await request('GET', '/app/whoami', session.authorization)).status).toBe(200);
         expect(await (await request('GET', '/_auth/session', session.authorization)).json())
             .not.toHaveProperty('secondFactorEnrolmentRequired');
+    });
+
+    it('P1: with no policy the same registration marks nothing and answers as it always did', async () =>
+    {
+        const session = await signIn();
+
+        const { passkeyId, answer } = await registerPasskey(session);
+
+        expect(answer).toEqual({ passkeyId, label: null, createdAt: expect.any(String) });
+        expect(await liveMarkedPasskeys()).toBe(0);
     });
 
     it('S7: a passkey-enrolled account signing in by password on a new device answers 202 mfaRequired', async () =>
@@ -882,7 +1016,7 @@ describe.skipIf(!dbAvailable)('second-factor policy (#309 case table)', () =>
         expect(await unusedRecoveryCodes()).toBe(10);
     });
 
-    it('K5: recoveryCodes true with methods [\'passkey\'] — the first passkey/mark answers as it does with no policy', async () =>
+    it('K5: recoveryCodes true with methods [\'passkey\'] — the first passkey factor answers the status the first mark answers with no policy', async () =>
     {
         const withoutPolicy = await signIn();
         const reference = await registerPasskey(withoutPolicy);
@@ -892,11 +1026,262 @@ describe.skipIf(!dbAvailable)('second-factor policy (#309 case table)', () =>
         await getTestDb().delete(passkeys);
         usePolicy({ required: true, methods: ['passkey'], recoveryCodes: true });
         const session = await signIn();
-        const { passkeyId } = await registerPasskey(session);
-        const marked = await mark(session, passkeyId, true);
+        const { answer } = await registerPasskey(session);
 
-        expect(marked.status).toBe(200);
-        expect(await marked.json()).toEqual(referenceAnswer);
+        expect(answer.mfaStatus).toEqual(referenceAnswer);
         expect((await getTestDb().select().from(mfaRecoveryCodes)).length).toBe(referenceRows);
+    });
+
+    // ========================================================================
+    // F1 — a principal from an app-registered auth profile
+    // ========================================================================
+
+    it('F1: a registered profile resolving an unenrolled account is refused 403 before the handler, and is anonymous under optionalAuth', async () =>
+    {
+        usePolicy();
+        const profileHeaders = { 'x-spfn-auth-profile': APP_PROFILE, [APP_PROFILE_USER_HEADER]: String(userId) };
+
+        await expectRefused(
+            await requestWith(app, 'GET', '/app/whoami', profileHeaders),
+            403,
+            'SECOND_FACTOR_ENROLMENT_REQUIRED',
+        );
+        expect(handled).toEqual([]);
+
+        const optional = await requestWith(app, 'GET', '/app/optional', profileHeaders);
+        expect(optional.status).toBe(200);
+        expect(await optional.json()).toEqual({ userId: null });
+    });
+
+    it('F1: the same profile on an enrolment route reaches it, and with no policy it works as today', async () =>
+    {
+        const profileHeaders = { 'x-spfn-auth-profile': APP_PROFILE, [APP_PROFILE_USER_HEADER]: String(userId) };
+
+        expect((await requestWith(app, 'GET', '/app/whoami', profileHeaders)).status).toBe(200);
+
+        usePolicy();
+
+        expect((await requestWith(app, 'GET', '/_auth/mfa/status', profileHeaders)).status).toBe(200);
+    });
+
+    // ========================================================================
+    // F2 — the enrolment route is the route that matched
+    // ========================================================================
+
+    it('F2: mounted under /api, an enrolment-only session reaches GET /api/_auth/session, with the flag', async () =>
+    {
+        usePolicy();
+        const session = await signIn();
+
+        const response = await requestWith(prefixed, 'GET', '/api/_auth/session', { Authorization: session.authorization });
+
+        expect(response.status).toBe(200);
+        expect(await response.json()).toMatchObject({ userId, secondFactorEnrolmentRequired: true });
+        expect((await requestWith(prefixed, 'GET', '/api/_auth/mfa/status', { Authorization: session.authorization })).status)
+            .toBe(200);
+    });
+
+    it('F2: under the same mount an app route is refused 403, and an unmatched path is 404', async () =>
+    {
+        usePolicy();
+        const session = await signIn();
+        const signed = { Authorization: session.authorization };
+
+        await expectRefused(await requestWith(prefixed, 'GET', '/api/app/whoami', signed), 403, 'SECOND_FACTOR_ENROLMENT_REQUIRED');
+        expect((await requestWith(prefixed, 'GET', '/api/_auth/session/elsewhere', signed)).status).toBe(404);
+        // The unprefixed path is not a route of the mounted app.
+        expect((await requestWith(prefixed, 'GET', '/_auth/session', signed)).status).toBe(404);
+        expect(handled).toEqual([]);
+    });
+
+    it('F2: an app route at an enrolment route\'s exact path on another method is refused, mounted or not', async () =>
+    {
+        usePolicy();
+        const session = await signIn();
+        const signed = { Authorization: session.authorization };
+
+        await expectRefused(await requestWith(app, 'POST', '/_auth/session', signed), 403, 'SECOND_FACTOR_ENROLMENT_REQUIRED');
+        await expectRefused(await requestWith(prefixed, 'POST', '/api/_auth/session', signed), 403, 'SECOND_FACTOR_ENROLMENT_REQUIRED');
+        expect(handled).toEqual([]);
+    });
+
+    it('F2: recognition by route — a trailing slash and another case match nothing (404), HEAD is the GET route', async () =>
+    {
+        usePolicy();
+        const session = await signIn();
+        const signed = { Authorization: session.authorization };
+
+        expect((await requestWith(app, 'GET', '/_auth/session/', signed)).status).toBe(404);
+        expect((await requestWith(app, 'GET', '/_AUTH/SESSION', signed)).status).toBe(404);
+        expect((await requestWith(app, 'HEAD', '/_auth/session', signed)).status).toBe(200);
+        expect((await requestWith(app, 'HEAD', '/app/whoami', signed)).status).toBe(403);
+        expect(handled).toEqual([]);
+    });
+
+    // ========================================================================
+    // F3 — enrolling needs proof of whatever the account already holds
+    // ========================================================================
+
+    it('P2: one unmarked passkey — marking it without a step-up is 403 STEP_UP_REQUIRED, and no mark is written', async () =>
+    {
+        const { session, passkeyId } = await accountWithUnmarkedPasskey();
+
+        await expectRefused(await mark(session, passkeyId, true), 403, 'STEP_UP_REQUIRED');
+
+        expect(await liveMarkedPasskeys()).toBe(0);
+    });
+
+    it('P2: the reviewer\'s probe — a second session cannot mark the passkey the first one registered', async () =>
+    {
+        usePolicy();
+        const first = await signIn();
+        const second = await signIn();
+        const { passkeyId } = await registerPasskey(first);
+        // The first session's registration marked it; take the mark off as an operator would.
+        await getTestDb().update(passkeys).set({ secondFactor: false });
+
+        await expectRefused(await mark(second, passkeyId, true), 403, 'STEP_UP_REQUIRED');
+
+        expect(await liveMarkedPasskeys()).toBe(0);
+    });
+
+    it('P3: one unmarked passkey — registering another without a step-up is 403 at options and at verify, and no row is written', async () =>
+    {
+        const { session } = await accountWithUnmarkedPasskey();
+
+        await expectRefused(await post('/_auth/passkeys/register/options', {}, session.authorization), 403, 'STEP_UP_REQUIRED', 'options');
+        await expectRefused(await registerVerifyUnasked(session), 403, 'STEP_UP_REQUIRED', 'verify');
+
+        expect(await passkeyRows()).toBe(1);
+    });
+
+    it('P4: one unmarked passkey — a step-up with an assertion from it, then marking it, enrols; the session is ordinary', async () =>
+    {
+        const { session, passkeyId, authenticator } = await accountWithUnmarkedPasskey();
+
+        await stepUpWithPasskey(session, authenticator, 1);
+
+        expect((await mark(session, passkeyId, true)).status).toBe(200);
+        expect(await liveMarkedPasskeys()).toBe(1);
+        expect((await request('GET', '/app/whoami', session.authorization)).status).toBe(200);
+    });
+
+    it('P5: a confirmed TOTP only (unlisted) — registering a passkey without a step-up is 403, and no passkey row is written', async () =>
+    {
+        const { session } = await accountWithUnlistedTotp();
+
+        await expectRefused(await post('/_auth/passkeys/register/options', {}, session.authorization), 403, 'STEP_UP_REQUIRED', 'options');
+        await expectRefused(await registerVerifyUnasked(session), 403, 'STEP_UP_REQUIRED', 'verify');
+
+        expect(await passkeyRows()).toBe(0);
+    });
+
+    it('P6: a confirmed TOTP only (unlisted) — a step-up with its code, then a passkey registration: registered and marked, the session ordinary', async () =>
+    {
+        const { session, secret } = await accountWithUnlistedTotp();
+
+        expect((await stepUpWithTotp(session, secret)).status).toBe(204);
+        const { answer } = await registerPasskey(session);
+
+        expect(answer.mfaStatus).toEqual({ enrolled: true, methods: ['passkey'], recoveryCodesRemaining: 0 });
+        expect(await liveMarkedPasskeys()).toBe(1);
+        expect((await request('GET', '/app/whoami', session.authorization)).status).toBe(200);
+    });
+
+    it('P7: P6\'s account after enrolling — mfa/step-up with a valid TOTP code is 401 and opens no window', async () =>
+    {
+        const { secret, authenticator } = await accountFromBeforeThePolicy();
+        await forgetUsedTotpStep();
+        // A passkey sign-in: exempt from the challenge, and no window of its own.
+        const { session } = await passkeySignIn(authenticator, 1);
+
+        expect((await stepUpWithTotp(session, secret)).status).toBe(401);
+        expect(await verificationsFor(session.keyId)).toEqual([]);
+    });
+
+    it('P8: a confirmed TOTP only (unlisted), new device — a password sign-in answers a session with the flag, no challenge', async () =>
+    {
+        const { session } = await accountWithUnlistedTotp();
+
+        const { response, body, session: next } = await passwordLogin();
+
+        expect(response.status).toBe(200);
+        expect(body).toMatchObject({ mfaRequired: false, secondFactorEnrolmentRequired: true });
+        expect(await challengeFor(next.keyId)).toBeUndefined();
+        expect(await challengeFor(session.keyId)).toBeUndefined();
+    });
+
+    it('P9: unspent recovery codes and an unlisted TOTP, recoveryCodes false — step-up with a recovery code is 401, nothing spent, no window', async () =>
+    {
+        const { session, recoveryCodes } = await accountWithUnlistedTotp();
+
+        const response = await post('/_auth/mfa/step-up', { recoveryCode: recoveryCodes[0] }, session.authorization);
+
+        expect(response.status).toBe(401);
+        expect(await unusedRecoveryCodes()).toBe(10);
+        expect(await verificationsFor(session.keyId)).toEqual([]);
+    });
+
+    it('P10: one unmarked passkey — a step-up with another account\'s passkey is 401 and opens no window', async () =>
+    {
+        await getTestDb().insert(users).values({
+            email: OTHER_EMAIL,
+            passwordHash: await hashPassword(PASSWORD),
+            roleId: (await getRoleByName('user'))!.id,
+            emailVerifiedAt: new Date(),
+        });
+        const stranger = await registerPasskey(await signIn(OTHER_EMAIL));
+        const { session } = await accountWithUnmarkedPasskey();
+
+        const options = await post('/_auth/mfa/step-up/options', {}, session.authorization);
+        const response = await post('/_auth/mfa/step-up', {
+            response: stranger.authenticator.assert({ challenge: (await options.json()).challenge, origin: ORIGIN, rpId: RP_ID, counter: 1 }),
+        }, session.authorization);
+
+        expect(response.status).toBe(401);
+        expect(await verificationsFor(session.keyId)).toEqual([]);
+    });
+
+    it('P11: methods [\'totp\'], one marked passkey (unlisted) and no TOTP — totp/enroll is 403 without a step-up, and works after a passkey step-up', async () =>
+    {
+        const { authenticator } = await enrolPasskey(await signIn());
+        usePolicy({ required: true, methods: ['totp'], recoveryCodes: false });
+        const session = await signIn();
+
+        await expectRefused(await post('/_auth/mfa/totp/enroll', {}, session.authorization), 403, 'STEP_UP_REQUIRED');
+        expect(await getTestDb().select().from(mfaTotp)).toEqual([]);
+
+        await stepUpWithPasskey(session, authenticator, 1);
+        const { secret } = await enrolTotp(session);
+
+        expect(secret).toEqual(expect.any(String));
+        expect((await request('GET', '/app/whoami', session.authorization)).status).toBe(200);
+    });
+
+    it('P12: no policy — every row\'s request answers as today, with no new refusal and no mark', async () =>
+    {
+        const session = await signIn();
+        const first = await registerPasskey(session);
+        expect(first.answer).not.toHaveProperty('mfaStatus');
+
+        // P3: another registration beside an unmarked passkey.
+        const second = await registerPasskey(session);
+        expect(second.answer).not.toHaveProperty('mfaStatus');
+        expect(await liveMarkedPasskeys()).toBe(0);
+
+        // P9/P10: step-up on an account with no second factor is the 400 it always was.
+        expect((await post('/_auth/mfa/step-up', { code: '123456' }, session.authorization)).status).toBe(400);
+
+        // P2: marking a passkey on an account with no second factor needs no step-up.
+        expect((await mark(session, first.passkeyId, true)).status).toBe(200);
+
+        // P7/P11: once enrolled, a step-up with a passkey that is not marked is refused, as today.
+        const { session: fresh } = await passkeySignIn(first.authenticator, 1);
+        const options = await post('/_auth/mfa/step-up/options', {}, fresh.authorization);
+        const refused = await post('/_auth/mfa/step-up', {
+            response: second.authenticator.assert({ challenge: (await options.json()).challenge, origin: ORIGIN, rpId: RP_ID, counter: 1 }),
+        }, fresh.authorization);
+        expect(refused.status).toBe(401);
+        expect(await verificationsFor(fresh.keyId)).toEqual([]);
     });
 });

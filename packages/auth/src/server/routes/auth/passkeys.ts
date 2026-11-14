@@ -78,6 +78,8 @@ const CurrentPasswordSchema = Type.String({
  *
  * Gated on recent authentication: adding a credential is adding a way in, and
  * someone who found an unlocked laptop must not be able to do it silently.
+ * Under a required second factor, an enrolment-only session on an account that
+ * already holds a credential steps up first (#309).
  */
 export const passkeyRegisterOptions = route.post('/_auth/passkeys/register/options')
     .input({
@@ -106,6 +108,11 @@ export const passkeyRegisterOptions = route.post('/_auth/passkeys/register/optio
  * `Transactional()`: spending the challenge and writing the row commit together,
  * so a refusal after the spend leaves the ceremony retryable and a success can
  * never be replayed.
+ *
+ * Under a required second factor, a session that may only enrol has the new
+ * passkey marked as its second factor in the same transaction, and the answer
+ * carries `mfaStatus` (#309). An account that already holds a credential needs
+ * a step-up on this device first: 403 `STEP_UP_REQUIRED`.
  */
 export const passkeyRegisterVerify = route.post('/_auth/passkeys/register/verify')
     .input({
@@ -123,10 +130,11 @@ export const passkeyRegisterVerify = route.post('/_auth/passkeys/register/verify
     .handler(async (c) =>
     {
         const { body } = await c.data();
-        const { userId } = getAuth(c);
+        const { userId, keyId } = getAuth(c);
 
         return await finishPasskeyEnrollmentService({
             userId: Number(userId),
+            keyId,
             response: body.response as Parameters<typeof finishPasskeyEnrollmentService>[0]['response'],
             label: body.label,
         });

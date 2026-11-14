@@ -12,6 +12,10 @@
  */
 
 import { describe, it, expect, afterEach } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { Hono, type Context, type Next } from 'hono';
+import { defineRouter, registerRoutes, route } from '@spfn/core/route';
 
 import { mainAuthRouter } from '@/server/routes';
 import { ROUTE_CHANNELS, ROUTE_ENROLMENT, ROUTE_SECOND_FACTOR_METHODS } from '@/server/routes/channels';
@@ -24,7 +28,7 @@ import {
     requireMethod,
     type SecondFactorOptions,
 } from '@/server/lib/second-factor-policy';
-import { isEnrolmentRequest } from '@/server/lib/enrolment-routes';
+import { isEnrolmentRoute, registerEnrolmentGate } from '@/server/lib/enrolment-routes';
 import { getPasskeyConfig } from '@/server/lib/config';
 import { createAuthLifecycle } from '@/server/lifecycle';
 import { buildMobileContractBundle } from '@/server/client-proof/contract-bundle';
@@ -230,23 +234,148 @@ describe('second-factor policy (#309)', () =>
             mfaTotpEnroll: 'totp',
             mfaTotpConfirm: 'totp',
             mfaStatus: 'always',
+            mfaStepUp: 'always',
+            mfaStepUpOptions: 'always',
             getAuthSession: 'always',
             logout: 'always',
+            sessionRenewOptions: 'unchecked',
+            sessionRenewVerify: 'unchecked',
         });
     });
 
-    it('the router hands the middleware its enrolment routes by method and path, read under the policy', () =>
+    /** A route the global `auth` never runs on, by its own declaration. */
+    function isPublic(key: string): boolean
+    {
+        const route = mainAuthRouter.routes[key as keyof typeof mainAuthRouter.routes] as { skipMiddlewares?: string[] | '*' };
+
+        return route.skipMiddlewares === '*' || (route.skipMiddlewares ?? []).includes('auth');
+    }
+
+    /** The middleware that authenticates a route in place of the global `auth`, by name, or null. */
+    function ownAuthenticator(key: string): string | null
+    {
+        const route = mainAuthRouter.routes[key as keyof typeof mainAuthRouter.routes] as {
+            middlewares?: { name?: string; skips?: string[] }[];
+        };
+
+        return route.middlewares?.find(middleware => middleware?.skips?.includes('auth'))?.name ?? null;
+    }
+
+    /**
+     * Every route mounted behind a probe standing where the global `auth`
+     * stands: what `isEnrolmentRoute` reads from there, per route key, for
+     * every route the global `auth` runs on.
+     */
+    async function recognisedFrom(probeIsGate: boolean): Promise<Record<string, boolean | undefined>>
+    {
+        const app = new Hono();
+        const recognised: boolean[] = [];
+        const probe = async (c: Context, _next: Next) =>
+        {
+            recognised.push(isEnrolmentRoute(c));
+
+            return c.body(null, 204);
+        };
+        if (probeIsGate)
+        {
+            registerEnrolmentGate(probe);
+        }
+        registerRoutes(app, mainAuthRouter, [{ name: 'auth', handler: probe }]);
+
+        const answers: Record<string, boolean | undefined> = {};
+
+        for (const [key, route] of Object.entries(mainAuthRouter.routes) as [string, { method: string; path: string }][])
+        {
+            // Nothing stands in front of these but their own handler, which needs a database.
+            if (isPublic(key) || ownAuthenticator(key) !== null)
+            {
+                continue;
+            }
+
+            recognised.length = 0;
+            await app.request(route.path.replace(/:[a-zA-Z]+/g, 'x'), { method: route.method });
+            answers[key] = recognised[0];
+        }
+
+        return answers;
+    }
+
+    it('F2: the gate recognises exactly the marked routes, by the route that matched, read under the policy', async () =>
     {
         configureSecondFactor({ required: true, methods: ['totp'] });
 
-        expect(isEnrolmentRequest('GET', '/_auth/mfa/status')).toBe(true);
-        expect(isEnrolmentRequest('POST', '/_auth/mfa/totp/enroll')).toBe(true);
-        expect(isEnrolmentRequest('POST', '/_auth/passkeys/register/options')).toBe(false);
+        const answers = await recognisedFrom(true);
+        const expected = Object.fromEntries(Object.entries(ROUTE_ENROLMENT).map(([key, routeClass]) =>
+        {
+            const gated = Object.hasOwn(ROUTE_SECOND_FACTOR_METHODS, key);
+            const enrolment = routeClass === 'always' || routeClass === 'totp' || (routeClass === 'passkey' && gated);
+
+            return [key, routeClass === 'unchecked' || isPublic(key) ? undefined : enrolment];
+        }));
+
+        expect(answers).toEqual(expected);
         // Its own gate answers the 404, so the global middleware lets it through to it.
-        expect(isEnrolmentRequest('POST', '/_auth/mfa/passkey/mark')).toBe(true);
-        expect(isEnrolmentRequest('POST', '/_auth/keys/list')).toBe(false);
-        expect(isEnrolmentRequest('GET', '/_auth/keys/list')).toBe(false);
-        expect(isEnrolmentRequest('GET', '/app/mfa/status')).toBe(false);
+        expect(answers.mfaMarkPasskey).toBe(true);
+        expect(answers.passkeyRegisterOptions).toBe(false);
+        expect(answers.listKeys).toBe(false);
+        expect(answers.mfaStatus).toBe(true);
+    });
+
+    it('F2: a middleware that is not a registered gate is never exempted, even standing where auth stands', async () =>
+    {
+        configureSecondFactor({ required: true });
+
+        const answers = await recognisedFrom(false);
+
+        expect(Object.values(answers).filter(answer => answer !== undefined).every(answer => answer === false)).toBe(true);
+        expect(answers.mfaStatus).toBe(false);
+    });
+
+    it('F2: an app route at an enrolment route\'s own method and path, registered first, is not the enrolment route', async () =>
+    {
+        configureSecondFactor({ required: true });
+        const app = new Hono();
+        const recognised: boolean[] = [];
+        const probe = async (c: Context, _next: Next) =>
+        {
+            recognised.push(isEnrolmentRoute(c));
+
+            return c.body(null, 204);
+        };
+        registerEnrolmentGate(probe);
+        const shadow = defineRouter({ shadow: route.get('/_auth/session').handler(async () => ({ shadow: true })) });
+        // Core registers an app's own routes before the package routers, so the app's chain runs first.
+        registerRoutes(app, shadow, [{ name: 'auth', handler: probe }]);
+        registerRoutes(app, mainAuthRouter, [{ name: 'auth', handler: probe }]);
+
+        await app.request('/_auth/session');
+
+        expect(recognised).toEqual([false]);
+    });
+
+    it('F4: every route whose authenticator is not the global one is classified as that authenticator behaves', () =>
+    {
+        const notGlobal = Object.keys(ROUTE_ENROLMENT).filter(key => isPublic(key) || ownAuthenticator(key) !== null);
+        const classOf = (key: string) => ROUTE_ENROLMENT[key as keyof typeof ROUTE_ENROLMENT];
+
+        // Renewal authenticates a bound key itself and never asks the policy:
+        // an enrolment-only session renews, and the renewed key is held to
+        // enrolment on its next request. Its class says it is admitted.
+        expect(Object.fromEntries(notGlobal.filter(key => !isPublic(key)).map(key => [key, ownAuthenticator(key)])))
+            .toEqual({ sessionRenewOptions: 'authForRenewal', sessionRenewVerify: 'authForRenewal' });
+        expect(readFileSync(join(__dirname, '..', '..', 'server', 'middleware', 'authenticate-for-renewal.ts'), 'utf8'))
+            .not.toMatch(/assertSecondFactorAdmits|isEnrolmentOnly/);
+        expect([classOf('sessionRenewOptions'), classOf('sessionRenewVerify')]).toEqual(['unchecked', 'unchecked']);
+
+        // A public route authenticates no session, so it can neither admit nor
+        // refuse one, and is never an enrolment route — the marker answers only
+        // to the global gate.
+        expect(notGlobal.filter(isPublic).filter(key => classOf(key) !== 'none')).toEqual([]);
+        expect(notGlobal.filter(isPublic)).toContain('mfaVerify');
+
+        // And "unchecked" is used for nothing else.
+        expect(Object.keys(ROUTE_ENROLMENT).filter(key => classOf(key) === 'unchecked'))
+            .toEqual(['sessionRenewOptions', 'sessionRenewVerify']);
     });
 
     it('the method gates are on the design\'s four routes, first among their own middlewares', () =>

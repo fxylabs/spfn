@@ -38,6 +38,8 @@ import { readContextClientIdentity } from '../client-proof/version-middleware';
 import { attestedClientIp } from '../lib/device-provenance';
 import { resolveAuthenticatedUser, runAuthProfile, type AuthContext, type AuthProfileOutcome } from './auth-profiles';
 import { matchesMachineDiscriminator } from './machine-principals';
+import { assertSecondFactorAdmits } from '../services/second-factor-policy.service';
+import { registerEnrolmentGate } from '../lib/enrolment-routes';
 import type { ProfileLocale } from '../lib/profile-locale';
 
 // Auth context type — one principal shape for every scheme (see auth-profiles).
@@ -310,9 +312,12 @@ export const authenticate = defineMiddleware('auth', async (c, next) =>
     const keyId = keyRecord.keyId;
 
     // 5.–6. Load the user and apply the account-status rules — the shared
-    // path every scheme takes (see resolveAuthenticatedUser).
-    const resolved = await resolveAuthenticatedUser(keyRecord.userId, c);
+    // path every scheme takes (see resolveAuthenticatedUser) — then the
+    // second-factor policy, which an enrolment route exempts here.
+    const resolved = await resolveAuthenticatedUser(keyRecord.userId);
     const { user } = resolved;
+
+    await assertSecondFactorAdmits(user.id, c);
 
     // 7. Update last used timestamp (fire-and-forget)
     // Don't await to avoid blocking the request
@@ -459,10 +464,14 @@ export const optionalAuth = defineMiddleware('optionalAuth', async (c, next) =>
         );
 
         // The account rules `authenticate` applies, through the one function
-        // that applies them — an account that is not active, and one the
-        // second-factor policy holds to enrolling, throw here and so continue
-        // anonymously, which is this middleware's answer to an unusable principal.
-        const resolved = await resolveAuthenticatedUser(keyRecord.userId, c);
+        // that applies them, and the second-factor policy — which exempts no
+        // route here, this not being the enrolment gate. An account that is not
+        // active, and one the policy holds to enrolling, throw here and so
+        // continue anonymously, which is this middleware's answer to an
+        // unusable principal.
+        const resolved = await resolveAuthenticatedUser(keyRecord.userId);
+
+        await assertSecondFactorAdmits(resolved.user.id, c);
 
         keysRepository.updateLastUsedById(keyRecord.id, readContextClientIdentity(c), attestedClientIp(c))
             .catch((err: unknown) => authLogger.middleware.error('Failed to update lastUsedAt', err));
@@ -478,6 +487,10 @@ export const optionalAuth = defineMiddleware('optionalAuth', async (c, next) =>
 
     return undefined;
 }, { skips: ['auth'] });
+
+// The one middleware an enrolment route's marker answers to: it runs on every
+// enrolment route, ahead of the route's own middlewares (#309).
+registerEnrolmentGate(authenticate.handler);
 
 /**
  * The profile path, as `optionalAuth` reads it.
