@@ -228,7 +228,7 @@ real secret values out of band, never commit them.
 | `SPFN_AUTH_PASSWORD_RESET_CONFIRM_PATH` | `.env.server` | — | default `/password/reset`; the page in your app the emailed link opens |
 | `SPFN_AUTH_REVOKE_ALL_LINK_TTL_MINUTES` | `.env.server` | — | default `30` — see [The sign-out-everywhere link](#the-sign-out-everywhere-link) |
 | `SPFN_AUTH_REVOKE_ALL_CONFIRM_PATH` | `.env.server` | — | default `/account/revoke-all`; the page in your app the link opens |
-| `SPFN_AUTH_LINK_MAIL_DELIVERY` | `.env.server` | — | `auto` (default) \| `inline` \| `queued`; who sends signup-link, reset and account-exists mail — see [Link mail delivery](#link-mail-delivery) |
+| `SPFN_AUTH_LINK_MAIL_DELIVERY` | `.env.server` | — | `auto` (default) \| `inline` \| `queued`; who sends signup-link, reset and account-exists mail and verification codes — see [Link mail delivery](#link-mail-delivery) |
 | `SPFN_AUTH_PASSKEY_RP_ID` / `_RP_NAME` / `_ORIGINS` | `.env.server` | — | relying party for passkeys; defaults derive from `{NEXT_PUBLIC_SPFN_APP_URL\|\|SPFN_APP_URL}` and are **checked at boot** — see [Passkeys](#passkeys-webauthn) |
 | `SPFN_AUTH_PASSKEY_USER_VERIFICATION` | `.env.server` | — | `preferred` (default) or `required`; `discouraged` refuses boot |
 | `SPFN_AUTH_PASSKEY_CHALLENGE_TTL_SECONDS` / `_RECENT_AUTH_MINUTES` | `.env.server` | — | defaults `300` / `10` — see [Passkeys](#passkeys-webauthn) |
@@ -378,7 +378,7 @@ not a merge.
 | channel | its routes |
 |---|---|
 | `signup` | `register`, `requestSignupLink`, `confirmSignupLink`, `completeSignup`; `sendVerificationCode` and `verifyCode` with `purpose: 'registration'` |
-| `passwordReset` | `requestPasswordReset`, `confirmPasswordReset`, `completePasswordReset`; `sendVerificationCode` and `verifyCode` with `purpose: 'password_reset'` |
+| `passwordReset` | `requestPasswordReset`, `confirmPasswordReset`, `completePasswordReset` |
 | `deviceCode` | `startDeviceAuth`, `startDeviceAuthWeb`, `pollDeviceAuth`, `getDeviceAuthInfo`, `approveDeviceAuth`, `denyDeviceAuth` |
 | `deviceLink` | `issueDeviceLink`, `redeemDeviceLink`, `redeemDeviceLinkWeb`, `getDeviceLinkStatus`, `confirmDeviceLink`, `denyDeviceLink`, `cancelDeviceLink`, `pollDeviceLink` |
 
@@ -397,8 +397,7 @@ signed-in one the 404 — as the authorization server's signed-in routes answer 
 configured. The routes still register (registration happens at import, before `createAuthLifecycle`
 runs), so the check is made per request, as the
 [authorization server's](#authorization-server-for-mcp-clients) is. A verification code is judged by
-its `purpose`: with `signup: false`, `purpose: 'password_reset'` is still sent, and the other way
-round.
+its `purpose`: with `signup: false`, `purpose: 'account_deletion'` is still sent.
 
 **`signup: false` also closes the social door.** It means no account exists that an operator did not
 issue, so a first sign-in with a provider that would create an account is refused —
@@ -880,6 +879,153 @@ holding `user:read`, so an `admin` could accept a pending `superadmin` invitatio
   the metadata, and an array took it as an appended element. A row stored earlier with non-object
   metadata keeps it under `legacyMetadata` when cancelled, so the result is always an object.
 
+### Migration — per-IP limits count the address a caller cannot choose
+
+**BREAKING** (au9-N3, in `@spfn/core`). Every per-IP limit in this package — sign-in, signup,
+codes, `mfa/verify`, password change, deletion, device-code and device-link, the signup and
+reset links, invitation acceptance, OAuth 2.1 token and revoke, revoke-all — keys on
+`getClientIp` from `@spfn/core/middleware`, and on a request that did not come through the
+signed Next.js proxy it used to take the left-most `X-Forwarded-For` value: a caller sending a
+new one per request was never limited. The same address is what device provenance
+(`registeredIp`), `last_seen_ip` and the access log record; they all read the one function.
+
+Now the backend reads `X-Forwarded-For` only as far as the operator declared proxies in front of
+it — `SERVER_TRUSTED_PROXY_HOPS=<hops>` or `defineServerConfig().trustedProxyHops(<hops>)`,
+taking the entry that many hops from the right — and otherwise counts the TCP peer. **An API
+server behind a load balancer must declare it**, or every direct request (a mobile app, a CLI,
+an OAuth client) counts as the balancer's address and shares one per-IP budget.
+
+**Browser traffic through the Next.js proxy** keeps its own client address only when the
+backend's proxy-guard mode is `'tag'` or `'strict'`: the proxy signs the address it resolved,
+and only a verified signature makes the backend read it. The default mode is `'off'`, so in a
+default app every browser request reaches the backend from the Next.js server's address and
+every per-IP limit above is per Next.js server, shared by all its visitors. For per-client
+limits, turn proxy-guard on (`defineServerConfig().proxyGuard({ mode: 'tag' })` or `'strict'`,
+with `SPFN_PROXY_SECRET` set on both sides), or — when your Next.js server's request to the
+backend carries an `X-Forwarded-For` naming the client, which the spfn proxy does not send —
+declare the hops (`SERVER_TRUSTED_PROXY_HOPS`). This release does not change the default. See
+*Client address* in the `@spfn/core/middleware` README.
+
+### Migration — every character of a password counts
+
+**Behaviour change** (au9-N5). bcrypt reads at most 72 bytes of its input, and the password
+schema counted 72 *characters*: a character is up to four UTF-8 bytes, so a 60-character
+Korean password was decided by its first 24 characters. New password hashes are
+`bcrypt(base64(sha256(password)))` — 44 ASCII bytes for any password — stored with the prefix
+`$spfn-sha256$` ahead of the bcrypt string; `isLegacyPasswordHash` (`@spfn/auth/server`
+helpers) is the one decision about which format a stored hash is in.
+
+- **Existing users keep signing in.** A hash without the prefix verifies the legacy way, and a
+  successful password sign-in rewrites it in the new format in the sign-in's own transaction:
+  verified and re-hashed before the account lock, written under the lock the key write takes,
+  and only over the hash that was verified — a password changed meanwhile stays changed. A
+  password change whose verified hash such a rewrite replaced meanwhile verifies the current
+  password once more against the stored hash instead of refusing it.
+  A password change, reset, signup or invitation acceptance writes the new format anyway. Nothing
+  ever writes the legacy format back. An account that never signs in keeps its legacy hash.
+- **A password of 72 bytes (UTF-8) or more keeps its legacy hash.** bcrypt hashes the password
+  plus its NUL terminator, cut at 72 bytes: up to 71 bytes the terminator fixes the length, from
+  72 it is cut off and the legacy hash proves only the first 72 bytes. Any password sharing them
+  signs in — as before this release — and none of them is known to be the owner's. The sign-in does not rewrite such a hash; a password change
+  or reset writes the new format, and from then on every character counts.
+- **The password bound is 8–256 characters** (`PasswordSchema`, which invitation acceptance now
+  uses too), up from 72. The other rules are unchanged.
+- MFA recovery codes are hashed by the same helper, so newly issued ones use the new format;
+  existing ones still verify. Their ten base32 characters were never near the 72-byte cut.
+- Code that compares `users.password_hash` against `/^\$2[aby]\$/` or verifies it with a bcrypt
+  library directly must go through `verifyPassword` instead.
+
+### Migration — the code routes answer alike for every address
+
+**Fix** (au4-A4, au4-B2, au4-A7). The "you already have an account" notice was rate limited by
+a never-sent `registration` row in `verification_codes`, and `POST /_auth/codes/verify` read that
+row like a code: its attempt count survived a resend that, for an address without an account,
+started a fresh code. Send, five wrong codes, send, one wrong code answered "Invalid
+verification code" for an unknown address and "Too many attempts" for a known one.
+
+- The notice window has its own table, `spfn_auth.account_exists_notices` (one row per address,
+  claimed in one statement); nothing that verifies a code reads it. Run the package migration:
+  it creates the table, carries windows still open over, and deletes the old marker rows.
+- `sendVerificationCode` with `purpose: 'registration'` stores a code row for every address.
+  For an address with an account the row is never sent and can never match, so the verify
+  route answers and counts attempts exactly as it does for an address without one.
+- The window is keyed on the folded address (trimmed, lower-cased), so `Owner@` and `owner@`
+  share it — the signup-link route used to send one notice per spelling.
+- Purging an account deletes its address's notice window along with its codes.
+
+### Migration — a code send does not wait for its delivery
+
+**BREAKING** (a12f1-F4). `POST /_auth/codes` sent the code before answering when the address
+had no account, and inside the notice window answered at once when it had one: how long the
+answer took said which. The code now leaves the way the account-exists notice does — through
+`auth.link-mail` when pg-boss is up (`kind: 'verification-code'`, a row id only), otherwise in
+this process after the request — so neither branch waits for the mail or SMS provider. This
+covers SMS too: the job sends by the row's `targetType`. See [Link mail delivery](#link-mail-delivery).
+
+- **A provider failure no longer reaches the HTTP answer.** An app that read a 5xx from
+  `POST /_auth/codes` as "the provider is down" gets 200 now. The failure is observable where
+  the other link mails' are: the auth log line (`Failed to send verification code`, and `Link
+  mail was not sent on the request path` for an inline send), the `@spfn/notification` history
+  row's `failed` status when history is on, and the failed `auth.link-mail` job (retried up to
+  three times) when queued. Alert on those.
+- With pg-boss initialised, register `authJobRouter` (`.jobs(authJobRouter)`): a code reaches
+  the user once the worker picks the job up. An app that wants codes sent by the API process
+  without a worker sets `SPFN_AUTH_LINK_MAIL_DELIVERY='inline'`.
+- The same applies to the signup link, the reset link and the account-exists notice in `inline`
+  mode (and `auto` without pg-boss): they used to be sent before the answer, and are now sent
+  after the commit — outside any transaction and any account lock, also when an app calls the
+  service inside a transaction of its own.
+- The enqueue waits for the commit too. A job is sent on pg-boss's own connection, so enqueued
+  inside an app's transaction it could run before the row it names was visible and send
+  nothing. Called inside a transaction, the job is enqueued after it commits, and the request
+  has already answered 200. An enqueue failure then means: no mail, one log line by kind and row
+  id (`Link mail was not queued after the commit`), and the person asks again — except the missing
+  queue in `auto`, which sends inline. There is no inline resend otherwise: a "failed" enqueue
+  may have reached the queue, and a resend would send the mail twice. A rolled-back transaction
+  enqueues and sends nothing. Called outside one, the enqueue runs at once and its failure
+  surfaces as before.
+- `createAuthLifecycle()` now returns a `beforeShutdown` hook: a graceful shutdown waits up to
+  ten seconds for inline sends still running after their request answered, then closes the
+  database; what is still running at the bound is logged by kind and row id (`Link mail still in
+  flight at shutdown was abandoned`). `settleLinkMail` is that hook. It does not protect queued
+  delivery: `@spfn/core` stops pg-boss before `beforeShutdown`, so an after-commit enqueue still
+  in flight then is logged (`Link mail was not queued after the commit`) and not delivered.
+
+### Migration — verification codes: two purposes, deliverable targets; phone signups are verified
+
+**BREAKING** (au4-A9, au4-A13, au1-B8).
+
+- `sendVerificationCode` / `verifyCode` accept `purpose: 'registration'` and
+  `purpose: 'account_deletion'` only — the two purposes something consumes (`register` and the
+  deletion re-authentication). `login`, `password_reset`, `email_change` and `phone_change` now
+  answer 400: nothing ever accepted their tokens, so they only mailed or texted codes to whoever
+  was named. `VERIFICATION_PURPOSES` and `VerificationPurpose` shrink to match. A password reset
+  is the reset link (`requestPasswordReset`); the `passwordReset` channel no longer covers a code.
+- `sendVerificationCode` refuses a target its `targetType` cannot be delivered to with 400
+  before anything is stored or sent: a phone target must be E.164 (`+821012345678`). Normalise
+  numbers to E.164 on the client. A `registration` email target must be what `register` accepts
+  (`EmailSchema`). For every other purpose the target is an account's existing address, which
+  may have been stored from an OAuth provider or an invitation with no format check — and a code
+  to it is how a password-less account deletes itself — so it is held only to this: exactly one
+  `@` between a non-empty local part and a non-empty domain, no control characters (CR/LF among
+  them), no whitespace, nothing that makes the address display as another or is invisible — no
+  bidi control (`Bidi_Control`: marks, overrides, isolates) and no default-ignorable code point
+  (`Default_Ignorable_Code_Point`: zero-width space, soft hyphen, variation selectors) — at most
+  254 characters after trimming. ZWNJ and ZWJ (U+200C, U+200D) are the exception: IDNA2008
+  allows them inside Persian, Arabic and Indic domain labels, an OAuth sign-up can store such an
+  address, and an `account_deletion` code is how a password-less one deletes itself.
+  Plus-addressing and internationalised domains are sent a code.
+- Signing up with a phone through `register` now stamps `phoneVerifiedAt` — the verified-at
+  column of the target the code proved — as an email signup stamps `emailVerifiedAt`. Accounts
+  created by phone before this release keep a null `phoneVerifiedAt`.
+- `AuthInitOptions.defaultRole` is removed from the config type: nothing ever read it, and
+  every signup gets the `user` role. A config that set it was being ignored; drop the key (an
+  object literal that still carries it no longer type-checks). Assign other roles after signup
+  (`updateUserRole`) or through invitations, which carry their role.
+- The route modules `routes/auth`, `routes/users`, `routes/invitations` and `routes/deletion`
+  no longer have a default export (it was marked temporary, for file-based routing nothing
+  uses); import the named routers, or `mainAuthRouter`.
+
 ### Migration — social OAuth: refusals write nothing, one identity per provider, PKCE
 
 **Breaking** (au5, superself w-tfhek). Four changes an app can notice:
@@ -1175,7 +1321,9 @@ Offer whichever suits your product, or both.
 
 **1 — request the link.** The response is identical whether or not the address already has
 an account, so it cannot be used to probe for accounts. When one exists, the owner gets a
-"you already have an account" notice instead of a usable link.
+"you already have an account" notice instead of a usable link — at most once an hour per
+address, a window this route shares with `sendVerificationCode` and keys on the address
+trimmed and lower-cased, so writing it in another case does not send another notice.
 
 ```typescript
 await authApi.requestSignupLink.call({
@@ -5572,10 +5720,13 @@ the deletion purge since `auth.link-mail` joined it.
 `auth.link-mail` is the second job on the router, and the reason to register the router even in
 an app that never deletes an account.
 
-**What it queues, and why only a row id.** Three mails leave through it: the verified-email
-signup link, the password reset link, and the "you already have an account" notice the signup
-request answers a known address with. The payload is `{ kind, rowId }` — or `{ kind, target,
-targetType }` for the notice — and never the token, the URL or the rendered mail.
+**What it queues, and why only a row id.** Four messages leave through it: the verified-email
+signup link, the password reset link, the "you already have an account" notice the signup
+request answers a known address with, and every verification code `POST /_auth/codes` sends —
+by email or by SMS (`kind: 'verification-code'`; the worker reads the code from its
+`verification_codes` row and sends it by the row's `targetType`, and a code superseded, used or
+expired by then is not sent). The payload is `{ kind, rowId }` — or `{ kind, target,
+targetType }` for the notice — and never the token, the code, the URL or the rendered mail.
 `@spfn/notification` can queue a send of its own, but its payload carries the *rendered* mail,
 which for these three templates would leave the link token in plaintext in `pgboss.job` until
 archive. So the queue carries a reference and the worker mints the credential moments before
@@ -5593,14 +5744,29 @@ token from a failed attempt stops working.
 
 | mode | behaviour |
 |------|-----------|
-| `auto` (default) | queue when pg-boss is initialised, send on the request when it is not — an app with no jobs keeps working exactly as before |
-| `queued` | always queue; an enqueue failure surfaces as a failed request rather than becoming an inline send |
-| `inline` | always send on the request — today's behaviour, and the timing signal that comes with it |
+| `auto` (default) | queue when pg-boss is initialised, send inline when it is not — an app with no jobs keeps working |
+| `queued` | always queue; an enqueue failure never becomes an inline send — outside a transaction it fails the request, after a commit it is logged (below) |
+| `inline` | always send inline |
 
-**When the provider refuses on the request path** — `inline`, `auto` with no pg-boss, or the
-fallback below — the failure is logged and the request still answers as if the mail had gone out,
-because an answer that depended on the mail provider would be an account-existence oracle during
-an outage; the user asks again, and only the job path retries.
+**Inline** means in this process, once the request's transaction has committed — not before the
+answer. A queued job is likewise enqueued only after the caller's transaction commits, so the
+worker never runs before the row it reads exists; called outside a transaction, the enqueue runs
+at once. After a commit the request has already answered 200, so an enqueue failure (but the
+missing queue in `auto`) means no mail and one log line (kind, row id) — no inline resend, since
+a "failed" enqueue may have reached the queue — and the person asks again. On a graceful shutdown,
+`createAuthLifecycle()`'s `beforeShutdown` waits up to ten seconds for inline sends still in
+flight, before the database closes, and logs what it abandons. It does not protect queued
+delivery: `@spfn/core` stops pg-boss before this hook runs, so an after-commit enqueue still in
+flight then fails and is logged like any other enqueue failure — no mail.
+In no mode does a request wait for the provider: an answer that waited for a send would
+take longer for the branch that sends something than for the one that sends nothing, which says
+whether the address has an account.
+
+**When the provider refuses an inline send** — `inline`, `auto` with no pg-boss, or the
+fallback below — the failure is logged (`Link mail was not sent on the request path`, with the
+kind and row id) and the request has already answered as if the mail had gone out, because an
+answer that depended on the mail provider would be an account-existence oracle during an outage;
+the user asks again, and only the job path retries.
 
 **The fallback warning.** In `auto`, an app that initialised pg-boss but never registered this
 router has no `auth.link-mail` queue, so the enqueue fails. Losing the mail there would be silent,
@@ -5613,8 +5779,8 @@ Register the auth job router — .jobs(authJobRouter) — or set SPFN_AUTH_LINK_
 
 The fix is in the message: register the router, or say `inline` if sending on the request is what
 you want. Only a missing queue falls back — every other enqueue failure, a database outage above
-all, surfaces, because falling back on those would hide the outage behind mail that still gets
-through.
+all, surfaces (or, for a call inside a transaction, is logged after the commit), because falling
+back on those would hide the outage behind mail that still gets through.
 
 ## FAQ
 

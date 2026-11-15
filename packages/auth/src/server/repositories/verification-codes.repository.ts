@@ -64,6 +64,30 @@ export class VerificationCodesRepository extends BaseRepository
     }
 
     /**
+     * The code a send was asked for, while it can still be used.
+     *
+     * Read by the delivery that runs after the request: a code superseded by a
+     * newer send, used or expired since then is not sent. Write primary, because
+     * the row was written moments ago and a replica may not have it yet.
+     */
+    async findDeliverable(id: number)
+    {
+        const result = await this.db
+            .select()
+            .from(verificationCodes)
+            .where(
+                and(
+                    eq(verificationCodes.id, id),
+                    isNull(verificationCodes.usedAt),
+                    gt(verificationCodes.expiresAt, new Date()),
+                ),
+            )
+            .limit(1);
+
+        return result[0] ?? null;
+    }
+
+    /**
      * 인증 코드 생성
      * Write primary 사용
      */

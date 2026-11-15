@@ -397,16 +397,16 @@ describe.skipIf(!dbAvailable)('An app chooses which sign-in channels exist (#308
             expect(sendEmail).not.toHaveBeenCalled();
         });
 
-        it('C7: a password-reset code is still sent', async () =>
+        it('C7: an account-deletion code is still sent', async () =>
         {
             configureChannels({ signup: false });
 
             const response = await post('/_auth/codes', {
-                target: 'c7@ch308.test', targetType: 'email', purpose: 'password_reset',
+                target: 'c7@ch308.test', targetType: 'email', purpose: 'account_deletion',
             });
 
             expect(response.status, await response.clone().text()).toBe(200);
-            expect(await codeRows('password_reset')).toHaveLength(1);
+            expect(await codeRows('account_deletion')).toHaveLength(1);
             expect(sendEmail).toHaveBeenCalledTimes(1);
         });
 
@@ -481,7 +481,7 @@ describe.skipIf(!dbAvailable)('An app chooses which sign-in channels exist (#308
 
     describe('passwordReset: false', () =>
     {
-        it('C11: the three reset routes and a password-reset code answer 404; nothing is sent and no row is written', async () =>
+        it('C11: the three reset routes answer 404; nothing is sent and no row is written', async () =>
         {
             await createTestUser('c11@ch308.test', await userRoleId());
             configureChannels({ passwordReset: false });
@@ -491,12 +491,6 @@ describe.skipIf(!dbAvailable)('An app chooses which sign-in channels exist (#308
             await expectChannelClosed(await post('/_auth/password/reset/complete', {
                 password: TEST_PASSWORD, setupSecret: 'secret', ...deviceKeyBody(),
             }), 'passwordReset', 'completePasswordReset');
-            await expectChannelClosed(await post('/_auth/codes', {
-                target: 'c11@ch308.test', targetType: 'email', purpose: 'password_reset',
-            }), 'passwordReset', 'sendVerificationCode');
-            await expectChannelClosed(await post('/_auth/codes/verify', {
-                target: 'c11@ch308.test', targetType: 'email', code: '123456', purpose: 'password_reset',
-            }), 'passwordReset', 'verifyCode');
 
             expect(await getTestDb().select().from(passwordResetTokens)).toHaveLength(0);
             expect(await getTestDb().select().from(verificationCodes)).toHaveLength(0);

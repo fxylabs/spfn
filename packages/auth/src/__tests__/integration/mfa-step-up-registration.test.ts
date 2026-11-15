@@ -42,6 +42,7 @@ vi.mock('@spfn/notification/server', async (importOriginal) =>
 });
 
 const { mainAuthRouter } = await import('@/server/routes');
+const { settleLinkMail } = await import('@/server/lib/link-mail-delivery');
 const { registerRoutes } = await import('@spfn/core/route');
 const { ErrorHandler, resetMemoryRateLimitStore } = await import('@spfn/core/middleware');
 const { initializeAuth } = await import('@/server/services/rbac.service');
@@ -136,13 +137,16 @@ describe.skipIf(!dbAvailable)('new-device step-up (case table 6b)', () =>
     // Driving the router
     // ========================================================================
 
-    function post(path: string, body: unknown, authorization?: string)
+    async function post(path: string, body: unknown, authorization?: string)
     {
-        return app.request(path, {
+        const response = await app.request(path, {
             method: 'POST',
             headers: authorization ? { ...JSON_HEADERS, Authorization: authorization } : JSON_HEADERS,
             body: JSON.stringify(body),
         });
+        await settleLinkMail();
+
+        return response;
     }
 
     function put(path: string, body: unknown, authorization: string)

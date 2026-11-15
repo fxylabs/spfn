@@ -236,7 +236,7 @@ describe('Verification Helpers', () =>
             const payload: VerificationTokenPayload = {
                 target: '+821012345678',
                 targetType: 'phone',
-                purpose: 'login',
+                purpose: 'account_deletion',
                 codeId: 456,
             };
 
@@ -246,7 +246,7 @@ describe('Verification Helpers', () =>
             expect(decoded).not.toBeNull();
             expect(decoded?.target).toBe('+821012345678');
             expect(decoded?.targetType).toBe('phone');
-            expect(decoded?.purpose).toBe('login');
+            expect(decoded?.purpose).toBe('account_deletion');
             expect(decoded?.codeId).toBe(456);
         });
     });

@@ -47,6 +47,7 @@ vi.mock('@spfn/notification/server', async (importOriginal) =>
 });
 
 const { mainAuthRouter } = await import('@/server/routes');
+const { settleLinkMail } = await import('@/server/lib/link-mail-delivery');
 const { registerRoutes } = await import('@spfn/core/route');
 const { ErrorHandler, resetMemoryRateLimitStore } = await import('@spfn/core/middleware');
 const { initializeAuth } = await import('@/server/services/rbac.service');
@@ -108,13 +109,16 @@ describe.skipIf(!dbAvailable)('Password reset', () =>
         vi.restoreAllMocks();
     });
 
-    function post(path: string, body: unknown, proxied = false)
+    async function post(path: string, body: unknown, proxied = false)
     {
-        return app.request(path, {
+        const response = await app.request(path, {
             method: 'POST',
             headers: proxied ? { ...JSON_HEADERS, [CLIENT_TYPE_HEADER]: 'web' } : JSON_HEADERS,
             body: JSON.stringify(body),
         });
+        await settleLinkMail();
+
+        return response;
     }
 
     // ========================================================================
@@ -910,7 +914,8 @@ describe.skipIf(!dbAvailable)('Password reset', () =>
             expect((await userRow('s2@example.com')).emailVerifiedAt).not.toBeNull();
         });
 
-        it('row S3: a phone-only register stamps neither the email nor anything else new', async () =>
+        // au4-A13: the code proved the phone, so its column is the one stamped
+        it('row S3: a phone-only register stamps phoneVerifiedAt and not the email', async () =>
         {
             await registerViaOtp('+821012345678', 'phone');
 
@@ -918,7 +923,7 @@ describe.skipIf(!dbAvailable)('Password reset', () =>
 
             expect(row.email).toBeNull();
             expect(row.emailVerifiedAt).toBeNull();
-            expect(row.phoneVerifiedAt).toBeNull();
+            expect(row.phoneVerifiedAt).toBeInstanceOf(Date);
         });
     });
 });

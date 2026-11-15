@@ -32,8 +32,9 @@ describe('Password - Hashing', () =>
         const hash = await hashPassword(password);
 
         expect(hash).toBeTruthy();
-        expect(hash).toMatch(/^\$2[aby]\$\d+\$/); // bcrypt format ($2a/$2b/$2y)
-        expect(hash.length).toBe(60); // bcrypt always produces 60-char hashes
+        // The pre-hash marker, then a bcrypt string ($2a/$2b/$2y, always 60 chars)
+        expect(hash).toMatch(/^\$spfn-sha256\$\$2[aby]\$\d+\$/);
+        expect(hash.length).toBe('$spfn-sha256$'.length + 60);
     });
 
     it('should generate different hashes for same password', async () =>
@@ -56,7 +57,7 @@ describe('Password - Hashing', () =>
         expect(authEnvSchema.SPFN_AUTH_BCRYPT_SALT_ROUNDS.default).toBe(12);
 
         const hash = await hashPassword('test123');
-        expect(hash).toMatch(/^\$2[aby]\$12\$/); // Default: 12 rounds
+        expect(hash).toMatch(/^\$spfn-sha256\$\$2[aby]\$12\$/); // Default: 12 rounds
     });
 });
 

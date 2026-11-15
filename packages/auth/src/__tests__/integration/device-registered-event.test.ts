@@ -56,6 +56,7 @@ vi.mock('@spfn/notification/server', async (importOriginal) =>
 const { resetMemoryRateLimitStore } = await import('@spfn/core/middleware');
 const { runInTransaction } = await import('@spfn/core/db');
 const { initializeAuth } = await import('@/server/services/rbac.service');
+const { settleLinkMail } = await import('@/server/lib/link-mail-delivery');
 const { getRoleByName } = await import('@/server/services/role.service');
 const { authDeviceRegisteredEvent } = await import('@/server/events');
 const { createOAuthState, generateOAuthNonce } = await import('@/server/lib/oauth/state');
@@ -147,7 +148,7 @@ describe.skipIf(!dbAvailable)('device-registered event (case table 7a)', () =>
     // Driving the router
     // ========================================================================
 
-    function post(path: string, body: unknown, authorization?: string)
+    async function post(path: string, body: unknown, authorization?: string)
     {
         const headers: Record<string, string> = {
             ...JSON_HEADERS,
@@ -160,7 +161,10 @@ describe.skipIf(!dbAvailable)('device-registered event (case table 7a)', () =>
             headers.Authorization = authorization;
         }
 
-        return app.request(path, { method: 'POST', headers, body: JSON.stringify(body) });
+        const response = await app.request(path, { method: 'POST', headers, body: JSON.stringify(body) });
+        await settleLinkMail();
+
+        return response;
     }
 
     /**

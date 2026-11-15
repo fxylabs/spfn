@@ -22,6 +22,7 @@
 
 import type { Context } from 'hono';
 import { defineMiddleware } from '@spfn/core/route';
+import { getClientIp } from '@spfn/core/middleware';
 import { UnauthorizedError } from '@spfn/core/errors';
 
 import type { KeyAlgorithmType } from '@spfn/auth/server';
@@ -345,7 +346,7 @@ export const authenticate = defineMiddleware('auth', async (c, next) =>
         keyId,
         method,
         path,
-        ip: c.req.header('x-forwarded-for') || c.req.header('x-real-ip'),
+        ip: getClientIp(c),
         userAgent: c.req.header('user-agent'),
     });
 

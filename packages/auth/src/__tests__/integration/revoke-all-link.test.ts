@@ -36,6 +36,7 @@ vi.mock('@spfn/notification/server', async (importOriginal) =>
 
 const { resetMemoryRateLimitStore } = await import('@spfn/core/middleware');
 const { initializeAuth } = await import('@/server/services/rbac.service');
+const { settleLinkMail } = await import('@/server/lib/link-mail-delivery');
 const { getRoleByName } = await import('@/server/services/role.service');
 const { createRevokeAllLink, consumeRevokeAllLink } = await import('@/server/services/revoke-all-link.service');
 const { revokeAllKeysService } = await import('@/server/services/key.service');
@@ -84,7 +85,7 @@ describe.skipIf(!dbAvailable)('signed revoke-all link (case table 7b)', () =>
     // Driving the two endpoints
     // ========================================================================
 
-    function post(path: string, body: unknown, authorization?: string)
+    async function post(path: string, body: unknown, authorization?: string)
     {
         const headers: Record<string, string> = { ...JSON_HEADERS, 'x-forwarded-for': clientIp };
 
@@ -93,7 +94,10 @@ describe.skipIf(!dbAvailable)('signed revoke-all link (case table 7b)', () =>
             headers.Authorization = authorization;
         }
 
-        return app.request(path, { method: 'POST', headers, body: JSON.stringify(body) });
+        const response = await app.request(path, { method: 'POST', headers, body: JSON.stringify(body) });
+        await settleLinkMail();
+
+        return response;
     }
 
     const confirm = (token: unknown) => post('/_auth/keys/revoke-all/confirm', { token });

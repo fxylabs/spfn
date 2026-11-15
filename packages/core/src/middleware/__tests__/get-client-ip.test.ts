@@ -4,7 +4,7 @@
 
 import { describe, it, expect } from 'vitest';
 import type { Context } from 'hono';
-import { getClientIp } from '../rate-limit';
+import { getClientIp } from '../client-ip';
 import { PROXY_CLIENT_IP_HEADER } from '../../security/proxy-signature';
 
 function ctx(headers: Record<string, string>, clientType?: string): Context
@@ -30,19 +30,19 @@ describe('getClientIp', () =>
     {
         const c = ctx({ [PROXY_CLIENT_IP_HEADER]: '1.2.3.4', 'x-forwarded-for': '10.0.0.1' }, 'untrusted');
 
-        expect(getClientIp(c)).toBe('10.0.0.1');
+        expect(getClientIp(c)).toBe('unknown');
     });
 
     it('ignores the forwarded header when proxy-guard did not run (clientType unset)', () =>
     {
         const c = ctx({ [PROXY_CLIENT_IP_HEADER]: '1.2.3.4', 'x-forwarded-for': '10.0.0.1' });
 
-        expect(getClientIp(c)).toBe('10.0.0.1');
+        expect(getClientIp(c)).toBe('unknown');
     });
 
-    it('falls back through x-real-ip to unknown', () =>
+    it('reads no forwarding header when no proxy is declared', () =>
     {
-        expect(getClientIp(ctx({ 'x-real-ip': '198.51.100.7' }))).toBe('198.51.100.7');
+        expect(getClientIp(ctx({ 'x-real-ip': '198.51.100.7' }))).toBe('unknown');
         expect(getClientIp(ctx({}))).toBe('unknown');
     });
 });

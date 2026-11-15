@@ -850,7 +850,11 @@ const clicks = await getClickDetails(notificationId);
 // [{ linkUrl: 'https://...', linkIndex: 0, totalClicks: 5, uniqueClicks: 3 }]
 ```
 
-Unique counts are based on distinct IP addresses.
+Unique counts are based on distinct IP addresses. The address is `getClientIp` from
+`@spfn/core/middleware`: a forwarding header counts only as far as the backend declared proxies
+in front of it (`SERVER_TRUSTED_PROXY_HOPS`), otherwise the connection peer — so behind an
+undeclared load balancer every event shares one address. Before this, `X-Forwarded-For` (else
+`X-Real-IP`) was stored as sent, and a caller chose the address its own events counted under.
 
 ### Limitations
 

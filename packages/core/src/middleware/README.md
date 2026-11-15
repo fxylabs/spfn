@@ -63,8 +63,12 @@ From `@spfn/core/middleware`:
 - `rateLimit(options: RateLimitOptions)` → Hono middleware. Redis-backed fixed-window limiter,
   registered under the named `'rateLimit'` slot so routes can `.skip(['rateLimit'])`. Attach
   with `.use([rateLimit({...})])`. See [rateLimit](#ratelimit).
-- `getClientIp(c)` → best-effort client IP from the proxy chain (leftmost `X-Forwarded-For`,
-  then `X-Real-IP`, else `'unknown'`). Spoofable — see the caveat in [rateLimit](#ratelimit).
+- `getClientIp(c)` → the client address: the proxy-attested address on a request proxy-guard
+  verified; else, when trusted proxies are declared (`SERVER_TRUSTED_PROXY_HOPS` /
+  `defineServerConfig().trustedProxyHops(n)`), the `X-Forwarded-For` entry n hops from the
+  right; else the TCP peer address; else `'unknown'`. See [Client address](#client-address).
+- `setTrustedProxyHops(n | undefined)` / `parseTrustedProxyHops(value)` → the declaration
+  `createServer` publishes from server config, and the rule that validates it.
 
 Types: `ErrorHandlerOptions`, `OnErrorContext`, `RequestLoggerOptions`, `RequestLoggerConfig`,
 `ProxyGuardConfig`, `ProxyGuardMode`, `ClientType`, `NonceStore`, `RateLimitOptions`.
@@ -261,8 +265,8 @@ Per-request logging middleware. Register with **`app.use()`**.
 - Generates a request ID (`req_<timestamp>_<6-byte hex>`) and stores it on the context:
   `c.set('requestId', id)` → read via `c.get('requestId')`.
 - Logs `Request received` (method, path, ip, userAgent) and `Request completed`
-  (status, duration). Client IP is taken from `x-forwarded-for` (first hop) → `x-real-ip` →
-  `'unknown'`.
+  (status, duration). The `ip` is `getClientIp(c)` — the same address rate limiting counts
+  (see [Client address](#client-address)).
 - Log level by status: `info` (<400), `warn` (4xx), `error` (5xx). Logger child:
   `@spfn/core:api`.
 - **Slow requests** (`duration >= slowRequestThreshold`) get `slow: true`.
@@ -417,9 +421,68 @@ by source IP.
   from the key's remaining TTL.
 - **Storage**: keys are `ratelimit:{scope}:{dimension}` in the shared cache.
 
-> **IP trust caveat**: `getClientIp` reads the leftmost `X-Forwarded-For` hop, which a client
-> can spoof unless a trusted proxy overwrites it. For security-sensitive limits, pair the IP
-> dimension with an account/target dimension rather than relying on IP alone.
+> **IP trust**: the IP dimension is `getClientIp(c)`, which reads `X-Forwarded-For` only as far
+> as you declared proxies in front of the server — see [Client address](#client-address). An
+> app behind a load balancer must declare it, or every request counts as the balancer's address.
+> For security-sensitive limits, still pair the IP dimension with an account/target dimension.
+
+### Client address
+
+**BREAKING** (au9-N3): the backend no longer trusts any proxy by default.
+
+`getClientIp(c)` is the one definition of "the client's address" — per-IP rate limits, the
+request log and `@spfn/auth` (device provenance, access logs) all read it. In order:
+
+1. A request proxy-guard verified as the Next.js proxy's: the address the proxy resolved and
+   sent signed (`x-spfn-proxy-client-ip`). Unchanged. Only when proxy-guard runs — its mode is
+   `'tag'` or `'strict'`; with the default `'off'` nothing is verified and this step never
+   applies (see *Browser traffic through the Next.js proxy* below).
+2. When the operator declared trusted proxies: the `X-Forwarded-For` entry that many hops
+   **from the right** — the one the outermost trusted proxy appended. Entries to its left are
+   the caller's own and are skipped, so a forged left-most value changes nothing. A chain with
+   fewer entries than the declared hops did not come through the declared proxies and names no
+   client: the request falls through to the TCP peer.
+3. The TCP peer address (Node adapter), else `'unknown'`.
+
+With no declaration neither `X-Forwarded-For` nor `X-Real-IP` is read: a direct caller that
+sent a new `X-Forwarded-For` value per request used to be a new caller per request to every
+per-IP limit. The first request that carries the header while nothing is declared logs one
+warning per process.
+
+Declare the proxies with **`SERVER_TRUSTED_PROXY_HOPS`** (env, default `0`) or
+`defineServerConfig().trustedProxyHops(n)` (wins over the env). The value is a hop count —
+proxy addresses and CIDR ranges are not supported. Anything but a whole number of 0 or more
+refuses the boot: the env through the boot-time env check, the builder by failing the config
+load, a plain config object in `validateServerConfig`.
+
+```typescript
+// One load balancer in front of the API server
+export default defineServerConfig()
+    .trustedProxyHops(1)
+    .build();
+```
+
+**Migration:** an app whose backend sits behind a load balancer or reverse proxy that
+appends `X-Forwarded-For` sets `SERVER_TRUSTED_PROXY_HOPS` to that count. Without it every
+request counts as the balancer's address, so one per-IP limit is shared by all visitors.
+`TRUSTED_PROXY_HOPS` is a different setting: it is read by the Next.js proxy for the hops in
+front of *it*, and requests that proxy signs do not depend on the backend's declaration.
+
+**Browser traffic through the Next.js proxy.** A request the proxy signed carries its client's
+address separately (`x-spfn-proxy-client-ip`), but the backend reads it only when proxy-guard
+verified the signature — proxy-guard mode `'tag'` or `'strict'`. The default mode is `'off'`:
+nothing is verified, and every browser request reaches the backend from the Next.js server's
+own address. In a default app, then, a per-IP limit is **per Next.js server**, shared by every
+visitor behind it. For per-client limits on browser traffic:
+
+- turn proxy-guard on — `defineServerConfig().proxyGuard({ mode: 'tag' })` (or `'strict'`)
+  with the same `SPFN_PROXY_SECRET` on the proxy and the backend — so the signed client
+  address is read; or
+- when your Next.js server's request to the backend carries an `X-Forwarded-For` naming the
+  client (a forwarder of your own — the spfn Next.js proxy does not forward that header), declare
+  the hops with `SERVER_TRUSTED_PROXY_HOPS` / `trustedProxyHops(n)`.
+
+The default is unchanged.
 
 ### Global default limiter
 
@@ -489,12 +552,12 @@ Read these before relying on rate limiting as a security control:
   OTP/SMS-bombing) add a `by` dimension returning a stable account/target key alongside the IP
   — ideally with a per-dimension limit (loose IP, tight account). The bundled `@spfn/auth`
   login/register/code routes already do this via `byIpAndAccount()` / `byIpAndTarget()`.
-- **`getClientIp` trusts forwarded headers.** Behind a verified proxy (proxy-guard) it uses
-  the real client IP; otherwise it reads `X-Forwarded-For`/`X-Real-IP`, which a direct client
-  can spoof (rotate to bypass, or pin to a victim to DoS them). With no forwarding header it
-  falls back to the TCP peer address (Node adapter), and only to the literal `'unknown'` when
-  even that is unavailable (non-Node runtime). Still: enable the global default behind a proxy
-  that sets a trustworthy client IP, since the header — when present — is taken on trust.
+- **`getClientIp` reads forwarded headers only as declared.** Behind a verified proxy
+  (proxy-guard) it uses the attested client IP; otherwise the `X-Forwarded-For` entry
+  `SERVER_TRUSTED_PROXY_HOPS` hops from the right, and with nothing declared the TCP peer
+  address (Node adapter), and only the literal `'unknown'` when even that is unavailable
+  (non-Node runtime). A declared hop count is only as good as the network: a caller that can
+  reach the server around the declared proxies can still state the header.
 - **Counters fall back to memory, not to nothing.** With no cache configured — or with the
   cache down, or a command failing mid-request — the limiter counts in the process
   (`MemoryRateLimitStore`) instead of having nowhere to count. Limits still apply, but

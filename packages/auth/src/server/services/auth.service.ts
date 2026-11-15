@@ -20,7 +20,14 @@ import { usersRepository, keysRepository, deviceAuthorizationsRepository, device
 import { revokeAllOAuth2GrantsForUser } from './oauth2-grant.service';
 import { runBeforeRegister } from '../lib/config';
 import { type KeyAlgorithmType, type KeyPlatformType } from '../types';
-import { hashPassword, verifyPassword, getDummyPasswordHash, normalizeEmail } from '../helpers';
+import {
+    hashPassword,
+    verifyPassword,
+    getDummyPasswordHash,
+    isLegacyPasswordHash,
+    legacyHashProvesWholePassword,
+    normalizeEmail,
+} from '../helpers';
 import { validateVerificationToken } from './verification.service';
 import { registerPublicKeyService, revokeKeyService } from './key.service';
 import { assertStepUp, mfaEnrolledForUser } from './mfa.service';
@@ -245,16 +252,20 @@ export async function createVerifiedAccount(
 
     // Create user
     //
-    // `emailVerifiedAt` is stamped here because both entry points proved the
-    // address before arriving: the six-digit-code path verified a code sent to
-    // it, the link path confirmed a link sent to it. It went unstamped for a
-    // long time, which left password accounts indistinguishable from accounts
-    // whose provider reported the address unverified — and made every predicate
-    // written against the column wrong about them.
+    // The verified-at column of the target that was proven is stamped here,
+    // because both entry points proved it before arriving: the six-digit-code
+    // path verified a code sent to it, the link path confirmed a link sent to
+    // it. The proven target is the email when there is one — the link path has
+    // only an email, and `registerService` checks the token against the email
+    // first — and otherwise the phone. Left unstamped, a password account is
+    // indistinguishable from one whose address nobody proved, and every
+    // predicate written against the column is wrong about it.
+    const verifiedAt = new Date();
     const newUser = await usersRepository.create({
         email: email || null,
         phone: phone || null,
-        emailVerifiedAt: email ? new Date() : null,
+        emailVerifiedAt: email ? verifiedAt : null,
+        phoneVerifiedAt: email ? null : verifiedAt,
         passwordHash,
         passwordChangeRequired: false,
         roleId: userRole.id,
@@ -359,6 +370,9 @@ export async function loginService(
         throw new AccountDisabledError({ status: user.status });
     }
 
+    // Hashed before the account lock is taken: the hash is the slow step.
+    const upgradedHash = await upgradedPasswordHash(password, user.passwordHash);
+
     // Register new public key
     const registered = await registerPublicKeyService({
         userId: user.id,
@@ -380,6 +394,13 @@ export async function loginService(
             phone: user.phone || undefined,
         },
     });
+
+    // Under the account lock the key write took, which this transaction holds
+    // until it commits.
+    if (upgradedHash)
+    {
+        await usersRepository.replaceVerifiedPasswordHash(user.id, user.passwordHash, upgradedHash);
+    }
 
     // An enrolled account on a device it has never seen gets a challenge instead
     // of a session (#95). Nothing below this line runs: the sign-in has not
@@ -422,6 +443,25 @@ export async function loginService(
 }
 
 /**
+ * The pre-hashed replacement for a legacy `bcrypt(password)` hash the password
+ * has just been proven against, or null for a hash already in the new format:
+ * the legacy format is never written back. Null as well for a password the
+ * legacy hash did not prove whole (72 bytes or more): that hash stays until
+ * a password change or reset writes a new one.
+ *
+ * Computed outside the account lock; the sign-in writes it under the lock, in
+ * its own transaction, so it lands only with a sign-in that commits — and only
+ * over the hash that was verified (`replaceVerifiedPasswordHash`): a password
+ * changed since stays changed.
+ */
+async function upgradedPasswordHash(password: string, verifiedHash: string): Promise<string | null>
+{
+    return isLegacyPasswordHash(verifiedHash) && legacyHashProvesWholePassword(password)
+        ? await hashPassword(password)
+        : null;
+}
+
+/**
  * Logout user (revoke current key)
  */
 export async function logoutService(
@@ -457,7 +497,45 @@ export async function changePasswordService(
     // Hashed before the account lock is taken: the hash is the slow step.
     const newPasswordHash = await hashPassword(params.newPassword);
 
-    await runInTransaction(async () =>
+    if (await replaceVerifiedPassword(userId, verifiedHash, newPasswordHash))
+    {
+        return;
+    }
+
+    // For an account that had none, the request sent no current password to be
+    // wrong about: another request set the first one meanwhile.
+    if (verifiedHash === null)
+    {
+        throw new ConflictError({ message: 'A password was set on this account by another request in the meantime. Send it as the current password to change it.' });
+    }
+
+    // A stored hash that moved since it was verified makes the proof stale, not
+    // wrong: a sign-in re-encodes a legacy hash of the same password. Verified
+    // again against what is stored now — outside the lock, since verifying is
+    // the slow step — and the locked step runs once more. A hash that moves
+    // again, or a password that no longer matches, is refused as before.
+    const reverifiedHash = await verifyCurrentPassword({ ...params, passwordHash: undefined });
+
+    if (!await replaceVerifiedPassword(userId, reverifiedHash, newPasswordHash))
+    {
+        throw new InvalidCredentialsError({ message: 'Current password is incorrect' });
+    }
+}
+
+/**
+ * The change itself, under the account lock, when the hash the current
+ * password was verified against is still the one stored — read again under the
+ * lock, since a change committed while it was being verified moves it.
+ *
+ * @returns false, with nothing written, when the stored hash moved
+ */
+async function replaceVerifiedPassword(
+    userId: number,
+    verifiedHash: string | null,
+    newPasswordHash: string,
+): Promise<boolean>
+{
+    return await runInTransaction(async () =>
     {
         const account = await usersRepository.lockAccount(userId);
         if (!account)
@@ -465,19 +543,15 @@ export async function changePasswordService(
             throw new ValidationError({ message: 'User not found' });
         }
 
-        // The password verified above, read again under the lock: a change
-        // committed while it was being verified makes this one's proof stale.
-        // For an account that had none, the request sent no current password
-        // to be wrong about: another request set the first one meanwhile.
         if (account.passwordHash !== verifiedHash)
         {
-            throw verifiedHash === null
-                ? new ConflictError({ message: 'A password was set on this account by another request in the meantime. Send it as the current password to change it.' })
-                : new InvalidCredentialsError({ message: 'Current password is incorrect' });
+            return false;
         }
 
         await usersRepository.updatePassword(userId, newPasswordHash, true);
         await signOutEverywhere(userId);
+
+        return true;
     }, { context: 'auth:change-password' });
 }
 

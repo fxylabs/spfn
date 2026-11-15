@@ -1,9 +1,11 @@
 /**
  * @spfn/auth - Link Mail Delivery Mode
  *
- * Decides who sends a link mail: the `auth.link-mail` worker, or the request
- * itself. The two paths write the same row and mint the same way — only the
- * moment, and what a failed send means, differ.
+ * Decides who sends a link mail or a verification code: the `auth.link-mail`
+ * worker, or the request's own process once its transaction has committed —
+ * never the request's answer, which waits for neither. The two paths write the
+ * same row and mint the same way — only the moment, and what a failed send
+ * means, differ.
  *
  * `auto` (the default) queues when pg-boss is initialised and sends inline when
  * it is not, which is what lets an app that never registered a job router keep
@@ -19,12 +21,21 @@
  * still gets through.
  *
  * A refused *send*, on the other hand, never surfaces from here: see
- * `sendInlineQuietly` below for why the request's answer must not depend on the
+ * `sendInline` below for why the request's answer must not depend on the
  * mail provider.
+ *
+ * Both the send and the enqueue wait for the caller's transaction to commit:
+ * the job runs on pg-boss's own connection, so enqueued inside the transaction
+ * it could run before the row it names is visible, and find nothing to send.
+ * Inline sends left running after the answer are drained on a graceful
+ * shutdown (`settleLinkMail`), before the database closes under them. Queued
+ * delivery has no such protection: `@spfn/core` stops pg-boss before that
+ * drain, so an enqueue still in flight then fails, is logged and not delivered.
  */
 
 import { env } from '@spfn/auth/config';
 import { getBoss } from '@spfn/core/job';
+import { getTransactionContext, onAfterCommit } from '@spfn/core/db';
 import { authLogger } from '../logger';
 import { linkMailJob } from '../jobs/link-mail';
 import type { LinkMailPayload } from '../jobs/link-mail';
@@ -39,6 +50,18 @@ export type LinkMailDelivery = 'auto' | 'inline' | 'queued';
  * fix under thousands of copies of itself.
  */
 let warnedQueueMissing = false;
+
+/**
+ * How long a shutdown waits for link mail still in flight. A provider call
+ * takes seconds; one blocked for longer is abandoned, and named in the log.
+ */
+const LINK_MAIL_SHUTDOWN_WAIT_MS = 10_000;
+
+/**
+ * Sends and enqueues started after a commit and not yet finished, each with the
+ * payload it carries; read by `settleLinkMail`.
+ */
+const inFlight = new Map<Promise<void>, LinkMailPayload>();
 
 /**
  * Forget the warning, so a test can assert "once" more than once.
@@ -97,42 +120,97 @@ async function enqueueLinkMail(payload: LinkMailPayload): Promise<unknown>
 }
 
 /**
- * Send on the request path, and let the request answer as if it had worked.
+ * Send outside the request's answer, now: the caller has committed, or was in
+ * no transaction.
  *
- * `inlineSend` is `issueSignupLink` or `issuePasswordResetLink`, and both throw
- * when the provider refuses — correct in the worker, where the throw is what
- * makes pg-boss retry. On the request path there is no retry to ask for and the
- * throw becomes a 500, while the branch that had no mail to send still answers
- * 200: during a mail outage the pair of statuses says which addresses have an
- * account, at the two endpoints whose entire design is that both branches answer
- * alike. So the request's answer must not depend on the mail provider. The
- * failure is logged, the user asks again, and only the job path retries.
+ * `inlineSend` is one of the `link-mail.service` sends, and they throw when the
+ * provider refuses — correct in the worker, where the throw is what makes
+ * pg-boss retry. On the request path there is no retry to ask for and the throw
+ * became a 500, while the branch that had nothing to send still answered 200:
+ * during an outage the pair of statuses said which addresses have an account.
+ * Awaiting a send that succeeds says the same thing in how long the answer took.
+ * So the request never waits for it, and a failure is logged. The user asks
+ * again; only the job path retries.
  *
  * The line names the payload's kind and row id — never the recipient, never a
  * URL — because it is written on behalf of an address the request has not
  * admitted to knowing.
  */
-async function sendInlineQuietly(
-    inlineSend: () => Promise<void>,
-    payload: LinkMailPayload,
-): Promise<void>
+function sendInline(inlineSend: () => Promise<void>, payload: LinkMailPayload): void
 {
-    try
+    track(payload, inlineSend().catch((error: unknown) =>
     {
-        await inlineSend();
+        authLogger.email.error('Link mail was not sent on the request path', { ...describe(payload), error });
+    }));
+}
+
+/** Keep `work` where a shutdown can wait for it, until it settles. */
+function track(payload: LinkMailPayload, work: Promise<void>): void
+{
+    inFlight.set(work, payload);
+    void work.finally(() => inFlight.delete(work));
+}
+
+/** What a log line may say about a payload: its kind and row, never its recipient. */
+function describe(payload: LinkMailPayload): { kind: string; rowId: number | null }
+{
+    return { kind: payload.kind, rowId: 'rowId' in payload ? payload.rowId : null };
+}
+
+/**
+ * Wait, at most `timeoutMs`, until every inline send started after a commit
+ * has finished — the auth lifecycle's `beforeShutdown`, so a graceful shutdown
+ * does not close the database under them. What is still running at the bound
+ * is abandoned and logged by kind and row.
+ *
+ * It does not protect queued delivery: `@spfn/core` stops pg-boss before
+ * `beforeShutdown`, so an after-commit enqueue still in flight then fails and
+ * is logged (`Link mail was not queued after the commit`) — no mail.
+ *
+ * A request no longer waits for its mail, so a test that reads what was sent
+ * waits here as well.
+ */
+export async function settleLinkMail(timeoutMs = LINK_MAIL_SHUTDOWN_WAIT_MS): Promise<void>
+{
+    const deadline = Date.now() + timeoutMs;
+
+    while (inFlight.size > 0 && Date.now() < deadline)
+    {
+        await settledWithin(Promise.all(inFlight.keys()), deadline - Date.now());
     }
-    catch (error)
+
+    if (inFlight.size > 0)
     {
-        authLogger.email.error('Link mail was not sent on the request path', {
-            kind: payload.kind,
-            rowId: 'rowId' in payload ? payload.rowId : null,
-            error,
+        authLogger.email.error('Link mail still in flight at shutdown was abandoned', {
+            abandoned: [...inFlight.values()].map(describe),
         });
     }
 }
 
+/** `work` settled, or `ms` passed — whichever comes first. */
+async function settledWithin(work: Promise<unknown>, ms: number): Promise<void>
+{
+    let timer: NodeJS.Timeout | undefined;
+    const bound = new Promise<void>((resolve) =>
+    {
+        timer = setTimeout(resolve, ms);
+    });
+
+    await Promise.race([work, bound]);
+    clearTimeout(timer);
+}
+
 /**
- * Hand a link mail to whoever is going to send it.
+ * Hand a link mail to whoever is going to send it, once the caller's
+ * transaction has committed (`onAfterCommit`).
+ *
+ * Called in no transaction, the enqueue is awaited and an enqueue failure
+ * surfaces to the caller. Called inside one, the enqueue runs after the commit,
+ * when the request has already answered 200: a failure — but the missing queue
+ * in `auto`, which sends inline — means no mail and one log line (kind, row
+ * id), and the person asks again. There is no inline resend — a "failed"
+ * enqueue may have reached the queue, and a resend would send the mail twice.
+ * A rolled-back transaction enqueues and sends nothing.
  *
  * @param payload - The reference the worker needs; never a secret or a URL
  * @param inlineSend - The same send, performed by this request instead
@@ -146,9 +224,34 @@ export async function deliverLinkMail(
 
     if (mode === 'inline' || (mode === 'auto' && !getBoss()))
     {
-        return await sendInlineQuietly(inlineSend, payload);
+        onAfterCommit(() => sendInline(inlineSend, payload));
+
+        return;
     }
 
+    if (!getTransactionContext())
+    {
+        await queueLinkMail(payload, inlineSend, mode);
+
+        return;
+    }
+
+    onAfterCommit(() => track(payload, queueLinkMail(payload, inlineSend, mode).catch((error: unknown) =>
+    {
+        authLogger.email.error('Link mail was not queued after the commit', { ...describe(payload), error });
+    })));
+}
+
+/**
+ * Enqueue, falling back to an inline send only in `auto` and only for the queue
+ * nobody registered — every other failure is the caller's to see.
+ */
+async function queueLinkMail(
+    payload: LinkMailPayload,
+    inlineSend: () => Promise<void>,
+    mode: LinkMailDelivery,
+): Promise<void>
+{
     const error = await enqueueLinkMail(payload);
 
     if (!error)
@@ -170,5 +273,5 @@ export async function deliverLinkMail(
         );
     }
 
-    await sendInlineQuietly(inlineSend, payload);
+    sendInline(inlineSend, payload);
 }

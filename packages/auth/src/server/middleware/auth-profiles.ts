@@ -31,6 +31,7 @@
  * @module server/middleware/auth-profiles
  */
 import type { Context } from 'hono';
+import { getClientIp } from '@spfn/core/middleware';
 
 import { attestedClientIp } from '../lib/device-provenance';
 import { keyLiveness } from '../lib/key-liveness';
@@ -401,7 +402,7 @@ async function admitClientProofProfile(c: Context): Promise<AuthContext>
         scheme: CLIENT_PROOF_PROFILE,
         method: c.req.method,
         path: c.req.path,
-        ip: c.req.header('x-forwarded-for') || c.req.header('x-real-ip'),
+        ip: getClientIp(c),
         userAgent: c.req.header('user-agent'),
     });
 

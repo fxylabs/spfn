@@ -6,6 +6,7 @@
  */
 
 import { route } from '@spfn/core/route';
+import { getClientIp } from '@spfn/core/middleware';
 import { Type } from '@sinclair/typebox';
 import { defineUnmappedRouter } from '@spfn/core/route';
 import { verifyOpenToken, verifyClickToken, hashClickUrl } from './token';
@@ -21,6 +22,22 @@ const TRANSPARENT_GIF = Buffer.from(
     'R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7',
     'base64',
 );
+
+/**
+ * The address a tracking event is recorded under.
+ *
+ * Core's client address: a forwarding header is read only as far as the
+ * operator declared proxies in front of the server, never as the caller states
+ * it — the header was stored verbatim, so a caller chose the address its own
+ * opens and clicks were counted under, and the unique counts with it. No
+ * address is recorded as none, not as `'unknown'`, so it counts as no visitor.
+ */
+function clientAddress(c: Parameters<typeof getClientIp>[0]): string | undefined
+{
+    const ip = getClientIp(c);
+
+    return ip === 'unknown' ? undefined : ip;
+}
 
 /**
  * Open tracking pixel endpoint
@@ -42,7 +59,7 @@ export const trackOpen = route.get('/_noti/t/o/:token')
         if (result.valid && result.notificationId)
         {
             recordOpenEvent(result.notificationId, {
-                ipAddress: c.raw.req.header('x-forwarded-for') ?? c.raw.req.header('x-real-ip'),
+                ipAddress: clientAddress(c.raw),
                 userAgent: c.raw.req.header('user-agent'),
             });
         }
@@ -119,7 +136,7 @@ export const trackClick = route.get('/_noti/t/c/:token')
         }
 
         recordClickEvent(result.notificationId, result.linkIndex, targetUrl, {
-            ipAddress: c.raw.req.header('x-forwarded-for') ?? c.raw.req.header('x-real-ip'),
+            ipAddress: clientAddress(c.raw),
             userAgent: c.raw.req.header('user-agent'),
         });
 

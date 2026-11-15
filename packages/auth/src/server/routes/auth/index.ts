@@ -72,7 +72,7 @@ export const sendVerificationCode = route.post('/_auth/codes')
     .input({
         body: Type.Object({
             target: Type.String({
-                description: 'Email address or phone number in E.164 format',
+                description: 'Email address, or phone number in E.164 format (+821012345678); must match targetType',
             }),
             targetType: TargetTypeSchema,
             purpose: VerificationPurposeSchema,
@@ -1018,6 +1018,3 @@ export const authRouter = defineRouter({
     getAuthSession: getAuthSession,
     issueOneTimeToken: issueOneTimeToken,
 });
-
-// For backward compatibility with file-based routing (temporary)
-export default authRouter;

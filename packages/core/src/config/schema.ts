@@ -16,6 +16,7 @@ import {
     envString,
     parsePostgresUrl,
     parseRedisUrl,
+    createNumberParser,
 } from '@spfn/core/env';
 
 /**
@@ -466,6 +467,13 @@ export const coreEnvSchema = defineEnvSchema({
         default: 1,
         nextjs: true,
         examples: [1, 2, 3],
+    }),
+
+    SERVER_TRUSTED_PROXY_HOPS: envNumber({
+        description: 'Number of trusted reverse proxies directly in front of the SPFN backend (e.g. a load balancer = 1). The backend\'s client address — per-IP rate limits, request logs, device provenance — is the X-Forwarded-For entry that many hops from the right. Default 0: no proxy is trusted, the header is never read and the address is the TCP peer, so an app behind a load balancer that leaves this unset counts every request as the balancer\'s address. Requests the Next.js proxy signed carry their client address separately and do not depend on this. Overridden by defineServerConfig().trustedProxyHops(n). An invalid value refuses the boot.',
+        default: 0,
+        validator: createNumberParser({ min: 0, integer: true }),
+        examples: [0, 1, 2],
     }),
 
     // ========================================================================

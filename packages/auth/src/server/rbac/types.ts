@@ -104,13 +104,6 @@ export interface AuthInitOptions
     rolePermissions?: Record<string, string[]>;
 
     /**
-     * Default role name for new users
-     * Must be a valid role name that exists after initialization
-     * @default 'user'
-     */
-    defaultRole?: string;
-
-    /**
      * Default session TTL (Time To Live)
      *
      * Supports:

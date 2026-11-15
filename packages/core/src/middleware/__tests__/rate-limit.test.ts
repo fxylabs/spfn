@@ -17,9 +17,10 @@ vi.mock('../../cache', () => ({
 }));
 
 import {
-    rateLimit, rateLimitPolicy, getClientIp, setRateLimitPolicies, getRateLimitPolicy,
+    rateLimit, rateLimitPolicy, setRateLimitPolicies, getRateLimitPolicy,
     setRateLimitFailClosedDefault, resetMemoryRateLimitStore,
 } from '../rate-limit';
+import { getClientIp } from '../client-ip';
 import { TooManyRequestsError } from '../../errors';
 
 function makeCtx(headers: Record<string, string> = {})
@@ -169,10 +170,10 @@ describe('rateLimitPolicy named policies', () =>
         evalMock.mockResolvedValue([1, 60_000]);
 
         await rateLimitPolicy('auth-login', { limit: 5, windowMs: 60_000 })
-            .handler(makeCtx({ 'x-forwarded-for': '1.2.3.4' }), vi.fn());
+            .handler(makeCtx(), vi.fn());
 
         // key is `ratelimit:${scope}:${dimension}` — scope defaults to the policy name
-        expect(evalMock.mock.calls[0][2]).toBe('ratelimit:auth-login:1.2.3.4');
+        expect(evalMock.mock.calls[0][2]).toBe('ratelimit:auth-login:unknown');
     });
 
     it('uses the fallback when the app configured no policy', async () =>
@@ -260,14 +261,14 @@ describe('getClientIp socket fallback', () =>
         expect(getClientIp(ipCtx({ env: { server: { incoming: { socket: { remoteAddress: '203.0.113.9' } } } } }))).toBe('203.0.113.9');
     });
 
-    it('prefers X-Forwarded-For over the socket address', () =>
+    it('keeps the socket address over an X-Forwarded-For no declared proxy vouches for', () =>
     {
         const c = ipCtx({
             headers: { 'x-forwarded-for': '198.51.100.1' },
             env: { incoming: { socket: { remoteAddress: '203.0.113.9' } } },
         });
 
-        expect(getClientIp(c)).toBe('198.51.100.1');
+        expect(getClientIp(c)).toBe('203.0.113.9');
     });
 
     it('returns "unknown" only when nothing identifies the client', () =>

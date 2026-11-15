@@ -12,6 +12,7 @@ import { ensureAdminExists } from './setup';
 import { authLogger } from './logger';
 import { assertRoleEmailDomainPolicy, initializeAuth, normalizeStoredEmails } from './services';
 import { initOneTimeTokenManager } from './lib/one-time-token';
+import { settleLinkMail } from './lib/link-mail-delivery';
 import { configureDeletion } from './lib/deletion-config';
 import { configureDeviceAuth } from './lib/device-auth-config';
 import { configureDeviceLink } from './lib/device-link-config';
@@ -33,6 +34,7 @@ export interface AuthLifecycleConfig
 {
     beforeInfrastructure?: () => Promise<void>;
     afterInfrastructure?: () => Promise<void>;
+    beforeShutdown?: () => Promise<void>;
 }
 
 /**
@@ -41,6 +43,9 @@ export interface AuthLifecycleConfig
  * Provides essential initialization hooks:
  * - `beforeInfrastructure`: Validates environment variables before DB connection
  * - `afterInfrastructure`: Sets up admin accounts and initializes RBAC after DB is ready
+ * - `beforeShutdown`: Waits, bounded, for link mail and codes still being sent
+ *   inline after a request answered, before the database closes; an enqueue
+ *   still in flight when pg-boss stops (before this hook) is logged, not delivered
  *
  * @param options - Auth initialization options (custom roles, permissions, mappings)
  *
@@ -327,7 +332,7 @@ export interface AuthLifecycleOptions extends AuthInitOptions
      *   account a first social sign-in would create (`SignupDisabledError`,
      *   403 `SIGNUP_DISABLED`); a sign-in whose identity is linked, or that
      *   attaches to an existing account under `oauthEmailMatch`, is untouched.
-     * - `passwordReset` — the reset link and a code with `purpose: 'password_reset'`
+     * - `passwordReset` — the reset link
      * - `deviceCode` — device-code login
      * - `deviceLink` — device link
      *
@@ -503,5 +508,13 @@ export function createAuthLifecycle(options: AuthLifecycleOptions = {}): AuthLif
             await assertRoleEmailDomainPolicy();
             initOneTimeTokenManager(options.oneTimeToken);
         },
+
+        /**
+         * A request answers before its link mail or code is sent or queued
+         * (`deliverLinkMail`); this waits for the inline sends, at most ten
+         * seconds, while the database is still open, and logs what it abandons.
+         * pg-boss has already stopped here, so it cannot help queued delivery.
+         */
+        beforeShutdown: () => settleLinkMail(),
     };
 }

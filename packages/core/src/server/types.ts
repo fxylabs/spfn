@@ -156,6 +156,23 @@ export interface ServerConfig
     };
 
     /**
+     * How many proxies directly in front of this server append to
+     * `X-Forwarded-For` (a load balancer = 1).
+     *
+     * The client address every per-IP limit, request log and device record uses
+     * is the forwarded entry this many hops from the right. Unset, the
+     * `SERVER_TRUSTED_PROXY_HOPS` environment variable decides, and its default
+     * is 0: no proxy is trusted, the header is not read, and the address is the
+     * TCP peer's. An app behind a load balancer that declares nothing counts
+     * every request as the balancer's. A value that is not a whole number of 0
+     * or more refuses the boot.
+     *
+     * @default 0
+     * @env SERVER_TRUSTED_PROXY_HOPS
+     */
+    trustedProxyHops?: number;
+
+    /**
      * SSRF policy for outbound requests made via `safeFetch` (`@spfn/core/security`).
      * Sets the process-wide default used by webhook/callback senders. Private and
      * reserved IPs are blocked by default; set `allowHosts` to restrict to a known

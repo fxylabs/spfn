@@ -12,38 +12,11 @@ import type {
 } from './interceptors/types';
 import type { InterceptorRegistry } from './interceptors';
 import { PROXY_CLIENT_IP_HEADER } from '../../security/proxy-signature';
+import { clientIpFromForwardedChain } from '../../security/forwarded-chain';
 
 // Re-export from shared
 export { parseResponseBody } from '../shared';
-
-/**
- * Resolve the real client IP from a forwarded chain.
- *
- * `X-Forwarded-For` is `client, proxy1, proxy2, …` — each trusted hop appends the
- * address it received the connection from, so the rightmost `trustedHops` entries
- * are added by our own infra and can't be spoofed. The client as the outermost
- * trusted hop saw it is `parts[len - trustedHops]`. A client that prepends a fake
- * value just lengthens the chain to the left and is ignored.
- *
- * @param xff - raw X-Forwarded-For header value
- * @param trustedHops - number of trusted proxies in front (e.g. LB + nginx = 2)
- */
-export function clientIpFromForwardedChain(
-    xff: string | null | undefined,
-    trustedHops: number,
-): string | undefined
-{
-    if (!xff) return undefined;
-
-    const parts = xff.split(',').map(s => s.trim()).filter(Boolean);
-    if (parts.length === 0) return undefined;
-
-    const idx = parts.length - Math.max(1, trustedHops);
-
-    // Fewer entries than configured hops (misconfig / fewer real hops): best-effort
-    // to the leftmost rather than returning nothing.
-    return parts[idx] ?? parts[0];
-}
+export { clientIpFromForwardedChain };
 
 function trustedProxyHops(): number
 {

@@ -170,6 +170,7 @@ export async function clearTables(db: ReturnType<typeof drizzle>)
         spfn_auth.user_public_keys,
         spfn_auth.user_social_accounts,
         spfn_auth.verification_codes,
+        spfn_auth.account_exists_notices,
         spfn_auth.signup_link_tokens,
         spfn_auth.password_reset_tokens,
         spfn_auth.key_revoke_all_tokens,

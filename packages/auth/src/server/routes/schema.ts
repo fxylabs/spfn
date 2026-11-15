@@ -183,8 +183,8 @@ export const DeviceAuthPollResponseSchema = Type.Union([
 
 export const PasswordSchema = Type.String({
     minLength: 8,
-    maxLength: 72,
-    description: 'User password (8–72 characters). bcrypt silently ignores bytes past 72, so longer inputs are rejected rather than truncated.',
+    maxLength: 256,
+    description: 'User password (8–256 characters). Every character counts: the password is SHA-256 pre-hashed before bcrypt, so its length in bytes is not limited to bcrypt\'s 72.',
 });
 
 // ============================================================================
@@ -206,12 +206,14 @@ export const VERIFICATION_TARGET_TYPES = ['email', 'phone'] as const;
 // Verification Purpose
 // ============================================================================
 
+/**
+ * The purposes a verification code can be sent for: each one has a consumer
+ * that checks a verification token of that purpose — `registerService` and the
+ * account-deletion re-authentication. A purpose nothing consumes only mails or
+ * texts codes to whoever is named.
+ */
 export const VerificationPurposeSchema = Type.Union([
     Type.Literal('registration'),
-    Type.Literal('login'),
-    Type.Literal('password_reset'),
-    Type.Literal('email_change'),
-    Type.Literal('phone_change'),
     Type.Literal('account_deletion'),
 ], {
     description: 'Purpose of verification',
@@ -219,4 +221,4 @@ export const VerificationPurposeSchema = Type.Union([
 
 export type VerificationPurpose = Static<typeof VerificationPurposeSchema>;
 
-export const VERIFICATION_PURPOSES = ['registration', 'login', 'password_reset', 'email_change', 'phone_change', 'account_deletion'] as const;
+export const VERIFICATION_PURPOSES = ['registration', 'account_deletion'] as const;

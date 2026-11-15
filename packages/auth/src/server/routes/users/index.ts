@@ -145,6 +145,3 @@ export const userRouter = defineRouter({
     updateUsername: updateUsername,
     updateLocale: updateLocale,
 });
-
-// For backward compatibility with file-based routing (temporary)
-export default userRouter;

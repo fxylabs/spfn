@@ -239,6 +239,10 @@ SPFN_API_URL="https://api.yourdomain.com"
 SPFN_PROXY_SECRET=your-shared-proxy-secret
 # Number of trusted proxies in front (LB + nginx = 2). Default 1.
 TRUSTED_PROXY_HOPS=1
+
+# API backend — trusted proxies directly in front of the SPFN server. Default 0
+# (none: X-Forwarded-For is not read). Behind a load balancer, set it.
+SERVER_TRUSTED_PROXY_HOPS=1
 ```
 
 The cache variable was once `REDIS_URL` and the public API URL `NEXT_PUBLIC_API_URL`. No
@@ -627,6 +631,11 @@ To make verified client IPs work in production, set two environment variables:
 - **`TRUSTED_PROXY_HOPS`** — how many trusted proxies sit in front of the app (e.g. load
   balancer + nginx = `2`; default `1`). This tells the proxy how many rightmost
   `X-Forwarded-For` entries are your own infra so it picks the correct client entry.
+- **`SERVER_TRUSTED_PROXY_HOPS`** — the same count for the API backend's own front (or
+  `defineServerConfig().trustedProxyHops(n)`). **Default `0` (BREAKING):** the backend reads
+  no forwarding header and counts the TCP peer, so a backend behind a load balancer that
+  leaves it unset counts every direct request as the balancer's address. Requests the Next.js
+  proxy signed carry their client address separately and are unaffected.
 
 > **Don't** work around a missing client IP by forwarding raw `X-Forwarded-For` from the proxy —
 > that header is client-controllable and reintroduces IP spoofing. Set `SPFN_PROXY_SECRET`

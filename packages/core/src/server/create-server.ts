@@ -10,7 +10,9 @@ import { existsSync } from 'fs';
 import { join } from 'path';
 
 import { registerRoutes, defineMiddleware, type RegisteredRoute } from '@spfn/core/route';
-import { ErrorHandler, RequestLogger, rateLimit, setRateLimitPolicies, setRateLimitFailClosedDefault } from '@spfn/core/middleware';
+import {
+    ErrorHandler, RequestLogger, rateLimit, setRateLimitPolicies, setRateLimitFailClosedDefault, setTrustedProxyHops,
+} from '@spfn/core/middleware';
 import { setDefaultSafeFetchPolicy } from '@spfn/core/security';
 import { env } from '@spfn/core/config';
 import { createSSEHandler } from '../event/sse/handler';
@@ -51,6 +53,9 @@ export async function createServer(config?: ServerConfig): Promise<Hono>
 {
     // Publish the outbound SSRF policy before any route or handler can call safeFetch.
     applyOutboundFetch(config);
+
+    // Before any request is served: every per-IP limit and log reads the address through it.
+    setTrustedProxyHops(config?.trustedProxyHops);
 
     const cwd = process.cwd();
     const appPath = join(cwd, 'src', 'server', 'app.ts');

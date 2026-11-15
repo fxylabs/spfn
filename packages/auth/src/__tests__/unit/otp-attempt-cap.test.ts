@@ -28,7 +28,7 @@ vi.mock('../../server/repositories', () => ({
 
 import { verifyCodeService } from '../../server/services/verification.service';
 
-const base = { target: 'a@b.com', targetType: 'email' as const, purpose: 'password_reset' as const };
+const base = { target: 'a@b.com', targetType: 'email' as const, purpose: 'account_deletion' as const };
 const future = new Date(Date.now() + 300_000);
 
 describe('verifyCodeService — OTP attempt cap', () =>

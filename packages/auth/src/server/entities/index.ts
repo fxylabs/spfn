@@ -14,6 +14,7 @@ export * from './user-settings';
 export * from './user-public-keys';
 export * from './user-social-accounts';
 export * from './verification-codes';
+export * from './account-exists-notices';
 export * from './signup-link-tokens';
 export * from './password-reset-tokens';
 export * from './key-revoke-all-tokens';

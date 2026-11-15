@@ -91,6 +91,3 @@ export const deletionRouter = defineRouter({
     requestAccountDeletion: requestAccountDeletion,
     cancelAccountDeletion: cancelAccountDeletion,
 });
-
-// For backward compatibility with file-based routing (temporary)
-export default deletionRouter;

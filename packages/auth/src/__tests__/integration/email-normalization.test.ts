@@ -25,7 +25,7 @@ import { fileURLToPath } from 'node:url';
 import { ConflictError } from '@spfn/core/errors';
 import { AccountAlreadyExistsError } from '@spfn/auth/errors';
 import { setupTestDb, teardownTestDb, clearTables, getTestDb, isDatabaseAvailable } from '../helpers/db';
-import { passwordResetTokens, users, verificationCodes } from '@/server/entities';
+import { accountExistsNotices, passwordResetTokens, users, verificationCodes } from '@/server/entities';
 import { generateKeyPair } from '@/server/lib/crypto';
 import { hashPassword } from '@/server/helpers/password';
 
@@ -531,22 +531,17 @@ describe.skipIf(!dbAvailable)('Email normalization', () =>
         {
             await insertRaw('exact@example.com');
             await insertRaw('Variant@Example.com');
-            const lifetimes = new Map<string, number>();
-
             for (const target of ['exact@example.com', 'variant@example.com', 'nobody@example.com'])
             {
                 const response = await post('/_auth/codes', { target, targetType: 'email', purpose: 'registration' });
-                const [row] = await getTestDb().select().from(verificationCodes).where(eq(verificationCodes.target, target));
 
                 expect(response.status).toBe(200);
                 expect(Object.keys(await response.json()).sort()).toEqual(['expiresAt', 'success']);
-                lifetimes.set(target, Math.round((row!.expiresAt.getTime() - row!.createdAt.getTime()) / 60_000));
             }
 
-            // The account-exists branch keeps a dedupe marker, not a code: its
-            // lifetime is the notice window, not the code expiry
-            expect(lifetimes.get('variant@example.com')).toBe(lifetimes.get('exact@example.com'));
-            expect(lifetimes.get('variant@example.com')).not.toBe(lifetimes.get('nobody@example.com'));
+            // The account-exists branch opens a notice window instead of sending a code
+            const noticed = await getTestDb().select({ target: accountExistsNotices.target }).from(accountExistsNotices);
+            expect(noticed.map(row => row.target).sort()).toEqual(['exact@example.com', 'variant@example.com']);
         });
 
         it('F6: an invitation to an address stored in another case is a conflict', async () =>

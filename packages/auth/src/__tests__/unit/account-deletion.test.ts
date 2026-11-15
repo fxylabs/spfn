@@ -24,6 +24,7 @@ const {
     userProfilesRepository,
     userSettingsRepository,
     verificationCodesRepository,
+    accountExistsNoticesRepository,
     accountDeletionRequestsRepository,
     verifyPassword,
     getDummyPasswordHash,
@@ -69,6 +70,9 @@ const {
     verificationCodesRepository: {
         deleteByTarget: vi.fn(async () => 0),
     },
+    accountExistsNoticesRepository: {
+        deleteByTarget: vi.fn(async () => undefined),
+    },
     accountDeletionRequestsRepository: {
         create: vi.fn(),
         findPendingByUserId: vi.fn(),
@@ -98,6 +102,7 @@ vi.mock('../../server/repositories', () => ({
     userProfilesRepository,
     userSettingsRepository,
     verificationCodesRepository,
+    accountExistsNoticesRepository,
     accountDeletionRequestsRepository,
 }));
 

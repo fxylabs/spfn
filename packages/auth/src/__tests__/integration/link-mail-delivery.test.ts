@@ -20,9 +20,10 @@
 import crypto from 'crypto';
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
 import { Hono } from 'hono';
-import { and, eq } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
+import { getTransactionContext, runInTransaction } from '@spfn/core/db';
 import { setupTestDb, teardownTestDb, clearTables, getTestDb, isDatabaseAvailable } from '../helpers/db';
-import { passwordResetTokens, signupLinkTokens, users, verificationCodes } from '@/server/entities';
+import { accountExistsNotices, passwordResetTokens, signupLinkTokens, users, verificationCodes } from '@/server/entities';
 import { generateKeyPair } from '@/server/lib/crypto';
 import { hashPassword } from '@/server/helpers/password';
 import type { LinkMailPayload } from '@/server/jobs/link-mail';
@@ -62,8 +63,10 @@ const { ErrorHandler, resetMemoryRateLimitStore } = await import('@spfn/core/mid
 const { initializeAuth } = await import('@/server/services/rbac.service');
 const { getRoleByName } = await import('@/server/services/role.service');
 const { linkMailJob } = await import('@/server/jobs/link-mail');
-const { resetLinkMailFallbackWarning } = await import('@/server/lib/link-mail-delivery');
+const { resetLinkMailFallbackWarning, settleLinkMail } = await import('@/server/lib/link-mail-delivery');
 const { authLogger } = await import('@/server/logger');
+const { requestPasswordResetService } = await import('@/server/services/password-reset.service');
+const { createAuthLifecycle } = await import('@/server/lifecycle');
 
 // See the file comment: the definition's own `send` would reach for the real
 // pg-boss, so the enqueue is pointed at the fake the `getBoss` mock hands out.
@@ -115,13 +118,16 @@ describe.skipIf(!dbAvailable)('Link mail delivery', () =>
         resetMemoryRateLimitStore();
     });
 
-    function post(path: string, body: unknown)
+    async function post(path: string, body: unknown)
     {
-        return app.request(path, {
+        const response = await app.request(path, {
             method: 'POST',
             headers: JSON_HEADERS,
             body: JSON.stringify(body),
         });
+        await settleLinkMail();
+
+        return response;
     }
 
     // ========================================================================
@@ -305,11 +311,8 @@ describe.skipIf(!dbAvailable)('Link mail delivery', () =>
             expect(sendEmail).not.toHaveBeenCalled();
 
             // The dedupe window is bookkeeping, and bookkeeping stays on the request.
-            const notices = await getTestDb().select().from(verificationCodes)
-                .where(and(
-                    eq(verificationCodes.target, 't4@example.com'),
-                    eq(verificationCodes.purpose, 'registration'),
-                ));
+            const notices = await getTestDb().select().from(accountExistsNotices)
+                .where(eq(accountExistsNotices.target, 't4@example.com'));
             expect(notices).toHaveLength(1);
         });
 
@@ -343,6 +346,17 @@ describe.skipIf(!dbAvailable)('Link mail delivery', () =>
                 { kind: 'password-reset', rowId: rows[0].id },
                 { kind: 'password-reset', rowId: rows[1].id },
             ]);
+        });
+
+        it('row T6: a code send queues the code row by id, never the code, and sends nothing', async () =>
+        {
+            const response = await post('/_auth/codes', { target: 't6@example.com', targetType: 'email', purpose: 'registration' });
+
+            expect(response.status).toBe(200);
+
+            const [row] = await getTestDb().select().from(verificationCodes).where(eq(verificationCodes.target, 't6@example.com'));
+            expect(enqueued()).toEqual([{ kind: 'verification-code', rowId: row.id }]);
+            expect(sendEmail).not.toHaveBeenCalled();
         });
     });
 
@@ -443,6 +457,22 @@ describe.skipIf(!dbAvailable)('Link mail delivery', () =>
 
             expect(templatesSent()).toEqual(['account-exists']);
             expect(sendEmail.mock.calls[0][0].to).toBe('w6@example.com');
+        });
+
+        it('row W8: a verification-code payload sends the stored code by its channel, and a superseded one is not sent', async () =>
+        {
+            await post('/_auth/codes', { target: '+821012345678', targetType: 'phone', purpose: 'registration' });
+            await post('/_auth/codes', { target: '+821012345678', targetType: 'phone', purpose: 'registration' });
+            const rows = await getTestDb().select().from(verificationCodes)
+                .where(eq(verificationCodes.target, '+821012345678'))
+                .orderBy(verificationCodes.id);
+
+            await drainLinkMail();
+
+            expect(sendSMS).toHaveBeenCalledTimes(1);
+            expect(sendSMS.mock.calls[0][0]).toMatchObject({
+                to: '+821012345678', template: 'verification-code', data: { code: rows[1].code },
+            });
         });
 
         it('row W7: an unknown kind is refused and sends nothing', async () =>
@@ -657,6 +687,158 @@ describe.skipIf(!dbAvailable)('Link mail delivery', () =>
             expect(await unknown.text()).toBe(await known.text());
 
             now.mockRestore();
+        });
+
+        it('row D13: an inline send runs after the commit, in no transaction and under no account lock', async () =>
+        {
+            process.env.SPFN_AUTH_LINK_MAIL_DELIVERY = 'inline';
+            const account = await seedResettable('d13@example.com');
+            const seen: { inTransaction: boolean; accountFree: boolean }[] = [];
+
+            // From another connection: NOWAIT refuses at once while any
+            // transaction still holds the account row.
+            const accountFree = async () => await getTestDb()
+                .execute(sql`SELECT id FROM spfn_auth.users WHERE id = ${account.id} FOR NO KEY UPDATE NOWAIT`)
+                .then(() => true, () => false);
+
+            sendEmail.mockImplementation(async () =>
+            {
+                seen.push({ inTransaction: getTransactionContext() !== null, accountFree: await accountFree() });
+
+                return { success: true };
+            });
+
+            await post('/_auth/password/reset', { email: 'd13@example.com' });
+            await post('/_auth/codes', { target: 'd13@example.com', targetType: 'email', purpose: 'registration' });
+
+            // An application calling the service in a transaction of its own:
+            // the reset's account lock is held until that transaction commits,
+            // and the send still waits for the commit.
+            await runInTransaction(async () =>
+            {
+                await requestPasswordResetService({ email: 'd13@example.com' });
+            });
+            await settleLinkMail();
+
+            expect(templatesSent()).toEqual(['password-reset', 'account-exists', 'password-reset']);
+            expect(seen).toEqual(Array(3).fill({ inTransaction: false, accountFree: true }));
+        });
+    });
+
+    describe('S — what waits for the commit, and what shutdown waits for', () =>
+    {
+        /** A provider that holds every send until released. */
+        function blockProvider(): { release: () => void; sendsFinished: () => number }
+        {
+            let release!: () => void;
+            const released = new Promise<void>((resolve) =>
+            {
+                release = resolve;
+            });
+            let finished = 0;
+
+            sendEmail.mockImplementation(async () =>
+            {
+                await released;
+                finished += 1;
+
+                return { success: true };
+            });
+
+            return { release, sendsFinished: () => finished };
+        }
+
+        it('row S1: the shutdown hook resolves only after a send in flight when it ran', async () =>
+        {
+            process.env.SPFN_AUTH_LINK_MAIL_DELIVERY = 'inline';
+            await seedResettable('s1@example.com');
+            const provider = blockProvider();
+
+            const response = await app.request('/_auth/password/reset', {
+                method: 'POST', headers: JSON_HEADERS, body: JSON.stringify({ email: 's1@example.com' }),
+            });
+            expect(response.status).toBe(200);
+            await vi.waitFor(() => expect(sendEmail).toHaveBeenCalledTimes(1));
+
+            let hookResolved = false;
+            const hook = createAuthLifecycle().beforeShutdown!().then(() =>
+            {
+                hookResolved = true;
+            });
+            await new Promise(resolve => setTimeout(resolve, 50));
+            expect(hookResolved).toBe(false);
+
+            provider.release();
+            await hook;
+            expect(provider.sendsFinished()).toBe(1);
+        });
+
+        it('row S2: with a blocked provider the hook resolves at its bound and names what it abandoned', async () =>
+        {
+            process.env.SPFN_AUTH_LINK_MAIL_DELIVERY = 'inline';
+            const error = vi.spyOn(authLogger.email, 'error');
+            await seedResettable('s2@example.com');
+            const provider = blockProvider();
+
+            await app.request('/_auth/password/reset', {
+                method: 'POST', headers: JSON_HEADERS, body: JSON.stringify({ email: 's2@example.com' }),
+            });
+            await vi.waitFor(() => expect(sendEmail).toHaveBeenCalledTimes(1));
+
+            const started = Date.now();
+            await settleLinkMail(100);
+            expect(Date.now() - started).toBeLessThan(2_000);
+            expect(provider.sendsFinished()).toBe(0);
+
+            const [row] = await resetRows('s2@example.com');
+            const abandoned = error.mock.calls.filter(([message]) =>
+                message === 'Link mail still in flight at shutdown was abandoned');
+            expect(abandoned).toHaveLength(1);
+            expect(abandoned[0][1]).toEqual({ abandoned: [{ kind: 'password-reset', rowId: row.id }] });
+            expect(loggedText(abandoned[0])).not.toMatch(/s2@example\.com|https?:/i);
+
+            provider.release();
+            await settleLinkMail();
+            error.mockRestore();
+        });
+
+        it('row S3: inside an app transaction the job is enqueued after the commit, and delivers', async () =>
+        {
+            await seedResettable('s3@example.com');
+            const rowsSeenAtEnqueue: number[] = [];
+            boss.send.mockImplementation(async () =>
+            {
+                // From another connection, as the worker reads it.
+                rowsSeenAtEnqueue.push((await resetRows('s3@example.com')).length);
+
+                return 'job-1';
+            });
+
+            await runInTransaction(async () =>
+            {
+                await requestPasswordResetService({ email: 's3@example.com' });
+                expect(boss.send).not.toHaveBeenCalled();
+            });
+            await settleLinkMail();
+
+            expect(rowsSeenAtEnqueue).toEqual([1]);
+            await drainLinkMail();
+            expect(templatesSent()).toEqual(['password-reset']);
+        });
+
+        it('row S4: a rolled-back app transaction enqueues and sends nothing', async () =>
+        {
+            await seedResettable('s4@example.com');
+
+            await expect(runInTransaction(async () =>
+            {
+                await requestPasswordResetService({ email: 's4@example.com' });
+                throw new Error('the app changed its mind');
+            })).rejects.toThrow('the app changed its mind');
+            await settleLinkMail();
+
+            expect(boss.send).not.toHaveBeenCalled();
+            expect(sendEmail).not.toHaveBeenCalled();
         });
     });
 

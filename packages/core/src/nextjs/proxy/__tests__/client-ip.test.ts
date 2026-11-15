@@ -25,9 +25,9 @@ describe('clientIpFromForwardedChain', () =>
         expect(clientIpFromForwardedChain('1.2.3.4, 203.0.113.9, 10.0.0.1', 2)).toBe('203.0.113.9');
     });
 
-    it('best-efforts to leftmost when fewer entries than hops', () =>
+    it('names no client when the chain is shorter than the declared hops', () =>
     {
-        expect(clientIpFromForwardedChain('203.0.113.9', 3)).toBe('203.0.113.9');
+        expect(clientIpFromForwardedChain('203.0.113.9', 3)).toBeUndefined();
     });
 
     it('returns undefined for empty/missing', () =>

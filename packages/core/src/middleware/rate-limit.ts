@@ -20,7 +20,6 @@
  */
 
 import type { Context, MiddlewareHandler } from 'hono';
-import { PROXY_CLIENT_IP_HEADER } from '../security/proxy-signature';
 import { defineMiddleware, defineMiddlewareFactory } from '../route/define-middleware';
 import type { NamedMiddleware } from '../route/define-middleware';
 import { getCache, isCacheDisabled } from '../cache';
@@ -30,6 +29,7 @@ import { TooManyRequestsError } from '../errors';
 // bundle (issue #136).
 import { logger } from '@spfn/core/logger';
 import { CacheRateLimitStore, MemoryRateLimitStore, type RateLimitStore } from './rate-limit-store';
+import { getClientIp } from './client-ip';
 
 const rateLimitLogger = logger.child('@spfn/core:rate-limit');
 
@@ -70,7 +70,7 @@ export interface RateLimitOptions
      * Identity dimensions to limit on. Each non-empty value is counted
      * separately and the strictest wins (e.g. by IP and by account). A dimension
      * may override the top-level `limit` via `{ key, limit }`. Defaults to the
-     * client IP only.
+     * client address only, as `getClientIp` resolves it.
      */
     by?: (c: Context) => (RateLimitDimension | null | undefined)[] | Promise<(RateLimitDimension | null | undefined)[]>;
 
@@ -83,57 +83,6 @@ export interface RateLimitOptions
 
     /** Message for the 429 response. */
     message?: string;
-}
-
-/**
- * Best-effort client IP for rate-limit keying.
- *
- * Prefers the proxy-forwarded real client IP, but ONLY when proxy-guard verified
- * the request came through our proxy (`clientType` set and not 'untrusted') — on a
- * verified request the proxy is the sole hop, so the value is the true client and
- * isn't client-spoofable. Otherwise (no proxy-guard, or unverified/direct request)
- * the forwarded header is attacker-settable, so fall back to the raw chain — whose
- * leftmost hop is itself spoofable, so still pair with an account/target dimension
- * for anything security-sensitive.
- *
- * Last resort before giving up is the TCP peer address from the Node adapter
- * socket. Without it, a deployment that sets no forwarding header would collapse
- * every client onto a single `'unknown'` bucket.
- */
-export function getClientIp(c: Context): string
-{
-    const clientType = c.get('clientType');
-    if (clientType && clientType !== 'untrusted')
-    {
-        const forwarded = c.req.header(PROXY_CLIENT_IP_HEADER);
-        if (forwarded)
-        {
-            return forwarded;
-        }
-    }
-
-    const forwardedFor = c.req.header('x-forwarded-for');
-
-    return forwardedFor?.split(',')[0]?.trim()
-        || c.req.header('x-real-ip')
-        || socketRemoteAddress(c)
-        || 'unknown';
-}
-
-/**
- * TCP peer address from the @hono/node-server adapter, when present. Mirrors the
- * adapter's own getConnInfo access path and degrades to undefined on other
- * runtimes (Bun/edge) so callers fall through to 'unknown'.
- */
-function socketRemoteAddress(c: Context): string | undefined
-{
-    const env = c.env as {
-        server?: { incoming?: { socket?: { remoteAddress?: string } } };
-        incoming?: { socket?: { remoteAddress?: string } };
-    } | undefined;
-    const bindings = env?.server ?? env;
-
-    return bindings?.incoming?.socket?.remoteAddress;
 }
 
 /**

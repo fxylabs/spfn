@@ -65,6 +65,7 @@ vi.mock('@spfn/core/event/sse', async (importOriginal) =>
 });
 
 const { mainAuthRouter } = await import('@/server/routes');
+const { settleLinkMail } = await import('@/server/lib/link-mail-delivery');
 const { registerRoutes } = await import('@spfn/core/route');
 const { ErrorHandler, resetMemoryRateLimitStore } = await import('@spfn/core/middleware');
 const { runInTransaction } = await import('@spfn/core/db');
@@ -224,7 +225,7 @@ describe.skipIf(!dbAvailable)('SSE streams close after a key revocation commits 
         return mounted;
     }
 
-    function send(method: string, path: string, body: unknown, authorization?: string)
+    async function send(method: string, path: string, body: unknown, authorization?: string)
     {
         const headers: Record<string, string> = {
             ...JSON_HEADERS,
@@ -238,7 +239,10 @@ describe.skipIf(!dbAvailable)('SSE streams close after a key revocation commits 
             headers.Authorization = authorization;
         }
 
-        return app.request(path, { method, headers, body: JSON.stringify(body) });
+        const response = await app.request(path, { method, headers, body: JSON.stringify(body) });
+        await settleLinkMail();
+
+        return response;
     }
 
     const post = (path: string, body: unknown, authorization?: string) => send('POST', path, body, authorization);

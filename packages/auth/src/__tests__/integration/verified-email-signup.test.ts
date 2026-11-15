@@ -39,6 +39,7 @@ vi.mock('@spfn/notification/server', async (importOriginal) =>
 });
 
 const { mainAuthRouter } = await import('@/server/routes');
+const { settleLinkMail } = await import('@/server/lib/link-mail-delivery');
 const { registerRoutes } = await import('@spfn/core/route');
 const { ErrorHandler, resetMemoryRateLimitStore } = await import('@spfn/core/middleware');
 const { initializeAuth } = await import('@/server/services/rbac.service');
@@ -81,13 +82,16 @@ describe.skipIf(!dbAvailable)('Verified-email signup', () =>
         resetMemoryRateLimitStore();
     });
 
-    function post(path: string, body: unknown)
+    async function post(path: string, body: unknown)
     {
-        return app.request(path, {
+        const response = await app.request(path, {
             method: 'POST',
             headers: JSON_HEADERS,
             body: JSON.stringify(body),
         });
+        await settleLinkMail();
+
+        return response;
     }
 
     /** The token from the most recent signup-link email. */

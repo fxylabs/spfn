@@ -8,6 +8,7 @@
 export * from './users.repository';
 export * from './keys.repository';
 export * from './verification-codes.repository';
+export * from './account-exists-notices.repository';
 export * from './signup-link-tokens.repository';
 export * from './password-reset-tokens.repository';
 export * from './key-revoke-all-tokens.repository';

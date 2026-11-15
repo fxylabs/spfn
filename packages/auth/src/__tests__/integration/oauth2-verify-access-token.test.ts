@@ -50,6 +50,7 @@ vi.mock('@spfn/notification/server', async (importOriginal) =>
 const dbAvailable = await isDatabaseAvailable();
 
 const { initializeAuth } = await import('@/server/services/rbac.service');
+const { settleLinkMail } = await import('@/server/lib/link-mail-delivery');
 const { getRoleByName } = await import('@/server/services/role.service');
 
 /** Names unique to this file: one fork runs every suite. */
@@ -186,6 +187,7 @@ describe.skipIf(!dbAvailable)('verifyAccessToken (8e)', () =>
             headers: JSON_HEADERS,
             body: JSON.stringify({ email: EMAIL }),
         })).status).toBe(200);
+        await settleLinkMail();
 
         const confirmUrl = sendEmail.mock.calls
             .filter(([arg]) => arg?.template === 'password-reset')

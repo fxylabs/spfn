@@ -33,6 +33,7 @@ import {
     userProfilesRepository,
     userSettingsRepository,
     verificationCodesRepository,
+    accountExistsNoticesRepository,
     accountDeletionRequestsRepository,
 } from '../repositories';
 import type { User } from '../entities/users';
@@ -701,15 +702,13 @@ async function purgePendingRequest(request: AccountDeletionRequest): Promise<Pur
             await anonymizeUser(user);
         }
 
-        // verificationCodes has no userId FK (target-keyed) — clean up regardless
-        // of strategy so leftover codes don't linger for a reused email/phone.
-        if (user.email)
+        // Codes and account-exists notice windows have no userId FK (target-keyed)
+        // — clean up regardless of strategy so neither lingers for a reused
+        // email/phone.
+        for (const target of [user.email, user.phone].filter((value): value is string => !!value))
         {
-            await verificationCodesRepository.deleteByTarget(user.email);
-        }
-        if (user.phone)
-        {
-            await verificationCodesRepository.deleteByTarget(user.phone);
+            await verificationCodesRepository.deleteByTarget(target);
+            await accountExistsNoticesRepository.deleteByTarget(target);
         }
 
         purgedUser = user;

@@ -115,6 +115,7 @@ export class UsersRepository extends AccountStateRepository
         fillEmailIfUnheld: { account: id => id },
         updateById: { account: id => id },
         updatePassword: { account: id => id },
+        replaceVerifiedPasswordHash: { account: id => id },
         updateLastLogin: { account: id => id },
         deleteById: { account: id => id },
     };
@@ -642,6 +643,28 @@ export class UsersRepository extends AccountStateRepository
             .returning();
 
         return result[0] ?? null;
+    }
+
+    /**
+     * Re-encode the password hash a sign-in has just verified.
+     *
+     * Conditional on the stored hash still being `verifiedHash`: a password
+     * change or reset that lands between the verification and this statement
+     * has replaced it, and writing the re-encoded old password over the new one
+     * would make the old password work again. Zero rows means there is nothing
+     * left to re-encode, and is not an error. Called under the account lock
+     * (`lockAccount`); the hash it writes was computed before the lock.
+     * Write primary 사용
+     */
+    async replaceVerifiedPasswordHash(id: number, verifiedHash: string, passwordHash: string): Promise<boolean>
+    {
+        const result = await this.db
+            .update(users)
+            .set({ passwordHash })
+            .where(and(eq(users.id, id), eq(users.passwordHash, verifiedHash)))
+            .returning({ id: users.id });
+
+        return result.length > 0;
     }
 
     /**

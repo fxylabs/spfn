@@ -36,7 +36,7 @@ type PurposeChannels = Partial<Record<VerificationPurpose, AuthChannel>>;
 
 export type RouteChannel = AuthChannel | 'always' | PurposeChannels;
 
-const CODE_PURPOSES: PurposeChannels = { registration: 'signup', password_reset: 'passwordReset' };
+const CODE_PURPOSES: PurposeChannels = { registration: 'signup' };
 
 export const ROUTE_CHANNELS = {
     sendVerificationCode: CODE_PURPOSES,

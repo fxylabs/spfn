@@ -120,7 +120,7 @@ pnpm spfn db generate
 pnpm spfn db migrate
 ```
 
-This creates the `spfn_auth` schema with tables: `users`, `user_profiles`, `user_public_keys`, `user_social_accounts`, `verification_codes`, `user_invitations`, `roles`, `permissions`, `role_permissions`, `user_permissions`, `user_settings`, `account_deletion_requests`, `auth_metadata`.
+This creates the `spfn_auth` schema with tables: `users`, `user_profiles`, `user_public_keys`, `user_social_accounts`, `verification_codes`, `account_exists_notices`, `user_invitations`, `roles`, `permissions`, `role_permissions`, `user_permissions`, `user_settings`, `account_deletion_requests`, `auth_metadata`.
 
 ### 4. Register Lifecycle in `server.config.ts`
 

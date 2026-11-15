@@ -6,10 +6,11 @@
  * the key row so the account owner's device list can say "this one appeared
  * from there".
  *
- * Both values are unauthenticated display material. `getClientIp` is documented
- * as best-effort keying material and is spoofable on any request that is not
- * proxy-verified, and a `user-agent` is whatever the caller typed — so nothing
- * in this package decides anything by either one, and neither is ever compared.
+ * Both values are unauthenticated display material. `getClientIp` reads a
+ * forwarded header only as far as the operator declared proxies in front of the
+ * server, which no request can prove it came through, and a `user-agent` is
+ * whatever the caller typed — so nothing in this package decides anything by
+ * either one, and neither is ever compared.
  */
 
 import type { Context } from 'hono';
@@ -77,10 +78,11 @@ export function deviceProvenance(c: Context): DeviceProvenance
  * concurrent-use signal an account owner is shown and notified on.
  *
  * Everywhere else in this module the address is display material and spoofing it
- * only defaces the spoofer's own device list. Here it is not: `getClientIp` falls
- * back to `x-forwarded-for` on a request nothing verified, so a caller alternating
- * that header on their own key could raise "your session was used from two places
- * at once" whenever they liked — on a deployment where the design says the signal
+ * only defaces the spoofer's own device list. Here it is not: where the operator
+ * declared a proxy, `getClientIp` reads `x-forwarded-for` on a request nothing
+ * verified, so a caller reaching the server around that proxy and alternating the
+ * header on their own key could raise "your session was used from two places at
+ * once" whenever they liked — on a deployment where the design says the signal
  * never fires at all. Absent the attestation this answers null, which the
  * statement stores and compares as "no observation".
  */

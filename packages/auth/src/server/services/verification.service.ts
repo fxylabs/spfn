@@ -6,15 +6,17 @@
 
 import crypto from 'crypto';
 import { env } from '@spfn/auth/config';
+import { PHONE_PATTERN } from '@spfn/auth';
 import { InvalidVerificationCodeError } from '@spfn/auth/errors';
+import { ValidationError } from '@spfn/core/errors';
 import jwt from 'jsonwebtoken';
-import { sendEmail, sendSMS } from '@spfn/notification/server';
+import { Value } from '@sinclair/typebox/value';
 import { authLogger } from '../logger';
 import { normalizeEmail } from '../helpers/email';
-import { verificationCodesRepository, usersRepository } from '../repositories';
+import { accountExistsNoticesRepository, verificationCodesRepository, usersRepository } from '../repositories';
 import { deliverLinkMail } from '../lib/link-mail-delivery';
-import { sendAccountExistsNotice } from './link-mail.service';
-import type { VerificationTargetType, VerificationPurpose } from '../routes/schema';
+import { sendAccountExistsNotice, sendVerificationCode, VERIFICATION_CODE_EXPIRY_MINUTES } from './link-mail.service';
+import { EmailSchema, type VerificationTargetType, type VerificationPurpose } from '../routes/schema';
 
 /**
  * How long to suppress repeat "account already exists" notices to the same target.
@@ -29,9 +31,13 @@ const ACCOUNT_EXISTS_NOTICE_DEDUPE_MINUTES = 60;
 const VERIFICATION_TOKEN_EXPIRY = '15m';
 
 /**
- * Verification code expiry (5 minutes)
+ * The code stored for a registration on an address that already has an account.
+ *
+ * The row exists so the verify route reads, counts and refuses exactly as it
+ * does for an address without one. It is never sent, and the verify route only
+ * accepts six digits, so nothing submitted can match it.
  */
-const VERIFICATION_CODE_EXPIRY_MINUTES = 5;
+const NEVER_SENT_CODE = 'never-sent';
 
 /**
  * Maximum verification attempts before code expires
@@ -58,8 +64,8 @@ export interface VerificationTokenPayload
  * valid code refused as invalid — the address is the lookup key, so the two
  * spellings address different rows.
  *
- * Phone numbers are already canonical (E.164 is validated on the way in) and
- * have no case, so only email is folded.
+ * Phone numbers are already canonical (E.164 is validated before a code is
+ * sent, see `assertDeliverableTarget`) and have no case, so only email is folded.
  *
  * @param target - Email address or E.164 phone number as supplied
  * @param targetType - Which of the two it is
@@ -67,6 +73,66 @@ export interface VerificationTokenPayload
 function normalizeVerificationTarget(target: string, targetType: VerificationTargetType): string
 {
     return targetType === 'email' ? normalizeEmail(target) : target.trim();
+}
+
+/**
+ * The longest address a mailer takes: RFC 5321's 256-octet path less its two
+ * angle brackets.
+ */
+const EMAIL_TARGET_MAX_LENGTH = 254;
+
+/**
+ * Refuse a target its type cannot be delivered to, before anything is stored or sent.
+ *
+ * The route declares `target` as a plain string because its shape depends on
+ * `targetType`. Unchecked, an SMS went to whatever string was named, which is
+ * an SMS-pumping surface: a phone target must be E.164.
+ *
+ * An email target for a registration must be what `/_auth/register` accepts
+ * (`EmailSchema`): a code for an address that can never sign up is useless.
+ * For every other purpose it addresses an account's existing e-mail, which
+ * this system may have stored with no format check — from an OAuth provider,
+ * from an invitation — and for an account with no password a code to that
+ * address is the only way to delete it. So those are held only to
+ * `isAddressable`, which plus-addressing and internationalised domains pass.
+ */
+function assertDeliverableTarget(target: string, targetType: VerificationTargetType, purpose: VerificationPurpose): void
+{
+    const deliverable = targetType === 'phone'
+        ? new RegExp(PHONE_PATTERN).test(target)
+        : isAddressable(target) && (purpose !== 'registration' || Value.Check(EmailSchema, target));
+
+    if (!deliverable)
+    {
+        const shape = targetType === 'phone' ? 'a phone number in E.164 format' : 'an email address';
+        throw new ValidationError({ message: `target must be ${shape} when targetType is ${targetType}` });
+    }
+}
+
+/**
+ * What no account can hold as its address and no mailer should be handed:
+ * anything but exactly one `@` between a non-empty local part and a non-empty
+ * domain, any control character (CR and LF among them — a header injection
+ * once the address reaches a mail header) or whitespace, any character that
+ * makes the address display as another or is invisible — a bidi control
+ * (marks, overrides, isolates) or any default-ignorable code point (zero-width
+ * space, soft hyphen, variation selectors) — or more than
+ * `EMAIL_TARGET_MAX_LENGTH` characters. Nothing stricter: a pattern here would
+ * refuse addresses accounts already hold.
+ *
+ * ZWNJ and ZWJ (U+200C, U+200D) are default-ignorable but stay allowed:
+ * IDNA2008 permits them inside Persian, Arabic and Indic domain labels, an
+ * OAuth sign-up can store such an address, and for an account with no password
+ * an `account_deletion` code to it is the only way to delete it.
+ */
+function isAddressable(target: string): boolean
+{
+    const parts = target.split('@');
+
+    return target.length <= EMAIL_TARGET_MAX_LENGTH
+        && !/[\p{Cc}\s\p{Bidi_Control}]|(?![\u200C\u200D])\p{Default_Ignorable_Code_Point}/u.test(target)
+        && parts.length === 2
+        && parts.every(part => part.length > 0);
 }
 
 /**
@@ -238,71 +304,6 @@ export function validateVerificationToken(token: string): VerificationTokenPaylo
 }
 
 /**
- * Send verification code via email
- *
- * @param email - Email address
- * @param code - 6-digit verification code
- * @param purpose - Purpose of verification
- */
-async function sendVerificationEmail(
-    email: string,
-    code: string,
-    purpose: string,
-): Promise<void>
-{
-    const result = await sendEmail({
-        to: email,
-        template: 'verification-code',
-        data: {
-            code,
-            purpose,
-            expiresInMinutes: VERIFICATION_CODE_EXPIRY_MINUTES,
-        },
-    });
-
-    if (!result.success)
-    {
-        authLogger.email.error('Failed to send verification email', {
-            email,
-            purpose,
-            error: result.error,
-        });
-    }
-}
-
-/**
- * Send verification code via SMS
- *
- * @param phone - Phone number in E.164 format
- * @param code - 6-digit verification code
- * @param purpose - Purpose of verification
- */
-async function sendVerificationSMS(
-    phone: string,
-    code: string,
-    purpose: string,
-): Promise<void>
-{
-    const result = await sendSMS({
-        to: phone,
-        template: 'verification-code',
-        data: {
-            code,
-            expiresInMinutes: VERIFICATION_CODE_EXPIRY_MINUTES,
-        },
-    });
-
-    if (!result.success)
-    {
-        authLogger.sms.error('Failed to send verification SMS', {
-            phone,
-            purpose,
-            error: result.error,
-        });
-    }
-}
-
-/**
  * Whether an account already exists for the given target.
  *
  * An address counts in any stored case, so a row the boot backfill left in
@@ -328,9 +329,9 @@ async function accountExistsForTarget(
  * many notices as either one permits — the email-bombing this dedupe exists to
  * prevent.
  *
- * The window is kept as an undelivered marker row in `verification_codes`: the
- * code it carries is never sent and is unusable, since registration refuses an
- * existing account regardless. Only its timestamp matters.
+ * The window is a row of `account_exists_notices`, keyed by the folded address
+ * so that writing it in another case is the same window. Nothing that verifies
+ * a code reads it.
  *
  * Only the bookkeeping runs here. The notice itself leaves through
  * `auth.link-mail`, so the signup branch that finds an account costs the same as
@@ -345,27 +346,16 @@ export async function noticeAccountExistsOnce(
     targetType: VerificationTargetType,
 ): Promise<void>
 {
-    const recentNotice = await verificationCodesRepository.findValidByTargetAndPurpose(target, 'registration');
+    const folded = normalizeVerificationTarget(target, targetType);
 
-    if (recentNotice)
+    if (!await accountExistsNoticesRepository.claimWindow(folded, ACCOUNT_EXISTS_NOTICE_DEDUPE_MINUTES * 60_000))
     {
         return;
     }
 
-    const dedupeExpiresAt = new Date(Date.now() + ACCOUNT_EXISTS_NOTICE_DEDUPE_MINUTES * 60_000);
-    await verificationCodesRepository.invalidatePreviousCodes(target, 'registration');
-    await verificationCodesRepository.create({
-        target,
-        targetType,
-        code: generateVerificationCode(),
-        purpose: 'registration',
-        expiresAt: dedupeExpiresAt,
-        attempts: 0,
-    });
-
     await deliverLinkMail(
-        { kind: 'account-exists', target, targetType },
-        () => sendAccountExistsNotice(target, targetType),
+        { kind: 'account-exists', target: folded, targetType },
+        () => sendAccountExistsNotice(folded, targetType),
     );
 }
 
@@ -406,35 +396,29 @@ export async function sendVerificationCodeService(
     const { targetType, purpose } = params;
     const target = normalizeVerificationTarget(params.target, targetType);
 
-    // Registration to an already-registered target: don't send a usable signup code
-    // (the account exists). Notify the owner instead — but return the SAME response
-    // as the new-account path so existence can't be probed (no enumeration), and
-    // dedupe so this can't be used to email-bomb the owner.
-    if (purpose === 'registration' && await accountExistsForTarget(target, targetType))
-    {
-        await noticeAccountExistsOnce(target, targetType);
+    assertDeliverableTarget(target, targetType, purpose);
 
-        // Uniform response shape (indistinguishable from a real code send).
-        return {
-            success: true,
-            expiresAt: new Date(Date.now() + VERIFICATION_CODE_EXPIRY_MINUTES * 60_000).toISOString(),
-        };
-    }
-
-    // Generate 6-digit verification code
-    const code = generateVerificationCode();
-
-    // Store code in database
+    // Registration to an already-registered target sends no usable code: the
+    // owner gets a notice instead, deduped so this cannot mail-bomb them. A code
+    // row is stored either way, so the answer here and every answer of the
+    // verify route are the ones an address without an account gets. Neither
+    // branch waits for a provider: the notice and the code both leave through
+    // `auth.link-mail` or after the request, so the answer does not take longer
+    // for the branch that sends something.
+    const accountExists = purpose === 'registration' && await accountExistsForTarget(target, targetType);
+    const code = accountExists ? NEVER_SENT_CODE : generateVerificationCode();
     const codeRecord = await storeVerificationCode(target, targetType, code, purpose);
 
-    // Send code via email or SMS
-    if (targetType === 'email')
+    if (accountExists)
     {
-        await sendVerificationEmail(target, code, purpose);
+        await noticeAccountExistsOnce(target, targetType);
     }
     else
     {
-        await sendVerificationSMS(target, code, purpose);
+        await deliverLinkMail(
+            { kind: 'verification-code', rowId: codeRecord.id },
+            () => sendVerificationCode(codeRecord.id),
+        );
     }
 
     return {

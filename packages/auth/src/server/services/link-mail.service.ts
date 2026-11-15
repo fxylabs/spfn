@@ -1,9 +1,9 @@
 /**
  * @spfn/auth - Link Mail Service
  *
- * The three mails that leave through the `auth.link-mail` job: a signup
- * confirmation link, a password reset link, and the "you already have an
- * account" notice. Each is also callable directly, which is what the request
+ * The four messages that leave through the `auth.link-mail` job: a signup
+ * confirmation link, a password reset link, the "you already have an account"
+ * notice, and a verification code. Each is also callable directly, which is what the request
  * path does when jobs are not in use — one code path for the send, two for who
  * runs it.
  *
@@ -22,8 +22,13 @@ import { env } from '@spfn/auth/config';
 import { sendEmail, sendSMS } from '@spfn/notification/server';
 import { authLogger } from '../logger';
 import { buildConfirmUrl, mintCredential } from '../lib/link-credentials';
-import { passwordResetTokensRepository, signupLinkTokensRepository } from '../repositories';
+import { passwordResetTokensRepository, signupLinkTokensRepository, verificationCodesRepository } from '../repositories';
 import type { VerificationTargetType } from '../routes/schema';
+
+/**
+ * Verification code expiry (5 minutes)
+ */
+export const VERIFICATION_CODE_EXPIRY_MINUTES = 5;
 
 /**
  * Mint the signup link for a pending row and mail it.
@@ -125,5 +130,50 @@ export async function sendAccountExistsNotice(
     {
         const log = targetType === 'email' ? authLogger.email : authLogger.sms;
         log.error('Failed to send account-exists notice', { target, error: result.error });
+    }
+}
+
+/**
+ * Send the verification code a request stored, by the channel its target names.
+ *
+ * The request that stored the code does not wait for this: whether a send for
+ * an address with an account (a notice, or nothing inside the notice window)
+ * and one without (a code) reach a provider must not show in how long the
+ * request took. A code superseded, used or expired by now is not sent.
+ *
+ * A refused send throws, so the worker retries it; the code is the same row and
+ * stays valid until it expires.
+ *
+ * @param rowId - `verification_codes` row written by the request
+ */
+export async function sendVerificationCode(rowId: number): Promise<void>
+{
+    const row = await verificationCodesRepository.findDeliverable(rowId);
+
+    if (!row)
+    {
+        authLogger.service.info('Verification code not sent', { reason: 'no longer deliverable' });
+
+        return;
+    }
+
+    const result = row.targetType === 'email'
+        ? await sendEmail({
+            to: row.target,
+            template: 'verification-code',
+            data: { code: row.code, purpose: row.purpose, expiresInMinutes: VERIFICATION_CODE_EXPIRY_MINUTES },
+        })
+        : await sendSMS({
+            to: row.target,
+            template: 'verification-code',
+            data: { code: row.code, expiresInMinutes: VERIFICATION_CODE_EXPIRY_MINUTES },
+        });
+
+    if (!result.success)
+    {
+        const log = row.targetType === 'email' ? authLogger.email : authLogger.sms;
+        log.error('Failed to send verification code', { purpose: row.purpose, error: result.error });
+
+        throw new Error(`[auth.link-mail] verification-code row ${rowId} could not be sent`);
     }
 }

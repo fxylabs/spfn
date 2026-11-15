@@ -19,6 +19,7 @@ const {
 } = vi.hoisted(() => ({
     usersRepository: {
         findById: vi.fn(),
+        findByIdOnPrimary: vi.fn(),
         lockAccount: vi.fn(async (id: number) => ({ id, passwordHash: 'old-hash' })),
         updatePassword: vi.fn(async () => undefined),
     },
@@ -97,8 +98,13 @@ describe('changePasswordService — session revocation', () =>
     it('refuses when the password changed while the current one was being verified', async () =>
     {
         // The hash read under the account lock is not the one the current
-        // password was checked against: another change committed in between.
-        usersRepository.lockAccount.mockResolvedValueOnce({ id: 7, passwordHash: 'changed-meanwhile' });
+        // password was checked against: another change committed in between,
+        // and the current password does not verify against the hash it stored.
+        usersRepository.lockAccount
+            .mockResolvedValueOnce({ id: 7, passwordHash: 'changed-meanwhile' })
+            .mockResolvedValueOnce({ id: 7, passwordHash: 'changed-meanwhile' });
+        usersRepository.findByIdOnPrimary.mockResolvedValueOnce({ id: 7, passwordHash: 'changed-meanwhile' });
+        verifyPassword.mockResolvedValueOnce(true).mockResolvedValueOnce(false);
 
         await expect(changePasswordService({
             userId: 7,
@@ -108,7 +114,30 @@ describe('changePasswordService — session revocation', () =>
             passwordHash: 'old-hash',
         })).rejects.toMatchObject({ message: 'Current password is incorrect' });
 
+        expect(verifyPassword).toHaveBeenLastCalledWith('old-password', 'changed-meanwhile');
         expect(usersRepository.updatePassword).not.toHaveBeenCalled();
         expect(keysRepository.revokeAllActiveByUserId).not.toHaveBeenCalled();
+    });
+
+    it('changes it when the stored hash moved but still holds the current password', async () =>
+    {
+        // A sign-in re-encoded the same password meanwhile: the proof is stale,
+        // not wrong, and verifies again against what is stored now.
+        usersRepository.lockAccount
+            .mockResolvedValueOnce({ id: 7, passwordHash: 're-encoded' })
+            .mockResolvedValueOnce({ id: 7, passwordHash: 're-encoded' });
+        usersRepository.findByIdOnPrimary.mockResolvedValueOnce({ id: 7, passwordHash: 're-encoded' });
+
+        await changePasswordService({
+            userId: 7,
+            keyId: 'key-of-the-calling-device',
+            currentPassword: 'old-password',
+            newPassword: 'new-password',
+            passwordHash: 'old-hash',
+        });
+
+        expect(verifyPassword).toHaveBeenLastCalledWith('old-password', 're-encoded');
+        expect(usersRepository.updatePassword).toHaveBeenCalledWith(7, 'new-hash', true);
+        expect(keysRepository.revokeAllActiveByUserId).toHaveBeenCalledWith(7, 'Revoked by password change');
     });
 });

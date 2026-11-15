@@ -9,6 +9,7 @@ import { getAuth } from '../../helpers';
 import { authenticate, requirePermissions, requireRole } from '../../middleware';
 import { INVITATION_MAX_EXPIRY_DAYS, KEY_ALGORITHM } from '../../types';
 import { deviceProvenance } from '../../lib/device-provenance';
+import { PasswordSchema } from '../schema';
 import {
     describeInvitation,
     acceptInvitation as _acceptInvitation,
@@ -84,11 +85,7 @@ export const acceptInvitation = route.post('/_auth/invitations/accept')
     .input({
         body: Type.Object({
             token: InvitationTokenSchema,
-            password: Type.String({
-                minLength: 8,
-                maxLength: 72,
-                description: 'User password (8–72 characters). bcrypt silently ignores bytes past 72, so longer inputs are rejected rather than truncated.',
-            }),
+            password: PasswordSchema,
         }),
     })
     .interceptor({
@@ -317,6 +314,3 @@ export const invitationRouter = defineRouter({
     resendInvitation: resendInvitation,
     deleteInvitation: deleteInvitation,
 });
-
-// For backward compatibility with file-based routing (temporary)
-export default invitationRouter;

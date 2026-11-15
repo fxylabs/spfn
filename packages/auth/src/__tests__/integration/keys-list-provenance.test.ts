@@ -38,6 +38,7 @@ vi.mock('@spfn/notification/server', async (importOriginal) =>
 
 const { resetMemoryRateLimitStore } = await import('@spfn/core/middleware');
 const { initializeAuth } = await import('@/server/services/rbac.service');
+const { settleLinkMail } = await import('@/server/lib/link-mail-delivery');
 const { getRoleByName } = await import('@/server/services/role.service');
 const { buildMobileContractBundle, CONTRACT_VERSION } = await import('@/server/client-proof/contract-bundle');
 const { requestAccountDeletionService } = await import('@/server/services/account-deletion.service');
@@ -93,7 +94,7 @@ describe.skipIf(!dbAvailable)('key registration provenance and the key epoch (ca
     // Driving the router
     // ========================================================================
 
-    function post(path: string, body: unknown, options: { authorization?: string; headers?: Record<string, string> } = {})
+    async function post(path: string, body: unknown, options: { authorization?: string; headers?: Record<string, string> } = {})
     {
         const headers: Record<string, string> = {
             ...JSON_HEADERS,
@@ -107,7 +108,10 @@ describe.skipIf(!dbAvailable)('key registration provenance and the key epoch (ca
             headers.Authorization = options.authorization;
         }
 
-        return app.request(path, { method: 'POST', headers, body: JSON.stringify(body) });
+        const response = await app.request(path, { method: 'POST', headers, body: JSON.stringify(body) });
+        await settleLinkMail();
+
+        return response;
     }
 
     async function seedUser(email: string)

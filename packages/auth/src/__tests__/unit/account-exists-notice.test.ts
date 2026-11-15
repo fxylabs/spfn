@@ -25,12 +25,19 @@ vi.mock('../../server/repositories', () => ({
     verificationCodesRepository: {
         findValidByTargetAndPurpose: vi.fn(),
         invalidatePreviousCodes: vi.fn(async () => undefined),
-        create: vi.fn(async () => ({ expiresAt: new Date(Date.now() + 300_000) })),
+        create: vi.fn(async () => ({ id: 7, expiresAt: new Date(Date.now() + 300_000) })),
+        findDeliverable: vi.fn(async () => ({
+            id: 7, target: 'new@example.com', targetType: 'email', purpose: 'registration', code: '123456',
+        })),
+    },
+    accountExistsNoticesRepository: {
+        claimWindow: vi.fn(),
     },
 }));
 
 import { sendVerificationCodeService } from '../../server/services/verification.service';
-import { usersRepository, verificationCodesRepository } from '../../server/repositories';
+import { settleLinkMail } from '../../server/lib/link-mail-delivery';
+import { accountExistsNoticesRepository, usersRepository, verificationCodesRepository } from '../../server/repositories';
 
 const reg = { target: 'taken@example.com', targetType: 'email' as const, purpose: 'registration' as const };
 
@@ -41,14 +48,16 @@ describe('sendVerificationCodeService — account-exists notice', () =>
     it('notifies the owner (account-exists template) and returns a uniform response for an existing account', async () =>
     {
         vi.mocked(usersRepository.findByFoldedEmail).mockResolvedValue({ kind: 'account', user: { id: 1 } } as any);
-        vi.mocked(verificationCodesRepository.findValidByTargetAndPurpose).mockResolvedValue(null as any);
+        vi.mocked(accountExistsNoticesRepository.claimWindow).mockResolvedValue(true);
 
         const res = await sendVerificationCodeService(reg);
+        await settleLinkMail();
 
         expect(sendEmail).toHaveBeenCalledTimes(1);
         expect(sendEmail.mock.calls[0][0]).toMatchObject({ template: 'account-exists' });
-        // A dedupe marker is written…
+        // A code row the verify route reads like any other, holding nothing that can match…
         expect(verificationCodesRepository.create).toHaveBeenCalledTimes(1);
+        expect(verificationCodesRepository.create).toHaveBeenCalledWith(expect.objectContaining({ code: 'never-sent' }));
         // …and the response is the same shape as a real code send.
         expect(res).toMatchObject({ success: true });
         expect(typeof res.expiresAt).toBe('string');
@@ -57,12 +66,13 @@ describe('sendVerificationCodeService — account-exists notice', () =>
     it('dedupes: a recent notice suppresses re-sending', async () =>
     {
         vi.mocked(usersRepository.findByFoldedEmail).mockResolvedValue({ kind: 'account', user: { id: 1 } } as any);
-        vi.mocked(verificationCodesRepository.findValidByTargetAndPurpose).mockResolvedValue({ id: 9 } as any);
+        vi.mocked(accountExistsNoticesRepository.claimWindow).mockResolvedValue(false);
 
         const res = await sendVerificationCodeService(reg);
+        await settleLinkMail();
 
         expect(sendEmail).not.toHaveBeenCalled();
-        expect(verificationCodesRepository.create).not.toHaveBeenCalled();
+        expect(verificationCodesRepository.create).toHaveBeenCalledTimes(1);
         expect(res).toMatchObject({ success: true });
         expect(typeof res.expiresAt).toBe('string');
     });
@@ -72,6 +82,7 @@ describe('sendVerificationCodeService — account-exists notice', () =>
         vi.mocked(usersRepository.findByFoldedEmail).mockResolvedValue({ kind: 'none' });
 
         await sendVerificationCodeService({ ...reg, target: 'new@example.com' });
+        await settleLinkMail();
 
         expect(sendEmail).toHaveBeenCalledTimes(1);
         expect(sendEmail.mock.calls[0][0]).toMatchObject({ template: 'verification-code' });

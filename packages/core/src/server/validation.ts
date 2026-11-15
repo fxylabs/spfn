@@ -4,6 +4,7 @@
  * Validates server configuration to catch errors early with clear messages.
  */
 
+import { parseTrustedProxyHops } from '@spfn/core/middleware';
 import type { ServerConfig } from './types';
 
 /**
@@ -60,6 +61,11 @@ export function validateServerConfig(config: ServerConfig): void
         {
             throw new Error(`Invalid shutdown.timeout: ${timeout}. Must be a positive number.`);
         }
+    }
+
+    if (config.trustedProxyHops !== undefined)
+    {
+        parseTrustedProxyHops(config.trustedProxyHops);
     }
 
     // Health check path validation

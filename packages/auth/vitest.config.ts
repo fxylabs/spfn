@@ -36,6 +36,12 @@ export default defineConfig(
             // bcrypt's minimum. The env proxy reads on every access, so
             // unit/password.test.ts removes this for itself and keeps proving
             // the production default.
+            //
+            // One trusted proxy hop, as a deployment behind a load balancer
+            // declares it: suites give each row its own address through
+            // `x-forwarded-for` so that per-IP limits, which outlive a file in
+            // the single fork, do not carry from one row to the next. With no
+            // declaration the backend reads no forwarding header (au9-N3).
             env:
             {
                 SPFN_AUTH_BCRYPT_SALT_ROUNDS: '4',
@@ -43,6 +49,7 @@ export default defineConfig(
                 // state throws without the account lock in its transaction
                 // (`usersRepository.lockAccount`).
                 SPFN_AUTH_ASSERT_ACCOUNT_LOCK: '1',
+                SERVER_TRUSTED_PROXY_HOPS: '1',
             },
 
             // Coverage configuration

@@ -12,6 +12,7 @@ import type { EventRouterDef } from '../event/router';
 import type { SSEHandlerConfig, SSEAuthConfig } from '../event/sse/types';
 import type { WSRouterDef, WSHandlerConfig, WSAuthConfig, WSMessageHandlers } from '../event/ws/types';
 import type { EventDef } from '../event/types';
+import { parseTrustedProxyHops } from '@spfn/core/middleware';
 import { mergeJobRouters } from '../job/job-router';
 import { serverLogger } from './logger';
 
@@ -146,6 +147,24 @@ export class ServerConfigBuilder
     rateLimit(rateLimit: ServerConfig['rateLimit']): this
     {
         this.config.rateLimit = rateLimit;
+
+        return this;
+    }
+
+    /**
+     * Declare how many proxies directly in front of this server append to
+     * `X-Forwarded-For`, so the client address is read from the entry that many
+     * hops from the right. Throws on anything but a whole number of 0 or more,
+     * which makes the config fail to load and the server refuse to start.
+     *
+     * @example
+     * ```typescript
+     * .trustedProxyHops(1) // one load balancer
+     * ```
+     */
+    trustedProxyHops(hops: number): this
+    {
+        this.config.trustedProxyHops = parseTrustedProxyHops(hops);
 
         return this;
     }
