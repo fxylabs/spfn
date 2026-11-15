@@ -75,10 +75,15 @@ export const AuthLoginProviderSchema = Type.Union([
  * sign-in that rolls back announces nothing. A subscriber that throws is
  * logged and cannot fail the request.
  *
- * `mfaEnrolled` is computed as the event is emitted (#95) and is the whole of
- * the package's opinion about the second factor: it never blocks an account
- * that has none, and this is the hook an app uses to offer enrolment at a first
+ * `mfaEnrolled` is computed as the event is emitted (#95): whether the account
+ * has a second factor of a method the policy lists. Without a
+ * `createAuthLifecycle({ secondFactor: { required: true } })` policy nothing is
+ * blocked on it, and this is the hook an app uses to offer enrolment at a first
  * login. It says nothing about *which* factor and carries no secret.
+ *
+ * `secondFactorEnrolmentRequired` is true when that policy holds this sign-in's
+ * session to enrolling a second factor (#309) — the sign-in still happened, so
+ * it is announced and `lastLoginAt` moves. Always false without the policy.
  *
  * @example
  * ```typescript
@@ -96,6 +101,7 @@ export const authLoginEvent = defineEvent(
         email: Type.Optional(Type.String()),
         phone: Type.Optional(Type.String()),
         mfaEnrolled: Type.Boolean(),
+        secondFactorEnrolmentRequired: Type.Boolean(),
         ...ProviderAccountFields,
     }),
 );
@@ -237,10 +243,11 @@ export const passkeyEnrolledEvent = defineEvent(
  *
  * 발행 시점:
  * - revokePasskeyService()가 커밋된 직후
+ * - resetSecondFactorService()가 커밋된 직후, 회수한 passkey마다
  *
- * `reason` is why the row was retired, not who asked: `'user'` is the only value
- * the package emits today, and it exists so a later automatic revocation is
- * distinguishable to a subscriber that already ships.
+ * `reason` says how the row was retired: `'user'` by its owner's route,
+ * `'operator'` by the application's second-factor reset. It exists so a later
+ * automatic revocation is distinguishable to a subscriber that already ships.
  */
 export const passkeyRevokedEvent = defineEvent(
     'auth.passkey.revoked',

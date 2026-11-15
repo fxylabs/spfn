@@ -31,6 +31,7 @@ import { NextRequest } from 'next/server';
 
 import { loginRegisterInterceptor } from '../../nextjs/interceptors/login-register';
 import { mfaVerifyInterceptor } from '../../nextjs/interceptors/mfa-verify';
+import { generalAuthInterceptor } from '../../nextjs/interceptors/general-auth';
 import { oauthFinalizeInterceptor, oauthUrlInterceptor } from '../../nextjs/interceptors/oauth';
 import { authInterceptors } from '../../nextjs/interceptors';
 import { createOAuthCallbackHandler } from '../../nextjs/oauth-handlers';
@@ -373,6 +374,64 @@ describe('the proxy and a second-factor step-up (case table 6e)', () =>
         // silently does not exist. This is the assertion that would catch it.
         expect(routeMap.mfaVerify).toEqual({ method: 'POST', path: '/_auth/mfa/verify' });
         expect(routeMap.mfaVerifyOptions).toEqual({ method: 'POST', path: '/_auth/mfa/verify/options' });
+    });
+});
+
+describe('the proxy and a second-factor policy (#309)', () =>
+{
+    beforeEach(() =>
+    {
+        vi.stubEnv('SPFN_AUTH_SESSION_SECRET', SECRET);
+    });
+
+    afterEach(() =>
+    {
+        vi.unstubAllEnvs();
+    });
+
+    it('passkeys/login/verify answers 202 under a policy that does not list passkeys — no session, the pending cookie instead', async () =>
+    {
+        const key = mintedKey();
+        const ctx = responseContext('/_auth/passkeys/login/verify', 202, stepUpBody(), { metadata: asMintedMetadata(key) });
+
+        await loginRegisterInterceptor.response?.(ctx, next);
+        await mfaVerifyInterceptor.response?.(ctx, next);
+
+        expect(cookieNamed(ctx.setCookies, COOKIE_NAMES.SESSION)).toBeUndefined();
+        expect(await unsealPendingMfaSession(cookieNamed(ctx.setCookies, COOKIE_NAMES.MFA_PENDING)!.value))
+            .toMatchObject({ keyId: key.keyId, challengeHash: hashCredential(CHALLENGE) });
+    });
+
+    it('a 403 SECOND_FACTOR_ENROLMENT_REQUIRED on a signed-in request keeps the session, as STEP_UP_REQUIRED does', async () =>
+    {
+        const refusals = [
+            { status: 403, body: { code: 'SECOND_FACTOR_ENROLMENT_REQUIRED', message: 'Enrol a second factor' } },
+            { status: 403, body: { code: 'STEP_UP_REQUIRED', message: 'Step up' } },
+        ];
+
+        for (const refusal of refusals)
+        {
+            const ctx = responseContext('/_auth/keys/list', refusal.status, refusal.body, {
+                metadata: { sessionValid: true, keyId: 'key-1', userId: '7' },
+            });
+
+            await generalAuthInterceptor.response!(ctx, next);
+
+            expect(cookieNamed(ctx.setCookies, COOKIE_NAMES.SESSION), refusal.body.code).toBeUndefined();
+            expect(cookieNamed(ctx.setCookies, COOKIE_NAMES.SESSION_KEY_ID), refusal.body.code).toBeUndefined();
+            expect(ctx.response.body).toEqual(refusal.body);
+        }
+    });
+
+    it('the same request refused 401 does clear it — the rule the 403 stays out of', async () =>
+    {
+        const ctx = responseContext('/_auth/keys/list', 401, { code: 'UnauthorizedError' }, {
+            metadata: { sessionValid: true, keyId: 'key-1', userId: '7' },
+        });
+
+        await generalAuthInterceptor.response!(ctx, next);
+
+        expect(cookieNamed(ctx.setCookies, COOKIE_NAMES.SESSION)?.options?.maxAge).toBe(0);
     });
 });
 

@@ -116,7 +116,14 @@ import {
 } from './oauth2';
 import { getOAuth2Authorize, createOAuth2AuthorizationCode } from './oauth2/authorize';
 import { oauth2Token, oauth2Revoke } from './oauth2/token';
-import { gateChannels, ROUTE_CHANNELS } from './channels';
+import {
+    gateChannels,
+    gateSecondFactorMethods,
+    markEnrolmentRoutes,
+    ROUTE_CHANNELS,
+    ROUTE_ENROLMENT,
+    ROUTE_SECOND_FACTOR_METHODS,
+} from './channels';
 
 /**
  * Every auth route, ungated. Mounted only through `gateChannels`, with
@@ -270,9 +277,17 @@ const authRoutes = {
  * - Android App Link verification: /.well-known/assetlinks.json
  *
  * A route of a sign-in channel the app turned off with
- * `createAuthLifecycle({ channels })` answers 404 — see ./channels.ts.
+ * `createAuthLifecycle({ channels })` answers 404 — see ./channels.ts. So does
+ * a second-factor route of a method `createAuthLifecycle({ secondFactor })`
+ * does not list, and each enrolment route carries the marker the global
+ * `authenticate` recognises it by (`ROUTE_ENROLMENT`, same file).
  */
-export const mainAuthRouter = defineRouter(gateChannels(authRoutes, ROUTE_CHANNELS));
+export const mainAuthRouter = defineRouter(
+    gateChannels(
+        gateSecondFactorMethods(markEnrolmentRoutes(authRoutes, ROUTE_ENROLMENT), ROUTE_SECOND_FACTOR_METHODS),
+        ROUTE_CHANNELS,
+    ),
+);
 
 // For backward compatibility
 export default mainAuthRouter;

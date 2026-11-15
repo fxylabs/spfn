@@ -61,8 +61,10 @@ import type { WebAuthnChallengeKind } from '../entities/webauthn-challenges';
 import type { User } from '../entities/users';
 import { getDummyPasswordHash, verifyPassword } from '../helpers';
 import type { KeyAlgorithmType, KeyPlatformType } from '../types';
-import { registerPublicKeyService, registeredBinding, revokeKeyService } from './key.service';
-import { assertStepUp, mfaEnrolledForUser } from './mfa.service';
+import { registerPublicKeyService, revokeKeyService } from './key.service';
+import { assertEnrolmentProven, assertStepUp, mfaEnrolledForUser, mfaStatusService, type MfaStatus } from './mfa.service';
+import { assertNotLastListedFactor, isEnrolmentOnly, secondFactorEnrolmentFields } from './second-factor-policy.service';
+import { isMethodListed } from '../lib/second-factor-policy';
 import { decideKeyBinding } from '../lib/key-policy';
 import { updateLastLoginService } from './user.service';
 import { getPendingDeletionInfo } from './account-deletion.service';
@@ -313,6 +315,8 @@ export async function startPasskeyEnrollmentService(
 export interface FinishPasskeyEnrollmentParams
 {
     userId: number;
+    /** The device key this request is signed with — its step-up window is the enrolment proof (#309). */
+    keyId: string;
     response: RegistrationResponseJSON;
     label?: string;
 }
@@ -322,6 +326,13 @@ export interface FinishPasskeyEnrollmentResult
     passkeyId: string;
     label: string | null;
     createdAt: string;
+    /**
+     * The account's second-factor state, present only when this registration
+     * also marked the passkey as its second factor — in the policy's
+     * enrolment-only state (#309). Absent otherwise, so the answer without a
+     * policy is the one it always was.
+     */
+    mfaStatus?: MfaStatus;
 }
 
 /**
@@ -330,11 +341,23 @@ export interface FinishPasskeyEnrollmentResult
  * Runs under `Transactional()`: the challenge is spent and the row written
  * together, so a failure after the spend leaves the challenge live and the
  * ceremony retryable, while a success can never be replayed.
+ *
+ * In the policy's enrolment-only state (#309) with `'passkey'` listed, the new
+ * passkey is marked as the second factor in the same transaction: the ceremony
+ * with user verification is the proof, and the session is ordinary on its next
+ * request. An account that already held a credential reaches this only from a
+ * device that proved it (`assertEnrolmentProven`). With no policy, or outside
+ * that state, nothing is marked.
+ *
+ * @throws StepUpRequiredError | PasskeyChallengeError | PasskeyVerificationError | PasskeyAlreadyRegisteredError
  */
 export async function finishPasskeyEnrollmentService(
     params: FinishPasskeyEnrollmentParams,
 ): Promise<FinishPasskeyEnrollmentResult>
 {
+    await assertEnrolmentProven(params);
+
+    const marksFactor = isMethodListed('passkey') && await isEnrolmentOnly(params.userId);
     const challenge = presentedChallenge(params.response.response.clientDataJSON);
 
     await consumeChallenge(challenge, 'registration', params.userId);
@@ -369,6 +392,7 @@ export async function finishPasskeyEnrollmentService(
         backedUp: verified.backedUp,
         aaguid: verified.aaguid,
         label: params.label ?? null,
+        secondFactor: marksFactor,
     });
 
     onAfterCommit(() => passkeyEnrolledEvent.emit({
@@ -377,7 +401,9 @@ export async function finishPasskeyEnrollmentService(
         label: row.label ?? undefined,
     }));
 
-    return { passkeyId: String(row.id), label: row.label, createdAt: row.createdAt.toISOString() };
+    const enrolled = { passkeyId: String(row.id), label: row.label, createdAt: row.createdAt.toISOString() };
+
+    return marksFactor ? { ...enrolled, mfaStatus: await mfaStatusService(params.userId) } : enrolled;
 }
 
 /**
@@ -593,20 +619,33 @@ async function startSession(user: User, params: FinishPasskeyLoginParams): Promi
         userAgent: params.userAgent,
         binding: decideKeyBinding(user.sessionBinding, params.webProxy),
         replacesKeyId,
+        loginEvent: {
+            provider: 'passkey',
+            email: user.email || undefined,
+            phone: user.phone || undefined,
+        },
     });
+
+    // A passkey sign-in steps up only when the second-factor policy does not
+    // list passkeys: then the assertion is not a second factor, and an enrolled
+    // account on a new device is asked for one like a password sign-in (#309).
+    // Nothing below runs — `verify` does it instead.
+    if (registered.pending)
+    {
+        return { mfaRequired: true, challenge: registered.challenge };
+    }
 
     await updateLastLoginService(user.id);
 
     const result: LoginResult = {
-        // A passkey sign-in never steps up: the assertion is already a second
-        // factor, so this answer is always the session itself (#95).
         mfaRequired: false,
         userId: String(user.id),
         publicId: user.publicId,
         email: user.email || undefined,
         phone: user.phone || undefined,
         passwordChangeRequired: user.passwordChangeRequired,
-        ...loginBindingFields(registeredBinding(registered)),
+        ...loginBindingFields(registered),
+        ...await secondFactorEnrolmentFields(user.id),
     };
 
     const mfaEnrolled = await mfaEnrolledForUser(user.id);
@@ -617,6 +656,7 @@ async function startSession(user: User, params: FinishPasskeyLoginParams): Promi
         email: result.email,
         phone: result.phone,
         mfaEnrolled,
+        secondFactorEnrolmentRequired: result.secondFactorEnrolmentRequired === true,
     }));
 
     return result;
@@ -807,6 +847,7 @@ export async function revokePasskeyService(params: RevokePasskeyParams): Promise
 
     await usersRepository.lockById(params.userId);
     await assertNotLastRecoveryCredential(params.userId);
+    await assertNotLastListedFactor(params.userId, { passkeyId: passkey.id });
 
     const revoked = await passkeysRepository.revokeByIdAndUserId(passkey.id, params.userId, 'Revoked by user');
 

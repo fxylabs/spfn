@@ -42,6 +42,7 @@ import {
     requireSignInProvider,
     isSafeReturnPath,
     keySessionBindingService,
+    keySecondFactorEnrolmentFields,
     startOAuthLinkService,
     oauthLinkCallbackService,
     oauthLinkResultUrl,
@@ -453,6 +454,8 @@ export interface OAuthFinalizeResponse
     returnUrl: string;
     sessionBinding?: SessionBindingType;
     keyExpiresAtMillis?: number;
+    /** As on `LoginResult`: the session may only enrol a second factor. Read off the key's owner. */
+    secondFactorEnrolmentRequired?: boolean;
 }
 
 /**
@@ -543,6 +546,7 @@ export const oauthFinalize = route.post('/_auth/oauth/finalize')
             keyId: body.keyId,
             returnUrl: body.returnUrl || '/',
             ...await keySessionBindingService(body.keyId),
+            ...await keySecondFactorEnrolmentFields(body.keyId),
         };
     });
 

@@ -69,6 +69,7 @@ import { clientProofRefusalResponse } from '../client-proof/refusal-response';
 import { getClientProofReplayStore } from '../client-proof/replay-store';
 import { readContextClientIdentity } from '../client-proof/version-middleware';
 import { profileLocale, type ProfileLocale } from '../lib/profile-locale';
+import { assertSecondFactorAdmits } from '../services/second-factor-policy.service';
 
 /** What a verified request leaves in the context — one shape for every scheme. */
 export interface AuthContext
@@ -136,6 +137,12 @@ export function selectAuthProfile(c: Context): AuthProfileVerifier | null
  * Loads the user for an authenticated key and applies the account-status
  * rules. One implementation for every scheme: the Bearer path and the profile
  * verifiers call this, so a status added here gates both identically.
+ *
+ * The second-factor policy is not one of these rules: it is about the person
+ * a principal stands for, whoever produced it, so it is asked where every
+ * principal passes — `runAuthProfile` for each profile, and the Bearer paths
+ * of `authenticate` and `optionalAuth` — rather than here, where only the
+ * built-in verifiers come.
  */
 export async function resolveAuthenticatedUser(userId: number): Promise<{
     user: User;
@@ -239,8 +246,31 @@ export type AuthProfileOutcome =
  * Bearer path. A refusal comes back as a built response rather than a throw:
  * the answer a proven call gets is the contract's own envelope, and an error
  * handed to the generic error handler is classified by its class name instead.
+ *
+ * The principal any verifier returns — built-in or registered by the app —
+ * stands for a person, and is held to the second-factor policy here, the one
+ * point every profile principal passes (#309). A person who may only enrol is
+ * refused with a throw of 403 `SECOND_FACTOR_ENROLMENT_REQUIRED` — except on an
+ * enrolment route reached through the global `authenticate` — and `optionalAuth`
+ * reads that refusal as anonymous. A credential that is not a person belongs
+ * in a machine principal (`registerMachineVerifier`), which never comes here.
+ *
+ * @throws SecondFactorEnrolmentRequiredError
  */
 export async function runAuthProfile(c: Context): Promise<AuthProfileOutcome>
+{
+    const outcome = await dispatchAuthProfile(c);
+
+    if (outcome.kind === 'authenticated')
+    {
+        await assertSecondFactorAdmits(Number(outcome.auth.userId), c);
+    }
+
+    return outcome;
+}
+
+/** The registered verifier for this request, run, and its refusal answered. */
+async function dispatchAuthProfile(c: Context): Promise<AuthProfileOutcome>
 {
     try
     {

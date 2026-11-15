@@ -91,6 +91,16 @@ export interface EnrollPasskeyValue
     passkeyId: string;
     label: string | null;
     createdAt: string;
+    /**
+     * Present when the app requires a second factor and this session could only
+     * enrol one: the passkey was also marked as the second factor, and the
+     * session is ordinary from its next request.
+     */
+    mfaStatus?: {
+        enrolled: boolean;
+        methods: ('totp' | 'passkey')[];
+        recoveryCodesRemaining: number;
+    };
 }
 
 /**
@@ -151,6 +161,16 @@ export interface SignInWithPasskeyValue
     email?: string;
     phone?: string;
     passwordChangeRequired: boolean;
+    /**
+     * `true` only under a second-factor policy that does not list passkeys
+     * (#309): the account has a listed factor and this device is new, so the
+     * answer is a challenge rather than a session — the fields above are then
+     * absent. Finish it with `completeMfaWithCode` and `challenge.secret`.
+     */
+    mfaRequired?: boolean;
+    challenge?: { secret: string; expiresAtMillis: number };
+    /** `true` when the session may only enrol a second factor (#309). */
+    secondFactorEnrolmentRequired?: boolean;
 }
 
 /**

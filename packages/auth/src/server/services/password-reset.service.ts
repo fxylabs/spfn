@@ -46,6 +46,7 @@ import { authPasswordResetEvent } from '../events';
 import { issuePasswordResetLink } from './link-mail.service';
 import { revokeAllOAuth2GrantsForUser } from './oauth2-grant.service';
 import { registerPublicKeyService, type RegisterPublicKeyResult } from './key.service';
+import { secondFactorEnrolmentFields } from './second-factor-policy.service';
 import { decideKeyBinding } from '../lib/key-policy';
 import { updateLastLoginService } from './user.service';
 import { loginBindingFields, type LoginResult } from './auth.service';
@@ -387,5 +388,6 @@ export async function completePasswordResetService(
         email: user.email || undefined,
         phone: user.phone || undefined,
         ...loginBindingFields(registered),
+        ...await secondFactorEnrolmentFields(user.id),
     };
 }

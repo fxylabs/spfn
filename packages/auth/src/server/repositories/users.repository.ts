@@ -119,14 +119,18 @@ export class UsersRepository extends BaseRepository
      *
      * Only meaningful inside a transaction — the lock is released at commit.
      * Write primary.
+     *
+     * @returns whether the row exists, for a caller that has not read it yet
      */
-    async lockById(id: number): Promise<void>
+    async lockById(id: number): Promise<boolean>
     {
-        await this.db
+        const rows = await this.db
             .select({ id: users.id })
             .from(users)
             .where(eq(users.id, id))
             .for('update');
+
+        return rows.length > 0;
     }
 
     /**

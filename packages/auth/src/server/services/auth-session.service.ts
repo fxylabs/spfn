@@ -8,6 +8,7 @@ import { NotFoundError } from '@spfn/core/errors';
 
 import { usersRepository } from '../repositories';
 import { findUserWithEffectiveRole } from './role-email-domain.service';
+import { secondFactorEnrolmentFields } from './second-factor-policy.service';
 
 /**
  * Get authentication session information
@@ -15,6 +16,10 @@ import { findUserWithEffectiveRole } from './role-email-domain.service';
  * The role and permissions are the effective ones, as every server-side check
  * sees them: an account outside `SPFN_AUTH_ROLE_EMAIL_DOMAINS` for its stored
  * role reports the `user` role, so a page guard agrees with the API.
+ *
+ * `secondFactorEnrolmentRequired: true` is present exactly when the
+ * second-factor policy holds this session to enrolling one, as on the
+ * `LoginResult` — this route is one such a session reaches.
  *
  * @param userId - User ID (string, number, or bigint)
  * @returns Auth session data (minimal user info + role + permissions)
@@ -51,5 +56,6 @@ export async function getAuthSessionService(userId: string | number | bigint)
         hasPassword: user.hasPassword,
         role: resolved.role,
         permissions: await usersRepository.fetchActiveRolePermissions(resolved.role.id),
+        ...await secondFactorEnrolmentFields(userIdNum),
     };
 }

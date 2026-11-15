@@ -158,6 +158,21 @@ export class PasskeysRepository extends BaseRepository
     }
 
     /**
+     * Retire every live credential of an account, for the same reason.
+     * Write primary.
+     *
+     * @returns the rows it retired
+     */
+    async revokeAllLiveByUserId(userId: number, reason: string): Promise<Passkey[]>
+    {
+        return await this.db
+            .update(passkeys)
+            .set({ revokedAt: new Date(), revokedReason: reason })
+            .where(and(eq(passkeys.userId, userId), isNull(passkeys.revokedAt)))
+            .returning();
+    }
+
+    /**
      * Mark or unmark a live credential as the owner's second factor.
      *
      * Owner-scoped and live-only, so somebody else's passkey and an already

@@ -118,7 +118,8 @@ describe.skipIf(!dbAvailable)('OAuth link callback: status read under the row lo
         vi.spyOn(usersRepository, 'lockById').mockImplementation(async userId =>
         {
             announceLockAttempt();
-            await originalLock(userId);
+
+            return await originalLock(userId);
         });
 
         const callback = runInTransaction(

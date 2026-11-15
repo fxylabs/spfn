@@ -47,15 +47,17 @@ import { bindingSessionFields } from './session-binding';
 import { resolveMfaConfirmPath } from '../mfa-confirm-path';
 
 /**
- * The four paths that can answer 202, plus the one that resolves it.
+ * The paths that can answer 202, plus the one that resolves it.
  *
  * `oauth/{provider}/native` is on the list for completeness rather than for the
  * cookie: a native client holds its own key and never reaches this proxy. When
  * it does come through one there is no pending key to seal, and the rule leaves
- * the 202 alone.
+ * the 202 alone. `passkeys/login/verify` answers 202 only under a second-factor
+ * policy that does not list passkeys (#309); otherwise the rule sees its 200
+ * and does nothing.
  */
 const MFA_PATH_PATTERN =
-    /^\/_auth\/(login|password\/reset\/complete|oauth\/[\w-]+\/native|oauth\/finalize|mfa\/verify)$/;
+    /^\/_auth\/(login|password\/reset\/complete|passkeys\/login\/verify|oauth\/[\w-]+\/native|oauth\/finalize|mfa\/verify)$/;
 
 /** How long the pending cookie lives — the challenge's own ten minutes. */
 const PENDING_TTL_SECONDS = 600;

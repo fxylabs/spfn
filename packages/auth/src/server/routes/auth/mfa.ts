@@ -13,7 +13,9 @@
  * `assertStepUp`, because each one changes what the second factor is, and a
  * stolen session alone must not be able to do that. For an account with nothing
  * enrolled that gate is a no-op, so none of these is a new refusal for anybody
- * who has not opted in.
+ * who has not opted in — except under a required second factor, where an
+ * account that may only enrol and already holds a credential proves it first
+ * (#309, `assertEnrolmentProven`).
  *
  * `confirm` and `step-up` carry the `auth-mfa-verify` policy, the same numbers
  * as `auth-login`: both take a guessable six-digit value, so they are bounded
@@ -31,6 +33,7 @@ import { route } from '@spfn/core/route';
 import { getAuth } from '../../helpers';
 import { byIpAndCaller } from '../../lib/rate-limit-keys';
 import {
+    assertNotLastListedFactor,
     assertStepUp,
     confirmTotpEnrolmentService,
     disableMfaService,
@@ -105,8 +108,11 @@ export const mfaTotpEnroll = route.post('/_auth/mfa/totp/enroll')
  * POST /_auth/mfa/totp/confirm - Spend the first code
  *
  * Not step-up gated: this *is* the step-up, and gating it would make enrolling
- * impossible for the account it is being enrolled on. Five wrong codes discard
- * the pending secret, and the sixth attempt says there is nothing to confirm.
+ * impossible for the account it is being enrolled on. The one exception is the
+ * policy's enrolment-only state (#309): an account that already holds another
+ * credential confirms only from a device that proved it, as `enroll` requires.
+ * Five wrong codes discard the pending secret, and the sixth attempt says there
+ * is nothing to confirm.
  *
  * No `Transactional()`, which is the one route here without it. The
  * failed-attempt counter has to survive the refusal that increments it, and a
@@ -136,6 +142,11 @@ export const mfaTotpConfirm = route.post('/_auth/mfa/totp/confirm')
  * 204 whether or not anything was enrolled: "make sure MFA is off" has already
  * succeeded on an account that never turned it on, and answering a 400 there
  * would tell an unauthenticated guess nothing useful and an owner nothing true.
+ *
+ * While the policy requires a second factor this would remove the last listed
+ * one, so it is a 409 `SECOND_FACTOR_REQUIRED` and nothing changes. The
+ * operator's way to re-issue one is `disableMfaService(userId)`, called by the
+ * application, which this rule does not reach.
  */
 export const mfaDisable = route.post('/_auth/mfa/disable')
     .input({
@@ -147,6 +158,7 @@ export const mfaDisable = route.post('/_auth/mfa/disable')
         const { userId, keyId } = getAuth(c);
 
         await assertStepUp({ userId: Number(userId), keyId });
+        await assertNotLastListedFactor(Number(userId), { all: true });
         await disableMfaService(Number(userId));
 
         return c.noContent();
@@ -156,9 +168,13 @@ export const mfaDisable = route.post('/_auth/mfa/disable')
  * POST /_auth/mfa/passkey/mark - Make a passkey count as a second factor
  *
  * Unmarking the last marked credential is allowed and leaves the account
- * unenrolled. Independent of the last-recovery-credential guard on
+ * unenrolled — a 409 `SECOND_FACTOR_REQUIRED` instead while the policy requires
+ * a second factor and no other listed one remains. Independent of the last-recovery-credential guard on
  * `passkeys/revoke`: that one protects a way *into* the account, and this
  * removes a mark rather than a credential.
+ *
+ * An enrolment-only session marks a passkey that predates the policy here, after
+ * a step-up with one of the account's credentials (#309).
  */
 export const mfaMarkPasskey = route.post('/_auth/mfa/passkey/mark')
     .input({
@@ -298,6 +314,11 @@ export const mfaVerifyOptions = route.post('/_auth/mfa/verify/options')
  * sign-in both register a key with no verification against it, on purpose, so
  * the session they create would otherwise fail every sensitive change with
  * nowhere to go. Exactly one of the three inputs; two or none is a 400.
+ *
+ * Under a required second factor it is also the proof an enrolment-only session
+ * gives before it enrols on an account that already holds a credential (#309):
+ * in that state only, any live passkey of the account and a confirmed TOTP
+ * count whatever the policy lists, and recovery codes while they are on.
  */
 export const mfaStepUp = route.post('/_auth/mfa/step-up')
     .input({

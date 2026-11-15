@@ -172,6 +172,10 @@ export const DeviceAuthPollResponseSchema = Type.Union([
         // must not be able to drift apart.
         sessionBinding: Type.Optional(Type.Union(SESSION_BINDINGS.map(mode => Type.Literal(mode)))),
         keyExpiresAtMillis: Type.Optional(Type.Integer()),
+        // Declared for the same reason (#309), and never carried either: a
+        // second-factor policy that requires one refuses boot while device-code
+        // login or device link is on.
+        secondFactorEnrolmentRequired: Type.Optional(Type.Boolean()),
     }),
 ], {
     description: 'Pending, or the login the approval produced',

@@ -1566,6 +1566,79 @@ export class StepUpRequiredError extends ForbiddenError
 }
 
 /**
+ * Second Factor Enrolment Required Error (403)
+ *
+ * The application requires a second factor
+ * (`createAuthLifecycle({ secondFactor: { required: true } })`) and the signed-in
+ * account has none of the listed methods. Every signed-in route answers this
+ * except the enrolment routes, so the session can do nothing but enrol one.
+ *
+ * 403 and not 401, for the reason `StepUpRequiredError` is: a 401 on an
+ * authenticated route is what a web client reads as "the session is gone", and
+ * this session is not gone — it is the one the person enrols with. Clients
+ * branch on `code` to send the person to the enrolment screen.
+ */
+export class SecondFactorEnrolmentRequiredError extends ForbiddenError
+{
+    readonly code = 'SECOND_FACTOR_ENROLMENT_REQUIRED';
+
+    constructor(data: { message?: string; details?: Record<string, any> } = {})
+    {
+        super({
+            message: data.message || 'Enrol a second factor before using this account.',
+            details: data.details,
+        });
+        this.name = 'SecondFactorEnrolmentRequiredError';
+    }
+}
+
+/**
+ * Second Factor Method Disabled Error (404)
+ *
+ * A second-factor route of a method the application does not list
+ * (`createAuthLifecycle({ secondFactor: { methods, recoveryCodes } })`). Not found
+ * rather than forbidden, as `ChannelDisabledError` is: to every caller the route
+ * is not there. `details.method` names it — `'totp'`, `'passkey'` or
+ * `'recoveryCodes'`. Clients branch on `code`.
+ */
+export class SecondFactorMethodDisabledError extends NotFoundError
+{
+    readonly code = 'SECOND_FACTOR_METHOD_DISABLED';
+
+    constructor(data: { message?: string; details?: Record<string, any> } = {})
+    {
+        super({
+            message: data.message || 'This application does not offer this second-factor method',
+            details: data.details,
+        });
+        this.name = 'SecondFactorMethodDisabledError';
+    }
+}
+
+/**
+ * Second Factor Required Error (409)
+ *
+ * The application requires a second factor and this change would remove the
+ * account's last listed one — `mfa/disable`, unmarking the last marked passkey,
+ * or revoking it. Nothing changes. Removing one of several is allowed, and an
+ * operator re-issues a factor with `disableMfaService(userId)`, which this does
+ * not refuse.
+ */
+export class SecondFactorRequiredError extends ConflictError
+{
+    readonly code = 'SECOND_FACTOR_REQUIRED';
+
+    constructor(data: { message?: string; details?: Record<string, any> } = {})
+    {
+        super({
+            message: data.message || 'This application requires a second factor; this one is the last.',
+            details: data.details,
+        });
+        this.name = 'SecondFactorRequiredError';
+    }
+}
+
+/**
  * Session Pending Mismatch Error (401)
  *
  * Minted by the Next.js proxy: a second-factor verification succeeded at the

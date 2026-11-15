@@ -24,6 +24,7 @@ import { defineMiddleware } from '@spfn/core/route';
 import { UnauthorizedError } from '@spfn/core/errors';
 import { verifyOneTimeTokenService } from '../services/one-time-token.service';
 import { profileLocale } from '../lib/profile-locale';
+import { assertSecondFactorAdmits } from '../services/second-factor-policy.service';
 import { findUserWithEffectiveRole, userSettingsRepository } from '@spfn/auth/server';
 
 export const oneTimeTokenAuth = defineMiddleware('oneTimeTokenAuth', async (c, next) =>
@@ -62,6 +63,11 @@ export const oneTimeTokenAuth = defineMiddleware('oneTimeTokenAuth', async (c, n
     {
         throw new UnauthorizedError({ message: 'Account is not active' });
     }
+
+    // A one-time token admits a person, so the second-factor policy holds here
+    // as it does in `resolveAuthenticatedUser`. No route this guards is an
+    // enrolment route: those are `mainAuthRouter`'s, behind `authenticate`.
+    await assertSecondFactorAdmits(user.id, null);
 
     // Inject AuthContext (identical shape to authenticate middleware)
     c.set('auth', {

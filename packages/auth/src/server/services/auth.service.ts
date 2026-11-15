@@ -24,6 +24,7 @@ import { hashPassword, verifyPassword, getDummyPasswordHash, normalizeEmail } fr
 import { validateVerificationToken } from './verification.service';
 import { registerPublicKeyService, revokeKeyService } from './key.service';
 import { assertStepUp, mfaEnrolledForUser } from './mfa.service';
+import { secondFactorEnrolmentFields } from './second-factor-policy.service';
 import { decideKeyBinding } from '../lib/key-policy';
 import { updateLastLoginService } from './user.service';
 import { getPendingDeletionInfo } from './account-deletion.service';
@@ -71,6 +72,8 @@ export interface RegisterResult
     publicId: string;
     email?: string;
     phone?: string;
+    /** As on `LoginResult`: a new account under a required second factor may only enrol one. */
+    secondFactorEnrolmentRequired?: boolean;
 }
 
 export interface LoginParams
@@ -272,6 +275,7 @@ export async function createVerifiedAccount(
         publicId: newUser.publicId,
         email: newUser.email || undefined,
         phone: newUser.phone || undefined,
+        ...await secondFactorEnrolmentFields(newUser.id),
     };
 
     // After the commit: both routes that reach here run under `Transactional()`,
@@ -413,6 +417,7 @@ export async function loginService(
         phone: user.phone || undefined,
         passwordChangeRequired: user.passwordChangeRequired,
         ...loginBindingFields(registered),
+        ...await secondFactorEnrolmentFields(user.id),
     };
 
     // After the commit, with `mfaEnrolled` read before the callback is queued
@@ -425,6 +430,7 @@ export async function loginService(
         email: result.email,
         phone: result.phone,
         mfaEnrolled,
+        secondFactorEnrolmentRequired: result.secondFactorEnrolmentRequired === true,
     }));
 
     return result;

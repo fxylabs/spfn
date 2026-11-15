@@ -61,6 +61,15 @@ export interface LoginResult
     sessionBinding?: SessionBindingType;
     /** Epoch milliseconds that key expires at. Only sent alongside `sessionBinding`. */
     keyExpiresAtMillis?: number;
+    /**
+     * `true` exactly when the application requires a second factor
+     * (`createAuthLifecycle({ secondFactor: { required: true } })`) and this
+     * account has none of the listed methods: the session is real, but every
+     * signed-in route except the enrolment routes answers 403
+     * `SECOND_FACTOR_ENROLMENT_REQUIRED` until one is enrolled. Absent otherwise,
+     * so an application without the policy never sees it.
+     */
+    secondFactorEnrolmentRequired?: boolean;
 }
 
 /**

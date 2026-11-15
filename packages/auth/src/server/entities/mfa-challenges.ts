@@ -26,17 +26,22 @@ import { authSchema } from './schema';
 import type { AuthLoginProvider } from '../events';
 
 /**
- * The four doors a second factor is asked for at.
+ * The doors a second factor is asked for at.
  *
- * A subset of `DeviceRegistrationChannel`, and the subset is the decision: these
- * are the four where a stolen first credential — a password, a social account, a
- * mailbox — is enough to reach a new device on its own. `device-code` and
- * `passkey` are exempt because each already carried a second proof, and
- * `register`, `signup-link`, `invitation` and `renewal` cannot apply (a
+ * A subset of `DeviceRegistrationChannel`, and the subset is the decision: the
+ * first four are where a stolen first credential — a password, a social
+ * account, a mailbox — is enough to reach a new device on its own. `passkey`
+ * is asked only when the second-factor policy does not list passkeys
+ * (`createAuthLifecycle({ secondFactor: { methods: ['totp'] } })`): otherwise
+ * the assertion already was the second proof, and the sign-in is exempt (see
+ * `decideStepUp`). `device-code` is exempt because its approval already carried
+ * one, and `register`, `signup-link`, `invitation` and `renewal` cannot apply (a
  * brand-new account has nothing enrolled, and a renewal replaces a key on a
  * device that is already signed in).
+ *
+ * The column is plain text, so the list is the type, not a database constraint.
  */
-export const MFA_CHALLENGE_CHANNELS = ['password', 'oauth', 'oauth-native', 'password-reset'] as const;
+export const MFA_CHALLENGE_CHANNELS = ['password', 'oauth', 'oauth-native', 'password-reset', 'passkey'] as const;
 
 export type MfaChallengeChannel = typeof MFA_CHALLENGE_CHANNELS[number];
 

@@ -174,7 +174,6 @@ describe('source scan: role resolution goes through findUserWithEffectiveRole', 
         expect(resolving.sort()).toEqual([
             'auth-profiles.ts',
             'authenticate-for-renewal.ts',
-            'authenticate.ts',
             'one-time-token-auth.ts',
         ]);
     });

@@ -7,6 +7,7 @@
 import { type KeyAlgorithmType, type KeyPlatformType, type SessionBindingType } from '../types';
 import { assertKeyMatchesAlgorithm, verifyKeyFingerprint } from '../helpers/jwt';
 import { KEY_TTL_DAYS } from '../lib/key-policy';
+import { isMethodListed } from '../lib/second-factor-policy';
 import { getBoundKeyTtlMs } from '../lib/config';
 import { uaFamily } from '../lib/ua-family';
 import { InvalidKeyFingerprintError, KeyIdAlreadyRegisteredError } from '@spfn/auth/errors';
@@ -296,7 +297,9 @@ function isExpired(expiresAt: Date | null): boolean
  * signed in is swapping its key, which is not an arrival and not a moment to
  * challenge. And the channel is one of the four where a single stolen
  * credential would be enough on its own; a device-code approval and a passkey
- * sign-in each already carried a second proof, and `register`, `signup-link`,
+ * sign-in each already carried a second proof (the passkey only while the
+ * second-factor policy lists passkeys; when it does not, a passkey sign-in is
+ * challenged like the four), and `register`, `signup-link`,
  * `invitation` and `renewal` cannot reach this at all — the first three create
  * the account, which is by construction unenrolled, and the fourth is a
  * rotation. The brand-new social account is covered by the same fact: a user row
@@ -306,7 +309,7 @@ async function decideStepUp(params: RegisterPublicKeyParams): Promise<MfaChallen
 {
     const channel = MFA_CHALLENGE_CHANNELS.find(candidate => candidate === params.channel);
 
-    if (!channel || params.replacesKeyId)
+    if (!channel || params.replacesKeyId || (channel === 'passkey' && isMethodListed('passkey')))
     {
         return null;
     }

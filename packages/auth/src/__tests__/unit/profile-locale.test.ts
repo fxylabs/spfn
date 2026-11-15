@@ -49,17 +49,18 @@ describe('source scan: every locale read goes through profileLocale', () =>
         .map(name => ({ name, source: readFileSync(join(middlewareDir, name), 'utf8') }))
         .filter(file => file.source.includes('findLocaleByUserId('));
 
+    // `authenticate.ts` is not among them: both of its middlewares resolve the
+    // principal through `resolveAuthenticatedUser` in auth-profiles.ts (#309).
     it('finds the middlewares that resolve a principal', () =>
     {
         expect(readers.map(file => file.name).sort()).toEqual([
             'auth-profiles.ts',
             'authenticate-for-renewal.ts',
-            'authenticate.ts',
             'one-time-token-auth.ts',
         ]);
     });
 
-    it.each(['auth-profiles.ts', 'authenticate-for-renewal.ts', 'authenticate.ts', 'one-time-token-auth.ts'])(
+    it.each(['auth-profiles.ts', 'authenticate-for-renewal.ts', 'one-time-token-auth.ts'])(
         '%s builds its locale fields with profileLocale',
         (name) =>
         {
