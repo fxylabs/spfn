@@ -134,19 +134,23 @@ to seven days.
 ### Deletion is a state machine, not a DELETE
 
 ```
-active ──request (re-auth)──> pending_deletion ──grace elapses──> anonymised or removed
-  ^                                  │
-  └───────────cancel (re-auth)───────┘
+none ──request (step-up, recent auth)──> pending ──grace elapses──> anonymised or removed
+  ^                                         │
+  └──cancel (password or one-time code)─────┘
 ```
 
-- **Request** requires step-up re-auth — a password, or a verification code for
-  OAuth-only accounts. Every active session key is revoked at that moment, an audit row is
-  written, and the user is told the scheduled purge date.
+- **Deletion is not a status.** Where the account is in its deletion is its own column,
+  apart from whether an operator lets it in, so a suspended account stays suspended
+  through a deletion request and its cancellation.
+- **Request** passes the gates every sensitive change does: the second factor re-proved
+  on this device for an account that has one, and a recent sign-in or the password. Every
+  active session key is revoked at that moment, an audit row is written, and the user is
+  told the scheduled purge date.
 - **Login is refused while pending**, with a dedicated error carrying the purge date, so
   the client can offer recovery instead of showing a generic failure.
 - **Cancel is public**, because the sessions were already revoked and there is no token
-  left to authenticate with. Credentials plus a password or a fresh code restore the
-  account.
+  left to authenticate with. The password, or a single-use code sent to the account's
+  e-mail or phone, cancels it — a forgotten password does not lock the owner out.
 - **The sweep runs daily** once registered with `.jobs(authJobRouter)`, and it is
   deliberately not automatic — a purge job that appears without you asking is worse than
   one you had to type.

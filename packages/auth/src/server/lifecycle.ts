@@ -182,7 +182,7 @@ export interface AuthLifecycleOptions extends AuthInitOptions
 
         /**
          * How the purge job destroys the account once the grace period elapses.
-         * - 'anonymize': scrub PII, keep the row (status -> 'deleted') — recommended default
+         * - 'anonymize': scrub PII, keep the row (deletion -> 'deleted') — recommended default
          * - 'hard-delete': physically remove the `users` row (cascades to child rows)
          * @default 'anonymize'
          */

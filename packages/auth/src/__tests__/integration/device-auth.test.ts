@@ -968,7 +968,7 @@ describe.skipIf(!dbAvailable)('Device-code login', () =>
         it('poll refuses to collect for an account that is pending deletion', async () =>
         {
             const { started } = await approvedDevice();
-            await setStatus('pending_deletion');
+            await getDatabase('write')!.update(users).set({ deletion: 'pending' }).where(eq(users.email, owner));
 
             await expectError(await poll(started.deviceCode), 403, 'AccountPendingDeletionError');
 

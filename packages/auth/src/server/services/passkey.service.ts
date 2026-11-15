@@ -26,8 +26,6 @@
 import { onAfterCommit, runInTransaction } from '@spfn/core/db';
 import { ValidationError } from '@spfn/core/errors';
 import {
-    AccountDisabledError,
-    AccountPendingDeletionError,
     LastRecoveryCredentialError,
     PasskeyAlreadyRegisteredError,
     PasskeyChallengeError,
@@ -77,7 +75,7 @@ import { assertNotLastListedFactor, isEnrolmentOnly, secondFactorEnrolmentFields
 import { isMethodListed } from '../lib/second-factor-policy';
 import { decideKeyBinding } from '../lib/key-policy';
 import { updateLastLoginService } from './user.service';
-import { getPendingDeletionInfo } from './account-deletion.service';
+import { accountRefusal, admissionRefusalError } from './admission.service';
 import { authLoginEvent, passkeyEnrolledEvent, passkeyRevokedEvent } from '../events';
 import { loginBindingFields, type LoginResult } from './auth.service';
 
@@ -158,6 +156,11 @@ export interface RecentAuthenticationParams
  * writes a new row without anybody proving anything, so a stale session could
  * rotate its way past this gate. Or the body carries the account password.
  *
+ * A password in the body is the proof offered, and it is judged: a wrong one
+ * is refused even on a device that signed in a moment ago. Either suffices
+ * when it is what the person offers; a proof presented and failed is a failed
+ * proof, not an absent one.
+ *
  * An account with no password stored cannot satisfy it with a password, however
  * plausible the value (E5): the comparison still runs, against a dummy hash, so
  * "no password on file" costs exactly what "wrong password" costs. Skipping it
@@ -174,13 +177,31 @@ export async function assertRecentAuthentication(
     windowMs?: number,
 ): Promise<'key' | 'password'>
 {
-    if (await keyRecentlyAuthenticated(params, windowMs))
+    return (await proveRecentAuthentication(params, windowMs)).by;
+}
+
+/** What satisfied recent authentication: the key's own sign-in, or the password and the hash it was verified against. */
+export type RecentAuthenticationProof = { by: 'key' } | { by: 'password'; verifiedHash: string };
+
+/**
+ * `assertRecentAuthentication`, answering with what satisfied it, for a caller
+ * that confirms the proof again under the account lock
+ * (`recentAuthenticationHolds`). The stored hash is read on the primary: it is
+ * compared there with what the lock reads.
+ *
+ * @throws RecentAuthenticationRequiredError
+ */
+export async function proveRecentAuthentication(
+    params: RecentAuthenticationParams,
+    windowMs?: number,
+): Promise<RecentAuthenticationProof>
+{
+    if (!params.currentPassword && await keyRecentlyAuthenticated(params, windowMs))
     {
-        return 'key';
+        return { by: 'key' };
     }
 
-    const user = await usersRepository.findById(params.userId);
-    const storedHash = user?.passwordHash;
+    const storedHash = (await usersRepository.findByIdOnPrimary(params.userId))?.passwordHash;
     const matched = await verifyPassword(
         params.currentPassword || NO_PASSWORD_PRESENTED,
         storedHash ?? await getDummyPasswordHash(),
@@ -188,10 +209,40 @@ export async function assertRecentAuthentication(
 
     if (storedHash && matched)
     {
-        return 'password';
+        return { by: 'password', verifiedHash: storedHash };
     }
 
     throw new RecentAuthenticationRequiredError();
+}
+
+/**
+ * Whether a proof from `proveRecentAuthentication` still holds, asked under the
+ * account lock with the row the lock read: the key's sign-in still inside the
+ * window, or the hash the password was verified against still the one stored.
+ * Nothing hashes here.
+ *
+ * @returns false when the stored hash moved since it was verified — the proof
+ *   is stale, not wrong: the caller verifies again outside the lock
+ * @throws RecentAuthenticationRequiredError when the key's window closed meanwhile
+ */
+export async function recentAuthenticationHolds(
+    params: RecentAuthenticationParams,
+    proof: RecentAuthenticationProof,
+    account: Pick<User, 'passwordHash'>,
+    windowMs?: number,
+): Promise<boolean>
+{
+    if (proof.by === 'password')
+    {
+        return account.passwordHash === proof.verifiedHash;
+    }
+
+    if (!await keyRecentlyAuthenticated(params, windowMs))
+    {
+        throw new RecentAuthenticationRequiredError();
+    }
+
+    return true;
 }
 
 /**
@@ -897,16 +948,10 @@ async function assertActiveForPasskeyLogin(user: User | null): Promise<User>
         throw new PasskeyVerificationError();
     }
 
-    if (user.status === 'pending_deletion')
+    const refusal = await accountRefusal(user);
+    if (refusal)
     {
-        const pending = await getPendingDeletionInfo(user.id);
-
-        throw new AccountPendingDeletionError({ purgeScheduledAt: pending?.purgeScheduledAt.toISOString() });
-    }
-
-    if (user.status !== 'active')
-    {
-        throw new AccountDisabledError({ status: user.status });
+        throw admissionRefusalError(refusal);
     }
 
     return user;

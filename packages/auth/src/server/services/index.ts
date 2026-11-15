@@ -478,7 +478,7 @@ export { verifyAccessToken } from './oauth2-access-token.service';
 export type { VerifiedOAuth2AccessToken } from './oauth2-access-token.service';
 
 // Admission — the one answer to "may this person be let in now"
-export { admitPrincipal, authContextFor, admitsForRenewal, signingKeyOf } from './admission.service';
+export { admitPrincipal, admitsAccount, authContextFor, admitsForRenewal, signingKeyOf } from './admission.service';
 export type {
     Admission,
     AdmissionRefusal,

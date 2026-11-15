@@ -8,7 +8,7 @@ import { runInTransaction } from '@spfn/core/db';
 import { NotFoundError } from '@spfn/core/errors';
 
 import { type User } from '../entities/users';
-import type { AccountStatusSource, UserStatus } from '../types';
+import type { AccountDeletionState, AccountStatusSource, UserStatus } from '../types';
 import { keysRepository, rolesRepository, usersRepository, type UserUpdate } from '../repositories';
 import { accountStatusRepository } from '../repositories/account-status.repository';
 import { assertEmailAllowedForRole, getRoleEmailDomainPolicy } from '../lib/role-email-domains';
@@ -136,9 +136,8 @@ export type AccountStatusChange = 'changed' | 'refused';
  *
  * A change names the status it leaves (`from`), and the write is one
  * conditional statement on the primary: a transition decided on a read that
- * another writer has since overtaken — a deletion cancel reading
- * `pending_deletion` while an operator's suspension commits — matches no row
- * and is `'refused'`, rather than overwriting what that writer committed. The
+ * another writer has since overtaken — an operator lifting a suspension that
+ * another operator already changed — matches no row and is `'refused'`, rather than overwriting what that writer committed. The
  * caller maps the refusal to its own answer; inside the caller's transaction,
  * throwing that answer rolls back what it wrote before.
  *
@@ -157,7 +156,8 @@ export type AccountStatusChange = 'changed' | 'refused';
  * second-factor sign-ins die with the generation (`revokeAllActiveByUserId`).
  *
  * Joins a transaction already open on the call chain, so a caller that writes
- * more beside the status (account deletion) commits or rolls back as one.
+ * more beside the status commits or rolls back as one. An account's deletion
+ * is not a status: `setAccountDeletion` moves it, and leaves this column.
  *
  * @throws NotFoundError when no such account exists and `from` is `'any'`
  */
@@ -194,6 +194,55 @@ function refusedTransition(transition: AccountStatusTransition): AccountStatusCh
     }
 
     return 'refused';
+}
+
+/** Where an account's deletion moves from, and why. */
+export interface AccountDeletionTransition
+{
+    /** The deletion the account has to be in for the change to happen; null: none asked for. */
+    from: AccountDeletionState | null;
+    /** Recorded on every key the change revokes. */
+    reason: string;
+}
+
+/**
+ * Move an account's deletion — the one writer of `users.deletion`, beside
+ * `setAccountStatus` and never through it: asking for, cancelling or completing
+ * a deletion leaves the status, so an operator's suspension holds through all
+ * three.
+ *
+ * Like the status, the change names the deletion it leaves (`from`) and is one
+ * conditional statement under the account lock: a request, cancel or purge
+ * decided on a read another of them has overtaken matches no row and is
+ * `'refused'`. Entering a deletion (`pending`, `deleted`) ends the account's
+ * key generation in the same transaction; leaving one restores no key — the
+ * person signs in anew.
+ *
+ * Package-internal: the deletion service is its only caller, because the
+ * deletion request row moves with it.
+ */
+export async function setAccountDeletion(
+    userId: number,
+    deletion: AccountDeletionState | null,
+    transition: AccountDeletionTransition,
+): Promise<AccountStatusChange>
+{
+    return await runInTransaction(async () =>
+    {
+        await usersRepository.lockAccount(userId);
+
+        if (!await accountStatusRepository.setDeletion(userId, deletion, transition.from))
+        {
+            return 'refused';
+        }
+
+        if (deletion !== null)
+        {
+            await keysRepository.revokeAllActiveByUserId(userId, transition.reason);
+        }
+
+        return 'changed';
+    }, { context: 'auth:set-account-deletion' });
 }
 
 /**

@@ -14,7 +14,6 @@ import { EntityNotFoundError, NotFoundError } from '@spfn/core/errors';
 import { rolePermissions, roles, NewUser, users, permissions, type User } from '../entities';
 import { userPublicKeys, type UserPublicKey } from '../entities/user-public-keys';
 import { oauth2Grants, type OAuth2Grant } from '../entities/oauth2-grants';
-import type { UserStatus } from '../types';
 import { normalizeEmail, normalizeOptionalEmail } from '../helpers/email';
 import { AccountBusyError } from '@spfn/auth/errors';
 import { isLockTimeout } from '../lib/lock-timeout';
@@ -39,13 +38,14 @@ export const EMAIL_NORMALIZATION_BATCH = 500;
 type Database = RepositoryDatabase<PostgresJsDatabase<EmptyRelations>>;
 
 /**
- * What `updateById` may change: every column but `status`.
+ * What `updateById` may change: every column but `status` and `deletion`.
  *
- * An account's status is written by `setAccountStatus` alone, because a status
- * that forbids access has to end the account's sessions in the same
- * transaction — a column write here would change the status and clear nothing.
+ * An account's status is written by `setAccountStatus` alone, and its deletion
+ * by `setAccountDeletion`, because a value that forbids access has to end the
+ * account's sessions in the same transaction — a column write here would
+ * change it and clear nothing.
  */
-export type UserUpdate = Omit<Partial<NewUser>, 'status'>;
+export type UserUpdate = Omit<Partial<NewUser>, 'status' | 'deletion'>;
 
 /** A user row with the role that row stores, as the admission reads load it. */
 export interface UserWithStoredRole
@@ -191,7 +191,7 @@ export class UsersRepository extends AccountStateRepository
     /**
      * ID로 사용자 조회 — Write primary에서 직접 읽는다.
      *
-     * 복제 지연 창에서 status 전이(예: 삭제 요청으로 pending_deletion 전환)를 놓치면
+     * 복제 지연 창에서 status/deletion 전이(예: 삭제 요청으로 deletion='pending' 전환)를 놓치면
      * 안 되는 게이트(OAuth 세션 발급 등)가 사용한다. 일반 조회는 `findById`(replica)를
      * 계속 사용할 것.
      */
@@ -438,9 +438,10 @@ export class UsersRepository extends AccountStateRepository
      * so a report built on it has no address to leak beyond the rule itself.
      *
      * @param roleNames - Stored role names to match
-     * @param status - Only accounts in this status; every status when omitted
+     * @param admissibleOnly - Only accounts that may be let in (`active`, no
+     *   deletion asked for); every account when false
      */
-    async findRoleHolders(roleNames: string[], status?: UserStatus)
+    async findRoleHolders(roleNames: string[], admissibleOnly = false)
     {
         return this.readDb
             .select({
@@ -453,7 +454,7 @@ export class UsersRepository extends AccountStateRepository
             .innerJoin(roles, eq(users.roleId, roles.id))
             .where(and(
                 inArray(roles.name, roleNames),
-                status ? eq(users.status, status) : undefined,
+                admissibleOnly ? and(eq(users.status, 'active'), isNull(users.deletion)) : undefined,
             ));
     }
 
@@ -594,12 +595,17 @@ export class UsersRepository extends AccountStateRepository
      */
     async updateById(id: number, data: UserUpdate)
     {
-        // The type already leaves `status` out; this is for the caller the type
-        // does not reach (JavaScript, a cast). Writing it here would change the
-        // status and clear nothing, which is the defect `setAccountStatus` ends.
+        // The type already leaves `status` and `deletion` out; this is for the
+        // caller the type does not reach (JavaScript, a cast). Writing either here
+        // would change it and clear nothing, which is the defect their writers end.
         if ((data as Partial<NewUser>).status !== undefined)
         {
             throw new Error('users.status is written by setAccountStatus, not updateById');
+        }
+
+        if ((data as Partial<NewUser>).deletion !== undefined)
+        {
+            throw new Error('users.deletion is written by setAccountDeletion, not updateById');
         }
 
         // `'email' in data` rather than a truthiness check: setting it to null

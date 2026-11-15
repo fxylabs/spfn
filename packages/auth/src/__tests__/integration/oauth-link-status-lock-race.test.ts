@@ -102,7 +102,7 @@ describe.skipIf(!dbAvailable)('OAuth link callback: status read under the row lo
         const blocker = getTestDb().transaction(async tx =>
         {
             await tx.update(users)
-                .set({ status: 'pending_deletion' })
+                .set({ deletion: 'pending' })
                 .where(eq(users.id, user!.id));
             announceBlockerReady();
             await blockerMayCommit;

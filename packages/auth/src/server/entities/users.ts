@@ -12,7 +12,7 @@
  * - Email/phone verification
  */
 
-import { SESSION_BINDINGS, USER_STATUSES } from '../types';
+import { ACCOUNT_DELETION_STATES, SESSION_BINDINGS, USER_STATUSES } from '../types';
 import { sql } from 'drizzle-orm';
 import { text, boolean, index, integer, uuid } from 'drizzle-orm/pg-core';
 import { id, timestamps, enumText, utcTimestamp, foreignKey, softDelete } from '@spfn/core/db';
@@ -56,13 +56,21 @@ export const users = authSchema.table('users',
         // Can also reference custom roles created at runtime
         roleId: foreignKey('role', () => roles.id),
 
-        // Account status
+        // Account status: whether an operator lets the account in
         // - active: Normal operation (default)
         // - inactive: Deactivated (user request, dormant)
         // - suspended: Locked (security incident, ToS violation)
-        // - pending_deletion: Deletion requested, within the grace period (recoverable)
-        // - deleted: Grace period elapsed and the account was purged (anonymize mode)
+        // Written by setAccountStatus alone
         status: enumText('status', USER_STATUSES).default('active').notNull(),
+
+        // Where the account is in its deletion — a fact of its own, so asking for
+        // or cancelling a deletion never touches the status above
+        // - null: no deletion asked for (default)
+        // - pending: requested, within the grace period (recoverable); the purge
+        //   date is on the request row (account_deletion_requests)
+        // - deleted: purged in anonymize mode (hard-delete removes the row)
+        // Written by setAccountDeletion alone
+        deletion: enumText('deletion', ACCOUNT_DELETION_STATES),
 
         // Verification timestamps
         // null = unverified, timestamp = verified at this time
@@ -106,7 +114,7 @@ export const users = authSchema.table('users',
         ...timestamps(),
 
         // Soft delete (deletedAt / deletedBy) — set when the account deletion purge job
-        // anonymizes the row (status -> 'deleted'). Hard-delete mode removes the row
+        // anonymizes the row (deletion -> 'deleted'). Hard-delete mode removes the row
         // instead, so these stay null for that strategy.
         ...softDelete(),
     },

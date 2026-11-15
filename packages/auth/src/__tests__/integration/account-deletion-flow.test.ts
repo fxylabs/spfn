@@ -262,7 +262,7 @@ describe.skipIf(!dbAvailable)('Account Deletion Lifecycle Integration', () =>
         expect(result).toMatchObject({ processed: 1, purged: 1, skipped: 0 });
 
         const [row] = await db.select().from(users).where(eq(users.id, Number(userId))).limit(1);
-        expect(row.status).toBe('deleted');
+        expect(row.deletion).toBe('deleted');
         expect(row.email).toBe(`deleted-${row.publicId}@deleted.invalid`);
         expect(row.phone).toBeNull();
         expect(row.passwordHash).toBeNull();
@@ -325,7 +325,7 @@ describe.skipIf(!dbAvailable)('Account Deletion Lifecycle Integration', () =>
         expect(purgeResult.outcome).not.toBe('purged');
 
         const [userRow] = await db.select().from(users).where(eq(users.id, Number(userId)));
-        expect(userRow.status).toBe('active'); // recovered, not purged
+        expect(userRow.deletion).toBeNull();   // recovered, not purged
         expect(userRow.email).toBe(email);     // not anonymized
         expect(userRow.deletedAt).toBeNull();
 

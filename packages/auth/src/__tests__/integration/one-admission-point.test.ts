@@ -6,9 +6,10 @@
  *
  * | Row | Checks                                                                                              |
  * |-----|-----------------------------------------------------------------------------------------------------|
- * | T1  | every door × suspended / inactive / pending_deletion / deleted → refused in that door's own answer; |
- * |     | active → admitted. The door list is derived from the source (every caller of `admitPrincipal`), so |
- * |     | a door this table does not drive fails the first T1 row                                             |
+ * | T1  | every door × status {active, suspended} × deletion {none, pending, deleted}, and inactive → refused |
+ * |     | in that door's own answer (a pending deletion with the pending-deletion answer, whatever the       |
+ * |     | status); active with none → admitted. The door list is derived from the source (every caller of   |
+ * |     | `admitPrincipal`), so a door this table does not drive fails the first T1 row                      |
  * | T2  | only the admission module can make a principal (brand + sealed constructor), and no source casts   |
  * |     | its way to one                                                                                      |
  * | T3  | a one-time token dies with the key that issued it — logout, revoke-all, password change — and a    |
@@ -18,9 +19,9 @@
  * | T5  | a 202 sign-in is not completed for an account suspended while its challenge was open                |
  * | T6  | a device-code approval dies with the approving key                                                  |
  * | T7  | `setAccountStatus(…, 'suspended')` ends every session and stream; `updateUserService` takes no status |
- * | T8  | a deletion cancel that read the account before a suspension committed does not lift it: the account |
- * |     | stays suspended, the request stays pending, cancel answers DeletionNotRequestedError. Without it, a |
- * |     | cancel overwrites an operator's suspension with `active`                                          |
+ * | T8  | a deletion cancel that read the account before a suspension committed does not lift it: the        |
+ * |     | deletion is cleared and the account stays suspended. Without it, a cancel overwrites an operator's |
+ * |     | suspension with `active`                                                                          |
  * | T9  | a password sign-in that read the account before a suspension committed writes no key: refused, and |
  * |     | nothing it registered is admitted after reactivation. Without it, the key outlives the suspension |
  * | T10 | a token minted through core's endpoint with a custom `getSubject` and the shared manager is honoured |
@@ -34,10 +35,11 @@
  * of their own (no route in the package carries them), and `@spfn/mcp`'s
  * `createMcpRoute` with `verifyAccessToken`, as the README wires it.
  *
- * T1 writes the status straight to the row. That isolates the status rule
- * itself: `setAccountStatus` would also end every key, and a door would then be
- * refused for its dead credential whatever it does with the status (T7 covers
- * the writer). It is also the state a status written outside the package leaves.
+ * T1 writes the status and the deletion straight to the row. That isolates the
+ * rule itself: `setAccountStatus` and `setAccountDeletion` would also end every
+ * key, and a door would then be refused for its dead credential whatever it
+ * does with the account (T7 covers the writer). It is also the state a value
+ * written outside the package leaves.
  */
 
 import { describe, it, expect, expectTypeOf, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
@@ -82,7 +84,7 @@ import {
 } from '@/server/services/admission.service';
 import { setAccountStatus, updateUserService } from '@/server/services/user.service';
 import { verifyAccessToken } from '@/server/services/oauth2-access-token.service';
-import type { UserStatus } from '@/server/types';
+import type { AccountDeletionState, UserStatus } from '@/server/types';
 
 vi.mock('@spfn/notification/server', async (importOriginal) =>
 {
@@ -118,8 +120,22 @@ const APP_PROFILE = 'admissionT1AppProfileV1';
 const APP_PROFILE_USER_HEADER = 'x-t1-account';
 const STREAM_EVENT = 'admissionT1Ping';
 
-/** The statuses that forbid access — every one of them is refused at every door. */
-const REFUSING: UserStatus[] = ['suspended', 'inactive', 'pending_deletion', 'deleted'];
+/** Where an account stands: an operator's status and its deletion, two facts. */
+interface AccountState
+{
+    status: UserStatus;
+    deletion: AccountDeletionState | null;
+}
+
+/** The states that forbid access — every one of them is refused at every door. */
+const REFUSING: AccountState[] = [
+    { status: 'inactive', deletion: null },
+    { status: 'suspended', deletion: null },
+    { status: 'active', deletion: 'pending' },
+    { status: 'suspended', deletion: 'pending' },
+    { status: 'active', deletion: 'deleted' },
+    { status: 'suspended', deletion: 'deleted' },
+];
 
 const SERVER_ROOT = join(__dirname, '..', '..', 'server');
 const ADMISSION_MODULE = join('services', 'admission.service.ts');
@@ -130,7 +146,7 @@ interface Session
     authorization: string;
 }
 
-/** A door's attempt, prepared while the account was active and made after its status moved. */
+/** A door's attempt, prepared while the account was active and made after its state moved. */
 type Attempt = () => Promise<Response>;
 
 interface Door
@@ -138,7 +154,7 @@ interface Door
     name: string;
     prepare: (account: Account) => Promise<Attempt>;
     admitted: (response: Response, account: Account) => Promise<void>;
-    refused: (response: Response, status: UserStatus) => Promise<void>;
+    refused: (response: Response, state: AccountState) => Promise<void>;
 }
 
 interface Account
@@ -150,8 +166,8 @@ interface Account
 
 /**
  * Every file that produces a person principal: the callers of `admitPrincipal`
- * — and of `admitCompletion`, its entry for a procedure's completion — read
- * off the source.
+ * — and of `admitCompletion`, its entry for a credential asked again under the
+ * account lock — read off the source.
  */
 function admissionCallers(): string[]
 {
@@ -278,10 +294,10 @@ describe.skipIf(!dbAvailable)('one admission point for a person principal (T1-T1
         expect((await response.json()).error.code).toBe(code);
     }
 
-    /** The answer the cookie/Bearer surfaces give an account that is not active. */
-    async function expectAccountRefusal(response: Response, status: UserStatus): Promise<void>
+    /** The answer the cookie/Bearer surfaces give an account that may not be let in. */
+    async function expectAccountRefusal(response: Response, state: AccountState): Promise<void>
     {
-        await expectError(response, 403, status === 'pending_deletion' ? 'AccountPendingDeletionError' : 'AccountDisabledError');
+        await expectError(response, 403, state.deletion === 'pending' ? 'AccountPendingDeletionError' : 'AccountDisabledError');
     }
 
     // ========================================================================
@@ -297,9 +313,9 @@ describe.skipIf(!dbAvailable)('one admission point for a person principal (T1-T1
         return { id: await createTestUser(email, (await getRoleByName('user'))!.id), email, ip: `198.51.${counter >> 8}.${counter & 0xff}` };
     }
 
-    async function writeStatus(account: Account, status: UserStatus): Promise<void>
+    async function writeState(account: Account, state: AccountState): Promise<void>
     {
-        await getTestDb().update(users).set({ status }).where(eq(users.id, account.id));
+        await getTestDb().update(users).set(state).where(eq(users.id, account.id));
     }
 
     function bearer(keyId: string, privateKey: string): string
@@ -677,6 +693,21 @@ describe.skipIf(!dbAvailable)('one admission point for a person principal (T1-T1
             },
             refused: expectAccountRefusal,
         },
+        deletionRequest: {
+            name: 'deletion/request, its session re-admitted under the account lock (admitCompletion)',
+            prepare: async (account) =>
+            {
+                const session = await signIn(account);
+
+                return () => post('/_auth/deletion/request', account, { password: TEST_PASSWORD }, session.authorization);
+            },
+            admitted: async (response) =>
+            {
+                expect(response.status).toBe(200);
+                expect((await response.json()).purgeScheduledAt).toEqual(expect.any(String));
+            },
+            refused: expectAccountRefusal,
+        },
         deviceCode: {
             name: 'device-code collection',
             prepare: async (account) =>
@@ -716,6 +747,9 @@ describe.skipIf(!dbAvailable)('one admission point for a person principal (T1-T1
         // binding-off by passkey, renewal, and the link callback — the last one
         // with no session in front of it, driven in deferred-stamps.test.ts T2/T5.
         'services/deferred-admission.service.ts': ['totpConfirm'],
+        // The deletion request asks again under the account lock, behind `authenticate`;
+        // the races only the second asking catches are account-status-vs-deletion T6, T11, T12.
+        'services/account-deletion.service.ts': ['deletionRequest'],
         'services/mfa.service.ts': ['mfaVerify'],
         // Consent approval asks again under the account lock, behind `authenticate`;
         // the race that only the second asking catches is account-lock-round4 R9.
@@ -744,14 +778,14 @@ describe.skipIf(!dbAvailable)('one admission point for a person principal (T1-T1
             await door.admitted(await attempt(), account);
         });
 
-        it.each(REFUSING)(`${door.name}: a %s account is refused in this door's answer`, async (status) =>
+        it.each(REFUSING)(`${door.name}: an account $status with deletion $deletion is refused in this door's answer`, async (state) =>
         {
             const account = await newAccount();
             const attempt = await door.prepare(account);
 
-            await writeStatus(account, status);
+            await writeState(account, state);
 
-            await door.refused(await attempt(), status);
+            await door.refused(await attempt(), state);
         });
     });
 
@@ -849,7 +883,7 @@ describe.skipIf(!dbAvailable)('one admission point for a person principal (T1-T1
 
         await setAccountStatus(account.id, 'suspended', { from: 'any', reason: 'T4 suspension' });
 
-        await expectAccountRefusal(await mcp(tokens.access_token), 'suspended');
+        await expectAccountRefusal(await mcp(tokens.access_token), { status: 'suspended', deletion: null });
         await expectInvalidGrant(await refresh(clientId, tokens.refresh_token));
         await expectInvalidGrant(await exchange(clientId, code, verifier));
 
@@ -874,7 +908,7 @@ describe.skipIf(!dbAvailable)('one admission point for a person principal (T1-T1
         // Written to the row, not through setAccountStatus: that would also end
         // the key generation the challenge belongs to, and the challenge would be
         // refused for its generation whatever mfa/verify does with the status.
-        await writeStatus(account, 'suspended');
+        await writeState(account, { status: 'suspended', deletion: null });
 
         await expectError(await post('/_auth/mfa/verify', account, { challenge, code: totpCode(secret, 1) }), 401, 'MfaVerificationFailedError');
         await new Promise((resolve) => setTimeout(resolve, 40));
@@ -959,14 +993,15 @@ describe.skipIf(!dbAvailable)('one admission point for a person principal (T1-T1
         });
     }
 
-    async function statusOf(account: Account): Promise<UserStatus>
+    async function stateOf(account: Account): Promise<AccountState>
     {
-        const [row] = await getTestDb().select({ status: users.status }).from(users).where(eq(users.id, account.id));
+        const [row] = await getTestDb().select({ status: users.status, deletion: users.deletion })
+            .from(users).where(eq(users.id, account.id));
 
-        return row!.status;
+        return row!;
     }
 
-    it('T8 a deletion cancel that read the account before a suspension committed leaves it suspended, and the request pending', async () =>
+    it('T8 a deletion cancel that read the account before a suspension committed clears the deletion and leaves it suspended', async () =>
     {
         const account = await newAccount();
         await requestAccountDeletionService(account.id, { requestedBy: 'admin' });
@@ -974,11 +1009,11 @@ describe.skipIf(!dbAvailable)('one admission point for a person principal (T1-T1
 
         const cancelled = await post('/_auth/deletion/cancel', account, { email: account.email, password: TEST_PASSWORD });
 
-        await expectError(cancelled, 404, 'DeletionNotRequestedError');
-        expect(await statusOf(account)).toBe('suspended');
+        expect(cancelled.status).toBe(204);
+        expect(await stateOf(account)).toEqual({ status: 'suspended', deletion: null });
         const requests = await getTestDb().select({ status: accountDeletionRequests.status })
             .from(accountDeletionRequests).where(eq(accountDeletionRequests.userId, account.id));
-        expect(requests).toEqual([{ status: 'pending' }]);
+        expect(requests).toEqual([{ status: 'cancelled' }]);
     });
 
     it('T9 a password sign-in that read the account before a suspension committed is refused, and leaves no key that reactivation admits', async () =>
@@ -988,7 +1023,7 @@ describe.skipIf(!dbAvailable)('one admission point for a person principal (T1-T1
 
         const { response, session } = await login(account);
 
-        await expectAccountRefusal(response, 'suspended');
+        await expectAccountRefusal(response, { status: 'suspended', deletion: null });
         await setAccountStatus(account.id, 'active', { from: 'suspended', reason: 'T9 reactivation' });
 
         expect(await getTestDb().select().from(userPublicKeys).where(eq(userPublicKeys.keyId, session.keyId))).toHaveLength(0);
@@ -1051,10 +1086,10 @@ describe.skipIf(!dbAvailable)('one admission point for a person principal (T1-T1
 
         // Written to the row, as in T5: setAccountStatus would end the challenge's
         // key generation, and the challenge would be refused for that instead.
-        await writeStatus(account, 'suspended');
+        await writeState(account, { status: 'suspended', deletion: null });
         await expectError(await post('/_auth/mfa/verify', account, { challenge, recoveryCode: recoveryCodes[0] }), 401, 'MfaVerificationFailedError');
 
-        await writeStatus(account, 'active');
+        await writeState(account, { status: 'active', deletion: null });
         expect((await post('/_auth/mfa/verify', account, { challenge, recoveryCode: recoveryCodes[0] })).status).toBe(200);
     });
 });

@@ -638,7 +638,8 @@ describe.skipIf(!dbAvailable)('Per-role email-domain policy', () =>
 
         it('#29b superadmin restricted, the only superadmin row is deleted and anonymised: starts', async () =>
         {
-            await seedWithStatus('deleted-1@deleted.invalid', 'superadmin', 'deleted');
+            const deleted = await seed('deleted-1@deleted.invalid', 'superadmin');
+            await getTestDb().update(users).set({ deletion: 'deleted' }).where(eq(users.id, deleted.id));
             setPolicy('superadmin=example.com');
 
             await expect(assertRoleEmailDomainPolicy()).resolves.toBeUndefined();

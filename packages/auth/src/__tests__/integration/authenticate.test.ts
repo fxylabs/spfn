@@ -55,9 +55,9 @@ import type { Context, Next } from 'hono';
 const KEY_ID = 'test-key-id';
 
 /** The admission's one primary read: the account, its role, and the key it names. */
-function admissionRow(status: string, role: unknown)
+function admissionRow(status: string, role: unknown, deletion: string | null = null)
 {
-    return { user: { id: 1, email: 'test@example.com', status, keyEpoch: 0 }, role, key: validKeyRecord() };
+    return { user: { id: 1, email: 'test@example.com', status, deletion, keyEpoch: 0 }, role, key: validKeyRecord() };
 }
 
 /** A valid, unexpired key record as returned by keysRepository.findWithAccountEpochOnPrimary. */
@@ -214,9 +214,9 @@ describe('Authenticate Middleware', () =>
             expect(mockNext).not.toHaveBeenCalled();
         });
 
-        it('rejects a pending_deletion account with AccountPendingDeletionError, carrying purgeScheduledAt', async () =>
+        it('rejects an account pending deletion with AccountPendingDeletionError, carrying purgeScheduledAt', async () =>
         {
-            vi.mocked(usersRepository.findByIdWithRoleAndKeyOnPrimary).mockResolvedValue(admissionRow('pending_deletion', null) as never);
+            vi.mocked(usersRepository.findByIdWithRoleAndKeyOnPrimary).mockResolvedValue(admissionRow('active', null, 'pending') as never);
             const purgeScheduledAt = new Date('2030-01-01T00:00:00.000Z');
             vi.mocked(accountDeletionRequestsRepository.findPendingByUserIdOnPrimary).mockResolvedValue({ purgeScheduledAt } as never);
 

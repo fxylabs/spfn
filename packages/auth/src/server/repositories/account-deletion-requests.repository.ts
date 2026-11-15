@@ -56,7 +56,7 @@ export class AccountDeletionRequestsRepository extends BaseRepository
     /**
      * User ID로 pending 요청 조회 — Write primary에서 직접 읽는다.
      *
-     * 로그인/OAuth/authenticate 게이트가 pending_deletion 유저의 purgeScheduledAt을
+     * 로그인/OAuth/authenticate 게이트가 deletion='pending' 유저의 purgeScheduledAt을
      * 표시하는 데 쓴다. 이 경로들은 복제 지연이 있으면 방금 커밋된 상태 전이를 놓칠 수
      * 있어(예: 삭제 요청 직후 OAuth 로그인 시도), replica가 아닌 primary에서 읽는다.
      */

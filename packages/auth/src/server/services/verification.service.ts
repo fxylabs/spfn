@@ -26,11 +26,6 @@ import { EmailSchema, type VerificationTargetType, type VerificationPurpose } fr
 const ACCOUNT_EXISTS_NOTICE_DEDUPE_MINUTES = 60;
 
 /**
- * Verification token expiry (15 minutes)
- */
-const VERIFICATION_TOKEN_EXPIRY = '15m';
-
-/**
  * The code stored for a registration on an address that already has an account.
  *
  * The row exists so the verify route reads, counts and refuses exactly as it
@@ -38,6 +33,19 @@ const VERIFICATION_TOKEN_EXPIRY = '15m';
  * accepts six digits, so nothing submitted can match it.
  */
 const NEVER_SENT_CODE = 'never-sent';
+
+/**
+ * Verification token expiry (15 minutes), and with it the code row the token spends.
+ *
+ * The two lifetimes of a code are tied here so they cannot drift. A code can be
+ * verified until its own expiry; the token verifying it mints outlives that,
+ * and the code's row is what makes the token single-use (`spendToken` deletes
+ * it). So verifying moves the row's `expiresAt` to the token's expiry
+ * (`markCodeAsUsed`), the token is signed to expire at that same moment, and
+ * `deleteExpired`, which sweeps by `expiresAt`, removes an unverified row at
+ * its own expiry and a verified one once its token can no longer be presented.
+ */
+const VERIFICATION_TOKEN_EXPIRY_MINUTES = 15;
 
 /**
  * Maximum verification attempts before code expires
@@ -241,25 +249,36 @@ async function validateVerificationCode(
 }
 
 /**
- * Mark verification code as used
+ * Mark a verified code used, and keep its row for as long as the token minted
+ * from it lives (`VERIFICATION_TOKEN_EXPIRY_MINUTES`).
  *
  * @param codeId - Verification code ID
+ * @returns when the token minted from it expires
  */
-async function markCodeAsUsed(codeId: number): Promise<void>
+async function markCodeAsUsed(codeId: number): Promise<Date>
 {
-    await verificationCodesRepository.markAsUsed(codeId);
+    const tokenExpiresAt = verificationTokenExpiry();
+    await verificationCodesRepository.markAsUsed(codeId, tokenExpiresAt);
+
+    return tokenExpiresAt;
+}
+
+function verificationTokenExpiry(): Date
+{
+    return new Date(Date.now() + VERIFICATION_TOKEN_EXPIRY_MINUTES * 60_000);
 }
 
 /**
  * Create verification token (JWT)
  *
  * @param payload - Token payload
+ * @param expiresAt - When it expires: the expiry its code row was given. Rounded
+ *   down to the second a JWT counts in, so the token never outlives the row.
  * @returns Signed JWT token
  */
-export function createVerificationToken(payload: VerificationTokenPayload): string
+export function createVerificationToken(payload: VerificationTokenPayload, expiresAt = verificationTokenExpiry()): string
 {
-    return jwt.sign(payload, env.SPFN_AUTH_VERIFICATION_TOKEN_SECRET!, {
-        expiresIn: VERIFICATION_TOKEN_EXPIRY,
+    return jwt.sign({ ...payload, exp: Math.floor(expiresAt.getTime() / 1000) }, env.SPFN_AUTH_VERIFICATION_TOKEN_SECRET!, {
         issuer: 'spfn-auth',
         audience: 'spfn-client',
     });
@@ -443,16 +462,12 @@ export async function verifyCodeService(params: VerifyCodeParams)
         throw new InvalidVerificationCodeError({ message: validation.error || 'Invalid verification code' });
     }
 
-    // Mark code as used
-    await markCodeAsUsed(validation.codeId!);
-
-    // Create verification token (15 min validity)
     const verificationToken = createVerificationToken({
         target,
         targetType,
         purpose,
         codeId: validation.codeId!,
-    });
+    }, await markCodeAsUsed(validation.codeId!));
 
     return {
         valid: true,

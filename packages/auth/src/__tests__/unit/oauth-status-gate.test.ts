@@ -2,7 +2,7 @@
  * oauth.service.ts — assertActiveForOAuthSession (issue #9 OAuth gap fix)
  *
  * createOrLinkUser() never checked account status before a session (public key)
- * was registered — a suspended/inactive/pending_deletion user could still log in
+ * was registered — a suspended/inactive/pending-deletion user could still log in
  * via OAuth. Worse, the far more common "already-linked social account" branch in
  * oauthCallbackService/oauth-native's persistNativeLogin doesn't even call
  * createOrLinkUser, so patching only that function wouldn't have closed the gap.
@@ -12,13 +12,12 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-const { usersRepository, getPendingDeletionInfo } = vi.hoisted(() => ({
+const { usersRepository, accountDeletionRequestsRepository } = vi.hoisted(() => ({
     usersRepository: { findByIdOnPrimary: vi.fn() },
-    getPendingDeletionInfo: vi.fn(),
+    accountDeletionRequestsRepository: { findPendingByUserIdOnPrimary: vi.fn() },
 }));
 
-vi.mock('../../server/repositories', () => ({ usersRepository }));
-vi.mock('../../server/services/account-deletion.service', () => ({ getPendingDeletionInfo }));
+vi.mock('../../server/repositories', () => ({ usersRepository, accountDeletionRequestsRepository }));
 
 import { assertActiveForOAuthSession } from '../../server/services/oauth.service';
 // Imported via the package specifier (matching how oauth.service.ts imports them) —
@@ -32,23 +31,23 @@ describe('assertActiveForOAuthSession', () =>
 
     it('allows an active user through', async () =>
     {
-        usersRepository.findByIdOnPrimary.mockResolvedValue({ id: 1, status: 'active' });
+        usersRepository.findByIdOnPrimary.mockResolvedValue({ id: 1, status: 'active', deletion: null });
 
         await expect(assertActiveForOAuthSession(1)).resolves.toBeUndefined();
     });
 
     it('blocks a suspended user with AccountDisabledError', async () =>
     {
-        usersRepository.findByIdOnPrimary.mockResolvedValue({ id: 2, status: 'suspended' });
+        usersRepository.findByIdOnPrimary.mockResolvedValue({ id: 2, status: 'suspended', deletion: null });
 
         await expect(assertActiveForOAuthSession(2)).rejects.toBeInstanceOf(AccountDisabledError);
     });
 
-    it('blocks a pending_deletion user with AccountPendingDeletionError, carrying purgeScheduledAt', async () =>
+    it('blocks a user pending deletion with AccountPendingDeletionError, carrying purgeScheduledAt', async () =>
     {
-        usersRepository.findByIdOnPrimary.mockResolvedValue({ id: 3, status: 'pending_deletion' });
+        usersRepository.findByIdOnPrimary.mockResolvedValue({ id: 3, status: 'active', deletion: 'pending' });
         const purgeScheduledAt = new Date('2030-01-01T00:00:00.000Z');
-        getPendingDeletionInfo.mockResolvedValue({ purgeScheduledAt });
+        accountDeletionRequestsRepository.findPendingByUserIdOnPrimary.mockResolvedValue({ purgeScheduledAt });
 
         const error = await assertActiveForOAuthSession(3).catch((e) => e);
 

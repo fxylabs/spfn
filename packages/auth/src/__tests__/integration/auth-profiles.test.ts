@@ -98,7 +98,7 @@ function validKeyRecord(overrides: Record<string, unknown> = {})
 function admissionRow(overrides: Record<string, unknown> = {})
 {
     return {
-        user: { id: USER_ID, email: 'proof@example.com', status: 'active', keyEpoch: 0, ...overrides },
+        user: { id: USER_ID, email: 'proof@example.com', status: 'active', deletion: null, keyEpoch: 0, ...overrides },
         role: { name: 'user' },
         key: validKeyRecord(),
     };
@@ -525,10 +525,10 @@ describe('auth profile branch (case table G)', () =>
             expect(driven.next).not.toHaveBeenCalled();
         });
 
-        it('a pending_deletion account carries purgeScheduledAt, as on the web path', async () =>
+        it('an account pending deletion carries purgeScheduledAt, as on the web path', async () =>
         {
             vi.mocked(usersRepository.findByIdWithRoleAndKeyOnPrimary).mockResolvedValue(
-                admissionRow({ status: 'pending_deletion' }) as never,
+                admissionRow({ deletion: 'pending' }) as never,
             );
             const purgeScheduledAt = new Date('2030-01-01T00:00:00.000Z');
             vi.mocked(accountDeletionRequestsRepository.findPendingByUserIdOnPrimary).mockResolvedValue({ purgeScheduledAt } as never);

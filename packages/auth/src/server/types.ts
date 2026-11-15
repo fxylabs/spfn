@@ -80,14 +80,16 @@ export const INVITATION_MAX_EXPIRY_DAYS = 30;
  * User status enum values
  * Single source of truth for all user statuses
  *
+ * Whether an operator lets the account in — moderation and activation, and
+ * nothing else. Where the account is in its deletion is a separate fact
+ * (`ACCOUNT_DELETION_STATES`, `users.deletion`): writing one never changes the
+ * other, so a suspension outlives a deletion request and its cancellation.
+ *
  * - active: Normal operation (default)
  * - inactive: Deactivated (user request, dormant)
  * - suspended: Locked (security incident, ToS violation)
- * - pending_deletion: Deletion requested, within the grace period (recoverable)
- * - deleted: Grace period elapsed and the account was purged (anonymize mode only —
- *   hard-delete removes the row instead, so this status never appears for it)
  */
-export const USER_STATUSES = ['active', 'inactive', 'suspended', 'pending_deletion', 'deleted'] as const;
+export const USER_STATUSES = ['active', 'inactive', 'suspended'] as const;
 
 /**
  * User status type derived from the const array
@@ -99,6 +101,18 @@ export type UserStatus = typeof USER_STATUSES[number];
  * change that holds whatever the account was in — an operator suspending it.
  */
 export type AccountStatusSource = UserStatus | 'any';
+
+/**
+ * Where an account is in its deletion (`users.deletion`; null: none asked for)
+ *
+ * - pending: Deletion requested, within the grace period (recoverable through
+ *   `/_auth/deletion/cancel`)
+ * - deleted: The grace period elapsed and the account was purged (anonymize
+ *   mode only — hard-delete removes the row instead)
+ */
+export const ACCOUNT_DELETION_STATES = ['pending', 'deleted'] as const;
+
+export type AccountDeletionState = typeof ACCOUNT_DELETION_STATES[number];
 
 /**
  * Social provider enum values
@@ -139,7 +153,7 @@ export type AccountDeletionRequestedBy = typeof ACCOUNT_DELETION_REQUESTED_BY[nu
 /**
  * Purge strategy enum values
  *
- * - anonymize: Scrub PII, keep the row (status becomes 'deleted') — default
+ * - anonymize: Scrub PII, keep the row (deletion becomes 'deleted') — default
  * - hard-delete: Physically remove the `users` row (cascades to child rows)
  */
 export const PURGE_STRATEGIES = ['anonymize', 'hard-delete'] as const;

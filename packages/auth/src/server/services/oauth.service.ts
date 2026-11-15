@@ -59,7 +59,7 @@ import { providerAccountFields } from '../lib/oauth/provider-account';
 import { registerPublicKeyService } from './key.service';
 import { decideKeyBinding } from '../lib/key-policy';
 import { updateLastLoginService } from './user.service';
-import { getPendingDeletionInfo } from './account-deletion.service';
+import { accountRefusal, admissionRefusalError } from './admission.service';
 import { mfaEnrolledForUser } from './mfa.service';
 import { secondFactorEnrolmentFields } from './second-factor-policy.service';
 import { authLoginEvent, authRegisterEvent, oauthUnlinkedEvent } from '../events';
@@ -783,18 +783,11 @@ export async function assertActiveForOAuthSession(
         throw missing();
     }
 
-    if (user.status === 'active')
+    const refusal = await accountRefusal(user);
+    if (refusal)
     {
-        return;
+        throw admissionRefusalError(refusal);
     }
-
-    if (user.status === 'pending_deletion')
-    {
-        const pending = await getPendingDeletionInfo(user.id);
-        throw new AccountPendingDeletionError({ purgeScheduledAt: pending?.purgeScheduledAt.toISOString() });
-    }
-
-    throw new AccountDisabledError({ status: user.status });
 }
 
 /**

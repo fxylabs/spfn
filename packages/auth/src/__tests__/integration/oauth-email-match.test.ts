@@ -410,11 +410,11 @@ describe.skipIf(!dbAvailable)('First social sign-in on an email an existing acco
             expect((await snapshot()).users).toBe(before.users);
         });
 
-        for (const status of ['suspended', 'pending_deletion'] as const)
+        for (const [state, patch] of [['suspended', { status: 'suspended' }], ['pending deletion', { deletion: 'pending' }]] as const)
         {
-            it(`E11 (${status}): reject answers email_in_use, not account_unavailable, when the matching account is ${status}`, async () =>
+            it(`E11 (${state}): reject answers email_in_use, not account_unavailable, when the matching account is ${state}`, async () =>
             {
-                await getTestDb().update(users).set({ status }).where(eq(users.id, ownerId));
+                await getTestDb().update(users).set(patch).where(eq(users.id, ownerId));
                 configureAuth({ oauthEmailMatch: 'reject' });
                 const before = await snapshot();
 

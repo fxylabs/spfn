@@ -1,25 +1,28 @@
 /**
  * Account Status Repository
  *
- * The one statement that writes `users.status`.
+ * The one statement that writes `users.status`, and the one that writes
+ * `users.deletion`.
  *
  * Deliberately not exported from the package entry (`repositories/index.ts`
  * leaves it out): an application changes an account's status through
- * `setAccountStatus`, which ends the account's sessions in the same
+ * `setAccountStatus`, and the deletion service moves its deletion through
+ * `setAccountDeletion`; both end the account's sessions in the same
  * transaction. A repository method an application could call would change the
- * column and clear nothing — the defect that function exists to end.
+ * column and clear nothing — the defect those functions exist to end.
  */
 
-import { and, eq } from 'drizzle-orm';
+import { and, eq, isNull } from 'drizzle-orm';
 
 import { users } from '../entities/users';
 import { AccountStateRepository, type AccountWrites } from './account-state.repository';
-import type { AccountStatusSource, UserStatus } from '../types';
+import type { AccountDeletionState, AccountStatusSource, UserStatus } from '../types';
 
 export class AccountStatusRepository extends AccountStateRepository
 {
     static override readonly accountWrites: AccountWrites<AccountStatusRepository> = {
         setStatus: { account: id => id },
+        setDeletion: { account: id => id },
     };
 
     /**
@@ -38,6 +41,24 @@ export class AccountStatusRepository extends AccountStateRepository
             .update(users)
             .set({ status })
             .where(from === 'any' ? eq(users.id, id) : and(eq(users.id, id), eq(users.status, from)))
+            .returning({ id: users.id });
+
+        return result.length > 0;
+    }
+
+    /**
+     * Move the account's deletion from `from` to `deletion`, in one
+     * conditional statement. Write primary. `status` is not in it: a deletion
+     * neither lifts nor imposes a sanction.
+     *
+     * @returns whether the account's deletion was `from` (null: none asked for)
+     */
+    async setDeletion(id: number, deletion: AccountDeletionState | null, from: AccountDeletionState | null): Promise<boolean>
+    {
+        const result = await this.db
+            .update(users)
+            .set({ deletion })
+            .where(and(eq(users.id, id), from === null ? isNull(users.deletion) : eq(users.deletion, from)))
             .returning({ id: users.id });
 
         return result.length > 0;

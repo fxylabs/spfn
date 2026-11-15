@@ -421,7 +421,7 @@ describe.skipIf(!dbAvailable)('key registration provenance and the key epoch (ca
         const deleting = await seedUser('d3-delete@test.com');
         await signIn('d3-delete@test.com');
 
-        await requestAccountDeletionService(deleting.id, { requestedBy: 'self', password: PASSWORD });
+        await requestAccountDeletionService(deleting.id, { requestedBy: 'admin' });
         expect(await keyEpoch(deleting.id)).toBe(1);
     });
 
@@ -447,7 +447,7 @@ describe.skipIf(!dbAvailable)('key registration provenance and the key epoch (ca
         expect(await keyEpoch(user.id)).toBe(0);
     });
 
-    it('an anonymize purge: the users row stays with its epoch untouched and its key rows gone, so the link dies on the status condition instead', async () =>
+    it('an anonymize purge: the users row stays with its epoch untouched and its key rows gone, so the link dies on the deletion condition instead', async () =>
     {
         const user = await seedUser('d5@test.com');
         await signIn('d5@test.com');
@@ -456,7 +456,7 @@ describe.skipIf(!dbAvailable)('key registration provenance and the key epoch (ca
         const token = new URL(link.url).searchParams.get('token')!;
 
         await getTestDb().delete(userPublicKeys).where(eq(userPublicKeys.userId, user.id));
-        await getTestDb().update(users).set({ status: 'deleted', deletedAt: new Date() }).where(eq(users.id, user.id));
+        await getTestDb().update(users).set({ deletion: 'deleted', deletedAt: new Date() }).where(eq(users.id, user.id));
 
         const [row] = await getTestDb().select().from(users).where(eq(users.id, user.id)).limit(1);
         expect(row.keyEpoch).toBe(0);

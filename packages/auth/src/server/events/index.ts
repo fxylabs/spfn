@@ -389,7 +389,8 @@ export const authDeletionCompletedEvent = defineEvent(
  * @example
  * ```typescript
  * oauthUnlinkedEvent.subscribe(async (payload) => {
- *     await requestAccountDeletionService({ userId: payload.userId, requestedBy: 'self' });
+ *     // The app's own decision, not the person's request from a session: 'admin'.
+ *     await requestAccountDeletionService(Number(payload.userId), { requestedBy: 'admin', reason: 'provider unlinked' });
  * });
  * ```
  */

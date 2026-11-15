@@ -157,10 +157,9 @@ export async function verifyPassword(password: string, hash: string): Promise<bo
  * at the configured cost and in the format `hashPassword` writes (matches new
  * users' hashes) and reused.
  *
- * Shared by `loginService` (auth.service.ts) and `cancelAccountDeletionService`
- * (account-deletion.service.ts) — kept here rather than in either service to
- * avoid a circular import between the two (they already import from each other
- * for `getPendingDeletionInfo`).
+ * Shared by `loginService` (auth.service.ts), `cancelAccountDeletionService`
+ * (account-deletion.service.ts) and `assertRecentAuthentication` — kept here
+ * rather than in any one service, so none imports another for it.
  */
 let dummyHashPromise: Promise<string> | null = null;
 export function getDummyPasswordHash(): Promise<string>

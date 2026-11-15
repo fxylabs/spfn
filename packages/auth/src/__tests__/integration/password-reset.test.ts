@@ -131,7 +131,8 @@ describe.skipIf(!dbAvailable)('Password reset', () =>
         phone?: string;
         password?: string | null;
         emailVerifiedAt?: Date | null;
-        status?: 'active' | 'suspended' | 'pending_deletion';
+        status?: 'active' | 'suspended';
+        deletion?: 'pending';
     }
 
     async function seedUser(options: SeedOptions)
@@ -143,6 +144,7 @@ describe.skipIf(!dbAvailable)('Password reset', () =>
             passwordHash: options.password === null ? null : await hashPassword(options.password ?? PASSWORD),
             emailVerifiedAt: options.emailVerifiedAt ?? null,
             status: options.status ?? 'active',
+            deletion: options.deletion ?? null,
             roleId: userRole!.id,
         }).returning();
 
@@ -346,17 +348,17 @@ describe.skipIf(!dbAvailable)('Password reset', () =>
         });
 
         it.each([
-            ['suspended' as const],
-            ['pending_deletion' as const],
-        ])('row P5: an account that is %s gets no mail', async (status) =>
+            ['suspended', { status: 'suspended' }],
+            ['pending-deletion', { deletion: 'pending' }],
+        ] as const)('row P5: an account that is %s gets no mail', async (state, patch) =>
         {
-            await seedUser({ email: `p5-${status}@example.com`, emailVerifiedAt: new Date(), status });
+            await seedUser({ email: `p5-${state}@example.com`, emailVerifiedAt: new Date(), ...patch });
 
-            const response = await post('/_auth/password/reset', { email: `p5-${status}@example.com` });
+            const response = await post('/_auth/password/reset', { email: `p5-${state}@example.com` });
 
             expect(response.status).toBe(200);
             expect(sendEmail).not.toHaveBeenCalled();
-            expect(await resetRows(`p5-${status}@example.com`)).toHaveLength(0);
+            expect(await resetRows(`p5-${state}@example.com`)).toHaveLength(0);
         });
 
         it('rows P1/P3/P4/P5: every answer is byte-identical', async () =>
@@ -783,7 +785,7 @@ describe.skipIf(!dbAvailable)('Password reset', () =>
             const setupSecret = await openSetupSession('c8@example.com');
 
             await getTestDb().update(users)
-                .set({ status: 'pending_deletion' })
+                .set({ deletion: 'pending' })
                 .where(eq(users.email, 'c8@example.com'));
 
             expect((await post('/_auth/password/reset/complete', completeBody(setupSecret))).status).toBe(401);

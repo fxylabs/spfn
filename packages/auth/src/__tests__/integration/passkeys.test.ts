@@ -776,7 +776,7 @@ describe.skipIf(!dbAvailable)('Passkeys (WebAuthn)', () =>
             const session = await signIn('owner@test.com');
             const { authenticator } = await enrolled(session);
 
-            await getTestDb().update(users).set({ status: 'pending_deletion' }).where(eq(users.email, 'owner@test.com'));
+            await getTestDb().update(users).set({ deletion: 'pending' }).where(eq(users.email, 'owner@test.com'));
 
             const response = await signInWithPasskey(authenticator);
 

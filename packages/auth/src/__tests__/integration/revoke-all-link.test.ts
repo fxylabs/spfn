@@ -114,7 +114,7 @@ describe.skipIf(!dbAvailable)('signed revoke-all link (case table 7b)', () =>
     // Accounts, keys and links
     // ========================================================================
 
-    async function seedUser(email: string, status: 'active' | 'suspended' | 'inactive' | 'pending_deletion' = 'active')
+    async function seedUser(email: string, status: 'active' | 'suspended' | 'inactive' = 'active')
     {
         const userRole = await getRoleByName('user');
         const [row] = await getTestDb().insert(users).values({
@@ -347,7 +347,7 @@ describe.skipIf(!dbAvailable)('signed revoke-all link (case table 7b)', () =>
     {
         const { user, token } = await accountWithLink('b10@test.com');
 
-        await requestAccountDeletionService(user.id, { requestedBy: 'self', password: PASSWORD });
+        await requestAccountDeletionService(user.id, { requestedBy: 'admin' });
 
         expect(await keyEpoch(user.id)).toBe(1);
         await expectRefused(await confirm(token));
@@ -408,14 +408,14 @@ describe.skipIf(!dbAvailable)('signed revoke-all link (case table 7b)', () =>
         expect((await consume(token)).status).toBe(200);
     });
 
-    it('an account anonymized by the deletion purge, whose users row survives: 404 from both, because the statement joins status active', async () =>
+    it('an account anonymized by the deletion purge, whose users row survives: 404 from both, because the statement joins no deletion', async () =>
     {
         const { user, token } = await accountWithLink('b14@test.com');
 
         // What anonymize leaves behind: the row, marked deleted, with its keys gone
-        // and its epoch untouched — which is why status has to be in the join.
+        // and its epoch untouched — which is why the deletion has to be in the join.
         await getTestDb().delete(userPublicKeys).where(eq(userPublicKeys.userId, user.id));
-        await getTestDb().update(users).set({ status: 'deleted', deletedAt: new Date() })
+        await getTestDb().update(users).set({ deletion: 'deleted', deletedAt: new Date() })
             .where(eq(users.id, user.id));
 
         expect(await keyEpoch(user.id)).toBe(0);
@@ -434,14 +434,14 @@ describe.skipIf(!dbAvailable)('signed revoke-all link (case table 7b)', () =>
         expect(await linkRows(user.id)).toHaveLength(0);
     });
 
-    it('an account that is suspended, inactive or pending_deletion: 404 from both', async () =>
+    it('an account that is suspended, inactive or pending deletion: 404 from both', async () =>
     {
-        for (const status of ['suspended', 'inactive', 'pending_deletion'] as const)
+        for (const [state, patch] of [['suspended', { status: 'suspended' }], ['inactive', { status: 'inactive' }], ['pending', { deletion: 'pending' }]] as const)
         {
-            const user = await seedUser(`b16-${status}@test.com`);
+            const user = await seedUser(`b16-${state}@test.com`);
             const { token } = await issueLink(user.id);
 
-            await getTestDb().update(users).set({ status }).where(eq(users.id, user.id));
+            await getTestDb().update(users).set(patch).where(eq(users.id, user.id));
 
             await expectRefused(await confirm(token));
             await expectRefused(await consume(token));

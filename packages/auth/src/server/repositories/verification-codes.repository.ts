@@ -97,15 +97,18 @@ export class VerificationCodesRepository extends BaseRepository
     }
 
     /**
-     * 인증 코드 사용 처리
+     * 인증 코드 사용 처리 — and keep the row until `retainedUntil`, the expiry of
+     * the verification token minted from it: the row is what `spendToken`
+     * spends, so it lives as long as the token (`VERIFICATION_TOKEN_EXPIRY_MINUTES`).
      * Write primary 사용
      */
-    async markAsUsed(id: number)
+    async markAsUsed(id: number, retainedUntil: Date)
     {
         const result = await this.db
             .update(verificationCodes)
             .set({
                 usedAt: new Date(),
+                expiresAt: retainedUntil,
             })
             .where(eq(verificationCodes.id, id))
             .returning();
@@ -134,7 +137,9 @@ export class VerificationCodesRepository extends BaseRepository
     }
 
     /**
-     * 만료된 코드 삭제
+     * 만료된 코드 삭제 — by `expiresAt`: an unverified code's own expiry, and for
+     * a verified one the expiry of the token minted from it (`markAsUsed`), so a
+     * sweep never removes a row a live token still has to spend.
      * Write primary 사용
      */
     async deleteExpired()
@@ -164,6 +169,33 @@ export class VerificationCodesRepository extends BaseRepository
             .returning();
 
         return result.length;
+    }
+
+    /**
+     * Spend the verification token minted from a code: delete the code's row,
+     * in one conditional statement that names the target and purpose the token
+     * carries. The token is a signed copy of those three values and lives past
+     * its code, so the row is what makes it single-use — a second presentation,
+     * or one racing this, matches no row.
+     *
+     * Write primary.
+     *
+     * @returns whether this call spent it
+     */
+    async spendToken(codeId: number, target: string, purpose: VerificationPurpose): Promise<boolean>
+    {
+        const result = await this.db
+            .delete(verificationCodes)
+            .where(
+                and(
+                    eq(verificationCodes.id, codeId),
+                    eq(verificationCodes.target, target),
+                    eq(verificationCodes.purpose, purpose),
+                ),
+            )
+            .returning({ id: verificationCodes.id });
+
+        return result.length > 0;
     }
 
     /**

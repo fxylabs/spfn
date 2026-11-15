@@ -196,7 +196,7 @@ async function assertSuperadminReachable(): Promise<void>
         return;
     }
 
-    const holders = await usersRepository.findRoleHolders(['superadmin'], 'active');
+    const holders = await usersRepository.findRoleHolders(['superadmin'], true);
 
     if (holders.length > 0 && !holders.some(holder => isEmailAllowedForRole(holder, 'superadmin')))
     {

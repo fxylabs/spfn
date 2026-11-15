@@ -756,13 +756,13 @@ describe.skipIf(!dbAvailable)('Battle.net sign-in and OAuth link/unlink (#154)',
             expect(await socialRows()).toHaveLength(0);
         });
 
-        it.each(['suspended', 'pending_deletion'] as const)(
+        it.each([['suspended', { status: 'suspended' }], ['pending deletion', { deletion: 'pending' }]] as const)(
             'C10: an account that became %s meanwhile is refused account_unavailable',
-            async (status) =>
+            async (_state, patch) =>
             {
                 const session = await signIn('owner@test.com');
                 const started = await startLink(session);
-                await getTestDb().update(users).set({ status }).where(eq(users.id, ownerId));
+                await getTestDb().update(users).set(patch).where(eq(users.id, ownerId));
 
                 const location = await finishLink(started, 'code-flash');
 

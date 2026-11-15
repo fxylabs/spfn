@@ -326,8 +326,8 @@ routes use `.skip(['auth'])`; the rest require `Authorization: Bearer <client-si
 | `setSetting` | PUT `/_auth/users/settings/:key` | yes | write one (`{ value }`, checked against the key's schema); the default deletes the row |
 | `resetSetting` | DELETE `/_auth/users/settings/:key` | yes | return one to its default (204) |
 | `createInvitation` / `acceptInvitation` / `listInvitations` / `cancelInvitation` / `resendInvitation` / `deleteInvitation` / `getInvitation` | — | mixed | invitation flow — see [Invitations](#invitations) |
-| `requestAccountDeletion` | POST `/_auth/deletion/request` | yes | request account deletion (re-auth gated) — see [Account Deletion & Recovery](#account-deletion--recovery) |
-| `cancelAccountDeletion` | POST `/_auth/deletion/cancel` | public | cancel a pending deletion (credential-based recovery) |
+| `requestAccountDeletion` | POST `/_auth/deletion/request` | yes | request account deletion (step-up and recent authentication) — see [Account Deletion & Recovery](#account-deletion--recovery) |
+| `cancelAccountDeletion` | POST `/_auth/deletion/cancel` | public | cancel a pending deletion (password or a one-time code to the account's e-mail or phone) |
 | `listRoles` / `createAdminRole` / `updateAdminRole` / `deleteAdminRole` / `updateUserRole` | — | superadmin | admin RBAC management |
 | OAuth routes | — | — | see OAuth section |
 | `registerOAuth2Client` / `getOAuth2Authorize` / `createOAuth2AuthorizationCode` / `oauth2Token` / `oauth2Revoke` / `listOAuth2Grants` / `revokeOAuth2Grant` | `/_auth/oauth2/*` | mixed | OAuth 2.1 authorization server for MCP clients — see [Authorization server for MCP clients](#authorization-server-for-mcp-clients). 404 unless configured |
@@ -1399,11 +1399,17 @@ confirm  → the link becomes a short-lived, HttpOnly password-setup session
 complete → the new password is written, every other device is signed out, this one is signed in
 ```
 
-**Who can reset.** An `active` account whose `emailVerifiedAt` is set **or** that already has
-a password. The second half is what makes the rule work on accounts created before the
-column was stamped: both register paths proved the address at signup. An OAuth-only account
-whose provider reported the address unverified has neither and is excluded — for it, a reset
-would be a way in built on an address nobody proved.
+**Who can reset.** An `active` account with no deletion pending whose `emailVerifiedAt` is set
+**or** that already has a password. The second half is what makes the rule work on accounts
+created before the column was stamped: both register paths proved the address at signup. An
+OAuth-only account whose provider reported the address unverified has neither and is excluded —
+for it, a reset would be a way in built on an address nobody proved.
+
+**An account pending deletion is not reset.** It is recovered first, through
+`/_auth/deletion/cancel` with a one-time code sent to its own e-mail or phone — no password
+needed — and reset once it is back. The reset request answers it as it answers every input (no
+mail, the same body), because a different answer would tell a stranger the address has an
+account; the pointer to the code path is in the deletion notice the account was sent instead.
 
 **1 — request the link.** The response is identical for every input — same status, same two
 fields, same `expiresAt` arithmetic — and mail goes only to an account that can be reset, so
@@ -2252,6 +2258,11 @@ unless the caller has recently proved themselves, in one of two ways:
   `SPFN_AUTH_PASSKEY_RECENT_AUTH_MINUTES`** — the key's `authenticatedAt`, which a sign-in sets and
   a `rotateKey` only inherits, so rotating does not make a stale session fresh; or
 - **the body carries `currentPassword`** and it verifies.
+
+A password in the body is the proof offered, and it is judged: a wrong one answers
+`RECENT_AUTH_REQUIRED` even on a device that signed in a moment ago. A presented password is always
+judged, on every route that takes one — passkey register options, passkey revoke, OAuth link and
+unlink, session-binding disable, and the deletion request.
 
 Otherwise: **403 with `code: 'RECENT_AUTH_REQUIRED'`**. Branch on that code to prompt for the
 password and retry — it is a stable field, not a message to match on.
@@ -4438,7 +4449,10 @@ const admission = await admitPrincipal({
 
 It decides in this order:
 
-1. **The account's status**, read on the write primary — anything but `active` is refused.
+1. **The account**, read on the write primary — a deletion asked for is refused with the
+   pending-deletion answer (a purged account with the disabled one), then a status other than
+   `active` with the disabled answer. Both are columns of the users row, so this is still one
+   read; `admitsAccount(user)` is the yes/no form for a reader that needs no reason.
 2. **The credential is live** — a device key by `keyLiveness` (active, unexpired, of the
    account's current key generation); a one-time token by the key that issued it; a renewal key
    by the renewal grace rule (bound, inside its grace); an OAuth 2.1 grant by not being revoked;
@@ -4485,7 +4499,52 @@ keeps no per-key WebSocket registry yet — but no new one is let in: a WebSocke
 admitted at the connect, and a revoked key's token is refused there. Device sessions do **not**
 come back when the account is reactivated — the person signs in again. OAuth 2.1 grants are
 kept: they are refused while the account is not active and work again after reactivation.
-Account deletion, cancellation and purge go through it.
+Account deletion does **not** go through it — see the next section.
+
+### Account status and account deletion are two facts
+
+`users.status` says whether an operator lets the account in (`active | inactive | suspended`).
+`users.deletion` says where the account is in its deletion (`null | 'pending' | 'deleted'`; the
+purge date stays on the `account_deletion_requests` row). Writing one never changes the other:
+a deletion request leaves a suspension in place, cancelling it clears only the deletion, and a
+suspended account scheduled for deletion by an administrator and then recovered by its owner is
+still suspended. `users.deletion` is the one source of truth for the account's deletion state;
+the request row records the request (who, when, the purge date, how it ended).
+
+`setAccountDeletion` (package-internal) is the one writer of `users.deletion`, beside
+`setAccountStatus` and like it: under the account lock, one conditional statement naming the
+deletion it leaves (`null → pending` on a request, `pending → null` on a cancel,
+`pending → deleted` on an anonymize purge), and entering a deletion ends the account's key
+generation. `usersRepository.updateById` refuses `deletion` as it refuses `status`.
+
+> **BREAKING — `pending_deletion` and `deleted` are no longer statuses.** `USER_STATUSES` is
+> `['active', 'inactive', 'suspended']`; `ACCOUNT_DELETION_STATES` (`['pending', 'deleted']`) and
+> `AccountDeletionState` are new exports. Code reading `user.status === 'pending_deletion'` reads
+> `user.deletion === 'pending'`; `status === 'deleted'` is `deletion === 'deleted'`; "may this
+> account be let in" is `admitsAccount(user)` (`status === 'active' && deletion === null`), not
+> `status === 'active'` alone. `UserUpdate` omits `deletion`. `usersRepository.findRoleHolders`
+> takes `admissibleOnly: boolean` instead of a status. `AccountPendingDeletionError` keeps
+> `details.status: 'pending_deletion'` on the wire.
+>
+> **Upgrade.** The migration adds `users.deletion` and moves existing rows: `pending_deletion` →
+> `status = 'active', deletion = 'pending'`; `deleted` → `status = 'inactive', deletion =
+> 'deleted'` (a purged account is not let in by either column). Purge dates and request rows are
+> untouched, so scheduled purges run as planned and nobody can sign in who could not before.
+> What the old column could not hold is lost: an account suspended **and then** scheduled for
+> deletion stored only `pending_deletion`, so after the upgrade it reads as active-and-pending,
+> and a cancel would let it in. Before migrating, list the accounts in that state and re-apply
+> their suspension afterwards with `setAccountStatus(id, 'suspended', { from: 'any', reason })`:
+>
+> ```sql
+> SELECT u.id, u.public_id, u.email, r.requested_by, r.requested_at, r.purge_scheduled_at
+> FROM spfn_auth.users u
+> LEFT JOIN spfn_auth.account_deletion_requests r ON r.user_id = u.id AND r.status = 'pending'
+> WHERE u.status = 'pending_deletion'
+> ORDER BY r.requested_at;
+> ```
+>
+> Your own moderation records (or `requested_by = 'admin'` rows) tell which of them were
+> suspended.
 
 A sign-in racing a status change cannot leave a key behind: every key write
 (`registerPublicKeyService` — all sign-in channels, renewal, rotation, invitation acceptance)
@@ -5617,34 +5676,72 @@ PII protection track for blind-index re-signup prevention), backup beyond-use ha
 intake/response workflows, and webhook fan-out — those are app/ops concerns.
 
 ```
-active ──request (re-auth)──> pending_deletion ──grace period elapses (cron)──> deleted (anonymize) | row removed (hard-delete)
-  ^                                  │
-  └───────────cancel (re-auth)───────┘        immediate = grace period of 0, same pipeline
+users.deletion:
+none ──request (step-up, recent auth)──> pending ──grace period elapses (cron)──> deleted (anonymize) | row removed (hard-delete)
+  ^                                         │
+  └──cancel (password or one-time code)─────┘        immediate = grace period of 0, same pipeline
+
+users.status (active | inactive | suspended) is not written by any of them.
 ```
 
-- **Request** — `POST /_auth/deletion/request` (authenticated). Step-up re-auth: password
-  holders confirm with `password`; OAuth-only/passwordless accounts confirm with a
-  `verificationToken` from `/_auth/codes` + `/_auth/codes/verify` (`purpose: 'account_deletion'`).
-  On success: status → `pending_deletion`, every active session key is revoked, a
-  `account_deletion_requests` audit row is created, `auth.deletion.requested` fires, and (if
-  the user has an email and `sendNotifications` is on) a notice is sent with the scheduled purge
-  date.
-- **Login is blocked while pending** — password login, OAuth login, and the `authenticate`
-  middleware all reject a `pending_deletion` account with `AccountPendingDeletionError` (403,
-  `details.purgeScheduledAt`) instead of the generic `AccountDisabledError`, so the client can
-  show a recovery prompt.
+- **Request** — `POST /_auth/deletion/request` (authenticated). The gates every sensitive
+  change passes, with the shared functions: an account with a second factor re-proves it on this
+  device (`assertStepUp` — **403 `STEP_UP_REQUIRED`**, as `keys/revoke-all` answers), and the
+  device proved a credential within the recent-authentication window
+  (`SPFN_AUTH_PASSKEY_RECENT_AUTH_MINUTES`, default 10) or the body carries the account
+  `password` (**403 `RECENT_AUTH_REQUIRED`**; a passwordless account signs in again; a password
+  that is presented and wrong is refused even on a recent session). The proofs are checked before
+  the account lock (the password hashes) and confirmed under it: the session admitted again by the
+  admission for this route — account, credential of whatever kind and second-factor policy, as
+  `authenticate` asks them — the step-up still on record, the recent authentication still holding,
+  and the password's hash still the one stored — a request that waited for the lock while another
+  transaction revoked the key, suspended the account, left it enrolment-only, removed the second
+  factor or changed the password is refused with the answer its next request would get and
+  schedules nothing (a hash re-encoded meanwhile is verified once more). On success: `deletion` → `pending` (the
+  status is left as it is), every active session key is revoked, an `account_deletion_requests`
+  audit row is created (with `requestedBy: 'self'`), `auth.deletion.requested` fires, and (when
+  `sendNotifications` is on) a notice with the scheduled purge date and how to cancel goes to the
+  channel the account has: by e-mail when it has an address, otherwise by SMS (`sendSMS` from
+  `@spfn/notification`, the sender verification codes use).
+- **Login is blocked while pending** — password, passkey and OAuth sign-in and every door of the
+  admission (`authenticate` and the rest) reject an account whose deletion is pending with
+  `AccountPendingDeletionError` (403, `details.purgeScheduledAt`) — before its status, so the
+  client can show a recovery prompt even for a suspended account.
 - **Cancel (recovery)** — `POST /_auth/deletion/cancel` (public — sessions were revoked at
-  request time, so there's no Bearer token to authenticate with). Credential-based: email/phone
-  plus `password` or a fresh `verificationToken`. On success, status → `active`; the user still
-  needs to log in separately afterward.
+  request time, so there's no Bearer token to authenticate with), the one door that admits an
+  account whose deletion is pending. Email or phone, plus **either** the `password` **or** a
+  `verificationToken` from `/_auth/codes` + `/_auth/codes/verify` (`purpose: 'account_deletion'`)
+  for the account's own e-mail **or** phone — both are accepted whether or not the account has a
+  password, so a person who forgot it recovers with a code. The token says which address it
+  proves; it is spent by the cancel (single use — a second presentation answers
+  `InvalidVerificationTokenError`). A token lives 15 minutes, its code 5: a verified code's row is
+  kept until its token expires, so `verificationCodesRepository.deleteExpired()` on a schedule never
+  breaks a token still valid. A password is confirmed under the account lock as the request's is. On success `deletion` is cleared and nothing else: a
+  suspended account stays suspended, whoever requested the deletion. The user still needs to
+  log in separately afterward.
 - **Purge job** — sweeps `account_deletion_requests` for rows past their grace period and
   destroys the account. Register it explicitly (see below); it is **not** wired up by
   `createAuthLifecycle()` automatically.
 - **Admin / GDPR-response entry points** — `requestAccountDeletionService(userId, { requestedBy: 'admin', immediate })`
   and `purgeUserService(userId)` are exported for app-side admin routes / DSR handling; the app
-  owns the route and its authorization. An `immediate` request purges once it commits, outside
+  owns the route and its authorization. The request row records `requestedBy: 'admin'`; the
+  person can still cancel it (an operator who wants the account kept out suspends it — that
+  fact survives the cancel). An `immediate` request purges once it commits, outside
   its transaction (`onBeforePurge` is the app's own I/O); a purge that fails there is the sweep's
   to retry.
+
+> **BREAKING — a deletion request passes step-up and recent authentication.** `POST
+> /_auth/deletion/request` no longer takes `verificationToken`; a passwordless account whose
+> session is older than the recent-authentication window signs in again first, and an account
+> with a second factor answers `403 STEP_UP_REQUIRED` until it re-proves it on this device
+> (`mfa/step-up`). `requestAccountDeletionService(userId, { requestedBy: 'self', credential, password? })`
+> takes the requesting session's credential (`getAuth(c).credential`) in place of `verificationToken`; `{ requestedBy: 'admin' }` is
+> unchanged.
+
+> **BREAKING — cancel accepts a code for any account, and spends it.** `POST
+> /_auth/deletion/cancel` accepts a `verificationToken` for an account that has a password (it
+> answered 400 before), and for the account's phone as well as its e-mail. A token cancels once;
+> before, it could be presented again for its 15 minutes.
 
 ```typescript
 import { defineServerConfig } from '@spfn/core/server';
@@ -5672,7 +5769,8 @@ export default defineServerConfig()
 **Purge strategies:**
 
 - `anonymize` (default) — scrubs PII, keeps the row: `email` → `deleted-{publicId}@deleted.invalid`,
-  `phone`/`username`/`passwordHash` → `null`, `status` → `'deleted'`, `deletedAt`/`deletedBy` set
+  `phone`/`username`/`passwordHash` → `null`, `deletion` → `'deleted'` (the status is kept),
+  `deletedAt`/`deletedBy` set
   (`softDelete()` on `users`). Social accounts and public keys are deleted (frees the provider
   link and revokes access), the profile's PII columns are cleared, and any leftover verification
   codes for the original email/phone are removed. The freed email/phone can be re-registered
@@ -5687,7 +5785,7 @@ The final "your account has been deleted" notice is sent **after** the purge tra
 captured before the destructive step ran. This holds for `hard-delete` too: the row is already
 gone by send time, but the address was captured beforehand, so the notice still goes out.
 
-**Concurrency.** The purge job re-verifies the user is still `pending_deletion` on the write
+**Concurrency.** The purge job re-verifies the account's deletion is still `pending` on the write
 primary immediately before any destructive DML, inside the same transaction as the DML itself —
 closing the window between a stale read (the sweep's own batch, or replica lag) and a concurrent
 `cancel`. The `account_deletion_requests` claim (`markCompleted`) is a conditional `UPDATE ...
@@ -5827,9 +5925,9 @@ when the environment is validated (`spfn env validate`, or the server's boot che
 the app lists), naming the variable and the accepted forms.
 
 **Is account deletion immediate?**
-No. A request moves the account to `pending_deletion`, revokes every session key, and
-schedules the purge for 30 days later by default. The user can cancel with their
-credentials during that window. Two things need your attention: the purge sweep is a job
+No. A request moves the account's deletion to `pending`, revokes every session key, and
+schedules the purge for 30 days later by default. The user can cancel with their password
+or a one-time code during that window. Two things need your attention: the purge sweep is a job
 you register explicitly (`.jobs(authJobRouter)`), and a purged account's email becomes
 reusable immediately. See [Account Deletion & Recovery](#account-deletion--recovery).
 
@@ -5900,9 +5998,10 @@ duplicated into a second privileged row holding the configured password.
   [Account Deletion & Recovery](#account-deletion--recovery). An app that initialises pg-boss and
   skips this keeps sending link mail, but on the request path, with a warning naming the router —
   see [Link mail delivery](#link-mail-delivery).
-- **`USER_STATUSES` gained `pending_deletion` / `deleted`.** Any code with a `switch(user.status)`
-  or an exhaustive status union must handle both — `enumText` is plain `text` with no DB `CHECK`,
-  so nothing enforces this at the database layer.
+- **A deletion is not a status.** `users.status` holds `active | inactive | suspended` only; where
+  the account is in its deletion is `users.deletion`. Checking `status === 'active'` alone lets a
+  pending or purged account through — use `admitsAccount(user)`. `enumText` is plain `text` with
+  no DB `CHECK`, so nothing enforces either set of values at the database layer.
 
 ## Complete example
 

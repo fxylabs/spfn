@@ -1,5 +1,5 @@
 /**
- * account-deletion.service.ts — status transitions, re-auth gate, immediate-deletion
+ * account-deletion.service.ts — deletion transitions, request gates, immediate-deletion
  * gate, anonymize placeholder email, error/status-code consistency, and the
  * concurrency/ordering fixes from PR #11 review (issue #9):
  *
@@ -32,7 +32,11 @@ const {
     sendEmail,
     runInTransaction,
     revokeAllOAuth2GrantsForUser,
-    setAccountStatus,
+    setAccountDeletion,
+    assertStepUp,
+    proveRecentAuthentication,
+    recentAuthenticationHolds,
+    admitCompletion,
 } = vi.hoisted(() => ({
     usersRepository: {
         findById: vi.fn(),
@@ -87,9 +91,16 @@ const {
     sendEmail: vi.fn(async () => ({ success: true })),
     runInTransaction: vi.fn(async (fn: () => Promise<unknown>) => fn()),
     revokeAllOAuth2GrantsForUser: vi.fn(async () => undefined),
-    // The one writer of users.status: it writes the status and, for every
-    // status but active, revokes every key in the same transaction.
-    setAccountStatus: vi.fn(async (_id: number, _status: string, _transition: { from: string; reason: string }): Promise<'changed' | 'refused'> => 'changed'),
+    // The one writer of users.deletion: it writes the deletion and, entering
+    // one, revokes every key in the same transaction.
+    setAccountDeletion: vi.fn(async (_id: number, _deletion: string | null, _transition: { from: string | null; reason: string }): Promise<'changed' | 'refused'> => 'changed'),
+    // The gates every sensitive change passes; each a no-op answer here unless a test refuses it.
+    assertStepUp: vi.fn(async (_params: { userId: number; keyId: string }) => undefined),
+    proveRecentAuthentication: vi.fn(async (_params: { userId: number; keyId: string; currentPassword?: string }, _windowMs?: number): Promise<{ by: 'key' } | { by: 'password'; verifiedHash: string }> => ({ by: 'key' })),
+    // The same proof, confirmed under the account lock: it holds unless a test says otherwise.
+    recentAuthenticationHolds: vi.fn(async (): Promise<boolean> => true),
+    // The session re-admitted under the account lock: admitted unless a test says otherwise.
+    admitCompletion: vi.fn(async (_params: unknown): Promise<{ admitted: object } | { refused: { reason: string } }> => ({ admitted: {} })),
 }));
 
 vi.mock('../../server/repositories', () => ({
@@ -106,10 +117,21 @@ vi.mock('../../server/repositories', () => ({
     accountDeletionRequestsRepository,
 }));
 
-vi.mock('../../server/helpers', () => ({ verifyPassword, getDummyPasswordHash }));
+vi.mock('../../server/helpers', async (importOriginal) => ({
+    normalizeEmail: (await importOriginal<typeof import('../../server/helpers')>()).normalizeEmail,
+    verifyPassword,
+    getDummyPasswordHash,
+}));
 vi.mock('../../server/services/verification.service', () => ({ validateVerificationToken }));
 vi.mock('../../server/services/oauth2-grant.service', () => ({ revokeAllOAuth2GrantsForUser }));
-vi.mock('../../server/services/user.service', () => ({ setAccountStatus }));
+vi.mock('../../server/services/user.service', () => ({ setAccountDeletion }));
+vi.mock('../../server/services/mfa.service', () => ({ assertStepUp }));
+vi.mock('../../server/services/passkey.service', () => ({ proveRecentAuthentication, recentAuthenticationHolds }));
+vi.mock('../../server/services/admission.service', () => ({
+    admitCompletion,
+    sessionKeyOf: (credential: { keyId: string }) => credential.keyId,
+    admissionRefusalError: (refusal: { reason: string }) => new Error(refusal.reason),
+}));
 vi.mock('@spfn/notification/server', () => ({ sendEmail }));
 vi.mock('@spfn/core/db', async (importOriginal) =>
 {
@@ -137,7 +159,11 @@ import {
     DeletionNotRequestedError,
     ImmediateDeletionNotAllowedError,
     InvalidCredentialsError,
+    RecentAuthenticationRequiredError,
 } from '@spfn/auth/errors';
+
+/** The session a self-service request comes in with. */
+const KEY_1 = { kind: 'deviceKey', keyId: 'key-1' } as const;
 
 function makeUser(overrides: Record<string, unknown> = {})
 {
@@ -148,7 +174,9 @@ function makeUser(overrides: Record<string, unknown> = {})
         phone: null,
         username: 'someone',
         passwordHash: '$2b$12$hash',
+        keyEpoch: 0,
         status: 'active',
+        deletion: null as string | null,
         ...overrides,
     };
 }
@@ -175,24 +203,31 @@ describe('account-deletion.service', () =>
         accountDeletionRequestsRepository.markCancelled.mockResolvedValue(claimedRow({ status: 'cancelled' }));
     });
 
-    describe('requestAccountDeletionService — self, password re-auth', () =>
+    describe('requestAccountDeletionService — self, step-up and recent authentication', () =>
     {
-        it('transitions status, records the request, and revokes sessions', async () =>
+        it('moves the deletion, records the request, and revokes sessions', async () =>
         {
             const user = makeUser();
             usersRepository.findById.mockResolvedValue(user);
 
             const result = await requestAccountDeletionService(user.id, {
                 requestedBy: 'self',
+                credential: KEY_1,
                 password: 'correct-password',
             });
 
-            expect(verifyPassword).toHaveBeenCalledWith('correct-password', user.passwordHash);
-            expect(setAccountStatus).toHaveBeenCalledWith(user.id, 'pending_deletion', { from: 'active', reason: expect.any(String) });
+            expect(assertStepUp).toHaveBeenCalledWith({ userId: user.id, keyId: 'key-1' });
+            // Under the lock, the session is asked of the admission again, for this route.
+            expect(admitCompletion).toHaveBeenCalledWith({ userId: user.id, credential: KEY_1, enrolment: 'none' });
+            expect(proveRecentAuthentication).toHaveBeenCalledWith(
+                { userId: user.id, keyId: 'key-1', currentPassword: 'correct-password' },
+                expect.any(Number),
+            );
+            expect(setAccountDeletion).toHaveBeenCalledWith(user.id, 'pending', { from: null, reason: expect.any(String) });
             expect(accountDeletionRequestsRepository.create).toHaveBeenCalledWith(
                 expect.objectContaining({ userId: user.id, userPublicId: user.publicId, status: 'pending' }),
             );
-            // The keys are revoked by setAccountStatus, with the status, not beside it.
+            // The keys are revoked by setAccountDeletion, with the deletion, not beside it.
             expect(keysRepository.revokeAllActiveByUserId).not.toHaveBeenCalled();
 
             // Device-code requests in flight go with them. One that was already
@@ -220,98 +255,82 @@ describe('account-deletion.service', () =>
             await vi.waitFor(() => expect(sendEmail).toHaveBeenCalled());
         });
 
-        it('rejects an incorrect password without transitioning status', async () =>
+        it('a refused recent authentication moves nothing', async () =>
         {
             const user = makeUser();
             usersRepository.findById.mockResolvedValue(user);
-            verifyPassword.mockResolvedValueOnce(false);
+            proveRecentAuthentication.mockRejectedValueOnce(new RecentAuthenticationRequiredError());
 
             await expect(
-                requestAccountDeletionService(user.id, { requestedBy: 'self', password: 'wrong' }),
-            ).rejects.toBeInstanceOf(InvalidCredentialsError);
+                requestAccountDeletionService(user.id, { requestedBy: 'self', credential: KEY_1, password: 'wrong' }),
+            ).rejects.toBeInstanceOf(RecentAuthenticationRequiredError);
 
-            expect(usersRepository.updateById).not.toHaveBeenCalled();
+            expect(setAccountDeletion).not.toHaveBeenCalled();
+            expect(accountDeletionRequestsRepository.create).not.toHaveBeenCalled();
         });
     });
 
-    describe('requestAccountDeletionService — self, verification-code re-auth (passwordless)', () =>
+    describe('requestAccountDeletionService — the proof confirmed under the account lock', () =>
     {
-        it('accepts a valid account_deletion-purpose token matching the user target', async () =>
+        it('a password hash that moved since it was verified is verified again outside the lock, and the request runs once more', async () =>
         {
-            const user = makeUser({ passwordHash: null });
+            const user = makeUser();
             usersRepository.findById.mockResolvedValue(user);
-            validateVerificationToken.mockReturnValue({
-                target: user.email,
-                targetType: 'email',
-                purpose: 'account_deletion',
-                codeId: 1,
-            });
+            recentAuthenticationHolds.mockResolvedValueOnce(false);
 
-            await requestAccountDeletionService(user.id, {
-                requestedBy: 'self',
-                verificationToken: 'tok',
-            });
+            await requestAccountDeletionService(user.id, { requestedBy: 'self', credential: KEY_1, password: 'correct-password' });
 
-            expect(setAccountStatus).toHaveBeenCalledWith(user.id, 'pending_deletion', { from: 'active', reason: expect.any(String) });
+            expect(proveRecentAuthentication).toHaveBeenCalledTimes(2);
+            expect(usersRepository.lockAccount).toHaveBeenCalledTimes(2);
+            expect(setAccountDeletion).toHaveBeenCalledTimes(1);
+            expect(accountDeletionRequestsRepository.create).toHaveBeenCalledTimes(1);
         });
 
-        it('rejects a token issued for a different purpose', async () =>
+        it('a hash that moves again is refused, with nothing moved', async () =>
         {
-            const user = makeUser({ passwordHash: null });
+            const user = makeUser();
             usersRepository.findById.mockResolvedValue(user);
-            validateVerificationToken.mockReturnValue({
-                target: user.email,
-                targetType: 'email',
-                purpose: 'password_reset',
-                codeId: 1,
-            });
+            recentAuthenticationHolds.mockResolvedValueOnce(false).mockResolvedValueOnce(false);
 
             await expect(
-                requestAccountDeletionService(user.id, { requestedBy: 'self', verificationToken: 'tok' }),
-            ).rejects.toThrow(/account_deletion/);
-        });
+                requestAccountDeletionService(user.id, { requestedBy: 'self', credential: KEY_1, password: 'correct-password' }),
+            ).rejects.toBeInstanceOf(RecentAuthenticationRequiredError);
 
-        it('requires a password or verification token', async () =>
-        {
-            const user = makeUser({ passwordHash: null });
-            usersRepository.findById.mockResolvedValue(user);
-
-            await expect(
-                requestAccountDeletionService(user.id, { requestedBy: 'self' }),
-            ).rejects.toThrow(/verification code is required/i);
+            expect(setAccountDeletion).not.toHaveBeenCalled();
+            expect(accountDeletionRequestsRepository.create).not.toHaveBeenCalled();
         });
     });
 
     describe('requestAccountDeletionService — duplicate request / admin / immediate gate', () =>
     {
-        it('rejects a second request while one is already pending_deletion', async () =>
+        it('rejects a second request while one is already pending', async () =>
         {
-            const user = makeUser({ status: 'pending_deletion' });
+            const user = makeUser({ deletion: 'pending' });
             usersRepository.findById.mockResolvedValue(user);
 
             await expect(
-                requestAccountDeletionService(user.id, { requestedBy: 'self', password: 'x' }),
+                requestAccountDeletionService(user.id, { requestedBy: 'self', credential: KEY_1, password: 'x' }),
             ).rejects.toBeInstanceOf(DeletionAlreadyRequestedError);
         });
 
-        it('N-2: decides on the status read under the account lock, not on a lagging read before it', async () =>
+        it('N-2: decides on the deletion read under the account lock, not on a lagging read before it', async () =>
         {
             // The replica still shows the deletion this account just cancelled;
-            // the primary, read under the lock, has it active again.
+            // the primary, read under the lock, has none.
             const user = makeUser();
-            usersRepository.findById.mockResolvedValue({ ...user, status: 'pending_deletion' });
+            usersRepository.findById.mockResolvedValue({ ...user, deletion: 'pending' });
             usersRepository.lockAccount.mockResolvedValue(user);
 
             await requestAccountDeletionService(user.id, { requestedBy: 'admin' });
 
-            expect(setAccountStatus).toHaveBeenCalledWith(user.id, 'pending_deletion', { from: 'active', reason: expect.any(String) });
+            expect(setAccountDeletion).toHaveBeenCalledWith(user.id, 'pending', { from: null, reason: expect.any(String) });
             expect(usersRepository.lockAccount.mock.invocationCallOrder[0])
-                .toBeLessThan(setAccountStatus.mock.invocationCallOrder[0]!);
+                .toBeLessThan(setAccountDeletion.mock.invocationCallOrder[0]!);
         });
 
         it('rejects a request for an already-deleted account', async () =>
         {
-            const user = makeUser({ status: 'deleted' });
+            const user = makeUser({ deletion: 'deleted' });
             usersRepository.findById.mockResolvedValue(user);
 
             await expect(
@@ -319,15 +338,16 @@ describe('account-deletion.service', () =>
             ).rejects.toBeInstanceOf(DeletionAlreadyRequestedError);
         });
 
-        it('admin requests skip the self re-auth gate', async () =>
+        it('admin requests skip the self gates', async () =>
         {
             const user = makeUser();
             usersRepository.findById.mockResolvedValue(user);
 
             await requestAccountDeletionService(user.id, { requestedBy: 'admin' });
 
-            expect(verifyPassword).not.toHaveBeenCalled();
-            expect(setAccountStatus).toHaveBeenCalledWith(user.id, 'pending_deletion', { from: 'active', reason: expect.any(String) });
+            expect(assertStepUp).not.toHaveBeenCalled();
+            expect(proveRecentAuthentication).not.toHaveBeenCalled();
+            expect(setAccountDeletion).toHaveBeenCalledWith(user.id, 'pending', { from: null, reason: expect.any(String) });
         });
 
         it('rejects self-service immediate deletion unless allowSelfImmediate is enabled', async () =>
@@ -336,7 +356,7 @@ describe('account-deletion.service', () =>
             usersRepository.findById.mockResolvedValue(user);
 
             await expect(
-                requestAccountDeletionService(user.id, { requestedBy: 'self', password: 'x', immediate: true }),
+                requestAccountDeletionService(user.id, { requestedBy: 'self', credential: KEY_1, password: 'x', immediate: true }),
             ).rejects.toBeInstanceOf(ImmediateDeletionNotAllowedError);
         });
 
@@ -344,15 +364,15 @@ describe('account-deletion.service', () =>
         {
             configureDeletion({ allowSelfImmediate: true });
             // A mutable fixture: purgePendingRequest's own re-checks (B1) require
-            // status='pending_deletion' by the time it re-reads the user, so the
-            // mock must reflect the status transition requestAccountDeletionService
-            // itself performs — a static fixture stuck at 'active' would (correctly)
-            // make the purge's re-check abort.
+            // deletion='pending' by the time it re-reads the user, so the mock must
+            // reflect the transition requestAccountDeletionService itself performs —
+            // a static fixture with no deletion would (correctly) make the purge's
+            // re-check abort.
             let currentUser = makeUser();
             usersRepository.findById.mockImplementation(async () => currentUser);
-            setAccountStatus.mockImplementation(async (_id: number, status: string) =>
+            setAccountDeletion.mockImplementation(async (_id: number, deletion: string | null) =>
             {
-                currentUser = { ...currentUser, status };
+                currentUser = { ...currentUser, deletion };
 
                 return 'changed';
             });
@@ -360,6 +380,7 @@ describe('account-deletion.service', () =>
 
             const result = await requestAccountDeletionService(currentUser.id, {
                 requestedBy: 'self',
+                credential: KEY_1,
                 password: 'x',
                 immediate: true,
             });
@@ -369,7 +390,8 @@ describe('account-deletion.service', () =>
             // never under the request's account lock: `onBeforePurge` is app I/O.
             expect(Math.abs(result.purgeScheduledAt.getTime() - Date.now())).toBeLessThan(5000);
             await vi.waitFor(() => expect(accountDeletionRequestsRepository.markCompleted).toHaveBeenCalled());
-            expect(currentUser.status).toBe('deleted');
+            expect(currentUser.deletion).toBe('deleted');
+            expect(currentUser.status).toBe('active');
         });
 
         it('m2: converts a concurrent duplicate-request unique-violation into DeletionAlreadyRequestedError (409)', async () =>
@@ -383,7 +405,7 @@ describe('account-deletion.service', () =>
             accountDeletionRequestsRepository.create.mockRejectedValueOnce(pgUniqueViolation);
 
             await expect(
-                requestAccountDeletionService(user.id, { requestedBy: 'self', password: 'x' }),
+                requestAccountDeletionService(user.id, { requestedBy: 'self', credential: KEY_1, password: 'x' }),
             ).rejects.toBeInstanceOf(DeletionAlreadyRequestedError);
         });
 
@@ -396,16 +418,16 @@ describe('account-deletion.service', () =>
             accountDeletionRequestsRepository.create.mockRejectedValueOnce(otherError);
 
             await expect(
-                requestAccountDeletionService(user.id, { requestedBy: 'self', password: 'x' }),
+                requestAccountDeletionService(user.id, { requestedBy: 'self', credential: KEY_1, password: 'x' }),
             ).rejects.toBe(otherError);
         });
     });
 
     describe('cancelAccountDeletionService', () =>
     {
-        it('recovers a pending_deletion account back to active, claiming the request row before touching users', async () =>
+        it('clears a pending deletion, claiming the request row before touching users', async () =>
         {
-            const user = makeUser({ status: 'pending_deletion' });
+            const user = makeUser({ deletion: 'pending' });
             usersRepository.findByEmailOrPhone.mockResolvedValue(user);
             usersRepository.findById.mockResolvedValue(user);
             accountDeletionRequestsRepository.findPendingByUserId.mockResolvedValue({ id: 5 });
@@ -413,8 +435,8 @@ describe('account-deletion.service', () =>
             await cancelAccountDeletionService({ email: user.email, password: 'correct-password' });
 
             expect(accountDeletionRequestsRepository.markCancelled).toHaveBeenCalledWith(5);
-            expect(setAccountStatus).toHaveBeenCalledWith(user.id, 'active', { from: 'pending_deletion', reason: expect.any(String) });
-            // The status changes through the one writer, never a column update.
+            expect(setAccountDeletion).toHaveBeenCalledWith(user.id, null, { from: 'pending', reason: expect.any(String) });
+            // The deletion changes through the one writer, never a column update.
             expect(usersRepository.updateById).not.toHaveBeenCalled();
 
             // The account lock first, then the claim (request row), then the users
@@ -422,17 +444,48 @@ describe('account-deletion.service', () =>
             expect(usersRepository.lockAccount.mock.invocationCallOrder[0])
                 .toBeLessThan(accountDeletionRequestsRepository.findPendingByUserId.mock.invocationCallOrder[0]!);
             const claimOrder = accountDeletionRequestsRepository.markCancelled.mock.invocationCallOrder[0];
-            const reactivateOrder = setAccountStatus.mock.invocationCallOrder[0];
+            const reactivateOrder = setAccountDeletion.mock.invocationCallOrder[0];
             expect(claimOrder).toBeLessThan(reactivateOrder);
         });
 
-        it('reactivates only from pending_deletion read under the account lock: a status another writer committed after cancel read the account is kept, and nothing is claimed', async () =>
+        it('a password whose hash moved before the lock is verified again against the primary, and the cancel claims once more', async () =>
         {
-            // Cancel read `pending_deletion`; an operator's suspension committed
-            // before the cancel took the account lock, which reads it.
-            const user = makeUser({ status: 'pending_deletion' });
+            const user = makeUser({ deletion: 'pending' });
+            const rehashed = { ...user, passwordHash: '$2b$12$rehashed' };
             usersRepository.findByEmailOrPhone.mockResolvedValue(user);
-            usersRepository.lockAccount.mockResolvedValue({ ...user, status: 'suspended' });
+            usersRepository.findByIdOnPrimary.mockResolvedValue(rehashed);
+            usersRepository.lockAccount.mockResolvedValue(rehashed);
+            accountDeletionRequestsRepository.findPendingByUserId.mockResolvedValue({ id: 5 });
+
+            await cancelAccountDeletionService({ email: user.email, password: 'correct-password' });
+
+            expect(verifyPassword).toHaveBeenNthCalledWith(2, 'correct-password', rehashed.passwordHash);
+            expect(accountDeletionRequestsRepository.markCancelled).toHaveBeenCalledTimes(1);
+            expect(setAccountDeletion).toHaveBeenCalledTimes(1);
+        });
+
+        it('a password whose hash moves again is refused, with nothing claimed', async () =>
+        {
+            const user = makeUser({ deletion: 'pending' });
+            usersRepository.findByEmailOrPhone.mockResolvedValue(user);
+            usersRepository.findByIdOnPrimary.mockResolvedValue({ ...user, passwordHash: '$2b$12$changed' });
+            usersRepository.lockAccount.mockResolvedValue({ ...user, passwordHash: '$2b$12$changed-again' });
+
+            await expect(
+                cancelAccountDeletionService({ email: user.email, password: 'correct-password' }),
+            ).rejects.toBeInstanceOf(InvalidCredentialsError);
+
+            expect(accountDeletionRequestsRepository.markCancelled).not.toHaveBeenCalled();
+            expect(setAccountDeletion).not.toHaveBeenCalled();
+        });
+
+        it('clears only a deletion still pending under the account lock: a purge that committed after cancel read the account is kept, and nothing is claimed', async () =>
+        {
+            // Cancel read `pending`; the purge committed before the cancel took
+            // the account lock, which reads it.
+            const user = makeUser({ deletion: 'pending' });
+            usersRepository.findByEmailOrPhone.mockResolvedValue(user);
+            usersRepository.lockAccount.mockResolvedValue({ ...user, deletion: 'deleted' });
             accountDeletionRequestsRepository.findPendingByUserId.mockResolvedValue({ id: 5 });
 
             await expect(
@@ -440,16 +493,16 @@ describe('account-deletion.service', () =>
             ).rejects.toBeInstanceOf(DeletionNotRequestedError);
 
             expect(accountDeletionRequestsRepository.markCancelled).not.toHaveBeenCalled();
-            expect(setAccountStatus).not.toHaveBeenCalled();
+            expect(setAccountDeletion).not.toHaveBeenCalled();
         });
 
         it('a refused reactivation throws inside the claim\'s transaction, so the claim is rolled back with it', async () =>
         {
-            const user = makeUser({ status: 'pending_deletion' });
+            const user = makeUser({ deletion: 'pending' });
             usersRepository.findByEmailOrPhone.mockResolvedValue(user);
             usersRepository.findById.mockResolvedValue(user);
             accountDeletionRequestsRepository.findPendingByUserId.mockResolvedValue({ id: 5 });
-            setAccountStatus.mockResolvedValueOnce('refused');
+            setAccountDeletion.mockResolvedValueOnce('refused');
 
             await expect(
                 cancelAccountDeletionService({ email: user.email, password: 'correct-password' }),
@@ -461,8 +514,9 @@ describe('account-deletion.service', () =>
 
         it('rejects when the account has no pending deletion request (after verifying the credential)', async () =>
         {
-            const user = makeUser({ status: 'active' });
+            const user = makeUser();
             usersRepository.findByEmailOrPhone.mockResolvedValue(user);
+            usersRepository.findById.mockResolvedValue(user);
 
             await expect(
                 cancelAccountDeletionService({ email: user.email, password: 'correct-password' }),
@@ -473,10 +527,10 @@ describe('account-deletion.service', () =>
         it('B1 (cancel side): when the purge already won the race and claimed the request row, cancel throws DeletionNotRequestedError and never reactivates the (already-purged) user', async () =>
         {
             // The user row has already been anonymized by a purge that committed
-            // between our credential check and this claim attempt — status is
-            // 'deleted' here purely to prove the reactivation is never
+            // between our credential check and this claim attempt — the
+            // request row's claim below is what proves the clearing is never
             // even called; the real defense is the request-row claim below.
-            const user = makeUser({ status: 'pending_deletion' });
+            const user = makeUser({ deletion: 'pending' });
             usersRepository.findByEmailOrPhone.mockResolvedValue(user);
             accountDeletionRequestsRepository.findPendingByUserId.mockResolvedValue({ id: 5 });
             // The conditional UPDATE (WHERE status='pending') matches 0 rows because
@@ -487,13 +541,13 @@ describe('account-deletion.service', () =>
                 cancelAccountDeletionService({ email: user.email, password: 'correct-password' }),
             ).rejects.toBeInstanceOf(DeletionNotRequestedError);
 
-            expect(setAccountStatus).not.toHaveBeenCalled();
+            expect(setAccountDeletion).not.toHaveBeenCalled();
             expect(usersRepository.updateById).not.toHaveBeenCalled();
         });
 
         it('m1: a wrong credential on a non-pending account fails with InvalidCredentialsError, not DeletionNotRequestedError', async () =>
         {
-            const user = makeUser({ status: 'active' });
+            const user = makeUser();
             usersRepository.findByEmailOrPhone.mockResolvedValue(user);
             verifyPassword.mockResolvedValueOnce(false);
 
@@ -533,11 +587,11 @@ describe('account-deletion.service', () =>
         });
     });
 
-    describe('purge — anonymize placeholder + status transitions', () =>
+    describe('purge — anonymize placeholder + deletion transitions', () =>
     {
         it('anonymizes the user with a deleted-invalid placeholder address and scrubs child rows', async () =>
         {
-            const user = makeUser({ status: 'pending_deletion' });
+            const user = makeUser({ deletion: 'pending' });
             accountDeletionRequestsRepository.findPendingByUserId.mockResolvedValue({
                 id: 5,
                 userId: user.id,
@@ -557,7 +611,7 @@ describe('account-deletion.service', () =>
                     passwordHash: null,
                 }),
             );
-            expect(setAccountStatus).toHaveBeenCalledWith(user.id, 'deleted', { from: 'pending_deletion', reason: expect.any(String) });
+            expect(setAccountDeletion).toHaveBeenCalledWith(user.id, 'deleted', { from: 'pending', reason: expect.any(String) });
             expect(socialAccountsRepository.deleteAllByUserId).toHaveBeenCalledWith(user.id);
             expect(keysRepository.deleteAllByUserId).toHaveBeenCalledWith(user.id);
             // Passkeys go with the other credentials — an anonymized row must
@@ -572,7 +626,7 @@ describe('account-deletion.service', () =>
         it('hard-deletes the row instead when purgeStrategy is hard-delete', async () =>
         {
             configureDeletion({ purgeStrategy: 'hard-delete' });
-            const user = makeUser({ status: 'pending_deletion' });
+            const user = makeUser({ deletion: 'pending' });
             accountDeletionRequestsRepository.findPendingByUserId.mockResolvedValue({ id: 5, userId: user.id });
             usersRepository.findById.mockResolvedValue(user);
 
@@ -591,8 +645,8 @@ describe('account-deletion.service', () =>
 
         it('skips (does not complete) a user whose onBeforePurge hook throws, and the sweep continues', async () =>
         {
-            const failing = makeUser({ id: 1, status: 'pending_deletion' });
-            const ok = makeUser({ id: 2, publicId: '22222222-2222-2222-2222-222222222222', status: 'pending_deletion' });
+            const failing = makeUser({ id: 1, deletion: 'pending' });
+            const ok = makeUser({ id: 2, publicId: '22222222-2222-2222-2222-222222222222', deletion: 'pending' });
 
             configureDeletion({
                 onBeforePurge: async (u) =>
@@ -623,7 +677,7 @@ describe('account-deletion.service', () =>
         it('pre-check gate: aborts (no destructive DML, no onBeforePurge call) when the user is already recovered before any DB transaction opens', async () =>
         {
             const user = makeUser();
-            usersRepository.findById.mockResolvedValue({ ...user, status: 'active' });
+            usersRepository.findById.mockResolvedValue({ ...user, deletion: null });
             const onBeforePurge = vi.fn();
             configureDeletion({ onBeforePurge });
 
@@ -639,8 +693,8 @@ describe('account-deletion.service', () =>
 
         it('cancel-during-sweep: the primary/tx re-check (not the earlier pre-check) catches a recovery that committed in between, before any destructive DML', async () =>
         {
-            const user = makeUser({ status: 'pending_deletion' });
-            const recovered = { ...user, status: 'active' };
+            const user = makeUser({ deletion: 'pending' });
+            const recovered = { ...user, deletion: null };
 
             // First call = the pre-check (before onBeforePurge/tx) — still pending,
             // so the hook runs and the transaction opens. Every call after that
@@ -658,7 +712,7 @@ describe('account-deletion.service', () =>
 
         it('aborts via the conditional markCompleted claim when the request row was already moved off "pending" concurrently', async () =>
         {
-            const user = makeUser({ status: 'pending_deletion' });
+            const user = makeUser({ deletion: 'pending' });
             usersRepository.findById.mockResolvedValue(user);
             // Simulates the conditional UPDATE matching 0 rows (WHERE status='pending')
             // — e.g. a cancel committed between our primary re-read and this claim.
@@ -676,7 +730,7 @@ describe('account-deletion.service', () =>
 
         it('sweepDuePurges: a cancelled-mid-sweep request is not purged and is not overwritten back to completed', async () =>
         {
-            const cancelledUser = makeUser({ id: 50, status: 'active' }); // recovered before we processed it
+            const cancelledUser = makeUser({ id: 50 }); // recovered before we processed it
             const okUser = makeUser({ id: 51, publicId: '33333333-3333-3333-3333-333333333333' });
 
             accountDeletionRequestsRepository.findDueForPurge.mockResolvedValue([
@@ -684,7 +738,7 @@ describe('account-deletion.service', () =>
                 { id: 21, userId: okUser.id, userPublicId: okUser.publicId },
             ]);
             usersRepository.findById.mockImplementation(async (id: number) =>
-                (id === cancelledUser.id ? cancelledUser : { ...okUser, status: 'pending_deletion' }));
+                (id === cancelledUser.id ? cancelledUser : { ...okUser, deletion: 'pending' }));
 
             const result = await sweepDuePurges();
 

@@ -8,8 +8,6 @@ import { ConflictError, ValidationError } from '@spfn/core/errors';
 import { onAfterCommit, runInTransaction } from '@spfn/core/db';
 import {
     InvalidCredentialsError,
-    AccountDisabledError,
-    AccountPendingDeletionError,
     AccountAlreadyExistsError,
     InvalidVerificationTokenError,
     VerificationTokenPurposeMismatchError,
@@ -34,7 +32,7 @@ import { assertStepUp, mfaEnrolledForUser } from './mfa.service';
 import { secondFactorEnrolmentFields } from './second-factor-policy.service';
 import { decideKeyBinding } from '../lib/key-policy';
 import { updateLastLoginService } from './user.service';
-import { getPendingDeletionInfo } from './account-deletion.service';
+import { accountRefusal, admissionRefusalError } from './admission.service';
 import { authLoginEvent, authRegisterEvent } from '../events';
 
 export interface RegisterParams
@@ -358,16 +356,11 @@ export async function loginService(
         throw new InvalidCredentialsError();
     }
 
-    // Check if user is active
-    if (user.status !== 'active')
+    // The account half of the admission: a deletion asked for, then the status
+    const refusal = await accountRefusal(user);
+    if (refusal)
     {
-        if (user.status === 'pending_deletion')
-        {
-            const pending = await getPendingDeletionInfo(user.id);
-            throw new AccountPendingDeletionError({ purgeScheduledAt: pending?.purgeScheduledAt.toISOString() });
-        }
-
-        throw new AccountDisabledError({ status: user.status });
+        throw admissionRefusalError(refusal);
     }
 
     // Hashed before the account lock is taken: the hash is the slow step.

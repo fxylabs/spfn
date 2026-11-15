@@ -669,16 +669,18 @@ Upgrading an app that kept its own settings table, or put preferences in `metada
 
 ## Account Deletion & Recovery
 
-Grace-period deletion with in-window recovery: `active → pending_deletion → deleted` (anonymize)
-or row removal (hard-delete), with a `cancel` step back to `active` at any point before the purge
-runs. Full config (`gracePeriodDays`, `purgeStrategy`, `allowSelfImmediate`, `onBeforePurge`,
+Grace-period deletion with in-window recovery: `users.deletion` moves `none → pending → deleted`
+(anonymize) or the row is removed (hard-delete), with a `cancel` step back to none at any point
+before the purge runs. The account's status (`active | inactive | suspended`) is a separate fact
+none of these steps writes: a suspended account stays suspended through a deletion request and
+its cancellation. Full config (`gracePeriodDays`, `purgeStrategy`, `allowSelfImmediate`, `onBeforePurge`,
 notifications) and the purge job registration caveat live in the package README — see
 [`packages/auth/README.md#account-deletion--recovery`](../../packages/auth/README.md#account-deletion--recovery).
 
 | Route | Method | Auth | Purpose |
 |-------|--------|------|---------|
-| `/_auth/deletion/request` | POST | Required | Request deletion (password or verification-code re-auth) |
-| `/_auth/deletion/cancel` | POST | Public | Cancel a pending deletion (credential-based — sessions were revoked at request time) |
+| `/_auth/deletion/request` | POST | Required | Request deletion — step-up for an account with a second factor (403 `STEP_UP_REQUIRED`), and recent authentication or the `password` (403 `RECENT_AUTH_REQUIRED`) |
+| `/_auth/deletion/cancel` | POST | Public | Cancel a pending deletion with the password or a one-time code (`purpose: 'account_deletion'`) to the account's e-mail or phone — sessions were revoked at request time |
 
 ```typescript
 // Request (client already holds a valid session)
@@ -698,8 +700,10 @@ catch (error)
     }
 }
 
-// Cancel (no Bearer token — the account's sessions were revoked on request)
+// Cancel (no Bearer token — the account's sessions were revoked on request):
+// the password, or a single-use code token for the account's e-mail or phone
 await authApi.cancelAccountDeletion.call({ body: { email, password } });
+await authApi.cancelAccountDeletion.call({ body: { email, verificationToken } });
 ```
 
 The purge job (`authJobRouter` from `@spfn/auth/server`) must be registered explicitly with

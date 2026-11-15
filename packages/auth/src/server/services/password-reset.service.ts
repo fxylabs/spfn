@@ -46,6 +46,7 @@ import { authPasswordResetEvent } from '../events';
 import { issuePasswordResetLink } from './link-mail.service';
 import { revokeAllOAuth2GrantsForUser } from './oauth2-grant.service';
 import { registerPublicKeyService, type RegisterPublicKeyResult } from './key.service';
+import { admitsAccount } from './admission.service';
 import { secondFactorEnrolmentFields } from './second-factor-policy.service';
 import { decideKeyBinding } from '../lib/key-policy';
 import { updateLastLoginService } from './user.service';
@@ -61,12 +62,18 @@ import type { KeyAlgorithmType, KeyPlatformType, SessionBindingType } from '../t
  * Re-read at every step that writes, not only at request time: an account can
  * be disabled or asked to be deleted while a link sits in a mailbox, and a link
  * issued before that must not still open it.
+ *
+ * An account pending deletion is not reset: it is recovered through
+ * `/_auth/deletion/cancel`, with the password or a verification code sent to its
+ * own address — no password needed — and reset once it is back. The request
+ * answers it as it answers every input (no mail), so the pointer is in the
+ * deletion notice the account was sent, never in this answer.
  */
 async function lockActiveUserOf(userId: number)
 {
     const user = await usersRepository.lockAccount(userId);
 
-    return user?.status === 'active' ? user : null;
+    return user && admitsAccount(user) ? user : null;
 }
 
 /**
@@ -129,7 +136,7 @@ export async function requestPasswordResetService(
     // before it.
     const user = await usersRepository.findByEmail(email);
 
-    if (!user || user.status !== 'active' || !isResettable(user))
+    if (!user || !admitsAccount(user) || !isResettable(user))
     {
         authLogger.service.info('Password reset request answered without issuing a link');
 

@@ -65,7 +65,7 @@ const NOT_CREDENTIAL_STATE: Record<string, string> = {
     signup_link_tokens: 'a signup link names an address, not an account: completing it creates the account',
     verification_codes: 'codes for a target address or phone, not for an account',
     account_exists_notices: 'keyed by an address, not an account: when a signup to an address that has an account last sent its notice',
-    account_deletion_requests: 'the request row is written under the account lock by account-deletion.service with the status it moves; the row itself admits nothing',
+    account_deletion_requests: 'the request row is written under the account lock by account-deletion.service with the deletion it moves (users.deletion, classified on AccountStatusRepository); the row itself admits nothing',
     ops_tokens: 'operator tokens: no account',
     oauth2_clients: 'third-party client registrations: no account',
 };

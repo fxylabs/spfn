@@ -7,15 +7,17 @@
  * one-time token, renewal, the OAuth 2.1 access token and token endpoint, the
  * new-device challenge, device-code / device-link collection — extracts its
  * credential and calls `admitPrincipal`; the completion of a two-step procedure
- * (`admitDeferred`) calls `admitCompletion`, the same decision with the
- * completing route's enrolment class in place of a request. None of them
- * carries a rule of its own, so a rule added here holds at every door and a
- * door cannot keep a copy that has drifted.
+ * (`admitDeferred`) and a write that asks again under the account lock whether
+ * its session is still let in (the deletion request) call `admitCompletion`,
+ * the same decision with a named route's enrolment class in place of a
+ * request. None of them carries a rule of its own, so a rule added here holds
+ * at every door and a door cannot keep a copy that has drifted.
  *
  * The decision, in order:
  *
- * 1. the account's status — read on the write primary, so a suspension is
- *    refused on the next request and not once a replica catches up;
+ * 1. the account — its deletion and its status, read on the write primary, so
+ *    a suspension or a deletion request is refused on the next request and
+ *    not once a replica catches up;
  * 2. the credential is live — a device key by `keyLiveness`, a renewal key by
  *    the renewal grace rule, a grant by not being revoked;
  * 3. the second-factor policy (#309) — except for renewal, below.
@@ -67,9 +69,9 @@ import type { RouteEnrolment } from '../routes/channels';
  * live exactly when the registered verifier admitted it on this request.
  *
  * A procedure's completion is no kind of its own: it presents the credential
- * the procedure was started with, to `admitCompletion`, which only
- * `admitDeferred` calls and the package entry does not export — so no caller
- * of `admitPrincipal` can claim a completing route's enrolment class.
+ * the procedure was started with, to `admitCompletion`, which the package
+ * entry does not export — so no caller of `admitPrincipal` can claim a
+ * completing route's enrolment class.
  */
 export type PrincipalCredential =
     | { kind: 'deviceKey'; keyId: string }
@@ -78,10 +80,15 @@ export type PrincipalCredential =
     | { kind: 'renewal'; keyId: string }
     | { kind: 'appProfile'; profile: string; keyId: string };
 
-/** Why a person was not let in. Each door answers each reason in its own vocabulary. */
+/**
+ * Why a person was not let in. Each door answers each reason in its own vocabulary.
+ *
+ * A purged account (`deletion: 'deleted'`) is answered as a disabled one, with
+ * `'deleted'` where the status goes — the answer it has always had.
+ */
 export type AdmissionRefusal =
     | { reason: 'accountMissing' }
-    | { reason: 'accountDisabled'; status: UserStatus }
+    | { reason: 'accountDisabled'; status: Exclude<UserStatus, 'active'> | 'deleted' }
     | { reason: 'pendingDeletion'; purgeScheduledAt: string | undefined }
     | { reason: 'credentialRevoked' }
     | { reason: 'credentialExpired' }
@@ -160,7 +167,7 @@ export class AuthContext extends Principal
     constructor(seal: typeof SEAL, principal: Principal, scheme: AuthScheme)
     {
         super(seal, principal);
-        this.keyId = signingKeyOf(principal.credential) ?? appProfileKeyOf(principal.credential);
+        this.keyId = sessionKeyOf(principal.credential);
         this.scheme = scheme;
     }
 }
@@ -226,10 +233,13 @@ export function signingKeyOf(credential: PrincipalCredential): string | null
     }
 }
 
-/** The key id an application profile reported, `''` for any other keyless credential. */
-function appProfileKeyOf(credential: PrincipalCredential): string
+/**
+ * The key id a session is known by (`AuthContext.keyId`): the device key it
+ * signs with, the key id an application profile reported, `''` for a grant.
+ */
+export function sessionKeyOf(credential: PrincipalCredential): string
 {
-    return credential.kind === 'appProfile' ? credential.keyId : '';
+    return signingKeyOf(credential) ?? (credential.kind === 'appProfile' ? credential.keyId : '');
 }
 
 /**
@@ -307,15 +317,20 @@ export interface AdmitCompletionParams
     userId: number;
     /** The credential the procedure was started with — or, for a renewal, the renewal it completes. */
     credential: PrincipalCredential;
-    /** The completing route's class in `ROUTE_ENROLMENT` (#309). */
+    /** The class in `ROUTE_ENROLMENT` (#309) of the route the credential is admitted for. */
     enrolment: RouteEnrolment;
 }
 
 /**
- * `admitPrincipal` for the completion of a two-step procedure, which only
- * `admitDeferred` asks: the same decision, with no request in front of it.
+ * `admitPrincipal` asked again, with no request in front of it, of a
+ * credential a named route admitted: for the completion of a two-step
+ * procedure (`admitDeferred`), and for a write that re-admits its own session
+ * under the account lock it holds (the deletion request), so a key revoked or
+ * an account suspended or left enrolment-only while it waited is refused.
+ * An application profile's credential is live here as it was on the request
+ * its verifier admitted.
  *
- * The second-factor policy's enrolment-only state admits the completion
+ * The second-factor policy's enrolment-only state admits the credential
  * exactly as it admitted the route it came in on (`ROUTE_ENROLMENT`): under
  * `'always'` and `'unchecked'`, under a method while that method is listed,
  * and under `'none'` not at all. Not exported from the package entry: an
@@ -424,27 +439,44 @@ function accountOnly(row: UserWithStoredRole | null): AdmissionRead | null
 }
 
 /**
- * Step 1: an account that is not active is refused, whatever it presented.
+ * Whether an account may be let in: an operator lets it in (`active`) and no
+ * deletion was asked for. The one rule every reader of the two facts applies —
+ * a reader that needs no reason (a reset link, an operator report) asks this.
+ */
+export function admitsAccount(user: Pick<User, 'status' | 'deletion'>): boolean
+{
+    return user.status === 'active' && user.deletion === null;
+}
+
+/**
+ * Step 1: an account that is not active, or whose deletion was asked for, is
+ * refused, whatever it presented.
+ *
+ * The deletion is answered first: a pending deletion carries the purge date
+ * and names the one door left open — `/_auth/deletion/cancel`, which admits a
+ * pending account whatever its status — and a purged account is gone. A
+ * sanction answers once no deletion is in the way.
  *
  * Exported for the doors that ask it before the credential half: a key write
  * (`registerPublicKeyService`), which asks it of the account row it has
- * locked, and `mfa/verify`, which asks it before spending a proof.
+ * locked, the sign-in channels, which ask it once the credential is proven,
+ * and `mfa/verify`, which asks it before spending a proof.
  */
-export async function accountRefusal(user: Pick<User, 'id' | 'status'>): Promise<AdmissionRefusal | null>
+export async function accountRefusal(user: Pick<User, 'id' | 'status' | 'deletion'>): Promise<AdmissionRefusal | null>
 {
-    if (user.status === 'active')
+    if (user.deletion === 'deleted')
     {
-        return null;
+        return { reason: 'accountDisabled', status: 'deleted' };
     }
 
-    if (user.status !== 'pending_deletion')
+    if (user.deletion === 'pending')
     {
-        return { reason: 'accountDisabled', status: user.status };
+        const pending = await accountDeletionRequestsRepository.findPendingByUserIdOnPrimary(user.id);
+
+        return { reason: 'pendingDeletion', purgeScheduledAt: pending?.purgeScheduledAt.toISOString() };
     }
 
-    const pending = await accountDeletionRequestsRepository.findPendingByUserIdOnPrimary(user.id);
-
-    return { reason: 'pendingDeletion', purgeScheduledAt: pending?.purgeScheduledAt.toISOString() };
+    return user.status === 'active' ? null : { reason: 'accountDisabled', status: user.status };
 }
 
 /** Step 2. Revocation is told apart from expiry because some doors answer them differently. */

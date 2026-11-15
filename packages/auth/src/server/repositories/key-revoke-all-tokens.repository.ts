@@ -81,10 +81,10 @@ export class KeyRevokeAllTokensRepository extends AccountStateRepository
     /**
      * Find a link that could still be spent right now, without spending it.
      *
-     * Joined to the account on both the generation and an active status, so the
-     * describe call answers exactly what consume would: a link issued before a
-     * password reset, or for an account since suspended or anonymized, is not
-     * live here either.
+     * Joined to the account on the generation, an active status and no deletion
+     * asked for, so the describe call answers exactly what consume would: a link
+     * issued before a password reset, or for an account since suspended, asked
+     * to be deleted or anonymized, is not live here either.
      *
      * Read replica.
      */
@@ -102,6 +102,7 @@ export class KeyRevokeAllTokensRepository extends AccountStateRepository
                     gt(keyRevokeAllTokens.expiresAt, new Date()),
                     eq(keyRevokeAllTokens.keyEpoch, users.keyEpoch),
                     eq(users.status, 'active'),
+                    isNull(users.deletion),
                 ),
             )
             .limit(1);
@@ -135,6 +136,7 @@ export class KeyRevokeAllTokensRepository extends AccountStateRepository
               AND t.expires_at > now()
               AND t.key_epoch = u.key_epoch
               AND u.status = 'active'
+              AND u.deletion IS NULL
             RETURNING t.user_id AS "userId"
         `) as unknown as { userId: number | string }[];
 

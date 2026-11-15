@@ -149,7 +149,7 @@ describe.skipIf(!dbAvailable)('per-person settings (case table #161)', () =>
     {
         const [user] = await getTestDb()
             .update(users)
-            .set({ status: 'pending_deletion' })
+            .set({ deletion: 'pending' })
             .where(eq(users.id, owner))
             .returning();
 

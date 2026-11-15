@@ -990,9 +990,17 @@ export function linkNeedsRecentAuth(provider: SocialProvider, action: keyof OAut
  */
 export function getOAuthLinkRecentAuthMs(): number
 {
-    const fallback = minutesOr(process.env.SPFN_AUTH_PASSKEY_RECENT_AUTH_MINUTES, DEFAULT_RECENT_AUTH_MINUTES);
+    return minutesOr(String(globalConfig.oauthLink?.recentAuthMinutes), getRecentAuthMs() / 60_000) * 60_000;
+}
 
-    return minutesOr(String(globalConfig.oauthLink?.recentAuthMinutes), fallback) * 60_000;
+/**
+ * The recent-authentication window of a change with no window of its own — an
+ * account deletion request: `SPFN_AUTH_PASSKEY_RECENT_AUTH_MINUTES`, read as a
+ * plain number for the reason given above, else 10 minutes.
+ */
+export function getRecentAuthMs(): number
+{
+    return minutesOr(process.env.SPFN_AUTH_PASSKEY_RECENT_AUTH_MINUTES, DEFAULT_RECENT_AUTH_MINUTES) * 60_000;
 }
 
 /**

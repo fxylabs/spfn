@@ -3,19 +3,23 @@
  *
  * Request / cancel (recovery) / purge for the account deletion lifecycle.
  *
- * Lifecycle:
- *   active --request(reauth)--> pending_deletion --grace expires(cron)--> deleted (anonymize) | row removed (hard-delete)
- *     ^                              |
- *     +-------cancel(reauth)---------+          immediate = grace period of 0, same pipeline
+ * Lifecycle of `users.deletion` — `setAccountDeletion` is its one writer:
+ *   none --request(step-up, recent auth)--> pending --grace expires(cron)--> deleted (anonymize) | row removed (hard-delete)
+ *     ^                                        |
+ *     +--cancel(password or one-time code)-----+          immediate = grace period of 0, same pipeline
+ *
+ * None of the three touches `users.status`: an operator's suspension is a fact
+ * of its own, and holds through a request, its cancellation and the purge.
  */
 
 import { ValidationError, NotFoundError } from '@spfn/core/errors';
 import { runInTransaction, onAfterCommit } from '@spfn/core/db';
-import { sendEmail } from '@spfn/notification/server';
+import { sendEmail, sendSMS } from '@spfn/notification/server';
 
 import {
     InvalidCredentialsError,
     InvalidVerificationTokenError,
+    RecentAuthenticationRequiredError,
     VerificationTokenPurposeMismatchError,
     VerificationTokenTargetMismatchError,
     DeletionAlreadyRequestedError,
@@ -39,11 +43,16 @@ import {
 import type { User } from '../entities/users';
 import type { AccountDeletionRequest } from '../entities/account-deletion-requests';
 import type { AccountDeletionRequestedBy, PurgeStrategy } from '../types';
-import { verifyPassword, getDummyPasswordHash } from '../helpers';
-import { validateVerificationToken } from './verification.service';
+import { verifyPassword, getDummyPasswordHash, normalizeEmail } from '../helpers';
+import { validateVerificationToken, type VerificationTokenPayload } from './verification.service';
 import { revokeAllOAuth2GrantsForUser } from './oauth2-grant.service';
-import { setAccountStatus } from './user.service';
+import { setAccountDeletion } from './user.service';
+import { assertStepUp } from './mfa.service';
+import { proveRecentAuthentication, recentAuthenticationHolds, type RecentAuthenticationProof } from './passkey.service';
+import { admissionRefusalError, admitCompletion, sessionKeyOf, type PrincipalCredential } from './admission.service';
+import { ROUTE_ENROLMENT } from '../routes/channels';
 import { getDeletionConfig } from '../lib/deletion-config';
+import { getRecentAuthMs } from '../lib/config';
 import { isUniqueViolation } from '../lib/unique-violation';
 import { authLogger } from '../logger';
 import {
@@ -53,7 +62,7 @@ import {
 } from '../events';
 
 // ============================================================================
-// Shared lookup (login / OAuth / authenticate gates)
+// Shared lookup
 // ============================================================================
 
 export interface PendingDeletionInfo
@@ -62,8 +71,8 @@ export interface PendingDeletionInfo
 }
 
 /**
- * Look up the pending deletion request's `purgeScheduledAt` for a `pending_deletion`
- * user, so login/OAuth/authenticate can surface it on `AccountPendingDeletionError`.
+ * Look up the pending deletion request's `purgeScheduledAt` for an account whose
+ * deletion is pending, so a client can surface it beside `AccountPendingDeletionError`.
  * Returns null if there is no pending row (shouldn't normally happen for a user in
  * that status, but the caller falls back to an error without the date).
  *
@@ -79,59 +88,146 @@ export async function getPendingDeletionInfo(userId: number): Promise<PendingDel
 }
 
 // ============================================================================
-// Re-authentication gate
+// Proof
 // ============================================================================
 
-interface ReauthParams
+/** A request from a session, proved before the lock: the credential it came in with, and what satisfied recent authentication. */
+interface ProvenRequester
 {
-    password?: string;
-    verificationToken?: string;
+    credential: PrincipalCredential;
+    proof: RecentAuthenticationProof;
 }
 
 /**
- * Step-up re-auth for a destructive action: password holders confirm with their
- * password, OAuth-only/passwordless users confirm with a fresh verification code
- * (purpose 'account_deletion'). Shared by request (self-service) and cancel.
+ * A request from a session passes the gates every sensitive change does: the
+ * second factor re-proved on this device (`assertStepUp` — a no-op for an
+ * account without one), and a credential proved recently on it or the password
+ * now (`proveRecentAuthentication`). Before the account lock: the second may
+ * hash. `requesterStillProven` asks both again under it. An administrator's
+ * request proves nothing here.
+ *
+ * @throws StepUpRequiredError, RecentAuthenticationRequiredError
  */
-async function verifyReauthCredential(user: User, params: ReauthParams): Promise<void>
+async function proveRequester(userId: number, params: RequestAccountDeletionParams): Promise<ProvenRequester | null>
 {
-    if (user.passwordHash)
+    if (params.requestedBy !== 'self')
     {
-        if (!params.password)
-        {
-            throw new ValidationError({ message: 'Password is required to confirm this action' });
-        }
-
-        const valid = await verifyPassword(params.password, user.passwordHash);
-        if (!valid)
-        {
-            throw new InvalidCredentialsError({ message: 'Incorrect password' });
-        }
-
-        return;
+        return null;
     }
 
-    if (!params.verificationToken)
+    const keyId = sessionKeyOf(params.credential);
+    await assertStepUp({ userId, keyId });
+
+    return {
+        credential: params.credential,
+        proof: await proveRecentAuthentication({ userId, keyId, currentPassword: params.password }, getRecentAuthMs()),
+    };
+}
+
+/**
+ * What the request was decided on, asked again under the account lock: the
+ * session still admitted — by the admission, for this route, every step of it
+ * (`admitCompletion`) — the step-up still on record, and recent authentication
+ * still holding. A transaction that revoked the key, suspended the account,
+ * left it enrolment-only, removed the second factor or changed the password
+ * while this one waited for the lock ends it here. Nothing hashes.
+ *
+ * @returns false when the password hash moved since it was verified: the caller verifies again outside the lock
+ * @throws the admission's errors, StepUpRequiredError, RecentAuthenticationRequiredError
+ */
+async function requesterStillProven(user: User, requester: ProvenRequester): Promise<boolean>
+{
+    const admission = await admitCompletion({
+        userId: user.id,
+        credential: requester.credential,
+        enrolment: ROUTE_ENROLMENT.requestAccountDeletion,
+    });
+
+    if ('refused' in admission)
     {
-        throw new ValidationError({ message: 'A verification code is required to confirm this action' });
+        throw admissionRefusalError(admission.refused);
     }
 
-    const payload = validateVerificationToken(params.verificationToken);
-    if (!payload)
+    const params = { userId: user.id, keyId: sessionKeyOf(requester.credential) };
+    await assertStepUp(params);
+
+    return await recentAuthenticationHolds(params, requester.proof, user, getRecentAuthMs());
+}
+
+/**
+ * What proved a cancel: the password and the hash it was verified against, to
+ * be confirmed under the lock, or a verification token still to be spent there.
+ */
+type CancelProof = { kind: 'password'; verifiedHash: string } | { kind: 'token'; token: VerificationTokenPayload };
+
+/** The account a cancel named, and what proved its holder asked. */
+interface ProvenHolder
+{
+    user: User;
+    proof: CancelProof;
+}
+
+/**
+ * Prove the person behind a cancel holds the account — its password, or a
+ * verification token (purpose `account_deletion`) for its e-mail or its phone.
+ * Either is accepted whether or not the account has a password, so a person
+ * who forgot it recovers with a code. The token names the address it proves
+ * and its kind; it proves this account when that is the account's own address
+ * of that kind.
+ *
+ * Answers a missing account as it answers a wrong credential, at the same cost.
+ *
+ * @throws ValidationError, InvalidCredentialsError, InvalidVerificationTokenError,
+ *   VerificationTokenPurposeMismatchError, VerificationTokenTargetMismatchError
+ */
+async function proveAccountHolder(user: User | null, params: CancelAccountDeletionParams): Promise<ProvenHolder>
+{
+    if (params.verificationToken)
+    {
+        const token = deletionToken(params.verificationToken);
+        if (!user || addressOf(user, token.targetType) !== token.target)
+        {
+            throw new VerificationTokenTargetMismatchError();
+        }
+
+        return { user, proof: { kind: 'token', token } };
+    }
+
+    if (!params.password)
+    {
+        throw new ValidationError({ message: 'A password or a verification code is required to confirm this action' });
+    }
+
+    const matched = await verifyPassword(params.password, user?.passwordHash ?? await getDummyPasswordHash());
+    if (!user?.passwordHash || !matched)
+    {
+        throw new InvalidCredentialsError();
+    }
+
+    return { user, proof: { kind: 'password', verifiedHash: user.passwordHash } };
+}
+
+/** A verification token minted for an account deletion. */
+function deletionToken(verificationToken: string): VerificationTokenPayload
+{
+    const token = validateVerificationToken(verificationToken);
+    if (!token)
     {
         throw new InvalidVerificationTokenError();
     }
 
-    if (payload.purpose !== 'account_deletion')
+    if (token.purpose !== 'account_deletion')
     {
-        throw new VerificationTokenPurposeMismatchError({ expected: 'account_deletion', actual: payload.purpose });
+        throw new VerificationTokenPurposeMismatchError({ expected: 'account_deletion', actual: token.purpose });
     }
 
-    const target = user.email ?? user.phone;
-    if (!target || payload.target !== target)
-    {
-        throw new VerificationTokenTargetMismatchError();
-    }
+    return token;
+}
+
+/** The account's address of a kind, in the form a verification token carries it. */
+function addressOf(user: User, targetType: VerificationTokenPayload['targetType']): string | null
+{
+    return targetType === 'email' ? user.email && normalizeEmail(user.email) : user.phone;
 }
 
 // ============================================================================
@@ -152,19 +248,47 @@ async function sendDeletionEmail(
     }
 }
 
+async function sendDeletionSMS(to: string, message: string): Promise<void>
+{
+    const result = await sendSMS({ to, message });
+
+    if (!result.success)
+    {
+        authLogger.sms.error('Failed to send account deletion SMS', { to, error: result.error });
+    }
+}
+
+/**
+ * The notice is the one place the person learns the purge date and that a
+ * code cancels it — a pending account is not reset — so it goes to the
+ * channel the account has: e-mail when it has an address, otherwise SMS
+ * through the sender verification codes use.
+ */
 async function notifyDeletionRequested(user: User, purgeScheduledAt: Date): Promise<void>
 {
-    if (!getDeletionConfig().sendNotifications || !user.email)
+    if (!getDeletionConfig().sendNotifications)
     {
         return;
     }
 
-    await sendDeletionEmail(
-        user.email,
-        'Account deletion requested',
-        `We received a request to delete your account. It is scheduled for permanent deletion on `
-        + `${purgeScheduledAt.toISOString()}. If this wasn't you, sign in before that date to cancel it.`,
-    );
+    if (user.email)
+    {
+        await sendDeletionEmail(
+            user.email,
+            'Account deletion requested',
+            `We received a request to delete your account. It is scheduled for permanent deletion on `
+            + `${purgeScheduledAt.toISOString()}. To cancel it before then, confirm with your password or with a `
+            + `verification code sent to this address — no password needed.`,
+        );
+    }
+    else if (user.phone)
+    {
+        await sendDeletionSMS(
+            user.phone,
+            `Your account is scheduled for deletion on ${purgeScheduledAt.toISOString().slice(0, 10)}. `
+            + `To cancel, confirm with a verification code sent to this number.`,
+        );
+    }
 }
 
 async function notifyDeletionCancelled(user: User): Promise<void>
@@ -177,7 +301,7 @@ async function notifyDeletionCancelled(user: User): Promise<void>
     await sendDeletionEmail(
         user.email,
         'Account deletion cancelled',
-        'Your account deletion request was cancelled and your account is active again.',
+        'Your account deletion request was cancelled.',
     );
 }
 
@@ -199,16 +323,25 @@ async function notifyPurgeFinal(email: string): Promise<void>
 // Request
 // ============================================================================
 
-export interface RequestAccountDeletionParams
-{
-    /** Who initiated this — 'self' requires re-auth via password/verificationToken; 'admin' does not. */
-    requestedBy: AccountDeletionRequestedBy;
-    password?: string;
-    verificationToken?: string;
+/**
+ * Who asks, and with what. The person (`'self'`, from a session) passes the
+ * step-up and recent-authentication gates; an administrator's call (`'admin'`)
+ * is the app's to authorize, and is recorded as such on the request row.
+ */
+export type RequestAccountDeletionParams = (
+    | {
+        requestedBy: Extract<AccountDeletionRequestedBy, 'self'>;
+        /** The credential the session came in with (`getAuth(c).credential`): admitted again under the account lock, and its key's step-up and recent-authentication windows are the ones asked. */
+        credential: PrincipalCredential;
+        /** The account password, for a session that did not prove a credential recently. */
+        password?: string;
+    }
+    | { requestedBy: Extract<AccountDeletionRequestedBy, 'admin'> }
+) & {
     reason?: string;
     /** Skip the grace period: purge as soon as the request commits. Self-service requires `deletion.allowSelfImmediate`. */
     immediate?: boolean;
-}
+};
 
 export interface RequestAccountDeletionResult
 {
@@ -225,9 +358,11 @@ function addDays(date: Date, days: number): Date
 }
 
 /**
- * Request account deletion (self-service re-auth gate, or trusted admin/DSR call).
+ * Request account deletion (self-service, gated as every sensitive change is, or
+ * a trusted admin/DSR call).
  *
- * Sets status -> 'pending_deletion', records the request, revokes every active
+ * Moves the account's deletion to `pending` and leaves its status — a suspended
+ * account stays suspended — records the request, revokes every active
  * session key, and (after commit) emits `auth.deletion.requested` and sends the
  * request-received notice. With a zero grace period (explicit `immediate: true`,
  * gated for self-service by `allowSelfImmediate`), purges once the request commits instead of
@@ -238,14 +373,11 @@ export async function requestAccountDeletionService(
     params: RequestAccountDeletionParams,
 ): Promise<RequestAccountDeletionResult>
 {
-    const { requestedBy, password, verificationToken, immediate } = params;
+    const { requestedBy, immediate } = params;
 
-    // The credential is checked before the account lock (the check hashes);
-    // whether the account may be deleted is decided under it, on the primary.
-    if (requestedBy === 'self')
-    {
-        await verifyReauthCredential(await existingUser(userId), { password, verificationToken });
-    }
+    // The proof is checked before the account lock (the check hashes), and
+    // confirmed under it with whether the account may be deleted, on the primary.
+    const requester = await proveRequester(userId, params);
 
     const config = getDeletionConfig();
     const wantsImmediate = immediate === true;
@@ -256,10 +388,18 @@ export async function requestAccountDeletionService(
     }
 
     const gracePeriodDays = wantsImmediate ? 0 : config.gracePeriodDays;
-    const request = await runInTransaction(
-        () => recordDeletionRequest(userId, params, gracePeriodDays),
+    const record = (proven: ProvenRequester | null) => runInTransaction(
+        () => recordDeletionRequest(userId, params, gracePeriodDays, proven),
         { context: 'auth:deletion-request' },
     );
+    // A password hash that moved since it was verified makes the proof stale,
+    // not wrong: verified again against what is stored now — outside the lock,
+    // since verifying is the slow step — and the locked step runs once more.
+    const request = await record(requester) ?? await record(await proveRequester(userId, params));
+    if (!request)
+    {
+        throw new RecentAuthenticationRequiredError();
+    }
 
     // After the commit, not inside it: the purge runs `onBeforePurge` — the
     // app's own I/O — before it opens its transaction, which must not happen
@@ -271,17 +411,6 @@ export async function requestAccountDeletionService(
     }
 
     return { requestId: request.id, purgeScheduledAt: request.purgeScheduledAt };
-}
-
-async function existingUser(userId: number): Promise<User>
-{
-    const user = await usersRepository.findById(userId);
-    if (!user)
-    {
-        throw new NotFoundError({ message: 'User not found', resource: 'User' });
-    }
-
-    return user;
 }
 
 /**
@@ -296,34 +425,44 @@ function assertDeletable(user: User | null): asserts user is User
         throw new NotFoundError({ message: 'User not found', resource: 'User' });
     }
 
-    if (user.status === 'pending_deletion' || user.status === 'deleted')
+    if (user.deletion !== null)
     {
         throw new DeletionAlreadyRequestedError();
     }
 }
 
 /**
- * Lock the account (`usersRepository.lockAccount`), read its status under the
- * lock, and move it to `pending_deletion` from that status — the status, the
- * end of every session and the request row in one transaction.
+ * Lock the account (`usersRepository.lockAccount`), read its deletion under the
+ * lock, confirm a person's proof under it (`requesterStillProven`), and move
+ * the deletion to `pending` from none — the deletion, the end of every session
+ * and the request row in one transaction. The status is not written: whatever
+ * an operator set holds.
  *
- * The status is read on the primary under the lock, so a replica that has not
- * caught up with a status change cannot refuse a request falsely, and a status
- * changed meanwhile is the one this request moves from.
+ * The deletion is read on the primary under the lock, so a replica that has
+ * not caught up cannot refuse a request falsely, and a request that committed
+ * meanwhile makes this one a duplicate.
+ *
+ * @returns null, with nothing written, when the password hash the proof was verified against moved
  */
 async function recordDeletionRequest(
     userId: number,
     params: RequestAccountDeletionParams,
     gracePeriodDays: number,
-): Promise<AccountDeletionRequest>
+    requester: ProvenRequester | null,
+): Promise<AccountDeletionRequest | null>
 {
     const user = await usersRepository.lockAccount(userId);
     assertDeletable(user);
 
-    // `setAccountStatus` revokes the account's keys (their streams close after
-    // commit) as part of moving it to `pending_deletion`.
-    const moved = await setAccountStatus(user.id, 'pending_deletion', {
-        from: user.status,
+    if (requester && !await requesterStillProven(user, requester))
+    {
+        return null;
+    }
+
+    // `setAccountDeletion` revokes the account's keys (their streams close after
+    // commit) as part of moving it to `pending`.
+    const moved = await setAccountDeletion(user.id, 'pending', {
+        from: null,
         reason: 'Account deletion requested',
     });
     if (moved === 'refused')
@@ -419,62 +558,39 @@ export interface CancelAccountDeletionResult
 
 /**
  * Cancel a pending deletion (recovery). All sessions were revoked at request
- * time, so this is credential-based (no Bearer token) rather than auth-context-based.
+ * time, so this is credential-based (no Bearer token) rather than auth-context-based
+ * — the one door that lets a person whose deletion is pending act on the account.
  *
- * Credential verification always runs before the caller learns whether the
- * account exists / is pending deletion — otherwise this endpoint could be used
- * to enumerate accounts or probe deletion status without a valid credential,
- * the same posture `loginService` takes for missing accounts.
+ * The credential is proved before the caller learns whether the account exists
+ * or is pending deletion — otherwise this endpoint could be used to enumerate
+ * accounts or probe deletion status without a valid credential, the same
+ * posture `loginService` takes for missing accounts.
  *
- * Claims the `account_deletion_requests` row (conditional `WHERE status =
- * 'pending'`) before touching `users` — see the comment at that claim below for
- * why the `users` row must not move until the claim succeeds.
+ * Clears the account's deletion and nothing else: a cancelled deletion of a
+ * suspended account leaves it suspended, whoever asked for the deletion.
  */
 export async function cancelAccountDeletionService(
     params: CancelAccountDeletionParams,
 ): Promise<CancelAccountDeletionResult>
 {
-    const { email, phone, password, verificationToken } = params;
+    const { email, phone } = params;
 
     if (!email && !phone)
     {
         throw new ValidationError({ message: 'Either email or phone must be provided' });
     }
 
-    const user = await usersRepository.findByEmailOrPhone(email, phone);
-    if (!user)
-    {
-        // No real hash to check against — burn roughly the same time a real
-        // (wrong-password) attempt would, mirroring loginService's dummy-hash
-        // equalization, so "no such account" isn't distinguishable by timing.
-        if (password)
-        {
-            await verifyPassword(password, await getDummyPasswordHash());
-        }
+    const claim = (holder: ProvenHolder) => runInTransaction(() => claimCancellation(holder), { context: 'auth:deletion-cancel' });
+    const { user, proof } = await proveAccountHolder(await usersRepository.findByEmailOrPhone(email, phone), params);
 
+    // A password hash that moved since it was verified (read on a replica, or
+    // re-encoded by a sign-in) is verified again against the primary's, outside
+    // the lock, and claimed once more.
+    if (!await claim({ user, proof })
+        && !await claim(await proveAccountHolder(await usersRepository.findByIdOnPrimary(user.id), params)))
+    {
         throw new InvalidCredentialsError();
     }
-
-    if (user.status !== 'pending_deletion')
-    {
-        // Still verify the credential before revealing "not pending" — a caller
-        // without the right password/code must see the same InvalidCredentialsError
-        // as a wrong guess against a genuinely pending account, not a distinguishing
-        // 404 up front.
-        await verifyReauthCredential(user, { password, verificationToken });
-        throw new DeletionNotRequestedError();
-    }
-
-    await verifyReauthCredential(user, { password, verificationToken });
-
-    // Claim-first (B1): reactivating `users` before the claim raced the purge —
-    // if the purge's own claim + destructive DML committed in the gap between our
-    // credential check and our users UPDATE, this would revive an
-    // already-anonymized row (status='deleted', PII scrubbed, passwordHash null)
-    // back to 'active': a "zombie" account. Cancel and purge both take the
-    // account lock first, so whichever gets it first wins; the loser sees a
-    // request already moved off 'pending' and backs off.
-    await runInTransaction(() => claimCancellation(user), { context: 'auth:deletion-cancel' });
 
     onAfterCommit(() =>
         authDeletionCancelledEvent.emit({
@@ -487,48 +603,58 @@ export async function cancelAccountDeletionService(
 }
 
 /**
- * Claim the pending request, then move the account out of `pending_deletion`
- * — one transaction, so a refusal at either step leaves both as they were.
+ * Spend the proof, claim the pending request, then clear the account's
+ * deletion — one transaction, so a refusal at any step leaves all three as
+ * they were.
  *
- * The account is locked first (`usersRepository.lockAccount`) and its status
- * read again under the lock, because the status cancel decided on was read
- * before this ran: a suspension that committed in between is not lifted, and
- * the cancel is answered as it is for an account that is not pending deletion.
- * The claim guarantees the purge did not win. The account's keys stay revoked:
- * the person signs in anew.
+ * The account is locked first (`usersRepository.lockAccount`) and its deletion
+ * read again under the lock, because the read cancel decided on was taken
+ * before this ran. A password is confirmed here — the hash it was verified
+ * against still the one stored — and a verification token is spent here,
+ * conditionally, so it cancels once. The claim guarantees the purge did not win (claim-first: the
+ * purge also locks the account, and whichever gets the lock first wins; the
+ * loser sees a request already moved off `pending` and backs off). The
+ * account's keys stay revoked: the person signs in anew.
  *
- * @throws DeletionNotRequestedError when there is no pending request to claim,
- *   or the account is no longer `pending_deletion`
+ * @throws DeletionNotRequestedError when the account's deletion is not pending
+ *   or there is no pending request to claim; InvalidVerificationTokenError
+ *   when the token was spent already
+ * @returns false, with nothing written, when the password hash moved since it was verified
  */
-async function claimCancellation(user: User): Promise<void>
+async function claimCancellation({ user, proof }: ProvenHolder): Promise<boolean>
 {
     const locked = await usersRepository.lockAccount(user.id);
-    if (locked?.status !== 'pending_deletion')
+    if (locked?.deletion !== 'pending')
     {
         throw new DeletionNotRequestedError();
+    }
+
+    if (proof.kind === 'password' && locked.passwordHash !== proof.verifiedHash)
+    {
+        return false;
+    }
+
+    if (proof.kind === 'token' && !await verificationCodesRepository.spendToken(proof.token.codeId, proof.token.target, 'account_deletion'))
+    {
+        throw new InvalidVerificationTokenError();
     }
 
     const pendingRequest = await accountDeletionRequestsRepository.findPendingByUserId(user.id);
-    if (!pendingRequest)
+    if (!pendingRequest || !await accountDeletionRequestsRepository.markCancelled(pendingRequest.id))
     {
         throw new DeletionNotRequestedError();
     }
 
-    // The purge won the race and already claimed/completed this row — same
-    // surface as retrying cancel after the account was actually purged.
-    if (!await accountDeletionRequestsRepository.markCancelled(pendingRequest.id))
-    {
-        throw new DeletionNotRequestedError();
-    }
-
-    const moved = await setAccountStatus(user.id, 'active', {
-        from: 'pending_deletion',
+    const moved = await setAccountDeletion(user.id, null, {
+        from: 'pending',
         reason: 'Account deletion cancelled',
     });
     if (moved === 'refused')
     {
         throw new DeletionNotRequestedError();
     }
+
+    return true;
 }
 
 // ============================================================================
@@ -543,17 +669,18 @@ export interface PurgeUserResult
 /**
  * Anonymize a user in place: scrub PII, drop child rows that would otherwise
  * block re-registration (social accounts, public keys), keep the row for referential
- * integrity/audit. `status` -> 'deleted', `deletedAt`/`deletedBy` set (softDelete()).
+ * integrity/audit. `deletion` -> 'deleted' (the status is left as it was),
+ * `deletedAt`/`deletedBy` set (softDelete()).
  *
  * Must run inside the same transaction as the `markCompleted` claim (caller's
  * responsibility) — this function itself does not re-check pending status.
  */
 async function anonymizeUser(user: User): Promise<void>
 {
-    // Conditional on `pending_deletion`, though the caller read that status
-    // under the account lock: the throw rolls the claim back.
-    const moved = await setAccountStatus(user.id, 'deleted', {
-        from: 'pending_deletion',
+    // Conditional on `pending`, though the caller read it under the account
+    // lock: the throw rolls the claim back.
+    const moved = await setAccountDeletion(user.id, 'deleted', {
+        from: 'pending',
         reason: 'Account deleted',
     });
     if (moved === 'refused')
@@ -632,13 +759,13 @@ async function purgePendingRequest(request: AccountDeletionRequest): Promise<Pur
     const userId = request.userId;
 
     const precheckUser = await usersRepository.findByIdOnPrimary(userId);
-    if (!precheckUser || precheckUser.status !== 'pending_deletion')
+    if (!precheckUser || precheckUser.deletion !== 'pending')
     {
         // Recovered (or otherwise gone) before we got here — no hook call, no
         // transaction, nothing to undo.
         authLogger.service.info('[account-deletion] purge skipped', {
             userId,
-            reason: precheckUser ? `account is ${precheckUser.status}, not pending_deletion` : 'account not found',
+            reason: precheckUser ? `account deletion is ${precheckUser.deletion ?? 'none'}, not pending` : 'account not found',
         });
 
         return { outcome: 'skipped' };
@@ -678,7 +805,7 @@ async function purgePendingRequest(request: AccountDeletionRequest): Promise<Pur
         // findDueForPurge (replica)/the pre-check above and this transaction: a
         // cancel that committed in between must be honored.
         const user = await usersRepository.lockAccount(userId);
-        if (!user || user.status !== 'pending_deletion')
+        if (!user || user.deletion !== 'pending')
         {
             return;
         }
