@@ -19,7 +19,8 @@
 
 import type { InterceptorRule } from '@spfn/core/nextjs/server';
 import { generateKeyPair } from '../../server/lib/crypto';
-import { sealSession } from '../../server/lib/session';
+import { sealSession, unsealSession } from '../../server/lib/session';
+import { signKeyReplacementProof } from '../../server/lib/key-replacement-proof';
 import { getSessionTtl, COOKIE_NAMES } from '../../server/lib/config';
 import { authLogger } from '../../server/logger';
 import { cookieSecure } from './cookie-options';
@@ -36,6 +37,34 @@ import { bindingSessionFields } from './session-binding';
 const ROTATING_SIGN_IN_PATHS = new Set(['/_auth/login', '/_auth/passkeys/login/verify']);
 
 /**
+ * The fields that claim a replacement, which only this interceptor may write.
+ *
+ * Deleted from whatever the browser sent, on every path this rule matches,
+ * before anything is decided: a key id the browser names is not a proof, and a
+ * `replacementProof` it supplies would be one this proxy did not make.
+ */
+const REPLACEMENT_FIELDS = ['oldKeyId', 'replacementProof'] as const;
+
+/**
+ * A proof that this browser's session key is being replaced by `newKeyId`,
+ * signed with that key's private half — or nothing, when there is no sealed
+ * session to sign with.
+ *
+ * Only the **sealed** session cookie is read. The plain key-id cookie names a
+ * key and proves nothing; the private key inside the sealed cookie is the one
+ * thing that can, and an unreadable cookie is the same as none: the sign-in goes
+ * ahead as a new device.
+ */
+async function replacementProofFromSession(sealed: string | undefined, newKeyId: string): Promise<string | undefined>
+{
+    const session = sealed ? await unsealSession(sealed).catch(() => null) : null;
+
+    return session
+        ? signKeyReplacementProof({ oldKeyId: session.keyId, newKeyId }, session.privateKey, session.algorithm)
+        : undefined;
+}
+
+/**
  * Login, Register, and Invitation-Accept Interceptor
  *
  * Request: Generates key pair and adds publicKey to request body
@@ -48,9 +77,6 @@ export const loginRegisterInterceptor: InterceptorRule =
 
         request: async (ctx, next) =>
         {
-            // Get old session if exists (for key rotation on login)
-            const oldKeyId = ctx.cookies.get(COOKIE_NAMES.SESSION_KEY_ID);
-
             // Extract remember option from request body (if provided)
             const remember = ctx.body?.remember;
 
@@ -63,19 +89,29 @@ export const loginRegisterInterceptor: InterceptorRule =
                 ctx.body = {};
             }
 
+            for (const field of REPLACEMENT_FIELDS)
+            {
+                delete ctx.body[field];
+            }
+
             ctx.body.publicKey = keyPair.publicKey;
             ctx.body.keyId = keyPair.keyId;
             ctx.body.fingerprint = keyPair.fingerprint;
             ctx.body.algorithm = keyPair.algorithm;
             ctx.body.keySize = Buffer.from(keyPair.publicKey, 'base64').length;
 
-            // Add oldKeyId for a sign-in (key rotation). Both sign-in paths:
-            // a passkey assertion starts a session exactly as a password login
-            // does, so the key the browser was already carrying has to be
-            // retired by the same request that replaces it.
-            if (ROTATING_SIGN_IN_PATHS.has(ctx.path) && oldKeyId)
+            // Prove the replacement for a sign-in. Both sign-in paths: a passkey
+            // assertion starts a session exactly as a password login does, so
+            // the key the browser was already carrying has to be retired by the
+            // same request that replaces it — and only a signature by that key
+            // makes the backend treat this as the same device.
+            const replacementProof = ROTATING_SIGN_IN_PATHS.has(ctx.path)
+                ? await replacementProofFromSession(ctx.cookies.get(COOKIE_NAMES.SESSION), keyPair.keyId)
+                : undefined;
+
+            if (replacementProof)
             {
-                ctx.body.oldKeyId = oldKeyId;
+                ctx.body.replacementProof = replacementProof;
             }
 
             // Remove remember from body (not part of contract)
@@ -149,7 +185,8 @@ export const loginRegisterInterceptor: InterceptorRule =
                     },
                 });
 
-                // Set keyId cookie (for oldKeyId lookup)
+                // Set keyId cookie. Not read for the replacement decision — the
+                // proof above is signed from the sealed cookie alone
                 ctx.setCookies.push({
                     name: COOKIE_NAMES.SESSION_KEY_ID,
                     value: ctx.metadata.newKeyId,

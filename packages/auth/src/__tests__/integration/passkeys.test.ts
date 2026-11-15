@@ -24,6 +24,7 @@ import { FixtureAuthenticator } from '../helpers/webauthn-fixture';
 import { passkeys, userPublicKeys, users, userSocialAccounts, webauthnChallenges } from '@/server/entities';
 import { hashPassword } from '@/server/helpers/password';
 import { generateKeyPair, generateClientToken } from '@/server/lib/crypto';
+import { signKeyReplacementProof } from '@/server/lib/key-replacement-proof';
 import { authenticate } from '@/server/middleware/authenticate';
 import { authLoginEvent, passkeyEnrolledEvent, passkeyRevokedEvent } from '@/server/events';
 import { authLogger } from '@/server/logger';
@@ -118,7 +119,8 @@ describe.skipIf(!dbAvailable)('Passkeys (WebAuthn)', () =>
     }
 
     /** Exactly what a client does: hand over a public key at login, sign with the private half. */
-    async function signIn(email: string): Promise<Session>
+    /** A password sign-in, with the private key a replacement proof is signed with. */
+    async function signIn(email: string): Promise<Session & { privateKey: string }>
     {
         const keyPair = generateKeyPair('ES256');
         const response = await post('/_auth/login', {
@@ -134,7 +136,7 @@ describe.skipIf(!dbAvailable)('Passkeys (WebAuthn)', () =>
 
         const token = generateClientToken({ keyId: keyPair.keyId }, keyPair.privateKey, 'ES256', { expiresIn: '5m' });
 
-        return { authorization: `Bearer ${token}`, keyId: keyPair.keyId };
+        return { authorization: `Bearer ${token}`, keyId: keyPair.keyId, privateKey: keyPair.privateKey };
     }
 
     /**
@@ -168,12 +170,12 @@ describe.skipIf(!dbAvailable)('Passkeys (WebAuthn)', () =>
         return row;
     }
 
-    /** Push a device key's registration moment into the past, ageing the session. */
+    /** Push the moment a credential was last proved on a device key into the past, ageing the session. */
     async function ageSession(session: Session, minutes: number): Promise<void>
     {
         await getTestDb()
             .update(userPublicKeys)
-            .set({ createdAt: new Date(Date.now() - minutes * 60_000) })
+            .set({ authenticatedAt: new Date(Date.now() - minutes * 60_000) })
             .where(eq(userPublicKeys.keyId, session.keyId));
     }
 
@@ -805,14 +807,19 @@ describe.skipIf(!dbAvailable)('Passkeys (WebAuthn)', () =>
             })).status).toBe(200);
         });
 
-        it('row L15: an old key named in the body is revoked as the new one is registered', async () =>
+        it('row L15: an old key that signs the replacement proof is revoked as the new one is registered', async () =>
         {
             const session = await signIn('owner@test.com');
             const { authenticator } = await enrolled(session);
             const newKey = deviceKeyBody();
+            const replacementProof = signKeyReplacementProof(
+                { oldKeyId: session.keyId, newKeyId: newKey.keyId },
+                session.privateKey,
+                'ES256',
+            );
 
             const response = await signInWithPasskey(authenticator, {
-                body: { ...newKey, oldKeyId: session.keyId },
+                body: { ...newKey, replacementProof },
             });
             expect(response.status).toBe(200);
 

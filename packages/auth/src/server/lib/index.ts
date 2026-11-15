@@ -17,6 +17,7 @@
  */
 
 export * from './crypto';
+export * from './key-replacement-proof';
 export * from './session';
 export * from './config';
 // Kept on the public surface where it used to live (config); the routes no

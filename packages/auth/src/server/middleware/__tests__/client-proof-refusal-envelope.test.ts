@@ -20,8 +20,7 @@ vi.mock('@spfn/auth/server', async (importOriginal) =>
         decodeToken: vi.fn(),
         verifyClientToken: vi.fn(),
         keysRepository: {
-            findActiveByKeyIdOnPrimary: vi.fn(),
-            findByKeyIdOnPrimary: vi.fn(),
+            findWithAccountEpochOnPrimary: vi.fn(),
             updateLastUsedById: vi.fn().mockResolvedValue(undefined),
         },
         findUserWithEffectiveRoleOnPrimary: vi.fn(),
@@ -70,6 +69,8 @@ function validKeyRecord(overrides: Record<string, unknown> = {})
         publicKey: TEST_PUBLIC_KEY_SPKI_B64,
         algorithm: 'ES256',
         isActive: true,
+        keyEpoch: 0,
+        accountKeyEpoch: 0,
         expiresAt: futureDate,
         ...overrides,
     };
@@ -216,7 +217,7 @@ const SCENARIOS: Record<ClientProofErrorCode, (middleware: Middleware) => Promis
 
     SESSION_REVOKED: (middleware) =>
     {
-        vi.mocked(keysRepository.findByKeyIdOnPrimary).mockResolvedValue(validKeyRecord({ isActive: false }) as never);
+        vi.mocked(keysRepository.findWithAccountEpochOnPrimary).mockResolvedValue(validKeyRecord({ isActive: false }) as never);
 
         return answer(middleware, contextFor({ headers: proofHeaders() }));
     },
@@ -257,7 +258,7 @@ describe.each(EACH_MIDDLEWARE)('clientProofV1 refusal envelope (%s)', (_name, mi
         vi.clearAllMocks();
         configureClientProofReplayStore(new MemoryReplayStore());
         vi.mocked(keysRepository.updateLastUsedById).mockResolvedValue(undefined as never);
-        vi.mocked(keysRepository.findByKeyIdOnPrimary).mockResolvedValue(validKeyRecord() as never);
+        vi.mocked(keysRepository.findWithAccountEpochOnPrimary).mockResolvedValue(validKeyRecord() as never);
         vi.mocked(findUserWithEffectiveRoleOnPrimary).mockResolvedValue(activeUser() as never);
     });
 
@@ -381,7 +382,7 @@ describe('a refused proven call through the whole server stack', () =>
         vi.clearAllMocks();
         configureClientProofReplayStore(new MemoryReplayStore());
         vi.mocked(keysRepository.updateLastUsedById).mockResolvedValue(undefined as never);
-        vi.mocked(keysRepository.findByKeyIdOnPrimary).mockResolvedValue(validKeyRecord() as never);
+        vi.mocked(keysRepository.findWithAccountEpochOnPrimary).mockResolvedValue(validKeyRecord() as never);
         vi.mocked(findUserWithEffectiveRoleOnPrimary).mockResolvedValue(activeUser() as never);
     });
 

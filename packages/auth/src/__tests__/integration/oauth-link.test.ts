@@ -218,7 +218,7 @@ describe.skipIf(!dbAvailable)('Battle.net sign-in and OAuth link/unlink (#154)',
     {
         await getTestDb()
             .update(userPublicKeys)
-            .set({ createdAt: new Date(Date.now() - minutes * 60_000) })
+            .set({ authenticatedAt: new Date(Date.now() - minutes * 60_000) })
             .where(eq(userPublicKeys.keyId, session.keyId));
     }
 

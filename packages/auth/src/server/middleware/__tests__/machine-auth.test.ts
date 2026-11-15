@@ -31,8 +31,7 @@ vi.mock('@spfn/auth/server', async (importOriginal) =>
         decodeToken: vi.fn(),
         verifyClientToken: vi.fn(),
         keysRepository: {
-            findActiveByKeyIdOnPrimary: vi.fn(),
-            findByKeyIdOnPrimary: vi.fn(),
+            findWithAccountEpochOnPrimary: vi.fn(),
             updateLastUsedById: vi.fn().mockResolvedValue(undefined),
         },
         findUserWithEffectiveRoleOnPrimary: vi.fn(),
@@ -215,6 +214,8 @@ function validKeyRecord()
         publicKey: 'unused-on-the-bearer-path',
         algorithm: 'ES256',
         isActive: true,
+        keyEpoch: 0,
+        accountKeyEpoch: 0,
         expiresAt: futureDate,
     };
 }
@@ -320,7 +321,7 @@ describe('the machine-principal case table', () =>
     function admitUserToken(): void
     {
         vi.mocked(decodeToken).mockReturnValue({ keyId: KEY_ID } as never);
-        vi.mocked(keysRepository.findActiveByKeyIdOnPrimary).mockResolvedValue(validKeyRecord() as never);
+        vi.mocked(keysRepository.findWithAccountEpochOnPrimary).mockResolvedValue(validKeyRecord() as never);
         vi.mocked(verifyClientToken).mockReturnValue({ keyId: KEY_ID } as never);
     }
 
@@ -368,7 +369,7 @@ describe('the machine-principal case table', () =>
             expect(refusal.status).toBe(401);
             expect(refusal.message).toBe('Invalid token: missing keyId');
             expect(decodeToken).not.toHaveBeenCalled();
-            expect(keysRepository.findActiveByKeyIdOnPrimary).not.toHaveBeenCalled();
+            expect(keysRepository.findWithAccountEpochOnPrimary).not.toHaveBeenCalled();
             expect(driven.authOf()).toBeUndefined();
             expect(driven.next).not.toHaveBeenCalled();
         });

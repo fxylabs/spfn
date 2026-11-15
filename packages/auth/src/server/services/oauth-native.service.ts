@@ -141,8 +141,9 @@ export async function oauthNativeService(params: OAuthNativeParams): Promise<OAu
  * 두 검사가 모두 있어야 결속이 성립한다. fingerprint 검증만 있으면 nonce는 아무 값이나 될 수
  * 있고, 동등 검사만 있으면 fingerprint가 실제 키의 해시가 아니어도 통과한다.
  *
- * registerPublicKeyService에 기대지 않는 이유: 그쪽은 같은 사용자의 활성 키 재등록을 early
- * return으로 흘려보내 fingerprint를 검증하지 않는다. 결속은 여기서 끝나야 구멍이 없다.
+ * registerPublicKeyService도 모든 경로에서 fingerprint를 검증하지만(기존 keyId 재등록 포함),
+ * 그것은 id_token 검증 뒤다. 여기서 먼저 끝내는 이유는 결속이 깨진 요청이 provider 호출(외부
+ * JWKS 조회)에 닿지 않게 하기 위해서다.
  *
  * @throws NonceKeyBindingError nonce가 fingerprint와 다를 때
  * @throws InvalidKeyFingerprintError fingerprint가 publicKey의 해시가 아닐 때

@@ -1643,9 +1643,9 @@ describe('declared proof rules match the implementation', () =>
         replayWindowMillis: number;
     };
 
-    it('#309: the contract line is the revision that carries the second-factor policy', () =>
+    it('the contract line is the revision that carries the key replacement proof', () =>
     {
-        expect(bundle.contractVersion).toBe('0.14.0');
+        expect(bundle.contractVersion).toBe('0.14.1');
     });
 
     it('the supported range floor is the current minor, as the 0.x rule has it', () =>

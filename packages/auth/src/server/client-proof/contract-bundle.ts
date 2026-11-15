@@ -413,8 +413,25 @@ import { CLIENT_IDENTITY_HEADERS, CLIENT_KINDS, SERVER_CONTRACT_HEADERS } from '
  * response from an app that never states one is byte-identical to 0.13.8's;
  * the range moves with the minor, since its floor is mechanically the current
  * minor's `.0`.
+ *
+ * 0.14.1 declares `LoginRequest.replacementProof`, an optional string: a JWT
+ * the key being replaced signs (`alg` that key's algorithm, `iss`
+ * `spfn-key-replacement`, `purpose` `key-replacement`, `oldKeyId`, `newKeyId` —
+ * the `keyId` of this request — and an `iat` within the last 60 seconds by the
+ * server's clock and at most 10 seconds ahead of it, whatever `exp` says). It
+ * is the only thing that makes a sign-in a replacement of the device's key: a
+ * key id is not a secret, so `LoginRequest.oldKeyId` no longer has any effect —
+ * still accepted, so a client that sends it is not refused, but a sign-in
+ * carrying it and no proof that verifies is a new device (an enrolled account
+ * answers 202, the owner is told, and the old key stays live until it expires
+ * or is revoked). A native client relying on `oldKeyId` therefore keeps its old
+ * key live and can receive a 202 until it sends `replacementProof`.
+ * A patch, on 0.13.1's reasoning: an optional field a client may send, and no
+ * declared response field, type or error changes. A consumer generated against
+ * 0.14.0 keeps decoding every answer it can get — the 202 a rotation now gets
+ * is one it already handles — so the supported range does not move.
  */
-export const CONTRACT_VERSION = '0.14.0';
+export const CONTRACT_VERSION = '0.14.1';
 export const CONTRACT_MAJOR = 0;
 export const CONTRACT_NAME = 'spfn-mobile-contract';
 
@@ -723,7 +740,11 @@ export const CONTRACT_TYPES: readonly TypeDeclaration[] = [
             required('keyId', 'string'),
             required('fingerprint', 'string'),
             required('algorithm', 'KeyAlgorithm'),
+            // No effect since 0.14.1: naming a key proves nothing. Kept so a
+            // client that still sends it is not refused.
             optional('oldKeyId', 'string'),
+            // 0.14.1: signed by the key this one replaces — see CONTRACT_VERSION.
+            optional('replacementProof', 'string'),
         ],
     },
     /**

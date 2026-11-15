@@ -8,6 +8,7 @@
 import { SSETokenManager } from '@spfn/core/event/sse';
 import type { SSETokenStore } from '@spfn/core/event/sse';
 import { keysRepository } from '../repositories/keys.repository';
+import { keyLiveness } from './key-liveness';
 
 let manager: SSETokenManager | null = null;
 
@@ -40,14 +41,14 @@ export function initOneTimeTokenManager(config?: { ttl?: number; store?: SSEToke
 }
 
 /**
- * The key exists, is active and has not expired. Read on the primary: a key
+ * The key exists and is live (`keyLiveness`). Read on the primary: a key
  * revoked a moment ago may still read active on a replica.
  */
 async function isKeyLive(keyId: string): Promise<boolean>
 {
-    const key = await keysRepository.findByKeyIdOnPrimary(keyId);
+    const key = await keysRepository.findWithAccountEpochOnPrimary(keyId);
 
-    return !!key && key.isActive && (!key.expiresAt || key.expiresAt > new Date());
+    return !!key && keyLiveness(key) === 'live';
 }
 
 /**

@@ -21,7 +21,7 @@ vi.mock('@spfn/auth/server', async (importOriginal) =>
         decodeToken: vi.fn(),
         verifyClientToken: vi.fn(),
         keysRepository: {
-            findActiveByKeyIdOnPrimary: vi.fn(),
+            findWithAccountEpochOnPrimary: vi.fn(),
             // Replica read: admission must never reach it (replica-lag guard).
             findActiveByKeyId: vi.fn(),
             updateLastUsedById: vi.fn().mockResolvedValue(undefined),
@@ -47,7 +47,7 @@ import type { Context, Next } from 'hono';
 
 const KEY_ID = 'test-key-id';
 
-/** A valid, unexpired key record as returned by keysRepository.findActiveByKeyIdOnPrimary. */
+/** A valid, unexpired key record as returned by keysRepository.findWithAccountEpochOnPrimary. */
 function validKeyRecord(overrides: Record<string, unknown> = {})
 {
     const futureDate = new Date();
@@ -60,6 +60,8 @@ function validKeyRecord(overrides: Record<string, unknown> = {})
         publicKey: 'mock-public-key',
         algorithm: 'ES256',
         isActive: true,
+        keyEpoch: 0,
+        accountKeyEpoch: 0,
         expiresAt: futureDate,
         ...overrides,
     };
@@ -140,7 +142,7 @@ describe('Authenticate Middleware', () =>
 
         it('rejects an invalid or revoked key', async () =>
         {
-            vi.mocked(keysRepository.findActiveByKeyIdOnPrimary).mockResolvedValue(null as never);
+            vi.mocked(keysRepository.findWithAccountEpochOnPrimary).mockResolvedValue(null as never);
 
             await expect(authenticate.handler(mockContext as Context, mockNext))
                 .rejects.toThrow('Invalid or revoked key');
@@ -151,7 +153,7 @@ describe('Authenticate Middleware', () =>
         {
             const expiredDate = new Date();
             expiredDate.setDate(expiredDate.getDate() - 1);
-            vi.mocked(keysRepository.findActiveByKeyIdOnPrimary).mockResolvedValue(
+            vi.mocked(keysRepository.findWithAccountEpochOnPrimary).mockResolvedValue(
                 validKeyRecord({ expiresAt: expiredDate }) as never,
             );
 
@@ -167,7 +169,7 @@ describe('Authenticate Middleware', () =>
         {
             withBearer();
             vi.mocked(decodeToken).mockReturnValue({ keyId: KEY_ID } as never);
-            vi.mocked(keysRepository.findActiveByKeyIdOnPrimary).mockResolvedValue(validKeyRecord() as never);
+            vi.mocked(keysRepository.findWithAccountEpochOnPrimary).mockResolvedValue(validKeyRecord() as never);
             // Signature verification passes for these tests
             vi.mocked(verifyClientToken).mockReturnValue({ keyId: KEY_ID, iss: 'spfn-client' } as never);
         });
@@ -231,7 +233,7 @@ describe('Authenticate Middleware', () =>
         {
             withBearer();
             vi.mocked(decodeToken).mockReturnValue({ keyId: KEY_ID } as never);
-            vi.mocked(keysRepository.findActiveByKeyIdOnPrimary).mockResolvedValue(validKeyRecord() as never);
+            vi.mocked(keysRepository.findWithAccountEpochOnPrimary).mockResolvedValue(validKeyRecord() as never);
             vi.mocked(verifyClientToken).mockReturnValue({ keyId: KEY_ID, iss: 'spfn-client' } as never);
             vi.mocked(findUserWithEffectiveRoleOnPrimary).mockResolvedValue({
                 user: { id: 1, email: 'test@example.com', status: 'active' },
@@ -258,7 +260,7 @@ describe('Authenticate Middleware', () =>
         {
             withBearer();
             vi.mocked(decodeToken).mockReturnValue({ keyId: KEY_ID } as never);
-            vi.mocked(keysRepository.findActiveByKeyIdOnPrimary).mockResolvedValue(validKeyRecord() as never);
+            vi.mocked(keysRepository.findWithAccountEpochOnPrimary).mockResolvedValue(validKeyRecord() as never);
             vi.mocked(verifyClientToken).mockReturnValue({ keyId: KEY_ID, iss: 'spfn-client' } as never);
             vi.mocked(findUserWithEffectiveRoleOnPrimary).mockResolvedValue({
                 user: { id: 1, email: 'test@example.com', status: 'active' },
@@ -280,7 +282,7 @@ describe('Authenticate Middleware', () =>
         {
             withBearer();
             vi.mocked(decodeToken).mockReturnValue({ keyId: KEY_ID } as never);
-            vi.mocked(keysRepository.findActiveByKeyIdOnPrimary).mockResolvedValue(validKeyRecord() as never);
+            vi.mocked(keysRepository.findWithAccountEpochOnPrimary).mockResolvedValue(validKeyRecord() as never);
             vi.mocked(verifyClientToken).mockReturnValue({ keyId: KEY_ID, iss: 'spfn-client' } as never);
             vi.mocked(findUserWithEffectiveRoleOnPrimary).mockResolvedValue({
                 user: { id: 1, email: 'test@example.com', status: 'active' },
@@ -290,7 +292,7 @@ describe('Authenticate Middleware', () =>
             await authenticate.handler(mockContext as Context, mockNext);
 
             expect(mockNext).toHaveBeenCalled();
-            expect(keysRepository.findActiveByKeyIdOnPrimary).toHaveBeenCalledWith(KEY_ID);
+            expect(keysRepository.findWithAccountEpochOnPrimary).toHaveBeenCalledWith(KEY_ID);
             expect(keysRepository.findActiveByKeyId).not.toHaveBeenCalled();
             expect(findUserWithEffectiveRoleOnPrimary).toHaveBeenCalledWith(1);
             expect(findUserWithEffectiveRole).not.toHaveBeenCalled();

@@ -40,7 +40,7 @@ import { keysRepository, usersRepository } from '../repositories';
 import type { UserPublicKey } from '../entities/user-public-keys';
 import type { User } from '../entities/users';
 import type { KeyAlgorithmType } from '../types';
-import { registerPublicKeyService, registeredBinding, revokeKeyService } from './key.service';
+import { registerPublicKeyService, registeredBinding } from './key.service';
 import { secondFactorEnrolmentFields } from './second-factor-policy.service';
 import { startRenewalCeremonyService, verifyRenewalAssertionService } from './passkey.service';
 import { loginBindingFields, type LoginResult } from './auth.service';
@@ -103,9 +103,10 @@ export async function startSessionRenewService(
 /**
  * Step 2 — verify the assertion, put a new bound key in place of the old one.
  *
- * The revocation runs first and its answer is the race winner: two verifies that
- * both got past their own challenges meet at the same conditional UPDATE, and
- * only the one that actually revoked the key goes on to register a replacement.
+ * The old key is revoked by the registration itself, in the statement that
+ * checks it is still live: two verifies that both got past their own challenges
+ * meet at that conditional UPDATE, and only the one that actually revoked the
+ * key goes on to write a replacement.
  *
  * The new key inherits the old row's provenance, so the device list keeps saying
  * where this device first appeared rather than re-stamping itself every day. Its
@@ -125,17 +126,6 @@ export async function finishSessionRenewService(
         throw new SessionRenewalRefusedError();
     }
 
-    const revoked = await revokeKeyService({
-        userId: key.userId,
-        keyId: key.keyId,
-        reason: RENEWAL_REVOCATION_REASON,
-    });
-
-    if (!revoked)
-    {
-        throw new SessionRenewalRefusedError();
-    }
-
     const registered = await registerPublicKeyService({
         userId: key.userId,
         keyId: params.keyId,
@@ -151,7 +141,15 @@ export async function finishSessionRenewService(
         ip: key.registeredIp ?? undefined,
         userAgent: key.registeredUserAgent ?? undefined,
         binding: 'passkey',
-        replacesKeyId: key.keyId,
+        // The request is signed by the expiring key, which is the replacement's
+        // proof. Its revocation is the race winner: two verifies that both got
+        // past their own challenges meet at the same conditional UPDATE, and the
+        // one that revoked nothing is refused before it writes a key.
+        replaces: {
+            signedBy: key.keyId,
+            reason: RENEWAL_REVOCATION_REASON,
+            refusal: new SessionRenewalRefusedError(),
+        },
     });
 
     return {

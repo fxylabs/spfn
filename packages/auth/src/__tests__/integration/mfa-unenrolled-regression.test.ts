@@ -131,7 +131,7 @@ describe.skipIf(!dbAvailable)('an account with no second factor', () =>
     {
         await getTestDb()
             .update(userPublicKeys)
-            .set({ createdAt: new Date(Date.now() - minutes * 60_000) })
+            .set({ authenticatedAt: new Date(Date.now() - minutes * 60_000) })
             .where(eq(userPublicKeys.keyId, session.keyId));
     }
 

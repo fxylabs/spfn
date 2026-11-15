@@ -175,11 +175,13 @@ async function assertWindowOpen(params: AssertStepUpParams): Promise<void>
 /**
  * Carry a device's verification onto the key that replaces it.
  *
- * Called from the two rotation seams — `rotateKeyService`, and the `oldKeyId`
- * rotation every login path runs through `registerPublicKeyService`. Without
- * it the window would expire silently on every rotation, which the web proxy
- * does at each login: a user who stepped up a minute ago would be asked again
- * with nothing to connect it to.
+ * Called from one place: `registerPublicKeyService`, for a verified
+ * replacement — a `keys/rotate`, a renewal, or a sign-in whose
+ * `replacementProof` the old key signed. Never for a key id merely named: the
+ * window is the device's, and only the old private key shows it is the same
+ * device. Without it the window would expire silently on every rotation, which
+ * the web proxy does at each login: a user who stepped up a minute ago would be
+ * asked again with nothing to connect it to.
  */
 export function carryStepUpVerification(userId: number, fromKeyId: string, toKeyId: string): Promise<void>
 {

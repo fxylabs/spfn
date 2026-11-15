@@ -17,7 +17,7 @@
  * - Token signature verification
  * - Key expiration check
  * - User status check (active/inactive/suspended)
- * - Key revocation check (isActive flag)
+ * - Key revocation check (isActive flag and the account's key generation)
  */
 
 import type { Context } from 'hono';
@@ -36,6 +36,7 @@ import {
 import type { UserPublicKey } from '../entities/user-public-keys';
 import { readContextClientIdentity } from '../client-proof/version-middleware';
 import { attestedClientIp } from '../lib/device-provenance';
+import { keyLiveness } from '../lib/key-liveness';
 import { resolveAuthenticatedUser, runAuthProfile, type AuthContext, type AuthProfileOutcome } from './auth-profiles';
 import { matchesMachineDiscriminator } from './machine-principals';
 import { assertSecondFactorAdmits } from '../services/second-factor-policy.service';
@@ -141,15 +142,17 @@ export async function admitBearerKey(
         return { refused: 'undecodable' };
     }
 
-    // isActive = true is part of the lookup, so a revoked key is an unknown one.
-    const key = await keysRepository.findActiveByKeyIdOnPrimary(decoded.keyId as string);
+    // A revoked key — and one of an ended key generation, which is the same
+    // thing (see keyLiveness) — is an unknown one.
+    const key = await keysRepository.findWithAccountEpochOnPrimary(decoded.keyId as string);
+    const liveness = key ? keyLiveness(key) : 'revoked';
 
-    if (!key)
+    if (!key || liveness === 'revoked')
     {
         return { refused: 'unknown' };
     }
 
-    if (key.expiresAt && new Date() > key.expiresAt && !admitsExpired(key))
+    if (liveness === 'expired' && !admitsExpired(key))
     {
         return { refused: 'expired' };
     }
@@ -436,21 +439,15 @@ export const optionalAuth = defineMiddleware('optionalAuth', async (c, next) =>
 
         const keyId = decoded.keyId as string;
 
-        const keyRecord = await keysRepository.findActiveByKeyIdOnPrimary(keyId);
+        const keyRecord = await keysRepository.findWithAccountEpochOnPrimary(keyId);
 
-        if (!keyRecord)
-        {
-            await next();
-
-            return undefined;
-        }
-
-        // An expired key continues anonymously rather than refusing, and that
-        // includes a bound key past its window: this middleware's whole posture
-        // is that an unusable credential is the same as none, and a route that
-        // works signed-out must go on working. The renewal prompt belongs to the
-        // proxy and to the routes that do require a principal.
-        if (keyRecord.expiresAt && new Date() > keyRecord.expiresAt)
+        // A key that is not live continues anonymously rather than refusing —
+        // revoked, of an ended generation, or expired, and that includes a bound
+        // key past its window: this middleware's whole posture is that an
+        // unusable credential is the same as none, and a route that works
+        // signed-out must go on working. The renewal prompt belongs to the proxy
+        // and to the routes that do require a principal.
+        if (!keyRecord || keyLiveness(keyRecord) !== 'live')
         {
             await next();
 

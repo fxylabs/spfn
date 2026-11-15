@@ -16,7 +16,8 @@ const { keysRepository, deviceAuthorizationsRepository, deviceLinksRepository, r
         revokeAllActiveByUserId: vi.fn(),
         revokeAllActiveByUserIdExcept: vi.fn(),
         findByKeyIdAndUserId: vi.fn(),
-        findByKeyIdOnPrimary: vi.fn(),
+        findWithAccountEpochOnPrimary: vi.fn(),
+        revokeForReplacement: vi.fn(),
         findByKeyId: vi.fn(),
         create: vi.fn(),
     },
@@ -58,6 +59,8 @@ function row(overrides: Record<string, unknown> = {})
         algorithm: 'ES256',
         fingerprint: FINGERPRINT,
         isActive: true,
+        keyEpoch: 0,
+        accountKeyEpoch: 0,
         revokedAt: null,
         createdAt: new Date('2026-07-01T00:00:00Z'),
         lastUsedAt: new Date('2026-08-01T00:00:00Z'),
@@ -333,10 +336,15 @@ describe('rotation keeps the device recognisable', () =>
     const der = publicKey.export({ type: 'spki', format: 'der' });
     const newKey = { publicKey: der.toString('base64'), fingerprint: createHash('sha256').update(der).digest('hex') };
 
+    // The written row is what the rotation answers its binding from.
+    beforeEach(() =>
+    {
+        keysRepository.create.mockImplementation(async (values: unknown) => values);
+    });
+
     it('carries the replaced key\'s label over when the client sends none', async () =>
     {
-        keysRepository.findByKeyIdAndUserId.mockResolvedValue(row());
-        keysRepository.revokeByKeyIdAndUserId.mockResolvedValue(row());
+        keysRepository.revokeForReplacement.mockResolvedValue(row());
 
         await rotateKeyService({
             userId: 1,
@@ -353,8 +361,7 @@ describe('rotation keeps the device recognisable', () =>
 
     it('lets the client rename the device during rotation', async () =>
     {
-        keysRepository.findByKeyIdAndUserId.mockResolvedValue(row());
-        keysRepository.revokeByKeyIdAndUserId.mockResolvedValue(row());
+        keysRepository.revokeForReplacement.mockResolvedValue(row());
 
         await rotateKeyService({
             userId: 1,
@@ -372,8 +379,7 @@ describe('rotation keeps the device recognisable', () =>
 
     it('leaves the label undefined when neither side has one', async () =>
     {
-        keysRepository.findByKeyIdAndUserId.mockResolvedValue(row({ deviceName: null, platform: null }));
-        keysRepository.revokeByKeyIdAndUserId.mockResolvedValue(row());
+        keysRepository.revokeForReplacement.mockResolvedValue(row({ deviceName: null, platform: null }));
 
         await rotateKeyService({
             userId: 1,
@@ -384,7 +390,7 @@ describe('rotation keeps the device recognisable', () =>
         });
 
         expect(keysRepository.create).toHaveBeenCalledWith(
-            expect.objectContaining({ deviceName: undefined, platform: undefined }),
+            expect.objectContaining({ deviceName: null, platform: null }),
         );
     });
 });

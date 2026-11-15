@@ -343,7 +343,9 @@ with the stored public key (`keyId` carried in the JWT). The server never holds 
 Keys expire after 90 days — rotate with `rotateKey`, which starts the ninety days again. A key
 bound to a passkey is the one exception: it lives for hours and a rotation carries its expiry over
 rather than resetting it, because only `session/renew` may move that window — see
-[Session binding](#session-binding).
+[Session binding](#session-binding). A sign-in **replaces** the device's key only when the old
+private key proves it (`replacementProof`); otherwise it is a new device — see
+[Registered devices](#registered-devices-key-management).
 
 ### Which sign-in channels exist (`channels`)
 
@@ -598,6 +600,49 @@ In `afterInfrastructure`, beside the channel check:
 
 The mobile contract lists the three since 0.14.0 and marks each operation that can answer the
 first with `secondFactor.enrolmentRequired` — every signed-in operation except `auth.mfa.status`.
+
+### Migration — a sign-in replaces a key only with proof of the old key
+
+**BREAKING.** A sign-in used to count as "the same device swapping its key" when its body named
+one of the account's key ids in `oldKeyId`. A key id is not a secret — it is in every request token
+and in the device notice — so a password and a known key id were enough to skip the new-device
+challenge, silence the owner's notice and take over the step-up window. Only the old private key
+can prove a replacement now:
+
+- **`oldKeyId` no longer has any effect** on `POST /_auth/login` and
+  `POST /_auth/passkeys/login/verify`. It is still accepted, so an old client is not refused, but
+  a sign-in carrying it is a **new device**: an enrolled account answers `202` with a challenge,
+  the owner gets `auth.device.registered`, no step-up record moves, and the key it named stays
+  live. **A native client that relies on it now keeps its old key live after every sign-in, and
+  can receive a `202`**, until it sends `replacementProof`.
+- **`replacementProof` replaces it** — a JWT the old key signs, see
+  [Registered devices](#registered-devices-key-management). The `@spfn/auth/nextjs/api` proxy
+  signs it for you from the sealed session cookie and strips any `oldKeyId` or `replacementProof`
+  the browser sent; an app on that proxy changes nothing. **A custom proxy or native client that
+  sent `oldKeyId` now gets new-device treatment** until it sends a proof instead
+  (`signKeyReplacementProof` in `@spfn/auth/server` is the proxy's own helper). Mobile contract
+  0.14.1 declares the field; the supported range does not move.
+- **`POST /_auth/keys/rotate` whose old key is no longer live answers `401`** and writes nothing.
+  Before, a rotation that lost a race with a revocation still wrote a live key.
+- **A key id already registered is `409 KeyIdAlreadyRegisteredError` on every path** — rotation and
+  invitation acceptance included, which answered `500` — unless it is a *sign-in* by the same
+  account presenting the same public key of a key that is not revoked (a repeated login from one
+  device). `keys/rotate` onto a key id the caller already holds — pending, active, the same public
+  key or not — is always the `409`, and a key of an ended generation is a revoked key here too.
+- **"Recently authenticated" reads `authenticatedAt`**, when a person last proved a credential on
+  this device, rather than the key's `createdAt`. A rotation inherits it, so rotating no longer
+  makes a stale session look fresh to the [recent-authentication gate](#the-recent-authentication-gate).
+- **A key belongs to the account's key generation.** `revokeAllKeys`, a password change or reset,
+  an account deletion request and the sign-out-everywhere link move the generation, and
+  `authenticate`, `optionalAuth` and clientProofV1 admission refuse a key of an older one. A
+  rotation racing "sign out everywhere" therefore writes a key that is dead on arrival. Such a key
+  is answered exactly as a revoked one: `401 Invalid or revoked key` on the Bearer surface,
+  `SESSION_REVOKED` on clientProofV1 (before the proof and the nonce ledger, as a revoked key is).
+  The device that asked to sign out the *others* moves into the new generation with the account.
+
+The migration adds `user_public_keys.authenticated_at` (backfilled from `created_at`) and
+`user_public_keys.key_epoch` (backfilled from the account's `users.key_epoch`), so every existing
+key matches its account and nobody is signed out at deploy. Run it with the release.
 
 ### Migration — `secondFactorEnrolmentRequired` on a sign-in
 
@@ -1431,8 +1476,8 @@ await authApi.revokeAllKeys.call({ body: { includeCurrent: true } });   // every
   delay a revocation or a suspension, nor refuse a key registered a moment ago.
 - **Revocation closes the key's live streams, after commit.** Every path that revokes a key —
   `revokeKey`, `revokeAllKeys`, `logout`, a password change or reset, an account deletion request,
-  the sign-out-everywhere link, and the replacements (rotation, session renewal, a re-login with
-  `oldKeyId`) — ends in the keys repository, which calls `closeSSEConnectionsByKey` from
+  the sign-out-everywhere link, and the replacements (rotation, session renewal, a re-login whose
+  `replacementProof` the old key signed) — ends in the keys repository, which calls `closeSSEConnectionsByKey` from
   `@spfn/core/event/sse` for each revoked key once the transaction commits (at once outside one;
   never after a rollback). The SSE streams that key opened close on every pod, and a token it
   minted before the revocation is refused at open: the one-time token manager re-checks the key
@@ -1472,10 +1517,47 @@ rotation.
 A `keyId` is **single-use for its lifetime**: it is unique across all users and is never reissued
 once revoked. A client that logs out, rotates, or is revoked must generate a **fresh keypair and
 `keyId`** for its next sign-in — resending the old one is refused with
-`KeyIdAlreadyRegisteredError` (409), on every path that registers a key. Re-registering a key that
-is still active is the one
-exception: it stays a no-op success, so repeated logins from the same device keep working, and an
-expired-but-active key has its expiry extended by the sign-in that proved the identity again.
+`KeyIdAlreadyRegisteredError` (409), on every path that registers a key — sign-ins, `rotateKey` and
+invitation acceptance alike. Re-registering a key that is still active, by the same account and with
+the **same public key**, is the one exception: it stays a no-op success, so repeated logins from the
+same device keep working, and an expired-but-active key has its expiry extended by the sign-in that
+proved the identity again. The same id with any other public key is the 409.
+
+#### Replacing a device's key
+
+A sign-in that arrives at a device already holding a session key **replaces** that key — the old
+one is revoked, the step-up window carries across, no device notice is sent and no new-device
+challenge is asked — only when the **old private key** proves it. Naming the old key is not enough:
+a key id is in every request token and in the device notice. The proof is `replacementProof` in
+the sign-in body (`login`, `passkeys/login/verify`), a JWT:
+
+| part | value |
+|------|-------|
+| `alg` | the old key's algorithm (`ES256` or `RS256`), signed with its private key |
+| `iss` | `spfn-key-replacement` — never `spfn-client`, so a request token is not a proof and a proof is not a request token |
+| `purpose` | `key-replacement` |
+| `oldKeyId` | the key being replaced — it must be this account's and still live |
+| `newKeyId` | the `keyId` this same request registers |
+| `iat` | within the last 60 seconds **by the server's clock**, and at most 10 seconds ahead of it — whatever `exp` says |
+
+The Next.js proxy signs it from the private key in the **sealed** session cookie and deletes any
+`oldKeyId` or `replacementProof` the browser sent; a native client signs it with the key it holds
+(`signKeyReplacementProof` from `@spfn/auth/server` does it for a custom proxy). A proof that is
+absent, malformed, expired, made by another account's key or a revoked one, or for another new key
+is **not an error**: the password (or passkey) was proved, so the sign-in goes ahead as a **new
+device**, and the answer does not say whether the named key exists. So is a proof signed by a key
+that is no longer live — revoked, expired, or of an ended key generation: a key `authenticate`
+refuses vouches for nothing. `oldKeyId` is still accepted and has no effect.
+
+The old key is revoked by the same statement that checks it is still live, so a replacement never
+outlives a revocation that committed first. `rotateKey` is signed by the old key already — the
+request is the proof — and is **refused with 401** when that key is no longer live, writing no key.
+
+Each key records when a person last proved a credential on it (`authenticatedAt`): a sign-in sets it
+to now, a `rotateKey` inherits it. Each key also belongs to the account's **key generation**:
+every global revocation moves the account's, `authenticate` refuses a key of an older one, and a
+replacement inherits the old key's — so a rotation racing "sign out everywhere" writes a key that is
+dead on arrival.
 
 ### The sign-out-everywhere link
 
@@ -1760,9 +1842,9 @@ someone who simply changed their mind.
 Adding a credential is adding a way in, and removing one can lock an account. Both are refused
 unless the caller has recently proved themselves, in one of two ways:
 
-- **the device key this request is signed with was registered within
-  `SPFN_AUTH_PASSKEY_RECENT_AUTH_MINUTES`** — that is when this device last presented a
-  credential, and it needs no new state; or
+- **a person proved a credential on the device key this request is signed with within
+  `SPFN_AUTH_PASSKEY_RECENT_AUTH_MINUTES`** — the key's `authenticatedAt`, which a sign-in sets and
+  a `rotateKey` only inherits, so rotating does not make a stale session fresh; or
 - **the body carries `currentPassword`** and it verifies.
 
 Otherwise: **403 with `code: 'RECENT_AUTH_REQUIRED'`**. Branch on that code to prompt for the
@@ -1978,8 +2060,10 @@ code, a recovery code, or an assertion from a marked passkey (options from
 reason `RECENT_AUTH_REQUIRED` is: a 401 on an authenticated route is what a web client reads
 as "the session is gone", so it would sign the user out instead of asking for a code.
 
-A key **rotation carries the window across**, because rotating is already proof of the same
-device — otherwise the web proxy, which rotates at every login, would expire it constantly.
+A key **replacement carries the window across** — `rotateKey`, a renewal, or a sign-in whose
+`replacementProof` the old key signed — because each is proof of the same device; otherwise the web
+proxy, which replaces the key at every login, would expire it constantly. A sign-in that only
+*names* the old key carries nothing.
 
 The two passkey routes keep their own `RECENT_AUTH_REQUIRED` rule unchanged and run it after
 the step-up: the two guards are independent, and an unenrolled account meets exactly the rule
@@ -2014,7 +2098,10 @@ the four where one stolen credential would otherwise be enough. A device-code ap
 passkey sign-in do not, because each already carried a second proof — the passkey only while
 the [policy](#requiring-a-second-factor-secondfactor) lists passkeys; when it does not, a passkey
 sign-in is the fifth channel that stops, and `passkeys/login/verify` answers the same 202; nor does a key rotation,
-a renewal, or any path that is creating the account. A brand-new social account is not stepped
+a renewal, or any path that is creating the account. A sign-in that **replaces** the device's key is
+not stopped either — but only when the old private key proves it with `replacementProof`; a sign-in
+that merely names an `oldKeyId` is a new device and is challenged
+([Replacing a device's key](#replacing-a-devices-key)). A brand-new social account is not stepped
 up either, and needs no exemption to say so: an account that was written a moment ago has
 nothing enrolled.
 
@@ -3738,9 +3825,9 @@ these events to mean.
 
 Key **rotation** is deliberately not announced — replacing the key of a device that is already
 signed in is not a new device, and a notice for it would teach the owner to ignore the ones that
-matter. A login that names an `oldKeyId` is only a rotation when that key was actually revoked: an
-`oldKeyId` naming somebody else's key, an already-revoked one or nothing at all registers a new
-device and fires the event. `ip` and `userAgent` are unauthenticated and display-only.
+matter. A sign-in is only a rotation when the old key signed its `replacementProof` and was still
+live: a bare `oldKeyId`, or a proof by somebody else's key, a revoked one, an expired proof or one
+made for another key, registers a new device and fires the event. `ip` and `userAgent` are unauthenticated and display-only.
 
 `invitationCreatedEvent` (`auth.invitation.created`) carries the invitation `token` — the only
 copy, since only its hash is stored. Mail it from the subscriber; do not log or persist it.

@@ -30,6 +30,7 @@
 import type { Context } from 'hono';
 
 import { attestedClientIp } from '../lib/device-provenance';
+import { keyLiveness } from '../lib/key-liveness';
 import {
     SerializableError,
     ServiceUnavailableError,
@@ -356,22 +357,16 @@ async function verifyClientProofProfile(c: Context): Promise<AuthContext>
     };
 
     // 1. Revocation, before anything the proof could explain. A key that was
-    //    registered and then revoked — or aged past its TTL — answers
+    //    registered and is no longer live — revoked, of an ended key
+    //    generation, or aged past its TTL (`keyLiveness`) — answers
     //    SESSION_REVOKED here. A keyId that was *never* registered does not:
     //    it falls through to the proof step and shares PROOF_INVALID with a
     //    failed signature, so whether a keyId exists is not inferable from
     //    the refusal (the same non-disclosure the dev surface keeps).
-    const keyRecord = await keysRepository.findByKeyIdOnPrimary(credentials.keyId);
-    if (keyRecord !== null)
+    const keyRecord = await keysRepository.findWithAccountEpochOnPrimary(credentials.keyId);
+    if (keyRecord !== null && keyLiveness(keyRecord) !== 'live')
     {
-        if (!keyRecord.isActive)
-        {
-            throw refusalError(ClientProofRefusal.sessionRevoked());
-        }
-        if (keyRecord.expiresAt && new Date() > keyRecord.expiresAt)
-        {
-            throw refusalError(ClientProofRefusal.sessionRevoked());
-        }
+        throw refusalError(ClientProofRefusal.sessionRevoked());
     }
 
     // 2. (Session — nothing to check: this surface is sessionless and the

@@ -183,12 +183,12 @@ describe.skipIf(!dbAvailable)('MFA enrolment (case table 6a)', () =>
         return row;
     }
 
-    /** Push a device key's registration moment into the past, ageing the session. */
+    /** Push the moment a credential was last proved on a device key into the past, ageing the session. */
     async function ageSession(session: Session, minutes: number): Promise<void>
     {
         await getTestDb()
             .update(userPublicKeys)
-            .set({ createdAt: new Date(Date.now() - minutes * 60_000) })
+            .set({ authenticatedAt: new Date(Date.now() - minutes * 60_000) })
             .where(eq(userPublicKeys.keyId, session.keyId));
     }
 

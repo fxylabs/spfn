@@ -11,12 +11,13 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 const { keysRepository } = vi.hoisted(() => ({
     keysRepository: {
-        findByKeyIdOnPrimary: vi.fn(),
+        findWithAccountEpochOnPrimary: vi.fn(),
         findByKeyId: vi.fn(),
         findActiveByKeyId: vi.fn(),
         create: vi.fn(async () => undefined),
-        extendExpiry: vi.fn(async () => null),
+        markReauthenticated: vi.fn(async () => null),
         revokeByKeyIdAndUserId: vi.fn(async () => null),
+        revokeForReplacement: vi.fn(async () => null),
         findByKeyIdAndUserId: vi.fn(async () => null),
     },
 }));
@@ -90,6 +91,8 @@ function keyRow(overrides: Record<string, unknown> = {})
         fingerprint: 'a'.repeat(64),
         binding: 'none',
         isActive: true,
+        keyEpoch: 0,
+        accountKeyEpoch: 0,
         createdAt: new Date(),
         lastUsedAt: null,
         expiresAt: null,
@@ -109,7 +112,7 @@ describe('registerPublicKeyService - keyId collisions', () =>
 
     it('registers the key when the keyId is unused', async () =>
     {
-        keysRepository.findByKeyIdOnPrimary.mockResolvedValue(null);
+        keysRepository.findWithAccountEpochOnPrimary.mockResolvedValue(null);
 
         await registerPublicKeyService(params());
 
@@ -119,7 +122,7 @@ describe('registerPublicKeyService - keyId collisions', () =>
     it('is a no-op success when the same user re-registers their own active key', async () =>
     {
         // 한 기기에서 반복 로그인하는 정상 경로. 네이티브·웹 양쪽이 여기에 기댄다.
-        keysRepository.findByKeyIdOnPrimary.mockResolvedValue(keyRow());
+        keysRepository.findWithAccountEpochOnPrimary.mockResolvedValue(keyRow());
 
         await expect(registerPublicKeyService(params())).resolves.toMatchObject({ binding: 'none' });
 
@@ -128,7 +131,7 @@ describe('registerPublicKeyService - keyId collisions', () =>
 
     it('refuses reuse of the same user\'s revoked keyId instead of failing on the unique index', async () =>
     {
-        keysRepository.findByKeyIdOnPrimary.mockResolvedValue(keyRow({
+        keysRepository.findWithAccountEpochOnPrimary.mockResolvedValue(keyRow({
             isActive: false,
             revokedAt: new Date(),
             revokedReason: 'Replaced by new key on login',
@@ -142,7 +145,7 @@ describe('registerPublicKeyService - keyId collisions', () =>
 
     it('refuses another user\'s active keyId with the same error (no existence oracle)', async () =>
     {
-        keysRepository.findByKeyIdOnPrimary.mockResolvedValue(keyRow());
+        keysRepository.findWithAccountEpochOnPrimary.mockResolvedValue(keyRow());
 
         const revoked = registerPublicKeyService(params(OTHER_ID));
 
@@ -152,10 +155,10 @@ describe('registerPublicKeyService - keyId collisions', () =>
 
     it('answers identically for a revoked own key and another user\'s active key', async () =>
     {
-        keysRepository.findByKeyIdOnPrimary.mockResolvedValue(keyRow({ isActive: false, revokedAt: new Date() }));
+        keysRepository.findWithAccountEpochOnPrimary.mockResolvedValue(keyRow({ isActive: false, revokedAt: new Date() }));
         const ownRevoked = await registerPublicKeyService(params()).catch((e: Error) => e);
 
-        keysRepository.findByKeyIdOnPrimary.mockResolvedValue(keyRow());
+        keysRepository.findWithAccountEpochOnPrimary.mockResolvedValue(keyRow());
         const otherActive = await registerPublicKeyService(params(OTHER_ID)).catch((e: Error) => e);
 
         expect((ownRevoked as Error).name).toBe((otherActive as Error).name);
@@ -166,14 +169,14 @@ describe('registerPublicKeyService - keyId collisions', () =>
     {
         // 만료는 isActive를 뒤집지 않는다. 그냥 무시하고 반환하면 로그인은 200인데
         // authenticate가 KeyExpiredError로 모든 요청을 막아, 회복할 방법이 없어진다.
-        keysRepository.findByKeyIdOnPrimary.mockResolvedValue(keyRow({
+        keysRepository.findWithAccountEpochOnPrimary.mockResolvedValue(keyRow({
             expiresAt: new Date(Date.now() - 86_400_000),
         }));
 
         await expect(registerPublicKeyService(params())).resolves.toMatchObject({ binding: 'none' });
 
-        expect(keysRepository.extendExpiry).toHaveBeenCalledTimes(1);
-        const [keyId, userId, expiresAt] = keysRepository.extendExpiry.mock.calls[0] as unknown as [string, number, Date];
+        expect(keysRepository.markReauthenticated).toHaveBeenCalledTimes(1);
+        const [keyId, userId, expiresAt] = keysRepository.markReauthenticated.mock.calls[0] as unknown as [string, number, Date];
         expect(keyId).toBe(KEY_ID);
         expect(userId).toBe(OWNER_ID);
         expect(expiresAt.getTime()).toBeGreaterThan(Date.now());
@@ -182,18 +185,19 @@ describe('registerPublicKeyService - keyId collisions', () =>
 
     it('does not touch the expiry of a key that has not expired', async () =>
     {
-        keysRepository.findByKeyIdOnPrimary.mockResolvedValue(keyRow({
+        keysRepository.findWithAccountEpochOnPrimary.mockResolvedValue(keyRow({
             expiresAt: new Date(Date.now() + 86_400_000),
         }));
 
         await registerPublicKeyService(params());
 
-        expect(keysRepository.extendExpiry).not.toHaveBeenCalled();
+        // The sign-in still moves `authenticatedAt`; only the expiry is left alone.
+        expect(keysRepository.markReauthenticated).toHaveBeenCalledWith(KEY_ID, OWNER_ID);
     });
 
     it('does not resurrect an expired key that was also revoked', async () =>
     {
-        keysRepository.findByKeyIdOnPrimary.mockResolvedValue(keyRow({
+        keysRepository.findWithAccountEpochOnPrimary.mockResolvedValue(keyRow({
             isActive: false,
             revokedAt: new Date(),
             expiresAt: new Date(Date.now() - 86_400_000),
@@ -201,29 +205,29 @@ describe('registerPublicKeyService - keyId collisions', () =>
 
         await expect(registerPublicKeyService(params())).rejects.toBeInstanceOf(KeyIdAlreadyRegisteredError);
 
-        expect(keysRepository.extendExpiry).not.toHaveBeenCalled();
+        expect(keysRepository.markReauthenticated).not.toHaveBeenCalled();
         expect(keysRepository.create).not.toHaveBeenCalled();
     });
 
     it('looks the keyId up without an isActive filter', async () =>
     {
-        keysRepository.findByKeyIdOnPrimary.mockResolvedValue(null);
+        keysRepository.findWithAccountEpochOnPrimary.mockResolvedValue(null);
 
         await registerPublicKeyService(params());
 
         // 활성 필터가 걸린 조회로 되돌아가면 폐기 행을 다시 놓친다.
-        expect(keysRepository.findByKeyIdOnPrimary).toHaveBeenCalledWith(KEY_ID);
+        expect(keysRepository.findWithAccountEpochOnPrimary).toHaveBeenCalledWith(KEY_ID);
         expect(keysRepository.findActiveByKeyId).not.toHaveBeenCalled();
     });
 
     it('P5: reads the existing key from the write primary, not a replica (replica-lag guard, #133)', async () =>
     {
-        keysRepository.findByKeyIdOnPrimary.mockResolvedValue(null);
+        keysRepository.findWithAccountEpochOnPrimary.mockResolvedValue(null);
 
         await registerPublicKeyService(params());
 
         // replica가 한 커밋 뒤처져 있으면 방금 등록된 키를 못 보고 insert가 unique에 걸린다.
-        expect(keysRepository.findByKeyIdOnPrimary).toHaveBeenCalledWith(KEY_ID);
+        expect(keysRepository.findWithAccountEpochOnPrimary).toHaveBeenCalledWith(KEY_ID);
         expect(keysRepository.findByKeyId).not.toHaveBeenCalled();
     });
 });
@@ -238,7 +242,7 @@ describe('key type must match the declared algorithm', () =>
     beforeEach(() =>
     {
         vi.clearAllMocks();
-        keysRepository.findByKeyIdOnPrimary.mockResolvedValue(null);
+        keysRepository.findWithAccountEpochOnPrimary.mockResolvedValue(null);
         keysRepository.create.mockResolvedValue(keyRow() as never);
     });
 
@@ -292,12 +296,14 @@ describe('key type must match the declared algorithm', () =>
         await expect(rotate).rejects.toBeInstanceOf(KeyAlgorithmMismatchError);
 
         // 거절이 회전을 시작시키면 안 된다 — 옛 키가 폐기된 채 새 키가 없는 상태가 된다.
-        expect(keysRepository.revokeByKeyIdAndUserId).not.toHaveBeenCalled();
+        expect(keysRepository.revokeForReplacement).not.toHaveBeenCalled();
         expect(keysRepository.create).not.toHaveBeenCalled();
     });
 
     it('rotates onto an RSA key declared RS256', async () =>
     {
+        keysRepository.revokeForReplacement.mockResolvedValueOnce(keyRow() as never);
+
         await rotateKeyService({
             userId: OWNER_ID,
             oldKeyId: KEY_ID,

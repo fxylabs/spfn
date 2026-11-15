@@ -24,7 +24,7 @@
  * Every transition wakes the long polls parked on the link, after commit.
  */
 
-import { deviceLinks, userPublicKeys } from '../entities';
+import { deviceLinks, userPublicKeys, users } from '../entities';
 import type { DeviceLink, DeviceLinkDeniedReason, DeviceLinkStatus, NewDeviceLink } from '../entities';
 import { BaseRepository } from '@spfn/core/db';
 import { eq, and, gt, or, isNull, inArray, exists, getTableColumns, sql, type SQL } from 'drizzle-orm';
@@ -278,8 +278,9 @@ export class DeviceLinksRepository extends BaseRepository
     }
 
     /**
-     * Whether the link's issuing key is still registered to its issuer, active
-     * and unexpired — the test `authenticate` applies to the same row.
+     * Whether the link's issuing key is still registered to its issuer and live:
+     * active, unexpired, and of the account's current key generation — the rule
+     * `keyLiveness` states, here as the one statement that also takes the lock.
      *
      * @param lock take a share lock on the key row, so a transition waits for a
      *   revocation in flight instead of judging the version before it
@@ -289,6 +290,7 @@ export class DeviceLinksRepository extends BaseRepository
         const key = this.db
             .select({ one: sql`1` })
             .from(userPublicKeys)
+            .innerJoin(users, and(eq(users.id, userPublicKeys.userId), eq(users.keyEpoch, userPublicKeys.keyEpoch)))
             .where(
                 and(
                     eq(userPublicKeys.keyId, deviceLinks.issuerKeyId),
@@ -298,7 +300,7 @@ export class DeviceLinksRepository extends BaseRepository
                 ),
             );
 
-        return sql<boolean>`${exists(lock ? key.for('share') : key)}`;
+        return sql<boolean>`${exists(lock ? key.for('share', { of: userPublicKeys }) : key)}`;
     }
 }
 

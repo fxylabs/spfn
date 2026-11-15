@@ -1083,7 +1083,10 @@ authDeviceRegisteredEvent.subscribe(async (payload) =>
 
 Key rotation is deliberately not announced — replacing the key of a device that is already
 signed in is not a new device, and mail about it teaches people to ignore the mail that
-matters. A sign-in that stopped at a second-factor challenge emits nothing until the
+matters. A sign-in counts as a replacement only when the old private key signs its
+`replacementProof` (the Next.js proxy does this from the sealed session cookie); a sign-in
+that merely names an `oldKeyId` is a new device, is announced, and is challenged on an
+enrolled account — see [Replacing a device's key](../../packages/auth/README.md#replacing-a-devices-key). A sign-in that stopped at a second-factor challenge emits nothing until the
 challenge is spent.
 
 ### The sign-out-everywhere link

@@ -20,8 +20,7 @@ vi.mock('@spfn/auth/server', async (importOriginal) =>
         decodeToken: vi.fn(),
         verifyClientToken: vi.fn(),
         keysRepository: {
-            findActiveByKeyIdOnPrimary: vi.fn(),
-            findByKeyIdOnPrimary: vi.fn(),
+            findWithAccountEpochOnPrimary: vi.fn(),
             updateLastUsedById: vi.fn().mockResolvedValue(undefined),
         },
         findUserWithEffectiveRoleOnPrimary: vi.fn(),
@@ -71,6 +70,8 @@ function validKeyRecord()
         publicKey: 'unused-on-the-bearer-path',
         algorithm: 'ES256',
         isActive: true,
+        keyEpoch: 0,
+        accountKeyEpoch: 0,
         expiresAt: futureDate,
     };
 }
@@ -167,7 +168,7 @@ describe('with no machine verifier registered', () =>
     it('authenticate still admits a valid user token', async () =>
     {
         vi.mocked(decodeToken).mockReturnValue({ keyId: KEY_ID } as never);
-        vi.mocked(keysRepository.findActiveByKeyIdOnPrimary).mockResolvedValue(validKeyRecord() as never);
+        vi.mocked(keysRepository.findWithAccountEpochOnPrimary).mockResolvedValue(validKeyRecord() as never);
         vi.mocked(verifyClientToken).mockReturnValue({ keyId: KEY_ID } as never);
         const driven = contextFor({ Authorization: 'Bearer user-token' });
 

@@ -16,9 +16,9 @@
  * the configuration error it is.
  *
  * Turning it *off* is the privileged direction, which is the reverse of the
- * usual posture. `assertRecentAuthentication` is satisfied by the age of the
- * device key this request is signed with — and a cookie copied in the ten
- * minutes after a sign-in carries exactly that. So leaving `'passkey'` asks for
+ * usual posture. `assertRecentAuthentication` is satisfied by when a credential
+ * was last proved on the device key this request is signed with — and a cookie
+ * copied in the ten minutes after a sign-in carries exactly that. So leaving `'passkey'` asks for
  * a credential the copy does not hold: a renewal-grade assertion, or the account
  * password.
  *

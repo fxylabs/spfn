@@ -77,7 +77,9 @@ export const users = authSchema.table('users',
         // caller can revoke globally and forget to move it
         // Used for: binding a signed sign-out-everywhere link to the generation
         // it was issued against — a link is dead once any other path has already
-        // signed every device out
+        // signed every device out — and admitting a device key, which records the
+        // generation it was created under (`user_public_keys.key_epoch`) and is
+        // refused once this has moved past it
         keyEpoch: integer('key_epoch').notNull().default(0),
 
         // Whether this account's web sessions run on a key bound to a passkey

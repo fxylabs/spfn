@@ -245,7 +245,7 @@ describe.skipIf(!dbAvailable)('Link-only providers and the recent-authentication
     {
         await getTestDb()
             .update(userPublicKeys)
-            .set({ createdAt: new Date(Date.now() - minutes * 60_000) })
+            .set({ authenticatedAt: new Date(Date.now() - minutes * 60_000) })
             .where(eq(userPublicKeys.keyId, session.keyId));
     }
 

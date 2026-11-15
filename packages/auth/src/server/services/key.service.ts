@@ -10,8 +10,10 @@ import { KEY_TTL_DAYS } from '../lib/key-policy';
 import { isMethodListed } from '../lib/second-factor-policy';
 import { getBoundKeyTtlMs } from '../lib/config';
 import { uaFamily } from '../lib/ua-family';
+import { keyIdClaimedByProof, verifyKeyReplacementProof } from '../lib/key-replacement-proof';
+import { keyLiveness, type KeyWithAccountEpoch } from '../lib/key-liveness';
 import { InvalidKeyFingerprintError, KeyIdAlreadyRegisteredError } from '@spfn/auth/errors';
-import { ValidationError } from '@spfn/core/errors';
+import { UnauthorizedError, ValidationError } from '@spfn/core/errors';
 import { deviceAuthorizationsRepository, deviceLinksRepository, keysRepository, usersRepository } from '../repositories';
 import { revokeAllOAuth2GrantsForUser } from './oauth2-grant.service';
 import { emitDeviceRegistered } from './device-registration.service';
@@ -25,6 +27,38 @@ import {
 import type { MfaChallengeHandle } from './login-result';
 import { MFA_CHALLENGE_CHANNELS, type DeferredLoginEvent, type MfaChallengeChannel } from '../entities/mfa-challenges';
 import type { DeviceRegistrationChannel } from '../events';
+import type { NewUserPublicKey, UserPublicKey } from '../entities/user-public-keys';
+
+/**
+ * Every door a key row is written through: the eleven sign-in channels, and
+ * `keys/rotate`. Rotation is not a `DeviceRegistrationChannel` because it is
+ * never a new device — it is refused rather than registered when it is not a
+ * replacement — so it never reaches the device notice.
+ */
+export type KeyRegistrationChannel = DeviceRegistrationChannel | 'rotation';
+
+/**
+ * How a registration claims to replace a key the device already holds.
+ *
+ * A key id is not a secret — it rides every request token and the device
+ * notice — so naming one proves nothing. Only the old private key can, and the
+ * two shapes are the two ways it is presented.
+ */
+export type KeyReplacementClaim =
+    /**
+     * A sign-in's `replacementProof`, exactly as the body carried it: a short
+     * JWT the old key signed over both key ids (`lib/key-replacement-proof`).
+     * One that does not verify is not an error — the sign-in proved a
+     * credential of its own, and is simply a new device.
+     */
+    | { proof: string }
+    /**
+     * The request itself was signed by the old key — `keys/rotate`, and a
+     * bound session's renewal. An old key no longer live refuses the
+     * registration with `refusal` and writes nothing, so a rotation racing a
+     * revocation cannot leave a live key behind.
+     */
+    | { signedBy: string; reason: string; refusal: Error };
 
 export interface RegisterPublicKeyParams
 {
@@ -40,7 +74,7 @@ export interface RegisterPublicKeyParams
      * Which door this device came through. Required, so that a registration path
      * added later has to say what it is rather than inherit an answer.
      */
-    channel: DeviceRegistrationChannel;
+    channel: KeyRegistrationChannel;
     /** Client address of the registering request, absent when none resolved. */
     ip?: string;
     /** `user-agent` of the registering request, already truncated. */
@@ -58,16 +92,12 @@ export interface RegisterPublicKeyParams
      */
     binding?: SessionBindingType;
     /**
-     * The key this one replaces on the same device, when a revocation actually
-     * happened. Its presence is what makes this a rotation rather than a new
-     * device, so no event is announced for it.
+     * The claim that this key replaces one the device already holds.
      *
-     * Only ever set from a `revokeKeyService` that returned true: an `oldKeyId`
-     * naming somebody else's key, an already-revoked key or nothing at all
-     * revokes nothing, and treating that as a rotation would be a way to
-     * register a device with the owner's notice switched off.
+     * A claim, not a fact: this function alone decides it (`claimReplacement`).
+     * Absent, or a proof that does not hold, and the registration is a new device.
      */
-    replacesKeyId?: string;
+    replaces?: KeyReplacementClaim;
     /**
      * What to announce if this registration is stopped and later verified (#95).
      *
@@ -94,8 +124,10 @@ export type RegisterPublicKeyResult =
 /**
  * The binding half of a registration that could not have been stepped up.
  *
- * Only four channels can answer `pending`, so a caller on any other one is
- * reading a case its channel cannot reach. Throwing rather than defaulting is
+ * Only the step-up channels can answer `pending` — a new key stopped by
+ * `decideStepUp`, or a pending one resumed, which `answerForExistingKey` does
+ * for those channels alone — so a caller on any other one is reading a case its
+ * channel cannot reach. Throwing rather than defaulting is
  * the honest answer if that ever stops being true: a silent `{}` would seal an
  * unbound session for a key nobody had proved, which is the one outcome this
  * whole feature exists to prevent.
@@ -292,24 +324,25 @@ function isExpired(expiresAt: Date | null): boolean
  * through, rather than at each of the four that can be stopped: a path added
  * later then inherits the rule instead of having to remember it.
  *
- * Three terms. The account has a second factor, or there is nothing to ask for.
- * The registration is not a rotation — `replacesKeyId` means a device already
- * signed in is swapping its key, which is not an arrival and not a moment to
- * challenge. And the channel is one of the four where a single stolen
- * credential would be enough on its own; a device-code approval and a passkey
- * sign-in each already carried a second proof (the passkey only while the
- * second-factor policy lists passkeys; when it does not, a passkey sign-in is
- * challenged like the four), and `register`, `signup-link`,
- * `invitation` and `renewal` cannot reach this at all — the first three create
- * the account, which is by construction unenrolled, and the fourth is a
- * rotation. The brand-new social account is covered by the same fact: a user row
- * `createOrLinkUser` has just written has no second factor to ask for.
+ * Asked only of a registration that is not a verified replacement — a device
+ * already signed in swapping its key, proved by the old key itself, is not an
+ * arrival and not a moment to challenge. Two terms remain. The account has a
+ * second factor, or there is nothing to ask for. And the channel is one of the
+ * four where a single stolen credential would be enough on its own; a
+ * device-code approval and a passkey sign-in each already carried a second
+ * proof (the passkey only while the second-factor policy lists passkeys; when it
+ * does not, a passkey sign-in is challenged like the four), and `register`,
+ * `signup-link`, `invitation`, `renewal` and `rotation` cannot reach this at
+ * all — the first three create the account, which is by construction
+ * unenrolled, and the last two are replacements. The brand-new social account is
+ * covered by the same fact: a user row `createOrLinkUser` has just written has no
+ * second factor to ask for.
  */
 async function decideStepUp(params: RegisterPublicKeyParams): Promise<MfaChallengeChannel | null>
 {
-    const channel = MFA_CHALLENGE_CHANNELS.find(candidate => candidate === params.channel);
+    const channel = stepUpChannel(params.channel);
 
-    if (!channel || params.replacesKeyId || (channel === 'passkey' && isMethodListed('passkey')))
+    if (!channel || (channel === 'passkey' && isMethodListed('passkey')))
     {
         return null;
     }
@@ -317,32 +350,61 @@ async function decideStepUp(params: RegisterPublicKeyParams): Promise<MfaChallen
     return await mfaEnrolledForUser(params.userId) ? channel : null;
 }
 
+/** The step-up channel a registration channel is, if it is one that can be stopped. */
+function stepUpChannel(channel: KeyRegistrationChannel): MfaChallengeChannel | undefined
+{
+    return MFA_CHALLENGE_CHANNELS.find(candidate => candidate === channel);
+}
+
 /**
- * The answer for a keyId this account already holds.
+ * The answer for a keyId that is already registered.
  *
- * Two of the three cases are ordinary: an active key being re-registered is a
- * repeated login from one device, and a key still waiting on a second factor is
- * a retried registration — a native client reusing its keyId, or an OAuth state
- * replayed from the back button. Both get their own state back rather than a
- * 409, which would refuse a caller for holding a key that is theirs.
+ * It is the same device signing in again only on a sign-in, and only when the
+ * presented key is the one stored, for the same account. Then two cases are
+ * ordinary: a key that is not revoked being re-registered is a repeated login
+ * from one device, and a key still waiting on a second factor is a retried
+ * registration — a native client reusing its keyId, or an OAuth state replayed
+ * from the back button — on a channel that can have stopped it. Both get their
+ * own state back rather than a 409, which would refuse a caller for holding a
+ * key that is theirs.
  *
- * Anything else — a revoked key of their own, somebody else's key — is the one
- * error, told the same way, so a caller cannot probe whether a keyId exists.
+ * A registration that replaces by request signature (`replaces.signedBy` —
+ * rotation, a bound session's renewal, whatever comes next) never is: it exists
+ * to put a *new* key in place of the one that signed it, and a key id the
+ * caller already holds — pending, active, the same public key or not — leaves
+ * nothing to put in place. What decides it is that claim, not the channel's
+ * name: answered any other way it is a 200 that renews and replaces nothing,
+ * leaving the signing key as it was.
+ *
+ * Anything else — another public key under that id, a revoked key of their own
+ * (and a key of an ended generation is one, see `keyLiveness`), a pending key
+ * presented through a door that cannot step up, somebody else's key — is the
+ * one error, told the same way on every path, so a caller cannot probe whether
+ * a keyId exists.
  *
  * @throws KeyIdAlreadyRegisteredError
  */
 async function answerForExistingKey(
-    existing: NonNullable<Awaited<ReturnType<typeof keysRepository.findByKeyIdOnPrimary>>>,
-    userId: number,
+    existing: KeyWithAccountEpoch,
+    params: RegisterPublicKeyParams,
 ): Promise<RegisterPublicKeyResult>
 {
-    if (existing.userId === userId && existing.isActive)
+    if (params.replaces && 'signedBy' in params.replaces)
     {
-        return { pending: false, ...await reRegisterOwnActiveKey(existing, userId) };
+        throw new KeyIdAlreadyRegisteredError();
     }
 
-    const resumed = existing.userId === userId && existing.pendingMfaChallengeId
-        ? await resumeStepUpChallengeService(userId, existing.keyId)
+    const sameKey = existing.userId === params.userId
+        && existing.publicKey === params.publicKey
+        && existing.fingerprint === params.fingerprint;
+
+    if (sameKey && keyLiveness(existing) !== 'revoked')
+    {
+        return { pending: false, ...await reRegisterOwnKey(existing, params) };
+    }
+
+    const resumed = sameKey && existing.pendingMfaChallengeId && stepUpChannel(params.channel)
+        ? await resumeStepUpChallengeService(params.userId, existing.keyId)
         : null;
 
     if (resumed)
@@ -354,105 +416,263 @@ async function answerForExistingKey(
 }
 
 /**
- * Register a new public key for a user
+ * Write a key row — the one function every path that writes one goes through:
+ * the eleven sign-in channels, `keys/rotate`, and invitation acceptance.
+ *
+ * It alone decides whether the key replaces one the device already held or
+ * arrives as a new device (`claimReplacement`), and everything that follows
+ * from that is decided here with it:
+ *
+ * - a **replacement** is never challenged, announces nothing, carries the old
+ *   key's step-up record across, and inherits its key generation — so a
+ *   rotation racing a global revocation writes a key that is dead on arrival;
+ * - a **new device** has its second factor decided normally, is announced, and
+ *   carries no step-up record, under the account's current key generation.
  *
  * `keyId` is UNIQUE across all users, so the lookup must ignore `isActive` —
  * filtering on it misses a revoked row and the insert then fails on the unique
- * index, rolling the whole login transaction back into a 500. Reuse is refused
- * with a domain error instead, telling the client to generate a fresh keyId.
+ * index, rolling the whole login transaction back into a 500. Reuse is answered
+ * by `answerForExistingKey` instead, before anything is revoked.
  *
  * An enrolled account arriving on a new device gets the key written **inactive**
  * and a challenge back (#95). Nothing else happens: no device event, no login
  * event, no `lastLoginAt` — those are what the challenge is holding, and they
  * fire at `POST /_auth/mfa/verify` or not at all.
  *
- * @throws KeyIdAlreadyRegisteredError keyId가 이미 쓰인 값일 때 (자기 폐기 키 재사용 · 남의 키)
+ * @throws KeyIdAlreadyRegisteredError keyId가 이미 쓰인 값일 때 (다른 공개키 · 폐기된 키 · 남의 키)
  * @throws InvalidKeyFingerprintError fingerprint가 publicKey와 맞지 않을 때
  * @throws KeyAlgorithmMismatchError 키의 SPKI 타입이 선언된 algorithm과 다를 때
+ * @throws the claim's `refusal` when a signed-request replacement's old key is no longer live
  */
 export async function registerPublicKeyService(
     params: RegisterPublicKeyParams,
 ): Promise<RegisterPublicKeyResult>
 {
-    const { userId, keyId, publicKey, fingerprint, algorithm = DEFAULT_KEY_ALGORITHM, deviceName, platform } = params;
-    const binding = params.binding ?? 'none';
-
-    const existing = await keysRepository.findByKeyIdOnPrimary(keyId);
-    if (existing)
-    {
-        return await answerForExistingKey(existing, userId);
-    }
-
-    // Verify fingerprint matches public key
-    const isValidFingerprint = verifyKeyFingerprint(publicKey, fingerprint);
-    if (!isValidFingerprint)
+    // Before the existing-key answer too: a re-registration is compared against
+    // the stored key by fingerprint, so the fingerprint has to be this key's.
+    if (!verifyKeyFingerprint(params.publicKey, params.fingerprint))
     {
         throw new InvalidKeyFingerprintError();
+    }
+
+    const existing = await keysRepository.findWithAccountEpochOnPrimary(params.keyId);
+    if (existing)
+    {
+        return await answerForExistingKey(existing, params);
     }
 
     // The defaulted algorithm is what gets stored, so it is the one the key has
     // to be: a key parked under an algorithm it cannot sign for would only fail
     // at proof verification, after the caller believes it is enrolled.
-    assertKeyMatchesAlgorithm(publicKey, algorithm);
+    assertKeyMatchesAlgorithm(params.publicKey, params.algorithm ?? DEFAULT_KEY_ALGORITHM);
+
+    return await registerNewKey(params);
+}
+
+/**
+ * Write a key id nobody holds yet: settle the replacement claim, then write the
+ * row as a replacement or as a new device, and do what follows from which.
+ */
+async function registerNewKey(params: RegisterPublicKeyParams): Promise<RegisterPublicKeyResult>
+{
+    const replaced = await claimReplacement(params);
 
     // Decided before the insert, so `is_active` is right the moment the row
     // exists. Deciding afterwards would leave a window, however short, in which
     // the key an unproven second factor is meant to be holding back is live.
-    const stepUp = await decideStepUp(params);
-
-    // Store public key — hours for a bound key, 90 days otherwise
-    const row = await keysRepository.create({
-        userId,
-        keyId,
-        publicKey,
-        algorithm,
-        fingerprint,
-        deviceName,
-        platform,
-        binding,
-        registeredIp: params.ip ?? null,
-        registeredUserAgent: params.userAgent ?? null,
-        registeredUaFamily: params.userAgent ? uaFamily(params.userAgent) : null,
-        isActive: stepUp === null,
-        expiresAt: getKeyExpiryDate(binding),
-    });
+    const stepUp = replaced ? null : await decideStepUp(params);
+    const keyEpoch = replaced?.keyEpoch ?? await usersRepository.currentKeyEpoch(params.userId);
+    const row = await keysRepository.create(newKeyRow(params, replaced, keyEpoch, stepUp === null));
 
     if (stepUp)
     {
         return { pending: true, challenge: await openStepUpChallengeService({
-            userId,
-            keyId,
+            userId: params.userId,
+            keyId: params.keyId,
             channel: stepUp,
-            keyEpoch: await usersRepository.currentKeyEpoch(userId),
+            keyEpoch,
             loginEvent: params.loginEvent,
         }) };
     }
 
-    // A rotation replaces a device that is already signed in, so it is not the
-    // arrival this event exists to announce. Every other return above is an
-    // early return or a throw, so a row written here is always a new device.
-    //
-    // That same device under a new key id carries its second-factor verification
-    // across instead: this is the one place every `oldKeyId` rotation passes
-    // through, and without it the step-up window would expire silently every
-    // time the web proxy rotated.
-    if (params.replacesKeyId)
+    // That same device under a new key id carries its second-factor
+    // verification across: without it the step-up window would expire silently
+    // every time the web proxy rotated. A rotation is never a new device — its
+    // claim refuses instead — so it never reaches the notice.
+    if (replaced)
     {
-        await carryStepUpVerification(userId, params.replacesKeyId, keyId);
+        await carryStepUpVerification(params.userId, replaced.keyId, params.keyId);
     }
-    else
+    else if (params.channel !== 'rotation')
     {
         await emitDeviceRegistered(row, params.channel);
     }
 
-    return { pending: false, binding, expiresAt: row.expiresAt };
+    return { pending: false, binding: row.binding, expiresAt: row.expiresAt };
 }
 
 /**
- * The caller re-registering a key it already holds — a repeated login from one
- * device, which is an ordinary path and stays a no-op success.
+ * Settle a replacement claim: the old key's row, revoked by this call, or null
+ * when this registration is a new device.
  *
- * Expiry is the one thing looked at. Nothing flips `isActive` when a TTL runs
+ * The old key has to be live, and each claim is held to that once. A proof is
+ * checked here (`keyIdProvenByProof`): it arrives on a sign-in, where nothing
+ * else has looked at the old key. A signed request was admitted by its
+ * middleware, which is where liveness was already decided for it —
+ * `authenticate` for `keys/rotate`, and for a renewal `authenticateForRenewal`,
+ * whose grace window is the one place a bound key past its expiry is admitted.
+ * Either way the old key is revoked by the same statement that checks it is
+ * still active and of the current generation (`revokeForReplacement`), so a
+ * revocation committing a moment earlier leaves nothing to replace rather than
+ * a replacement of a dead key.
+ *
+ * @throws the claim's `refusal`, for a signed-request claim whose old key is no longer live
+ */
+async function claimReplacement(params: RegisterPublicKeyParams): Promise<UserPublicKey | null>
+{
+    const claim = params.replaces;
+
+    if (!claim)
+    {
+        return null;
+    }
+
+    if ('signedBy' in claim)
+    {
+        const replaced = await keysRepository.revokeForReplacement(claim.signedBy, params.userId, claim.reason);
+
+        if (!replaced)
+        {
+            throw claim.refusal;
+        }
+
+        return replaced;
+    }
+
+    const oldKeyId = await keyIdProvenByProof(claim.proof, params);
+
+    return oldKeyId
+        ? await keysRepository.revokeForReplacement(oldKeyId, params.userId, `Replaced by new key on ${params.channel} sign-in`)
+        : null;
+}
+
+/**
+ * The old key a sign-in's `replacementProof` proves, or null.
+ *
+ * The proof names the old key; its stored public key is what the signature is
+ * checked against, so only that key's private half can have made it. The key
+ * has to be this account's and live — a key `authenticate` would refuse, expired
+ * as much as revoked, can no more vouch for a successor than sign a request —
+ * and the proof has to name the very key being registered: a proof made for
+ * another new key, or by another account's key, proves nothing here. Every
+ * failure is the same null, so the answer a caller gets never says whether a
+ * key id exists.
+ */
+async function keyIdProvenByProof(proof: string, params: RegisterPublicKeyParams): Promise<string | null>
+{
+    const claimedKeyId = keyIdClaimedByProof(proof);
+    const oldKey = claimedKeyId ? await keysRepository.findWithAccountEpochOnPrimary(claimedKeyId) : null;
+
+    if (!oldKey || oldKey.userId !== params.userId || keyLiveness(oldKey) !== 'live')
+    {
+        return null;
+    }
+
+    const claims = verifyKeyReplacementProof(proof, oldKey);
+
+    return claims && claims.oldKeyId === oldKey.keyId && claims.newKeyId === params.keyId
+        ? oldKey.keyId
+        : null;
+}
+
+/**
+ * The row a registration writes.
+ *
+ * `authenticatedAt` is now — every path that writes a key proved a credential
+ * on the way, except a rotation, which proves only that it holds the old key
+ * and so inherits when a person last proved one on this device. Treating a
+ * rotation as a fresh authentication is what let a stale session satisfy the
+ * recent-authentication gate by rotating.
+ */
+function newKeyRow(
+    params: RegisterPublicKeyParams,
+    replaced: UserPublicKey | null,
+    keyEpoch: number,
+    isActive: boolean,
+): NewUserPublicKey
+{
+    const rotated = params.channel === 'rotation' ? replaced : null;
+
+    return {
+        userId: params.userId,
+        keyId: params.keyId,
+        publicKey: params.publicKey,
+        algorithm: params.algorithm ?? DEFAULT_KEY_ALGORITHM,
+        fingerprint: params.fingerprint,
+        keyEpoch,
+        authenticatedAt: rotated?.authenticatedAt ?? new Date(),
+        isActive,
+        ...(rotated ? rotatedDevice(params, rotated) : registeringDevice(params)),
+    };
+}
+
+/** What a registration knows about the device: what this request said about it. */
+function registeringDevice(params: RegisterPublicKeyParams)
+{
+    const binding = params.binding ?? 'none';
+
+    return {
+        deviceName: params.deviceName,
+        platform: params.platform,
+        binding,
+        registeredIp: params.ip ?? null,
+        registeredUserAgent: params.userAgent ?? null,
+        registeredUaFamily: params.userAgent ? uaFamily(params.userAgent) : null,
+        // Hours for a bound key, 90 days otherwise
+        expiresAt: getKeyExpiryDate(binding),
+    };
+}
+
+/**
+ * What a rotation knows about the device: everything the replaced row said.
+ *
+ * The label and platform carry over unless the client renames them; where and
+ * what it registered from, and the binding — the owner's setting rather than
+ * anything this request chose — carry over always.
+ *
+ * A *bound* key's expiry carries over verbatim, rather than being recomputed.
+ * A rotation is not a renewal: recomputing would hand a bound key another full
+ * window every time the browser rotated, which is a way to hold a bound session
+ * open forever without ever presenting the credential that binding exists to ask
+ * for. `session/renew` is the only path that moves it.
+ *
+ * An unbound rotation resets the ninety days, exactly as it did before #97.
+ * Inheriting there would mean an app that rotates at every login — the
+ * documented reason `rotateKey` exists — rotating on day 89 into a key that
+ * expires tomorrow, and signing every one of its users out on day 91.
+ */
+function rotatedDevice(params: RegisterPublicKeyParams, replaced: UserPublicKey)
+{
+    return {
+        deviceName: params.deviceName ?? replaced.deviceName,
+        platform: params.platform ?? replaced.platform,
+        binding: replaced.binding,
+        registeredIp: replaced.registeredIp,
+        registeredUserAgent: replaced.registeredUserAgent,
+        registeredUaFamily: replaced.registeredUaFamily,
+        expiresAt: replaced.binding === 'passkey' ? replaced.expiresAt : getKeyExpiryDate('none'),
+    };
+}
+
+/**
+ * The caller signing in again with a key it already holds that nobody revoked —
+ * a repeated login from one device, which is an ordinary path and stays a no-op
+ * success.
+ *
+ * The sign-in just proved a credential on this device, so `authenticatedAt`
+ * moves to now.
+ *
+ * Expiry is the other thing looked at. Nothing flips `isActive` when a TTL runs
  * out, so returning quietly on an expired key would answer the login 200 while
  * `authenticate` refuses every request it makes afterwards: signed in, and
  * nothing works. The sign-in just proved the identity again, so the expiry moves.
@@ -464,18 +684,20 @@ export async function registerPublicKeyService(
  * setting was turned on to withhold. It is left expired and `session/renew`,
  * which needs a fresh WebAuthn assertion, is the only way to a live key.
  */
-async function reRegisterOwnActiveKey(
-    existing: { keyId: string; binding: SessionBindingType; expiresAt: Date | null },
-    userId: number,
+async function reRegisterOwnKey(
+    existing: UserPublicKey,
+    params: RegisterPublicKeyParams,
 ): Promise<RegisteredKeyBinding>
 {
     if (existing.binding !== 'passkey' && isExpired(existing.expiresAt))
     {
         const extended = getKeyExpiryDate('none');
-        await keysRepository.extendExpiry(existing.keyId, userId, extended);
+        await keysRepository.markReauthenticated(existing.keyId, params.userId, extended);
 
         return { binding: 'none', expiresAt: extended };
     }
+
+    await keysRepository.markReauthenticated(existing.keyId, params.userId);
 
     return { binding: existing.binding, expiresAt: existing.expiresAt };
 }
@@ -483,74 +705,40 @@ async function reRegisterOwnActiveKey(
 /**
  * Rotate user's public key (revoke old, register new)
  *
+ * The request is signed by the old key, and that is the proof the shared
+ * registration is handed: the old key is revoked only if it is still live, by
+ * the statement that checks it, and a rotation whose old key is already gone —
+ * revoked a moment ago, or outdated by a sign-out-everywhere — is refused with
+ * the answer `authenticate` gives a revoked key, writing nothing.
+ *
  * @throws InvalidKeyFingerprintError fingerprint가 newPublicKey와 맞지 않을 때
  * @throws KeyAlgorithmMismatchError 새 키의 SPKI 타입이 선언된 algorithm과 다를 때
+ * @throws KeyIdAlreadyRegisteredError newKeyId가 이미 쓰인 값일 때 — 호출자 자신의 키(대기·활성)라도
+ * @throws UnauthorizedError 이전 키가 이미 폐기됐을 때
  */
 export async function rotateKeyService(
     params: RotateKeyParams,
 ): Promise<RotateKeyResult>
 {
-    const { userId, oldKeyId, newKeyId, newPublicKey, fingerprint, algorithm = DEFAULT_KEY_ALGORITHM } = params;
-
-    // Verify fingerprint matches public key
-    const isValidFingerprint = verifyKeyFingerprint(newPublicKey, fingerprint);
-    if (!isValidFingerprint)
-    {
-        throw new InvalidKeyFingerprintError();
-    }
-
-    assertKeyMatchesAlgorithm(newPublicKey, algorithm);
-
-    // Rotation replaces a key on the same device, so its label carries over unless
-    // the client renames it. Read before the revoke — the row survives either way,
-    // but the intent is "what this device was called", not "what it is called now".
-    const replaced = await keysRepository.findByKeyIdAndUserId(oldKeyId, userId);
-
-    // Revoke old key
-    await keysRepository.revokeByKeyIdAndUserId(
-        oldKeyId,
-        userId,
-        'Replaced by key rotation',
-    );
-
-    // Store new public key. Rotation is a new key for the same device, so
-    // everything the row said about that device carries over: the label, the
-    // platform, where and what it registered from — and the binding, which is
-    // the owner's setting rather than anything this request chose.
-    //
-    // A *bound* key's expiry carries over verbatim, rather than being recomputed.
-    // A rotation is not a renewal: recomputing would hand a bound key another full
-    // window every time the browser rotated, which is a way to hold a bound
-    // session open forever without ever presenting the credential that binding
-    // exists to ask for. `session/renew` is the only path that moves it.
-    //
-    // An unbound rotation resets the ninety days, exactly as it did before #97.
-    // Inheriting there would mean an app that rotates at every login — the
-    // documented reason `rotateKey` exists — rotating on day 89 into a key that
-    // expires tomorrow, and signing every one of its users out on day 91.
-    await keysRepository.create({
-        userId,
-        keyId: newKeyId,
-        publicKey: newPublicKey,
-        algorithm,
-        fingerprint,
-        deviceName: params.deviceName ?? replaced?.deviceName ?? undefined,
-        platform: params.platform ?? replaced?.platform ?? undefined,
-        binding: replaced?.binding ?? 'none',
-        registeredIp: replaced?.registeredIp ?? null,
-        registeredUserAgent: replaced?.registeredUserAgent ?? null,
-        registeredUaFamily: replaced?.registeredUaFamily ?? null,
-        isActive: true,
-        expiresAt: replaced?.binding === 'passkey' ? replaced.expiresAt : getKeyExpiryDate('none'),
-    });
-
-    // A rotation is already proof of the same device, so the second-factor
-    // verification follows the key rather than dying with it (#95).
-    await carryStepUpVerification(userId, oldKeyId, newKeyId);
+    registeredBinding(await registerPublicKeyService({
+        userId: params.userId,
+        keyId: params.newKeyId,
+        publicKey: params.newPublicKey,
+        fingerprint: params.fingerprint,
+        algorithm: params.algorithm,
+        deviceName: params.deviceName,
+        platform: params.platform,
+        channel: 'rotation',
+        replaces: {
+            signedBy: params.oldKeyId,
+            reason: 'Replaced by key rotation',
+            refusal: new UnauthorizedError({ message: 'Invalid or revoked key' }),
+        },
+    }));
 
     return {
         success: true,
-        keyId: newKeyId,
+        keyId: params.newKeyId,
     };
 }
 

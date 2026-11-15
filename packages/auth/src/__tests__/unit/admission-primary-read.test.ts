@@ -24,7 +24,7 @@ const { keysRepository, usersRepository, bearerKeys, roles } = vi.hoisted(() => 
         findById: vi.fn(),
     },
     bearerKeys: {
-        findActiveByKeyIdOnPrimary: vi.fn(),
+        findWithAccountEpochOnPrimary: vi.fn(),
         findActiveByKeyId: vi.fn(),
         updateLastUsedById: vi.fn(async () => undefined),
     },
@@ -75,6 +75,8 @@ function boundKey()
         publicKey: 'public-key',
         algorithm: 'ES256',
         isActive: true,
+        keyEpoch: 0,
+        accountKeyEpoch: 0,
         binding: 'passkey',
         expiresAt: new Date(Date.now() + HOUR_MS),
     };
@@ -151,16 +153,16 @@ describe('admission reads the write primary (replica-lag guards, #133)', () =>
         expect(usersRepository.findById).not.toHaveBeenCalled();
     });
 
-    it('P8 authenticateForRenewal: reads the key with findActiveByKeyIdOnPrimary', async () =>
+    it('P8 authenticateForRenewal: reads the key with findWithAccountEpochOnPrimary', async () =>
     {
-        bearerKeys.findActiveByKeyIdOnPrimary.mockResolvedValue(boundKey());
+        bearerKeys.findWithAccountEpochOnPrimary.mockResolvedValue(boundKey());
         roles.findUserWithEffectiveRole.mockResolvedValue({ user: { id: USER_ID, status: 'active' }, role: null });
         const next = vi.fn(async () => undefined);
 
         await authenticateForRenewal.handler(bearerContext(), next);
 
         expect(next).toHaveBeenCalled();
-        expect(bearerKeys.findActiveByKeyIdOnPrimary).toHaveBeenCalledWith(KEY_ID);
+        expect(bearerKeys.findWithAccountEpochOnPrimary).toHaveBeenCalledWith(KEY_ID);
         expect(bearerKeys.findActiveByKeyId).not.toHaveBeenCalled();
     });
 });

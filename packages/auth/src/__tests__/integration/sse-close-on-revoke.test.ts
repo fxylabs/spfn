@@ -18,7 +18,7 @@
  * | R22c | account deletion request                                     | every active key                                      |
  * | R23a | key rotation                                                 | the old key only; the new key is never closed         |
  * | R23b | session renewal                                              | the old key only; the new key is never closed         |
- * | R23c | re-login with `oldKeyId`                                     | the old key only; the new key is never closed         |
+ * | R23c | re-login with a replacement proof by the old key             | the old key only; the new key is never closed         |
  * | R24  | transaction rolls back after the repository revoke           | no call                                               |
  * | R25  | repository revoke outside a transaction                      | call at once (after a tick)                           |
  * | R26  | revoke of an already-revoked key                             | no call (0 rows)                                      |
@@ -38,6 +38,7 @@ import { setupTestDb, teardownTestDb, clearTables, getTestDb, isDatabaseAvailabl
 import { FixtureAuthenticator } from '../helpers/webauthn-fixture';
 import { userPublicKeys, users } from '@/server/entities';
 import { generateClientToken, generateKeyPair } from '@/server/lib/crypto';
+import { signKeyReplacementProof } from '@/server/lib/key-replacement-proof';
 import { hashPassword } from '@/server/helpers/password';
 import { authenticate } from '@/server/middleware/authenticate';
 
@@ -267,11 +268,14 @@ describe.skipIf(!dbAvailable)('SSE streams close after a key revocation commits 
         return row;
     }
 
-    /** Sign in with a password, optionally replacing `oldKeyId`, and answer with what the client holds. */
-    async function signIn(email: string, oldKeyId?: string): Promise<Session>
+    /** Sign in with a password, optionally replacing `replacing` (which signs the proof), and answer with what the client holds. */
+    async function signIn(email: string, replacing?: Session): Promise<Session>
     {
         const key = generateKeyPair('ES256');
-        const response = await post('/_auth/login', { email, password: PASSWORD, ...keyFields(key), oldKeyId });
+        const replacementProof = replacing
+            ? signKeyReplacementProof({ oldKeyId: replacing.keyId, newKeyId: key.keyId }, replacing.privateKey, 'ES256')
+            : undefined;
+        const response = await post('/_auth/login', { email, password: PASSWORD, ...keyFields(key), replacementProof });
 
         expect(response.status).toBe(200);
 
@@ -445,12 +449,12 @@ describe.skipIf(!dbAvailable)('SSE streams close after a key revocation commits 
         expect(closeSpy).not.toHaveBeenCalledWith(renewedKeyId);
     });
 
-    it('R23c a re-login with oldKeyId closes the old key only, never the new one', async () =>
+    it('R23c a re-login whose replacement proof the old key signed closes the old key only, never the new one', async () =>
     {
         const { current } = await threeDevices('r23c@test.com');
         forgetCloses();
 
-        const relogged = await signIn('r23c@test.com', current.keyId);
+        const relogged = await signIn('r23c@test.com', current);
 
         await expectClosedAfterCommit([current.keyId]);
         expect(closeSpy).not.toHaveBeenCalledWith(relogged.keyId);

@@ -28,6 +28,7 @@ import { mountAuthApp } from '../helpers/oauth2';
 import { userInvitations, userPublicKeys, users, verificationCodes } from '@/server/entities';
 import { generateClientToken, generateKeyPair } from '@/server/lib/crypto';
 import { hashCredential } from '@/server/lib/link-credentials';
+import { signKeyReplacementProof } from '@/server/lib/key-replacement-proof';
 import { hashPassword } from '@/server/helpers/password';
 
 // The remote JWKS fetch is the only part of native sign-in that leaves the
@@ -231,7 +232,8 @@ describe.skipIf(!dbAvailable)('device-registered event (case table 7a)', () =>
     }
 
     /** Sign in with a password and answer with what a client would then hold. */
-    async function signIn(email: string, body: Record<string, unknown> = {})
+    /** A password sign-in; `replacing` is the device's current key, which signs a replacement proof. */
+    async function signIn(email: string, body: Record<string, unknown> = {}, replacing?: ReturnType<typeof generateKeyPair>)
     {
         const key = generateKeyPair('ES256');
         const response = await post('/_auth/login', {
@@ -241,6 +243,9 @@ describe.skipIf(!dbAvailable)('device-registered event (case table 7a)', () =>
             keyId: key.keyId,
             fingerprint: key.fingerprint,
             algorithm: key.algorithm,
+            ...(replacing
+                ? { replacementProof: signKeyReplacementProof({ oldKeyId: replacing.keyId, newKeyId: key.keyId }, replacing.privateKey, 'ES256') }
+                : {}),
             ...body,
         });
 
@@ -380,13 +385,13 @@ describe.skipIf(!dbAvailable)('device-registered event (case table 7a)', () =>
         expect(seen[0]).toMatchObject({ keyId: key.keyId, channel: 'password', ip: clientIp });
     });
 
-    it('password with oldKeyId naming the caller\'s own active key: no emission, revokeKeyService returned true', async () =>
+    it('password with a replacementProof signed by the caller\'s own active key: no emission, the old key revoked', async () =>
     {
         await seedUser('a5@test.com');
         const first = await signIn('a5@test.com');
 
         seen.length = 0;
-        const second = await signIn('a5@test.com', { oldKeyId: first.key.keyId });
+        const second = await signIn('a5@test.com', {}, first.key);
         await settled();
 
         expect(seen).toHaveLength(0);
@@ -394,7 +399,7 @@ describe.skipIf(!dbAvailable)('device-registered event (case table 7a)', () =>
         expect((await keyRow(first.key.keyId)).isActive).toBe(false);
     });
 
-    it('password with oldKeyId naming someone else\'s key, an already-revoked key or no key at all: one emission each, nothing was revoked so it is not a rotation', async () =>
+    it('password with oldKeyId naming someone else\'s key, an already-revoked key or no key at all: one emission each — a key id without a proof is never a rotation', async () =>
     {
         await seedUser('a6@test.com');
         await seedUser('a6-other@test.com');
@@ -419,7 +424,7 @@ describe.skipIf(!dbAvailable)('device-registered event (case table 7a)', () =>
         expect((await keyRow(other.key.keyId)).isActive).toBe(true);
     });
 
-    it('passkey with oldKeyId: the login rule, no emission when a key was revoked and one when none was', async () =>
+    it('passkey: the login rule, no emission for a proven replacement and one for a bare oldKeyId', async () =>
     {
         await seedUser('a7@test.com');
         const session = await signIn('a7@test.com');
@@ -430,7 +435,7 @@ describe.skipIf(!dbAvailable)('device-registered event (case table 7a)', () =>
         // login, so the rule is exercised through the key service either way —
         // driven here through the login route, which is the tail's other caller,
         // because a WebAuthn ceremony adds nothing to what this row is about.
-        const revoking = await signIn('a7@test.com', { oldKeyId: session.key.keyId });
+        const revoking = await signIn('a7@test.com', {}, session.key);
         await settled();
         expect(seen).toHaveLength(0);
 

@@ -27,8 +27,7 @@ vi.mock('@spfn/auth/server', async (importOriginal) =>
         decodeToken: vi.fn(),
         verifyClientToken: vi.fn(),
         keysRepository: {
-            findActiveByKeyIdOnPrimary: vi.fn(),
-            findByKeyIdOnPrimary: vi.fn(),
+            findWithAccountEpochOnPrimary: vi.fn(),
             updateLastUsedById: vi.fn().mockResolvedValue(undefined),
         },
         findUserWithEffectiveRoleOnPrimary: vi.fn(),

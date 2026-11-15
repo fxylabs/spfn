@@ -11,9 +11,10 @@ import { mfaChallenges } from '../entities/mfa-challenges';
 import type { ClientIdentity } from '../client-proof/wire-version';
 import { BaseRepository, onAfterCommit } from '@spfn/core/db';
 import { closeSSEConnectionsByKey } from '@spfn/core/event/sse';
-import { eq, and, or, isNull, lt, desc, sql } from 'drizzle-orm';
+import { eq, and, or, isNull, lt, desc, sql, getTableColumns } from 'drizzle-orm';
 import { getConcurrentUseWindowMs } from '../lib/config';
 import { authLogger } from '../logger';
+import type { KeyWithAccountEpoch } from '../lib/key-liveness';
 
 /**
  * Throttle window for lastUsedAt writes. The column is for audit / inactive-key
@@ -207,6 +208,46 @@ export class KeysRepository extends BaseRepository
     }
 
     /**
+     * Revoke the key a verified replacement names — the check that it is still
+     * live and the revocation are one statement.
+     *
+     * Live means active **and** of the account's current key generation: a key
+     * a global revocation has already outdated proves nothing, even while its
+     * row still reads active. A separate read followed by a revoke would leave
+     * the window this exists to close — a revocation committing in between, and
+     * the replacement going ahead as though the old key were still the device's.
+     *
+     * Null when nothing was revoked, which every caller reads as "not a
+     * replacement". The row, when there is one, is what the replacement inherits
+     * from (generation, `authenticatedAt`, and on a rotation the device's
+     * provenance). Its SSE streams close after commit, as every revocation's do.
+     * Write primary 사용
+     */
+    async revokeForReplacement(keyId: string, userId: number, reason: string)
+    {
+        const result = await this.db
+            .update(userPublicKeys)
+            .set({
+                isActive: false,
+                revokedAt: new Date(),
+                revokedReason: reason,
+            })
+            .where(
+                and(
+                    eq(userPublicKeys.keyId, keyId),
+                    eq(userPublicKeys.userId, userId),
+                    eq(userPublicKeys.isActive, true),
+                    eq(userPublicKeys.keyEpoch, sql`(SELECT ${users.keyEpoch} FROM ${users} WHERE ${users.id} = ${userId})`),
+                ),
+            )
+            .returning();
+
+        closeStreamsAfterCommit(result.map(row => row.keyId));
+
+        return result[0] ?? null;
+    }
+
+    /**
      * 사용자의 모든 활성 공개키 revoke (비활성화) — 그리고 같은 문장에서 key_epoch +1
      *
      * 비번 변경 시 전체 세션 로그아웃에 사용. authenticate는 활성 키만 검증하므로,
@@ -279,11 +320,32 @@ export class KeysRepository extends BaseRepository
      * The SSE streams of every revoked key close after commit, for the same
      * "no caller can forget" reason (`closeStreamsAfterCommit`).
      *
+     * A key this statement cannot see — one a rotation in flight inserts after
+     * its snapshot — keeps the generation being ended, and `authenticate`
+     * refuses it: that is what makes such a key dead on arrival.
+     *
      * Write primary 사용
      */
     private async revokeActive(userId: number, reason: string, keepKeyId?: string): Promise<RevokedKey[]>
     {
         const spare = keepKeyId ? sql` AND t.key_id <> ${keepKeyId}` : sql``;
+        // The spared key moves into the new generation with the account, or the
+        // device asking to sign out the others would sign itself out too:
+        // `authenticate` admits a key only of the account's current generation.
+        // Only from the generation being ended — every subquery here reads the
+        // statement's snapshot, before the bump — so a key already outdated by an
+        // earlier revocation is never brought back.
+        const spareMoved = keepKeyId
+            ? sql`,
+            spared_moved AS (
+                UPDATE ${userPublicKeys}
+                SET key_epoch = key_epoch + 1
+                WHERE user_id = ${userId}
+                  AND key_id = ${keepKeyId}
+                  AND is_active = true
+                  AND key_epoch = (SELECT key_epoch FROM ${users} WHERE id = ${userId})
+            )`
+            : sql``;
 
         const rows = await this.db.execute(sql`
             WITH epoch_bump AS (
@@ -302,7 +364,7 @@ export class KeysRepository extends BaseRepository
                 DELETE FROM ${userPublicKeys}
                 WHERE user_id = ${userId}
                   AND pending_mfa_challenge_id IS NOT NULL
-            )
+            )${spareMoved}
             UPDATE ${userPublicKeys} t
             SET is_active = false,
                 revoked_at = now(),
@@ -377,14 +439,15 @@ export class KeysRepository extends BaseRepository
     }
 
     /**
-     * 만료 시각 연장 — 같은 사용자가 로그인으로 신원을 다시 증명했을 때 쓴다.
+     * 같은 사용자가 이 키로 신원을 다시 증명했다 — `authenticatedAt`을 지금으로,
+     * `expiresAt`이 주어지면 만료 시각도 함께 연장한다.
      * Write primary 사용
      */
-    async extendExpiry(keyId: string, userId: number, expiresAt: Date)
+    async markReauthenticated(keyId: string, userId: number, expiresAt?: Date)
     {
         const result = await this.db
             .update(userPublicKeys)
-            .set({ expiresAt })
+            .set({ authenticatedAt: new Date(), ...(expiresAt ? { expiresAt } : {}) })
             .where(
                 and(
                     eq(userPublicKeys.keyId, keyId),
@@ -487,10 +550,32 @@ export class KeysRepository extends BaseRepository
     }
 
     /**
+     * A key row with its account's current key generation, read on the primary.
+     *
+     * Everything `keyLiveness` needs in one statement: the admission surfaces and
+     * the registration that decides a replacement ask whether a key is live, and
+     * the generation half of that answer lives on the user row. Joined rather
+     * than read separately so the question costs the one query it always did.
+     * Active or not, so a caller can tell a revoked key from one never
+     * registered; null only for the latter.
+     */
+    async findWithAccountEpochOnPrimary(keyId: string): Promise<KeyWithAccountEpoch | null>
+    {
+        const result = await this.db
+            .select({ ...getTableColumns(userPublicKeys), accountKeyEpoch: users.keyEpoch })
+            .from(userPublicKeys)
+            .innerJoin(users, eq(users.id, userPublicKeys.userId))
+            .where(eq(userPublicKeys.keyId, keyId))
+            .limit(1);
+
+        return result[0] ?? null;
+    }
+
+    /**
      * Key ID로 활성 공개키 조회
      *
-     * 요청의 admission을 판정하는 호출자(authenticate, optionalAuth)는
-     * `findActiveByKeyIdOnPrimary`를 쓸 것.
+     * 요청의 admission을 판정하는 호출자는 `findWithAccountEpochOnPrimary`와
+     * `keyLiveness`를 쓸 것 — 활성이라고 살아 있는 키는 아니다.
      * Read replica 사용
      */
     async findActiveByKeyId(keyId: string)
@@ -505,10 +590,11 @@ export class KeysRepository extends BaseRepository
     }
 
     /**
-     * Key ID로 활성 공개키 조회 — Write primary에서 직접 읽는다 (authenticate·optionalAuth용)
+     * Key ID로 활성 공개키 조회 — Write primary에서 직접 읽는다
      *
-     * 복제 지연 창에서 로그인 직후 등록된 키를 못 찾아 401을 내거나, 로그아웃으로
-     * 폐기된 키를 아직 활성으로 읽어 통과시키면 안 되는 admission 게이트가 사용한다.
+     * 활성(isActive)만 본다. 만료와 계정의 키 세대는 보지 않으므로 admission 판정에는
+     * 쓰지 말 것 — authenticate·optionalAuth·clientProofV1은
+     * `findWithAccountEpochOnPrimary`와 `keyLiveness`로 판정한다.
      * 일반 조회는 `findActiveByKeyId`(replica)를 계속 사용할 것.
      */
     async findActiveByKeyIdOnPrimary(keyId: string)

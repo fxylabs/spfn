@@ -6,7 +6,7 @@
  */
 
 import { KEY_ALGORITHM, KEY_PLATFORM, SESSION_BINDINGS } from '../types';
-import { text, boolean, bigint, index } from 'drizzle-orm/pg-core';
+import { text, boolean, bigint, index, integer } from 'drizzle-orm/pg-core';
 import { id, foreignKey, enumText, utcTimestamp } from '@spfn/core/db';
 import { CLIENT_KINDS } from '../client-proof/wire-headers';
 import { users } from './users';
@@ -168,6 +168,23 @@ export const userPublicKeys = authSchema.table(
         // writable first. The link that decides anything is that one; this column
         // is what makes "is this row pending" a predicate on the keys table
         pendingMfaChallengeId: bigint('pending_mfa_challenge_id', { mode: 'number' }),
+
+        // The account's key generation (`users.key_epoch`) this key belongs to
+        // Set at registration to the account's current value; a verified
+        // replacement inherits the replaced key's value instead
+        // `authenticate` admits the key only while it equals the account's
+        // current value, so a global revocation (which increments the account's)
+        // also ends a key a rotation racing it wrote after the revocation's
+        // snapshot was taken
+        keyEpoch: integer('key_epoch').notNull().default(0),
+
+        // When a person last proved a credential (password, passkey, social
+        // sign-in, emailed code…) on this device
+        // A sign-in sets it to now; a `keys/rotate` replacement, which proves only
+        // possession of the old key, inherits the replaced key's value
+        // Used for: every "recently authenticated" check — never createdAt, which a
+        // rotation resets without anybody proving anything
+        authenticatedAt: utcTimestamp('authenticated_at').notNull().defaultNow(),
 
         // Key creation timestamp
         // Automatically set on insertion

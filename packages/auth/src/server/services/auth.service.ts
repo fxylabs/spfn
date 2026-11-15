@@ -84,7 +84,12 @@ export interface LoginParams
     publicKey: string;
     keyId: string;
     fingerprint: string;
-    oldKeyId?: string;
+    /**
+     * The sign-in body's `replacementProof`: a short JWT signed by the key this
+     * one replaces. `registerPublicKeyService` alone decides whether it holds;
+     * absent or not, the password was proved and the sign-in goes ahead.
+     */
+    replacementProof?: string;
     algorithm?: KeyAlgorithmType;
     deviceName?: string;
     platform?: KeyPlatformType;
@@ -316,7 +321,7 @@ export async function loginService(
     params: LoginParams,
 ): Promise<LoginResult>
 {
-    const { email, phone, password, publicKey, keyId, fingerprint, oldKeyId, algorithm } = params;
+    const { email, phone, password, publicKey, keyId, fingerprint, algorithm } = params;
 
     // Find user
     const user = await usersRepository.findByEmailOrPhone(email, phone);
@@ -354,27 +359,6 @@ export async function loginService(
         throw new AccountDisabledError({ status: user.status });
     }
 
-    // Revoke old key if provided.
-    //
-    // The boolean matters: `oldKeyId` is a client-supplied field, and
-    // `revokeKeyService` answers false for a key that is not this user's or was
-    // already revoked. Treating such a value as a rotation would let a stolen
-    // password register a device with the owner's notice suppressed, which is
-    // exactly what the device event exists to prevent — so only a revocation
-    // that happened makes this a replacement.
-    let replacesKeyId: string | undefined;
-
-    if (oldKeyId)
-    {
-        const revoked = await revokeKeyService({
-            userId: user.id,
-            keyId: oldKeyId,
-            reason: 'Replaced by new key on login',
-        });
-
-        replacesKeyId = revoked ? oldKeyId : undefined;
-    }
-
     // Register new public key
     const registered = await registerPublicKeyService({
         userId: user.id,
@@ -388,7 +372,7 @@ export async function loginService(
         ip: params.ip,
         userAgent: params.userAgent,
         binding: decideKeyBinding(user.sessionBinding, params.webProxy),
-        replacesKeyId,
+        replaces: params.replacementProof ? { proof: params.replacementProof } : undefined,
         loginEvent: {
             provider: email ? 'email' : 'phone',
             email: user.email || undefined,

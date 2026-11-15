@@ -23,6 +23,7 @@ import { FixtureAuthenticator } from '../helpers/webauthn-fixture';
 import { mfaChallenges, userPublicKeys, users } from '@/server/entities';
 import { hashPassword } from '@/server/helpers/password';
 import { generateKeyPair, generateClientToken } from '@/server/lib/crypto';
+import { signKeyReplacementProof } from '@/server/lib/key-replacement-proof';
 import { decodeBase32, hotp, totpStep } from '@/server/lib/totp';
 import { createOAuthState } from '@/server/lib/oauth/state';
 import { buildStartCookieName } from '@/server/lib/oauth/start-cookies';
@@ -165,8 +166,12 @@ describe.skipIf(!dbAvailable)('new-device step-up (case table 6b)', () =>
         };
     }
 
-    /** A password sign-in, on a fresh device key unless one is handed in. */
-    async function signIn(overrides: { keyPair?: ReturnType<typeof generateKeyPair>; oldKeyId?: string } = {})
+    /**
+     * A password sign-in, on a fresh device key unless one is handed in.
+     * `replacing` is the session this device already holds; its key signs the
+     * replacement proof, as the Next.js proxy does from the sealed cookie.
+     */
+    async function signIn(overrides: { keyPair?: ReturnType<typeof generateKeyPair>; replacing?: Session } = {})
     {
         const keyPair = overrides.keyPair ?? generateKeyPair('ES256');
         const response = await post('/_auth/login', {
@@ -176,7 +181,15 @@ describe.skipIf(!dbAvailable)('new-device step-up (case table 6b)', () =>
             keyId: keyPair.keyId,
             fingerprint: keyPair.fingerprint,
             algorithm: keyPair.algorithm,
-            ...(overrides.oldKeyId ? { oldKeyId: overrides.oldKeyId } : {}),
+            ...(overrides.replacing
+                ? {
+                    replacementProof: signKeyReplacementProof(
+                        { oldKeyId: overrides.replacing.keyId, newKeyId: keyPair.keyId },
+                        overrides.replacing.privateKey,
+                        'ES256',
+                    ),
+                }
+                : {}),
         });
 
         return { response, session: sessionFor(keyPair) };
@@ -316,12 +329,12 @@ describe.skipIf(!dbAvailable)('new-device step-up (case table 6b)', () =>
         expect((await again.response.json()).mfaRequired).toBe(false);
     });
 
-    it('row: enrolled, password with oldKeyId naming their own key, a new key — 200 (a rotation)', async () =>
+    it('row: enrolled, password with a replacement proof signed by their own key, a new key — 200 (a rotation)', async () =>
     {
         const first = await signIn();
         await enrolled(first.session);
 
-        const rotated = await signIn({ oldKeyId: first.session.keyId });
+        const rotated = await signIn({ replacing: first.session });
 
         expect(rotated.response.status).toBe(200);
         expect((await rotated.response.json()).mfaRequired).toBe(false);

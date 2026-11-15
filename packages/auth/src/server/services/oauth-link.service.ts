@@ -51,7 +51,7 @@ export interface StartOAuthLinkParams
 {
     provider: SocialProvider;
     userId: number;
-    /** The device key the request is signed with — the recent-authentication window is its age. */
+    /** The device key the request is signed with — the recent-authentication window is read off its `authenticatedAt`. */
     keyId: string;
     currentPassword?: string;
     returnUrl: string;

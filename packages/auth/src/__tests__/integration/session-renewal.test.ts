@@ -524,6 +524,27 @@ describe.skipIf(!dbAvailable)('renewing a bound session key (case table 6d)', ()
         expect((await keyRow(subject.keyId)).isActive).toBe(true);
     });
 
+    it('the new key is the expiring key itself, inside the grace: 409, and its row unchanged', async () =>
+    {
+        const subject = await bound();
+        await expireKey(subject.keyId, 1_000);
+        const before = await keyRow(subject.keyId);
+        const authorization = bearer(subject.keyId, subject.privateKey);
+        const issued = await (await renewOptions(authorization)).json();
+
+        const verified = await post('/_auth/session/renew/verify', {
+            response: subject.authenticator.assert({ challenge: issued.challenge, origin: ORIGIN, rpId: RP_ID, counter: ++counter }),
+            publicKey: before.publicKey,
+            keyId: before.keyId,
+            fingerprint: before.fingerprint,
+            algorithm: before.algorithm,
+        }, authorization);
+
+        expect(verified.status).toBe(409);
+        expect((await verified.json()).__type).toBe('KeyIdAlreadyRegisteredError');
+        expect(await keyRow(subject.keyId)).toEqual(before);
+    });
+
     it('the passkey was revoked before the renewal: options still 200 (the list is empty for everyone), verify 401', async () =>
     {
         const subject = await bound();

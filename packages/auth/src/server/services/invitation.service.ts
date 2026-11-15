@@ -10,15 +10,14 @@ import {
     invitationsRepository,
     usersRepository,
     rolesRepository,
-    keysRepository,
 } from '../repositories';
 import { INVITATION_MAX_EXPIRY_DAYS, type InvitationStatus, type KeyAlgorithmType } from '../types';
 import { hashCredential, mintCredential } from '../lib/link-credentials';
 import { runBeforeRegister } from '../lib/config';
 import { assertEmailAllowedForRole } from '../lib/role-email-domains';
-import { assertKeyMatchesAlgorithm, hashPassword } from '../helpers';
+import { hashPassword } from '../helpers';
 import { invitationCreatedEvent, invitationAcceptedEvent } from '../events';
-import { emitDeviceRegistered } from './device-registration.service';
+import { registerPublicKeyService, registeredBinding } from './key.service';
 import { BadRequestError, NotFoundError, ConflictError } from '@spfn/core/errors';
 import { InvitationChangedError, InvitationNoLongerValidError, InvitationNotFoundError } from '@spfn/auth/errors';
 import { secondFactorEnrolmentFields } from './second-factor-policy.service';
@@ -348,12 +347,6 @@ interface AcceptInvitationParams
  */
 export async function acceptInvitation(params: AcceptInvitationParams)
 {
-    // This is the one key-storing path that does not go through
-    // registerPublicKeyService, so the check the other paths inherit is stated
-    // here. It runs before the account exists: a key that could never sign for
-    // its declared algorithm must not consume the invitation.
-    assertKeyMatchesAlgorithm(params.publicKey, params.algorithm);
-
     // One transaction from the claim to the key: whatever refuses the
     // acceptance after the claim puts the invitation back to pending.
     return await runInTransaction(async () =>
@@ -456,24 +449,21 @@ async function createInvitedAccount(
         status: 'active',
     });
 
-    const key = await keysRepository.create({
+    // Through the one function every key row is written by, in this
+    // transaction: the user row it belongs to is visible to it here, and a key
+    // refused there (a reused keyId, a fingerprint that is not the key's hash, a
+    // key of the wrong type) rolls the account and the acceptance back with it.
+    // A brand-new account has nothing enrolled, so this never steps up.
+    registeredBinding(await registerPublicKeyService({
         userId: newUser.id,
         keyId: params.keyId,
         publicKey: params.publicKey,
-        algorithm: params.algorithm,
         fingerprint: params.fingerprint,
-        registeredIp: params.ip ?? null,
-        registeredUserAgent: params.userAgent ?? null,
-        isActive: true,
-        expiresAt: new Date(Date.now() + 90 * 24 * 60 * 60 * 1000), // 90 days
-    });
-
-    // The second of the two emission points, and the reason there are two: the
-    // key above is written before the account it belongs to exists anywhere but
-    // this transaction, so it cannot go through `registerPublicKeyService`. The
-    // helper still defers to after the commit, so an invitation that fails later
-    // announces nothing.
-    await emitDeviceRegistered(key, 'invitation');
+        algorithm: params.algorithm,
+        channel: 'invitation',
+        ip: params.ip,
+        userAgent: params.userAgent,
+    }));
 
     return newUser;
 }

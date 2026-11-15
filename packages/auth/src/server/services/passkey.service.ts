@@ -61,7 +61,7 @@ import type { WebAuthnChallengeKind } from '../entities/webauthn-challenges';
 import type { User } from '../entities/users';
 import { getDummyPasswordHash, verifyPassword } from '../helpers';
 import type { KeyAlgorithmType, KeyPlatformType } from '../types';
-import { registerPublicKeyService, revokeKeyService } from './key.service';
+import { registerPublicKeyService } from './key.service';
 import { assertEnrolmentProven, assertStepUp, mfaEnrolledForUser, mfaStatusService, type MfaStatus } from './mfa.service';
 import { assertNotLastListedFactor, isEnrolmentOnly, secondFactorEnrolmentFields } from './second-factor-policy.service';
 import { isMethodListed } from '../lib/second-factor-policy';
@@ -137,7 +137,7 @@ async function consumeChallenge(
 export interface RecentAuthenticationParams
 {
     userId: number;
-    /** The device key this request is signed with — its age is the signal. */
+    /** The device key this request is signed with — when it last proved a credential is the signal. */
     keyId: string;
     currentPassword?: string;
 }
@@ -145,17 +145,18 @@ export interface RecentAuthenticationParams
 /**
  * Refuse a passkey change unless the caller has recently proved themselves (D4).
  *
- * Two ways to satisfy it. The device key this request is signed with was
- * registered within the window — that is when this device last presented a
- * credential, and it needs no new state. Or the body carries the account
- * password.
+ * Two ways to satisfy it. A person proved a credential on the device key this
+ * request is signed with within the window — its `authenticatedAt`, which a
+ * sign-in sets and a `keys/rotate` only inherits. Not `createdAt`: a rotation
+ * writes a new row without anybody proving anything, so a stale session could
+ * rotate its way past this gate. Or the body carries the account password.
  *
  * An account with no password stored cannot satisfy it with a password, however
  * plausible the value (E5): the comparison still runs, against a dummy hash, so
  * "no password on file" costs exactly what "wrong password" costs. Skipping it
  * would turn response time into an oracle for which accounts are OAuth-only.
  *
- * @param windowMs - The window to hold the key's age to. Omitted, it is the
+ * @param windowMs - The window to hold the key's `authenticatedAt` to. Omitted, it is the
  *                   passkey window; a provider link passes its own (#155), so
  *                   that path never resolves the passkey configuration.
  * @throws RecentAuthenticationRequiredError
@@ -167,7 +168,7 @@ export async function assertRecentAuthentication(
 {
     const key = await keysRepository.findByKeyIdAndUserId(params.keyId, params.userId);
 
-    if (key && Date.now() - key.createdAt.getTime() <= (windowMs ?? getPasskeyConfig().recentAuthMs))
+    if (key && Date.now() - key.authenticatedAt.getTime() <= (windowMs ?? getPasskeyConfig().recentAuthMs))
     {
         return;
     }
@@ -532,7 +533,12 @@ export interface FinishPasskeyLoginParams
     keyId: string;
     fingerprint: string;
     algorithm?: KeyAlgorithmType;
-    oldKeyId?: string;
+    /**
+     * The sign-in body's `replacementProof`: a short JWT signed by the key this
+     * one replaces. `registerPublicKeyService` alone decides whether it holds;
+     * absent or not, the passkey was proved and the sign-in goes ahead.
+     */
+    replacementProof?: string;
     deviceName?: string;
     platform?: KeyPlatformType;
     /** Client address of the request, from `deviceProvenance` at the route. */
@@ -582,30 +588,14 @@ export async function finishPasskeyLoginService(params: FinishPasskeyLoginParams
 /**
  * The tail every identified sign-in runs, once identity is settled.
  *
- * Lifted verbatim from `loginService` and the OAuth flows: retire the key being
- * replaced, register the new device key, stamp the last login, announce it after
- * the commit. Passkeys add a way to prove identity, not a second way to hold a
- * session, so this must stay the same four steps in the same order.
+ * Lifted verbatim from `loginService` and the OAuth flows: register the new
+ * device key (which retires the one it replaces, when the body proves it),
+ * stamp the last login, announce it after the commit. Passkeys add a way to
+ * prove identity, not a second way to hold a session, so this must stay the
+ * same steps in the same order.
  */
 async function startSession(user: User, params: FinishPasskeyLoginParams): Promise<LoginResult>
 {
-    // Only a revocation that happened makes this a replacement rather than a
-    // new device — the same rule `loginService` follows, and for the reason it
-    // does: `oldKeyId` comes from the caller, and one that names nothing
-    // revocable would otherwise switch the owner's notice off.
-    let replacesKeyId: string | undefined;
-
-    if (params.oldKeyId)
-    {
-        const revoked = await revokeKeyService({
-            userId: user.id,
-            keyId: params.oldKeyId,
-            reason: 'Replaced by new key on passkey login',
-        });
-
-        replacesKeyId = revoked ? params.oldKeyId : undefined;
-    }
-
     const registered = await registerPublicKeyService({
         userId: user.id,
         keyId: params.keyId,
@@ -618,7 +608,7 @@ async function startSession(user: User, params: FinishPasskeyLoginParams): Promi
         ip: params.ip,
         userAgent: params.userAgent,
         binding: decideKeyBinding(user.sessionBinding, params.webProxy),
-        replacesKeyId,
+        replaces: params.replacementProof ? { proof: params.replacementProof } : undefined,
         loginEvent: {
             provider: 'passkey',
             email: user.email || undefined,

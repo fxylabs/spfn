@@ -255,7 +255,8 @@ export const completeSignup = route.post('/_auth/signup/password')
 /**
  * POST /_auth/login - User login
  * Authenticate user with email/phone and password
- * Replaces existing key with new one
+ * Replaces the device's existing key only when `replacementProof` — signed by
+ * that key — verifies; otherwise the key is a new device
  *
  * 202 rather than 200 when the account has a second factor and this device is
  * new to it (#95): the password was right, the key is registered and inactive,
@@ -283,7 +284,8 @@ export const login = route.post('/_auth/login')
             keyId: Type.String({ description: 'Key identifier' }),
             fingerprint: Type.String({ description: 'Key fingerprint' }),
             algorithm: Type.Union(KEY_ALGORITHM.map(algo => Type.Literal(algo)), { description: 'Signature algorithm' }),
-            oldKeyId: Type.Optional(Type.String({ description: 'Previous key ID for rotation' })),
+            oldKeyId: Type.Optional(Type.String({ description: 'Ignored. Accepted so a client that still sends it is not refused; naming a key proves nothing — send replacementProof' })),
+            replacementProof: Type.Optional(Type.String({ description: 'JWT signed by the key this one replaces (iss spfn-key-replacement, purpose key-replacement, oldKeyId, newKeyId, at most 60 s old). Without one that verifies, the sign-in is a new device' })),
             deviceName: Type.Optional(DeviceNameSchema),
             platform: Type.Optional(PlatformSchema),
         }),

@@ -98,7 +98,9 @@ export const authenticateForRenewal = defineMiddleware('authForRenewal', async (
  *
  * `resolveAuthenticatedUser` is deliberately not used: it tells a caller which
  * status refused them — suspended, pending deletion — and on this path every
- * refusal has to read the same. The reads are the ones it makes.
+ * refusal has to read the same. The reads are the ones it makes. A key a global
+ * revocation has outdated never gets here: `admitBearerKey` refuses it as the
+ * revoked key it is (`keyLiveness`).
  */
 async function activeAccount(userId: number)
 {

@@ -1,13 +1,11 @@
 /**
  * @spfn/auth - Device Registration Announcement
  *
- * One helper, called from the two places a `user_public_keys` row is created:
- * `registerPublicKeyService`, which seven of the eight registration paths go
- * through, and `acceptInvitation`, which stores its key directly because the row
- * is written before the user row it belongs to has committed.
- *
- * Both call this rather than emitting for themselves, so the payload is built
- * once and the after-commit rule holds in one place instead of two.
+ * One helper, called from the one place a `user_public_keys` row is created —
+ * `registerPublicKeyService`, which every registration channel, `keys/rotate`
+ * and invitation acceptance go through, and which calls this for a new device
+ * only, never for a verified replacement — and from `POST /_auth/mfa/verify`,
+ * for a new device whose announcement a second-factor challenge was holding.
  */
 
 import { onAfterCommit } from '@spfn/core/db';

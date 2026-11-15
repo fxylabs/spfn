@@ -241,7 +241,7 @@ describe.skipIf(!dbAvailable)('session binding (case tables 6a, 6b, 6g)', () =>
     {
         await getTestDb()
             .update(userPublicKeys)
-            .set({ createdAt: new Date(Date.now() - minutes * 60_000) })
+            .set({ authenticatedAt: new Date(Date.now() - minutes * 60_000) })
             .where(eq(userPublicKeys.keyId, session.keyId));
     }
 
@@ -508,7 +508,7 @@ describe.skipIf(!dbAvailable)('session binding (case tables 6a, 6b, 6g)', () =>
                 body: JSON.stringify({
                     email: 'owner@test.com',
                     password: PASSWORD,
-                    ...reRegistration(session.keyId),
+                    ...await reRegistration(session.keyId),
                 }),
             });
 
@@ -730,7 +730,7 @@ describe.skipIf(!dbAvailable)('session binding (case tables 6a, 6b, 6g)', () =>
             // The instance `authenticate` holds, which it imports through the
             // package entry rather than from the source tree.
             const { keysRepository } = await import('@spfn/auth/server');
-            const find = vi.spyOn(keysRepository, 'findActiveByKeyIdOnPrimary');
+            const find = vi.spyOn(keysRepository, 'findWithAccountEpochOnPrimary');
             const write = vi.spyOn(keysRepository, 'updateLastUsedById');
 
             const session = await signIn();
@@ -744,16 +744,20 @@ describe.skipIf(!dbAvailable)('session binding (case tables 6a, 6b, 6g)', () =>
         });
     });
 
-    /** The device-key fields of a login that re-presents a key already registered. */
-    function reRegistration(keyId: string): Record<string, string>
+    /**
+     * The device-key fields of a login that re-presents a key already registered —
+     * the same public key under the same id, which is the only re-registration
+     * that is the same device signing in again rather than a 409.
+     */
+    async function reRegistration(keyId: string): Promise<Record<string, string>>
     {
-        const keyPair = generateKeyPair('ES256');
+        const row = await keyRow(keyId);
 
         return {
-            publicKey: keyPair.publicKey,
+            publicKey: row.publicKey,
             keyId,
-            fingerprint: keyPair.fingerprint,
-            algorithm: keyPair.algorithm,
+            fingerprint: row.fingerprint,
+            algorithm: row.algorithm,
         };
     }
 });

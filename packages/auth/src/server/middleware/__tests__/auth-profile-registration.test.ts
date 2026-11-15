@@ -25,8 +25,7 @@ vi.mock('@spfn/auth/server', async (importOriginal) =>
         decodeToken: vi.fn(),
         verifyClientToken: vi.fn(),
         keysRepository: {
-            findActiveByKeyIdOnPrimary: vi.fn(),
-            findByKeyIdOnPrimary: vi.fn(),
+            findWithAccountEpochOnPrimary: vi.fn(),
             updateLastUsedById: vi.fn().mockResolvedValue(undefined),
         },
         findUserWithEffectiveRoleOnPrimary: vi.fn(),
@@ -59,6 +58,8 @@ function validKeyRecord(overrides: Record<string, unknown> = {})
         publicKey: 'unused-on-the-bearer-path',
         algorithm: 'ES256',
         isActive: true,
+        keyEpoch: 0,
+        accountKeyEpoch: 0,
         expiresAt: futureDate,
         ...overrides,
     };
@@ -197,7 +198,7 @@ describe('registerAuthProfile — the dispatch around a registered verifier', ()
         beforeEach(() =>
         {
             vi.mocked(decodeToken).mockReturnValue({ keyId: TEST_KEY_ID } as never);
-            vi.mocked(keysRepository.findActiveByKeyIdOnPrimary).mockResolvedValue(validKeyRecord() as never);
+            vi.mocked(keysRepository.findWithAccountEpochOnPrimary).mockResolvedValue(validKeyRecord() as never);
             vi.mocked(verifyClientToken).mockReturnValue({ keyId: TEST_KEY_ID } as never);
         });
 
@@ -313,7 +314,7 @@ describe('registerAuthProfile — the dispatch around a registered verifier', ()
             const driven = contextFor({ headers: { [CLIENT_PROOF_HEADERS.profile]: profileId } });
             expect(await run(middleware, driven)).toBeNull();
             expect(decodeToken).not.toHaveBeenCalled();
-            expect(keysRepository.findActiveByKeyIdOnPrimary).not.toHaveBeenCalled();
+            expect(keysRepository.findWithAccountEpochOnPrimary).not.toHaveBeenCalled();
         });
     });
 
