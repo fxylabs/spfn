@@ -11,6 +11,7 @@ import {
     InternalServerError,
     ValidationError,
 } from '@spfn/core/errors';
+import { ServiceUnavailableError } from '../../errors/http-errors';
 // Imported from source so the `internal` getter under test is exercised
 // regardless of the built dist freshness.
 import { QueryError, EntityNotFoundError } from '../../errors/database-errors';
@@ -102,6 +103,31 @@ describe('ErrorHandler Middleware', () =>
             expect(json.message).toBe('Validation failed');
             expect(json.fields).toHaveLength(2);
             expect(json.fields[0].path).toBe('/email');
+        });
+    });
+
+    describe('Retry-After', () =>
+    {
+        it('answers the retryAfter an error carries as the Retry-After header', async () =>
+        {
+            const app = new Hono();
+
+            app.onError(ErrorHandler({ enableLogging: false }));
+            app.get('/busy', () =>
+            {
+                throw new ServiceUnavailableError({ retryAfter: 2 });
+            });
+            app.get('/missing', () =>
+            {
+                throw new NotFoundError({ message: 'gone' });
+            });
+
+            const busy = await app.request('/busy');
+            const missing = await app.request('/missing');
+
+            expect(busy.status).toBe(503);
+            expect(busy.headers.get('retry-after')).toBe('2');
+            expect(missing.headers.get('retry-after')).toBeNull();
         });
     });
 

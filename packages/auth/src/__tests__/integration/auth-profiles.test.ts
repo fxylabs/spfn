@@ -28,23 +28,30 @@ vi.mock('@spfn/auth/server', async (importOriginal) =>
             findByKeyId: vi.fn(),
             updateLastUsedById: vi.fn().mockResolvedValue(undefined),
         },
-        findUserWithEffectiveRoleOnPrimary: vi.fn(),
-        findUserWithEffectiveRole: vi.fn(),
+    };
+});
+
+// The admission (admitPrincipal) reads the repositories directly: the account,
+// its role and the credential's row in one primary read, the locale beside it.
+vi.mock('@/server/repositories', async (importOriginal) =>
+{
+    const actual = await importOriginal<typeof import('@/server/repositories')>();
+
+    return {
+        ...actual,
+        usersRepository: { findByIdWithRoleAndKeyOnPrimary: vi.fn(), findByIdWithRole: vi.fn() },
         userSettingsRepository: { findLocaleByUserId: vi.fn().mockResolvedValue('en') },
-        getPendingDeletionInfo: vi.fn(),
+        accountDeletionRequestsRepository: { findPendingByUserIdOnPrimary: vi.fn() },
     };
 });
 
 import { authenticate, optionalAuth } from '@/server/middleware/authenticate';
+import { usersRepository, accountDeletionRequestsRepository } from '@/server/repositories';
 import {
     decodeToken,
     verifyClientToken,
     keysRepository,
-    findUserWithEffectiveRoleOnPrimary,
-    findUserWithEffectiveRole,
-    getPendingDeletionInfo,
 } from '@spfn/auth/server';
-import { resolveAuthenticatedUser } from '@/server/middleware/auth-profiles';
 import { CLIENT_PROOF_HEADERS } from '@/server/client-proof/admission';
 import { encodeCanonicalJson, type CanonicalValue } from '@/server/client-proof/canonical-json';
 import { ABSENT_BODY_SHA256, sha256Hex, signClientProof } from '@/server/client-proof/proof';
@@ -87,11 +94,13 @@ function validKeyRecord(overrides: Record<string, unknown> = {})
     };
 }
 
-function activeUser(overrides: Record<string, unknown> = {})
+/** The admission's one primary read: the account, its role, and the key it names. */
+function admissionRow(overrides: Record<string, unknown> = {})
 {
     return {
-        user: { id: USER_ID, email: 'proof@example.com', status: 'active', ...overrides },
+        user: { id: USER_ID, email: 'proof@example.com', status: 'active', keyEpoch: 0, ...overrides },
         role: { name: 'user' },
+        key: validKeyRecord(),
     };
 }
 
@@ -255,7 +264,7 @@ describe('auth profile branch (case table G)', () =>
         configureClientProofReplayStore(new MemoryReplayStore());
         vi.mocked(keysRepository.updateLastUsedById).mockResolvedValue(undefined as never);
         vi.mocked(keysRepository.findWithAccountEpochOnPrimary).mockResolvedValue(validKeyRecord() as never);
-        vi.mocked(findUserWithEffectiveRoleOnPrimary).mockResolvedValue(activeUser() as never);
+        vi.mocked(usersRepository.findByIdWithRoleAndKeyOnPrimary).mockResolvedValue(admissionRow() as never);
     });
 
     describe('G1 — Bearer only: the web path, untouched', () =>
@@ -448,7 +457,7 @@ describe('auth profile branch (case table G)', () =>
             const driven = contextFor({ headers: proofHeaders({ nonce }) });
             await expectRefusal(await run(middleware, driven), 401, 'SESSION_REVOKED');
             expect(driven.next).not.toHaveBeenCalled();
-            expect(findUserWithEffectiveRoleOnPrimary).not.toHaveBeenCalled();
+            expect(usersRepository.findByIdWithRoleAndKeyOnPrimary).not.toHaveBeenCalled();
 
             // Refused before the ledger, as a revoked key is: the nonce is
             // admissible once the key is live again.
@@ -507,8 +516,8 @@ describe('auth profile branch (case table G)', () =>
     {
         it('an inactive account is refused as AccountDisabledError', async () =>
         {
-            vi.mocked(findUserWithEffectiveRoleOnPrimary).mockResolvedValue(
-                activeUser({ status: 'inactive' }) as never,
+            vi.mocked(usersRepository.findByIdWithRoleAndKeyOnPrimary).mockResolvedValue(
+                admissionRow({ status: 'inactive' }) as never,
             );
             const driven = contextFor({ headers: proofHeaders() });
             const error = await run(authenticate, driven) as { name: string };
@@ -518,11 +527,11 @@ describe('auth profile branch (case table G)', () =>
 
         it('a pending_deletion account carries purgeScheduledAt, as on the web path', async () =>
         {
-            vi.mocked(findUserWithEffectiveRoleOnPrimary).mockResolvedValue(
-                activeUser({ status: 'pending_deletion' }) as never,
+            vi.mocked(usersRepository.findByIdWithRoleAndKeyOnPrimary).mockResolvedValue(
+                admissionRow({ status: 'pending_deletion' }) as never,
             );
             const purgeScheduledAt = new Date('2030-01-01T00:00:00.000Z');
-            vi.mocked(getPendingDeletionInfo).mockResolvedValue({ purgeScheduledAt } as never);
+            vi.mocked(accountDeletionRequestsRepository.findPendingByUserIdOnPrimary).mockResolvedValue({ purgeScheduledAt } as never);
 
             const driven = contextFor({ headers: proofHeaders() });
             const error = await run(authenticate, driven) as { name: string; details: Record<string, unknown> };
@@ -555,23 +564,16 @@ describe('auth profile branch (case table G)', () =>
             expect(driven.authOf()).toMatchObject({ userId: String(USER_ID) });
             expect(keysRepository.findWithAccountEpochOnPrimary).toHaveBeenCalledWith(TEST_KEY_ID);
             expect(keysRepository.findActiveByKeyId).not.toHaveBeenCalled();
-            expect(findUserWithEffectiveRoleOnPrimary).toHaveBeenCalledWith(USER_ID);
-            expect(findUserWithEffectiveRole).not.toHaveBeenCalled();
-        });
-
-        it('P4 resolveAuthenticatedUser: reads the account with findUserWithEffectiveRoleOnPrimary', async () =>
-        {
-            await expect(resolveAuthenticatedUser(USER_ID)).resolves.toMatchObject({ role: 'user' });
-            expect(findUserWithEffectiveRoleOnPrimary).toHaveBeenCalledWith(USER_ID);
-            expect(findUserWithEffectiveRole).not.toHaveBeenCalled();
+            expect(usersRepository.findByIdWithRoleAndKeyOnPrimary).toHaveBeenCalledWith(USER_ID, TEST_KEY_ID);
+            expect(usersRepository.findByIdWithRole).not.toHaveBeenCalled();
         });
 
         it.each(EACH_MIDDLEWARE)('P4 %s: clientProofV1 admission resolves the account from the primary', async (_name, middleware) =>
         {
             const driven = contextFor({ headers: proofHeaders() });
             expect(await run(middleware, driven)).toBeNull();
-            expect(findUserWithEffectiveRoleOnPrimary).toHaveBeenCalledWith(USER_ID);
-            expect(findUserWithEffectiveRole).not.toHaveBeenCalled();
+            expect(usersRepository.findByIdWithRoleAndKeyOnPrimary).toHaveBeenCalledWith(USER_ID, TEST_KEY_ID);
+            expect(usersRepository.findByIdWithRole).not.toHaveBeenCalled();
         });
     });
 
@@ -588,6 +590,9 @@ describe('auth profile branch (case table G)', () =>
                 join('middleware', 'auth-profiles.ts'),
                 join('middleware', 'authenticate.ts'),
                 join('middleware', 'one-time-token-auth.ts'),
+                // The admission builds every AuthContext, so it names the field
+                // it is handed; it never branches on it.
+                join('services', 'admission.service.ts'),
                 // machine-principals sets the field on its own principal — the
                 // one that never enters AuthContext (#79). It is a
                 // scheme-setting middleware in exactly the sense this list
@@ -633,7 +638,7 @@ describe('replay ledger through the middleware (case table H)', () =>
         configureClientProofReplayStore(new MemoryReplayStore());
         vi.mocked(keysRepository.updateLastUsedById).mockResolvedValue(undefined as never);
         vi.mocked(keysRepository.findWithAccountEpochOnPrimary).mockResolvedValue(validKeyRecord() as never);
-        vi.mocked(findUserWithEffectiveRoleOnPrimary).mockResolvedValue(activeUser() as never);
+        vi.mocked(usersRepository.findByIdWithRoleAndKeyOnPrimary).mockResolvedValue(admissionRow() as never);
     });
 
     it('H1/H2: a nonce is admitted once, and its reuse is PROOF_REPLAYED', async () =>

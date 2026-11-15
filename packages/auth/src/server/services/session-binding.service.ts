@@ -138,18 +138,16 @@ export async function enableSessionBindingService(
         throw new SessionBindingUnavailableError();
     }
 
-    const live = await passkeysRepository.listLiveByUserId(params.userId);
-
-    if (live.length === 0)
-    {
-        throw new ValidationError({
-            message: 'Session binding needs a passkey to renew with. Enroll one first.',
-        });
-    }
-
+    await assertLivePasskey(params.userId);
     await assertRecentAuthentication({ userId: params.userId, keyId: params.keyId });
 
-    const user = await usersRepository.findById(params.userId);
+    // The proof (which may verify a password) done, the account is locked before
+    // its setting is read and its key is bound (`usersRepository.lockAccount`).
+    // The live passkey is asked for again under it: one revoked since the
+    // check above would leave the account bound with nothing to renew with.
+    const user = await usersRepository.lockAccount(params.userId);
+
+    await assertLivePasskey(params.userId);
 
     if (user?.sessionBinding === 'passkey')
     {
@@ -168,6 +166,21 @@ export async function enableSessionBindingService(
     );
 
     return { mode: 'passkey', keyExpiresAtMillis: bound?.expiresAt?.getTime() };
+}
+
+/**
+ * Refuse binding an account that holds no live passkey to renew with.
+ *
+ * @throws ValidationError
+ */
+async function assertLivePasskey(userId: number): Promise<void>
+{
+    if ((await passkeysRepository.listLiveByUserId(userId)).length === 0)
+    {
+        throw new ValidationError({
+            message: 'Session binding needs a passkey to renew with. Enroll one first.',
+        });
+    }
 }
 
 /**
@@ -190,6 +203,9 @@ export async function disableSessionBindingService(
         });
     }
 
+    // After the proof, which may verify a password: the account lock first
+    // (`usersRepository.lockAccount`), then the setting and the keys.
+    await usersRepository.lockAccount(params.userId);
     await usersRepository.updateById(params.userId, {
         sessionBinding: 'none',
         sessionBindingChangedAt: new Date(),

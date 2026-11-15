@@ -39,6 +39,10 @@ export default defineConfig(
             env:
             {
                 SPFN_AUTH_BCRYPT_SALT_ROUNDS: '4',
+                // Every repository method that writes an account's credential
+                // state throws without the account lock in its transaction
+                // (`usersRepository.lockAccount`).
+                SPFN_AUTH_ASSERT_ACCOUNT_LOCK: '1',
             },
 
             // Coverage configuration

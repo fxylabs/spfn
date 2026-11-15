@@ -118,5 +118,7 @@ export const createOAuth2AuthorizationCode = route.post('/_auth/oauth2/authorize
             return await denyOAuth2AuthorizeService(params);
         }
 
-        return await approveOAuth2AuthorizeService(params, Number(getAuth(c).userId));
+        const { userId, credential } = getAuth(c);
+
+        return await approveOAuth2AuthorizeService(params, { userId: Number(userId), credential });
     });

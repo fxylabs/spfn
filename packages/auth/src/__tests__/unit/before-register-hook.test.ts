@@ -36,6 +36,7 @@ const {
             findByFoldedEmail: vi.fn(),
             create: vi.fn(),
             updateById: vi.fn(),
+            lockAccount: vi.fn(async (id: number) => ({ id, emailVerifiedAt: null })),
         },
         keysRepository: { create: vi.fn() },
         socialAccountsRepository: { createIfAbsent: vi.fn(async () => ({ id: 1 })) },

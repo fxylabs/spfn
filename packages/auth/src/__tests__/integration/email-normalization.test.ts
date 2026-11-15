@@ -328,6 +328,18 @@ describe.skipIf(!dbAvailable)('Email normalization', () =>
             expect((await usersRepository.findById(safe.id))?.email).toBe('small@example.com');
         });
 
+        it('folds in bounded batches, one statement each, until nothing is pending', async () =>
+        {
+            for (let i = 0; i < 25; i++)
+            {
+                await insertRaw(`Batch${i}@Example.com`);
+            }
+
+            // 25 rows at 10 a statement: three statements, the last one short.
+            expect(await usersRepository.normalizeEmailsExcept([], 10)).toBe(25);
+            expect(await usersRepository.normalizeEmailsExcept([], 10)).toBe(0);
+        });
+
         it('rewrites every safe row in one pass', async () =>
         {
             const ids = [];

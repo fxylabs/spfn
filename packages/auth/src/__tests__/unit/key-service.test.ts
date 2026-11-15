@@ -29,7 +29,13 @@ const { keysRepository } = vi.hoisted(() => ({
 vi.mock('../../server/repositories', () => ({
     keysRepository,
     mfaEnrolmentRepository: { isEnrolledIn: vi.fn(async () => false) },
-    usersRepository: { currentKeyEpoch: vi.fn(async () => 0) },
+    // The account a key is written for, as the key writer locks it: active.
+    usersRepository: { lockAccount: vi.fn(async (id: number) => ({ id, status: 'active', keyEpoch: 0 })) },
+}));
+// The key write is its own transaction; here only its body matters.
+vi.mock('@spfn/core/db', async (importOriginal) => ({
+    ...(await importOriginal<typeof import('@spfn/core/db')>()),
+    runInTransaction: async (fn: () => Promise<unknown>) => fn(),
 }));
 // `key.service` now asks the second-factor service two questions — whether the
 // caller must step up, and whether a rotation carries a verification across.
@@ -192,7 +198,7 @@ describe('registerPublicKeyService - keyId collisions', () =>
         await registerPublicKeyService(params());
 
         // The sign-in still moves `authenticatedAt`; only the expiry is left alone.
-        expect(keysRepository.markReauthenticated).toHaveBeenCalledWith(KEY_ID, OWNER_ID);
+        expect(keysRepository.markReauthenticated).toHaveBeenCalledWith(KEY_ID, OWNER_ID, undefined);
     });
 
     it('does not resurrect an expired key that was also revoked', async () =>

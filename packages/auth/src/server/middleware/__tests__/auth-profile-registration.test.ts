@@ -28,17 +28,32 @@ vi.mock('@spfn/auth/server', async (importOriginal) =>
             findWithAccountEpochOnPrimary: vi.fn(),
             updateLastUsedById: vi.fn().mockResolvedValue(undefined),
         },
-        findUserWithEffectiveRoleOnPrimary: vi.fn(),
+    };
+});
+
+// The admission (admitPrincipal) reads the repositories directly.
+vi.mock('@/server/repositories', async (importOriginal) =>
+{
+    const actual = await importOriginal<typeof import('@/server/repositories')>();
+
+    return {
+        ...actual,
+        usersRepository: { findByIdWithRoleAndKeyOnPrimary: vi.fn(), findByIdWithRoleOnPrimary: vi.fn() },
         userSettingsRepository: { findLocaleByUserId: vi.fn().mockResolvedValue('en') },
-        getPendingDeletionInfo: vi.fn(),
+        accountDeletionRequestsRepository: { findPendingByUserIdOnPrimary: vi.fn() },
     };
 });
 
 import { authenticate, optionalAuth } from '@/server/middleware/authenticate';
-import { registerAuthProfile, type AuthContext, type AuthProfileVerifier } from '@/server/middleware/auth-profiles';
+import {
+    registerAuthProfile,
+    type AuthContext,
+    type AuthProfileIdentity,
+    type AuthProfileVerifier,
+} from '@/server/middleware/auth-profiles';
 import { UnauthorizedError } from '@spfn/core/errors';
-import { decodeToken, verifyClientToken, keysRepository, findUserWithEffectiveRoleOnPrimary } from '@spfn/auth/server';
-import type { User } from '@spfn/auth/server';
+import { decodeToken, verifyClientToken, keysRepository } from '@spfn/auth/server';
+import { usersRepository } from '@/server/repositories';
 import { CLIENT_PROOF_HEADERS } from '@/server/client-proof/admission';
 import { CLIENT_PROOF_PROFILE } from '@/server/client-proof/proof';
 import type { Context, Next } from 'hono';
@@ -65,10 +80,10 @@ function validKeyRecord(overrides: Record<string, unknown> = {})
     };
 }
 
-function activeUser()
+function activeUser(status = 'active')
 {
     return {
-        user: { id: USER_ID, email: 'registered@example.com', status: 'active' },
+        user: { id: USER_ID, email: 'registered@example.com', status, keyEpoch: 0 },
         role: { name: 'user' },
     };
 }
@@ -142,17 +157,10 @@ function uniqueProfileId(): string
     return `testProfileV${profileCounter}`;
 }
 
-/** What a custom verifier returns: the one AuthContext shape every scheme converges on. */
-function customPrincipal(scheme: string): AuthContext
+/** What a custom verifier returns: who presented the request — never a principal. */
+function customPrincipal(scheme: string): AuthProfileIdentity
 {
-    return {
-        user: { id: USER_ID, email: 'registered@example.com', status: 'active' } as unknown as User,
-        userId: String(USER_ID),
-        keyId: 'custom-key',
-        role: 'admin',
-        locale: 'ko',
-        scheme,
-    };
+    return { userId: String(USER_ID), keyId: 'custom-key', scheme };
 }
 
 /** Registers a verifier that admits every request, and returns its profile name. */
@@ -190,7 +198,9 @@ describe('registerAuthProfile — the dispatch around a registered verifier', ()
     {
         vi.clearAllMocks();
         vi.mocked(keysRepository.updateLastUsedById).mockResolvedValue(undefined as never);
-        vi.mocked(findUserWithEffectiveRoleOnPrimary).mockResolvedValue(activeUser() as never);
+        vi.mocked(usersRepository.findByIdWithRoleOnPrimary).mockResolvedValue(activeUser() as never);
+        vi.mocked(usersRepository.findByIdWithRoleAndKeyOnPrimary)
+            .mockResolvedValue({ ...activeUser(), key: validKeyRecord() } as never);
     });
 
     describe('1/2 — no profile header: the Bearer path, untouched', () =>
@@ -297,12 +307,16 @@ describe('registerAuthProfile — the dispatch around a registered verifier', ()
             const driven = contextFor({ headers: { [CLIENT_PROOF_HEADERS.profile]: profileId } });
             expect(await run(middleware, driven)).toBeNull();
             expect(driven.next).toHaveBeenCalled();
+            // The verifier said who; the admission built the principal — the
+            // account and its role read on the primary, the locale from settings.
             expect(driven.authOf()).toEqual({
-                user: { id: USER_ID, email: 'registered@example.com', status: 'active' },
+                user: { id: USER_ID, email: 'registered@example.com', status: 'active', keyEpoch: 0 },
                 userId: String(USER_ID),
                 keyId: 'custom-key',
-                role: 'admin',
-                locale: 'ko',
+                role: 'user',
+                locale: 'en',
+                chosenLocale: 'en',
+                credential: { kind: 'appProfile', profile: profileId, keyId: 'custom-key' },
                 scheme: profileId,
             });
         });
@@ -346,7 +360,7 @@ describe('registerAuthProfile — the dispatch around a registered verifier', ()
         ])('refuses when the verifier resolves %s', async (_label, resolved) =>
         {
             const profileId = uniqueProfileId();
-            registerAuthProfile(profileId, { verify: async () => resolved as unknown as AuthContext });
+            registerAuthProfile(profileId, { verify: async () => resolved as unknown as AuthProfileIdentity });
 
             const driven = contextFor({ headers: { [CLIENT_PROOF_HEADERS.profile]: profileId } });
 
@@ -383,7 +397,7 @@ describe('registerAuthProfile — the dispatch around a registered verifier', ()
                 {
                 }
 
-                async verify(): Promise<AuthContext>
+                async verify(): Promise<AuthProfileIdentity>
                 {
                     return customPrincipal(this.scheme);
                 }

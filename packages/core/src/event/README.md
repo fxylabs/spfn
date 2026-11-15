@@ -375,7 +375,9 @@ key ends what it opened.
   empty, `null` or `undefined` key leaves the token untagged — such a stream is never closed by
   key. A non-device value (`'service'`) is stored as given; nothing asks to close it.
 - **A token minted before the revocation is refused at open.** `SSETokenManagerConfig.verifyKey`
-  runs when a tagged token is consumed; `false` or a throw refuses it (`401`). The token is
+  runs when a tagged token is consumed, with `(keyId, subject, keyHolder)` — `keyHolder` is who the
+  endpoint recorded as holding the key (`getKeyHolder(c)`, default `c.get('auth')?.userId`), so a
+  verifier judges that person whatever `getSubject` returns; `false` or a throw refuses it (`401`). The token is
   consumed first, so a refused token is never retried. The throw is warned without its text.
 - **`closeSSEConnectionsByKey(keyId)` ends the open ones.** It closes, on this process, every
   stream whose token carried `keyId` — every `createSSEHandler` of the process, not one — and a
@@ -604,6 +606,7 @@ client.subscribe({
 | `tokenManager` | `SSETokenManager \| () => SSETokenManager` | — | reuse an external manager (lazy resolver recommended); overrides `store`/`tokenTtl` |
 | `getSubject` | `(c: Context) => string \| null` | `c.get('auth')?.userId ?? null` | extract subject on the token endpoint |
 | `getKeyId` | `(c: Context) => string \| null \| undefined` | `c.get('auth')?.keyId` | the device key the token is tagged with; empty → untagged ([revoked keys](#closing-the-streams-of-a-revoked-device-key)) |
+| `getKeyHolder` | `(c: Context) => string \| null \| undefined` | `c.get('auth')?.userId` | who holds that key, recorded beside the tag and passed to `verifyKey` — independent of `getSubject` |
 | `authorize` | `(subject, events[]) => events[] \| Promise<…>` | — | subscription authorization (once on connect) |
 | `filter` | `{ [event]?: (subject, payload) => boolean }` | — | per-event payload filter |
 | `resolvePrincipal` | `(subject, request) => unknown \| Promise<unknown>` | — | principal for every `canSubscribe` (once per connection); a throw ⇒ `403` |

@@ -34,9 +34,8 @@
 
 import { SessionRenewalRefusedError } from '@spfn/auth/errors';
 
-import { getBoundKeyRenewGraceMs } from '../lib/config';
 import type { AuthenticationResponseJSON, PublicKeyCredentialRequestOptionsJSON } from '../lib/webauthn';
-import { keysRepository, usersRepository } from '../repositories';
+import { keysRepository } from '../repositories';
 import type { UserPublicKey } from '../entities/user-public-keys';
 import type { User } from '../entities/users';
 import type { KeyAlgorithmType } from '../types';
@@ -44,6 +43,7 @@ import { registerPublicKeyService, registeredBinding } from './key.service';
 import { secondFactorEnrolmentFields } from './second-factor-policy.service';
 import { startRenewalCeremonyService, verifyRenewalAssertionService } from './passkey.service';
 import { loginBindingFields, type LoginResult } from './auth.service';
+import { admitPrincipal } from './admission.service';
 
 /** What the old key is revoked with, in the voice `revoked_reason` is written in. */
 const RENEWAL_REVOCATION_REASON = 'Replaced by bound-session renewal';
@@ -170,11 +170,12 @@ export async function finishSessionRenewService(
 /**
  * The key a renewal may act on and the account behind it, or the one refusal.
  *
- * Four conditions, and the caller learns which of them failed only by not being
- * told: the row exists, it is still active, it is bound, and it is inside its
- * renewal grace. The account has to be one that may hold a session at all —
- * suspended and pending-deletion accounts do not get a new key by this door any
- * more than they get one by the sign-in door.
+ * Whether the person may renew is `admitPrincipal`'s, with a `renewal`
+ * credential — the account active on the primary, the key of the account's
+ * current generation, bound, and inside its renewal grace — and the caller
+ * learns which of them failed only by not being told. Suspended and
+ * pending-deletion accounts do not get a new key by this door any more than
+ * they get one by the sign-in door.
  *
  * @throws SessionRenewalRefusedError
  */
@@ -182,26 +183,21 @@ async function admitForRenewal(expiredKeyId: string): Promise<{ key: UserPublicK
 {
     const key = expiredKeyId ? await keysRepository.findByKeyIdOnPrimary(expiredKeyId) : null;
 
-    if (!key || !key.isActive || key.binding !== 'passkey' || !key.expiresAt)
+    if (!key)
     {
         throw new SessionRenewalRefusedError();
     }
 
-    // Early renewal is allowed — a browser that asks a minute before its key runs
-    // out should not have to wait for the failure first. Late renewal is allowed
-    // for the grace window, so a laptop closed over a long weekend comes back to
-    // one prompt instead of a sign-in; past it there is nothing to continue.
-    if (Date.now() > key.expiresAt.getTime() + getBoundKeyRenewGraceMs())
+    const admission = await admitPrincipal({
+        userId: key.userId,
+        credential: { kind: 'renewal', keyId: key.keyId },
+        route: null,
+    });
+
+    if ('refused' in admission)
     {
         throw new SessionRenewalRefusedError();
     }
 
-    const user = await usersRepository.findByIdOnPrimary(key.userId);
-
-    if (!user || user.status !== 'active')
-    {
-        throw new SessionRenewalRefusedError();
-    }
-
-    return { key, user };
+    return { key, user: admission.admitted.user };
 }

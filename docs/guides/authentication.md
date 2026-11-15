@@ -387,8 +387,13 @@ For operations that bypass the RPC proxy — streaming, large file uploads, SSE,
 1. Client → RPC → POST /_auth/tokens (authenticated) → { token, expiresAt }
 2. Client → Direct → POST /files/upload?token=xxx    (file upload)
    Client → Direct → GET /events/stream?token=xxx     (SSE streaming)
-3. Backend → oneTimeTokenAuth middleware → verify & consume → AuthContext
+3. Backend → oneTimeTokenAuth middleware → consume → admitPrincipal → AuthContext
 ```
+
+A token is bound to the device key that issued it. It is admitted only while that key is live
+and the account is active (`admitPrincipal`), so a logout, a sign-out-everywhere, a password
+change or a suspension refuses every token the key issued and closes the streams opened with
+them. The `AuthContext` it produces carries the issuing key as `keyId`.
 
 ### Server Setup
 

@@ -38,6 +38,7 @@ import { isChannelEnabled } from '../lib/channels-config';
 import { uniqueViolationConstraint } from '../lib/unique-violation';
 import { type SocialProvider, type KeyAlgorithmType, type SessionBindingType } from '../types';
 import type { User } from '../entities/users';
+import type { SocialAccountLink } from '../repositories/social-accounts.repository';
 import {
     refreshAccessToken,
     createOAuthState,
@@ -305,7 +306,10 @@ const SIGN_IN_PREMISE_CONSTRAINTS = new Set([
  * (`OAuthSignInContendedError`), and the transaction rolls back. The premise
  * was stale, not wrong: run again in a new transaction, every read sees what
  * the other one committed — the identity's link, and it is an ordinary sign-in
- * to that account; the address held, and the backfill fills nothing. The
+ * to that account; the address held, and the backfill fills nothing. A link
+ * that moved or vanished under the account lock (`StaleAccountLockError`) is
+ * the same: the lock taken was the wrong account's, and the next attempt
+ * starts with none held. The
  * provider was asked once, before the first attempt; `attempt` only touches the
  * database. A second stale premise is answered `OAuthSignInContendedError`.
  *
@@ -332,6 +336,7 @@ function refuseContendedTwice(provider: SocialProvider, error: unknown): Promise
 function actedOnStaleRead(error: unknown): boolean
 {
     return error instanceof OAuthSignInContendedError
+        || error instanceof StaleAccountLockError
         || SIGN_IN_PREMISE_CONSTRAINTS.has(uniqueViolationConstraint(error) ?? '');
 }
 
@@ -388,6 +393,7 @@ async function persistWebSignIn(signIn: WebSignIn): Promise<OAuthCallbackResult>
         fingerprint: stateData.fingerprint,
         algorithm: stateData.algorithm,
         channel: 'oauth',
+        missingAccount: () => new OAuthAccountNotFoundError(),
         ip: params.ip,
         userAgent: params.userAgent,
         binding: decideKeyBinding(user?.sessionBinding ?? 'none', params.webProxy),
@@ -400,9 +406,9 @@ async function persistWebSignIn(signIn: WebSignIn): Promise<OAuthCallbackResult>
 }
 
 /**
- * The account an identity signs in to: the one its social row names, with the
- * fresh tokens and handle stored — or, for an identity no row holds yet, the
- * one `createOrLinkUser` finds or makes.
+ * The account an identity signs in to: the one its social row names, locked
+ * (`lockLinkedAccount`) and then given the fresh tokens and handle — or, for an
+ * identity no row holds yet, the one `createOrLinkUser` finds or makes.
  */
 async function signInAccount(
     provider: SocialProvider,
@@ -411,7 +417,7 @@ async function signInAccount(
     metadata: Record<string, unknown> | undefined,
 ): Promise<{ userId: number; isNewUser: boolean }>
 {
-    const existing = await socialAccountsRepository.findByProviderAndProviderId(provider, identity.providerUserId);
+    const existing = await lockLinkedAccount(provider, identity.providerUserId);
 
     if (!existing)
     {
@@ -700,6 +706,55 @@ export async function fromProvider<T>(call: () => Promise<T>): Promise<T>
 }
 
 /**
+ * A sign-in locked the account its unlocked read named, and the read taken
+ * again under the lock names another — or none: the link moved, or was
+ * unlinked, in between. The transaction holds the wrong account's lock, and
+ * going on would mean a second lock (the account the link moved to, or the one
+ * an attach-by-email names) or an app hook (`beforeRegister`) under it, so it
+ * rolls back instead and `retryContendedSignIn` runs the resolution again from
+ * nothing held. Internal: a second occurrence is answered
+ * `OAuthSignInContendedError`.
+ */
+export class StaleAccountLockError extends Error
+{
+    constructor()
+    {
+        super('The account a sign-in locked is no longer the one its identity names');
+        this.name = 'StaleAccountLockError';
+    }
+}
+
+/**
+ * The identity's link, with the account it names locked
+ * (`usersRepository.lockAccount`) before anything is written for it, and read
+ * again under that lock. A link that moved or vanished in between is a stale
+ * premise (`StaleAccountLockError`), never a second lock.
+ *
+ * The first thing a sign-in's transaction does for an account found by its
+ * provider identity, ahead of the token update, the e-mail backfill and the key.
+ *
+ * @throws StaleAccountLockError
+ */
+export async function lockLinkedAccount(provider: SocialProvider, providerUserId: string): Promise<SocialAccountLink | null>
+{
+    const link = await socialAccountsRepository.findByProviderAndProviderId(provider, providerUserId);
+    if (!link)
+    {
+        return null;
+    }
+
+    await usersRepository.lockAccount(link.userId);
+    const relocked = await socialAccountsRepository.findByProviderAndProviderId(provider, providerUserId);
+
+    if (relocked?.userId !== link.userId)
+    {
+        throw new StaleAccountLockError();
+    }
+
+    return relocked;
+}
+
+/**
  * OAuth 세션(공개키 등록) 발급 전 계정 상태 검사
  *
  * web(code 교환)·native(id_token) 두 흐름 모두 "기존 소셜 연결 재로그인" 또는
@@ -809,7 +864,7 @@ export async function createOrLinkUser(
     }
 
     const { userId, isNewUser } = match.kind === 'account' && emailMatch === 'attach'
-        ? { userId: await attachByEmail(match.user, identity), isNewUser: false }
+        ? { userId: await attachByEmail(match.user.id, identity), isNewUser: false }
         : { userId: await registerOAuthUser(provider, identity, metadata, match.kind === 'none'), isNewUser: true };
 
     // 소셜 계정 생성 (native 흐름은 provider 토큰이 없어 null로 저장)
@@ -870,23 +925,28 @@ async function signInLinkConflict(provider: SocialProvider, providerUserId: stri
  * 미검증 이메일로는 연결하지 않는다(계정 탈취 방지). provider가 검증한 이메일이므로
  * 기존 계정의 이메일 인증 상태도 채운다.
  *
+ * The account is locked (`usersRepository.lockAccount`) before it is written,
+ * and its verification state is read off that lock, not off the match.
+ *
  * @throws UnverifiedEmailLinkError
  */
-async function attachByEmail(existingUser: User, identity: NormalizedIdentity): Promise<number>
+async function attachByEmail(userId: number, identity: NormalizedIdentity): Promise<number>
 {
     if (!identity.emailVerified)
     {
         throw new UnverifiedEmailLinkError();
     }
 
-    if (!existingUser.emailVerifiedAt)
+    const existingUser = await usersRepository.lockAccount(userId);
+
+    if (existingUser && !existingUser.emailVerifiedAt)
     {
-        await usersRepository.updateById(existingUser.id, {
+        await usersRepository.updateById(userId, {
             emailVerifiedAt: new Date(),
         });
     }
 
-    return existingUser.id;
+    return userId;
 }
 
 /**
@@ -941,6 +1001,10 @@ async function registerOAuthUser(
         status: 'active',
         emailVerifiedAt: storesEmail ? new Date() : null,
     });
+
+    // The new account's own lock, before its identity row and its key: the
+    // hook above ran with no account lock held, and this is the only one.
+    await usersRepository.lockAccount(newUser.id);
 
     return newUser.id;
 }
@@ -1147,7 +1211,13 @@ export async function oauthUnlinkNotifyService(
         return { ackStatus, handled: false };
     }
 
-    await socialAccountsRepository.deleteById(account.id);
+    // The identity is a way into the account: removed under its lock
+    // (`usersRepository.lockAccount`), in a transaction of its own.
+    await runInTransaction(async () =>
+    {
+        await usersRepository.lockAccount(account.userId);
+        await socialAccountsRepository.deleteById(account);
+    }, { context: 'auth:oauth-unlink-notify' });
 
     await oauthUnlinkedEvent.emit({
         userId: String(account.userId),

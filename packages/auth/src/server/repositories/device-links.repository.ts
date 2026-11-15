@@ -24,14 +24,18 @@
  * Every transition wakes the long polls parked on the link, after commit.
  */
 
-import { deviceLinks, userPublicKeys, users } from '../entities';
+import { deviceLinks } from '../entities';
 import type { DeviceLink, DeviceLinkDeniedReason, DeviceLinkStatus, NewDeviceLink } from '../entities';
-import { BaseRepository } from '@spfn/core/db';
-import { eq, and, gt, or, isNull, inArray, exists, getTableColumns, sql, type SQL } from 'drizzle-orm';
+import { eq, and, gt, inArray, getTableColumns, sql, type SQL } from 'drizzle-orm';
+import { AccountStateRepository, type AccountWrites } from './account-state.repository';
+import { liveKeyExists } from './live-key';
 import { announceDeviceLinkMoved } from '../lib/device-link-waiters';
 
 /** A link as read, with whether its issuing key can still sign. */
 export type DeviceLinkRecord = DeviceLink & { issuerKeyLive: boolean };
+
+/** The link a transition names: its row, and the issuer whose account lock it runs under. */
+export type LinkHandle = Pick<DeviceLink, 'id' | 'issuerUserId'>;
 
 /** The key material and labels a redeeming device parks, with the codes drawn for it. */
 export interface DeviceLinkRedemption
@@ -53,8 +57,14 @@ const LIVE_STATUSES: DeviceLinkStatus[] = ['issued', 'redeemed', 'approved'];
 /** The TTL, judged by the clock that stores it — see `device-authorizations.repository.ts`. */
 const notExpired = () => gt(deviceLinks.expiresAt, sql`now()`);
 
-export class DeviceLinksRepository extends BaseRepository
+export class DeviceLinksRepository extends AccountStateRepository
 {
+    static override readonly accountWrites: AccountWrites<DeviceLinksRepository> = {
+        create: { account: data => data.issuerUserId },
+        expireLive: { account: issuerUserId => issuerUserId },
+        transition: { account: issuerUserId => issuerUserId },
+    };
+
     /**
      * Insert an issued link, unless its user code is already taken.
      *
@@ -106,11 +116,12 @@ export class DeviceLinksRepository extends BaseRepository
      *
      * @returns the updated row, or null if it was no longer issued, expired, or its issuer signed out
      */
-    async redeem(id: number, redemption: DeviceLinkRedemption): Promise<DeviceLink | null>
+    async redeem(link: LinkHandle, redemption: DeviceLinkRedemption): Promise<DeviceLink | null>
     {
         return this.transition(
+            link.issuerUserId,
             { ...redemption, status: 'redeemed', redeemedAt: new Date() },
-            and(eq(deviceLinks.id, id), eq(deviceLinks.status, 'issued'), notExpired(), this.issuerKeyLive(true)),
+            and(eq(deviceLinks.id, link.id), eq(deviceLinks.status, 'issued'), notExpired(), this.issuerKeyLive(true)),
         );
     }
 
@@ -123,11 +134,12 @@ export class DeviceLinksRepository extends BaseRepository
      *
      * @returns the updated row, or null if it was no longer redeemed, expired, or its issuer signed out
      */
-    async approve(id: number): Promise<DeviceLink | null>
+    async approve(link: LinkHandle): Promise<DeviceLink | null>
     {
         return this.transition(
+            link.issuerUserId,
             { status: 'approved', approvedAt: new Date() },
-            and(eq(deviceLinks.id, id), eq(deviceLinks.status, 'redeemed'), notExpired(), this.issuerKeyLive(true)),
+            and(eq(deviceLinks.id, link.id), eq(deviceLinks.status, 'redeemed'), notExpired(), this.issuerKeyLive(true)),
         );
     }
 
@@ -141,11 +153,12 @@ export class DeviceLinksRepository extends BaseRepository
      *
      * @returns the updated row, or null if it was no longer redeemed, or expired
      */
-    async deny(id: number, reason: DeviceLinkDeniedReason): Promise<DeviceLink | null>
+    async deny(link: LinkHandle, reason: DeviceLinkDeniedReason): Promise<DeviceLink | null>
     {
         return this.transition(
+            link.issuerUserId,
             { status: 'denied', deniedReason: reason },
-            and(eq(deviceLinks.id, id), eq(deviceLinks.status, 'redeemed'), notExpired()),
+            and(eq(deviceLinks.id, link.id), eq(deviceLinks.status, 'redeemed'), notExpired()),
         );
     }
 
@@ -155,11 +168,12 @@ export class DeviceLinksRepository extends BaseRepository
      *
      * @returns the updated row, or null if it had moved past redeemed, or expired
      */
-    async cancel(id: number): Promise<DeviceLink | null>
+    async cancel(link: LinkHandle): Promise<DeviceLink | null>
     {
         return this.transition(
+            link.issuerUserId,
             { status: 'expired' },
-            and(eq(deviceLinks.id, id), inArray(deviceLinks.status, ['issued', 'redeemed']), notExpired()),
+            and(eq(deviceLinks.id, link.id), inArray(deviceLinks.status, ['issued', 'redeemed']), notExpired()),
         );
     }
 
@@ -170,9 +184,10 @@ export class DeviceLinksRepository extends BaseRepository
      *
      * @returns the spent row, or null if it was not approved (any more), expired, or its issuer signed out
      */
-    async consumeApproved(deviceCodeHash: string): Promise<DeviceLink | null>
+    async consumeApproved(issuerUserId: number, deviceCodeHash: string): Promise<DeviceLink | null>
     {
         return this.transition(
+            issuerUserId,
             { status: 'consumed', consumedAt: new Date() },
             and(
                 eq(deviceLinks.deviceCodeHash, deviceCodeHash),
@@ -184,35 +199,18 @@ export class DeviceLinksRepository extends BaseRepository
     }
 
     /**
-     * Lock the issuing key's row until the transaction ends, so two issues from
-     * one key run one after the other: each expires the other's link or waits for
-     * it to be inserted, and never both read "nothing live" and insert.
-     *
-     * `no key update` is the lock a plain UPDATE of the row takes: it conflicts
-     * with itself, with the share lock `issuerKeyLive(true)` takes and with a
-     * revocation's UPDATE, and it leaves foreign-key checks on the row alone.
-     * Taken first, before any link row, so every path that locks both — redeem,
-     * approve, consume and the revocations — locks the key row before the link.
-     */
-    async lockIssuerKey(issuerKeyId: string): Promise<void>
-    {
-        await this.db
-            .select({ one: sql`1` })
-            .from(userPublicKeys)
-            .where(eq(userPublicKeys.keyId, issuerKeyId))
-            .for('no key update');
-    }
-
-    /**
      * Expire the live link a key issued, so a fresh issue leaves one link per key.
      *
-     * Race-free only after `lockIssuerKey` in the same transaction.
+     * Race-free only under the issuer's account lock (`usersRepository.lockAccount`):
+     * two issues from one key then run one after the other, each expiring the
+     * other's link or waiting for it to be inserted, never both reading
+     * "nothing live" and inserting.
      *
      * @returns the rows this call expired
      */
-    async expireLiveByIssuerKey(issuerKeyId: string): Promise<DeviceLink[]>
+    async expireLiveByIssuerKey(issuerUserId: number, issuerKeyId: string): Promise<DeviceLink[]>
     {
-        return this.expireLive(eq(deviceLinks.issuerKeyId, issuerKeyId));
+        return this.expireLive(issuerUserId, eq(deviceLinks.issuerKeyId, issuerKeyId));
     }
 
     /**
@@ -227,15 +225,15 @@ export class DeviceLinksRepository extends BaseRepository
      */
     async expireAllLiveByUserId(userId: number): Promise<DeviceLink[]>
     {
-        return this.expireLive(eq(deviceLinks.issuerUserId, userId));
+        return this.expireLive(userId, undefined);
     }
 
-    private async expireLive(owner: SQL): Promise<DeviceLink[]>
+    private async expireLive(issuerUserId: number, owner: SQL | undefined): Promise<DeviceLink[]>
     {
         const expired = await this.db
             .update(deviceLinks)
             .set({ status: 'expired' })
-            .where(and(owner, inArray(deviceLinks.status, LIVE_STATUSES)))
+            .where(and(eq(deviceLinks.issuerUserId, issuerUserId), owner, inArray(deviceLinks.status, LIVE_STATUSES)))
             .returning();
 
         announceDeviceLinkMoved(expired.map(link => link.id));
@@ -243,13 +241,16 @@ export class DeviceLinksRepository extends BaseRepository
         return expired;
     }
 
-    /** Apply one conditional UPDATE, wake the waiters of the row it moved, and hand the row back. */
-    private async transition(values: Partial<NewDeviceLink>, where: SQL | undefined): Promise<DeviceLink | null>
+    /**
+     * Apply one conditional UPDATE to a link of this issuer, wake the waiters of
+     * the row it moved, and hand the row back.
+     */
+    private async transition(issuerUserId: number, values: Partial<NewDeviceLink>, where: SQL | undefined): Promise<DeviceLink | null>
     {
         const result = await this.db
             .update(deviceLinks)
             .set(values)
-            .where(where)
+            .where(and(eq(deviceLinks.issuerUserId, issuerUserId), where))
             .returning();
 
         const moved = result[0] ?? null;
@@ -278,29 +279,15 @@ export class DeviceLinksRepository extends BaseRepository
     }
 
     /**
-     * Whether the link's issuing key is still registered to its issuer and live:
-     * active, unexpired, and of the account's current key generation — the rule
-     * `keyLiveness` states, here as the one statement that also takes the lock.
+     * Whether the link's issuing key is still registered to its issuer and live
+     * (`liveKeyExists`, the rule device-code approval is spent under too).
      *
      * @param lock take a share lock on the key row, so a transition waits for a
      *   revocation in flight instead of judging the version before it
      */
     private issuerKeyLive(lock: boolean): SQL<boolean>
     {
-        const key = this.db
-            .select({ one: sql`1` })
-            .from(userPublicKeys)
-            .innerJoin(users, and(eq(users.id, userPublicKeys.userId), eq(users.keyEpoch, userPublicKeys.keyEpoch)))
-            .where(
-                and(
-                    eq(userPublicKeys.keyId, deviceLinks.issuerKeyId),
-                    eq(userPublicKeys.userId, deviceLinks.issuerUserId),
-                    eq(userPublicKeys.isActive, true),
-                    or(isNull(userPublicKeys.expiresAt), gt(userPublicKeys.expiresAt, sql`now()`)),
-                ),
-            );
-
-        return sql<boolean>`${exists(lock ? key.for('share', { of: userPublicKeys }) : key)}`;
+        return liveKeyExists(this.db, deviceLinks.issuerKeyId, deviceLinks.issuerUserId, lock);
     }
 }
 

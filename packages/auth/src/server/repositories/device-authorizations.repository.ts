@@ -27,9 +27,10 @@
 
 import { deviceAuthorizations } from '../entities/device-authorizations';
 import type { DeviceAuthorization, NewDeviceAuthorization } from '../entities/device-authorizations';
-import { BaseRepository } from '@spfn/core/db';
+import { liveKeyExists } from './live-key';
 import { eq, and, gt, inArray, sql } from 'drizzle-orm';
 import { announceDeviceAuthAnswered } from '../lib/device-auth-waiters';
+import { AccountStateRepository, type AccountWrites } from './account-state.repository';
 
 /**
  * The TTL condition every transition carries.
@@ -40,8 +41,16 @@ import { announceDeviceAuthAnswered } from '../lib/device-auth-waiters';
  */
 const notExpired = () => gt(deviceAuthorizations.expiresAt, sql`now()`);
 
-export class DeviceAuthorizationsRepository extends BaseRepository
+export class DeviceAuthorizationsRepository extends AccountStateRepository
 {
+    static override readonly accountWrites: AccountWrites<DeviceAuthorizationsRepository> = {
+        create: { exempt: 'a device code a waiting device started: it names no account until one approves it' },
+        approve: { account: (_id, userId) => userId },
+        deny: { exempt: 'refuses a pending code, which names no account and binds none: one conditional single-row statement that registers nothing' },
+        denyAllActiveByUserId: { account: userId => userId },
+        consumeApproved: { account: userId => userId },
+    };
+
     /**
      * Insert a pending authorization, unless one of its codes is already taken.
      *
@@ -127,16 +136,17 @@ export class DeviceAuthorizationsRepository extends BaseRepository
      * Bind the approving user and move the record to `approved`, but only from
      * `pending`.
      *
-     * `userId` comes from the approver's authenticated session — never from a
-     * request body — so this is the point where the record gains an owner.
+     * `userId` and `keyId` come from the approver's authenticated session —
+     * never from a request body — so this is the point where the record gains
+     * an owner, and the key whose liveness its collection depends on.
      *
      * @returns the updated row, or null if it was no longer pending, or expired
      */
-    async approve(id: number, userId: number): Promise<DeviceAuthorization | null>
+    async approve(id: number, userId: number, keyId: string): Promise<DeviceAuthorization | null>
     {
         const result = await this.db
             .update(deviceAuthorizations)
-            .set({ status: 'approved', userId, approvedAt: new Date() })
+            .set({ status: 'approved', userId, approvedByKeyId: keyId, approvedAt: new Date() })
             .where(
                 and(
                     eq(deviceAuthorizations.id, id),
@@ -223,11 +233,13 @@ export class DeviceAuthorizationsRepository extends BaseRepository
      * This is the one-shot: the winner of two concurrent polls registers the key,
      * and the loser sees no approved record and is answered as if the code were
      * unknown. Matching on the hash rather than on an id read a moment ago keeps
-     * the whole decision in one statement.
+     * the whole decision in one statement — the approving key's liveness
+     * included (`liveKeyExists`, the rule a device link's issuer is held to),
+     * so an approval left behind by a device signed out since registers nothing.
      *
-     * @returns the spent row, or null if it was not approved (any more), or expired
+     * @returns the spent row, or null if it was not approved (any more), expired, or its approver signed out
      */
-    async consumeApproved(deviceCodeHash: string): Promise<DeviceAuthorization | null>
+    async consumeApproved(userId: number, deviceCodeHash: string): Promise<DeviceAuthorization | null>
     {
         const result = await this.db
             .update(deviceAuthorizations)
@@ -235,8 +247,10 @@ export class DeviceAuthorizationsRepository extends BaseRepository
             .where(
                 and(
                     eq(deviceAuthorizations.deviceCodeHash, deviceCodeHash),
+                    eq(deviceAuthorizations.userId, userId),
                     eq(deviceAuthorizations.status, 'approved'),
                     notExpired(),
+                    liveKeyExists(this.db, deviceAuthorizations.approvedByKeyId, deviceAuthorizations.userId, true),
                 ),
             )
             .returning();

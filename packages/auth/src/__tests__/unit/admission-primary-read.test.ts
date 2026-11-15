@@ -20,7 +20,8 @@ const { keysRepository, usersRepository, bearerKeys, roles } = vi.hoisted(() => 
         findByKeyId: vi.fn(),
     },
     usersRepository: {
-        findByIdOnPrimary: vi.fn(),
+        // The admission's one primary read: the account, its role and the key.
+        findByIdWithRoleAndKeyOnPrimary: vi.fn(),
         findById: vi.fn(),
     },
     bearerKeys: {
@@ -28,8 +29,11 @@ const { keysRepository, usersRepository, bearerKeys, roles } = vi.hoisted(() => 
         findActiveByKeyId: vi.fn(),
         updateLastUsedById: vi.fn(async () => undefined),
     },
+    // `role-email-domain.service`, mocked whole below: the admission applies the
+    // policy to its primary read through `applyRoleEmailDomainPolicy`.
     roles: {
         findUserWithEffectiveRole: vi.fn(),
+        applyRoleEmailDomainPolicy: vi.fn(async (read: unknown) => read),
     },
 }));
 
@@ -38,6 +42,7 @@ vi.mock('../../server/repositories', () => ({
     usersRepository,
     passkeysRepository: {},
     userSettingsRepository: { findLocaleByUserId: vi.fn(async () => 'en') },
+    accountDeletionRequestsRepository: { findPendingByUserIdOnPrimary: vi.fn(async () => null) },
 }));
 vi.mock('../../server/services/passkey.service', () => ({
     assertRecentAuthentication: vi.fn(async () => undefined),
@@ -65,6 +70,12 @@ import { SessionRenewalRefusedError } from '@spfn/auth/errors';
 const KEY_ID = 'key-primary';
 const USER_ID = 3;
 const HOUR_MS = 60 * 60 * 1000;
+
+/** What the admission reads on the primary for a renewal: the account, its role, the key. */
+function admissionRow(status = 'active')
+{
+    return { user: { id: USER_ID, status, keyEpoch: 0 }, role: null, key: boundKey() };
+}
 
 function boundKey()
 {
@@ -112,23 +123,23 @@ describe('admission reads the write primary (replica-lag guards, #133)', () =>
         expect(keysRepository.findByKeyId).not.toHaveBeenCalled();
     });
 
-    it('P7 startSessionRenewService (admitForRenewal): reads the key and the account with the OnPrimary pair', async () =>
+    it('P7 startSessionRenewService (admitForRenewal): reads the key and the account on the primary', async () =>
     {
         keysRepository.findByKeyIdOnPrimary.mockResolvedValue(boundKey());
-        usersRepository.findByIdOnPrimary.mockResolvedValue({ id: USER_ID, status: 'active' });
+        usersRepository.findByIdWithRoleAndKeyOnPrimary.mockResolvedValue(admissionRow());
 
         await expect(startSessionRenewService({ expiredKeyId: KEY_ID })).resolves.toEqual({ challenge: 'challenge' });
 
         expect(keysRepository.findByKeyIdOnPrimary).toHaveBeenCalledWith(KEY_ID);
         expect(keysRepository.findByKeyId).not.toHaveBeenCalled();
-        expect(usersRepository.findByIdOnPrimary).toHaveBeenCalledWith(USER_ID);
+        expect(usersRepository.findByIdWithRoleAndKeyOnPrimary).toHaveBeenCalledWith(USER_ID, KEY_ID);
         expect(usersRepository.findById).not.toHaveBeenCalled();
     });
 
-    it('P9 finishSessionRenewService (admitForRenewal): reads the account with findByIdOnPrimary before the assertion refusal', async () =>
+    it('P9 finishSessionRenewService (admitForRenewal): reads the account on the primary before the assertion refusal', async () =>
     {
         keysRepository.findByKeyIdOnPrimary.mockResolvedValue(boundKey());
-        usersRepository.findByIdOnPrimary.mockResolvedValue({ id: USER_ID, status: 'active' });
+        usersRepository.findByIdWithRoleAndKeyOnPrimary.mockResolvedValue(admissionRow());
 
         await expect(finishSessionRenewService({
             expiredKeyId: KEY_ID,
@@ -138,25 +149,25 @@ describe('admission reads the write primary (replica-lag guards, #133)', () =>
             fingerprint: 'fingerprint-new',
         })).rejects.toThrow(SessionRenewalRefusedError);
 
-        expect(usersRepository.findByIdOnPrimary).toHaveBeenCalledWith(USER_ID);
+        expect(usersRepository.findByIdWithRoleAndKeyOnPrimary).toHaveBeenCalledWith(USER_ID, KEY_ID);
         expect(usersRepository.findById).not.toHaveBeenCalled();
     });
 
     it('P10 startSessionRenewService: a primary answer of a suspended account refuses without consulting the replica', async () =>
     {
         keysRepository.findByKeyIdOnPrimary.mockResolvedValue(boundKey());
-        usersRepository.findByIdOnPrimary.mockResolvedValue({ id: USER_ID, status: 'suspended' });
+        usersRepository.findByIdWithRoleAndKeyOnPrimary.mockResolvedValue(admissionRow('suspended'));
 
         await expect(startSessionRenewService({ expiredKeyId: KEY_ID })).rejects.toThrow(SessionRenewalRefusedError);
 
-        expect(usersRepository.findByIdOnPrimary).toHaveBeenCalledWith(USER_ID);
+        expect(usersRepository.findByIdWithRoleAndKeyOnPrimary).toHaveBeenCalledWith(USER_ID, KEY_ID);
         expect(usersRepository.findById).not.toHaveBeenCalled();
     });
 
     it('P8 authenticateForRenewal: reads the key with findWithAccountEpochOnPrimary', async () =>
     {
         bearerKeys.findWithAccountEpochOnPrimary.mockResolvedValue(boundKey());
-        roles.findUserWithEffectiveRole.mockResolvedValue({ user: { id: USER_ID, status: 'active' }, role: null });
+        usersRepository.findByIdWithRoleAndKeyOnPrimary.mockResolvedValue(admissionRow());
         const next = vi.fn(async () => undefined);
 
         await authenticateForRenewal.handler(bearerContext(), next);
@@ -164,5 +175,7 @@ describe('admission reads the write primary (replica-lag guards, #133)', () =>
         expect(next).toHaveBeenCalled();
         expect(bearerKeys.findWithAccountEpochOnPrimary).toHaveBeenCalledWith(KEY_ID);
         expect(bearerKeys.findActiveByKeyId).not.toHaveBeenCalled();
+        expect(usersRepository.findByIdWithRoleAndKeyOnPrimary).toHaveBeenCalledWith(USER_ID, KEY_ID);
+        expect(roles.findUserWithEffectiveRole).not.toHaveBeenCalled();
     });
 });

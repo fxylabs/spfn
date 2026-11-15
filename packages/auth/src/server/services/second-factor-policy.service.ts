@@ -82,12 +82,12 @@ export async function keySecondFactorEnrolmentFields(keyId: string): Promise<Sec
 }
 
 /**
- * Refuse a person who may only enrol, unless this request is an enrolment.
+ * Whether the policy lets this person in on this request: an account that may
+ * only enrol is admitted on an enrolment route reached through the global
+ * `authenticate`, and nowhere else.
  *
- * Asked at every point a person principal is produced — the global
- * `authenticate` (its Bearer path and every auth profile, through
- * `runAuthProfile`), `optionalAuth`, one-time tokens and the OAuth 2.1 access
- * token — so no principal carrying a user reaches a handler without it. Not
+ * Asked by `admitPrincipal`, the one point every person principal is produced
+ * — so no principal carrying a user reaches a handler without it. Not
  * evaluated at all while the policy does not require a second factor: no
  * query, no answer that differs from before.
  *
@@ -102,11 +102,22 @@ export async function keySecondFactorEnrolmentFields(keyId: string): Promise<Sec
  *   matched is looked at for the enrolment marker, from inside the chain that
  *   middleware runs in. `null` for every other producer — none of them stands
  *   in front of an enrolment route, and none may exempt one.
+ */
+export async function secondFactorAdmits(userId: number, route: Context | null): Promise<boolean>
+{
+    return !await isEnrolmentOnly(userId) || (route !== null && isEnrolmentRoute(route));
+}
+
+/**
+ * Refuse a person who may only enrol, unless this request is an enrolment —
+ * `secondFactorAdmits` as a throw, for an application that asks the policy
+ * outside the admission.
+ *
  * @throws SecondFactorEnrolmentRequiredError
  */
 export async function assertSecondFactorAdmits(userId: number, route: Context | null): Promise<void>
 {
-    if (!await isEnrolmentOnly(userId) || (route !== null && isEnrolmentRoute(route)))
+    if (await secondFactorAdmits(userId, route))
     {
         return;
     }
@@ -167,7 +178,7 @@ export async function assertNotLastListedFactor(
         return;
     }
 
-    await usersRepository.lockById(userId);
+    await usersRepository.lockAccount(userId);
 
     if (!await removesListedFactor(userId, removing) || await keepsListedFactor(userId, removing))
     {

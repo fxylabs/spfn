@@ -8,14 +8,24 @@
  * opaque string — nothing here decrypts, and nothing here logs a row.
  */
 
-import { BaseRepository } from '@spfn/core/db';
-import { and, eq, isNull, lt, sql } from 'drizzle-orm';
+import { and, eq, isNotNull, isNull, lt, or, sql } from 'drizzle-orm';
 
 import { mfaTotp } from '../entities/mfa-totp';
 import type { MfaTotp } from '../entities/mfa-totp';
+import { AccountStateRepository, type AccountWrites } from './account-state.repository';
 
-export class MfaTotpRepository extends BaseRepository
+export class MfaTotpRepository extends AccountStateRepository
 {
+    static override readonly accountWrites: AccountWrites<MfaTotpRepository> = {
+        startEnrolment: { account: userId => userId },
+        confirm: { account: userId => userId },
+        recordUsedStep: { account: userId => userId },
+        countFailedConfirm: { account: userId => userId },
+        updateSecret: { account: userId => userId },
+        deleteByUserId: { account: userId => userId },
+        deleteUnconfirmedOf: { account: userId => userId },
+    };
+
     /** The account's enrolment row, confirmed or not. */
     async findByUserId(userId: number): Promise<MfaTotp | null>
     {
@@ -66,13 +76,27 @@ export class MfaTotpRepository extends BaseRepository
             .where(eq(mfaTotp.userId, userId));
     }
 
-    /** Record the newest step this account has spent, so it cannot be replayed. */
-    async recordUsedStep(userId: number, step: number): Promise<void>
+    /**
+     * Record the newest step this account has spent, so it cannot be replayed —
+     * only while the enrolment is confirmed and the step is newer than the last
+     * one spent: the check the code was verified against, restated under the
+     * account lock, so two requests with one code produce one winner.
+     *
+     * @returns true when this call spent the step
+     */
+    async recordUsedStep(userId: number, step: number): Promise<boolean>
     {
-        await this.db
+        const result = await this.db
             .update(mfaTotp)
             .set({ lastUsedStep: step })
-            .where(eq(mfaTotp.userId, userId));
+            .where(and(
+                eq(mfaTotp.userId, userId),
+                isNotNull(mfaTotp.confirmedAt),
+                or(isNull(mfaTotp.lastUsedStep), lt(mfaTotp.lastUsedStep, step)),
+            ))
+            .returning({ userId: mfaTotp.userId });
+
+        return result.length > 0;
     }
 
     /**
@@ -91,13 +115,17 @@ export class MfaTotpRepository extends BaseRepository
         return result[0]?.failedConfirmAttempts ?? 0;
     }
 
-    /** Rewrite the ciphertext in place, after a read on a retired key. */
-    async updateSecret(userId: number, secretEnc: string): Promise<void>
+    /**
+     * Rewrite the ciphertext in place, after a read on a retired key — only
+     * while the row still holds the ciphertext that was read: an enrolment
+     * started over in between holds a new secret, which this must not put back.
+     */
+    async updateSecret(userId: number, readSecretEnc: string, secretEnc: string): Promise<void>
     {
         await this.db
             .update(mfaTotp)
             .set({ secretEnc })
-            .where(eq(mfaTotp.userId, userId));
+            .where(and(eq(mfaTotp.userId, userId), eq(mfaTotp.secretEnc, readSecretEnc)));
     }
 
     /** Drop the account's enrolment. Write primary. */
@@ -107,15 +135,32 @@ export class MfaTotpRepository extends BaseRepository
     }
 
     /**
-     * Drop enrolments nobody ever confirmed. The sweep job's statement.
+     * Up to `limit` accounts holding an enrolment nobody confirmed since before
+     * the cutoff. The rest wait for the next sweep run.
+     */
+    async findAccountsUnconfirmedBefore(cutoff: Date, limit: number): Promise<number[]>
+    {
+        const rows = await this.db
+            .select({ userId: mfaTotp.userId })
+            .from(mfaTotp)
+            .where(and(isNull(mfaTotp.confirmedAt), lt(mfaTotp.createdAt, cutoff)))
+            .orderBy(mfaTotp.userId)
+            .limit(limit);
+
+        return rows.map(row => row.userId);
+    }
+
+    /**
+     * Drop one account's enrolment if nobody confirmed it since before the
+     * cutoff. The sweep job's statement, under that account's lock.
      *
      * @returns number of rows deleted
      */
-    async deleteUnconfirmedBefore(cutoff: Date): Promise<number>
+    async deleteUnconfirmedOf(userId: number, cutoff: Date): Promise<number>
     {
         const result = await this.db
             .delete(mfaTotp)
-            .where(and(isNull(mfaTotp.confirmedAt), lt(mfaTotp.createdAt, cutoff)))
+            .where(and(eq(mfaTotp.userId, userId), isNull(mfaTotp.confirmedAt), lt(mfaTotp.createdAt, cutoff)))
             .returning();
 
         return result.length;

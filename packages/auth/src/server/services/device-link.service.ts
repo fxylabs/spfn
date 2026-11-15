@@ -57,8 +57,9 @@ import {
     InvalidKeyFingerprintError,
 } from '@spfn/auth/errors';
 import { getShutdownManager } from '@spfn/core/server';
+import { runInTransaction } from '@spfn/core/db';
 
-import { deviceLinksRepository, type DeviceLinkRecord } from '../repositories';
+import { deviceLinksRepository, usersRepository, type DeviceLinkRecord } from '../repositories';
 import type { DeviceLink, DeviceLinkDeniedReason, DeviceLinkStatus } from '../entities/device-links';
 import { type KeyAlgorithmType, type KeyPlatformType } from '../types';
 import { getDeviceAuthConfig } from '../lib/device-auth-config';
@@ -312,10 +313,13 @@ function describeDevice(record: DeviceLink): Partial<DeviceLinkStatusResult>
  */
 export async function issueDeviceLinkService(issuer: DeviceLinkIssuer): Promise<IssueDeviceLinkResult>
 {
-    // The route's transaction holds this lock through the insert below: a second
-    // issue from the same key waits here, then expires the link this one inserts.
-    await deviceLinksRepository.lockIssuerKey(issuer.keyId);
-    await deviceLinksRepository.expireLiveByIssuerKey(issuer.keyId);
+    // The issuer's account lock (`usersRepository.lockAccount`) first, as every
+    // writer of its credential state takes it: the route's transaction holds it
+    // through the insert below, so a second issue from the same key waits here
+    // and then expires the link this one inserts, and a password change or a
+    // revoke-all that expires links and revokes keys queues on the same row.
+    await usersRepository.lockAccount(issuer.userId);
+    await deviceLinksRepository.expireLiveByIssuerKey(issuer.userId, issuer.keyId);
 
     const expiresAt = new Date(Date.now() + getDeviceLinkConfig().ttlMs);
 
@@ -370,9 +374,14 @@ export async function redeemDeviceLinkService(params: RedeemDeviceLinkParams): P
     assertKeyMatchesAlgorithm(params.publicKey, algorithm);
 
     const userCode = normalizeUserCode(params.userCode);
+    const found = assertReachable(await deviceLinksRepository.findByUserCode(userCode));
+
+    // The issuer's account lock, and the link read again under it: the redeem
+    // parks a key on the issuer's credential state.
+    await usersRepository.lockAccount(found.issuerUserId);
     const record = assertReachable(await deviceLinksRepository.findByUserCode(userCode));
 
-    if (record.status !== 'issued')
+    if (record.status !== 'issued' || record.issuerUserId !== found.issuerUserId)
     {
         throw new DeviceLinkNotFoundError();
     }
@@ -382,7 +391,7 @@ export async function redeemDeviceLinkService(params: RedeemDeviceLinkParams): P
 
     // From `issued` only, with the TTL and the issuing key in the statement: of
     // two devices redeeming one code, exactly one parks its key.
-    const redeemed = await deviceLinksRepository.redeem(record.id, {
+    const redeemed = await deviceLinksRepository.redeem(record, {
         deviceCodeHash: hashDeviceCode(deviceCode),
         publicKey: params.publicKey,
         keyId: params.keyId,
@@ -431,37 +440,64 @@ export async function getDeviceLinkStatusService(params: DeviceLinkParams): Prom
  */
 export async function confirmDeviceLinkService(params: ConfirmDeviceLinkParams): Promise<DeviceLinkStatusResult>
 {
-    const record = assertIssuedBy(await deviceLinksRepository.findByLinkId(params.linkId), params.issuer);
-
-    assertAwaitingDecision(record);
-
-    if (params.choice !== record.matchNumber)
+    // Its own transaction, under the issuer's account lock, committed before
+    // a wrong pick is answered: the denial has to outlive the refusal.
+    const decided = await runInTransaction(async () =>
     {
-        await refuse(record, 'wrong_match');
+        const record = await lockIssuedLink(params);
 
+        assertAwaitingDecision(record);
+
+        return params.choice === record.matchNumber
+            ? { approved: await approve(record, params.linkId) }
+            : { denied: await refuse(record, 'wrong_match') };
+    }, { context: 'auth:device-link-confirm' });
+
+    if ('denied' in decided)
+    {
         throw new DeviceLinkWrongMatchError();
     }
 
-    // The issuing key is judged again in the statement, under a share lock on its
-    // row: an issuer signed out between the read above and now approves nothing.
-    const approved = await deviceLinksRepository.approve(record.id);
+    return describeLink(decided.approved);
+}
+
+/**
+ * The issuer's account locked (`usersRepository.lockAccount`) — every
+ * transition of its links is a write of its credential state — and the link
+ * read under that lock, refused unless this issuer issued it.
+ */
+async function lockIssuedLink(params: DeviceLinkParams): Promise<DeviceLinkRecord>
+{
+    await usersRepository.lockAccount(params.issuer.userId);
+
+    return assertIssuedBy(await deviceLinksRepository.findByLinkId(params.linkId), params.issuer);
+}
+
+/**
+ * Move a redeemed link to approved. The issuing key is judged again in the
+ * statement, under a share lock on its row: an issuer signed out between the
+ * read and now approves nothing.
+ */
+async function approve(record: DeviceLinkRecord, linkId: string): Promise<DeviceLink>
+{
+    const approved = await deviceLinksRepository.approve(record);
 
     if (!approved)
     {
         refuseMissedTransition(
-            await deviceLinksRepository.findByLinkId(params.linkId),
+            await deviceLinksRepository.findByLinkId(linkId),
             'redeemed',
             () => new DeviceLinkAlreadyHandledError(),
         );
     }
 
-    return describeLink(approved);
+    return approved;
 }
 
 /** The issuer refused the device, so it is told no instead of timing out. */
 export async function denyDeviceLinkService(params: DeviceLinkParams): Promise<DeviceLinkStatusResult>
 {
-    const record = assertIssuedBy(await deviceLinksRepository.findByLinkId(params.linkId), params.issuer);
+    const record = await lockIssuedLink(params);
 
     assertAwaitingDecision(record);
 
@@ -470,7 +506,7 @@ export async function denyDeviceLinkService(params: DeviceLinkParams): Promise<D
 
 async function refuse(record: DeviceLinkRecord, reason: DeviceLinkDeniedReason): Promise<DeviceLink>
 {
-    const denied = await deviceLinksRepository.deny(record.id, reason);
+    const denied = await deviceLinksRepository.deny(record, reason);
 
     if (!denied)
     {
@@ -490,14 +526,14 @@ async function refuse(record: DeviceLinkRecord, reason: DeviceLinkDeniedReason):
  */
 export async function cancelDeviceLinkService(params: DeviceLinkParams): Promise<DeviceLinkStatusResult>
 {
-    const record = assertIssuedBy(await deviceLinksRepository.findByLinkId(params.linkId), params.issuer);
+    const record = await lockIssuedLink(params);
 
     if (record.status !== 'issued' && record.status !== 'redeemed')
     {
         throw new DeviceLinkAlreadyHandledError();
     }
 
-    const cancelled = await deviceLinksRepository.cancel(record.id);
+    const cancelled = await deviceLinksRepository.cancel(record);
 
     if (!cancelled)
     {
@@ -537,7 +573,10 @@ export async function pollDeviceLinkService(params: PollDeviceLinkParams): Promi
         };
     }
 
-    const consumed = await deviceLinksRepository.consumeApproved(deviceCodeHash);
+    // The account the key joins is locked (`usersRepository.lockAccount`) before
+    // the link is spent and the issuing key's row is read under share.
+    await usersRepository.lockAccount(record.issuerUserId);
+    const consumed = await deviceLinksRepository.consumeApproved(record.issuerUserId, deviceCodeHash);
 
     if (!consumed)
     {
@@ -552,10 +591,12 @@ export async function pollDeviceLinkService(params: PollDeviceLinkParams): Promi
         status: 'approved',
         ...await completeDeviceLogin({
             userId: consumed.issuerUserId,
+            approvingKeyId: consumed.issuerKeyId,
             key: parkedKey(consumed),
             channel: 'device-link',
             provenance: params,
             missingAccount: () => new DeviceLinkNotFoundError(),
+            expiredRecord: () => new DeviceLinkExpiredError(),
         }),
     };
 }

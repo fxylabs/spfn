@@ -10,17 +10,34 @@
  * once therefore produce one rotation and one refusal, instead of two token
  * pairs off one refresh.
  *
+ * Credential state (`CREDENTIAL_TABLES`), written by the token endpoint
+ * alone; why those writes take no account lock is `TOKEN_ENDPOINT_WRITE`.
+ *
  * Nothing is deleted. A rotated refresh keeps its row so that presenting it
  * again is distinguishable from presenting a token that never existed, which is
  * the entire reuse detection.
  */
 
 import { and, eq, gt, isNull, sql } from 'drizzle-orm';
-import { BaseRepository } from '@spfn/core/db';
 import { oauth2Tokens, type NewOAuth2Token, type OAuth2Token } from '../entities/oauth2-tokens';
+import { AccountStateRepository, type AccountWrites } from './account-state.repository';
 
-export class OAuth2TokensRepository extends BaseRepository
+/**
+ * Why the token endpoint's writes — a code spent, a token pair minted, a
+ * refresh rotated — take no account lock, said once for each of them. The
+ * grant is admitted (`admitPrincipal`) before anything is minted, too.
+ */
+export const TOKEN_ENDPOINT_WRITE = 'the token endpoint: client-authenticated, with no session to re-admit, and nothing it writes outlives its grant — every code and token is judged against a live grant on each use (isLiveGrant), so a row written after a revocation committed authorizes nothing';
+
+export class OAuth2TokensRepository extends AccountStateRepository
 {
+    static override readonly accountWrites: AccountWrites<OAuth2TokensRepository> = {
+        create: { exempt: TOKEN_ENDPOINT_WRITE },
+        rotate: { exempt: TOKEN_ENDPOINT_WRITE },
+        revokeByTokenHash: { exempt: 'RFC 7009 revocation, client-authenticated: it only removes a way in, and a revoked token is never live again' },
+        updateLastUsedById: { exempt: 'last-used bookkeeping from the verification path: read by no admission' },
+    };
+
     async create(data: NewOAuth2Token): Promise<OAuth2Token>
     {
         const result = await this.db

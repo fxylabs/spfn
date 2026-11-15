@@ -37,9 +37,12 @@ export type { AuthApi };
  * - `unsupported`: this browser has no WebAuthn at all
  * - `cancelled`: the person dismissed the prompt
  * - `no-credential`: the authenticator had nothing for this relying party
+ * - `busy`: the server answered 503 — another change to the account held it
+ *   (`AccountBusyError`). Retryable: the session is not over, and nothing was
+ *   spent; run the same call again shortly (`renewSession` alone answers it)
  * - `error`: anything else, with the original error attached
  */
-export type PasskeyFailureReason = 'unsupported' | 'cancelled' | 'no-credential' | 'error';
+export type PasskeyFailureReason = 'unsupported' | 'cancelled' | 'no-credential' | 'busy' | 'error';
 
 export type PasskeyResult<T> =
     | ({ ok: true } & T)
@@ -235,6 +238,12 @@ export interface RenewSessionValue
  * server declined — the key is past its grace, or was revoked — and the app's
  * answer is to send the person to sign in, which is not the same as the ceremony
  * failing.
+ *
+ * A 503 is neither: the account was busy with another change
+ * (`AccountBusyError`, with `Retry-After`), the renewal wrote nothing, and its
+ * challenge is unspent. It comes back as `{ ok: false, reason: 'busy' }` so an
+ * app does not read it as a refusal and send a signed-in person to sign in;
+ * calling `renewSession` again is the answer.
  */
 export async function renewSession(api: AuthApi): Promise<PasskeyResult<RenewSessionValue>>
 {
@@ -260,9 +269,25 @@ export async function renewSession(api: AuthApi): Promise<PasskeyResult<RenewSes
 
     const renewed = await api.sessionRenewVerify.call({
         body: { response },
-    }) as { keyId: string };
+    }).then(
+        value => value as { keyId: string },
+        (error: unknown) => isServiceUnavailable(error) ? { busy: error } : Promise.reject(error),
+    );
 
-    return { ok: true, keyId: renewed.keyId };
+    return 'busy' in renewed
+        ? { ok: false, reason: 'busy', error: renewed.busy }
+        : { ok: true, keyId: renewed.keyId };
+}
+
+/**
+ * A 503 from the server, as the client hands it over: a restored error class
+ * carries `statusCode`, an `ApiError` carries `status`.
+ */
+function isServiceUnavailable(error: unknown): boolean
+{
+    const answered = error as { statusCode?: unknown; status?: unknown } | null;
+
+    return answered?.statusCode === 503 || answered?.status === 503;
 }
 
 /** What a successful disable answers with — the mode the account is now in. */

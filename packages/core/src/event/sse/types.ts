@@ -92,6 +92,13 @@ export interface SSEHandlerAuthConfig
     getKeyId?: (c: Context) => string | null | undefined;
 
     /**
+     * Extract who holds the key `getKeyId` names, recorded beside the tag so
+     * that `verifyKey` judges that person whatever `getSubject` returns.
+     * @default (c) => c.get('auth')?.userId
+     */
+    getKeyHolder?: (c: Context) => string | null | undefined;
+
+    /**
      * Subscription authorization hook (called once on connect)
      *
      * Return allowed events subset. Empty array = 403 rejection.
@@ -150,6 +157,7 @@ export interface SSEAuthConfig<TRouter extends EventRouterDef<any>>
     tokenManager?: SSETokenManager | (() => SSETokenManager);
     getSubject?: (c: Context) => string | null;
     getKeyId?: (c: Context) => string | null | undefined;
+    getKeyHolder?: (c: Context) => string | null | undefined;
     authorize?: (
         subject: string,
         events: InferEventNames<TRouter>[],

@@ -16,11 +16,15 @@ const { socialAccountsRepository, usersRepository, oauthUnlinkedEvent } = vi.hoi
         findByProviderAndProviderId: vi.fn(),
         deleteById: vi.fn(),
     },
-    usersRepository: {},
+    usersRepository: { lockAccount: vi.fn(async () => ({ id: 7 })) },
     oauthUnlinkedEvent: { emit: vi.fn() },
 }));
 
 vi.mock('../../server/repositories', () => ({ usersRepository, socialAccountsRepository }));
+vi.mock('@spfn/core/db', async (importOriginal) => ({
+    ...await importOriginal<typeof import('@spfn/core/db')>(),
+    runInTransaction: async (fn: () => Promise<unknown>) => fn(),
+}));
 vi.mock('../../server/events', async (importOriginal) =>
 {
     const original = await importOriginal<typeof import('../../server/events')>();
@@ -227,7 +231,9 @@ describe('oauthUnlinkNotifyService', () =>
             reason: 'UNLINK_FROM_APPS',
         })).resolves.toEqual({ ackStatus: 200, handled: true });
 
-        expect(socialAccountsRepository.deleteById).toHaveBeenCalledWith(42);
+        // Under the account's lock: the identity is a way into it.
+        expect(usersRepository.lockAccount).toHaveBeenCalledWith(7);
+        expect(socialAccountsRepository.deleteById).toHaveBeenCalledWith({ id: 42, userId: 7 });
         expect(oauthUnlinkedEvent.emit).toHaveBeenCalledWith({
             userId: '7',
             provider: 'kakao',

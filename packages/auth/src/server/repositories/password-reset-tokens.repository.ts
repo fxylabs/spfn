@@ -18,11 +18,23 @@
 
 import { passwordResetTokens } from '../entities/password-reset-tokens';
 import type { NewPasswordResetToken, PasswordResetToken } from '../entities/password-reset-tokens';
-import { BaseRepository } from '@spfn/core/db';
 import { eq, and, gt, isNull } from 'drizzle-orm';
+import { AccountStateRepository, type AccountWrites } from './account-state.repository';
 
-export class PasswordResetTokensRepository extends BaseRepository
+/** The reset row a spending statement names, and the account whose lock it runs under. */
+type TokenHandle = Pick<PasswordResetToken, 'id' | 'userId'>;
+
+export class PasswordResetTokensRepository extends AccountStateRepository
 {
+    static override readonly accountWrites: AccountWrites<PasswordResetTokensRepository> = {
+        create: { account: data => data.userId },
+        createPending: { account: data => data.userId },
+        issue: { exempt: 'mints the hash onto the pending row its request wrote, conditional on that row still live (not superseded, consumed or completed); it holds no other row and opens nothing — `consume` and `complete` are what spend it, under the lock' },
+        consume: { account: token => token.userId },
+        complete: { account: token => token.userId },
+        supersedeAllLiveByUserId: { account: userId => userId },
+    };
+
     /**
      * Create a reset link row.
      * Write primary.
@@ -144,7 +156,7 @@ export class PasswordResetTokensRepository extends BaseRepository
      * @returns the updated row, or null if another request claimed it first
      */
     async consume(
-        id: number,
+        token: TokenHandle,
         setupSecretHash: string,
         setupExpiresAt: Date,
     ): Promise<PasswordResetToken | null>
@@ -158,7 +170,8 @@ export class PasswordResetTokensRepository extends BaseRepository
             })
             .where(
                 and(
-                    eq(passwordResetTokens.id, id),
+                    eq(passwordResetTokens.id, token.id),
+                    eq(passwordResetTokens.userId, token.userId),
                     isNull(passwordResetTokens.consumedAt),
                     isNull(passwordResetTokens.supersededAt),
                 ),
@@ -174,14 +187,15 @@ export class PasswordResetTokensRepository extends BaseRepository
      *
      * @returns the updated row, or null if another request completed it first
      */
-    async complete(id: number): Promise<PasswordResetToken | null>
+    async complete(token: TokenHandle): Promise<PasswordResetToken | null>
     {
         const result = await this.db
             .update(passwordResetTokens)
             .set({ completedAt: new Date() })
             .where(
                 and(
-                    eq(passwordResetTokens.id, id),
+                    eq(passwordResetTokens.id, token.id),
+                    eq(passwordResetTokens.userId, token.userId),
                     isNull(passwordResetTokens.completedAt),
                     isNull(passwordResetTokens.supersededAt),
                 ),

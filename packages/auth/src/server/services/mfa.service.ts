@@ -42,7 +42,7 @@ import {
 import { authLogger } from '../logger';
 import { getMfaConfig, getPasskeyConfig } from '../lib/config';
 import { decryptMfaSecret, encryptMfaSecret } from '../lib/mfa-cipher';
-import { generateRecoveryCodes, matchesRecoveryCode } from '../lib/recovery-codes';
+import { generateRecoveryCodes, matchesRecoveryCode, type MintedRecoveryCode } from '../lib/recovery-codes';
 import { buildOtpauthUri, generateTotpSecret, verifyTotp } from '../lib/totp';
 import { buildAuthenticationOptions, verifyAuthentication } from '../lib/webauthn';
 import type { AuthenticationResponseJSON, PublicKeyCredentialRequestOptionsJSON } from '../lib/webauthn';
@@ -65,8 +65,10 @@ import { MFA_CONFIRM_ATTEMPT_LIMIT } from '../entities/mfa-totp';
 import type { DeferredLoginEvent, MfaChallenge, MfaChallengeChannel } from '../entities/mfa-challenges';
 import type { UserPublicKey } from '../entities/user-public-keys';
 import type { MfaVerificationMethod } from '../entities/mfa-verifications';
-import { mintChallenge, presentedChallenge, spendChallenge } from './webauthn-challenge.service';
+import { challengeIsLive, mintChallenge, presentedChallenge, spendChallenge } from './webauthn-challenge.service';
 import { isMethodListed } from '../lib/second-factor-policy';
+import { accountRefusal, admitPrincipal } from './admission.service';
+import { SWEEP_BATCH, sweepEachAccount } from './account-sweep.service';
 import {
     assertNotLastListedFactor,
     enrolmentNeedsProof,
@@ -230,7 +232,7 @@ export async function openStepUpChallengeService(
         loginEvent: params.loginEvent ?? null,
     });
 
-    await mfaChallengesRepository.markKeyPending(params.keyId, row.id);
+    await mfaChallengesRepository.markKeyPending(row);
 
     return { secret, expiresAtMillis: expiresAt.getTime() };
 }
@@ -263,7 +265,7 @@ export async function resumeStepUpChallengeService(
 
     const { secret, hash } = mintCredential();
 
-    return await mfaChallengesRepository.resecret(live.id, hash)
+    return await mfaChallengesRepository.resecret(live, hash)
         ? { secret, expiresAtMillis: live.expiresAt.getTime() }
         : null;
 }
@@ -301,6 +303,11 @@ export interface VerifyMfaChallengeResult extends LoginResult
  * and one from a key generation that has since ended are all states the caller
  * is guessing at, and there is no counter belonging to a guess to move.
  *
+ * The account half of the admission is asked here too, on the primary, before
+ * any proof is looked at: an account that is not active spends no recovery
+ * code and is charged no attempt. The credential half stays where it is, after
+ * the activation (`assertSignInAdmitted`).
+ *
  * @throws MfaVerificationFailedError
  */
 async function spendableChallenge(challengeHash: string): Promise<MfaChallenge>
@@ -312,12 +319,34 @@ async function spendableChallenge(challengeHash: string): Promise<MfaChallenge>
         throw new MfaVerificationFailedError();
     }
 
-    if (row.keyEpoch !== await usersRepository.currentKeyEpoch(row.userId))
+    const account = await usersRepository.findByIdOnPrimary(row.userId);
+
+    if (!account || row.keyEpoch !== account.keyEpoch || await accountRefusal(account))
     {
         throw new MfaVerificationFailedError();
     }
 
     return row;
+}
+
+/**
+ * Lock the challenge's account (`usersRepository.lockAccount`) and ask again,
+ * of that read, what `spendableChallenge` asked before any proof was looked at:
+ * the account active, and the challenge of its current key generation. A
+ * suspension or a revoke-all that committed while the proof was being checked
+ * refuses the activation here; one that arrives later waits for it, and then
+ * revokes the key it activated.
+ *
+ * @throws MfaVerificationFailedError
+ */
+async function assertAccountStillAdmits(row: MfaChallenge): Promise<void>
+{
+    const account = await usersRepository.lockAccount(row.userId);
+
+    if (!account || row.keyEpoch !== account.keyEpoch || await accountRefusal(account))
+    {
+        throw new MfaVerificationFailedError();
+    }
 }
 
 /**
@@ -332,14 +361,23 @@ async function spendableChallenge(challengeHash: string): Promise<MfaChallenge>
  */
 async function countChallengeFailure(row: MfaChallenge): Promise<never>
 {
-    if (await mfaChallengesRepository.countFailure(row.id))
+    // Its own transaction, committed before the refusal, under the account
+    // lock: the drop deletes the key row and, by cascade, the challenge — the
+    // rows `mfa/verify` writes under that lock, so taking it first is what
+    // keeps the two from locking them in opposite orders.
+    await runInTransaction(async () =>
     {
-        await mfaChallengesRepository.dropPendingKey(row.keyId, row.id);
+        await usersRepository.lockAccount(row.userId);
 
-        authLogger.service.warn('Second-factor challenge discarded after repeated wrong proofs', {
-            userId: row.userId,
-        });
-    }
+        if (await mfaChallengesRepository.countFailure(row))
+        {
+            await mfaChallengesRepository.dropPendingKey(row);
+
+            authLogger.service.warn('Second-factor challenge discarded after repeated wrong proofs', {
+                userId: row.userId,
+            });
+        }
+    }, { context: 'auth:mfa-verify-failure' });
 
     throw new MfaVerificationFailedError();
 }
@@ -405,15 +443,15 @@ export async function verifyMfaChallengeService(
     const challengeHash = hashCredential(params.challenge);
     const row = await spendableChallenge(challengeHash);
 
-    const method = await attemptSecondFactor({
+    const proof = await checkSecondFactor({
         userId: row.userId,
         keyId: row.keyId,
         code: params.code,
         recoveryCode: params.recoveryCode,
         response: params.response,
-    });
+    }, listedProofs());
 
-    if (!method)
+    if (!proof)
     {
         await countChallengeFailure(row);
     }
@@ -422,20 +460,55 @@ export async function verifyMfaChallengeService(
     // `totp/confirm` has no route-wide one either: the attempt counter above has
     // to survive the refusal that raised it, and a transaction around the whole
     // request would roll it back with the error — leaving every wrong proof
-    // free. From here on the mark, the activation and the announcements do have
-    // to land together.
+    // free. From here on the spend of the proof, the mark, the activation and
+    // the announcements do have to land together, under the account lock, and
+    // what `spendableChallenge` read of the account is read again under it.
     return await runInTransaction(async () =>
     {
-        if (!await mfaChallengesRepository.markVerified(row.id, row.keyEpoch))
+        await assertAccountStillAdmits(row);
+
+        if (!await proof!.spend() || !await mfaChallengesRepository.markVerified(row))
         {
             throw new MfaVerificationFailedError();
         }
 
-        await mfaChallengesRepository.activateKey(row.keyId, row.id);
-        await mfaVerificationsRepository.record(row.keyId, row.userId, method!);
+        await mfaChallengesRepository.activateKey(row);
+        await assertSignInAdmitted(row);
+        await mfaVerificationsRepository.record(row.keyId, row.userId, proof!.method);
 
         return { ...await settleStepUpLogin(row), keyId: row.keyId, challengeHash };
     }, { context: 'auth:mfa-verify' });
+}
+
+/**
+ * Whether the person whose sign-in this completes may be let in now —
+ * `admitPrincipal`, as every door asks it, on the key just activated: the
+ * account active on the primary, the key live, the second-factor policy (which
+ * a step-up never meets refused: a challenge is opened only for an account
+ * enrolled under it).
+ *
+ * Asked inside the transaction that activated the key, after the activation
+ * and before anything is announced, so a refusal rolls the activation back
+ * with it: an account suspended while its challenge was open keeps the key
+ * inactive, emits no login event and moves no `lastLoginAt`. The challenge
+ * stays unspent, and every attempt on it is refused alike. The refusal is this
+ * route's one `MfaVerificationFailedError` — the contract enumerates nothing
+ * else for `auth.mfa.verify`.
+ *
+ * @throws MfaVerificationFailedError
+ */
+async function assertSignInAdmitted(row: MfaChallenge): Promise<void>
+{
+    const admission = await admitPrincipal({
+        userId: row.userId,
+        credential: { kind: 'deviceKey', keyId: row.keyId },
+        route: null,
+    });
+
+    if ('refused' in admission)
+    {
+        throw new MfaVerificationFailedError();
+    }
 }
 
 /**
@@ -507,7 +580,14 @@ export async function startMfaChallengeAssertionService(
  */
 export async function sweepMfaChallengesService(): Promise<{ deleted: number }>
 {
-    return { deleted: await mfaChallengesRepository.sweepFinished(new Date()) };
+    const cutoff = new Date();
+    const deleted = await sweepEachAccount(
+        await mfaChallengesRepository.findAccountsWithFinished(cutoff, SWEEP_BATCH),
+        'auth:mfa-sweep-challenges',
+        userId => mfaChallengesRepository.sweepFinishedOf(userId, cutoff),
+    );
+
+    return { deleted };
 }
 
 export interface TotpEnrolmentResult
@@ -532,6 +612,8 @@ export interface TotpEnrolmentResult
  */
 export async function startTotpEnrolmentService(userId: number): Promise<TotpEnrolmentResult>
 {
+    await usersRepository.lockAccount(userId);
+
     const existing = await mfaTotpRepository.findByUserId(userId);
 
     if (existing?.confirmedAt)
@@ -597,7 +679,8 @@ export async function confirmTotpEnrolmentService(params: ConfirmTotpParams): Pr
         throw new MfaNotEnrolledError();
     }
 
-    const step = verifyTotp({ secret: readSecret(row.secretEnc, params.userId), code: params.code });
+    const secret = readSecret(row.secretEnc, params.userId);
+    const step = verifyTotp({ secret, code: params.code });
 
     if (step === null)
     {
@@ -606,13 +689,42 @@ export async function confirmTotpEnrolmentService(params: ConfirmTotpParams): Pr
         throw new MfaVerificationFailedError();
     }
 
+    // Hashed before the lock: no password hash runs under it.
+    const minted = isMethodListed('recoveryCodes') ? await generateRecoveryCodes() : [];
+
     return await runInTransaction(async () =>
     {
+        await assertSameEnrolment(params.userId, secret);
         await mfaTotpRepository.confirm(params.userId, step);
         await mfaVerificationsRepository.record(params.keyId, params.userId, 'totp');
 
-        return { recoveryCodes: isMethodListed('recoveryCodes') ? await issueRecoveryCodes(params.userId) : [] };
+        return { recoveryCodes: await issueRecoveryCodes(params.userId, minted) };
     }, { context: 'auth:mfa-confirm' });
+}
+
+/**
+ * Lock the account and ask again, under the lock, whether the enrolment the
+ * code was checked against is still the unconfirmed one there: an `enroll`
+ * that started over, a confirm that won, or a disable in between each leave
+ * a different row, and the code proves nothing about it.
+ *
+ * "The same enrolment" is the same secret — what the code was checked
+ * against, and the one thing a re-encryption leaves alone. Not the ciphertext:
+ * the rotation `readSecret` queued while the code was checked rewrites
+ * `secret_enc` under a new key, and the enrolment it seals is still this one.
+ *
+ * @throws MfaNotEnrolledError
+ */
+async function assertSameEnrolment(userId: number, secret: string): Promise<void>
+{
+    await usersRepository.lockAccount(userId);
+
+    const row = await mfaTotpRepository.findByUserId(userId);
+
+    if (!row || row.confirmedAt || decryptMfaSecret(row.secretEnc, userId).value !== secret)
+    {
+        throw new MfaNotEnrolledError();
+    }
 }
 
 /**
@@ -624,14 +736,19 @@ export async function confirmTotpEnrolmentService(params: ConfirmTotpParams): Pr
  */
 async function countConfirmFailure(userId: number): Promise<void>
 {
-    if (await mfaTotpRepository.countFailedConfirm(userId) < MFA_CONFIRM_ATTEMPT_LIMIT)
+    await runInTransaction(async () =>
     {
-        return;
-    }
+        await usersRepository.lockAccount(userId);
 
-    await mfaTotpRepository.deleteByUserId(userId);
+        if (await mfaTotpRepository.countFailedConfirm(userId) < MFA_CONFIRM_ATTEMPT_LIMIT)
+        {
+            return;
+        }
 
-    authLogger.service.warn('Second-factor enrolment discarded after repeated wrong codes', { userId });
+        await mfaTotpRepository.deleteByUserId(userId);
+
+        authLogger.service.warn('Second-factor enrolment discarded after repeated wrong codes', { userId });
+    }, { context: 'auth:mfa-confirm-failure' });
 }
 
 /**
@@ -647,17 +764,29 @@ function readSecret(secretEnc: string, userId: number): string
 
     if (needsRotation)
     {
-        onAfterCommit(() => mfaTotpRepository.updateSecret(userId, encryptMfaSecret(value, userId)));
+        onAfterCommit(() => runInTransaction(async () =>
+        {
+            await usersRepository.lockAccount(userId);
+            await mfaTotpRepository.updateSecret(userId, secretEnc, encryptMfaSecret(value, userId));
+        }, { context: 'auth:mfa-secret-rotation' }));
     }
 
     return value;
 }
 
-/** Raise the generation and hand out ten fresh codes. */
-async function issueRecoveryCodes(userId: number): Promise<string[]>
+/**
+ * Raise the generation and hand out the codes minted for it — hashed by the
+ * caller before it took the account lock, which it holds here. None minted
+ * (the policy turned them off) writes nothing.
+ */
+async function issueRecoveryCodes(userId: number, minted: MintedRecoveryCode[]): Promise<string[]>
 {
+    if (minted.length === 0)
+    {
+        return [];
+    }
+
     const generation = await mfaRecoveryCodesRepository.currentGeneration(userId) + 1;
-    const minted = await generateRecoveryCodes();
 
     await mfaRecoveryCodesRepository.createGeneration(userId, generation, minted.map(entry => entry.hash));
 
@@ -675,12 +804,16 @@ async function issueRecoveryCodes(userId: number): Promise<string[]>
  */
 export async function regenerateRecoveryCodesService(userId: number): Promise<{ recoveryCodes: string[] }>
 {
+    const minted = await generateRecoveryCodes();
+
+    await usersRepository.lockAccount(userId);
+
     if (!await mfaEnrolledForUser(userId))
     {
         throw new MfaNotEnrolledError();
     }
 
-    return { recoveryCodes: await issueRecoveryCodes(userId) };
+    return { recoveryCodes: await issueRecoveryCodes(userId, minted) };
 }
 
 /**
@@ -693,10 +826,16 @@ export async function regenerateRecoveryCodesService(userId: number): Promise<{ 
  */
 export async function disableMfaService(userId: number): Promise<void>
 {
-    await mfaTotpRepository.deleteByUserId(userId);
-    await mfaRecoveryCodesRepository.deleteByUserId(userId);
-    await mfaVerificationsRepository.deleteByUserId(userId);
-    await passkeysRepository.clearSecondFactorByUserId(userId);
+    // A savepoint of the caller's transaction when there is one (the route's,
+    // the operator reset's); its own otherwise. The account lock first either way.
+    await runInTransaction(async () =>
+    {
+        await usersRepository.lockAccount(userId);
+        await mfaTotpRepository.deleteByUserId(userId);
+        await mfaRecoveryCodesRepository.deleteByUserId(userId);
+        await mfaVerificationsRepository.deleteByUserId(userId);
+        await passkeysRepository.clearSecondFactorByUserId(userId);
+    }, { context: 'auth:mfa-disable' });
 }
 
 /**
@@ -727,7 +866,7 @@ export async function resetSecondFactorService(userId: number): Promise<void>
 {
     await runInTransaction(async () =>
     {
-        if (!await usersRepository.lockById(userId))
+        if (!await usersRepository.lockAccount(userId))
         {
             throw new NotFoundError({ message: 'User not found', resource: 'User' });
         }
@@ -766,6 +905,8 @@ export interface MarkPasskeyParams
  */
 export async function markPasskeySecondFactorService(params: MarkPasskeyParams): Promise<MfaStatus>
 {
+    await usersRepository.lockAccount(params.userId);
+
     if (!params.secondFactor)
     {
         await assertNotLastListedFactor(params.userId, { passkeyId: Number(params.passkeyId) });
@@ -879,11 +1020,16 @@ export interface StepUpParams
  */
 export async function stepUpService(params: StepUpParams): Promise<void>
 {
-    const method = await isEnrolmentOnly(params.userId)
-        ? await verifySecondFactor(params, heldProofs())
-        : await verifyEnrolledFactor(params);
+    await runInTransaction(async () =>
+    {
+        const method = await isEnrolmentOnly(params.userId)
+            ? await verifySecondFactor(params, heldProofs())
+            : await verifyEnrolledFactor(params);
 
-    await mfaVerificationsRepository.record(params.keyId, params.userId, method);
+        // `verifySecondFactor` spent the proof under the account lock, in a
+        // savepoint of this transaction, so its root still holds the lock here.
+        await mfaVerificationsRepository.record(params.keyId, params.userId, method);
+    }, { context: 'auth:mfa-step-up' });
 }
 
 async function verifyEnrolledFactor(params: StepUpParams): Promise<MfaVerificationMethod>
@@ -926,7 +1072,8 @@ function heldProofs(): AcceptedProofs
 }
 
 /**
- * Check exactly one of the three proofs, and say which one it was — or null.
+ * Check exactly one of the three proofs, spend it, and say which one it was —
+ * or null.
  *
  * Exactly one: two inputs in a body is a caller trying combinations, and none
  * is a malformed request. Neither is a failed verification, so both are a 400
@@ -944,12 +1091,48 @@ function heldProofs(): AcceptedProofs
  * `accepts` widens it for the one caller that may: step-up in the
  * enrolment-only state.
  *
+ * The proof is checked before the account lock — a recovery code is a bcrypt
+ * comparison, a passkey a signature check — and spent under it, in a
+ * transaction of its own or a savepoint of the caller's: the spend restates
+ * what the check read (the step newer than the last spent; the code unused
+ * and of the newest generation; the WebAuthn challenge unspent and the passkey
+ * live at the counter verified against), so a proof made stale meanwhile is
+ * refused, not written — and a lock wait that runs out spends nothing.
+ *
  * @throws ValidationError when the body names none or more than one input
  */
 export async function attemptSecondFactor(
     params: StepUpParams,
     accepts: AcceptedProofs = listedProofs(),
 ): Promise<MfaVerificationMethod | null>
+{
+    const proof = await checkSecondFactor(params, accepts);
+
+    return proof && await runInTransaction(async () =>
+    {
+        await usersRepository.lockAccount(params.userId);
+
+        return await proof.spend() ? proof.method : null;
+    }, { context: 'auth:second-factor-spend' });
+}
+
+/**
+ * A second-factor proof that checked out, not yet spent. `spend` runs under
+ * the account lock and answers false when the proof went stale since.
+ */
+interface SecondFactorProof
+{
+    method: MfaVerificationMethod;
+    spend: () => Promise<boolean>;
+}
+
+/**
+ * The check half of `attemptSecondFactor`: which proof the body carries, and
+ * whether it holds — read and verified without the account lock.
+ *
+ * @throws ValidationError when the body names none or more than one input
+ */
+async function checkSecondFactor(params: StepUpParams, accepts: AcceptedProofs): Promise<SecondFactorProof | null>
 {
     const presented = [params.code, params.recoveryCode, params.response].filter(value => value !== undefined);
 
@@ -1003,7 +1186,7 @@ export async function verifySecondFactor(
  *
  * @returns null when the code does not verify
  */
-async function verifyTotpProof(userId: number, code: string): Promise<MfaVerificationMethod | null>
+async function verifyTotpProof(userId: number, code: string): Promise<SecondFactorProof | null>
 {
     const row = await mfaTotpRepository.findByUserId(userId);
 
@@ -1018,14 +1201,9 @@ async function verifyTotpProof(userId: number, code: string): Promise<MfaVerific
         lastUsedStep: row.lastUsedStep,
     });
 
-    if (step === null)
-    {
-        return null;
-    }
-
-    await mfaTotpRepository.recordUsedStep(userId, step);
-
-    return 'totp';
+    return step === null
+        ? null
+        : { method: 'totp', spend: () => mfaTotpRepository.recordUsedStep(userId, step) };
 }
 
 /**
@@ -1038,18 +1216,16 @@ async function verifyTotpProof(userId: number, code: string): Promise<MfaVerific
  *
  * @returns null when the code does not verify
  */
-async function verifyRecoveryProof(userId: number, submitted: string): Promise<MfaVerificationMethod | null>
+async function verifyRecoveryProof(userId: number, submitted: string): Promise<SecondFactorProof | null>
 {
     const generation = await mfaRecoveryCodesRepository.currentGeneration(userId);
     const candidates = generation === 0 ? [] : await mfaRecoveryCodesRepository.listUnused(userId, generation);
 
     for (const candidate of candidates)
     {
-        const matched = await matchesRecoveryCode(submitted, candidate.codeHash);
-
-        if (matched && await mfaRecoveryCodesRepository.consume(candidate.id))
+        if (await matchesRecoveryCode(submitted, candidate.codeHash))
         {
-            return 'recovery';
+            return { method: 'recovery', spend: () => mfaRecoveryCodesRepository.consume(userId, candidate.id) };
         }
     }
 
@@ -1072,11 +1248,11 @@ async function verifyPasskeyProof(
     userId: number,
     response: AuthenticationResponseJSON,
     candidates: 'marked' | 'live',
-): Promise<MfaVerificationMethod | null>
+): Promise<SecondFactorProof | null>
 {
     const challenge = presentedChallenge(response.response.clientDataJSON);
 
-    if (!await spendChallenge(challenge, 'mfa', userId))
+    if (!await challengeIsLive(challenge, 'mfa', userId))
     {
         return null;
     }
@@ -1108,9 +1284,11 @@ async function verifyPasskeyProof(
         return null;
     }
 
-    await passkeysRepository.recordUse(passkey.id, outcome.newCounter);
-
-    return 'passkey';
+    return {
+        method: 'passkey',
+        spend: async () => await spendChallenge(challenge, 'mfa', userId)
+            && await passkeysRepository.recordUse(passkey, outcome.newCounter),
+    };
 }
 
 /**
@@ -1124,6 +1302,11 @@ async function verifyPasskeyProof(
 export async function sweepUnconfirmedMfaService(): Promise<{ deleted: number }>
 {
     const cutoff = new Date(Date.now() - MFA_UNCONFIRMED_TTL_MS);
+    const deleted = await sweepEachAccount(
+        await mfaTotpRepository.findAccountsUnconfirmedBefore(cutoff, SWEEP_BATCH),
+        'auth:mfa-sweep-unconfirmed',
+        userId => mfaTotpRepository.deleteUnconfirmedOf(userId, cutoff),
+    );
 
-    return { deleted: await mfaTotpRepository.deleteUnconfirmedBefore(cutoff) };
+    return { deleted };
 }

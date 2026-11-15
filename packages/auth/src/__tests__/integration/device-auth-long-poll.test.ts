@@ -46,7 +46,7 @@ import { setupTestDb, teardownTestDb, clearTables, getTestDb, isDatabaseAvailabl
 import { users, userPublicKeys, deviceAuthorizations } from '@/server/entities';
 import { hashPassword } from '@/server/helpers/password';
 import { generateKeyPair, generateClientToken } from '@/server/lib/crypto';
-import { deviceAuthorizationsRepository } from '@/server/repositories';
+import { deviceAuthorizationsRepository, usersRepository } from '@/server/repositories';
 import {
     configureDeviceAuth,
     DEFAULT_DEVICE_AUTH_INTERVAL_MS,
@@ -206,13 +206,31 @@ describe.skipIf(!dbAvailable)('Device-code long poll', () =>
         }));
     }
 
-    /** Approve by writing the row, as another instance would: no wake reaches this process. */
+    /**
+     * Approve by writing the row, as another instance would: no wake reaches this
+     * process. The approval names a signed-in device's key, as a real one does —
+     * collection is refused once that key is not live.
+     */
     async function approveElsewhere(userCode: string)
     {
+        const approvingKeyId = await signedInKeyId();
+
         await getDatabase('write')!
             .update(deviceAuthorizations)
-            .set({ status: 'approved', userId: await ownerId(), approvedAt: new Date() })
+            .set({ status: 'approved', userId: await ownerId(), approvedByKeyId: approvingKeyId, approvedAt: new Date() })
             .where(eq(deviceAuthorizations.userCode, userCode.replace('-', '')));
+    }
+
+    /** Sign the owner in on a device of its own, and answer that device's key id. */
+    async function signedInKeyId(): Promise<string>
+    {
+        await signIn();
+        const [key] = await getDatabase('write')!
+            .select()
+            .from(userPublicKeys)
+            .where(eq(userPublicKeys.userId, await ownerId()));
+
+        return key.keyId;
     }
 
     function readRecord(userCode: string)
@@ -511,7 +529,8 @@ describe.skipIf(!dbAvailable)('Device-code long poll', () =>
             await sleep(100);
             await expect(runInTransaction(async () =>
             {
-                await deviceAuthorizationsRepository.approve(record.id, userId);
+                await usersRepository.lockAccount(userId);
+                await deviceAuthorizationsRepository.approve(record.id, userId, 'approving-key');
                 throw new Error('rolled back on purpose');
             })).rejects.toThrow('rolled back on purpose');
 
@@ -615,7 +634,12 @@ describe.skipIf(!dbAvailable)('Device-code long poll', () =>
             const startedAt = Date.now();
 
             const parked = waitForDeviceAuthAnswer(record.id, LONG_WAIT_MS);
-            await deviceAuthorizationsRepository.denyAllActiveByUserId(await ownerId());
+            const userId = await ownerId();
+            await runInTransaction(async () =>
+            {
+                await usersRepository.lockAccount(userId);
+                await deviceAuthorizationsRepository.denyAllActiveByUserId(userId);
+            });
             await parked;
 
             expect(Date.now() - startedAt).toBeLessThan(WOKEN_WITHIN_MS);

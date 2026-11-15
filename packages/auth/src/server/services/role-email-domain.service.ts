@@ -79,8 +79,12 @@ export async function findUserWithEffectiveRoleOnPrimary(userId: number): Promis
     return applyRoleEmailDomainPolicy(await usersRepository.findByIdWithRoleOnPrimary(userId));
 }
 
-/** Resolve a loaded user's stored role through the email-domain policy. */
-async function applyRoleEmailDomainPolicy(result: UserWithEffectiveRole | null): Promise<UserWithEffectiveRole | null>
+/**
+ * Resolve a loaded user's stored role through the email-domain policy — for a
+ * read that loads the user with more beside it (the admission's), which
+ * cannot go through the two finders above.
+ */
+export async function applyRoleEmailDomainPolicy(result: UserWithEffectiveRole | null): Promise<UserWithEffectiveRole | null>
 {
     if (!result?.role || isEmailAllowedForRole(result.user, result.role.name))
     {

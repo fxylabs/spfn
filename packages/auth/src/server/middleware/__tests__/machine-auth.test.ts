@@ -34,9 +34,20 @@ vi.mock('@spfn/auth/server', async (importOriginal) =>
             findWithAccountEpochOnPrimary: vi.fn(),
             updateLastUsedById: vi.fn().mockResolvedValue(undefined),
         },
-        findUserWithEffectiveRoleOnPrimary: vi.fn(),
+    };
+});
+
+// The admission (admitPrincipal) reads the repositories directly: the account,
+// its role and the key in one primary read, the locale beside it.
+vi.mock('@/server/repositories', async (importOriginal) =>
+{
+    const actual = await importOriginal<typeof import('@/server/repositories')>();
+
+    return {
+        ...actual,
+        usersRepository: { findByIdWithRoleAndKeyOnPrimary: vi.fn() },
         userSettingsRepository: { findLocaleByUserId: vi.fn().mockResolvedValue('en') },
-        getPendingDeletionInfo: vi.fn(),
+        accountDeletionRequestsRepository: { findPendingByUserIdOnPrimary: vi.fn() },
     };
 });
 
@@ -54,7 +65,8 @@ import { CLIENT_PROOF_HEADERS } from '@/server/client-proof/admission';
 import { CONTRACT_SUPPORTED_RANGE, CONTRACT_VERSION } from '@/server/client-proof/contract-bundle';
 import { SERVER_CONTRACT_HEADERS } from '@/server/client-proof/wire-headers';
 import { authLogger } from '@/server/logger';
-import { decodeToken, verifyClientToken, keysRepository, findUserWithEffectiveRoleOnPrimary } from '@spfn/auth/server';
+import { decodeToken, verifyClientToken, keysRepository } from '@spfn/auth/server';
+import { usersRepository } from '@/server/repositories';
 import type { Context, Next } from 'hono';
 
 const USER_ID = 7;
@@ -220,6 +232,12 @@ function validKeyRecord()
     };
 }
 
+/** The admission's one primary read: the account (of key generation 0), its role, and the key. */
+function withKey(read: { user: Record<string, unknown>; role: unknown })
+{
+    return { ...read, user: { keyEpoch: 0, ...read.user }, key: validKeyRecord() };
+}
+
 interface DrivenContext
 {
     c: Context;
@@ -311,10 +329,10 @@ describe('the machine-principal case table', () =>
     {
         vi.clearAllMocks();
         vi.mocked(keysRepository.updateLastUsedById).mockResolvedValue(undefined as never);
-        vi.mocked(findUserWithEffectiveRoleOnPrimary).mockResolvedValue({
+        vi.mocked(usersRepository.findByIdWithRoleAndKeyOnPrimary).mockResolvedValue(withKey({
             user: { id: USER_ID, email: 'machine-table@example.com', status: 'active' },
             role: { name: 'user' },
-        } as never);
+        }) as never);
     });
 
     /** The mocks a user's Bearer JWT needs to authenticate for real. */

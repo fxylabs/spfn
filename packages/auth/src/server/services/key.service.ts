@@ -12,11 +12,18 @@ import { getBoundKeyTtlMs } from '../lib/config';
 import { uaFamily } from '../lib/ua-family';
 import { keyIdClaimedByProof, verifyKeyReplacementProof } from '../lib/key-replacement-proof';
 import { keyLiveness, type KeyWithAccountEpoch } from '../lib/key-liveness';
-import { InvalidKeyFingerprintError, KeyIdAlreadyRegisteredError } from '@spfn/auth/errors';
-import { UnauthorizedError, ValidationError } from '@spfn/core/errors';
+import {
+    AccountDisabledError,
+    AccountPendingDeletionError,
+    InvalidKeyFingerprintError,
+    KeyIdAlreadyRegisteredError,
+} from '@spfn/auth/errors';
+import { NotFoundError, UnauthorizedError, ValidationError } from '@spfn/core/errors';
+import { runInTransaction } from '@spfn/core/db';
 import { deviceAuthorizationsRepository, deviceLinksRepository, keysRepository, usersRepository } from '../repositories';
 import { revokeAllOAuth2GrantsForUser } from './oauth2-grant.service';
 import { emitDeviceRegistered } from './device-registration.service';
+import { accountRefusal, type AdmissionRefusal } from './admission.service';
 import {
     assertStepUp,
     carryStepUpVerification,
@@ -108,6 +115,22 @@ export interface RegisterPublicKeyParams
      * challenge row rather than being guessed at from the user row.
      */
     loginEvent?: DeferredLoginEvent;
+    /**
+     * The channel's own answer for an account that may not open a session,
+     * where it is not `loginService`'s two (`AccountDisabledError`,
+     * `AccountPendingDeletionError`). A signed-request replacement answers its
+     * claim's `refusal` instead, and needs none.
+     */
+    inactiveAccount?: () => Error;
+    /**
+     * The channel's own answer for an account that is gone by the time its key
+     * is written — the answer it gives a missing account at its own lookup.
+     * Absent only on the channels that create the account in the same
+     * transaction (register, signup link, invitation), where it cannot be
+     * missing, and on a signed-request replacement, which answers its claim's
+     * `refusal`.
+     */
+    missingAccount?: () => Error;
 }
 
 /**
@@ -417,7 +440,17 @@ async function answerForExistingKey(
 
 /**
  * Write a key row — the one function every path that writes one goes through:
- * the eleven sign-in channels, `keys/rotate`, and invitation acceptance.
+ * the eleven sign-in channels, renewal, `keys/rotate`, and invitation acceptance.
+ *
+ * Writing a key is itself a door, so it asks the account half of the admission
+ * (`accountRefusal`) of the account it locks (`usersRepository.lockAccount`),
+ * in the same transaction as the write, and takes the key generation from that
+ * same read. The lock is the first thing this transaction does for the
+ * account, and a caller that touched the account earlier in its own
+ * transaction took it before that. A suspension, a deletion request or a
+ * revoke-all cannot commit between the question and the key: it waits for the
+ * key and then revokes it, or the key is refused. A status a channel read
+ * earlier (on a replica, before the credential) decides nothing here.
  *
  * It alone decides whether the key replaces one the device already held or
  * arrives as a new device (`claimReplacement`), and everything that follows
@@ -455,25 +488,76 @@ export async function registerPublicKeyService(
         throw new InvalidKeyFingerprintError();
     }
 
-    const existing = await keysRepository.findWithAccountEpochOnPrimary(params.keyId);
-    if (existing)
+    return await runInTransaction(async () =>
     {
-        return await answerForExistingKey(existing, params);
+        const account = await lockAdmittedAccount(params);
+        const existing = await keysRepository.findWithAccountEpochOnPrimary(params.keyId);
+        if (existing)
+        {
+            return await answerForExistingKey(existing, params);
+        }
+
+        // The defaulted algorithm is what gets stored, so it is the one the key has
+        // to be: a key parked under an algorithm it cannot sign for would only fail
+        // at proof verification, after the caller believes it is enrolled.
+        assertKeyMatchesAlgorithm(params.publicKey, params.algorithm ?? DEFAULT_KEY_ALGORITHM);
+
+        return await registerNewKey(params, account.keyEpoch);
+    }, { context: 'auth:register-key' });
+}
+
+/**
+ * The account a key is written for, locked against a status change until the
+ * transaction ends, and its key generation as of that lock.
+ *
+ * @throws the channel's answer for an account that may not open a session
+ */
+async function lockAdmittedAccount(params: RegisterPublicKeyParams): Promise<{ keyEpoch: number }>
+{
+    const account = await usersRepository.lockAccount(params.userId);
+    if (!account)
+    {
+        throw inactiveAccountError({ reason: 'accountMissing' }, params);
     }
 
-    // The defaulted algorithm is what gets stored, so it is the one the key has
-    // to be: a key parked under an algorithm it cannot sign for would only fail
-    // at proof verification, after the caller believes it is enrolled.
-    assertKeyMatchesAlgorithm(params.publicKey, params.algorithm ?? DEFAULT_KEY_ALGORITHM);
+    const refusal = await accountRefusal(account);
+    if (refusal)
+    {
+        throw inactiveAccountError(refusal, params);
+    }
 
-    return await registerNewKey(params);
+    return account;
+}
+
+/** A refused key write, answered as the channel answers an account that is not active. */
+function inactiveAccountError(refusal: AdmissionRefusal, params: RegisterPublicKeyParams): Error
+{
+    if (params.replaces && 'signedBy' in params.replaces)
+    {
+        return params.replaces.refusal;
+    }
+
+    if (params.inactiveAccount)
+    {
+        return params.inactiveAccount();
+    }
+
+    switch (refusal.reason)
+    {
+        case 'accountDisabled':
+            return new AccountDisabledError({ status: refusal.status });
+        case 'pendingDeletion':
+            return new AccountPendingDeletionError({ purgeScheduledAt: refusal.purgeScheduledAt });
+        default:
+            return params.missingAccount?.() ?? new NotFoundError({ message: 'User not found', resource: 'User' });
+    }
 }
 
 /**
  * Write a key id nobody holds yet: settle the replacement claim, then write the
  * row as a replacement or as a new device, and do what follows from which.
  */
-async function registerNewKey(params: RegisterPublicKeyParams): Promise<RegisterPublicKeyResult>
+async function registerNewKey(params: RegisterPublicKeyParams, accountKeyEpoch: number): Promise<RegisterPublicKeyResult>
 {
     const replaced = await claimReplacement(params);
 
@@ -481,7 +565,7 @@ async function registerNewKey(params: RegisterPublicKeyParams): Promise<Register
     // exists. Deciding afterwards would leave a window, however short, in which
     // the key an unproven second factor is meant to be holding back is live.
     const stepUp = replaced ? null : await decideStepUp(params);
-    const keyEpoch = replaced?.keyEpoch ?? await usersRepository.currentKeyEpoch(params.userId);
+    const keyEpoch = replaced?.keyEpoch ?? accountKeyEpoch;
     const row = await keysRepository.create(newKeyRow(params, replaced, keyEpoch, stepUp === null));
 
     if (stepUp)
@@ -689,17 +773,15 @@ async function reRegisterOwnKey(
     params: RegisterPublicKeyParams,
 ): Promise<RegisteredKeyBinding>
 {
-    if (existing.binding !== 'passkey' && isExpired(existing.expiresAt))
-    {
-        const extended = getKeyExpiryDate('none');
-        await keysRepository.markReauthenticated(existing.keyId, params.userId, extended);
+    const extended = existing.binding !== 'passkey' && isExpired(existing.expiresAt)
+        ? getKeyExpiryDate('none')
+        : null;
 
-        return { binding: 'none', expiresAt: extended };
-    }
+    await keysRepository.markReauthenticated(existing.keyId, params.userId, extended ?? undefined);
 
-    await keysRepository.markReauthenticated(existing.keyId, params.userId);
-
-    return { binding: existing.binding, expiresAt: existing.expiresAt };
+    return extended
+        ? { binding: 'none', expiresAt: extended }
+        : { binding: existing.binding, expiresAt: existing.expiresAt };
 }
 
 /**
@@ -759,9 +841,12 @@ export async function revokeKeyService(
 {
     const { userId, keyId, reason } = params;
 
-    const revoked = await keysRepository.revokeByKeyIdAndUserId(keyId, userId, reason);
+    return await runInTransaction(async () =>
+    {
+        await usersRepository.lockAccount(userId);
 
-    return revoked !== null;
+        return await keysRepository.revokeByKeyIdAndUserId(keyId, userId, reason) !== null;
+    }, { context: 'auth:revoke-key' });
 }
 
 /**
@@ -828,18 +913,34 @@ export async function revokeAllKeysService(
         throw new ValidationError({ message: 'currentKeyId is required unless includeCurrent is set' });
     }
 
-    // Only when a device is making the call. The signed sign-out-everywhere
-    // link has no key to name and no session at all — it proved itself by a
-    // mailbox round trip, which is a credential this window cannot measure.
-    if (currentKeyId)
+    return await runInTransaction(async () =>
     {
-        await assertStepUp({ userId, keyId: currentKeyId });
-    }
+        await usersRepository.lockAccount(userId);
 
-    const revoked = !includeCurrent && currentKeyId
-        ? await keysRepository.revokeAllActiveByUserIdExcept(userId, currentKeyId, reason)
-        : await keysRepository.revokeAllActiveByUserId(userId, reason);
+        // Only when a device is making the call. The signed sign-out-everywhere
+        // link has no key to name and no session at all — it proved itself by a
+        // mailbox round trip, which is a credential this window cannot measure.
+        if (currentKeyId)
+        {
+            await assertStepUp({ userId, keyId: currentKeyId });
+        }
 
+        const revoked = !includeCurrent && currentKeyId
+            ? await keysRepository.revokeAllActiveByUserIdExcept(userId, currentKeyId, reason)
+            : await keysRepository.revokeAllActiveByUserId(userId, reason);
+
+        await revokeEveryWayBackIn(userId);
+
+        return { revokedCount: revoked.length, currentKeyRevoked: includeCurrent };
+    }, { context: 'auth:revoke-all-keys' });
+}
+
+/**
+ * What a global revocation ends beside the keys: every way a device could sign
+ * itself back in after it.
+ */
+async function revokeEveryWayBackIn(userId: number): Promise<void>
+{
     await deviceAuthorizationsRepository.denyAllActiveByUserId(userId);
 
     // Device links the account issued go with them, for the same reason: an
@@ -851,6 +952,4 @@ export async function revokeAllKeysService(
     // global revocation is aimed at. Revoked alongside the device codes, and for
     // the reason they are.
     await revokeAllOAuth2GrantsForUser(userId);
-
-    return { revokedCount: revoked.length, currentKeyRevoked: includeCurrent };
 }

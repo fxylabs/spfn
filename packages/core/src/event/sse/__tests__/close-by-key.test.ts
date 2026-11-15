@@ -330,12 +330,12 @@ describe('a token minted before its key was revoked', () =>
     {
         const verifyKey = vi.fn(() => false);
         const manager = new SSETokenManager({ ttl: 5000, verifyKey });
-        const token = await manager.issue('u', { keyId: 'K1' });
+        const token = await manager.issue('u', { keyId: 'K1', keyHolder: '7' });
 
         expect(await manager.consume(token)).toBeNull();
         expect(await manager.consume(token)).toBeNull();
         expect(verifyKey).toHaveBeenCalledTimes(1);
-        expect(verifyKey).toHaveBeenCalledWith('K1');
+        expect(verifyKey).toHaveBeenCalledWith('K1', 'u', '7');
         manager.destroy();
 
         const { router } = events();

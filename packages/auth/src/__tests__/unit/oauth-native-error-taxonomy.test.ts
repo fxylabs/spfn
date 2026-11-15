@@ -40,6 +40,7 @@ vi.mock('../../server/services/oauth.service', () => ({
     backfillVerifiedEmail: vi.fn(async () => undefined),
     // One attempt: the retry itself is under test in oauth-sign-in-race.test.ts.
     retryContendedSignIn: (_provider: unknown, attempt: () => Promise<unknown>) => attempt(),
+    lockLinkedAccount: () => socialAccountsRepository.findByProviderAndProviderId(),
 }));
 
 vi.mock('../../server/services/key.service', () => ({ registerPublicKeyService }));
@@ -309,6 +310,9 @@ describe('native sign-in answers each failure path with its own code', () =>
             // for the identity; the first is retried and signs in.
             { code: 'OAuthSignInContendedError', status: 409, retryable: false },
             { code: 'TooManyRequestsError', status: 429, retryable: true },
+            // Added in contract 0.14.3 (PR #315 review round 3): the account's
+            // lock stayed busy past the bound; nothing was written.
+            { code: 'AccountBusyError', status: 503, retryable: true },
             { code: 'Error', status: 500, retryable: false },
         ];
 
@@ -422,10 +426,10 @@ describe('native sign-in answers each failure path with its own code', () =>
         }
     });
 
-    it('only the rate limit invites a retry of the same request', () =>
+    it('only the rate limit and a busy account invite a retry of the same request', () =>
     {
         const declared = buildMobileContractBundle().errors as { code: string; retryable: boolean }[];
 
-        expect(declared.filter(e => e.retryable).map(e => e.code)).toEqual(['TooManyRequestsError']);
+        expect(declared.filter(e => e.retryable).map(e => e.code)).toEqual(['TooManyRequestsError', 'AccountBusyError']);
     });
 });

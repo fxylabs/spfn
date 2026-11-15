@@ -140,7 +140,7 @@ export async function oauthLinkCallbackService(params: OAuthLinkCallbackParams):
         // Lock first, then read the status: a status change that commits between
         // an earlier read and the lock would otherwise attach the identity to an
         // account that is already pending deletion.
-        await usersRepository.lockById(userId);
+        await usersRepository.lockAccount(userId);
         await assertActiveForOAuthSession(userId, () => new OAuthAccountNotFoundError());
 
         return await attachIdentity(userId, params.provider, identity, tokens);
@@ -256,7 +256,7 @@ export async function unlinkOAuthService(params: UnlinkOAuthParams): Promise<{ p
 {
     await assertStepUp(params);
     await assertLinkRecentAuthentication(params, 'unlink');
-    await usersRepository.lockById(params.userId);
+    await usersRepository.lockAccount(params.userId);
 
     const account = await socialAccountsRepository.findByUserIdAndProvider(params.userId, params.provider);
 
@@ -271,7 +271,7 @@ export async function unlinkOAuthService(params: UnlinkOAuthParams): Promise<{ p
         await assertNotLastRecoveryCredential(params.userId, 'social');
     }
 
-    await socialAccountsRepository.deleteById(account.id);
+    await socialAccountsRepository.deleteById(account);
 
     onAfterCommit(() => oauthLinkRemovedEvent.emit({
         userId: String(params.userId),

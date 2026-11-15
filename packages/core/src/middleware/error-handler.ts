@@ -270,6 +270,22 @@ function logError(
 }
 
 /**
+ * `Retry-After` for an error that says when to send the request again —
+ * `TooManyRequestsError` and `ServiceUnavailableError` carry `retryAfter` in
+ * seconds — so a client reads it where HTTP puts it for a 429 or a 503, not
+ * only from the body.
+ */
+function setRetryAfter(c: Context, err: Error): void
+{
+    const retryAfter = (err as { retryAfter?: unknown }).retryAfter;
+
+    if (typeof retryAfter === 'number' && retryAfter > 0)
+    {
+        c.header('Retry-After', String(Math.ceil(retryAfter)));
+    }
+}
+
+/**
  * Type guard for SerializableError
  *
  * Uses duck typing to handle module duplication issues in dev mode (tsx)
@@ -380,6 +396,8 @@ export function ErrorHandler(options: ErrorHandlerOptions = {}): (err: Error, c:
                     statusCode,
                 );
             }
+
+            setRetryAfter(c, err);
 
             // Use toJSON() for automatic serialization
             const serialized = err.toJSON();

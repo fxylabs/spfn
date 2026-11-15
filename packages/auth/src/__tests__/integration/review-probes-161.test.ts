@@ -41,7 +41,7 @@ const {
     updateLocaleService,
     updateUserProfileService,
 } = await import('@/server/services/user-profile.service');
-const { resolveAuthenticatedUser } = await import('@/server/middleware/auth-profiles');
+const { admitPrincipal } = await import('@/server/services/admission.service');
 const { userProfilesRepository } = await import('@/server/repositories');
 const { defineUserSettings } = await import('@/server/lib/user-settings');
 const { __resetUserSettingsForTests } = await import('@/server/lib/user-settings/registry');
@@ -69,6 +69,19 @@ function backfillStatements(): string[]
         .split('--> statement-breakpoint')
         .map(statement => statement.trim())
         .filter(statement => statement.startsWith('INSERT INTO "spfn_auth"."user_settings"'));
+}
+
+/** The principal an account resolves to — through `admitPrincipal`, as every door reaches it. */
+async function resolveAuthenticatedUser(userId: number)
+{
+    const admission = await admitPrincipal({ userId, credential: { kind: 'appProfile', profile: 'test', keyId: 'test' }, route: null });
+
+    if (!('admitted' in admission))
+    {
+        throw new Error(`refused: ${admission.refused.reason}`);
+    }
+
+    return admission.admitted;
 }
 
 describe.skipIf(!dbAvailable)('review round 1 probes (#161)', () =>

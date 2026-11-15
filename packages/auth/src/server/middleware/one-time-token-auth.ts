@@ -4,8 +4,12 @@
  * Authenticates requests using a one-time token instead of JWT.
  * Extracts token from query parameter `?token=xxx` or `Authorization: OTT xxx` header.
  *
- * On success, injects AuthContext identical to the `authenticate` middleware,
- * making it transparent to downstream handlers using `getAuth(c)`.
+ * The token names the account and the device key that issued it; whether the
+ * person may be let in is `admitPrincipal`'s, with a `oneTimeToken`
+ * credential — the issuing key still live, the account active on the primary,
+ * the second-factor policy. On success it injects the `AuthContext` the
+ * `authenticate` middleware does, with the issuing key as `keyId`, so it is
+ * transparent to downstream handlers using `getAuth(c)`.
  *
  * Auto-skips the global 'auth' middleware.
  *
@@ -22,10 +26,10 @@
 
 import { defineMiddleware } from '@spfn/core/route';
 import { UnauthorizedError } from '@spfn/core/errors';
-import { verifyOneTimeTokenService } from '../services/one-time-token.service';
-import { profileLocale } from '../lib/profile-locale';
-import { assertSecondFactorAdmits } from '../services/second-factor-policy.service';
-import { findUserWithEffectiveRole, userSettingsRepository } from '@spfn/auth/server';
+import { SecondFactorEnrolmentRequiredError } from '@spfn/auth/errors';
+
+import { redeemOneTimeTokenService } from '../services/one-time-token.service';
+import { admitPrincipal, authContextFor, type AdmissionRefusal } from '../services/admission.service';
 
 export const oneTimeTokenAuth = defineMiddleware('oneTimeTokenAuth', async (c, next) =>
 {
@@ -38,49 +42,53 @@ export const oneTimeTokenAuth = defineMiddleware('oneTimeTokenAuth', async (c, n
         throw new UnauthorizedError({ message: 'One-time token required: ?token=xxx or Authorization: OTT xxx' });
     }
 
-    // Verify and consume token (one-time use)
-    const userId = await verifyOneTimeTokenService(token);
+    // Spend the token (one-time use), then admit the person it was issued to.
+    // No route this guards is an enrolment route: those are `mainAuthRouter`'s,
+    // behind `authenticate`.
+    const redeemed = await redeemOneTimeTokenService(token);
 
-    if (!userId)
+    if (!redeemed)
     {
         throw new UnauthorizedError({ message: 'Invalid or expired one-time token' });
     }
 
-    // Load user data (same as authenticate middleware)
-    const [result, chosenLocale] = await Promise.all([
-        findUserWithEffectiveRole(Number(userId)),
-        userSettingsRepository.findLocaleByUserId(Number(userId)),
-    ]);
-
-    if (!result)
-    {
-        throw new UnauthorizedError({ message: 'User not found' });
-    }
-
-    const { user, role } = result;
-
-    if (user.status !== 'active')
-    {
-        throw new UnauthorizedError({ message: 'Account is not active' });
-    }
-
-    // A one-time token admits a person, so the second-factor policy holds here
-    // as it does in `resolveAuthenticatedUser`. No route this guards is an
-    // enrolment route: those are `mainAuthRouter`'s, behind `authenticate`.
-    await assertSecondFactorAdmits(user.id, null);
-
-    // Inject AuthContext (identical shape to authenticate middleware)
-    c.set('auth', {
-        user,
-        userId: String(user.id),
-        keyId: '',  // No key involved in OTT auth
-        role: role?.name ?? null,
-        ...profileLocale(chosenLocale),
-        scheme: 'oneTimeToken',
+    const admission = await admitPrincipal({
+        userId: redeemed.userId,
+        credential: { kind: 'oneTimeToken', issuedByKeyId: redeemed.issuedByKeyId },
+        route: null,
     });
+
+    if ('refused' in admission)
+    {
+        throw oneTimeTokenRefusal(admission.refused);
+    }
+
+    c.set('auth', authContextFor(admission.admitted, 'oneTimeToken'));
 
     await next();
 }, { skips: ['auth'] });
+
+/**
+ * The answers this middleware has always given: a dead token — here, one whose
+ * issuing key has since died — is an invalid one; an account that is not
+ * active is a 401 of its own; enrolment-only is the policy's 403.
+ */
+function oneTimeTokenRefusal(refusal: AdmissionRefusal): Error
+{
+    switch (refusal.reason)
+    {
+        case 'accountMissing':
+            return new UnauthorizedError({ message: 'User not found' });
+        case 'accountDisabled':
+        case 'pendingDeletion':
+            return new UnauthorizedError({ message: 'Account is not active' });
+        case 'credentialRevoked':
+        case 'credentialExpired':
+            return new UnauthorizedError({ message: 'Invalid or expired one-time token' });
+        case 'enrolmentRequired':
+            return new SecondFactorEnrolmentRequiredError();
+    }
+}
 
 /**
  * Extract token from `Authorization: OTT xxx` header

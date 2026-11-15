@@ -29,34 +29,20 @@
 import { defineMiddleware } from '@spfn/core/route';
 import { SessionRenewalRefusedError } from '@spfn/auth/errors';
 
-import { getBoundKeyRenewGraceMs } from '../lib/config';
-import { profileLocale } from '../lib/profile-locale';
-import { userSettingsRepository } from '../repositories';
-import { findUserWithEffectiveRole } from '../services/role-email-domain.service';
-import type { UserPublicKey } from '../entities/user-public-keys';
-import { admitBearerKey, bearerAuthContext } from './authenticate';
-
-/**
- * Whether a key may sign a renewal — the one clause that differs from `authenticate`.
- *
- * Bound, and within its grace. Early renewal is allowed, because a browser that
- * asks a minute before its key runs out should not have to wait for the failure
- * first; late renewal is allowed for the grace window, so a laptop closed over a
- * long weekend comes back to one prompt instead of a sign-in. Past it there is
- * nothing to continue, and an unbound key was never in this ceremony at all.
- */
-export function admitsForRenewal(key: UserPublicKey): boolean
-{
-    return key.binding === 'passkey'
-        && key.expiresAt !== null
-        && Date.now() < key.expiresAt.getTime() + getBoundKeyRenewGraceMs();
-}
+import { admitPrincipal, admitsForRenewal, authContextFor } from '../services/admission.service';
+import { admitBearerKey } from './authenticate';
 
 /**
  * Renewal authentication middleware
  *
  * Auto-skips the global `auth` middleware, the way `optionalAuth` does: a route
  * that carries this one must not also be asked for a live key.
+ *
+ * The signature is checked by the Bearer step every middleware shares, which
+ * lets an expired key through only when `admitsForRenewal` would; whether the
+ * person may renew — the account active on the primary, the key bound and
+ * inside its grace — is `admitPrincipal`'s, with a `renewal` credential. Every
+ * refusal of either is the one `SessionRenewalRefusedError`.
  *
  * @example
  * ```typescript
@@ -67,52 +53,27 @@ export function admitsForRenewal(key: UserPublicKey): boolean
  */
 export const authenticateForRenewal = defineMiddleware('authForRenewal', async (c, next) =>
 {
-    // `admitsForRenewal` is asked twice, and both times for the same reason. The
-    // first is the expiry clause the shared step consults only for a key that has
-    // already run out; the second covers a key that has *not* — an unbound
-    // session presenting a live key is refused here rather than admitted into a
-    // ceremony that exists for bound ones.
     const outcome = await admitBearerKey(c, admitsForRenewal);
 
-    if ('refused' in outcome || !admitsForRenewal(outcome.key))
+    if ('refused' in outcome)
     {
         throw new SessionRenewalRefusedError();
     }
 
-    const resolved = await activeAccount(outcome.key.userId);
+    const admission = await admitPrincipal({
+        userId: outcome.key.userId,
+        credential: { kind: 'renewal', keyId: outcome.key.keyId },
+        route: null,
+    });
 
-    if (!resolved)
+    if ('refused' in admission)
     {
         throw new SessionRenewalRefusedError();
     }
 
-    c.set('auth', bearerAuthContext(outcome.key.keyId, resolved));
+    c.set('auth', authContextFor(admission.admitted, 'bearer'));
 
     await next();
 
     return undefined;
 }, { skips: ['auth'] });
-
-/**
- * The account behind the key, or nothing.
- *
- * `resolveAuthenticatedUser` is deliberately not used: it tells a caller which
- * status refused them — suspended, pending deletion — and on this path every
- * refusal has to read the same. The reads are the ones it makes. A key a global
- * revocation has outdated never gets here: `admitBearerKey` refuses it as the
- * revoked key it is (`keyLiveness`).
- */
-async function activeAccount(userId: number)
-{
-    const [result, chosenLocale] = await Promise.all([
-        findUserWithEffectiveRole(userId),
-        userSettingsRepository.findLocaleByUserId(userId),
-    ]);
-
-    if (!result || result.user.status !== 'active')
-    {
-        return null;
-    }
-
-    return { user: result.user, role: result.role?.name ?? null, ...profileLocale(chosenLocale) };
-}

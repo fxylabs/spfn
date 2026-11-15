@@ -9,6 +9,7 @@
  * | R7'| `getKeyId` unset, no `auth` at all (`getSubject` from the app)     | the token is issued, untagged                        |
  * | R7''| `getKeyId` unset, `auth.keyId` set                               | the token carries that `keyId`                       |
  * | R8 | `getKeyId` returns `''`                                           | the token has no `keyId`; consume runs no `verifyKey` |
+ * | R9 | custom `getSubject`, `auth` has `userId` and `keyId`              | the token records `auth.userId` as `keyHolder` beside the tag, and `verifyKey` receives it — not a parse of the subject |
  */
 
 import { Type } from '@sinclair/typebox';
@@ -168,6 +169,19 @@ describe('the token endpoint tags a token with the caller\'s device key', () =>
         const app = await serveAs(eventRouter(), { userId: 'u', keyId: 'K1' }, { auth: { enabled: true, tokenManager } });
 
         expect(await tokenManager.consume(await mint(app))).toMatchObject({ subject: 'u', keyId: 'K1' });
+        tokenManager.destroy();
+    });
+
+    it('R9 a custom getSubject: the key holder is recorded from auth.userId beside the tag, and verifyKey receives it', async () =>
+    {
+        const verifyKey = vi.fn(() => true);
+        const tokenManager = new SSETokenManager({ ttl: 5000, verifyKey });
+        const app = await serveAs(eventRouter(), { userId: '42', keyId: 'K1' }, {
+            auth: { enabled: true, tokenManager, getSubject: () => 'user:42' },
+        });
+
+        expect(await tokenManager.consume(await mint(app))).toMatchObject({ subject: 'user:42', keyId: 'K1', keyHolder: '42' });
+        expect(verifyKey).toHaveBeenCalledWith('K1', 'user:42', '42');
         tokenManager.destroy();
     });
 

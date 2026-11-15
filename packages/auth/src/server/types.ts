@@ -95,6 +95,12 @@ export const USER_STATUSES = ['active', 'inactive', 'suspended', 'pending_deleti
 export type UserStatus = typeof USER_STATUSES[number];
 
 /**
+ * The status an account status change leaves: one status, or `'any'` for a
+ * change that holds whatever the account was in — an operator suspending it.
+ */
+export type AccountStatusSource = UserStatus | 'any';
+
+/**
  * Social provider enum values
  * Single source of truth for supported OAuth providers
  */

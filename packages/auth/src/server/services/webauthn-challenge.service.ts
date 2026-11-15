@@ -1,9 +1,17 @@
 /**
  * @spfn/auth - WebAuthn Challenge Handling
  *
- * The four things every WebAuthn ceremony in this package does with its nonce:
- * mint one, hash a presented one the way it was stored, spend it exactly once,
- * and read back the value the browser actually signed over.
+ * The five things every WebAuthn ceremony in this package does with its nonce:
+ * mint one, hash a presented one the way it was stored, read whether it is
+ * still live, spend it exactly once, and read back the value the browser
+ * actually signed over.
+ *
+ * The order is one rule for every ceremony: read the challenge, verify the
+ * response outside the account lock, then spend the challenge inside the
+ * locked transaction, together with what the ceremony writes. A lock wait that
+ * runs out (`AccountBusyError`, "retry") therefore leaves the challenge live
+ * for the retry, and the account row is locked before the challenge row — the
+ * order the account purge's cascade takes them in.
  *
  * Lifted out of `passkey.service.ts` when the second factor became the third
  * ceremony (#95). Both callers need identical behaviour and neither may import
@@ -11,10 +19,10 @@
  * one way — which is what makes this its own module rather than an export of
  * either.
  *
- * `spendChallenge` answers a boolean instead of throwing, because the refusal
- * differs by caller: a passkey ceremony answers `PasskeyChallengeError` and a
- * step-up answers `MfaVerificationFailedError`, and each is the uniform body its
- * own surface promises.
+ * `challengeIsLive` and `spendChallenge` answer a boolean instead of throwing,
+ * because the refusal differs by caller: a passkey ceremony answers
+ * `PasskeyChallengeError` and a step-up answers `MfaVerificationFailedError`,
+ * and each is the uniform body its own surface promises.
  */
 
 import crypto from 'crypto';
@@ -60,23 +68,41 @@ export function hashChallenge(challenge: string): string
 }
 
 /**
- * Spend the challenge this ceremony was started with.
+ * Whether the challenge this ceremony was started with is still one it may
+ * spend — read, not spent. Asked before the response is verified, so an
+ * unknown or used challenge costs no signature check; the spend comes later,
+ * under the account lock (`spendChallenge`).
  *
  * Unknown, expired, already spent, another ceremony's kind, or another
  * account's — all one answer, because the remedy is the same in every case and
  * naming which applies describes a challenge the caller did not mint.
  *
- * @returns true when this call spent a challenge of that kind for that account
+ * @param owner - The account it was minted for, or null for a discoverable login
+ */
+export async function challengeIsLive(
+    challenge: string,
+    kind: WebAuthnChallengeKind,
+    owner: number | null,
+): Promise<boolean>
+{
+    return await webauthnChallengesRepository.findLive(hashChallenge(challenge), kind, owner) !== null;
+}
+
+/**
+ * Spend the challenge, inside the transaction that holds `accountId`'s lock
+ * and writes what the ceremony earned. False when it is no longer there to
+ * spend — another request with the same assertion got to it first.
+ *
+ * @param accountId - The locked account: the challenge's owner, or for a
+ *   discoverable login the account the passkey signed in to
  */
 export async function spendChallenge(
     challenge: string,
     kind: WebAuthnChallengeKind,
-    userId: number | null,
+    accountId: number,
 ): Promise<boolean>
 {
-    const spent = await webauthnChallengesRepository.consume(hashChallenge(challenge), kind);
-
-    return Boolean(spent) && spent!.userId === userId;
+    return await webauthnChallengesRepository.consume(accountId, hashChallenge(challenge), kind);
 }
 
 /**

@@ -31,13 +31,18 @@ const {
     sendEmail,
     runInTransaction,
     revokeAllOAuth2GrantsForUser,
+    setAccountStatus,
 } = vi.hoisted(() => ({
     usersRepository: {
         findById: vi.fn(),
+        // The account as of its lock: whatever `findById` is set to answer,
+        // unless a test makes the two reads disagree.
+        lockAccount: vi.fn(),
+        // The purge's pre-check reads the primary: the same answer as `findById`.
+        findByIdOnPrimary: vi.fn(),
         findByEmailOrPhone: vi.fn(),
         updateById: vi.fn(async (_id: number, _data: Record<string, unknown>): Promise<unknown> => undefined),
         deleteById: vi.fn(async () => undefined),
-        reactivateFromPendingDeletion: vi.fn(),
     },
     keysRepository: {
         revokeAllActiveByUserId: vi.fn(async () => []),
@@ -78,6 +83,9 @@ const {
     sendEmail: vi.fn(async () => ({ success: true })),
     runInTransaction: vi.fn(async (fn: () => Promise<unknown>) => fn()),
     revokeAllOAuth2GrantsForUser: vi.fn(async () => undefined),
+    // The one writer of users.status: it writes the status and, for every
+    // status but active, revokes every key in the same transaction.
+    setAccountStatus: vi.fn(async (_id: number, _status: string, _transition: { from: string; reason: string }): Promise<'changed' | 'refused'> => 'changed'),
 }));
 
 vi.mock('../../server/repositories', () => ({
@@ -96,6 +104,7 @@ vi.mock('../../server/repositories', () => ({
 vi.mock('../../server/helpers', () => ({ verifyPassword, getDummyPasswordHash }));
 vi.mock('../../server/services/verification.service', () => ({ validateVerificationToken }));
 vi.mock('../../server/services/oauth2-grant.service', () => ({ revokeAllOAuth2GrantsForUser }));
+vi.mock('../../server/services/user.service', () => ({ setAccountStatus }));
 vi.mock('@spfn/notification/server', () => ({ sendEmail }));
 vi.mock('@spfn/core/db', async (importOriginal) =>
 {
@@ -150,13 +159,15 @@ describe('account-deletion.service', () =>
     beforeEach(() =>
     {
         vi.clearAllMocks();
+        usersRepository.lockAccount.mockReset();
+        usersRepository.lockAccount.mockImplementation((id: number) => usersRepository.findById(id));
+        usersRepository.findByIdOnPrimary.mockImplementation((id: number) => usersRepository.findById(id));
         configureDeletion(); // reset to defaults between tests
         accountDeletionRequestsRepository.create.mockImplementation(async (data: any) => ({ id: 99, ...data }));
         // Default: conditional claim/cancel succeeds (repo returns the updated row).
         // Individual tests override this to simulate the "0 rows matched" race.
         accountDeletionRequestsRepository.markCompleted.mockResolvedValue(claimedRow());
         accountDeletionRequestsRepository.markCancelled.mockResolvedValue(claimedRow({ status: 'cancelled' }));
-        usersRepository.reactivateFromPendingDeletion.mockResolvedValue({ status: 'active' });
     });
 
     describe('requestAccountDeletionService — self, password re-auth', () =>
@@ -172,11 +183,12 @@ describe('account-deletion.service', () =>
             });
 
             expect(verifyPassword).toHaveBeenCalledWith('correct-password', user.passwordHash);
-            expect(usersRepository.updateById).toHaveBeenCalledWith(user.id, { status: 'pending_deletion' });
+            expect(setAccountStatus).toHaveBeenCalledWith(user.id, 'pending_deletion', { from: 'active', reason: expect.any(String) });
             expect(accountDeletionRequestsRepository.create).toHaveBeenCalledWith(
                 expect.objectContaining({ userId: user.id, userPublicId: user.publicId, status: 'pending' }),
             );
-            expect(keysRepository.revokeAllActiveByUserId).toHaveBeenCalledWith(user.id, expect.any(String));
+            // The keys are revoked by setAccountStatus, with the status, not beside it.
+            expect(keysRepository.revokeAllActiveByUserId).not.toHaveBeenCalled();
 
             // Device-code requests in flight go with them. One that was already
             // approved outlives the key revocation, and the poll that collects it
@@ -235,7 +247,7 @@ describe('account-deletion.service', () =>
                 verificationToken: 'tok',
             });
 
-            expect(usersRepository.updateById).toHaveBeenCalledWith(user.id, { status: 'pending_deletion' });
+            expect(setAccountStatus).toHaveBeenCalledWith(user.id, 'pending_deletion', { from: 'active', reason: expect.any(String) });
         });
 
         it('rejects a token issued for a different purpose', async () =>
@@ -277,6 +289,21 @@ describe('account-deletion.service', () =>
             ).rejects.toBeInstanceOf(DeletionAlreadyRequestedError);
         });
 
+        it('N-2: decides on the status read under the account lock, not on a lagging read before it', async () =>
+        {
+            // The replica still shows the deletion this account just cancelled;
+            // the primary, read under the lock, has it active again.
+            const user = makeUser();
+            usersRepository.findById.mockResolvedValue({ ...user, status: 'pending_deletion' });
+            usersRepository.lockAccount.mockResolvedValue(user);
+
+            await requestAccountDeletionService(user.id, { requestedBy: 'admin' });
+
+            expect(setAccountStatus).toHaveBeenCalledWith(user.id, 'pending_deletion', { from: 'active', reason: expect.any(String) });
+            expect(usersRepository.lockAccount.mock.invocationCallOrder[0])
+                .toBeLessThan(setAccountStatus.mock.invocationCallOrder[0]!);
+        });
+
         it('rejects a request for an already-deleted account', async () =>
         {
             const user = makeUser({ status: 'deleted' });
@@ -295,7 +322,7 @@ describe('account-deletion.service', () =>
             await requestAccountDeletionService(user.id, { requestedBy: 'admin' });
 
             expect(verifyPassword).not.toHaveBeenCalled();
-            expect(usersRepository.updateById).toHaveBeenCalledWith(user.id, { status: 'pending_deletion' });
+            expect(setAccountStatus).toHaveBeenCalledWith(user.id, 'pending_deletion', { from: 'active', reason: expect.any(String) });
         });
 
         it('rejects self-service immediate deletion unless allowSelfImmediate is enabled', async () =>
@@ -308,7 +335,7 @@ describe('account-deletion.service', () =>
             ).rejects.toBeInstanceOf(ImmediateDeletionNotAllowedError);
         });
 
-        it('allows self-service immediate deletion once allowSelfImmediate is enabled, and purges inline', async () =>
+        it('allows self-service immediate deletion once allowSelfImmediate is enabled, and purges once the request commits', async () =>
         {
             configureDeletion({ allowSelfImmediate: true });
             // A mutable fixture: purgePendingRequest's own re-checks (B1) require
@@ -318,11 +345,11 @@ describe('account-deletion.service', () =>
             // make the purge's re-check abort.
             let currentUser = makeUser();
             usersRepository.findById.mockImplementation(async () => currentUser);
-            usersRepository.updateById.mockImplementation(async (_id: number, data: Record<string, unknown>) =>
+            setAccountStatus.mockImplementation(async (_id: number, status: string) =>
             {
-                currentUser = { ...currentUser, ...data };
+                currentUser = { ...currentUser, status };
 
-                return currentUser;
+                return 'changed';
             });
             accountDeletionRequestsRepository.findPendingByUserId.mockResolvedValue(null);
 
@@ -332,9 +359,11 @@ describe('account-deletion.service', () =>
                 immediate: true,
             });
 
-            // grace period 0 -> purgeScheduledAt ~= now, and the inline purge ran.
+            // grace period 0 -> purgeScheduledAt ~= now, and the purge ran after
+            // the commit (at once here, with no transaction around the call),
+            // never under the request's account lock: `onBeforePurge` is app I/O.
             expect(Math.abs(result.purgeScheduledAt.getTime() - Date.now())).toBeLessThan(5000);
-            expect(accountDeletionRequestsRepository.markCompleted).toHaveBeenCalled();
+            await vi.waitFor(() => expect(accountDeletionRequestsRepository.markCompleted).toHaveBeenCalled());
             expect(currentUser.status).toBe('deleted');
         });
 
@@ -373,21 +402,56 @@ describe('account-deletion.service', () =>
         {
             const user = makeUser({ status: 'pending_deletion' });
             usersRepository.findByEmailOrPhone.mockResolvedValue(user);
+            usersRepository.findById.mockResolvedValue(user);
             accountDeletionRequestsRepository.findPendingByUserId.mockResolvedValue({ id: 5 });
 
             await cancelAccountDeletionService({ email: user.email, password: 'correct-password' });
 
             expect(accountDeletionRequestsRepository.markCancelled).toHaveBeenCalledWith(5);
-            expect(usersRepository.reactivateFromPendingDeletion).toHaveBeenCalledWith(user.id);
-            // The unconditional users.updateById path this used to take is gone —
-            // reactivation only happens via the conditional reactivateFromPendingDeletion.
+            expect(setAccountStatus).toHaveBeenCalledWith(user.id, 'active', { from: 'pending_deletion', reason: expect.any(String) });
+            // The status changes through the one writer, never a column update.
             expect(usersRepository.updateById).not.toHaveBeenCalled();
 
-            // Claim (request row) strictly precedes the users reactivation, matching
-            // purge's own claim-then-DML lock order.
+            // The account lock first, then the claim (request row), then the users
+            // reactivation — the purge takes the same lock first.
+            expect(usersRepository.lockAccount.mock.invocationCallOrder[0])
+                .toBeLessThan(accountDeletionRequestsRepository.findPendingByUserId.mock.invocationCallOrder[0]!);
             const claimOrder = accountDeletionRequestsRepository.markCancelled.mock.invocationCallOrder[0];
-            const reactivateOrder = usersRepository.reactivateFromPendingDeletion.mock.invocationCallOrder[0];
+            const reactivateOrder = setAccountStatus.mock.invocationCallOrder[0];
             expect(claimOrder).toBeLessThan(reactivateOrder);
+        });
+
+        it('reactivates only from pending_deletion read under the account lock: a status another writer committed after cancel read the account is kept, and nothing is claimed', async () =>
+        {
+            // Cancel read `pending_deletion`; an operator's suspension committed
+            // before the cancel took the account lock, which reads it.
+            const user = makeUser({ status: 'pending_deletion' });
+            usersRepository.findByEmailOrPhone.mockResolvedValue(user);
+            usersRepository.lockAccount.mockResolvedValue({ ...user, status: 'suspended' });
+            accountDeletionRequestsRepository.findPendingByUserId.mockResolvedValue({ id: 5 });
+
+            await expect(
+                cancelAccountDeletionService({ email: user.email, password: 'correct-password' }),
+            ).rejects.toBeInstanceOf(DeletionNotRequestedError);
+
+            expect(accountDeletionRequestsRepository.markCancelled).not.toHaveBeenCalled();
+            expect(setAccountStatus).not.toHaveBeenCalled();
+        });
+
+        it('a refused reactivation throws inside the claim\'s transaction, so the claim is rolled back with it', async () =>
+        {
+            const user = makeUser({ status: 'pending_deletion' });
+            usersRepository.findByEmailOrPhone.mockResolvedValue(user);
+            usersRepository.findById.mockResolvedValue(user);
+            accountDeletionRequestsRepository.findPendingByUserId.mockResolvedValue({ id: 5 });
+            setAccountStatus.mockResolvedValueOnce('refused');
+
+            await expect(
+                cancelAccountDeletionService({ email: user.email, password: 'correct-password' }),
+            ).rejects.toBeInstanceOf(DeletionNotRequestedError);
+
+            const cancelTransaction = runInTransaction.mock.invocationCallOrder[0];
+            expect(cancelTransaction).toBeLessThan(accountDeletionRequestsRepository.markCancelled.mock.invocationCallOrder[0]!);
         });
 
         it('rejects when the account has no pending deletion request (after verifying the credential)', async () =>
@@ -405,7 +469,7 @@ describe('account-deletion.service', () =>
         {
             // The user row has already been anonymized by a purge that committed
             // between our credential check and this claim attempt — status is
-            // 'deleted' here purely to prove reactivateFromPendingDeletion is never
+            // 'deleted' here purely to prove the reactivation is never
             // even called; the real defense is the request-row claim below.
             const user = makeUser({ status: 'pending_deletion' });
             usersRepository.findByEmailOrPhone.mockResolvedValue(user);
@@ -418,7 +482,7 @@ describe('account-deletion.service', () =>
                 cancelAccountDeletionService({ email: user.email, password: 'correct-password' }),
             ).rejects.toBeInstanceOf(DeletionNotRequestedError);
 
-            expect(usersRepository.reactivateFromPendingDeletion).not.toHaveBeenCalled();
+            expect(setAccountStatus).not.toHaveBeenCalled();
             expect(usersRepository.updateById).not.toHaveBeenCalled();
         });
 
@@ -486,9 +550,9 @@ describe('account-deletion.service', () =>
                     phone: null,
                     username: null,
                     passwordHash: null,
-                    status: 'deleted',
                 }),
             );
+            expect(setAccountStatus).toHaveBeenCalledWith(user.id, 'deleted', { from: 'pending_deletion', reason: expect.any(String) });
             expect(socialAccountsRepository.deleteAllByUserId).toHaveBeenCalledWith(user.id);
             expect(keysRepository.deleteAllByUserId).toHaveBeenCalledWith(user.id);
             // Passkeys go with the other credentials — an anonymized row must

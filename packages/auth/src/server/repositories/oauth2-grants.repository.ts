@@ -3,6 +3,10 @@
  *
  * Data access for the consent records every code and token hangs off.
  *
+ * A grant is a standing way in to the account for a client, so it is
+ * credential state (`CREDENTIAL_TABLES`): a consent, a disconnect and the
+ * bulk revocation write it under the account lock.
+ *
  * Revocation is the operation that matters here. It is recorded on the grant
  * and nowhere else, and it is terminal: nothing in this file sets `revoked_at`
  * back to null, so a code or token whose grant was revoked is refused for good,
@@ -18,9 +22,9 @@
  */
 
 import { and, desc, eq, gt, isNull, not, sql, type SQL } from 'drizzle-orm';
-import { BaseRepository } from '@spfn/core/db';
 import { oauth2Grants, type NewOAuth2Grant, type OAuth2Grant } from '../entities/oauth2-grants';
 import { oauth2Clients, type OAuth2Client } from '../entities/oauth2-clients';
+import { AccountStateRepository, type AccountWrites } from './account-state.repository';
 
 /** A grant with the client it belongs to — what every list and lookup needs. */
 export interface OAuth2GrantWithClient
@@ -45,8 +49,16 @@ export function isLiveGrant(grant: OAuth2Grant, now: Date = new Date()): boolean
     return grant.revokedAt === null && grant.expiresAt.getTime() > now.getTime();
 }
 
-export class OAuth2GrantsRepository extends BaseRepository
+export class OAuth2GrantsRepository extends AccountStateRepository
 {
+    static override readonly accountWrites: AccountWrites<OAuth2GrantsRepository> = {
+        upsert: { account: data => data.user },
+        revokeLapsed: { account: key => key.user },
+        revokeByIdForUser: { account: (_id, userId) => userId },
+        revokeById: { exempt: 'the replay detections at the token endpoint (client-authenticated, no session): a revocation only removes a way in, and it is terminal' },
+        revokeAllActiveByUserId: { account: userId => userId },
+    };
+
     /**
      * Record a consent, or amend the scopes of the live one already there.
      *

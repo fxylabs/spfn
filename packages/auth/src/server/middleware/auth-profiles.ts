@@ -6,9 +6,12 @@
  * chain in the middleware body. A request that names no profile falls through
  * to the existing Bearer path untouched.
  *
- * Every verifier converges on the same `AuthContext` the Bearer path sets, so
- * downstream permission/tenant code consumes one principal shape and never
- * branches on how it was authenticated.
+ * A verifier only establishes who presented what: it answers an identity —
+ * the account and the key — and `runAuthProfile` hands that to
+ * `admitPrincipal`, which decides whether the person may be let in and builds
+ * the same `AuthContext` the Bearer path sets. Downstream permission/tenant
+ * code consumes one principal shape and never branches on how it was
+ * authenticated.
  *
  * An app adds its own scheme with `registerAuthProfile` at boot. The dispatch
  * it joins is the one below, unchanged: a name nobody registered is still
@@ -38,16 +41,7 @@ import {
     type SerializedError,
 } from '@spfn/core/errors';
 
-import type { User } from '@spfn/auth/server';
-import {
-    authLogger,
-    keysRepository,
-    findUserWithEffectiveRoleOnPrimary,
-    userSettingsRepository,
-    getPendingDeletionInfo,
-} from '@spfn/auth/server';
-import { AccountDisabledError, AccountPendingDeletionError } from '@spfn/auth/errors';
-
+import { authLogger, keysRepository } from '@spfn/auth/server';
 import {
     CLIENT_PROOF_HEADERS,
     isRequestContentType,
@@ -69,43 +63,47 @@ import { ClientProofRefusal } from '../client-proof/refusal';
 import { clientProofRefusalResponse } from '../client-proof/refusal-response';
 import { getClientProofReplayStore } from '../client-proof/replay-store';
 import { readContextClientIdentity } from '../client-proof/version-middleware';
-import { profileLocale, type ProfileLocale } from '../lib/profile-locale';
-import { assertSecondFactorAdmits } from '../services/second-factor-policy.service';
+import {
+    admissionRefusalError,
+    admitPrincipal,
+    authContextFor,
+    type AdmissionRefusal,
+    type AuthContext,
+    type AuthScheme,
+} from '../services/admission.service';
 
-/** What a verified request leaves in the context — one shape for every scheme. */
-export interface AuthContext
+export type { AuthContext } from '../services/admission.service';
+
+/**
+ * Who a profile's verifier found behind the request: the account, the key it
+ * names for it, and the scheme. Not a principal — `runAuthProfile` admits it.
+ */
+export interface AuthProfileIdentity
 {
-    user: User;
     userId: string;
     keyId: string;
-    role: string | null;
-    /** The person's language choice, or `'en'` when they never made one. */
-    locale: string;
-    /**
-     * The person's language choice, or `null` when they never made one — so an
-     * app can follow the request's language instead. Optional so a registered
-     * profile that builds its own principal keeps compiling; read it with
-     * `getChosenLocale`, which treats an absent value as `null`.
-     */
-    chosenLocale?: string | null;
-
     /**
      * How the principal was authenticated. Informational — downstream code
      * never branches on it. The union stays open for the profiles an app
-     * registers itself: the built-in names keep their autocomplete, and a
-     * registered profile names its own scheme without editing this file.
+     * registers itself.
      */
-    scheme: 'bearer' | 'clientProofV1' | 'oneTimeToken' | (string & {});
+    scheme: AuthScheme;
 }
 
-/** A profile's verifier: admits the request and returns the principal, or throws. */
+/** A profile's verifier: establishes who presented the request, or throws. */
 export interface AuthProfileVerifier
 {
-    verify(c: Context): Promise<AuthContext>;
+    verify(c: Context): Promise<AuthProfileIdentity>;
+}
+
+/** A registered profile: admits the request it names and answers the principal, or throws. */
+export interface AuthProfile
+{
+    admit(c: Context): Promise<AuthContext>;
 }
 
 /**
- * Routes a request to its profile verifier.
+ * Routes a request to its profile.
  *
  * - no profile header → null: the caller continues on the Bearer path;
  * - profile header + Authorization header → rejected (mixing prohibited);
@@ -114,7 +112,7 @@ export interface AuthProfileVerifier
  * Shared by authenticate and optionalAuth so "presented but invalid" refuses
  * identically on both — only the "presented nothing" outcome differs.
  */
-export function selectAuthProfile(c: Context): AuthProfileVerifier | null
+export function selectAuthProfile(c: Context): AuthProfile | null
 {
     const profile = c.req.header(CLIENT_PROOF_HEADERS.profile);
     if (profile === undefined)
@@ -125,55 +123,13 @@ export function selectAuthProfile(c: Context): AuthProfileVerifier | null
     {
         throw refusalError(ClientProofRefusal.credentialsMixed());
     }
-    const verifier = AUTH_PROFILE_VERIFIERS.get(profile);
-    if (verifier === undefined)
+    const registered = AUTH_PROFILES.get(profile);
+    if (registered === undefined)
     {
         throw refusalError(ClientProofRefusal.profileRejected());
     }
 
-    return verifier;
-}
-
-/**
- * Loads the user for an authenticated key and applies the account-status
- * rules. One implementation for every scheme: the Bearer path and the profile
- * verifiers call this, so a status added here gates both identically.
- *
- * The second-factor policy is not one of these rules: it is about the person
- * a principal stands for, whoever produced it, so it is asked where every
- * principal passes — `runAuthProfile` for each profile, and the Bearer paths
- * of `authenticate` and `optionalAuth` — rather than here, where only the
- * built-in verifiers come.
- */
-export async function resolveAuthenticatedUser(userId: number): Promise<{
-    user: User;
-    role: string | null;
-} & ProfileLocale>
-{
-    const [result, chosenLocale] = await Promise.all([
-        findUserWithEffectiveRoleOnPrimary(userId),
-        userSettingsRepository.findLocaleByUserId(userId),
-    ]);
-    if (!result)
-    {
-        throw new UnauthorizedError({ message: 'User not found' });
-    }
-
-    const { user, role } = result;
-
-    // Status can be: active, inactive, suspended, pending_deletion, deleted
-    if (user.status !== 'active')
-    {
-        if (user.status === 'pending_deletion')
-        {
-            const pending = await getPendingDeletionInfo(user.id);
-            throw new AccountPendingDeletionError({ purgeScheduledAt: pending?.purgeScheduledAt.toISOString() });
-        }
-
-        throw new AccountDisabledError({ status: user.status });
-    }
-
-    return { user, role: role?.name ?? null, ...profileLocale(chosenLocale) };
+    return registered;
 }
 
 // ---- clientProofV1 ---------------------------------------------------------
@@ -244,56 +200,28 @@ export type AuthProfileOutcome =
  * `optionalAuth` both run before their own Bearer code.
  *
  * `none` means the request named no profile and the caller continues on the
- * Bearer path. A refusal comes back as a built response rather than a throw:
- * the answer a proven call gets is the contract's own envelope, and an error
- * handed to the generic error handler is classified by its class name instead.
+ * Bearer path. A contract refusal comes back as a built response rather than a
+ * throw: the answer a proven call gets is the contract's own envelope, and an
+ * error handed to the generic error handler is classified by its class name
+ * instead.
  *
- * The principal any verifier returns — built-in or registered by the app —
- * stands for a person, and is held to the second-factor policy here, the one
- * point every profile principal passes (#309). A person who may only enrol is
- * refused with a throw of 403 `SECOND_FACTOR_ENROLMENT_REQUIRED` — except on an
- * enrolment route reached through the global `authenticate` — and `optionalAuth`
- * reads that refusal as anonymous. A credential that is not a person belongs
- * in a machine principal (`registerMachineVerifier`), which never comes here.
+ * Every profile — built-in or registered by the app — is admitted through
+ * `admitPrincipal`, with this request as the route (#309): a person who may
+ * only enrol is refused with a throw of 403 `SECOND_FACTOR_ENROLMENT_REQUIRED`
+ * except on an enrolment route reached through the global `authenticate`, and
+ * `optionalAuth` reads that refusal as anonymous. A credential that is not a
+ * person belongs in a machine principal (`registerMachineVerifier`), which
+ * never comes here.
  *
- * @throws SecondFactorEnrolmentRequiredError
+ * @throws SecondFactorEnrolmentRequiredError, AccountDisabledError, AccountPendingDeletionError
  */
 export async function runAuthProfile(c: Context): Promise<AuthProfileOutcome>
 {
-    const outcome = await dispatchAuthProfile(c);
-
-    if (outcome.kind === 'authenticated')
-    {
-        await assertSecondFactorAdmits(Number(outcome.auth.userId), c);
-    }
-
-    return outcome;
-}
-
-/** The registered verifier for this request, run, and its refusal answered. */
-async function dispatchAuthProfile(c: Context): Promise<AuthProfileOutcome>
-{
     try
     {
-        const verifier = selectAuthProfile(c);
-        if (verifier === null)
-        {
-            return { kind: 'none' };
-        }
+        const registered = selectAuthProfile(c);
 
-        // What the verifier resolved has to be a principal. `null` is the JS
-        // idiom for "no user", and taken at face value it would set `auth` to
-        // null and call the route: authenticated everywhere downstream, a 500
-        // in the handler. A resolve that carries no userId is a refusal, and
-        // it leaves here as one — the same throw the verifier's own refusal
-        // takes, so `optionalAuth` cannot downgrade it to anonymous passage.
-        const auth = await verifier.verify(c);
-        if (!auth?.userId)
-        {
-            throw new UnauthorizedError({ message: 'Auth profile verifier returned no principal' });
-        }
-
-        return { kind: 'authenticated', auth };
+        return registered === null ? { kind: 'none' } : { kind: 'authenticated', auth: await registered.admit(c) };
     }
     catch (err)
     {
@@ -304,6 +232,41 @@ async function dispatchAuthProfile(c: Context): Promise<AuthProfileOutcome>
 
         throw err;
     }
+}
+
+/**
+ * An app profile's identity, admitted. The verifier only says who presented
+ * the request; whether that person may be let in is `admitPrincipal`'s.
+ *
+ * What the verifier resolved has to name an account. `null` is the JS idiom
+ * for "no user", and taken at face value it would set `auth` to null and call
+ * the route: authenticated everywhere downstream, a 500 in the handler. A
+ * resolve that names no account is a refusal, and it leaves here as one — the
+ * same throw the verifier's own refusal takes, so `optionalAuth` cannot
+ * downgrade it to anonymous passage.
+ */
+async function admitAppProfile(c: Context, profile: string, verifier: AuthProfileVerifier): Promise<AuthContext>
+{
+    const identity = await verifier.verify(c);
+    const userId = Number(identity?.userId);
+
+    if (!Number.isSafeInteger(userId) || userId <= 0)
+    {
+        throw new UnauthorizedError({ message: 'Auth profile verifier returned no principal' });
+    }
+
+    const admission = await admitPrincipal({
+        userId,
+        credential: { kind: 'appProfile', profile, keyId: identity.keyId },
+        route: c,
+    });
+
+    if ('refused' in admission)
+    {
+        throw admissionRefusalError(admission.refused);
+    }
+
+    return authContextFor(admission.admitted, identity.scheme);
 }
 
 /**
@@ -328,7 +291,7 @@ async function failClosed<T>(operation: () => Promise<T>): Promise<T>
  * so `x-spfn-session` never travels here and `requiresSession` is false for
  * every operation authenticated this way.
  */
-async function verifyClientProofProfile(c: Context): Promise<AuthContext>
+async function admitClientProofProfile(c: Context): Promise<AuthContext>
 {
     const headers = c.req.raw.headers;
     const credentials = readCredentials(headers);
@@ -411,8 +374,19 @@ async function verifyClientProofProfile(c: Context): Promise<AuthContext>
         throw refusalError(ClientProofRefusal.proofReplayed());
     }
 
-    // 7. The same user-status path the Bearer scheme takes.
-    const { user, role, locale, chosenLocale } = await resolveAuthenticatedUser(keyRecord.userId);
+    // 7. The admission every door takes: the account's status, the key's
+    //    liveness on the same read, and the second-factor policy. A key that
+    //    died since step 1 answers SESSION_REVOKED, as it would have there.
+    const admission = await admitPrincipal({
+        userId: keyRecord.userId,
+        credential: { kind: 'deviceKey', keyId: credentials.keyId },
+        route: c,
+    });
+
+    if ('refused' in admission)
+    {
+        throw clientProofAdmissionRefusal(admission.refused);
+    }
 
     // Fire-and-forget, as the Bearer path does — and with the address under the
     // same rule, so this surface neither erases `last_seen_ip` on every throttle
@@ -421,8 +395,8 @@ async function verifyClientProofProfile(c: Context): Promise<AuthContext>
         .catch((err: unknown) => authLogger.middleware.error('Failed to update lastUsedAt', err));
 
     authLogger.middleware.info('API access', {
-        userId: user.id,
-        email: user.email,
+        userId: admission.admitted.user.id,
+        email: admission.admitted.user.email,
         keyId: credentials.keyId,
         scheme: CLIENT_PROOF_PROFILE,
         method: c.req.method,
@@ -431,15 +405,19 @@ async function verifyClientProofProfile(c: Context): Promise<AuthContext>
         userAgent: c.req.header('user-agent'),
     });
 
-    return {
-        user,
-        userId: String(user.id),
-        keyId: credentials.keyId,
-        role,
-        locale,
-        chosenLocale,
-        scheme: 'clientProofV1',
-    };
+    return authContextFor(admission.admitted, 'clientProofV1');
+}
+
+/**
+ * An admission refusal on the proven surface: a key that stopped being live is
+ * the contract's SESSION_REVOKED; the account refusals are the errors the
+ * Bearer path answers, as they have always been here.
+ */
+function clientProofAdmissionRefusal(refusal: AdmissionRefusal): Error
+{
+    return refusal.reason === 'credentialRevoked' || refusal.reason === 'credentialExpired'
+        ? refusalError(ClientProofRefusal.sessionRevoked())
+        : admissionRefusalError(refusal);
 }
 
 /**
@@ -508,9 +486,9 @@ function verifyProofOrThrow(
     }
 }
 
-/** profile name → verifier. Registration is the only way to add a scheme. */
-const AUTH_PROFILE_VERIFIERS: Map<string, AuthProfileVerifier> = new Map([
-    [CLIENT_PROOF_PROFILE, { verify: verifyClientProofProfile }],
+/** profile name → profile. Registration is the only way to add a scheme. */
+const AUTH_PROFILES: Map<string, AuthProfile> = new Map([
+    [CLIENT_PROOF_PROFILE, { admit: admitClientProofProfile }],
 ]);
 
 /**
@@ -531,9 +509,14 @@ const AUTH_PROFILE_VERIFIERS: Map<string, AuthProfileVerifier> = new Map([
  * reads as "no profile header", which is anonymous passage under
  * `optionalAuth` for a request that presented profile credentials.
  *
- * The verifier returns the same `AuthContext` the Bearer path sets and refuses
- * by throwing. A resolve that carries no `userId` is refused as a throw too —
- * "no user" is a refusal, never a principal. A throw is not caught here:
+ * The verifier establishes who presented the request and refuses by throwing:
+ * it answers an `AuthProfileIdentity` — the account id, the key id it names
+ * for it, the scheme — and never a principal. `admitPrincipal` then decides
+ * whether that person may be let in (account status on the primary, the
+ * second-factor policy) and builds the `AuthContext` the Bearer path sets, so
+ * an app profile cannot admit a suspended account or skip a rule added later.
+ * A resolve that names no account is refused as a throw too — "no user" is a
+ * refusal, never a principal. A throw is not caught here:
  * `runAuthProfile` answers the internal clientProofV1 contract refusal and
  * nothing else, so a verifier's own error reaches the app's generic error
  * handler exactly as the Bearer path's `UnauthorizedError` does — and never
@@ -541,16 +524,16 @@ const AUTH_PROFILE_VERIFIERS: Map<string, AuthProfileVerifier> = new Map([
  *
  * @example
  * ```typescript
- * registerAuthProfile('serviceTokenV1', {
+ * registerAuthProfile('acmeDeviceV1', {
  *     verify: async (c) =>
  *     {
- *         const user = await authenticateServiceToken(c.req.header('x-acme-service-token'));
- *         if (user === null)
+ *         const device = await verifyAcmeDevice(c.req.header('x-acme-device-proof'));
+ *         if (device === null)
  *         {
- *             throw new UnauthorizedError({ message: 'Invalid service token' });
+ *             throw new UnauthorizedError({ message: 'Invalid device proof' });
  *         }
  *
- *         return { user, userId: String(user.id), keyId: 'service', role: null, locale: 'en', scheme: 'serviceTokenV1' };
+ *         return { userId: String(device.userId), keyId: device.id, scheme: 'acmeDeviceV1' };
  *     },
  * });
  * ```
@@ -565,7 +548,7 @@ export function registerAuthProfile(profileId: string, verifier: AuthProfileVeri
     {
         throw new Error(`registerAuthProfile: auth profile '${profileId}' needs a verifier with a callable verify(c)`);
     }
-    if (AUTH_PROFILE_VERIFIERS.has(profileId))
+    if (AUTH_PROFILES.has(profileId))
     {
         throw new Error(`registerAuthProfile: auth profile '${profileId}' is already registered`);
     }
@@ -578,5 +561,7 @@ export function registerAuthProfile(profileId: string, verifier: AuthProfileVeri
     // verifier that consults its own mutable state through that function still
     // changes behaviour when the registrant mutates it. This is a footgun guard
     // against an accidental reassignment, not an immutability guarantee.
-    AUTH_PROFILE_VERIFIERS.set(profileId, { verify: verifier.verify.bind(verifier) });
+    const verify = verifier.verify.bind(verifier);
+
+    AUTH_PROFILES.set(profileId, { admit: c => admitAppProfile(c, profileId, { verify }) });
 }

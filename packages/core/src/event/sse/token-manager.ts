@@ -65,13 +65,27 @@ export interface SSEToken
 
     /** The device key the token was minted with; absent → an untagged token. */
     keyId?: string;
+
+    /**
+     * Who holds `keyId`, as the issuer recorded it beside the tag — the
+     * authenticated principal's id. Independent of `subject`, which an app may
+     * shape freely (`getSubject`).
+     */
+    keyHolder?: string;
 }
 
 /**
  * Whether the device key a token was minted with still holds; `false` or a
- * throw refuses the token.
+ * throw refuses the token. `keyHolder` is who the issuer recorded as holding
+ * the key (absent when it recorded none), so a verifier judges the person as
+ * well as the key without parsing `subject` — `@spfn/auth` admits the key
+ * holder on that key, account status included.
  */
-export type SSEKeyVerifier = (keyId: string) => boolean | Promise<boolean>;
+export type SSEKeyVerifier = (
+    keyId: string,
+    subject: string,
+    keyHolder: string | undefined,
+) => boolean | Promise<boolean>;
 
 /**
  * Token storage interface
@@ -272,17 +286,21 @@ export class SSETokenManager
     /**
      * Issue a new one-time-use token for the given subject. `keyId` tags it
      * with the device key it is minted for; an empty one leaves it untagged.
+     * `keyHolder` records who holds that key, beside the tag, for `verifyKey`;
+     * it is kept only on a tagged token.
      */
-    async issue(subject: string, options?: { keyId?: string }): Promise<string>
+    async issue(subject: string, options?: { keyId?: string; keyHolder?: string }): Promise<string>
     {
         const token = randomBytes(32).toString('hex');
         const keyId = options?.keyId || undefined;
+        const keyHolder = keyId ? options?.keyHolder || undefined : undefined;
 
         // The store keys by sha256(token); the raw token is never persisted.
         await this.store.set(token, {
             subject,
             expiresAt: Date.now() + this.ttl,
             ...(keyId ? { keyId } : {}),
+            ...(keyHolder ? { keyHolder } : {}),
         });
 
         return token;
@@ -337,7 +355,7 @@ export class SSETokenManager
 
         try
         {
-            return await this.verifyKey(data.keyId) === true;
+            return await this.verifyKey(data.keyId, data.subject, data.keyHolder) === true;
         }
         catch
         {

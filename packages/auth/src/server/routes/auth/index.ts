@@ -26,6 +26,7 @@ import {
     verifyCodeService,
     getAuthSessionService,
     issueOneTimeTokenService,
+    signingKeyOf,
     requestSignupLinkService,
     confirmSignupLinkService,
     completeSignupService,
@@ -519,9 +520,9 @@ export const approveDeviceAuth = route.post('/_auth/device/approve')
     .handler(async (c) =>
     {
         const { body } = await c.data();
-        const { userId } = getAuth(c);
+        const { userId, keyId } = getAuth(c);
 
-        return await approveDeviceAuthService({ userCode: body.userCode, userId: Number(userId) });
+        return await approveDeviceAuthService({ userCode: body.userCode, userId: Number(userId), keyId });
     });
 
 /**
@@ -973,16 +974,19 @@ export const getAuthSession = route.get('/_auth/session')
 
 /**
  * POST /_auth/tokens - Issue a one-time token
- * Returns a single-use token for direct API access (file uploads, SSE, etc.)
+ * Returns a single-use token for direct API access (file uploads, SSE, etc.),
+ * bound to the device key this request was signed with — refused once that key
+ * is revoked. A principal that signed with no device key (an app's own auth
+ * profile) is refused 403: there is no key to bind the token to.
  *
  * Requires authentication
  */
 export const issueOneTimeToken = route.post('/_auth/tokens')
     .handler(async (c) =>
     {
-        const { userId } = getAuth(c);
+        const { userId, credential } = getAuth(c);
 
-        return await issueOneTimeTokenService(userId);
+        return await issueOneTimeTokenService(userId, signingKeyOf(credential));
     });
 
 // Export router

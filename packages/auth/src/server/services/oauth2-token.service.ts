@@ -67,6 +67,7 @@ import {
     secondsUntil,
 } from '../lib/oauth2/tokens';
 import { authLogger } from '../logger';
+import { admitPrincipal } from './admission.service';
 
 /** A token request as RFC 6749 names its fields, before anything is trusted. */
 export interface OAuth2TokenRequest
@@ -178,7 +179,7 @@ async function exchangeAuthorizationCode(request: OAuth2TokenRequest): Promise<O
     const pair = await oauth2GrantsRepository.findWithClientById(record.grant);
 
     if (!pair || !isLiveGrant(pair.grant)
-        || !boundToRequest(request, record, pair.client))
+        || !boundToRequest(request, record, pair.client) || !await grantAdmitted(pair.grant))
     {
         return invalidGrant();
     }
@@ -189,6 +190,25 @@ async function exchangeAuthorizationCode(request: OAuth2TokenRequest): Promise<O
     }
 
     return await spendBoundCode(record, pair);
+}
+
+/**
+ * Whether the person behind a grant may be let in now — `admitPrincipal`, as
+ * every door asks it: the grant not revoked, the account active on the
+ * primary, the second-factor policy. Asked before anything is spent, so a
+ * suspended person's client can neither exchange a code nor extend its tokens,
+ * and holds the same code or refresh token once the account is reactivated.
+ * Every refusal is the endpoint's one `invalid_grant`.
+ */
+async function grantAdmitted(grant: OAuth2Grant): Promise<boolean>
+{
+    const admission = await admitPrincipal({
+        userId: grant.user,
+        credential: { kind: 'oauth2Grant', grantId: grant.id },
+        route: null,
+    });
+
+    return 'admitted' in admission;
 }
 
 /**
@@ -319,7 +339,7 @@ async function rotateRefresh(
     const pair = await oauth2GrantsRepository.findWithClientById(grantId);
 
     if (!pair || !isLiveGrant(pair.grant)
-        || request.client_id !== pair.client.clientId)
+        || request.client_id !== pair.client.clientId || !await grantAdmitted(pair.grant))
     {
         return invalidGrant();
     }

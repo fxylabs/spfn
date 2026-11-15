@@ -11,15 +11,26 @@
  * is what keeps a guess from touching another challenge's `attempts`.
  */
 
-import { BaseRepository } from '@spfn/core/db';
 import { and, eq, gt, inArray, isNotNull, isNull, lte, or, sql } from 'drizzle-orm';
 
 import { mfaChallenges, MFA_CHALLENGE_ATTEMPT_LIMIT } from '../entities/mfa-challenges';
 import type { MfaChallenge, NewMfaChallenge } from '../entities/mfa-challenges';
 import { userPublicKeys } from '../entities/user-public-keys';
+import { AccountStateRepository, type AccountWrites } from './account-state.repository';
 
-export class MfaChallengesRepository extends BaseRepository
+export class MfaChallengesRepository extends AccountStateRepository
 {
+    static override readonly accountWrites: AccountWrites<MfaChallengesRepository> = {
+        create: { account: data => data.userId },
+        markVerified: { account: challenge => challenge.userId },
+        countFailure: { account: challenge => challenge.userId },
+        markKeyPending: { account: challenge => challenge.userId },
+        resecret: { account: challenge => challenge.userId },
+        dropPendingKey: { account: challenge => challenge.userId },
+        activateKey: { account: challenge => challenge.userId },
+        sweepFinishedOf: { account: userId => userId },
+    };
+
     /** Park a fresh challenge. The caller has already written the pending key. */
     async create(data: NewMfaChallenge): Promise<MfaChallenge>
     {
@@ -76,14 +87,14 @@ export class MfaChallengesRepository extends BaseRepository
      * Every condition the caller checked is restated here, so the row that is
      * marked is a row that was still spendable at the moment it was marked.
      */
-    async markVerified(id: number, keyEpoch: number): Promise<boolean>
+    async markVerified(challenge: MfaChallenge): Promise<boolean>
     {
         const result = await this.db
             .update(mfaChallenges)
             .set({ verifiedAt: new Date() })
             .where(and(
-                eq(mfaChallenges.id, id),
-                eq(mfaChallenges.keyEpoch, keyEpoch),
+                eq(mfaChallenges.id, challenge.id),
+                eq(mfaChallenges.keyEpoch, challenge.keyEpoch),
                 isNull(mfaChallenges.verifiedAt),
                 gt(mfaChallenges.expiresAt, new Date()),
             ))
@@ -99,12 +110,12 @@ export class MfaChallengesRepository extends BaseRepository
      * is the whole reason lookup is by hash: there is no id for a caller to name,
      * so no counter but their own can be moved.
      */
-    async countFailure(id: number): Promise<boolean>
+    async countFailure(challenge: MfaChallenge): Promise<boolean>
     {
         const result = await this.db
             .update(mfaChallenges)
             .set({ attempts: sql`${mfaChallenges.attempts} + 1` })
-            .where(eq(mfaChallenges.id, id))
+            .where(and(eq(mfaChallenges.id, challenge.id), eq(mfaChallenges.userId, challenge.userId)))
             .returning({ attempts: mfaChallenges.attempts });
 
         return (result[0]?.attempts ?? 0) >= MFA_CHALLENGE_ATTEMPT_LIMIT;
@@ -118,12 +129,12 @@ export class MfaChallengesRepository extends BaseRepository
      * challenge can, so the back-reference is written once both do. Both run
      * inside the registering route's transaction.
      */
-    async markKeyPending(keyId: string, challengeId: number): Promise<void>
+    async markKeyPending(challenge: MfaChallenge): Promise<void>
     {
         await this.db
             .update(userPublicKeys)
-            .set({ pendingMfaChallengeId: challengeId })
-            .where(eq(userPublicKeys.keyId, keyId));
+            .set({ pendingMfaChallengeId: challenge.id })
+            .where(and(eq(userPublicKeys.keyId, challenge.keyId), eq(userPublicKeys.userId, challenge.userId)));
     }
 
     /**
@@ -134,13 +145,14 @@ export class MfaChallengesRepository extends BaseRepository
      * another ten minutes; only the secret is new, because the old one was never
      * stored and cannot be handed out twice.
      */
-    async resecret(id: number, challengeHash: string): Promise<boolean>
+    async resecret(challenge: MfaChallenge, challengeHash: string): Promise<boolean>
     {
         const result = await this.db
             .update(mfaChallenges)
             .set({ challengeHash })
             .where(and(
-                eq(mfaChallenges.id, id),
+                eq(mfaChallenges.id, challenge.id),
+                eq(mfaChallenges.userId, challenge.userId),
                 isNull(mfaChallenges.verifiedAt),
                 gt(mfaChallenges.expiresAt, new Date()),
             ))
@@ -156,13 +168,14 @@ export class MfaChallengesRepository extends BaseRepository
      * Scoped to `pending_mfa_challenge_id`, so a key that has since been
      * activated is never deleted by a late failure or a sweep.
      */
-    async dropPendingKey(keyId: string, challengeId: number): Promise<void>
+    async dropPendingKey(challenge: MfaChallenge): Promise<void>
     {
         await this.db
             .delete(userPublicKeys)
             .where(and(
-                eq(userPublicKeys.keyId, keyId),
-                eq(userPublicKeys.pendingMfaChallengeId, challengeId),
+                eq(userPublicKeys.keyId, challenge.keyId),
+                eq(userPublicKeys.userId, challenge.userId),
+                eq(userPublicKeys.pendingMfaChallengeId, challenge.id),
             ));
     }
 
@@ -172,19 +185,39 @@ export class MfaChallengesRepository extends BaseRepository
      * Conditioned on the challenge id, so this can only activate the key that
      * challenge was minted for.
      */
-    async activateKey(keyId: string, challengeId: number): Promise<void>
+    async activateKey(challenge: MfaChallenge): Promise<void>
     {
         await this.db
             .update(userPublicKeys)
             .set({ isActive: true, pendingMfaChallengeId: null })
             .where(and(
-                eq(userPublicKeys.keyId, keyId),
-                eq(userPublicKeys.pendingMfaChallengeId, challengeId),
+                eq(userPublicKeys.keyId, challenge.keyId),
+                eq(userPublicKeys.userId, challenge.userId),
+                eq(userPublicKeys.pendingMfaChallengeId, challenge.id),
             ));
     }
 
     /**
-     * Clear out challenges nobody finished, and the keys they were gating.
+     * Up to `limit` accounts holding a challenge nobody can finish any more —
+     * expired by the cutoff, or spent. Read on the primary: what it names is
+     * deleted next. The rest wait for the next sweep run.
+     */
+    async findAccountsWithFinished(cutoff: Date, limit: number): Promise<number[]>
+    {
+        const rows = await this.db
+            .selectDistinct({ userId: mfaChallenges.userId })
+            .from(mfaChallenges)
+            .where(finishedBy(cutoff))
+            .orderBy(mfaChallenges.userId)
+            .limit(limit);
+
+        return rows.map(row => row.userId);
+    }
+
+    /**
+     * Clear out one account's challenges nobody finished, and the keys they
+     * were gating. Its caller holds that account's lock: the keys and the
+     * challenges are the rows `mfa/verify` writes under it.
      *
      * Counted from the read rather than from either delete, because the two
      * overlap: deleting a pending key cascades onto its challenge, so the second
@@ -198,10 +231,10 @@ export class MfaChallengesRepository extends BaseRepository
      *
      * @returns how many challenge rows are gone
      */
-    async sweepFinished(cutoff: Date): Promise<number>
+    async sweepFinishedOf(userId: number, cutoff: Date): Promise<number>
     {
-        const finished = or(lte(mfaChallenges.expiresAt, cutoff), isNotNull(mfaChallenges.verifiedAt));
-        const doomed = await this.readDb
+        const finished = and(eq(mfaChallenges.userId, userId), finishedBy(cutoff));
+        const doomed = await this.db
             .select({ id: mfaChallenges.id })
             .from(mfaChallenges)
             .where(finished);
@@ -213,12 +246,21 @@ export class MfaChallengesRepository extends BaseRepository
 
         await this.db
             .delete(userPublicKeys)
-            .where(inArray(userPublicKeys.pendingMfaChallengeId, doomed.map(row => row.id)));
+            .where(and(
+                eq(userPublicKeys.userId, userId),
+                inArray(userPublicKeys.pendingMfaChallengeId, doomed.map(row => row.id)),
+            ));
 
         await this.db.delete(mfaChallenges).where(finished);
 
         return doomed.length;
     }
+}
+
+/** A challenge expired by the cutoff, or already spent. */
+function finishedBy(cutoff: Date)
+{
+    return or(lte(mfaChallenges.expiresAt, cutoff), isNotNull(mfaChallenges.verifiedAt));
 }
 
 // Default instance export

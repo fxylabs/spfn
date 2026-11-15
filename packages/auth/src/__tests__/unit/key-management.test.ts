@@ -30,7 +30,18 @@ const { keysRepository, deviceAuthorizationsRepository, deviceLinksRepository, r
     revokeAllOAuth2GrantsForUser: vi.fn(async () => undefined),
 }));
 
-vi.mock('../../server/repositories', () => ({ keysRepository, deviceAuthorizationsRepository, deviceLinksRepository }));
+vi.mock('../../server/repositories', () => ({
+    keysRepository,
+    deviceAuthorizationsRepository,
+    deviceLinksRepository,
+    // The account a key is written for, as the key writer locks it: active.
+    usersRepository: { lockAccount: vi.fn(async (id: number) => ({ id, status: 'active', keyEpoch: 0 })) },
+}));
+// The key write is its own transaction; here only its body matters.
+vi.mock('@spfn/core/db', async (importOriginal) => ({
+    ...(await importOriginal<typeof import('@spfn/core/db')>()),
+    runInTransaction: async (fn: () => Promise<unknown>) => fn(),
+}));
 vi.mock('../../server/services/oauth2-grant.service', () => ({ revokeAllOAuth2GrantsForUser }));
 // `key.service` now asks the second-factor service two questions — whether the
 // caller must step up, and whether a rotation carries a verification across.

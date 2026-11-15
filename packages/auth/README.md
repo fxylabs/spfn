@@ -467,7 +467,8 @@ no migration, a session that predates the policy is covered, and the moment the 
 - `optionalAuth` reads the caller as anonymous, on its Bearer path and on a profile alike.
 - A person reaching the app through an OAuth 2.1 access token is refused the same way:
   `verifyAccessToken` throws `SecondFactorEnrolmentRequiredError` for a valid token whose account
-  may only enrol (`@spfn/mcp` turns any throw from its validator into its 401 challenge). A
+  may only enrol (`@spfn/mcp` turns any throw from its validator into its 401 challenge), and
+  the token endpoint refuses its code exchange and refresh with `invalid_grant`. A
   one-time token is refused too. Ops tokens and machine principals are not people and are untouched.
 
 The enrolment routes — the only ones such a session reaches:
@@ -1339,11 +1340,17 @@ two ways in are indistinguishable.
 - **A global revocation reaches the codes too.** `revoke-all`, a password change and a
   deletion request each refuse the account's live device authorizations, so an approval nobody
   collected cannot register a fresh key seconds after the user signed everything out — which
-  would hand one back to exactly the device they were cutting off. Revoking a single key,
-  logging out and rotating a key do not: those name one device, and the waiting one is not it.
-- **The poll re-checks the account.** It is a login, so it refuses a suspended or
-  pending-deletion account with the same errors `/_auth/login` does. Approval and collection
-  are separate moments, and what the account is when the key is registered is what counts.
+  would hand one back to exactly the device they were cutting off.
+- **An approval holds only while the approving key does.** The approval records the key the
+  approver signed it with, and the poll that collects it is spent only while that key is still
+  live — the rule a device link's issuing key is held to, in the same statement. Revoking that
+  key, logging that device out or rotating its key withdraws what it approved: the poll answers
+  `DeviceAuthExpiredError` and registers nothing. An approval the approving device can no
+  longer stand behind is not one the waiting device may collect.
+- **The poll re-checks the account.** It is a login, so it admits the account through
+  `admitPrincipal` (on the approving key) and refuses a suspended or pending-deletion account
+  with the same errors `/_auth/login` does. Approval and collection are separate moments, and
+  what the account is when the key is registered is what counts.
 - **`start` bounds what it stores.** It is the one route that takes key material from a caller
   who cannot authenticate, so `publicKey`, `keyId` and `fingerprint` carry length limits —
   generous next to a real key (an RSA-2048 SPKI is 392 base64 characters against a 2048 limit)
@@ -1630,8 +1637,10 @@ await authApi.revokeAllKeys.call({ body: { includeCurrent: true } });   // every
   `replacementProof` the old key signed) — ends in the keys repository, which calls `closeSSEConnectionsByKey` from
   `@spfn/core/event/sse` for each revoked key once the transaction commits (at once outside one;
   never after a rollback). The SSE streams that key opened close on every pod, and a token it
-  minted before the revocation is refused at open: the one-time token manager re-checks the key
-  (active, not expired, read on the primary) when the token is consumed. A device whose key was
+  minted before the revocation is refused at open: every one-time token is issued tagged with
+  the key that asked for it (`/_auth/tokens`, and the core SSE and WS token endpoints), and the
+  token manager admits its subject on that key (`admitPrincipal` — key live, account active,
+  read on the primary) when the token is consumed. A device whose key was
   replaced reconnects with the new one; a signed-out device's token mint answers 401 and its
   client stops. An app that shares the manager with `.events()`
   (`tokenManager: () => getOneTimeTokenManager()`) gets this with no change. A failed close is
@@ -4111,11 +4120,193 @@ Notes:
   (302 to the app's OAuth error URL, message only) — not a 403 JSON response. The native
   OAuth flow, credentials, and invitation channels return the error status (403) directly.
 
+## Admission: one answer to "may this person be let in"
+
+Every door that produces a person principal asks one function, `admitPrincipal`
+(`@spfn/auth/server`), and carries no rule of its own: the Bearer and clientProofV1 paths of
+`authenticate`, `optionalAuth`, an app's registered auth profiles, `oneTimeTokenAuth` and the
+SSE stream or WebSocket a one-time token opens (at the connect), `authenticateForRenewal`,
+`verifyAccessToken` (`/mcp`),
+the OAuth 2.1 token endpoint (code exchange and refresh), `mfa/verify` completing a 202 sign-in,
+and device-code / device-link collection. A rule added there holds at every door.
+
+```typescript
+const admission = await admitPrincipal({
+    userId,
+    credential: { kind: 'deviceKey', keyId },   // | oneTimeToken | oauth2Grant | renewal | appProfile
+    route: c,                                   // the request, for the enrolment-route exception; null elsewhere
+});
+// { admitted: Principal } | { refused: { reason: 'accountDisabled' | 'pendingDeletion' | 'credentialRevoked' | ... } }
+```
+
+It decides in this order:
+
+1. **The account's status**, read on the write primary — anything but `active` is refused.
+2. **The credential is live** — a device key by `keyLiveness` (active, unexpired, of the
+   account's current key generation); a one-time token by the key that issued it; a renewal key
+   by the renewal grace rule (bound, inside its grace); an OAuth 2.1 grant by not being revoked;
+   an app profile's credential by its verifier having admitted it on this request.
+3. **The second-factor policy** (#309) — except for renewal, deliberately: renewal admits no
+   request, it continues a key the person holds into its replacement, which meets the policy on
+   its first request like any key.
+
+The account, its role and the credential's row are one primary read, so `authenticate` makes
+no query it did not make before. Each door answers a refusal as it always has: 401/403 with the
+error classes on the cookie/Bearer paths, the contract codes on a proven call, `invalid_grant`
+on the token endpoint, 401 with `WWW-Authenticate` on `/mcp`, the one `SessionRenewalRefusedError`
+on renewal, `MfaVerificationFailedError` on `mfa/verify`.
+
+Only the admission module can make a principal. `AuthContext`, `Principal` and
+`VerifiedOAuth2AccessToken` carry a brand and a sealed constructor. The brand is a compile-time
+guarantee — a private member, so an object literal or a spread of another principal does not
+compile as one; it is not checked at run time. A `new` from outside throws, and the package's
+own source is scanned in its test suite for a cast to a principal type. An app's own door admits with
+`admitPrincipal` and hands the result on with `authContextFor(principal, scheme)`.
+
+### Account status (`setAccountStatus`)
+
+```typescript
+import { setAccountStatus } from '@spfn/auth/server';
+
+await setAccountStatus(userId, 'suspended', { from: 'any', reason: 'chargeback dispute' });
+
+const lifted = await setAccountStatus(userId, 'active', { from: 'suspended', reason: 'dispute resolved' });
+// 'changed' | 'refused' — refused when the account was no longer 'suspended'
+```
+
+The one writer of `users.status`. A change names the status it leaves (`from`), and the write
+is one conditional statement on the primary: if another writer moved the account first — a
+deletion request, another operator — the change matches no row and answers `'refused'`
+instead of overwriting it. `from: 'any'` is the explicit "whatever it is now" (an operator
+suspending); with it, `NotFoundError` means no such account.
+
+In one transaction it writes the status and, for every status but `active`, ends the account's
+key generation: every device key is revoked (the reason is recorded on each), pending
+second-factor sign-ins die with it, and once the transaction commits the **SSE streams** those
+keys opened close on every instance. **WebSocket connections already open stay open** — core
+keeps no per-key WebSocket registry yet — but no new one is let in: a WebSocket token is
+admitted at the connect, and a revoked key's token is refused there. Device sessions do **not**
+come back when the account is reactivated — the person signs in again. OAuth 2.1 grants are
+kept: they are refused while the account is not active and work again after reactivation.
+Account deletion, cancellation and purge go through it.
+
+A sign-in racing a status change cannot leave a key behind: every key write
+(`registerPublicKeyService` — all sign-in channels, renewal, rotation, invitation acceptance)
+locks the account row, asks the account half of the admission, and takes the key generation
+from that same read. A suspension committing meanwhile waits for the key and then revokes it, or
+the key is refused with the answer the channel gives a non-active account. The account row is
+the one lock every writer of an account's credential state takes first — see
+`usersRepository.lockAccount`.
+
+Which writers those are is derived, not listed: every repository over a table that holds an
+account's credential state extends `AccountStateRepository`, whose `accountWrites` classifies
+each write method by the account it writes (or names why it needs no lock). Under the package's
+tests every such write checks the lock, and an unclassified one is refused. A wait for the lock
+is bounded (`ACCOUNT_LOCK_TIMEOUT_MS`, 5 s, exported from `@spfn/auth/server`): a request that
+runs out answers **`503 AccountBusyError`** with a `Retry-After` header (retryable, mobile
+contract 0.14.3; on the wire the envelope's `code` is `AccountBusyError`) with nothing written,
+not a connection error. **`usersRepository.lockAccount(id)` can therefore reject with
+`AccountBusyError`** — an application calling it in its own transaction lets that error reach
+the error handler, or answers it as a retry. A transaction holds one account's lock at most: a
+second account's lock throws `SecondAccountLockError` (an internal error, in every run, not only
+under test). An OAuth sign-in whose link moved between its read and its lock runs again (a second
+time answers `OAuthSignInContendedError`). `renewSession()` answers a 503 as
+`{ ok: false, reason: 'busy' }` — retry, the session is not over.
+
+The tables in that set include the OAuth 2.1 grants, codes and tokens and the WebAuthn
+challenges. A consent locks the account and admits the approving session again under the lock
+before it writes a grant, so a consent racing a password change or revoke-all is refused, with
+no grant and no code. A WebAuthn ceremony reads its challenge, verifies outside the lock, and
+spends the challenge under the lock with what it writes: a `503` leaves the challenge unspent
+for the retry. A passkey's use is recorded only at the counter the assertion was verified
+against, and only upward (an authenticator that always reports 0 keeps working); a recovery code
+spends only while its generation is the newest.
+
+The sweeps run one account per transaction under its lock, bounded per run: at most 500
+accounts (`SWEEP_BATCH`) from `mfaChallengesRepository.findAccountsWithFinished(cutoff, limit)`
+and `mfaTotpRepository.findAccountsUnconfirmedBefore(cutoff, limit)`, no new account after 60 s
+(`SWEEP_BUDGET_MS`); a busy account is left for the next run, and each run logs one summary
+line. The boot email backfill folds in batches of 500 rows (`EMAIL_NORMALIZATION_BATCH`), so a
+lock never waits behind a table-wide rewrite.
+
+> **BREAKING — repository signatures.** Writers of credential state now name the account they
+> write: `mfaChallengesRepository.countFailure/markKeyPending/resecret/dropPendingKey` take the
+> challenge row; `passkeysRepository.recordUse(passkey, counter)` takes the row the assertion was
+> verified against and answers whether the passkey was still live at that counter; `deviceLinksRepository.redeem/approve/deny/cancel` take the link,
+> `consumeApproved` and `expireLiveByIssuerKey` the issuer's id; `lockIssuerKey` is removed;
+> `LinkHandle` (`Pick<DeviceLink, 'id' | 'issuerUserId'>`, from the device-links repository) is
+> what they take; `deviceAuthorizationsRepository.consumeApproved(userId, hash)`;
+> `mfaRecoveryCodesRepository.consume(userId, id)`; `mfaTotpRepository.recordUsedStep` answers
+> whether it spent the step, `updateSecret` takes the ciphertext it replaces, and
+> `deleteUnconfirmedBefore` is `deleteUnconfirmedOf(userId, cutoff)`;
+> `mfaChallengesRepository.sweepFinished` is `sweepFinishedOf(userId, cutoff)`;
+> `socialAccountsRepository.deleteById(link)`;
+> `passwordResetTokensRepository.consume/complete(token, ...)`;
+> `keyRevokeAllTokensRepository.consume(userId, hash)`; `keysRepository.updateLastUsed` (unused)
+> is removed; `webauthnChallengesRepository.consume(accountId, hash, kind)` answers a boolean and
+> `findLive(hash, kind, owner)` reads without spending;
+> `oauth2AuthorizationCodesRepository.create(approverId, data)`;
+> `approveOAuth2AuthorizeService(params, { userId, credential })`;
+> `mfaChallengesRepository.findAccountsWithFinished` and
+> `mfaTotpRepository.findAccountsUnconfirmedBefore` take a `limit`. Call the writers under
+> `usersRepository.lockAccount` in a transaction.
+
+> **BREAKING — `updateUserService` no longer takes `status`.** It is removed from the type
+> (`UserUpdate` = `Omit<Partial<NewUser>, 'status'>`), and `usersRepository.updateById` refuses
+> a `status` it is handed at run time. Migration: replace
+> `updateUserService(id, { status })` with `setAccountStatus(id, status, { from, reason })` — and
+> expect the account's sessions to end, which is the point.
+
+> **BREAKING — `resolveAuthenticatedUser` and `bearerAuthContext` are removed.** Admit with
+> `admitPrincipal` and build the context with `authContextFor`. `admitsForRenewal` now lives
+> in the admission module (still exported from `@spfn/auth/server`).
+
+> **BREAKING — `AuthContext` is a class.** Its fields are unchanged and gain `credential`
+> (what the person presented); a literal no longer type-checks as one. A test stub that set a
+> literal casts it (`as never`).
+
+> **BREAKING — `VerifiedOAuth2AccessToken` is a class**, made only by `verifyAccessToken`. Its
+> fields are unchanged; a literal no longer type-checks as one.
+
+> **BREAKING — `approveDeviceAuthService` requires `keyId`**, the approving device's key
+> (`signingKeyOf(getAuth(c).credential)`). Collection admits the person on that key, so a code is
+> refused at collection once the approving key is revoked. Device codes approved before the
+> upgrade and not yet collected carry no approving key and are refused; the device starts again.
+
+> **BREAKING — OAuth 2.1 refresh and code exchange answer `invalid_grant`** for an account that
+> is not active and for a person the second-factor policy holds to enrolment only. A client
+> discards its refresh token on `invalid_grant`, so it signs in again after reactivation.
+
+> **BREAKING — WebSocket tokens are key-tagged.** The WS token endpoint tags a token with the
+> device key like the SSE one, and the connect admits the person on that key. A principal of an
+> app's own auth profile, which holds no device key, is refused at the connect.
+
+> **BREAKING (`@spfn/core`) — `SSEKeyVerifier` is `(keyId, subject, keyHolder)`** and
+> `SSETokenManager.issue(subject, { keyId, keyHolder })` records who holds the key beside the
+> tag (the SSE/WS token endpoints record `getKeyHolder(c)`, default `c.get('auth')?.userId`).
+> `@spfn/auth`'s manager admits the recorded key holder, never a parse of `subject`, so an app's
+> `getSubject` may shape the subject freely; a tagged token issued with no `keyHolder` is
+> refused.
+
 ## One-Time Token
 
 For short-lived authenticated handshakes (e.g. SSE) where a `Bearer` header is awkward: issue
 with `authApi.issueOneTimeToken`, protect the consuming route with the `oneTimeTokenAuth`
 middleware. Call `initOneTimeTokenManager({ ttl, store })` during setup for a custom TTL/store.
+
+A token is bound to the device key that asked for it, and is good only while the person is
+admitted on that key: `oneTimeTokenAuth` and a stream opening with it both ask `admitPrincipal`
+with a `oneTimeToken` credential. A token whose key was revoked since — a logout, a
+sign-out-everywhere, a password change, a suspension — is refused (401). An SSE stream opened
+with it closes when the key is revoked; a WebSocket already open does not (it stays open until
+it disconnects), but a new connect with a token of that key is refused. The person admitted is
+the user id the issuer recorded beside the key (`keyHolder`), not a parse of the token's subject. The principal it produces carries the issuing key as
+`keyId`. A principal that signed with no device key (an app's own auth profile) is refused a
+token (403): there would be no key to bind it to.
+
+> **BREAKING — `issueOneTimeTokenService(userId, keyId)`.** The service takes the key the
+> token is bound to (`signingKeyOf(getAuth(c).credential)`); `null` is refused. Untagged
+> tokens are no longer admitted by `oneTimeTokenAuth`.
 
 ## Ops tokens (`spfn ops`)
 
@@ -4526,29 +4717,22 @@ Responses and errors MUST be canonical bytes with the contract envelope — buil
 without forking the middleware or wrapping it:
 
 ```typescript
-import { registerAuthProfile, type AuthContext } from '@spfn/auth/server';
+import { registerAuthProfile, type AuthProfileIdentity } from '@spfn/auth/server';
 import { UnauthorizedError } from '@spfn/core/errors';
 
 // At boot — server.config.ts, before the server starts taking requests.
-registerAuthProfile('serviceTokenV1', {
-    verify: async (c): Promise<AuthContext> =>
+registerAuthProfile('acmeDeviceV1', {
+    verify: async (c): Promise<AuthProfileIdentity> =>
     {
-        const user = await findServiceAccount(c.req.header('x-acme-service-token'));
-        if (user === null)
+        const device = await verifyAcmeDevice(c.req.header('x-acme-device-proof'));
+        if (device === null)
         {
             // A refusal leaves the verifier as a throw. It reaches the app's
             // error handler exactly as the Bearer path's does.
-            throw new UnauthorizedError({ message: 'Invalid service token' });
+            throw new UnauthorizedError({ message: 'Invalid device proof' });
         }
 
-        return {
-            user,
-            userId: String(user.id),
-            keyId: 'service-token',
-            role: null,
-            locale: 'en',
-            scheme: 'serviceTokenV1',
-        };
+        return { userId: String(device.userId), keyId: device.id, scheme: 'acmeDeviceV1' };
     },
 });
 ```
@@ -4557,9 +4741,19 @@ A request naming the profile is then answered by that verifier:
 
 ```http
 POST /v1/reports
-x-spfn-auth-profile: serviceTokenV1
-x-acme-service-token: <the app's own credential>
+x-spfn-auth-profile: acmeDeviceV1
+x-acme-device-proof: <the app's own credential>
 ```
+
+- **The verifier says who; the admission decides.** It answers an `AuthProfileIdentity` — the
+  account id, the key id it names for it, the scheme — never a principal. `runAuthProfile`
+  admits it with `admitPrincipal` (credential `appProfile`): the account is read on the
+  primary with its role and locale, a suspended or deleting account is refused with the errors
+  the Bearer path gives, and the second-factor policy applies.
+
+> **BREAKING — a verifier returns `AuthProfileIdentity`, not `AuthContext`.** Migration: return
+> `{ userId, keyId, scheme }` and drop `user`, `role` and `locale` — the admission reads them
+> from the account. A role a verifier used to state is now the account's stored role.
 
 - **Register at boot, before the first request.** The registry is read on every dispatch, so a
   profile registered later is simply a profile the requests before it did not have. Registration
@@ -4582,7 +4776,7 @@ x-acme-service-token: <the app's own credential>
   & {})`. The built-in names keep their autocomplete and a registered profile names its own scheme.
   The field stays informational: downstream permission and tenant code takes one principal shape and
   never branches on how it was produced.
-- **A profile that resolves to a user row is a person**, and a person is held to
+- **A profile that names an account is a person**, and a person is held to
   [the second-factor policy](#requiring-a-second-factor-secondfactor) like any other: while
   `secondFactor.required` holds, an account with no listed factor is refused 403
   `SECOND_FACTOR_ENROLMENT_REQUIRED` before the handler runs (anonymous under `optionalAuth`),
@@ -4661,6 +4855,14 @@ token authorizes **now**: the scopes it was issued with that its grant still hol
 | `null` | unknown, revoked, expired, refresh-kind, wrong resource, grant revoked or past its `expires_at`, no scope left | 401 `invalid_token` |
 | throws `SecondFactorEnrolmentRequiredError` | a valid token whose person may only enrol a second factor | 403 `SECOND_FACTOR_ENROLMENT_REQUIRED` |
 | throws anything else | verification failed — a database error is not a verdict on the token | 5xx |
+
+- **A suspended person's client is refused, and comes back with the account.** Every access
+  token, every refresh and every code exchange admits the grant's account through
+  `admitPrincipal`: while the account is not `active` the token answers `null` (401 at `/mcp`)
+  and the token endpoint `invalid_grant`, and nothing is spent or revoked. The grant itself is
+  kept, so once the account is reactivated (`setAccountStatus(id, 'active', …)`) the same
+  refresh token works again. The second-factor policy now applies at the token endpoint too:
+  an account that may only enrol cannot exchange or refresh (`invalid_grant`).
 
 - **Only loopback and origins you allowed.** A client may register `http://localhost:*`,
   `http://127.0.0.1:*` or `http://[::1]:*` — a CLI cannot know which port the OS will hand it,
@@ -5143,7 +5345,9 @@ active ──request (re-auth)──> pending_deletion ──grace period elapse
   `createAuthLifecycle()` automatically.
 - **Admin / GDPR-response entry points** — `requestAccountDeletionService(userId, { requestedBy: 'admin', immediate })`
   and `purgeUserService(userId)` are exported for app-side admin routes / DSR handling; the app
-  owns the route and its authorization.
+  owns the route and its authorization. An `immediate` request purges once it commits, outside
+  its transaction (`onBeforePurge` is the app's own I/O); a purge that fails there is the sweep's
+  to retry.
 
 ```typescript
 import { defineServerConfig } from '@spfn/core/server';

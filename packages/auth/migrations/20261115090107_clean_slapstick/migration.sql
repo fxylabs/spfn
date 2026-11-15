@@ -1,0 +1,1 @@
+ALTER TABLE "spfn_auth"."device_authorizations" ADD COLUMN "approved_by_key_id" text;

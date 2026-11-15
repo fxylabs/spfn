@@ -380,7 +380,9 @@ describe.skipIf(!dbAvailable)('A first sign-in losing the race for its identity 
 
         expect((await webSignIn()).searchParams.get('reason')).toBe('account_unavailable');
         expect((await nativeSignIn()).status).toBe(403);
-        expect(lookUps.calls).toBe(2);
+        // One attempt each, which reads the link twice: before the account lock
+        // and again under it (`lockLinkedAccount`).
+        expect(lookUps.calls).toBe(4);
 
         await clearTables(getTestDb());
         await initializeAuth();

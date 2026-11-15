@@ -50,7 +50,8 @@ import { users, userPublicKeys, deviceAuthorizations } from '@/server/entities';
 import { hashPassword } from '@/server/helpers/password';
 import { generateKeyPair, generateClientToken } from '@/server/lib/crypto';
 import { hashDeviceCode } from '@/server/lib/device-code';
-import { deviceAuthorizationsRepository } from '@/server/repositories';
+import { deviceAuthorizationsRepository, usersRepository } from '@/server/repositories';
+import { runInTransaction } from '@spfn/core/db';
 import type { UserStatus } from '@/server/types';
 import { authenticate } from '@/server/middleware/authenticate';
 import { getDatabase } from '@spfn/core/db';
@@ -571,11 +572,19 @@ describe.skipIf(!dbAvailable)('Device-code login', () =>
             await expire(approved.userCode);
 
             const [pendingRecord] = await readRecord(pending.userCode);
+            const [approvedRecord] = await readRecord(approved.userCode);
+            const ownerId = approvedRecord.userId!;
 
-            expect(await deviceAuthorizationsRepository.approve(pendingRecord.id, 1)).toBeNull();
-            expect(await deviceAuthorizationsRepository.deny(pendingRecord.id)).toBeNull();
-            expect(await deviceAuthorizationsRepository.consumeApproved(hashDeviceCode(approved.deviceCode)))
-                .toBeNull();
+            // Under the approver's account lock, as the services write them.
+            await runInTransaction(async () =>
+            {
+                await usersRepository.lockAccount(ownerId);
+
+                expect(await deviceAuthorizationsRepository.approve(pendingRecord.id, ownerId, 'approving-key')).toBeNull();
+                expect(await deviceAuthorizationsRepository.deny(pendingRecord.id)).toBeNull();
+                expect(await deviceAuthorizationsRepository.consumeApproved(ownerId, hashDeviceCode(approved.deviceCode)))
+                    .toBeNull();
+            });
         });
     });
 
@@ -872,12 +881,11 @@ describe.skipIf(!dbAvailable)('Device-code login', () =>
             expect(await keysOf(started.keyId)).toHaveLength(0);
         });
 
-        it('revoking one key leaves a waiting device alone', async () =>
+        it('revoking the approving key refuses the waiting device', async () =>
         {
-            // Revoking a single key names the device it is about, and the waiting
-            // one is not that device — it has no key to name. Sweeping here would
-            // mean "sign out this laptop" also cancelled an approval the user gave
-            // a minute ago on their TV.
+            // The approval was the approving device's word, and it holds only while
+            // that device's key does — the rule a device link's issuer is held to.
+            // Signing that laptop out withdraws what it approved a minute ago.
             const { authorization, started } = await approvedDevice();
 
             const [record] = await readRecord(started.userCode);
@@ -888,28 +896,24 @@ describe.skipIf(!dbAvailable)('Device-code login', () =>
 
             expect((await post('/_auth/keys/revoke', { keyId: ownKey.keyId }, authorization)).status).toBe(200);
 
-            const answer = await poll(started.deviceCode);
-            expect(answer.status).toBe(200);
-            expect((await answer.json()).status).toBe('approved');
+            await expectError(await poll(started.deviceCode), 400, 'DeviceAuthExpiredError');
+            expect(await keysOf(started.keyId)).toHaveLength(0);
         });
 
-        it('logging out leaves a waiting device alone', async () =>
+        it('logging out the approving device refuses the waiting device', async () =>
         {
-            // Same boundary from the other side: logout is one device saying it is
-            // done, not the account withdrawing everything it has granted.
             const { authorization, started } = await approvedDevice();
 
             expect((await post('/_auth/logout', {}, authorization)).status).toBe(204);
 
-            const answer = await poll(started.deviceCode);
-            expect(answer.status).toBe(200);
-            expect((await answer.json()).status).toBe('approved');
+            await expectError(await poll(started.deviceCode), 400, 'DeviceAuthExpiredError');
+            expect(await keysOf(started.keyId)).toHaveLength(0);
         });
 
-        it('rotating a key leaves a waiting device alone', async () =>
+        it('rotating the approving key refuses the waiting device', async () =>
         {
-            // Rotation swaps one device's key for another of its own. It names the
-            // key it replaces, so it is about that device and no other.
+            // Rotation revokes the key that approved; the replacement approved
+            // nothing.
             const { authorization, started } = await approvedDevice();
             const replacement = generateKeyPair('ES256');
 
@@ -921,9 +925,8 @@ describe.skipIf(!dbAvailable)('Device-code login', () =>
             }, authorization);
             expect(rotated.status).toBe(200);
 
-            const answer = await poll(started.deviceCode);
-            expect(answer.status).toBe(200);
-            expect((await answer.json()).status).toBe('approved');
+            await expectError(await poll(started.deviceCode), 400, 'DeviceAuthExpiredError');
+            expect(await keysOf(started.keyId)).toHaveLength(0);
         });
     });
 

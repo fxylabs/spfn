@@ -29,7 +29,7 @@
 import { env } from '@spfn/auth/config';
 import { PasswordResetLinkError, PasswordResetSessionError } from '@spfn/auth/errors';
 import { ValidationError } from '@spfn/core/errors';
-import { onAfterCommit } from '@spfn/core/db';
+import { onAfterCommit, runInTransaction } from '@spfn/core/db';
 import { authLogger } from '../logger';
 import {
     deviceAuthorizationsRepository,
@@ -53,15 +53,18 @@ import { loginBindingFields, type LoginResult } from './auth.service';
 import type { KeyAlgorithmType, KeyPlatformType, SessionBindingType } from '../types';
 
 /**
- * The account behind a row, if a reset may still land on it.
+ * The account behind a row, if a reset may still land on it — locked
+ * (`usersRepository.lockAccount`) before its status is read, so a suspension
+ * committing meanwhile is either seen here or waits for the step and then
+ * revokes what it wrote.
  *
- * Re-read at every step, not only at request time: an account can be disabled
- * or asked to be deleted while a link sits in a mailbox, and a link issued
- * before that must not still open it.
+ * Re-read at every step that writes, not only at request time: an account can
+ * be disabled or asked to be deleted while a link sits in a mailbox, and a link
+ * issued before that must not still open it.
  */
-async function activeUserOf(userId: number)
+async function lockActiveUserOf(userId: number)
 {
-    const user = await usersRepository.findByIdOnPrimary(userId);
+    const user = await usersRepository.lockAccount(userId);
 
     return user?.status === 'active' ? user : null;
 }
@@ -133,16 +136,23 @@ export async function requestPasswordResetService(
         return uniformResponse;
     }
 
-    await passwordResetTokensRepository.supersedeAllLiveByUserId(user.id);
+    // The account's live links are its credential state: superseded and
+    // replaced under its lock (`usersRepository.lockAccount`), in a transaction
+    // of its own that commits before any mail is handed off.
+    const row = await runInTransaction(async () =>
+    {
+        await usersRepository.lockAccount(user.id);
+        await passwordResetTokensRepository.supersedeAllLiveByUserId(user.id);
 
-    // The row is written without a token: minting belongs to whoever sends the
-    // mail, and until then a hash-less row matches no lookup.
-    const row = await passwordResetTokensRepository.createPending({
-        userId: user.id,
-        email: user.email!,
-        returnPath: params.returnPath ?? null,
-        expiresAt,
-    });
+        // The row is written without a token: minting belongs to whoever sends
+        // the mail, and until then a hash-less row matches no lookup.
+        return await passwordResetTokensRepository.createPending({
+            userId: user.id,
+            email: user.email!,
+            returnPath: params.returnPath ?? null,
+            expiresAt,
+        });
+    }, { context: 'auth:password-reset-request' });
 
     await deliverLinkMail({ kind: 'password-reset', rowId: row.id }, () => issuePasswordResetLink(row.id));
 
@@ -182,19 +192,24 @@ export async function confirmPasswordResetService(
         throw new PasswordResetLinkError();
     }
 
-    if (!await activeUserOf(row.userId))
-    {
-        authLogger.service.warn('Password reset link refused', { reason: 'account is no longer active' });
-
-        throw new PasswordResetLinkError();
-    }
-
     const setupTtlMinutes = env.SPFN_AUTH_PASSWORD_RESET_SETUP_TTL_MINUTES ?? 15;
     const setupExpiresAt = new Date(Date.now() + setupTtlMinutes * 60_000);
     const setup = mintCredential();
 
-    // Conditional update: two confirms racing on one link produce one winner.
-    const claimed = await passwordResetTokensRepository.consume(row.id, setup.hash, setupExpiresAt);
+    // Under the account lock, with the status read off it: a suspension
+    // committing meanwhile is seen here, or waits for this claim.
+    const claimed = await runInTransaction(async () =>
+    {
+        if (!await lockActiveUserOf(row.userId))
+        {
+            authLogger.service.warn('Password reset link refused', { reason: 'account is no longer active' });
+
+            throw new PasswordResetLinkError();
+        }
+
+        // Conditional update: two confirms racing on one link produce one winner.
+        return await passwordResetTokensRepository.consume(row, setup.hash, setupExpiresAt);
+    }, { context: 'auth:password-reset-confirm' });
 
     if (!claimed)
     {
@@ -259,20 +274,18 @@ export interface CompletePasswordResetParams
 async function replaceCredentials(
     row: PasswordResetToken,
     user: { id: number; emailVerifiedAt: Date | null; sessionBinding: SessionBindingType },
+    passwordHash: string,
     params: CompletePasswordResetParams,
 ): Promise<RegisterPublicKeyResult>
 {
     await usersRepository.updateById(user.id, {
-        passwordHash: await hashPassword(params.password),
+        passwordHash,
         passwordChangeRequired: false,
         // The link proved the address; the column should have said so already
         // for accounts created before the register flows stamped it.
         ...(user.emailVerifiedAt ? {} : { emailVerifiedAt: new Date() }),
     });
 
-    // The key rows are locked before any device-link row, the order every
-    // device-link statement takes them in; the revoke itself stays last.
-    await keysRepository.lockActiveByUserId(user.id);
     await deviceAuthorizationsRepository.denyAllActiveByUserId(user.id);
 
     // Device links the account issued go with them, for the same reason: an
@@ -298,9 +311,10 @@ async function replaceCredentials(
         ip: params.ip,
         userAgent: params.userAgent,
         binding: decideKeyBinding(user.sessionBinding, params.webProxy),
+        inactiveAccount: () => new PasswordResetSessionError(),
     });
 
-    if (!await passwordResetTokensRepository.complete(row.id))
+    if (!await passwordResetTokensRepository.complete(row))
     {
         authLogger.service.warn('Password reset session refused', { reason: 'lost the claim race' });
 
@@ -356,7 +370,9 @@ export async function completePasswordResetService(
         throw new PasswordResetSessionError();
     }
 
-    const user = await activeUserOf(row.userId);
+    // Hashed before the account lock is taken: the hash is the slow step.
+    const passwordHash = await hashPassword(params.password);
+    const user = await lockActiveUserOf(row.userId);
 
     if (!user)
     {
@@ -365,7 +381,7 @@ export async function completePasswordResetService(
         throw new PasswordResetSessionError();
     }
 
-    const registered = await replaceCredentials(row, user, params);
+    const registered = await replaceCredentials(row, user, passwordHash, params);
 
     // The reset happened whether or not a second factor is still to come: the
     // password is new and every key is gone, which is what this event announces.

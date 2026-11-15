@@ -23,9 +23,10 @@
  * | R25  | repository revoke outside a transaction                      | call at once (after a tick)                           |
  * | R26  | revoke of an already-revoked key                             | no call (0 rows)                                      |
  * | R27  | revoke with another user's key id                            | 0 rows, no call                                       |
- * | R28  | the one-time token manager's `verifyKey` against the real rows | a live key's token holds; a revoked, an expired-but-active and an unknown key's are refused; an untagged token holds |
+ * | R28  | the one-time token manager's `verifyKey` against the real rows | a live key's token holds; a revoked, an expired-but-active and an unknown key's are refused; a tagged token with no key holder recorded is refused; an untagged token holds |
  *
- * R18–R23 go through the mounted router; R24–R27 call the repository directly,
+ * R18–R23 go through the mounted router; R24–R27 call the repository directly
+ * (R24, R26, R27 under the account lock their transaction takes first),
  * because what they pin is the repository's own contract with a transaction.
  * R28 goes through `initOneTimeTokenManager` / `getOneTimeTokenManager`.
  */
@@ -70,6 +71,7 @@ const { runInTransaction } = await import('@spfn/core/db');
 const { initializeAuth } = await import('@/server/services/rbac.service');
 const { getRoleByName } = await import('@/server/services/role.service');
 const { keysRepository } = await import('@/server/repositories/keys.repository');
+const { usersRepository } = await import('@/server/repositories/users.repository');
 const { initOneTimeTokenManager, getOneTimeTokenManager } = await import('@/server/lib/one-time-token');
 
 const dbAvailable = await isDatabaseAvailable();
@@ -464,6 +466,17 @@ describe.skipIf(!dbAvailable)('SSE streams close after a key revocation commits 
     // The repository against a transaction
     // ========================================================================
 
+    /** The repository revoke, in a transaction that holds the account lock. */
+    function revokeUnderTheLock(keyId: string, userId: number, reason: string)
+    {
+        return runInTransaction(async () =>
+        {
+            await usersRepository.lockAccount(userId);
+
+            return await keysRepository.revokeByKeyIdAndUserId(keyId, userId, reason);
+        });
+    }
+
     it('R24 a transaction that rolls back after the repository revoke closes nothing, and the key stays active', async () =>
     {
         const { user, current } = await threeDevices('r24@test.com');
@@ -471,6 +484,7 @@ describe.skipIf(!dbAvailable)('SSE streams close after a key revocation commits 
 
         const rolledBack = runInTransaction(async () =>
         {
+            await usersRepository.lockAccount(user.id);
             expect(await keysRepository.revokeByKeyIdAndUserId(current.keyId, user.id, 'R24')).not.toBeNull();
             throw new Error('R24 rolls back');
         });
@@ -485,7 +499,17 @@ describe.skipIf(!dbAvailable)('SSE streams close after a key revocation commits 
         const { user, current } = await threeDevices('r25@test.com');
         forgetCloses();
 
-        expect(await keysRepository.revokeByKeyIdAndUserId(current.keyId, user.id, 'R25')).not.toBeNull();
+        // Outside a transaction no lock can be held: the row is about what the
+        // repository does there, so the test-only lock check stands aside.
+        vi.stubEnv('SPFN_AUTH_ASSERT_ACCOUNT_LOCK', '0');
+        try
+        {
+            expect(await keysRepository.revokeByKeyIdAndUserId(current.keyId, user.id, 'R25')).not.toBeNull();
+        }
+        finally
+        {
+            vi.unstubAllEnvs();
+        }
         await nextTick();
 
         expect(closeSpy).toHaveBeenCalledWith(current.keyId);
@@ -498,7 +522,7 @@ describe.skipIf(!dbAvailable)('SSE streams close after a key revocation commits 
         await markRevoked(current.keyId);
         forgetCloses();
 
-        expect(await keysRepository.revokeByKeyIdAndUserId(current.keyId, user.id, 'R26')).toBeNull();
+        expect(await revokeUnderTheLock(current.keyId, user.id, 'R26')).toBeNull();
 
         await expectNoClose();
     });
@@ -509,7 +533,7 @@ describe.skipIf(!dbAvailable)('SSE streams close after a key revocation commits 
         const { current: stranger } = await threeDevices('r27-stranger@test.com');
         forgetCloses();
 
-        expect(await keysRepository.revokeByKeyIdAndUserId(stranger.keyId, user.id, 'R27')).toBeNull();
+        expect(await revokeUnderTheLock(stranger.keyId, user.id, 'R27')).toBeNull();
 
         await expectNoClose();
         expect(await keyIsActive(stranger.keyId)).toBe(true);
@@ -529,9 +553,11 @@ describe.skipIf(!dbAvailable)('SSE streams close after a key revocation commits 
         initOneTimeTokenManager();
         const manager = getOneTimeTokenManager();
         const subject = String(user.id);
-        const verifyTagged = async (keyId: string) => manager.verify(await manager.issue(subject, { keyId }));
+        const verifyTagged = async (keyId: string) => manager.verify(await manager.issue(subject, { keyId, keyHolder: subject }));
 
         expect(await verifyTagged(live.keyId)).toBe(subject);
+        // The person is the key holder recorded beside the tag, never a parse of the subject.
+        expect(await manager.verify(await manager.issue(subject, { keyId: live.keyId }))).toBeNull();
         expect(await verifyTagged(revoked.keyId)).toBeNull();
         expect(await verifyTagged(expired.keyId)).toBeNull();
         expect(await keyIsActive(expired.keyId)).toBe(true);

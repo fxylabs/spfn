@@ -20,8 +20,8 @@
 import { keyRevokeAllTokens } from '../entities/key-revoke-all-tokens';
 import type { KeyRevokeAllToken, NewKeyRevokeAllToken } from '../entities/key-revoke-all-tokens';
 import { users } from '../entities/users';
-import { BaseRepository } from '@spfn/core/db';
 import { and, eq, gt, isNull, lt, or, sql } from 'drizzle-orm';
+import { AccountStateRepository, type AccountWrites } from './account-state.repository';
 
 /** What a live link says about itself, for the describe call that changes nothing. */
 export interface LiveRevokeAllLink
@@ -30,8 +30,15 @@ export interface LiveRevokeAllLink
     expiresAt: Date;
 }
 
-export class KeyRevokeAllTokensRepository extends BaseRepository
+export class KeyRevokeAllTokensRepository extends AccountStateRepository
 {
+    static override readonly accountWrites: AccountWrites<KeyRevokeAllTokensRepository> = {
+        create: { account: data => data.userId },
+        supersedeAllLiveByUserId: { account: userId => userId },
+        consume: { account: userId => userId },
+        purge: { exempt: 'deletes only rows no statement can spend any more — expired a week ago, or consumed or superseded a day ago; a spendable row never matches, so no request acts on what it deletes' },
+    };
+
     /**
      * Write an issued link row.
      * Write primary.
@@ -107,20 +114,21 @@ export class KeyRevokeAllTokensRepository extends BaseRepository
      *
      * One UPDATE with every condition in it and `RETURNING`, rather than a read
      * and a write: the row is claimed by whichever request the database serves
-     * first, and the other matches nothing. Nothing opens a transaction around
-     * it, so the claim is not held open across the revocation that follows.
+     * first, and the other matches nothing. Its caller holds the account's lock,
+     * and the revocation that follows commits with the claim.
      *
      * Write primary.
      *
      * @returns the account id, or null if the link was not spendable by this call
      */
-    async consume(tokenHash: string): Promise<number | null>
+    async consume(userId: number, tokenHash: string): Promise<number | null>
     {
         const rows = await this.db.execute(sql`
             UPDATE ${keyRevokeAllTokens} t
             SET consumed_at = now()
             FROM ${users} u
             WHERE t.user_id = u.id
+              AND t.user_id = ${userId}
               AND t.token_hash = ${tokenHash}
               AND t.consumed_at IS NULL
               AND t.superseded_at IS NULL

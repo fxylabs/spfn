@@ -23,9 +23,20 @@ vi.mock('@spfn/auth/server', async (importOriginal) =>
             findWithAccountEpochOnPrimary: vi.fn(),
             updateLastUsedById: vi.fn().mockResolvedValue(undefined),
         },
-        findUserWithEffectiveRoleOnPrimary: vi.fn(),
+    };
+});
+
+// The admission (admitPrincipal) reads the repositories directly: the account,
+// its role and the key in one primary read, the locale beside it.
+vi.mock('@/server/repositories', async (importOriginal) =>
+{
+    const actual = await importOriginal<typeof import('@/server/repositories')>();
+
+    return {
+        ...actual,
+        usersRepository: { findByIdWithRoleAndKeyOnPrimary: vi.fn() },
         userSettingsRepository: { findLocaleByUserId: vi.fn().mockResolvedValue('en') },
-        getPendingDeletionInfo: vi.fn(),
+        accountDeletionRequestsRepository: { findPendingByUserIdOnPrimary: vi.fn() },
     };
 });
 
@@ -35,7 +46,8 @@ import { ValidationError } from '@spfn/core/errors';
 
 import { authenticate, optionalAuth } from '@/server/middleware/authenticate';
 import { selectAuthProfile } from '@/server/middleware/auth-profiles';
-import { keysRepository, findUserWithEffectiveRoleOnPrimary } from '@spfn/auth/server';
+import { keysRepository } from '@spfn/auth/server';
+import { usersRepository } from '@/server/repositories';
 import { CLIENT_PROOF_HEADERS } from '@/server/client-proof/admission';
 import { encodeCanonicalJson, parseCanonicalJson } from '@/server/client-proof/canonical-json';
 import { ABSENT_BODY_SHA256, sha256Hex, signClientProof } from '@/server/client-proof/proof';
@@ -76,11 +88,13 @@ function validKeyRecord(overrides: Record<string, unknown> = {})
     };
 }
 
+/** The admission's one primary read: the account, its role, and the key it names. */
 function activeUser(overrides: Record<string, unknown> = {})
 {
     return {
-        user: { id: USER_ID, email: 'proof@example.com', status: 'active', ...overrides },
+        user: { id: USER_ID, email: 'proof@example.com', status: 'active', keyEpoch: 0, ...overrides },
         role: { name: 'user' },
+        key: validKeyRecord(),
     };
 }
 
@@ -259,7 +273,7 @@ describe.each(EACH_MIDDLEWARE)('clientProofV1 refusal envelope (%s)', (_name, mi
         configureClientProofReplayStore(new MemoryReplayStore());
         vi.mocked(keysRepository.updateLastUsedById).mockResolvedValue(undefined as never);
         vi.mocked(keysRepository.findWithAccountEpochOnPrimary).mockResolvedValue(validKeyRecord() as never);
-        vi.mocked(findUserWithEffectiveRoleOnPrimary).mockResolvedValue(activeUser() as never);
+        vi.mocked(usersRepository.findByIdWithRoleAndKeyOnPrimary).mockResolvedValue(activeUser() as never);
     });
 
     it.each(CLIENT_PROOF_ERROR_CODES.map((code) => [code] as const))(
@@ -319,7 +333,7 @@ describe.each(EACH_MIDDLEWARE)('clientProofV1 refusal envelope (%s)', (_name, mi
     {
         // The user-status path runs after admission and is not part of the
         // contract's refusal vocabulary — it must keep its own error class.
-        vi.mocked(findUserWithEffectiveRoleOnPrimary).mockResolvedValue(
+        vi.mocked(usersRepository.findByIdWithRoleAndKeyOnPrimary).mockResolvedValue(
             activeUser({ status: 'inactive' }) as never,
         );
 
@@ -383,7 +397,7 @@ describe('a refused proven call through the whole server stack', () =>
         configureClientProofReplayStore(new MemoryReplayStore());
         vi.mocked(keysRepository.updateLastUsedById).mockResolvedValue(undefined as never);
         vi.mocked(keysRepository.findWithAccountEpochOnPrimary).mockResolvedValue(validKeyRecord() as never);
-        vi.mocked(findUserWithEffectiveRoleOnPrimary).mockResolvedValue(activeUser() as never);
+        vi.mocked(usersRepository.findByIdWithRoleAndKeyOnPrimary).mockResolvedValue(activeUser() as never);
     });
 
     function appWithAuth(): Hono

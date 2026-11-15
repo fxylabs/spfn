@@ -24,7 +24,7 @@ import type { Context } from 'hono';
 import { defineMiddleware } from '@spfn/core/route';
 import { UnauthorizedError } from '@spfn/core/errors';
 
-import type { KeyAlgorithmType, User } from '@spfn/auth/server';
+import type { KeyAlgorithmType } from '@spfn/auth/server';
 import { verifyClientToken, decodeToken, authLogger, keysRepository } from '@spfn/auth/server';
 import {
     InvalidTokenError,
@@ -37,13 +37,12 @@ import type { UserPublicKey } from '../entities/user-public-keys';
 import { readContextClientIdentity } from '../client-proof/version-middleware';
 import { attestedClientIp } from '../lib/device-provenance';
 import { keyLiveness } from '../lib/key-liveness';
-import { resolveAuthenticatedUser, runAuthProfile, type AuthContext, type AuthProfileOutcome } from './auth-profiles';
+import { runAuthProfile, type AuthContext, type AuthProfileOutcome } from './auth-profiles';
 import { matchesMachineDiscriminator } from './machine-principals';
-import { assertSecondFactorAdmits } from '../services/second-factor-policy.service';
+import { admissionRefusalError, admitPrincipal, authContextFor, type Admission } from '../services/admission.service';
 import { registerEnrolmentGate } from '../lib/enrolment-routes';
-import type { ProfileLocale } from '../lib/profile-locale';
 
-// Auth context type — one principal shape for every scheme (see auth-profiles).
+// Auth context type — one principal shape for every scheme (see admission.service).
 export type { AuthContext } from './auth-profiles';
 
 /**
@@ -229,25 +228,19 @@ function bearerRefusal(c: Context, refused: BearerRefusal): Error
 }
 
 /**
- * The principal a verified Bearer key resolves to.
- *
- * The one place the Bearer path builds an `AuthContext`, so that a middleware
- * added beside `authenticate` cannot invent a second shape of it.
+ * The admission of a verified Bearer key: the account, the key's liveness on
+ * the same read, and the second-factor policy — `admitPrincipal`, as every
+ * door asks it. `route` is the request for the global `authenticate`, whose
+ * enrolment routes the policy exempts, and for `optionalAuth`, which is no
+ * enrolment gate and so exempts none.
  */
-export function bearerAuthContext(
-    keyId: string,
-    resolved: { user: User; role: string | null } & ProfileLocale,
-): AuthContext
+export async function admitBearerPrincipal(c: Context, key: UserPublicKey): Promise<Admission>
 {
-    return {
-        user: resolved.user,
-        userId: String(resolved.user.id),
-        keyId,
-        role: resolved.role,
-        locale: resolved.locale,
-        chosenLocale: resolved.chosenLocale,
-        scheme: 'bearer',
-    };
+    return await admitPrincipal({
+        userId: key.userId,
+        credential: { kind: 'deviceKey', keyId: key.keyId },
+        route: c,
+    });
 }
 
 /**
@@ -314,13 +307,17 @@ export const authenticate = defineMiddleware('auth', async (c, next) =>
     const keyRecord = outcome.key;
     const keyId = keyRecord.keyId;
 
-    // 5.–6. Load the user and apply the account-status rules — the shared
-    // path every scheme takes (see resolveAuthenticatedUser) — then the
-    // second-factor policy, which an enrolment route exempts here.
-    const resolved = await resolveAuthenticatedUser(keyRecord.userId);
-    const { user } = resolved;
+    // 5.–6. The admission every door takes (admitPrincipal): the account's
+    // status, the key's liveness on the same read, then the second-factor
+    // policy, which an enrolment route exempts here.
+    const admission = await admitBearerPrincipal(c, keyRecord);
 
-    await assertSecondFactorAdmits(user.id, c);
+    if ('refused' in admission)
+    {
+        throw admissionRefusalError(admission.refused);
+    }
+
+    const { user } = admission.admitted;
 
     // 7. Update last used timestamp (fire-and-forget)
     // Don't await to avoid blocking the request
@@ -337,7 +334,7 @@ export const authenticate = defineMiddleware('auth', async (c, next) =>
 
     // 8. Attach auth data to context
     // Available in downstream route handlers via c.get('auth')
-    c.set('auth', bearerAuthContext(keyId, resolved));
+    c.set('auth', authContextFor(admission.admitted, 'bearer'));
 
     // Log API access
     const method = c.req.method;
@@ -460,20 +457,20 @@ export const optionalAuth = defineMiddleware('optionalAuth', async (c, next) =>
             keyRecord.algorithm as KeyAlgorithmType,
         );
 
-        // The account rules `authenticate` applies, through the one function
-        // that applies them, and the second-factor policy — which exempts no
-        // route here, this not being the enrolment gate. An account that is not
-        // active, and one the policy holds to enrolling, throw here and so
-        // continue anonymously, which is this middleware's answer to an
-        // unusable principal.
-        const resolved = await resolveAuthenticatedUser(keyRecord.userId);
+        // The admission `authenticate` asks, through the one function that
+        // answers it. A refusal — an account that is not active, a key that
+        // died, a person the policy holds to enrolling — continues
+        // anonymously, which is this middleware's answer to an unusable
+        // principal.
+        const admission = await admitBearerPrincipal(c, keyRecord);
 
-        await assertSecondFactorAdmits(resolved.user.id, c);
+        if ('admitted' in admission)
+        {
+            keysRepository.updateLastUsedById(keyRecord.id, readContextClientIdentity(c), attestedClientIp(c))
+                .catch((err: unknown) => authLogger.middleware.error('Failed to update lastUsedAt', err));
 
-        keysRepository.updateLastUsedById(keyRecord.id, readContextClientIdentity(c), attestedClientIp(c))
-            .catch((err: unknown) => authLogger.middleware.error('Failed to update lastUsedAt', err));
-
-        c.set('auth', bearerAuthContext(keyId, resolved));
+            c.set('auth', authContextFor(admission.admitted, 'bearer'));
+        }
     }
     catch
     {

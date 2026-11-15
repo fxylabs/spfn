@@ -5,10 +5,10 @@
  * how an address is compared, and that the value is re-read per call so a
  * test — or an operator — changing it needs no reset.
  *
- * The last block is a source scan: no middleware may load a principal's role
- * except through `findUserWithEffectiveRole` (or its primary-read twin
- * `findUserWithEffectiveRoleOnPrimary`), so a middleware added later cannot
- * skip the policy by calling the repository itself.
+ * The last block is a source scan: no middleware loads a principal's role
+ * itself — the admission (`admitPrincipal`) does, through
+ * `applyRoleEmailDomainPolicy` — so a middleware added later cannot skip the
+ * policy by calling the repository itself.
  */
 
 import { describe, it, expect, afterEach } from 'vitest';
@@ -165,16 +165,14 @@ describe('source scan: role resolution goes through findUserWithEffectiveRole', 
         expect(offenders).toEqual([]);
     });
 
-    it('the scan reads the middlewares that resolve a principal', () =>
+    it('no middleware resolves a role itself: the admission does, through the policy', () =>
     {
         const resolving = readdirSync(MIDDLEWARE_DIR)
             .filter(file => file.endsWith('.ts'))
             .filter(file => /findUserWithEffectiveRole(OnPrimary)?\(/.test(readFileSync(join(MIDDLEWARE_DIR, file), 'utf8')));
+        const admission = readFileSync(join(MIDDLEWARE_DIR, '..', 'services', 'admission.service.ts'), 'utf8');
 
-        expect(resolving.sort()).toEqual([
-            'auth-profiles.ts',
-            'authenticate-for-renewal.ts',
-            'one-time-token-auth.ts',
-        ]);
+        expect(resolving).toEqual([]);
+        expect(admission).toContain('applyRoleEmailDomainPolicy(read.account)');
     });
 });

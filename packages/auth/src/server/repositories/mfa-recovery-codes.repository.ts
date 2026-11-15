@@ -10,14 +10,20 @@
  * outside every query this class can make.
  */
 
-import { BaseRepository } from '@spfn/core/db';
-import { and, count, eq, isNull, max } from 'drizzle-orm';
+import { and, count, eq, isNull, max, sql } from 'drizzle-orm';
 
 import { mfaRecoveryCodes } from '../entities/mfa-recovery-codes';
 import type { MfaRecoveryCode } from '../entities/mfa-recovery-codes';
+import { AccountStateRepository, type AccountWrites } from './account-state.repository';
 
-export class MfaRecoveryCodesRepository extends BaseRepository
+export class MfaRecoveryCodesRepository extends AccountStateRepository
 {
+    static override readonly accountWrites: AccountWrites<MfaRecoveryCodesRepository> = {
+        createGeneration: { account: userId => userId },
+        consume: { account: userId => userId },
+        deleteByUserId: { account: userId => userId },
+    };
+
     /**
      * The account's newest generation, or 0 when it has never had codes.
      *
@@ -71,20 +77,34 @@ export class MfaRecoveryCodesRepository extends BaseRepository
     }
 
     /**
-     * Spend one code, if this call is the one that spends it.
+     * Spend one code, if this call is the one that spends it, and only while
+     * its generation is still the account's newest.
      *
      * One conditional UPDATE, like the WebAuthn challenge consume and for the
      * same reason: two requests arriving with the same code must produce one
      * winner, not two, and a read-then-write would let both read it as unused.
+     * The generation is part of the same condition because the code was matched
+     * outside the account lock: a regeneration that committed in between has
+     * revoked it, and a revoked code spends nothing.
      *
      * @returns true when this call spent the row
      */
-    async consume(id: number): Promise<boolean>
+    async consume(userId: number, id: number): Promise<boolean>
     {
+        const newest = this.db
+            .select({ generation: max(mfaRecoveryCodes.generation) })
+            .from(mfaRecoveryCodes)
+            .where(eq(mfaRecoveryCodes.userId, userId));
+
         const result = await this.db
             .update(mfaRecoveryCodes)
             .set({ usedAt: new Date() })
-            .where(and(eq(mfaRecoveryCodes.id, id), isNull(mfaRecoveryCodes.usedAt)))
+            .where(and(
+                eq(mfaRecoveryCodes.id, id),
+                eq(mfaRecoveryCodes.userId, userId),
+                isNull(mfaRecoveryCodes.usedAt),
+                eq(mfaRecoveryCodes.generation, sql`(${newest})`),
+            ))
             .returning();
 
         return result.length > 0;

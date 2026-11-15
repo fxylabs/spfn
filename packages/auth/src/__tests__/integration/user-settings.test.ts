@@ -31,7 +31,7 @@ vi.mock('@spfn/notification/server', async (importOriginal) =>
 const { resetMemoryRateLimitStore } = await import('@spfn/core/middleware');
 const { initializeAuth } = await import('@/server/services/rbac.service');
 const { getRoleByName } = await import('@/server/services/role.service');
-const { resolveAuthenticatedUser } = await import('@/server/middleware/auth-profiles');
+const { admitPrincipal } = await import('@/server/services/admission.service');
 const { authLogger } = await import('@/server/logger');
 const { configureDeletion } = await import('@/server/lib/deletion-config');
 const { purgeUserService } = await import('@/server/services/account-deletion.service');
@@ -58,6 +58,19 @@ const SETTINGS = defineUserSettings([
     },
     { key: 'itSettings.lastTemplate', schema: Type.Union([Type.String(), Type.Null()]), default: 'blank' },
 ]);
+
+/** The principal an account resolves to — through `admitPrincipal`, as every door reaches it. */
+async function resolveAuthenticatedUser(userId: number)
+{
+    const admission = await admitPrincipal({ userId, credential: { kind: 'appProfile', profile: 'test', keyId: 'test' }, route: null });
+
+    if (!('admitted' in admission))
+    {
+        throw new Error(`refused: ${admission.refused.reason}`);
+    }
+
+    return admission.admitted;
+}
 
 describe.skipIf(!dbAvailable)('per-person settings (case table #161)', () =>
 {

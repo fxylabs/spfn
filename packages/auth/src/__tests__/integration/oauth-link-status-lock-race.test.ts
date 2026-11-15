@@ -110,13 +110,13 @@ describe.skipIf(!dbAvailable)('OAuth link callback: status read under the row lo
         });
         await blockerReady;
 
-        const originalLock = usersRepository.lockById.bind(usersRepository);
+        const originalLock = usersRepository.lockAccount.bind(usersRepository);
         let announceLockAttempt!: () => void;
         const lockAttempted = new Promise<void>(resolve => 
         {
             announceLockAttempt = resolve; 
         });
-        vi.spyOn(usersRepository, 'lockById').mockImplementation(async userId =>
+        vi.spyOn(usersRepository, 'lockAccount').mockImplementation(async userId =>
         {
             announceLockAttempt();
 

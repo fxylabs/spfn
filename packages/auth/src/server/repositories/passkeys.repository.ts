@@ -13,11 +13,22 @@
 
 import { passkeys } from '../entities/passkeys';
 import type { NewPasskey, Passkey } from '../entities/passkeys';
-import { BaseRepository } from '@spfn/core/db';
 import { and, desc, eq, isNull } from 'drizzle-orm';
+import { AccountStateRepository, type AccountWrites } from './account-state.repository';
 
-export class PasskeysRepository extends BaseRepository
+export class PasskeysRepository extends AccountStateRepository
 {
+    static override readonly accountWrites: AccountWrites<PasskeysRepository> = {
+        create: { account: data => data.userId },
+        recordUse: { account: passkey => passkey.userId },
+        renameByIdAndUserId: { exempt: 'the label alone: display, authorizes nothing, read by no admission; one owner-scoped single-row statement on a live passkey, outside any transaction' },
+        revokeByIdAndUserId: { account: (_id, userId) => userId },
+        revokeAllLiveByUserId: { account: userId => userId },
+        markSecondFactorByIdAndUserId: { account: (_id, userId) => userId },
+        clearSecondFactorByUserId: { account: userId => userId },
+        deleteAllByUserId: { account: userId => userId },
+    };
+
     /**
      * Enroll a credential.
      * Write primary.
@@ -102,15 +113,41 @@ export class PasskeysRepository extends BaseRepository
     }
 
     /**
-     * Record a successful assertion.
-     * Write primary.
+     * Record a successful assertion — only on a passkey still live, and still
+     * at the counter the assertion was verified against. The assertion was
+     * verified against a row read before the account lock: a revocation that
+     * landed since must refuse it, and so must another assertion recorded
+     * since, or two assertions verified against one counter would both succeed
+     * and the counter could move backwards. Write primary.
+     *
+     * The counter rule, after WebAuthn §6.1.1 and §7.2 step 21: the new
+     * counter must be greater than the one verified against. The one exception
+     * is the authenticator that implements no counter and reports 0 every time
+     * (the spec's "both zero"): it keeps working, with no clone detection —
+     * there is no counter to detect one by.
+     *
+     * @returns false when the passkey is revoked (or not the account's), or its
+     *   counter moved or would not advance: a refusal
      */
-    async recordUse(id: number, counter: number): Promise<void>
+    async recordUse(passkey: Pick<Passkey, 'id' | 'userId' | 'counter'>, newCounter: number): Promise<boolean>
     {
-        await this.db
+        if (!counterAdvances(passkey.counter, newCounter))
+        {
+            return false;
+        }
+
+        const result = await this.db
             .update(passkeys)
-            .set({ counter, lastUsedAt: new Date() })
-            .where(eq(passkeys.id, id));
+            .set({ counter: newCounter, lastUsedAt: new Date() })
+            .where(and(
+                eq(passkeys.id, passkey.id),
+                eq(passkeys.userId, passkey.userId),
+                isNull(passkeys.revokedAt),
+                eq(passkeys.counter, passkey.counter),
+            ))
+            .returning({ id: passkeys.id });
+
+        return result.length > 0;
     }
 
     /**
@@ -245,6 +282,12 @@ export class PasskeysRepository extends BaseRepository
 
         return result.length;
     }
+}
+
+/** The counter rule `recordUse` states: strictly up, or an authenticator that counts nothing. */
+function counterAdvances(verifiedAgainst: number, newCounter: number): boolean
+{
+    return newCounter > verifiedAgainst || (newCounter === 0 && verifiedAgainst === 0);
 }
 
 // Default instance export

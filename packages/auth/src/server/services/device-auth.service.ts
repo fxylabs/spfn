@@ -40,11 +40,13 @@ import {
     DeviceAuthAlreadyHandledError,
     DeviceAuthDeniedError,
     InvalidKeyFingerprintError,
+    SecondFactorEnrolmentRequiredError,
 } from '@spfn/auth/errors';
 import { onAfterCommit } from '@spfn/core/db';
 import { getShutdownManager } from '@spfn/core/server';
 
 import { deviceAuthorizationsRepository, usersRepository } from '../repositories';
+import type { User } from '../entities/users';
 import type { DeviceAuthorization, DeviceAuthStatus } from '../entities/device-authorizations';
 import { type KeyAlgorithmType, type KeyPlatformType } from '../types';
 import { getDeviceAuthConfig } from '../lib/device-auth-config';
@@ -66,7 +68,7 @@ import {
 } from './key.service';
 import { decideKeyBinding } from '../lib/key-policy';
 import { updateLastLoginService } from './user.service';
-import { getPendingDeletionInfo } from './account-deletion.service';
+import { admitPrincipal } from './admission.service';
 import { loginBindingFields, type LoginResult } from './auth.service';
 import { mfaEnrolledForUser } from './mfa.service';
 import { secondFactorEnrolmentFields } from './second-factor-policy.service';
@@ -123,6 +125,9 @@ export interface ApproveDeviceAuthParams
 
     /** The approver, read from their session. Never from a request body. */
     userId: number;
+
+    /** The device key the approver signed with — collection needs it still live. */
+    keyId: string;
 }
 
 export interface DenyDeviceAuthParams
@@ -411,8 +416,12 @@ export async function approveDeviceAuthService(
     // The transition names `pending` and the TTL itself, so the read above is for
     // the refusal message only. A record that moved between the two — a second
     // approver, a deny from another device — or one that passed its expiry in the
-    // same gap fails the transition rather than overwriting it.
-    const approved = await deviceAuthorizationsRepository.approve(record.id, params.userId);
+    // same gap fails the transition rather than overwriting it. It binds the
+    // record to the approving account, so that account's lock comes first
+    // (`usersRepository.lockAccount`): a revoke-all denies its approved records
+    // under the same lock.
+    await usersRepository.lockAccount(params.userId);
+    const approved = await deviceAuthorizationsRepository.approve(record.id, params.userId, params.keyId);
 
     if (!approved)
     {
@@ -559,7 +568,18 @@ export async function pollDeviceAuthService(
         };
     }
 
-    const consumed = await deviceAuthorizationsRepository.consumeApproved(deviceCodeHash);
+    // userId is non-null on any record that reached `approved` — the transition
+    // that sets the status sets it in the same statement — but it is a nullable
+    // column, so the impossible case is refused rather than coerced.
+    if (record.userId === null)
+    {
+        throw new DeviceAuthNotFoundError();
+    }
+
+    // The account the key joins is locked (`usersRepository.lockAccount`) before
+    // the record is spent and the approving key's row is read under share.
+    await usersRepository.lockAccount(record.userId);
+    const consumed = await deviceAuthorizationsRepository.consumeApproved(record.userId, deviceCodeHash);
 
     if (!consumed)
     {
@@ -573,22 +593,16 @@ export async function pollDeviceAuthService(
         );
     }
 
-    // userId is non-null on any record that reached `approved` — the transition
-    // that sets the status sets it in the same statement — but it is a nullable
-    // column, so the impossible case is refused rather than coerced.
-    if (consumed.userId === null)
-    {
-        throw new DeviceAuthNotFoundError();
-    }
-
     return {
         status: 'approved',
         ...await completeDeviceLogin({
-            userId: consumed.userId,
+            userId: record.userId,
+            approvingKeyId: consumed.approvedByKeyId!,
             key: consumed,
             channel: 'device-code',
             provenance: params,
             missingAccount: () => new DeviceAuthNotFoundError(),
+            expiredRecord: () => new DeviceAuthExpiredError(),
         }),
     };
 }
@@ -608,12 +622,51 @@ export interface CompleteDeviceLoginParams
 {
     /** The account the key joins: the approver's, or the link's issuer's. */
     userId: number;
+    /** The key that approved: the approver's, or the one that issued the link. */
+    approvingKeyId: string;
     key: ParkedDeviceKey;
     channel: 'device-code' | 'device-link';
     /** The polling device's request — the device that will be signing. */
     provenance: DeviceProvenance;
     /** The flow's own refusal for an account that is gone by the time the key is collected. */
     missingAccount: () => Error;
+    /** The flow's own refusal for a record whose approving key died before collection. */
+    expiredRecord: () => Error;
+}
+
+/**
+ * The account a collection signs in to, admitted on the key that approved it.
+ *
+ * The approving key was already judged live in the statement that spent the
+ * record (`liveKeyExists`); a refusal for it here is the race after that, and
+ * is answered as the expiry that statement would have answered.
+ */
+async function admittedApprover(params: CompleteDeviceLoginParams): Promise<User>
+{
+    const admission = await admitPrincipal({
+        userId: params.userId,
+        credential: { kind: 'deviceKey', keyId: params.approvingKeyId },
+        route: null,
+    });
+
+    if ('admitted' in admission)
+    {
+        return admission.admitted.user;
+    }
+
+    switch (admission.refused.reason)
+    {
+        case 'accountMissing':
+            throw params.missingAccount();
+        case 'accountDisabled':
+            throw new AccountDisabledError({ status: admission.refused.status });
+        case 'pendingDeletion':
+            throw new AccountPendingDeletionError({ purgeScheduledAt: admission.refused.purgeScheduledAt });
+        case 'enrolmentRequired':
+            throw new SecondFactorEnrolmentRequiredError();
+        default:
+            throw params.expiredRecord();
+    }
 }
 
 /**
@@ -625,9 +678,11 @@ export interface CompleteDeviceLoginParams
  * alike — a client cannot tell which door it came through, and neither can a
  * weakness be fixed in one and left in the other.
  *
- * The account is judged here and not only at approve time, with the same gate
- * and the same errors `loginService` uses, because approval and collection are
- * separate moments and the account can change between them. A user who approves
+ * The person is admitted here and not only at approve time — `admitPrincipal`
+ * on the approving key, as every door asks it, answering an account that is
+ * not active with the errors `loginService` uses — because approval and
+ * collection are separate moments and the account, or the approving device,
+ * can change between them. A user who approves
  * a device and then asks for their account to be deleted must not be handed a
  * fresh signing key by the next poll: that key would be created after the
  * deletion's own revoke-all swept the old ones, so cancelling the deletion later
@@ -637,26 +692,7 @@ export interface CompleteDeviceLoginParams
 export async function completeDeviceLogin(params: CompleteDeviceLoginParams): Promise<DeviceAuthLogin>
 {
     const { key, provenance } = params;
-    const user = await usersRepository.findById(params.userId);
-
-    if (!user)
-    {
-        throw params.missingAccount();
-    }
-
-    if (user.status !== 'active')
-    {
-        if (user.status === 'pending_deletion')
-        {
-            const pending = await getPendingDeletionInfo(user.id);
-
-            throw new AccountPendingDeletionError({
-                purgeScheduledAt: pending?.purgeScheduledAt.toISOString(),
-            });
-        }
-
-        throw new AccountDisabledError({ status: user.status });
-    }
+    const user = await admittedApprover(params);
 
     // The provenance is the polling device's, not the approving one's: this is
     // the request that turns a parked key into a registered one, and the device
@@ -670,6 +706,7 @@ export async function completeDeviceLogin(params: CompleteDeviceLoginParams): Pr
         deviceName: key.deviceName ?? undefined,
         platform: key.platform ?? undefined,
         channel: params.channel,
+        missingAccount: params.missingAccount,
         ip: provenance.ip,
         userAgent: provenance.userAgent,
         binding: decideKeyBinding(user.sessionBinding, provenance.webProxy),

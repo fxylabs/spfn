@@ -9,14 +9,20 @@
  * grows with every step-up for no reader.
  */
 
-import { BaseRepository } from '@spfn/core/db';
 import { and, eq } from 'drizzle-orm';
 
 import { mfaVerifications } from '../entities/mfa-verifications';
 import type { MfaVerification, MfaVerificationMethod } from '../entities/mfa-verifications';
+import { AccountStateRepository, type AccountWrites } from './account-state.repository';
 
-export class MfaVerificationsRepository extends BaseRepository
+export class MfaVerificationsRepository extends AccountStateRepository
 {
+    static override readonly accountWrites: AccountWrites<MfaVerificationsRepository> = {
+        record: { account: (_keyId, userId) => userId },
+        moveToKeyId: { account: userId => userId },
+        deleteByUserId: { account: userId => userId },
+    };
+
     /** When this device last stepped up, if it ever did. */
     async findByKeyId(keyId: string): Promise<MfaVerification | null>
     {

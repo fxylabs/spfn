@@ -11,6 +11,7 @@
  */
 
 import { runInTransaction, onAfterCommit } from '@spfn/core/db';
+import { ValidationError } from '@spfn/core/errors';
 
 import {
     InvalidKeyFingerprintError,
@@ -18,12 +19,11 @@ import {
     NonceKeyBindingError,
 } from '@spfn/auth/errors';
 import { verifyKeyFingerprint } from '../helpers/jwt';
-import { socialAccountsRepository } from '../repositories';
 import { type SocialProvider, type KeyAlgorithmType, type KeyPlatformType } from '../types';
 import { getOAuthProvider, type NormalizedIdentity } from '../lib/oauth';
 import { providerAccountFields } from '../lib/oauth/provider-account';
 import { assertSignInProvider } from '../lib/config';
-import { createOrLinkUser, assertActiveForOAuthSession, backfillVerifiedEmail, retryContendedSignIn } from './oauth.service';
+import { createOrLinkUser, assertActiveForOAuthSession, backfillVerifiedEmail, lockLinkedAccount, retryContendedSignIn } from './oauth.service';
 import { registerPublicKeyService } from './key.service';
 import type { MfaChallengeHandle } from './login-result';
 import { updateLastLoginService } from './user.service';
@@ -177,10 +177,7 @@ async function persistNativeLogin(
     return retryContendedSignIn(params.provider, () => runInTransaction(async () =>
     {
         // providerUserId 우선 매칭 → 없으면 신규 생성/이메일 연결
-        const existing = await socialAccountsRepository.findByProviderAndProviderId(
-            params.provider,
-            identity.providerUserId,
-        );
+        const existing = await lockLinkedAccount(params.provider, identity.providerUserId);
 
         let userId: number;
         let isNewUser = false;
@@ -226,6 +223,7 @@ async function persistNativeLogin(
             deviceName: params.deviceName,
             platform: params.platform,
             channel: 'oauth-native',
+            missingAccount: () => new ValidationError({ message: 'User not found' }),
             ip: params.ip,
             userAgent: params.userAgent,
             loginEvent: {

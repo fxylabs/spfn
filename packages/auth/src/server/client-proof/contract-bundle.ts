@@ -441,8 +441,16 @@ import { CLIENT_IDENTITY_HEADERS, CLIENT_KINDS, SERVER_CONTRACT_HEADERS } from '
  * committed; only a second contention answers this. A patch, by
  * 0.10.1's rule: codes join the open list, and no operation, type or enum
  * changes shape, so the supported range does not move.
+ *
+ * 0.14.3 lists `AccountBusyError` (503, retryable). Every operation that writes
+ * an account's credential state — a sign-in, a step-up, a key rotation or
+ * revocation, a device approval — first takes that account's lock, and waits
+ * for it a bounded time; a wait that runs out answers this code instead of
+ * a connection error, with nothing written. `deviceAuthorization.pendingRule`
+ * names it beside TooManyRequestsError as a retryable answer that does not end
+ * a poll's wait. A patch, by 0.10.1's rule.
  */
-export const CONTRACT_VERSION = '0.14.2';
+export const CONTRACT_VERSION = '0.14.3';
 export const CONTRACT_MAJOR = 0;
 export const CONTRACT_NAME = 'spfn-mobile-contract';
 
@@ -1417,6 +1425,14 @@ const REST_SURFACE_ERRORS: readonly RestSurfaceError[] = [
         summary: 'the rate limit for this endpoint was exceeded; the same request succeeds after the window',
     },
     {
+        code: 'AccountBusyError',
+        httpStatus: 503,
+        retryable: true,
+        summary:
+            'another change to the same account held its lock past the bound a request waits for it — nothing '
+            + 'this request meant to write was written; send it again after the Retry-After header\'s seconds',
+    },
+    {
         code: 'Error',
         httpStatus: 500,
         retryable: false,
@@ -1691,9 +1707,10 @@ export function buildMobileContractBundle(): MobileContractBundle
                 + 'long passes, capped by the server; a pending answer then takes the time already waited off '
                 + 'intervalMillis, so after a wait at least that long it is 0 and the client asks again at once. '
                 + 'Every other answer is an error response, and an error response ends the wait '
-                + 'unless its entry under errors marks it retryable — TooManyRequestsError is the only one that '
-                + 'does today, and it means the device polled faster than the limit allows, so it resumes after '
-                + 'the window rather than treating the code as answered. DeviceAuthDeniedError, '
+                + 'unless its entry under errors marks it retryable — TooManyRequestsError and AccountBusyError '
+                + 'are the two that do today: the first means the device polled faster than the limit allows, so '
+                + 'it resumes after the window, the second that the account the approval signs in to was busy with '
+                + 'another change, so it asks again; neither is treated as the code being answered. DeviceAuthDeniedError, '
                 + 'DeviceAuthExpiredError and DeviceAuthNotFoundError are the device-code outcomes among the ones '
                 + 'that end it, and they are not the whole set: this operation also answers ValidationError, the '
                 + 'account and key refusals raised when the approved branch turns the approval into a login, and '

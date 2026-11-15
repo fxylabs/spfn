@@ -4,8 +4,13 @@
  * Handles user CRUD operations
  */
 
-import { type NewUser, type User } from '../entities/users';
-import { rolesRepository, usersRepository } from '../repositories';
+import { runInTransaction } from '@spfn/core/db';
+import { NotFoundError } from '@spfn/core/errors';
+
+import { type User } from '../entities/users';
+import type { AccountStatusSource, UserStatus } from '../types';
+import { keysRepository, rolesRepository, usersRepository, type UserUpdate } from '../repositories';
+import { accountStatusRepository } from '../repositories/account-status.repository';
 import { assertEmailAllowedForRole, getRoleEmailDomainPolicy } from '../lib/role-email-domains';
 import { ValidationError } from '@spfn/core/errors';
 import { ReservedUsernameError, UsernameAlreadyTakenError } from '@spfn/auth/errors';
@@ -49,7 +54,7 @@ export async function updateLastLoginService(userId: number)
  * The email columns as they will stand after `updates`. An update that changes
  * the address together with the role is judged on the new address.
  */
-function emailAfterUpdate(user: User, updates: Partial<NewUser>)
+function emailAfterUpdate(user: User, updates: UserUpdate)
 {
     return {
         email: updates.email !== undefined ? updates.email : user.email,
@@ -63,7 +68,7 @@ function emailAfterUpdate(user: User, updates: Partial<NewUser>)
  * Reads nothing when no policy is configured, so an install without one
  * behaves exactly as before.
  */
-async function assertRoleGrantAllowed(userId: number, roleId: number, updates: Partial<NewUser>): Promise<void>
+async function assertRoleGrantAllowed(userId: number, roleId: number, updates: UserUpdate): Promise<void>
 {
     if (getRoleEmailDomainPolicy().size === 0)
     {
@@ -85,19 +90,110 @@ async function assertRoleGrantAllowed(userId: number, roleId: number, updates: P
  * restricted by `SPFN_AUTH_ROLE_EMAIL_DOMAINS` and the account's email is
  * outside it, unverified, or absent.
  *
+ * `status` is not an update this takes: an account's status changes through
+ * `setAccountStatus`, which ends what the new status forbids.
+ *
  * @throws RoleEmailDomainNotAllowedError (403) when the policy refuses the role
  */
 export async function updateUserService(
     userId: number,
-    updates: Partial<NewUser>,
+    updates: UserUpdate,
 ): Promise<void>
 {
-    if (updates.roleId != null)
+    await runInTransaction(async () =>
     {
-        await assertRoleGrantAllowed(userId, updates.roleId, updates);
+        // The account row is written under its lock (`usersRepository.lockAccount`),
+        // and a role grant is judged against the email read under it.
+        await usersRepository.lockAccount(userId);
+
+        if (updates.roleId != null)
+        {
+            await assertRoleGrantAllowed(userId, updates.roleId, updates);
+        }
+
+        await usersRepository.updateById(userId, updates);
+    }, { context: 'auth:user-update' });
+}
+
+/** The status an account status change leaves, and why the change is made. */
+export interface AccountStatusTransition
+{
+    /** The status the account has to be in for the change to happen; `'any'` holds whatever it was. */
+    from: AccountStatusSource;
+    /** Recorded on every key the change revokes. */
+    reason: string;
+}
+
+/**
+ * What `setAccountStatus` did: the account moved, or it was refused because the
+ * account was not in the transition's `from` when the write ran — a writer that
+ * committed after the caller decided on the change has the last word.
+ */
+export type AccountStatusChange = 'changed' | 'refused';
+
+/**
+ * Change an account's status — the one writer of `users.status`.
+ *
+ * A change names the status it leaves (`from`), and the write is one
+ * conditional statement on the primary: a transition decided on a read that
+ * another writer has since overtaken — a deletion cancel reading
+ * `pending_deletion` while an operator's suspension commits — matches no row
+ * and is `'refused'`, rather than overwriting what that writer committed. The
+ * caller maps the refusal to its own answer; inside the caller's transaction,
+ * throwing that answer rolls back what it wrote before.
+ *
+ * One transaction writes the status and, for a status that forbids access
+ * (anything but `active`), ends the account's key generation: every device key
+ * is revoked, so no session of the account is admitted again and none comes
+ * back when the account is reactivated — a person signs in anew. The streams
+ * those keys opened close once the transaction commits, on every instance, by
+ * the mechanism every key revocation uses (`closeSSEConnectionsByKey`).
+ *
+ * The account lock (`usersRepository.lockAccount`) is its first statement, so
+ * a status change and a sign-in in flight serialise instead of deadlocking.
+ *
+ * OAuth 2.1 grants are kept: the admission refuses them while the account is
+ * not active, and the same grant works again after reactivation. Pending
+ * second-factor sign-ins die with the generation (`revokeAllActiveByUserId`).
+ *
+ * Joins a transaction already open on the call chain, so a caller that writes
+ * more beside the status (account deletion) commits or rolls back as one.
+ *
+ * @throws NotFoundError when no such account exists and `from` is `'any'`
+ */
+export async function setAccountStatus(
+    userId: number,
+    status: UserStatus,
+    transition: AccountStatusTransition,
+): Promise<AccountStatusChange>
+{
+    return await runInTransaction(async () =>
+    {
+        await usersRepository.lockAccount(userId);
+
+        if (!await accountStatusRepository.setStatus(userId, status, transition.from))
+        {
+            return refusedTransition(transition);
+        }
+
+        if (status !== 'active')
+        {
+            await keysRepository.revokeAllActiveByUserId(userId, transition.reason);
+        }
+
+        return 'changed';
+    }, { context: 'auth:set-account-status' });
+}
+
+/** A change from `'any'` matches no row only for an account that does not exist. */
+function refusedTransition(transition: AccountStatusTransition): AccountStatusChange
+{
+    if (transition.from === 'any')
+    {
+        throw new NotFoundError({ message: 'User not found', resource: 'User' });
     }
 
-    await usersRepository.updateById(userId, updates);
+    return 'refused';
 }
 
 /**
@@ -203,7 +299,11 @@ export async function updateUsernameService(
         }
     }
 
-    await usersRepository.updateById(userIdNum, { username });
+    await runInTransaction(async () =>
+    {
+        await usersRepository.lockAccount(userIdNum);
+        await usersRepository.updateById(userIdNum, { username });
+    }, { context: 'auth:username-update' });
 
     return await getUserProfileService(userIdNum);
 }

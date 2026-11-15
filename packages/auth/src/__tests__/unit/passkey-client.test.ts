@@ -313,6 +313,26 @@ describe('browser passkey helpers', () =>
             expect(await renewSession(renewApi({ keyId: 'x' }))).toMatchObject({ ok: false, reason: 'no-credential' });
         });
 
+        it('a 503 (AccountBusyError) is a retryable failure, not a refusal that sends the person to sign in', async () =>
+        {
+            assertionCredential();
+            const busy = Object.assign(new Error('Another change to this account is in progress. Try again.'), { statusCode: 503 });
+            const api = renewApi({});
+            (api.sessionRenewVerify.call as ReturnType<typeof vi.fn>).mockRejectedValueOnce(busy);
+
+            expect(await renewSession(api)).toEqual({ ok: false, reason: 'busy', error: busy });
+        });
+
+        it('a refusal stays a rejected promise', async () =>
+        {
+            assertionCredential();
+            const refused = Object.assign(new Error('refused'), { statusCode: 401 });
+            const api = renewApi({});
+            (api.sessionRenewVerify.call as ReturnType<typeof vi.fn>).mockRejectedValueOnce(refused);
+
+            await expect(renewSession(api)).rejects.toBe(refused);
+        });
+
         it('a browser with no WebAuthn at all: answered before the server is asked', async () =>
         {
             stubBrowser({ supported: false });

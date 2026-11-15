@@ -6,7 +6,7 @@
  */
 
 import { eq, and } from 'drizzle-orm';
-import { BaseRepository } from '@spfn/core/db';
+import { AccountStateRepository, type AccountWrites } from './account-state.repository';
 
 import { userSocialAccounts, type NewUserSocialAccount, type UserSocialAccount } from '../entities';
 import { type SocialProvider } from '../types';
@@ -46,8 +46,17 @@ const linkColumns = {
 /**
  * Social Accounts Repository 클래스
  */
-export class SocialAccountsRepository extends BaseRepository
+export class SocialAccountsRepository extends AccountStateRepository
 {
+    static override readonly accountWrites: AccountWrites<SocialAccountsRepository> = {
+        rotateTokens: { exempt: 'a re-encryption of the provider\'s own tokens (and display handle): no admission or sign-in here reads them, and the identity columns — account, provider, provider user id — are not written; conditional on the ciphertext read' },
+        createIfAbsent: { account: data => data.userId },
+        updateTokens: { exempt: 'the provider\'s own tokens (and display handle): no admission or sign-in here reads them, and the identity columns — account, provider, provider user id — are not written' },
+        deleteById: { account: link => link.userId },
+        deleteByUserIdAndProvider: { account: userId => userId },
+        deleteAllByUserId: { account: userId => userId },
+    };
+
     /**
      * 저장할 row의 토큰을 암호화한 사본
      */
@@ -266,11 +275,11 @@ export class SocialAccountsRepository extends BaseRepository
      * 소셜 계정 삭제
      * Write primary 사용
      */
-    async deleteById(id: number)
+    async deleteById(link: Pick<UserSocialAccount, 'id' | 'userId'>)
     {
         const result = await this.db
             .delete(userSocialAccounts)
-            .where(eq(userSocialAccounts.id, id))
+            .where(and(eq(userSocialAccounts.id, link.id), eq(userSocialAccounts.userId, link.userId)))
             .returning();
 
         return result[0] ?? null;

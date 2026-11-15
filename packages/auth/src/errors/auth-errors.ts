@@ -14,6 +14,7 @@ import {
     HttpError,
     InternalServerError,
     GoneError,
+    ServiceUnavailableError,
 } from '@spfn/core/errors';
 
 /**
@@ -1814,5 +1815,30 @@ export class UserSettingNotDeclaredError extends NotFoundError
             details: data.details,
         });
         this.name = 'UserSettingNotDeclaredError';
+    }
+}
+
+/**
+ * Account Busy Error (503)
+ *
+ * Another change to the same account held its lock (`usersRepository.lockAccount`)
+ * for longer than a request waits for it (`ACCOUNT_LOCK_TIMEOUT_MS`). Nothing
+ * this request meant to write was written; sending it again once the other
+ * change has landed is the answer, so it carries `retryAfter`, which the error
+ * handler answers as the `Retry-After` header. Distinct from a database
+ * `ConnectionError`: the database answered, the account was busy. On the wire
+ * it is the envelope's `code: 'AccountBusyError'`, the name the contract
+ * lists — there is no second, upper-case code.
+ */
+export class AccountBusyError extends ServiceUnavailableError
+{
+    constructor(data: { message?: string; details?: Record<string, any> } = {})
+    {
+        super({
+            message: data.message || 'Another change to this account is in progress. Try again.',
+            retryAfter: 1,
+            details: data.details,
+        });
+        this.name = 'AccountBusyError';
     }
 }

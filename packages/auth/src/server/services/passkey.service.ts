@@ -37,7 +37,7 @@ import {
 } from '@spfn/auth/errors';
 import { authLogger } from '../logger';
 import { getPasskeyConfig, isSignInProvider } from '../lib/config';
-import { mintChallenge, presentedChallenge, spendChallenge } from './webauthn-challenge.service';
+import { challengeIsLive, mintChallenge, presentedChallenge, spendChallenge } from './webauthn-challenge.service';
 import {
     buildAuthenticationOptions,
     buildRegistrationOptions,
@@ -114,17 +114,14 @@ function toSummary(row: Passkey): PasskeySummary
 }
 
 /**
- * Spend a challenge, or refuse the ceremony.
+ * Refuse the ceremony when its challenge was not live to read
+ * (`challengeIsLive`) or not there to spend under the lock (`spendChallenge`).
  *
  * @throws PasskeyChallengeError
  */
-async function consumeChallenge(
-    challenge: string,
-    kind: WebAuthnChallengeKind,
-    userId: number | null,
-): Promise<void>
+function assertChallenge(held: boolean, kind: WebAuthnChallengeKind): void
 {
-    if (await spendChallenge(challenge, kind, userId))
+    if (held)
     {
         return;
     }
@@ -339,9 +336,11 @@ export interface FinishPasskeyEnrollmentResult
 /**
  * Step 2 of enrollment — verify the attestation and keep the credential.
  *
- * Runs under `Transactional()`: the challenge is spent and the row written
- * together, so a failure after the spend leaves the challenge live and the
- * ceremony retryable, while a success can never be replayed.
+ * Runs under `Transactional()`. The challenge is read, the attestation
+ * verified, and then — under the account lock — the challenge is spent and the
+ * row written together: a failure after the spend, the lock's own
+ * `AccountBusyError` included, leaves the challenge live and the ceremony
+ * retryable, while a success can never be replayed.
  *
  * In the policy's enrolment-only state (#309) with `'passkey'` listed, the new
  * passkey is marked as the second factor in the same transaction: the ceremony
@@ -358,10 +357,9 @@ export async function finishPasskeyEnrollmentService(
 {
     await assertEnrolmentProven(params);
 
-    const marksFactor = isMethodListed('passkey') && await isEnrolmentOnly(params.userId);
     const challenge = presentedChallenge(params.response.response.clientDataJSON);
 
-    await consumeChallenge(challenge, 'registration', params.userId);
+    assertChallenge(await challengeIsLive(challenge, 'registration', params.userId), 'registration');
 
     const verified = await verifyRegistration({
         config: getPasskeyConfig(),
@@ -374,6 +372,13 @@ export async function finishPasskeyEnrollmentService(
         throw new PasskeyVerificationError();
     }
 
+    // The attestation verified, the account is locked before the challenge is
+    // spent and the row written: an operator's `resetSecondFactorService`
+    // either lands first and this enrols after it, or waits and revokes what
+    // this enrolled.
+    await usersRepository.lockAccount(params.userId);
+    assertChallenge(await spendChallenge(challenge, 'registration', params.userId), 'registration');
+
     // Global, and over revoked rows too: a credential id is reserved for good
     // once used, so this is also what refuses re-enrolling one's own revoked
     // passkey (D5). The unique constraint would catch a race here; this makes
@@ -383,6 +388,7 @@ export async function finishPasskeyEnrollmentService(
         throw new PasskeyAlreadyRegisteredError();
     }
 
+    const marksFactor = isMethodListed('passkey') && await isEnrolmentOnly(params.userId);
     const row = await passkeysRepository.create({
         userId: params.userId,
         credentialId: verified.credentialId,
@@ -460,9 +466,9 @@ export async function startRenewalCeremonyService(
  * to be caught and translated at both, and the catch is what would decide which
  * refusals stay indistinguishable.
  *
- * Every refusal spends nothing it did not have to: the challenge is consumed by
- * the same conditional UPDATE the other ceremonies use, so a replay of a
- * successful assertion finds nothing to spend.
+ * Every refusal spends nothing it did not have to: the challenge is read here,
+ * and spent under the account lock by the same conditional UPDATE the other
+ * ceremonies use, so a replay of a successful assertion finds nothing to spend.
  */
 export async function verifyRenewalAssertionService(
     userId: number,
@@ -473,7 +479,7 @@ export async function verifyRenewalAssertionService(
         ? presentedChallenge(response.response.clientDataJSON)
         : '';
 
-    if (!await spendChallenge(challenge, 'renewal', userId))
+    if (!await challengeIsLive(challenge, 'renewal', userId))
     {
         authLogger.service.warn('Renewal challenge refused');
 
@@ -521,9 +527,16 @@ async function assertionMatchesLivePasskey(
         return false;
     }
 
-    await passkeysRepository.recordUse(passkey.id, outcome.newCounter);
+    // After the verification, before the challenge and passkey rows: the
+    // account lock is the first lock this transaction takes for the account
+    // (`lockAccount`). The challenge is spent under it, and the passkey — read
+    // before it — has its use recorded only on a row still live, at the
+    // counter verified against: a revocation or another assertion that landed
+    // meanwhile refuses the renewal.
+    await usersRepository.lockAccount(userId);
 
-    return true;
+    return await spendChallenge(challenge, 'renewal', userId)
+        && await passkeysRepository.recordUse(passkey, outcome.newCounter);
 }
 
 export interface FinishPasskeyLoginParams
@@ -566,7 +579,7 @@ export async function finishPasskeyLoginService(params: FinishPasskeyLoginParams
     {
         const challenge = presentedChallenge(params.response.response.clientDataJSON);
 
-        await consumeChallenge(challenge, 'authentication', null);
+        assertChallenge(await challengeIsLive(challenge, 'authentication', null), 'authentication');
 
         const passkey = await passkeysRepository.findLiveByCredentialId(params.response.id);
 
@@ -577,9 +590,22 @@ export async function finishPasskeyLoginService(params: FinishPasskeyLoginParams
             throw new PasskeyVerificationError();
         }
 
-        const user = await assertActiveForPasskeyLogin(passkey.userId);
+        await assertActiveForPasskeyLogin(await usersRepository.findById(passkey.userId));
+        const newCounter = await verifiedCounter(passkey, params.response, challenge);
 
-        await verifyAssertion(passkey, params.response, challenge);
+        // The verification done, the account is locked (`lockAccount`) before
+        // the challenge is spent and the passkey row written, and its status
+        // is asked again under it. The passkey was read before the lock: its
+        // use is recorded only on a row still live under it, at the counter
+        // verified against, and a revocation that landed meanwhile refuses the
+        // sign-in as a revoked credential is refused (L4/L5).
+        const user = await assertActiveForPasskeyLogin(await usersRepository.lockAccount(passkey.userId));
+        assertChallenge(await spendChallenge(challenge, 'authentication', user.id), 'authentication');
+
+        if (!await passkeysRepository.recordUse(passkey, newCounter))
+        {
+            throw new PasskeyVerificationError();
+        }
 
         return await startSession(user, params);
     }, { context: 'auth:passkey-login' });
@@ -605,6 +631,7 @@ async function startSession(user: User, params: FinishPasskeyLoginParams): Promi
         deviceName: params.deviceName,
         platform: params.platform,
         channel: 'passkey',
+        missingAccount: () => new PasskeyVerificationError(),
         ip: params.ip,
         userAgent: params.userAgent,
         binding: decideKeyBinding(user.sessionBinding, params.webProxy),
@@ -687,10 +714,8 @@ function assertDeviceKeyPresent(params: FinishPasskeyLoginParams): void
  *
  * @throws AccountDisabledError | AccountPendingDeletionError
  */
-async function assertActiveForPasskeyLogin(userId: number): Promise<User>
+async function assertActiveForPasskeyLogin(user: User | null): Promise<User>
 {
-    const user = await usersRepository.findById(userId);
-
     if (!user)
     {
         throw new PasskeyVerificationError();
@@ -712,7 +737,8 @@ async function assertActiveForPasskeyLogin(userId: number): Promise<User>
 }
 
 /**
- * Check the assertion and move the counter, or refuse.
+ * Check the assertion, or refuse; the counter it moves to is the caller's to
+ * record, under the account lock.
  *
  * A regressed counter is logged by passkey id and left alone (D11). It is the
  * signal a cloned authenticator would produce, but a synced passkey reports 0
@@ -722,11 +748,11 @@ async function assertActiveForPasskeyLogin(userId: number): Promise<User>
  *
  * @throws PasskeyVerificationError
  */
-async function verifyAssertion(
+async function verifiedCounter(
     passkey: Passkey,
     response: AuthenticationResponseJSON,
     challenge: string,
-): Promise<void>
+): Promise<number>
 {
     const outcome = await verifyAuthentication({
         config: getPasskeyConfig(),
@@ -753,7 +779,7 @@ async function verifyAssertion(
         throw new PasskeyVerificationError();
     }
 
-    await passkeysRepository.recordUse(passkey.id, outcome.newCounter);
+    return outcome.newCounter;
 }
 
 /**
@@ -835,7 +861,7 @@ export async function revokePasskeyService(params: RevokePasskeyParams): Promise
         throw new PasskeyNotFoundError();
     }
 
-    await usersRepository.lockById(params.userId);
+    await usersRepository.lockAccount(params.userId);
     await assertNotLastRecoveryCredential(params.userId);
     await assertNotLastListedFactor(params.userId, { passkeyId: passkey.id });
 

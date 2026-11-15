@@ -222,7 +222,8 @@ describe.skipIf(!dbAvailable)('OAuth2 register (8a)', () =>
 
     it('registering again under the same client_name → 201 with a new client_id, the old row and its grant untouched', async () =>
     {
-        const { oauth2ClientsRepository, oauth2GrantsRepository } = await import('@/server/repositories');
+        const { oauth2ClientsRepository, oauth2GrantsRepository, usersRepository } = await import('@/server/repositories');
+        const { runInTransaction } = await import('@spfn/core/db');
         const first = await register({ client_name: NAME, redirect_uris: ['http://127.0.0.1:1/cb'] });
 
         expect(first.status).toBe(201);
@@ -232,12 +233,18 @@ describe.skipIf(!dbAvailable)('OAuth2 register (8a)', () =>
         // CLI install rather than an amendment to that consent.
         const original = await oauth2ClientsRepository.findByClientId(first.body.client_id!);
         const userId = await createTestUser(EMAIL, (await getRoleByName('user'))!.id);
-        const granted = await oauth2GrantsRepository.upsert({
-            client: original!.id,
-            user: userId,
-            resource: TEST_RESOURCE,
-            scopes: ['mcp:read'],
-            expiresAt: new Date(Date.now() + DEFAULT_GRANT_LIFETIME_MS),
+        // A grant is credential state: written under the account lock.
+        const granted = await runInTransaction(async () =>
+        {
+            await usersRepository.lockAccount(userId);
+
+            return await oauth2GrantsRepository.upsert({
+                client: original!.id,
+                user: userId,
+                resource: TEST_RESOURCE,
+                scopes: ['mcp:read'],
+                expiresAt: new Date(Date.now() + DEFAULT_GRANT_LIFETIME_MS),
+            });
         });
 
         const second = await register({ client_name: NAME, redirect_uris: ['http://127.0.0.1:2/cb'] });

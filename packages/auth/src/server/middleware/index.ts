@@ -3,12 +3,13 @@
  */
 
 export * from './authenticate';
-export { authenticateForRenewal, admitsForRenewal } from './authenticate-for-renewal';
+export { authenticateForRenewal } from './authenticate-for-renewal';
 export {
     registerAuthProfile,
     selectAuthProfile,
     runAuthProfile,
-    resolveAuthenticatedUser,
+    type AuthProfile,
+    type AuthProfileIdentity,
     type AuthProfileOutcome,
     type AuthProfileVerifier,
 } from './auth-profiles';

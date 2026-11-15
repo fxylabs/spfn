@@ -4,8 +4,8 @@
  * Core authentication logic: registration, login, logout, password management
  */
 
-import { ValidationError } from '@spfn/core/errors';
-import { onAfterCommit } from '@spfn/core/db';
+import { ConflictError, ValidationError } from '@spfn/core/errors';
+import { onAfterCommit, runInTransaction } from '@spfn/core/db';
 import {
     InvalidCredentialsError,
     AccountDisabledError,
@@ -369,6 +369,7 @@ export async function loginService(
         deviceName: params.deviceName,
         platform: params.platform,
         channel: 'password',
+        missingAccount: () => new InvalidCredentialsError(),
         ip: params.ip,
         userAgent: params.userAgent,
         binding: decideKeyBinding(user.sessionBinding, params.webProxy),
@@ -448,56 +449,88 @@ export async function changePasswordService(
     params: ChangePasswordParams,
 ): Promise<void>
 {
-    const { userId, currentPassword, newPassword, passwordHash: providedHash } = params;
+    const { userId } = params;
 
     await assertStepUp({ userId, keyId: params.keyId });
 
-    // Get user's password hash (either provided or fetch from DB)
-    let passwordHash: string | null;
-    if (providedHash)
+    const verifiedHash = await verifyCurrentPassword(params);
+    // Hashed before the account lock is taken: the hash is the slow step.
+    const newPasswordHash = await hashPassword(params.newPassword);
+
+    await runInTransaction(async () =>
     {
-        passwordHash = providedHash;
-    }
-    else
-    {
-        const user = await usersRepository.findById(userId);
-        if (!user)
+        const account = await usersRepository.lockAccount(userId);
+        if (!account)
         {
             throw new ValidationError({ message: 'User not found' });
         }
-        passwordHash = user.passwordHash;
-    }
 
-    // Verify current password (skip for OAuth-only users setting password for the first time)
-    if (passwordHash)
+        // The password verified above, read again under the lock: a change
+        // committed while it was being verified makes this one's proof stale.
+        // For an account that had none, the request sent no current password
+        // to be wrong about: another request set the first one meanwhile.
+        if (account.passwordHash !== verifiedHash)
+        {
+            throw verifiedHash === null
+                ? new ConflictError({ message: 'A password was set on this account by another request in the meantime. Send it as the current password to change it.' })
+                : new InvalidCredentialsError({ message: 'Current password is incorrect' });
+        }
+
+        await usersRepository.updatePassword(userId, newPasswordHash, true);
+        await signOutEverywhere(userId);
+    }, { context: 'auth:change-password' });
+}
+
+/**
+ * The current password checked against the hash the account holds — skipped
+ * for an OAuth-only account setting its first password.
+ *
+ * @returns the hash it was checked against, or null for an account that had none
+ */
+async function verifyCurrentPassword(params: ChangePasswordParams): Promise<string | null>
+{
+    const passwordHash = params.passwordHash ?? await storedPasswordHash(params.userId);
+
+    if (!passwordHash)
     {
-        if (!currentPassword)
-        {
-            throw new ValidationError({ message: 'Current password is required' });
-        }
-        const isValid = await verifyPassword(currentPassword, passwordHash);
-        if (!isValid)
-        {
-            throw new InvalidCredentialsError({ message: 'Current password is incorrect' });
-        }
+        return null;
     }
 
-    // Hash new password
-    const newPasswordHash = await hashPassword(newPassword);
+    if (!params.currentPassword)
+    {
+        throw new ValidationError({ message: 'Current password is required' });
+    }
 
-    // Update password and clear passwordChangeRequired flag
-    await usersRepository.updatePassword(userId, newPasswordHash, true);
+    if (!await verifyPassword(params.currentPassword, passwordHash))
+    {
+        throw new InvalidCredentialsError({ message: 'Current password is incorrect' });
+    }
 
+    return passwordHash;
+}
+
+/** On the primary: it is compared, under the lock, with what the primary holds. */
+async function storedPasswordHash(userId: number): Promise<string | null>
+{
+    const user = await usersRepository.findByIdOnPrimary(userId);
+    if (!user)
+    {
+        throw new ValidationError({ message: 'User not found' });
+    }
+
+    return user.passwordHash;
+}
+
+/**
+ * What a password change ends: every key the account holds, and every way a
+ * device could sign itself back in after it.
+ */
+async function signOutEverywhere(userId: number): Promise<void>
+{
     // The device-code requests still in flight are keys that have not been handed
     // out yet: a poll on an approved one would register a fresh active key moments
     // after the revocation below, defeating the "log me out everywhere" this call
     // exists for.
-    //
-    // Refused first, and this route is the reason the order is worth a thought —
-    // it is the one revoke-all path with no surrounding transaction, so the two
-    // statements can be interrupted between. Losing the second leaves a device
-    // still signed in, which the user can see and revoke; losing them the other
-    // way round leaves a live approval that hands out a key nothing revoked.
     await deviceAuthorizationsRepository.denyAllActiveByUserId(userId);
 
     // Device links the account issued go with them, for the same reason: an

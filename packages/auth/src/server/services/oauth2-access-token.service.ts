@@ -19,8 +19,8 @@
  *   presented was ever real. `@spfn/mcp` answers it 401 `invalid_token`, which
  *   sends the client to refresh or re-authorize.
  * - **A thrown 4xx `HttpError` — a valid token whose person may not act right
- *   now.** Today that is `SecondFactorEnrolmentRequiredError` (403,
- *   `SECOND_FACTOR_ENROLMENT_REQUIRED`). Thrown rather than nulled so the holder
+ *   now.** A 403: `AccountDisabledError`, `AccountPendingDeletionError`, or
+ *   `SecondFactorEnrolmentRequiredError` (`SECOND_FACTOR_ENROLMENT_REQUIRED`). Thrown rather than nulled so the holder
  *   of a real token is told why, and so its client keeps the token instead of
  *   re-authorizing for one that would be refused the same way. Nothing is
  *   disclosed to anyone else: every token check above refused first.
@@ -37,7 +37,19 @@
  * refused by another (RFC 8707), so a token a user approved for their MCP server
  * cannot be replayed against a neighbouring deployment that happens to share this
  * authorization server.
+ *
+ * The token names a grant; whether the person behind it may be let in — the
+ * grant not revoked, the account active on the primary, the second-factor
+ * policy — is `admitPrincipal`'s, with an `oauth2Grant` credential. A suspended
+ * account's client is refused (403) while the suspension lasts, and its grant
+ * works again once the account is reactivated.
  */
+
+import {
+    AccountDisabledError,
+    AccountPendingDeletionError,
+    SecondFactorEnrolmentRequiredError,
+} from '@spfn/auth/errors';
 
 import { isLiveGrant, oauth2GrantsRepository } from '../repositories/oauth2-grants.repository';
 import { oauth2TokensRepository } from '../repositories/oauth2-tokens.repository';
@@ -52,27 +64,14 @@ import {
     toEpochSeconds,
 } from '../lib/oauth2/tokens';
 import { authLogger } from '../logger';
-import { assertSecondFactorAdmits } from './second-factor-policy.service';
+import {
+    accessTokenPrincipalFor,
+    admitPrincipal,
+    type AdmissionRefusal,
+    type VerifiedOAuth2AccessToken,
+} from './admission.service';
 
-/** What a verified access token authorizes. */
-export interface VerifiedOAuth2AccessToken
-{
-    /** The public `client_id` of the CLI holding the token. */
-    clientId: string;
-
-    /**
-     * Scope names the token authorizes now: those it was issued with — as granted,
-     * or as the refresh that minted it narrowed them — that its grant still holds.
-     * Never empty.
-     */
-    scopes: string[];
-
-    /** Expiry as seconds since the epoch — the unit every OAuth field uses. */
-    expiresAt: number;
-
-    /** The account the CLI is acting for. */
-    userId: string;
-}
+export type { VerifiedOAuth2AccessToken } from './admission.service';
 
 /**
  * Verify a bearer token presented to a protected resource.
@@ -119,21 +118,51 @@ export async function verifyAccessToken(
         return null;
     }
 
-    // The person the token acts for, under the second-factor policy (#309):
-    // an account that may only enrol cannot act through a client either. A
-    // throw rather than the null, so the holder of a real token is told why;
-    // nothing is disclosed to anyone else, since everything above refused first.
-    await assertSecondFactorAdmits(pair.grant.user, null);
+    const admission = await admitPrincipal({
+        userId: pair.grant.user,
+        credential: { kind: 'oauth2Grant', grantId: pair.grant.id },
+        route: null,
+    });
+
+    if ('refused' in admission)
+    {
+        return refuseToken(admission.refused);
+    }
 
     oauth2TokensRepository.updateLastUsedById(record.id)
         .catch((err: unknown) => authLogger.service.error('Failed to update OAuth2 token lastUsedAt', err));
 
-    return {
+    return accessTokenPrincipalFor(admission.admitted, {
         clientId: pair.client.clientId,
         scopes,
         expiresAt: toEpochSeconds(record.expiresAt),
-        userId: String(pair.grant.user),
-    };
+    });
+}
+
+/**
+ * An admission refusal in this endpoint's two outcomes. What says the token is
+ * not valid — its grant revoked or past its lifetime, the account gone — is the
+ * one null. What says a real token's person may not act right now — an account
+ * disabled or awaiting deletion, a second factor to enrol (#309) — is its 403,
+ * thrown so the client keeps the token instead of re-authorizing for one that
+ * would be refused the same way. Nothing is disclosed to anyone else: every
+ * token check refused first.
+ */
+function refuseToken(refusal: AdmissionRefusal): null
+{
+    switch (refusal.reason)
+    {
+        case 'accountMissing':
+        case 'credentialRevoked':
+        case 'credentialExpired':
+            return null;
+        case 'accountDisabled':
+            throw new AccountDisabledError({ status: refusal.status });
+        case 'pendingDeletion':
+            throw new AccountPendingDeletionError({ purgeScheduledAt: refusal.purgeScheduledAt });
+        case 'enrolmentRequired':
+            throw new SecondFactorEnrolmentRequiredError();
+    }
 }
 
 /**

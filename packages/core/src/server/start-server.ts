@@ -446,6 +446,12 @@ async function initializeWebSocket(
         const mwHandlers = resolveEndpointMiddlewares(config).map(mw => mw.handler);
         const getSubject = authConfig.getSubject
             ?? ((c: Context) => (c.get('auth') as Record<string, string> | undefined)?.userId ?? null);
+        // Tagged like the SSE endpoint's token, so a token minted by a device key
+        // that is revoked before the connect is refused there.
+        const getKeyId = authConfig.getKeyId
+            ?? ((c: Context) => (c.get('auth') as Record<string, string> | undefined)?.keyId);
+        const getKeyHolder = authConfig.getKeyHolder
+            ?? ((c: Context) => (c.get('auth') as Record<string, string> | undefined)?.userId);
 
         app.on(['POST'], [tokenPath], ...mwHandlers, async (c: Context) =>
         {
@@ -455,7 +461,10 @@ async function initializeWebSocket(
                 return c.json({ error: 'Unable to identify subject' }, 401);
             }
 
-            const token = await tokenManager!.issue(subject);
+            const token = await tokenManager!.issue(subject, {
+                keyId: getKeyId(c) ?? undefined,
+                keyHolder: getKeyHolder(c) ?? undefined,
+            });
 
             return c.json({ token });
         });

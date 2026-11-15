@@ -225,9 +225,12 @@ export {
     getUserByPhoneService,
     updateLastLoginService,
     updateUserService,
+    setAccountStatus,
     checkUsernameAvailableService,
     updateUsernameService,
 } from './user.service';
+
+export type { AccountStatusTransition, AccountStatusChange } from './user.service';
 
 // RBAC Service
 export {
@@ -296,6 +299,7 @@ export { getAuthSessionService } from './auth-session.service';
 // One-Time Token Service
 export {
     issueOneTimeTokenService,
+    redeemOneTimeTokenService,
     verifyOneTimeTokenService,
 } from './one-time-token.service';
 
@@ -472,6 +476,17 @@ export type { OAuth2GrantSummary } from './oauth2-grant.service';
 // `validateToken`. Exported from the same entry as `isOpsToken`.
 export { verifyAccessToken } from './oauth2-access-token.service';
 export type { VerifiedOAuth2AccessToken } from './oauth2-access-token.service';
+
+// Admission — the one answer to "may this person be let in now"
+export { admitPrincipal, authContextFor, admitsForRenewal, signingKeyOf } from './admission.service';
+export type {
+    Admission,
+    AdmissionRefusal,
+    AdmitPrincipalParams,
+    AuthScheme,
+    Principal,
+    PrincipalCredential,
+} from './admission.service';
 
 // Session binding (#97) — the opt-in that gives a web session a short-lived key
 // only a passkey assertion can renew.

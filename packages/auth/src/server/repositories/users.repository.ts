@@ -8,15 +8,69 @@
 import { eq, and, inArray, isNull, notExists, sql, type EmptyRelations } from 'drizzle-orm';
 import { alias, type AnyPgColumn } from 'drizzle-orm/pg-core';
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js';
-import { BaseRepository, type RepositoryDatabase } from '@spfn/core/db';
+import type { RepositoryDatabase } from '@spfn/core/db';
 import { EntityNotFoundError, NotFoundError } from '@spfn/core/errors';
 
 import { rolePermissions, roles, NewUser, users, permissions, type User } from '../entities';
+import { userPublicKeys, type UserPublicKey } from '../entities/user-public-keys';
+import { oauth2Grants, type OAuth2Grant } from '../entities/oauth2-grants';
 import type { UserStatus } from '../types';
 import { normalizeEmail, normalizeOptionalEmail } from '../helpers/email';
+import { AccountBusyError } from '@spfn/auth/errors';
+import { isLockTimeout } from '../lib/lock-timeout';
+import { recordAccountLock } from './account-lock';
+import { AccountStateRepository, type AccountWrites } from './account-state.repository';
+
+/**
+ * How long a request waits for an account's lock before it answers
+ * `AccountBusyError`. Every holder writes a handful of rows and runs no network
+ * call and no password hash under it, so a wait this long means something is
+ * wrong with the holder, not that the queue is long.
+ */
+export const ACCOUNT_LOCK_TIMEOUT_MS = 5_000;
+
+/**
+ * Rows one statement of the boot email backfill folds (`normalizeEmailsExcept`):
+ * the most account rows a `lockAccount` can find held by it at once.
+ */
+export const EMAIL_NORMALIZATION_BATCH = 500;
 
 /** Either handle a repository method reads through: `this.db` or `this.readDb`. */
 type Database = RepositoryDatabase<PostgresJsDatabase<EmptyRelations>>;
+
+/**
+ * What `updateById` may change: every column but `status`.
+ *
+ * An account's status is written by `setAccountStatus` alone, because a status
+ * that forbids access has to end the account's sessions in the same
+ * transaction — a column write here would change the status and clear nothing.
+ */
+export type UserUpdate = Omit<Partial<NewUser>, 'status'>;
+
+/** A user row with the role that row stores, as the admission reads load it. */
+export interface UserWithStoredRole
+{
+    user: User;
+    role: { id: number; name: string; displayName: string; priority: number } | null;
+}
+
+/** The role columns every user-with-role read selects beside the user row. */
+const ROLE_COLUMNS = {
+    roleId: roles.id,
+    roleName: roles.name,
+    roleDisplayName: roles.displayName,
+    rolePriority: roles.priority,
+};
+
+type RoleColumns = { roleId: number | null; roleName: string | null; roleDisplayName: string | null; rolePriority: number | null };
+
+/** The stored role of a user-with-role row, or null for an account that holds none. */
+function storedRole(row: RoleColumns): UserWithStoredRole['role']
+{
+    return row.roleName
+        ? { id: row.roleId!, name: row.roleName, displayName: row.roleDisplayName!, priority: row.rolePriority! }
+        : null;
+}
 
 /**
  * What a case-insensitive email lookup found.
@@ -52,27 +106,70 @@ function foldedEmailEquals(normalizedEmail: string, email: AnyPgColumn = users.e
  * - Read/Write 연결 분리 (replica 활용)
  * - 타입 안전성
  */
-export class UsersRepository extends BaseRepository
+export class UsersRepository extends AccountStateRepository
 {
+    static override readonly accountWrites: AccountWrites<UsersRepository> = {
+        lockAccount: { exempt: 'the lock statement itself, and the transaction-local lock_timeout set around it' },
+        create: { exempt: 'a new account: no other transaction can name its row before this one commits' },
+        normalizeEmailsExcept: { exempt: 'the boot backfill of email casing (normalizeStoredEmails), which under a rolling deploy runs while other instances serve: it writes no status, key generation or password, and folds in batches of EMAIL_NORMALIZATION_BATCH rows, one short statement each, so a lockAccount waits behind one batch at most rather than a table-wide rewrite' },
+        fillEmailIfUnheld: { account: id => id },
+        updateById: { account: id => id },
+        updatePassword: { account: id => id },
+        updateLastLogin: { account: id => id },
+        deleteById: { account: id => id },
+    };
+
     /**
-     * The account's current key generation.
+     * Lock the account: the mutex for its credential state. Write primary.
      *
-     * Read from the primary, and this is the one place that matters: the value
-     * is stamped onto a second-factor challenge that must die with the
-     * generation it was minted in, and a replica lagging behind a revoke-all
-     * would stamp the generation that has just ended.
+     * **The invariant.** A transaction that writes any of an account's
+     * credential state — a key row (insert, activate, revoke, re-authenticate,
+     * rotate, bind), a challenge that activates a key, the status, the key
+     * generation, the password with the revocation it brings — calls this as
+     * its first statement touching that account: before any read it will act
+     * on and before any child row. Every such writer then queues on this one
+     * row, so the order in which each touches the child rows afterwards cannot
+     * deadlock against another. Gating state (status, generation, an existing
+     * link) is read after the lock — this read, or another on the primary —
+     * never before it. No network call and no password hash runs while it is
+     * held. `authenticate` takes no lock.
      *
-     * Write primary 사용
+     * `FOR NO KEY UPDATE`: two lockers of one account serialise, and a child
+     * row's foreign key (`FOR KEY SHARE`) is not blocked. A `FOR SHARE` would
+     * deadlock two sign-ins of one account, each later updating the row it
+     * shares (`lastLoginAt`).
+     *
+     * **The wait is bounded.** The lock statement runs under a transaction-local
+     * `lock_timeout` of `ACCOUNT_LOCK_TIMEOUT_MS`, restored to what it was once
+     * the lock is held; a wait that runs out answers `AccountBusyError` — a
+     * typed, retryable refusal — rather than meeting `statement_timeout` as a
+     * connection error.
+     *
+     * **One account per transaction.** The lock is recorded on the transaction,
+     * and a second account's lock in it throws `SecondAccountLockError` before
+     * its statement runs — in every run, not only under test. Under test every
+     * write of an `AccountStateRepository` also refuses to run without the
+     * lock (`assertAccountLocked`).
+     *
+     * @returns the account as of the lock, or null when no such account exists
      */
-    async currentKeyEpoch(id: number): Promise<number>
+    async lockAccount(id: number): Promise<User | null>
     {
+        recordAccountLock(id);
+
+        const [setting] = await this.db.execute<{ previous: string }>(
+            sql`select current_setting('lock_timeout') as previous, set_config('lock_timeout', ${String(ACCOUNT_LOCK_TIMEOUT_MS)}, true)`,
+        );
         const result = await this.db
-            .select({ keyEpoch: users.keyEpoch })
+            .select()
             .from(users)
             .where(eq(users.id, id))
-            .limit(1);
+            .for('no key update')
+            .catch((error: unknown) => Promise.reject(isLockTimeout(error) ? new AccountBusyError() : error));
 
-        return result[0]?.keyEpoch ?? 0;
+        await this.db.execute(sql`select set_config('lock_timeout', ${setting!.previous}, true)`);
+
+        return result[0] ?? null;
     }
 
     /**
@@ -106,32 +203,6 @@ export class UsersRepository extends BaseRepository
             .limit(1);
 
         return result[0] ?? null;
-    }
-
-    /**
-     * Take a row lock on a user, so callers that read-then-decide serialise.
-     *
-     * `SELECT id ... FOR UPDATE` and nothing else: the value is never used, the
-     * lock is. A caller that counts an account's remaining credentials and then
-     * removes one has a read-modify-write between two statements, and two such
-     * callers racing both read the pre-removal count. Locking the owner row
-     * first makes the second one wait for the first to commit, so it counts
-     * what is actually left.
-     *
-     * Only meaningful inside a transaction — the lock is released at commit.
-     * Write primary.
-     *
-     * @returns whether the row exists, for a caller that has not read it yet
-     */
-    async lockById(id: number): Promise<boolean>
-    {
-        const rows = await this.db
-            .select({ id: users.id })
-            .from(users)
-            .where(eq(users.id, id))
-            .for('update');
-
-        return rows.length > 0;
     }
 
     /**
@@ -299,33 +370,63 @@ export class UsersRepository extends BaseRepository
         return this.selectByIdWithRole(this.db, id);
     }
 
-    private async selectByIdWithRole(db: Database, id: number)
+    private async selectByIdWithRole(db: Database, id: number): Promise<UserWithStoredRole | null>
     {
         const result = await db
-            .select({
-                user: users,
-                roleId: roles.id,
-                roleName: roles.name,
-                roleDisplayName: roles.displayName,
-                rolePriority: roles.priority,
-            })
+            .select({ user: users, ...ROLE_COLUMNS })
             .from(users)
             .leftJoin(roles, eq(users.roleId, roles.id))
             .where(eq(users.id, id))
             .limit(1);
 
         const row = result[0];
-        if (!row)
-        {
-            return null;
-        }
 
-        return {
-            user: row.user,
-            role: row.roleName
-                ? { id: row.roleId!, name: row.roleName, displayName: row.roleDisplayName!, priority: row.rolePriority! }
-                : null,
-        };
+        return row ? { user: row.user, role: storedRole(row) } : null;
+    }
+
+    /**
+     * A user, the role it stores, and one of its device keys — on the primary,
+     * in one statement.
+     *
+     * The admission read for a key credential: the account's status, its role
+     * and the key's liveness are decided on one snapshot, and `authenticate`
+     * pays for the key no query beyond the user read it always made. The key
+     * is joined by owner as well as id, so a key of another account reads as
+     * absent. `key` is null when the account holds no such key.
+     */
+    async findByIdWithRoleAndKeyOnPrimary(id: number, keyId: string): Promise<(UserWithStoredRole & { key: UserPublicKey | null }) | null>
+    {
+        const result = await this.db
+            .select({ user: users, ...ROLE_COLUMNS, key: userPublicKeys })
+            .from(users)
+            .leftJoin(roles, eq(users.roleId, roles.id))
+            .leftJoin(userPublicKeys, and(eq(userPublicKeys.userId, users.id), eq(userPublicKeys.keyId, keyId)))
+            .where(eq(users.id, id))
+            .limit(1);
+
+        const row = result[0];
+
+        return row ? { user: row.user, role: storedRole(row), key: row.key } : null;
+    }
+
+    /**
+     * A user, the role it stores, and one of its OAuth 2.1 grants — on the
+     * primary, in one statement. The grant is joined by owner as well as id;
+     * `grant` is null when the account holds no such grant.
+     */
+    async findByIdWithRoleAndGrantOnPrimary(id: number, grantId: number): Promise<(UserWithStoredRole & { grant: OAuth2Grant | null }) | null>
+    {
+        const result = await this.db
+            .select({ user: users, ...ROLE_COLUMNS, grant: oauth2Grants })
+            .from(users)
+            .leftJoin(roles, eq(users.roleId, roles.id))
+            .leftJoin(oauth2Grants, and(eq(oauth2Grants.user, users.id), eq(oauth2Grants.id, grantId)))
+            .where(eq(users.id, id))
+            .limit(1);
+
+        const row = result[0];
+
+        return row ? { user: row.user, role: storedRole(row), grant: row.grant } : null;
     }
 
     /**
@@ -395,20 +496,26 @@ export class UsersRepository extends BaseRepository
     /**
      * Fold every stored address to canonical form, leaving the given ids alone.
      *
-     * One statement rather than a row at a time: the rewrite is the same
-     * expression the detection uses, so the database can do it in place. A
-     * legacy install with a large users table therefore pays one update instead
-     * of a round trip per row on the boot path, and no list of addresses is ever
-     * carried through the application.
+     * In the database rather than a row at a time through the application: the
+     * rewrite is the same expression the detection uses, and no list of
+     * addresses is ever carried through the application.
+     *
+     * In batches of `batchSize` rows, each its own statement. Under a rolling
+     * deploy this runs while other instances serve, and an UPDATE holds the
+     * row lock of every row it rewrites until it ends: one statement over a
+     * legacy table would hold every pending account's row at once, and each
+     * `lockAccount` behind it would wait out `ACCOUNT_LOCK_TIMEOUT_MS` and
+     * answer `AccountBusyError`. A batch is short, so a lock waits behind one
+     * batch at most.
      *
      * The excluded ids travel as a single array parameter, so the count of
      * conflicts cannot run into the protocol's limit on bind parameters.
      *
-     * One statement also means all or nothing. `users.email` is unique, so if an
-     * instance still running the old code registers a canonical address in the
-     * moment between the conflict query and this update, the update aborts and
-     * nothing is folded on this boot. The next boot sees that pair as a conflict
-     * and folds everything else, so the repair is deferred rather than lost.
+     * `users.email` is unique, so if an instance still running the old code
+     * registers a canonical address in the moment between the conflict query
+     * and a batch, that batch aborts and the error ends the run; the batches
+     * before it stay folded. The next boot sees that pair as a conflict and
+     * folds everything else, so the repair is deferred rather than lost.
      *
      * `lower(btrim(...))` is the SQL spelling of `normalizeEmail`. The two agree
      * on every address this package's validation accepts (ASCII, no interior
@@ -417,9 +524,10 @@ export class UsersRepository extends BaseRepository
      * whose collation lower-cases non-ASCII letters.
      *
      * @param excludedIds - Rows to leave untouched, normally the conflict groups
+     * @param batchSize - Rows one statement folds
      * @returns How many rows were rewritten
      */
-    async normalizeEmailsExcept(excludedIds: number[]): Promise<number>
+    async normalizeEmailsExcept(excludedIds: number[], batchSize: number = EMAIL_NORMALIZATION_BATCH): Promise<number>
     {
         // `bigint[]`, matching the bigserial primary key. Cast to `int[]` this
         // fails outright once an install's id sequence passes 2^31 — which a
@@ -428,20 +536,24 @@ export class UsersRepository extends BaseRepository
             ? sql` AND NOT (${users.id} = ANY(string_to_array(${excludedIds.join(',')}, ',')::bigint[]))`
             : sql``;
         const pending = sql`${users.email} IS NOT NULL AND ${users.email} <> lower(btrim(${users.email}))${keepConflicts}`;
+        let total = 0;
 
-        // Counted rather than returned. `RETURNING` would hand back one row per
-        // rewritten address, which is the transfer this method exists to avoid.
-        const [counted] = await this.db
-            .select({ rows: sql<number>`count(*)` })
-            .from(users)
-            .where(pending);
+        for (;;)
+        {
+            const batch = this.db.select({ id: users.id }).from(users).where(pending).orderBy(users.id).limit(batchSize);
+            const folded = await this.db
+                .update(users)
+                .set({ email: sql`lower(btrim(${users.email}))` })
+                .where(inArray(users.id, batch))
+                .returning({ id: users.id });
 
-        await this.db
-            .update(users)
-            .set({ email: sql`lower(btrim(${users.email}))` })
-            .where(pending);
+            total += folded.length;
 
-        return Number(counted?.rows ?? 0);
+            if (folded.length < batchSize)
+            {
+                return total;
+            }
+        }
     }
 
     /**
@@ -479,8 +591,16 @@ export class UsersRepository extends BaseRepository
      * 사용자 정보 업데이트
      * Write primary 사용
      */
-    async updateById(id: number, data: Partial<NewUser>)
+    async updateById(id: number, data: UserUpdate)
     {
+        // The type already leaves `status` out; this is for the caller the type
+        // does not reach (JavaScript, a cast). Writing it here would change the
+        // status and clear nothing, which is the defect `setAccountStatus` ends.
+        if ((data as Partial<NewUser>).status !== undefined)
+        {
+            throw new Error('users.status is written by setAccountStatus, not updateById');
+        }
+
         // `'email' in data` rather than a truthiness check: setting it to null
         // (unlinking an address) is a real update and must not be dropped.
         const patch = 'email' in data
@@ -491,31 +611,6 @@ export class UsersRepository extends BaseRepository
             .update(users)
             .set(patch)
             .where(eq(users.id, id))
-            .returning();
-
-        return result[0] ?? null;
-    }
-
-    /**
-     * 계정 삭제 취소(복구) — `WHERE status = 'pending_deletion'` 조건부 UPDATE.
-     *
-     * cancelAccountDeletionService가 account_deletion_requests claim(조건부
-     * markCancelled)에 성공한 **이후에만** 호출한다. 그 claim이 이미 purge와의
-     * 경합을 해결하므로 이 조건은 방어적 이중 안전장치 — 0 row 매치(= 이미
-     * status가 바뀐 상태) 시 null을 반환하며 예외를 던지지 않는다.
-     * Write primary 사용
-     */
-    async reactivateFromPendingDeletion(id: number)
-    {
-        const result = await this.db
-            .update(users)
-            .set({ status: 'active' })
-            .where(
-                and(
-                    eq(users.id, id),
-                    eq(users.status, 'pending_deletion'),
-                ),
-            )
             .returning();
 
         return result[0] ?? null;

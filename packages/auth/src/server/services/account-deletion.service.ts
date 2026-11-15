@@ -41,6 +41,7 @@ import type { AccountDeletionRequestedBy, PurgeStrategy } from '../types';
 import { verifyPassword, getDummyPasswordHash } from '../helpers';
 import { validateVerificationToken } from './verification.service';
 import { revokeAllOAuth2GrantsForUser } from './oauth2-grant.service';
+import { setAccountStatus } from './user.service';
 import { getDeletionConfig } from '../lib/deletion-config';
 import { isUniqueViolation } from '../lib/unique-violation';
 import { authLogger } from '../logger';
@@ -204,7 +205,7 @@ export interface RequestAccountDeletionParams
     password?: string;
     verificationToken?: string;
     reason?: string;
-    /** Skip the grace period and purge inline. Self-service requires `deletion.allowSelfImmediate`. */
+    /** Skip the grace period: purge as soon as the request commits. Self-service requires `deletion.allowSelfImmediate`. */
     immediate?: boolean;
 }
 
@@ -228,7 +229,7 @@ function addDays(date: Date, days: number): Date
  * Sets status -> 'pending_deletion', records the request, revokes every active
  * session key, and (after commit) emits `auth.deletion.requested` and sends the
  * request-received notice. With a zero grace period (explicit `immediate: true`,
- * gated for self-service by `allowSelfImmediate`), purges inline instead of
+ * gated for self-service by `allowSelfImmediate`), purges once the request commits instead of
  * waiting for the cron sweep.
  */
 export async function requestAccountDeletionService(
@@ -236,22 +237,13 @@ export async function requestAccountDeletionService(
     params: RequestAccountDeletionParams,
 ): Promise<RequestAccountDeletionResult>
 {
-    const { requestedBy, password, verificationToken, reason, immediate } = params;
+    const { requestedBy, password, verificationToken, immediate } = params;
 
-    const user = await usersRepository.findById(userId);
-    if (!user)
-    {
-        throw new NotFoundError({ message: 'User not found', resource: 'User' });
-    }
-
-    if (user.status === 'pending_deletion' || user.status === 'deleted')
-    {
-        throw new DeletionAlreadyRequestedError();
-    }
-
+    // The credential is checked before the account lock (the check hashes);
+    // whether the account may be deleted is decided under it, on the primary.
     if (requestedBy === 'self')
     {
-        await verifyReauthCredential(user, { password, verificationToken });
+        await verifyReauthCredential(await existingUser(userId), { password, verificationToken });
     }
 
     const config = getDeletionConfig();
@@ -263,75 +255,148 @@ export async function requestAccountDeletionService(
     }
 
     const gracePeriodDays = wantsImmediate ? 0 : config.gracePeriodDays;
+    const request = await runInTransaction(
+        () => recordDeletionRequest(userId, params, gracePeriodDays),
+        { context: 'auth:deletion-request' },
+    );
+
+    // After the commit, not inside it: the purge runs `onBeforePurge` — the
+    // app's own I/O — before it opens its transaction, which must not happen
+    // under this one's account lock. A purge that fails here is the sweep's to
+    // retry: the request is due at once.
+    if (gracePeriodDays === 0)
+    {
+        onAfterCommit(() => purgePendingRequest(request).then(() => undefined));
+    }
+
+    return { requestId: request.id, purgeScheduledAt: request.purgeScheduledAt };
+}
+
+async function existingUser(userId: number): Promise<User>
+{
+    const user = await usersRepository.findById(userId);
+    if (!user)
+    {
+        throw new NotFoundError({ message: 'User not found', resource: 'User' });
+    }
+
+    return user;
+}
+
+/**
+ * Refuse an account that is gone, or already on its way out.
+ *
+ * @throws NotFoundError, DeletionAlreadyRequestedError
+ */
+function assertDeletable(user: User | null): asserts user is User
+{
+    if (!user)
+    {
+        throw new NotFoundError({ message: 'User not found', resource: 'User' });
+    }
+
+    if (user.status === 'pending_deletion' || user.status === 'deleted')
+    {
+        throw new DeletionAlreadyRequestedError();
+    }
+}
+
+/**
+ * Lock the account (`usersRepository.lockAccount`), read its status under the
+ * lock, and move it to `pending_deletion` from that status — the status, the
+ * end of every session and the request row in one transaction.
+ *
+ * The status is read on the primary under the lock, so a replica that has not
+ * caught up with a status change cannot refuse a request falsely, and a status
+ * changed meanwhile is the one this request moves from.
+ */
+async function recordDeletionRequest(
+    userId: number,
+    params: RequestAccountDeletionParams,
+    gracePeriodDays: number,
+): Promise<AccountDeletionRequest>
+{
+    const user = await usersRepository.lockAccount(userId);
+    assertDeletable(user);
+
+    // `setAccountStatus` revokes the account's keys (their streams close after
+    // commit) as part of moving it to `pending_deletion`.
+    const moved = await setAccountStatus(user.id, 'pending_deletion', {
+        from: user.status,
+        reason: 'Account deletion requested',
+    });
+    if (moved === 'refused')
+    {
+        throw new DeletionAlreadyRequestedError();
+    }
+
     const requestedAt = new Date();
-    const purgeScheduledAt = addDays(requestedAt, gracePeriodDays);
+    const request = await createDeletionRequest({
+        userId: user.id,
+        userPublicId: user.publicId,
+        requestedAt,
+        purgeScheduledAt: addDays(requestedAt, gracePeriodDays),
+        status: 'pending',
+        requestedBy: params.requestedBy,
+        reason: params.reason ?? null,
+    });
 
-    await usersRepository.updateById(user.id, { status: 'pending_deletion' });
+    await endWaysBackIn(user.id);
+    announceDeletionRequested(user, request);
 
-    // A concurrent duplicate request racing the partial unique index
-    // (one pending row per user) surfaces here as a raw Postgres unique-violation —
-    // convert it to the same typed 409 a sequential duplicate request gets above.
-    let request: AccountDeletionRequest;
-    try
-    {
-        request = await accountDeletionRequestsRepository.create({
-            userId: user.id,
-            userPublicId: user.publicId,
-            requestedAt,
-            purgeScheduledAt,
-            status: 'pending',
-            requestedBy,
-            reason: reason ?? null,
-        });
-    }
-    catch (error)
-    {
-        if (isUniqueViolation(error))
-        {
-            throw new DeletionAlreadyRequestedError();
-        }
+    return request;
+}
 
-        throw error;
-    }
+/**
+ * The request row. A concurrent duplicate racing the partial unique index (one
+ * pending row per user) surfaces as a raw Postgres unique-violation — converted
+ * to the same typed 409 a sequential duplicate request gets.
+ */
+async function createDeletionRequest(
+    data: Parameters<typeof accountDeletionRequestsRepository.create>[0],
+): Promise<AccountDeletionRequest>
+{
+    return await accountDeletionRequestsRepository.create(data).catch((error: unknown) =>
+        Promise.reject(isUniqueViolation(error) ? new DeletionAlreadyRequestedError() : error));
+}
 
-    await keysRepository.revokeAllActiveByUserId(user.id, 'Account deletion requested');
-
+/** Every way a device could sign itself back in after the revocation. */
+async function endWaysBackIn(userId: number): Promise<void>
+{
     // Device-code requests the user had in flight are refused in the same breath.
     // An approved-but-uncollected one outlives the key revocation above, and the
     // poll that collects it registers a key created *after* this revoke-all — so
     // cancelling the deletion later would restore an account with a signing key
     // nothing in the deletion path ever saw.
-    await deviceAuthorizationsRepository.denyAllActiveByUserId(user.id);
+    await deviceAuthorizationsRepository.denyAllActiveByUserId(userId);
 
     // Device links the account issued go with them, for the same reason: an
     // approved link nobody has collected would register a key after this.
-    await deviceLinksRepository.expireAllLiveByUserId(user.id);
+    await deviceLinksRepository.expireAllLiveByUserId(userId);
 
     // A grant the user gave a CLI carries a refresh token, so a client holding
     // one signs itself back in within the hour — which is exactly the client a
     // global revocation is aimed at. Revoked alongside the device codes, and for
     // the reason they are.
-    await revokeAllOAuth2GrantsForUser(user.id);
+    await revokeAllOAuth2GrantsForUser(userId);
+}
 
-    // Deferred to after commit: event subscribers and the outbound email must not
-    // observe (or be triggered by) a request that ultimately rolls back, and an
-    // external I/O call (email provider) must not run while a DB transaction/row
-    // lock is held.
+/**
+ * Deferred to after commit: event subscribers and the outbound email must not
+ * observe (or be triggered by) a request that ultimately rolls back, and an
+ * external I/O call (email provider) must not run while a DB transaction/row
+ * lock is held.
+ */
+function announceDeletionRequested(user: User, request: AccountDeletionRequest): void
+{
     onAfterCommit(() =>
         authDeletionRequestedEvent.emit({
             userId: String(user.id),
             userPublicId: user.publicId,
-            purgeScheduledAt: purgeScheduledAt.toISOString(),
-            requestedBy,
+            purgeScheduledAt: request.purgeScheduledAt.toISOString(),
+            requestedBy: request.requestedBy,
         }));
-    onAfterCommit(() => notifyDeletionRequested(user, purgeScheduledAt));
-
-    if (gracePeriodDays === 0)
-    {
-        await purgePendingRequest(request);
-    }
-
-    return { requestId: request.id, purgeScheduledAt };
+    onAfterCommit(() => notifyDeletionRequested(user, request.purgeScheduledAt));
 }
 
 // ============================================================================
@@ -401,35 +466,14 @@ export async function cancelAccountDeletionService(
 
     await verifyReauthCredential(user, { password, verificationToken });
 
-    // Claim-first, in the same row order the purge job locks in (B1): the
-    // account_deletion_requests row before the users row. Reactivating `users`
-    // first (the previous ordering) raced the purge — if the purge's own claim +
-    // destructive DML committed in the gap between our credential check and our
-    // (unconditional) users UPDATE, this would revive an already-anonymized row
-    // (status='deleted', PII scrubbed, passwordHash null) back to 'active': a
-    // "zombie" account, and a recovery success response for an account that was
-    // actually just destroyed. Claiming the request row first — with the same
-    // conditional `WHERE status = 'pending'` markCompleted uses — means whichever
-    // of cancel/purge locks this row first wins; the loser sees a row already
-    // moved off 'pending' and backs off before touching `users` at all.
-    const pendingRequest = await accountDeletionRequestsRepository.findPendingByUserId(user.id);
-    if (!pendingRequest)
-    {
-        throw new DeletionNotRequestedError();
-    }
-
-    const claimed = await accountDeletionRequestsRepository.markCancelled(pendingRequest.id);
-    if (!claimed)
-    {
-        // The purge won the race and already claimed/completed this row — same
-        // surface as retrying cancel after the account was actually purged.
-        throw new DeletionNotRequestedError();
-    }
-
-    // Only now touch `users` — the claim above guarantees the purge did not win.
-    // Conditional on status='pending_deletion' too, defensively (belt-and-suspenders
-    // alongside the request-row claim, not a race this alone needs to close).
-    await usersRepository.reactivateFromPendingDeletion(user.id);
+    // Claim-first (B1): reactivating `users` before the claim raced the purge —
+    // if the purge's own claim + destructive DML committed in the gap between our
+    // credential check and our users UPDATE, this would revive an
+    // already-anonymized row (status='deleted', PII scrubbed, passwordHash null)
+    // back to 'active': a "zombie" account. Cancel and purge both take the
+    // account lock first, so whichever gets it first wins; the loser sees a
+    // request already moved off 'pending' and backs off.
+    await runInTransaction(() => claimCancellation(user), { context: 'auth:deletion-cancel' });
 
     onAfterCommit(() =>
         authDeletionCancelledEvent.emit({
@@ -439,6 +483,51 @@ export async function cancelAccountDeletionService(
     onAfterCommit(() => notifyDeletionCancelled(user));
 
     return { userId: String(user.id) };
+}
+
+/**
+ * Claim the pending request, then move the account out of `pending_deletion`
+ * — one transaction, so a refusal at either step leaves both as they were.
+ *
+ * The account is locked first (`usersRepository.lockAccount`) and its status
+ * read again under the lock, because the status cancel decided on was read
+ * before this ran: a suspension that committed in between is not lifted, and
+ * the cancel is answered as it is for an account that is not pending deletion.
+ * The claim guarantees the purge did not win. The account's keys stay revoked:
+ * the person signs in anew.
+ *
+ * @throws DeletionNotRequestedError when there is no pending request to claim,
+ *   or the account is no longer `pending_deletion`
+ */
+async function claimCancellation(user: User): Promise<void>
+{
+    const locked = await usersRepository.lockAccount(user.id);
+    if (locked?.status !== 'pending_deletion')
+    {
+        throw new DeletionNotRequestedError();
+    }
+
+    const pendingRequest = await accountDeletionRequestsRepository.findPendingByUserId(user.id);
+    if (!pendingRequest)
+    {
+        throw new DeletionNotRequestedError();
+    }
+
+    // The purge won the race and already claimed/completed this row — same
+    // surface as retrying cancel after the account was actually purged.
+    if (!await accountDeletionRequestsRepository.markCancelled(pendingRequest.id))
+    {
+        throw new DeletionNotRequestedError();
+    }
+
+    const moved = await setAccountStatus(user.id, 'active', {
+        from: 'pending_deletion',
+        reason: 'Account deletion cancelled',
+    });
+    if (moved === 'refused')
+    {
+        throw new DeletionNotRequestedError();
+    }
 }
 
 // ============================================================================
@@ -460,12 +549,22 @@ export interface PurgeUserResult
  */
 async function anonymizeUser(user: User): Promise<void>
 {
+    // Conditional on `pending_deletion`, though the caller read that status
+    // under the account lock: the throw rolls the claim back.
+    const moved = await setAccountStatus(user.id, 'deleted', {
+        from: 'pending_deletion',
+        reason: 'Account deleted',
+    });
+    if (moved === 'refused')
+    {
+        throw new DeletionNotRequestedError();
+    }
+
     await usersRepository.updateById(user.id, {
         email: `deleted-${user.publicId}@deleted.invalid`,
         phone: null,
         username: null,
         passwordHash: null,
-        status: 'deleted',
         deletedAt: new Date(),
         deletedBy: 'system:auth.deletion.purge',
     });
@@ -497,11 +596,14 @@ async function anonymizeUser(user: User): Promise<void>
 
 /**
  * Purge a single user for a given (already fetched) request row. Shared by the
- * immediate inline path, the standalone admin/DSR entry point, and the cron sweep.
+ * immediate path (after the request commits), the standalone admin/DSR entry point, and the cron sweep.
  *
  * Ordering (deliberate — see PR review B1/M1/M2):
- * 1. A pre-check read (replica is fine — only gates whether the hook below runs)
- *    so a request already recovered before we even got here skips the hook.
+ * 1. A pre-check read on the primary, so a request already recovered before we
+ *    got here skips the hook. On the primary because the immediate path runs it
+ *    the moment the request commits: a replica one commit behind still reads
+ *    the account `active` and would skip a purge that was asked for. A skip is
+ *    logged with why.
  * 2. `onBeforePurge` runs BEFORE any DB transaction is opened — it's arbitrary
  *    app I/O and must not hold a DB row lock or run inside our transaction.
  * 3. Only then does the transaction open, and the *only* things inside it are:
@@ -528,11 +630,16 @@ async function purgePendingRequest(request: AccountDeletionRequest): Promise<Pur
 
     const userId = request.userId;
 
-    const precheckUser = await usersRepository.findById(userId);
+    const precheckUser = await usersRepository.findByIdOnPrimary(userId);
     if (!precheckUser || precheckUser.status !== 'pending_deletion')
     {
         // Recovered (or otherwise gone) before we got here — no hook call, no
         // transaction, nothing to undo.
+        authLogger.service.info('[account-deletion] purge skipped', {
+            userId,
+            reason: precheckUser ? `account is ${precheckUser.status}, not pending_deletion` : 'account not found',
+        });
+
         return { outcome: 'skipped' };
     }
 
@@ -565,10 +672,11 @@ async function purgePendingRequest(request: AccountDeletionRequest): Promise<Pur
 
     await runInTransaction(async () =>
     {
-        // Re-read on the primary/tx connection — the authoritative check. Closes
-        // the window between findDueForPurge (replica)/the pre-check above and
-        // this transaction: a cancel that committed in between must be honored.
-        const user = await usersRepository.findById(userId);
+        // The account lock (`usersRepository.lockAccount`) first, and the status
+        // read under it — the authoritative check. Closes the window between
+        // findDueForPurge (replica)/the pre-check above and this transaction: a
+        // cancel that committed in between must be honored.
+        const user = await usersRepository.lockAccount(userId);
         if (!user || user.status !== 'pending_deletion')
         {
             return;

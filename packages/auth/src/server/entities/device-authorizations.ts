@@ -77,6 +77,12 @@ export const deviceAuthorizations = authSchema.table('device_authorizations',
         // Never taken from a request body — that would be the whole authorization
         userId: optionalForeignKey('user', () => users.id, { onDelete: 'cascade' }),
 
+        // The device key the approver signed the approval with, written in the
+        // same statement as userId. Collection is refused once it stops being
+        // live — revoked, of an ended key generation, or expired — the rule a
+        // device link's issuing key is held to. null while pending
+        approvedByKeyId: text('approved_by_key_id'),
+
         // Expiry — 10 minutes from creation by default
         // Judged on read; no job clears the row
         expiresAt: utcTimestamp('expires_at').notNull(),

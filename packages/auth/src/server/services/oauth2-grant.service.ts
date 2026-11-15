@@ -16,9 +16,11 @@
  * exactly the device the user was cutting off.
  */
 
+import { runInTransaction } from '@spfn/core/db';
 import { OAuth2GrantNotFoundError } from '@spfn/auth/errors';
 
 import { oauth2GrantsRepository } from '../repositories/oauth2-grants.repository';
+import { usersRepository } from '../repositories/users.repository';
 import { getAuthorizationServerConfig } from '../lib/oauth2/config';
 import { authLogger } from '../logger';
 
@@ -67,11 +69,19 @@ export async function listOAuth2GrantsService(userId: number): Promise<OAuth2Gra
  *
  * The user id is part of the statement's condition, not a check before it: the
  * id comes from a URL, and a grant belonging to somebody else must answer as if
- * it did not exist rather than as if it were merely not theirs.
+ * it did not exist rather than as if it were merely not theirs. A grant is
+ * credential state, so the write runs under the account lock.
  */
 export async function revokeOAuth2GrantService(id: number, userId: number): Promise<void>
 {
-    if (!await oauth2GrantsRepository.revokeByIdForUser(id, userId))
+    const revoked = await runInTransaction(async () =>
+    {
+        await usersRepository.lockAccount(userId);
+
+        return await oauth2GrantsRepository.revokeByIdForUser(id, userId);
+    }, { context: 'auth:oauth2-disconnect' });
+
+    if (!revoked)
     {
         throw new OAuth2GrantNotFoundError();
     }
@@ -79,7 +89,8 @@ export async function revokeOAuth2GrantService(id: number, userId: number): Prom
 
 /**
  * Revoke every grant a user has — the authorization-server half of a global
- * revocation, called beside `deviceAuthorizationsRepository.denyAllActiveByUserId`.
+ * revocation, called beside `deviceAuthorizationsRepository.denyAllActiveByUserId`,
+ * inside the caller's transaction, which holds the account lock.
  */
 export async function revokeAllOAuth2GrantsForUser(userId: number): Promise<void>
 {

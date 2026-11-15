@@ -23,6 +23,7 @@
 
 import { env } from '@spfn/auth/config';
 import { NotFoundError, ValidationError } from '@spfn/core/errors';
+import { runInTransaction } from '@spfn/core/db';
 import { RevokeAllLinkError } from '@spfn/auth/errors';
 
 import { authLogger } from '../logger';
@@ -92,27 +93,31 @@ export async function createRevokeAllLink(
         throw new ValidationError({ message: 'ttlMinutes must be a positive whole number of minutes' });
     }
 
-    // Refused here rather than at the insert: an unknown id is the caller's
-    // mistake and reads as one, where the foreign key would surface as a 500
-    // naming a constraint.
-    const user = await usersRepository.findById(Number(userId));
-
-    if (!user)
-    {
-        throw new NotFoundError({ message: 'User not found', resource: 'User' });
-    }
-
-    await keyRevokeAllTokensRepository.supersedeAllLiveByUserId(user.id);
-
     const { secret, hash } = mintCredential();
     const expiresAt = new Date(Date.now() + ttlMinutes * 60_000);
 
-    await keyRevokeAllTokensRepository.create({
-        userId: user.id,
-        tokenHash: hash,
-        keyEpoch: user.keyEpoch,
-        expiresAt,
-    });
+    // Under the account lock (`usersRepository.lockAccount`), with the key
+    // generation the link is bound to read off it.
+    await runInTransaction(async () =>
+    {
+        // Refused here rather than at the insert: an unknown id is the caller's
+        // mistake and reads as one, where the foreign key would surface as a 500
+        // naming a constraint.
+        const user = await usersRepository.lockAccount(Number(userId));
+
+        if (!user)
+        {
+            throw new NotFoundError({ message: 'User not found', resource: 'User' });
+        }
+
+        await keyRevokeAllTokensRepository.supersedeAllLiveByUserId(user.id);
+        await keyRevokeAllTokensRepository.create({
+            userId: user.id,
+            tokenHash: hash,
+            keyEpoch: user.keyEpoch,
+            expiresAt,
+        });
+    }, { context: 'auth:revoke-all-link-issue' });
 
     return {
         url: buildConfirmUrl(env.SPFN_AUTH_REVOKE_ALL_CONFIRM_PATH || '/account/revoke-all', secret),
@@ -156,22 +161,33 @@ export async function describeRevokeAllLink(token: string): Promise<RevokeAllLin
  */
 export async function consumeRevokeAllLink(token: string): Promise<{ revokedCount: number }>
 {
-    const userId = await keyRevokeAllTokensRepository.consume(hashCredential(token));
+    const tokenHash = hashCredential(token);
 
-    if (userId === null)
+    // The account the link names is locked (`usersRepository.lockAccount`)
+    // before the claim, and the claim restates every condition under it; the
+    // revocation commits with it.
+    return await runInTransaction(async () =>
     {
-        authLogger.service.warn('Revoke-all link refused', { reason: 'not live', step: 'consume' });
+        const live = await keyRevokeAllTokensRepository.findLiveByTokenHash(tokenHash);
+        const userId = live && await usersRepository.lockAccount(live.userId)
+            ? await keyRevokeAllTokensRepository.consume(live.userId, tokenHash)
+            : null;
 
-        throw new RevokeAllLinkError();
-    }
+        if (userId === null)
+        {
+            authLogger.service.warn('Revoke-all link refused', { reason: 'not live', step: 'consume' });
 
-    const { revokedCount } = await revokeAllKeysService({
-        userId,
-        includeCurrent: true,
-        reason: 'revoke-all-link',
-    });
+            throw new RevokeAllLinkError();
+        }
 
-    return { revokedCount };
+        const { revokedCount } = await revokeAllKeysService({
+            userId,
+            includeCurrent: true,
+            reason: 'revoke-all-link',
+        });
+
+        return { revokedCount };
+    }, { context: 'auth:revoke-all-link-consume' });
 }
 
 /**

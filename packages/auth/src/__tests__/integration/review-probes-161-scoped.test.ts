@@ -36,12 +36,25 @@ const { userProfilesRepository, userSettingsRepository } = await import('@/serve
 const { defineUserSettings } = await import('@/server/lib/user-settings');
 const { __resetUserSettingsForTests } = await import('@/server/lib/user-settings/registry');
 const { defineProfileFields, __resetProfileFieldsForTests } = await import('@/server/lib/profile-fields');
-const { resolveAuthenticatedUser } = await import('@/server/middleware/auth-profiles');
+const { admitPrincipal } = await import('@/server/services/admission.service');
 
 const dbAvailable = await isDatabaseAvailable();
 
 const PASSWORD = 'SecurePassword123!';
 const JSON_HEADERS = { 'Content-Type': 'application/json' };
+
+/** The principal an account resolves to — through `admitPrincipal`, as every door reaches it. */
+async function resolveAuthenticatedUser(userId: number)
+{
+    const admission = await admitPrincipal({ userId, credential: { kind: 'appProfile', profile: 'test', keyId: 'test' }, route: null });
+
+    if (!('admitted' in admission))
+    {
+        throw new Error(`refused: ${admission.refused.reason}`);
+    }
+
+    return admission.admitted;
+}
 
 describe.skipIf(!dbAvailable)('scoped review probes of 542e9e95 (#161)', () =>
 {
@@ -141,8 +154,8 @@ describe.skipIf(!dbAvailable)('scoped review probes of 542e9e95 (#161)', () =>
         await initializeAuth();
         await seedUser('hot@test.com');
         const authorization = await signIn('hot@test.com');
-        // the middleware imports the repository through the package entry, not `@/server/repositories`
-        const { userSettingsRepository: middlewareRepository } = await import('@spfn/auth/server');
+        // the admission (admitPrincipal) reads it through `@/server/repositories`
+        const { userSettingsRepository: middlewareRepository } = await import('@/server/repositories');
         const findValue = vi.spyOn(middlewareRepository, 'findValue');
         const byKeys = vi.spyOn(middlewareRepository, 'listByUserAndKeys');
         const byUser = vi.spyOn(middlewareRepository, 'listByUser');

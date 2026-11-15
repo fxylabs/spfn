@@ -9,12 +9,13 @@ import { NewUserPublicKey, userPublicKeys } from '../entities/user-public-keys';
 import { users } from '../entities/users';
 import { mfaChallenges } from '../entities/mfa-challenges';
 import type { ClientIdentity } from '../client-proof/wire-version';
-import { BaseRepository, onAfterCommit } from '@spfn/core/db';
+import { onAfterCommit } from '@spfn/core/db';
 import { closeSSEConnectionsByKey } from '@spfn/core/event/sse';
 import { eq, and, or, isNull, lt, desc, sql, getTableColumns } from 'drizzle-orm';
 import { getConcurrentUseWindowMs } from '../lib/config';
 import { authLogger } from '../logger';
 import type { KeyWithAccountEpoch } from '../lib/key-liveness';
+import { AccountStateRepository, type AccountWrites } from './account-state.repository';
 
 /**
  * Throttle window for lastUsedAt writes. The column is for audit / inactive-key
@@ -58,8 +59,21 @@ function closeStreamsAfterCommit(keyIds: string[]): void
  * - Read/Write 연결 분리 (replica 활용)
  * - 타입 안전성
  */
-export class KeysRepository extends BaseRepository
+export class KeysRepository extends AccountStateRepository
 {
+    static override readonly accountWrites: AccountWrites<KeysRepository> = {
+        create: { account: data => data.userId },
+        revokeByKeyIdAndUserId: { account: (_keyId, userId) => userId },
+        revokeForReplacement: { account: (_keyId, userId) => userId },
+        revokeActive: { account: userId => userId },
+        deleteByKeyIdAndUserId: { account: (_keyId, userId) => userId },
+        deleteAllByUserId: { account: userId => userId },
+        markReauthenticated: { account: (_keyId, userId) => userId },
+        bindByKeyIdAndUserId: { account: (_keyId, userId) => userId },
+        unbindActiveByUserId: { account: userId => userId },
+        updateLastUsedById: { exempt: '`authenticate`\'s throttled lastUsedAt / client identity / last-seen address: one single-row statement outside any transaction, on columns no admission reads' },
+    };
+
     /**
      * Key ID와 User ID로 공개키 조회
      * Read replica 사용
@@ -163,6 +177,7 @@ export class KeysRepository extends BaseRepository
      */
     async create(data: NewUserPublicKey)
     {
+
         return await this._create(userPublicKeys, {
             ...data,
             createdAt: data.createdAt || new Date(),
@@ -186,6 +201,7 @@ export class KeysRepository extends BaseRepository
         reason: string,
     )
     {
+
         const result = await this.db
             .update(userPublicKeys)
             .set({
@@ -225,6 +241,7 @@ export class KeysRepository extends BaseRepository
      */
     async revokeForReplacement(keyId: string, userId: number, reason: string)
     {
+
         const result = await this.db
             .update(userPublicKeys)
             .set({
@@ -279,24 +296,6 @@ export class KeysRepository extends BaseRepository
     }
 
     /**
-     * Lock the user's active key rows until the transaction ends, for a revocation
-     * that has to touch other rows before it revokes the keys.
-     *
-     * Device-link statements lock the issuing key row before the link row. A
-     * transaction that expires links and then revokes keys takes them the other
-     * way round, and deadlocks against an issue, redeem, approve or consume in
-     * flight on the same key. Calling this first restores the key-before-link order.
-     */
-    async lockActiveByUserId(userId: number): Promise<void>
-    {
-        await this.db
-            .select({ id: userPublicKeys.id })
-            .from(userPublicKeys)
-            .where(and(eq(userPublicKeys.userId, userId), eq(userPublicKeys.isActive, true)))
-            .for('no key update');
-    }
-
-    /**
      * The one statement behind both global revocations.
      *
      * The epoch bump is a data-modifying CTE on the same statement rather than a
@@ -328,6 +327,7 @@ export class KeysRepository extends BaseRepository
      */
     private async revokeActive(userId: number, reason: string, keepKeyId?: string): Promise<RevokedKey[]>
     {
+
         const spare = keepKeyId ? sql` AND t.key_id <> ${keepKeyId}` : sql``;
         // The spared key moves into the new generation with the account, or the
         // device asking to sign out the others would sign itself out too:
@@ -386,6 +386,7 @@ export class KeysRepository extends BaseRepository
      */
     async deleteByKeyIdAndUserId(keyId: string, userId: number)
     {
+
         const result = await this.db
             .delete(userPublicKeys)
             .where(
@@ -408,6 +409,7 @@ export class KeysRepository extends BaseRepository
      */
     async deleteAllByUserId(userId: number): Promise<number>
     {
+
         const result = await this.db
             .delete(userPublicKeys)
             .where(eq(userPublicKeys.userId, userId))
@@ -417,34 +419,13 @@ export class KeysRepository extends BaseRepository
     }
 
     /**
-     * 마지막 사용 시간 업데이트
-     * Write primary 사용
-     */
-    async updateLastUsed(keyId: string, userId: number)
-    {
-        const result = await this.db
-            .update(userPublicKeys)
-            .set({
-                lastUsedAt: new Date(),
-            })
-            .where(
-                and(
-                    eq(userPublicKeys.keyId, keyId),
-                    eq(userPublicKeys.userId, userId),
-                ),
-            )
-            .returning();
-
-        return result[0] ?? null;
-    }
-
-    /**
      * 같은 사용자가 이 키로 신원을 다시 증명했다 — `authenticatedAt`을 지금으로,
      * `expiresAt`이 주어지면 만료 시각도 함께 연장한다.
      * Write primary 사용
      */
     async markReauthenticated(keyId: string, userId: number, expiresAt?: Date)
     {
+
         const result = await this.db
             .update(userPublicKeys)
             .set({ authenticatedAt: new Date(), ...(expiresAt ? { expiresAt } : {}) })
@@ -469,6 +450,7 @@ export class KeysRepository extends BaseRepository
      */
     async bindByKeyIdAndUserId(keyId: string, userId: number, expiresAt: Date)
     {
+
         const result = await this.db
             .update(userPublicKeys)
             .set({ binding: 'passkey', expiresAt })
@@ -494,6 +476,7 @@ export class KeysRepository extends BaseRepository
      */
     async unbindActiveByUserId(userId: number, expiresAt: Date): Promise<number>
     {
+
         const result = await this.db
             .update(userPublicKeys)
             .set({ binding: 'none', expiresAt })

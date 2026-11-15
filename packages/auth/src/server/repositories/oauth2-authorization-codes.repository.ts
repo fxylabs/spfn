@@ -12,6 +12,10 @@
  * same clock that stores it, so an app server whose clock drifted cannot extend
  * a code's life.
  *
+ * Credential state (`CREDENTIAL_TABLES`): a code is minted for a signed-in
+ * person, under their account lock, beside the grant it hangs off. Its spend
+ * at the token endpoint is classified apart (`TOKEN_ENDPOINT_WRITE`).
+ *
  * `findByCodeHash` exists only to explain a miss. A code that is simply unknown
  * and one that was already spent get the same answer at the endpoint —
  * `invalid_grant` either way — but the spent one also revokes the grant, and
@@ -19,16 +23,30 @@
  */
 
 import { and, eq, gt, isNull, sql } from 'drizzle-orm';
-import { BaseRepository } from '@spfn/core/db';
 import {
     oauth2AuthorizationCodes,
     type NewOAuth2AuthorizationCode,
     type OAuth2AuthorizationCode,
 } from '../entities/oauth2-authorization-codes';
+import { AccountStateRepository, type AccountWrites } from './account-state.repository';
+import { TOKEN_ENDPOINT_WRITE } from './oauth2-tokens.repository';
 
-export class OAuth2AuthorizationCodesRepository extends BaseRepository
+export class OAuth2AuthorizationCodesRepository extends AccountStateRepository
 {
-    async create(data: NewOAuth2AuthorizationCode): Promise<OAuth2AuthorizationCode>
+    static override readonly accountWrites: AccountWrites<OAuth2AuthorizationCodesRepository> = {
+        create: { account: approver => approver },
+        consume: { exempt: TOKEN_ENDPOINT_WRITE },
+    };
+
+    /**
+     * Mint a code under a consent, in the transaction that recorded it.
+     *
+     * @param _approver - The approving account — the grant's user, whose lock
+     *   the consent holds (`approveOAuth2AuthorizeService`). The row has no
+     *   user column; this names the account the write belongs to, for
+     *   `accountWrites`, and is not otherwise read.
+     */
+    async create(_approver: number, data: NewOAuth2AuthorizationCode): Promise<OAuth2AuthorizationCode>
     {
         const result = await this.db
             .insert(oauth2AuthorizationCodes)

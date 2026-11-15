@@ -22,12 +22,14 @@
  *   read.
  */
 
+import { runInTransaction } from '@spfn/core/db';
 import {
     OAuth2AuthorizeRedirectError,
     OAuth2RedirectUriMismatchError,
     OAuth2UnknownClientError,
 } from '@spfn/auth/errors';
 
+import { usersRepository } from '../repositories/users.repository';
 import { oauth2ClientsRepository } from '../repositories/oauth2-clients.repository';
 import { oauth2GrantsRepository } from '../repositories/oauth2-grants.repository';
 import { oauth2AuthorizationCodesRepository } from '../repositories/oauth2-authorization-codes.repository';
@@ -41,6 +43,7 @@ import {
     hashOAuth2Secret,
     isPkceS256ChallengeShaped,
 } from '../lib/oauth2/tokens';
+import { admissionRefusalError, admitPrincipal, type PrincipalCredential } from './admission.service';
 
 /** An authorize request as the web handler forwards it, before anything is trusted. */
 export interface OAuth2AuthorizeParams
@@ -250,6 +253,13 @@ export async function describeOAuth2AuthorizeRequestService(
     };
 }
 
+/** The session approving a consent: its account, and what it presented — its device key. */
+export interface OAuth2Approver
+{
+    userId: number;
+    credential: PrincipalCredential;
+}
+
 /**
  * Record the consent and mint the code.
  *
@@ -258,28 +268,63 @@ export async function describeOAuth2AuthorizeRequestService(
  * there must be caught here and not honoured because the screen once looked
  * right.
  *
- * `userId` comes from the approving session. Never from a request body — that
- * would be the entire authorization.
+ * The approver comes from the approving session. Never from a request body —
+ * that would be the entire authorization.
+ *
+ * A grant is a standing way in, so it is credential state: the consent locks
+ * the account (`lockAccount`) and asks again, under the lock, whether the
+ * approving session may still be let in, before anything is written. A
+ * password change or revoke-all that committed after `authenticate` admitted
+ * this request has revoked the session's key and every grant; this consent is
+ * then refused with what the session's next request would be told, and writes
+ * no grant and no code.
  */
 export async function approveOAuth2AuthorizeService(
     params: OAuth2AuthorizeParams,
-    userId: number,
+    approver: OAuth2Approver,
 ): Promise<OAuth2AuthorizationCodeIssued>
 {
     const config = requireConfig();
     const validated = await validate(params);
-    const grant = await recordConsent(validated, userId, config);
     const code = generateAuthorizationCode();
 
-    await oauth2AuthorizationCodesRepository.create({
-        codeHash: hashOAuth2Secret(code),
-        grant: grant.id,
-        redirectUri: validated.redirectUri,
-        codeChallenge: validated.codeChallenge,
-        expiresAt: new Date(Date.now() + config.codeTtlMs),
-    });
+    await runInTransaction(async () =>
+    {
+        await usersRepository.lockAccount(approver.userId);
+        await assertApproverAdmitted(approver);
+
+        const grant = await recordConsent(validated, approver.userId, config);
+
+        await oauth2AuthorizationCodesRepository.create(approver.userId, {
+            codeHash: hashOAuth2Secret(code),
+            grant: grant.id,
+            redirectUri: validated.redirectUri,
+            codeChallenge: validated.codeChallenge,
+            expiresAt: new Date(Date.now() + config.codeTtlMs),
+        });
+    }, { context: 'auth:oauth2-consent' });
 
     return { code, redirectUri: validated.redirectUri, state: validated.state, iss: config.issuer };
+}
+
+/**
+ * `admitPrincipal` on what the approving session presented, asked under the
+ * account lock.
+ *
+ * @throws the error `authenticate` answers the same refusal with
+ */
+async function assertApproverAdmitted(approver: OAuth2Approver): Promise<void>
+{
+    const admission = await admitPrincipal({
+        userId: approver.userId,
+        credential: approver.credential,
+        route: null,
+    });
+
+    if ('refused' in admission)
+    {
+        throw admissionRefusalError(admission.refused);
+    }
 }
 
 /**

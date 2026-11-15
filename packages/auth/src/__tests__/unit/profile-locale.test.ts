@@ -43,30 +43,24 @@ describe('normalizeChosenLocale', () =>
 
 describe('source scan: every locale read goes through profileLocale', () =>
 {
-    const middlewareDir = fileURLToPath(new URL('../../server/middleware', import.meta.url));
-    const readers = readdirSync(middlewareDir)
-        .filter(name => name.endsWith('.ts'))
-        .map(name => ({ name, source: readFileSync(join(middlewareDir, name), 'utf8') }))
+    const serverDir = fileURLToPath(new URL('../../server', import.meta.url));
+    const candidates = [
+        ...readdirSync(join(serverDir, 'middleware')).filter(name => name.endsWith('.ts')).map(name => join('middleware', name)),
+        join('services', 'admission.service.ts'),
+    ];
+    const readers = candidates
+        .map(name => ({ name, source: readFileSync(join(serverDir, name), 'utf8') }))
         .filter(file => file.source.includes('findLocaleByUserId('));
 
-    // `authenticate.ts` is not among them: both of its middlewares resolve the
-    // principal through `resolveAuthenticatedUser` in auth-profiles.ts (#309).
-    it('finds the middlewares that resolve a principal', () =>
+    // Every principal is built by the admission (`admitPrincipal`), so it is the
+    // one place a principal's locale is read; no middleware reads it itself.
+    it('finds the one module that resolves a principal', () =>
     {
-        expect(readers.map(file => file.name).sort()).toEqual([
-            'auth-profiles.ts',
-            'authenticate-for-renewal.ts',
-            'one-time-token-auth.ts',
-        ]);
+        expect(readers.map(file => file.name)).toEqual([join('services', 'admission.service.ts')]);
     });
 
-    it.each(['auth-profiles.ts', 'authenticate-for-renewal.ts', 'one-time-token-auth.ts'])(
-        '%s builds its locale fields with profileLocale',
-        (name) =>
-        {
-            const file = readers.find(reader => reader.name === name)!;
-
-            expect(file.source).toContain('profileLocale(chosenLocale)');
-        },
-    );
+    it('the admission builds its locale fields with profileLocale', () =>
+    {
+        expect(readers[0].source).toContain('profileLocale(chosenLocale)');
+    });
 });

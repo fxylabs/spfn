@@ -1,15 +1,21 @@
 /**
  * WebAuthn Challenges Repository
  *
- * Data access for the one-time nonces the two WebAuthn ceremonies hand out.
- * Extends BaseRepository for transaction-context detection and read/write
- * splitting.
+ * Data access for the one-time nonces the WebAuthn ceremonies hand out.
+ * Credential state (`CREDENTIAL_TABLES`): spending one is what lets an
+ * assertion sign in, renew a session, enrol a passkey or step up.
  *
- * `consume` is one conditional UPDATE and returns the row only if THIS call was
- * the one that spent it. Read-then-write would lose that race: two verifies
- * arriving with the same challenge would both read it as live and both proceed,
- * which is the replay the challenge exists to stop.
+ * A ceremony **reads** its challenge (`findLive`), verifies the response
+ * outside the account lock, and **spends** it (`consume`) inside the locked
+ * transaction together with what the ceremony writes. `consume` is one
+ * conditional UPDATE and answers true only if THIS call spent the row: two
+ * verifies arriving with the same challenge both read it as live, and one of
+ * them finds nothing left to spend. A lock wait that runs out
+ * (`AccountBusyError`) rolls back with the spend, so the challenge is still
+ * live for the retry that error invites.
  */
+
+import { and, eq, gt, isNull, lt } from 'drizzle-orm';
 
 import { webauthnChallenges } from '../entities/webauthn-challenges';
 import type {
@@ -17,11 +23,16 @@ import type {
     WebAuthnChallenge,
     WebAuthnChallengeKind,
 } from '../entities/webauthn-challenges';
-import { BaseRepository } from '@spfn/core/db';
-import { and, eq, gt, isNull, lt } from 'drizzle-orm';
+import { AccountStateRepository, type AccountWrites } from './account-state.repository';
 
-export class WebAuthnChallengesRepository extends BaseRepository
+export class WebAuthnChallengesRepository extends AccountStateRepository
 {
+    static override readonly accountWrites: AccountWrites<WebAuthnChallengesRepository> = {
+        create: { exempt: 'minting a nonce admits nothing: only its spend does, and that runs under the account lock (consume)' },
+        consume: { account: accountId => accountId },
+        deleteExpired: { exempt: 'drops rows past their expiry, which no ceremony can spend: a sweep over every account, nothing live' },
+    };
+
     /**
      * Park a freshly minted challenge.
      * Write primary.
@@ -37,33 +48,49 @@ export class WebAuthnChallengesRepository extends BaseRepository
     }
 
     /**
-     * Spend a challenge, if it is still live and was minted for this ceremony.
-     *
-     * The whole refusal — unknown, expired, already spent, wrong kind — is this
-     * one statement's WHERE clause, so nothing can read a challenge as usable in
-     * one step and spend it in another. The caller compares `userId` on the row
-     * it gets back; that is the one condition left outside, because a
-     * discoverable login has no user to match and must still spend the row.
-     *
-     * @returns the row this call spent, or null if there was nothing to spend
+     * The challenge, if it is still live, of this kind, and minted for this
+     * owner — null for an `'authentication'` challenge, which names nobody
+     * (D3). Read on the primary: it was minted moments ago. Spends nothing.
      */
-    async consume(
+    async findLive(
         challengeHash: string,
         kind: WebAuthnChallengeKind,
+        owner: number | null,
     ): Promise<WebAuthnChallenge | null>
+    {
+        const result = await this.db
+            .select()
+            .from(webauthnChallenges)
+            .where(and(liveChallenge(challengeHash, kind), ownedBy(owner)))
+            .limit(1);
+
+        return result[0] ?? null;
+    }
+
+    /**
+     * Spend a challenge for the account whose lock this transaction holds — if
+     * it is still live, of this kind, and minted for that account (or, for
+     * `'authentication'`, for nobody).
+     *
+     * The whole refusal — unknown, expired, already spent, wrong kind, another
+     * account's — is this one statement's WHERE clause, so nothing can read a
+     * challenge as usable in one step and spend it in another.
+     *
+     * @returns true when this call spent the row
+     */
+    async consume(
+        accountId: number,
+        challengeHash: string,
+        kind: WebAuthnChallengeKind,
+    ): Promise<boolean>
     {
         const result = await this.db
             .update(webauthnChallenges)
             .set({ consumedAt: new Date() })
-            .where(and(
-                eq(webauthnChallenges.challengeHash, challengeHash),
-                eq(webauthnChallenges.kind, kind),
-                isNull(webauthnChallenges.consumedAt),
-                gt(webauthnChallenges.expiresAt, new Date()),
-            ))
-            .returning();
+            .where(and(liveChallenge(challengeHash, kind), ownedBy(kind === 'authentication' ? null : accountId)))
+            .returning({ id: webauthnChallenges.id });
 
-        return result[0] ?? null;
+        return result.length > 0;
     }
 
     /**
@@ -82,6 +109,21 @@ export class WebAuthnChallengesRepository extends BaseRepository
 
         return result.length;
     }
+}
+
+function liveChallenge(challengeHash: string, kind: WebAuthnChallengeKind)
+{
+    return and(
+        eq(webauthnChallenges.challengeHash, challengeHash),
+        eq(webauthnChallenges.kind, kind),
+        isNull(webauthnChallenges.consumedAt),
+        gt(webauthnChallenges.expiresAt, new Date()),
+    );
+}
+
+function ownedBy(owner: number | null)
+{
+    return owner === null ? isNull(webauthnChallenges.userId) : eq(webauthnChallenges.userId, owner);
 }
 
 // Default instance export

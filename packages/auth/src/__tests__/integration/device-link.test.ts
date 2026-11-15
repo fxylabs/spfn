@@ -52,6 +52,7 @@ import { hashDeviceCode } from '@/server/lib/device-code';
 import { DEFAULT_DEVICE_AUTH_INTERVAL_MS } from '@/server/lib/device-auth-config';
 import { DEFAULT_DEVICE_LINK_TTL_MS } from '@/server/lib/device-link-config';
 import { deviceLinksRepository } from '@/server/repositories';
+import type { LinkHandle } from '@/server/repositories/device-links.repository';
 import { authenticate } from '@/server/middleware/authenticate';
 
 const { mainAuthRouter } = await import('@/server/routes');
@@ -956,14 +957,14 @@ describe.skipIf(!dbAvailable)('Device link', () =>
             const realApprove = deviceLinksRepository.approve.bind(deviceLinksRepository);
 
             const spy = vi.spyOn(deviceLinksRepository, 'approve')
-                .mockImplementationOnce(async (id: number) =>
+                .mockImplementationOnce(async (handle: LinkHandle) =>
                 {
                     await getTestDb()
                         .update(userPublicKeys)
                         .set({ isActive: false, revokedAt: new Date() })
                         .where(eq(userPublicKeys.keyId, issuer.keyId));
 
-                    return realApprove(id);
+                    return realApprove(handle);
                 });
 
             try

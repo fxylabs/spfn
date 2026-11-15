@@ -18,7 +18,7 @@ import { users, userProfiles, userSettings } from '@/server/entities';
 
 const { initializeAuth } = await import('@/server/services/rbac.service');
 const { getRoleByName } = await import('@/server/services/role.service');
-const { resolveAuthenticatedUser } = await import('@/server/middleware/auth-profiles');
+const { admitPrincipal } = await import('@/server/services/admission.service');
 const { userProfilesRepository } = await import('@/server/repositories');
 const {
     getUserProfileService,
@@ -27,6 +27,19 @@ const {
 } = await import('@/server/services/user-profile.service');
 
 const dbAvailable = await isDatabaseAvailable();
+
+/** The principal an account resolves to — through `admitPrincipal`, as every door reaches it. */
+async function resolveAuthenticatedUser(userId: number)
+{
+    const admission = await admitPrincipal({ userId, credential: { kind: 'appProfile', profile: 'test', keyId: 'test' }, route: null });
+
+    if (!('admitted' in admission))
+    {
+        throw new Error(`refused: ${admission.refused.reason}`);
+    }
+
+    return admission.admitted;
+}
 
 describe.skipIf(!dbAvailable)('profile locale (case table #110)', () =>
 {

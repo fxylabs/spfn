@@ -1337,9 +1337,9 @@ describe('the poll answer keeps a union inside a grammar that has none', () =>
         expect(device.pendingRule).toContain('codes this bundle does not list');
         expect(device.pendingRule).not.toContain('Only DeviceAuth');
 
-        // The one carve-out the rule names has to be the one the error list marks.
-        expect(retryable).toEqual(['TooManyRequestsError']);
-        expect(device.pendingRule).toContain('TooManyRequestsError is the only one that does');
+        // The carve-outs the rule names have to be the ones the error list marks.
+        expect(retryable).toEqual(['TooManyRequestsError', 'AccountBusyError']);
+        expect(device.pendingRule).toContain('TooManyRequestsError and AccountBusyError are the two that do');
     });
 });
 
@@ -1643,9 +1643,9 @@ describe('declared proof rules match the implementation', () =>
         replayWindowMillis: number;
     };
 
-    it('au5-A3: the contract line is the revision that lists OAuthProviderAlreadyLinkedError', () =>
+    it('the contract line is the revision that lists AccountBusyError (0.14.3, after au5-A3\'s 0.14.2)', () =>
     {
-        expect(bundle.contractVersion).toBe('0.14.2');
+        expect(bundle.contractVersion).toBe('0.14.3');
     });
 
     it('the supported range floor is the current minor, as the 0.x rule has it', () =>

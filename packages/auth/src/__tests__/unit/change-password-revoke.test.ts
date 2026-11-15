@@ -19,6 +19,7 @@ const {
 } = vi.hoisted(() => ({
     usersRepository: {
         findById: vi.fn(),
+        lockAccount: vi.fn(async (id: number) => ({ id, passwordHash: 'old-hash' })),
         updatePassword: vi.fn(async () => undefined),
     },
     keysRepository: {
@@ -43,6 +44,11 @@ vi.mock('../../server/repositories', () => ({
     deviceLinksRepository,
 }));
 vi.mock('../../server/helpers', () => ({ hashPassword, verifyPassword }));
+// No database here: the change's own transaction runs its callback as is.
+vi.mock('@spfn/core/db', async (importOriginal) => ({
+    ...await importOriginal<typeof import('@spfn/core/db')>(),
+    runInTransaction: async (fn: () => Promise<unknown>) => fn(),
+}));
 vi.mock('../../server/services/oauth2-grant.service', () => ({ revokeAllOAuth2GrantsForUser }));
 // The second-factor gate has its own suites; here it only has to be reachable,
 // since this service now calls it before doing anything else.
@@ -86,5 +92,23 @@ describe('changePasswordService — session revocation', () =>
 
         // And the OAuth grants, for the same reason one step further out.
         expect(revokeAllOAuth2GrantsForUser).toHaveBeenCalledWith(7);
+    });
+
+    it('refuses when the password changed while the current one was being verified', async () =>
+    {
+        // The hash read under the account lock is not the one the current
+        // password was checked against: another change committed in between.
+        usersRepository.lockAccount.mockResolvedValueOnce({ id: 7, passwordHash: 'changed-meanwhile' });
+
+        await expect(changePasswordService({
+            userId: 7,
+            keyId: 'key-of-the-calling-device',
+            currentPassword: 'old-password',
+            newPassword: 'new-password',
+            passwordHash: 'old-hash',
+        })).rejects.toMatchObject({ message: 'Current password is incorrect' });
+
+        expect(usersRepository.updatePassword).not.toHaveBeenCalled();
+        expect(keysRepository.revokeAllActiveByUserId).not.toHaveBeenCalled();
     });
 });

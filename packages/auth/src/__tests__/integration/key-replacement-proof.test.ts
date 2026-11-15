@@ -42,7 +42,7 @@ import { CSRF_HEADER } from '@/server/lib/csrf';
 import { decodeBase32, hotp, totpStep } from '@/server/lib/totp';
 import { authDeviceRegisteredEvent } from '@/server/events';
 import { authenticate } from '@/server/middleware/authenticate';
-import { keysRepository, mfaVerificationsRepository } from '@/server/repositories';
+import { mfaVerificationsRepository, usersRepository } from '@/server/repositories';
 import { registerPublicKeyService } from '@/server/services/key.service';
 import { KeyIdAlreadyRegisteredError } from '@spfn/auth/errors';
 import { authInterceptors } from '@/nextjs/interceptors';
@@ -478,22 +478,33 @@ describe.skipIf(!dbAvailable)('replacing a key requires proof of the old key (bu
         expect((await after.json()).code).toBe('RECENT_AUTH_REQUIRED');
     });
 
-    it('T6: a rotation and a revoke-all racing, in both orders — no key authenticates afterwards', async () =>
+    /**
+     * The next account lock waits, before it is taken, until `release`. A
+     * revocation lands in that window — after the rotation was admitted and
+     * before its transaction holds the account (`usersRepository.lockAccount`).
+     */
+    function pauseBeforeTheAccountLock(reached: ReturnType<typeof deferred>, release: ReturnType<typeof deferred>): void
     {
-        // Order 1: the revoke-all commits after the rotation was admitted and
-        // before it revokes the old key.
-        const rotating = await signedIn(OWNER);
-        const revoking = await signedIn(OWNER);
-        const reached = deferred();
-        const release = deferred();
-        const replace = keysRepository.revokeForReplacement.bind(keysRepository);
-        vi.spyOn(keysRepository, 'revokeForReplacement').mockImplementationOnce(async (...args) =>
+        const lockAccount = usersRepository.lockAccount.bind(usersRepository);
+        vi.spyOn(usersRepository, 'lockAccount').mockImplementationOnce(async (...args) =>
         {
             reached.resolve();
             await release.promise;
 
-            return replace(...args);
+            return lockAccount(...args);
         });
+    }
+
+    it('T6: a rotation and a revoke-all racing, in both orders — no key authenticates afterwards', async () =>
+    {
+        // Order 1: the revoke-all commits after the rotation was admitted and
+        // before it takes the account lock, which comes before it revokes the
+        // old key.
+        const rotating = await signedIn(OWNER);
+        const revoking = await signedIn(OWNER);
+        const reached = deferred();
+        const release = deferred();
+        pauseBeforeTheAccountLock(reached, release);
         const rotatedKey = generateKeyPair('ES256');
 
         const rotation = post('/_auth/keys/rotate', keyFields(rotatedKey), rotating.authorization);
@@ -544,14 +555,7 @@ describe.skipIf(!dbAvailable)('replacing a key requires proof of the old key (bu
         const other = await signedIn(OWNER);
         const reached = deferred();
         const release = deferred();
-        const replace = keysRepository.revokeForReplacement.bind(keysRepository);
-        vi.spyOn(keysRepository, 'revokeForReplacement').mockImplementationOnce(async (...args) =>
-        {
-            reached.resolve();
-            await release.promise;
-
-            return replace(...args);
-        });
+        pauseBeforeTheAccountLock(reached, release);
         const rotatedKey = generateKeyPair('ES256');
 
         const rotation = post('/_auth/keys/rotate', keyFields(rotatedKey), rotating.authorization);

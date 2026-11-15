@@ -7,8 +7,7 @@
 
 import { SSETokenManager } from '@spfn/core/event/sse';
 import type { SSETokenStore } from '@spfn/core/event/sse';
-import { keysRepository } from '../repositories/keys.repository';
-import { keyLiveness } from './key-liveness';
+import { admitPrincipal } from '../services/admission.service';
 
 let manager: SSETokenManager | null = null;
 
@@ -22,9 +21,11 @@ let manager: SSETokenManager | null = null;
  * @param config.ttl - Token time-to-live in milliseconds (default: 30000)
  * @param config.store - Custom token store (e.g., CacheTokenStore for Redis)
  *
- * A token minted for a device key (the SSE token endpoint tags it with the
- * caller's `keyId`) is refused at consume once that key is revoked or expired —
- * so a token minted just before a revocation cannot open a stream after it.
+ * A token is minted for a device key (`/_auth/tokens` and the SSE and WS token
+ * endpoints tag it with the caller's key) and is refused at consume unless the
+ * person it was minted for is admitted on that key now (`admitPrincipal`): a
+ * token minted just before a revocation, or a suspension, cannot open a
+ * stream after it.
  */
 export function initOneTimeTokenManager(config?: { ttl?: number; store?: SSETokenStore }): void
 {
@@ -36,19 +37,38 @@ export function initOneTimeTokenManager(config?: { ttl?: number; store?: SSEToke
     manager = new SSETokenManager({
         ttl: config?.ttl,
         store: config?.store,
-        verifyKey: isKeyLive,
+        verifyKey: admitsTokenHolder,
     });
 }
 
 /**
- * The key exists and is live (`keyLiveness`). Read on the primary: a key
- * revoked a moment ago may still read active on a replica.
+ * Whether the person a token was minted for is admitted on the key that
+ * minted it — the one admission every door asks, with a `oneTimeToken`
+ * credential: the key live, the account active, the second-factor policy.
+ * Read on the primary: a key revoked a moment ago may still read active on a
+ * replica.
+ *
+ * The person is the key holder the issuer recorded beside the key tag (core's
+ * token endpoints record the `AuthContext` user id, `issueOneTimeTokenService`
+ * the caller's), never a parse of the subject, which an app shapes with
+ * `getSubject`. A tagged token with no holder recorded is refused.
  */
-async function isKeyLive(keyId: string): Promise<boolean>
+async function admitsTokenHolder(keyId: string, _subject: string, keyHolder: string | undefined): Promise<boolean>
 {
-    const key = await keysRepository.findWithAccountEpochOnPrimary(keyId);
+    const userId = Number(keyHolder);
 
-    return !!key && keyLiveness(key) === 'live';
+    if (!keyHolder || !Number.isSafeInteger(userId))
+    {
+        return false;
+    }
+
+    const admission = await admitPrincipal({
+        userId,
+        credential: { kind: 'oneTimeToken', issuedByKeyId: keyId },
+        route: null,
+    });
+
+    return 'admitted' in admission;
 }
 
 /**

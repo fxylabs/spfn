@@ -79,6 +79,22 @@ export interface WSHandlerAuthConfig
     getSubject?: (c: Context) => string | null;
 
     /**
+     * Extract the device key the token is minted for, so that a token minted
+     * by a key revoked before the connect is refused at the connect
+     * (`SSETokenManagerConfig.verifyKey`). Empty, `null` or `undefined` → an
+     * untagged token, which no key check reaches.
+     * @default (c) => c.get('auth')?.keyId
+     */
+    getKeyId?: (c: Context) => string | null | undefined;
+
+    /**
+     * Extract who holds the key `getKeyId` names, recorded beside the tag so
+     * that `verifyKey` judges that person whatever `getSubject` returns.
+     * @default (c) => c.get('auth')?.userId
+     */
+    getKeyHolder?: (c: Context) => string | null | undefined;
+
+    /**
      * Authorize event subscriptions on connect
      * Return allowed events subset. Empty array = 403 rejection.
      */
@@ -101,6 +117,8 @@ export interface WSAuthConfig<TRouter extends WSRouterDef<any, any>>
     store?: SSETokenStore;
     tokenManager?: SSETokenManager | (() => SSETokenManager);
     getSubject?: (c: Context) => string | null;
+    getKeyId?: (c: Context) => string | null | undefined;
+    getKeyHolder?: (c: Context) => string | null | undefined;
     authorize?: (
         subject: string,
         events: InferEventNames<TRouter>[],
