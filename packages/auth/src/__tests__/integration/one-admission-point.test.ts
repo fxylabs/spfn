@@ -148,11 +148,15 @@ interface Account
     ip: string;
 }
 
-/** Every file that produces a person principal: the callers of `admitPrincipal`, read off the source. */
+/**
+ * Every file that produces a person principal: the callers of `admitPrincipal`
+ * — and of `admitCompletion`, its entry for a procedure's completion — read
+ * off the source.
+ */
 function admissionCallers(): string[]
 {
     return sourceFiles(SERVER_ROOT)
-        .filter((file) => !file.endsWith(ADMISSION_MODULE) && /\badmitPrincipal\(/.test(readFileSync(file, 'utf8')))
+        .filter((file) => !file.endsWith(ADMISSION_MODULE) && /\badmit(?:Principal|Completion)\(/.test(readFileSync(file, 'utf8')))
         .map((file) => relative(SERVER_ROOT, file).split(sep).join('/'))
         .sort();
 }
@@ -656,6 +660,23 @@ describe.skipIf(!dbAvailable)('one admission point for a person principal (T1-T1
             admitted: async (response) => expect(response.status).toBe(200),
             refused: async (response) => expectError(response, 401, 'MfaVerificationFailedError'),
         },
+        totpConfirm: {
+            name: 'mfa/totp/confirm completing an enrolment (admitDeferred)',
+            prepare: async (account) =>
+            {
+                const session = await signIn(account);
+                const enrolled = await post('/_auth/mfa/totp/enroll', account, {}, session.authorization);
+                const secret = (await enrolled.json()).secret as string;
+
+                return () => post('/_auth/mfa/totp/confirm', account, { code: totpCode(secret) }, session.authorization);
+            },
+            admitted: async (response) =>
+            {
+                expect(response.status).toBe(200);
+                expect((await response.json()).recoveryCodes).toHaveLength(10);
+            },
+            refused: expectAccountRefusal,
+        },
         deviceCode: {
             name: 'device-code collection',
             prepare: async (account) =>
@@ -690,6 +711,11 @@ describe.skipIf(!dbAvailable)('one admission point for a person principal (T1-T1
         'middleware/authenticate.ts': ['bearer', 'optionalAuth'],
         'middleware/one-time-token-auth.ts': ['oneTimeToken'],
         'services/device-auth.service.ts': ['deviceCode'],
+        // Every completion of a two-step procedure asks again here
+        // (`admitCompletion`), under the account lock: TOTP confirm, passkey register/verify, step-up and
+        // binding-off by passkey, renewal, and the link callback — the last one
+        // with no session in front of it, driven in deferred-stamps.test.ts T2/T5.
+        'services/deferred-admission.service.ts': ['totpConfirm'],
         'services/mfa.service.ts': ['mfaVerify'],
         // Consent approval asks again under the account lock, behind `authenticate`;
         // the race that only the second asking catches is account-lock-round4 R9.

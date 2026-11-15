@@ -24,6 +24,8 @@ const LINK: OAuthLinkState = {
     nonce: 'a'.repeat(32),
     startId: 'b'.repeat(32),
     codeVerifier: 'c'.repeat(43),
+    startedByKeyId: 'd'.repeat(36),
+    keyEpoch: 3,
 };
 
 describe('OAuth link state', () =>

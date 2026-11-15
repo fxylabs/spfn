@@ -211,6 +211,13 @@ export const userPublicKeys = authSchema.table(
         // Human-readable explanation for key revocation
         // Example: "Key compromised", "User reported device lost"
         revokedReason: text('revoked_reason'),
+
+        // The key that replaced this one in a verified replacement — a
+        // `keys/rotate`, a renewal, or a sign-in whose `replacementProof` this
+        // key signed. null for a key revoked any other way, and for a live one
+        // Used for: a sealed procedure stamp (`lib/deferred-stamp.ts`), which
+        // cannot be re-pointed, follows it to the key the device holds now
+        replacedByKeyId: text('replaced_by_key_id'),
     },
     (table) => [
         index('user_public_keys_user_id_idx').on(table.userId),

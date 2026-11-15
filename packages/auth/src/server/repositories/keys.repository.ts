@@ -52,6 +52,13 @@ function closeStreamsAfterCommit(keyIds: string[]): void
 }
 
 /**
+ * The most verified replacements a sealed procedure stamp is followed through.
+ * A stamp lives ten minutes; a device that replaced its key this often in that
+ * time is not completing a procedure, and is refused as a revoked key is.
+ */
+const REPLACEMENT_CHAIN_LIMIT = 16;
+
+/**
  * User Public Keys Repository 클래스
  *
  * BaseRepository를 상속받아 다음 기능을 제공:
@@ -237,9 +244,13 @@ export class KeysRepository extends AccountStateRepository
      * replacement". The row, when there is one, is what the replacement inherits
      * from (generation, `authenticatedAt`, and on a rotation the device's
      * provenance). Its SSE streams close after commit, as every revocation's do.
+     *
+     * The row records the key that replaced it (`replacedByKeyId`), so a
+     * procedure stamp sealed under the old key can still be followed to the
+     * device's key now (`findReplacementChainEnd`).
      * Write primary 사용
      */
-    async revokeForReplacement(keyId: string, userId: number, reason: string)
+    async revokeForReplacement(keyId: string, userId: number, reason: string, replacedByKeyId: string)
     {
 
         const result = await this.db
@@ -248,6 +259,7 @@ export class KeysRepository extends AccountStateRepository
                 isActive: false,
                 revokedAt: new Date(),
                 revokedReason: reason,
+                replacedByKeyId,
             })
             .where(
                 and(
@@ -530,6 +542,41 @@ export class KeysRepository extends AccountStateRepository
             .limit(1);
 
         return result[0] ?? null;
+    }
+
+    /**
+     * The key a chain of verified replacements starting at `keyId` ends in: the
+     * key itself when nothing replaced it, the last successor otherwise. Null
+     * when the account holds no such key, or the chain is longer than any a
+     * procedure stamp outlives (`REPLACEMENT_CHAIN_LIMIT`). Whether the key it
+     * ends in is live is the caller's question. Read on the primary.
+     */
+    async findReplacementChainEnd(userId: number, keyId: string): Promise<string | null>
+    {
+        let current = keyId;
+
+        for (let hop = 0; hop < REPLACEMENT_CHAIN_LIMIT; hop++)
+        {
+            const result = await this.db
+                .select({ replacedByKeyId: userPublicKeys.replacedByKeyId })
+                .from(userPublicKeys)
+                .where(and(eq(userPublicKeys.keyId, current), eq(userPublicKeys.userId, userId)))
+                .limit(1);
+
+            if (result.length === 0)
+            {
+                return null;
+            }
+
+            if (result[0].replacedByKeyId === null)
+            {
+                return current;
+            }
+
+            current = result[0].replacedByKeyId;
+        }
+
+        return null;
     }
 
     /**

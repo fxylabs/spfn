@@ -27,6 +27,7 @@
  * is the thing the short life exists to prevent.
  */
 
+import { runInTransaction } from '@spfn/core/db';
 import { RecentAuthenticationRequiredError, SessionBindingUnavailableError } from '@spfn/auth/errors';
 import { ValidationError } from '@spfn/core/errors';
 
@@ -38,9 +39,13 @@ import type { SessionBindingType } from '../types';
 import { getDummyPasswordHash, verifyPassword } from '../helpers';
 import {
     assertRecentAuthentication,
+    checkRenewalAssertionService,
     startRenewalCeremonyService,
-    verifyRenewalAssertionService,
+    type RenewalProof,
 } from './passkey.service';
+import { stampFor } from '../lib/deferred-stamp';
+import { startingCredentialOf } from './deferred-admission.service';
+import type { PrincipalCredential } from './admission.service';
 
 /** What every one of the three reads and writes here answers with. */
 export interface SessionBindingResult
@@ -69,6 +74,8 @@ export interface SessionBindingParams
 
 export interface DisableSessionBindingParams extends SessionBindingParams
 {
+    /** The credential this request presented (`getAuth(c).credential`): the one the challenge was asked with. */
+    credential: PrincipalCredential;
     /** A renewal-grade assertion, from `binding/disable/options`. */
     response?: AuthenticationResponseJSON;
     /** The account password, for a browser with no passkey to hand. */
@@ -141,10 +148,19 @@ export async function enableSessionBindingService(
     await assertLivePasskey(params.userId);
     await assertRecentAuthentication({ userId: params.userId, keyId: params.keyId });
 
-    // The proof (which may verify a password) done, the account is locked before
-    // its setting is read and its key is bound (`usersRepository.lockAccount`).
-    // The live passkey is asked for again under it: one revoked since the
-    // check above would leave the account bound with nothing to renew with.
+    // The route runs no transaction (see `disableSessionBindingService`); the
+    // writes open their own.
+    return await runInTransaction(() => bindAccount(params), { context: 'auth:session-binding-enable' });
+}
+
+/**
+ * The proof (which may verify a password) done, the account is locked before
+ * its setting is read and its key is bound (`usersRepository.lockAccount`).
+ * The live passkey is asked for again under it: one revoked since the check
+ * before it would leave the account bound with nothing to renew with.
+ */
+async function bindAccount(params: SessionBindingParams): Promise<SessionBindingResult>
+{
     const user = await usersRepository.lockAccount(params.userId);
 
     await assertLivePasskey(params.userId);
@@ -196,50 +212,91 @@ export async function disableSessionBindingService(
     params: DisableSessionBindingParams,
 ): Promise<SessionBindingResult>
 {
-    if (!await provedOwnership(params))
+    const proof = await ownershipProof(params);
+
+    if (!proof)
     {
         throw new RecentAuthenticationRequiredError({
             message: 'Turning session binding off needs a passkey or your current password.',
         });
     }
 
-    // After the proof, which may verify a password: the account lock first
-    // (`usersRepository.lockAccount`), then the setting and the keys.
-    await usersRepository.lockAccount(params.userId);
-    await usersRepository.updateById(params.userId, {
+    return await runInTransaction(() => unbindAccount(params.userId, proof), { context: 'auth:session-binding-disable' });
+}
+
+/**
+ * After the proof, which may verify a password: the account lock first
+ * (`usersRepository.lockAccount`), the proof spent under it, then the setting
+ * and the keys.
+ *
+ * @throws RecentAuthenticationRequiredError when the proof went stale under the lock
+ */
+async function unbindAccount(userId: number, proof: RenewalProof): Promise<SessionBindingResult>
+{
+    await usersRepository.lockAccount(userId);
+
+    if (!await proof.spend())
+    {
+        throw new RecentAuthenticationRequiredError({
+            message: 'Turning session binding off needs a passkey or your current password.',
+        });
+    }
+
+    await usersRepository.updateById(userId, {
         sessionBinding: 'none',
         sessionBindingChangedAt: new Date(),
     });
 
     const unbound = new Date();
     unbound.setDate(unbound.getDate() + KEY_TTL_DAYS);
-    await keysRepository.unbindActiveByUserId(params.userId, unbound);
+    await keysRepository.unbindActiveByUserId(userId, unbound);
 
     return { mode: 'none' };
 }
 
-/** The challenge the disabling ceremony signs. Same ceremony renewal uses. */
+/**
+ * The challenge the disabling ceremony signs — a renewal-grade assertion of
+ * its own kind (`'bindingOff'`), stamped with this request's credential
+ * (`lib/deferred-stamp.ts`): only this session, in this key generation, can
+ * spend it, and only to turn binding off.
+ */
 export async function startSessionBindingDisableService(
     userId: number,
+    credential: PrincipalCredential,
 ): Promise<PublicKeyCredentialRequestOptionsJSON>
 {
-    return await startRenewalCeremonyService(userId);
+    const user = await usersRepository.findByIdOnPrimary(userId);
+
+    if (!user)
+    {
+        throw new ValidationError({ message: 'User not found' });
+    }
+
+    return await startRenewalCeremonyService('bindingOff', stampFor(user, startingCredentialOf(credential)));
 }
 
 /**
- * Whether the caller presented something a copied cookie does not hold.
+ * Whether the caller presented something a copied cookie does not hold, as a
+ * proof to spend under the account lock — or null.
  *
  * Key age is deliberately not one of the answers — see this module's header. An
  * account with no password stored still pays a full bcrypt verify against a
  * dummy hash, on the same reasoning `assertRecentAuthentication` records: making
  * "no password on file" the fast refusal turns response time into an oracle for
- * which accounts are OAuth-only.
+ * which accounts are OAuth-only. An assertion that does not verify spends its
+ * challenge (`checkRenewalAssertionService`), which is why the route runs no
+ * transaction a refusal would roll that spend back with.
  */
-async function provedOwnership(params: DisableSessionBindingParams): Promise<boolean>
+async function ownershipProof(params: DisableSessionBindingParams): Promise<RenewalProof | null>
 {
     if (params.response)
     {
-        return await verifyRenewalAssertionService(params.userId, params.response);
+        return await checkRenewalAssertionService({
+            userId: params.userId,
+            ceremony: 'bindingOff',
+            credential: params.credential,
+            response: params.response,
+        });
     }
 
     const user = await usersRepository.findById(params.userId);
@@ -249,7 +306,7 @@ async function provedOwnership(params: DisableSessionBindingParams): Promise<boo
         storedHash ?? await getDummyPasswordHash(),
     );
 
-    return Boolean(storedHash) && matched;
+    return storedHash && matched ? { spend: async () => true } : null;
 }
 
 /**

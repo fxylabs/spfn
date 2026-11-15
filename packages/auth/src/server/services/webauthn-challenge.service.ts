@@ -29,7 +29,8 @@ import crypto from 'crypto';
 
 import { getPasskeyConfig } from '../lib/config';
 import { webauthnChallengesRepository } from '../repositories';
-import type { WebAuthnChallengeKind } from '../entities/webauthn-challenges';
+import type { NewWebAuthnChallenge, WebAuthnChallenge, WebAuthnChallengeKind } from '../entities/webauthn-challenges';
+import { stampColumns, type DeferredStamp } from '../lib/deferred-stamp';
 
 /**
  * Bytes of entropy in a challenge.
@@ -49,12 +50,38 @@ const CHALLENGE_BYTES = 32;
  */
 export async function mintChallenge(kind: WebAuthnChallengeKind, userId: number | null): Promise<string>
 {
+    return await parkChallenge(kind, { userId });
+}
+
+/**
+ * Mint a challenge for a ceremony a signed-in person starts, stamped with the
+ * credential that started it and the account's key generation
+ * (`lib/deferred-stamp.ts`): its completion is admitted against that stamp
+ * (`admitDeferred`).
+ *
+ * @param passwordProvenAt - When the start was answered with the account
+ *   password: a proof that belongs to this procedure, read back at its completion
+ */
+export async function mintStampedChallenge(
+    kind: WebAuthnChallengeKind,
+    stamp: DeferredStamp,
+    passwordProvenAt: Date | null = null,
+): Promise<string>
+{
+    return await parkChallenge(kind, { userId: stamp.userId, ...stampColumns(stamp), passwordProvenAt });
+}
+
+async function parkChallenge(
+    kind: WebAuthnChallengeKind,
+    owner: Pick<NewWebAuthnChallenge, 'userId' | 'startedByKeyId' | 'startedByProfile' | 'keyEpoch' | 'passwordProvenAt'>,
+): Promise<string>
+{
     const challenge = crypto.randomBytes(CHALLENGE_BYTES).toString('base64url');
 
     await webauthnChallengesRepository.create({
+        ...owner,
         challengeHash: hashChallenge(challenge),
         kind,
-        userId,
         expiresAt: new Date(Date.now() + getPasskeyConfig().challengeTtlMs),
     });
 
@@ -85,7 +112,20 @@ export async function challengeIsLive(
     owner: number | null,
 ): Promise<boolean>
 {
-    return await webauthnChallengesRepository.findLive(hashChallenge(challenge), kind, owner) !== null;
+    return await liveChallenge(challenge, kind, owner) !== null;
+}
+
+/**
+ * The challenge row `challengeIsLive` reads, for a ceremony whose completion
+ * asks the row's stamp (`stampOf`). Null on every refusal alike.
+ */
+export async function liveChallenge(
+    challenge: string,
+    kind: WebAuthnChallengeKind,
+    owner: number | null,
+): Promise<WebAuthnChallenge | null>
+{
+    return await webauthnChallengesRepository.findLive(hashChallenge(challenge), kind, owner);
 }
 
 /**

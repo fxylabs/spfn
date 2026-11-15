@@ -16,7 +16,6 @@
  */
 
 import { Type } from '@sinclair/typebox';
-import { Transactional } from '@spfn/core/db';
 import { rateLimitPolicy } from '@spfn/core/middleware';
 import { route } from '@spfn/core/route';
 
@@ -54,6 +53,11 @@ const CurrentPasswordSchema = Type.String({
  * sign-in satisfies key age and would otherwise be able to switch the protection
  * off. The 200 is what the Next.js interceptor re-seals the session cookie from,
  * so the browser stops believing in an expiry that no longer applies.
+ *
+ * No `Transactional()`: a passkey assertion that does not verify spends its
+ * challenge before the refusal, and a route-wide transaction would roll that
+ * spend back with the error (au9-N7). Each service opens its own transaction
+ * for the writes.
  */
 export const setSessionBinding = route.post('/_auth/session/binding')
     .input({
@@ -69,18 +73,18 @@ export const setSessionBinding = route.post('/_auth/session/binding')
         rateLimitPolicy('auth-session-binding', {
             limit: 10, windowMs: 60_000, by: byIpAndCaller({ ipLimit: 100 }),
         }),
-        Transactional(),
     ])
     .handler(async (c) =>
     {
         const { body } = await c.data();
-        const { userId, keyId } = getAuth(c);
+        const { userId, keyId, credential } = getAuth(c);
         const params = { userId: Number(userId), keyId, webProxy: deviceProvenance(c.raw).webProxy };
 
         if (body.mode === 'none')
         {
             return await disableSessionBindingService({
                 ...params,
+                credential,
                 response: body.response as AuthenticationResponseJSON | undefined,
                 currentPassword: body.currentPassword,
             });
@@ -125,7 +129,7 @@ export const sessionBindingDisableOptions = route.post('/_auth/session/binding/d
     })])
     .handler(async (c) =>
     {
-        const { userId } = getAuth(c);
+        const { userId, credential } = getAuth(c);
 
-        return await startSessionBindingDisableService(Number(userId));
+        return await startSessionBindingDisableService(Number(userId), credential);
     });

@@ -17,6 +17,7 @@ import { ValidationError } from '@spfn/core/errors';
 import {
     OAuthAccountNotFoundError,
     OAuthLinkNotFoundError,
+    OAuthLinkCredentialUnsupportedError,
     OAuthProviderAlreadyLinkedError,
 } from '@spfn/auth/errors';
 
@@ -42,8 +43,10 @@ import {
     assertRecentAuthentication,
     type RecentAuthenticationParams,
 } from './passkey.service';
+import { stampOf } from '../lib/deferred-stamp';
+import { admitDeferred, startingCredentialOf } from './deferred-admission.service';
+import type { AdmissionRefusal, PrincipalCredential } from './admission.service';
 import {
-    assertActiveForOAuthSession,
     identifyWithProvider,
     requireEnabledProvider,
     socialAccountConflict,
@@ -56,6 +59,8 @@ export interface StartOAuthLinkParams
     userId: number;
     /** The device key the request is signed with — the recent-authentication window is read off its `authenticatedAt`. */
     keyId: string;
+    /** The credential the request presented (`getAuth(c).credential`): the link is stamped with it. */
+    credential: PrincipalCredential;
     currentPassword?: string;
     returnUrl: string;
     /** CSRF nonce the Next.js interceptor also set as this start's cookie. */
@@ -65,8 +70,21 @@ export interface StartOAuthLinkParams
 }
 
 /**
- * Begin a link: check the caller may add a way in, then seal a link state.
+ * Begin a link: check the caller may add a way in, then seal a link state
+ * stamped with this device key and the account's key generation
+ * (`lib/deferred-stamp.ts`).
  *
+ * Only a device key starts one. The callback has no session in front of it
+ * and re-admits the starting credential from its row; an application
+ * profile's credential is live only while its verifier admits it on a
+ * request, which the callback has none of — so such a session is refused
+ * here, before anything is sealed, rather than its link completed unchecked.
+ *
+ * The checks here are early refusals: the callback admits the stamp against
+ * the account as it is when the provider sends the browser back, and that is
+ * the decision.
+ *
+ * @throws OAuthLinkCredentialUnsupportedError for a session signed in through an application's auth profile
  * @throws ValidationError for a provider that is not configured or a returnUrl off the app
  * @throws StepUpRequiredError
  * @throws RecentAuthenticationRequiredError unless the app turned the rule off for this provider (#155)
@@ -75,6 +93,12 @@ export interface StartOAuthLinkParams
 export async function startOAuthLinkService(params: StartOAuthLinkParams): Promise<{ authUrl: string }>
 {
     const oauthProvider = requireEnabledProvider(params.provider);
+    const startedBy = startingCredentialOf(params.credential);
+
+    if (startedBy.kind !== 'deviceKey')
+    {
+        throw new OAuthLinkCredentialUnsupportedError();
+    }
 
     if (!isSafeReturnPath(params.returnUrl))
     {
@@ -92,6 +116,13 @@ export async function startOAuthLinkService(params: StartOAuthLinkParams): Promi
         throw new OAuthProviderAlreadyLinkedError({ details: { provider: params.provider } });
     }
 
+    const account = await usersRepository.findByIdOnPrimary(params.userId);
+
+    if (!account)
+    {
+        throw new OAuthAccountNotFoundError();
+    }
+
     const codeVerifier = generateCodeVerifier();
     const state = await createOAuthLinkState({
         provider: params.provider,
@@ -100,6 +131,8 @@ export async function startOAuthLinkService(params: StartOAuthLinkParams): Promi
         nonce: params.nonce,
         startId: params.startId,
         codeVerifier,
+        startedByKeyId: startedBy.keyId,
+        keyEpoch: account.keyEpoch,
     });
 
     return { authUrl: buildAuthorizationUrl(oauthProvider, state, codeVerifier) };
@@ -118,13 +151,13 @@ export interface OAuthLinkCallbackParams
  * Finish a link whose state opened and whose CSRF cookie matched.
  *
  * The provider is asked first, outside any transaction. The writes then run in
- * a transaction this service opens: the account is locked before its status is
- * read, so two links finishing at once for one account are decided one after
- * the other, and a deletion request that commits meanwhile is seen. A refusal
- * throws and rolls it back; the route maps the error to an outcome afterwards.
+ * a transaction this service opens: the account is locked, and the link's
+ * stamp admitted under the lock (`linkRefusal`), so two links finishing at
+ * once for one account are decided one after the other, and a sign-out or a
+ * deletion request that commits meanwhile is seen. A refusal writes nothing
+ * and answers its outcome.
  *
- * @throws OAuthProviderError when the provider fails; the account-status errors
- *   when the account can no longer sign in
+ * @throws OAuthProviderError when the provider fails
  */
 export async function oauthLinkCallbackService(params: OAuthLinkCallbackParams): Promise<OAuthLinkOutcome>
 {
@@ -137,14 +170,42 @@ export async function oauthLinkCallbackService(params: OAuthLinkCallbackParams):
 
     return await runInTransaction(async () =>
     {
-        // Lock first, then read the status: a status change that commits between
-        // an earlier read and the lock would otherwise attach the identity to an
-        // account that is already pending deletion.
+        // Lock first, then admit: a sign-out or a status change that commits
+        // between an earlier read and the lock would otherwise attach the
+        // identity for a session or an account that is no longer there.
         await usersRepository.lockAccount(userId);
-        await assertActiveForOAuthSession(userId, () => new OAuthAccountNotFoundError());
 
-        return await attachIdentity(userId, params.provider, identity, tokens);
+        return await linkRefusal(params.link) ?? await attachIdentity(userId, params.provider, identity, tokens);
     }, { context: 'auth:oauth-link-callback' });
+}
+
+/** The admission refusals that are about the account rather than the session: `account_unavailable`. */
+const ACCOUNT_REFUSALS: ReadonlySet<AdmissionRefusal['reason']> = new Set(['accountMissing', 'accountDisabled', 'pendingDeletion']);
+
+/**
+ * Whether the link may complete now, asked under the account lock: the
+ * stamp's key — or the key its verified replacements lead to — still live, of
+ * the account's key generation, and the person admitted (`admitDeferred`). No
+ * session completes a link, so no key is compared (au5-A1). An account that
+ * cannot be let in is `account_unavailable`, as it always was; a link whose
+ * starting session is gone, whose key generation ended, or that was sealed
+ * before stamps existed, `failed` — start it again.
+ */
+async function linkRefusal(link: OAuthLinkState): Promise<OAuthLinkOutcome | null>
+{
+    const admission = await admitDeferred(
+        stampOf({ userId: Number(link.userId), startedByKeyId: link.startedByKeyId, startedByProfile: null, keyEpoch: link.keyEpoch }),
+        { credential: null, route: 'oauthProviderCallback' },
+    );
+
+    if (!('refused' in admission))
+    {
+        return null;
+    }
+
+    return admission.refused.reason === 'admission' && ACCOUNT_REFUSALS.has(admission.refused.refusal.reason)
+        ? 'account_unavailable'
+        : 'failed';
 }
 
 /**

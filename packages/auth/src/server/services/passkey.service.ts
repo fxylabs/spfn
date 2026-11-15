@@ -37,7 +37,17 @@ import {
 } from '@spfn/auth/errors';
 import { authLogger } from '../logger';
 import { getPasskeyConfig, isSignInProvider } from '../lib/config';
-import { challengeIsLive, mintChallenge, presentedChallenge, spendChallenge } from './webauthn-challenge.service';
+import {
+    challengeIsLive,
+    liveChallenge,
+    mintChallenge,
+    mintStampedChallenge,
+    presentedChallenge,
+    spendChallenge,
+} from './webauthn-challenge.service';
+import { stampFor, stampOf, type DeferredStamp } from '../lib/deferred-stamp';
+import { admitDeferred, deferredRefusalError, startingCredentialOf } from './deferred-admission.service';
+import type { PrincipalCredential } from './admission.service';
 import {
     buildAuthenticationOptions,
     buildRegistrationOptions,
@@ -57,7 +67,7 @@ import {
     usersRepository,
 } from '../repositories';
 import type { Passkey, PasskeyDeviceType } from '../entities/passkeys';
-import type { WebAuthnChallengeKind } from '../entities/webauthn-challenges';
+import type { WebAuthnChallenge, WebAuthnChallengeKind } from '../entities/webauthn-challenges';
 import type { User } from '../entities/users';
 import { getDummyPasswordHash, verifyPassword } from '../helpers';
 import type { KeyAlgorithmType, KeyPlatformType } from '../types';
@@ -156,18 +166,17 @@ export interface RecentAuthenticationParams
  * @param windowMs - The window to hold the key's `authenticatedAt` to. Omitted, it is the
  *                   passkey window; a provider link passes its own (#155), so
  *                   that path never resolves the passkey configuration.
+ * @returns which of the two satisfied it
  * @throws RecentAuthenticationRequiredError
  */
 export async function assertRecentAuthentication(
     params: RecentAuthenticationParams,
     windowMs?: number,
-): Promise<void>
+): Promise<'key' | 'password'>
 {
-    const key = await keysRepository.findByKeyIdAndUserId(params.keyId, params.userId);
-
-    if (key && Date.now() - key.authenticatedAt.getTime() <= (windowMs ?? getPasskeyConfig().recentAuthMs))
+    if (await keyRecentlyAuthenticated(params, windowMs))
     {
-        return;
+        return 'key';
     }
 
     const user = await usersRepository.findById(params.userId);
@@ -179,10 +188,45 @@ export async function assertRecentAuthentication(
 
     if (storedHash && matched)
     {
-        return;
+        return 'password';
     }
 
     throw new RecentAuthenticationRequiredError();
+}
+
+/**
+ * Recent authentication as a registration's completion asks it, under the
+ * account lock and with no password in the body: a person proved a credential
+ * on this device key within the passkey window, or answered this ceremony's
+ * options with the account password within it (`passwordProvenAt` on its
+ * challenge). The password proof is the procedure's own — no other route
+ * reads it, and the key's `authenticatedAt` never learns of it.
+ *
+ * @throws RecentAuthenticationRequiredError
+ */
+async function assertRegistrationRecentlyAuthenticated(
+    params: RecentAuthenticationParams,
+    challenge: WebAuthnChallenge,
+): Promise<void>
+{
+    const provenAt = challenge.passwordProvenAt;
+
+    if (provenAt !== null && Date.now() - provenAt.getTime() <= getPasskeyConfig().recentAuthMs)
+    {
+        return;
+    }
+
+    if (!await keyRecentlyAuthenticated(params))
+    {
+        throw new RecentAuthenticationRequiredError();
+    }
+}
+
+async function keyRecentlyAuthenticated(params: RecentAuthenticationParams, windowMs?: number): Promise<boolean>
+{
+    const key = await keysRepository.findByKeyIdAndUserId(params.keyId, params.userId);
+
+    return key !== null && Date.now() - key.authenticatedAt.getTime() <= (windowMs ?? getPasskeyConfig().recentAuthMs);
 }
 
 /** The credential a removal takes away: one passkey, or one linked social account (#154). */
@@ -264,6 +308,8 @@ export interface StartPasskeyEnrollmentParams
 {
     userId: number;
     keyId: string;
+    /** The credential this request presented (`getAuth(c).credential`): the ceremony is stamped with it. */
+    credential: PrincipalCredential;
     currentPassword?: string;
 }
 
@@ -274,6 +320,13 @@ export interface StartPasskeyEnrollmentParams
  * recent-authentication rule this route has always had (#95). The order is what
  * makes the two independent: `assertStepUp` is a no-op for an unenrolled
  * account, so the answer such a caller gets is byte-for-byte today's.
+ *
+ * Both are early refusals: the verify asks them again of the account as it is
+ * then, and that is the decision. The challenge is stamped with this request's
+ * credential and the account's key generation (`lib/deferred-stamp.ts`), so
+ * only this session, in this generation, can complete it. A password given
+ * here is recorded on the challenge, for this ceremony's verify alone
+ * (`assertRegistrationRecentlyAuthenticated`).
  *
  * `excludeCredentials` lists the caller's **live** passkeys only, so the
  * authenticator quietly refuses one already enrolled here. Revoked ones are left
@@ -286,9 +339,9 @@ export async function startPasskeyEnrollmentService(
 ): Promise<PublicKeyCredentialCreationOptionsJSON>
 {
     await assertStepUp(params);
-    await assertRecentAuthentication(params);
 
-    const user = await usersRepository.findById(params.userId);
+    const passwordProvenAt = await assertRecentAuthentication(params) === 'password' ? new Date() : null;
+    const user = await usersRepository.findByIdOnPrimary(params.userId);
 
     if (!user)
     {
@@ -299,7 +352,11 @@ export async function startPasskeyEnrollmentService(
 
     return await buildRegistrationOptions({
         config: getPasskeyConfig(),
-        challenge: await mintChallenge('registration', params.userId),
+        challenge: await mintStampedChallenge(
+            'registration',
+            stampFor(user, startingCredentialOf(params.credential)),
+            passwordProvenAt,
+        ),
         userHandle: userHandleOf(user),
         userName: displayNameOf(user),
         userDisplayName: displayNameOf(user),
@@ -315,6 +372,8 @@ export interface FinishPasskeyEnrollmentParams
     userId: number;
     /** The device key this request is signed with — its step-up window is the enrolment proof (#309). */
     keyId: string;
+    /** The credential this request presented: the one the options were asked with. */
+    credential: PrincipalCredential;
     response: RegistrationResponseJSON;
     label?: string;
 }
@@ -349,12 +408,19 @@ export interface FinishPasskeyEnrollmentResult
  * device that proved it (`assertEnrolmentProven`). With no policy, or outside
  * that state, nothing is marked.
  *
- * @throws StepUpRequiredError | PasskeyChallengeError | PasskeyVerificationError | PasskeyAlreadyRegisteredError
+ * **The decision is made here, under the account lock** (`assertMayRegister`):
+ * the challenge's stamp admitted for this key, then step-up and recent
+ * authentication against the account as it is now — not as it was when the
+ * options were asked for (au7-A3).
+ *
+ * @throws StepUpRequiredError | RecentAuthenticationRequiredError | PasskeyChallengeError
+ *   | PasskeyVerificationError | PasskeyAlreadyRegisteredError
  */
 export async function finishPasskeyEnrollmentService(
     params: FinishPasskeyEnrollmentParams,
 ): Promise<FinishPasskeyEnrollmentResult>
 {
+    // Early refusal (#309), before the attestation is verified; `assertMayRegister` is the decision.
     await assertEnrolmentProven(params);
 
     const challenge = presentedChallenge(params.response.response.clientDataJSON);
@@ -377,6 +443,7 @@ export async function finishPasskeyEnrollmentService(
     // either lands first and this enrols after it, or waits and revokes what
     // this enrolled.
     await usersRepository.lockAccount(params.userId);
+    await assertMayRegister(challenge, params);
     assertChallenge(await spendChallenge(challenge, 'registration', params.userId), 'registration');
 
     // Global, and over revoked rows too: a credential id is reserved for good
@@ -414,6 +481,38 @@ export async function finishPasskeyEnrollmentService(
 }
 
 /**
+ * Whether this session may add a passkey now — asked under the account lock,
+ * of the challenge read under it.
+ *
+ * The challenge's stamp first (`admitDeferred`): the credential that asked for
+ * the options is this request's, still live, of the account's key generation,
+ * and the person is admitted now. Anything else is a challenge this session
+ * may not spend — `PasskeyChallengeError`, the one answer for every unusable
+ * challenge. Then the rules for adding a credential, against the account as
+ * it is now: a step-up when the account is enrolled, and recent
+ * authentication — on this key, or by the password this ceremony's options
+ * were answered with.
+ *
+ * @throws PasskeyChallengeError | StepUpRequiredError | RecentAuthenticationRequiredError | the admission's errors
+ */
+async function assertMayRegister(challenge: string, params: FinishPasskeyEnrollmentParams): Promise<void>
+{
+    const row = await liveChallenge(challenge, 'registration', params.userId);
+    const admission = await admitDeferred(row && stampOf(row), {
+        credential: params.credential,
+        route: 'passkeyRegisterVerify',
+    });
+
+    if ('refused' in admission)
+    {
+        throw deferredRefusalError(admission.refused, new PasskeyChallengeError());
+    }
+
+    await assertStepUp(params);
+    await assertRegistrationRecentlyAuthenticated(params, row!);
+}
+
+/**
  * Step 1 of sign-in — options for `navigator.credentials.get()`.
  *
  * Takes nothing and returns the same shape to everyone: `allowCredentials` is
@@ -437,6 +536,12 @@ export async function startPasskeyLoginService(): Promise<PublicKeyCredentialReq
  * enrolled a passkey here, right now" — and both are answered by an assertion
  * over a challenge this account owns.
  *
+ * Each is its own challenge kind — `'renewal'` and `'bindingOff'` — so a
+ * challenge minted to renew a key does not turn binding off, nor the other way
+ * round. The challenge is stamped with the credential it is for
+ * (`lib/deferred-stamp.ts`): the key being renewed, or the session turning
+ * binding off. Only that credential can spend it (au9-N7).
+ *
  * `allowCredentials` is empty, exactly as on the sign-in ceremony and for the
  * same reason (D3): the renewal options route is public, a key id is not a
  * secret the cookie-copying adversary lacks, and an answer that listed the
@@ -445,48 +550,93 @@ export async function startPasskeyLoginService(): Promise<PublicKeyCredentialReq
  * the account, server-side, where nobody can read it.
  */
 export async function startRenewalCeremonyService(
-    userId: number,
+    ceremony: RenewalGradeCeremony,
+    stamp: DeferredStamp,
 ): Promise<PublicKeyCredentialRequestOptionsJSON>
 {
     return await buildAuthenticationOptions({
         config: getPasskeyConfig(),
-        challenge: await mintChallenge('renewal', userId),
+        challenge: await mintStampedChallenge(ceremony, stamp),
     });
 }
 
-/**
- * Step 2 — whether this assertion was signed by a live passkey of this account.
- *
- * Answers a boolean rather than throwing, because the two callers refuse in
- * different vocabularies and neither wants this file's: the renewal route
- * answers one `SessionRenewalRefusedError` to every refusal so that a live key,
- * a stranger's key and a key that never existed are indistinguishable, and the
- * binding route answers `RecentAuthenticationRequiredError` so the browser knows
- * to ask for the password instead. A thrown `PasskeyVerificationError` would have
- * to be caught and translated at both, and the catch is what would decide which
- * refusals stay indistinguishable.
- *
- * Every refusal spends nothing it did not have to: the challenge is read here,
- * and spent under the account lock by the same conditional UPDATE the other
- * ceremonies use, so a replay of a successful assertion finds nothing to spend.
- */
-export async function verifyRenewalAssertionService(
-    userId: number,
-    response: AuthenticationResponseJSON,
-): Promise<boolean>
+/** The two renewal-grade ceremonies, each its own challenge kind. */
+export type RenewalGradeCeremony = Extract<WebAuthnChallengeKind, 'renewal' | 'bindingOff'>;
+
+/** The route each renewal-grade ceremony completes on (`ROUTE_ENROLMENT`). */
+const COMPLETING_ROUTE = {
+    renewal: 'sessionRenewVerify',
+    bindingOff: 'setSessionBinding',
+} as const satisfies Record<RenewalGradeCeremony, string>;
+
+export interface RenewalAssertionParams
 {
-    const challenge = response?.response?.clientDataJSON
-        ? presentedChallenge(response.response.clientDataJSON)
+    userId: number;
+    ceremony: RenewalGradeCeremony;
+    /**
+     * What completes the ceremony: for a renewal, the `renewal` credential of
+     * the key being renewed — admitted by the renewal grace rule rather than as
+     * a live key; for binding-off, the session's own credential.
+     */
+    credential: PrincipalCredential;
+    response: AuthenticationResponseJSON;
+}
+
+/** A renewal-grade assertion that verified, not yet spent. `spend` runs in the caller's transaction. */
+export interface RenewalProof
+{
+    /** Under the account lock: false when the proof went stale, or the challenge is not this key's. */
+    spend: () => Promise<boolean>;
+}
+
+/**
+ * Step 2 — whether this assertion was signed by a live passkey of this account,
+ * checked outside the account lock; null on every refusal.
+ *
+ * Answers rather than throws, because the two callers refuse in different
+ * vocabularies and neither wants this file's: the renewal route answers one
+ * `SessionRenewalRefusedError` to every refusal so that a live key, a
+ * stranger's key and a key that never existed are indistinguishable, and the
+ * binding route answers `RecentAuthenticationRequiredError` so the browser knows
+ * to ask for the password instead.
+ *
+ * **A failed assertion spends the challenge** (au9-N7), in a transaction of its
+ * own that commits before the caller refuses — so the refusal, which rolls back
+ * the caller's transaction, cannot roll the spend back with it, and the same
+ * challenge cannot be tried again. Both callers therefore run this outside any
+ * transaction and open theirs for the success path. A proof that verified is
+ * spent by `spend`, under the lock, only when the challenge's stamp admits this
+ * key (`admitDeferred`).
+ */
+export async function checkRenewalAssertionService(params: RenewalAssertionParams): Promise<RenewalProof | null>
+{
+    const challenge = params.response?.response?.clientDataJSON
+        ? presentedChallenge(params.response.response.clientDataJSON)
         : '';
 
-    if (!await challengeIsLive(challenge, 'renewal', userId))
+    if (!await challengeIsLive(challenge, params.ceremony, params.userId))
     {
-        authLogger.service.warn('Renewal challenge refused');
+        authLogger.service.warn('Renewal challenge refused', { kind: params.ceremony });
 
-        return false;
+        return null;
     }
 
-    return await assertionMatchesLivePasskey(userId, response, challenge);
+    const verified = await verifiedRenewalAssertion(params.userId, params.response, challenge);
+
+    if (!verified)
+    {
+        await spendFailedRenewalChallenge(params, challenge);
+
+        return null;
+    }
+
+    return { spend: () => spendRenewalProof(params, challenge, verified) };
+}
+
+interface VerifiedAssertion
+{
+    passkey: Passkey;
+    newCounter: number;
 }
 
 /**
@@ -497,17 +647,17 @@ export async function verifyRenewalAssertionService(
  * renewal middleware does: even a caller who somehow reached this step for a key
  * that is not theirs cannot finish the ceremony with their own passkey.
  */
-async function assertionMatchesLivePasskey(
+async function verifiedRenewalAssertion(
     userId: number,
     response: AuthenticationResponseJSON,
     challenge: string,
-): Promise<boolean>
+): Promise<VerifiedAssertion | null>
 {
     const passkey = await passkeysRepository.findLiveByCredentialId(response.id);
 
     if (!passkey || passkey.userId !== userId)
     {
-        return false;
+        return null;
     }
 
     const outcome = await verifyAuthentication({
@@ -522,21 +672,47 @@ async function assertionMatchesLivePasskey(
         },
     });
 
-    if (!outcome.verified)
+    return outcome.verified ? { passkey, newCounter: outcome.newCounter } : null;
+}
+
+/** Spend the challenge of an assertion that did not verify, in a transaction of its own (au9-N7). */
+async function spendFailedRenewalChallenge(params: RenewalAssertionParams, challenge: string): Promise<void>
+{
+    await runInTransaction(async () =>
     {
-        return false;
-    }
+        await usersRepository.lockAccount(params.userId);
+        await spendChallenge(challenge, params.ceremony, params.userId);
+    }, { context: 'auth:renewal-failed-assertion' });
+}
 
-    // After the verification, before the challenge and passkey rows: the
-    // account lock is the first lock this transaction takes for the account
-    // (`lockAccount`). The challenge is spent under it, and the passkey — read
-    // before it — has its use recorded only on a row still live, at the
-    // counter verified against: a revocation or another assertion that landed
-    // meanwhile refuses the renewal.
-    await usersRepository.lockAccount(userId);
+/**
+ * Spend a verified renewal-grade proof, in the caller's transaction.
+ *
+ * The account lock first (`lockAccount`). Under it the challenge's stamp is
+ * read and admitted for the credential this ceremony is for (`admitDeferred`):
+ * a challenge minted for another — another session of the account, or the
+ * key before it was renewed by someone else — is not this one's to spend. Then
+ * the challenge is spent, and the passkey — read before the lock — has its use
+ * recorded only on a row still live, at the counter verified against: a
+ * revocation or another assertion that landed meanwhile refuses the renewal.
+ */
+async function spendRenewalProof(
+    params: RenewalAssertionParams,
+    challenge: string,
+    verified: VerifiedAssertion,
+): Promise<boolean>
+{
+    await usersRepository.lockAccount(params.userId);
 
-    return await spendChallenge(challenge, 'renewal', userId)
-        && await passkeysRepository.recordUse(passkey, outcome.newCounter);
+    const row = await liveChallenge(challenge, params.ceremony, params.userId);
+    const admission = await admitDeferred(row && stampOf(row), {
+        credential: params.credential,
+        route: COMPLETING_ROUTE[params.ceremony],
+    });
+
+    return !('refused' in admission)
+        && await spendChallenge(challenge, params.ceremony, params.userId)
+        && await passkeysRepository.recordUse(verified.passkey, verified.newCounter);
 }
 
 export interface FinishPasskeyLoginParams

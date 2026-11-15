@@ -93,11 +93,12 @@ export const passkeyRegisterOptions = route.post('/_auth/passkeys/register/optio
     .handler(async (c) =>
     {
         const { body } = await c.data();
-        const { userId, keyId } = getAuth(c);
+        const { userId, keyId, credential } = getAuth(c);
 
         return await startPasskeyEnrollmentService({
             userId: Number(userId),
             keyId,
+            credential,
             currentPassword: body.currentPassword,
         });
     });
@@ -130,11 +131,12 @@ export const passkeyRegisterVerify = route.post('/_auth/passkeys/register/verify
     .handler(async (c) =>
     {
         const { body } = await c.data();
-        const { userId, keyId } = getAuth(c);
+        const { userId, keyId, credential } = getAuth(c);
 
         return await finishPasskeyEnrollmentService({
             userId: Number(userId),
             keyId,
+            credential,
             response: body.response as Parameters<typeof finishPasskeyEnrollmentService>[0]['response'],
             label: body.label,
         });

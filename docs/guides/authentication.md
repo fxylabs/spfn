@@ -975,8 +975,10 @@ account without one may only enrol (see above).
 
 Two forms — a TOTP authenticator app, or a passkey the person already enrolled and has marked
 as their second factor — and ten single-use recovery codes come with either. Enrolment is
-`POST /_auth/mfa/totp/enroll` then `/_auth/mfa/totp/confirm`, both from a signed-in session,
-and `GET /_auth/mfa/status` is what an account screen renders from.
+`POST /_auth/mfa/totp/enroll` then `/_auth/mfa/totp/confirm`, both from the same signed-in
+session — another session's `confirm` is told there is nothing to confirm, and an account that
+enrolled a factor in between is asked for a step-up at `confirm` — and `GET /_auth/mfa/status` is
+what an account screen renders from.
 
 You need `SPFN_AUTH_TOKEN_ENCRYPTION_KEYS` set, even with no social login: it is the keyring
 the TOTP secret is encrypted with at rest.

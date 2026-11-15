@@ -32,6 +32,7 @@
  * meaningless for exactly the accounts that turned this protection on.
  */
 
+import { runInTransaction } from '@spfn/core/db';
 import { SessionRenewalRefusedError } from '@spfn/auth/errors';
 
 import type { AuthenticationResponseJSON, PublicKeyCredentialRequestOptionsJSON } from '../lib/webauthn';
@@ -41,7 +42,8 @@ import type { User } from '../entities/users';
 import type { KeyAlgorithmType } from '../types';
 import { registerPublicKeyService, registeredBinding } from './key.service';
 import { secondFactorEnrolmentFields } from './second-factor-policy.service';
-import { startRenewalCeremonyService, verifyRenewalAssertionService } from './passkey.service';
+import { checkRenewalAssertionService, startRenewalCeremonyService } from './passkey.service';
+import { stampFor } from '../lib/deferred-stamp';
 import { loginBindingFields, type LoginResult } from './auth.service';
 import { admitPrincipal } from './admission.service';
 
@@ -95,23 +97,26 @@ export async function startSessionRenewService(
     params: StartSessionRenewParams,
 ): Promise<PublicKeyCredentialRequestOptionsJSON>
 {
-    const { key } = await admitForRenewal(params.expiredKeyId);
+    const { key, user } = await admitForRenewal(params.expiredKeyId);
 
-    return await startRenewalCeremonyService(key.userId);
+    return await startRenewalCeremonyService('renewal', stampFor(user, { kind: 'deviceKey', keyId: key.keyId }));
 }
 
 /**
  * Step 2 — verify the assertion, put a new bound key in place of the old one.
  *
+ * The assertion is checked outside any transaction: one that does not verify
+ * spends its challenge in a transaction of its own before the refusal, so it
+ * cannot be tried again (au9-N7). The success path opens one transaction, in
+ * which the challenge — only if it was minted for this very key — is spent,
+ * the old key revoked and the new one registered together, so a failure
+ * part-way leaves a session that can still be renewed rather than one with no
+ * key at all.
+ *
  * The old key is revoked by the registration itself, in the statement that
  * checks it is still live: two verifies that both got past their own challenges
  * meet at that conditional UPDATE, and only the one that actually revoked the
  * key goes on to write a replacement.
- *
- * The new key inherits the old row's provenance, so the device list keeps saying
- * where this device first appeared rather than re-stamping itself every day. Its
- * expiry is a fresh window from now — renewal is a renewal, not an extension of
- * what the old key had.
  *
  * @throws SessionRenewalRefusedError 갱신할 수 없을 때 (증명 실패 포함, 모든 사유 동일)
  */
@@ -120,12 +125,39 @@ export async function finishSessionRenewService(
 ): Promise<SessionRenewResult>
 {
     const { key, user } = await admitForRenewal(params.expiredKeyId);
+    const proof = await checkRenewalAssertionService({
+        userId: key.userId,
+        ceremony: 'renewal',
+        credential: { kind: 'renewal', keyId: key.keyId },
+        response: params.response,
+    });
 
-    if (!await verifyRenewalAssertionService(key.userId, params.response))
+    if (!proof)
     {
         throw new SessionRenewalRefusedError();
     }
 
+    return await runInTransaction(async () =>
+    {
+        if (!await proof.spend())
+        {
+            throw new SessionRenewalRefusedError();
+        }
+
+        return await renewKey(params, key, user);
+    }, { context: 'auth:session-renew' });
+}
+
+/**
+ * Register the bound key that replaces `key`.
+ *
+ * The new key inherits the old row's provenance, so the device list keeps saying
+ * where this device first appeared rather than re-stamping itself every day. Its
+ * expiry is a fresh window from now — renewal is a renewal, not an extension of
+ * what the old key had.
+ */
+async function renewKey(params: FinishSessionRenewParams, key: UserPublicKey, user: User): Promise<SessionRenewResult>
+{
     const registered = await registerPublicKeyService({
         userId: key.userId,
         keyId: params.keyId,

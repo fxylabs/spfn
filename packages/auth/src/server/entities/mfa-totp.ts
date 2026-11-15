@@ -49,6 +49,16 @@ export const mfaTotp = authSchema.table('mfa_totp',
         // Wrong codes against the unconfirmed row. Reset by a fresh `enroll`.
         failedConfirmAttempts: integer('failed_confirm_attempts').notNull().default(0),
 
+        // The procedure stamp (`lib/deferred-stamp.ts`): the credential that
+        // started this — a device key's id, or an application profile's name
+        // and reported key id — and the account's key generation then.
+        // Completion admits only that credential, of that generation, as the
+        // account is now. null on a row written before the stamp existed —
+        // refused at completion
+        startedByKeyId: text('started_by_key_id'),
+        startedByProfile: text('started_by_profile'),
+        keyEpoch: integer('key_epoch'),
+
         ...timestamps(),
     },
     (table) => [

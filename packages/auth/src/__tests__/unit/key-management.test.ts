@@ -36,6 +36,9 @@ vi.mock('../../server/repositories', () => ({
     deviceLinksRepository,
     // The account a key is written for, as the key writer locks it: active.
     usersRepository: { lockAccount: vi.fn(async (id: number) => ({ id, status: 'active', keyEpoch: 0 })) },
+    // A verified replacement re-points the procedures the old key started.
+    mfaTotpRepository: { repointStamp: vi.fn(async () => undefined) },
+    webauthnChallengesRepository: { repointStamps: vi.fn(async () => undefined) },
 }));
 // The key write is its own transaction; here only its body matters.
 vi.mock('@spfn/core/db', async (importOriginal) => ({

@@ -20,7 +20,14 @@ import {
 } from '@spfn/auth/errors';
 import { NotFoundError, UnauthorizedError, ValidationError } from '@spfn/core/errors';
 import { runInTransaction } from '@spfn/core/db';
-import { deviceAuthorizationsRepository, deviceLinksRepository, keysRepository, usersRepository } from '../repositories';
+import {
+    deviceAuthorizationsRepository,
+    deviceLinksRepository,
+    keysRepository,
+    mfaTotpRepository,
+    usersRepository,
+    webauthnChallengesRepository,
+} from '../repositories';
 import { revokeAllOAuth2GrantsForUser } from './oauth2-grant.service';
 import { emitDeviceRegistered } from './device-registration.service';
 import { accountRefusal, type AdmissionRefusal } from './admission.service';
@@ -586,6 +593,7 @@ async function registerNewKey(params: RegisterPublicKeyParams, accountKeyEpoch: 
     if (replaced)
     {
         await carryStepUpVerification(params.userId, replaced.keyId, params.keyId);
+        await carryDeferredStamps(params.userId, replaced.keyId, params.keyId);
     }
     else if (params.channel !== 'rotation')
     {
@@ -593,6 +601,21 @@ async function registerNewKey(params: RegisterPublicKeyParams, accountKeyEpoch: 
     }
 
     return { pending: false, binding: row.binding, expiresAt: row.expiresAt };
+}
+
+/**
+ * Re-point the procedures the replaced key started — a pending TOTP enrolment,
+ * live WebAuthn ceremonies — at the key that replaced it, in the replacement's
+ * transaction (`lib/deferred-stamp.ts`). The web proxy replaces its key at
+ * every sign-in, so without this a person who signed in again in the middle of
+ * an enrolment would be refused at its completion on the same device. Only a
+ * verified replacement reaches here: a key id merely named is a new device,
+ * whose completion of another key's procedure is refused.
+ */
+async function carryDeferredStamps(userId: number, fromKeyId: string, toKeyId: string): Promise<void>
+{
+    await mfaTotpRepository.repointStamp(userId, fromKeyId, toKeyId);
+    await webauthnChallengesRepository.repointStamps(userId, fromKeyId, toKeyId);
 }
 
 /**
@@ -623,7 +646,7 @@ async function claimReplacement(params: RegisterPublicKeyParams): Promise<UserPu
 
     if ('signedBy' in claim)
     {
-        const replaced = await keysRepository.revokeForReplacement(claim.signedBy, params.userId, claim.reason);
+        const replaced = await keysRepository.revokeForReplacement(claim.signedBy, params.userId, claim.reason, params.keyId);
 
         if (!replaced)
         {
@@ -636,7 +659,7 @@ async function claimReplacement(params: RegisterPublicKeyParams): Promise<UserPu
     const oldKeyId = await keyIdProvenByProof(claim.proof, params);
 
     return oldKeyId
-        ? await keysRepository.revokeForReplacement(oldKeyId, params.userId, `Replaced by new key on ${params.channel} sign-in`)
+        ? await keysRepository.revokeForReplacement(oldKeyId, params.userId, `Replaced by new key on ${params.channel} sign-in`, params.keyId)
         : null;
 }
 

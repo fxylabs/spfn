@@ -12,12 +12,14 @@ import { and, eq, isNotNull, isNull, lt, or, sql } from 'drizzle-orm';
 
 import { mfaTotp } from '../entities/mfa-totp';
 import type { MfaTotp } from '../entities/mfa-totp';
+import { stampColumns, type DeferredStamp } from '../lib/deferred-stamp';
 import { AccountStateRepository, type AccountWrites } from './account-state.repository';
 
 export class MfaTotpRepository extends AccountStateRepository
 {
     static override readonly accountWrites: AccountWrites<MfaTotpRepository> = {
         startEnrolment: { account: userId => userId },
+        repointStamp: { account: userId => userId },
         confirm: { account: userId => userId },
         recordUsedStep: { account: userId => userId },
         countFailedConfirm: { account: userId => userId },
@@ -49,19 +51,42 @@ export class MfaTotpRepository extends AccountStateRepository
      *
      * A **confirmed** row is refused by the service before this is reached, so
      * this can never overwrite a working second factor.
+     *
+     * The row carries the stamp of the start (`lib/deferred-stamp.ts`): the
+     * credential that started it and the account's key generation then.
      */
-    async startEnrolment(userId: number, secretEnc: string): Promise<MfaTotp>
+    async startEnrolment(userId: number, secretEnc: string, stamp: DeferredStamp): Promise<MfaTotp>
     {
+        const started = { secretEnc, ...stampColumns(stamp) };
         const result = await this.db
             .insert(mfaTotp)
-            .values({ userId, secretEnc })
+            .values({ userId, ...started })
             .onConflictDoUpdate({
                 target: mfaTotp.userId,
-                set: { secretEnc, confirmedAt: null, lastUsedStep: null, failedConfirmAttempts: 0 },
+                set: { ...started, confirmedAt: null, lastUsedStep: null, failedConfirmAttempts: 0 },
             })
             .returning();
 
         return result[0];
+    }
+
+    /**
+     * Point an unconfirmed enrolment started on the device key `fromKeyId` at
+     * the key that replaced it in a verified replacement — the same device
+     * under a new key. An application profile's stamp is not a device key's,
+     * whatever key id its verifier reported, and is left alone. Write primary.
+     */
+    async repointStamp(userId: number, fromKeyId: string, toKeyId: string): Promise<void>
+    {
+        await this.db
+            .update(mfaTotp)
+            .set({ startedByKeyId: toKeyId })
+            .where(and(
+                eq(mfaTotp.userId, userId),
+                eq(mfaTotp.startedByKeyId, fromKeyId),
+                isNull(mfaTotp.startedByProfile),
+                isNull(mfaTotp.confirmedAt),
+            ));
     }
 
     /**

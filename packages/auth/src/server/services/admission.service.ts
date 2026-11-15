@@ -5,10 +5,12 @@
  * place it is answered. Every door that produces a person principal — the
  * Bearer path of `authenticate` and `optionalAuth`, every auth profile, the
  * one-time token, renewal, the OAuth 2.1 access token and token endpoint, the
- * new-device challenge and device-code / device-link collection — extracts its
- * credential and calls `admitPrincipal`. None of them carries a rule of its
- * own, so a rule added here holds at every door and a door cannot keep a copy
- * that has drifted.
+ * new-device challenge, device-code / device-link collection — extracts its
+ * credential and calls `admitPrincipal`; the completion of a two-step procedure
+ * (`admitDeferred`) calls `admitCompletion`, the same decision with the
+ * completing route's enrolment class in place of a request. None of them
+ * carries a rule of its own, so a rule added here holds at every door and a
+ * door cannot keep a copy that has drifted.
  *
  * The decision, in order:
  *
@@ -52,6 +54,8 @@ import { getBoundKeyRenewGraceMs } from '../lib/config';
 import { profileLocale } from '../lib/profile-locale';
 import { applyRoleEmailDomainPolicy } from './role-email-domain.service';
 import { secondFactorAdmits } from './second-factor-policy.service';
+import { isMethodListed } from '../lib/second-factor-policy';
+import type { RouteEnrolment } from '../routes/channels';
 
 /**
  * What a door presents. Closed: a kind added here does not compile until
@@ -61,6 +65,11 @@ import { secondFactorAdmits } from './second-factor-policy.service';
  * `appProfile` is a credential an application's registered auth profile
  * verified with its own scheme. The package holds no record of it, so it is
  * live exactly when the registered verifier admitted it on this request.
+ *
+ * A procedure's completion is no kind of its own: it presents the credential
+ * the procedure was started with, to `admitCompletion`, which only
+ * `admitDeferred` calls and the package entry does not export — so no caller
+ * of `admitPrincipal` can claim a completing route's enrolment class.
  */
 export type PrincipalCredential =
     | { kind: 'deviceKey'; keyId: string }
@@ -290,6 +299,37 @@ export function admitsForRenewal(key: UserPublicKey): boolean
  */
 export async function admitPrincipal(params: AdmitPrincipalParams): Promise<Admission>
 {
+    return await admit(params, null);
+}
+
+export interface AdmitCompletionParams
+{
+    userId: number;
+    /** The credential the procedure was started with — or, for a renewal, the renewal it completes. */
+    credential: PrincipalCredential;
+    /** The completing route's class in `ROUTE_ENROLMENT` (#309). */
+    enrolment: RouteEnrolment;
+}
+
+/**
+ * `admitPrincipal` for the completion of a two-step procedure, which only
+ * `admitDeferred` asks: the same decision, with no request in front of it.
+ *
+ * The second-factor policy's enrolment-only state admits the completion
+ * exactly as it admitted the route it came in on (`ROUTE_ENROLMENT`): under
+ * `'always'` and `'unchecked'`, under a method while that method is listed,
+ * and under `'none'` not at all. Not exported from the package entry: an
+ * application that could name an enrolment class here could let any request
+ * past the enrolment-only refusal.
+ */
+export async function admitCompletion(params: AdmitCompletionParams): Promise<Admission>
+{
+    return await admit({ userId: params.userId, credential: params.credential, route: null }, params.enrolment);
+}
+
+/** The decision both entries make; `enrolment` is a completing route's class, null for a door. */
+async function admit(params: AdmitPrincipalParams, enrolment: RouteEnrolment | null): Promise<Admission>
+{
     const [read, chosenLocale] = await Promise.all([
         readAdmission(params.userId, params.credential),
         userSettingsRepository.findLocaleByUserId(params.userId),
@@ -303,7 +343,7 @@ export async function admitPrincipal(params: AdmitPrincipalParams): Promise<Admi
     // In the documented order; each step runs only when the one before it admitted.
     const refusal = await accountRefusal(read.account.user)
         ?? credentialRefusal(read.liveness)
-        ?? await secondFactorRefusal(params);
+        ?? await secondFactorRefusal(params, enrolment);
 
     if (refusal !== null)
     {
@@ -419,12 +459,26 @@ function credentialRefusal(liveness: KeyLiveness): AdmissionRefusal | null
 }
 
 /** Step 3, for every credential but renewal (see `admitPrincipal`). */
-async function secondFactorRefusal(params: AdmitPrincipalParams): Promise<AdmissionRefusal | null>
+async function secondFactorRefusal(
+    params: AdmitPrincipalParams,
+    enrolment: RouteEnrolment | null,
+): Promise<AdmissionRefusal | null>
 {
-    if (params.credential.kind === 'renewal' || await secondFactorAdmits(params.userId, params.route))
+    if (params.credential.kind === 'renewal' || (enrolment !== null && admitsEnrolmentOnly(enrolment)))
     {
         return null;
     }
 
-    return { reason: 'enrolmentRequired' };
+    return await secondFactorAdmits(params.userId, params.route) ? null : { reason: 'enrolmentRequired' };
+}
+
+/** Whether a completing route admits an enrolment-only session, as `authenticate` reads its class. */
+function admitsEnrolmentOnly(enrolment: RouteEnrolment): boolean
+{
+    if (enrolment === 'none')
+    {
+        return false;
+    }
+
+    return enrolment === 'always' || enrolment === 'unchecked' || isMethodListed(enrolment);
 }

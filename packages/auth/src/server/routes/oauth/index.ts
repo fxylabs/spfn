@@ -1010,7 +1010,7 @@ export const oauthLinkStart = route.post('/_auth/oauth/:provider/link')
     .handler(async (c) =>
     {
         const { params, body } = await c.data();
-        const { userId, keyId } = getAuth(c);
+        const { userId, keyId, credential } = getAuth(c);
 
         if (!body.nonce || !body.startId)
         {
@@ -1023,6 +1023,7 @@ export const oauthLinkStart = route.post('/_auth/oauth/:provider/link')
             provider: params.provider,
             userId: Number(userId),
             keyId,
+            credential,
             currentPassword: body.currentPassword,
             returnUrl: body.returnUrl || '/',
             nonce: body.nonce,

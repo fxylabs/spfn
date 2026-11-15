@@ -16,33 +16,36 @@
  * it keeps "plaintext or hash" from becoming a per-table judgement call.
  */
 
-import { bigint, index, text, uniqueIndex } from 'drizzle-orm/pg-core';
+import { bigint, index, integer, text, uniqueIndex } from 'drizzle-orm/pg-core';
 import { id, enumText, utcTimestamp } from '@spfn/core/db';
 import { users } from './users';
 import { authSchema } from './schema';
 
 /**
- * Which ceremony the challenge was minted for.
+ * Which ceremony the challenge was minted for — one kind per procedure, and
+ * each kind is spent by exactly one route.
  *
- * Recorded and matched at consume time so a registration challenge cannot be
- * presented to `login/verify` or the other way round — the two ceremonies
- * authorize very different things, and only the kind tells them apart once the
- * value itself is just 32 random bytes.
+ * Recorded and matched at consume time because the value itself is just 32
+ * random bytes: only the kind tells a challenge minted to start one procedure
+ * from one minted to start another, and two procedures that shared a kind
+ * would each accept the other's challenge under its own rule.
  *
- * `'mfa'` is the third: a step-up assertion, minted for an identified account
- * and spent by `POST /_auth/mfa/step-up`. It buys the same separation in the
- * direction that matters most — an assertion collected as a second factor is
- * not a sign-in, and `passkeys/login/verify` refuses it for exactly the reason
- * the column exists.
+ * | Kind             | Minted by                                  | Spent only by                         | Stamped |
+ * |------------------|--------------------------------------------|---------------------------------------|---------|
+ * | `authentication` | `passkeys/login/options`                   | `passkeys/login/verify`               | no — names nobody (D3) |
+ * | `registration`   | `passkeys/register/options`                | `passkeys/register/verify`            | yes     |
+ * | `stepUp`         | `mfa/step-up/options`                      | `mfa/step-up` (`attemptSecondFactor`) | yes     |
+ * | `newDevice`      | `mfa/verify/options`                       | `mfa/verify`                          | no — the sign-in's challenge handle names its pending key |
+ * | `renewal`        | `session/renew/options`                    | `session/renew/verify`                | yes, with the key it renews |
+ * | `bindingOff`     | `session/binding/disable/options`          | `session/binding` (`mode: 'none'`)    | yes     |
  *
- * `'renewal'` is the fourth: the assertion that renews a bound session key, and
- * the one that lets an account leave `session_binding: 'passkey'`. It is its own
- * kind rather than a reused `'authentication'` because that kind's challenge is
- * minted for nobody in particular — a discoverable sign-in names no account —
- * while a renewal challenge is bound to the account it was issued for, and
- * spending one where the other was expected would cross those two rules.
+ * A stamped kind is spent only through `admitDeferred` (`lib/deferred-stamp.ts`),
+ * and an unstamped row of one is refused. `'mfa'`, the kind a step-up and a
+ * new-device sign-in once shared, is no longer minted and no route spends it:
+ * a row of it left from before the upgrade is refused everywhere, and the
+ * sweep takes it with the expired.
  */
-export const WEBAUTHN_CHALLENGE_KINDS = ['registration', 'authentication', 'mfa', 'renewal'] as const;
+export const WEBAUTHN_CHALLENGE_KINDS = ['registration', 'authentication', 'stepUp', 'newDevice', 'renewal', 'bindingOff'] as const;
 
 export type WebAuthnChallengeKind = typeof WEBAUTHN_CHALLENGE_KINDS[number];
 
@@ -58,8 +61,8 @@ export const webauthnChallenges = authSchema.table('webauthn_challenges',
 
         // The account the ceremony is for, or null for a discoverable login —
         // where nobody has been identified yet and naming an account would be
-        // the enumeration surface the whole flow is shaped to avoid (D3). An
-        // `'mfa'` challenge always names one: the caller is already signed in.
+        // the enumeration surface the whole flow is shaped to avoid (D3). Every
+        // other kind names one.
         //
         // Nullable, so `foreignKey()` (which is notNull by construction) does
         // not apply; the cascade is still declared, so destroying an account
@@ -73,6 +76,20 @@ export const webauthnChallenges = authSchema.table('webauthn_challenges',
         // gone, regardless of expiry.
         consumedAt: utcTimestamp('consumed_at'),
 
+        // The procedure stamp (`lib/deferred-stamp.ts`) of a stamped kind (see
+        // `WEBAUTHN_CHALLENGE_KINDS`): the credential that started it — a device
+        // key's id, or an application profile's name in `started_by_profile`
+        // and the key id its verifier reported — and the account's key
+        // generation then. null on an unstamped kind, and on a row written
+        // before the stamp existed — which a stamped kind's completion refuses
+        startedByKeyId: text('started_by_key_id'),
+        startedByProfile: text('started_by_profile'),
+        keyEpoch: integer('key_epoch'),
+        // A `'registration'` ceremony whose options were answered with the
+        // account password: when that proof was given. Recent authentication
+        // belongs to the procedure it was given for, so `register/verify` reads
+        // it here and the key's own `authenticated_at` is not refreshed by it
+        passwordProvenAt: utcTimestamp('password_proven_at'),
         createdAt: utcTimestamp('created_at').notNull().defaultNow(),
     },
     (table) => [

@@ -30,6 +30,7 @@ export class WebAuthnChallengesRepository extends AccountStateRepository
     static override readonly accountWrites: AccountWrites<WebAuthnChallengesRepository> = {
         create: { exempt: 'minting a nonce admits nothing: only its spend does, and that runs under the account lock (consume)' },
         consume: { account: accountId => accountId },
+        repointStamps: { account: userId => userId },
         deleteExpired: { exempt: 'drops rows past their expiry, which no ceremony can spend: a sweep over every account, nothing live' },
     };
 
@@ -91,6 +92,25 @@ export class WebAuthnChallengesRepository extends AccountStateRepository
             .returning({ id: webauthnChallenges.id });
 
         return result.length > 0;
+    }
+
+    /**
+     * Point the live challenges a ceremony started on the device key
+     * `fromKeyId` at the key that replaced it in a verified replacement — the
+     * same device under a new key (`lib/deferred-stamp.ts`). An application
+     * profile's stamp is left alone. Write primary.
+     */
+    async repointStamps(userId: number, fromKeyId: string, toKeyId: string): Promise<void>
+    {
+        await this.db
+            .update(webauthnChallenges)
+            .set({ startedByKeyId: toKeyId })
+            .where(and(
+                eq(webauthnChallenges.userId, userId),
+                eq(webauthnChallenges.startedByKeyId, fromKeyId),
+                isNull(webauthnChallenges.startedByProfile),
+                isNull(webauthnChallenges.consumedAt),
+            ));
     }
 
     /**

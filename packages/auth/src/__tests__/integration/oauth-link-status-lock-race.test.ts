@@ -5,15 +5,14 @@
  * Found by the Codex reviewer on PR #290. A deletion request that held the row
  * and committed between an earlier status read and the lock let the link attach
  * the identity to an account already pending deletion. Row C10b: the status
- * change commits while the callback waits on the lock → the service refuses
- * with `AccountPendingDeletionError` (the route's `account_unavailable`), and no
- * social row is written.
+ * change commits while the callback waits on the lock → the service answers
+ * `account_unavailable` (its link's admission, under the lock), and no social
+ * row is written.
  */
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { eq } from 'drizzle-orm';
 import { runInTransaction } from '@spfn/core/db';
-import { AccountPendingDeletionError } from '@spfn/auth/errors';
 
 import {
     clearTables,
@@ -135,6 +134,10 @@ describe.skipIf(!dbAvailable)('OAuth link callback: status read under the row lo
                     nonce: 'nonce',
                     startId: 'start-id',
                     codeVerifier: 'code-verifier',
+                    // The admission reads the status before the key, so the
+                    // status the blocker commits is what refuses here.
+                    startedByKeyId: 'start-key',
+                    keyEpoch: 0,
                 },
             }),
             { context: 'review:oauth-link-status-lock-race' },
@@ -144,9 +147,9 @@ describe.skipIf(!dbAvailable)('OAuth link callback: status read under the row lo
         releaseBlocker();
         await blocker;
 
-        // The service refuses with the status error; the callback route turns it into
-        // `oauthLink=account_unavailable` (rows C10 in oauth-link.test.ts).
-        await expect(callback).rejects.toBeInstanceOf(AccountPendingDeletionError);
+        // The link's admission, under the lock, sees the committed status and
+        // answers `account_unavailable` (rows C10 in oauth-link.test.ts).
+        await expect(callback).resolves.toBe('account_unavailable');
         expect(await getTestDb().select().from(userSocialAccounts)).toHaveLength(0);
     });
 });

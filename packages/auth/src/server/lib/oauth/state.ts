@@ -191,7 +191,9 @@ function stateRefusal(cause: unknown): Error
 /**
  * What a session-initiated link (#154) seals into the `state` it hands the
  * provider: whose account the identity is attached to, where the browser goes
- * back to, and the CSRF pair.
+ * back to, the CSRF pair, and the procedure stamp (`lib/deferred-stamp.ts`) —
+ * the device key that started the link and the account's key generation then,
+ * which the callback admits against the account as it is when it lands.
  *
  * Sealed under its own key, so a link state never opens as a sign-in state and
  * a sign-in state never opens as a link — one callback route serves both, and
@@ -207,6 +209,10 @@ export interface OAuthLinkState
     startId: string;
     /** The PKCE verifier of this flow, as a sign-in state carries it. */
     codeVerifier: string;
+    /** The device key the link was started with; null in a state sealed before stamps existed. */
+    startedByKeyId: string | null;
+    /** The account's key generation at the start; null in a state sealed before stamps existed. */
+    keyEpoch: number | null;
 }
 
 async function getLinkStateKey(): Promise<Uint8Array>
@@ -252,12 +258,26 @@ export async function openOAuthLinkState(sealed: string): Promise<OAuthLinkState
     return payload ? linkStateOf(payload) : null;
 }
 
+/**
+ * The link a payload carries. A state sealed before the stamp existed opens
+ * with a null stamp, so its callback returns to its page refused rather than
+ * to the error URL as a state that is not a link.
+ */
 function linkStateOf(payload: jose.JWTPayload): OAuthLinkState | null
 {
     const link = payload.link as Partial<OAuthLinkState> | undefined;
     const fields = [link?.provider, link?.userId, link?.returnUrl, link?.nonce, link?.startId, link?.codeVerifier];
 
-    return fields.every(field => typeof field === 'string') ? link as OAuthLinkState : null;
+    if (!fields.every(field => typeof field === 'string'))
+    {
+        return null;
+    }
+
+    return {
+        ...link as OAuthLinkState,
+        startedByKeyId: typeof link!.startedByKeyId === 'string' ? link!.startedByKeyId : null,
+        keyEpoch: typeof link!.keyEpoch === 'number' ? link!.keyEpoch : null,
+    };
 }
 
 /**

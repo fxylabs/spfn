@@ -61,13 +61,22 @@ import { loginBindingFields, type LoginResult, type MfaChallengeHandle } from '.
 import { updateLastLoginService } from './user.service';
 import { emitDeviceRegistered } from './device-registration.service';
 import { authLoginEvent, passkeyRevokedEvent } from '../events';
-import { MFA_CONFIRM_ATTEMPT_LIMIT } from '../entities/mfa-totp';
+import { MFA_CONFIRM_ATTEMPT_LIMIT, type MfaTotp } from '../entities/mfa-totp';
 import type { DeferredLoginEvent, MfaChallenge, MfaChallengeChannel } from '../entities/mfa-challenges';
 import type { UserPublicKey } from '../entities/user-public-keys';
 import type { MfaVerificationMethod } from '../entities/mfa-verifications';
-import { challengeIsLive, mintChallenge, presentedChallenge, spendChallenge } from './webauthn-challenge.service';
+import { stampFor, stampOf } from '../lib/deferred-stamp';
+import { admitDeferred, deferredRefusalError, startingCredentialOf } from './deferred-admission.service';
+import {
+    challengeIsLive,
+    liveChallenge,
+    mintChallenge,
+    mintStampedChallenge,
+    presentedChallenge,
+    spendChallenge,
+} from './webauthn-challenge.service';
 import { isMethodListed } from '../lib/second-factor-policy';
-import { accountRefusal, admitPrincipal } from './admission.service';
+import { accountRefusal, admitPrincipal, type PrincipalCredential } from './admission.service';
 import { SWEEP_BATCH, sweepEachAccount } from './account-sweep.service';
 import {
     assertNotLastListedFactor,
@@ -449,7 +458,7 @@ export async function verifyMfaChallengeService(
         code: params.code,
         recoveryCode: params.recoveryCode,
         response: params.response,
-    }, listedProofs());
+    }, listedProofs(), { kind: 'newDevice' });
 
     if (!proof)
     {
@@ -549,7 +558,8 @@ async function settleStepUpLogin(row: MfaChallenge): Promise<LoginResult>
  * it is what names the account, so the WebAuthn challenge can be minted for the
  * right owner without the request having to say who that is. `allowCredentials`
  * is empty for the reason it is everywhere else here (D3), and the ceremony kind
- * is `'mfa'`, so what comes back cannot be spent as a sign-in.
+ * is `'newDevice'`, which only `mfa/verify` spends: what comes back is neither
+ * a sign-in nor a signed-in session's step-up.
  *
  * @throws MfaVerificationFailedError when the challenge cannot be spent
  */
@@ -561,7 +571,7 @@ export async function startMfaChallengeAssertionService(
 
     return await buildAuthenticationOptions({
         config: getPasskeyConfig(),
-        challenge: await mintChallenge('mfa', row.userId),
+        challenge: await mintChallenge('newDevice', row.userId),
     });
 }
 
@@ -599,22 +609,30 @@ export interface TotpEnrolmentResult
 }
 
 /**
- * Mint a secret and park it unconfirmed.
+ * Mint a secret and park it unconfirmed, stamped with the credential that
+ * started it and the account's key generation (`lib/deferred-stamp.ts`).
  *
- * Calling this twice replaces the unconfirmed row and its failure counter — a
- * user who closed the app before scanning starts over, which is also the
- * documented remedy for a row that spent its five confirm attempts. A
+ * Calling this twice replaces the unconfirmed row, its stamp and its failure
+ * counter — a user who closed the app before scanning starts over, which is
+ * also the documented remedy for a row that spent its five confirm attempts. A
  * **confirmed** enrolment is refused instead: replacing a working second factor
  * is `disable` followed by a fresh enrolment, both step-up gated, so nobody
  * holding only a stolen session can swap an authenticator for their own.
  *
  * @throws MfaAlreadyEnrolledError when a confirmed enrolment already exists
  */
-export async function startTotpEnrolmentService(userId: number): Promise<TotpEnrolmentResult>
+export async function startTotpEnrolmentService(
+    userId: number,
+    credential: PrincipalCredential,
+): Promise<TotpEnrolmentResult>
 {
-    await usersRepository.lockAccount(userId);
-
+    const account = await usersRepository.lockAccount(userId);
     const existing = await mfaTotpRepository.findByUserId(userId);
+
+    if (!account)
+    {
+        throw new NotFoundError({ message: 'User not found', resource: 'User' });
+    }
 
     if (existing?.confirmedAt)
     {
@@ -623,7 +641,7 @@ export async function startTotpEnrolmentService(userId: number): Promise<TotpEnr
 
     const secret = generateTotpSecret();
 
-    await mfaTotpRepository.startEnrolment(userId, encryptMfaSecret(secret, userId));
+    await mfaTotpRepository.startEnrolment(userId, encryptMfaSecret(secret, userId), stampFor(account, startingCredentialOf(credential)));
 
     const user = await usersRepository.findById(userId);
 
@@ -642,6 +660,8 @@ export interface ConfirmTotpParams
     userId: number;
     /** The device this enrolment is being confirmed from — it gets the first verification. */
     keyId: string;
+    /** The credential this request presented: the one the enrolment was started with. */
+    credential: PrincipalCredential;
     code: string;
 }
 
@@ -663,13 +683,19 @@ export interface ConfirmTotpResult
  * the confirmation, the first verification and the recovery codes have to
  * commit together or not at all.
  *
- * In the policy's enrolment-only state, an account that already holds a
- * credential confirms only from a device that proved it (`assertEnrolmentProven`).
+ * **The decision is made here, at the write, under the account lock**
+ * (`assertMayConfirm`): the enrolment's stamp admitted for this credential, and then
+ * the factor-adding rule — `assertStepUp` — against the account as it is now.
+ * `enroll` asked the same rule of the account as it was then; that is an early
+ * refusal only. In the policy's enrolment-only state, an account that already
+ * holds a credential is refused early too, before any code is counted
+ * (`assertEnrolmentProven`, #309).
  *
  * @throws StepUpRequiredError | MfaNotEnrolledError | MfaVerificationFailedError
  */
 export async function confirmTotpEnrolmentService(params: ConfirmTotpParams): Promise<ConfirmTotpResult>
 {
+    // Early refusal (#309); `assertMayConfirm` below is the decision.
     await assertEnrolmentProven(params);
 
     const row = await mfaTotpRepository.findByUserId(params.userId);
@@ -694,7 +720,7 @@ export async function confirmTotpEnrolmentService(params: ConfirmTotpParams): Pr
 
     return await runInTransaction(async () =>
     {
-        await assertSameEnrolment(params.userId, secret);
+        await assertMayConfirm(await assertSameEnrolment(params.userId, secret), params);
         await mfaTotpRepository.confirm(params.userId, step);
         await mfaVerificationsRepository.record(params.keyId, params.userId, 'totp');
 
@@ -713,9 +739,10 @@ export async function confirmTotpEnrolmentService(params: ConfirmTotpParams): Pr
  * the rotation `readSecret` queued while the code was checked rewrites
  * `secret_enc` under a new key, and the enrolment it seals is still this one.
  *
+ * @returns the enrolment, as read under the lock
  * @throws MfaNotEnrolledError
  */
-async function assertSameEnrolment(userId: number, secret: string): Promise<void>
+async function assertSameEnrolment(userId: number, secret: string): Promise<MfaTotp>
 {
     await usersRepository.lockAccount(userId);
 
@@ -725,6 +752,35 @@ async function assertSameEnrolment(userId: number, secret: string): Promise<void
     {
         throw new MfaNotEnrolledError();
     }
+
+    return row;
+}
+
+/**
+ * Whether this session may turn this enrolment into a second factor now —
+ * asked under the account lock, of the row read under it.
+ *
+ * The enrolment's stamp first (`admitDeferred`): the credential that started
+ * it is this request's, still live, of the account's key generation, and the person
+ * is admitted now. Another session's enrolment, or one whose key generation
+ * has ended, is no enrolment of this session's: `MfaNotEnrolledError`, and
+ * `enroll` again. Then the rule for adding a factor, `assertStepUp`, against
+ * the account as it is now — an account that enrolled a factor since `enroll`
+ * ran is asked for a step-up here, which a session that only holds a stolen
+ * cookie cannot give (au7-A1).
+ *
+ * @throws MfaNotEnrolledError | StepUpRequiredError | the admission's errors
+ */
+async function assertMayConfirm(pending: MfaTotp, params: ConfirmTotpParams): Promise<void>
+{
+    const admission = await admitDeferred(stampOf(pending), { credential: params.credential, route: 'mfaTotpConfirm' });
+
+    if ('refused' in admission)
+    {
+        throw deferredRefusalError(admission.refused, new MfaNotEnrolledError());
+    }
+
+    await assertStepUp(params);
 }
 
 /**
@@ -980,19 +1036,33 @@ async function unusedRecoveryCodes(userId: number): Promise<number>
  * `allowCredentials` is empty, as it is for a sign-in and for the same reason
  * (D3): the discoverable credential on the device names itself, and the owner
  * and the second-factor mark are checked when the assertion comes back. The
- * challenge is minted with kind `'mfa'` and this account's id, so it cannot be
- * presented to `passkeys/login/verify` and a sign-in challenge cannot be
- * presented here.
+ * challenge is minted with kind `'stepUp'` and this account's id, which only a
+ * step-up spends — not `passkeys/login/verify`, not a new-device `mfa/verify` —
+ * and a step-up spends no other kind. It is stamped with this request's
+ * credential and the account's key generation (`lib/deferred-stamp.ts`): the
+ * window it opens is this session's, so only this session, in this
+ * generation, can spend it.
  */
-export async function startStepUpService(userId: number): Promise<PublicKeyCredentialRequestOptionsJSON>
+export async function startStepUpService(
+    userId: number,
+    credential: PrincipalCredential,
+): Promise<PublicKeyCredentialRequestOptionsJSON>
 {
+    const account = await usersRepository.findByIdOnPrimary(userId);
+
+    if (!account)
+    {
+        throw new NotFoundError({ message: 'User not found', resource: 'User' });
+    }
+
     return await buildAuthenticationOptions({
         config: getPasskeyConfig(),
-        challenge: await mintChallenge('mfa', userId),
+        challenge: await mintStampedChallenge('stepUp', stampFor(account, startingCredentialOf(credential))),
     });
 }
 
-export interface StepUpParams
+/** One proof of a second factor, for the account and device it is checked for. */
+interface SecondFactorParams
 {
     userId: number;
     /** The device the verification is recorded against. */
@@ -1001,6 +1071,25 @@ export interface StepUpParams
     recoveryCode?: string;
     response?: AuthenticationResponseJSON;
 }
+
+export interface StepUpParams extends SecondFactorParams
+{
+    /**
+     * The credential this request presented (`getAuth(c).credential`): a
+     * passkey assertion's `'stepUp'` challenge was asked for with it, and is
+     * spent only with it.
+     */
+    credential: PrincipalCredential;
+}
+
+/**
+ * The procedure a passkey proof completes, which is the one challenge kind it
+ * is checked against: a signed-in session's step-up, held to its stamp, or a
+ * new-device sign-in, whose challenge handle already names its pending key.
+ */
+type PasskeyCeremony =
+    | { kind: 'stepUp'; credential: PrincipalCredential }
+    | { kind: 'newDevice' };
 
 /**
  * Re-prove the second factor on this device, refreshing its window.
@@ -1106,7 +1195,7 @@ export async function attemptSecondFactor(
     accepts: AcceptedProofs = listedProofs(),
 ): Promise<MfaVerificationMethod | null>
 {
-    const proof = await checkSecondFactor(params, accepts);
+    const proof = await checkSecondFactor(params, accepts, { kind: 'stepUp', credential: params.credential });
 
     return proof && await runInTransaction(async () =>
     {
@@ -1132,7 +1221,11 @@ interface SecondFactorProof
  *
  * @throws ValidationError when the body names none or more than one input
  */
-async function checkSecondFactor(params: StepUpParams, accepts: AcceptedProofs): Promise<SecondFactorProof | null>
+async function checkSecondFactor(
+    params: SecondFactorParams,
+    accepts: AcceptedProofs,
+    ceremony: PasskeyCeremony,
+): Promise<SecondFactorProof | null>
 {
     const presented = [params.code, params.recoveryCode, params.response].filter(value => value !== undefined);
 
@@ -1153,7 +1246,9 @@ async function checkSecondFactor(params: StepUpParams, accepts: AcceptedProofs):
         return accepts.recoveryCodes ? await verifyRecoveryProof(params.userId, params.recoveryCode) : null;
     }
 
-    return accepts.passkeys === null ? null : await verifyPasskeyProof(params.userId, params.response!, accepts.passkeys);
+    return accepts.passkeys === null
+        ? null
+        : await verifyPasskeyProof(params, params.response!, accepts.passkeys, ceremony);
 }
 
 /**
@@ -1245,21 +1340,22 @@ async function verifyRecoveryProof(userId: number, submitted: string): Promise<S
  * @returns null when the assertion does not verify
  */
 async function verifyPasskeyProof(
-    userId: number,
+    params: SecondFactorParams,
     response: AuthenticationResponseJSON,
     candidates: 'marked' | 'live',
+    ceremony: PasskeyCeremony,
 ): Promise<SecondFactorProof | null>
 {
     const challenge = presentedChallenge(response.response.clientDataJSON);
 
-    if (!await challengeIsLive(challenge, 'mfa', userId))
+    if (!await challengeIsLive(challenge, ceremony.kind, params.userId))
     {
         return null;
     }
 
     const owned = candidates === 'marked'
-        ? await passkeysRepository.listLiveSecondFactorByUserId(userId)
-        : await passkeysRepository.listLiveByUserId(userId);
+        ? await passkeysRepository.listLiveSecondFactorByUserId(params.userId)
+        : await passkeysRepository.listLiveByUserId(params.userId);
     const passkey = owned.find(row => row.credentialId === response.id);
 
     if (!passkey)
@@ -1286,9 +1382,36 @@ async function verifyPasskeyProof(
 
     return {
         method: 'passkey',
-        spend: async () => await spendChallenge(challenge, 'mfa', userId)
+        spend: async () => await spendCeremonyChallenge(ceremony, challenge, params.userId)
             && await passkeysRepository.recordUse(passkey, outcome.newCounter),
     };
+}
+
+/**
+ * Under the account lock: spend a passkey proof's challenge, of its ceremony's
+ * kind. A `'stepUp'` challenge is stamped (`lib/deferred-stamp.ts`), and only
+ * the session that asked for it, still admitted and in its key generation,
+ * spends it; one without a stamp was minted before the upgrade and is
+ * refused. A `'newDevice'` challenge names no session — its sign-in's
+ * `mfa_challenges` row carries the key and generation, and `mfa/verify` asks
+ * them.
+ */
+async function spendCeremonyChallenge(ceremony: PasskeyCeremony, challenge: string, userId: number): Promise<boolean>
+{
+    if (ceremony.kind === 'stepUp' && !await stepUpChallengeAdmits(challenge, userId, ceremony.credential))
+    {
+        return false;
+    }
+
+    return await spendChallenge(challenge, ceremony.kind, userId);
+}
+
+async function stepUpChallengeAdmits(challenge: string, userId: number, credential: PrincipalCredential): Promise<boolean>
+{
+    const row = await liveChallenge(challenge, 'stepUp', userId);
+    const admission = await admitDeferred(row && stampOf(row), { credential, route: 'mfaStepUp' });
+
+    return !('refused' in admission);
 }
 
 /**

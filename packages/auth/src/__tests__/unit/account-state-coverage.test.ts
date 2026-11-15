@@ -9,23 +9,30 @@
  *
  * Two static checks, on two representations:
  *
- * - every method of an `AccountStateRepository`, as the compiled method source
- *   (`Function.prototype.toString`), that writes a credential table — a
- *   drizzle `insert`/`update`/`delete`, a core helper (`_create`, `_upsert`,
- *   `_updateOne`, `_deleteMany`, …) or a raw `execute` — has an `accountWrites`
- *   entry;
- * - every file under `src/server` that is not an `AccountStateRepository`
- *   (services, routes, other repositories, module-level helpers), as source
- *   text, names no credential table as the target of such a write or of a
- *   `sql` template that inserts into, updates or deletes from it.
+ * - every method of every `AccountStateRepository` class — found by walking
+ *   the files under `src/server` for one, not by what `repositories/index.ts`
+ *   re-exports — as the compiled method source (`Function.prototype.toString`),
+ *   that writes a credential table — a drizzle `insert`/`update`/`delete`, a
+ *   core helper (`_create`, `_upsert`, `_updateOne`, `_deleteMany`, …) or a raw
+ *   `execute` — has an `accountWrites` entry; such a class must be exported
+ *   from its module, or it could not be checked;
+ * - the code of every file under `src/server` outside the bodies of those
+ *   classes (services, routes, other repositories, module-level helpers —
+ *   those of a repository's own file included), with its comments removed,
+ *   names no credential table as the target of such a write (`update (t)`
+ *   with a space too) or of a `sql` template (`sql\`…\``, `sql<T>\`…\``) or
+ *   `sql.raw(…)` string, quoted any way, that inserts into, updates or deletes
+ *   from it.
  *
  * What neither sees, and only the runtime check (`AccountStateRepository`'s
  * guard, under test) can: a write built with `db.with(...)` or `$with`; one in
  * a `#private` method or an arrow-function class field of a base repository
- * (neither is on the prototype these checks walk); a module-level helper
- * inside a base repository's own file that is handed `this.db`; a table
- * imported under another name; and a write whose target is a variable rather
- * than the table's identifier.
+ * (neither is on the prototype these checks walk); a class extending another
+ * repository class rather than `AccountStateRepository` by name; a table
+ * imported under another name; a write whose target is a variable rather than
+ * the table's identifier; a `sql` string built by concatenation or held in a
+ * variable; and a class body these checks cut short because a line inside it
+ * starts with `}`.
  */
 
 import { readdirSync, readFileSync } from 'node:fs';
@@ -34,6 +41,7 @@ import { describe, it, expect } from 'vitest';
 import { BaseRepository } from '@spfn/core/db';
 import { getTableName, isTable } from 'drizzle-orm';
 import type { PgTable } from 'drizzle-orm/pg-core';
+import ts from 'typescript';
 
 import * as entities from '@/server/entities';
 import * as repositories from '@/server/repositories';
@@ -66,12 +74,17 @@ const NOT_CREDENTIAL_STATE: Record<string, string> = {
  * core `BaseRepository` helpers — as source spells them (`table`) and as the
  * compiled method does (`(0, module.table)`, `__vi_import_0__.table`).
  */
-const WRITE_PATTERN = /\.(?:insert|update|delete|_create|_createMany|_upsert|_updateOne|_updateMany|_deleteOne|_deleteMany)\(\s*(?:\(0,\s*)?(?:[\w$]+\.)?([\w$]+)/g;
-const EXECUTE_PATTERN = /\.execute\(/;
+const WRITE_PATTERN = /\.(?:insert|update|delete|_create|_createMany|_upsert|_updateOne|_updateMany|_deleteOne|_deleteMany)\s*\(\s*(?:\(0,\s*)?(?:[\w$]+\.)?([\w$]+)/g;
+const EXECUTE_PATTERN = /\.execute\s*\(/;
 
 /** A `sql` template that writes, with its target: an interpolated table, or a table name spelled out. */
 const SQL_WRITE_PATTERN = /\b(?:insert\s+into|update|delete\s+from)\s+(?:\$\{\s*(?:\(0,\s*)?(?:[\w$]+\.)?([\w$]+)\s*\)?\s*\}|(?:"?\w+"?\.)?"?(\w+)"?)/gi;
-const SQL_TEMPLATE_PATTERN = /\bsql(?:\.raw\()?\s*`([^`]*)`/g;
+
+/** The text of a `sql` template — typed (`sql<T>`) or not — or of a `sql.raw(…)` string in any quotes. */
+const SQL_TEXT_PATTERN = /\bsql(?:\s*<[^>`]*>)?\s*`([^`]*)`|\bsql\s*\.\s*raw\s*\(\s*(?:`([^`]*)`|'((?:[^'\\]|\\.)*)'|"((?:[^"\\]|\\.)*)")/g;
+
+/** A class extending the base, as code declares it — with its body, which ends at the first line starting with `}`. */
+const REPOSITORY_CLASS_PATTERN = /^(?:export\s+)?class\s+([\w$]+)\s+extends\s+AccountStateRepository\b[\s\S]*?^\}/gm;
 
 const tableByIdentifier = new Map(
     Object.entries(entities).filter(([, value]) => isTable(value)).map(([name, table]) => [name, table as PgTable]),
@@ -94,8 +107,9 @@ function credentialTableNamed(name: string | undefined): string | undefined
 function credentialWritesIn(source: string): string[]
 {
     const statements = [...source.matchAll(WRITE_PATTERN)].map(match => credentialTableNamed(match[1]));
-    const templates = [...source.matchAll(SQL_TEMPLATE_PATTERN)]
-        .flatMap(template => [...template[1]!.matchAll(SQL_WRITE_PATTERN)])
+    const templates = [...source.matchAll(SQL_TEXT_PATTERN)]
+        .map(text => (text[1] ?? text[2] ?? text[3] ?? text[4])!.replace(/\\(.)/g, '$1'))
+        .flatMap(text => [...text.matchAll(SQL_WRITE_PATTERN)])
         .map(match => credentialTableNamed(match[1] ?? match[2]));
 
     return [...statements, ...templates].filter((name): name is string => name !== undefined);
@@ -118,6 +132,114 @@ function serverSources(directory: string = SERVER_ROOT): string[]
     });
 }
 
+/** The tokens after which a `/` divides: anything else before it starts a regular expression. */
+const ENDS_AN_OPERAND = new Set([
+    ts.SyntaxKind.Identifier,
+    ts.SyntaxKind.NumericLiteral,
+    ts.SyntaxKind.BigIntLiteral,
+    ts.SyntaxKind.StringLiteral,
+    ts.SyntaxKind.RegularExpressionLiteral,
+    ts.SyntaxKind.NoSubstitutionTemplateLiteral,
+    ts.SyntaxKind.TemplateTail,
+    ts.SyntaxKind.CloseParenToken,
+    ts.SyntaxKind.CloseBracketToken,
+    ts.SyntaxKind.CloseBraceToken,
+    ts.SyntaxKind.ThisKeyword,
+    ts.SyntaxKind.SuperKeyword,
+]);
+
+const COMMENTS = new Set([ts.SyntaxKind.SingleLineCommentTrivia, ts.SyntaxKind.MultiLineCommentTrivia]);
+
+/**
+ * Source with its comments removed, so what is matched is code, not text about
+ * it. Read by the TypeScript scanner, token by token, so a comment marker inside
+ * a string, a template or a regular expression is that literal's text and not a
+ * comment. Everything else is kept as written, whitespace included.
+ */
+function withoutComments(source: string): string
+{
+    const scanner = ts.createScanner(ts.ScriptTarget.Latest, false, ts.LanguageVariant.Standard, source);
+    const templates: number[] = [];
+    let previous = ts.SyntaxKind.Unknown;
+    let code = '';
+
+    for (let token = scanner.scan(); token !== ts.SyntaxKind.EndOfFileToken; token = scanner.scan())
+    {
+        token = rescanned(scanner, token, previous, templates);
+
+        if (!COMMENTS.has(token))
+        {
+            code += scanner.getTokenText();
+        }
+
+        if (!COMMENTS.has(token) && token !== ts.SyntaxKind.WhitespaceTrivia && token !== ts.SyntaxKind.NewLineTrivia)
+        {
+            previous = token;
+        }
+    }
+
+    return code;
+}
+
+/**
+ * The token as its context reads it, which the scanner alone cannot know: a
+ * `/` that starts a regular expression, and a `}` that closes a template's
+ * `${…}` and continues the template. `templates` holds, for each template open
+ * around this point, how many braces are open inside its current substitution.
+ */
+function rescanned(scanner: ts.Scanner, token: ts.SyntaxKind, previous: ts.SyntaxKind, templates: number[]): ts.SyntaxKind
+{
+    if ((token === ts.SyntaxKind.SlashToken || token === ts.SyntaxKind.SlashEqualsToken) && !ENDS_AN_OPERAND.has(previous))
+    {
+        return scanner.reScanSlashToken();
+    }
+
+    if (token === ts.SyntaxKind.CloseBraceToken && templates.at(-1) === 0)
+    {
+        const continued = scanner.reScanTemplateToken(false);
+
+        if (continued === ts.SyntaxKind.TemplateTail)
+        {
+            templates.pop();
+        }
+
+        return continued;
+    }
+
+    countBraces(token, templates);
+
+    return token;
+}
+
+function countBraces(token: ts.SyntaxKind, templates: number[]): void
+{
+    if (token === ts.SyntaxKind.TemplateHead)
+    {
+        templates.push(0);
+    }
+    else if (templates.length > 0 && token === ts.SyntaxKind.OpenBraceToken)
+    {
+        templates[templates.length - 1]! += 1;
+    }
+    else if (templates.length > 0 && token === ts.SyntaxKind.CloseBraceToken)
+    {
+        templates[templates.length - 1]! -= 1;
+    }
+}
+
+/** The code of a file outside the bodies of its `AccountStateRepository` classes. */
+function codeOutsideRepositories(source: string): string
+{
+    return withoutComments(source).replace(REPOSITORY_CLASS_PATTERN, '');
+}
+
+/** Every `AccountStateRepository` class declared in a file under `src/server`, by file and name. */
+function declaredRepositoryClasses(): { path: string; name: string }[]
+{
+    return serverSources().flatMap(path => [...withoutComments(readFileSync(path, 'utf8')).matchAll(REPOSITORY_CLASS_PATTERN)]
+        .map(match => ({ path, name: match[1]! })));
+}
+
 /** A base repository method's credential writes; any raw `execute` counts, since it names no table drizzle can see. */
 function credentialTablesWritten(method: (...args: unknown[]) => unknown): string[]
 {
@@ -131,6 +253,27 @@ const allRepositories: BaseRepository[] = [
     ...Object.values(repositories as Record<string, unknown>).filter((value): value is BaseRepository => value instanceof BaseRepository),
     accountStatusRepository,
 ];
+
+type RepositoryClass = typeof AccountStateRepository;
+
+/**
+ * Every `AccountStateRepository` class on disk, as its module exports it — or
+ * the name of one its module does not export.
+ */
+async function repositoryClassesOnDisk(): Promise<{ classes: RepositoryClass[]; unexported: string[] }>
+{
+    const found = await Promise.all(declaredRepositoryClasses().map(async ({ path, name }) =>
+    {
+        const exported = (await import(path) as Record<string, unknown>)[name];
+
+        return { name: `${relative(SERVER_ROOT, path)} ${name}`, exported: exported as RepositoryClass | undefined };
+    }));
+
+    return {
+        classes: found.flatMap(({ exported }) => exported?.prototype instanceof AccountStateRepository ? [exported] : []),
+        unexported: found.filter(({ exported }) => !(exported?.prototype instanceof AccountStateRepository)).map(({ name }) => name),
+    };
+}
 
 describe('account-state coverage', () =>
 {
@@ -147,9 +290,8 @@ describe('account-state coverage', () =>
     it('finds no credential write in any file under src/server outside the base repositories', () =>
     {
         const outside = serverSources()
-            .map(path => ({ path, source: readFileSync(path, 'utf8') }))
-            .filter(({ source }) => !/\bextends\s+AccountStateRepository\b/.test(source))
-            .flatMap(({ path, source }) => credentialWritesIn(source).map(table => `${relative(SERVER_ROOT, path)} (${table})`));
+            .flatMap(path => credentialWritesIn(codeOutsideRepositories(readFileSync(path, 'utf8')))
+                .map(table => `${relative(SERVER_ROOT, path)} (${table})`));
 
         expect(outside).toEqual([]);
     });
@@ -171,25 +313,83 @@ describe('account-state coverage', () =>
         expect(credentialWritesIn('await this.db.update(roles).set({ name })')).toEqual([]);
     });
 
-    it('classifies every write method of every AccountStateRepository, and nothing that is not one', () =>
+    it('sees the shapes bundle 3 left open: sql.raw strings, typed templates, a spaced call, a comment that names the base', () =>
+    {
+        const shapes = [
+            'await db.execute(sql.raw(\'update spfn_auth.passkeys set counter = 0\'))',
+            'await db.execute(sql.raw("DELETE FROM \\"spfn_auth\\".\\"mfa_totp\\""))',
+            'await db.execute(sql<number>`update ${userPublicKeys} set is_active = false`)',
+            'await db.update (passkeys).set({ counter })',
+        ];
+
+        expect(shapes.map(shape => credentialWritesIn(shape))).toEqual([
+            ['passkeys'], ['mfa_totp'], ['user_public_keys'], ['passkeys'],
+        ]);
+
+        const mentionsTheBase = [
+            '// unlike class Keys extends AccountStateRepository, this helper is not a repository',
+            'export async function wipe(db: Db) { await db.update(passkeys).set({ counter: 0 }); }',
+        ].join('\n');
+
+        expect(credentialWritesIn(codeOutsideRepositories(mentionsTheBase))).toEqual(['passkeys']);
+
+        const helperBesideARepository = [
+            'export class Stray extends AccountStateRepository',
+            '{',
+            '    async touch() { await this.db.update(passkeys).set({ counter: 1 }); }',
+            '}',
+            'export async function wipe(db: Db) { await db.delete(mfaTotp); }',
+        ].join('\n');
+
+        expect(credentialWritesIn(codeOutsideRepositories(helperBesideARepository))).toEqual(['mfa_totp']);
+    });
+
+    it('removes comments only: a comment marker inside a string, a template or a regular expression hides no write', () =>
+    {
+        const insideStrings = [
+            'const opens = "a/*";',
+            'await db.update(passkeys).set({ counter: 0 });',
+            'const closes = "*/";',
+        ].join('\n');
+        const insideATemplate = 'const note = `a ${"/*"} b`;\nawait db.delete(mfaTotp);\nconst end = `*/`;';
+        const insideARegex = 'const pattern = /[/*]/;\nawait db.update(userPublicKeys).set({ isActive: false });\nconst end = "*/";';
+        const realComment = '/* await db.update(passkeys).set({ counter: 0 }); */\n// await db.delete(mfaTotp);\nconst url = "https://x//y";';
+
+        expect(credentialWritesIn(withoutComments(insideStrings))).toEqual(['passkeys']);
+        expect(credentialWritesIn(withoutComments(insideATemplate))).toEqual(['mfa_totp']);
+        expect(credentialWritesIn(withoutComments(insideARegex))).toEqual(['user_public_keys']);
+        expect(withoutComments(realComment)).toBe('\n\nconst url = "https://x//y";');
+    });
+
+    it('finds every AccountStateRepository class on disk, whether or not repositories/index.ts re-exports it', async () =>
+    {
+        const { classes, unexported } = await repositoryClassesOnDisk();
+        const reExported = new Set(allRepositories.map(repository => repository.constructor));
+
+        expect(unexported).toEqual([]);
+        expect(classes.length).toBe(declaredRepositoryClasses().length);
+        expect(classes.filter(cls => !reExported.has(cls)).map(cls => cls.name)).toEqual([]);
+    });
+
+    it('classifies every write method of every AccountStateRepository on disk, and nothing that is not one', async () =>
     {
         const unclassified: string[] = [];
         const stale: string[] = [];
 
-        for (const repository of allRepositories.filter(r => r instanceof AccountStateRepository) as AccountStateRepository[])
+        for (const repositoryClass of (await repositoryClassesOnDisk()).classes)
         {
-            const methods = ownMethods(Object.getPrototypeOf(repository));
-            const declared = (repository.constructor as typeof AccountStateRepository).accountWrites;
+            const methods = ownMethods(repositoryClass.prototype);
+            const declared = repositoryClass.accountWrites;
 
             for (const [name, method] of methods)
             {
-                if (credentialTablesWritten(method).length > 0 && !repository.accountWriteOf(name))
+                if (credentialTablesWritten(method).length > 0 && !declared[name])
                 {
-                    unclassified.push(`${repository.constructor.name}.${name} (${credentialTablesWritten(method).join(', ')})`);
+                    unclassified.push(`${repositoryClass.name}.${name} (${credentialTablesWritten(method).join(', ')})`);
                 }
             }
 
-            stale.push(...Object.keys(declared).filter(name => !methods.has(name)).map(name => `${repository.constructor.name}.${name}`));
+            stale.push(...Object.keys(declared).filter(name => !methods.has(name)).map(name => `${repositoryClass.name}.${name}`));
         }
 
         expect(unclassified).toEqual([]);

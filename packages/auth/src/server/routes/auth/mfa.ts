@@ -11,7 +11,9 @@
  * else. Every other route here is authenticated. Four of those — enrol, disable,
  * mark a passkey, regenerate recovery codes — are additionally gated on
  * `assertStepUp`, because each one changes what the second factor is, and a
- * stolen session alone must not be able to do that. For an account with nothing
+ * stolen session alone must not be able to do that. `confirm` asks it again,
+ * of the account as it is when the enrolment completes: that is the decision,
+ * and `enrol`'s is an early refusal. For an account with nothing
  * enrolled that gate is a no-op, so none of these is a new refusal for anybody
  * who has not opted in — except under a required second factor, where an
  * account that may only enrol and already holds a credential proves it first
@@ -97,22 +99,30 @@ export const mfaTotpEnroll = route.post('/_auth/mfa/totp/enroll')
     .use([Transactional()])
     .handler(async (c) =>
     {
-        const { userId, keyId } = getAuth(c);
+        const { userId, keyId, credential } = getAuth(c);
 
+        // An early refusal: `confirm` asks the same rule again of the account
+        // as it is then, and that is the decision.
         await assertStepUp({ userId: Number(userId), keyId });
 
-        return await startTotpEnrolmentService(Number(userId));
+        return await startTotpEnrolmentService(Number(userId), credential);
     });
 
 /**
  * POST /_auth/mfa/totp/confirm - Spend the first code
  *
- * Not step-up gated: this *is* the step-up, and gating it would make enrolling
- * impossible for the account it is being enrolled on. The one exception is the
- * policy's enrolment-only state (#309): an account that already holds another
- * credential confirms only from a device that proved it, as `enroll` requires.
- * Five wrong codes discard the pending secret, and the sixth attempt says there
- * is nothing to confirm.
+ * Where the enrolment is decided. Only the session that ran `enroll` confirms
+ * it, while its key is live and of the key generation it was started in;
+ * another session, or one whose generation ended (a password change, a
+ * sign-out of every other device), is told there is nothing to confirm
+ * (`MfaNotEnrolledError`) and enrols again. The account is then asked the rule
+ * for adding a factor as it is now: unenrolled, nothing — the code itself is
+ * the proof, and gating it would make enrolling impossible for the account it
+ * is being enrolled on; enrolled since `enroll` ran, a step-up on this device
+ * (`STEP_UP_REQUIRED`); in the policy's enrolment-only state (#309), a device
+ * that proved a credential the account already holds. Five wrong codes
+ * discard the pending secret, and the sixth attempt says there is nothing to
+ * confirm.
  *
  * No `Transactional()`, which is the one route here without it. The
  * failed-attempt counter has to survive the refusal that increments it, and a
@@ -131,9 +141,9 @@ export const mfaTotpConfirm = route.post('/_auth/mfa/totp/confirm')
     .handler(async (c) =>
     {
         const { body } = await c.data();
-        const { userId, keyId } = getAuth(c);
+        const { userId, keyId, credential } = getAuth(c);
 
-        return await confirmTotpEnrolmentService({ userId: Number(userId), keyId, code: body.code });
+        return await confirmTotpEnrolmentService({ userId: Number(userId), keyId, credential, code: body.code });
     });
 
 /**
@@ -332,11 +342,12 @@ export const mfaStepUp = route.post('/_auth/mfa/step-up')
     .handler(async (c) =>
     {
         const { body } = await c.data();
-        const { userId, keyId } = getAuth(c);
+        const { userId, keyId, credential } = getAuth(c);
 
         await stepUpService({
             userId: Number(userId),
             keyId,
+            credential,
             code: body.code,
             recoveryCode: body.recoveryCode,
             response: body.response as Parameters<typeof stepUpService>[0]['response'],
@@ -350,8 +361,9 @@ export const mfaStepUp = route.post('/_auth/mfa/step-up')
  *
  * `allowCredentials` is empty, as it is for a sign-in: the credential on the
  * device names itself, and the owner and the second-factor mark are checked
- * when the assertion comes back. The challenge is bound to this account and to
- * the `mfa` ceremony, so it cannot be spent as a sign-in.
+ * when the assertion comes back. The challenge is bound to this account, to
+ * this session and to the `stepUp` ceremony, so it cannot be spent as a
+ * sign-in, as a new-device verification, or by another session.
  */
 export const mfaStepUpOptions = route.post('/_auth/mfa/step-up/options')
     .input({
@@ -359,7 +371,7 @@ export const mfaStepUpOptions = route.post('/_auth/mfa/step-up/options')
     })
     .handler(async (c) =>
     {
-        const { userId } = getAuth(c);
+        const { userId, credential } = getAuth(c);
 
-        return await startStepUpService(Number(userId));
+        return await startStepUpService(Number(userId), credential);
     });

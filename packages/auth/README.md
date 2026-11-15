@@ -1030,6 +1030,105 @@ do on its grant and nowhere else:
   an entry of the package's map matching the same method and path never removes your route's
   own declaration.
 
+### Migration — a two-step procedure is decided when it completes
+
+**BREAKING.** A TOTP enrolment, a passkey registration, a passkey step-up, a session renewal,
+turning session binding off and a social link each start on one request and complete on
+another. The authority used to be decided at the start and carried, unrecorded, in the pending
+row, the WebAuthn challenge or the sealed link state; at completion the record's existence was
+enough. A session the owner had signed out could finish a link, and a session that started an
+enrolment before the owner enrolled a factor could confirm it without a step-up (audit au7-A1,
+au5-A1, au7-A3, au9-N7).
+
+Every such record now carries a **stamp** — the credential that started it and the account's key
+generation then — and every completion passes one function, `admitDeferred`. The stamp names the
+credential by kind and identity: a device key by its key id, a session of an application's
+registered auth profile (`registerAuthProfile`) by the profile's name and the key id its verifier
+reported. At completion the request presents its own credential, which must be the starting one —
+the same kind and the same identity (for a device key, or its verified replacement, below) — and
+is admitted with it, so its liveness is asked the way `admitPrincipal` asks it for that kind: a
+device key by its row, an application profile by its verifier having admitted it on the completing
+request. The account's key generation must still be the stamp's, and the person is admitted now
+(`admitCompletion`, the same decision as `admitPrincipal`, under the completing route's
+`ROUTE_ENROLMENT` class). The link callback has no session: it is admitted with the starting device
+key, or its verified replacement. The rule the procedure exists for is asked at completion, against
+the account as it is then. What changes:
+
+- **`POST /_auth/mfa/totp/confirm`** confirms only the enrolment this session started. Another
+  session of the account, or one whose key generation ended since (a password change, a sign-out
+  of every other device — including from this session) gets **`400 MfaNotEnrolledError`**: enrol
+  again. An account that enrolled a factor since `totp/enroll` now answers **`403
+  STEP_UP_REQUIRED`** at `confirm`; step up and confirm again.
+- **`POST /_auth/passkeys/register/verify`** asks step-up and recent authentication again, at the
+  verify. A challenge another session asked for, or one of an ended key generation, is
+  **`401 PasskeyChallengeError`**. Recent authentication at the verify is the device key's
+  `authenticatedAt`, or a `currentPassword` sent to **this ceremony's** `register/options`: that
+  proof is recorded on the ceremony's challenge (`password_proven_at`) and read back by its verify
+  alone. It does not touch the key's `authenticatedAt`, so it satisfies no other route's recent
+  authentication (a social link, turning session binding on).
+- **`POST /_auth/mfa/step-up`** with a passkey spends only a `stepUp` challenge this session asked
+  `step-up/options` for. A new-device sign-in's challenge (`mfa/verify/options`) is a kind of its
+  own, which only `mfa/verify` spends, and `mfa/verify` spends no step-up challenge. See the
+  [challenge kinds](#webauthn-challenge-kinds).
+- **`POST /_auth/session/renew/verify`** renews only the key the challenge was issued for, and
+  **`POST /_auth/session/binding`** (`mode: 'none'`) spends only a challenge this session asked
+  `binding/disable/options` for. An assertion that does not verify now **spends** its challenge:
+  ask for new options. Both routes no longer run in a route-wide transaction — the spend of a
+  failed assertion has to survive the refusal — and their services open their own.
+- **The link callback** completes only while the session that started the link — or the key a
+  verified re-login replaced it with — is live and of the account's key generation. Otherwise it
+  answers `oauthLink=failed`; an account that cannot be let in answers `account_unavailable` as
+  before. `oauthLinkCallbackService` answers that outcome instead of throwing the account-status
+  errors.
+- **A link cannot be started from an application profile's session.** The callback has no session
+  in front of it, and an application profile's credential is live only while its verifier admits
+  it on a request — so the callback could not ask whether that session still stands. `POST
+  /_auth/oauth/:provider/link` from such a session answers **`403
+  OAUTH_LINK_CREDENTIAL_UNSUPPORTED`** (`OAuthLinkCredentialUnsupportedError`) before anything is
+  sealed. Start the link from a session signed in with a device key.
+- **Only a device key or an application profile starts a two-step procedure.** A stamp names one
+  of the two; an OAuth 2.1 grant is neither, and a start presented with one answers **`403
+  DEFERRED_CREDENTIAL_UNSUPPORTED`** (`DeferredCredentialUnsupportedError`). No `/_auth` route
+  admits a grant today.
+- **A record made before the upgrade carries no stamp and is refused** — the person starts again.
+  No signed-in completion accepts an unstamped record. A step-up or new-device challenge issued
+  before the upgrade was of the retired `mfa` kind, which no route spends any more. All of them are
+  short-lived: a WebAuthn challenge lives `SPFN_AUTH_PASSKEY_CHALLENGE_TTL_SECONDS` (5 minutes), a link state 10 minutes, and a pending TOTP enrolment until it is confirmed or swept
+  (24 hours) — an enrolment pending across the deploy answers `MfaNotEnrolledError` at `confirm`,
+  and `totp/enroll` again is the remedy.
+- **A verified replacement carries the stamps.** The web proxy replaces its key at every sign-in;
+  a procedure started on key A and completed on its verified replacement B (`keys/rotate`, a
+  renewal, a sign-in whose `replacementProof` A signed) is the same device. The replacement
+  re-points the pending enrolment and the live challenges to B in its own transaction, as it
+  carries the step-up window. A sealed link state cannot be re-pointed: the replaced key records
+  its successor (`user_public_keys.replaced_by_key_id`), and the callback follows that chain to
+  the key live now. A key id merely named is a new device and carries nothing. An application
+  profile's stamp is never re-pointed: its key id is its verifier's.
+- **Signatures.** Every service that starts or completes such a procedure takes the request's
+  credential (`getAuth(c).credential`): `startTotpEnrolmentService(userId, credential)`,
+  `startStepUpService(userId, credential)`, `startSessionBindingDisableService(userId, credential)`,
+  and a `credential` field on the params of `confirmTotpEnrolmentService`,
+  `startPasskeyEnrollmentService`, `finishPasskeyEnrollmentService`, `stepUpService`,
+  `attemptSecondFactor` / `verifySecondFactor` (an app route that verifies a step-up by passkey
+  passes it too), `disableSessionBindingService` and `startOAuthLinkService`.
+  `startRenewalCeremonyService(ceremony, stamp)` takes the ceremony (`'renewal' | 'bindingOff'`)
+  and the stamp; `verifyRenewalAssertionService` is `checkRenewalAssertionService({ userId,
+  ceremony, credential, response })`, which answers a proof to `spend()` under the account lock in
+  the caller's transaction (or null, having spent a failed assertion's challenge);
+  `assertRecentAuthentication` answers which half satisfied it (`'key' | 'password'`);
+  `keysRepository.revokeForReplacement(keyId, userId, reason, replacedByKeyId)`,
+  `mfaTotpRepository.startEnrolment(userId, secretEnc, stamp)`, and the new
+  `mfaTotpRepository.repointStamp` / `webauthnChallengesRepository.repointStamps` (both under the
+  account lock). `OAuthLinkState` carries `startedByKeyId` and `keyEpoch`. `PrincipalCredential`
+  is unchanged: a completion is admitted through `admitCompletion`, which the package entry does
+  not export, so no application can claim a completing route's enrolment class.
+  `WEBAUTHN_CHALLENGE_KINDS` drops `mfa` and gains `stepUp`, `newDevice` and `bindingOff`.
+
+The migration adds `started_by_key_id`, `started_by_profile` and `key_epoch` to `mfa_totp` and
+`webauthn_challenges`, `password_proven_at` to `webauthn_challenges`, and `replaced_by_key_id` to
+`user_public_keys`, all nullable and without a backfill. Run it with the release. The mobile
+contract does not change.
+
 ### Invitations
 
 An invitation lets an account with `user:invite` bring someone in with a role it is allowed to
@@ -2009,6 +2108,13 @@ unless the caller has recently proved themselves, in one of two ways:
 Otherwise: **403 with `code: 'RECENT_AUTH_REQUIRED'`**. Branch on that code to prompt for the
 password and retry — it is a stable field, not a message to match on.
 
+Registration asks the gate twice. `register/options` is the early refusal, and a
+`currentPassword` that satisfies it there is recorded on that ceremony's challenge — not on the
+device key: the proof was given for this registration, and no other route's gate learns of it.
+`register/verify` is the decision: it asks the key's `authenticatedAt`, or that ceremony's recorded
+password proof, within the window, with step-up, against the account as it is then — so the verify
+carries no password and runs no hash under the account lock.
+
 An account with no password stored **cannot** satisfy the gate with a password, however
 plausible the value; it has to sign in again. The comparison still runs, against a dummy hash,
 so "no password on file" costs exactly what "wrong password" costs — otherwise response time
@@ -2067,9 +2173,32 @@ Ask for a password, an address, or a social link before, or shortly after, the p
   verifies arriving with the same challenge produce one winner and one refusal, across
   instances. A challenge is bound to its ceremony (`registration` / `authentication`) and, for
   enrollment, to the account that minted it.
-- **A refusal leaves the challenge live.** Spending happens inside the transaction that writes
-  what it authorizes, so a failure rolls it back and the ceremony is retryable; only a success
-  is unrepeatable.
+- **A refusal leaves the challenge live** — except a renewal-grade assertion (`session/renew`,
+  turning binding off) that does not verify, which spends it in a transaction of its own so it
+  cannot be tried again. Otherwise spending happens inside the transaction that writes what it
+  authorizes, so a failure rolls it back and the ceremony is retryable; only a success is
+  unrepeatable.
+- **A challenge a signed-in person asked for is theirs alone.** Registration, step-up, renewal and
+  binding-off challenges are stamped with the credential that asked for them and the account's
+  key generation; only that credential — or, for a device key, its verified replacement — of that
+  generation spends one, and only after the account is asked again (`admitDeferred`). A
+  discoverable sign-in's challenge names nobody, as before.
+- **One challenge kind per procedure, spent by one route.** Two procedures that shared a kind
+  would each accept the other's challenge under its own rule:
+
+  <a id="webauthn-challenge-kinds"></a>
+
+  | Kind | Minted by | Accepted only by | Stamped |
+  |---|---|---|---|
+  | `authentication` | `passkeys/login/options` | `passkeys/login/verify` | no — names nobody |
+  | `registration` | `passkeys/register/options` | `passkeys/register/verify` | yes |
+  | `stepUp` | `mfa/step-up/options` | `mfa/step-up` (and `attemptSecondFactor` / `verifySecondFactor`) | yes |
+  | `newDevice` | `mfa/verify/options` | `mfa/verify` | no — the 202 handle names its pending key |
+  | `renewal` | `session/renew/options` | `session/renew/verify` | yes, with the key it renews |
+  | `bindingOff` | `session/binding/disable/options` | `session/binding` with `mode: 'none'` | yes |
+
+  The retired `mfa` kind, which a step-up and a new-device sign-in once shared, is accepted by
+  nothing.
 - **A signature counter that goes backwards refuses the sign-in and leaves the row alone.** It
   is the signal a cloned authenticator would produce — but a synced passkey reports 0 forever
   and a restored device can hit it, so auto-revoking would lock people out on a false
@@ -2178,6 +2307,12 @@ padding) plus the `otpauth://` URI an authenticator app scans. Nothing is enroll
 calling it again replaces the pending secret, and a secret nobody confirms is swept away a day
 later by `auth.mfa.sweep`. `totp/confirm` spends the first code, which is what turns the
 enrolment into a second factor and issues the recovery codes.
+
+The enrolment is the session's that started it. `confirm` is where it is decided, under the
+account lock: only that session (or its verified replacement), in the same key generation, confirms
+it — any other gets `MfaNotEnrolledError` — and the rule for adding a factor is asked again of the
+account as it is then: an account that enrolled a factor since `enroll` answers `403
+STEP_UP_REQUIRED`. The checks at `enroll` are an early refusal only.
 
 A submitted code has its spaces and dashes stripped, so `123 456` and `123-456` are the same
 code. Five wrong codes discard the pending secret — the sixth attempt says there is nothing to
@@ -2528,6 +2663,8 @@ applying to it.
 > hold the private half of a key gets the same `SessionRenewalRefusedError` whatever key id they
 > name — no credential, a wrong signature, an unbound key, a revoked key, one past its grace and an
 > inactive account are one answer with one body, and whether a key id is live never leaks.
+> The challenge `renew/options` issues is the key's own: another session's renewal cannot spend
+> it, and an assertion that does not verify spends it, so a renewal is retried with new options.
 
 ```tsx
 'use client';
@@ -2907,7 +3044,15 @@ The callback sends the browser back to `returnUrl` with `oauthLink=<outcome>&pro
 | `provider_already_linked` | The account gained another identity of this provider meanwhile |
 | `account_unavailable` | The account is disabled, pending deletion, or gone |
 | `provider_error` | The provider reported an error or could not be reached |
-| `failed` | Anything else |
+| `failed` | Anything else — among them, the session that started the link was signed out, or the account's key generation moved (a password change, a sign-out everywhere) since the start |
+
+The checks at the link start — step-up, recent authentication — are an early refusal. The state
+carries the starting device key and the account's key generation, and the callback admits them
+against the account when it lands: the starting key — or the key a verified re-login replaced it
+with — still live, of the same generation, and the person admitted now. A session signed out
+meanwhile cannot finish a link it started. Because the callback has no session to present, only a session signed in
+with a device key can start a link: one signed in through an application's auth profile is
+refused at the start with `403 OAUTH_LINK_CREDENTIAL_UNSUPPORTED`.
 
 A link that cannot be confirmed as this browser's — expired after ten minutes, a missing or
 mismatched CSRF cookie, a state brought to another provider's callback — goes to the
@@ -4128,7 +4273,11 @@ Every door that produces a person principal asks one function, `admitPrincipal`
 SSE stream or WebSocket a one-time token opens (at the connect), `authenticateForRenewal`,
 `verifyAccessToken` (`/mcp`),
 the OAuth 2.1 token endpoint (code exchange and refresh), `mfa/verify` completing a 202 sign-in,
-and device-code / device-link collection. A rule added there holds at every door.
+device-code / device-link collection, and `admitDeferred`, which every completion of a two-step
+procedure asks under the account lock (TOTP confirm, passkey registration, step-up and binding-off
+by passkey, renewal, the link callback — see
+[the migration](#migration--a-two-step-procedure-is-decided-when-it-completes)). A rule added
+there holds at every door.
 
 ```typescript
 const admission = await admitPrincipal({

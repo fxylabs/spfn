@@ -47,7 +47,7 @@ vi.mock('../../server/repositories', () => ({
 vi.mock('../../server/services/passkey.service', () => ({
     assertRecentAuthentication: vi.fn(async () => undefined),
     startRenewalCeremonyService: vi.fn(async () => ({ challenge: 'challenge' })),
-    verifyRenewalAssertionService: vi.fn(async () => false),
+    checkRenewalAssertionService: vi.fn(async () => null),
 }));
 vi.mock('../../server/services/role-email-domain.service', () => roles);
 // `authenticate.ts`, which the renewal middleware borrows `admitBearerKey` from,

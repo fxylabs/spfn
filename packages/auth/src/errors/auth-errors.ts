@@ -1177,6 +1177,57 @@ export class OAuthLinkNotFoundError extends NotFoundError
 }
 
 /**
+ * OAuth Link Credential Unsupported Error (403)
+ *
+ * A link was started by a session signed in through an application's own
+ * auth profile. A link completes at the provider's callback, where no session
+ * is present, and the callback re-admits the credential that started it
+ * (`lib/deferred-stamp.ts`): a device key can be asked again from its row, an
+ * application profile only by its verifier on a request — so the callback
+ * could not tell whether that session still stands, and the link is refused
+ * at the start rather than completed unchecked. Link from a session signed in
+ * with a device key. Clients branch on `code`.
+ */
+export class OAuthLinkCredentialUnsupportedError extends ForbiddenError
+{
+    readonly code = 'OAUTH_LINK_CREDENTIAL_UNSUPPORTED';
+
+    constructor(data: { message?: string; details?: Record<string, any> } = {})
+    {
+        super({
+            message: data.message || 'A provider can only be linked from a session signed in with a device key',
+            details: data.details,
+        });
+        this.name = 'OAuthLinkCredentialUnsupportedError';
+    }
+}
+
+/**
+ * Deferred Credential Unsupported Error (403)
+ *
+ * A two-step procedure — a TOTP enrolment, a passkey registration or step-up,
+ * a link, turning session binding off — was started with a credential that
+ * cannot start one: an OAuth 2.1 grant. A procedure's record names the
+ * credential that started it (`lib/deferred-stamp.ts`), a device key or an
+ * application's auth profile, and a grant is neither: it signs with no key and
+ * is no session. No `/_auth` route admits a grant today; this is the refusal
+ * the stamp makes if one ever reaches it. Clients branch on `code`.
+ */
+export class DeferredCredentialUnsupportedError extends ForbiddenError
+{
+    readonly code = 'DEFERRED_CREDENTIAL_UNSUPPORTED';
+
+    constructor(data: { message?: string; details?: Record<string, any> } = {})
+    {
+        super({
+            message: data.message || 'This credential cannot start a two-step procedure',
+            details: data.details,
+        });
+        this.name = 'DeferredCredentialUnsupportedError';
+    }
+}
+
+/**
  * OAuth Provider Link Only Error (403)
  *
  * A sign-in was started or finished with a provider the app configured as

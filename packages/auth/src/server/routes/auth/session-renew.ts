@@ -20,7 +20,6 @@
  */
 
 import { Type } from '@sinclair/typebox';
-import { Transactional } from '@spfn/core/db';
 import { rateLimitPolicy } from '@spfn/core/middleware';
 import { route } from '@spfn/core/route';
 
@@ -74,10 +73,14 @@ export const sessionRenewOptions = route.post('/_auth/session/renew/options')
  *
  * The new key pair's fields arrive under the names the login interceptor already
  * writes — this path is on its list — while the key being replaced is read off
- * the credential the request is signed with, never off the body. `Transactional()`:
- * the challenge is spent, the old key revoked and the new one registered together,
- * so a failure part-way leaves a session that can still be renewed rather than one
- * with no key at all.
+ * the credential the request is signed with, never off the body.
+ *
+ * No `Transactional()`. An assertion that does not verify spends its challenge
+ * before the refusal, and a route-wide transaction would roll that spend back
+ * with the error — leaving the challenge free to try again until it expires
+ * (au9-N7). The service opens its own transaction for the success path, where
+ * the challenge is spent, the old key revoked and the new one registered
+ * together.
  */
 export const sessionRenewVerify = route.post('/_auth/session/renew/verify')
     .input({
@@ -96,7 +99,7 @@ export const sessionRenewVerify = route.post('/_auth/session/renew/verify')
             )),
         }),
     })
-    .use([rateLimitPolicy('auth-session-renew', RENEW_RATE_LIMIT), authenticateForRenewal, Transactional()])
+    .use([rateLimitPolicy('auth-session-renew', RENEW_RATE_LIMIT), authenticateForRenewal])
     .handler(async (c) =>
     {
         const { body } = await c.data();
