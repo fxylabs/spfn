@@ -1,5 +1,21 @@
 import { NextRequest } from 'next/server.js';
+import type { HttpMethod, RouteCsrf } from '@spfn/core/route';
 import { SetCookie } from '../../client';
+
+/**
+ * One route of the generated route map: where the RPC proxy sends a route name,
+ * and what the route declares about itself for the proxy's interceptors.
+ */
+export interface RouteMapEntry
+{
+    method: HttpMethod;
+
+    /** The route's path template, `:params` and all — `/_auth/oauth2/grants/:id`. */
+    path: string;
+
+    /** Written by the route-map generator from the route's `.csrf()`. */
+    csrf?: RouteCsrf;
+}
 
 /**
  * Interceptor Rule
@@ -85,9 +101,16 @@ export interface ProxyAbort
 export interface RequestInterceptorContext
 {
     /**
-     * Request path (e.g., '/_auth/login')
+     * Request path (e.g., '/_auth/login'), with its params filled in
      */
     path: string;
+
+    /**
+     * The route-map entry the request resolved to — what the route declares,
+     * read from the route rather than inferred from the path. Set by the RPC
+     * proxy; absent where a context is built by hand.
+     */
+    route?: RouteMapEntry;
 
     /**
      * HTTP method (e.g., 'POST')

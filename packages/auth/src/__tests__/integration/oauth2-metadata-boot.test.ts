@@ -97,6 +97,8 @@ describe.skipIf(!dbAvailable)('OAuth2 metadata and boot check (8f)', () =>
             response_types_supported: ['code'],
             grant_types_supported: ['authorization_code', 'refresh_token'],
             token_endpoint_auth_methods_supported: ['none'],
+            revocation_endpoint_auth_methods_supported: ['none'],
+            authorization_response_iss_parameter_supported: true,
             code_challenge_methods_supported: ['S256'],
             scopes_supported: Object.keys(TEST_SCOPES),
         });

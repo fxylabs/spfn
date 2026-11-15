@@ -34,7 +34,7 @@ import {
     TEST_REDIRECT_URI,
     TEST_RESOURCE,
 } from '../helpers/oauth2';
-import { oauth2AuthorizationCodes, oauth2Grants, oauth2Tokens } from '@/server/entities';
+import { oauth2AuthorizationCodes, oauth2Grants } from '@/server/entities';
 import { hashOAuth2Secret } from '@/server/lib/oauth2/tokens';
 import { verifyAccessToken } from '@/server/services/oauth2-access-token.service';
 
@@ -262,10 +262,6 @@ describe.skipIf(!dbAvailable)('OAuth2 token, authorization_code (8c)', () =>
         // produced are dead, because somebody else may be holding them.
         expect(await verifyAccessToken(first.body.access_token!, TEST_RESOURCE)).toBeNull();
 
-        const revoked = await getTestDb().select().from(oauth2Tokens);
-
-        expect(revoked.every(token => token.revokedAt !== null)).toBe(true);
-
         const grants = await getTestDb().select().from(oauth2Grants);
 
         expect(grants.every(grant => grant.revokedAt !== null)).toBe(true);
@@ -303,7 +299,7 @@ describe.skipIf(!dbAvailable)('OAuth2 token, authorization_code (8c)', () =>
         expect(grants.every(grant => grant.revokedAt === null)).toBe(true);
     });
 
-    it('two requests presenting one code at the same time → exactly one 200, and its tokens live', async () =>
+    it('two requests presenting one code at the same time → exactly one 200, and its tokens dead', async () =>
     {
         const code = await freshCode();
         const [left, right] = await Promise.all([exchange({}, code), exchange({}, code)]);
@@ -311,11 +307,12 @@ describe.skipIf(!dbAvailable)('OAuth2 token, authorization_code (8c)', () =>
 
         expect(statuses).toEqual([200, 400]);
 
-        // The loser is a client retrying a request it thought had timed out,
-        // not a thief: the winner keeps the pair it was just handed.
+        // The loser presented a spent code, which is a replay whether it arrived
+        // a second after the winner or alongside it: nothing in it tells a
+        // client's own retry from a thief, so the winner's pair dies with the grant.
         const winner = left.response.status === 200 ? left : right;
 
-        expect(await verifyAccessToken(winner.body.access_token!, TEST_RESOURCE)).not.toBeNull();
+        expect(await verifyAccessToken(winner.body.access_token!, TEST_RESOURCE)).toBeNull();
     });
 
     it('a code that was never issued → 400 invalid_grant, the same answer a spent one gets', async () =>

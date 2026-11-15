@@ -166,6 +166,7 @@ export function ConsentForm({ consent, fields }: { consent: Consent; fields: Aut
                 url.searchParams.set('state', issued.state);
             }
 
+            url.searchParams.set('iss', issued.iss);
             window.location.assign(url);
         }
         catch (refusal)
@@ -227,7 +228,7 @@ export function refusalDestination(refusal: unknown, returnPath: string): string
         return `/login?returnUrl=${encodeURIComponent(returnPath)}`;
     }
 
-    const { error, redirectUri, state } = refusal.details ?? {};
+    const { error, redirectUri, state, iss } = refusal.details ?? {};
 
     if (typeof error !== 'string' || SHOWN.has(error) || typeof redirectUri !== 'string')
     {
@@ -241,6 +242,11 @@ export function refusalDestination(refusal: unknown, returnPath: string): string
     if (typeof state === 'string')
     {
         url.searchParams.set('state', state);
+    }
+
+    if (typeof iss === 'string')
+    {
+        url.searchParams.set('iss', iss);
     }
 
     return url.toString();
@@ -285,10 +291,20 @@ The page owns these rules:
 - **`frame-ancestors 'none'` and `no-store`** on the consent path, as in the
   `next.config` snippet: a consent screen that can be framed can be clickjacked.
 
-The decision needs no CSRF work from you. `POST /_auth/oauth2/authorize` is the
-one route the proxy CSRF-checks in every mode, whatever `SPFN_AUTH_CSRF` says,
-and the `authApi` client already mirrors the CSRF cookie into the header. The
-full rules are in [The consent screen](../../packages/auth/README.md#the-consent-screen).
+Every authorization response carries `iss`, this server's issuer (RFC 9207): the
+approve response and every redirectable refusal include it, and the snippets above
+append it beside `code` or `error`. The metadata document publishes
+`authorization_response_iss_parameter_supported: true`, so a client checks it — and
+rejects a redirect without it. A consent page that builds the redirect has to append
+`iss`; one that does not breaks every RFC 9207 client.
+
+The decision needs no CSRF work from you. `POST /_auth/oauth2/authorize` and
+`DELETE /_auth/oauth2/grants/:id` declare `.csrf('required')`, and the proxy reads
+that from the route map `@spfn/auth` ships — not from your generated copy — so it
+checks them in every mode whatever `SPFN_AUTH_CSRF` says, whether or not you have
+regenerated your route map since upgrading. The `authApi` client already
+mirrors the CSRF cookie into the header. The full rules are in
+[The consent screen](../../packages/auth/README.md#the-consent-screen).
 
 ## 3. Serve `/mcp`
 
@@ -331,11 +347,16 @@ export const appRouter = defineRouter({ /* your routes */ })
 
 `validateToken: verifyAccessToken` is the whole connection between the two
 packages. It answers `{ clientId, scopes, expiresAt, userId }` or `null`, and
-`null` is a refusal — expired, revoked, or issued for another resource. Under a
-required second-factor policy (`createAuthLifecycle({ secondFactor: { required: true } })`)
-a valid token whose account has no listed second factor throws
-`SecondFactorEnrolmentRequiredError` instead; `@spfn/mcp` answers any throw from
-its validator with the same 401 challenge as a `null`.
+`null` is an invalid token — expired, revoked, issued for another resource, its
+grant revoked or past its lifetime — which `@spfn/mcp` answers 401
+`invalid_token`. `scopes` is what the token authorizes now: those it was issued
+with that the user's grant still holds, so a tool checking `authInfo.scopes`
+follows a consent the user narrowed. Under a required second-factor policy
+(`createAuthLifecycle({ secondFactor: { required: true } })`) a valid token whose
+account has no listed second factor throws `SecondFactorEnrolmentRequiredError`
+instead, which `@spfn/mcp` answers 403 `SECOND_FACTOR_ENROLMENT_REQUIRED` through
+the application's error handler; any other throw — a database error — is a 5xx,
+not a reason for the client to discard its token.
 
 An MCP access token is not a session. It authorizes the MCP surface for the
 resource it names and is not accepted by ordinary API routes.
@@ -393,18 +414,27 @@ exists to close — so they are shown on the screen instead.
 
 A user revokes what they approved with `DELETE /_auth/oauth2/grants/:id`; a
 password change, a completed reset, "sign me out everywhere" and a deletion
-request each revoke every grant the account has.
+request each revoke every grant the account has. Revocation is final: approving
+the client again creates a new grant, and nothing minted under the old one works
+again. Approving it again while it is connected amends the grant instead — fewer
+scopes there narrow the tokens the client already holds. A grant also ends on its
+own at the `expires_at` written when it was created — the consent plus
+`authorizationServer.grantLifetimeMs` (180 days by default), not moved by
+refreshing or by a later change to the setting; the CLI is then sent to consent
+again.
 
 ## Troubleshooting
 
 | Symptom | What it means | Fix |
 | --- | --- | --- |
 | `/mcp` answers 401 with `WWW-Authenticate: Bearer error="invalid_token"` | The token was presented and refused: expired, revoked, or issued for a different `resource` | Re-run the CLI's login. If it recurs immediately, check that `appUrl` in `createMcpRoute` is the API origin, so the `resource` the token names is the one being checked |
+| `/mcp` answers 403 `SECOND_FACTOR_ENROLMENT_REQUIRED` | The token is valid; the account must enrol a second factor before acting | The person enrols on the web app; the CLI keeps its token |
+| `/mcp` answers 5xx | Verification failed — the database was unreachable, for one — rather than refusing the token | Fix the API's dependency; the CLI retries with the token it holds |
 | `/mcp` answers 401 with no `error` parameter | No bearer token arrived at all | Expected on the first request — it is how discovery starts. A CLI stuck here is not reading `WWW-Authenticate`; check for a proxy stripping the header |
 | `/.well-known/oauth-authorization-server` answers 404 | No `authorizationServer` block in `createAuthLifecycle` | Add it (step 1). Without it every endpoint in this guide answers 404 and the boot check does not run |
 | `/.well-known/oauth-protected-resource` answers 404 | `mcpRouter` is not registered, or the app is served under a base path | Add it to `.packages([...])`. Under a base path the documents move with it, where clients will not look — terminate the base path at the proxy or set `resourceMetadataUrl` |
 | The CLI reports an issuer mismatch | `authorization_servers` in the protected-resource document and `issuer` in the authorization-server document are not the same string | They are derived separately: `issuer` from `SPFN_API_URL` or `authorizationServer.issuer`, `authorization_servers` from `createMcpRoute`'s `appUrl`. Make them the same origin, with no trailing path |
-| `createOAuth2AuthorizationCode` answers 403 `CSRF token missing or invalid` on Allow | The `x-spfn-csrf` header did not match the session's CSRF cookie — the proxy checks this route in every mode | The refusal carries a fresh CSRF cookie, so a second click passes. Every click refused means the call is not going through the `authApi` client (which mirrors the cookie) or the page's origin cannot read the cookie |
+| `createOAuth2AuthorizationCode` answers 403 `CSRF token missing or invalid` on Allow | The `x-spfn-csrf` header did not match the session's CSRF cookie — the route declares `.csrf('required')`, so the proxy checks it in every mode | The refusal carries a fresh CSRF cookie, so a second click passes. Every click refused means the call is not going through the `authApi` client (which mirrors the cookie) or the page's origin cannot read the cookie |
 | The consent page shows a `redirect_uri_mismatch` refusal | The `redirect_uri` is not one the client registered | Loopback registrations vary only in **port**; `localhost`, `127.0.0.1` and `[::1]` are three separate registrations. An `https` URI must be on an origin in `allowedRedirectOrigins` |
 | The API refuses to start, naming `SPFN_API_URL` | The issuer has a path, or is neither `https` nor loopback `http` | Set it to a bare origin |
 

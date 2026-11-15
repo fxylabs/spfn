@@ -258,12 +258,13 @@ the wrong path: a method that is not an `HttpMethod`, and the two collisions abo
 
 ```typescript
 // src/generated/route-map.ts  — DO NOT EDIT
-import type { HttpMethod } from '@spfn/core/route';
+import type { HttpMethod, RouteCsrf } from '@spfn/core/route';
 
 export interface RouteInfo
 {
     method: HttpMethod;
     path: string;
+    csrf?: RouteCsrf;
 }
 
 export const routeMap: Record<string, RouteInfo> = {
@@ -271,11 +272,19 @@ export const routeMap: Record<string, RouteInfo> = {
     createUser: { method: 'POST', path: '/users' },
     // From the package routers this app mounts with .packages(), not its own:
     login: { method: 'POST', path: '/_auth/login' },
+    revokeOAuth2Grant: { method: 'DELETE', path: '/_auth/oauth2/grants/:id', csrf: 'required' },
 };
 
 export type RouteMap = typeof routeMap;
 export type RouteName = keyof RouteMap;
 ```
+
+`csrf` is written only for a route that declares `.csrf('required')`. The RPC proxy hands the
+entry it resolved a name to its interceptors as `ctx.route`, which is how `@spfn/auth`'s CSRF
+check learns one of the app's own routes must be checked in every mode — so a map generated
+before such a route gained the declaration leaves it to the configured mode until the map is
+regenerated. A package's own routes need not depend on that: `@spfn/auth` reads its routes'
+declarations from the map it ships, with `findRouteEntry`.
 
 `watchPatterns` are `[routerPath, 'src/server/routes/**/*.ts', ...additionalRouteDirs]` and
 `runOn` is `['watch', 'manual', 'build']` — every trigger the CLI fires, so it runs in every mode.

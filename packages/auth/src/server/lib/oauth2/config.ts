@@ -49,6 +49,13 @@ export interface AuthorizationServerConfig
     accessTokenTtlMs: number;
     refreshTokenTtlMs: number;
     codeTtlMs: number;
+
+    /**
+     * How long a grant lives from its creation, however often it is refreshed.
+     * Written onto each grant as `expiresAt` when it is created, so a change
+     * applies to grants created afterwards and never revives a lapsed one.
+     */
+    grantLifetimeMs: number;
 }
 
 /** Options as an application writes them. Everything but `scopes` has a default. */
@@ -62,13 +69,25 @@ export interface AuthorizationServerOptions
     accessTokenTtlMs?: number;
     refreshTokenTtlMs?: number;
     codeTtlMs?: number;
+    grantLifetimeMs?: number;
 }
 
 /** Eight hours. Long enough for a working session, short enough to matter. */
 export const DEFAULT_ACCESS_TOKEN_TTL_MS = 8 * 60 * 60 * 1000;
 
-/** Thirty days. The CLI is expected to be reconnected about that often. */
+/**
+ * Thirty days without a refresh. Each rotation starts a new thirty days, so this
+ * bounds how long an idle client keeps its connection, not how long a busy one
+ * does — that is `DEFAULT_GRANT_LIFETIME_MS`.
+ */
 export const DEFAULT_REFRESH_TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+
+/**
+ * 180 days from the consent, whatever the client does in between. Past it the
+ * grant authorizes nothing — refresh and verification both refuse — and the
+ * user is asked to consent again, which creates a new grant.
+ */
+export const DEFAULT_GRANT_LIFETIME_MS = 180 * 24 * 60 * 60 * 1000;
 
 /** Sixty seconds — the code travels from a browser redirect to a local listener. */
 export const DEFAULT_CODE_TTL_MS = 60 * 1000;
@@ -103,7 +122,8 @@ function resolveAuthorizeUrl(env: Record<string, string | undefined>): string
  * `assertAuthorizationServerIssuer` from `afterInfrastructure`, beside the
  * other boot refusals. See `lifecycle.ts`.
  *
- * @throws When `scopes` is empty or `defaultScopes` names an unknown scope, and
+ * @throws When `scopes` is empty, `defaultScopes` names an unknown scope or
+ *         `grantLifetimeMs` is not a positive whole number of milliseconds, and
  *         when `authorizeUrl` is not given and neither `NEXT_PUBLIC_SPFN_APP_URL`
  *         nor `SPFN_APP_URL` is set to derive it from.
  */
@@ -130,7 +150,7 @@ export function configureAuthorizationServer(
         );
     }
 
-    config = {
+    const resolved: AuthorizationServerConfig = {
         issuer: canonicalIssuer(options.issuer ?? resolveIssuerSource(env).value ?? ''),
         issuerSource: options.issuer ? 'authorizationServer.issuer' : resolveIssuerSource(env).variable,
         authorizeUrl: options.authorizeUrl ?? resolveAuthorizeUrl(env),
@@ -140,9 +160,31 @@ export function configureAuthorizationServer(
         accessTokenTtlMs: options.accessTokenTtlMs ?? DEFAULT_ACCESS_TOKEN_TTL_MS,
         refreshTokenTtlMs: options.refreshTokenTtlMs ?? DEFAULT_REFRESH_TOKEN_TTL_MS,
         codeTtlMs: options.codeTtlMs ?? DEFAULT_CODE_TTL_MS,
+        grantLifetimeMs: options.grantLifetimeMs ?? DEFAULT_GRANT_LIFETIME_MS,
     };
 
-    assertKnownDefaultScopes(config);
+    // Validated before it is stored: a refused configuration must leave nothing
+    // behind for a request to be served under.
+    assertKnownDefaultScopes(resolved);
+    assertGrantLifetime(resolved.grantLifetimeMs);
+
+    config = resolved;
+}
+
+/**
+ * A positive whole number of milliseconds. Zero, a negative, a fraction or
+ * `Infinity` would each mean either that no grant ever works or that none ever
+ * ends, and neither is a lifetime anybody meant to configure.
+ */
+function assertGrantLifetime(grantLifetimeMs: number): void
+{
+    if (!Number.isSafeInteger(grantLifetimeMs) || grantLifetimeMs <= 0)
+    {
+        throw new Error(
+            `authorizationServer.grantLifetimeMs must be a positive whole number of milliseconds; it is `
+            + `${String(grantLifetimeMs)}. It is how long a consent lasts before the user is asked again.`,
+        );
+    }
 }
 
 function assertKnownDefaultScopes(resolved: AuthorizationServerConfig): void

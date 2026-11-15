@@ -27,6 +27,7 @@ import {
 } from '../helpers/oauth2';
 import { MAX_UNGRANTED_CLIENTS_PER_IP } from '@/server/services/oauth2-client.service';
 import { oauth2Clients } from '@/server/entities';
+import { DEFAULT_GRANT_LIFETIME_MS } from '@/server/lib/oauth2/config';
 
 const dbAvailable = await isDatabaseAvailable();
 
@@ -236,6 +237,7 @@ describe.skipIf(!dbAvailable)('OAuth2 register (8a)', () =>
             user: userId,
             resource: TEST_RESOURCE,
             scopes: ['mcp:read'],
+            expiresAt: new Date(Date.now() + DEFAULT_GRANT_LIFETIME_MS),
         });
 
         const second = await register({ client_name: NAME, redirect_uris: ['http://127.0.0.1:2/cb'] });
@@ -245,7 +247,7 @@ describe.skipIf(!dbAvailable)('OAuth2 register (8a)', () =>
         expect((await oauth2ClientsRepository.findByClientId(first.body.client_id!))?.redirectUris)
             .toEqual(['http://127.0.0.1:1/cb']);
 
-        const live = await oauth2GrantsRepository.listActiveByUserId(userId);
+        const live = await oauth2GrantsRepository.listLiveByUserId(userId);
 
         expect(live).toHaveLength(1);
         expect(live[0]!.grant.id).toBe(granted.id);

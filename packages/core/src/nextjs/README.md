@@ -47,7 +47,7 @@ From `@spfn/core/nextjs` (client-safe):
 From `@spfn/core/nextjs/server` (server-only):
 
 - Values: `createRpcProxy`, `registerInterceptors`, `interceptorRegistry`, `matchPath`,
-  `matchMethod`, `filterMatchingInterceptors`, `executeRequestInterceptors`,
+  `matchMethod`, `filterMatchingInterceptors`, `findRouteEntry`, `executeRequestInterceptors`,
   `executeResponseInterceptors`
 - Types: `RpcProxyConfig`, `RequestInterceptorContext`, `ResponseInterceptorContext`,
   `RequestInterceptor`, `ResponseInterceptor` (the *proxy* `(ctx, next)` shape — distinct
@@ -417,11 +417,18 @@ Pattern matching: `'*'` matches all; a `RegExp` is tested directly; a string con
 `.*` and `:param`→`[^/]+`. The path matched is the **resolved backend path** (e.g.
 `/users/123`), not `/api/rpc/...`.
 
+`findRouteEntry(routeMap, method, path)` looks a request up in a route map of your choosing,
+by method and template, on the path the backend will route (dot segments resolved, encoded
+characters decoded as Hono decodes them). A package's interceptor uses it to read what its
+own routes declare from the map it ships rather than from `ctx.route`, which comes from the
+app's generated copy and lags behind until the app regenerates it.
+
 ### Contexts
 
 ```typescript
 interface RequestInterceptorContext {
     path: string; method: string;
+    route?: RouteMapEntry;                     // { method, path template, csrf? } the RPC proxy resolved
     headers: Record<string, string>;          // mutable — written back to forwarded headers
     body?: any;                                // mutable — re-stringified if changed
     query: Record<string, string | string[]>;

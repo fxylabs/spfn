@@ -17,6 +17,7 @@ export {
     matchPath,
     matchMethod,
     filterMatchingInterceptors,
+    findRouteEntry,
     executeRequestInterceptors,
     executeResponseInterceptors,
 } from './proxy/interceptors';
@@ -30,4 +31,5 @@ export type {
     InterceptorRule,
     ProxyConfig,
     ProxyAbort,
+    RouteMapEntry,
 } from './proxy/interceptors/types';

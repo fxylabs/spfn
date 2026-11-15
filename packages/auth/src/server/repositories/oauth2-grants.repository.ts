@@ -3,18 +3,24 @@
  *
  * Data access for the consent records every code and token hangs off.
  *
- * Revocation is the operation that matters here, and it is always one statement
- * per table rather than a read-then-write: a grant being revoked at the same
- * moment as a refresh rotation must not let the rotation's successor survive,
- * and `where revoked_at is null` in the UPDATE is what makes the two orderings
- * produce the same end state.
+ * Revocation is the operation that matters here. It is recorded on the grant
+ * and nowhere else, and it is terminal: nothing in this file sets `revoked_at`
+ * back to null, so a code or token whose grant was revoked is refused for good,
+ * however it was minted and whenever it arrives — including one an exchange or
+ * a refresh in flight wrote after the revocation landed.
+ *
+ * "Is this grant live" is answered here and nowhere else: not revoked, and
+ * `expires_at` later than now. `liveGrant` asks it in SQL and `isLiveGrant` of
+ * a row already loaded, of the same stored column against the application's
+ * clock, so the list a user sees, the consent that amends a grant, the
+ * disconnect, the code exchange, the refresh and the verification of every
+ * access token agree on which grants exist — at the boundary too.
  */
 
-import { and, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
+import { and, desc, eq, gt, isNull, not, sql, type SQL } from 'drizzle-orm';
 import { BaseRepository } from '@spfn/core/db';
 import { oauth2Grants, type NewOAuth2Grant, type OAuth2Grant } from '../entities/oauth2-grants';
 import { oauth2Clients, type OAuth2Client } from '../entities/oauth2-clients';
-import { oauth2Tokens } from '../entities/oauth2-tokens';
 
 /** A grant with the client it belongs to — what every list and lookup needs. */
 export interface OAuth2GrantWithClient
@@ -23,19 +29,34 @@ export interface OAuth2GrantWithClient
     client: OAuth2Client;
 }
 
+/** A grant authorizes anything only while it is live — the rule in SQL. */
+function liveGrant(now: Date): SQL
+{
+    return and(isNull(oauth2Grants.revokedAt), gt(oauth2Grants.expiresAt, now))!;
+}
+
+/**
+ * The same rule as `liveGrant`, for a row already loaded: not revoked, and
+ * `expires_at` later than now. A grant that is not live authorizes nothing,
+ * however recently its tokens were rotated.
+ */
+export function isLiveGrant(grant: OAuth2Grant, now: Date = new Date()): boolean
+{
+    return grant.revokedAt === null && grant.expiresAt.getTime() > now.getTime();
+}
+
 export class OAuth2GrantsRepository extends BaseRepository
 {
     /**
-     * Record a consent, or refresh the scopes of the one already there.
+     * Record a consent, or amend the scopes of the live one already there.
      *
-     * Re-consenting is an upsert and not an insert: the unique index on
-     * (client, user, resource) says one consent per triple, and a user who
-     * approves a wider scope set is amending the consent they already gave, not
-     * giving a second one. Revoking the entry they can see must revoke
-     * everything the client holds, which a second row would break.
-     *
-     * `revokedAt: null` in the update is deliberate — approving again after
-     * revoking is how a user reconnects a CLI they cut off.
+     * An upsert against the live grant only: the unique index on (client, user,
+     * resource) covers rows that are not revoked, so a user who approves again
+     * while connected amends the consent they gave — wider or narrower, and every
+     * token already out follows it — and a user reconnecting after a disconnect
+     * gets a new row. The revoked row stays revoked, and with it every code and
+     * token that hung off it. Amending changes the scopes only: `expiresAt` is
+     * the one the row was inserted with, so re-consenting does not extend it.
      */
     async upsert(data: NewOAuth2Grant): Promise<OAuth2Grant>
     {
@@ -44,11 +65,37 @@ export class OAuth2GrantsRepository extends BaseRepository
             .values(data)
             .onConflictDoUpdate({
                 target: [oauth2Grants.client, oauth2Grants.user, oauth2Grants.resource],
-                set: { scopes: data.scopes, revokedAt: null, updatedAt: new Date() },
+                targetWhere: sql`${oauth2Grants.revokedAt} is null`,
+                set: { scopes: data.scopes, updatedAt: new Date() },
             })
             .returning();
 
         return result[0]!;
+    }
+
+    /**
+     * Revoke the unrevoked grant for (client, user, resource) that is no longer
+     * live — one past its `expiresAt`. Called before a fresh consent is recorded:
+     * the unique index `upsert` amends against covers every unrevoked row, lapsed
+     * or not, so without this the consent would amend a grant that has already
+     * ended instead of starting a new grant and a new lifetime.
+     */
+    async revokeLapsed(
+        key: Pick<NewOAuth2Grant, 'client' | 'user' | 'resource'>,
+    ): Promise<void>
+    {
+        await this.db
+            .update(oauth2Grants)
+            .set({ revokedAt: new Date() })
+            .where(
+                and(
+                    eq(oauth2Grants.client, key.client),
+                    eq(oauth2Grants.user, key.user),
+                    eq(oauth2Grants.resource, key.resource),
+                    isNull(oauth2Grants.revokedAt),
+                    not(liveGrant(new Date())),
+                ),
+            );
     }
 
     /**
@@ -70,14 +117,17 @@ export class OAuth2GrantsRepository extends BaseRepository
         return result[0] ?? null;
     }
 
-    /** What the user's "connected apps" screen lists. Read replica. */
-    async listActiveByUserId(userId: number): Promise<OAuth2GrantWithClient[]>
+    /**
+     * What the user's "connected apps" screen lists: their live grants. A grant
+     * past its `expiresAt` is not connected, so it is not shown. Read replica.
+     */
+    async listLiveByUserId(userId: number): Promise<OAuth2GrantWithClient[]>
     {
         return await this.readDb
             .select({ grant: oauth2Grants, client: oauth2Clients })
             .from(oauth2Grants)
             .innerJoin(oauth2Clients, eq(oauth2Grants.client, oauth2Clients.id))
-            .where(and(eq(oauth2Grants.user, userId), isNull(oauth2Grants.revokedAt)))
+            .where(and(eq(oauth2Grants.user, userId), liveGrant(new Date())))
             .orderBy(desc(oauth2Grants.createdAt));
     }
 
@@ -87,7 +137,9 @@ export class OAuth2GrantsRepository extends BaseRepository
      * The user id is part of the condition rather than checked beforehand: the
      * id in the URL comes from a caller, and a grant that is not theirs must not
      * be revocable by guessing a number. A miss is indistinguishable from an id
-     * that does not exist, which is the answer the route gives.
+     * that does not exist, which is the answer the route gives. Live by the
+     * same rule as the list: a grant the list does not show cannot be
+     * disconnected either.
      *
      * @returns the revoked row, or null if there was no live grant of that id
      *          for that user
@@ -101,7 +153,7 @@ export class OAuth2GrantsRepository extends BaseRepository
                 and(
                     eq(oauth2Grants.id, id),
                     eq(oauth2Grants.user, userId),
-                    isNull(oauth2Grants.revokedAt),
+                    liveGrant(new Date()),
                 ),
             )
             .returning();
@@ -136,31 +188,6 @@ export class OAuth2GrantsRepository extends BaseRepository
             .returning({ id: oauth2Grants.id });
 
         return revoked.map(row => row.id);
-    }
-
-    /**
-     * Revoke every live token under the given grants.
-     *
-     * Verification already refuses a token whose grant is revoked, so this is
-     * belt and braces — but the belt is what a `SELECT` against this table shows
-     * an operator, and a live-looking row under a dead grant reads as a hole.
-     *
-     * @returns how many tokens this call revoked
-     */
-    async revokeTokensOfGrants(grantIds: number[]): Promise<number>
-    {
-        if (grantIds.length === 0)
-        {
-            return 0;
-        }
-
-        const revoked = await this.db
-            .update(oauth2Tokens)
-            .set({ revokedAt: sql`now()` })
-            .where(and(inArray(oauth2Tokens.grant, grantIds), isNull(oauth2Tokens.revokedAt)))
-            .returning({ id: oauth2Tokens.id });
-
-        return revoked.length;
     }
 }
 

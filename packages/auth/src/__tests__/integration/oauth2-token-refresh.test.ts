@@ -148,10 +148,12 @@ describe.skipIf(!dbAvailable)('OAuth2 token, refresh_token (8d)', () =>
     });
 
     /**
-     * Not a row of its own, but the reading of the narrow row that matters: the
-     * narrowing is per request, so the chain can come back up to the grant.
+     * Effective scope = the presented token's scopes ∩ the grant's, and an
+     * explicit `scope` only narrows that. A chain narrowed to `mcp:read` stays
+     * there: asking for the grant's full set again is refused, and nothing it
+     * issues afterwards exceeds the narrowed set.
      */
-    it('a refresh narrowed once may ask for the full granted set again', async () =>
+    it('a refresh narrowed once asking for the full granted set again → 400 invalid_scope, never wider', async () =>
     {
         const narrowed = await refresh({ scope: 'mcp:read' });
 
@@ -161,8 +163,24 @@ describe.skipIf(!dbAvailable)('OAuth2 token, refresh_token (8d)', () =>
 
         const widened = await refresh({ scope: 'mcp:read mcp:write mcp:admin' });
 
-        expect(widened.response.status).toBe(200);
-        expect(widened.body.scope).toBe('mcp:read mcp:write mcp:admin');
+        expect(widened.response.status).toBe(400);
+        expect(widened.body.error).toBe('invalid_scope');
+        expect(widened.body.access_token).toBeUndefined();
+
+        const renewed = await refresh();
+
+        expect(renewed.response.status).toBe(200);
+        expect(renewed.body.scope).toBe('mcp:read');
+        expect((await verifyAccessToken(renewed.body.access_token!, TEST_RESOURCE))!.scopes).toEqual(['mcp:read']);
+
+        // The code exchange's pair carries the grant; the two refreshes' pairs
+        // carry `mcp:read` and nothing else. Six rows, so no seventh was issued.
+        const issued = (await getTestDb().select().from(oauth2Tokens)).map(row => row.scopes.join(' '));
+
+        expect(issued.sort()).toEqual([
+            'mcp:read', 'mcp:read', 'mcp:read', 'mcp:read',
+            'mcp:read mcp:write mcp:admin', 'mcp:read mcp:write mcp:admin',
+        ]);
     });
 
     it('a live refresh token asking for a subset → 200 narrowed, and the grant unchanged', async () =>
@@ -215,13 +233,11 @@ describe.skipIf(!dbAvailable)('OAuth2 token, refresh_token (8d)', () =>
         expect(await verifyAccessToken(accessToken, TEST_RESOURCE)).toBeNull();
         expect(await verifyAccessToken(rotated.body.access_token!, TEST_RESOURCE)).toBeNull();
 
-        // And the rows say so, which is what an operator reading this table
-        // sees: no live-looking token left under a dead grant.
+        // The grant row says so — the one place a grant's revocation is
+        // recorded, and what every token under it is judged against.
         const grants = await getTestDb().select().from(oauth2Grants).where(eq(oauth2Grants.user, userId));
-        const tokens = await getTestDb().select().from(oauth2Tokens);
 
         expect(grants.every(grant => grant.revokedAt !== null)).toBe(true);
-        expect(tokens.every(token => token.revokedAt !== null)).toBe(true);
 
         refreshToken = rotated.body.refresh_token!;
 

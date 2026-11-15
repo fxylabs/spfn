@@ -393,10 +393,51 @@ describe.skipIf(!dbAvailable)('OAuth2 authorize, API side (8b)', () =>
             approve: true,
         }, pkcePair('wide').challenge);
 
-        const grants = await oauth2GrantsRepository.listActiveByUserId(userId);
+        const grants = await oauth2GrantsRepository.listLiveByUserId(userId);
 
         expect(grants).toHaveLength(1);
         expect(grants[0]!.grant.scopes).toEqual(['mcp:read', 'mcp:write']);
         expect(grants[0]!.grant.resource).toBe(TEST_RESOURCE);
+    });
+
+    /**
+     * RFC 9207: the metadata advertises `authorization_response_iss_parameter_supported`,
+     * so a client checks `iss` on every response its redirect URI receives and
+     * rejects one without it. Every answer the consent page turns into that
+     * redirect has to carry the issuer the metadata names — a code, the user's
+     * no, and each refusal that goes back on the URI.
+     */
+    it('approve, deny and every redirectable refusal carry iss equal to the metadata issuer', async () =>
+    {
+        const metadata = await app.request('/.well-known/oauth-authorization-server');
+        const { issuer } = await metadata.json() as { issuer: string };
+
+        expect(issuer).toBe('https://api.example.com');
+
+        const approved = await decideAuthorize(app, authorization, { client_id: clientId, approve: true });
+
+        expect(approved.status).toBe(200);
+        expect((await approved.json() as { iss?: string }).iss).toBe(issuer);
+
+        const refusals: [string, Response][] = [
+            ['access_denied', await decideAuthorize(app, authorization, { client_id: clientId, approve: false })],
+            ['invalid_request', await describeAuthorize(app, authorization, { client_id: clientId, omitPkce: true })],
+            ['invalid_request', await decideAuthorize(app, authorization, {
+                client_id: clientId,
+                code_challenge_method: 'plain',
+                approve: true,
+            })],
+            ['invalid_target', await describeAuthorize(app, authorization, { client_id: clientId, omitResource: true })],
+            ['invalid_scope', await describeAuthorize(app, authorization, { client_id: clientId, scope: 'mcp:teleport' })],
+        ];
+
+        for (const [error, response] of refusals)
+        {
+            const refusal = refusalOf(await response.json() as Envelope);
+
+            expect(response.status).toBe(400);
+            expect(refusal.error).toBe(error);
+            expect(refusal.iss).toBe(issuer);
+        }
     });
 });

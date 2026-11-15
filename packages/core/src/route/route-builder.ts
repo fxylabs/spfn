@@ -9,7 +9,7 @@ import type { NamedMiddleware } from './define-middleware';
 import type { RouteInput } from './route-input';
 import type { RouteBuilderContext } from './context';
 import type { RouteContract } from './contract';
-import type { HttpMethod, RouteEffect } from './types';
+import type { HttpMethod, RouteCsrf, RouteEffect } from './types';
 
 /**
  * Route handler function
@@ -54,6 +54,12 @@ export type RouteDef<
     /** One line a command surface announces beside the route; codegen and the contract ignore it. */
     summary?: string;
 
+    /**
+     * CSRF requirement. The route-map generator writes it into the map, and the
+     * Next.js RPC proxy hands it to its interceptors as `ctx.route.csrf`.
+     */
+    csrf?: RouteCsrf;
+
     handler: RouteHandlerFn<TInput, TInterceptor, TResponse>;
 
     // Type inference helpers
@@ -80,6 +86,7 @@ export class RouteBuilder<
     public _contract?: RouteContract;
     public _effect?: RouteEffect;
     public _summary?: string;
+    public _csrf?: RouteCsrf;
 
     /**
      * Create a new RouteBuilder with copied properties and optional overrides
@@ -96,6 +103,7 @@ export class RouteBuilder<
             contract: RouteContract;
             effect: RouteEffect;
             summary: string;
+            csrf: RouteCsrf;
         }>,
     ): RouteBuilder<TNewInput, TNewInterceptor, TResponse>
     {
@@ -109,6 +117,7 @@ export class RouteBuilder<
         builder._contract = overrides?.contract ?? this._contract;
         builder._effect = overrides?.effect ?? this._effect;
         builder._summary = overrides?.summary ?? this._summary;
+        builder._csrf = overrides?.csrf ?? this._csrf;
 
         return builder;
     }
@@ -343,6 +352,36 @@ export class RouteBuilder<
     }
 
     /**
+     * Declare that a cookie-session caller must prove the request came from the
+     * application's own pages
+     *
+     * For a route that changes state on the strength of the session cookie
+     * alone — a consent decision, a disconnect button. The route-map generator
+     * writes the declaration into the generated map, and the Next.js RPC proxy
+     * passes it to its interceptors as `ctx.route.csrf`; `@spfn/auth`'s CSRF
+     * check refuses such a request without a valid CSRF header in every mode,
+     * `off` and `warn` included, and ignores an exempt-list entry for it.
+     *
+     * The server itself does not read it: the check belongs to the proxy, the
+     * one layer that knows the credential was an ambient cookie. An application
+     * must regenerate its route map (`spfn codegen run`) for a declaration on
+     * its own route to reach the proxy; a package that ships its own map can
+     * read its routes' declarations from it with `findRouteEntry` instead.
+     *
+     * @example
+     * ```ts
+     * export const revokeGrant = route.delete('/grants/:id')
+     *   .use([authenticate])
+     *   .csrf('required')
+     *   .handler(async (c) => { ... });
+     * ```
+     */
+    csrf(requirement: RouteCsrf): RouteBuilder<TInput, TInterceptor, TResponse>
+    {
+        return this.clone({ csrf: requirement });
+    }
+
+    /**
      * Define handler function
      *
      * Response type is automatically inferred from the return value.
@@ -402,6 +441,7 @@ export class RouteBuilder<
             contract: this._contract,
             ...(this._effect !== undefined ? { effect: this._effect } : {}),
             ...(this._summary !== undefined ? { summary: this._summary } : {}),
+            ...(this._csrf !== undefined ? { csrf: this._csrf } : {}),
             handler: fn,
             _input: {} as TInput,
             _interceptor: {} as TInterceptor,

@@ -1508,7 +1508,8 @@ export class OAuth2RedirectUriMismatchError extends ValidationError
  * The API cannot perform that redirect — it is answering the web app's consent
  * handler, not the browser — so it carries the pieces in `details` and the
  * handler builds the 302. `redirectUri` is the registered-and-matched value, not
- * the raw parameter, which is what makes it safe to send somebody to.
+ * the raw parameter, which is what makes it safe to send somebody to. `iss` is
+ * this server's issuer, which the redirect carries beside `error` (RFC 9207).
  */
 export class OAuth2AuthorizeRedirectError extends ValidationError
 {
@@ -1516,6 +1517,7 @@ export class OAuth2AuthorizeRedirectError extends ValidationError
         error: string;
         redirectUri: string;
         state?: string;
+        iss: string;
         message?: string;
         details?: Record<string, any>;
     })
@@ -1526,6 +1528,7 @@ export class OAuth2AuthorizeRedirectError extends ValidationError
                 error: data.error,
                 redirectUri: data.redirectUri,
                 state: data.state,
+                iss: data.iss,
                 ...data.details,
             },
         });

@@ -32,6 +32,7 @@ import { oauth2ClientsRepository } from '../repositories/oauth2-clients.reposito
 import { oauth2GrantsRepository } from '../repositories/oauth2-grants.repository';
 import { oauth2AuthorizationCodesRepository } from '../repositories/oauth2-authorization-codes.repository';
 import type { OAuth2Client } from '../entities/oauth2-clients';
+import type { OAuth2Grant } from '../entities/oauth2-grants';
 import { getAuthorizationServerConfig, type AuthorizationServerConfig } from '../lib/oauth2/config';
 import { matchesRegisteredRedirectUri, redirectHostOf } from '../lib/oauth2/redirect-uri';
 import { normalizeResource } from '../lib/oauth2/resource';
@@ -82,6 +83,9 @@ export interface OAuth2AuthorizationCodeIssued
 
     /** Echoed back verbatim, or absent when the request carried none. */
     state?: string;
+
+    /** This server's issuer, which the redirect carries as `iss` (RFC 9207). */
+    iss: string;
 }
 
 /** A request that passed every check, with the values it resolved to. */
@@ -166,7 +170,13 @@ function refuseRedirectable(
     message: string,
 ): never
 {
-    throw new OAuth2AuthorizeRedirectError({ error, redirectUri, state: params.state, message });
+    throw new OAuth2AuthorizeRedirectError({
+        error,
+        redirectUri,
+        state: params.state,
+        iss: requireConfig().issuer,
+        message,
+    });
 }
 
 /** S256 named, and a challenge that could have come out of S256. */
@@ -258,16 +268,7 @@ export async function approveOAuth2AuthorizeService(
 {
     const config = requireConfig();
     const validated = await validate(params);
-
-    // Upsert, not insert: a user widening a CLI's scopes is amending the consent
-    // they already gave. See the unique index on (client, user, resource).
-    const grant = await oauth2GrantsRepository.upsert({
-        client: validated.client.id,
-        user: userId,
-        resource: validated.resource,
-        scopes: validated.scopes,
-    });
-
+    const grant = await recordConsent(validated, userId, config);
     const code = generateAuthorizationCode();
 
     await oauth2AuthorizationCodesRepository.create({
@@ -278,7 +279,37 @@ export async function approveOAuth2AuthorizeService(
         expiresAt: new Date(Date.now() + config.codeTtlMs),
     });
 
-    return { code, redirectUri: validated.redirectUri, state: validated.state };
+    return { code, redirectUri: validated.redirectUri, state: validated.state, iss: config.issuer };
+}
+
+/**
+ * The live grant this consent amends, or a new one.
+ *
+ * Amending, not inserting: a user approving a CLI again while it is connected
+ * is changing the consent they already gave, and the scopes they approve now
+ * are what every token of that grant authorizes from here on, until the
+ * `expiresAt` it was created with — amending does not extend it. A grant past
+ * its `expiresAt` is ended first, so this consent starts a new grant, with a new
+ * `expiresAt` under the lifetime configured now, rather than amending one that
+ * no longer authorizes anything. A revoked grant is never
+ * amended — the unique index covers live rows only — so reconnecting after a
+ * disconnect is a new grant too.
+ */
+async function recordConsent(
+    validated: ValidatedAuthorizeRequest,
+    userId: number,
+    config: AuthorizationServerConfig,
+): Promise<OAuth2Grant>
+{
+    const key = { client: validated.client.id, user: userId, resource: validated.resource };
+
+    await oauth2GrantsRepository.revokeLapsed(key);
+
+    return await oauth2GrantsRepository.upsert({
+        ...key,
+        scopes: validated.scopes,
+        expiresAt: new Date(Date.now() + config.grantLifetimeMs),
+    });
 }
 
 /**
@@ -300,6 +331,7 @@ export async function denyOAuth2AuthorizeService(params: OAuth2AuthorizeParams):
         error: 'access_denied',
         redirectUri: validated.redirectUri,
         state: validated.state,
+        iss: requireConfig().issuer,
         message: 'The account owner refused this authorization request.',
     });
 }

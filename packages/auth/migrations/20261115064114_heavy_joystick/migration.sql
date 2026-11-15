@@ -1,0 +1,2 @@
+DROP INDEX "spfn_auth"."oauth2_grant_client_user_resource_idx";--> statement-breakpoint
+CREATE UNIQUE INDEX "oauth2_grant_live_client_user_resource_idx" ON "spfn_auth"."oauth2_grants" ("oauth2_client_id","user_id","resource") WHERE "revoked_at" is null;

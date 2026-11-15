@@ -164,7 +164,11 @@ async function handleRequest<Auth extends McpAuth, Ctx>(
         return challenge(config, resource, false);
     }
 
-    const auth = await validateAuth(config, bearer, resource);
+    // A throw is not a refusal: it propagates to the application's error
+    // handler, which answers it with its own status — a 403 from a validator
+    // that knows the person may not act right now, a 5xx from one that could
+    // not decide. Only null or undefined means the token is not valid.
+    const auth = await config.validateToken(bearer, resource);
     if (!auth)
     {
         return challenge(config, resource, true);
@@ -211,22 +215,6 @@ function bearerToken(header: string | null): string | undefined
     const match = header?.match(/^Bearer\s+(.+)$/i);
 
     return match?.[1];
-}
-
-async function validateAuth<Auth extends McpAuth, Ctx>(
-    config: McpHttpRouteConfig<Auth, Ctx>,
-    token: string,
-    resource: string,
-): Promise<Auth | null | undefined>
-{
-    try
-    {
-        return await config.validateToken(token, resource);
-    }
-    catch
-    {
-        return undefined;
-    }
 }
 
 /**

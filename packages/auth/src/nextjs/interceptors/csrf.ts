@@ -14,12 +14,14 @@
  * layout drift) and covers nothing an XSS on your own origin could not do anyway.
  */
 
+import { findRouteEntry } from '@spfn/core/nextjs/server';
 import type { ProxyAbort, RequestInterceptorContext } from '@spfn/core/nextjs/server';
 import type { SetCookie } from '@spfn/core/nextjs';
 
 import { getCsrfMode, getCsrfExemptPaths, getSessionTtl, COOKIE_NAMES, type CsrfMode } from '../../server/lib/config';
 import { CSRF_HEADER, deriveCsrfToken, matchesCsrfToken, timingSafeEqualString } from '../../server/lib/csrf';
 import { authLogger } from '../../server/logger';
+import { routeMap as authRouteMap } from '../../generated/route-map';
 import { cookieSecure } from './cookie-options';
 
 /**
@@ -33,19 +35,7 @@ import { cookieSecure } from './cookie-options';
  */
 const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
 
-/**
- * Paths checked in every mode, `off` and `warn` included, and never exempt.
- *
- * `POST /_auth/oauth2/authorize` is the consent decision: it issues an
- * authorization code for a third-party client on the strength of the session
- * cookie alone. The package ships no consent screen, so an app's own page calls
- * it through this proxy, and a cross-site POST that got past a relaxed mode
- * would hand a code to a client the user never approved. Nothing else earns a
- * place here; everything else follows the configured mode.
- */
-const ALWAYS_ENFORCED_PATHS = new Set(['/_auth/oauth2/authorize']);
-
-/** Always-enforced paths an exempt list has already been warned about */
+/** Paths of CSRF-required routes an exempt list has already been warned about */
 const exemptionsReported = new Set<string>();
 
 /**
@@ -93,10 +83,17 @@ function refusal(): ProxyAbort
 /**
  * The mode this request is checked under.
  *
- * Safe methods and exempt paths come out as `off`. An always-enforced path comes
- * out as `enforce` whatever the configuration says, and an exempt-list entry
- * naming it is ignored — with one warning, so the entry does not sit there
- * looking like it took effect.
+ * Safe methods and exempt paths come out as `off`. A route that declares
+ * `.csrf('required')` comes out as `enforce` whatever the configuration says,
+ * and an exempt-list entry naming its path is ignored — with one warning, so
+ * the entry does not sit there looking like it took effect.
+ *
+ * The declaration is read from a route, never from a path list: a list has to
+ * spell every parameterised path the proxy may produce, and the route it missed
+ * is the one left open. Which routes declare it is `declaresRequired`'s to
+ * say. Those routes are cookie-session mutations a third party must not be able
+ * to trigger — the consent decision hands a code to a client, the disconnect
+ * button cuts one off — so they are refused in `off` and `warn` too.
  */
 function checkModeFor(ctx: RequestInterceptorContext): CsrfMode
 {
@@ -105,7 +102,7 @@ function checkModeFor(ctx: RequestInterceptorContext): CsrfMode
         return 'off';
     }
 
-    if (ALWAYS_ENFORCED_PATHS.has(ctx.path))
+    if (declaresRequired(ctx))
     {
         reportIgnoredExemption(ctx.path);
 
@@ -125,7 +122,28 @@ function checkModeFor(ctx: RequestInterceptorContext): CsrfMode
 }
 
 /**
- * Warn, once per process, that the exempt list names an always-enforced path.
+ * Whether the route this request reaches declares `.csrf('required')` — in the
+ * map this package ships or in the application's, either one is enough.
+ *
+ * A request that reaches one of this package's routes is checked against the
+ * map the package ships, whatever the application's map says: `ctx.route` comes
+ * from the application's generated copy, and a copy generated before a route
+ * declared `.csrf('required')` — an upgrade nobody followed with a regeneration
+ * — would otherwise switch the declaration off without anybody seeing it. The
+ * lookup is by method and the path the backend will route, so a spelling the
+ * backend resolves to the same route (`%61uthorize`, `x/../`) finds it too.
+ * `ctx.route` is the application's own declaration, and a package entry that
+ * matches the same method and path without declaring anything does not
+ * override it: a declaration can only be added to, never taken away.
+ */
+function declaresRequired(ctx: RequestInterceptorContext): boolean
+{
+    return findRouteEntry(authRouteMap, ctx.method, ctx.path)?.csrf === 'required'
+        || ctx.route?.csrf === 'required';
+}
+
+/**
+ * Warn, once per process, that the exempt list names a CSRF-required route's path.
  */
 function reportIgnoredExemption(path: string): void
 {
@@ -155,9 +173,9 @@ function reportIgnoredExemption(path: string): void
  * "wrong token" while holding nothing better to try, and the documented recovery
  * would need an unrelated GET to happen first.
  *
- * The consent POST is refused in every mode, `off` included (see
- * ALWAYS_ENFORCED_PATHS); the cookie it repairs is issued in every mode too, so
- * a page's retry with the mirrored header passes.
+ * A route declaring `.csrf('required')` is refused in every mode, `off`
+ * included (see checkModeFor); the cookie it repairs is issued in every mode
+ * too, so a page's retry with the mirrored header passes.
  *
  * @param ctx - Request interceptor context, mutated with `abort` on refusal
  * @param keyId - Key id of the session that authenticated this request

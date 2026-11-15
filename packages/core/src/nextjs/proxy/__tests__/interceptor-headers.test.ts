@@ -43,6 +43,7 @@ describe('proxy header forwarding', () =>
             new URLSearchParams(),
             new Map(),
             { headers: browserHeaders } as unknown as NextRequest,
+            { method: 'POST', path: '/orders' },
         );
 
         expect(ctx.headers[CSRF_HEADER]).toBeUndefined();

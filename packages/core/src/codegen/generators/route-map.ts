@@ -100,6 +100,9 @@ interface CollectedRoute
     method: string;
     path: string;
 
+    /** The route's `.csrf()` declaration, written into its entry for the RPC proxy. */
+    csrf?: string;
+
     /** Where the route was found, for a collision message. */
     trail: string;
 
@@ -308,6 +311,7 @@ function addRoute(
     const collected: CollectedRoute = {
         method: routeDef.method,
         path: routeDef.path,
+        csrf: routeDef.csrf,
         trail: where,
         def: routeDef,
     };
@@ -607,12 +611,13 @@ function generateRouteMapContent(collection: Collection, nodeEnv: string): strin
         ...packageHeaderLines(collection),
         ' */',
         '',
-        'import type { HttpMethod } from \'@spfn/core/route\';',
+        'import type { HttpMethod, RouteCsrf } from \'@spfn/core/route\';',
         '',
         'export interface RouteInfo',
         '{',
         '    method: HttpMethod;',
         '    path: string;',
+        '    csrf?: RouteCsrf;',
         '}',
         '',
         'export const routeMap: Record<string, RouteInfo> = {',
@@ -643,10 +648,15 @@ function generateRouteMapContent(collection: Collection, nodeEnv: string): strin
     return lines.join('\n');
 }
 
-/** One `name: { method, path },` line of the map. */
+/**
+ * One `name: { method, path },` line of the map, with `csrf` when the route
+ * declares it — the RPC proxy has no other way to learn it.
+ */
 function entryLine(name: string, route: CollectedRoute): string
 {
-    return `    ${toObjectKey(name)}: { method: '${route.method}', path: ${toStringLiteral(route.path)} },`;
+    const csrf = route.csrf ? `, csrf: ${toStringLiteral(route.csrf)}` : '';
+
+    return `    ${toObjectKey(name)}: { method: '${route.method}', path: ${toStringLiteral(route.path)}${csrf} },`;
 }
 
 /**

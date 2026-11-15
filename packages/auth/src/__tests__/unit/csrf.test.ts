@@ -617,6 +617,23 @@ describe('CSRF - modes', () =>
         expect(warn).toHaveBeenCalledTimes(1);
     });
 
+    // A package route template (`POST /_auth/oauth/:provider/url`, no `csrf`)
+    // matches this path too; the app route's own declaration still holds.
+    it('off mode still refuses an app route declaring required at a path a package template also matches', async () =>
+    {
+        setMode('off');
+
+        const path = '/_auth/oauth/acme/url';
+        const ctx = {
+            ...requestContext({ sessionCookie: session.cookie, path }),
+            route: { method: 'POST', path, csrf: 'required' },
+        } as RequestInterceptorContext;
+        const { continued } = await run(ctx);
+
+        expect(continued).toBe(false);
+        expect(ctx.abort?.status).toBe(403);
+    });
+
     it('off mode is silent', async () =>
     {
         setMode('off');

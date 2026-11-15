@@ -1,0 +1,1 @@
+ALTER TABLE "spfn_auth"."oauth2_grants" ALTER COLUMN "expires_at" SET NOT NULL;

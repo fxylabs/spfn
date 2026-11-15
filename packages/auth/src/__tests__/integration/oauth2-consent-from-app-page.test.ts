@@ -8,8 +8,11 @@
  * without it, the proxy's check is the only thing between a cross-site POST and
  * a consent the user never gave.
  *
- * The proxy therefore checks this one POST in every mode — `off` and `warn`
- * included — and whatever the exempt list says. These rows run the whole path:
+ * The proxy therefore checks this POST in every mode — `off` and `warn`
+ * included — and whatever the exempt list says, because the route declares
+ * `.csrf('required')` and the check reads that from the route map this package
+ * ships, whatever the app's own generated copy says. The disconnect button,
+ * `DELETE /_auth/oauth2/grants/:id`, declares the same. These rows run the whole path:
  * a real login on the backend, a session cookie sealed around the key that
  * login registered, the shipped `authInterceptors` chain as `createRpcProxy`
  * runs it, and — when the chain lets the request through — the real authorize
@@ -41,6 +44,8 @@ import {
     TEST_RESOURCE,
 } from '../helpers/oauth2';
 import { authInterceptors } from '../../nextjs/interceptors';
+import { routeMap } from '../../generated/route-map';
+import { oauth2Grants } from '../../server/entities';
 import { generateKeyPair } from '../../server/lib/crypto';
 import { sealSession } from '../../server/lib/session';
 import { COOKIE_NAMES, configureAuth, type CsrfMode } from '../../server/lib/config';
@@ -124,7 +129,10 @@ function authorizeFields(clientId: string): Record<string, string>
     };
 }
 
-/** `buildRequestContext`'s shape; `csrf` is the header the browser sent, if any. */
+/**
+ * `buildRequestContext`'s shape, with the route-map entry `createRpcProxy`
+ * resolved the route name to; `csrf` is the header the browser sent, if any.
+ */
 function requestContext(
     method: 'GET' | 'POST',
     fields: Record<string, unknown>,
@@ -134,12 +142,29 @@ function requestContext(
 {
     return {
         path: AUTHORIZE,
+        route: method === 'GET' ? routeMap.getOAuth2Authorize : routeMap.createOAuth2AuthorizationCode,
         method,
         headers: { 'content-type': 'application/json' } as Record<string, string>,
         body: method === 'POST' ? fields : undefined,
         query: method === 'GET' ? fields : {},
         cookies: jar,
         request: { headers: new Headers(csrf === undefined ? {} : { [CSRF_HEADER]: csrf }) },
+        metadata: {} as Record<string, unknown>,
+    } as unknown as RequestInterceptorContext;
+}
+
+/** The disconnect button's call, `revokeOAuth2Grant` resolved as the proxy resolves it. */
+function disconnectContext(grantId: number, jar: Map<string, string>): RequestInterceptorContext
+{
+    return {
+        path: `/_auth/oauth2/grants/${grantId}`,
+        route: routeMap.revokeOAuth2Grant,
+        method: 'DELETE',
+        headers: {} as Record<string, string>,
+        body: undefined,
+        query: {},
+        cookies: jar,
+        request: { headers: new Headers() },
         metadata: {} as Record<string, unknown>,
     } as unknown as RequestInterceptorContext;
 }
@@ -202,7 +227,11 @@ async function callBackend(app: Hono, ctx: RequestInterceptorContext): Promise<R
             status: response.status,
             statusText: response.statusText,
             headers: response.headers,
-            body: await response.json(),
+            // As the proxy's parseResponseBody reads it: a route the backend
+            // does not have answers Hono's plain-text 404.
+            body: response.headers.get('content-type')?.includes('application/json')
+                ? await response.json()
+                : await response.text(),
         },
         cookies: ctx.cookies,
         setCookies: [],
@@ -390,6 +419,154 @@ describe.skipIf(!dbAvailable)('OAuth2 consent API called from an app page (#108 
 
             expect(retry.status).toBe(200);
             expect(retry.body.code).toEqual(expect.any(String));
+        });
+    });
+
+    // T7 (au6-B5): the disconnect button is a cookie-session mutation as much as
+    // the consent is. Under the default settings — `warn` — a cross-site page
+    // could otherwise cut the user's CLI off through their session cookie.
+    describe('default settings — the disconnect button', () =>
+    {
+        beforeEach(() =>
+        {
+            configureAuth({ csrf: undefined });
+        });
+
+        it('DELETE /_auth/oauth2/grants/:id without the CSRF header is refused 403, the grant left live', async () =>
+        {
+            expect((await approve(jar.get(COOKIE_NAMES.CSRF))).status).toBe(200);
+
+            const [grant] = await getTestDb().select().from(oauth2Grants);
+            const answer = await throughTheProxy(app, disconnectContext(Number(grant!.id), jar));
+
+            expect(answer.status).toBe(403);
+            expect(answer.reachedBackend).toBe(false);
+
+            const [after] = await getTestDb().select().from(oauth2Grants);
+
+            expect(after!.revokedAt).toBeNull();
+        });
+    });
+
+    // F2 (a10f1): the declaration of the package's own routes is read from the
+    // map the package ships, not from the app's generated copy. An app that
+    // upgraded without regenerating holds entries with no `csrf` — and the proxy
+    // hands those over as `ctx.route`. Neither that entry nor a spelling of the
+    // path the backend still routes may switch the check off.
+    describe('a stale app route map — entries generated before `.csrf()` was declared', () =>
+    {
+        const MODES: [string, { mode: CsrfMode } | undefined][] = [
+            ['unset', undefined],
+            ['warn', { mode: 'warn' }],
+            ['off', { mode: 'off' }],
+        ];
+
+        /** The consent POST, resolved through a stale entry spelled `path`. */
+        function staleConsent(path: string): RequestInterceptorContext
+        {
+            return {
+                ...requestContext('POST', { ...fields, approve: true }, jar),
+                path,
+                route: { method: 'POST', path },
+            } as RequestInterceptorContext;
+        }
+
+        /** The disconnect, resolved through a stale entry spelled `path`. */
+        function staleDisconnect(path: string): RequestInterceptorContext
+        {
+            return {
+                ...disconnectContext(0, jar),
+                path,
+                route: { method: 'DELETE', path: '/_auth/oauth2/grants/:id' },
+            } as RequestInterceptorContext;
+        }
+
+        /** A live grant to disconnect, made with a valid header. */
+        async function liveGrantId(): Promise<number>
+        {
+            expect((await approve(jar.get(COOKIE_NAMES.CSRF))).status).toBe(200);
+
+            const [grant] = await getTestDb().select().from(oauth2Grants);
+
+            return Number(grant!.id);
+        }
+
+        /** Refused by the proxy, or never routed by the backend — never passed. */
+        function expectNotPassed(answer: ProxyAnswer): void
+        {
+            if (answer.reachedBackend)
+            {
+                expect(answer.status).toBe(404);
+
+                return;
+            }
+
+            expect(answer.status).toBe(403);
+        }
+
+        describe.each(MODES)('mode %s', (_label, csrf) =>
+        {
+            beforeEach(() =>
+            {
+                configureAuth({ csrf });
+            });
+
+            it('consent approve without the CSRF header → 403, nothing recorded', async () =>
+            {
+                const answer = await throughTheProxy(app, staleConsent(AUTHORIZE));
+
+                expect(answer.status).toBe(403);
+                expect(answer.reachedBackend).toBe(false);
+                expect(await getTestDb().select().from(oauth2Grants)).toHaveLength(0);
+            });
+
+            it('disconnect without the CSRF header → 403, the grant left live', async () =>
+            {
+                const grantId = await liveGrantId();
+                const answer = await throughTheProxy(app, staleDisconnect(`/_auth/oauth2/grants/${grantId}`));
+
+                expect(answer.status).toBe(403);
+                expect(answer.reachedBackend).toBe(false);
+
+                const [after] = await getTestDb().select().from(oauth2Grants);
+
+                expect(after!.revokedAt).toBeNull();
+            });
+        });
+
+        describe('variant spellings, default settings', () =>
+        {
+            beforeEach(() =>
+            {
+                configureAuth({ csrf: undefined });
+            });
+
+            it.each([
+                ['an encoded character', '/_auth/oauth2/%61uthorize'],
+                ['a dot segment', '/_auth/oauth2/x/../authorize'],
+                ['an encoded dot segment', '/_auth/oauth2/x/%2e%2e/authorize'],
+                ['a trailing slash', '/_auth/oauth2/authorize/'],
+            ])('consent approve spelled with %s → refused or not routed, nothing recorded', async (_label, path) =>
+            {
+                expectNotPassed(await throughTheProxy(app, staleConsent(path)));
+                expect(await getTestDb().select().from(oauth2Grants)).toHaveLength(0);
+            });
+
+            it.each([
+                ['an encoded character', (id: number) => `/_auth/oauth2/grant%73/${id}`],
+                ['an encoded id', (id: number) => `/_auth/oauth2/grants/${[...String(id)].map(digit => `%3${digit}`).join('')}`],
+                ['a dot segment', (id: number) => `/_auth/oauth2/x/../grants/${id}`],
+                ['a trailing slash', (id: number) => `/_auth/oauth2/grants/${id}/`],
+            ])('disconnect spelled with %s → refused or not routed, the grant left live', async (_label, spell) =>
+            {
+                const grantId = await liveGrantId();
+
+                expectNotPassed(await throughTheProxy(app, staleDisconnect(spell(grantId))));
+
+                const [after] = await getTestDb().select().from(oauth2Grants);
+
+                expect(after!.revokedAt).toBeNull();
+            });
         });
     });
 

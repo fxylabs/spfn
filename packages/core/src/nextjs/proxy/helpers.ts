@@ -4,7 +4,12 @@
  */
 import { NextRequest } from 'next/server.js';
 import type { CookieOptions, SetCookie } from '../client';
-import type { InterceptorRule, RequestInterceptorContext, ResponseInterceptorContext } from './interceptors/types';
+import type {
+    InterceptorRule,
+    RequestInterceptorContext,
+    ResponseInterceptorContext,
+    RouteMapEntry,
+} from './interceptors/types';
 import type { InterceptorRegistry } from './interceptors';
 import { PROXY_CLIENT_IP_HEADER } from '../../security/proxy-signature';
 
@@ -283,10 +288,12 @@ export function buildRequestContext(
     searchParams: URLSearchParams,
     cookiesMap: Map<string, string>,
     request: NextRequest,
+    route: RouteMapEntry,
 ): RequestInterceptorContext
 {
     return {
         path: `/${path}`,
+        route,
         method,
         headers: Object.fromEntries(headers.entries()),
         body,

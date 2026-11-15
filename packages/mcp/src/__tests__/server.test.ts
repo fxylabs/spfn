@@ -19,7 +19,7 @@ function createApp(overrides: Partial<McpRouteConfig<TestAuth, { userId: number 
         {
             if (token !== 'valid-token')
             {
-                throw new Error('invalid');
+                return null;
             }
 
             return { clientId: 'client-1', scopes: ['tools'], userId: 42 };

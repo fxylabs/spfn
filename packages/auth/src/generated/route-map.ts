@@ -8,12 +8,13 @@
  * difference rather than an edit.
  */
 
-import type { HttpMethod } from '@spfn/core/route';
+import type { HttpMethod, RouteCsrf } from '@spfn/core/route';
 
 export interface RouteInfo
 {
     method: HttpMethod;
     path: string;
+    csrf?: RouteCsrf;
 }
 
 export const routeMap: Record<string, RouteInfo> = {
@@ -118,11 +119,11 @@ export const routeMap: Record<string, RouteInfo> = {
     revokeOpsToken: { method: 'DELETE', path: '/_auth/ops-tokens/:id' },
     registerOAuth2Client: { method: 'POST', path: '/_auth/oauth2/register' },
     getOAuth2Authorize: { method: 'GET', path: '/_auth/oauth2/authorize' },
-    createOAuth2AuthorizationCode: { method: 'POST', path: '/_auth/oauth2/authorize' },
+    createOAuth2AuthorizationCode: { method: 'POST', path: '/_auth/oauth2/authorize', csrf: 'required' },
     oauth2Token: { method: 'POST', path: '/_auth/oauth2/token' },
     oauth2Revoke: { method: 'POST', path: '/_auth/oauth2/revoke' },
     listOAuth2Grants: { method: 'GET', path: '/_auth/oauth2/grants' },
-    revokeOAuth2Grant: { method: 'DELETE', path: '/_auth/oauth2/grants/:id' },
+    revokeOAuth2Grant: { method: 'DELETE', path: '/_auth/oauth2/grants/:id', csrf: 'required' },
     oauth2AuthorizationServerMetadata: { method: 'GET', path: '/.well-known/oauth-authorization-server' },
 };
 

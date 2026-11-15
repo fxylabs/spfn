@@ -729,7 +729,7 @@ each path, calling `authApi` the way your login and reset screens already do:
 [The consent screen](#the-consent-screen) each show one. The consent page takes over the rules
 the handler enforced — the login redirect, redirecting only to the API's `redirectUri`, and the
 `frame-ancestors 'none'` / `no-store` headers. Its CSRF check needs nothing from you: the proxy
-checks the consent POST in every mode.
+checks the consent POST in every mode, reading that from the route map this package ships.
 
 ### Migration — tell a chosen locale from none
 
@@ -949,6 +949,85 @@ Also, without a migration step: a refused web sign-in or link writes nothing (th
 run no `Transactional()`; the services open their own transaction after the provider calls and the
 error page is built after the rollback), every provider HTTP call times out after 5 seconds, and a
 Naver unlink notification more than five minutes from now is refused.
+
+### Migration — the grant decides what an MCP client may do
+
+**BREAKING** (au6, superself w-fww3c). The OAuth 2.1 authorization server keeps what a client may
+do on its grant and nowhere else:
+
+- **Narrowing a consent narrows the tokens already out.** A token's effective scope is its own
+  scopes intersected with the grant's current ones, everywhere: `verifyAccessToken` answers it,
+  a refresh without `scope` issues it, and a refresh's explicit `scope` may only narrow it
+  further — a chain narrowed to `mcp:read` cannot ask for the grant's full set again
+  (`invalid_scope`; re-authorize to widen). The same holds across a narrowing of the grant: a
+  refresh while the grant is narrowed issues tokens capped at the narrowed set, and widening the
+  grant afterwards does not lift that cap — only a new authorization does. (A token not
+  refreshed in between keeps the ceiling it was issued with and follows the grant back up.) A
+  token left with none is refused (`null` / `invalid_grant`), an explicit `scope` included. A tool that read `scopes` saw what the token was issued with; it now sees
+  what the user still allows.
+- **Disconnecting is final; reconnecting makes a new grant.** `DELETE /_auth/oauth2/grants/:id`
+  revokes the grant, and approving the same client again inserts a new row instead of bringing
+  the old one back — a code, access token or refresh token minted before the disconnect stays
+  refused. The unique index on `(client, user, resource)` becomes partial (`WHERE revoked_at IS
+  NULL`); the migration replaces it. A revocation is recorded on the grant only: `oauth2_tokens.
+  revoked_at` is no longer written when a grant is revoked (it still is when an access token is
+  revoked on its own through `/_auth/oauth2/revoke`), so judge a token by its grant.
+- **A grant lasts 180 days, and its end is stored on it.** A new column, `oauth2_grants.
+  expires_at`, is written when the grant is created: creation + `authorizationServer.
+  grantLifetimeMs` (default `180 * 24 * 60 * 60 * 1000`, a positive whole number of milliseconds
+  or the lifecycle refuses to start). From `expires_at` on the grant is not live: code exchange,
+  refresh and verification refuse, the connected apps list (`GET /_auth/oauth2/grants`) no longer
+  shows it, disconnecting it answers 404, and the user's next consent revokes it and creates a
+  new grant. Re-consenting to a live grant changes its scopes, not its `expires_at`. Changing
+  `grantLifetimeMs` applies to grants created afterwards: raising it does not bring a lapsed
+  grant (or its tokens) back, and lowering it does not shorten grants already out.
+  **The migration backfills existing rows with `created_at + interval '180 days'` — the default
+  lifetime, whatever your app configures.** Grants created more than 180 days before the upgrade
+  end at the upgrade. If you configured a different `grantLifetimeMs`, update the existing rows
+  after migrating if you want it applied to them, e.g. for 90 days:
+  `UPDATE spfn_auth.oauth2_grants SET expires_at = created_at + interval '90 days' WHERE revoked_at IS NULL;`
+- **`verifyAccessToken` with no authorization server configured answers `null`** (401 on `/mcp`)
+  instead of throwing: no token can have been issued by a server that is not configured.
+- **A code is spent only by a request that passed every check.** A `resource` that does not
+  match is refused `invalid_target` with the code unspent, so the client can retry. Two exchanges
+  of one code revoke the grant whether they arrive one after the other or together — the loser of
+  a race used to be answered `invalid_grant` and leave the winner's tokens live.
+- **`verifyAccessToken` throws what is not a refusal.** `null` is an invalid token; a 4xx
+  `HttpError` (today `SECOND_FACTOR_ENROLMENT_REQUIRED`, 403) is a valid token whose person may not
+  act now; anything else — a database error — is thrown as it is. `@spfn/mcp` now answers the
+  last two with their own status (403 / 5xx) instead of 401, so a passing outage no longer sends
+  every client to re-authorize. A custom validator that threw to refuse must return `null`.
+- **Required app change: your consent page must append `iss` to the redirect (RFC 9207).** The
+  metadata document now advertises `authorization_response_iss_parameter_supported: true`, so a
+  conforming client rejects any authorization response on its redirect URI that lacks `iss`.
+  The approve response and every redirectable refusal (`access_denied` included) carry it as
+  `iss` / `details.iss`. A consent page that builds the redirect from `code` and `state` alone —
+  every page written before this release — now hands RFC 9207 clients a response they refuse.
+  Add the line to both redirects (the [consent screen](#the-consent-screen) snippets have it):
+
+  ```typescript
+  // approve: beside code and state
+  url.searchParams.set('iss', issued.iss);
+
+  // a redirectable refusal: beside error and state
+  const { error, redirectUri, state, iss } = refusal.details ?? {};
+  if (typeof iss === 'string')
+  {
+      url.searchParams.set('iss', iss);
+  }
+  ```
+
+  The metadata document also adds `revocation_endpoint_auth_methods_supported: ["none"]`.
+- **CSRF is declared on the route, and the package's own declarations do not depend on your
+  route map.** The consent decision and `DELETE /_auth/oauth2/grants/:id` declare
+  `.csrf('required')`, and the proxy checks them in every mode. For a request that reaches one of
+  this package's routes the check reads the declaration from the route map `@spfn/auth` ships,
+  whatever the app's generated map says — an app that upgrades without regenerating keeps the
+  protection, as do spellings of the path the backend routes the same way (`%61uthorize`,
+  `x/../`). Your own routes' `.csrf('required')` still travels in your generated map; regenerate
+  it (`spfn codegen run`) after declaring one. A route is checked when either map declares it:
+  an entry of the package's map matching the same method and path never removes your route's
+  own declaration.
 
 ### Invitations
 
@@ -3601,14 +3680,31 @@ configureAuth({
 `SPFN_AUTH_SESSION_SECRET` — sessions need it anyway — and refuse rather than quietly
 passing everything if it is missing.
 
-**One route is checked in every mode.** `POST /_auth/oauth2/authorize` — the consent
-decision — is refused without a matching header under `off` and `warn` too, and an
-`exemptPaths` entry naming it is ignored (with one warning line). It issues an
-authorization code for a third-party client on the strength of the session alone, and
-the page that posts it is your app's own, so the proxy's check is the only thing between
-a cross-site POST and a consent the user never gave. Nothing on your side changes: the
-cookie is issued in every mode, the api client mirrors it, and a refusal repairs a
-missing one as described below.
+**Routes that declare it are checked in every mode.** A route built with
+`.csrf('required')` is refused without a matching header under `off` and `warn` too, and an
+`exemptPaths` entry naming its path is ignored (with one warning line). The package declares
+it on `POST /_auth/oauth2/authorize` — the consent decision, which issues an authorization
+code for a third-party client on the strength of the session alone — and on
+`DELETE /_auth/oauth2/grants/:id`, the button that disconnects a client. The declaration
+travels in the generated route map (`createOAuth2AuthorizationCode: { …, csrf: 'required' }`).
+For this package's routes the check reads it from the map `@spfn/auth` ships (`authRouteMap`),
+looked up by method and the path the backend will route (`findRouteEntry` from
+`@spfn/core/nextjs/server`), so it holds whether or not the app regenerated its own map. It
+also reads the entry the RPC proxy resolved, `ctx.route` — never a path list — and checks the
+request when either declares `required`.
+Your own route can declare it the same way:
+
+```typescript
+export const removeMember = route.delete('/teams/:id/members/:userId')
+    .use([authenticate])
+    .csrf('required')
+    .handler(async (c) => { /* … */ });
+```
+
+Regenerate the route map after adding one (`spfn codegen run`); for your own routes a map
+without the entry leaves the route to the configured mode. Nothing else on your side changes: the cookie is
+issued in every mode, the api client mirrors it, and a refusal repairs a missing one as
+described below.
 
 ### If a request is refused
 
@@ -4523,7 +4619,8 @@ createAuthLifecycle({
         // authorizeUrl: 'https://acme.com/oauth/authorize',  // default: {app url}/oauth/authorize
         // allowedRedirectOrigins: [],    // https origins a client may register. loopback needs no entry
         // accessTokenTtlMs: 8 * 60 * 60 * 1000,     // default 8 hours
-        // refreshTokenTtlMs: 30 * 24 * 60 * 60 * 1000,   // default 30 days
+        // refreshTokenTtlMs: 30 * 24 * 60 * 60 * 1000,   // default 30 days without a refresh
+        // grantLifetimeMs: 180 * 24 * 60 * 60 * 1000,   // default 180 days from consent, however often refreshed
         // codeTtlMs: 60 * 1000,          // default 60 seconds
     },
 })
@@ -4554,8 +4651,16 @@ export const mcp = createMcpRoute({ validateToken: verifyAccessToken, tools: [..
 ```
 
 `verifyAccessToken(token, resource)` answers `{ clientId, scopes, expiresAt, userId }` or
-`null`, and `null` is a refusal — `@spfn/mcp` ≥ 0.3.0-beta.3 accepts it as one rather than
-requiring a throw. `expiresAt` is seconds since the epoch, like every other OAuth field here.
+`null`, and `null` is the token being invalid — `@spfn/mcp` answers it 401 `invalid_token`.
+`expiresAt` is seconds since the epoch, like every other OAuth field here. `scopes` is what the
+token authorizes **now**: the scopes it was issued with that its grant still holds.
+
+| Outcome | Meaning | `@spfn/mcp` answers |
+| --- | --- | --- |
+| the principal | a live token whose grant still holds at least one of its scopes | the request runs |
+| `null` | unknown, revoked, expired, refresh-kind, wrong resource, grant revoked or past its `expires_at`, no scope left | 401 `invalid_token` |
+| throws `SecondFactorEnrolmentRequiredError` | a valid token whose person may only enrol a second factor | 403 `SECOND_FACTOR_ENROLMENT_REQUIRED` |
+| throws anything else | verification failed — a database error is not a verdict on the token | 5xx |
 
 - **Only loopback and origins you allowed.** A client may register `http://localhost:*`,
   `http://127.0.0.1:*` or `http://[::1]:*` — a CLI cannot know which port the OS will hand it,
@@ -4579,14 +4684,30 @@ requiring a throw. `expiresAt` is seconds since the epoch, like every other OAut
 - **`resource` is required** (RFC 8707) and the token is only good against it. A token your
   user approved for your MCP server cannot be replayed against a neighbouring deployment that
   shares this authorization server.
-- **A code is spent by the statement that reads it**, so of two exchanges arriving together
-  exactly one gets tokens — and **presenting a code twice revokes the grant**, because by then
-  somebody else may hold what the first exchange produced.
+- **A code is spent last, by one statement.** Client, redirect URI, PKCE verifier and
+  `resource` are all checked first; a request refused for any of them leaves the code unspent,
+  so a client that sent the wrong `resource` can correct it and retry. The spend is a conditional
+  `UPDATE … RETURNING`, so of two exchanges arriving together exactly one gets tokens — and
+  **presenting a code twice revokes the grant**, whether the second arrives after the first
+  finished or alongside it, because by then somebody else may hold what the first produced.
 - **Refresh tokens rotate, and a rotated one is marked rather than deleted.** Presenting it
   again revokes the grant, which kills the replacement as well as the replayed token: both
   hang off the grant and there is no telling which holder is the thief. A refresh may ask for
   a **subset** of the granted scopes and never for more; narrowing applies to that request and
   leaves the user's consent record as they gave it.
+- **The grant is the authority.** A token's own scopes are only the ceiling it was issued with:
+  verification answers them intersected with the grant's current scopes, and a refresh without
+  `scope` issues that intersection. A user who approves a client again with fewer scopes has
+  narrowed every token it already holds; a token left with none is refused.
+- **Revocation is final; reconnecting is a new grant.** A revoked grant is never live again, so
+  every code and token minted under it stays refused. Approving the same client again while it
+  is connected amends the live grant's scopes; approving it after a disconnect creates a new one.
+- **A grant ends at its `expires_at`**: the consent + `grantLifetimeMs` (180 days by default),
+  written when the grant is created and moved by nothing — not by refreshing, not by re-consenting
+  while it is live, not by a later change to `grantLifetimeMs` (which applies to grants created
+  afterwards). From then on refresh and verification refuse and the user consents again.
+  `refreshTokenTtlMs` is how long an *idle* client keeps its connection; this is how long a busy
+  one does.
 - **Every code and refresh failure is one `invalid_grant`, word for word.** Unknown, expired,
   spent, wrong verifier, another client's. The endpoint is public, and an error that told
   those apart would answer the question somebody holding a stolen value is asking.
@@ -4602,7 +4723,8 @@ requiring a throw. `expiresAt` is seconds since the epoch, like every other OAut
   password reset and a deletion request each revoke every grant the account has — so a CLI
   holding a refresh token through "sign me out everywhere" cannot be back within the hour,
   which is exactly the client that call was aimed at. The user's own
-  `DELETE /_auth/oauth2/grants/:id` does the same for one client, immediately.
+  `DELETE /_auth/oauth2/grants/:id` does the same for one client, immediately. It is CSRF-checked
+  in every mode, like the consent decision.
 - **The issuer is checked at boot.** It must be an absolute URL with no path — the metadata
   document is served at an origin's root and nowhere else — and it must be `https`, or `http`
   on `localhost` / `127.0.0.1` / `[::1]` for development. Anything else refuses to start with
@@ -4705,6 +4827,7 @@ export function ConsentForm({ consent, fields }: { consent: Consent; fields: Aut
                 url.searchParams.set('state', issued.state);
             }
 
+            url.searchParams.set('iss', issued.iss);
             window.location.assign(url);
         }
         catch (refusal)
@@ -4766,7 +4889,7 @@ export function refusalDestination(refusal: unknown, returnPath: string): string
         return `/login?returnUrl=${encodeURIComponent(returnPath)}`;
     }
 
-    const { error, redirectUri, state } = refusal.details ?? {};
+    const { error, redirectUri, state, iss } = refusal.details ?? {};
 
     if (typeof error !== 'string' || SHOWN.has(error) || typeof redirectUri !== 'string')
     {
@@ -4780,6 +4903,11 @@ export function refusalDestination(refusal: unknown, returnPath: string): string
     if (typeof state === 'string')
     {
         url.searchParams.set('state', state);
+    }
+
+    if (typeof iss === 'string')
+    {
+        url.searchParams.set('iss', iss);
     }
 
     return url.toString();
@@ -4814,22 +4942,24 @@ These are rules your page owns; each one is an attack that would otherwise work.
   request's own path and query — a same-app path, never an absolute URL — so signing in lands
   back on the screen with its parameters intact. The API answers `401` to both calls without a
   session.
-- **Redirect only to the `redirectUri` the API returned**, with `code` and `state` appended on
-  success. Never build a destination from the request's `redirect_uri`: the API's value is the
+- **Redirect only to the `redirectUri` the API returned**, with `code`, `state` and `iss`
+  appended on success (`iss` is RFC 9207's mix-up defence: the client checks it names the server
+  it started with). Never build a destination from the request's `redirect_uri`: the API's value is the
   one that matched a registration, which is the whole difference between a redirect and an open
   redirect.
 - **The two unredirectable refusals are shown on the page.** `unknown_client` and
   `redirect_uri_mismatch` have no vetted URI to carry them. Every other refusal —
   `invalid_request`, `invalid_target`, `invalid_scope`, and `access_denied` when the user denies —
-  arrives with `details.redirectUri`, and goes to that URI with `error` and the `state` verbatim.
+  arrives with `details.redirectUri`, and goes to that URI with `error`, `iss` and the `state`
+  verbatim.
 - **`clientName` is attacker-controlled.** It arrives from unauthenticated dynamic registration.
   Render it as text — React escapes it — and never through `dangerouslySetInnerHTML`.
 - **Forbid framing and caching** with `Content-Security-Policy: frame-ancestors 'none'` and
   `Cache-Control: no-store` on the consent path (the `next.config` snippet above). A consent
   screen that can be framed is a consent screen that can be clickjacked.
-- **The decision is CSRF-checked in every mode.** `POST /_auth/oauth2/authorize` is the one
-  route the proxy checks whatever `SPFN_AUTH_CSRF` says (see
-  [CSRF protection](#csrf-protection)), so the page needs nothing beyond the normal `authApi`
+- **The decision is CSRF-checked in every mode.** `POST /_auth/oauth2/authorize` declares
+  `.csrf('required')`, so the proxy checks it whatever `SPFN_AUTH_CSRF` says (see
+  [CSRF protection](#csrf-protection)); the page needs nothing beyond the normal `authApi`
   client, which mirrors the CSRF cookie into the header. A browser whose CSRF cookie was missing
   gets one on the refusal, and a second click goes through.
 

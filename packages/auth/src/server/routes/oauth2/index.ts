@@ -111,12 +111,16 @@ export const listOAuth2Grants = route.get('/_auth/oauth2/grants')
 /**
  * DELETE /_auth/oauth2/grants/:id
  *
- * Disconnect one client. Takes effect immediately: the grant and every token
- * under it are revoked in the same call, and verification reads the primary.
+ * Disconnect one client. Takes effect immediately and for good: the grant is
+ * revoked, and every code and token under it dies with it.
+ *
+ * CSRF-required, like the consent decision: a cross-site page must not be able
+ * to cut a user's CLI off through their session cookie, in any CSRF mode.
  */
 export const revokeOAuth2Grant = route.delete('/_auth/oauth2/grants/:id')
     .input({ params: Type.Object({ id: Type.Number({ description: 'Grant id from the list' }) }) })
     .use([authenticate])
+    .csrf('required')
     .handler(async (c) =>
     {
         requireAuthorizationServer();
@@ -138,6 +142,13 @@ export const revokeOAuth2Grant = route.delete('/_auth/oauth2/grants/:id')
  * `authorization_endpoint` is on the web app while everything else is on the
  * API, which RFC 8414 allows and this deployment needs: the consent screen is
  * the one part of the flow that requires the session cookie.
+ *
+ * `revocation_endpoint_auth_methods_supported` is stated rather than left to its
+ * RFC 8414 default, `client_secret_basic`, which no public client can do: the
+ * revocation endpoint takes `client_id` in the body and nothing else.
+ * `authorization_response_iss_parameter_supported` tells a client that every
+ * authorization response names this issuer (RFC 9207), which is how a client
+ * talking to several servers tells a mixed-up response from its own.
  */
 export const oauth2AuthorizationServerMetadata = route.get('/.well-known/oauth-authorization-server')
     .skip(['auth'])
@@ -154,6 +165,8 @@ export const oauth2AuthorizationServerMetadata = route.get('/.well-known/oauth-a
             response_types_supported: SUPPORTED_RESPONSE_TYPES,
             grant_types_supported: SUPPORTED_GRANT_TYPES,
             token_endpoint_auth_methods_supported: ['none'],
+            revocation_endpoint_auth_methods_supported: ['none'],
+            authorization_response_iss_parameter_supported: true,
             code_challenge_methods_supported: ['S256'],
             scopes_supported: Object.keys(config.scopes),
         });

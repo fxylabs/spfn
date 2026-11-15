@@ -12,31 +12,40 @@
  * stolen value is actually asking. `invalid_target` and `invalid_scope` are the
  * two exceptions, and both are decided from values the caller already knows.
  *
- * Nothing is spent or revoked before the presenter has shown it is the client the
- * credential belongs to. On the code path that means `client_id`, `redirect_uri`
- * and the PKCE verifier are all checked against the row before the code is
- * consumed — a caller that cannot satisfy them leaves the code unspent for the
- * real client and the grant untouched, because it has proved nothing about
- * itself and must therefore cost nobody anything.
+ * Nothing is spent or revoked before the request has passed every check. On the
+ * code path that means `client_id`, `redirect_uri`, the PKCE verifier and
+ * `resource` are all checked against the row before the code is consumed — a
+ * caller that cannot satisfy them leaves the code unspent and the grant
+ * untouched: one that has not shown it is the client the code belongs to must
+ * cost nobody anything, and one that has but sent a wrong parameter can correct
+ * it and retry.
  *
  * Two replays are detected rather than merely refused, and both revoke the whole
  * grant:
  *
  * - A code presented twice. The first exchange already produced tokens; if the
  *   second presentation is the real client, somebody else holds those tokens.
+ *   Decided by the consuming statement alone, so a second presentation that
+ *   arrives after the first finished and one that races it end the same way.
  * - A rotated refresh token presented again. Same reasoning, and it is why a
  *   rotated row is marked rather than deleted — a deleted row is
  *   indistinguishable from one that never existed.
  *
  * Revoking the grant kills the replacement tokens too, which is the point: the
  * thief's pair and the client's pair both hang off the grant, and there is no
- * way to tell which is which.
+ * way to tell which is which. The grant is the only place that is recorded, and
+ * it is never undone.
+ *
+ * The grant is also what a refresh is measured against: it issues what the
+ * presented token carried that the grant still holds — an explicit `scope` may
+ * only narrow that — and nothing once the grant is no longer live.
  */
 
 import { runInTransaction } from '@spfn/core/db';
 
 import { oauth2ClientsRepository } from '../repositories/oauth2-clients.repository';
 import {
+    isLiveGrant,
     oauth2GrantsRepository,
     type OAuth2GrantWithClient,
 } from '../repositories/oauth2-grants.repository';
@@ -46,6 +55,7 @@ import type { OAuth2Grant } from '../entities/oauth2-grants';
 import type { OAuth2Client } from '../entities/oauth2-clients';
 import type { OAuth2AuthorizationCode } from '../entities/oauth2-authorization-codes';
 import { getAuthorizationServerConfig, type AuthorizationServerConfig } from '../lib/oauth2/config';
+import { effectiveScopes } from '../lib/oauth2/grant-authority';
 import { sameResource } from '../lib/oauth2/resource';
 import {
     generateAccessToken,
@@ -167,12 +177,18 @@ async function exchangeAuthorizationCode(request: OAuth2TokenRequest): Promise<O
 
     const pair = await oauth2GrantsRepository.findWithClientById(record.grant);
 
-    if (!pair || pair.grant.revokedAt !== null || !boundToRequest(request, record, pair.client))
+    if (!pair || !isLiveGrant(pair.grant)
+        || !boundToRequest(request, record, pair.client))
     {
         return invalidGrant();
     }
 
-    return await spendBoundCode(request, record, pair);
+    if (resolveResource(request.resource, pair.grant) === null)
+    {
+        return refuse('invalid_target', 'resource does not match the resource this grant was issued for.');
+    }
+
+    return await spendBoundCode(record, pair);
 }
 
 /**
@@ -207,45 +223,46 @@ function boundToRequest(
 }
 
 /**
- * Spend a code whose bindings agree, and answer for the two ways it may not be
- * spendable.
+ * Spend a code that passed every check — the last step, and one statement.
  *
- * A row that was already used when this call read it is a replay by the client
- * the code belongs to — the first exchange produced tokens, so somebody else
- * holds them — and the grant dies for it. That includes a client's own retry
- * after a socket timeout: it arrives seconds later, reads a `usedAt` the winning
- * exchange already committed, and is revoked. It has to be. A retry that late is
- * a second presentation of a spent code and nothing in it distinguishes it from
- * a stolen one, which is the 8c row `사용됨 | 일치 | 일치 | 일치`.
- *
- * The benign branch is narrower: a request whose READ found the row unused and
- * whose `consume` then lost the race to the winner, or one whose sixty seconds
- * had passed. Neither is spent here and neither costs the grant.
+ * `consume` is a conditional UPDATE that matches only an unspent, unexpired row,
+ * so of any number of exchanges of one code exactly one gets a row back. Every
+ * other one is answered from what the statement found, never from what an
+ * earlier read saw: see `refuseUnspentCode`.
  */
 async function spendBoundCode(
-    request: OAuth2TokenRequest,
     record: OAuth2AuthorizationCode,
     pair: OAuth2GrantWithClient,
 ): Promise<OAuth2TokenResult>
 {
-    if (record.usedAt !== null)
-    {
-        await revokeGrantAndTokens(record.grant, 'authorization code presented twice');
-
-        return invalidGrant();
-    }
-
     if (!await oauth2AuthorizationCodesRepository.consume(record.codeHash))
     {
-        return invalidGrant();
-    }
-
-    if (resolveResource(request.resource, pair.grant) === null)
-    {
-        return refuse('invalid_target', 'resource does not match the resource this grant was issued for.');
+        return await refuseUnspentCode(record.codeHash, record.grant);
     }
 
     return { ok: true, tokens: await issueTokenPair(pair.grant, pair.grant.scopes) };
+}
+
+/**
+ * The consume matched nothing. A re-read says why.
+ *
+ * Spent already means the code was presented twice — by an exchange that
+ * finished before this one or one that won the race to the statement, which
+ * are the same event to whoever holds the first pair of tokens — and the grant
+ * dies for it. That includes a client's own retry after a socket timeout: a
+ * second presentation of a spent code carries nothing that tells it apart from
+ * a stolen one. Unspent means its sixty seconds ran out, which costs nothing.
+ */
+async function refuseUnspentCode(codeHash: string, grantId: number): Promise<OAuth2TokenRefusal>
+{
+    const current = await oauth2AuthorizationCodesRepository.findByCodeHash(codeHash);
+
+    if (current && current.usedAt !== null)
+    {
+        await revokeGrant(grantId, 'authorization code presented twice');
+    }
+
+    return invalidGrant();
 }
 
 // ============================================================================
@@ -269,7 +286,7 @@ async function refreshTokens(request: OAuth2TokenRequest): Promise<OAuth2TokenRe
 
     if (presented.replacedAt !== null)
     {
-        await revokeGrantAndTokens(presented.grant, 'rotated refresh token presented again');
+        await revokeGrant(presented.grant, 'rotated refresh token presented again');
 
         return invalidGrant();
     }
@@ -301,7 +318,8 @@ async function rotateRefresh(
 {
     const pair = await oauth2GrantsRepository.findWithClientById(grantId);
 
-    if (!pair || pair.grant.revokedAt !== null || request.client_id !== pair.client.clientId)
+    if (!pair || !isLiveGrant(pair.grant)
+        || request.client_id !== pair.client.clientId)
     {
         return invalidGrant();
     }
@@ -311,11 +329,19 @@ async function rotateRefresh(
         return refuse('invalid_target', 'resource does not match the resource this grant was issued for.');
     }
 
-    const scopes = resolveRefreshScopes(request.scope, pair.grant, presentedScopes);
+    const effective = effectiveScopes(presentedScopes, pair.grant);
+
+    if (effective.length === 0)
+    {
+        return invalidGrant();
+    }
+
+    const scopes = narrowTo(request.scope, effective);
 
     if (!scopes)
     {
-        return refuse('invalid_scope', 'A refresh may ask for a subset of the granted scopes, never more.');
+        return refuse('invalid_scope',
+            'A refresh may ask for a subset of the presented token\'s current scopes, never more.');
     }
 
     if (!await oauth2TokensRepository.rotate(tokenHash))
@@ -337,7 +363,7 @@ async function refuseLostRotation(tokenHash: string, grantId: number): Promise<O
 
     if (current && current.replacedAt !== null)
     {
-        await revokeGrantAndTokens(grantId, 'refresh token rotated twice concurrently');
+        await revokeGrant(grantId, 'refresh token rotated twice concurrently');
     }
 
     return invalidGrant();
@@ -345,32 +371,29 @@ async function refuseLostRotation(tokenHash: string, grantId: number): Promise<O
 
 /**
  * What the new tokens carry: the request's scopes when it named any, otherwise
- * what the presented refresh carried.
+ * the presented token's effective scopes unchanged.
  *
- * Narrowing is allowed and is per-request in the sense that matters — the grant
- * is never touched, so the user's consent record still says what they approved
- * and a later refresh may ask for all of it again. Widening past the grant is
- * `invalid_scope`, whatever the presented token carried.
+ * The ceiling is the presented token's effective scopes — what it carried that
+ * the grant still holds — never the grant alone. A refresh narrowed to
+ * `mcp:read` renews into `mcp:read` or less for good: asking for the grant's
+ * full set again is `invalid_scope`, or narrowing would only last until the
+ * next refresh. Getting the wider set back means a new authorization.
  *
- * @returns the scopes to issue, or null when the request asked for more than the
- *          grant allows
+ * @returns the scopes to issue, or null when the request asked for one outside
+ *          the ceiling
  */
-function resolveRefreshScopes(
-    requested: string | undefined,
-    grant: OAuth2Grant,
-    presentedScopes: string[],
-): string[] | null
+function narrowTo(requested: string | undefined, effective: string[]): string[] | null
 {
     const asked = requested?.trim();
 
     if (!asked)
     {
-        return presentedScopes;
+        return effective;
     }
 
     const scopes = asked.split(/\s+/);
 
-    return scopes.every(scope => grant.scopes.includes(scope)) ? scopes : null;
+    return scopes.every(scope => effective.includes(scope)) ? scopes : null;
 }
 
 // ============================================================================
@@ -445,15 +468,15 @@ async function storeToken(
 }
 
 /**
- * Kill a grant and everything under it — the answer to both replays.
+ * Kill a grant, and with it every code and token under it — the answer to both
+ * replays.
  *
  * The reason is logged and the value that triggered it is not. A token or code
  * in a log line is a credential in a log line.
  */
-async function revokeGrantAndTokens(grantId: number, reason: string): Promise<void>
+async function revokeGrant(grantId: number, reason: string): Promise<void>
 {
     await oauth2GrantsRepository.revokeById(grantId);
-    await oauth2GrantsRepository.revokeTokensOfGrants([grantId]);
 
     authLogger.service.warn('OAuth2 grant revoked after a replay', { grantId, reason });
 }
@@ -516,7 +539,6 @@ export async function revokeOAuth2TokenService(token: string, clientId: string):
     }
 
     await oauth2GrantsRepository.revokeById(record.grant);
-    await oauth2GrantsRepository.revokeTokensOfGrants([record.grant]);
 }
 
 /** Whether this grant's client is the one the caller claims to be. */

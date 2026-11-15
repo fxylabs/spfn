@@ -160,9 +160,15 @@ type McpHttpTransportConfig<Auth extends McpAuth, Ctx> = {
     /**
      * Authenticate a bearer token for `resource`.
      *
-     * A refusal may be expressed either way: return `null`/`undefined`, or throw. The
-     * adapter treats all three identically and answers `401` with
-     * `WWW-Authenticate: Bearer error="invalid_token", resource_metadata="..."`.
+     * Return `null`/`undefined` when the token is not valid: the adapter answers `401`
+     * with `WWW-Authenticate: Bearer error="invalid_token", resource_metadata="..."`,
+     * which sends the client to refresh or re-authorize.
+     *
+     * A throw is not a refusal. It propagates to the application's error handler and
+     * is answered with the error's own status: throw an `HttpError` such as a 403
+     * when the token is valid but its holder may not act right now (the client keeps
+     * its token), and let anything else — a database outage — become a 5xx, so a
+     * transient failure does not make every client discard its token.
      */
     validateToken: (token: string, resource: string) => Promise<Auth | null | undefined>;
     resolveContext: (auth: Auth, request: McpRequestInfo) => Promise<Ctx>;

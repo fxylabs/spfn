@@ -89,18 +89,17 @@ describe('rejected bearer challenge', () =>
         );
     });
 
-    it('treats a thrown error as a refusal', async () =>
+    it('does not treat a thrown error as a refusal', async () =>
     {
         const response = await challengeFor(async () =>
         {
-            throw new Error('invalid');
+            throw new Error('database unavailable');
         });
 
-        expect(response.status).toBe(401);
-        expect(response.headers.get('www-authenticate')).toBe(
-            'Bearer error="invalid_token", '
-            + `resource_metadata="https://example.com${METADATA_PATH}/mcp"`,
-        );
+        // A validator that could not decide has not refused the token: answering
+        // `invalid_token` would send the client to discard it and re-authorize.
+        expect(response.status).toBe(500);
+        expect(response.headers.get('www-authenticate')).toBeNull();
     });
 
     it('accepts a validateToken that only ever refuses', async () =>

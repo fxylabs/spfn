@@ -6,6 +6,7 @@
  */
 
 export * from './config';
+export * from './grant-authority';
 export * from './redirect-uri';
 export * from './resource';
 export * from './tokens';

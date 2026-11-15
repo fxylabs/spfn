@@ -4,7 +4,9 @@
  * The user's side of the authorization server: what is connected, and the button
  * that disconnects it. A grant is the unit because it is the thing a person can
  * recognise — "Claude Code, on this API, with these permissions" — and because
- * revoking it takes every code and token underneath with it.
+ * revoking it takes every code and token underneath with it. The grant's
+ * `revoked_at` is the one record of that: codes and tokens are judged against
+ * their grant, and a revoked grant is never live again.
  *
  * `revokeAllOAuth2GrantsForUser` is the same act performed on the user's behalf
  * rather than by them, and it sits at the four places that revoke everything:
@@ -17,6 +19,7 @@
 import { OAuth2GrantNotFoundError } from '@spfn/auth/errors';
 
 import { oauth2GrantsRepository } from '../repositories/oauth2-grants.repository';
+import { getAuthorizationServerConfig } from '../lib/oauth2/config';
 import { authLogger } from '../logger';
 
 /** One connected client, as the account settings screen lists it. */
@@ -31,10 +34,22 @@ export interface OAuth2GrantSummary
     lastUsedAtMillis?: number;
 }
 
-/** What a user has connected. Revoked grants are not listed — they are gone. */
+/**
+ * What a user has connected: their live grants. A revoked grant is gone, and one
+ * past its `expiresAt` is too — no token under it is honoured, so listing it would
+ * show a connection that does not exist. With no authorization server
+ * configured no grant authorizes anything, so none is listed.
+ */
 export async function listOAuth2GrantsService(userId: number): Promise<OAuth2GrantSummary[]>
 {
-    const rows = await oauth2GrantsRepository.listActiveByUserId(userId);
+    const config = getAuthorizationServerConfig();
+
+    if (!config)
+    {
+        return [];
+    }
+
+    const rows = await oauth2GrantsRepository.listLiveByUserId(userId);
 
     return rows.map(({ grant, client }) => ({
         id: Number(grant.id),
@@ -56,24 +71,15 @@ export async function listOAuth2GrantsService(userId: number): Promise<OAuth2Gra
  */
 export async function revokeOAuth2GrantService(id: number, userId: number): Promise<void>
 {
-    const revoked = await oauth2GrantsRepository.revokeByIdForUser(id, userId);
-
-    if (!revoked)
+    if (!await oauth2GrantsRepository.revokeByIdForUser(id, userId))
     {
         throw new OAuth2GrantNotFoundError();
     }
-
-    await oauth2GrantsRepository.revokeTokensOfGrants([revoked.id]);
 }
 
 /**
  * Revoke every grant a user has — the authorization-server half of a global
  * revocation, called beside `deviceAuthorizationsRepository.denyAllActiveByUserId`.
- *
- * Tokens are revoked as well as the grants. Verification already refuses a token
- * whose grant is dead, so this changes no decision; it means a `SELECT` against
- * `oauth2_tokens` after a revoke-all does not show live-looking rows, which is
- * the sort of thing that gets read as a hole.
  */
 export async function revokeAllOAuth2GrantsForUser(userId: number): Promise<void>
 {
@@ -84,11 +90,5 @@ export async function revokeAllOAuth2GrantsForUser(userId: number): Promise<void
         return;
     }
 
-    const tokens = await oauth2GrantsRepository.revokeTokensOfGrants(grantIds);
-
-    authLogger.service.info('OAuth2 grants revoked for a user', {
-        userId,
-        grants: grantIds.length,
-        tokens,
-    });
+    authLogger.service.info('OAuth2 grants revoked for a user', { userId, grants: grantIds.length });
 }

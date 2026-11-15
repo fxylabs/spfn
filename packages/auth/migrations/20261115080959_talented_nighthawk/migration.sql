@@ -1,0 +1,2 @@
+ALTER TABLE "spfn_auth"."oauth2_grants" ADD COLUMN "expires_at" timestamp with time zone;--> statement-breakpoint
+UPDATE "spfn_auth"."oauth2_grants" SET "expires_at" = "created_at" + interval '180 days' WHERE "expires_at" IS NULL;

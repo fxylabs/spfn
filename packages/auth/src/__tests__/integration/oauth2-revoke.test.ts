@@ -146,8 +146,17 @@ describe.skipIf(!dbAvailable)('OAuth2 revoke (RFC 7009)', () =>
 
         expect(response.status).toBe(200);
         expect(await grantIsLive()).toBe(false);
-        expect(await refreshIsLive()).toBe(false);
         expect(await verifyAccessToken(accessToken, TEST_RESOURCE)).toBeNull();
+
+        // Dead through its grant, the one place a grant's revocation is
+        // recorded: the token row itself is not rewritten.
+        const renewed = await postToken(app, {
+            grant_type: 'refresh_token',
+            refresh_token: refreshToken,
+            client_id: clientId,
+        });
+
+        expect(renewed.status).toBe(400);
     });
 
     it('a token that was never issued → 200, and nothing is revoked', async () =>

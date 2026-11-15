@@ -187,9 +187,23 @@ not your user table's column type — so `Auth` declares `userId: string` and
 An application whose user ids are already strings drops the `Number(...)` and keeps the id
 a string end to end.
 
-`verifyAccessToken` returns `null` when it refuses the token — expired, revoked, or
-issued for another resource. `validateToken` may signal a refusal that way or by
-throwing; the adapter treats `null`, `undefined`, and a thrown error identically.
+`validateToken` has three outcomes, and the adapter keeps them apart:
+
+| `validateToken` | Response | What the client does |
+| --- | --- | --- |
+| returns `null` or `undefined` — the token is not valid | `401`, `WWW-Authenticate: Bearer error="invalid_token", …` | refreshes or re-authorizes |
+| throws an `HttpError` with a 4xx status — a valid token whose holder may not act right now | that status, through the application's error handler (`403` with the error's `code`) | keeps its token; tells the person why |
+| throws anything else — it could not decide | `5xx`, through the application's error handler | retries later with the same token |
+
+`verifyAccessToken` returns `null` when the token is not valid — expired, revoked, issued for
+another resource, its grant revoked or past its lifetime — and throws `403`
+`SECOND_FACTOR_ENROLMENT_REQUIRED` when the account must enrol a second factor first. A
+database error is thrown as it is, so an outage is a `5xx` and not a reason for every client
+to discard its token.
+
+**BREAKING (since 0.3.0-beta.4):** a thrown error used to be answered `401 invalid_token`
+like `null`. A `validateToken` that throws to refuse a token must return `null` instead,
+or its refusals are answered `500`.
 `@spfn/auth` `0.3.0-beta.19` ships the authorization server that issues these tokens —
 see its README section
 [Authorization server for MCP clients](../auth/README.md#authorization-server-for-mcp-clients).

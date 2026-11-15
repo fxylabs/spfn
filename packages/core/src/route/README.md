@@ -374,6 +374,23 @@ route.get('/users/:id')
     });
 ```
 
+### `.csrf('required')` — checked by the proxy in every mode
+
+A route that changes state on the strength of a cookie session alone — a consent decision, a
+disconnect button — declares it. The route-map generator writes `csrf: 'required'` into its
+entry, and the Next.js RPC proxy passes that entry to its interceptors as `ctx.route`;
+`@spfn/auth`'s CSRF check refuses such a request without a valid CSRF header whatever
+`SPFN_AUTH_CSRF` says, and ignores an exempt-list entry for its path. The server does not read
+it. Regenerate the route map after adding one. (`@spfn/auth`'s own routes are read from the map
+the package ships, so they do not wait for the app to regenerate.)
+
+```ts
+export const revokeGrant = route.delete('/grants/:id')
+    .use([authenticate])
+    .csrf('required')
+    .handler(async (c) => { ... });
+```
+
 ### `.interceptor()` — middleware-injected fields
 
 When a middleware injects fields into the request (e.g. auth crypto keys), declare them with

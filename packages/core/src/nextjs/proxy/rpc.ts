@@ -25,12 +25,12 @@ import { NextRequest, NextResponse } from 'next/server.js';
 
 import { env } from '@spfn/core/config';
 import { logger } from '@spfn/core/logger';
-import type { HttpMethod } from '@spfn/core/route';
 
 import { signProxyRequest, parseProxyKeySet } from '../../security/proxy-signature';
 import { buildUrlWithParams, buildQueryString } from '../shared';
 import { interceptorRegistry } from './interceptors';
 import { executeRequestInterceptors, executeResponseInterceptors, filterMatchingInterceptors } from './interceptors';
+import type { RouteMapEntry } from './interceptors/types';
 import {
     buildProxyHeaders,
     parseCookiesFromNextRequest,
@@ -50,14 +50,7 @@ const rpcLogger = logger.child('@spfn/core:rpc-proxy');
 // Types
 // ============================================================================
 
-/**
- * Route info from generated route map
- */
-export interface RouteMapEntry
-{
-    method: HttpMethod;
-    path: string;
-}
+export type { RouteMapEntry };
 
 /**
  * Generated route map type
@@ -159,15 +152,9 @@ export function createRpcProxy(config: RpcProxyConfig)
     /**
      * Resolve route info from routeMap
      */
-    function resolveRoute(routeName: string): { method: string; path: string } | null
+    function resolveRoute(routeName: string): RouteMapEntry | null
     {
-        const entry = routeMap[routeName];
-        if (entry)
-        {
-            return { method: entry.method, path: entry.path };
-        }
-
-        return null;
+        return routeMap[routeName] ?? null;
     }
 
     /**
@@ -393,6 +380,7 @@ export function createRpcProxy(config: RpcProxyConfig)
                 new URLSearchParams(queryString.slice(1)), // Remove leading ?
                 cookiesMap,
                 request,
+                routeInfo,
             );
 
             // Execute request interceptors

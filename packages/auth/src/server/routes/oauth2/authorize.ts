@@ -93,6 +93,9 @@ export const getOAuth2Authorize = route.get('/_auth/oauth2/authorize')
  * `userId` is read from the authenticated session and never from the body: it is
  * the entire authorization, and a body field of that name would let a caller
  * consent on somebody else's behalf.
+ *
+ * CSRF-required: it issues a code for a third-party client on the strength of
+ * the session cookie alone, so the proxy checks it whatever `SPFN_AUTH_CSRF` says.
  */
 export const createOAuth2AuthorizationCode = route.post('/_auth/oauth2/authorize')
     .input({
@@ -102,6 +105,7 @@ export const createOAuth2AuthorizationCode = route.post('/_auth/oauth2/authorize
         }),
     })
     .use([authenticate, authorizeRateLimit])
+    .csrf('required')
     .handler(async (c) =>
     {
         requireAuthorizationServer();
