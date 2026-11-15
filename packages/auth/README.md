@@ -319,13 +319,13 @@ routes use `.skip(['auth'])`; the rest require `Authorization: Bearer <client-si
 | `changePassword` | PUT `/_auth/password` | yes | change password |
 | `getAuthSession` | GET `/_auth/session` | yes | current session/user |
 | `issueOneTimeToken` | POST | yes | short-lived token (e.g. SSE handshake) |
-| `checkUsername` / `updateUsername` / `updateLocale` | — | mixed | username availability/update; set or clear (`null`) the language choice |
+| `checkUsername` / `updateUsername` / `updateLocale` | — | mixed | username availability/update (answers the profile, as `getUserProfile` does); set or clear (`null`) the language choice |
 | `getUserProfile` / `updateUserProfile` | — | yes | profile read/update; `metadata` is checked against `defineProfileFields` when declared |
 | `listSettings` | GET `/_auth/users/settings` | yes | every declared setting of the caller, built-ins included — see [per-person settings](#how-do-i-declare-per-person-settings-and-profile-fields) |
 | `getSetting` | GET `/_auth/users/settings/:key` | yes | one setting of the caller; the default when never set; 404 for an undeclared key |
 | `setSetting` | PUT `/_auth/users/settings/:key` | yes | write one (`{ value }`, checked against the key's schema); the default deletes the row |
 | `resetSetting` | DELETE `/_auth/users/settings/:key` | yes | return one to its default (204) |
-| `createInvitation` / `acceptInvitation` / `listInvitations` / `cancelInvitation` / `resendInvitation` / `deleteInvitation` / `getInvitation` | — | mixed | invitation flow |
+| `createInvitation` / `acceptInvitation` / `listInvitations` / `cancelInvitation` / `resendInvitation` / `deleteInvitation` / `getInvitation` | — | mixed | invitation flow — see [Invitations](#invitations) |
 | `requestAccountDeletion` | POST `/_auth/deletion/request` | yes | request account deletion (re-auth gated) — see [Account Deletion & Recovery](#account-deletion--recovery) |
 | `cancelAccountDeletion` | POST `/_auth/deletion/cancel` | public | cancel a pending deletion (credential-based recovery) |
 | `listRoles` / `createAdminRole` / `updateAdminRole` / `deleteAdminRole` / `updateUserRole` | — | superadmin | admin RBAC management |
@@ -799,6 +799,70 @@ effect, so an app that had it set gets that lifetime after upgrading. A malforme
 `1w`) is now refused when the environment is validated — by `spfn env validate`, by the server's
 boot check when the app lists a registry holding `envSchema` from `@spfn/auth/config`, and
 otherwise on the first read — instead of being ignored, so check the value before you deploy.
+
+### Migration — invitation links are hashed and shown once
+
+**Breaking** (w-etq2g). The invitation token is a bearer credential — whoever holds it becomes
+the invitee — and it was stored in plaintext and answered by `GET /_auth/invitations` to anyone
+holding `user:read`, so an `admin` could accept a pending `superadmin` invitation. Now:
+
+- `user_invitations.token` is gone; `token_hash` stores `hashCredential(token)`. The migration
+  backfills the hash of every stored token, so **links already mailed keep working**.
+- `listInvitations` answers `InvitationSummary` items with no `token`. A screen that copied the
+  link from the list must call `resendInvitation` instead: it answers a new `token` and
+  `invitationUrl` once, and the previous link stops working.
+- `resendInvitation` and `cancelInvitation` require the authority `createInvitation` requires —
+  `user:invite` and the right to assign the invitation's role (`assertCanAssignRole`).
+  `deleteInvitation` is unchanged: `superadmin` only.
+- Server API: `createInvitation` and `resendInvitation` return `{ invitation, token }`;
+  `resendInvitation({ id, resentBy, expiresInDays? })` takes the caller and refuses an
+  `expiresInDays` beyond 30. `invitationsRepository.findByToken` / `findByTokenWithDetails` are
+  `findByTokenHash` / `findByTokenHashWithDetails`, taking the hash; `resend(id, expected,
+  tokenHash, expiresAt)` and `cancel(id, cancelledBy, reason?)` write only while the invitation
+  is still in the state the caller read, and answer `null` otherwise.
+- Acceptance, resend and cancel are each one conditional statement: an acceptance in flight when
+  a resend or cancel commits is refused (404 / 410) and creates no account; the loser of two
+  concurrent resends, or of a cancel racing another change, answers `409 InvitationChangedError`.
+- `invitationCreatedEvent` (create and resend) is emitted after the commit, so a rolled-back
+  create or resend mails no link.
+- An unknown token answers `404 InvitationNotFoundError`; an accepted, cancelled or expired one
+  `410 InvitationNoLongerValidError` (`GET /_auth/invitations/:token` answered 500 before,
+  `accept` 400).
+- `expiresAt` at create is refused beyond 30 days, the bound `expiresInDays` already had.
+- `metadata` at create must be a JSON object: `POST /_auth/invitations` answers 400 for an array,
+  a scalar or `null`, and `createInvitation` throws `BadRequestError`. Cancel merges its reason into
+  the metadata, and an array took it as an appended element. A row stored earlier with non-object
+  metadata keeps it under `legacyMetadata` when cancelled, so the result is always an object.
+
+### Invitations
+
+An invitation lets an account with `user:invite` bring someone in with a role it is allowed to
+assign. The token in the link is a bearer credential, so it is treated like every other link
+credential (`mintCredential` / `hashCredential`): 32 random bytes, stored only as a hash.
+
+| Route | Who | Answers |
+|---|---|---|
+| `POST /_auth/invitations` | `user:invite` + may assign `roleId` | `{ id, email, token, roleId, expiresAt, invitationUrl }` — the only answer that carries the token |
+| `GET /_auth/invitations` | `user:read` | `{ invitations: InvitationSummary[], total, page, limit, totalPages }` — no token, no hash |
+| `POST /_auth/invitations/resend` | `user:invite` + may assign the invitation's role | `{ expiresAt, token, invitationUrl }` — a new token; the old link stops working |
+| `POST /_auth/invitations/cancel` | `user:invite` + may assign the invitation's role | `{ cancelledAt }` |
+| `POST /_auth/invitations/delete` | `superadmin` | 204 |
+| `GET /_auth/invitations/:token` | public | what the acceptance page shows; 404 / 410 as below |
+| `POST /_auth/invitations/accept` | public | the new account; 404 / 410 as below |
+
+- **Mail the link from `invitationCreatedEvent`.** Its `token` (with `isResend` on a resend) is
+  the secret; no route returns it again.
+- **Resend reissues.** It mints a new token for a pending or expired invitation and replaces the
+  stored hash, with a fresh expiry (`expiresInDays`, at most 30). It never extends an old link.
+- **`expiresAt` and `expiresInDays` share one bound**, 30 days.
+- Refused with 403 and nothing changed: a caller without the right to assign the invitation's
+  role, for resend and cancel as for create.
+
+| Error | HTTP | When |
+|---|---|---|
+| `InvitationNotFoundError` | 404 | the token names no invitation — never issued, replaced by a resend, or deleted |
+| `InvitationNoLongerValidError` | 410 | already accepted, cancelled, or expired (the message says which) |
+| `InvitationChangedError` | 409 | a resend or cancel found the invitation changed by another request since it read it; nothing was written |
 
 ### Verified-email signup
 
@@ -3677,6 +3741,9 @@ signed in is not a new device, and a notice for it would teach the owner to igno
 matter. A login that names an `oldKeyId` is only a rotation when that key was actually revoked: an
 `oldKeyId` naming somebody else's key, an already-revoked one or nothing at all registers a new
 device and fires the event. `ip` and `userAgent` are unauthenticated and display-only.
+
+`invitationCreatedEvent` (`auth.invitation.created`) carries the invitation `token` — the only
+copy, since only its hash is stored. Mail it from the subscriber; do not log or persist it.
 
 Payload types: `AuthLoginPayload`, `AuthRegisterPayload`, `AuthPasswordResetPayload`,
 `AuthDeviceRegisteredPayload`, `InvitationCreatedPayload`,

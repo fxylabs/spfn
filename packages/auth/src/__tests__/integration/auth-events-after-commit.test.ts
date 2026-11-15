@@ -2,7 +2,8 @@
  * @spfn/auth - Auth events are published after the transaction commits
  *
  * Every route that signs a user up, signs one in or accepts an invitation runs
- * under `Transactional()`. An event emitted inline is published while that
+ * under `Transactional()`, and a caller may run any of these services, or the
+ * one that issues an invitation link, inside a transaction of its own. An event emitted inline is published while that
  * transaction is still open: a subscriber reading from another connection cannot
  * see the account yet, and a mail or a webhook sent from it escapes even when the
  * transaction later rolls back.
@@ -12,6 +13,9 @@
  * event names is readable — true only once the transaction has committed. A
  * ROLLBACK row runs the service inside a transaction that throws after the emit
  * point and expects no event at all.
+ *
+ * The invitation link has a COMMIT row besides: a committed create and resend
+ * each publish exactly once, with the token that is accepted at that moment.
  *
  * The runner fires after-commit callbacks without awaiting them, so every row
  * reads its capture through `settled()` rather than straight after the response.
@@ -23,9 +27,10 @@ import postgres from 'postgres';
 import { and, desc, eq } from 'drizzle-orm';
 
 import { setupTestDb, teardownTestDb, clearTables, getTestDb, isDatabaseAvailable } from '../helpers/db';
-import { mountAuthApp } from '../helpers/oauth2';
+import { createTestUser, mountAuthApp, signIn as signInByPassword } from '../helpers/oauth2';
 import { userInvitations, users, verificationCodes } from '@/server/entities';
 import { generateKeyPair, type KeyPair } from '@/server/lib/crypto';
+import { hashCredential } from '@/server/lib/link-credentials';
 import { hashPassword } from '@/server/helpers/password';
 import type { NormalizedIdentity } from '@/server/lib/oauth';
 
@@ -44,14 +49,14 @@ const { resetMemoryRateLimitStore } = await import('@spfn/core/middleware');
 const { runInTransaction } = await import('@spfn/core/db');
 const { initializeAuth } = await import('@/server/services/rbac.service');
 const { getRoleByName } = await import('@/server/services/role.service');
-const { authLoginEvent, authRegisterEvent, invitationAcceptedEvent } = await import('@/server/events');
+const { authLoginEvent, authRegisterEvent, invitationAcceptedEvent, invitationCreatedEvent } = await import('@/server/events');
 const { registerOAuthProvider } = await import('@/server/lib/oauth');
 const { battlenetProvider } = await import('@/server/lib/oauth/battlenet-provider');
 const { buildStartCookieName } = await import('@/server/lib/oauth/start-cookies');
 const { createOAuthState, generateOAuthNonce } = await import('@/server/lib/oauth/state');
 const { oauthCallbackService } = await import('@/server/services/oauth.service');
 const { createVerifiedAccount, loginService } = await import('@/server/services/auth.service');
-const { acceptInvitation } = await import('@/server/services/invitation.service');
+const { acceptInvitation, createInvitation, resendInvitation } = await import('@/server/services/invitation.service');
 
 const dbAvailable = await isDatabaseAvailable();
 
@@ -209,13 +214,25 @@ describe.skipIf(!dbAvailable)('auth events are published after the transaction c
         };
     }
 
-    function post(path: string, body: unknown): Promise<Response>
+    function post(path: string, body: unknown, authorization?: string): Promise<Response>
     {
-        return Promise.resolve(app.request(path, {
-            method: 'POST',
-            headers: { ...JSON_HEADERS, 'x-forwarded-for': clientIp },
-            body: JSON.stringify(body),
-        }));
+        const headers: Record<string, string> = { ...JSON_HEADERS, 'x-forwarded-for': clientIp };
+
+        if (authorization)
+        {
+            headers.Authorization = authorization;
+        }
+
+        return Promise.resolve(app.request(path, { method: 'POST', headers, body: JSON.stringify(body) }));
+    }
+
+    /** Whether, read from the observer connection, `token` is the link of a pending, unexpired invitation. */
+    async function tokenAccepts({ token }: { token: string }): Promise<boolean>
+    {
+        const rows = await observer<{ id: number }[]>`select id from spfn_auth.user_invitations
+            where token_hash = ${hashCredential(token)} and status = 'pending' and expires_at > now()`;
+
+        return rows.length === 1;
     }
 
     function deviceKeyBody(key = generateKeyPair('ES256'))
@@ -242,7 +259,7 @@ describe.skipIf(!dbAvailable)('auth events are published after the transaction c
 
         await getTestDb().insert(userInvitations).values({
             email,
-            token: INVITATION_TOKEN,
+            tokenHash: hashCredential(INVITATION_TOKEN),
             roleId: userRole!.id,
             invitedBy: await seedUser(`inviter-${email}`),
             status: 'pending',
@@ -253,7 +270,7 @@ describe.skipIf(!dbAvailable)('auth events are published after the transaction c
     async function invitationStatus(): Promise<string>
     {
         const [row] = await getTestDb().select().from(userInvitations)
-            .where(eq(userInvitations.token, INVITATION_TOKEN));
+            .where(eq(userInvitations.tokenHash, hashCredential(INVITATION_TOKEN)));
 
         return row!.status;
     }
@@ -493,6 +510,64 @@ describe.skipIf(!dbAvailable)('auth events are published after the transaction c
             await rolledBack(() => acceptInvitation({ token: INVITATION_TOKEN, password: PASSWORD, ...deviceKeyBody() }));
 
             expect(accepted).toEqual([]);
+            expect(await invitationStatus()).toBe('pending');
+        });
+    });
+
+    // ========================================================================
+    // Invitation link (invitation.service) — the event the mailer sends from
+    // ========================================================================
+
+    describe('invitation link', () =>
+    {
+        it('COMMIT: a create then a resend by route each publish auth.invitation.created once, with the token that accepts then', async () =>
+        {
+            // The answered invitation link is built on the API origin.
+            vi.stubEnv('SPFN_API_URL', 'http://api.invitations.test');
+            const superadmin = await getRoleByName('superadmin');
+            const userRole = await getRoleByName('user');
+            await createTestUser('inviter-commit@test.com', superadmin!.id);
+            const authorization = await signInByPassword(app, 'inviter-commit@test.com', clientIp);
+            const created = capture(invitationCreatedEvent);
+            const accepting = visibilityAtEvent(invitationCreatedEvent, tokenAccepts);
+
+            const create = await post('/_auth/invitations', { email: 'mailed@test.com', roleId: userRole!.id }, authorization);
+            expect(create.status).toBe(200);
+            const { id, token: createdToken } = await create.json();
+            await settled();
+            const resend = await post('/_auth/invitations/resend', { id }, authorization);
+            expect(resend.status).toBe(200);
+            const { token: resentToken } = await resend.json();
+
+            expect(await accepting()).toEqual([true, true]);
+            expect(created.map(({ token, isResend }) => ({ token, isResend })))
+                .toEqual([{ token: createdToken, isResend: false }, { token: resentToken, isResend: true }]);
+            expect(await tokenAccepts({ token: createdToken })).toBe(false);
+        });
+
+        it('ROLLBACK: createInvitation in a transaction that rolls back publishes no auth.invitation.created', async () =>
+        {
+            const created = capture(invitationCreatedEvent);
+            const userRole = await getRoleByName('user');
+            const invitedBy = await seedUser('inviter-create-rollback@test.com');
+
+            await rolledBack(() => createInvitation({ email: 'never-mailed@test.com', roleId: userRole!.id, invitedBy }));
+
+            expect(created).toEqual([]);
+        });
+
+        it('ROLLBACK: resendInvitation in a transaction that rolls back publishes no auth.invitation.created', async () =>
+        {
+            await seedInvitation('invitee-resend-rollback@test.com');
+            const [{ id }] = await getTestDb().select({ id: userInvitations.id }).from(userInvitations);
+            const superadmin = await getRoleByName('superadmin');
+            const resentBy = await seedUser('resender-rollback@test.com');
+            await getTestDb().update(users).set({ roleId: superadmin!.id }).where(eq(users.id, resentBy));
+            const created = capture(invitationCreatedEvent);
+
+            await rolledBack(() => resendInvitation({ id, resentBy }));
+
+            expect(created).toEqual([]);
             expect(await invitationStatus()).toBe('pending');
         });
     });

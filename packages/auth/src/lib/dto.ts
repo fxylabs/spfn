@@ -104,3 +104,27 @@ export interface UserProfile
     updatedAt: Date;
     profile: ProfileInfo | null;
 }
+
+/**
+ * Invitation as the management routes answer it (`GET /_auth/invitations`)
+ *
+ * Carries no token and no token hash. The invitation link is a bearer
+ * credential: it is answered once, by the create or resend that minted it, and
+ * is otherwise only in the invitee's mail.
+ */
+export interface InvitationSummary
+{
+    id: number;
+    email: string;
+    roleId: number;
+    invitedBy: number;
+    status: 'pending' | 'accepted' | 'expired' | 'cancelled';
+    expiresAt: Date;
+    acceptedAt: Date | null;
+    cancelledAt: Date | null;
+    metadata: Record<string, any> | null;
+    createdAt: Date;
+    updatedAt: Date;
+    role: { id: number; name: string; displayName: string };
+    inviter: { id: number; email: string | null };
+}

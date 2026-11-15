@@ -40,8 +40,7 @@ const {
         keysRepository: { create: vi.fn() },
         socialAccountsRepository: { create: vi.fn() },
         invitationsRepository: {
-            findByToken: vi.fn(),
-            updateStatus: vi.fn(),
+            claimPendingByTokenHash: vi.fn(),
         },
         rolesRepository: { findById: vi.fn() },
         validateVerificationToken: vi.fn(),
@@ -65,6 +64,11 @@ vi.mock('../../server/repositories', () => ({
     socialAccountsRepository,
     invitationsRepository,
     rolesRepository,
+}));
+// No database here: acceptInvitation's own transaction runs its callback as is.
+vi.mock('@spfn/core/db', async (importOriginal) => ({
+    ...await importOriginal<typeof import('@spfn/core/db')>(),
+    runInTransaction: (callback: () => Promise<unknown>) => callback(),
 }));
 vi.mock('../../server/services/verification.service', () => ({ validateVerificationToken }));
 vi.mock('../../server/services/key.service', () => ({ registerPublicKeyService }));
@@ -271,7 +275,7 @@ describe('beforeRegister hook', () =>
         {
             const { hook, contexts } = rejectAll();
             configureAuth({ beforeRegister: hook });
-            invitationsRepository.findByToken.mockResolvedValue({
+            invitationsRepository.claimPendingByTokenHash.mockResolvedValue({
                 id: 5,
                 email: 'invitee@example.com',
                 status: 'pending',
@@ -297,14 +301,13 @@ describe('beforeRegister hook', () =>
                 metadata: { team: 'design' },
             });
             expect(usersRepository.create).not.toHaveBeenCalled();
-            expect(invitationsRepository.updateStatus).not.toHaveBeenCalled();
         });
 
         it('normalizes a NULL metadata column to undefined (contract type)', async () =>
         {
             const { hook, contexts } = rejectAll();
             configureAuth({ beforeRegister: hook });
-            invitationsRepository.findByToken.mockResolvedValue({
+            invitationsRepository.claimPendingByTokenHash.mockResolvedValue({
                 id: 6,
                 email: 'invitee@example.com',
                 status: 'pending',

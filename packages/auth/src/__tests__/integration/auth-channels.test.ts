@@ -41,6 +41,7 @@ import {
     verificationCodes,
 } from '@/server/entities';
 import { generateKeyPair, type KeyPair } from '@/server/lib/crypto';
+import { hashCredential } from '@/server/lib/link-credentials';
 import { __resetChannelsForTests, configureChannels, type AuthChannel } from '@/server/lib/channels-config';
 import { registerOAuthProvider, type NormalizedIdentity, type OAuthProvider } from '@/server/lib/oauth';
 import { kakaoProvider } from '@/server/lib/oauth/kakao-provider';
@@ -456,7 +457,7 @@ describe.skipIf(!dbAvailable)('An app chooses which sign-in channels exist (#308
             const inviterId = await createTestUser('inviter@ch308.test', await userRoleId());
             await getTestDb().insert(userInvitations).values({
                 email: 'invitee@ch308.test',
-                token: INVITATION_TOKEN,
+                tokenHash: hashCredential(INVITATION_TOKEN),
                 roleId: await userRoleId(),
                 invitedBy: inviterId,
                 status: 'pending',

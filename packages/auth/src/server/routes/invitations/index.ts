@@ -4,14 +4,13 @@
  * Thin route handlers for user invitation management
  */
 
-import { EMAIL_PATTERN, UUID_PATTERN } from '@spfn/auth';
+import { EMAIL_PATTERN } from '@spfn/auth';
 import { getAuth } from '../../helpers';
 import { authenticate, requirePermissions, requireRole } from '../../middleware';
-import { KEY_ALGORITHM } from '../../types';
+import { INVITATION_MAX_EXPIRY_DAYS, KEY_ALGORITHM } from '../../types';
 import { deviceProvenance } from '../../lib/device-provenance';
 import {
-    getInvitationWithDetails,
-    validateInvitation,
+    describeInvitation,
     acceptInvitation as _acceptInvitation,
     createInvitation as _createInvitation,
     listInvitations as _listInvitations,
@@ -31,6 +30,29 @@ import { defineRouter, route } from '@spfn/core/route';
  */
 const INVITATION_STATUSES = ['pending', 'accepted', 'expired', 'cancelled'] as const;
 
+/**
+ * The invitation token as the link carries it
+ *
+ * A minted token is 43 base64url characters; an invitation created before
+ * tokens were hashed carries a 36-character UUID, and its link keeps working.
+ * Either way the value is hashed and looked up, never compared as stored.
+ */
+const InvitationTokenSchema = Type.String({
+    minLength: 16,
+    maxLength: 256,
+    description: 'Invitation token, from the invitation link',
+});
+
+/**
+ * Link the invitee opens
+ *
+ * SPFN_API_URL is required by @spfn/core, so there is no fallback to guess.
+ */
+function invitationUrl(token: string): string
+{
+    return `${coreEnv.SPFN_API_URL}/auth/invite/${token}`;
+}
+
 // ==========================================
 // Public Routes (No Authentication Required)
 // ==========================================
@@ -42,10 +64,7 @@ const INVITATION_STATUSES = ['pending', 'accepted', 'expired', 'cancelled'] as c
 export const getInvitation = route.get('/_auth/invitations/:token')
     .input({
         params: Type.Object({
-            token: Type.String({
-                pattern: UUID_PATTERN,
-                description: 'Invitation token (UUID v4)',
-            }),
+            token: InvitationTokenSchema,
         }),
     })
     .use([rateLimitPolicy('auth-invitation-lookup', { limit: 30, windowMs: 60_000 })])
@@ -53,31 +72,8 @@ export const getInvitation = route.get('/_auth/invitations/:token')
     .handler(async (c) =>
     {
         const { params } = await c.data();
-        const token = params.token;
 
-        const validation = await validateInvitation(token);
-
-        if (!validation.valid || !validation.invitation)
-        {
-            throw new Error(validation.error || 'Invalid invitation');
-        }
-
-        // Get full details with role and inviter info
-        const invitation = await getInvitationWithDetails(token);
-
-        if (!invitation)
-        {
-            throw new Error('Invitation not found');
-        }
-
-        return {
-            email: invitation.email,
-            role: invitation.role.name,
-            roleDisplayName: invitation.role.displayName,
-            invitedBy: invitation.inviter.email || 'Unknown',
-            expiresAt: invitation.expiresAt.toISOString(),
-            metadata: invitation.metadata || undefined,
-        };
+        return await describeInvitation(params.token);
     });
 
 /**
@@ -87,10 +83,7 @@ export const getInvitation = route.get('/_auth/invitations/:token')
 export const acceptInvitation = route.post('/_auth/invitations/accept')
     .input({
         body: Type.Object({
-            token: Type.String({
-                pattern: UUID_PATTERN,
-                description: 'Invitation token',
-            }),
+            token: InvitationTokenSchema,
             password: Type.String({
                 minLength: 8,
                 maxLength: 72,
@@ -143,15 +136,15 @@ export const createInvitation = route.post('/_auth/invitations')
             }),
             expiresInDays: Type.Optional(Type.Number({
                 minimum: 1,
-                maximum: 30,
+                maximum: INVITATION_MAX_EXPIRY_DAYS,
                 description: 'Days until invitation expires (default: 7)',
             })),
             expiresAt: Type.Optional(Type.String({
                 format: 'date-time',
-                description: 'Exact expiration timestamp (ISO 8601). Takes precedence over expiresInDays.',
+                description: `Exact expiration timestamp (ISO 8601), at most ${INVITATION_MAX_EXPIRY_DAYS} days away. Takes precedence over expiresInDays.`,
             })),
-            metadata: Type.Optional(Type.Any({
-                description: 'Custom metadata (welcome message, department, etc.)',
+            metadata: Type.Optional(Type.Record(Type.String(), Type.Unknown(), {
+                description: 'Custom metadata object (welcome message, department, etc.); an array or a scalar is refused',
             })),
         }),
     })
@@ -165,7 +158,7 @@ export const createInvitation = route.post('/_auth/invitations')
         // a user:invite holder could invite with the superadmin roleId and self-accept
         await assertCanAssignRole(userId, body.roleId);
 
-        const invitation = await _createInvitation({
+        const { invitation, token } = await _createInvitation({
             email: body.email,
             roleId: body.roleId,
             invitedBy: Number(userId),
@@ -174,16 +167,15 @@ export const createInvitation = route.post('/_auth/invitations')
             metadata: body.metadata,
         });
 
-        // SPFN_API_URL is required by @spfn/core, so there is no fallback to guess
-        const invitationUrl = `${coreEnv.SPFN_API_URL}/auth/invite/${invitation.token}`;
-
+        // The one answer that carries the token: only its hash is stored, so
+        // no later call can return it. Resend issues a new one.
         return {
             id: invitation.id,
             email: invitation.email,
-            token: invitation.token,
+            token,
             roleId: invitation.roleId,
             expiresAt: invitation.expiresAt.toISOString(),
-            invitationUrl,
+            invitationUrl: invitationUrl(token),
         };
     });
 
@@ -214,24 +206,16 @@ export const listInvitations = route.get('/_auth/invitations')
     {
         const { query } = await c.data();
 
-        const result = await _listInvitations({
-            status: query.status as any,
+        return await _listInvitations({
+            status: query.status,
             page: query.page ? Number(query.page) : undefined,
             limit: query.limit ? Number(query.limit) : undefined,
         });
-
-        // Format dates to ISO strings
-        const formattedInvitations = result.invitations;
-
-        return {
-            ...result,
-            invitations: formattedInvitations,
-        };
     });
 
 /**
  * POST /_auth/invitations/cancel
- * Cancel invitation (requires user:invite permission)
+ * Cancel invitation (requires user:invite permission and authority over the invitation's role)
  */
 export const cancelInvitation = route.post('/_auth/invitations/cancel')
     .input({
@@ -263,7 +247,11 @@ export const cancelInvitation = route.post('/_auth/invitations/cancel')
 
 /**
  * POST /_auth/invitations/resend
- * Resend invitation email (requires user:invite permission)
+ * Reissue an invitation with a new link (requires user:invite permission and
+ * authority over the invitation's role)
+ *
+ * The old link stops working. The new token is answered here, once, and goes
+ * to the mailer through `auth.invitation.created`.
  */
 export const resendInvitation = route.post('/_auth/invitations/resend')
     .input({
@@ -273,7 +261,7 @@ export const resendInvitation = route.post('/_auth/invitations/resend')
             }),
             expiresInDays: Type.Optional(Type.Number({
                 minimum: 1,
-                maximum: 30,
+                maximum: INVITATION_MAX_EXPIRY_DAYS,
                 description: 'New expiration period (default: 7)',
             })),
         }),
@@ -282,14 +270,18 @@ export const resendInvitation = route.post('/_auth/invitations/resend')
     .handler(async (c) =>
     {
         const { body } = await c.data();
+        const { userId } = getAuth(c);
 
-        const updated = await _resendInvitation(
-            body.id,
-            body.expiresInDays,
-        );
+        const { invitation, token } = await _resendInvitation({
+            id: body.id,
+            resentBy: Number(userId),
+            expiresInDays: body.expiresInDays,
+        });
 
         return {
-            expiresAt: updated.expiresAt.toISOString(),
+            expiresAt: invitation.expiresAt.toISOString(),
+            token,
+            invitationUrl: invitationUrl(token),
         };
     });
 

@@ -19,6 +19,7 @@ import type { UserStatus } from '@/server/types';
 import { hashPassword } from '@/server/helpers/password';
 import { getAuth } from '@/server/helpers/context';
 import { generateKeyPair, generateClientToken } from '@/server/lib/crypto';
+import { hashCredential } from '@/server/lib/link-credentials';
 import { authenticate } from '@/server/middleware/authenticate';
 import { requireRole } from '@/server/middleware/require-role';
 import { requirePermissions } from '@/server/middleware/require-permission';
@@ -326,7 +327,7 @@ describe.skipIf(!dbAvailable)('Per-role email-domain policy', () =>
         {
             await getTestDb().insert(userInvitations).values({
                 email,
-                token: TOKEN,
+                tokenHash: hashCredential(TOKEN),
                 roleId: await roleId(role),
                 invitedBy,
                 status: 'pending',
@@ -365,7 +366,7 @@ describe.skipIf(!dbAvailable)('Per-role email-domain policy', () =>
                 .toMatch(/^https:\/\/api\.example\.com\/auth\/invite\//);
         });
 
-        it('#13 invite created while unset, policy then set, invitee out: 403 at accept, no account created', async () =>
+        it('#13 invite created while unset, policy then set, invitee out: 403 at accept, no account created, still pending', async () =>
         {
             const inviter = await seed('root@example.com', 'superadmin');
             await pendingInvitation('member@gmail.test', 'admin', inviter.id);
@@ -376,6 +377,10 @@ describe.skipIf(!dbAvailable)('Per-role email-domain policy', () =>
             expect(response.status).toBe(403);
             expect(await errorCodeOf(response)).toBe('RoleEmailDomainNotAllowedError');
             expect(await getTestDb().select().from(users).where(eq(users.email, 'member@gmail.test'))).toHaveLength(0);
+            // The acceptance claimed the invitation before the policy refused it;
+            // the refusal rolled the claim back.
+            expect((await getTestDb().select().from(userInvitations)
+                .where(eq(userInvitations.email, 'member@gmail.test')))[0]!.status).toBe('pending');
         });
 
         it('#14 in-domain invitee: accept is granted, account holds R and is verified', async () =>

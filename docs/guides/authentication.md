@@ -1542,8 +1542,19 @@ full design.
 | `/_auth/invitations` | POST | Required | `user:invite` | Create invitation |
 | `/_auth/invitations` | GET | Required | `user:read` | List invitations |
 | `/_auth/invitations/cancel` | POST | Required | `user:invite` | Cancel invitation |
-| `/_auth/invitations/resend` | POST | Required | `user:invite` | Resend invitation |
+| `/_auth/invitations/resend` | POST | Required | `user:invite` | Resend invitation (new link; the old one stops working) |
 | `/_auth/invitations/delete` | POST | Required | `superadmin` | Delete invitation |
+
+The invitation token is stored only as a hash. Create and resend answer it (with
+`invitationUrl`) once, and `invitationCreatedEvent` carries it for your mailer; the list
+answers no token. Resend and cancel also require the right to assign the invitation's role, as
+create does. An unknown token answers 404, an accepted, cancelled or expired one 410 — also when
+a resend or cancel committed while the acceptance ran. A resend or cancel that loses such a race
+answers 409 `InvitationChangedError` and writes nothing.
+
+**Breaking:** a screen that copied the link from the list must call resend, which issues a new
+link and stops the old one. See the package README, "Migration — invitation links are hashed
+and shown once".
 
 ---
 

@@ -4,7 +4,7 @@
  * Invitation system for invite-only user registration
  *
  * Features:
- * - Email-based invitations with unique tokens
+ * - Email-based invitations whose link token is stored only as a hash
  * - Role assignment at invitation time
  * - Expiration and status tracking
  * - Audit trail (who invited whom, when accepted)
@@ -27,10 +27,12 @@ export const userInvitations = authSchema.table('user_invitations',
         // Will become the user's email upon acceptance
         email: text('email').notNull(),
 
-        // Unique invitation token (UUID v4)
-        // Used in invitation URL: /auth/invite/{token}
-        // Single-use token that expires after acceptance
-        token: text('token').notNull().unique(),
+        // Hash of the invitation token (`hashCredential` in lib/link-credentials).
+        // The token is a bearer credential — whoever holds it becomes the
+        // invitee — so only its hash is stored, like every other link
+        // credential. The token itself exists once: in the create (or resend)
+        // response and in `auth.invitation.created`, for the invitee's mail.
+        tokenHash: text('token_hash').notNull().unique(),
 
         // Role to be assigned when invitation is accepted
         // Foreign key to roles table
@@ -76,7 +78,7 @@ export const userInvitations = authSchema.table('user_invitations',
     },
     (table) => [
         // Indexes for query optimization
-        index('invitations_token_idx').on(table.token),
+        index('invitations_token_hash_idx').on(table.tokenHash),
         index('invitations_email_idx').on(table.email),
         index('invitations_status_idx').on(table.status),
         index('invitations_invited_by_idx').on(table.invitedBy),

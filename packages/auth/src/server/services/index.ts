@@ -279,6 +279,7 @@ export {
     createInvitation,
     getInvitationByToken,
     getInvitationWithDetails,
+    describeInvitation,
     validateInvitation,
     acceptInvitation,
     listInvitations,
@@ -286,6 +287,7 @@ export {
     deleteInvitation,
     expireOldInvitations,
     resendInvitation,
+    type IssuedInvitation,
 } from './invitation.service';
 
 // Auth Session Service (new)

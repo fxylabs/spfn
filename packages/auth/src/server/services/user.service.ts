@@ -10,6 +10,8 @@ import { assertEmailAllowedForRole, getRoleEmailDomainPolicy } from '../lib/role
 import { ValidationError } from '@spfn/core/errors';
 import { ReservedUsernameError, UsernameAlreadyTakenError } from '@spfn/auth/errors';
 import { env } from '@spfn/auth/config';
+import type { UserProfile } from '@spfn/auth';
+import { getUserProfileService } from './user-profile.service';
 
 /**
  * Get user by ID
@@ -173,10 +175,14 @@ export async function checkUsernameAvailableService(username: string)
  *
  * @param userId - User ID (string, number, or bigint)
  * @param username - New username or null to clear
+ * @returns The caller's profile, as `GET /_auth/users/profile` answers it — never the user row
  * @throws ReservedUsernameError if username is reserved
  * @throws UsernameAlreadyTakenError if username is already in use by another user
  */
-export async function updateUsernameService(userId: string | number | bigint, username: string | null)
+export async function updateUsernameService(
+    userId: string | number | bigint,
+    username: string | null,
+): Promise<UserProfile>
 {
     const userIdNum = typeof userId === 'string' ? Number(userId) : Number(userId);
 
@@ -197,5 +203,7 @@ export async function updateUsernameService(userId: string | number | bigint, us
         }
     }
 
-    return await usersRepository.updateById(userIdNum, { username });
+    await usersRepository.updateById(userIdNum, { username });
+
+    return await getUserProfileService(userIdNum);
 }

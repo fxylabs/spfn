@@ -71,6 +71,12 @@ export const INVITATION_STATUSES = ['pending', 'accepted', 'expired', 'cancelled
 export type InvitationStatus = typeof INVITATION_STATUSES[number];
 
 /**
+ * The longest an invitation stays acceptable, in days from its creation or resend.
+ * Bounds `expiresInDays` and `expiresAt` alike.
+ */
+export const INVITATION_MAX_EXPIRY_DAYS = 30;
+
+/**
  * User status enum values
  * Single source of truth for all user statuses
  *

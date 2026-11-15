@@ -27,6 +27,7 @@ import { setupTestDb, teardownTestDb, clearTables, getTestDb, isDatabaseAvailabl
 import { mountAuthApp } from '../helpers/oauth2';
 import { userInvitations, userPublicKeys, users, verificationCodes } from '@/server/entities';
 import { generateClientToken, generateKeyPair } from '@/server/lib/crypto';
+import { hashCredential } from '@/server/lib/link-credentials';
 import { hashPassword } from '@/server/helpers/password';
 
 // The remote JWKS fetch is the only part of native sign-in that leaves the
@@ -350,7 +351,7 @@ describe.skipIf(!dbAvailable)('device-registered event (case table 7a)', () =>
 
         await getTestDb().insert(userInvitations).values({
             email: 'a3@test.com',
-            token,
+            tokenHash: hashCredential(token),
             roleId: userRole!.id,
             invitedBy: inviter.id,
             status: 'pending',

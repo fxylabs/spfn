@@ -13,6 +13,7 @@ import {
     NotFoundError,
     HttpError,
     InternalServerError,
+    GoneError,
 } from '@spfn/core/errors';
 
 /**
@@ -337,6 +338,56 @@ export class RevokeAllLinkError extends NotFoundError
             details: data.details,
         });
         this.name = 'RevokeAllLinkError';
+    }
+}
+
+/**
+ * Invitation Not Found Error (404)
+ *
+ * The presented invitation token names no invitation: it was never issued, it
+ * was replaced by a resend, or the invitation was deleted. Only the token's
+ * hash is stored, so this is the answer to any value that does not hash to a
+ * stored one.
+ */
+export class InvitationNotFoundError extends NotFoundError
+{
+    constructor(data: { message?: string; details?: Record<string, any> } = {})
+    {
+        super({ message: data.message || 'Invitation not found', details: data.details });
+        this.name = 'InvitationNotFoundError';
+    }
+}
+
+/**
+ * Invitation No Longer Valid Error (410)
+ *
+ * The token names an invitation that can no longer be accepted: it was already
+ * accepted, it was cancelled, or it expired. The message says which; the
+ * inviter can resend it, which issues a new link.
+ */
+export class InvitationNoLongerValidError extends GoneError
+{
+    constructor(data: { message?: string; details?: Record<string, any> } = {})
+    {
+        super({ message: data.message || 'Invitation is no longer valid', resource: 'Invitation', details: data.details });
+        this.name = 'InvitationNoLongerValidError';
+    }
+}
+
+/**
+ * Invitation Changed Error (409)
+ *
+ * A resend or cancel found the invitation already changed by another request
+ * between reading it and writing it — reissued, accepted or cancelled. Nothing
+ * was written; a resend's freshly minted token was never stored, so it is not
+ * returned. Read the invitation again and decide.
+ */
+export class InvitationChangedError extends ConflictError
+{
+    constructor(data: { message?: string; details?: Record<string, any> } = {})
+    {
+        super({ message: data.message || 'Invitation was changed by another request', details: data.details });
+        this.name = 'InvitationChangedError';
     }
 }
 
