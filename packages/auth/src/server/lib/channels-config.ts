@@ -110,8 +110,8 @@ function resolveChannels(options: AuthChannelsOptions): Record<AuthChannel, bool
  * Refuse boot when two `createAuthLifecycle()` calls stated different channels.
  *
  * Called from `afterInfrastructure` rather than thrown by `configureChannels`:
- * a throw from the lifecycle constructor is swallowed by `loadAndMergeConfig()`
- * and leaves the server listening (see `lifecycle.ts`).
+ * a contradiction is only known once every `createAuthLifecycle()` call has
+ * run (see `lifecycle.ts`).
  */
 export function assertChannelsConsistent(): void
 {

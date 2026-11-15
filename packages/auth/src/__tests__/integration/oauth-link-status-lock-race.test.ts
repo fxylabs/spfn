@@ -39,6 +39,7 @@ const dbAvailable = await isDatabaseAvailable();
 const standIn: OAuthProvider = {
     id: 'battlenet',
     isEnabled: () => true,
+    pkce: 'S256',
     getAuthUrl: state => `https://oauth.example/authorize?state=${state}`,
     exchangeCodeForTokens: async () => ({
         accessToken: 'access-token',
@@ -133,6 +134,7 @@ describe.skipIf(!dbAvailable)('OAuth link callback: status read under the row lo
                     returnUrl: '/settings',
                     nonce: 'nonce',
                     startId: 'start-id',
+                    codeVerifier: 'code-verifier',
                 },
             }),
             { context: 'review:oauth-link-status-lock-race' },

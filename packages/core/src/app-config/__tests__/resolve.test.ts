@@ -12,6 +12,8 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtempSync, writeFileSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
+import { pathToFileURL } from 'url';
+import { execFileSync } from 'child_process';
 
 import {
     loadAppConfig,
@@ -21,6 +23,8 @@ import {
     PORT_DEFAULTS,
     HOST_DEFAULT,
 } from '../index';
+
+const CONFIG_MODULE = join(__dirname, '..', 'config-module.ts');
 
 let fixture: string;
 
@@ -50,29 +54,72 @@ describe('loading spfn.config.js', () =>
         expect(config.ports).toEqual({ next: 3890, server: 8890 });
     });
 
+    describe('a CommonJS file compiled from TypeScript', () =>
+    {
+        beforeEach(() =>
+        {
+            writeConfig(
+                '"use strict";\n'
+                + 'Object.defineProperty(exports, "__esModule", { value: true });\n'
+                + 'exports.default = { ports: { next: 3890, server: 8890 } };\n',
+            );
+        });
+
+        it('yields its settings, not the interop wrapper, through Node\'s own import()', () =>
+        {
+            // vitest's loader unwraps CommonJS itself, so the namespace the built
+            // loader meets under Node is read in a Node process of its own.
+            const script = `
+                const { plainObjectDefault } = await import(${JSON.stringify(pathToFileURL(CONFIG_MODULE).href)});
+                const namespace = await import(${JSON.stringify(pathToFileURL(join(fixture, 'spfn.config.js')).href)});
+                process.stdout.write(JSON.stringify(plainObjectDefault(namespace, 'spfn.config.js')));
+            `;
+            const output = execFileSync(process.execPath, ['--input-type=module', '--eval', script], { stdio: 'pipe' });
+
+            expect(JSON.parse(output.toString())).toEqual({ ports: { next: 3890, server: 8890 } });
+        });
+
+        it('yields its settings through a loader that has unwrapped it already — one level, no more', async () =>
+        {
+            const config = await loadAppConfig(fixture);
+
+            expect(config.ports).toEqual({ next: 3890, server: 8890 });
+        });
+    });
+
     it('returns an empty config when the app has no file', async () =>
     {
         expect(await loadAppConfig(fixture)).toEqual({});
     });
 
-    it('returns an empty config rather than refusing to boot on a broken file', async () =>
+    it('refuses a file that throws while it loads, naming it', async () =>
     {
-        writeConfig('export default { this is not javascript');
+        writeConfig("throw new Error('ports: a typo');");
 
-        expect(await loadAppConfig(fixture)).toEqual({});
+        const loading = loadAppConfig(fixture);
+
+        await expect(loading).rejects.toThrow('spfn.config.js exists but failed to load: ports: a typo');
     });
 
-    it('says so when it falls back, because a broken file is a typo and not an absence', async () =>
+    it('refuses a file that does not parse, rather than falling back to defaults', async () =>
     {
-        const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
-
         writeConfig('export default { this is not javascript');
-        await loadAppConfig(fixture);
 
-        expect(warn).toHaveBeenCalledWith(expect.stringContaining('spfn.config.js'));
-        expect(warn).toHaveBeenCalledWith(expect.stringContaining('defaults'));
+        await expect(loadAppConfig(fixture)).rejects.toThrow('spfn.config.js exists but failed to load');
+    });
 
-        warn.mockRestore();
+    it.each([
+        ['only named exports', 'export const ports = { server: 8890 };', 'only named exports (ports)'],
+        ['a number as its default', 'export default 42;', 'a number as its default (42)'],
+        ['a promise as its default', 'export default Promise.resolve({ ports: { server: 8890 } });', 'a promise'],
+    ])('refuses a file that exports %s', async (_name, body, found) =>
+    {
+        writeConfig(body);
+
+        const loading = loadAppConfig(fixture);
+
+        await expect(loading).rejects.toThrow('spfn.config.js must export its configuration as a plain object');
+        await expect(loading).rejects.toThrow(found);
     });
 
     it('stays quiet when there is simply no file', async () =>

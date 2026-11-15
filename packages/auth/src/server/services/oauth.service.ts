@@ -9,15 +9,17 @@
 
 import { env } from '@spfn/auth/config';
 import { ValidationError } from '@spfn/core/errors';
-import { onAfterCommit } from '@spfn/core/db';
+import { onAfterCommit, runInTransaction } from '@spfn/core/db';
 import {
     AccountDisabledError,
     AccountPendingDeletionError,
     OAuthAccountNotFoundError,
     OAuthCookieMissingError,
     OAuthEmailInUseError,
+    OAuthProviderAlreadyLinkedError,
     OAuthProviderError,
     OAuthProviderLinkOnlyError,
+    OAuthSignInContendedError,
     OAuthStateExpiredError,
     OAuthStateInvalidError,
     SignupDisabledError,
@@ -33,6 +35,7 @@ import { findStartCookies, legacyStartCookies } from '../lib/oauth/start-cookies
 import { assertSignInProvider, getOAuthEmailMatch, runBeforeRegister } from '../lib/config';
 import { resolveAppUrl } from '../lib/app-url';
 import { isChannelEnabled } from '../lib/channels-config';
+import { uniqueViolationConstraint } from '../lib/unique-violation';
 import { type SocialProvider, type KeyAlgorithmType, type SessionBindingType } from '../types';
 import type { User } from '../entities/users';
 import {
@@ -41,7 +44,11 @@ import {
     verifyOAuthState,
     getOAuthProvider,
     getRegisteredProviders,
+    buildAuthorizationUrl,
+    exchangeCodeVerifier,
     type OAuthProvider,
+    type OAuthCodeExchangeOptions,
+    type OAuthState,
     type OAuthTokens,
     type NormalizedIdentity,
     type OAuthLinkState,
@@ -198,11 +205,38 @@ export async function oauthStartService(
         nonce,
     });
 
-    return { authUrl: oauthProvider.getAuthUrl(state) };
+    return { authUrl: await signInAuthorizationUrl(oauthProvider, state) };
+}
+
+/**
+ * Where a sign-in start sends the browser, for a state sealed here or by the
+ * Next.js interceptor: the state is opened for the PKCE verifier it carries, and
+ * the provider's URL gets that verifier's challenge (`buildAuthorizationUrl`).
+ *
+ * @throws OAuthStateInvalidError for a state that does not open, or names another provider
+ * @throws OAuthStateExpiredError
+ */
+export async function signInAuthorizationUrl(oauthProvider: OAuthProvider, sealedState: string): Promise<string>
+{
+    const stateData = await verifyOAuthState(sealedState);
+
+    if (stateData.provider !== oauthProvider.id)
+    {
+        throw new OAuthStateInvalidError();
+    }
+
+    return buildAuthorizationUrl(oauthProvider, sealedState, stateData.codeVerifier);
 }
 
 /**
  * OAuth 콜백 처리 - Code를 Token으로 교환하고 사용자 생성/연결
+ *
+ * The provider is asked first, outside any transaction: the code exchange and
+ * the userinfo call hold no connection while they wait. Everything the sign-in
+ * writes then runs in one transaction this service opens, and every refusal is
+ * a throw that rolls it back — the route turns the error into the redirect only
+ * after that, so a refused sign-in leaves nothing behind (au5-A2). The events
+ * are queued with `onAfterCommit` and fire only for a committed sign-in.
  *
  * state에서 publicKey를 추출하여 서버에 등록
  * Next.js는 반환된 userId, keyId로 세션을 구성
@@ -228,56 +262,123 @@ export async function oauthCallbackService(
     // state issued before the app turned sign-in off still opens here.
     const oauthProvider = requireSignInProvider(provider);
 
-    // 1. Code를 Token으로 교환
-    const tokens = await fromProvider(() => oauthProvider.exchangeCodeForTokens(code, { state, user: params.user }));
+    const { tokens, identity } = await identifyWithProvider(oauthProvider, code, {
+        state,
+        user: params.user,
+        codeVerifier: exchangeCodeVerifier(oauthProvider, stateData.codeVerifier),
+    });
 
-    // 2. 사용자 정보 조회 (provider별 응답을 공통 형태로 정규화)
-    //    토큰 응답이 신원을 이미 확정한 provider(Apple의 id_token)는 userinfo 조회를 건너뛴다.
+    return await retryContendedSignIn(provider, () => runInTransaction(
+        () => persistWebSignIn({ params, stateData, identity, tokens }),
+        { context: 'auth:oauth-callback' },
+    ));
+}
+
+/**
+ * The unique constraints a sign-in writes against on the strength of its own
+ * earlier reads.
+ *
+ * `users_email_unique`: a new account takes the identity's verified address
+ * (`registerOAuthUser`), and a linked account without one is given it
+ * (`fillEmailIfUnheld`), each after a read found no account holding it. The
+ * social table's two rules — one account per identity (`provider_user_unique_idx`),
+ * one identity per provider per account (`user_social_accounts_user_provider_unique_idx`) —
+ * are met by an insert that writes nothing instead of raising, and
+ * `signInLinkConflict` names that race `OAuthSignInContendedError`; they are
+ * listed so a write that does raise on them is read the same way. A sign-in
+ * never writes a phone or a username, and the profile row is insert-if-absent.
+ */
+const SIGN_IN_PREMISE_CONSTRAINTS = new Set([
+    'users_email_unique',
+    'provider_user_unique_idx',
+    'user_social_accounts_user_provider_unique_idx',
+]);
+
+/**
+ * Run a sign-in's transaction, and once more if what it read was made stale by
+ * a transaction that committed first.
+ *
+ * A sign-in reads — no link for the identity, no account holding the address —
+ * and writes on that premise. A concurrent sign-in or sign-up can commit the
+ * same identity or address in between; the write then breaks one of
+ * `SIGN_IN_PREMISE_CONSTRAINTS`, or the link insert writes nothing
+ * (`OAuthSignInContendedError`), and the transaction rolls back. The premise
+ * was stale, not wrong: run again in a new transaction, every read sees what
+ * the other one committed — the identity's link, and it is an ordinary sign-in
+ * to that account; the address held, and the backfill fills nothing. The
+ * provider was asked once, before the first attempt; `attempt` only touches the
+ * database. A second stale premise is answered `OAuthSignInContendedError`.
+ *
+ * A refusal, and any other error, is answered as it is, on the first attempt.
+ * An attempt that rolls back drops its after-commit events, so they fire once,
+ * for the attempt that committed; `beforeRegister` runs in each attempt that
+ * makes an account.
+ */
+export async function retryContendedSignIn<T>(provider: SocialProvider, attempt: () => Promise<T>): Promise<T>
+{
+    return await attempt().catch((error: unknown) => actedOnStaleRead(error)
+        ? attempt().catch((again: unknown) => refuseContendedTwice(provider, again))
+        : Promise.reject(error));
+}
+
+/** The second attempt's stale premise, as the typed refusal; anything else as it is. */
+function refuseContendedTwice(provider: SocialProvider, error: unknown): Promise<never>
+{
+    return Promise.reject(actedOnStaleRead(error) && !(error instanceof OAuthSignInContendedError)
+        ? new OAuthSignInContendedError({ details: { provider } })
+        : error);
+}
+
+function actedOnStaleRead(error: unknown): boolean
+{
+    return error instanceof OAuthSignInContendedError
+        || SIGN_IN_PREMISE_CONSTRAINTS.has(uniqueViolationConstraint(error) ?? '');
+}
+
+/**
+ * Exchange the code and read who signed in — the provider's two HTTP calls.
+ *
+ * Called before any transaction opens. A provider whose token response already
+ * established the identity (Apple's id_token) is not asked for userinfo.
+ */
+export async function identifyWithProvider(
+    oauthProvider: OAuthProvider,
+    code: string,
+    options: OAuthCodeExchangeOptions,
+): Promise<{ tokens: OAuthTokens; identity: NormalizedIdentity }>
+{
+    const tokens = await fromProvider(() => oauthProvider.exchangeCodeForTokens(code, options));
     const identity = tokens.identity ?? await fromProvider(() => oauthProvider.getUserInfo(tokens.accessToken));
 
-    // 3. 기존 소셜 계정 확인
-    const existingSocialAccount = await socialAccountsRepository.findByProviderAndProviderId(
-        provider,
-        identity.providerUserId,
-    );
+    return { tokens, identity };
+}
 
-    let userId: number;
-    let isNewUser = false;
+interface WebSignIn
+{
+    params: OAuthCallbackParams;
+    stateData: OAuthState;
+    identity: NormalizedIdentity;
+    tokens: OAuthTokens;
+}
 
-    if (existingSocialAccount)
-    {
-        // 기존 사용자 - 토큰 업데이트
-        userId = existingSocialAccount.userId;
+/**
+ * Everything a web sign-in writes, in the transaction `oauthCallbackService` opened.
+ *
+ * The account is found or made, its status checked, and the start's key
+ * registered; a refusal anywhere throws and nothing stays.
+ */
+async function persistWebSignIn(signIn: WebSignIn): Promise<OAuthCallbackResult>
+{
+    const { params, stateData, identity, tokens } = signIn;
+    const { userId, isNewUser } = await signInAccount(params.provider, identity, tokens, stateData.metadata);
 
-        await socialAccountsRepository.updateTokens(existingSocialAccount.id, {
-            accessToken: tokens.accessToken,
-            refreshToken: tokens.refreshToken ?? existingSocialAccount.refreshToken,
-            tokenExpiresAt: tokenExpiryDate(tokens.expiresIn),
-            providerHandle: identity.handle ?? existingSocialAccount.providerHandle,
-        });
-
-        await backfillVerifiedEmail(userId, identity);
-    }
-    else
-    {
-        // 신규 사용자 또는 이메일로 기존 사용자 연결
-        const result = await createOrLinkUser(provider, identity, tokens, stateData.metadata);
-        userId = result.userId;
-        isNewUser = result.isNewUser;
-    }
-
-    // 3.5. 세션(공개키) 발급 전 계정 상태 검사 — 기존에는 검사 없이 세션이 발급됐다
-    // (기존 버그: 정지/탈퇴예정 계정도 OAuth로 로그인 가능했음). 두 분기(기존 소셜
-    // 연결 재로그인 / createOrLinkUser 신규·연결) 모두 여기서 합류하므로 한 번의
-    // 검사로 양쪽을 다 막는다.
+    // 세션(공개키) 발급 전 계정 상태 검사 — both branches of `signInAccount` meet here.
     await assertActiveForOAuthSession(userId, () => new OAuthAccountNotFoundError());
 
-    // Read once, here rather than at step 7 where it used to be: registering the
-    // key needs the account's session_binding setting, and the event payload
-    // below needs the same row. One query serves both.
+    // Read once: registering the key needs the account's session_binding
+    // setting, and the event payload needs the same row.
     const user = await usersRepository.findById(userId);
 
-    // 4. state에서 추출한 publicKey 등록
     // No deviceName or platform: the sealed state the start step wrote carries
     // neither, so the event on this channel is the one that names no device.
     const registered = await registerPublicKeyService({
@@ -290,83 +391,157 @@ export async function oauthCallbackService(
         ip: params.ip,
         userAgent: params.userAgent,
         binding: decideKeyBinding(user?.sessionBinding ?? 'none', params.webProxy),
-        loginEvent: {
-            provider,
-            email: user?.email || undefined,
-            phone: user?.phone || undefined,
-            metadata: stateData.metadata,
-            ...providerAccountFields(identity),
-        },
+        loginEvent: signInEventFields(params.provider, user, stateData, identity),
     });
 
-    const callbackPath = env.SPFN_AUTH_OAUTH_SUCCESS_URL || '/auth/callback';
-    const callbackUrl = callbackPath.startsWith('http') ? callbackPath : `${resolveAppUrl()}${callbackPath}`;
-    const returnUrl = isSafeReturnPath(stateData.returnUrl) ? stateData.returnUrl : '/';
+    return registered.pending
+        ? challengeResult(signIn, userId, isNewUser, registered.challenge.secret)
+        : await signedInResult(signIn, { userId, isNewUser, user, registered });
+}
 
-    // An enrolled account on a new device is redirected with a challenge (#95):
-    // no `userId`, and neither the login event nor `lastLoginAt` below. The
-    // `keyId` rides along (#126) — not a session, but the name of the start whose
-    // pending cookie holds the private key, so the proxy can pick that cookie
-    // when it bakes the second-factor one while other starts are in flight. A
-    // brand-new social account never reaches this —
-    // `createOrLinkUser` has just written the user row, so there is no second
-    // factor to ask for and `isNewUser` is answered exactly as it always was.
-    if (registered.pending)
+/**
+ * The account an identity signs in to: the one its social row names, with the
+ * fresh tokens and handle stored — or, for an identity no row holds yet, the
+ * one `createOrLinkUser` finds or makes.
+ */
+async function signInAccount(
+    provider: SocialProvider,
+    identity: NormalizedIdentity,
+    tokens: OAuthTokens,
+    metadata: Record<string, unknown> | undefined,
+): Promise<{ userId: number; isNewUser: boolean }>
+{
+    const existing = await socialAccountsRepository.findByProviderAndProviderId(provider, identity.providerUserId);
+
+    if (!existing)
     {
-        return {
-            redirectUrl: buildRedirectUrl(callbackUrl, {
-                mfaChallenge: registered.challenge.secret,
-                keyId: stateData.keyId,
-                returnUrl,
-                isNewUser: String(isNewUser),
-            }),
-            userId: String(userId),
-            keyId: stateData.keyId,
-            isNewUser,
-            mfaChallenge: registered.challenge.secret,
-        };
+        return await createOrLinkUser(provider, identity, tokens, metadata);
     }
 
-    // 5. 마지막 로그인 시간 업데이트
-    await updateLastLoginService(userId);
-
-    // 6. 리다이렉트 URL 생성 (OAuth 콜백 페이지로)
-    // 콜백 페이지에서 oauthFinalize API를 호출하여 세션 저장
-    const redirectUrl = buildRedirectUrl(callbackUrl, {
-        userId: String(userId),
-        keyId: stateData.keyId,
-        // Defence in depth: the state is sealed, so this value was already checked
-        // where it was sealed. Checking it again costs one comparison and keeps a
-        // destination that leaves the app out of the callback URL no matter which
-        // seam sealed it.
-        returnUrl,
-        isNewUser: String(isNewUser),
-        // The callback page and `createOAuthCallbackHandler` are the two seams
-        // that seal a session out of this redirect, and neither calls a route
-        // that could tell them the key is bound. The two values ride the query
-        // for the same reason `userId` and `keyId` do — and, like those, nothing
-        // is authorized by them: the key row already expires when it says it
-        // does, whatever a tampered query claims the cookie should believe.
-        ...bindingRedirectParams(registered),
+    // A provider that sent no new refresh token leaves the stored one as it is.
+    await socialAccountsRepository.updateTokens(existing.id, {
+        accessToken: tokens.accessToken,
+        refreshToken: tokens.refreshToken,
+        tokenExpiresAt: tokenExpiryDate(tokens.expiresIn),
+        providerHandle: identity.handle ?? existing.providerHandle,
     });
+    await backfillVerifiedEmail(existing.userId, identity);
 
-    // 7. 이벤트 발행: 신규 사용자는 register, 기존 사용자는 login
-    const eventPayload = {
-        userId: String(userId),
+    return { userId: existing.userId, isNewUser: false };
+}
+
+/** What the login and register events say about this sign-in, beside the user id. */
+function signInEventFields(
+    provider: SocialProvider,
+    user: User | null | undefined,
+    stateData: OAuthState,
+    identity: NormalizedIdentity,
+)
+{
+    return {
         provider,
         email: user?.email || undefined,
         phone: user?.phone || undefined,
         metadata: stateData.metadata,
         ...providerAccountFields(identity),
     };
+}
 
-    // After the commit, never inline: both callback routes run under
-    // `Transactional()`, so an inline emit would announce a user that another
-    // connection cannot read yet, or one a rollback then erased.
-    // `mfaEnrolled` is on the login event only: a brand-new account cannot
-    // have a second factor, and the register event is where an app decides
-    // what to offer a user it has just met. Read before the callback is queued,
-    // so the callback stays synchronous and lands when consumers expect it to.
+/** The callback page's URL, absolute on the web app origin unless configured absolute. */
+function oauthCallbackPageUrl(): string
+{
+    const callbackPath = env.SPFN_AUTH_OAUTH_SUCCESS_URL || '/auth/callback';
+
+    return callbackPath.startsWith('http') ? callbackPath : `${resolveAppUrl()}${callbackPath}`;
+}
+
+/**
+ * An enrolled account on a new device is redirected with a challenge (#95): no
+ * `userId`, and neither the login event nor `lastLoginAt`. The `keyId` rides
+ * along (#126) — not a session, but the name of the start whose pending cookie
+ * holds the private key, so the proxy can pick that cookie when it bakes the
+ * second-factor one while other starts are in flight. A brand-new social
+ * account never reaches this: it has no second factor to ask for.
+ */
+function challengeResult(signIn: WebSignIn, userId: number, isNewUser: boolean, challenge: string): OAuthCallbackResult
+{
+    const { stateData } = signIn;
+
+    return {
+        redirectUrl: buildRedirectUrl(oauthCallbackPageUrl(), {
+            mfaChallenge: challenge,
+            keyId: stateData.keyId,
+            returnUrl: safeReturnUrl(stateData),
+            isNewUser: String(isNewUser),
+        }),
+        userId: String(userId),
+        keyId: stateData.keyId,
+        isNewUser,
+        mfaChallenge: challenge,
+    };
+}
+
+/**
+ * Defence in depth: the state is sealed, so its returnUrl was already checked
+ * where it was sealed. Checking it again keeps a destination that leaves the app
+ * out of the callback URL no matter which seam sealed it.
+ */
+function safeReturnUrl(stateData: OAuthState): string
+{
+    return isSafeReturnPath(stateData.returnUrl) ? stateData.returnUrl : '/';
+}
+
+interface SignedIn
+{
+    userId: number;
+    isNewUser: boolean;
+    user: User | null | undefined;
+    registered: { binding: SessionBindingType; expiresAt: Date | null };
+}
+
+/**
+ * A finished sign-in: `lastLoginAt`, the redirect to the callback page (which
+ * calls `oauthFinalize` to seal the session), and the event queued for after
+ * the commit — register for a new account, login otherwise.
+ */
+async function signedInResult(signIn: WebSignIn, signedIn: SignedIn): Promise<OAuthCallbackResult>
+{
+    const { params, stateData, identity } = signIn;
+    const { userId, isNewUser } = signedIn;
+
+    await updateLastLoginService(userId);
+
+    // The callback page and `createOAuthCallbackHandler` are the two seams that
+    // seal a session out of this redirect, and neither calls a route that could
+    // tell them the key is bound. The binding values ride the query for the same
+    // reason `userId` and `keyId` do — and, like those, nothing is authorized by
+    // them: the key row already expires when it says it does.
+    const redirectUrl = buildRedirectUrl(oauthCallbackPageUrl(), {
+        userId: String(userId),
+        keyId: stateData.keyId,
+        returnUrl: safeReturnUrl(stateData),
+        isNewUser: String(isNewUser),
+        ...bindingRedirectParams(signedIn.registered),
+    });
+
+    await queueSignInEvent(userId, isNewUser, signInEventFields(params.provider, signedIn.user, stateData, identity));
+
+    return { redirectUrl, userId: String(userId), keyId: stateData.keyId, isNewUser };
+}
+
+/**
+ * After the commit, never inline: an inline emit would announce a user another
+ * connection cannot read yet, or one a rollback then erased. `mfaEnrolled` is on
+ * the login event only — a brand-new account cannot have a second factor. Read
+ * before the callback is queued, so the callback stays synchronous.
+ */
+async function queueSignInEvent(
+    userId: number,
+    isNewUser: boolean,
+    fields: ReturnType<typeof signInEventFields>,
+): Promise<void>
+{
+    const eventPayload = { userId: String(userId), ...fields };
     const mfaEnrolled = isNewUser ? false : await mfaEnrolledForUser(userId);
     const { secondFactorEnrolmentRequired } = await secondFactorEnrolmentFields(userId);
 
@@ -377,13 +552,6 @@ export async function oauthCallbackService(
             mfaEnrolled,
             secondFactorEnrolmentRequired: secondFactorEnrolmentRequired === true,
         })));
-
-    return {
-        redirectUrl,
-        userId: String(userId),
-        keyId: stateData.keyId,
-        isNewUser,
-    };
 }
 
 /**
@@ -579,47 +747,20 @@ export async function assertActiveForOAuthSession(
  *
  * 과거 provider가 emailVerified=false를 보고해 email=null로 만들어진 계정(네이버 등)의
  * 구제 경로 — provider 판정이 바뀐 뒤 재로그인하면 이메일이 계정에 실린다.
- * 같은 이메일을 가진 다른 계정이 이미 있으면 건너뛴다(unique 충돌·계정 탈취 방지).
+ * 같은 이메일을 어떤 형태로든 가진 계정이 있으면 채우지 않는다(계정 탈취 방지) — 그 규칙은
+ * `fillEmailIfUnheld`의 조건부 UPDATE 한 문장이 표현하고, 채울 것이 없으면 0행일 뿐 오류가
+ * 아니다. 같은 주소를 아직 커밋하지 않은 다른 가입은 그 문장이 볼 수 없어, 그것이 커밋되면
+ * unique 위반으로 로그인 트랜잭션이 되돌려지고 `retryContendedSignIn`이 한 번 더 돌린다 —
+ * 두 번째에는 주소가 이미 있으니 채우지 않는다. 그 밖의 오류는 그대로 올라간다.
  */
 export async function backfillVerifiedEmail(
     userId: number,
     identity: NormalizedIdentity,
 ): Promise<void>
 {
-    if (!identity.email || !identity.emailVerified)
+    if (identity.email && identity.emailVerified)
     {
-        return;
-    }
-
-    const user = await usersRepository.findById(userId);
-    if (!user || user.email)
-    {
-        return;
-    }
-
-    // Any account the address folds onto, case variants included: the email
-    // already belongs to someone, or to several someones the operator has yet
-    // to settle
-    const emailOwner = await usersRepository.findByFoldedEmail(identity.email);
-    if (emailOwner.kind === 'ambiguous' || (emailOwner.kind === 'account' && emailOwner.user.id !== userId))
-    {
-        return;
-    }
-
-    try
-    {
-        await usersRepository.updateById(userId, {
-            email: identity.email,
-            emailVerifiedAt: new Date(),
-        });
-    }
-    catch (error)
-    {
-        // best-effort — 동시 가입으로 unique 충돌이 나도 로그인은 계속돼야 한다
-        authLogger.service.warn('Verified-email backfill failed; continuing login', {
-            userId: String(userId),
-            error: error instanceof Error ? error.message : String(error),
-        });
+        await usersRepository.fillEmailIfUnheld(userId, identity.email);
     }
 }
 
@@ -638,6 +779,11 @@ export async function backfillVerifiedEmail(
  * 또는 `'attach'`이고 소문자 행 없이 대소문자만 다른 계정이 여럿일 때
  * @throws UnverifiedEmailLinkError `'attach'`(기본)이고 provider가 이메일을 검증하지 않았을 때
  * @throws SignupDisabledError 새 계정을 만들어야 하는데 앱이 `channels.signup`을 끈 경우
+ * @throws OAuthProviderAlreadyLinkedError when the matched account already holds
+ *   another identity of this provider — one per provider per account (au5-A3)
+ * @throws OAuthSignInContendedError when a concurrent first sign-in attached the
+ *   identity first; the caller runs its transaction again (`retryContendedSignIn`),
+ *   as it does for a unique violation on the address a concurrent sign-up took
  */
 export async function createOrLinkUser(
     provider: SocialProvider,
@@ -667,7 +813,7 @@ export async function createOrLinkUser(
         : { userId: await registerOAuthUser(provider, identity, metadata, match.kind === 'none'), isNewUser: true };
 
     // 소셜 계정 생성 (native 흐름은 provider 토큰이 없어 null로 저장)
-    await socialAccountsRepository.create({
+    const created = await socialAccountsRepository.createIfAbsent({
         userId,
         provider,
         providerUserId: identity.providerUserId,
@@ -678,9 +824,44 @@ export async function createOrLinkUser(
         tokenExpiresAt: tokens ? tokenExpiryDate(tokens.expiresIn) : null,
     });
 
+    if (!created)
+    {
+        throw await signInLinkConflict(provider, identity.providerUserId);
+    }
+
     await recordProviderName(userId, identity.name);
 
     return { userId, isNewUser };
+}
+
+/**
+ * Which of the table's two rules an insert that wrote nothing met.
+ *
+ * `linked_elsewhere`: another account holds the identity. `provider_already_linked`:
+ * the account holds another identity of the provider. Read after the insert, in
+ * the same transaction, so it sees the row that stood in the way.
+ */
+export async function socialAccountConflict(
+    provider: SocialProvider,
+    providerUserId: string,
+): Promise<'linked_elsewhere' | 'provider_already_linked'>
+{
+    const owner = await socialAccountsRepository.findByProviderAndProviderId(provider, providerUserId);
+
+    return owner ? 'linked_elsewhere' : 'provider_already_linked';
+}
+
+/**
+ * The refusal of a sign-in whose identity could not be attached. The account
+ * already holding another identity of the provider is the refusal people see;
+ * the identity attached by a concurrent first sign-in in the meantime is a race
+ * `retryContendedSignIn` resolves.
+ */
+async function signInLinkConflict(provider: SocialProvider, providerUserId: string): Promise<Error>
+{
+    return await socialAccountConflict(provider, providerUserId) === 'provider_already_linked'
+        ? new OAuthProviderAlreadyLinkedError({ details: { provider } })
+        : new OAuthSignInContendedError({ details: { provider } });
 }
 
 /**
@@ -845,6 +1026,8 @@ const REASON_BY_ERROR: [abstract new (...args: never[]) => Error, OAuthErrorReas
     [OAuthProviderError, 'provider_error'],
     [OAuthProviderLinkOnlyError, 'link_only'],
     [OAuthEmailInUseError, 'email_in_use'],
+    [OAuthProviderAlreadyLinkedError, 'provider_already_linked'],
+    [OAuthSignInContendedError, 'sign_in_contended'],
     [SignupDisabledError, 'signup_disabled'],
     [AccountDisabledError, 'account_unavailable'],
     [AccountPendingDeletionError, 'account_unavailable'],
@@ -883,6 +1066,8 @@ const TOKEN_EXPIRY_BUFFER_MS = 5 * 60 * 1000;
  *
  * 저장된 토큰이 만료 임박(5분 이내) 또는 만료 상태이면
  * refresh token으로 자동 갱신 후 DB 업데이트하여 유효한 토큰 반환.
+ * The one place the stored tokens are decrypted (and re-encrypted under the
+ * active key when they need it): `readTokens`.
  *
  * @param userId - 사용자 ID
  * @returns 유효한 Google access token
@@ -890,39 +1075,40 @@ const TOKEN_EXPIRY_BUFFER_MS = 5 * 60 * 1000;
 export async function getGoogleAccessToken(userId: number): Promise<string>
 {
     const account = await socialAccountsRepository.findByUserIdAndProvider(userId, 'google');
+    const tokens = account ? await socialAccountsRepository.readTokens(account.id) : null;
 
-    if (!account)
+    if (!account || !tokens)
     {
         throw new ValidationError({
             message: 'No Google account linked. User must sign in with Google first.',
         });
     }
 
-    const isExpired = !account.tokenExpiresAt
-        || account.tokenExpiresAt.getTime() < Date.now() + TOKEN_EXPIRY_BUFFER_MS;
+    const isExpired = !tokens.tokenExpiresAt
+        || tokens.tokenExpiresAt.getTime() < Date.now() + TOKEN_EXPIRY_BUFFER_MS;
 
-    if (!isExpired && account.accessToken)
+    if (!isExpired && tokens.accessToken)
     {
-        return account.accessToken;
+        return tokens.accessToken;
     }
 
     // 리프레시 토큰이 없으면 갱신 불가
-    if (!account.refreshToken)
+    if (!tokens.refreshToken)
     {
         throw new ValidationError({
             message: 'Google refresh token not available. User must re-authenticate with Google.',
         });
     }
 
-    const tokens = await refreshAccessToken(account.refreshToken);
+    const refreshed = await refreshAccessToken(tokens.refreshToken);
 
     await socialAccountsRepository.updateTokens(account.id, {
-        accessToken: tokens.access_token,
-        refreshToken: tokens.refresh_token ?? account.refreshToken,
-        tokenExpiresAt: tokenExpiryDate(tokens.expires_in),
+        accessToken: refreshed.access_token,
+        refreshToken: refreshed.refresh_token,
+        tokenExpiresAt: tokenExpiryDate(refreshed.expires_in),
     });
 
-    return tokens.access_token;
+    return refreshed.access_token;
 }
 
 export interface UnlinkNotifyResult

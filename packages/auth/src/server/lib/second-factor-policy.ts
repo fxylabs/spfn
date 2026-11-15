@@ -183,9 +183,8 @@ function describeDifference(first: SecondFactorPolicy, second: SecondFactorPolic
  * rest of the configuration.
  *
  * Called from `afterInfrastructure` beside `assertChannelsConsistent`, and for
- * its reason: a throw from the lifecycle constructor is swallowed by
- * `loadAndMergeConfig()` and leaves the server listening. Silent when no
- * policy was stated.
+ * its reason: a contradicting second statement is only known once every
+ * `createAuthLifecycle()` call has run. Silent when no policy was stated.
  */
 export function assertSecondFactorPolicy(env: Record<string, string | undefined> = process.env): void
 {

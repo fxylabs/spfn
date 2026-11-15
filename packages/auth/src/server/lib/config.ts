@@ -13,6 +13,7 @@ import { normalizeOptionalEmail } from '../helpers/email';
 import { parseDuration } from '../../lib/duration';
 import { authLogger } from '../logger';
 import { isPasskeyOnly } from './second-factor-policy';
+import { assertPolicyValues } from './auth-config-values';
 
 export { parseDuration };
 
@@ -294,6 +295,12 @@ export interface AuthConfig
      * seeding (initializeAuth) or when linking a social account to an
      * existing user.
      *
+     * On the `oauth` channel it can run twice for one sign-in: a sign-in whose
+     * transaction lost a race with a concurrent sign-in or sign-up of the same
+     * identity or address is rolled back and run once more, hook included. A
+     * rejection is not retried. Side effects belong in the events, which fire
+     * once, for the attempt that committed.
+     *
      * Runs inside the registration DB transaction on every channel — keep it
      * fast. A slow call (e.g. an external policy API) holds a pooled DB
      * connection open for its full duration on every signup.
@@ -372,7 +379,13 @@ let globalConfig: AuthConfig = {};
 /**
  * Configure global auth settings
  *
+ * A policy value outside its declared set — `oauthEmailMatch`, `csrf.mode`, the
+ * `oauthProviders` names and flags, `oauthLink.recentAuth` — is refused here,
+ * before anything is stored, with an error naming the option and the values it
+ * accepts.
+ *
  * @param config - Auth configuration
+ * @throws Error for a policy value outside its declared set
  *
  * @example
  * ```typescript
@@ -383,6 +396,8 @@ let globalConfig: AuthConfig = {};
  */
 export function configureAuth(config: AuthConfig): void
 {
+    assertPolicyValues(config);
+
     globalConfig = {
         ...globalConfig,
         ...config,
@@ -983,12 +998,10 @@ export function getOAuthLinkRecentAuthMs(): number
 /**
  * How a first sign-in whose email matches an existing account is handled (#156).
  *
- * Read on every call, so a later `configureAuth` takes effect. Anything other
- * than `'reject'` or `'separate'` is `'attach'`.
+ * Read on every call, so a later `configureAuth` takes effect. Unset is
+ * `'attach'`; any other value was refused when it was configured.
  */
 export function getOAuthEmailMatch(): OAuthEmailMatch
 {
-    const configured = globalConfig.oauthEmailMatch;
-
-    return configured === 'reject' || configured === 'separate' ? configured : 'attach';
+    return globalConfig.oauthEmailMatch ?? 'attach';
 }

@@ -20,6 +20,8 @@ import { existsSync } from 'fs';
 import { pathToFileURL } from 'url';
 import { join } from 'path';
 
+import { plainObjectDefault } from './config-module';
+
 /**
  * Ports the app is served on.
  *
@@ -117,48 +119,30 @@ const CONFIG_FILE_NAMES = [
 /**
  * Read `spfn.config.js` from an app directory.
  *
- * Returns an empty object when there is no file, and also when the file cannot
- * be imported — a malformed deployment config must not stop a server from
- * booting. The caller decides whether the absence is worth reporting.
+ * Returns an empty object when there is no file — only an absent file means
+ * "no configuration". A file that exists and fails to import, or whose default
+ * export is not a plain object, rejects naming the file: it used to be warned
+ * about and replaced by the defaults, which sent the server to port 8790 while
+ * its own config named another. See `plainObjectDefault`.
  */
 export async function loadAppConfig(cwd: string = process.cwd()): Promise<SpfnAppConfig>
 {
-    for (const fileName of CONFIG_FILE_NAMES)
+    const fileName = CONFIG_FILE_NAMES.find(name => existsSync(join(cwd, name)));
+
+    if (!fileName)
     {
-        const fullPath = join(cwd, fileName);
-
-        if (!existsSync(fullPath))
-        {
-            continue;
-        }
-
-        try
-        {
-            // A file URL, not a path: on Windows an absolute path is not a
-            // valid ESM specifier, and this file is imported at runtime.
-            const module = await import(pathToFileURL(fullPath).href);
-
-            return (module.default ?? {}) as SpfnAppConfig;
-        }
-        catch (error)
-        {
-            // Falling back to defaults, and saying so. A file that exists and
-            // cannot be imported is a typo, not an absence — silence would send
-            // the server to port 8790 while its own config named another, and
-            // the only symptom would be a port nobody chose.
-            //
-            // console, not the server logger: this runs inside the CLI too,
-            // before any logger is configured.
-            console.warn(
-                `⚠️  ${fileName} could not be imported — falling back to defaults `
-                + `for ports and host. ${error instanceof Error ? error.message : String(error)}`,
-            );
-
-            return {};
-        }
+        return {};
     }
 
-    return {};
+    // A file URL, not a path: on Windows an absolute path is not a valid ESM
+    // specifier, and this file is imported at runtime.
+    const module = await import(pathToFileURL(join(cwd, fileName)).href).catch((error: unknown) =>
+        Promise.reject(new Error(
+            `Refusing to start: ${fileName} exists but failed to load: ${error instanceof Error ? error.message : String(error)}`,
+            { cause: error },
+        )));
+
+    return plainObjectDefault(module, fileName) as SpfnAppConfig;
 }
 
 /**

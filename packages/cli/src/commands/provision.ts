@@ -15,25 +15,58 @@
  */
 
 import { Command } from 'commander';
-import { existsSync, mkdirSync, writeFileSync } from 'fs';
+import { mkdirSync, writeFileSync } from 'fs';
 import { join } from 'path';
-import { pathToFileURL } from 'url';
 import { execa } from 'execa';
 import { logger } from '../utils/logger.js';
 import { detectPackageManager } from '../utils/package-manager.js';
 import { resolveKeychainEnv } from '../utils/secret-store/index.js';
 
-// Same discovery order as startServer() (built output first, then source)
-const CONFIG_FILE_PATHS = [
-    '.spfn/server/server.config.mjs',
-    '.spfn/server/server.config.js',
-    'src/server/server.config.ts',
-    'src/server/server.config.js',
-] as const;
-
-function findServerConfig(cwd: string): string | undefined
+/**
+ * The runner `spfn provision` spawns under tsx.
+ *
+ * It loads `server.config` with `loadServerConfigFile`, the loader `startServer`
+ * uses — same files, same order, same refusals. A file that exists but exports
+ * no plain object stops provisioning naming the file; it used to hand
+ * `provisionInfrastructure` an `undefined` config and provision on defaults.
+ * Only an absent file is "not found", which exits 1 with the paths it tried.
+ *
+ * Exported so its content is under test rather than only under review: this is
+ * generated text, so nothing type-checks it.
+ */
+export function renderProvisionRunner(): string
 {
-    return CONFIG_FILE_PATHS.map((path) => join(cwd, path)).find(existsSync);
+    return `
+if (!process.env.NODE_ENV)
+{
+    process.env.NODE_ENV = 'production';
+}
+
+// The Vercel Supabase integration injects POSTGRES_URL but not DATABASE_URL,
+// which is what SPFN reads. Map it so build-step provisioning connects too.
+process.env.DATABASE_URL ??= process.env.POSTGRES_URL;
+
+// Load environment variables FIRST (before any imports that depend on them)
+await import('@spfn/core/config');
+
+const { provisionInfrastructure, loadServerConfigFile, SERVER_CONFIG_FILE_PATHS } = await import('@spfn/core/server');
+
+const loaded = await loadServerConfigFile(process.cwd());
+
+if (!loaded)
+{
+    console.error('server.config not found. Looked for: ' + SERVER_CONFIG_FILE_PATHS.join(', '));
+    console.error('Run "spfn init" first, or run this command from the app root.');
+    process.exit(1);
+}
+
+console.info('[SPFN] Provisioning with config: ' + loaded.path);
+
+await provisionInfrastructure(loaded.config);
+
+// provisionInfrastructure leaves the DB pool open — exit explicitly.
+process.exit(0);
+`;
 }
 
 export const provisionCommand = new Command('provision')
@@ -46,15 +79,6 @@ export const provisionCommand = new Command('provision')
         }
 
         const cwd = process.cwd();
-        const configPath = findServerConfig(cwd);
-
-        if (!configPath)
-        {
-            logger.error('server.config not found.');
-            logger.info(`Looked for: ${CONFIG_FILE_PATHS.join(', ')}`);
-            logger.info('Run "spfn init" first, or run this command from the app root.');
-            process.exit(1);
-        }
 
         // Mirror dev.ts: resolve secret:keychain: refs from .env.server so local runs
         // get real values; CI/deploy environments have plain env and resolve nothing.
@@ -77,30 +101,7 @@ export const provisionCommand = new Command('provision')
 
         mkdirSync(tempDir, { recursive: true });
 
-        writeFileSync(runnerEntry, `
-if (!process.env.NODE_ENV)
-{
-    process.env.NODE_ENV = 'production';
-}
-
-// The Vercel Supabase integration injects POSTGRES_URL but not DATABASE_URL,
-// which is what SPFN reads. Map it so build-step provisioning connects too.
-process.env.DATABASE_URL ??= process.env.POSTGRES_URL;
-
-// Load environment variables FIRST (before any imports that depend on them)
-await import('@spfn/core/config');
-
-const { provisionInfrastructure } = await import('@spfn/core/server');
-
-const config = (await import(${JSON.stringify(pathToFileURL(configPath).href)})).default;
-
-await provisionInfrastructure(config);
-
-// provisionInfrastructure leaves the DB pool open — exit explicitly.
-process.exit(0);
-`);
-
-        logger.info(`[SPFN] Provisioning with config: ${configPath.replace(cwd + '/', '')}\n`);
+        writeFileSync(runnerEntry, renderProvisionRunner());
 
         const pm = detectPackageManager(cwd);
         const runnerCmd = pm === 'npm' ? 'npx' : pm;

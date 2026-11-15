@@ -824,6 +824,15 @@ part of a whole backend.
   start while a function package has migrations the database has not applied. That is the
   gate working, not a bug — see
   [Why does the server refuse to start after a package upgrade?](#why-does-the-server-refuse-to-start-after-a-package-upgrade)
+- **A server config that fails to load stops the boot (BREAKING).** If
+  `server.config` exists but its import fails — including top-level code that throws,
+  such as `configureAuth()` refusing a policy value — `startServer()` rejects and nothing
+  listens. It used to log the error and serve on defaults, with none of the app's routes
+  or lifecycle. A missing file still means defaults. A file that loads but whose default
+  export is not a plain object — only named exports, `export default 42`, a promise —
+  refuses too, naming the file; so does `spfn.config.js`, which used to warn and fall back to
+  the default ports, and `spfn provision`, which used to provision on defaults. See
+  [src/server](./src/server/README.md#file-config-loading-order).
 - **Cache, events and jobs degrade quietly.** `@spfn/core/cache` runs disabled — its
   getters return `undefined` — when there is no cache config or no `ioredis`, and
   WebSocket events need the optional `ws` dependency. Do not write code expecting them to

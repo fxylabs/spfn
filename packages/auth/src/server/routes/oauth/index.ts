@@ -40,6 +40,7 @@ import {
     buildOAuthErrorUrl,
     getEnabledOAuthProviders,
     requireSignInProvider,
+    signInAuthorizationUrl,
     isSafeReturnPath,
     keySessionBindingService,
     keySecondFactorEnrolmentFields,
@@ -49,7 +50,7 @@ import {
     unlinkOAuthService,
 } from '../../services';
 import { assertSignInProvider, isSignInProvider } from '../../lib/config';
-import { isGoogleOAuthEnabled, getGoogleAuthUrl, getOAuthProvider, UnlinkNotifyRejection } from '../../lib/oauth';
+import { isGoogleOAuthEnabled, getOAuthProvider, UnlinkNotifyRejection } from '../../lib/oauth';
 import {
     APPLE_RELAY_APP_STATE_PATTERN,
     generateOAuthNonce,
@@ -242,9 +243,7 @@ export const oauthGoogleStart = route.get('/_auth/oauth/google')
             return c.redirect(linkOnlyErrorUrl());
         }
 
-        const authUrl = getGoogleAuthUrl(query.state);
-
-        return c.redirect(authUrl);
+        return c.redirect(await signInAuthorizationUrl(requireSignInProvider('google'), query.state));
     });
 
 /**
@@ -270,7 +269,10 @@ export const oauthGoogleCallback = route.get('/_auth/oauth/google/callback')
             })),
         }),
     })
-    .use([rateLimitPolicy('oauth-callback', { limit: 30, windowMs: 60_000 }), Transactional()])
+    // No `Transactional()`: the service opens its own transaction after the
+    // provider calls, and a refusal it throws is rolled back before
+    // `oauthCallbackRedirect` turns it into the error page.
+    .use([rateLimitPolicy('oauth-callback', { limit: 30, windowMs: 60_000 })])
     .skip(['auth'])
     .handler(async (c) =>
     {
@@ -421,7 +423,7 @@ export const getGoogleOAuthUrl = route.post('/_auth/oauth/google/url')
             });
         }
 
-        return { authUrl: getGoogleAuthUrl(body.state) };
+        return { authUrl: await signInAuthorizationUrl(requireSignInProvider('google'), body.state) };
     });
 
 /**
@@ -587,7 +589,7 @@ export const oauthProviderStart = route.get('/_auth/oauth/:provider')
             return c.redirect(linkOnlyErrorUrl());
         }
 
-        return c.redirect(provider.getAuthUrl(query.state));
+        return c.redirect(await signInAuthorizationUrl(provider, query.state));
     });
 
 /**
@@ -617,7 +619,10 @@ export const oauthProviderCallback = route.get('/_auth/oauth/:provider/callback'
             })),
         }),
     })
-    .use([rateLimitPolicy('oauth-callback', { limit: 30, windowMs: 60_000 }), Transactional()])
+    // No `Transactional()`: the service opens its own transaction after the
+    // provider calls, and a refusal it throws is rolled back before
+    // `oauthCallbackRedirect` turns it into the error page.
+    .use([rateLimitPolicy('oauth-callback', { limit: 30, windowMs: 60_000 })])
     .skip(['auth'])
     .handler(async (c) =>
     {
@@ -764,7 +769,7 @@ export const getProviderOAuthUrl = route.post('/_auth/oauth/:provider/url')
             });
         }
 
-        return { authUrl: provider.getAuthUrl(body.state) };
+        return { authUrl: await signInAuthorizationUrl(provider, body.state) };
     });
 
 /**

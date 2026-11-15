@@ -12,7 +12,7 @@
  * device or the current password. One identity per provider per account.
  */
 
-import { onAfterCommit } from '@spfn/core/db';
+import { onAfterCommit, runInTransaction } from '@spfn/core/db';
 import { ValidationError } from '@spfn/core/errors';
 import {
     OAuthAccountNotFoundError,
@@ -20,19 +20,21 @@ import {
     OAuthProviderAlreadyLinkedError,
 } from '@spfn/auth/errors';
 
-import { socialAccountsRepository, usersRepository } from '../repositories';
+import { socialAccountsRepository, usersRepository, type SocialAccountLink } from '../repositories';
 import { isSafeReturnPath } from '../../lib/return-path';
 import { type OAuthLinkOutcome } from '../../lib/oauth-link-outcome';
 import { resolveAppUrl } from '../lib/app-url';
 import {
+    buildAuthorizationUrl,
     createOAuthLinkState,
+    exchangeCodeVerifier,
+    generateCodeVerifier,
     type NormalizedIdentity,
     type OAuthLinkState,
     type OAuthTokens,
 } from '../lib/oauth';
 import { getOAuthLinkRecentAuthMs, isSignInProvider, linkNeedsRecentAuth } from '../lib/config';
 import { type SocialProvider } from '../types';
-import { type UserSocialAccount } from '../entities';
 import { oauthLinkedEvent, oauthLinkRemovedEvent } from '../events';
 import { assertStepUp } from './mfa.service';
 import {
@@ -42,8 +44,9 @@ import {
 } from './passkey.service';
 import {
     assertActiveForOAuthSession,
-    fromProvider,
+    identifyWithProvider,
     requireEnabledProvider,
+    socialAccountConflict,
     tokenExpiryDate,
 } from './oauth.service';
 
@@ -81,20 +84,25 @@ export async function startOAuthLinkService(params: StartOAuthLinkParams): Promi
     await assertStepUp(params);
     await assertLinkRecentAuthentication(params, 'link');
 
+    // Spares the person a round-trip to the provider when the answer is already
+    // known. It is not the authority: a link can land between this read and the
+    // callback, and the `(user_id, provider)` constraint is what refuses it there.
     if (await socialAccountsRepository.findByUserIdAndProvider(params.userId, params.provider))
     {
         throw new OAuthProviderAlreadyLinkedError({ details: { provider: params.provider } });
     }
 
+    const codeVerifier = generateCodeVerifier();
     const state = await createOAuthLinkState({
         provider: params.provider,
         userId: String(params.userId),
         returnUrl: params.returnUrl,
         nonce: params.nonce,
         startId: params.startId,
+        codeVerifier,
     });
 
-    return { authUrl: oauthProvider.getAuthUrl(state) };
+    return { authUrl: buildAuthorizationUrl(oauthProvider, state, codeVerifier) };
 }
 
 export interface OAuthLinkCallbackParams
@@ -109,10 +117,11 @@ export interface OAuthLinkCallbackParams
 /**
  * Finish a link whose state opened and whose CSRF cookie matched.
  *
- * The account is locked for the rest of the transaction before its status is
+ * The provider is asked first, outside any transaction. The writes then run in
+ * a transaction this service opens: the account is locked before its status is
  * read, so two links finishing at once for one account are decided one after
- * the other, and a deletion request that commits meanwhile is seen. Runs under
- * the callback route's `Transactional()`.
+ * the other, and a deletion request that commits meanwhile is seen. A refusal
+ * throws and rolls it back; the route maps the error to an outcome afterwards.
  *
  * @throws OAuthProviderError when the provider fails; the account-status errors
  *   when the account can no longer sign in
@@ -120,24 +129,30 @@ export interface OAuthLinkCallbackParams
 export async function oauthLinkCallbackService(params: OAuthLinkCallbackParams): Promise<OAuthLinkOutcome>
 {
     const oauthProvider = requireEnabledProvider(params.provider);
-    const tokens = await fromProvider(() => oauthProvider.exchangeCodeForTokens(params.code, { state: params.state }));
-    const identity = tokens.identity ?? await fromProvider(() => oauthProvider.getUserInfo(tokens.accessToken));
+    const { tokens, identity } = await identifyWithProvider(oauthProvider, params.code, {
+        state: params.state,
+        codeVerifier: exchangeCodeVerifier(oauthProvider, params.link.codeVerifier),
+    });
     const userId = Number(params.link.userId);
 
-    // Lock first, then read the status: a status change that commits between an
-    // earlier read and the lock would otherwise attach the identity to an
-    // account that is already pending deletion.
-    await usersRepository.lockById(userId);
-    await assertActiveForOAuthSession(userId, () => new OAuthAccountNotFoundError());
+    return await runInTransaction(async () =>
+    {
+        // Lock first, then read the status: a status change that commits between
+        // an earlier read and the lock would otherwise attach the identity to an
+        // account that is already pending deletion.
+        await usersRepository.lockById(userId);
+        await assertActiveForOAuthSession(userId, () => new OAuthAccountNotFoundError());
 
-    return await attachIdentity(userId, params.provider, identity, tokens);
+        return await attachIdentity(userId, params.provider, identity, tokens);
+    }, { context: 'auth:oauth-link-callback' });
 }
 
 /**
  * Attach the identity, or say why not. Nothing is written for a refusal.
  *
- * `createIfAbsent` coming back empty means another account attached the same
- * identity between the read and the write; its row stands.
+ * The insert writes nothing when either rule of the table stands in the way —
+ * another account holds the identity, or this account holds another identity of
+ * the provider — and `socialAccountConflict` reads which one.
  */
 async function attachIdentity(
     userId: number,
@@ -153,11 +168,6 @@ async function attachIdentity(
         return owner.userId === userId ? await refreshLink(owner, identity, tokens) : 'linked_elsewhere';
     }
 
-    if (await socialAccountsRepository.findByUserIdAndProvider(userId, provider))
-    {
-        return 'provider_already_linked';
-    }
-
     const created = await socialAccountsRepository.createIfAbsent({
         userId,
         provider,
@@ -171,7 +181,7 @@ async function attachIdentity(
 
     if (!created)
     {
-        return 'linked_elsewhere';
+        return await socialAccountConflict(provider, identity.providerUserId);
     }
 
     onAfterCommit(() => oauthLinkedEvent.emit({
@@ -186,14 +196,14 @@ async function attachIdentity(
 
 /** Linking an identity the account already holds: keep the row, take the new tokens and handle. */
 async function refreshLink(
-    account: UserSocialAccount,
+    account: SocialAccountLink,
     identity: NormalizedIdentity,
     tokens: OAuthTokens,
 ): Promise<'linked'>
 {
     await socialAccountsRepository.updateTokens(account.id, {
         accessToken: tokens.accessToken,
-        refreshToken: tokens.refreshToken ?? account.refreshToken,
+        refreshToken: tokens.refreshToken,
         tokenExpiresAt: tokenExpiryDate(tokens.expiresIn),
         providerHandle: identity.handle ?? account.providerHandle,
     });
@@ -232,6 +242,8 @@ export interface UnlinkOAuthParams
  * identity (#157) is never a way in, so its removal is never refused. The account is locked
  * before anything is read, so two unlinks at once cannot both count the other's
  * identity as the one that remains. Runs under the route's `Transactional()`.
+ * Reads the link without its stored tokens, so a token that no longer decrypts
+ * does not stand in the way of removing it.
  *
  * Does not depend on the provider being configured: an operator who removed a
  * provider's settings has not taken away the owner's right to detach it.

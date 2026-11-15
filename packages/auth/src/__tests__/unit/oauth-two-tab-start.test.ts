@@ -113,6 +113,7 @@ function provider(): OAuthProvider
     return {
         id: 'superself',
         isEnabled: () => true,
+        pkce: 'S256',
         getAuthUrl: (state: string) => `https://idp.example/auth?state=${state}`,
         exchangeCodeForTokens: async () =>
         {

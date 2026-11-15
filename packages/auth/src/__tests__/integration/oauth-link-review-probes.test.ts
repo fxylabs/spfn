@@ -78,6 +78,7 @@ function standIn(id: OAuthProvider['id']): OAuthProvider
     return {
         id,
         isEnabled: () => true,
+        pkce: 'S256',
         getAuthUrl: (state: string) => `https://provider.example/${id}/authorize?state=${state}`,
         exchangeCodeForTokens: async (code: string) =>
         {

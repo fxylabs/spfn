@@ -38,6 +38,8 @@ vi.mock('../../server/services/oauth.service', () => ({
     createOrLinkUser,
     assertActiveForOAuthSession,
     backfillVerifiedEmail: vi.fn(async () => undefined),
+    // One attempt: the retry itself is under test in oauth-sign-in-race.test.ts.
+    retryContendedSignIn: (_provider: unknown, attempt: () => Promise<unknown>) => attempt(),
 }));
 
 vi.mock('../../server/services/key.service', () => ({ registerPublicKeyService }));
@@ -80,7 +82,9 @@ import {
     NativeSignInUnsupportedError,
     NonceKeyBindingError,
     OAuthEmailInUseError,
+    OAuthProviderAlreadyLinkedError,
     OAuthProviderLinkOnlyError,
+    OAuthSignInContendedError,
     SignupDisabledError,
     UnverifiedEmailLinkError,
 } from '@spfn/auth/errors';
@@ -224,6 +228,30 @@ describe('native sign-in answers each failure path with its own code', () =>
         expect(registerPublicKeyService).not.toHaveBeenCalled();
     });
 
+    it('cell 6d — the email-matched account already holds another identity of the provider (au5-A3): OAuthProviderAlreadyLinkedError 409', async () =>
+    {
+        const refusal = new OAuthProviderAlreadyLinkedError({ details: { provider: 'kakao' } });
+        createOrLinkUser.mockRejectedValueOnce(refusal).mockRejectedValueOnce(refusal);
+        const key = generateClientKey();
+
+        await expect(oauthNativeService(paramsFor(key))).rejects.toMatchObject({ code: 'OAUTH_PROVIDER_ALREADY_LINKED' });
+        expect(await refusalOf(() => oauthNativeService(paramsFor(key))))
+            .toEqual({ code: 'OAuthProviderAlreadyLinkedError', status: 409 });
+        expect(registerPublicKeyService).not.toHaveBeenCalled();
+    });
+
+    it('cell 6e — a concurrent first sign-in attached the identity, twice over (PR #314 F2): OAuthSignInContendedError 409', async () =>
+    {
+        const refusal = new OAuthSignInContendedError({ details: { provider: 'kakao' } });
+        createOrLinkUser.mockRejectedValueOnce(refusal).mockRejectedValueOnce(refusal);
+        const key = generateClientKey();
+
+        await expect(oauthNativeService(paramsFor(key))).rejects.toMatchObject({ code: 'OAUTH_SIGN_IN_CONTENDED' });
+        expect(await refusalOf(() => oauthNativeService(paramsFor(key))))
+            .toEqual({ code: 'OAuthSignInContendedError', status: 409 });
+        expect(registerPublicKeyService).not.toHaveBeenCalled();
+    });
+
     it('cell 7 — account not active: AccountDisabledError 403', async () =>
     {
         assertActiveForOAuthSession.mockRejectedValueOnce(new AccountDisabledError({ status: 'suspended' }));
@@ -275,6 +303,11 @@ describe('native sign-in answers each failure path with its own code', () =>
             { code: 'OAuthEmailInUseError', status: 409, retryable: false },
             // Added in contract 0.13.8 (#308), cell 6c.
             { code: 'SignupDisabledError', status: 403, retryable: false },
+            // Added in contract 0.14.2 (au5-A3), cell 6d.
+            { code: 'OAuthProviderAlreadyLinkedError', status: 409, retryable: false },
+            // Added in contract 0.14.2 (PR #314 review, F2): a second contention
+            // for the identity; the first is retried and signs in.
+            { code: 'OAuthSignInContendedError', status: 409, retryable: false },
             { code: 'TooManyRequestsError', status: 429, retryable: true },
             { code: 'Error', status: 500, retryable: false },
         ];

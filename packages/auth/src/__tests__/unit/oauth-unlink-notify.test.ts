@@ -123,7 +123,7 @@ describe('Naver unlink notification verification', () =>
         vi.unstubAllEnvs();
     });
 
-    it('verifies the signature and decrypts the unique id', async () =>
+    it('refuses a validly signed notification whose timestamp is from 2023 (a replay)', async () =>
     {
         const encrypted = encryptUniqueId('NAVER_UNIQUE_ID_001');
         const timestamp = '1693877406';
@@ -136,7 +136,7 @@ describe('Naver unlink notification verification', () =>
                 timestamp,
                 signature: sign(encrypted, timestamp),
             },
-        })).resolves.toMatchObject({ providerUserId: 'NAVER_UNIQUE_ID_001' });
+        })).rejects.toMatchObject({ status: 400 });
     });
 
     it('answers success with 204 No Content per the Naver spec', () =>
@@ -177,7 +177,7 @@ describe('Naver unlink notification verification', () =>
     it('rejects with 400 when encryptUniqueId is validly signed but not decryptable', async () =>
     {
         const garbage = Buffer.concat([randomBytes(16), randomBytes(8)]).toString('base64url');
-        const timestamp = '1693877406';
+        const timestamp = String(Math.floor(Date.now() / 1000));
 
         await expect(naverProvider.verifyUnlinkNotification!({
             authorization: null,

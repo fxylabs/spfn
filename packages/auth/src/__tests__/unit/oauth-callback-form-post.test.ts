@@ -28,7 +28,7 @@ import {
     type OAuthProvider,
     type OAuthTokens,
 } from '../../server/lib/oauth';
-import { createOAuthState } from '../../server/lib/oauth/state';
+import { createOAuthState, verifyOAuthState } from '../../server/lib/oauth/state';
 import { buildStartCookieName } from '../../server/lib/oauth/start-cookies';
 import { socialAccountsRepository } from '../../server/repositories';
 import { mainAuthRouter } from '../../server/routes';
@@ -51,6 +51,7 @@ function formPostProvider(): OAuthProvider
         id: 'apple',
         callbackResponseMode: 'form_post',
         isEnabled: () => fake.enabled,
+        pkce: 'S256',
         getAuthUrl: (state: string) => `https://idp.example/auth?state=${state}`,
         exchangeCodeForTokens: async (_code: string, options: OAuthCodeExchangeOptions): Promise<OAuthTokens> =>
         {
@@ -219,7 +220,7 @@ describe('POST /_auth/oauth/:provider/callback (form_post)', () =>
         expect(response.headers.get('location')).toBeNull();
     });
 
-    it('P6: the GET callback hands { state, user } to the exchange; identity skips getUserInfo', async () =>
+    it('P6: the GET callback hands { state, user, codeVerifier } to the exchange; identity skips getUserInfo', async () =>
     {
         // Stop the sign-in right after step 2 — the rows below are about steps 1 and 2.
         vi.spyOn(socialAccountsRepository, 'findByProviderAndProviderId')
@@ -230,7 +231,7 @@ describe('POST /_auth/oauth/:provider/callback (form_post)', () =>
         const hop = await postForm(app, '/_auth/oauth/apple/callback', [['code', 'c'], ['state', state], ['user', USER_JSON]]);
         await followWithCookie(app, hop.headers.get('location')!);
 
-        expect(fake.exchanges).toEqual([{ state, user: USER_JSON }]);
+        expect(fake.exchanges).toEqual([{ state, user: USER_JSON, codeVerifier: (await verifyOAuthState(state)).codeVerifier }]);
         expect(fake.userInfoCalls).toBe(0);
 
         fake.returnsIdentity = false;

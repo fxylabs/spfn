@@ -430,8 +430,19 @@ import { CLIENT_IDENTITY_HEADERS, CLIENT_KINDS, SERVER_CONTRACT_HEADERS } from '
  * declared response field, type or error changes. A consumer generated against
  * 0.14.0 keeps decoding every answer it can get — the 202 a rotation now gets
  * is one it already handles — so the supported range does not move.
+ *
+ * 0.14.2 lists `OAuthProviderAlreadyLinkedError` (409) (au5-A3). An account
+ * holds one identity per provider, now as a database constraint, and
+ * `auth.enroll.oauthNative` refuses a first sign-in whose email matches an
+ * account that already holds another identity of the same provider with this
+ * code. It lists `OAuthSignInContendedError` (409) too: a first
+ * sign-in that lost a race — a concurrent sign-in or sign-up committed the same
+ * identity or email address first — is run again against what that one
+ * committed; only a second contention answers this. A patch, by
+ * 0.10.1's rule: codes join the open list, and no operation, type or enum
+ * changes shape, so the supported range does not move.
  */
-export const CONTRACT_VERSION = '0.14.1';
+export const CONTRACT_VERSION = '0.14.2';
 export const CONTRACT_MAJOR = 0;
 export const CONTRACT_NAME = 'spfn-mobile-contract';
 
@@ -1228,7 +1239,19 @@ interface RestSurfaceError
  * refuses a first sign-in whose email an existing account holds (#156).
  *
  * `SignupDisabledError` (contract 0.13.8) is native sign-in's alone too: the
- * app turned sign-up off and the sign-in would have created an account (#308). *
+ * app turned sign-up off and the sign-in would have created an account (#308).
+ *
+ * `OAuthProviderAlreadyLinkedError` (contract 0.14.2) is native sign-in's alone
+ * on this surface: the email matched an account that already holds another
+ * identity of the provider (au5-A3).
+ *
+ * `OAuthSignInContendedError` (contract 0.14.2) is native sign-in's alone too: a
+ * concurrent sign-in or sign-up committed the same identity or email address
+ * first, and the sign-in, run once more against what that one committed, still
+ * could not settle it.
+ * Not `retryable` in the contract's sense — a new sign-in, not the same request,
+ * settles it.
+ *
  * `ChannelDisabledError` (contract 0.13.8) is every operation's that carries
  * `closedChannel`: the app turned that sign-in channel off (#308).
  *
@@ -1322,6 +1345,22 @@ const REST_SURFACE_ERRORS: readonly RestSurfaceError[] = [
         summary:
             'a first sign-in with this provider reported the email of an existing account and the app refuses it '
             + '— sign in to that account another way and link the provider from settings',
+    },
+    {
+        code: 'OAuthProviderAlreadyLinkedError',
+        httpStatus: 409,
+        retryable: false,
+        summary:
+            'a first sign-in with this provider matched an account by email, and that account already holds another '
+            + 'identity of the same provider — one per provider per account; the other one is unlinked first',
+    },
+    {
+        code: 'OAuthSignInContendedError',
+        httpStatus: 409,
+        retryable: false,
+        summary:
+            'a concurrent sign-in or sign-up committed the same provider identity or email address first, and '
+            + 'running this sign-in again did not settle it — nothing was written; sign in again',
     },
     {
         code: 'SignupDisabledError',

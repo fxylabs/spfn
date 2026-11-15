@@ -23,7 +23,9 @@ import { NativeSignInUnsupportedError } from '@spfn/auth/errors';
 import { resolveAppUrl } from '../app-url';
 import { getAppleClientSecret } from './apple-client-secret';
 import { verifyIdToken } from './jwks-verify';
+import { oauthFlowNonce } from './state';
 import {
+    providerRequestSignal,
     registerOAuthProvider,
     type OAuthProvider,
     type OAuthTokens,
@@ -37,15 +39,6 @@ const APPLE_TOKEN_URL = 'https://appleid.apple.com/auth/token';
 const APPLE_JWKS_URI = 'https://appleid.apple.com/auth/keys';
 const APPLE_ISSUER = 'https://appleid.apple.com';
 const APPLE_DEFAULT_SCOPES = ['name', 'email'];
-
-/**
- * token 요청의 응답 대기 한도(ms)
- *
- * undici의 기본값은 사실상 무제한이라, Apple이 응답을 붙들고 있으면 콜백 핸들러가 몇 분씩
- * 살아남는다. 작은 POST 하나의 정상 응답은 수백 ms 수준이므로 5초면 넉넉하다.
- * 초과 시 로그인이 실패해 사용자가 재시도한다 — 무한 대기보다 낫다.
- */
-const TOKEN_TIMEOUT_MS = 5_000;
 
 interface AppleTokenResponse
 {
@@ -125,7 +118,8 @@ function getAppleClientIds(): string[]
 /**
  * Apple은 nonce를 SHA-256(hex)으로 해시해 id_token의 nonce claim에 담는다.
  *
- * native는 클라이언트의 raw nonce를, 웹은 state 문자열을 이 함수에 넣는다.
+ * native는 클라이언트의 raw nonce를 이 함수에 넣는다. 웹은 `oauthFlowNonce(state)` — the same
+ * hash of the state string, shared with the other providers whose id_token carries a nonce.
  */
 function hashNonce(rawNonce: string): string
 {
@@ -138,7 +132,7 @@ async function requestAppleTokens(params: URLSearchParams): Promise<{ tokens: OA
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
         body: params,
-        signal: AbortSignal.timeout(TOKEN_TIMEOUT_MS),
+        signal: providerRequestSignal(),
     });
 
     if (!response.ok)
@@ -243,6 +237,12 @@ export const appleProvider: OAuthProvider =
 
         callbackResponseMode: 'form_post',
 
+        pkce: {
+            unsupported: true,
+            reason: 'Sign in with Apple takes no code_challenge. The code is bound instead by the id_token nonce, '
+                + 'the SHA-256 of the state, checked at the exchange.',
+        },
+
         /**
          * state를 SHA-256(hex)한 값을 nonce로 보낸다. 콜백이 돌려받는 state가 이 문자열과 같아야
          * id_token의 nonce가 맞는다(form POST → 303 → GET query를 거쳐도 문자열은 그대로다).
@@ -257,7 +257,7 @@ export const appleProvider: OAuthProvider =
                 response_mode: 'form_post',
                 scope: (scopes ?? APPLE_DEFAULT_SCOPES).join(' '),
                 state,
-                nonce: hashNonce(state),
+                nonce: oauthFlowNonce(state),
             });
 
             return `${APPLE_AUTH_URL}?${params.toString()}`;
@@ -285,7 +285,7 @@ export const appleProvider: OAuthProvider =
                 issuer: APPLE_ISSUER,
                 audiences: [config.servicesId],
                 algorithms: ['RS256'],
-                expectedNonce: hashNonce(options.state),
+                expectedNonce: oauthFlowNonce(options.state),
             });
 
             return {

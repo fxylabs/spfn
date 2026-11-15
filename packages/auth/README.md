@@ -879,6 +879,77 @@ holding `user:read`, so an `admin` could accept a pending `superadmin` invitatio
   the metadata, and an array took it as an appended element. A row stored earlier with non-object
   metadata keeps it under `legacyMetadata` when cancelled, so the result is always an object.
 
+### Migration — social OAuth: refusals write nothing, one identity per provider, PKCE
+
+**Breaking** (au5, superself w-tfhek). Four changes an app can notice:
+
+- **Unknown policy values refuse at configuration.** `configureAuth` throws, naming the option and
+  the values it accepts, for any value outside the declared set: `oauthEmailMatch` (`'Reject'` used
+  to read as `'attach'`), `csrf.mode`, a name under `oauthProviders` that is not a provider, an
+  option under a provider or under `oauthLink` that does not exist (`signin` for `signIn`), and a
+  `signIn` / `recentAuth.link` / `recentAuth.unlink` that is not a boolean (the string `'false'`
+  used to leave sign-in on; `0` used to turn the recent-authentication rule off).
+  `createAuthLifecycle({ deletion })` refuses a `purgeStrategy` other than `'anonymize'` /
+  `'hard-delete'` and an `allowSelfImmediate` / `sendNotifications` that is not a boolean. A
+  `configureAuth` call in `server.config.ts` that throws makes the server refuse to start
+  (`@spfn/core` stops the boot when `server.config` fails to load), so fix the value before you
+  deploy.
+- **A second identity of a provider is refused.** `user_social_accounts` gets
+  `UNIQUE (user_id, provider)`. A first sign-in whose email matches an account that already holds
+  another identity of the same provider is refused — the web error page with
+  `reason=provider_already_linked`, native `409 OAUTH_PROVIDER_ALREADY_LINKED`
+  (`OAuthProviderAlreadyLinkedError`, mobile contract 0.14.2) — and the account keeps its one link.
+  The migration first deletes, for an account holding several rows of one provider, every row but
+  the one with the greatest `updated_at` — the row most recently linked, or most recently used to
+  sign in on the web flow (a web sign-in stores fresh provider tokens on it; a native sign-in
+  leaves the row untouched) — and the greatest `id` breaks a tie. To see the accounts it will
+  touch, run this before upgrading:
+
+  ```sql
+  SELECT user_id, provider, count(*) AS links,
+         array_agg(provider_user_id ORDER BY updated_at DESC, id DESC) AS newest_first
+  FROM spfn_auth.user_social_accounts
+  GROUP BY user_id, provider
+  HAVING count(*) > 1;
+  ```
+
+  After an unlink the account holds no identity of that provider, so that identity no longer
+  signs in to it.
+- **A sign-in that acted on a read another transaction made stale runs once more.** A sign-in
+  reads — no link for the identity, no account holding its verified address — and writes on that
+  premise. When a concurrent sign-in or sign-up commits the same identity or address in between,
+  the write breaks a unique constraint (`users_email_unique`, or the social table's two rules,
+  which the link insert meets by writing nothing), the transaction rolls back, and the sign-in
+  runs once more against what the other one committed: two first sign-ins of one identity (a
+  double click) land on one account, the winner's; a linked sign-in whose address backfill
+  waited on someone else's sign-up of that address succeeds without the address. The provider
+  is asked once; `beforeRegister` runs once per attempt that makes an account; events fire once,
+  for the attempt that committed. A refusal is never retried. Stale on that second run as well,
+  it is refused with `OAuthSignInContendedError` (web `reason=sign_in_contended`, native
+  `409 OAUTH_SIGN_IN_CONTENDED`, mobile contract 0.14.2); it used to answer a 500 / `reason=failed`.
+- **Custom providers declare PKCE (BREAKING for provider authors).** Every authorization-code
+  flow now carries PKCE (S256): the start seals a verifier into the state and the package adds
+  `code_challenge` to the URL `getAuthUrl` returns; `exchangeCodeForTokens` receives
+  `options.codeVerifier` and must send it as `code_verifier`. `OAuthProvider.pkce` is required:
+  `'S256'`, or `{ unsupported: true, reason }` for a provider that cannot do it (it then receives no
+  verifier). `registerOAuthProvider()` throws, naming the provider, for one that declares neither —
+  a provider written in plain JavaScript or against the earlier type, where `pkce` was optional,
+  is refused at registration rather than run without PKCE. Add `pkce: 'S256'` once its exchange
+  sends `code_verifier`. A sign-in state sealed before the upgrade (it carries no verifier) is
+  refused as `invalid_state`; it lives ten minutes.
+- **Stored provider tokens are decrypted only where they are used.**
+  `socialAccountsRepository.findByProviderAndProviderId`, `findByUserIdAndProvider` and
+  `findByUserId` answer `SocialAccountLink` — the row without `accessToken` / `refreshToken` —
+  and `create` is gone (`createIfAbsent` answers `null` when either uniqueness rule stands in the
+  way). Code that read tokens off a lookup calls `socialAccountsRepository.readTokens(id)`, which
+  decrypts them and re-encrypts any under a retired key. A token that no longer decrypts blocks
+  only that call, never a sign-in, the link list or an unlink.
+
+Also, without a migration step: a refused web sign-in or link writes nothing (the callback routes
+run no `Transactional()`; the services open their own transaction after the provider calls and the
+error page is built after the rollback), every provider HTTP call times out after 5 seconds, and a
+Naver unlink notification more than five minutes from now is refused.
+
 ### Invitations
 
 An invitation lets an account with `user:invite` bring someone in with a role it is allowed to
@@ -2572,6 +2643,11 @@ plus the provider-generic `POST /_auth/oauth/start`, `GET /_auth/oauth/:provider
 valid Google access token (auto-refreshing via stored refresh token when near expiry; throws if
 no Google account is linked or no refresh token is available).
 
+Every authorization-code start carries PKCE (Google, GitHub, Kakao, Battle.net) or, for Apple, an
+id_token nonce bound to the state, so an authorization code issued to one sign-in cannot be
+finished in another; see [custom providers](#custom-providers). Every provider HTTP call gives up
+after 5 seconds, and none runs inside a database transaction.
+
 Kakao's `is_email_valid` and `is_email_verified` claims are both required before its email can
 link an existing SPFN account. GitHub uses the primary email from `/user/emails` (needs the
 `user:email` scope) and treats it as verified only when GitHub marks it verified; without that
@@ -2602,6 +2678,10 @@ configureAuth({
     oauthEmailMatch: 'reject',   // 'attach' (default) | 'reject' | 'separate'
 });
 ```
+
+Any other value — `'Reject'`, `'merge'` — makes `configureAuth` throw, naming the option and the
+three values; it is never read as `'attach'`. The same holds for every policy value
+`configureAuth` takes ([migration](#migration--social-oauth-refusals-write-nothing-one-identity-per-provider-pkce)).
 
 Someone who signed up with Google later signs in with Kakao, and Kakao reports the same email:
 
@@ -2721,8 +2801,11 @@ linked identity is one more way into the account:
   else `SPFN_AUTH_PASSKEY_RECENT_AUTH_MINUTES`, else 10 minutes. The app can turn this rule off
   per provider; [see below](#link-only-providers-and-recent-authentication).
 
-An account holds at most one identity per provider: a start for a provider the account already
-holds is `409 OAUTH_PROVIDER_ALREADY_LINKED`. The Next.js interceptor `oauthLinkInterceptor`
+An account holds at most one identity per provider — a `UNIQUE (user_id, provider)` constraint
+every write meets: a start for a provider the account already holds is
+`409 OAUTH_PROVIDER_ALREADY_LINKED`, a link that meets the constraint at the callback ends
+`provider_already_linked`, and a first sign-in that would attach a second identity by email is
+refused with `reason=provider_already_linked`. The Next.js interceptor `oauthLinkInterceptor`
 checks `returnUrl`, injects the CSRF nonce, and sets the CSRF cookie the callback checks, exactly
 as a sign-in start does — a link finished in a browser that did not start it is refused.
 
@@ -2966,7 +3049,13 @@ type. Branch on `reason`; show `error` if you like. The codes are the closed uni
 | `link_only` | the app made this provider [link-only](#link-only-providers-and-recent-authentication): it can be connected from a signed-in account, never used to sign in (added in 0.3.0-beta.50, #157) | a fixed sentence |
 | `email_in_use` | a first sign-in with this provider reported the email of an existing account and the app set [`oauthEmailMatch: 'reject'`](#when-a-first-sign-ins-email-matches-an-existing-account), or `'attach'` found that email on several accounts stored in different cases (added in 0.3.0-beta.51, #156) | a fixed sentence |
 | `signup_disabled` | a first sign-in with this provider would have created an account, and the app turned sign-up off with [`channels: { signup: false }`](#which-sign-in-channels-exist-channels) (#308) | a fixed sentence |
+| `provider_already_linked` | a first sign-in with this provider matched an account by email, and that account already holds another identity of the same provider — one per provider per account (au5) | a fixed sentence |
+| `sign_in_contended` | a concurrent sign-in or sign-up committed the same identity or address first, and running this one again did not settle it — signing in again does; nothing was written | a fixed sentence |
 | `failed` | anything else — missing `code`/`state`, an unverified email that would link an account (`oauthEmailMatch` unset or `'attach'`), a missing role | unchanged |
+
+A refused sign-in writes nothing: no account, no social row, no key, no stored token, no event.
+The callback asks the provider first, then does every write in one transaction, and builds the
+error page only after that transaction rolled back.
 
 `SPFN_AUTH_OAUTH_ERROR_URL` takes `{reason}` beside `{error}`
 (`/auth/error?error={error}&code={reason}`); a template without `{reason}` gets `reason` as a query
@@ -2993,7 +3082,12 @@ Register in the provider console:
 | Provider | Console setting | URL to register | Verification | Success response |
 |----------|-----------------|-----------------|--------------|------------------|
 | Kakao | [앱] > [웹훅] > 연결 해제 웹훅 | `https://<host>/_auth/oauth/kakao/unlink-notify` | `Authorization: KakaoAK <admin key>` vs `SPFN_AUTH_KAKAO_ADMIN_KEY` | 200 within 3s |
-| Naver | API 설정 > 연결끊기 Callback URL | `https://<host>/_auth/oauth/naver/unlink-notify` | HMAC-SHA256 signature + AES-128-CBC `encryptUniqueId` (key = `md5(client_secret)[0..16]`) | 204 No Content |
+| Naver | API 설정 > 연결끊기 Callback URL | `https://<host>/_auth/oauth/naver/unlink-notify` | HMAC-SHA256 signature + AES-128-CBC `encryptUniqueId` (key = `md5(client_secret)[0..16]`), and a signed `timestamp` within five minutes of now | 204 No Content |
+
+The signature proves Naver sent a notification, not when. A notification whose `timestamp` is
+more than five minutes from the server's clock is refused with 400 and changes nothing, so a
+captured one cannot be replayed to remove a link made later or to announce `auth.oauth.unlinked`
+again. Naver does not retry a failed notification. Keep the server's clock synchronized.
 
 The framework only severs the link. What happens next (keep the account, start account
 deletion, …) is app policy — subscribe to the event:
@@ -3108,6 +3202,8 @@ tell the fourteen ways this call fails apart:
 | `KeyIdAlreadyRegisteredError` | 409 | generate a new keyId and retry |
 | `OAuthEmailInUseError` | 409 | tell the user an account with this email exists: sign in to it and link this provider — the app set [`oauthEmailMatch: 'reject'`](#when-a-first-sign-ins-email-matches-an-existing-account) |
 | `SignupDisabledError` | 403 | `code: 'SIGNUP_DISABLED'` — tell the user this app does not create accounts by sign-in; the app set [`channels: { signup: false }`](#which-sign-in-channels-exist-channels) |
+| `OAuthProviderAlreadyLinkedError` | 409 | `code: 'OAUTH_PROVIDER_ALREADY_LINKED'` — the account this email matched already holds another identity of this provider; sign in to it and unlink that one first |
+| `OAuthSignInContendedError` | 409 | `code: 'OAUTH_SIGN_IN_CONTENDED'` — a concurrent sign-in or sign-up committed this identity or email address first; start a new sign-in (a fresh id_token) |
 | `TooManyRequestsError` | 429 | **the only retry-the-same-request code** |
 | `Error` | 500 | generic failure |
 
@@ -3241,6 +3337,25 @@ A provider without a userinfo endpoint returns the identity its token response e
 `callbackResponseMode: 'form_post'` declares a provider that returns with a cross-site POST, which
 `POST /_auth/oauth/:provider/callback` accepts and 303-redirects to the GET callback.
 
+**PKCE is part of the contract.** The start seals a fresh verifier into the state and the package
+adds `code_challenge` (S256) and `code_challenge_method` to the URL `getAuthUrl()` returns;
+`exchangeCodeForTokens()` receives the verifier as `options.codeVerifier` and must send it as
+`code_verifier`. Every provider declares it — `registerOAuthProvider()` throws, naming the
+provider, when `pkce` is missing or is neither of the two forms. One that cannot do PKCE says so,
+and only then is the challenge left out:
+
+```typescript
+pkce: 'S256',
+// or
+pkce: { unsupported: true, reason: 'what binds the code instead, if anything' },
+```
+
+Built in: Google, GitHub, Kakao and Battle.net do PKCE. Apple and Naver declare it unsupported —
+Apple binds the code with the id_token nonce (the SHA-256 of the state), and Naver's OAuth 2.0
+surface takes no `code_challenge`. A provider whose token response carries an OpenID id_token binds
+`oauthFlowNonce(state)` as its `nonce` and checks it at the exchange, as Apple, Google and Kakao do.
+Give every HTTP call `providerRequestSignal()` (5 seconds).
+
 ```typescript
 import {
     registerOAuthProvider, getOAuthProvider, getRegisteredProviders,
@@ -3275,6 +3390,11 @@ those tokens undecryptable. Ciphertext is bound to `provider`, `providerUserId`,
 (`access` or `refresh`) with authenticated data, preventing ciphertext from being moved to another
 account or field.
 
+Tokens are decrypted only where they are used: `getGoogleAccessToken()` and
+`socialAccountsRepository.readTokens(id)`, which is also where a token under an older key is
+re-encrypted. A sign-in, the link list and an unlink read the social row without its tokens, so a
+key removed by mistake makes those tokens unusable without locking anyone out.
+
 Deployments that need a KMS or per-account envelope encryption can call
 `configureOAuthTokenCipher()` from `@spfn/auth/server` before the server starts. The custom cipher
 receives the same account/token context and owns its key rotation policy.
@@ -3283,8 +3403,9 @@ receives the same account/token context and owns its key rotation policy.
 
 - The built-in provider-generic callback route handles any registered provider. A custom callback is
   only needed when the provider does not follow the standard `code` / `state` response contract.
-- If a custom callback calls `oauthCallbackService()` directly, wrap the route in `Transactional()`
-  (`import { Transactional } from '@spfn/core/db'`).
+- If a custom callback calls `oauthCallbackService()` directly, do **not** wrap the route in
+  `Transactional()`: the service asks the provider first and then opens its own transaction, and a
+  refusal it throws has already been rolled back when your route turns it into a redirect.
 - The provider `id` must be in `SOCIAL_PROVIDERS` (`enumText`, plain text — adding a value needs **no**
   DB migration).
 - `auth.login` / `auth.register` events now carry any `SOCIAL_PROVIDERS` value in `provider` —
@@ -3886,6 +4007,10 @@ Notes:
   `emailVerified` — an email-based allow/block policy must check it before trusting `email`.
 - The hook runs **inside the registration DB transaction** on every channel — keep it fast.
   A slow call (e.g. an external policy API) holds a pooled DB connection open per signup.
+- On the `oauth` channel it can run **twice for one sign-in**: a sign-in that lost a race with a
+  concurrent sign-in or sign-up of the same identity or address is rolled back and run once more,
+  hook included. A rejection is not retried. Put side effects in `authRegisterEvent`, which fires
+  once, for the attempt that committed.
 - On the **web** OAuth flow a rejection surfaces as the standard OAuth error redirect
   (302 to the app's OAuth error URL, message only) — not a 403 JSON response. The native
   OAuth flow, credentials, and invitation channels return the error status (403) directly.

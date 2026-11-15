@@ -72,6 +72,7 @@ function battlenetStandIn(enabled = true): OAuthProvider
     return {
         id: 'battlenet',
         isEnabled: () => enabled,
+        pkce: 'S256',
         getAuthUrl: (state: string) => `https://oauth.battle.example/authorize?state=${state}`,
         exchangeCodeForTokens: async (code: string) =>
         {
@@ -92,6 +93,7 @@ function enabledStandIn(id: SocialProvider, extra: Partial<OAuthProvider> = {}):
     return {
         id,
         isEnabled: () => true,
+        pkce: 'S256',
         getAuthUrl: (state: string) => `https://${id}.example/authorize?state=${state}`,
         exchangeCodeForTokens: async () =>
         {

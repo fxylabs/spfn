@@ -15,7 +15,7 @@
  * `server/jobs/deletion-purge.ts` and the README.
  */
 
-import type { PurgeStrategy } from '../types';
+import { PURGE_STRATEGIES, type PurgeStrategy } from '../types';
 
 export interface AccountDeletionPurgeUser
 {
@@ -70,9 +70,17 @@ let config: AuthDeletionConfig = {
  * Set the resolved deletion config. Called synchronously from `createAuthLifecycle()`
  * (not from `afterInfrastructure`) so it takes effect before any route/job handler
  * that reads `getDeletionConfig()` can run.
+ *
+ * @throws Error for a `purgeStrategy` outside `PURGE_STRATEGIES`, or an
+ *   `allowSelfImmediate` / `sendNotifications` that is not a boolean — the
+ *   string `'false'` would otherwise read as true
  */
 export function configureDeletion(options?: Partial<AuthDeletionConfig>): void
 {
+    assertDeletionOption('purgeStrategy', options?.purgeStrategy, PURGE_STRATEGIES);
+    assertDeletionOption('allowSelfImmediate', options?.allowSelfImmediate, [true, false]);
+    assertDeletionOption('sendNotifications', options?.sendNotifications, [true, false]);
+
     config = {
         gracePeriodDays: options?.gracePeriodDays ?? DEFAULT_DELETION_GRACE_PERIOD_DAYS,
         purgeStrategy: options?.purgeStrategy ?? DEFAULT_DELETION_PURGE_STRATEGY,
@@ -81,6 +89,14 @@ export function configureDeletion(options?: Partial<AuthDeletionConfig>): void
         sendNotifications: options?.sendNotifications ?? DEFAULT_DELETION_SEND_NOTIFICATIONS,
         onBeforePurge: options?.onBeforePurge,
     };
+}
+
+function assertDeletionOption(name: string, value: unknown, allowed: readonly unknown[]): void
+{
+    if (value !== undefined && !allowed.includes(value))
+    {
+        throw new Error(`deletion.${name} does not accept ${JSON.stringify(value)}. Allowed: ${allowed.join(', ')}.`);
+    }
 }
 
 /**

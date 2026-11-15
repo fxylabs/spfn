@@ -6,6 +6,7 @@
  * - nonce: CSRF 방지용 일회용 토큰
  * - provider: OAuth provider (google, github 등)
  * - publicKey, keyId, fingerprint, algorithm: 클라이언트 키 정보
+ * - codeVerifier: the PKCE verifier, made here and sent only at the code exchange
  * - expiresAt: state 만료 시간
  *
  * The Android start of Sign in with Apple seals a second kind of state —
@@ -13,6 +14,7 @@
  * neither verifier accepts the other's.
  */
 
+import { createHash, randomBytes } from 'node:crypto';
 import * as jose from 'jose';
 import { env } from '@spfn/auth/config';
 import { OAuthStateExpiredError, OAuthStateInvalidError } from '@spfn/auth/errors';
@@ -28,6 +30,8 @@ export interface OAuthState
     fingerprint: string;
     algorithm: KeyAlgorithmType;
     metadata?: Record<string, unknown>;
+    /** The PKCE verifier of this flow (RFC 7636); its S256 challenge goes to the provider. */
+    codeVerifier: string;
 }
 
 /**
@@ -73,6 +77,34 @@ export function generateOAuthNonce(): string
     return generateNonce();
 }
 
+/**
+ * A PKCE code verifier: 32 random bytes, base64url — 43 characters, the
+ * shortest RFC 7636 allows, with 256 bits of entropy.
+ */
+export function generateCodeVerifier(): string
+{
+    return randomBytes(32).toString('base64url');
+}
+
+/** The S256 code challenge of a verifier (RFC 7636 §4.2). */
+export function pkceChallenge(codeVerifier: string): string
+{
+    return createHash('sha256').update(codeVerifier).digest('base64url');
+}
+
+/**
+ * The nonce a code flow binds into the provider's id_token: the SHA-256 (hex) of
+ * the sealed state the flow sent.
+ *
+ * The callback receives that same state back, so it can recompute the nonce
+ * without storing it, and an id_token issued to another flow carries another
+ * state's hash.
+ */
+export function oauthFlowNonce(state: string): string
+{
+    return createHash('sha256').update(state).digest('hex');
+}
+
 export interface CreateOAuthStateParams
 {
     provider: string;
@@ -108,6 +140,7 @@ export async function createOAuthState(params: CreateOAuthStateParams): Promise<
         fingerprint: params.fingerprint,
         algorithm: params.algorithm,
         metadata: params.metadata,
+        codeVerifier: generateCodeVerifier(),
     };
 
     const jwe = await new jose.EncryptJWT({ state })
@@ -127,7 +160,7 @@ export async function createOAuthState(params: CreateOAuthStateParams): Promise<
  * @returns 복호화된 state 객체
  * @throws OAuthStateExpiredError past the ten minutes (jose's exp check)
  * @throws OAuthStateInvalidError for anything that does not decrypt, or decrypts
- *   to a state without its keyId and nonce
+ *   to a state without its keyId, nonce and PKCE verifier
  */
 export async function verifyOAuthState(encryptedState: string): Promise<OAuthState>
 {
@@ -138,7 +171,7 @@ export async function verifyOAuthState(encryptedState: string): Promise<OAuthSta
         .catch((cause: unknown) => Promise.reject(stateRefusal(cause)));
     const state = payload.state as OAuthState | undefined;
 
-    if (typeof state?.keyId !== 'string' || typeof state.nonce !== 'string')
+    if (typeof state?.keyId !== 'string' || typeof state.nonce !== 'string' || typeof state.codeVerifier !== 'string')
     {
         throw new OAuthStateInvalidError();
     }
@@ -172,6 +205,8 @@ export interface OAuthLinkState
     nonce: string;
     /** Names the CSRF cookie the link start set, standing where a sign-in's keyId does. */
     startId: string;
+    /** The PKCE verifier of this flow, as a sign-in state carries it. */
+    codeVerifier: string;
 }
 
 async function getLinkStateKey(): Promise<Uint8Array>
@@ -220,7 +255,7 @@ export async function openOAuthLinkState(sealed: string): Promise<OAuthLinkState
 function linkStateOf(payload: jose.JWTPayload): OAuthLinkState | null
 {
     const link = payload.link as Partial<OAuthLinkState> | undefined;
-    const fields = [link?.provider, link?.userId, link?.returnUrl, link?.nonce, link?.startId];
+    const fields = [link?.provider, link?.userId, link?.returnUrl, link?.nonce, link?.startId, link?.codeVerifier];
 
     return fields.every(field => typeof field === 'string') ? link as OAuthLinkState : null;
 }

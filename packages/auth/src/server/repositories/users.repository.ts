@@ -5,7 +5,8 @@
  * BaseRepository를 상속받아 자동 트랜잭션 컨텍스트 지원 및 Read/Write 분리
  */
 
-import { eq, and, inArray, sql, type EmptyRelations } from 'drizzle-orm';
+import { eq, and, inArray, isNull, notExists, sql, type EmptyRelations } from 'drizzle-orm';
+import { alias, type AnyPgColumn } from 'drizzle-orm/pg-core';
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js';
 import { BaseRepository, type RepositoryDatabase } from '@spfn/core/db';
 import { EntityNotFoundError, NotFoundError } from '@spfn/core/errors';
@@ -38,9 +39,9 @@ export type FoldedEmailMatch =
  * the planner can use that index; `lower(email)` alone would not match it.
  * `lower(btrim(...))` is the SQL spelling of `normalizeEmail`.
  */
-function foldedEmailEquals(normalizedEmail: string)
+function foldedEmailEquals(normalizedEmail: string, email: AnyPgColumn = users.email)
 {
-    return sql`lower(btrim(${users.email})) = ${normalizedEmail}`;
+    return sql`lower(btrim(${email})) = ${normalizedEmail}`;
 }
 
 /**
@@ -441,6 +442,37 @@ export class UsersRepository extends BaseRepository
             .where(pending);
 
         return Number(counted?.rows ?? 0);
+    }
+
+    /**
+     * Give an account without an email a verified one — only if no account
+     * holds that address in any stored form.
+     *
+     * One statement, so the rule is the statement: the row is written when the
+     * account has no email and no committed row folds onto the address, and
+     * otherwise nothing is. `false` means there was nothing to fill, not a
+     * failure. A holder still uncommitted is invisible to the check: the UPDATE
+     * waits for it and, once it commits, raises the unique violation on
+     * `users_email_unique`. The sign-in that called it runs again
+     * (`retryContendedSignIn`), and this statement then sees the holder and
+     * fills nothing.
+     * Write primary.
+     */
+    async fillEmailIfUnheld(id: number, email: string): Promise<boolean>
+    {
+        const normalizedEmail = normalizeEmail(email);
+        const holder = alias(users, 'holder');
+        const filled = await this.db
+            .update(users)
+            .set({ email: normalizedEmail, emailVerifiedAt: new Date() })
+            .where(and(
+                eq(users.id, id),
+                isNull(users.email),
+                notExists(this.db.select({ id: holder.id }).from(holder).where(foldedEmailEquals(normalizedEmail, holder.email))),
+            ))
+            .returning({ id: users.id });
+
+        return filled.length > 0;
     }
 
     /**

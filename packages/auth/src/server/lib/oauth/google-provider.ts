@@ -12,6 +12,7 @@ import { NativeSignInUnsupportedError } from '@spfn/auth/errors';
 
 import {
     isGoogleOAuthEnabled,
+    getGoogleOAuthConfig,
     getGoogleAuthUrl,
     exchangeCodeForTokens,
     getGoogleUserInfo,
@@ -22,9 +23,11 @@ import {
     registerOAuthProvider,
     type OAuthProvider,
     type OAuthTokens,
+    type OAuthCodeExchangeOptions,
     type NormalizedIdentity,
     type NativeVerifyOptions,
 } from './provider';
+import { oauthFlowNonce } from './state';
 
 const GOOGLE_JWKS_URI = 'https://www.googleapis.com/oauth2/v3/certs';
 
@@ -54,13 +57,32 @@ export const googleProvider: OAuthProvider =
     {
         id: 'google',
 
+        pkce: 'S256',
+
         isEnabled: isGoogleOAuthEnabled,
 
         getAuthUrl: getGoogleAuthUrl,
 
-        async exchangeCodeForTokens(code: string): Promise<OAuthTokens>
+        /**
+         * The verifier goes to Google with the code. The id_token that comes back
+         * beside the tokens must carry this flow's nonce: one issued to another
+         * flow is refused before its identity is read.
+         */
+        async exchangeCodeForTokens(code: string, options: OAuthCodeExchangeOptions): Promise<OAuthTokens>
         {
-            const tokens = await exchangeCodeForTokens(code);
+            const tokens = await exchangeCodeForTokens(code, options.codeVerifier);
+
+            if (tokens.id_token)
+            {
+                await verifyIdToken({
+                    idToken: tokens.id_token,
+                    jwksUri: GOOGLE_JWKS_URI,
+                    issuer: GOOGLE_ISSUERS,
+                    audiences: [getGoogleOAuthConfig().clientId],
+                    algorithms: ['RS256'],
+                    expectedNonce: oauthFlowNonce(options.state),
+                });
+            }
 
             return {
                 accessToken: tokens.access_token,

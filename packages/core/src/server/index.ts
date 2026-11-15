@@ -39,6 +39,7 @@ export {
 } from './server';
 export type { ServerClock, ServerTimeResponse } from './server';
 export { createServerlessApp, resetServerlessApp, provisionInfrastructure } from './serverless';
+export { loadServerConfigFile, SERVER_CONFIG_FILE_PATHS } from './config-file';
 export { getShutdownManager } from './shutdown-manager';
 
 // Migration boot gate

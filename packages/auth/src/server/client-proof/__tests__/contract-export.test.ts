@@ -1643,9 +1643,9 @@ describe('declared proof rules match the implementation', () =>
         replayWindowMillis: number;
     };
 
-    it('the contract line is the revision that carries the key replacement proof', () =>
+    it('au5-A3: the contract line is the revision that lists OAuthProviderAlreadyLinkedError', () =>
     {
-        expect(bundle.contractVersion).toBe('0.14.1');
+        expect(bundle.contractVersion).toBe('0.14.2');
     });
 
     it('the supported range floor is the current minor, as the 0.x rule has it', () =>

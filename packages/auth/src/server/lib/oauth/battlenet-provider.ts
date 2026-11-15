@@ -13,8 +13,10 @@ import { ValidationError } from '@spfn/core/errors';
 import { env } from '../../../config';
 import { resolveAppUrl } from '../app-url';
 import {
+    providerRequestSignal,
     registerOAuthProvider,
     type NormalizedIdentity,
+    type OAuthCodeExchangeOptions,
     type OAuthProvider,
     type OAuthTokens,
 } from './provider';
@@ -120,6 +122,8 @@ function accountIdOf(body: BattlenetUserInfo): string
 export const battlenetProvider: OAuthProvider = {
     id: 'battlenet',
 
+    pkce: 'S256',
+
     isEnabled(): boolean
     {
         return !!(env.SPFN_AUTH_BATTLENET_CLIENT_ID && env.SPFN_AUTH_BATTLENET_CLIENT_SECRET);
@@ -139,7 +143,7 @@ export const battlenetProvider: OAuthProvider = {
         return `${config.host}/authorize?${params.toString()}`;
     },
 
-    async exchangeCodeForTokens(code: string): Promise<OAuthTokens>
+    async exchangeCodeForTokens(code: string, options: OAuthCodeExchangeOptions): Promise<OAuthTokens>
     {
         const config = getBattlenetConfig();
         const response = await fetch(`${config.host}/token`, {
@@ -153,7 +157,9 @@ export const battlenetProvider: OAuthProvider = {
                 grant_type: 'authorization_code',
                 code,
                 redirect_uri: config.redirectUri,
+                ...(options.codeVerifier ? { code_verifier: options.codeVerifier } : {}),
             }),
+            signal: providerRequestSignal(),
         });
 
         if (!response.ok)
@@ -182,6 +188,7 @@ export const battlenetProvider: OAuthProvider = {
                 'Authorization': `Bearer ${accessToken}`,
                 'Accept': 'application/json',
             },
+            signal: providerRequestSignal(),
         });
 
         if (!response.ok)

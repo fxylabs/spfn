@@ -66,6 +66,7 @@ function kakaoStandIn(): OAuthProvider
     return {
         id: 'kakao',
         isEnabled: () => true,
+        pkce: 'S256',
         getAuthUrl: (state: string) => `https://kauth.em156.example/authorize?state=${state}`,
         exchangeCodeForTokens: async (code: string) =>
             ({ accessToken: `access-${code}`, expiresIn: 86400, identity: identities.get(code) }),

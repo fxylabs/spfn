@@ -23,7 +23,7 @@ import { type SocialProvider, type KeyAlgorithmType, type KeyPlatformType } from
 import { getOAuthProvider, type NormalizedIdentity } from '../lib/oauth';
 import { providerAccountFields } from '../lib/oauth/provider-account';
 import { assertSignInProvider } from '../lib/config';
-import { createOrLinkUser, assertActiveForOAuthSession, backfillVerifiedEmail } from './oauth.service';
+import { createOrLinkUser, assertActiveForOAuthSession, backfillVerifiedEmail, retryContendedSignIn } from './oauth.service';
 import { registerPublicKeyService } from './key.service';
 import type { MfaChallengeHandle } from './login-result';
 import { updateLastLoginService } from './user.service';
@@ -96,6 +96,8 @@ export interface OAuthNativeResult
  * @throws InvalidSocialTokenError id_token 검증 실패 시
  * @throws OAuthEmailInUseError `oauthEmailMatch: 'reject'`이고 이메일이 같은 계정이 있을 때
  * @throws SignupDisabledError 새 계정을 만들어야 하는데 앱이 `channels.signup`을 끈 경우
+ * @throws OAuthProviderAlreadyLinkedError 이메일로 찾은 계정이 이 provider의 다른 신원을 이미 가질 때
+ * @throws OAuthSignInContendedError 같은 신원·주소의 동시 로그인·가입과 두 번 연달아 겹쳤을 때 (409)
  */
 export async function oauthNativeService(params: OAuthNativeParams): Promise<OAuthNativeResult>
 {
@@ -164,13 +166,15 @@ function assertNonceBindsPublicKey(params: OAuthNativeParams): void
 /**
  * 검증된 신원에 사용자 연결/생성 + 공개키 등록을 한 트랜잭션으로 처리한다.
  * 이벤트는 커밋 성공 후에만 발행한다(롤백 시 유령 이벤트 방지).
+ * 읽은 전제(신원 연결 없음, 주소 비어 있음)가 먼저 커밋된 다른 트랜잭션 때문에 낡았으면
+ * 새 트랜잭션으로 한 번 더 돈다 — `retryContendedSignIn`.
  */
 async function persistNativeLogin(
     identity: NormalizedIdentity,
     params: OAuthNativeParams,
 ): Promise<OAuthNativeResult>
 {
-    return runInTransaction(async () =>
+    return retryContendedSignIn(params.provider, () => runInTransaction(async () =>
     {
         // providerUserId 우선 매칭 → 없으면 신규 생성/이메일 연결
         const existing = await socialAccountsRepository.findByProviderAndProviderId(
@@ -259,5 +263,5 @@ async function persistNativeLogin(
             })));
 
         return { mfaRequired: false, userId: String(userId), keyId: params.keyId, isNewUser, ...enrolment };
-    }, { context: 'auth:oauth-native' });
+    }, { context: 'auth:oauth-native' }));
 }

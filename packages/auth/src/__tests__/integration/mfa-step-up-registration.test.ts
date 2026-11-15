@@ -79,6 +79,7 @@ function mockProvider(providerUserId: string, email: string | null): OAuthProvid
     return {
         id: PROVIDER,
         isEnabled: () => true,
+        pkce: 'S256',
         getAuthUrl: (state: string) => `https://mock.example.com/auth?state=${state}`,
         exchangeCodeForTokens: async () => ({ accessToken: 'mock-access', expiresIn: 3600 }),
         getUserInfo: async () => ({ providerUserId, email, emailVerified: email !== null }),

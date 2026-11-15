@@ -80,6 +80,7 @@ let exchanges = 0;
 const standIn: OAuthProvider = {
     id: 'battlenet',
     isEnabled: () => true,
+    pkce: 'S256',
     getAuthUrl: (state: string) => `https://oauth.battle.example/authorize?state=${state}`,
     exchangeCodeForTokens: async (code: string) =>
     {

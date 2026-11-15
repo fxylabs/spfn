@@ -206,7 +206,9 @@ await instance.close(); // graceful shutdown (same path as SIGTERM)
 Its startup sequence:
 
 1. `loadEnv()` (env files → `process.env`)
-2. Load + merge config file (see order below) with the runtime `config` argument
+2. Load + merge config file (see order below) with the runtime `config` argument — a
+   file that exists and fails to load, or exports no plain object, rejects here, before
+   anything listens
 3. `validateServerConfig()` — throws on bad port/timeout/shutdown/healthCheck.path
 4. `lifecycle.beforeInfrastructure` → init DB (unless disabled) → init Redis (unless
    disabled) → `lifecycle.afterInfrastructure` → init pg-boss + register jobs (if `.jobs()`)
@@ -229,17 +231,48 @@ listening** and without infrastructure/shutdown. Use it for integration tests
 
 ### File-config loading order
 
-`startServer()` scans these paths (first found wins), each merged **under** the runtime
-`config` argument:
+`startServer()` and `spfn provision` load the file with one function,
+`loadServerConfigFile(cwd)` (exported from `@spfn/core/server`). It scans these paths
+(first found wins); `startServer()` merges the file **under** the runtime `config` argument:
 
 ```
 .spfn/server/server.config.mjs   (built, highest priority)
-.spfn/server/server.config       (built .js)
-src/server/server.config         (source .js)
+.spfn/server/server.config.js    (built under "type": "module")
+.spfn/server/server.config
+src/server/server.config
 src/server/server.config.ts      (source .ts, lowest)
 ```
 
 `port`/`host` resolve as `runtime ?? file ?? env (PORT/HOST) ?? defaults (4000/localhost)`.
+
+**A config file that exists and fails to load stops the boot.** If the first file found
+fails to import — a syntax error, an import that does not resolve, or top-level code that
+throws (`configureAuth()` refusing a policy value, for instance) — `startServer()` rejects
+with `Refusing to start: <path> exists but failed to load: <the import error>` (also its
+`cause`) and nothing listens. It does not fall back to a lower-priority file. Only an absent
+file means "no configuration, use defaults".
+
+**The default export must be a plain object** — what `defineServerConfig()…build()` returns,
+or an object literal. A file with only named exports, `export default 42`, a builder without
+`.build()`, or a promise refuses the same way, naming the file and what it exported. A
+promise is not awaited: nothing ever documented an async config, and awaiting one would turn
+a forgotten `await` elsewhere into a silent default. `spfn.config.js` (`loadAppConfig`)
+follows the same rule: absent means defaults; present and failing to load, or exporting no
+plain object, refuses. A CommonJS file compiled from TypeScript (`exports.default = { … }`)
+counts as its `default`: the one interop wrapper Node's `import()` puts around it is removed
+first.
+
+When the file that failed is the unbuilt `src/server/server.config.ts` and node refused it
+for being unbuilt — TypeScript it cannot run, or an import it cannot resolve, decided by the
+error's `code` — the refusal adds the `spfn build` hint. An import that is simply missing
+under tsx carries the same code as an unresolved alias, so the hint names both readings. Any
+other failure (top-level code that throws, under `spfn dev` or anywhere) prints the cause
+alone.
+
+> **BREAKING:** the failure used to be logged and skipped, and the server came up on
+> defaults — no middlewares, no routes, no lifecycle. An app that booted that way, knowingly
+> or not, now refuses to start until its config loads. A production process holding only the
+> unbuilt `src/server/server.config.ts` is one of them: run `spfn build`.
 
 ### Level 3: full control with `app.ts`
 

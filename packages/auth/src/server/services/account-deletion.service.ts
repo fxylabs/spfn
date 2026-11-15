@@ -42,25 +42,13 @@ import { verifyPassword, getDummyPasswordHash } from '../helpers';
 import { validateVerificationToken } from './verification.service';
 import { revokeAllOAuth2GrantsForUser } from './oauth2-grant.service';
 import { getDeletionConfig } from '../lib/deletion-config';
+import { isUniqueViolation } from '../lib/unique-violation';
 import { authLogger } from '../logger';
 import {
     authDeletionRequestedEvent,
     authDeletionCancelledEvent,
     authDeletionCompletedEvent,
 } from '../events';
-
-/**
- * `postgres` driver error code for a unique-constraint violation (23505). Used to
- * detect a concurrent duplicate deletion request racing the partial unique index
- * (`account_deletion_requests_user_pending_unique_idx`) rather than letting it
- * surface as a raw 500.
- */
-const POSTGRES_UNIQUE_VIOLATION = '23505';
-
-function isUniqueViolation(error: unknown): boolean
-{
-    return typeof error === 'object' && error !== null && (error as { code?: unknown }).code === POSTGRES_UNIQUE_VIOLATION;
-}
 
 // ============================================================================
 // Shared lookup (login / OAuth / authenticate gates)

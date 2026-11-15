@@ -15,6 +15,8 @@ import { registerRoutes } from '@spfn/core/route';
 import { mainAuthRouter } from '@/server/routes';
 import { registerOAuthProvider, type OAuthProvider } from '@/server/lib/oauth';
 import { oauthUrlInterceptor } from '@/nextjs/interceptors/oauth';
+import { createOAuthState, pkceChallenge, verifyOAuthState } from '@/server/lib/oauth/state';
+import { generateKeyPair } from '@/server/lib/crypto';
 import { keySessionBindingService } from '@/server/services/session-binding.service';
 
 /**
@@ -33,6 +35,7 @@ function mockProvider(id: OAuthProvider['id'], enabled = true): OAuthProvider
     return {
         id,
         isEnabled: () => enabled,
+        pkce: 'S256',
         getAuthUrl: (state: string) => `https://mock.example.com/${id}/auth?state=${state}`,
         exchangeCodeForTokens: async () => ({ accessToken: 'mock-access', expiresIn: 3600 }),
         getUserInfo: async () => ({ providerUserId: 'mock-id', email: null, emailVerified: false }),
@@ -67,18 +70,30 @@ describe(':provider OAuth routes', () =>
         registerRoutes(app, mainAuthRouter);
     });
 
-    it('POST /_auth/oauth/:provider/url 가 등록된 provider의 authUrl을 반환한다', async () =>
+    it('POST /_auth/oauth/:provider/url 가 등록된 provider의 authUrl을 반환한다 — with the S256 challenge of the state\'s verifier', async () =>
     {
+        const key = generateKeyPair('ES256');
+        const state = await createOAuthState({
+            provider: 'superself',
+            returnUrl: '/dashboard',
+            publicKey: key.publicKey,
+            keyId: key.keyId,
+            fingerprint: key.fingerprint,
+            algorithm: key.algorithm,
+        });
         const res = await app.request('/_auth/oauth/superself/url', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ returnUrl: '/dashboard', state: 'injected-state' }),
+            body: JSON.stringify({ returnUrl: '/dashboard', state }),
         });
 
         expect(res.status).toBe(200);
 
-        const data = await res.json();
-        expect(data.authUrl).toBe('https://mock.example.com/superself/auth?state=injected-state');
+        const authUrl = new URL((await res.json()).authUrl);
+        expect(`${authUrl.origin}${authUrl.pathname}`).toBe('https://mock.example.com/superself/auth');
+        expect(authUrl.searchParams.get('state')).toBe(decodeURIComponent(state));
+        expect(authUrl.searchParams.get('code_challenge')).toBe(pkceChallenge((await verifyOAuthState(state)).codeVerifier));
+        expect(authUrl.searchParams.get('code_challenge_method')).toBe('S256');
     });
 
     it('POST /_auth/oauth/:provider/url 가 비활성 provider면 400을 반환한다', async () =>

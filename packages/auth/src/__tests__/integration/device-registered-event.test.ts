@@ -290,6 +290,7 @@ describe.skipIf(!dbAvailable)('device-registered event (case table 7a)', () =>
         registerOAuthProvider({
             id: 'superself',
             isEnabled: () => true,
+            pkce: 'S256',
             getAuthUrl: (state: string) => `https://mock.example.com/auth?state=${state}`,
             exchangeCodeForTokens: async () => ({ accessToken: 'a', refreshToken: 'r', expiresIn: 3600 }),
             getUserInfo: async () => ({ providerUserId, email, emailVerified: email !== null }),

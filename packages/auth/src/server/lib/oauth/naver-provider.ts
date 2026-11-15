@@ -12,6 +12,7 @@ import { createDecipheriv, createHash, createHmac, timingSafeEqual } from 'node:
 import { authLogger } from '../../logger';
 import { verifyIdToken } from './jwks-verify';
 import {
+    providerRequestSignal,
     registerOAuthProvider,
     UnlinkNotifyRejection,
     type NativeVerifyOptions,
@@ -37,14 +38,16 @@ const NAVER_ISSUER = 'https://nid.naver.com';
 const NAVER_JWKS_URI = 'https://nid.naver.com/oauth2/jwks';
 
 /**
- * user-info 조회의 응답 대기 한도(ms)
+ * How far a signed unlink notification's `timestamp` may be from now, either way.
  *
- * undici의 기본값은 사실상 무제한이라, 네이버가 응답을 붙들고 있으면 요청 핸들러가 몇 분씩
- * 살아남는다. 작은 GET 하나의 정상 응답은 수백 ms 수준이므로 5초면 넉넉하다.
- * 초과 시 native 로그인은 프로필 보강만 건너뛰고 계속되고(withNaverProfile의 catch),
- * 웹 흐름은 로그인이 실패해 사용자가 재시도한다 — 어느 쪽도 무한 대기보다 낫다.
+ * The signature proves Naver sent the notification, not when. Without a window a
+ * captured notification — the route also reads query parameters, so one can sit
+ * in an access log — deletes the link again after the person signed in with
+ * Naver once more, and announces `auth.oauth.unlinked` again, whose documented
+ * subscriber starts an account deletion. Naver does not retry a failed
+ * notification, so a fresh one is never refused for being late.
  */
-const USERINFO_TIMEOUT_MS = 5_000;
+const UNLINK_NOTIFICATION_WINDOW_MS = 5 * 60 * 1000;
 
 interface NaverTokenResponse
 {
@@ -111,6 +114,7 @@ async function requestNaverTokens(params: URLSearchParams): Promise<OAuthTokens>
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded;charset=utf-8' },
         body: params,
+        signal: providerRequestSignal(),
     });
 
     if (!response.ok)
@@ -174,13 +178,23 @@ function decryptNaverUniqueId(encryptUniqueId: string, key: Buffer): string | nu
 }
 
 /**
+ * Whether a notification's `timestamp` — Unix seconds, digits only — is within
+ * the window of now. Anything else is not a time and is refused.
+ */
+function isWithinUnlinkWindow(timestamp: string): boolean
+{
+    return /^\d{1,12}$/.test(timestamp)
+        && Math.abs(Date.now() - Number(timestamp) * 1000) <= UNLINK_NOTIFICATION_WINDOW_MS;
+}
+
+/**
  * access token으로 네이버 사용자 정보를 조회해 공통 신원으로 정규화한다.
  */
 async function fetchNaverIdentity(accessToken: string): Promise<NormalizedIdentity>
 {
     const response = await fetch(NAVER_USERINFO_URL, {
         headers: { Authorization: `Bearer ${accessToken}` },
-        signal: AbortSignal.timeout(USERINFO_TIMEOUT_MS),
+        signal: providerRequestSignal(),
     });
 
     if (!response.ok)
@@ -259,6 +273,12 @@ async function withNaverProfile(
 
 export const naverProvider: OAuthProvider = {
     id: 'naver',
+
+    pkce: {
+        unsupported: true,
+        reason: 'The web flow uses Naver\'s OAuth 2.0 surface (/oauth2.0/*), which takes no code_challenge; '
+            + 'only the OIDC surface (/oauth2/*) advertises S256. The code is bound by nothing but the state.',
+    },
 
     isEnabled(): boolean
     {
@@ -365,8 +385,8 @@ export const naverProvider: OAuthProvider = {
      * key = md5(CLIENT_SECRET)[0..16].
      *
      * 복호화된 uniqueId는 프로필 API(/v1/nid/me)의 id와 동일한 이용자 고유 식별자다.
-     * 네이버는 실패 요청을 재시도하지 않으므로 재전송(replay) 방어는 검증 통과 후
-     * 삭제가 멱등이라는 점에 의존한다.
+     * A signed `timestamp` (Unix seconds) further than five minutes from now is
+     * refused: see `UNLINK_NOTIFICATION_WINDOW_MS`.
      */
     async verifyUnlinkNotification(request: UnlinkNotifyRequest): Promise<UnlinkNotification>
     {
@@ -395,6 +415,11 @@ export const naverProvider: OAuthProvider = {
         if (expected.length !== actual.length || !timingSafeEqual(expected, actual))
         {
             throw new UnlinkNotifyRejection(403, 'Naver unlink notification signature mismatch');
+        }
+
+        if (!isWithinUnlinkWindow(timestamp))
+        {
+            throw new UnlinkNotifyRejection(400, 'Naver unlink notification timestamp is outside the accepted window');
         }
 
         const uniqueId = decryptNaverUniqueId(encryptUniqueId, key);

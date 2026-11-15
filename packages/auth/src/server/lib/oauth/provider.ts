@@ -11,6 +11,7 @@
  */
 
 import { type SocialProvider } from '../../types';
+import { pkceChallenge } from './state';
 
 /**
  * Provider 사용자 정보를 공통 형태로 정규화한 신원
@@ -75,6 +76,13 @@ export interface OAuthCodeExchangeOptions
 {
     /** Provider가 callback에 돌려준 원본 state. 일부 provider는 token 교환에도 요구한다. */
     state: string;
+    /**
+     * The PKCE verifier the start sealed into this flow's state. Present exactly
+     * when the provider does PKCE (`pkce` not declared unsupported): send it as
+     * `code_verifier`, so a code issued to another flow's challenge is refused
+     * by the provider's token endpoint.
+     */
+    codeVerifier?: string;
     /** Apple only: the `user` JSON Apple posts with the first authorization (name), raw, ≤ 2048 bytes. */
     user?: string;
 }
@@ -121,6 +129,39 @@ export class UnlinkNotifyRejection extends Error
 }
 
 /**
+ * A provider's declaration that it cannot bind an authorization code with PKCE.
+ *
+ * `reason` says why, and what binds its code instead, if anything.
+ */
+export interface OAuthPkceUnsupported
+{
+    unsupported: true;
+    reason: string;
+}
+
+/**
+ * What a provider declares about PKCE: `'S256'`, or that it cannot do it.
+ * There is no default — `registerOAuthProvider` refuses a provider without one.
+ */
+export type OAuthPkce = 'S256' | OAuthPkceUnsupported;
+
+/**
+ * How long a provider HTTP call may take, in milliseconds.
+ *
+ * undici's default is practically unlimited, so a provider that holds a response
+ * would keep the request handler alive for minutes. A normal answer to one small
+ * request takes a few hundred milliseconds; past this the sign-in fails and the
+ * person retries, which is better than waiting forever.
+ */
+export const PROVIDER_REQUEST_TIMEOUT_MS = 5_000;
+
+/** The abort signal every provider HTTP call carries. */
+export function providerRequestSignal(): AbortSignal
+{
+    return AbortSignal.timeout(PROVIDER_REQUEST_TIMEOUT_MS);
+}
+
+/**
  * OAuth provider 구현 인터페이스
  *
  * google, superself 등 모든 provider가 이 형태를 만족해야 registry에 등록된다.
@@ -135,7 +176,29 @@ export interface OAuthProvider
     isEnabled(): boolean;
 
     /**
+     * PKCE (RFC 7636) is part of every authorization-code flow, unless the
+     * provider declares here that it cannot do it. Required: a provider that
+     * says nothing is refused at registration, so leaving it out cannot switch
+     * PKCE off unnoticed.
+     *
+     * `'S256'`: the package adds `code_challenge` (S256) and
+     * `code_challenge_method` to the URL `getAuthUrl` returns, and passes the
+     * verifier to `exchangeCodeForTokens` as `options.codeVerifier`, which the
+     * provider must send as `code_verifier`. `{ unsupported: true, reason }`:
+     * neither, and `reason` says what binds its code instead.
+     *
+     * Read once, when the provider is registered: flows act on that validated
+     * copy, and reassigning the field later changes nothing until the provider
+     * is registered again.
+     */
+    pkce: OAuthPkce;
+
+    /**
      * provider 로그인 페이지로 보낼 authorization URL 생성
+     *
+     * The PKCE challenge is added by the package (see `pkce`); a provider whose
+     * id_token carries a nonce binds `oauthFlowNonce(state)` here and checks it at
+     * the exchange.
      *
      * @param state - CSRF 방지용 암호화 state
      * @param scopes - 요청할 scope (미지정 시 provider 기본값)
@@ -144,6 +207,9 @@ export interface OAuthProvider
 
     /**
      * authorization code를 토큰으로 교환
+     *
+     * Sends `options.codeVerifier` as `code_verifier` when it is present. Every
+     * HTTP call carries `providerRequestSignal()`.
      */
     exchangeCodeForTokens(code: string, options: OAuthCodeExchangeOptions): Promise<OAuthTokens>;
 
@@ -193,16 +259,91 @@ export interface OAuthProvider
     callbackResponseMode?: 'query' | 'form_post';
 }
 
+/**
+ * Where a start sends the browser: the provider's authorization URL with the
+ * S256 challenge of the flow's verifier, unless the provider declared it cannot
+ * do PKCE.
+ */
+export function buildAuthorizationUrl(provider: OAuthProvider, state: string, codeVerifier: string): string
+{
+    const url = new URL(provider.getAuthUrl(state));
+
+    if (pkceOf(provider) === 'S256')
+    {
+        url.searchParams.set('code_challenge', pkceChallenge(codeVerifier));
+        url.searchParams.set('code_challenge_method', 'S256');
+    }
+
+    return url.toString();
+}
+
+/** The verifier the exchange sends, or nothing for a provider that declared it cannot do PKCE. */
+export function exchangeCodeVerifier(provider: OAuthProvider, codeVerifier: string): string | undefined
+{
+    return pkceOf(provider) === 'S256' ? codeVerifier : undefined;
+}
+
 const registry = new Map<SocialProvider, OAuthProvider>();
+
+/**
+ * The PKCE declaration each registered provider was validated with — a frozen
+ * copy taken at registration, not the provider's own field, which the app can
+ * still reassign.
+ */
+const registeredPkce = new WeakMap<OAuthProvider, OAuthPkce>();
 
 /**
  * OAuth provider 등록 (public)
  *
  * 동일 id로 다시 등록하면 덮어쓴다(외부 패키지의 override 허용).
+ *
+ * @throws Error naming the provider when it declares no valid `pkce` — an app
+ *   in plain JavaScript, or built against the type when `pkce` was optional,
+ *   would otherwise register a provider whose flows silently skip PKCE.
  */
 export function registerOAuthProvider(provider: OAuthProvider): void
 {
+    registeredPkce.set(provider, validatedPkce(provider));
     registry.set(provider.id, provider);
+}
+
+/**
+ * The declaration a flow acts on: what the provider was validated with when it
+ * was registered, so setting `provider.pkce` to something invalid afterwards
+ * cannot switch PKCE off. A provider used without being registered is
+ * validated here instead.
+ */
+function pkceOf(provider: OAuthProvider): OAuthPkce
+{
+    return registeredPkce.get(provider) ?? validatedPkce(provider);
+}
+
+/**
+ * A frozen copy of the provider's PKCE declaration.
+ *
+ * @throws Error naming the provider when the declaration is not valid
+ */
+function validatedPkce(provider: OAuthProvider): OAuthPkce
+{
+    const pkce = (provider as { pkce?: unknown }).pkce;
+
+    if (!isPkceDeclaration(pkce))
+    {
+        throw new Error(
+            `OAuth provider '${provider.id}' declares no valid pkce. Set pkce: 'S256' and send `
+            + "options.codeVerifier as code_verifier, or pkce: { unsupported: true, reason: '…' }.",
+        );
+    }
+
+    return pkce === 'S256' ? pkce : Object.freeze({ unsupported: true, reason: pkce.reason });
+}
+
+function isPkceDeclaration(pkce: unknown): pkce is OAuthPkce
+{
+    const unsupported = pkce as Partial<OAuthPkceUnsupported> | null | undefined;
+
+    return pkce === 'S256'
+        || (unsupported?.unsupported === true && typeof unsupported.reason === 'string' && unsupported.reason.trim() !== '');
 }
 
 /**

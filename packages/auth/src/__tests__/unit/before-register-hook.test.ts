@@ -38,7 +38,7 @@ const {
             updateById: vi.fn(),
         },
         keysRepository: { create: vi.fn() },
-        socialAccountsRepository: { create: vi.fn() },
+        socialAccountsRepository: { createIfAbsent: vi.fn(async () => ({ id: 1 })) },
         invitationsRepository: {
             claimPendingByTokenHash: vi.fn(),
         },
@@ -216,7 +216,7 @@ describe('beforeRegister hook', () =>
                 metadata: { birthDate: '2015-01-01' },
             });
             expect(usersRepository.create).not.toHaveBeenCalled();
-            expect(socialAccountsRepository.create).not.toHaveBeenCalled();
+            expect(socialAccountsRepository.createIfAbsent).not.toHaveBeenCalled();
         });
 
         it('signals an unverified provider email so email-based policies can tell', async () =>
@@ -249,7 +249,7 @@ describe('beforeRegister hook', () =>
                 email: null,
                 phone: null,
             }));
-            expect(socialAccountsRepository.create).toHaveBeenCalledWith(expect.objectContaining({
+            expect(socialAccountsRepository.createIfAbsent).toHaveBeenCalledWith(expect.objectContaining({
                 provider: 'naver',
                 providerUserId: 'naver-1',
                 providerEmail: 'naver-user@example.com',

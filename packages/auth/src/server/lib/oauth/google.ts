@@ -9,6 +9,8 @@
 
 import { env } from '@spfn/auth/config';
 import { resolveAppUrl } from '../app-url';
+import { providerRequestSignal } from './provider';
+import { oauthFlowNonce } from './state';
 
 // Google OAuth endpoints
 const GOOGLE_AUTH_URL = 'https://accounts.google.com/o/oauth2/v2/auth';
@@ -93,6 +95,10 @@ function getDefaultScopes(): string[]
 /**
  * Google 로그인 URL 생성
  *
+ * The id_token Google returns with the code carries `oauthFlowNonce(state)`,
+ * checked at the exchange. The PKCE challenge is added by the caller
+ * (`buildAuthorizationUrl`).
+ *
  * @param state - CSRF 방지용 state 파라미터 (암호화된 returnUrl + nonce 포함)
  * @param scopes - 요청할 OAuth scopes (기본: env 또는 email, profile)
  */
@@ -110,6 +116,7 @@ export function getGoogleAuthUrl(
         response_type: 'code',
         scope: resolvedScopes.join(' '),
         state,
+        nonce: oauthFlowNonce(state),
         access_type: 'offline',  // refresh_token 받기 위해
         prompt: 'consent',       // 매번 동의 화면 표시 (refresh_token 보장)
     });
@@ -121,8 +128,9 @@ export function getGoogleAuthUrl(
  * Authorization Code를 Token으로 교환
  *
  * @param code - Google에서 받은 authorization code
+ * @param codeVerifier - the PKCE verifier sealed into the flow's state
  */
-export async function exchangeCodeForTokens(code: string): Promise<GoogleTokenResponse>
+export async function exchangeCodeForTokens(code: string, codeVerifier?: string): Promise<GoogleTokenResponse>
 {
     const config = getGoogleOAuthConfig();
 
@@ -137,7 +145,9 @@ export async function exchangeCodeForTokens(code: string): Promise<GoogleTokenRe
             redirect_uri: config.redirectUri,
             grant_type: 'authorization_code',
             code,
+            ...(codeVerifier ? { code_verifier: codeVerifier } : {}),
         }),
+        signal: providerRequestSignal(),
     });
 
     if (!response.ok)
@@ -160,6 +170,7 @@ export async function getGoogleUserInfo(accessToken: string): Promise<GoogleUser
         headers: {
             Authorization: `Bearer ${accessToken}`,
         },
+        signal: providerRequestSignal(),
     });
 
     if (!response.ok)
@@ -191,6 +202,7 @@ export async function refreshAccessToken(refreshToken: string): Promise<GoogleTo
             refresh_token: refreshToken,
             grant_type: 'refresh_token',
         }),
+        signal: providerRequestSignal(),
     });
 
     if (!response.ok)

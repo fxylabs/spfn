@@ -7,8 +7,10 @@ import { ValidationError } from '@spfn/core/errors';
 import { env } from '../../../config';
 import { resolveAppUrl } from '../app-url';
 import {
+    providerRequestSignal,
     registerOAuthProvider,
     type NormalizedIdentity,
+    type OAuthCodeExchangeOptions,
     type OAuthProvider,
     type OAuthTokens,
 } from './provider';
@@ -87,6 +89,7 @@ async function requestGithubTokens(params: URLSearchParams): Promise<OAuthTokens
             Accept: 'application/json',
         },
         body: params,
+        signal: providerRequestSignal(),
     });
 
     if (!response.ok)
@@ -126,6 +129,7 @@ async function fetchPrimaryEmail(accessToken: string): Promise<{ email: string; 
             'Accept': 'application/vnd.github+json',
             'User-Agent': GITHUB_USER_AGENT,
         },
+        signal: providerRequestSignal(),
     });
 
     if (!response.ok)
@@ -150,6 +154,8 @@ async function fetchPrimaryEmail(accessToken: string): Promise<{ email: string; 
 export const githubProvider: OAuthProvider = {
     id: 'github',
 
+    pkce: 'S256',
+
     isEnabled(): boolean
     {
         return !!(env.SPFN_AUTH_GITHUB_CLIENT_ID && env.SPFN_AUTH_GITHUB_CLIENT_SECRET);
@@ -168,7 +174,7 @@ export const githubProvider: OAuthProvider = {
         return `${GITHUB_AUTH_URL}?${params.toString()}`;
     },
 
-    async exchangeCodeForTokens(code: string): Promise<OAuthTokens>
+    async exchangeCodeForTokens(code: string, options: OAuthCodeExchangeOptions): Promise<OAuthTokens>
     {
         const config = getGithubConfig();
 
@@ -177,6 +183,7 @@ export const githubProvider: OAuthProvider = {
             client_secret: config.clientSecret,
             redirect_uri: config.redirectUri,
             code,
+            ...(options.codeVerifier ? { code_verifier: options.codeVerifier } : {}),
         }));
     },
 
@@ -188,6 +195,7 @@ export const githubProvider: OAuthProvider = {
                 'Accept': 'application/vnd.github+json',
                 'User-Agent': GITHUB_USER_AGENT,
             },
+            signal: providerRequestSignal(),
         });
 
         if (!response.ok)

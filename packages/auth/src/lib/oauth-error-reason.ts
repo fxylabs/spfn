@@ -20,6 +20,8 @@ export const OAUTH_ERROR_REASONS = [
     'link_only',
     'email_in_use',
     'signup_disabled',
+    'provider_already_linked',
+    'sign_in_contended',
     'failed',
 ] as const;
 
@@ -42,6 +44,12 @@ export const OAUTH_ERROR_REASONS = [
  *   person can sign in to that account and link the provider from settings
  * - `signup_disabled` — a first sign-in with this provider would have created
  *   an account, and the app turned sign-up off (`channels: { signup: false }`)
+ * - `provider_already_linked` — a first sign-in with this provider matched an
+ *   account by email, and that account already holds another identity of the
+ *   same provider; an account holds one per provider
+ * - `sign_in_contended` — another first sign-in with the same identity attached
+ *   it at the same moment, and running this one again did not settle it; signing
+ *   in again does
  * - `failed` — anything else
  */
 export type OAuthErrorReason = typeof OAUTH_ERROR_REASONS[number];

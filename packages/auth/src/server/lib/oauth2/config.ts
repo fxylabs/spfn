@@ -100,9 +100,8 @@ function resolveAuthorizeUrl(env: Record<string, string | undefined>): string
  * other default is resolved, so the config is publishable in exactly one state
  * whether or not a lifecycle hook has run. It is not *validated* here: a value
  * this cannot reduce is stored as the operator wrote it and refused by
- * `assertAuthorizationServerIssuer` from `afterInfrastructure`, where a throw
- * exits the process instead of leaving a server listening without routes. See
- * `lifecycle.ts`.
+ * `assertAuthorizationServerIssuer` from `afterInfrastructure`, beside the
+ * other boot refusals. See `lifecycle.ts`.
  *
  * @throws When `scopes` is empty or `defaultScopes` names an unknown scope, and
  *         when `authorizeUrl` is not given and neither `NEXT_PUBLIC_SPFN_APP_URL`

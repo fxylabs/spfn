@@ -1,0 +1,2 @@
+DELETE FROM "spfn_auth"."user_social_accounts" AS "duplicate" USING "spfn_auth"."user_social_accounts" AS "kept" WHERE "kept"."user_id" = "duplicate"."user_id" AND "kept"."provider" = "duplicate"."provider" AND ("kept"."updated_at", "kept"."id") > ("duplicate"."updated_at", "duplicate"."id");--> statement-breakpoint
+CREATE UNIQUE INDEX "user_social_accounts_user_provider_unique_idx" ON "spfn_auth"."user_social_accounts" ("user_id","provider");

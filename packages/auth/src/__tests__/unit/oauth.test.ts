@@ -41,6 +41,7 @@ function mockProvider(id: OAuthProvider['id'], enabled = true): OAuthProvider
     return {
         id,
         isEnabled: () => enabled,
+        pkce: 'S256',
         getAuthUrl: (state: string) => `https://mock.example.com/${id}/auth?state=${state}`,
         exchangeCodeForTokens: async () => ({ accessToken: 'mock-access', refreshToken: 'mock-refresh', expiresIn: 3600 }),
         getUserInfo: async () => ({ providerUserId: 'mock-id', email: null, emailVerified: false }),
@@ -436,7 +437,10 @@ describe('OAuth Callback - CSRF nonce candidates', () =>
 
         await expect(refusal).rejects.toThrow(OAuthProviderError);
         await expect(refusal).rejects.not.toThrow('stop-after-exchange');
-        expect(exchangeCodeForTokens).toHaveBeenCalledWith('authorization-code', { state });
+        expect(exchangeCodeForTokens).toHaveBeenCalledWith('authorization-code', {
+            state,
+            codeVerifier: (await verifyOAuthState(state)).codeVerifier,
+        });
     });
 });
 

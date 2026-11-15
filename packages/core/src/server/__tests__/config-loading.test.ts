@@ -15,8 +15,12 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 
-import { loadAndMergeConfig } from '../start-server';
+import { loadAndMergeConfig, startServer } from '../start-server';
 import { serverLogger } from '../logger';
+
+const { serve } = vi.hoisted(() => ({ serve: vi.fn() }));
+
+vi.mock('@hono/node-server', () => ({ serve }));
 
 let fixture: string;
 
@@ -28,15 +32,14 @@ function writeCompiledConfig(fileName: string, body: string): void
     writeFileSync(join(outDir, fileName), body);
 }
 
-function writeAuthoredConfig(): void
+const ALIASED_SOURCE = "import { defineServerConfig } from '@/server/nowhere';\nexport default defineServerConfig().build();\n";
+
+function writeAuthoredConfig(body: string = ALIASED_SOURCE): void
 {
     const srcDir = join(fixture, 'src', 'server');
 
     mkdirSync(srcDir, { recursive: true });
-    writeFileSync(
-        join(srcDir, 'server.config.ts'),
-        "import { defineServerConfig } from '@/server/nowhere';\nexport default defineServerConfig().build();\n",
-    );
+    writeFileSync(join(srcDir, 'server.config.ts'), body);
 }
 
 beforeEach(() =>
@@ -99,41 +102,62 @@ describe('compiled server config lookup', () =>
     });
 });
 
-describe('reporting a configuration that was authored but not loaded', () =>
+describe('a config file that exists but fails to load', () =>
 {
-    it('warns when src/server/server.config.ts exists and nothing was loaded', async () =>
+    // Without this, a typo in a policy value (configureAuth throwing at the
+    // top of server.config) booted a server with no routes and no lifecycle
+    // that answered every request with a 404 and passed its health check.
+    it('rejects with the import error when the file\'s top-level code throws', async () =>
     {
-        const warn = vi.spyOn(serverLogger, 'warn').mockImplementation(() => undefined);
+        writeCompiledConfig('server.config.mjs', "throw new Error('oauthEmailMatch: Reject');");
 
-        writeAuthoredConfig();
+        const loading = loadAndMergeConfig(undefined, fixture);
 
-        await loadAndMergeConfig(undefined, fixture);
-
-        expect(warn).toHaveBeenCalledTimes(1);
-        expect(warn.mock.calls[0][0]).toContain('src/server/server.config.ts');
-        expect(warn.mock.calls[0][0]).toContain('running on defaults');
+        await expect(loading).rejects.toThrow('.spfn/server/server.config.mjs exists but failed to load');
+        await expect(loading).rejects.toMatchObject({ cause: { message: 'oauthEmailMatch: Reject' } });
     });
 
-    it('stays quiet when the compiled config was found', async () =>
+    it('does not fall through to a lower-priority file', async () =>
     {
-        const warn = vi.spyOn(serverLogger, 'warn').mockImplementation(() => undefined);
+        writeCompiledConfig('server.config.mjs', 'export default {');
+        writeCompiledConfig('server.config.js', 'export default { port: 4327 };');
 
+        await expect(loadAndMergeConfig(undefined, fixture)).rejects.toThrow('server.config.mjs');
+    });
+
+    it('makes startServer reject before anything listens', async () =>
+    {
+        writeCompiledConfig('server.config.mjs', "throw new Error('refused at configuration');");
+        vi.spyOn(process, 'cwd').mockReturnValue(fixture);
+
+        await expect(startServer()).rejects.toThrow('failed to load');
+        expect(serve).not.toHaveBeenCalled();
+    });
+
+    it('tells an app whose only config is the unbuilt source to build', async () =>
+    {
         writeAuthoredConfig();
-        writeCompiledConfig('server.config.js', 'export default { port: 4325 };');
 
+        await expect(loadAndMergeConfig(undefined, fixture)).rejects.toThrow('run "spfn build"');
+    });
+
+    it('prints the cause alone when the unbuilt source fails for another reason', async () =>
+    {
+        writeAuthoredConfig("throw new Error('oauthEmailMatch: Reject');\nexport default {};\n");
+
+        const loading = loadAndMergeConfig(undefined, fixture);
+
+        await expect(loading).rejects.toThrow('src/server/server.config.ts exists but failed to load: oauthEmailMatch: Reject');
+        await expect(loading).rejects.not.toThrow('spfn build');
+    });
+
+    it('keeps the defaults when no config file exists', async () =>
+    {
         const config = await loadAndMergeConfig(undefined, fixture);
 
-        expect(config.port).toBe(4325);
-        expect(warningsAbout(warn, 'running on defaults')).toHaveLength(0);
-    });
-
-    it('stays quiet for an app that authored no configuration at all', async () =>
-    {
-        const warn = vi.spyOn(serverLogger, 'warn').mockImplementation(() => undefined);
-
-        await loadAndMergeConfig(undefined, fixture);
-
-        expect(warn).not.toHaveBeenCalled();
+        expect(config.port).toBeTypeOf('number');
+        expect(config.middlewares).toBeUndefined();
+        expect(config.routes).toBeUndefined();
     });
 });
 
@@ -187,3 +211,43 @@ function warningsAbout(
         .map(call => String(call[0]))
         .filter(message => message.includes(fragment));
 }
+
+describe('a config file that loads but exports no plain object', () =>
+{
+    it.each([
+        ['only named exports', 'export const port = 4330;', 'only named exports (port)'],
+        ['a number as its default', 'export default 42;', 'a number as its default (42)'],
+        ['a promise as its default', 'export default Promise.resolve({ port: 4331 });', 'a promise as its default'],
+    ])('refuses a file that exports %s, naming the file and what it found', async (_name, body, found) =>
+    {
+        writeCompiledConfig('server.config.mjs', body);
+
+        const loading = loadAndMergeConfig(undefined, fixture);
+
+        await expect(loading).rejects.toThrow('.spfn/server/server.config.mjs must export its configuration as a plain object');
+        await expect(loading).rejects.toThrow(found);
+    });
+
+    it('names a builder that was never built', async () =>
+    {
+        writeCompiledConfig('server.config.mjs', 'class ServerConfigBuilder {}\nexport default new ServerConfigBuilder();');
+
+        await expect(loadAndMergeConfig(undefined, fixture)).rejects.toThrow('an instance of ServerConfigBuilder');
+    });
+
+    it('makes startServer reject before anything listens', async () =>
+    {
+        writeCompiledConfig('server.config.mjs', 'export default 42;');
+        vi.spyOn(process, 'cwd').mockReturnValue(fixture);
+
+        await expect(startServer()).rejects.toThrow('plain object');
+        expect(serve).not.toHaveBeenCalled();
+    });
+
+    it('accepts an object with a null prototype', async () =>
+    {
+        writeCompiledConfig('server.config.mjs', 'export default Object.assign(Object.create(null), { port: 4332 });');
+
+        expect((await loadAndMergeConfig(undefined, fixture)).port).toBe(4332);
+    });
+});

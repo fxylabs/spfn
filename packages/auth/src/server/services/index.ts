@@ -319,6 +319,7 @@ export {
 // OAuth Service
 export {
     oauthStartService,
+    signInAuthorizationUrl,
     oauthCallbackService,
     matchOAuthCallbackCsrf,
     matchOAuthLinkCsrf,

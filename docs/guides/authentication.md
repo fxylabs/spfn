@@ -825,7 +825,12 @@ codes are the closed union `OAuthErrorReason`:
 | `link_only` | the app made this provider link-only (#157) |
 | `email_in_use` | a first sign-in reported an existing account's email and the app set `oauthEmailMatch: 'reject'`, or `'attach'` found that email on several accounts stored in different cases (#156) |
 | `signup_disabled` | a first sign-in would have created an account and the app set `channels: { signup: false }` (#308) |
+| `provider_already_linked` | a first sign-in matched an account by email that already holds another identity of the same provider — an account holds one per provider |
+| `sign_in_contended` | a concurrent sign-in or sign-up committed the same identity or address first, and running this one again did not settle it — signing in again does |
 | `failed` | anything else |
+
+A refused sign-in writes nothing — no account, social row, key, stored token or event: the callback
+asks the provider first, does every write in one transaction, and redirects only after it rolled back.
 
 For `expired`, `invalid_state`, `no_cookie` and a library failure behind `provider_error` the `error` text is a
 fixed sentence, never a library message. Put `{reason}` in the template
@@ -869,7 +874,7 @@ export default function OAuthCallbackPage()
 | `/_auth/oauth/start` | POST | Get OAuth URL (API mode) |
 | `/_auth/oauth/providers` | GET | List enabled providers: `providers` to sign in with, `linkOnly` for the link-only ones |
 | `/_auth/oauth/finalize` | POST | Finalize OAuth session, or answer 202 with a second-factor challenge |
-| `/_auth/oauth/:provider/unlink-notify` | GET/POST | Receives a provider-initiated unlink webhook — register it as Kakao's unlink webhook or Naver's disconnect callback URL. Once the signature verifies, the social link and its stored tokens are deleted |
+| `/_auth/oauth/:provider/unlink-notify` | GET/POST | Receives a provider-initiated unlink webhook — register it as Kakao's unlink webhook or Naver's disconnect callback URL. Once the signature verifies (for Naver, with a signed timestamp within five minutes of now), the social link and its stored tokens are deleted |
 | `/_auth/oauth/:provider/link` | POST | Signed in: start attaching a provider identity to this account. The provider returns to the usual callback, which sends the browser back to `returnUrl?oauthLink=<outcome>` |
 | `/_auth/oauth/:provider/unlink` | POST | Signed in: detach this account's identity of a provider, refused when it is the last way in |
 
@@ -898,7 +903,11 @@ const myProvider: OAuthProvider = {
     id: 'superself',
     isEnabled: () => Boolean(process.env.MY_CLIENT_ID),
     getAuthUrl: (state) => `https://issuer.example.com/authorize?state=${state}`,
-    exchangeCodeForTokens: async (code) => ({ accessToken, refreshToken, expiresIn }),
+    // Required — registerOAuthProvider throws without it. 'S256': the package adds code_challenge
+    // to the URL above, and the exchange must send options.codeVerifier as code_verifier. A
+    // provider that cannot do PKCE declares pkce: { unsupported: true, reason: '…' } instead.
+    pkce: 'S256',
+    exchangeCodeForTokens: async (code, options) => ({ accessToken, refreshToken, expiresIn }),
     getUserInfo: async (accessToken) => ({ providerUserId, email, emailVerified }),
 };
 
@@ -907,8 +916,9 @@ registerOAuthProvider(myProvider);
 
 Once it is registered, `POST /_auth/oauth/start`, `GET /_auth/oauth/:provider` and
 `GET /_auth/oauth/:provider/callback` handle that provider automatically — you do not write a
-callback route of your own. The generic callback is already wrapped in `Transactional()`, so a
-failure part-way through leaves no orphan user behind. The provider id has to be a member of the
+callback route of your own. The callback asks the provider first and then writes in one transaction
+of its own, so a refusal part-way through leaves no orphan user behind — do not wrap a custom
+callback that calls `oauthCallbackService()` in `Transactional()`. The provider id has to be a member of the
 `SOCIAL_PROVIDERS` enum (`google`, `apple`, `github`, `kakao`, `naver`, `superself`, `battlenet`).
 
 Battle.net never releases an email, so a Battle.net identity reaches an existing account only
@@ -929,7 +939,12 @@ The first sign-in with a provider identity may report an email an existing accou
 unverified one with `UnverifiedEmailLinkError`; `'reject'` refuses either way
 (`OAuthEmailInUseError`, `reason=email_in_use`, native 409) and changes neither account;
 `'separate'` makes a new account without the email, running `beforeRegister` as any sign-up does.
-An identity already linked signs in to its account in every mode. So someone who signed up with
+Any other value makes `configureAuth` throw, naming the allowed values — as does every other
+policy value outside its set (`oauthProviders` names and flags, `oauthLink.recentAuth`, `csrf.mode`).
+An identity already linked signs in to its account in every mode. An account holds one identity per
+provider (a database constraint): an email match onto an account that already holds another identity
+of the provider is refused with `OAuthProviderAlreadyLinkedError` (`reason=provider_already_linked`,
+native 409). So someone who signed up with
 Google and later signs in with Kakao on the same email lands in the Google account (`'attach'`),
 sees the error page where the app can tell them to sign in with Google and connect Kakao
 (`'reject'`), or gets a Kakao-only account (`'separate'`).
@@ -1606,6 +1621,8 @@ catch (error)
 | `RegistrationRejectedError` | 403 | A `beforeRegister` hook rejected the signup |
 | `OAuthProviderLinkOnlyError` | 403 | A sign-in used a provider the app made link-only |
 | `OAuthEmailInUseError` | 409 | A first social sign-in's email belongs to an existing account and `oauthEmailMatch` is `'reject'` |
+| `OAuthProviderAlreadyLinkedError` | 409 | `OAUTH_PROVIDER_ALREADY_LINKED`: the account already holds an identity of this provider — a link start, or a first social sign-in matching it by email |
+| `OAuthSignInContendedError` | 409 | `OAUTH_SIGN_IN_CONTENDED`: a concurrent sign-in or sign-up committed the same identity or address first, and the sign-in run again could not settle it; a new sign-in does |
 | `SignupDisabledError` | 403 | `SIGNUP_DISABLED`: a first social sign-in would have created an account and `channels.signup` is `false` |
 | `ChannelDisabledError` | 404 | `CHANNEL_DISABLED`: a route of a sign-in channel the app turned off with `channels`; `details.channel` names it |
 | `SecondFactorEnrolmentRequiredError` | 403 | `SECOND_FACTOR_ENROLMENT_REQUIRED`: the app requires a second factor and this account has no listed one; only the enrolment routes answer |
@@ -1675,6 +1692,10 @@ configureAuth({
     },
 });
 ```
+
+On the `oauth` channel the hook can run twice for one sign-in: a sign-in that lost a race with a
+concurrent sign-in or sign-up of the same identity or address is rolled back and run once more.
+A rejection is not retried; events fire once, for the attempt that committed.
 
 See the [`@spfn/auth` README](../../packages/auth/README.md#registration-gate-beforeregister)
 for ordering guarantees and per-channel notes.

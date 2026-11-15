@@ -23,6 +23,7 @@ const LINK: OAuthLinkState = {
     returnUrl: '/settings/connections',
     nonce: 'a'.repeat(32),
     startId: 'b'.repeat(32),
+    codeVerifier: 'c'.repeat(43),
 };
 
 describe('OAuth link state', () =>

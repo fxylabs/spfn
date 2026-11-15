@@ -84,6 +84,12 @@ export const userSocialAccounts = authSchema.table('user_social_accounts',
         // Prevents same OAuth account from being linked to multiple users
         uniqueIndex('provider_user_unique_idx')
             .on(table.provider, table.providerUserId),
+
+        // Unique constraint: one identity per provider per account
+        // Every insert path (sign-in by email match, link) meets it here, so no
+        // call site has to look first
+        uniqueIndex('user_social_accounts_user_provider_unique_idx')
+            .on(table.userId, table.provider),
     ],
 );
 

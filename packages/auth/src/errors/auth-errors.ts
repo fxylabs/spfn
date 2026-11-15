@@ -1113,9 +1113,11 @@ export class RecentAuthenticationRequiredError extends ForbiddenError
 /**
  * OAuth Provider Already Linked Error (409)
  *
- * A signed-in user started linking a provider (#154) while the account already
- * holds an identity of that provider. One per provider per account: the existing
- * one is unlinked first. Clients branch on `code`.
+ * The account already holds an identity of that provider, and holds one per
+ * provider (`UNIQUE (user_id, provider)`): a signed-in user started linking it
+ * (#154), or a first sign-in matched the account by email with another identity
+ * of the same provider (au5-A3, `reason=provider_already_linked`, native 409).
+ * The existing one is unlinked first. Clients branch on `code`.
  */
 export class OAuthProviderAlreadyLinkedError extends ConflictError
 {
@@ -1128,6 +1130,30 @@ export class OAuthProviderAlreadyLinkedError extends ConflictError
             details: data.details,
         });
         this.name = 'OAuthProviderAlreadyLinkedError';
+    }
+}
+
+/**
+ * OAuth Sign-In Contended Error (409)
+ *
+ * A first sign-in with a provider identity read a premise — no link for the
+ * identity, no account holding its email address — that a concurrent sign-in or
+ * sign-up made stale by committing the same identity or address first, and the
+ * sign-in, run again against what the other one committed, still could not
+ * settle it. Signing in again resolves it; nothing was written. The
+ * OAuth error page carries `reason=sign_in_contended`.
+ */
+export class OAuthSignInContendedError extends ConflictError
+{
+    readonly code = 'OAUTH_SIGN_IN_CONTENDED';
+
+    constructor(data: { message?: string; details?: Record<string, any> } = {})
+    {
+        super({
+            message: data.message || 'Another sign-in with this identity was in progress. Sign in again.',
+            details: data.details,
+        });
+        this.name = 'OAuthSignInContendedError';
     }
 }
 

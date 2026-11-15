@@ -124,6 +124,7 @@ describe.skipIf(!dbAvailable)('auth events are published after the transaction c
         registerOAuthProvider({
             id: 'battlenet',
             isEnabled: () => true,
+            pkce: 'S256',
             getAuthUrl: (state: string) => `https://oauth.battle.example/authorize?state=${state}`,
             exchangeCodeForTokens: async (code: string) =>
                 ({ accessToken: `access-${code}`, expiresIn: 86400, identity: identities.get(code) }),

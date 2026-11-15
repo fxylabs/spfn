@@ -217,6 +217,28 @@ describe.skipIf(!dbAvailable)('Account Deletion Lifecycle Integration', () =>
         ).rejects.toMatchObject({ name: 'DeletionAlreadyRequestedError' });
     });
 
+    it('answers a request that lost the race to the pending-request index with DeletionAlreadyRequestedError', async () =>
+    {
+        const { userId } = await registerViaFlow('race@example.com', 'SecurePassword123!');
+
+        // The state the loser of two concurrent requests meets: it read the
+        // account as active, and the winner's pending row has committed since.
+        await accountDeletionRequestsRepository.create({
+            userId: Number(userId),
+            userPublicId: 'race-winner',
+            requestedAt: new Date(),
+            purgeScheduledAt: new Date(Date.now() + 86_400_000),
+            status: 'pending',
+            requestedBy: 'self',
+            reason: null,
+        });
+
+        const { requestAccountDeletionService } = await import('@/server/services/account-deletion.service');
+        await expect(
+            requestAccountDeletionService(Number(userId), { requestedBy: 'admin' }),
+        ).rejects.toMatchObject({ name: 'DeletionAlreadyRequestedError' });
+    });
+
     it('purge sweep (anonymize): scrubs PII, keeps the row, frees the email for re-registration', async () =>
     {
         const email = 'anonymize@example.com';

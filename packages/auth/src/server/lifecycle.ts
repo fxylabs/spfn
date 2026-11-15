@@ -433,13 +433,13 @@ export function createAuthLifecycle(options: AuthLifecycleOptions = {}): AuthLif
          */
         afterInfrastructure: async () =>
         {
-            // Deliberately here rather than synchronously beside configureDeviceAuth:
-            // env is resolved at both points (startServer() calls loadEnv() before it
-            // imports server.config.ts), but loadAndMergeConfig() catches a throw from
-            // that import and continues on defaults — a refusal in the constructor
-            // would leave the server listening without routes instead of refusing.
-            // A throw here propagates out of initializeInfrastructure(), before
-            // startHttpServer(), so the process exits without ever listening.
+            // Either place refuses the boot: a throw here propagates out of
+            // initializeInfrastructure(), and a throw from the constructor makes
+            // server.config fail to load, which startServer() refuses as well —
+            // in both cases before anything listens. The boot refusals are kept
+            // together here because some cannot run earlier: the Apple web key
+            // import is async, and the channel and second-factor checks need
+            // every createAuthLifecycle() call to have run.
             assertOAuthRedirectUris();
             // Same reasoning; refuses a partial Sign in with Apple web setup or a key that
             // does not import. Silent when none of its five variables is set.
@@ -450,12 +450,9 @@ export function createAuthLifecycle(options: AuthLifecycleOptions = {}): AuthLif
             assertAppleRelayUrls();
             assertAndroidAssetLinks();
 
-            // Here and not beside configureAuthorizationServer above, for the
-            // reason written one line up: a throw from the constructor is
-            // swallowed by loadAndMergeConfig() and leaves the server listening
-            // without routes, while a throw here propagates out of
-            // initializeInfrastructure() and the process exits without ever
-            // listening. Silent when no authorization server is configured.
+            // Here beside the other boot refusals rather than beside
+            // configureAuthorizationServer above. Silent when no authorization
+            // server is configured.
             assertAuthorizationServerIssuer();
             // Same reasoning: two createAuthLifecycle() calls that stated
             // different channels. Silent when at most one stated them.

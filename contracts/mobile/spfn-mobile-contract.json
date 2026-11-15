@@ -4,7 +4,7 @@
   "originStatement": "Generated from the route and contract definitions in SPFN primitives (packages/auth/src/server/client-proof) and published from that repository. This file is generated output: edit the source modules and re-export, never this file.",
   "contractName": "spfn-mobile-contract",
   "contractMajor": 0,
-  "contractVersion": "0.14.1",
+  "contractVersion": "0.14.2",
   "supportedRange": ">=0.14.0 <0.15.0",
   "exporterVersion": "@spfn/auth/contract-bundle@6.3.0",
   "authProfiles": { "allowed": ["clientProofV1"], "unknownProfilePolicy": "reject", "mixingWithinSession": "prohibited" },
@@ -906,6 +906,20 @@
       "httpStatus": 409,
       "retryable": false,
       "summary": "a first sign-in with this provider reported the email of an existing account and the app refuses it — sign in to that account another way and link the provider from settings",
+      "surface": "rest"
+    },
+    {
+      "code": "OAuthProviderAlreadyLinkedError",
+      "httpStatus": 409,
+      "retryable": false,
+      "summary": "a first sign-in with this provider matched an account by email, and that account already holds another identity of the same provider — one per provider per account; the other one is unlinked first",
+      "surface": "rest"
+    },
+    {
+      "code": "OAuthSignInContendedError",
+      "httpStatus": 409,
+      "retryable": false,
+      "summary": "a concurrent sign-in or sign-up committed the same provider identity or email address first, and running this sign-in again did not settle it — nothing was written; sign in again",
       "surface": "rest"
     },
     {

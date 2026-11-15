@@ -32,6 +32,7 @@ vi.mock('../../server/services/oauth.service', () => ({
     createOrLinkUser,
     assertActiveForOAuthSession: vi.fn(async () => undefined),
     backfillVerifiedEmail: vi.fn(async () => undefined),
+    retryContendedSignIn: (_provider: unknown, attempt: () => Promise<unknown>) => attempt(),
 }));
 
 vi.mock('../../server/services/key.service', () => ({ registerPublicKeyService }));

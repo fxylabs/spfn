@@ -11,11 +11,14 @@ import { timingSafeEqual } from 'node:crypto';
 
 import { authLogger } from '../../logger';
 import { verifyIdToken } from './jwks-verify';
+import { oauthFlowNonce } from './state';
 import {
+    providerRequestSignal,
     registerOAuthProvider,
     UnlinkNotifyRejection,
     type NativeVerifyOptions,
     type NormalizedIdentity,
+    type OAuthCodeExchangeOptions,
     type OAuthProvider,
     type OAuthTokens,
     type UnlinkNotification,
@@ -28,21 +31,12 @@ const KAKAO_USERINFO_URL = 'https://kapi.kakao.com/v2/user/me';
 const KAKAO_ISSUER = 'https://kauth.kakao.com';
 const KAKAO_JWKS_URI = 'https://kauth.kakao.com/.well-known/jwks.json';
 
-/**
- * user-info 조회의 응답 대기 한도(ms)
- *
- * undici의 기본값은 사실상 무제한이라, 카카오가 응답을 붙들고 있으면 요청 핸들러가 몇 분씩
- * 살아남는다. 작은 GET 하나의 정상 응답은 수백 ms 수준이므로 5초면 넉넉하다.
- * 초과 시 native 로그인은 이메일 보강만 건너뛰고 계속되고(withKakaoVerifiedEmail의 catch),
- * 웹 흐름은 로그인이 실패해 사용자가 재시도한다 — 어느 쪽도 무한 대기보다 낫다.
- */
-const USERINFO_TIMEOUT_MS = 5_000;
-
 interface KakaoTokenResponse
 {
     access_token?: unknown;
     refresh_token?: unknown;
     expires_in?: unknown;
+    id_token?: unknown;
 }
 
 interface KakaoUserInfo
@@ -110,10 +104,16 @@ function getKakaoNativeAudiences(): string[]
 
 async function requestKakaoTokens(params: URLSearchParams): Promise<OAuthTokens>
 {
+    return kakaoTokensOf(await postKakaoTokenRequest(params));
+}
+
+async function postKakaoTokenRequest(params: URLSearchParams): Promise<KakaoTokenResponse>
+{
     const response = await fetch(KAKAO_TOKEN_URL, {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded;charset=utf-8' },
         body: params,
+        signal: providerRequestSignal(),
     });
 
     if (!response.ok)
@@ -121,7 +121,11 @@ async function requestKakaoTokens(params: URLSearchParams): Promise<OAuthTokens>
         throw new Error(`Kakao token request failed with status ${response.status}`);
     }
 
-    const body = await response.json() as KakaoTokenResponse;
+    return await response.json() as KakaoTokenResponse;
+}
+
+function kakaoTokensOf(body: KakaoTokenResponse): OAuthTokens
+{
     const expiresIn = Number(body.expires_in);
     if (typeof body.access_token !== 'string' || !Number.isFinite(expiresIn) || expiresIn <= 0)
     {
@@ -145,7 +149,7 @@ async function fetchKakaoIdentity(accessToken: string): Promise<NormalizedIdenti
 {
     const response = await fetch(KAKAO_USERINFO_URL, {
         headers: { Authorization: `Bearer ${accessToken}` },
-        signal: AbortSignal.timeout(USERINFO_TIMEOUT_MS),
+        signal: providerRequestSignal(),
     });
 
     if (!response.ok)
@@ -231,6 +235,8 @@ async function withKakaoVerifiedEmail(
 export const kakaoProvider: OAuthProvider = {
     id: 'kakao',
 
+    pkce: 'S256',
+
     /**
      * 웹 authorization-code 흐름을 쓸 수 있는지만 판정한다.
      *
@@ -253,12 +259,17 @@ export const kakaoProvider: OAuthProvider = {
             redirect_uri: config.redirectUri,
             state,
             scope: (scopes ?? getKakaoScopes()).join(','),
+            nonce: oauthFlowNonce(state),
         });
 
         return `${KAKAO_AUTH_URL}?${params.toString()}`;
     },
 
-    async exchangeCodeForTokens(code: string): Promise<OAuthTokens>
+    /**
+     * The verifier goes to Kakao with the code. With the `openid` scope Kakao
+     * returns an id_token beside the tokens, and it must carry this flow's nonce.
+     */
+    async exchangeCodeForTokens(code: string, options: OAuthCodeExchangeOptions): Promise<OAuthTokens>
     {
         const config = getKakaoConfig();
 
@@ -267,13 +278,28 @@ export const kakaoProvider: OAuthProvider = {
             client_id: config.clientId,
             redirect_uri: config.redirectUri,
             code,
+            ...(options.codeVerifier ? { code_verifier: options.codeVerifier } : {}),
         });
         if (config.clientSecret)
         {
             params.set('client_secret', config.clientSecret);
         }
 
-        return requestKakaoTokens(params);
+        const body = await postKakaoTokenRequest(params);
+
+        if (typeof body.id_token === 'string')
+        {
+            await verifyIdToken({
+                idToken: body.id_token,
+                jwksUri: KAKAO_JWKS_URI,
+                issuer: KAKAO_ISSUER,
+                audiences: [config.clientId],
+                algorithms: ['RS256'],
+                expectedNonce: oauthFlowNonce(options.state),
+            });
+        }
+
+        return kakaoTokensOf(body);
     },
 
     async getUserInfo(accessToken: string): Promise<NormalizedIdentity>
