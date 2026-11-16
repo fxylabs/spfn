@@ -15,11 +15,12 @@
  * No secret, code or key value printed by these tests is a real one.
  */
 
-import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
 import { Hono } from 'hono';
 import { eq } from 'drizzle-orm';
 
 import { setupTestDb, teardownTestDb, clearTables, getTestDb, isDatabaseAvailable } from '../helpers/db';
+import { pinClockInsideTotpStep } from '../helpers/totp-clock';
 import { FixtureAuthenticator } from '../helpers/webauthn-fixture';
 import { mfaChallenges, mfaRecoveryCodes, userPublicKeys, users } from '@/server/entities';
 import { hashPassword } from '@/server/helpers/password';
@@ -72,6 +73,12 @@ describe.skipIf(!dbAvailable)('second-factor verify (case table 6c)', () =>
         delete process.env.SPFN_AUTH_PASSKEY_RP_ID;
         delete process.env.SPFN_AUTH_PASSKEY_ORIGINS;
         delete process.env.SPFN_AUTH_TOKEN_ENCRYPTION_KEYS;
+    });
+
+    afterEach(() =>
+    {
+        // A row that pinned the clock to a TOTP step lets it go.
+        vi.useRealTimers();
     });
 
     beforeEach(async () =>
@@ -243,6 +250,7 @@ describe.skipIf(!dbAvailable)('second-factor verify (case table 6c)', () =>
 
     it('row: a live challenge and a code one step out — 200', async () =>
     {
+        pinClockInsideTotpStep();
         const { secret } = await enrol();
         const { challenge } = await openChallenge();
 

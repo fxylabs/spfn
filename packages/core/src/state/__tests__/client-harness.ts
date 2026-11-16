@@ -186,12 +186,12 @@ export function routes(h: Harness): string[]
     return h.calls.map(call => call.route);
 }
 
-/** Let queued microtasks and the fake fetch's promises settle. */
+/** Let queued microtasks and the fake fetch's promises settle; under fake timers, without moving the clock. */
 export async function settle(): Promise<void>
 {
     for (let i = 0; i < 5; i++)
     {
-        await new Promise(resolve => setTimeout(resolve, 0));
+        await (vi.isFakeTimers() ? vi.advanceTimersByTimeAsync(0) : new Promise(resolve => setTimeout(resolve, 0)));
     }
 }
 

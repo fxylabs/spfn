@@ -114,6 +114,7 @@ describe('state client — subscription lifecycle', () =>
 
     afterEach(() =>
     {
+        vi.useRealTimers();
         FakeEventSource.uninstall();
     });
 
@@ -606,6 +607,7 @@ describe('state client — subscription lifecycle', () =>
 
     it('L24 a first snapshot that rejects once is read again after retryDelay; the stream opens; onError once', async () =>
     {
+        vi.useFakeTimers();
         const h = harness({ getStates: failingFirst(1) });
         const listener = vi.fn();
         h.client.subscribe('consent', listener);
@@ -613,7 +615,11 @@ describe('state client — subscription lifecycle', () =>
         expect(h.onError).toHaveBeenCalledTimes(1);
         expect(FakeEventSource.instances).toHaveLength(0);
 
-        await vi.waitFor(() => expect(FakeEventSource.instances).toHaveLength(1));
+        await vi.advanceTimersByTimeAsync(9);
+        expect(routes(h)).toEqual(['getStates']);
+        await vi.advanceTimersByTimeAsync(1);
+        await settle();
+        expect(FakeEventSource.instances).toHaveLength(1);
         FakeEventSource.last.open();
         await settle();
 
@@ -642,12 +648,16 @@ describe('state client — subscription lifecycle', () =>
 
     it('L26 close() before the retry of a failed first snapshot: no retry read, no stream', async () =>
     {
+        vi.useFakeTimers();
         const h = harness({ getStates: failingFirst(Infinity) });
         h.client.subscribe('consent', () => undefined);
         await settle();
+        expect(h.onError).toHaveBeenCalledTimes(1);             // the first read failed; its retry is due in 10 ms
+        expect(vi.getTimerCount()).toBe(1);
 
         h.client.close();
-        await new Promise(resolve => setTimeout(resolve, 50));   // five times the harness retryDelay
+        expect(vi.getTimerCount()).toBe(0);
+        await vi.advanceTimersByTimeAsync(50);                  // five times the harness retryDelay
 
         expect(routes(h)).toEqual(['getStates']);
         expect(FakeEventSource.instances).toHaveLength(0);
@@ -655,55 +665,59 @@ describe('state client — subscription lifecycle', () =>
 
     it('L26b a subscribe after close(), before the old retry would fire, makes the only new read; the stale timer reads nothing', async () =>
     {
+        vi.useFakeTimers();
         const times: number[] = [];
         const failing = failingFirst(Infinity);
         const h = harness({
             getStates: input =>
             {
-                times.push(performance.now());
+                times.push(Date.now());
 
                 return failing(input);
             },
         }, { retryDelay: 200 });
         h.client.subscribe('consent', () => undefined);
-        await vi.waitFor(() => expect(h.onError).toHaveBeenCalledTimes(1), { interval: 1 });
-        await new Promise(resolve => setTimeout(resolve, times[0] + 100 - performance.now()));   // the old retry is due 100 ms from now
+        await settle();
+        expect(h.onError).toHaveBeenCalledTimes(1);
+        await vi.advanceTimersByTimeAsync(100);                 // the old retry is due 100 ms from now
         expect(times).toHaveLength(1);
         h.client.close();
 
-        const resubscribed = performance.now();
+        const resubscribed = Date.now();
         h.client.subscribe('consent', () => undefined);
-        await vi.waitFor(() => expect(times.length).toBeGreaterThanOrEqual(3), { timeout: 1000 });
+        await settle();
+        await vi.advanceTimersByTimeAsync(100);                 // the old retry's moment passes
+        expect(times).toEqual([resubscribed - 100, resubscribed]);
+        await vi.advanceTimersByTimeAsync(100);
         h.client.close();
 
-        expect(times[1]).toBeGreaterThanOrEqual(resubscribed);
         // The third read is the new lifetime's retry, not the stale timer of the first.
-        expect(times[2] - times[1]).toBeGreaterThanOrEqual(199);
+        expect(times).toEqual([resubscribed - 100, resubscribed, resubscribed + 200]);
     });
 
     it('L27 a first snapshot that keeps rejecting is retried every retryDelay, not in a tight loop; onError per attempt', async () =>
     {
+        vi.useFakeTimers();
         const times: number[] = [];
         const failing = failingFirst(Infinity);
         const h = harness({
             getStates: input =>
             {
-                times.push(performance.now());
+                times.push(Date.now());
 
                 return failing(input);
             },
         });
+        const start = Date.now();
         h.client.subscribe('consent', () => undefined);
-        await new Promise(resolve => setTimeout(resolve, 100));
+        await settle();
+        await vi.advanceTimersByTimeAsync(100);
         h.client.close();
         await settle();
 
-        const gaps = times.slice(1).map((time, i) => time - times[i]);
-        expect(times.length).toBeGreaterThanOrEqual(3);
-        expect(times.length).toBeLessThanOrEqual(11);
-        // setTimeout(10) may fire a fraction of a millisecond early against performance.now().
-        expect(Math.min(...gaps)).toBeGreaterThanOrEqual(9);
-        expect(h.onError).toHaveBeenCalledTimes(times.length);
+        // A read at 0 ms, then one every harness retryDelay (10 ms) up to 100 ms.
+        expect(times.map(time => time - start)).toEqual([0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100]);
+        expect(h.onError).toHaveBeenCalledTimes(11);
         expect(FakeEventSource.instances).toHaveLength(0);
     });
 

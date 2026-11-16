@@ -12,11 +12,12 @@
  * No secret, code or key value printed by these tests is a real one.
  */
 
-import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
 import { Hono } from 'hono';
 import { eq } from 'drizzle-orm';
 
 import { setupTestDb, teardownTestDb, clearTables, getTestDb, isDatabaseAvailable } from '../helpers/db';
+import { pinClockInsideTotpStep } from '../helpers/totp-clock';
 import { FixtureAuthenticator } from '../helpers/webauthn-fixture';
 import { mfaRecoveryCodes, mfaTotp, passkeys, userPublicKeys, users } from '@/server/entities';
 import { hashPassword } from '@/server/helpers/password';
@@ -72,6 +73,12 @@ describe.skipIf(!dbAvailable)('MFA enrolment (case table 6a)', () =>
         delete process.env.SPFN_AUTH_PASSKEY_ORIGINS;
         delete process.env.SPFN_AUTH_TOKEN_ENCRYPTION_KEYS;
         delete process.env.SPFN_AUTH_MFA_ISSUER;
+    });
+
+    afterEach(() =>
+    {
+        // A row that pinned the clock to a TOTP step lets it go.
+        vi.useRealTimers();
     });
 
     beforeEach(async () =>
@@ -334,6 +341,8 @@ describe.skipIf(!dbAvailable)('MFA enrolment (case table 6a)', () =>
 
     it('row: unconfirmed — confirm with the current or a ±1 step code is 200, ten recovery codes, enrolled', async () =>
     {
+        pinClockInsideTotpStep();
+
         for (const offset of [0, -1, 1])
         {
             const session = await signIn('owner@test.com');
@@ -361,6 +370,7 @@ describe.skipIf(!dbAvailable)('MFA enrolment (case table 6a)', () =>
 
     it('row: unconfirmed — confirm with a ±2 step code is 401', async () =>
     {
+        pinClockInsideTotpStep();
         const session = await signIn('owner@test.com');
         const secret = await enroll(session);
 
