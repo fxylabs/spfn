@@ -13,6 +13,7 @@ import { describe, it, expect, vi } from 'vitest';
 import type { RequestInterceptorContext, ResponseInterceptorContext } from '@spfn/core/nextjs/server';
 import { signupLinkInterceptor } from '../../nextjs/interceptors/signup-link';
 import { COOKIE_NAMES } from '../../server/lib/config';
+import { decidedResponse } from '../helpers/session-decision';
 
 const CONFIRM_PATH = '/_auth/signup/email/confirm';
 const PASSWORD_PATH = '/_auth/signup/password';
@@ -74,7 +75,7 @@ describe('signup link interceptor - confirm response', () =>
         const ctx = responseContext(CONFIRM_PATH, true, { email: 'a@example.com', setupSecret: 'secret-value' });
         const next = vi.fn(async () => undefined);
 
-        await signupLinkInterceptor.response?.(ctx, next);
+        await decidedResponse(ctx, [signupLinkInterceptor.response], next);
 
         expect(ctx.response.body.setupSecret).toBeUndefined();
         expect(ctx.setCookies).toHaveLength(1);
@@ -86,7 +87,7 @@ describe('signup link interceptor - confirm response', () =>
     {
         const ctx = responseContext(CONFIRM_PATH, true, { setupSecret: 'secret-value' });
 
-        await signupLinkInterceptor.response?.(ctx, vi.fn(async () => undefined));
+        await decidedResponse(ctx, [signupLinkInterceptor.response], vi.fn(async () => undefined));
 
         expect(ctx.setCookies[0].options).toMatchObject({
             httpOnly: true,
@@ -99,7 +100,7 @@ describe('signup link interceptor - confirm response', () =>
     {
         const ctx = responseContext(CONFIRM_PATH, false, { message: 'nope' });
 
-        await signupLinkInterceptor.response?.(ctx, vi.fn(async () => undefined));
+        await decidedResponse(ctx, [signupLinkInterceptor.response], vi.fn(async () => undefined));
 
         expect(ctx.setCookies).toHaveLength(0);
     });
@@ -141,7 +142,7 @@ describe('signup link interceptor - password response', () =>
     {
         const ctx = responseContext(PASSWORD_PATH, true, { userId: '1' });
 
-        await signupLinkInterceptor.response?.(ctx, vi.fn(async () => undefined));
+        await decidedResponse(ctx, [signupLinkInterceptor.response], vi.fn(async () => undefined));
 
         expect(ctx.setCookies).toHaveLength(1);
         expect(ctx.setCookies[0].value).toBe('');
@@ -152,7 +153,7 @@ describe('signup link interceptor - password response', () =>
     {
         const ctx = responseContext(PASSWORD_PATH, false, { message: 'password too short' });
 
-        await signupLinkInterceptor.response?.(ctx, vi.fn(async () => undefined));
+        await decidedResponse(ctx, [signupLinkInterceptor.response], vi.fn(async () => undefined));
 
         expect(ctx.setCookies).toHaveLength(0);
     });

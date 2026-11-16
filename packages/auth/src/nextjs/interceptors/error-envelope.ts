@@ -62,6 +62,15 @@ export function refusalBody(error: HttpError): Record<string, unknown>
     };
 }
 
+/** The error code of a backend answer: the envelope's `error.code`, else its `__type`. */
+export function errorCodeOf(body: unknown): string | undefined
+{
+    const envelope = body as { error?: { code?: unknown }; __type?: unknown } | null;
+    const code = envelope?.error?.code ?? envelope?.__type;
+
+    return typeof code === 'string' ? code : undefined;
+}
+
 /**
  * A request id for a response no request logger ever saw.
  *

@@ -22,13 +22,14 @@ import { keyRotationInterceptor } from '../../nextjs/interceptors/key-rotation';
 import { oauthFinalizeInterceptor } from '../../nextjs/interceptors/oauth';
 import { sessionBindingInterceptor } from '../../nextjs/interceptors/session-binding';
 import { SESSION_RENEW_PATH_PATTERN } from '../../nextjs/interceptors/session-renew';
-import { sealPendingSession } from '../../nextjs/session-helpers';
+import { sealPendingSession, unsealPendingSession } from '../../nextjs/session-helpers';
 import { sealSession, unsealSession, type SessionData } from '../../server/lib/session';
 import { generateKeyPair } from '../../server/lib/crypto';
 import { COOKIE_NAMES } from '../../server/lib/config';
 import { buildStartCookieName } from '../../server/lib/oauth/start-cookies';
 import { refusalEnvelope } from '../../nextjs/interceptors/error-envelope';
-import { authErrorRegistry, SessionContextChangedError, SessionRenewalRequiredError, SessionResealFailedError } from '../../errors';
+import { authErrorRegistry, KeyRevokedError, SessionContextChangedError, SessionRenewalRequiredError, SessionResealFailedError } from '../../errors';
+import { decidedRequest, decidedResponse } from '../helpers/session-decision';
 
 const SECRET = 'test-secret-with-at-least-32-characters-for-security-testing';
 const CHROME = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36';
@@ -114,7 +115,7 @@ describe('the proxy and a bound session (case table 6c)', () =>
         const ctx = requestContext('/_auth/users/me', new Map([[COOKIE_NAMES.SESSION, sealed]]), CHROME);
         const forwarded = vi.fn(next);
 
-        await generalAuthInterceptor.request?.(ctx, forwarded);
+        await decidedRequest(ctx, [generalAuthInterceptor.request], forwarded);
 
         expect(forwarded).toHaveBeenCalledOnce();
         expect(ctx.abort).toBeUndefined();
@@ -128,7 +129,7 @@ describe('the proxy and a bound session (case table 6c)', () =>
             metadata: { sessionValid: true, sessionBound: true },
         });
 
-        await generalAuthInterceptor.response?.(ctx, next);
+        await decidedResponse(ctx, [generalAuthInterceptor.response], next);
 
         expect(ctx.response.body).toMatchObject({
             __type: 'SessionRenewalRequiredError',
@@ -149,11 +150,11 @@ describe('the proxy and a bound session (case table 6c)', () =>
         const ctx = requestContext('/_auth/users/me', new Map([[COOKIE_NAMES.SESSION, sealed]]), CHROME);
         const forwarded = vi.fn(next);
 
-        await generalAuthInterceptor.request?.(ctx, forwarded);
+        await decidedRequest(ctx, [generalAuthInterceptor.request], forwarded);
         expect(forwarded).toHaveBeenCalledOnce();
 
         const answered = responseContext('/_auth/users/me', 200, { ok: true }, { metadata: ctx.metadata });
-        await generalAuthInterceptor.response?.(answered, next);
+        await decidedResponse(answered, [generalAuthInterceptor.response], next);
 
         expect(answered.response.status).toBe(200);
         expect(answered.response.body).toEqual({ ok: true });
@@ -166,7 +167,7 @@ describe('the proxy and a bound session (case table 6c)', () =>
         const ctx = requestContext('/_auth/session/renew/options', new Map([[COOKIE_NAMES.SESSION, sealed]]), CHROME);
         const forwarded = vi.fn(next);
 
-        await generalAuthInterceptor.request?.(ctx, forwarded);
+        await decidedRequest(ctx, [generalAuthInterceptor.request], forwarded);
 
         expect(forwarded).toHaveBeenCalledOnce();
         expect(ctx.abort).toBeUndefined();
@@ -183,7 +184,7 @@ describe('the proxy and a bound session (case table 6c)', () =>
             metadata: { sessionValid: true },
         });
 
-        await generalAuthInterceptor.response?.(ctx, next);
+        await decidedResponse(ctx, [generalAuthInterceptor.response], next);
 
         expect(ctx.response.status).toBe(401);
         expect((ctx.response.body as { __type: string }).__type).toBe('SessionRenewalRefusedError');
@@ -195,7 +196,7 @@ describe('the proxy and a bound session (case table 6c)', () =>
         const { sealed } = await sealedSession({ binding: 'passkey', keyExpiresAt: Date.now() + 3_600_000, uaFamily: 'chrome' });
         const ctx = requestContext('/_auth/users/me', new Map([[COOKIE_NAMES.SESSION, sealed]]), FIREFOX);
 
-        await generalAuthInterceptor.request?.(ctx, next);
+        await decidedRequest(ctx, [generalAuthInterceptor.request], next);
 
         expect(ctx.abort?.status).toBe(401);
         expect((ctx.abort?.body as { __type: string }).__type).toBe('SessionContextChangedError');
@@ -212,7 +213,7 @@ describe('the proxy and a bound session (case table 6c)', () =>
         const ctx = requestContext('/_auth/users/me', new Map([[COOKIE_NAMES.SESSION, sealed]]));
         const forwarded = vi.fn(next);
 
-        await generalAuthInterceptor.request?.(ctx, forwarded);
+        await decidedRequest(ctx, [generalAuthInterceptor.request], forwarded);
 
         expect(forwarded).toHaveBeenCalledOnce();
         expect(ctx.abort).toBeUndefined();
@@ -225,27 +226,23 @@ describe('the proxy and a bound session (case table 6c)', () =>
         const { sealed } = await sealedSession({ uaFamily: 'chrome' });
         const ctx = requestContext('/_auth/users/me', new Map([[COOKIE_NAMES.SESSION, sealed]]), FIREFOX);
 
-        await generalAuthInterceptor.request?.(ctx, next);
+        await decidedRequest(ctx, [generalAuthInterceptor.request], next);
 
         expect(ctx.abort).toBeUndefined();
         expect(warn).not.toHaveBeenCalled();
     });
 
-    it('bound, backend answers some other 401: 401 passed through and the cookies are cleared', async () =>
+    it('bound, backend answers a 401 about the request token: 401 passed through and the cookies stay', async () =>
     {
         const ctx = responseContext('/_auth/users/me', 401, { __type: 'InvalidTokenError', message: 'no' }, {
             metadata: { sessionValid: true, sessionBound: true },
         });
 
-        await generalAuthInterceptor.response?.(ctx, next);
+        await decidedResponse(ctx, [generalAuthInterceptor.response], next);
 
         expect(ctx.response.status).toBe(401);
         expect((ctx.response.body as { __type: string }).__type).toBe('InvalidTokenError');
-        expect(ctx.setCookies.filter(cookie => cookie.value === '').map(cookie => cookie.name)).toEqual([
-            COOKIE_NAMES.SESSION,
-            COOKIE_NAMES.SESSION_KEY_ID,
-            COOKIE_NAMES.CSRF,
-        ]);
+        expect(ctx.setCookies.filter(cookie => cookie.value === '')).toEqual([]);
     });
 
     it('unbound, backend answers 401 KeyExpiredError: 401 passed through and the cookies are cleared, exactly as today', async () =>
@@ -254,7 +251,7 @@ describe('the proxy and a bound session (case table 6c)', () =>
             metadata: { sessionValid: true },
         });
 
-        await generalAuthInterceptor.response?.(ctx, next);
+        await decidedResponse(ctx, [generalAuthInterceptor.response], next);
 
         expect(ctx.response.status).toBe(401);
         expect((ctx.response.body as { __type: string }).__type).toBe('KeyExpiredError');
@@ -272,7 +269,7 @@ describe('the proxy and a bound session (case table 6c)', () =>
             userAgent: CHROME,
         });
 
-        await loginRegisterInterceptor.response?.(ctx, next);
+        await decidedResponse(ctx, [loginRegisterInterceptor.response], next);
 
         const session = await queuedSession(ctx.setCookies);
         expect(session.binding).toBeUndefined();
@@ -287,7 +284,7 @@ describe('the proxy and a bound session (case table 6c)', () =>
             userAgent: CHROME,
         });
 
-        await loginRegisterInterceptor.response?.(ctx, next);
+        await decidedResponse(ctx, [loginRegisterInterceptor.response], next);
 
         expect(await queuedSession(ctx.setCookies)).toMatchObject({
             binding: 'passkey',
@@ -304,10 +301,10 @@ describe('the proxy and a bound session (case table 6c)', () =>
             uaFamily: 'chrome',
         });
         const request = requestContext('/_auth/keys/rotate', new Map([[COOKIE_NAMES.SESSION, sealed]]));
-        await keyRotationInterceptor.request?.(request, next);
+        await decidedRequest(request, [keyRotationInterceptor.request], next);
 
         const ctx = responseContext('/_auth/keys/rotate', 200, { success: true }, { metadata: request.metadata });
-        await keyRotationInterceptor.response?.(ctx, next);
+        await decidedResponse(ctx, [keyRotationInterceptor.response], next);
 
         // The whole Set-Cookie set, not only the JWE: the key-id cookie has to
         // name the *new* key — it is what the renewal and CSRF paths key on — and
@@ -335,12 +332,15 @@ describe('the proxy and a bound session (case table 6c)', () =>
             keyId: keyPair.keyId,
             algorithm: keyPair.algorithm,
         });
+        const cookieName = buildStartCookieName('pending', keyPair.keyId);
         const ctx = responseContext('/_auth/oauth/finalize', 200, { userId: '7', keyId: keyPair.keyId, ...BOUND }, {
-            cookies: new Map([[buildStartCookieName('pending', keyPair.keyId), pending]]),
+            cookies: new Map([[cookieName, pending]]),
             userAgent: CHROME,
         });
+        // What the request phase leaves: the pending key it signed the finalize with
+        ctx.metadata.finalizePending = { cookieName, session: await unsealPendingSession(pending) };
 
-        await oauthFinalizeInterceptor.response?.(ctx, next);
+        await decidedResponse(ctx, [oauthFinalizeInterceptor.response], next);
 
         expect(await queuedSession(ctx.setCookies)).toMatchObject({
             binding: 'passkey',
@@ -358,10 +358,10 @@ describe('the proxy and a bound session (case table 6c)', () =>
         });
         const session = await unsealSession(sealed);
         const ctx = responseContext('/_auth/users/me', 200, { ok: true }, {
-            metadata: { refreshSession: true, sessionData: session, sessionValid: true, keyId: session.keyId },
+            metadata: { refreshSession: true, inboundSession: session, sessionValid: true, keyId: session.keyId },
         });
 
-        await generalAuthInterceptor.response?.(ctx, next);
+        await decidedResponse(ctx, [generalAuthInterceptor.response], next);
 
         expect(await queuedSession(ctx.setCookies)).toMatchObject({
             binding: 'passkey',
@@ -378,7 +378,7 @@ describe('the proxy and a bound session (case table 6c)', () =>
             userAgent: CHROME,
         });
 
-        await sessionBindingInterceptor.response?.(ctx, next);
+        await decidedResponse(ctx, [sessionBindingInterceptor.response], next);
 
         const session = await queuedSession(ctx.setCookies);
         expect(session.binding).toBe('passkey');
@@ -404,7 +404,7 @@ describe('the proxy and a bound session (case table 6c)', () =>
             userAgent: CHROME,
         });
 
-        await loginRegisterInterceptor.response?.(ctx, next);
+        await decidedResponse(ctx, [loginRegisterInterceptor.response], next);
 
         expect(await queuedSession(ctx.setCookies)).toMatchObject({
             binding: 'passkey',
@@ -424,7 +424,7 @@ describe('the proxy and a bound session (case table 6c)', () =>
             userAgent: CHROME,
         });
 
-        await sessionBindingInterceptor.response?.(ctx, next);
+        await decidedResponse(ctx, [sessionBindingInterceptor.response], next);
 
         expect(ctx.response.status).toBe(500);
         expect(ctx.response.ok).toBe(false);
@@ -452,7 +452,7 @@ describe('the proxy and a bound session (case table 6c)', () =>
             userAgent: CHROME,
         });
 
-        await sessionBindingInterceptor.response?.(ctx, next);
+        await decidedResponse(ctx, [sessionBindingInterceptor.response], next);
 
         const session = await queuedSession(ctx.setCookies);
         expect(session.binding).toBeUndefined();
@@ -497,7 +497,7 @@ describe('the proxy and a bound session (case table 6c)', () =>
         const { sealed } = await sealedSession({ binding: 'passkey', keyExpiresAt: Date.now() + 3_600_000, uaFamily: 'chrome' });
         const ctx = requestContext('/_auth/users/me', new Map([[COOKIE_NAMES.SESSION, sealed]]), FIREFOX);
 
-        await generalAuthInterceptor.request?.(ctx, next);
+        await decidedRequest(ctx, [generalAuthInterceptor.request], next);
 
         const body = ctx.abort!.body as { __type: string; error: { code: string; requestId: string } };
         expect(ctx.abort!.status).toBe(401);
@@ -527,7 +527,7 @@ describe('the renewal request shape the proxy builds (case table 6d, browser row
             const ctx = requestContext(path, new Map([[COOKIE_NAMES.SESSION, sealed]]), CHROME);
             const forwarded = vi.fn(next);
 
-            await generalAuthInterceptor.request?.(ctx, forwarded);
+            await decidedRequest(ctx, [generalAuthInterceptor.request], forwarded);
 
             expect(forwarded).toHaveBeenCalledOnce();
             expect(ctx.abort).toBeUndefined();
@@ -577,11 +577,11 @@ describe('a server component rendering a bound session that needs renewing (case
         expect(await getAuthSessionData()).toBe(RENEWAL_REQUIRED);
     });
 
-    it('getAuthSessionData still answers null for an ordinary refusal', async () =>
+    it('getAuthSessionData still answers null for a refused key', async () =>
     {
         vi.doMock('@spfn/auth', () => ({
             authApi: {
-                getAuthSession: { call: async () => Promise.reject(new Error('Unauthorized')) },
+                getAuthSession: { call: async () => Promise.reject(new KeyRevokedError()) },
             },
         }));
 

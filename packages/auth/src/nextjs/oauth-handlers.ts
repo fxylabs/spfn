@@ -5,18 +5,15 @@
  */
 
 import { NextRequest, NextResponse } from 'next/server.js';
-import { cookies } from 'next/headers.js';
-import { sealSession } from '../server/lib/session';
-import { deriveCsrfToken } from '../server/lib/csrf';
-import { COOKIE_NAMES, getSessionTtl } from '../server/lib/config';
-import { env } from '@spfn/core/config';
+import { CSRF_HEADER } from '../server/lib/csrf';
+import { COOKIE_NAMES } from '../server/lib/config';
 import { logger } from '@spfn/core/logger';
-import { OAUTH_COOKIE_MISSING_MESSAGE } from '@spfn/auth/errors';
-import { pendingCookieForKey, unsealPendingSession, type PendingSessionData } from './session-helpers';
+import { createRpcProxy } from '@spfn/core/nextjs/server';
 import { isSafeReturnPath } from '../lib/return-path';
-import { bindingSessionFields } from './interceptors/session-binding';
 import { resolveMfaConfirmPath } from './mfa-confirm-path';
-import { callbackQueryReason, type OAuthErrorReason } from '../lib/oauth-error-reason';
+import { callbackQueryReason, isOAuthErrorReason, type OAuthErrorReason } from '../lib/oauth-error-reason';
+import { routeMap as authRouteMap } from '../generated/route-map';
+import { authInterceptors } from './interceptors';
 
 export interface OAuthCallbackOptions
 {
@@ -46,7 +43,26 @@ export interface OAuthCallbackOptions
      * @default env SPFN_AUTH_MFA_CONFIRM_PATH, then '/auth/mfa'
      */
     mfaPath?: string;
+
+    /**
+     * The app's RPC proxy — what its `/api/rpc/[routeName]` route exports from
+     * `createRpcProxy(...)`. The handler completes the sign-in by calling its
+     * `POST` in-process, so the session is decided by the same interceptor chain,
+     * backend URL and proxy-guard key the app's own proxy uses. Pass it: that is
+     * the normal form. Nothing records the proxy an app builds, so without it the
+     * handler cannot find it, and an app proxy configured beyond the defaults (its
+     * own `interceptors`, `apiUrl` or `proxySecret`) would finalize through a
+     * different chain, silently.
+     *
+     * @default a proxy built as `createRpcProxy` builds one by default —
+     *   `SPFN_API_URL`, `SPFN_PROXY_SECRET`, the registered interceptors — with
+     *   `authInterceptors` in it
+     */
+    rpcProxy?: FinalizeProxy;
 }
+
+/** The part of an RPC proxy the callback calls. */
+type FinalizeProxy = Pick<ReturnType<typeof createRpcProxy>, 'POST'>;
 
 /**
  * The query's `returnUrl`, or the handler's default when it would leave the app.
@@ -59,26 +75,6 @@ export interface OAuthCallbackOptions
 function safeReturnUrl(requested: string | null, defaultRedirect: string): string
 {
     return requested && isSafeReturnPath(requested) ? requested : defaultRedirect;
-}
-
-/**
- * The two binding values the backend put on the callback URL, in the shape the
- * sealing helper reads a sign-in response in.
- *
- * A malformed number comes out as `NaN`, which the helper's `typeof` check
- * accepts — so it is filtered here instead, and a query that cannot be read
- * seals an unbound session rather than one whose expiry is unusable.
- */
-function bindingFromQuery(searchParams: URLSearchParams): { sessionBinding?: string; keyExpiresAtMillis?: number }
-{
-    const expiresAt = Number(searchParams.get('keyExpiresAtMillis'));
-
-    if (searchParams.get('sessionBinding') !== 'passkey' || !Number.isFinite(expiresAt))
-    {
-        return {};
-    }
-
-    return { sessionBinding: 'passkey', keyExpiresAtMillis: expiresAt };
 }
 
 /**
@@ -132,85 +128,21 @@ function errorRedirect(request: NextRequest, errorUrl: string, error: string, re
     return NextResponse.redirect(target);
 }
 
-/** Why a pending session could not be had for `keyId`, or the session itself. */
-type PendingLookup =
-    | { ok: true; pending: PendingSessionData; cookieName: string }
-    | { ok: false; error: string; reason: OAuthErrorReason };
-
-/**
- * This start's pending session, found by the callback's keyId (#126) — its own
- * cookie, else a legacy fixed-name one. No cookie at all is `no_cookie` (#129):
- * the browser kept none of the start's cookies. One that does not unseal, or
- * holds another key, is `invalid_state`. A refusal writes no cookie.
- */
-async function lookUpPending(keyId: string): Promise<PendingLookup>
-{
-    const jar = (await cookies()).getAll().map(({ name, value }) => [name, value] as const);
-    const cookie = await pendingCookieForKey(jar, keyId);
-
-    if (!cookie)
-    {
-        return { ok: false, error: OAUTH_COOKIE_MISSING_MESSAGE, reason: 'no_cookie' };
-    }
-
-    const pending = await unsealPendingSession(cookie.value).catch(() => null);
-
-    if (pending?.keyId !== keyId)
-    {
-        return { ok: false, error: 'Session mismatch. Please try again.', reason: 'invalid_state' };
-    }
-
-    return { ok: true, pending, cookieName: cookie.name };
-}
-
-/**
- * Seal the session and answer with the redirect that installs it.
- *
- * The binding fields ride the callback query, put there by the backend that
- * registered the key: this handler runs before any route call, so the redirect
- * is the only thing that can tell it the key is short-lived. Nothing is
- * authorized by them — the key row expires when it says it does whatever the
- * query claims — but a cookie that did not carry them would take the unbound
- * branch at the first expiry and sign the person out instead of renewing.
- *
- * Only this start's pending cookie is cleared; other starts in flight keep theirs.
- */
-async function sessionRedirect(
-    request: NextRequest,
-    session: { userId: string; returnUrl: string; found: Extract<PendingLookup, { ok: true }> },
-): Promise<NextResponse>
-{
-    const { pending, cookieName } = session.found;
-    const ttl = getSessionTtl();
-    const sessionToken = await sealSession({
-        userId: session.userId,
-        privateKey: pending.privateKey,
-        keyId: pending.keyId,
-        algorithm: pending.algorithm,
-        ...bindingSessionFields(bindingFromQuery(request.nextUrl.searchParams), request.headers.get('user-agent')),
-    }, ttl);
-    const response = NextResponse.redirect(new URL(session.returnUrl, request.url));
-    const options = { httpOnly: true, secure: env.NODE_ENV === 'production', sameSite: 'lax' as const, maxAge: ttl, path: '/' };
-
-    response.cookies.set(COOKIE_NAMES.SESSION, sessionToken, options);
-    response.cookies.set(COOKIE_NAMES.SESSION_KEY_ID, pending.keyId, options);
-    // Readable CSRF cookie — the client mirrors it into x-spfn-csrf
-    response.cookies.set(COOKIE_NAMES.CSRF, await deriveCsrfToken(pending.keyId), { ...options, httpOnly: false });
-    response.cookies.delete(cookieName);
-
-    logger.debug('OAuth callback completed', { userId: session.userId, keyId: pending.keyId });
-
-    return response;
-}
-
 /**
  * Create OAuth callback handler for Next.js API Route
  *
- * Handles the final step of OAuth flow:
- * 1. Gets userId, keyId from query params (set by backend)
- * 2. Gets privateKey from this start's pending session cookie, found by keyId
- * 3. Creates full session and saves to cookie
- * 4. Redirects to returnUrl
+ * Handles the final step of OAuth flow by completing it through the RPC proxy —
+ * the same `oauthFinalize` call the `OAuthCallback` page makes, with this
+ * browser's cookies, run in-process by the proxy's own handler — and
+ * redirecting with the cookies the proxy decided:
+ * 1. Gets keyId from query params (set by backend)
+ * 2. Posts it to the proxy's `oauthFinalize`, which finds this start's pending
+ *    cookie, takes the user id the backend answers for that key, and writes the
+ *    session through the one session decision
+ * 3. Redirects to returnUrl carrying those cookies
+ *
+ * The handler seals nothing itself, so a `userId` on the callback query is not
+ * read: the session is the backend's answer for the key, never the query's.
  *
  * When the account has a second factor and this device is new to it (#95) the
  * backend sends `mfaChallenge` in place of `userId`. No session is sealed; the
@@ -225,18 +157,22 @@ async function sessionRedirect(
  * ```typescript
  * // /api/auth/callback/route.ts
  * import { createOAuthCallbackHandler } from '@spfn/auth/nextjs/server';
- * export const GET = createOAuthCallbackHandler();
+ * import { POST } from '@/app/api/rpc/[routeName]/route';
+ *
+ * export const GET = createOAuthCallbackHandler({ rpcProxy: { POST } });
  * ```
  */
 export function createOAuthCallbackHandler(options?: OAuthCallbackOptions)
 {
     const defaultRedirect = options?.defaultRedirectUrl || '/';
     const errorUrl = options?.errorRedirectUrl || '/auth/error';
+    // Built on first use: `SPFN_API_URL` is read when a callback is handled, not when the route module loads
+    let defaultProxy: FinalizeProxy | undefined;
+    const rpcProxy = (): FinalizeProxy => options?.rpcProxy ?? (defaultProxy ??= defaultFinalizeProxy());
 
     return async (request: NextRequest): Promise<NextResponse> =>
     {
         const searchParams = request.nextUrl.searchParams;
-        const userId = searchParams.get('userId');
         const keyId = searchParams.get('keyId');
         const returnUrl = safeReturnUrl(searchParams.get('returnUrl'), defaultRedirect);
         const error = searchParams.get('error');
@@ -253,42 +189,117 @@ export function createOAuthCallbackHandler(options?: OAuthCallbackOptions)
             return mfaRedirect(request, { challenge: mfaChallenge, keyId, returnUrl }, options?.mfaPath);
         }
 
-        // Validate required params
-        if (!userId || !keyId)
+        if (!keyId)
         {
-            logger.error('OAuth callback missing required params', { userId: !!userId, keyId: !!keyId });
+            logger.error('OAuth callback missing required params', { keyId: false });
 
             return errorRedirect(request, errorUrl, 'Missing required parameters', 'failed');
         }
 
-        return await finishCallback(request, { userId, keyId, returnUrl, errorUrl });
+        return await finishCallback(request, {
+            keyId,
+            returnUrl,
+            errorUrl,
+            rpcProxy: rpcProxy(),
+        });
     };
 }
 
-/** The pending lookup, then the session — or the error page with the lookup's reason. */
+/**
+ * The proxy `oauthFinalize` runs through when the app passes none: the default
+ * `createRpcProxy`, with this package's interceptors whether or not the app's
+ * `@spfn/auth/nextjs/api` import has registered them in this bundle.
+ */
+function defaultFinalizeProxy(): FinalizeProxy
+{
+    return createRpcProxy({
+        routeMap: { oauthFinalize: authRouteMap.oauthFinalize },
+        disableAutoInterceptors: ['auth'],
+        interceptors: authInterceptors,
+    });
+}
+
+/**
+ * Complete the sign-in through the proxy, then redirect carrying its cookies —
+ * or to the error page with the reason the proxy named.
+ */
 async function finishCallback(
     request: NextRequest,
-    input: { userId: string; keyId: string; returnUrl: string; errorUrl: string },
+    input: FinalizeInput & { errorUrl: string },
 ): Promise<NextResponse>
 {
-    try
+    const finalized = await postFinalize(request, input).catch((error: Error) =>
     {
-        const found = await lookUpPending(input.keyId);
+        logger.error('OAuth callback failed', { error: error.message });
 
-        if (!found.ok)
-        {
-            logger.error('OAuth callback failed', { error: found.error });
+        return null;
+    });
 
-            return errorRedirect(request, input.errorUrl, found.error, found.reason);
-        }
-
-        return await sessionRedirect(request, { userId: input.userId, returnUrl: input.returnUrl, found });
-    }
-    catch (error)
+    if (!finalized?.ok)
     {
-        const err = error as Error;
-        logger.error('OAuth callback failed', { error: err.message });
+        const failure = await failureOf(finalized);
 
-        return errorRedirect(request, input.errorUrl, err.message, 'failed');
+        return errorRedirect(request, input.errorUrl, failure.message, failure.reason);
     }
+
+    const response = NextResponse.redirect(new URL(input.returnUrl, request.url));
+
+    for (const cookie of finalized.headers.getSetCookie())
+    {
+        response.headers.append('Set-Cookie', cookie);
+    }
+
+    logger.debug('OAuth callback completed', { keyId: input.keyId });
+
+    return response;
+}
+
+/** What the callback hands the proxy's `oauthFinalize`. */
+interface FinalizeInput
+{
+    keyId: string;
+    returnUrl: string;
+    rpcProxy: FinalizeProxy;
+}
+
+/**
+ * `oauthFinalize`, through the RPC proxy's own handler, in-process, as this browser.
+ *
+ * No HTTP hop: the request the proxy runs is the callback request itself — its
+ * cookies, its user agent, its client address — with the readable CSRF token
+ * mirrored into the header, exactly what the `OAuthCallback` page sends. Going
+ * out through the app's public URL instead would meet whatever stands in front
+ * of it (basic auth, an edge the server cannot call back through) and give the
+ * proxy the server's own address for every user.
+ */
+async function postFinalize(request: NextRequest, input: FinalizeInput): Promise<Response>
+{
+    const headers = new Headers(request.headers);
+    const csrf = request.cookies.get(COOKIE_NAMES.CSRF)?.value;
+
+    headers.set('content-type', 'application/json');
+
+    if (csrf)
+    {
+        headers.set(CSRF_HEADER, csrf);
+    }
+
+    const finalize = new NextRequest(new URL('/api/rpc/oauthFinalize', request.url), {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ body: { keyId: input.keyId, returnUrl: input.returnUrl } }),
+    });
+
+    return await input.rpcProxy.POST(finalize, { params: Promise.resolve({ routeName: 'oauthFinalize' }) });
+}
+
+/** The refusal's message, and the reason the proxy named for it (`failed` when none). */
+async function failureOf(response: Response | null): Promise<{ message: string; reason: OAuthErrorReason }>
+{
+    const data = response ? await response.json().catch(() => ({})) : {};
+
+    return {
+        message: typeof data.message === 'string' && data.message ? data.message : 'OAuth sign-in could not be completed',
+        reason: isOAuthErrorReason(data.reason) ? data.reason : 'failed',
+    };
 }

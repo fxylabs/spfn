@@ -5,9 +5,8 @@
  * time — this module is the one place an app reads them from.
  */
 
-import { type NextResponse } from 'next/server.js';
 import { COOKIE_NAMES } from '../server/lib/config';
-import { ownStartCookieNames } from '../server/lib/oauth/start-cookies';
+import { ownStartCookieNames, type CookieJar } from '../server/lib/oauth/start-cookies';
 
 /**
  * The cookie names that make up a browser session
@@ -56,45 +55,29 @@ export function sessionCookieNames(): SessionCookieNames
     };
 }
 
-/** The `getAll()` a NextRequest's cookie jar answers with. */
-interface RequestCookieSource
-{
-    cookies: { getAll(): { name: string; value: string }[] };
-}
-
 /**
- * Expire every session cookie on a response
+ * Every cookie this package can hold in a browser — the one list.
  *
- * For the route handler or middleware that answers "the API refused your
- * session" — it empties the jar so the next request arrives anonymous. The
- * path matches the one the setters use, because a delete under a different
- * path leaves the cookie in place. Absent cookies are not an error.
+ * The session and its key id and CSRF companions; the pending cookies the
+ * second-factor, device-login, sign-up and password-reset flows hold mid-way;
+ * and every OAuth start in flight, both of its cookies, plus the legacy fixed
+ * names (#126) — those are named per start, so only the jar knows them.
+ * Signing out expires exactly this list, so a cookie added to the package is
+ * added here or is left behind at sign-out.
  *
- * The OAuth start cookies are named per start (#126), so their names are known
- * only from the request: pass it, and every in-flight start's pending and CSRF
- * cookie is expired too. Without it, the legacy fixed names are.
- *
- * @param response - Response to expire the cookies on
- * @param request - The request whose jar names the in-flight OAuth starts
- * @returns The same response, so the call chains
- *
- * @example
- * ```typescript
- * export function GET(request: NextRequest): NextResponse
- * {
- *     return clearSessionCookies(NextResponse.redirect(new URL('/login', request.url)), request);
- * }
- * ```
+ * @param jar - the request's cookies, which name the in-flight OAuth starts
  */
-export function clearSessionCookies(response: NextResponse, request?: RequestCookieSource): NextResponse
+export function packageCookieNames(jar: CookieJar): string[]
 {
-    const { session, keyId, csrf } = sessionCookieNames();
-    const jar = (request?.cookies.getAll() ?? []).map(({ name, value }) => [name, value] as const);
-
-    for (const name of [session, keyId, csrf, ...ownStartCookieNames('pending', jar), ...ownStartCookieNames('csrf', jar)])
-    {
-        response.cookies.delete({ name, path: '/' });
-    }
-
-    return response;
+    return [
+        COOKIE_NAMES.SESSION,
+        COOKIE_NAMES.SESSION_KEY_ID,
+        COOKIE_NAMES.CSRF,
+        COOKIE_NAMES.MFA_PENDING,
+        COOKIE_NAMES.DEVICE_PENDING,
+        COOKIE_NAMES.SIGNUP_SETUP,
+        COOKIE_NAMES.PASSWORD_RESET_SETUP,
+        ...ownStartCookieNames('pending', jar),
+        ...ownStartCookieNames('csrf', jar),
+    ];
 }

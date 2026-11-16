@@ -384,6 +384,13 @@ describe('native sign-in answers each failure path with its own code', () =>
             'SecondFactorRequiredError',
         ];
 
+        // The admission refusals that end a session are the seventh (contract
+        // 0.14.5): a key that can no longer act and an account that is gone, each
+        // a code of its own instead of core's UnauthorizedError. Every signed-in
+        // operation and `auth.mfa.verify` can meet them. Held to their error
+        // classes in contract-export.test.ts.
+        const sessionEndingCodes = ['KeyRevokedError', 'AccountNotFoundError'];
+
         expect(declared.filter(e => e.surface === 'rest').map(e => e.code).sort())
             .toEqual([
                 ...table.map(cell => cell.code),
@@ -392,6 +399,7 @@ describe('native sign-in answers each failure path with its own code', () =>
                 ...deviceLinkCodes,
                 ...channelCodes,
                 ...secondFactorCodes,
+                ...sessionEndingCodes,
             ].sort());
     });
 

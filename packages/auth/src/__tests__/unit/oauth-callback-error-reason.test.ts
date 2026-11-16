@@ -58,7 +58,9 @@ vi.mock('../../server/services/oauth.service', async (importActual) =>
     };
 });
 
-// The finalize route's 200 reads the key row's binding; R9 needs no database.
+// The finalize route's 200 answers the principal its door admitted, and the key's binding; R9 needs no database.
+vi.mock('../../server/middleware/oauth-finalize-auth', async () => (await import('../helpers/finalize-door')).finalizeDoorStandIn('7'));
+
 vi.mock('../../server/services/session-binding.service', async (importActual) => ({
     ...(await importActual<typeof import('../../server/services/session-binding.service')>()),
     keySessionBindingService: vi.fn(async () => ({})),
@@ -108,6 +110,7 @@ import {
     UnverifiedEmailLinkError,
 } from '@spfn/auth/errors';
 import { ValidationError } from '@spfn/core/errors';
+import { mountProxy } from '../helpers/rpc-proxy';
 
 const SECRET = 'test-secret-with-at-least-32-characters-for-security-testing';
 const NONCE = 'nonce-of-this-browser';
@@ -202,6 +205,22 @@ async function pastTheGate(app: Hono): Promise<URLSearchParams>
 }
 
 /** A pending session sealed for `keyId`, its private key a fresh one. */
+/**
+ * A callback request as the browser makes it — the jar on its `cookie` header —
+ * with the app's proxy mounted, which `createOAuthCallbackHandler` completes the
+ * sign-in through.
+ */
+function callbackRequest(url: URL): NextRequest
+{
+    const backend = new Hono();
+    registerRoutes(backend, mainAuthRouter);
+    mountProxy(backend);
+
+    const cookie = [...seams.jar].map(([name, value]) => `${name}=${value}`).join('; ');
+
+    return new NextRequest(url, { headers: cookie ? { cookie } : {} });
+}
+
 function sealedFor(keyId: string): Promise<string>
 {
     const keyPair = generateKeyPair('ES256');
@@ -377,12 +396,13 @@ describe('OAuth callback reason codes — createOAuthCallbackHandler (#126)', ()
     afterEach(() =>
     {
         vi.unstubAllEnvs();
+        vi.unstubAllGlobals();
         seams.jar = new Map();
     });
 
     async function handled(query: string): Promise<URLSearchParams>
     {
-        const response = await createOAuthCallbackHandler()(new NextRequest(new URL(`/api/auth/callback?${query}`, 'https://app.example')));
+        const response = await createOAuthCallbackHandler()(callbackRequest(new URL(`/api/auth/callback?${query}`, 'https://app.example')));
         const location = new URL(response.headers.get('location')!);
 
         expect(location.pathname).toBe('/auth/error');
@@ -481,9 +501,15 @@ function proxiedFetch(app: Hono, jar: Map<string, string>): CallbackOptions['fet
 
         await executeRequestInterceptors(requestCtx, matching.map(rule => rule.request).filter(phase => !!phase));
 
+        // Refused before the backend is asked
+        if (requestCtx.abort)
+        {
+            return new Response(JSON.stringify(requestCtx.abort.body), { status: requestCtx.abort.status });
+        }
+
         const answer = await app.request(path, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'x-forwarded-for': clientIp() },
+            headers: { 'Content-Type': 'application/json', 'x-forwarded-for': clientIp(), ...requestCtx.headers },
             body: JSON.stringify(body),
         });
         const responseCtx = {
@@ -832,7 +858,7 @@ describe('no_cookie case table A — backend callback, matchOAuthCallbackCsrf (#
 });
 
 /** The case table for `createOAuthCallbackHandler`'s pending lookup (#129). */
-describe('no_cookie case table B — createOAuthCallbackHandler, lookUpPending (#129)', () =>
+describe('no_cookie case table B — createOAuthCallbackHandler, through the finalize rule (#129)', () =>
 {
     beforeEach(() =>
     {
@@ -842,13 +868,14 @@ describe('no_cookie case table B — createOAuthCallbackHandler, lookUpPending (
     afterEach(() =>
     {
         vi.unstubAllEnvs();
+        vi.unstubAllGlobals();
         seams.jar = new Map();
     });
 
     async function handled(keyId: string): Promise<{ location: URL; setCookies: string[] }>
     {
         const url = new URL(`/api/auth/callback?userId=7&keyId=${keyId}&returnUrl=%2Fhome`, 'https://app.example');
-        const response = await createOAuthCallbackHandler()(new NextRequest(url));
+        const response = await createOAuthCallbackHandler()(callbackRequest(url));
 
         return { location: new URL(response.headers.get('location')!), setCookies: response.headers.getSetCookie() };
     }
@@ -888,7 +915,7 @@ describe('no_cookie case table B — createOAuthCallbackHandler, lookUpPending (
         expect(answer.location.searchParams.get('reason')).toBe('invalid_state');
     });
 
-    it('B4: a pending cookie that unseals to this keyId — the session is sealed and the browser goes to returnUrl', async () =>
+    it('B4: a pending cookie that unseals to this keyId — the session the proxy decided is on the redirect to returnUrl', async () =>
     {
         const keyId = generateKeyPair('ES256').keyId;
         const pending = buildStartCookieName('pending', keyId);

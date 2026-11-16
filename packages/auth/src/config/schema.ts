@@ -105,6 +105,17 @@ export const authEnvSchema = defineEnvSchema({
         }),
     },
 
+    SPFN_AUTH_SESSION_TTL_REMEMBER: {
+        ...envString({
+            description: 'Lifetime of a kept session — one whose sign-in posted `remember: true` ("keep me signed in"). Same forms as SPFN_AUTH_SESSION_TTL. The client chooses only whether a session is kept; both lifetimes are set here.',
+            default: '30d',
+            required: false,
+            validator: parseSessionTtl,
+            nextjs: true, // Read by the Next.js proxy when it seals a kept session
+            examples: ['30d', '14d', '90d'],
+        }),
+    },
+
     // ============================================================================
     // JWT Configuration
     // ============================================================================
@@ -534,7 +545,7 @@ export const authEnvSchema = defineEnvSchema({
     // ============================================================================
     SPFN_AUTH_GUARD_TIMEOUT: {
         ...envNumber({
-            description: 'Timeout in milliseconds of the server-side session lookup behind the guards (`RequireAuth`, `RequireRole`, `RequirePermission` and the helpers in `@spfn/auth/nextjs/server`). Unset, the lookup waits as long as the API client does (`SERVER_TIMEOUT`, 120 s by default). A lookup that times out reads as no session, so the guard sends the person to sign in; a few seconds is a reasonable value.',
+            description: 'Timeout in milliseconds of the server-side session lookup behind the guards (`RequireAuth`, `RequireRole`, `RequirePermission` and the helpers in `@spfn/auth/nextjs/server`). Unset, the lookup waits as long as the API client does (`SERVER_TIMEOUT`, 120 s by default). A lookup that times out is an error, not a sign-out: it is thrown for the app\'s error boundary, the cookies stay and nobody is redirected to sign in; a few seconds is a reasonable value.',
             required: false,
             validator: parseGuardTimeout,
             nextjs: true, // Read by the guards, which render in the Next.js runtime

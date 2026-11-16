@@ -6,11 +6,14 @@
 
 import type { InterceptorRule } from '@spfn/core/nextjs/server';
 import { generateKeyPair, generateClientToken } from '../../server/lib/crypto';
-import { unsealSession, sealSession } from '../../server/lib/session';
-import { getSessionTtl, COOKIE_NAMES } from '../../server/lib/config';
+import { unsealSession } from '../../server/lib/session';
+import { COOKIE_NAMES } from '../../server/lib/config';
 import { authLogger } from '../../server/logger';
-import { cookieSecure } from './cookie-options';
-import { pushCsrfCookie } from './csrf';
+import { establish } from './session-decision';
+import { rememberField } from './remember';
+
+/** The path this rule establishes a session on. */
+export const ESTABLISHING_PATHS = ['/_auth/keys/rotate'] as const;
 
 /**
  * Key Rotation Interceptor
@@ -20,7 +23,7 @@ import { pushCsrfCookie } from './csrf';
  */
 export const keyRotationInterceptor: InterceptorRule =
     {
-        pathPattern: '/_auth/keys/rotate',
+        pathPattern: ESTABLISHING_PATHS[0],
         method: 'POST',
 
         request: async (ctx, next) =>
@@ -90,6 +93,7 @@ export const keyRotationInterceptor: InterceptorRule =
                         ...(currentSession.uaFamily ? { uaFamily: currentSession.uaFamily } : {}),
                     }
                     : {};
+                ctx.metadata.rotatedRemember = currentSession.remember;
             }
             catch (error)
             {
@@ -118,65 +122,20 @@ export const keyRotationInterceptor: InterceptorRule =
                 return;
             }
 
-            try
-            {
-            // Get session TTL
-                const ttl = getSessionTtl();
-
-                // Create new session with rotated key.
-                //
-                // The binding fields come from the session being replaced, not
-                // from the response: rotation registers a key that inherits the
-                // replaced key's binding and its expiry verbatim, so the cookie
-                // must inherit them too. Re-deriving would be wrong twice over —
-                // the rotate response says nothing about binding, and a fresh
-                // expiry is exactly what rotation must not hand a bound key.
-                const newSessionData =
-                    {
-                        userId: ctx.metadata.userId,
-                        privateKey: ctx.metadata.newPrivateKey,
-                        keyId: ctx.metadata.newKeyId,
-                        algorithm: ctx.metadata.newAlgorithm,
-                        ...ctx.metadata.bindingFields,
-                    };
-
-                const sealed = await sealSession(newSessionData, ttl);
-
-                // Update session cookie
-                ctx.setCookies.push({
-                    name: COOKIE_NAMES.SESSION,
-                    value: sealed,
-                    options: {
-                        httpOnly: true,
-                        secure: cookieSecure,
-                        sameSite: 'lax',
-                        maxAge: ttl,
-                        path: '/',
-                    },
-                });
-
-                // Update keyId cookie
-                ctx.setCookies.push({
-                    name: COOKIE_NAMES.SESSION_KEY_ID,
-                    value: ctx.metadata.newKeyId,
-                    options: {
-                        httpOnly: true,
-                        secure: cookieSecure,
-                        sameSite: 'lax',
-                        maxAge: ttl,
-                        path: '/',
-                    },
-                });
-
-                // Rotation changes the key id the token is derived from, so the
-                // old CSRF value stops verifying — reissue it in the same response.
-                await pushCsrfCookie(ctx.setCookies, ctx.metadata.newKeyId, ttl);
-            }
-            catch (error)
-            {
-                const err = error as Error;
-                authLogger.interceptor.keyRotation.error('Failed to update session after rotation', err);
-            }
+            // The binding fields come from the session being replaced, not from
+            // the response: rotation registers a key that inherits the replaced
+            // key's binding and its expiry verbatim, so the cookie must inherit
+            // them too. Re-deriving would be wrong twice over — the rotate
+            // response says nothing about binding, and a fresh expiry is exactly
+            // what rotation must not hand a bound key. A kept session stays kept.
+            await establish(ctx, {
+                userId: ctx.metadata.userId,
+                privateKey: ctx.metadata.newPrivateKey,
+                keyId: ctx.metadata.newKeyId,
+                algorithm: ctx.metadata.newAlgorithm,
+                ...ctx.metadata.bindingFields,
+                ...rememberField(ctx.metadata.rotatedRemember),
+            });
 
             await next();
         },

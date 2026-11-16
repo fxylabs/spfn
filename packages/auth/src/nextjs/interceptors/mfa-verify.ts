@@ -31,8 +31,7 @@ import type { HttpError } from '@spfn/core/errors';
 import { SessionPendingExpiredError, SessionPendingMismatchError } from '@spfn/auth/errors';
 
 import { hashCredential } from '../../server/lib/link-credentials';
-import { sealSession } from '../../server/lib/session';
-import { COOKIE_NAMES, getSessionTtl } from '../../server/lib/config';
+import { COOKIE_NAMES } from '../../server/lib/config';
 import { authLogger } from '../../server/logger';
 import {
     sealPendingMfaSession,
@@ -40,9 +39,10 @@ import {
     pendingSessionIn,
     type PendingSessionData,
 } from '../session-helpers';
-import { cookieSecure } from './cookie-options';
-import { pushCsrfCookie } from './csrf';
+import { expiredCookie, packageCookie } from '../cookie-writer';
 import { refusalBody } from './error-envelope';
+import { establish, writeCookie } from './session-decision';
+import { rememberField } from './remember';
 import { bindingSessionFields } from './session-binding';
 import { resolveMfaConfirmPath } from '../mfa-confirm-path';
 
@@ -58,6 +58,9 @@ import { resolveMfaConfirmPath } from '../mfa-confirm-path';
  */
 const MFA_PATH_PATTERN =
     /^\/_auth\/(login|password\/reset\/complete|passkeys\/login\/verify|oauth\/[\w-]+\/native|oauth\/finalize|mfa\/verify)$/;
+
+/** The path this rule establishes a session on. */
+export const ESTABLISHING_PATHS = ['/_auth/mfa/verify'] as const;
 
 /** How long the pending cookie lives — the challenge's own ten minutes. */
 const PENDING_TTL_SECONDS = 600;
@@ -85,7 +88,8 @@ function challengeSecretOf(body: unknown): string | undefined
 }
 
 /**
- * The device key this browser is holding, whichever flow produced it.
+ * The device key this browser is holding, whichever flow produced it, with the
+ * sign-in's "keep me signed in" — the session the verify seals is that sign-in's.
  *
  * A password sign-in or a password reset ran through `loginRegisterInterceptor`
  * a moment ago, so the pair it minted is in shared metadata, under the `new`
@@ -102,6 +106,7 @@ async function pendingKeyFor(ctx: ResponseInterceptorContext): Promise<PendingSe
             privateKey: ctx.metadata.newPrivateKey,
             keyId: ctx.metadata.newKeyId,
             algorithm: ctx.metadata.newAlgorithm,
+            ...rememberField(ctx.metadata.remember),
         };
     }
 
@@ -144,17 +149,11 @@ async function bakePendingCookie(ctx: ResponseInterceptorContext): Promise<void>
         return;
     }
 
-    ctx.setCookies.push({
-        name: COOKIE_NAMES.MFA_PENDING,
-        value: await sealPendingMfaSession({ ...pending, challengeHash: hashCredential(secret) }, PENDING_TTL_SECONDS),
-        options: {
-            httpOnly: true,
-            secure: cookieSecure,
-            sameSite: 'lax',
-            maxAge: PENDING_TTL_SECONDS,
-            path: '/',
-        },
-    });
+    writeCookie(ctx, packageCookie(
+        COOKIE_NAMES.MFA_PENDING,
+        await sealPendingMfaSession({ ...pending, challengeHash: hashCredential(secret) }, PENDING_TTL_SECONDS),
+        PENDING_TTL_SECONDS,
+    ));
 
     authLogger.interceptor.login.debug('Second-factor pending cookie set', { keyId: pending.keyId });
 }
@@ -234,27 +233,17 @@ async function sealVerifiedSession(ctx: ResponseInterceptorContext): Promise<voi
         return;
     }
 
-    const ttl = getSessionTtl();
-    const sealed = await sealSession({
-        userId,
+    await establish(ctx, {
+        userId: String(userId),
         privateKey: pending.privateKey,
         keyId: pending.keyId,
         algorithm: pending.algorithm,
         ...bindingSessionFields(ctx.response.body, ctx.request.headers['user-agent']),
-    }, ttl);
+        ...rememberField(pending.remember),
+    });
 
-    pushSessionCookies(ctx, sealed, pending.keyId, ttl);
-    await pushCsrfCookie(ctx.setCookies, pending.keyId, ttl);
-}
-
-/** The session trio, plus the expiry of the pending cookie they replace. */
-function pushSessionCookies(ctx: ResponseInterceptorContext, sealed: string, keyId: string, ttl: number): void
-{
-    const options = { httpOnly: true, secure: cookieSecure, sameSite: 'lax' as const, path: '/' };
-
-    ctx.setCookies.push({ name: COOKIE_NAMES.SESSION, value: sealed, options: { ...options, maxAge: ttl } });
-    ctx.setCookies.push({ name: COOKIE_NAMES.SESSION_KEY_ID, value: keyId, options: { ...options, maxAge: ttl } });
-    ctx.setCookies.push({ name: COOKIE_NAMES.MFA_PENDING, value: '', options: { ...options, maxAge: 0 } });
+    // The pending cookie the session replaces
+    writeCookie(ctx, expiredCookie(COOKIE_NAMES.MFA_PENDING));
 }
 
 /**
@@ -284,10 +273,9 @@ export const mfaVerifyInterceptor: InterceptorRule = {
         }
         catch (error)
         {
-            // An unreadable or expired pending cookie lands here, and so does a
-            // sealing failure. Both mean the same thing to the person in front of
-            // the browser — the window closed — and the key is active either way,
-            // so signing in again is the whole remedy.
+            // An unreadable or expired pending cookie lands here: the window
+            // closed, and signing in again is the whole remedy. A session that
+            // cannot be sealed is the session decision's to answer.
             authLogger.interceptor.login.error('Second-factor session handling failed', error as Error);
 
             if (ctx.path === '/_auth/mfa/verify')

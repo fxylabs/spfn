@@ -2,25 +2,27 @@
  * @spfn/auth - Next.js OAuth callback route handler
  *
  * The handler resolves `?returnUrl=` against the request URL and redirects the
- * browser there once the session is sealed, which is the last seam where a
+ * browser there once the sign-in is complete, which is the last seam where a
  * caller-supplied destination can turn a genuine login into an open redirect
  * (GitHub fxylabs/spfn#89). What is pinned here is that a destination leaving
  * the app is replaced by the handler's default — and that only the destination
  * is replaced: the login still stands and still sets its cookies.
+ *
+ * The handler completes the sign-in through the app's own RPC proxy — the real
+ * `createRpcProxy` with `authInterceptors`, the real finalize route behind it —
+ * and redirects carrying the cookies the proxy's session decision wrote.
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { Hono } from 'hono';
+import { registerRoutes } from '@spfn/core/route';
 
-// The handler reads the pending-session cookie through next/headers; the sealed
-// value is produced by the real sealer below, so unsealing runs for real. The jar
-// holds it under the start's own per-start name (#126), so the handler has to
-// find it by the callback's keyId rather than by a fixed name.
-const pendingCookie = { name: '', value: '' };
+// The finalize route answers the principal its door admitted, and the key's binding; no database here.
+vi.mock('../../server/middleware/oauth-finalize-auth', async () => (await import('../helpers/finalize-door')).finalizeDoorStandIn('user-1'));
 
-vi.mock('next/headers.js', () => ({
-    cookies: async () => ({
-        getAll: () => (pendingCookie.value ? [{ name: pendingCookie.name, value: pendingCookie.value }] : []),
-    }),
+vi.mock('../../server/services/session-binding.service', async (importActual) => ({
+    ...(await importActual<typeof import('../../server/services/session-binding.service')>()),
+    keySessionBindingService: vi.fn(async () => ({})),
 }));
 
 import { NextRequest } from 'next/server';
@@ -30,6 +32,22 @@ import { sealPendingSession } from '../../nextjs/session-helpers';
 import { unsealSession, type SessionData } from '../../server/lib/session';
 import { generateKeyPair } from '../../server/lib/crypto';
 import { buildStartCookieName } from '../../server/lib/oauth/start-cookies';
+import { keySessionBindingService } from '../../server/services/session-binding.service';
+import { mainAuthRouter } from '../../server/routes';
+import { mountProxy } from '../helpers/rpc-proxy';
+
+/** The browser's pending cookie for the start being completed, under its per-start name (#126). */
+const pendingCookie = { name: '', value: '' };
+
+/** A callback request carrying the pending cookie, with the app's proxy mounted in front of the real routes. */
+function callbackRequest(url: URL, headers: Record<string, string> = {}): NextRequest
+{
+    const backend = new Hono();
+    registerRoutes(backend, mainAuthRouter);
+    mountProxy(backend);
+
+    return new NextRequest(url, { headers: { ...headers, cookie: `${pendingCookie.name}=${pendingCookie.value}` } });
+}
 
 const APP = 'https://app.example';
 const DEFAULT_REDIRECT = '/after-login';
@@ -55,6 +73,7 @@ describe('createOAuthCallbackHandler - returnUrl', () =>
     afterEach(() =>
     {
         vi.unstubAllEnvs();
+        vi.unstubAllGlobals();
     });
 
     /**
@@ -71,7 +90,7 @@ describe('createOAuthCallbackHandler - returnUrl', () =>
 
         const handler = createOAuthCallbackHandler({ defaultRedirectUrl: DEFAULT_REDIRECT });
 
-        return await handler(new NextRequest(url));
+        return await handler(callbackRequest(url));
     }
 
     it.each([
@@ -129,12 +148,10 @@ describe('createOAuthCallbackHandler - returnUrl', () =>
 /**
  * The binding half of the same handler (design #97 v2, case table 6c).
  *
- * This is the fifth sealing site and the only one that reads the two fields off
- * a query string: the handler runs before any route call, so the redirect the
- * backend issued is the one thing that can tell it the key it is sealing is a
- * short-lived bound one. Nothing is authorized by the query — the key row expires
- * when it says it does — but a cookie that did not carry the fields would take
- * the unbound branch at every proxy check for the whole life of that key.
+ * The handler seals nothing itself any more: the proxy's finalize rule seals,
+ * from the finalize route's answer, which reads the binding off the key row. So
+ * the binding a callback query claims is never read — a cookie believing a bound
+ * key is an ordinary one cannot be asked for from the address bar.
  */
 describe('createOAuthCallbackHandler - the session binding fields', () =>
 {
@@ -159,9 +176,10 @@ describe('createOAuthCallbackHandler - the session binding fields', () =>
     afterEach(() =>
     {
         vi.unstubAllEnvs();
+        vi.unstubAllGlobals();
     });
 
-    /** A callback carrying whatever binding query the backend put on the redirect. */
+    /** A callback carrying whatever binding query, the session the redirect installs. */
     async function callbackSealing(query: Record<string, string>, userAgent = CHROME): Promise<SessionData>
     {
         const url = new URL('/api/auth/callback', APP);
@@ -174,7 +192,7 @@ describe('createOAuthCallbackHandler - the session binding fields', () =>
         }
 
         const handler = createOAuthCallbackHandler({ defaultRedirectUrl: DEFAULT_REDIRECT });
-        const response = await handler(new NextRequest(url, { headers: { 'user-agent': userAgent } }));
+        const response = await handler(callbackRequest(url, { 'user-agent': userAgent }));
         const sealed = response.headers.getSetCookie()
             .find(cookie => /^spfn_session(_\d+)?=/.test(cookie))!
             .split('=')[1].split(';')[0];
@@ -182,19 +200,18 @@ describe('createOAuthCallbackHandler - the session binding fields', () =>
         return await unsealSession(decodeURIComponent(sealed));
     }
 
-    it('a bound account: the sealed session carries binding, keyExpiresAt and the inbound family', async () =>
+    it('a bound key: the sealed session carries binding, keyExpiresAt and the inbound family', async () =>
     {
-        const session = await callbackSealing({
-            sessionBinding: 'passkey',
-            keyExpiresAtMillis: String(EXPIRES_AT),
-        });
+        vi.mocked(keySessionBindingService).mockResolvedValueOnce({ sessionBinding: 'passkey', keyExpiresAtMillis: EXPIRES_AT });
+
+        const session = await callbackSealing({});
 
         expect(session.binding).toBe('passkey');
         expect(session.keyExpiresAt).toBe(EXPIRES_AT);
         expect(session.uaFamily).toBe('chrome');
     });
 
-    it('an unbound account: the sealed session is the four-field one it has always been', async () =>
+    it('an unbound key: the sealed session is the four-field one it has always been', async () =>
     {
         const session = await callbackSealing({});
 
@@ -203,28 +220,9 @@ describe('createOAuthCallbackHandler - the session binding fields', () =>
         expect(session.uaFamily).toBeUndefined();
     });
 
-    // `''` is deliberately not in this list: `Number('')` is 0, which is finite,
-    // so an empty parameter seals `keyExpiresAt: 0`. Nothing decides by that value
-    // any more — the proxy asks the backend about expiry — so it is a wart rather
-    // than a defect, and pinning today's answer to it would be pinning the wart.
-    it.each([
-        ['not-a-number', 'a keyExpiresAtMillis that is not a number'],
-        ['Infinity', 'an infinite keyExpiresAtMillis'],
-        ['NaN', 'NaN spelled out'],
-    ])('refuses to seal %j (%s) and falls back to unbound', async (expiresAt) =>
+    it('a query claiming a binding the key row does not have seals unbound', async () =>
     {
-        // The `Number.isFinite` guard. A query is a caller-supplied string, and a
-        // cookie sealed with `keyExpiresAt: NaN` compares false against every
-        // expiry — a bound session that silently never prompts for renewal.
-        const session = await callbackSealing({ sessionBinding: 'passkey', keyExpiresAtMillis: expiresAt });
-
-        expect(session.binding).toBeUndefined();
-        expect(session.keyExpiresAt).toBeUndefined();
-    });
-
-    it('sessionBinding that is anything but passkey seals unbound, whatever the expiry says', async () =>
-    {
-        const session = await callbackSealing({ sessionBinding: 'none', keyExpiresAtMillis: String(EXPIRES_AT) });
+        const session = await callbackSealing({ sessionBinding: 'passkey', keyExpiresAtMillis: String(EXPIRES_AT) });
 
         expect(session.binding).toBeUndefined();
         expect(session.keyExpiresAt).toBeUndefined();

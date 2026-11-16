@@ -25,6 +25,9 @@ import { keySessionBindingService } from '@/server/services/session-binding.serv
  * the finalize rows stay what they test — the returnUrl rule — while the row
  * below states the binding answer it wants.
  */
+// The finalize route answers the principal its door admitted; there is no database here.
+vi.mock('@/server/middleware/oauth-finalize-auth', async () => (await import('../helpers/finalize-door')).finalizeDoorStandIn('1'));
+
 vi.mock('@/server/services/session-binding.service', async (importActual) => ({
     ...(await importActual<typeof import('@/server/services/session-binding.service')>()),
     keySessionBindingService: vi.fn(async () => ({})),
@@ -40,6 +43,12 @@ function mockProvider(id: OAuthProvider['id'], enabled = true): OAuthProvider
         exchangeCodeForTokens: async () => ({ accessToken: 'mock-access', expiresIn: 3600 }),
         getUserInfo: async () => ({ providerUserId: 'mock-id', email: null, emailVerified: false }),
     };
+}
+
+/** The headers the Next.js proxy signs a finalize with, as the stand-in door reads them. */
+function signedBy(keyId: string): Record<string, string>
+{
+    return { Authorization: 'Bearer signed-by-the-key', 'X-Key-Id': keyId };
 }
 
 describe(':provider OAuth routes', () =>
@@ -163,7 +172,7 @@ describe(':provider OAuth routes', () =>
     {
         const res = await app.request('/_auth/oauth/finalize', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: { 'Content-Type': 'application/json', ...signedBy('key-1') },
             body: JSON.stringify({ userId: '1', keyId: 'key-1', returnUrl: 'https://evil.com' }),
         });
 
@@ -180,7 +189,7 @@ describe(':provider OAuth routes', () =>
     {
         const res = await app.request('/_auth/oauth/finalize', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: { 'Content-Type': 'application/json', ...signedBy('key-1') },
             body: JSON.stringify({ userId: '1', keyId: 'key-1', returnUrl: '' }),
         });
 
@@ -192,7 +201,7 @@ describe(':provider OAuth routes', () =>
     {
         const res = await app.request('/_auth/oauth/finalize', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: { 'Content-Type': 'application/json', ...signedBy('key-1') },
             body: JSON.stringify({ userId: '1', keyId: 'key-1', returnUrl: '/dashboard' }),
         });
 
@@ -216,7 +225,7 @@ describe(':provider OAuth routes', () =>
 
         const res = await app.request('/_auth/oauth/finalize', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: { 'Content-Type': 'application/json', ...signedBy('bound-key') },
             body: JSON.stringify({ userId: '1', keyId: 'bound-key', returnUrl: '/dashboard' }),
         });
 

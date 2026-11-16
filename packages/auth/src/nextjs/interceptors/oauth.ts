@@ -9,14 +9,11 @@
  * in one browser and each finalize reads and clears only its own (#126).
  */
 
-import type { InterceptorRule, ProxyAbort, ResponseInterceptorContext } from '@spfn/core/nextjs/server';
-import type { SetCookie } from '@spfn/core/nextjs';
+import type { InterceptorRule, ProxyAbort, RequestInterceptorContext, ResponseInterceptorContext } from '@spfn/core/nextjs/server';
 import { OAUTH_COOKIE_MISSING_MESSAGE } from '@spfn/auth/errors';
 import { generateKeyPair } from '../../server/lib/crypto';
 import { createOAuthState, generateOAuthNonce } from '../../server/lib/oauth/state';
 import { buildStartCookieName, legacyPendingCookie, namesEvictedByStart } from '../../server/lib/oauth/start-cookies';
-import { sealSession } from '../../server/lib/session';
-import { COOKIE_NAMES, getSessionTtl } from '../../server/lib/config';
 import { authLogger } from '../../server/logger';
 import { isSafeReturnPath } from '../../lib/return-path';
 import {
@@ -24,10 +21,22 @@ import {
     pendingCookieForKey,
     sealPendingSession,
     unsealPendingSession,
+    type PendingSessionData,
 } from '../session-helpers';
-import { cookieSecure } from './cookie-options';
-import { pushCsrfCookie } from './csrf';
+import { expiredCookie, packageCookie } from '../cookie-writer';
 import { bindingSessionFields } from './session-binding';
+import { establish, writeCookie } from './session-decision';
+import { rememberField, takeRemember } from './remember';
+import { signedRequestHeaders } from './request-token';
+
+/** The path this rule establishes a session on. */
+export const ESTABLISHING_PATHS = ['/_auth/oauth/finalize'] as const;
+
+/**
+ * The start that takes `remember`. The choice is sealed into the start's pending
+ * cookie and read back at finalize, whose own body cannot set it.
+ */
+export const REMEMBER_PATHS = ['/_auth/oauth/:provider/url'] as const;
 
 /** How long a start's two cookies live — the state's own ten minutes. */
 const START_COOKIE_TTL_SECONDS = 600;
@@ -75,6 +84,13 @@ export const oauthUrlInterceptor: InterceptorRule = {
     request: async (ctx, next) =>
     {
         const provider = ctx.path.split('/')[3]; // google, github, etc.
+        const remember = takeRemember(ctx);
+
+        if (remember === null)
+        {
+            return;
+        }
+
         const returnUrl = ctx.body?.returnUrl || '/';
         const metadata = ctx.body?.metadata as Record<string, unknown> | undefined;
 
@@ -123,6 +139,7 @@ export const oauthUrlInterceptor: InterceptorRule = {
             privateKey: keyPair.privateKey,
             keyId: keyPair.keyId,
             algorithm: keyPair.algorithm,
+            ...rememberField(remember),
         };
         ctx.metadata.oauthCsrf = csrfNonce;
 
@@ -154,22 +171,6 @@ export const oauthUrlInterceptor: InterceptorRule = {
     },
 };
 
-/** An HttpOnly, SameSite=Lax cookie on `/` — the options every cookie this file writes uses. */
-function lockedCookie(name: string, value: string, maxAge: number): SetCookie
-{
-    return {
-        name,
-        value,
-        options: {
-            httpOnly: true,
-            secure: cookieSecure,
-            sameSite: 'lax', // OAuth 리다이렉트 허용
-            maxAge,
-            path: '/',
-        },
-    };
-}
-
 /**
  * This start's two cookies, under names of its own, and the cap.
  *
@@ -182,21 +183,19 @@ async function pushStartCookies(ctx: ResponseInterceptorContext): Promise<void>
     const { keyId } = ctx.metadata.pendingSession;
     const issuedAtMs = Date.now();
 
+    const sealed = await sealPendingSession(ctx.metadata.pendingSession);
+
     for (const name of [...namesEvictedByStart('pending', ctx.cookies), ...namesEvictedByStart('csrf', ctx.cookies)])
     {
-        ctx.setCookies.push(lockedCookie(name, '', 0));
+        writeCookie(ctx, expiredCookie(name));
     }
 
-    ctx.setCookies.push(lockedCookie(
-        buildStartCookieName('pending', keyId, issuedAtMs),
-        await sealPendingSession(ctx.metadata.pendingSession),
-        START_COOKIE_TTL_SECONDS,
-    ));
+    writeCookie(ctx, packageCookie(buildStartCookieName('pending', keyId, issuedAtMs), sealed, START_COOKIE_TTL_SECONDS));
 
     // CSRF nonce cookie (double-submit against the state.nonce at callback)
     if (ctx.metadata.oauthCsrf)
     {
-        ctx.setCookies.push(lockedCookie(
+        writeCookie(ctx, packageCookie(
             buildStartCookieName('csrf', keyId, issuedAtMs),
             ctx.metadata.oauthCsrf,
             START_COOKIE_TTL_SECONDS,
@@ -209,11 +208,9 @@ async function pushStartCookies(ctx: ResponseInterceptorContext): Promise<void>
 /**
  * Finalize 실패 시 에러 응답 설정 + pending 쿠키 정리
  *
- * The 401 is this rule's own answer, not the backend's, and `proxyWroteError`
- * says so to the rules after it. `generalAuthInterceptor` expires the session on
- * a 401 because a backend 401 means the key was refused; a finalize that failed
- * here says nothing about the session the browser already holds, so the flag is
- * what keeps that session in place.
+ * The 401 is this rule's own answer, not the backend's. It carries no error code
+ * of the key-refused family, so it says nothing about the session the browser
+ * already holds, and that session stays.
  *
  * Only the pending cookie this finalize read is expired, when it read one —
  * every other start's cookies stay, so a refusal here cannot break a sign-in
@@ -227,7 +224,6 @@ function setFinalizeError(
     readCookie?: string,
 ): void
 {
-    ctx.metadata.proxyWroteError = true;
     ctx.response.ok = false;
     ctx.response.status = 401;
     ctx.response.statusText = 'Unauthorized';
@@ -235,7 +231,7 @@ function setFinalizeError(
 
     if (readCookie)
     {
-        ctx.setCookies.push(lockedCookie(readCookie, '', 0));
+        writeCookie(ctx, expiredCookie(readCookie));
     }
 }
 
@@ -243,121 +239,43 @@ function setFinalizeError(
  * Whether a finalize repeats the one that installed the browser's current session.
  *
  * The first finalize clears the pending cookie, so a reload of the callback page
- * posts the same `userId`/`keyId` again with no pending cookie and the session it
- * sealed. The backend route keeps no state and answers 200 again; the session's
- * key id matching the body's is what makes this the same sign-in rather than a
- * different one. Both are server-issued ids, not secrets, so plain equality.
- *
- * The body's `userId` is only required to be present, never compared or used:
- * it is a UI convenience (see the SECURITY note on the oauthFinalize route), and
- * the repeat writes nothing, so nothing is taken on trust from it.
+ * posts the same `keyId` again with no pending cookie and the session it sealed.
+ * That request is signed by the session (`generalAuthInterceptor`) and the
+ * backend answers its principal; the session's key id matching the body's is
+ * what makes this the same sign-in rather than a different one. Both are
+ * server-issued ids, not secrets, so plain equality.
  */
-function repeatsCurrentSession(ctx: ResponseInterceptorContext): boolean
+function repeatsCurrentSession(ctx: { body?: any; metadata: Record<string, any> }): boolean
 {
-    const { userId, keyId } = ctx.response.body || {};
+    const keyId = ctx.body?.keyId;
 
-    return Boolean(userId && keyId)
+    return typeof keyId === 'string'
         && ctx.metadata.sessionValid === true
         && ctx.metadata.keyId === keyId;
 }
 
 /**
- * A backend success with no pending cookie: a repeat, or a finalize that cannot complete.
+ * Refuse a finalize before the backend is asked.
  *
- * A repeat is answered with the backend's success, unchanged, and writes no
- * cookie — there is no private key to seal with (the pending cookie is gone)
- * and none is needed: the session it would seal is the one already installed.
- * Anything else is refused with `no_cookie` (#129) — the browser kept none of
- * the start's cookies — without touching the session the browser holds, and
- * without expiring any cookie: there is none this finalize read.
+ * The 401 is this rule's own answer, not the backend's: it carries no error code
+ * of the key-refused family, so the session the browser already holds stays.
+ * Only the pending cookie this finalize read is expired, when it read one —
+ * every other start's cookies stay (#126). `reason` is the code the callback
+ * page shows (`OAuthErrorReason`).
  */
-function answerWithoutPendingCookie(ctx: ResponseInterceptorContext): void
-{
-    if (repeatsCurrentSession(ctx))
-    {
-        authLogger.interceptor.oauth?.debug?.('Repeated finalize for the current session, answered unchanged', {
-            keyId: ctx.metadata.keyId,
-        });
-
-        return;
-    }
-
-    authLogger.interceptor.oauth?.warn?.('No pending session cookie found');
-    setFinalizeError(ctx, OAUTH_COOKIE_MISSING_MESSAGE, 'no_cookie');
-}
-
-/**
- * Seal the session from the pending cookie this finalize's keyId names.
- *
- * `userId` here is the value reflected by /_auth/oauth/finalize (a UI
- * convenience, not a trust anchor). It's safe to seal: keyId is matched against
- * the pending cookie, the session is sealed, and the backend re-derives identity
- * from keyId on every request — see the SECURITY note on the oauthFinalize route
- * handler.
- */
-async function finalizeFromPendingCookie(
-    ctx: ResponseInterceptorContext,
-    pendingCookie: { name: string; value: string },
-): Promise<void>
-{
-    // pending session에서 privateKey 복원
-    const pendingSession = await unsealPendingSession(pendingCookie.value);
-    const { userId, keyId } = ctx.response.body || {};
-
-    if (!userId || !keyId)
-    {
-        authLogger.interceptor.oauth?.error?.('Missing userId or keyId in response');
-        setFinalizeError(ctx, 'OAuth finalize failed: missing credentials', 'failed', pendingCookie.name);
-
-        return;
-    }
-
-    // keyId 일치 확인 — a legacy cookie can hold another start's key
-    if (pendingSession.keyId !== keyId)
-    {
-        authLogger.interceptor.oauth?.error?.('KeyId mismatch', { expected: pendingSession.keyId, received: keyId });
-        setFinalizeError(ctx, 'OAuth session mismatch. Please try again.', 'invalid_state', pendingCookie.name);
-
-        return;
-    }
-
-    const ttl = getSessionTtl();
-    const sessionToken = await sealSession({
-        userId,
-        privateKey: pendingSession.privateKey,
-        keyId: pendingSession.keyId,
-        algorithm: pendingSession.algorithm,
-        ...bindingSessionFields(ctx.response.body, ctx.request.headers['user-agent']),
-    }, ttl);
-
-    pushFinalizedCookies(ctx, sessionToken, keyId, ttl, pendingCookie.name);
-    await pushCsrfCookie(ctx.setCookies, keyId, ttl);
-
-    authLogger.interceptor.oauth?.debug?.('OAuth session finalized', { userId, keyId });
-}
-
-/** The session and key-id cookies, plus the expiry of this start's pending cookie — that one only. */
-function pushFinalizedCookies(
-    ctx: ResponseInterceptorContext,
-    sessionToken: string,
-    keyId: string,
-    ttl: number,
-    pendingCookieName: string,
+function refuseFinalize(
+    ctx: RequestInterceptorContext,
+    message: string,
+    reason: 'expired' | 'invalid_state' | 'no_cookie',
+    readCookie?: string,
 ): void
 {
-    ctx.setCookies.push(lockedCookie(COOKIE_NAMES.SESSION, sessionToken, ttl));
-    ctx.setCookies.push(lockedCookie(COOKIE_NAMES.SESSION_KEY_ID, keyId, ttl));
-    ctx.setCookies.push(lockedCookie(pendingCookieName, '', 0));
-}
+    ctx.abort = { status: 401, body: { success: false, message, reason } };
 
-/** The pending cookie the finalize body's keyId names, else the legacy one when the body has none. */
-async function finalizePendingCookie(ctx: ResponseInterceptorContext): Promise<{ name: string; value: string } | undefined>
-{
-    const keyId = ctx.response.body?.keyId;
-
-    return typeof keyId === 'string' && keyId
-        ? await pendingCookieForKey(ctx.cookies, keyId)
-        : legacyPendingCookie(ctx.cookies);
+    if (readCookie)
+    {
+        writeCookie(ctx, expiredCookie(readCookie));
+    }
 }
 
 /**
@@ -369,66 +287,177 @@ async function finalizePendingCookie(ctx: ResponseInterceptorContext): Promise<{
  * its ten minutes is `expired`, told apart by jose's error class; anything else
  * is `invalid_state`.
  */
-function refuseUnreadablePendingCookie(ctx: ResponseInterceptorContext, error: unknown, cookieName: string): void
+function refuseUnreadablePendingCookie(ctx: RequestInterceptorContext, error: unknown, cookieName: string): void
 {
+    authLogger.interceptor.oauth?.error?.('Failed to read the OAuth pending session', error as Error);
+
     if (isPendingSessionExpired(error))
     {
-        setFinalizeError(ctx, 'OAuth session expired. Please try again.', 'expired', cookieName);
+        refuseFinalize(ctx, 'OAuth session expired. Please try again.', 'expired', cookieName);
 
         return;
     }
 
-    setFinalizeError(ctx, 'OAuth session could not be verified. Please try again.', 'invalid_state', cookieName);
+    refuseFinalize(ctx, 'OAuth session could not be verified. Please try again.', 'invalid_state', cookieName);
+}
+
+/** The pending cookie the finalize body's keyId names, else the legacy one when the body has none. */
+async function requestedPendingCookie(ctx: RequestInterceptorContext): Promise<{ name: string; value: string } | undefined>
+{
+    const keyId = ctx.body?.keyId;
+
+    return typeof keyId === 'string' && keyId
+        ? await pendingCookieForKey(ctx.cookies, keyId)
+        : legacyPendingCookie(ctx.cookies);
+}
+
+/**
+ * Sign the finalize with the key this start's pending cookie holds.
+ *
+ * The backend answers the principal the request is signed by (`oauthFinalizeAuth`),
+ * so only the browser holding the key's private half learns whose it is. A
+ * repeat of the finalize that installed the current session stays signed by that
+ * session; anything else without a usable pending cookie is refused here.
+ *
+ * The answer is about the key being finalized, not about the session the browser
+ * holds, so that session is not judged by it (`sessionValid` is lowered).
+ */
+async function signWithPendingKey(ctx: RequestInterceptorContext): Promise<void>
+{
+    const pendingCookie = await requestedPendingCookie(ctx);
+
+    if (!pendingCookie)
+    {
+        if (!repeatsCurrentSession(ctx))
+        {
+            authLogger.interceptor.oauth?.warn?.('No pending session cookie found');
+            refuseFinalize(ctx, OAUTH_COOKIE_MISSING_MESSAGE, 'no_cookie');
+        }
+
+        return;
+    }
+
+    const pending = await unsealPendingSession(pendingCookie.value).catch((error: unknown) =>
+    {
+        refuseUnreadablePendingCookie(ctx, error, pendingCookie.name);
+
+        return null;
+    });
+
+    if (!pending)
+    {
+        return;
+    }
+
+    // A legacy cookie can hold another start's key
+    if (typeof ctx.body?.keyId === 'string' && pending.keyId !== ctx.body.keyId)
+    {
+        authLogger.interceptor.oauth?.error?.('KeyId mismatch', { expected: pending.keyId, received: ctx.body.keyId });
+        refuseFinalize(ctx, 'OAuth session mismatch. Please try again.', 'invalid_state', pendingCookie.name);
+
+        return;
+    }
+
+    ctx.metadata.finalizePending = { cookieName: pendingCookie.name, session: pending };
+    ctx.metadata.sessionValid = false;
+    Object.assign(ctx.headers, signedRequestHeaders(pending));
+}
+
+/**
+ * A success with no pending key: the repeat the request phase let through, as
+ * long as the answer names the session's own key. Anything else is refused with
+ * `no_cookie` (#129) — the browser kept none of the start's cookies — without
+ * touching the session it holds.
+ */
+async function answerRepeat(ctx: ResponseInterceptorContext): Promise<void>
+{
+    const { userId, keyId } = ctx.response.body || {};
+
+    if (userId && keyId && ctx.metadata.sessionValid === true && ctx.metadata.keyId === keyId)
+    {
+        authLogger.interceptor.oauth?.debug?.('Repeated finalize for the current session, answered unchanged', { keyId });
+
+        return;
+    }
+
+    authLogger.interceptor.oauth?.warn?.('No pending session cookie found');
+    setFinalizeError(ctx, OAUTH_COOKIE_MISSING_MESSAGE, 'no_cookie');
+}
+
+/**
+ * Establish the session from the pending key the finalize was signed with.
+ *
+ * `userId` is the backend's: the principal it admitted for this key's signature,
+ * so `getSession().userId` is the account the key in this cookie belongs to.
+ */
+async function finalizeFromPendingKey(
+    ctx: ResponseInterceptorContext,
+    pending: { cookieName: string; session: PendingSessionData },
+): Promise<void>
+{
+    const { userId, keyId } = ctx.response.body || {};
+
+    if (!userId || keyId !== pending.session.keyId)
+    {
+        authLogger.interceptor.oauth?.error?.('Finalize answered for another key', { expected: pending.session.keyId, received: keyId });
+        setFinalizeError(ctx, 'OAuth session mismatch. Please try again.', 'invalid_state', pending.cookieName);
+
+        return;
+    }
+
+    await establish(ctx, {
+        userId: String(userId),
+        privateKey: pending.session.privateKey,
+        keyId: pending.session.keyId,
+        algorithm: pending.session.algorithm,
+        ...bindingSessionFields(ctx.response.body, ctx.request.headers['user-agent']),
+        ...rememberField(pending.session.remember),
+    });
+
+    // This start's pending cookie, that one only
+    writeCookie(ctx, expiredCookie(pending.cookieName));
+
+    authLogger.interceptor.oauth?.debug?.('OAuth session finalized', { userId, keyId });
 }
 
 /**
  * OAuth Finalize Interceptor
  *
- * POST /_auth/oauth/finalize 요청을 가로채서
- * pending session에서 세션 저장
+ * Request: signs the call with this start's pending key (after
+ * `generalAuthInterceptor` has signed it with the session, which a repeat keeps).
+ * Response: establishes the session from that key.
  */
 export const oauthFinalizeInterceptor: InterceptorRule = {
     pathPattern: /^\/_auth\/oauth\/finalize$/,
     method: 'POST',
+
+    request: async (ctx, next) =>
+    {
+        await next();
+
+        // The second-factor 202 echoes; its key is parked, so nothing signs it
+        if (!ctx.abort && typeof ctx.body?.mfaChallenge !== 'string')
+        {
+            await signWithPendingKey(ctx);
+        }
+    },
 
     response: async (ctx, next) =>
     {
         // 성공 응답일 때만 처리.
         //
         // A 202 is `ok` and is deliberately not one of them (#95): the callback
-        // carried a second-factor challenge rather than a userId/keyId pair, so
-        // there is no session to finalize yet. `mfaVerifyInterceptor` bakes its
-        // own cookie from that body — picking this start's pending cookie by the
-        // body's keyId — and the app page sends the person to the confirm screen;
-        // sealing anything here would be sealing a session for a key whose
-        // second factor has not been proved.
-        if (!ctx.response.ok || ctx.response.status === 202)
+        // carried a second-factor challenge rather than a key to finalize, so
+        // there is no session yet. `mfaVerifyInterceptor` bakes its own cookie
+        // from that body — picking this start's pending cookie by the body's
+        // keyId — and the app page sends the person to the confirm screen.
+        // A repeat (no pending key) is answered with the backend's success,
+        // unchanged: the session it would seal is the one already installed.
+        if (ctx.response.ok && ctx.response.status !== 202)
         {
-            await next();
-
-            return;
-        }
-
-        // This start's own pending cookie, else the legacy fixed name (a start
-        // made before per-start cookies).
-        const pendingCookie = await finalizePendingCookie(ctx);
-
-        if (!pendingCookie)
-        {
-            answerWithoutPendingCookie(ctx);
-            await next();
-
-            return;
-        }
-
-        try
-        {
-            await finalizeFromPendingCookie(ctx, pendingCookie);
-        }
-        catch (error)
-        {
-            authLogger.interceptor.oauth?.error?.('Failed to finalize OAuth session', error as Error);
-            refuseUnreadablePendingCookie(ctx, error, pendingCookie.name);
+            await (ctx.metadata.finalizePending
+                ? finalizeFromPendingKey(ctx, ctx.metadata.finalizePending)
+                : answerRepeat(ctx));
         }
 
         await next();
@@ -491,8 +520,8 @@ function pushLinkCsrfCookie(ctx: ResponseInterceptorContext): void
 
     for (const name of namesEvictedByStart('csrf', ctx.cookies))
     {
-        ctx.setCookies.push(lockedCookie(name, '', 0));
+        writeCookie(ctx, expiredCookie(name));
     }
 
-    ctx.setCookies.push(lockedCookie(buildStartCookieName('csrf', startId), nonce, START_COOKIE_TTL_SECONDS));
+    writeCookie(ctx, packageCookie(buildStartCookieName('csrf', startId), nonce, START_COOKIE_TTL_SECONDS));
 }

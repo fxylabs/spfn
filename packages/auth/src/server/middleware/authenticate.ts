@@ -200,7 +200,7 @@ function bearerRefusal(c: Context, refused: BearerRefusal): Error
         case 'undecodable':
             return new UnauthorizedError({ message: INVALID_TOKEN_MESSAGE });
         case 'unknown':
-            return new UnauthorizedError({ message: 'Invalid or revoked key' });
+            return admissionRefusalError({ reason: 'credentialRevoked' });
         case 'expired':
             return new KeyExpiredError();
         case 'token-expired':

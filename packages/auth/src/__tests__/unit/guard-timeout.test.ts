@@ -3,8 +3,8 @@
  *
  * Every guard reaches the backend through `getAuthSessionData()`. Unset, the
  * variable leaves that call exactly as it was; set, the call carries
- * `.timeout(ms)`, and a lookup that outlives it reads as no session with a warn
- * line of its own. G3 and G4 run the real client from `@spfn/core/nextjs`
+ * `.timeout(ms)`, and a lookup that outlives it is an error the guard throws —
+ * an outage is not a sign-out. G3 and G4 run the real client from `@spfn/core/nextjs`
  * against a fake `fetch`; the rest stub `authApi` to see which call was made.
  */
 
@@ -49,7 +49,7 @@ describe('getAuthSessionData and SPFN_AUTH_GUARD_TIMEOUT', () =>
         expect(route.call).toHaveBeenCalledTimes(1);
     });
 
-    it('G3 50, the backend does not answer in 50 ms: null, one warn naming the timeout, no generic error', async () =>
+    it('G3 50, the backend does not answer in 50 ms: the timeout is thrown, not read as signed out', async () =>
     {
         vi.stubEnv('SPFN_AUTH_GUARD_TIMEOUT', '50');
         vi.useFakeTimers();
@@ -58,15 +58,16 @@ describe('getAuthSessionData and SPFN_AUTH_GUARD_TIMEOUT', () =>
         const { warn, error } = await spyMiddlewareLog();
 
         const lookup = getAuthSessionData();
+        const settled = lookup.catch((thrown: unknown) => thrown);
         await backend.reached;
         await vi.advanceTimersByTimeAsync(50);
 
-        expect(await lookup).toBeNull();
-        expect(warn).toHaveBeenCalledExactlyOnceWith('Auth session lookup timed out', { timeoutMs: 50 });
-        expect(error).not.toHaveBeenCalled();
+        expect(await settled).toMatchObject({ name: 'ApiError', errorType: 'timeout' });
+        expect(error).toHaveBeenCalledExactlyOnceWith('Auth session lookup failed — not a sign-out, surfacing the error', expect.anything());
+        expect(warn).not.toHaveBeenCalled();
     });
 
-    it('G4 unset, the backend rejects with a network error: null and the generic error line, as today', async () =>
+    it('G4 unset, the backend rejects with a network error: thrown with the error line, not read as signed out', async () =>
     {
         const { getAuthSessionData } = await loadAuthUtilsOver(async () =>
         {
@@ -74,8 +75,8 @@ describe('getAuthSessionData and SPFN_AUTH_GUARD_TIMEOUT', () =>
         });
         const { warn, error } = await spyMiddlewareLog();
 
-        expect(await getAuthSessionData()).toBeNull();
-        expect(error).toHaveBeenCalledExactlyOnceWith('Failed to get auth session', expect.objectContaining({
+        await expect(getAuthSessionData()).rejects.toMatchObject({ name: 'ApiError', errorType: 'network' });
+        expect(error).toHaveBeenCalledExactlyOnceWith('Auth session lookup failed — not a sign-out, surfacing the error', expect.objectContaining({
             error: expect.objectContaining({ name: 'ApiError', errorType: 'network' }),
         }));
         expect(warn).not.toHaveBeenCalled();
@@ -91,17 +92,15 @@ describe('getAuthSessionData and SPFN_AUTH_GUARD_TIMEOUT', () =>
         expect(route.timeout).toHaveBeenCalledExactlyOnceWith(3000);
     });
 
-    it('G8 a malformed value at runtime: the read throws inside the catch, null, and an error line names the variable', async () =>
+    it('G8 a malformed value at runtime: the read throws out of the lookup, naming the variable', async () =>
     {
         vi.stubEnv('SPFN_AUTH_GUARD_TIMEOUT', 'abc');
         const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
         const route = stubRoute(async () => SESSION);
         const { getAuthSessionData } = await loadAuthUtils(route);
-        const { error } = await spyMiddlewareLog();
 
-        expect(await getAuthSessionData()).toBeNull();
+        await expect(getAuthSessionData()).rejects.toThrow();
         expect(route.call).not.toHaveBeenCalled();
-        expect(error).toHaveBeenCalledExactlyOnceWith('Failed to get auth session', expect.anything());
         expect(consoleError.mock.calls.flat().join('\n')).toContain('SPFN_AUTH_GUARD_TIMEOUT');
     });
 });

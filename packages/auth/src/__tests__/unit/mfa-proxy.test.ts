@@ -44,6 +44,7 @@ import { COOKIE_NAMES } from '../../server/lib/config';
 import { buildStartCookieName, parseStartCookieName, startCookieId } from '../../server/lib/oauth/start-cookies';
 import { authErrorRegistry, SessionPendingMismatchError } from '../../errors';
 import { routeMap } from '../../generated/route-map';
+import { decidedResponse } from '../helpers/session-decision';
 
 const SECRET = 'test-secret-with-at-least-32-characters-for-security-testing';
 const APP = 'https://app.example';
@@ -131,8 +132,8 @@ describe('the proxy and a second-factor step-up (case table 6e)', () =>
         const key = mintedKey();
         const ctx = responseContext('/_auth/login', 200, { userId: '7' }, { metadata: asMintedMetadata(key) });
 
-        await loginRegisterInterceptor.response?.(ctx, next);
-        await mfaVerifyInterceptor.response?.(ctx, next);
+        await decidedResponse(ctx, [loginRegisterInterceptor.response], next);
+        await decidedResponse(ctx, [mfaVerifyInterceptor.response], next);
 
         expect((await queuedSession(ctx.setCookies)).keyId).toBe(key.keyId);
         expect(cookieNamed(ctx.setCookies, COOKIE_NAMES.MFA_PENDING)).toBeUndefined();
@@ -145,11 +146,11 @@ describe('the proxy and a second-factor step-up (case table 6e)', () =>
 
         // The existing non-200 early return is what leaves the body here to read.
         // Nothing in that rule changed for #95.
-        await loginRegisterInterceptor.response?.(ctx, next);
+        await decidedResponse(ctx, [loginRegisterInterceptor.response], next);
 
         expect(cookieNamed(ctx.setCookies, COOKIE_NAMES.SESSION)).toBeUndefined();
 
-        await mfaVerifyInterceptor.response?.(ctx, next);
+        await decidedResponse(ctx, [mfaVerifyInterceptor.response], next);
 
         const pending = cookieNamed(ctx.setCookies, COOKIE_NAMES.MFA_PENDING)!;
         const unsealed = await unsealPendingMfaSession(pending.value);
@@ -171,7 +172,7 @@ describe('the proxy and a second-factor step-up (case table 6e)', () =>
         })]]);
         const ctx = responseContext('/_auth/mfa/verify', 200, verifiedBody(key.keyId as string), { cookies });
 
-        await mfaVerifyInterceptor.response?.(ctx, next);
+        await decidedResponse(ctx, [mfaVerifyInterceptor.response], next);
 
         expect(ctx.response.status).toBe(200);
         expect(await queuedSession(ctx.setCookies)).toMatchObject({ userId: '7', keyId: key.keyId });
@@ -191,7 +192,7 @@ describe('the proxy and a second-factor step-up (case table 6e)', () =>
         })]]);
         const ctx = responseContext('/_auth/mfa/verify', 200, verifiedBody(key.keyId as string), { cookies });
 
-        await mfaVerifyInterceptor.response?.(ctx, next);
+        await decidedResponse(ctx, [mfaVerifyInterceptor.response], next);
 
         expect(ctx.response.status).toBe(401);
         expect(ctx.response.body).toMatchObject({
@@ -218,7 +219,7 @@ describe('the proxy and a second-factor step-up (case table 6e)', () =>
         })]]);
         const ctx = responseContext('/_auth/mfa/verify', 200, verifiedBody('some-other-key-id'), { cookies });
 
-        await mfaVerifyInterceptor.response?.(ctx, next);
+        await decidedResponse(ctx, [mfaVerifyInterceptor.response], next);
 
         expect(ctx.response.status).toBe(401);
         expect(ctx.response.body).toMatchObject({ __type: 'SessionPendingMismatchError' });
@@ -238,7 +239,7 @@ describe('the proxy and a second-factor step-up (case table 6e)', () =>
             cookies: new Map([[COOKIE_NAMES.MFA_PENDING, sealed]]),
         });
 
-        await mfaVerifyInterceptor.response?.(ctx, next);
+        await decidedResponse(ctx, [mfaVerifyInterceptor.response], next);
 
         expect(ctx.response.status).toBe(401);
         expect(ctx.response.body).toMatchObject({ __type: 'MfaVerificationFailedError' });
@@ -249,7 +250,7 @@ describe('the proxy and a second-factor step-up (case table 6e)', () =>
     {
         const ctx = responseContext('/_auth/mfa/verify', 200, verifiedBody('a-key-id'));
 
-        await mfaVerifyInterceptor.response?.(ctx, next);
+        await decidedResponse(ctx, [mfaVerifyInterceptor.response], next);
 
         expect(ctx.response.status).toBe(401);
         expect(ctx.response.body).toMatchObject({
@@ -264,14 +265,14 @@ describe('the proxy and a second-factor step-up (case table 6e)', () =>
         const key = mintedKey();
         const stepUp = responseContext('/_auth/login', 202, stepUpBody(), { metadata: asMintedMetadata(key) });
 
-        await mfaVerifyInterceptor.response?.(stepUp, next);
+        await decidedResponse(stepUp, [mfaVerifyInterceptor.response], next);
 
         const oauthKey = mintedKey();
         const oauth = responseContext('/_auth/oauth/google/url', 200, { authUrl: 'https://provider.example/auth' }, {
             metadata: { pendingSession: oauthKey },
         });
 
-        await oauthUrlInterceptor.response?.(oauth, next);
+        await decidedResponse(oauth, [oauthUrlInterceptor.response], next);
 
         const mfaPending = cookieNamed(stepUp.setCookies, COOKIE_NAMES.MFA_PENDING)!;
         // The OAuth start's pending cookie is named for its own start (#126).
@@ -332,12 +333,12 @@ describe('the proxy and a second-factor step-up (case table 6e)', () =>
             returnUrl: '/',
         }, { cookies });
 
-        await oauthFinalizeInterceptor.response?.(ctx, next);
+        await decidedResponse(ctx, [oauthFinalizeInterceptor.response], next);
 
         expect(ctx.response.status).toBe(202);
         expect(cookieNamed(ctx.setCookies, COOKIE_NAMES.SESSION)).toBeUndefined();
 
-        await mfaVerifyInterceptor.response?.(ctx, next);
+        await decidedResponse(ctx, [mfaVerifyInterceptor.response], next);
 
         const pending = cookieNamed(ctx.setCookies, COOKIE_NAMES.MFA_PENDING)!;
 
@@ -352,8 +353,8 @@ describe('the proxy and a second-factor step-up (case table 6e)', () =>
         const key = mintedKey();
         const ctx = responseContext('/_auth/password/reset/complete', 202, stepUpBody(), { metadata: asMintedMetadata(key) });
 
-        await loginRegisterInterceptor.response?.(ctx, next);
-        await mfaVerifyInterceptor.response?.(ctx, next);
+        await decidedResponse(ctx, [loginRegisterInterceptor.response], next);
+        await decidedResponse(ctx, [mfaVerifyInterceptor.response], next);
 
         expect(cookieNamed(ctx.setCookies, COOKIE_NAMES.SESSION)).toBeUndefined();
         expect(await unsealPendingMfaSession(cookieNamed(ctx.setCookies, COOKIE_NAMES.MFA_PENDING)!.value))
@@ -394,8 +395,8 @@ describe('the proxy and a second-factor policy (#309)', () =>
         const key = mintedKey();
         const ctx = responseContext('/_auth/passkeys/login/verify', 202, stepUpBody(), { metadata: asMintedMetadata(key) });
 
-        await loginRegisterInterceptor.response?.(ctx, next);
-        await mfaVerifyInterceptor.response?.(ctx, next);
+        await decidedResponse(ctx, [loginRegisterInterceptor.response], next);
+        await decidedResponse(ctx, [mfaVerifyInterceptor.response], next);
 
         expect(cookieNamed(ctx.setCookies, COOKIE_NAMES.SESSION)).toBeUndefined();
         expect(await unsealPendingMfaSession(cookieNamed(ctx.setCookies, COOKIE_NAMES.MFA_PENDING)!.value))
@@ -415,7 +416,7 @@ describe('the proxy and a second-factor policy (#309)', () =>
                 metadata: { sessionValid: true, keyId: 'key-1', userId: '7' },
             });
 
-            await generalAuthInterceptor.response!(ctx, next);
+            await decidedResponse(ctx, [generalAuthInterceptor.response], next);
 
             expect(cookieNamed(ctx.setCookies, COOKIE_NAMES.SESSION), refusal.body.code).toBeUndefined();
             expect(cookieNamed(ctx.setCookies, COOKIE_NAMES.SESSION_KEY_ID), refusal.body.code).toBeUndefined();
@@ -425,11 +426,12 @@ describe('the proxy and a second-factor policy (#309)', () =>
 
     it('the same request refused 401 does clear it — the rule the 403 stays out of', async () =>
     {
-        const ctx = responseContext('/_auth/keys/list', 401, { code: 'UnauthorizedError' }, {
+        const refused = { __type: 'KeyRevokedError', message: 'Invalid or revoked key', error: { code: 'KeyRevokedError' } };
+        const ctx = responseContext('/_auth/keys/list', 401, refused, {
             metadata: { sessionValid: true, keyId: 'key-1', userId: '7' },
         });
 
-        await generalAuthInterceptor.response!(ctx, next);
+        await decidedResponse(ctx, [generalAuthInterceptor.response], next);
 
         expect(cookieNamed(ctx.setCookies, COOKIE_NAMES.SESSION)?.options?.maxAge).toBe(0);
     });
@@ -458,7 +460,7 @@ describe('the confirm path on the oauthFinalize 202 (#107)', () =>
     {
         const ctx = responseContext(path, status, body, { metadata: asMintedMetadata(mintedKey()) });
 
-        await mfaVerifyInterceptor.response?.(ctx, next);
+        await decidedResponse(ctx, [mfaVerifyInterceptor.response], next);
 
         return ctx.response.body;
     }

@@ -11,7 +11,8 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { NextResponse } from 'next/server';
 
-import { sessionCookieNames, clearSessionCookies } from '../../nextjs/cookie-names';
+import { packageCookieNames, sessionCookieNames } from '../../nextjs/cookie-names';
+import { clearSessionCookies } from '../../nextjs/cookie-writer';
 
 /**
  * The suite runs in the same fork as every other auth file, so a leaked
@@ -63,11 +64,11 @@ describe('sessionCookieNames', () =>
         });
     });
 
-    it('expires exactly the three session cookies and the two legacy OAuth names, each under Path=/', () =>
+    it('expires every cookie of the package — the session three, the pending ones and the two legacy OAuth names — each under Path=/', () =>
     {
         const setCookies = clearSessionCookies(new NextResponse()).headers.getSetCookie();
 
-        expect(setCookies).toHaveLength(5);
+        expect(setCookies).toHaveLength(9);
 
         for (const setCookie of setCookies)
         {
@@ -79,6 +80,10 @@ describe('sessionCookieNames', () =>
             'spfn_session',
             'spfn_session_key_id',
             'spfn_csrf',
+            'spfn_mfa_pending',
+            'spfn_device_pending',
+            'spfn_signup_setup',
+            'spfn_password_reset_setup',
             'spfn_oauth_pending',
             'spfn_oauth_csrf',
         ]);
@@ -101,7 +106,7 @@ describe('sessionCookieNames', () =>
         expect(cleared).toEqual(expect.arrayContaining(jar.slice(0, 3).map(cookie => cookie.name)));
         expect(cleared).not.toContain('spfn_oauth_pending_extra.kx1a2b.0123456789abcdef');
         expect(cleared).not.toContain('spfn_oauth_pending.x');
-        expect(cleared).toHaveLength(8);
+        expect(cleared).toHaveLength(12);
     });
 
     it('clears the names sessionCookieNames reports under the same env', () =>
@@ -114,7 +119,8 @@ describe('sessionCookieNames', () =>
 
         const { session, keyId, oauthPending, csrf } = sessionCookieNames();
 
-        expect(cleared.sort()).toEqual([session, keyId, oauthPending, csrf, 'spfn_oauth_csrf_4001'].sort());
+        expect(cleared).toEqual(expect.arrayContaining([session, keyId, oauthPending, csrf, 'spfn_oauth_csrf_4001']));
+        expect(cleared.sort()).toEqual(packageCookieNames([]).sort());
     });
 
     it('returns the same response, and does not throw when the cookies are absent', () =>

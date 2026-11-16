@@ -21,6 +21,7 @@ import { sealSession, type SessionData } from '../../server/lib/session';
 import { CSRF_HEADER, deriveCsrfToken, timingSafeEqualString } from '../../server/lib/csrf';
 import { COOKIE_NAMES, configureAuth, getCsrfMode, type CsrfMode } from '../../server/lib/config';
 import { authLogger } from '../../server/logger';
+import { decidedRequest, decidedResponse } from '../helpers/session-decision';
 
 const MUTATION_PATH = '/orders';
 
@@ -98,7 +99,7 @@ async function run(ctx: RequestInterceptorContext): Promise<{ continued: boolean
 {
     let continued = false;
 
-    await generalAuthInterceptor.request!(ctx, async () =>
+    await decidedRequest(ctx, [generalAuthInterceptor.request], async () =>
     {
         continued = true;
     });
@@ -379,8 +380,12 @@ describe('CSRF - requests the proxy does not cookie-authenticate', () =>
         expect(continued).toBe(true);
         expect(ctx.headers).toEqual(headersBefore);
         expect(ctx.body).toBe(bodyBefore);
-        // Nothing was learned about the caller, so nothing was recorded about them
-        expect(ctx.metadata).toEqual({});
+        // Nothing was learned about the caller, so nothing was recorded about
+        // them — the decision's own registration aside
+        const { sessionDecisionRegistered, ...learned } = ctx.metadata;
+
+        expect(sessionDecisionRegistered).toBe(true);
+        expect(learned).toEqual({});
     });
 
     it('does not log a CSRF line for any of them', async () =>
@@ -798,7 +803,7 @@ describe('CSRF - readable cookie', () =>
             },
         });
 
-        await loginRegisterInterceptor.response!(ctx, noop);
+        await decidedResponse(ctx, [loginRegisterInterceptor.response], noop);
 
         const sessionCookie = ctx.setCookies.find(c => c.name === COOKIE_NAMES.SESSION)!;
         const csrfCookie = ctx.setCookies.find(c => c.name === COOKIE_NAMES.CSRF)!;
@@ -819,7 +824,7 @@ describe('CSRF - readable cookie', () =>
             path: '/orders',
             metadata: {
                 refreshSession: true,
-                sessionData: {
+                inboundSession: {
                     userId: 'user-1',
                     privateKey: keyPair.privateKey,
                     keyId: keyPair.keyId,
@@ -828,7 +833,7 @@ describe('CSRF - readable cookie', () =>
             },
         });
 
-        await generalAuthInterceptor.response!(ctx, noop);
+        await decidedResponse(ctx, [generalAuthInterceptor.response], noop);
 
         const csrfCookie = ctx.setCookies.find(c => c.name === COOKIE_NAMES.CSRF)!;
 
@@ -851,7 +856,7 @@ describe('CSRF - readable cookie', () =>
             },
         });
 
-        await keyRotationInterceptor.response!(ctx, noop);
+        await decidedResponse(ctx, [keyRotationInterceptor.response], noop);
 
         const sessionCookie = ctx.setCookies.find(c => c.name === COOKIE_NAMES.SESSION)!;
         const csrfCookie = ctx.setCookies.find(c => c.name === COOKIE_NAMES.CSRF)!;
@@ -869,10 +874,10 @@ describe('CSRF - readable cookie', () =>
         const ctx = responseContext({
             path: '/orders',
             method: 'GET',
-            metadata: { sessionValid: true, keyId: keyPair.keyId },
+            metadata: { sessionValid: true, keyId: keyPair.keyId, inboundSession: { keyId: keyPair.keyId } },
         });
 
-        await generalAuthInterceptor.response!(ctx, noop);
+        await decidedResponse(ctx, [generalAuthInterceptor.response], noop);
 
         expect(ctx.setCookies.find(c => c.name === COOKIE_NAMES.CSRF)?.value)
             .toBe(await deriveCsrfToken(keyPair.keyId));
@@ -884,10 +889,10 @@ describe('CSRF - readable cookie', () =>
             path: '/orders',
             method: 'GET',
             cookies: new Map([[COOKIE_NAMES.CSRF, await deriveCsrfToken('key-1')]]),
-            metadata: { sessionValid: true, keyId: 'key-1' },
+            metadata: { sessionValid: true, keyId: 'key-1', inboundSession: { keyId: 'key-1' } },
         });
 
-        await generalAuthInterceptor.response!(ctx, noop);
+        await decidedResponse(ctx, [generalAuthInterceptor.response], noop);
 
         expect(ctx.setCookies).toHaveLength(0);
     });
@@ -903,10 +908,10 @@ describe('CSRF - readable cookie', () =>
             path: '/orders',
             method: 'GET',
             cookies: new Map([[COOKIE_NAMES.CSRF, 'stale-from-a-previous-key']]),
-            metadata: { sessionValid: true, keyId: 'key-1' },
+            metadata: { sessionValid: true, keyId: 'key-1', inboundSession: { keyId: 'key-1' } },
         });
 
-        await generalAuthInterceptor.response!(ctx, noop);
+        await decidedResponse(ctx, [generalAuthInterceptor.response], noop);
 
         expect(ctx.setCookies.find(c => c.name === COOKIE_NAMES.CSRF)?.value)
             .toBe(await deriveCsrfToken('key-1'));
@@ -924,10 +929,10 @@ describe('CSRF - readable cookie', () =>
         const ctx = responseContext({
             path: '/orders',
             method: 'GET',
-            metadata: { sessionValid: true, keyId: 'key-1' },
+            metadata: { sessionValid: true, keyId: 'key-1', inboundSession: { keyId: 'key-1' } },
         });
 
-        await expect(generalAuthInterceptor.response!(ctx, noop)).resolves.toBeUndefined();
+        await expect(decidedResponse(ctx, [generalAuthInterceptor.response], noop)).resolves.toBeUndefined();
 
         expect(ctx.setCookies).toHaveLength(0);
         expect(error).toHaveBeenCalledTimes(1);
@@ -935,9 +940,9 @@ describe('CSRF - readable cookie', () =>
 
     it('is not re-issued after logout cleared it', async () =>
     {
-        const ctx = responseContext({ path: '/_auth/logout', metadata: { sessionValid: true, keyId: 'key-1' } });
+        const ctx = responseContext({ path: '/_auth/logout', metadata: { sessionValid: true, keyId: 'key-1', inboundSession: { keyId: 'key-1' } } });
 
-        await generalAuthInterceptor.response!(ctx, noop);
+        await decidedResponse(ctx, [generalAuthInterceptor.response], noop);
 
         const csrfCookies = ctx.setCookies.filter(c => c.name === COOKIE_NAMES.CSRF);
 
@@ -949,7 +954,7 @@ describe('CSRF - readable cookie', () =>
     {
         const ctx = responseContext({ path: '/_auth/logout' });
 
-        await generalAuthInterceptor.response!(ctx, noop);
+        await decidedResponse(ctx, [generalAuthInterceptor.response], noop);
 
         const csrfCookie = ctx.setCookies.find(c => c.name === COOKIE_NAMES.CSRF)!;
 

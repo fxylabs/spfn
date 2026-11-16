@@ -31,6 +31,7 @@ import { buildUrlWithParams, buildQueryString } from '../shared';
 import { interceptorRegistry } from './interceptors';
 import { executeRequestInterceptors, executeResponseInterceptors, filterMatchingInterceptors } from './interceptors';
 import type { RouteMapEntry } from './interceptors/types';
+import { callBackend } from './backend-call';
 import {
     buildProxyHeaders,
     parseCookiesFromNextRequest,
@@ -486,6 +487,18 @@ export function createRpcProxy(config: RpcProxyConfig)
                     requestCtx.metadata,
                     requestCtx.cookies,
                 );
+
+                // The proxy's own fetch, offered back to the response phase
+                responseCtx.callBackend = (call) => callBackend({
+                    apiUrl,
+                    proxyKey,
+                    timeout,
+                    method: targetMethod,
+                    path: resolvedPath,
+                    query: queryString,
+                    headers,
+                    body: fetchOptions.body,
+                }, call);
 
                 // Execute response interceptors
                 const responseInterceptorsToRun = matchingInterceptors.map(r => r.response).filter((i): i is NonNullable<typeof i> => !!i);

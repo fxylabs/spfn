@@ -187,9 +187,10 @@ real secret values out of band, never commit them.
 | `SPFN_API_URL` | `.env.local` | yes | declared by `@spfn/core`, no default; the OAuth 2.1 issuer and invitation links are built on it |
 | `SPFN_APP_URL` | `.env.local` | OAuth, links, passkeys | declared by `@spfn/core`, no default; the web app origin, unless `NEXT_PUBLIC_SPFN_APP_URL` is set. With neither set, a flow that builds a URL on the app fails with an error naming both |
 | `SPFN_AUTH_SESSION_TTL` | both | — | default `7d` (e.g. `7d`, `12h`, `45m`) |
+| `SPFN_AUTH_SESSION_TTL_REMEMBER` | both | — | default `30d`; lifetime of a kept session — a sign-in that posted `remember: true`. Same forms; a malformed value refuses the boot |
 | `SPFN_AUTH_JWT_SECRET` / `SPFN_AUTH_JWT_EXPIRES_IN` | `.env.server` | — | legacy server-signed JWT mode only |
 | `SPFN_AUTH_BCRYPT_SALT_ROUNDS` | `.env.server` | — | default `12` (native bcrypt, off the event loop) |
-| `SPFN_AUTH_COOKIE_SECURE` | both | — | override Secure flag (defaults to `NODE_ENV==='production'`) |
+| `SPFN_AUTH_COOKIE_SECURE` | both | — | override Secure flag (defaults to `NODE_ENV==='production'`); read on every write, by every cookie this package writes — the proxy, `saveSession`/`clearSession`, `clearSessionCookies`, the OAuth callback handler, and the backend's own API-mode OAuth start (`POST /_auth/oauth/start`'s CSRF cookie and the callback's expiry of it) — from one definition, `server/lib/cookie-attributes.ts` |
 | `SPFN_AUTH_CSRF` | `.env.local` | — | `off` \| `warn` \| `enforce`; unset behaves as `warn` — see [CSRF protection](#csrf-protection) |
 | `SPFN_AUTH_ADMIN_*` | `.env.server` | — | admin seeding (see below) |
 | `SPFN_AUTH_ROLE_EMAIL_DOMAINS` | `.env.server` | — | per-role allow-list of email domains, e.g. `admin=example.com;support=example.com,partner.example`; **checked at boot** — see [Restricting roles to email domains](#restricting-roles-to-email-domains) |
@@ -638,7 +639,7 @@ can prove a replacement now:
   an account deletion request and the sign-out-everywhere link move the generation, and
   `authenticate`, `optionalAuth` and clientProofV1 admission refuse a key of an older one. A
   rotation racing "sign out everywhere" therefore writes a key that is dead on arrival. Such a key
-  is answered exactly as a revoked one: `401 Invalid or revoked key` on the Bearer surface,
+  is answered exactly as a revoked one: `401 KeyRevokedError` on the Bearer surface,
   `SESSION_REVOKED` on clientProofV1 (before the proof and the nonce ledger, as a revoked key is).
   The device that asked to sign out the *others* moves into the new generation with the account.
 
@@ -1601,6 +1602,141 @@ or take a role has one rule.
   is gone; `insertDeclared`, `findRoleLockHolders` and the `noKeyUpdate` strength of
   `lockInIdOrder` are new.
 
+### Migration — the Next.js proxy decides the session once per response
+
+**BREAKING.** Bundle 11 of the audit (au8-A2, A3, A4, A5, A6, A7, A8, A9, au8-B3, au8-dead).
+Every proxy rule used to write the session cookies itself, the last write won, and collisions were
+patched with a list of paths `generalAuthInterceptor` skipped; the proxy read *why* the backend
+refused from the status and the message text. So a fresh sign-in was wiped by a clear of the old,
+unreadable cookie that followed it; a wrong current password (any 401) signed the person out; a
+seal that failed answered the backend's 200 with no session and an ownerless key; and
+`getSession().userId` on a social sign-in was whatever the page posted. Now:
+
+- **One decision per response.** Rules propose — `establish(session)`, `clear(reason)`,
+  `refresh(session)` — and `sessionDecisionInterceptor`, first in `authInterceptors`, decides once
+  after every other rule: a new session wins over a clear, a clear over a refresh. It writes the
+  whole set (session, key id, CSRF, and the pending cookies flows ask for) through one cookie
+  writer, which alone decides the attributes. An app that registers its own interceptor and pushes
+  this package's cookie names onto `setCookies` is now competing with that decision — propose
+  instead.
+- **A proxy without the decision fails loudly.** `@spfn/auth/nextjs/api` registers
+  `authInterceptors` whole, decision first. A proxy that assembles its own list
+  (`createRpcProxy({ disableAutoInterceptors: ['auth'], interceptors: [...] })`) must put
+  `sessionDecisionInterceptor` first in it; a rule that proposes on a request the decision is not
+  registered for answers **500 `SessionDecisionMissingError`** (code `SESSION_DECISION_MISSING`)
+  in place of the response — and a sign-in's new key is revoked as for a failed seal — rather than
+  a 200 with no cookie. The individual rules are not exported from any entry of this package, so
+  there is no documented way to build such a list; the check covers a bundler that reaches them
+  anyway.
+- **Only the key-refused family clears the session.** The codes are those the server answers an
+  admission refusal with that end a key — `KeyRevokedError` (401: revoked or unknown key, or one
+  of an ended key generation), `AccountNotFoundError` (401: the account is gone),
+  `AccountDisabledError`, `AccountPendingDeletionError` and `KeyExpiredError` on an unbound
+  session — read off the response envelope's `error.code` from the same table the server builds
+  its answers from (`server/lib/admission-refusal.ts`). Every other refusal leaves the session:
+  invalid credentials, step-up and recent-authentication, second-factor enrolment, CSRF, rate
+  limits, `InvalidTokenError`, permissions, every 5xx and a backend that cannot be reached — and
+  **core's `UnauthorizedError` itself**, which is what a stale one-time token, an ops-token route,
+  a missing `Authorization` header and an app's own `throw new UnauthorizedError(...)` answer. A 401
+  `TokenExpiredError` is retried once with a freshly signed request token; a second refusal is
+  passed through.
+- **A revoked key answers `KeyRevokedError`, a vanished account `AccountNotFoundError`.** Both
+  used to answer core's `UnauthorizedError` (messages unchanged: `Invalid or revoked key`,
+  `User not found`) and both extend it. A 401 status check still holds everywhere. `instanceof
+  UnauthorizedError` holds on the server, and on a client only when that client was given
+  `authErrorRegistry`: `authApi` and `createAuthApi` register it themselves, but a client from
+  core's `createApi` without it rebuilds these bodies as a generic `ApiError` (status 401), where
+  before this release core's own registry restored `UnauthorizedError`. Register it with
+  `createApi<AppRouter>({ errorRegistry: [authErrorRegistry] })` (`authErrorRegistry` from
+  `@spfn/auth/errors`; core's registry is merged in for an array). Clients that matched the code `UnauthorizedError` to sign the user out must match the
+  new codes (the full family is above); `admissionRefusalError` is their only producer. Mobile
+  contract 0.14.5 lists both.
+- **Every unreadable session cookie is cleared** — expired, sealed under a rotated secret, issued
+  for another audience, or malformed (`readSealedSession` answers which). One that was worded
+  otherwise used to ride along for its lifetime.
+- **A session that could not be written is a failure.** If the seal or the cookie set fails after
+  the backend accepted a sign-in, the answer is **500 `SessionSealFailedError`** in place of the
+  200, and the proxy revokes the key that sign-in registered through `POST /_auth/logout` signed
+  by that key; a revocation that fails too is logged with the key id.
+- **`remember` is a boolean.** `true` gives the session `SPFN_AUTH_SESSION_TTL_REMEMBER` (new,
+  `30d` by default), absent or `false` the usual `SPFN_AUTH_SESSION_TTL`. The kept lifetime is
+  sealed into the session (`SessionData.remember`), so a renewal, rotation or re-seal keeps it.
+  **A string (`'30d'`) is refused with 400 `ValidationError`** before any key is made: the client
+  no longer sets its own lifetime. `getSessionTtl(override)` is `getSessionTtl({ remember })`.
+  It is taken on the request that **starts** a sign-in — `login`, `register`,
+  `invitations/accept`, `signup/password`, `password/reset/complete`, `passkeys/login/verify`,
+  `oauth/:provider/url`, `device/start/web` and `device/link/redeem/web` — and a sign-in that
+  completes later carries it in its own sealed pending cookie: a 202 into `mfa/verify`, a social
+  start into `oauth/finalize`, a device start or redeem into its poll. The completing request
+  cannot add or change it.
+- **`getSession().userId` is the backend's, and only the key's holder learns it.**
+  `POST /_auth/oauth/finalize` is authenticated by the key it finalizes: the proxy signs the call
+  with the private half the start's pending cookie holds, the route admits it through
+  `authenticate` (its door, `oauthFinalizeAuth`, is a registered enrolment gate, so an
+  enrolment-only account still completes) and answers **that principal** — a posted `userId` or
+  `keyId` is not read for the answer (`keyId` only picks the pending cookie in the proxy). An
+  unsigned finalize, or one signed by another key under the key's id, is a 401 that says nothing
+  about the key's owner; a pending cookie that is missing, unreadable or holds another key is
+  refused by the proxy before the backend is asked. The second-factor 202 (`{ mfaChallenge }`)
+  is the one branch with no principal: it only echoes what the page sent.
+  `createOAuthCallbackHandler` no longer seals:
+  it completes the sign-in through the RPC proxy (`oauthFinalize`, as the browser) and redirects
+  carrying the cookies the proxy decided, so a `userId` or binding on the callback query is not
+  read. The proxy runs **in-process** — its handler is called with the callback request's own
+  cookies, user agent and client address, never over HTTP — so a host behind basic auth or an
+  edge the server cannot call back through still completes, and every user keeps their own rate-limit
+  bucket. Pass the app's own proxy — `createOAuthCallbackHandler({ rpcProxy: { POST } })`, the
+  `POST` your `/api/rpc/[routeName]` route exports — as the normal form: nothing records the proxy
+  an app builds, so without it the handler builds one as `createRpcProxy` does with no options
+  (`SPFN_API_URL`, `SPFN_PROXY_SECRET`, the registered interceptors, `authInterceptors`), and an
+  app proxy with its own `interceptors`, `apiUrl` or proxy secret would finalize through a
+  different chain without saying so.
+- **Sign-out expires every cookie of this package** — the session three and the pending ones
+  (`spfn_mfa_pending`, `spfn_device_pending` with its private key, the sign-up and password-reset
+  setup cookies, every OAuth start's) — from one list, `packageCookieNames(jar)`. So do
+  `clearSession()` and `clearSessionCookies()`.
+- **The guards treat an outage as an error, not a sign-out.** `getAuthSessionData()` answers
+  `null` only for the key-refused family (and a bound session presented from another browser);
+  a 5xx, a network failure or `SPFN_AUTH_GUARD_TIMEOUT` running out is thrown, so the app's error
+  boundary renders, the cookies stay, and nobody is sent to sign in by an outage. Wrap a guard in
+  your error boundary if you rendered a sign-in page for these before.
+- **`saveSession` writes the key-id cookie too**, and every cookie this package writes takes
+  `Secure` from `SPFN_AUTH_COOKIE_SECURE` — the callback handler, `saveSession` and the
+  backend's API-mode OAuth start used `NODE_ENV` directly, so a sign-in on an HTTP staging host
+  set cookies the browser dropped. The attributes have one definition
+  (`server/lib/cookie-attributes.ts`, free of Next.js), read by the proxy's writer and the
+  backend's alike.
+- **Removed:** `interceptors/authentication.ts` (registered nowhere), the
+  `nextjs/interceptors/cookie-options` module, `pushCsrfCookie`, `pushCsrfCookieIfStale` and
+  `pushCsrfCookieRemoval` (internal), and the `proxyWroteError` metadata flag. The paths
+  `generalAuthInterceptor` skips are now only the routes that authenticate nobody (sign-in, codes,
+  `exists`, second-factor verify, the browser device-login routes); none is on the list to protect
+  a fresh session any more.
+
+**Every sign-in retires the browser's previous key of the same account.** The session decision
+does it, not each sign-in path: whenever it writes a new session it reads the request's session
+cookie itself (the same unseal that decides a clear) and, when that cookie unseals, is the same
+account's by the backend's answer and holds another key, revokes that key once the new session is
+written — the same `POST /_auth/logout` sign-out makes, signed by the previous session. A social
+sign-in (`oauth/finalize`, and `mfa/verify` after its 202), a device-link or device-code sign-in
+(the approving poll), a password reset and every other establishing path are covered alike,
+including any added later. Another account's session is left alone, as are the sessions invitation
+acceptance and sign-up completion replace (they create a new account). A password or passkey
+sign-in with the replacement proof ([above](#migration--a-sign-in-replaces-a-key-only-with-proof-of-the-old-key)),
+`keys/rotate` and a renewal have the backend revoke the previous key itself, and their answers do
+not say so; the proxy's sign-out then answers `KeyRevokedError`, which is read as "already gone"
+and not logged. Any other failure is logged with the key id and the sign-in stands.
+
+**What a failed seal leaves.** When the session cannot be written after the backend accepted a
+sign-in, the proxy revokes the new key (500 `SessionSealFailedError`). If that sign-in had already
+replaced the previous key on the backend — a password or passkey sign-in with the replacement
+proof, `keys/rotate`, a renewal — the previous key is gone too: the browser holds neither, and the
+person signs in again.
+
+**What is unchanged.** The key-id cookie (`spfn_session_key_id`) is still the plain key
+id: nothing reads it for a decision — the replacement proof is signed from the sealed session.
+The proxy-guard default stays `'off'`.
+
 ### Invitations
 
 An invitation lets an account with `user:invite` bring someone in with a role ranked below its
@@ -2149,7 +2285,7 @@ A [passkey](#passkeys-webauthn) is **not** one of these keys: it is a credential
 identity at sign-in, after which an ordinary device key is registered exactly as a password
 login registers one.
 
-Keys are per-device, so a login never revokes the previous key and they accumulate on purpose.
+Keys are per-device, so a login never revokes another device's key and they accumulate on purpose.
 `listKeys` / `revokeKey` / `revokeAllKeys` are what let the account owner see what accumulated and
 cut off anything they no longer recognise.
 
@@ -3387,11 +3523,11 @@ manages the keypair → pending-session-cookie → full-session handoff transpar
 
 A repeated `POST /_auth/oauth/finalize` — a reload of the callback page after the sign-in
 finished — is answered with success and never ends a session: when the pending cookie is gone
-and the browser's session already belongs to the key being finalized, the proxy passes the 200
-through and the finalize rule writes no cookie — the ordinary renewal still applies, so a session
+and the browser's session already belongs to the key being finalized, the call is signed by that
+session, and the proxy passes the 200 through and the finalize rule writes no cookie — the ordinary renewal still applies, so a session
 within a day of expiry is re-sealed on that 200 for the same key. A finalize the proxy refuses
 (no pending cookie and a different key, or a key mismatch) answers 401 and leaves the session the
-browser holds in place; only a 401 from the backend itself signs the browser out.
+browser holds in place; only a backend refusal of the key-refused family signs the browser out.
 
 On an account with a [second factor](#second-factor-mfa) and a device it has not seen, the
 callback carries `?mfaChallenge=` instead of `userId` and no session is created until
@@ -3409,6 +3545,20 @@ should upsert it rather than insert, because the row may already be there.
 ```tsx
 // app/auth/callback/page.tsx
 export { OAuthCallback as default } from '@spfn/auth/nextjs/client';
+```
+
+An app that completes the sign-in on a route handler instead of the page passes it its own RPC
+proxy, so the callback finalizes through the same interceptors, backend URL and proxy secret as
+every other call. Nothing records the proxy `createRpcProxy` builds, so the handler cannot find it
+on its own; without `rpcProxy` it builds a default one, which differs silently from an app proxy
+configured beyond the defaults.
+
+```typescript
+// app/api/auth/callback/route.ts
+import { createOAuthCallbackHandler } from '@spfn/auth/nextjs/server';
+import { POST } from '@/app/api/rpc/[routeName]/route';
+
+export const GET = createOAuthCallbackHandler({ rpcProxy: { POST } });
 ```
 
 ```typescript
@@ -4247,8 +4397,17 @@ import { saveSession, getSession, clearSession } from '@spfn/auth/nextjs/server'
 
 await saveSession({ userId: '123', privateKey: '...', keyId: 'uuid', algorithm: 'ES256' });
 const session = await getSession();   // read-only, safe in Server Components
-await clearSession();
+await clearSession();                 // expires every cookie of this package
 ```
+
+**What `getSession()` proves, and what it does not.** It proves that this server sealed the cookie
+for that user id and that it has not expired. The user id is the account the backend
+authenticated at sign-in — the owner of the key the cookie holds, never a value a page posted. It
+is **not a live check**: a key revoked, an account suspended or deleted since the cookie was sealed
+still reads as signed in here until the next request through the proxy clears it. Use it to
+render; for anything that must hold now — authorization, or reading data that belongs to the user
+— call the backend (`authApi.getAuthSession`, a guard, or your own authenticated route), which
+re-derives the user from the key on every request.
 
 RSC guards (redirect when unmet) — `RequireAuth`, `RequireRole`, `RequirePermission`:
 
@@ -4299,20 +4458,79 @@ SPFN_AUTH_GUARD_TIMEOUT=3000
 ```
 
 Milliseconds, greater than 0 and at most 2147483647; a few seconds (`3000`–`10000`) suits most
-apps. **A lookup that times out reads as no session: the guard sends a signed-in person to the
-sign-in page**, exactly as when the backend refuses. It is logged at warn level as
-`Auth session lookup timed out`, with the timeout. A malformed value is refused by the env
-validation, and at runtime fails the lookup the same way — `null`, with the env registry's
-error naming `SPFN_AUTH_GUARD_TIMEOUT`.
+apps. **A lookup that times out is an error, not a sign-out** (BREAKING — it used to read as no
+session): the guard throws it, so the app's error boundary renders, the cookies stay and nobody
+is redirected to sign in. So does a backend that answers 5xx or cannot be reached. Only a refusal
+of the key-refused family — the codes on which the proxy clears the cookies — reads as signed out.
+It is logged at error level as `Auth session lookup failed — not a sign-out`. A malformed value is
+refused by the env validation, and at runtime throws the env registry's error naming
+`SPFN_AUTH_GUARD_TIMEOUT`.
+
+#### What a guard throws, and how to catch it
+
+`getAuthSessionData`, `getUserRole`, `getUserPermissions`, `hasAnyRole`, `hasAnyPermission` and
+`RequireAuth` / `RequireRole` / `RequirePermission` answer "signed out" (`null`, `false`, `[]`, a
+redirect) only for the key-refused family. Everything else is thrown, as the error the API client
+restores — match on `name` (and `status` / `errorType` for `ApiError`):
+
+| failure | thrown | how to tell |
+|---------|--------|-------------|
+| the backend answered 5xx | its registered class — `InternalServerError` (500), `ServiceUnavailableError` (503), `AccountBusyError` (503), `DatabaseError`, … | `error.name`, `error.statusCode` |
+| the backend cannot be reached (the proxy answers 502) or the proxy's own timeout ran out (504) | `ApiError` | `error.name === 'ApiError'`, `error.status` 502 / 504, `error.errorType === 'http'` |
+| the Next.js server cannot reach its own proxy | `ApiError` | `error.errorType === 'network'`, `error.status === 0` |
+| `SPFN_AUTH_GUARD_TIMEOUT` ran out | `ApiError` | `error.errorType === 'timeout'`, `error.status === 408` |
+| a rate limit | `TooManyRequestsError` | `error.name`, `error.statusCode === 429` |
+| a bound session presented from another browser | — (`null`: signed out, cookies cleared) | |
+| an account held to enrolment (`secondFactor.required`) | — not thrown: the session route is an enrolment route, so the session comes back with `secondFactorEnrolmentRequired: true` | `session.secondFactorEnrolmentRequired` |
+
+`SecondFactorEnrolmentRequiredError` (403, code `SECOND_FACTOR_ENROLMENT_REQUIRED`) is what an
+enrolment-only session meets on every *other* route — your own data reads included — and it is
+thrown there like any refusal that is not a sign-out.
+
+A **public** layout that only wants to know whether to show the admin link decides for display,
+and must not turn an outage into a page that fails to render. Catch, and render as signed out —
+for display only; anything that must hold stays behind a guard that throws:
+
+```tsx
+import { hasAnyRole } from '@spfn/auth/nextjs/server';
+
+export default async function PublicLayout({ children }: { children: React.ReactNode })
+{
+    // An outage hides the link; it does not sign anyone out or break the page.
+    const showAdmin = await hasAnyRole(['admin']).catch(() => false);
+
+    return <Shell adminLink={showAdmin}>{children}</Shell>;
+}
+```
+
+Route an account the policy holds to enrolment to the enrolment page before anything else:
+
+```tsx
+import { redirect } from 'next/navigation';
+import { getAuthSessionData, RequireAuth } from '@spfn/auth/nextjs/server';
+
+export default async function AppLayout({ children }: { children: React.ReactNode })
+{
+    const session = await getAuthSessionData();
+
+    if (session && session !== 'renewal-required' && session.secondFactorEnrolmentRequired)
+    {
+        redirect('/settings/security/enrol');
+    }
+
+    return <RequireAuth redirectTo="/login">{children}</RequireAuth>;
+}
+```
 
 ### Emptying the cookie jar from a route handler or middleware
 
 `clearSession()` works where `next/headers` is writable. The page that answers *the API
 refused your session* is usually a route handler or middleware holding a `NextResponse`
-instead — `clearSessionCookies(response, request)` expires the session, key-id and CSRF
-cookies on it, plus every in-flight OAuth start's pending and CSRF cookie the request's jar
-names (only the legacy fixed names when no request is passed), and returns the same response,
-so the call chains:
+instead — `clearSessionCookies(response, request)` expires every cookie of this package on it —
+the session, key-id and CSRF cookies, the pending second-factor, device-login, sign-up and
+password-reset cookies, and every in-flight OAuth start's pending and CSRF cookie the request's
+jar names (only the legacy fixed names when no request is passed) — and returns the same
+response, so the call chains:
 
 ```typescript
 import { clearSessionCookies } from '@spfn/auth/nextjs/server';
@@ -4994,6 +5212,25 @@ no query it did not make before. Each door answers a refusal as it always has: 4
 error classes on the cookie/Bearer paths, the contract codes on a proven call, `invalid_grant`
 on the token endpoint, 401 with `WWW-Authenticate` on `/mcp`, the one `SessionRenewalRefusedError`
 on renewal, `MfaVerificationFailedError` on `mfa/verify`.
+
+On the cookie/Bearer paths each refusal is a class of its own, made by `admissionRefusalError`
+alone — so a client can tell "this session is over" from any other 401:
+
+| refusal | error | status | ends the browser session |
+|---------|-------|--------|--------------------------|
+| key revoked, unknown, or of an ended key generation | `KeyRevokedError` | 401 | yes |
+| key expired (unbound) | `KeyExpiredError` | 401 | yes (a bound one is renewable) |
+| account missing | `AccountNotFoundError` | 401 | yes |
+| account disabled / deleted | `AccountDisabledError` | 403 | yes |
+| deletion requested | `AccountPendingDeletionError` | 403 | yes |
+| second factor to enrol | `SecondFactorEnrolmentRequiredError` | 403 | no |
+
+`KeyRevokedError` and `AccountNotFoundError` extend core's `UnauthorizedError`; the plain
+`UnauthorizedError` is never one of these and never ends a session. On a client the classes —
+and so `instanceof UnauthorizedError` — are restored only by a client given `authErrorRegistry`:
+`authApi` and `createAuthApi` do it themselves; a core `createApi` client needs
+`createApi<AppRouter>({ errorRegistry: [authErrorRegistry] })`, or it receives a generic
+`ApiError` with the status.
 
 Only the admission module can make a principal. `AuthContext`, `Principal` and
 `VerifiedOAuth2AccessToken` carry a brand and a sealed constructor. The brand is a compile-time
@@ -6468,16 +6705,24 @@ No. The client generates an ES256/RS256 keypair, sends only the public key on re
 login, and signs each request itself. The server verifies with the stored public key. Keys
 expire after 90 days; `rotateKey` renews one.
 
+**Does signing in again in the same browser retire the browser's previous key?**
+Yes, when it is the same account's: whichever way the person signs in again — password, passkey,
+social, device link or code, a second factor after a 202 — the proxy revokes the key of the
+session it replaces once the new one is written. A sign-in into another account (an invitation,
+a sign-up, a social account of someone else) leaves the previous account's key live.
+
 **Does signing in on a new device sign the old one out?**
 No, and that is on purpose — keys are per-device and accumulate. `listKeys` shows the
 account owner what accumulated, `revokeKey` cuts one off, `revokeAllKeys` cuts off
 everything but the caller.
 
 **How long does a session last?**
-The first of these that is set: a per-call override (the `remember` value a login posts),
-`configureAuth({ sessionTtl })`, `SPFN_AUTH_SESSION_TTL`, and otherwise seven days. Each
-accepts `7d`, `12h`, `45m` or a number of seconds; a malformed value at the level that answers
-throws rather than falling through to the next. A malformed `SPFN_AUTH_SESSION_TTL` is refused
+A kept session — the sign-in posted `remember: true` ("keep me signed in") — lives
+`SPFN_AUTH_SESSION_TTL_REMEMBER`, thirty days unless set. Any other session: the first of
+`configureAuth({ sessionTtl })`, `SPFN_AUTH_SESSION_TTL`, and otherwise seven days. The client
+chooses only whether a session is kept, never how long; `remember` that is not a boolean is
+refused with 400. Each setting accepts `7d`, `12h`, `45m` or a number of seconds; a malformed
+value at the level that answers throws rather than falling through to the next. A malformed `SPFN_AUTH_SESSION_TTL` is refused
 when the environment is validated (`spfn env validate`, or the server's boot check for a registry
 the app lists), naming the variable and the accepted forms.
 

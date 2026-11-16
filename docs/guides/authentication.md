@@ -63,6 +63,7 @@ SPFN_AUTH_JWT_SECRET=your-jwt-secret        # Default: dev-secret-key-change-in-
 SPFN_AUTH_JWT_EXPIRES_IN=7d                 # Default: 7d
 SPFN_AUTH_BCRYPT_SALT_ROUNDS=12             # Default: 12 (native bcrypt, off the event loop)
 SPFN_AUTH_SESSION_TTL=7d                    # Default: 7d
+SPFN_AUTH_SESSION_TTL_REMEMBER=30d          # Default: 30d — a session whose sign-in posted remember: true
 
 # ── Email Delivery (via @spfn/notification) ──────────────────────────
 # @spfn/auth has no mail settings of its own — verification codes and
@@ -101,6 +102,7 @@ SPFN_AUTH_SESSION_SECRET="my-super-secret-session-key-at-least-32-chars-long"
 
 # ── Optional ─────────────────────────────────────────────────────────
 SPFN_AUTH_SESSION_TTL=7d
+SPFN_AUTH_SESSION_TTL_REMEMBER=30d
 SPFN_AUTH_COOKIE_SECURE=false   # Override cookie Secure flag (default: true in production)
 SPFN_AUTH_CSRF=enforce          # off | warn | enforce (unset = warn); see CSRF Protection
 SPFN_AUTH_GUARD_TIMEOUT=3000    # ms the guards' session lookup may take (unset = the client's 120 s); see Server Component Guards
@@ -1275,6 +1277,12 @@ export default async function HomePage()
 }
 ```
 
+`getSession()` proves that this server sealed the cookie for that user id — the account the
+backend authenticated at sign-in, never a value a page posted — and that it has not expired. It
+is not a live check: a key revoked or an account suspended since then still reads as signed in.
+Render with it; for authorization or the user's data, call the backend (a guard,
+`authApi.getAuthSession`, or your own authenticated route).
+
 ### Server Component Guards
 
 ```typescript
@@ -1317,10 +1325,11 @@ requests, so it cannot be lowered for the guards alone. `SPFN_AUTH_GUARD_TIMEOUT
 SPFN_AUTH_GUARD_TIMEOUT=3000   # a few seconds; > 0 and <= 2147483647
 ```
 
-**A lookup that times out reads as no session — the guard sends the person to sign in**, even
-when they are signed in and the backend is merely slow. It is logged at warn level as
-`Auth session lookup timed out`. A malformed value is refused by env validation; at runtime it
-fails the lookup the same way (no session), with an error log naming the variable.
+**A lookup that times out is an error, not a sign-out**: the guard throws it, so your error
+boundary renders, the cookies stay and nobody is redirected to sign in — the same as a backend
+that answers 5xx or cannot be reached. Only a refusal of the key or the account (the codes on
+which the proxy clears the cookies) reads as signed out. A malformed value is refused by env
+validation; at runtime it throws an error naming the variable.
 
 The variable bounds only this lookup. The passkey and MFA client helpers (`enrollPasskey`,
 `signInWithPasskey`, `completeMfaWithPasskey`, …) take a client and wait as long as it does; to
@@ -1332,7 +1341,8 @@ calls — `authApi.login.timeout(5000).call(...)`.
 ```typescript
 import { authApi } from '@spfn/auth';
 
-// Revokes the current key and clears session
+// Revokes the current key and expires every cookie of the package —
+// the session and the pending cookies a flow left behind
 await authApi.logout.call({});
 ```
 
@@ -1344,11 +1354,14 @@ Configure via environment variable:
 SPFN_AUTH_SESSION_TTL=7d    # 7 days (default)
 SPFN_AUTH_SESSION_TTL=30d   # 30 days
 SPFN_AUTH_SESSION_TTL=12h   # 12 hours
+SPFN_AUTH_SESSION_TTL_REMEMBER=30d   # a kept session: the sign-in posted remember: true (default 30d)
 ```
 
-The lifetime is the first of these that is set: a per-call override (the `remember` value a
-login posts), `configureAuth({ sessionTtl })`, `SPFN_AUTH_SESSION_TTL`, and otherwise seven
-days. A malformed value at the level that answers throws rather than falling through, and a
+A sign-in that posts `remember: true` ("keep me signed in") gets
+`SPFN_AUTH_SESSION_TTL_REMEMBER`. Any other session lives the first of these that is set:
+`configureAuth({ sessionTtl })`, `SPFN_AUTH_SESSION_TTL`, and otherwise seven days. `remember`
+is a boolean — the client chooses whether a session is kept, never how long; any other value is
+refused with 400 (a string such as `'30d'` used to set the lifetime itself). A malformed value at the level that answers throws rather than falling through, and a
 malformed `SPFN_AUTH_SESSION_TTL` is refused when the environment is validated (`spfn env
 validate`, or the server's boot check for a registry the app lists in
 `defineServerConfig().env({ registries })`), with a message naming the variable and the
@@ -1406,7 +1419,7 @@ bound to the expiring key, and the fail-closed re-seal — is in
 
 ### Cookie Secure Flag
 
-Session cookies have the `Secure` flag enabled by default in production (`NODE_ENV=production`). This means cookies are only sent over HTTPS.
+Session cookies have the `Secure` flag enabled by default in production (`NODE_ENV=production`). This means cookies are only sent over HTTPS. Every cookie the package writes — the proxy's, `saveSession`'s, `clearSessionCookies`' and the OAuth callback handler's — takes the flag from the setting below.
 
 For HTTP-only environments (e.g. bastion server accessed via plain HTTP), override with:
 

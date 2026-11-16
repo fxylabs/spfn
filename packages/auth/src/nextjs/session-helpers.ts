@@ -6,9 +6,10 @@
 
 import * as jose from 'jose';
 import { cookies } from 'next/headers.js';
+import type { SetCookie } from '@spfn/core/nextjs';
 import { sealSession, unsealSession, type SessionData } from '../server/lib/session';
-import { deriveCsrfToken } from '../server/lib/csrf';
-import { COOKIE_NAMES, getSessionTtl, parseDuration } from '../server/lib/config';
+import { COOKIE_NAMES, parseDuration } from '../server/lib/config';
+import { expiredCookie, packageCookie, sessionCookies, signedOutCookies } from './cookie-writer';
 import {
     latestOwnStartCookie,
     legacyPendingCookie,
@@ -30,6 +31,11 @@ export interface PendingSessionData
     privateKey: string;
     keyId: string;
     algorithm: KeyAlgorithmType;
+    /**
+     * "Keep me signed in", as the request that started the sign-in chose it —
+     * sealed here because the request that completes it cannot be asked again.
+     */
+    remember?: true;
 }
 
 /**
@@ -88,23 +94,25 @@ export interface SaveSessionOptions
      * - Number: seconds (e.g., 2592000)
      * - String: duration format ('30d', '12h', '45m', '3600s')
      *
-     * If not provided, uses global configuration:
-     * 1. Global config (configureAuth)
-     * 2. Environment variable (SPFN_AUTH_SESSION_TTL)
-     * 3. Default (7d)
+     * If not provided, the session lives the configured lifetime: the kept one
+     * (`SPFN_AUTH_SESSION_TTL_REMEMBER`) when `remember` is true, otherwise
+     * `configureAuth({ sessionTtl })`, `SPFN_AUTH_SESSION_TTL`, then seven days.
      */
     maxAge?: number | string;
 
     /**
-     * Remember me option
-     *
-     * When true, uses extended session duration (if configured)
+     * Keep me signed in: the session lives `SPFN_AUTH_SESSION_TTL_REMEMBER`, and
+     * every later re-seal of it keeps that lifetime.
      */
     remember?: boolean;
 }
 
 /**
- * Save session to HttpOnly cookie
+ * Save session to HttpOnly cookies
+ *
+ * Writes the whole set a session is — the sealed session, its key id and its
+ * CSRF token — through the same writer the proxy uses, so the attributes
+ * (`Secure` from `SPFN_AUTH_COOKIE_SECURE`, among them) are the proxy's.
  *
  * @param data - Session data to save
  * @param options - Session options (maxAge, remember)
@@ -117,10 +125,7 @@ export interface SaveSessionOptions
  * // Custom TTL with duration string
  * await saveSession(sessionData, { maxAge: '30d' });
  *
- * // Custom TTL in seconds
- * await saveSession(sessionData, { maxAge: 2592000 });
- *
- * // Remember me
+ * // Keep me signed in
  * await saveSession(sessionData, { remember: true });
  * ```
  */
@@ -129,49 +134,52 @@ export async function saveSession(
     options?: SaveSessionOptions,
 ): Promise<void>
 {
-    // Calculate maxAge
-    let maxAge: number;
+    const session: SessionData = options?.remember ? { ...data, remember: true } : data;
+    const built = await sessionCookies(session);
+    const maxAge = options?.maxAge === undefined ? undefined : secondsOf(options.maxAge);
 
-    if (options?.maxAge !== undefined)
-    {
-        // Custom maxAge provided
-        maxAge = typeof options.maxAge === 'number'
-            ? options.maxAge
-            : parseDuration(options.maxAge);
-    }
-    else
-    {
-        // Use getSessionTtl for consistent configuration
-        maxAge = getSessionTtl();
-    }
+    await applyCookies(maxAge === undefined ? built : await withMaxAge(session, built, maxAge));
+}
 
-    const token = await sealSession(data, maxAge);
+function secondsOf(maxAge: number | string): number
+{
+    return typeof maxAge === 'number' ? maxAge : parseDuration(maxAge);
+}
+
+/** The same set, re-sealed for an app-chosen lifetime. */
+async function withMaxAge(session: SessionData, built: SetCookie[], maxAge: number): Promise<SetCookie[]>
+{
+    const sealed = await sealSession(session, maxAge);
+
+    return built.map(cookie => packageCookie(
+        cookie.name,
+        cookie.name === COOKIE_NAMES.SESSION ? sealed : cookie.value,
+        maxAge,
+        cookie.name === COOKIE_NAMES.CSRF,
+    ));
+}
+
+async function applyCookies(toSet: SetCookie[]): Promise<void>
+{
     const cookieStore = await cookies();
 
-    cookieStore.set(COOKIE_NAMES.SESSION, token, {
-        httpOnly: true,
-        secure: process.env.NODE_ENV === 'production',
-        sameSite: 'lax',
-        path: '/',
-        maxAge,
-    });
-
-    // Readable companion: the client mirrors it into x-spfn-csrf, and the proxy
-    // refuses cookie-session mutations that arrive without it. A session saved
-    // here without one would be a session that cannot mutate anything.
-    cookieStore.set(COOKIE_NAMES.CSRF, await deriveCsrfToken(data.keyId), {
-        httpOnly: false,
-        secure: process.env.NODE_ENV === 'production',
-        sameSite: 'lax',
-        path: '/',
-        maxAge,
-    });
+    for (const cookie of toSet)
+    {
+        cookieStore.set(cookie.name, cookie.value, cookie.options);
+    }
 }
 
 /**
  * Get session from HttpOnly cookie
  *
- * Returns public session info only (excludes privateKey, algorithm, keyId)
+ * Returns public session info only (excludes privateKey, algorithm, keyId).
+ *
+ * What it proves: this server sealed the cookie, for this user id, and it has
+ * not expired. The user id is the account the backend authenticated at sign-in
+ * — never a value the page sent. It is **not** a live check: a key revoked or an
+ * account suspended since the cookie was sealed still reads here. For anything
+ * that must hold now — authorization, data that belongs to the user — call the
+ * backend (`authApi.getAuthSession`, or your own authenticated route) instead.
  */
 export async function getSession(): Promise<PublicSession | null>
 {
@@ -187,6 +195,7 @@ export async function getSession(): Promise<PublicSession | null>
     {
         // Never log the cookie value — it's the sealed session token.
         logger.debug('Validating session cookie', { present: true });
+
         const session = await unsealSession(sessionCookie.value);
 
         // Return only public information
@@ -196,9 +205,8 @@ export async function getSession(): Promise<PublicSession | null>
     }
     catch (error)
     {
-        // Session expired or invalid
-        // Note: Cannot delete cookies in Server Components (read-only)
-        // Use validateSessionMiddleware() in Next.js middleware for automatic cleanup
+        // Unreadable or expired. A Server Component cannot delete cookies; the
+        // proxy clears an unreadable one on the next request that reaches it.
         logger.debug('Session validation failed', {
             error: error instanceof Error ? error.message : String(error),
         });
@@ -208,14 +216,15 @@ export async function getSession(): Promise<PublicSession | null>
 }
 
 /**
- * Clear session cookie
+ * Sign this browser out: expire every cookie of this package.
+ *
+ * From the one list of names (`packageCookieNames`), so the pending cookies a
+ * flow left behind — one of them holds a sealed private key — go too. Does not
+ * revoke the key on the server; `authApi.logout` does both.
  */
 export async function clearSession(): Promise<void>
 {
-    const cookieStore = await cookies();
-    cookieStore.delete(COOKIE_NAMES.SESSION);
-    cookieStore.delete(COOKIE_NAMES.SESSION_KEY_ID);
-    cookieStore.delete(COOKIE_NAMES.CSRF);
+    await applyCookies(signedOutCookies(await cookieEntries()));
 }
 
 // ============================================================================
@@ -461,10 +470,5 @@ export async function getPendingSession(keyId?: string): Promise<PendingSessionD
  */
 export async function clearPendingSession(): Promise<void>
 {
-    const cookieStore = await cookies();
-
-    for (const name of ownStartCookieNames('pending', await cookieEntries()))
-    {
-        cookieStore.delete(name);
-    }
+    await applyCookies(ownStartCookieNames('pending', await cookieEntries()).map(expiredCookie));
 }

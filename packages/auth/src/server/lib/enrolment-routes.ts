@@ -62,6 +62,12 @@ export function registerEnrolmentGate(handler: MiddlewareHandler): void
     GATES.add(handler);
 }
 
+/** Whether `handler` is a registered gate — the place a route's marker has to follow. */
+export function isEnrolmentGate(handler: Function): boolean
+{
+    return GATES.has(registeredHandler(handler));
+}
+
 /**
  * A fresh marker for one enrolment route: a middleware that does nothing but
  * pass the request on, recognised later by identity.

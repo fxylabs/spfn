@@ -49,6 +49,12 @@ export interface SessionData
      * `user-agent`, and a server component's call to the RPC proxy carries none.
      */
     uaFamily?: UaFamily;
+    /**
+     * The sign-in asked to be kept signed in (`remember: true`). Sealed so that
+     * every later re-seal of this session keeps the lifetime it was given —
+     * `SPFN_AUTH_SESSION_TTL_REMEMBER` rather than `SPFN_AUTH_SESSION_TTL`.
+     */
+    remember?: true;
 }
 
 /**
@@ -121,56 +127,119 @@ export async function sealSession(
 }
 
 /**
- * Unseal encrypted JWT (JWE) to session data
+ * Why a sealed session could not be read — as jose tells the cases apart.
+ *
+ * - `expired`: sealed by this server, past its lifetime
+ * - `undecryptable`: not sealed under the current secret — tampered with, or
+ *   sealed before `SPFN_AUTH_SESSION_SECRET` was rotated
+ * - `claims`: decrypted, but issued for another issuer or audience
+ * - `malformed`: not a JWE at all
+ *
+ * Every kind means the same thing to a browser: the cookie is unusable and goes.
+ * They are kept apart for the log and for a test that has to reach each one.
+ */
+export type SessionUnsealFailure = 'expired' | 'undecryptable' | 'claims' | 'malformed';
+
+/** What reading a sealed session answers: the session, or the kind of failure. */
+export type SessionRead = { session: SessionData } | { failure: SessionUnsealFailure };
+
+const UNSEAL_FAILURE_MESSAGES: Record<SessionUnsealFailure, string> = {
+    expired: 'Session expired',
+    undecryptable: 'Invalid session',
+    claims: 'Session validation failed',
+    malformed: 'Failed to unseal session',
+};
+
+/**
+ * The error `unsealSession` throws, carrying the failure kind.
+ */
+export class SessionUnsealError extends Error
+{
+    constructor(readonly failure: SessionUnsealFailure)
+    {
+        super(UNSEAL_FAILURE_MESSAGES[failure]);
+        this.name = 'SessionUnsealError';
+    }
+}
+
+/**
+ * Read a sealed session, answering with the session or a typed failure.
  *
  * @param jwt - Encrypted JWT string
- * @returns Session data
- * @throws Error if session is invalid or expired
  */
-export async function unsealSession(jwt: string): Promise<SessionData>
+export async function readSealedSession(jwt: string): Promise<SessionRead>
 {
+    const secret = await getSessionSecretKey();
+
     try
     {
-        const secret = await getSessionSecretKey();
-
         const { payload } = await jose.jwtDecrypt(jwt, secret, {
             issuer: 'spfn-auth',
             audience: 'spfn-client',
         });
 
-        return payload.data as SessionData;
+        return { session: payload.data as SessionData };
     }
     catch (err)
     {
-        if (err instanceof jose.errors.JWTExpired)
+        const failure = unsealFailureOf(err);
+
+        if (failure === 'undecryptable')
         {
-            throw new Error('Session expired');
+            await warnUndecryptable(jwt);
         }
 
-        if (err instanceof jose.errors.JWEDecryptionFailed)
-        {
-            // Log secret fingerprint for debugging cross-process key mismatch
-            if (coreEnv.NODE_ENV !== 'production')
-            {
-                const fingerprint = await getSecretFingerprint();
-                authLogger.session.warn(`JWE decryption failed`, {
-                    secretFingerprint: fingerprint,
-                    jwtLength: jwt.length,
-                    jwtPrefix: jwt.slice(0, 20),
-                    jwtSuffix: jwt.slice(-10),
-                });
-            }
-
-            throw new Error('Invalid session');
-        }
-
-        if (err instanceof jose.errors.JWTClaimValidationFailed)
-        {
-            throw new Error('Session validation failed');
-        }
-
-        throw new Error('Failed to unseal session');
+        return { failure };
     }
+}
+
+function unsealFailureOf(err: unknown): SessionUnsealFailure
+{
+    if (err instanceof jose.errors.JWTExpired)
+    {
+        return 'expired';
+    }
+
+    if (err instanceof jose.errors.JWEDecryptionFailed)
+    {
+        return 'undecryptable';
+    }
+
+    return err instanceof jose.errors.JWTClaimValidationFailed ? 'claims' : 'malformed';
+}
+
+async function warnUndecryptable(jwt: string): Promise<void>
+{
+    if (coreEnv.NODE_ENV === 'production')
+    {
+        return;
+    }
+
+    authLogger.session.warn(`JWE decryption failed`, {
+        secretFingerprint: await getSecretFingerprint(),
+        jwtLength: jwt.length,
+        jwtPrefix: jwt.slice(0, 20),
+        jwtSuffix: jwt.slice(-10),
+    });
+}
+
+/**
+ * Unseal encrypted JWT (JWE) to session data
+ *
+ * @param jwt - Encrypted JWT string
+ * @returns Session data
+ * @throws SessionUnsealError, naming the failure kind, if the session cannot be read
+ */
+export async function unsealSession(jwt: string): Promise<SessionData>
+{
+    const read = await readSealedSession(jwt);
+
+    if ('failure' in read)
+    {
+        throw new SessionUnsealError(read.failure);
+    }
+
+    return read.session;
 }
 
 /**

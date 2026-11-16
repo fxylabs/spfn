@@ -31,30 +31,34 @@
  */
 
 import type { InterceptorRule, RequestInterceptorContext, ResponseInterceptorContext } from '@spfn/core/nextjs/server';
-import type { SetCookie } from '@spfn/core/nextjs';
 import type { HttpError } from '@spfn/core/errors';
 import { SessionPendingExpiredError, SessionPendingMismatchError } from '@spfn/auth/errors';
 
 import { generateKeyPair } from '../../server/lib/crypto';
 import { hashCredential } from '../../server/lib/link-credentials';
-import { sealSession } from '../../server/lib/session';
-import { COOKIE_NAMES, getSessionTtl } from '../../server/lib/config';
+import { COOKIE_NAMES } from '../../server/lib/config';
 import { authLogger } from '../../server/logger';
-import { sealPendingDeviceSession, unsealPendingDeviceSession, type PendingDeviceSessionData } from '../session-helpers';
-import { cookieSecure } from './cookie-options';
-import { pushCsrfCookie } from './csrf';
+import { sealPendingDeviceSession, unsealPendingDeviceSession } from '../session-helpers';
+import { expiredCookie, packageCookie } from '../cookie-writer';
 import { refusalBody } from './error-envelope';
+import { establish, writeCookie } from './session-decision';
+import { rememberField, takeRemember } from './remember';
 import { bindingSessionFields } from './session-binding';
 
 /**
  * The two browser calls that park a key: device link's and device-code login's.
- * Only the `/web` routes — the mobile ones carry the caller's own key, and a
+ * They take `remember` too, sealed into the pending cookie for the poll that
+ * collects the login, whose own body cannot set it. Only the `/web` routes — the mobile ones carry the caller's own key, and a
  * proxy in front of a mobile or CLI caller must pass that key through.
  */
-const KEY_ISSUING_PATHS = new Set(['/_auth/device/link/redeem/web', '/_auth/device/start/web']);
+export const REMEMBER_PATHS = ['/_auth/device/link/redeem/web', '/_auth/device/start/web'] as const;
 
-/** The two polls whose approved answer is the login. */
-const COMPLETING_PATHS = new Set(['/_auth/device/link/poll', '/_auth/device/poll']);
+const KEY_ISSUING_PATHS = new Set<string>(REMEMBER_PATHS);
+
+/** The two polls whose approved answer is the login — the paths this rule establishes a session on. */
+export const ESTABLISHING_PATHS = ['/_auth/device/link/poll', '/_auth/device/poll'] as const;
+
+const COMPLETING_PATHS = new Set<string>(ESTABLISHING_PATHS);
 
 const DEVICE_PATH_PATTERN = /^\/_auth\/device\/(start\/web|poll|link\/redeem\/web|link\/poll)$/;
 
@@ -67,7 +71,7 @@ const DEVICE_PATH_PATTERN = /^\/_auth\/device\/(start\/web|poll|link\/redeem\/we
  * own — `generalAuthInterceptor` writes `keyId` on every request it signs, and
  * sharing that name is how #99 sealed one key around another's id.
  */
-function injectKey(ctx: RequestInterceptorContext): void
+function injectKey(ctx: RequestInterceptorContext, remember: boolean): void
 {
     const keyPair = generateKeyPair('ES256');
 
@@ -83,6 +87,7 @@ function injectKey(ctx: RequestInterceptorContext): void
     ctx.metadata.devicePendingPrivateKey = keyPair.privateKey;
     ctx.metadata.devicePendingKeyId = keyPair.keyId;
     ctx.metadata.devicePendingAlgorithm = keyPair.algorithm;
+    ctx.metadata.devicePendingRemember = remember;
 }
 
 /**
@@ -129,13 +134,10 @@ async function bakePendingCookie(ctx: ResponseInterceptorContext): Promise<void>
         keyId: ctx.metadata.devicePendingKeyId,
         algorithm: ctx.metadata.devicePendingAlgorithm,
         deviceCodeHash: hashCredential(deviceCode),
+        ...rememberField(ctx.metadata.devicePendingRemember),
     }, ttl);
 
-    ctx.setCookies.push({
-        name: COOKIE_NAMES.DEVICE_PENDING,
-        value: sealed,
-        options: { httpOnly: true, secure: cookieSecure, sameSite: 'lax', maxAge: ttl, path: '/' },
-    });
+    writeCookie(ctx, packageCookie(COOKIE_NAMES.DEVICE_PENDING, sealed, ttl));
 
     authLogger.interceptor.login.debug('Device pending cookie set', { keyId: ctx.metadata.devicePendingKeyId });
 }
@@ -186,39 +188,19 @@ async function sealApprovedSession(ctx: ResponseInterceptorContext): Promise<voi
         return;
     }
 
-    ctx.setCookies.push(...await sessionCookies(ctx, pending));
-
-    authLogger.interceptor.login.debug('Device session sealed', { keyId: pending.keyId });
-}
-
-/**
- * The session trio, plus the expiry of the pending cookie they replace — built
- * whole before any of it is queued.
- *
- * A throw while building (the CSRF derivation, the seal) then leaves nothing
- * behind: the catch answers a refusal, and a refusal that still carried a
- * session cookie would sign the browser in under a 401.
- */
-async function sessionCookies(ctx: ResponseInterceptorContext, pending: PendingDeviceSessionData): Promise<SetCookie[]>
-{
-    const ttl = getSessionTtl();
-    const options = { httpOnly: true, secure: cookieSecure, sameSite: 'lax' as const, path: '/' };
-    const sealed = await sealSession({
-        userId: ctx.response.body.userId,
+    await establish(ctx, {
+        userId: String(ctx.response.body.userId),
         privateKey: pending.privateKey,
         keyId: pending.keyId,
         algorithm: pending.algorithm,
         ...bindingSessionFields(ctx.response.body, ctx.request.headers['user-agent']),
-    }, ttl);
-    const cookies: SetCookie[] = [
-        { name: COOKIE_NAMES.SESSION, value: sealed, options: { ...options, maxAge: ttl } },
-        { name: COOKIE_NAMES.SESSION_KEY_ID, value: pending.keyId, options: { ...options, maxAge: ttl } },
-        { name: COOKIE_NAMES.DEVICE_PENDING, value: '', options: { ...options, maxAge: 0 } },
-    ];
+        ...rememberField(pending.remember),
+    });
 
-    await pushCsrfCookie(cookies, pending.keyId, ttl);
+    // The pending cookie the session replaces
+    writeCookie(ctx, expiredCookie(COOKIE_NAMES.DEVICE_PENDING));
 
-    return cookies;
+    authLogger.interceptor.login.debug('Device session established', { keyId: pending.keyId });
 }
 
 /** Whether a poll's 200 is the login rather than "keep waiting". */
@@ -245,7 +227,14 @@ export const deviceLoginInterceptor: InterceptorRule = {
     {
         if (KEY_ISSUING_PATHS.has(ctx.path))
         {
-            injectKey(ctx);
+            const remember = takeRemember(ctx);
+
+            if (remember === null)
+            {
+                return;
+            }
+
+            injectKey(ctx, remember);
         }
         else if (COMPLETING_PATHS.has(ctx.path))
         {
@@ -270,11 +259,11 @@ export const deviceLoginInterceptor: InterceptorRule = {
         }
         catch (error)
         {
-            // An unreadable or expired pending cookie lands here, and so does a
-            // sealing failure. On a poll both mean the window closed — the device
-            // is registered either way, so signing in again is the remedy. On a
-            // parking call the backend's answer stands; the poll will find no
-            // cookie and say so.
+            // An unreadable or expired pending cookie lands here: on a poll the
+            // window closed, and signing in again is the remedy. On a parking call
+            // the backend's answer stands; the poll will find no cookie and say
+            // so. A session that cannot be sealed is the session decision's to
+            // answer.
             authLogger.interceptor.login.error('Device session handling failed', error as Error);
 
             if (COMPLETING_PATHS.has(ctx.path))

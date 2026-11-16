@@ -19,13 +19,28 @@
 
 import type { InterceptorRule } from '@spfn/core/nextjs/server';
 import { generateKeyPair } from '../../server/lib/crypto';
-import { sealSession, unsealSession } from '../../server/lib/session';
+import { unsealSession } from '../../server/lib/session';
 import { signKeyReplacementProof } from '../../server/lib/key-replacement-proof';
-import { getSessionTtl, COOKIE_NAMES } from '../../server/lib/config';
+import { COOKIE_NAMES } from '../../server/lib/config';
 import { authLogger } from '../../server/logger';
-import { cookieSecure } from './cookie-options';
-import { pushCsrfCookie } from './csrf';
 import { bindingSessionFields } from './session-binding';
+import { establish } from './session-decision';
+import { rememberField, takeRemember } from './remember';
+
+/**
+ * The paths this rule establishes a session on — every one but the renewal also
+ * takes `remember` (`REMEMBER_PATHS`), and completes on the same request unless
+ * it answers 202, when `mfaVerifyInterceptor` carries the choice to the verify.
+ */
+export const ESTABLISHING_PATHS = [
+    '/_auth/login',
+    '/_auth/register',
+    '/_auth/invitations/accept',
+    '/_auth/signup/password',
+    '/_auth/password/reset/complete',
+    '/_auth/passkeys/login/verify',
+    '/_auth/session/renew/verify',
+] as const;
 
 /**
  * The sign-in paths that replace a key the browser already holds.
@@ -34,6 +49,9 @@ import { bindingSessionFields } from './session-binding';
  * is nothing to rotate; the two sign-ins can each arrive at a browser that is
  * already carrying a session key.
  */
+/** The sign-ins whose request takes `remember`. */
+export const REMEMBER_PATHS = ESTABLISHING_PATHS.filter(path => path !== '/_auth/session/renew/verify');
+
 const ROTATING_SIGN_IN_PATHS = new Set(['/_auth/login', '/_auth/passkeys/login/verify']);
 
 /**
@@ -72,13 +90,18 @@ async function replacementProofFromSession(sealed: string | undefined, newKeyId:
  */
 export const loginRegisterInterceptor: InterceptorRule =
     {
-        pathPattern: /^\/_auth\/(login|register|invitations\/accept|signup\/password|password\/reset\/complete|passkeys\/login\/verify|session\/renew\/verify)$/,
+        pathPattern: new RegExp(`^(${ESTABLISHING_PATHS.join('|')})$`),
         method: 'POST',
 
         request: async (ctx, next) =>
         {
-            // Extract remember option from request body (if provided)
-            const remember = ctx.body?.remember;
+            // A renewal continues the session it renews, kept or not (keptSession)
+            const remember = ctx.path === '/_auth/session/renew/verify' ? false : takeRemember(ctx);
+
+            if (remember === null)
+            {
+                return;
+            }
 
             // Generate new key pair
             const keyPair = generateKeyPair('ES256');
@@ -114,7 +137,7 @@ export const loginRegisterInterceptor: InterceptorRule =
                 ctx.body.replacementProof = replacementProof;
             }
 
-            // Remove remember from body (not part of contract)
+            // A renewal's body carries no choice of its own
             delete ctx.body.remember;
 
             // Store the replacement credentials and remember in metadata for the
@@ -135,79 +158,39 @@ export const loginRegisterInterceptor: InterceptorRule =
 
         response: async (ctx, next) =>
         {
-            // Only process successful responses
-            if (ctx.response.status !== 200)
-            {
-                await next();
-
-                return;
-            }
-
             // Handle both wrapped ({ data: { userId } }) and direct ({ userId }) responses
             const userData = ctx.response.body?.data || ctx.response.body;
-            if (!userData?.userId)
+
+            // Only a 200 that names the account it signed in is a session. The
+            // user id is the backend's — the account the key was registered to —
+            // and never anything the page sent.
+            if (ctx.response.status === 200 && userData?.userId)
+            {
+                await establish(ctx, {
+                    userId: String(userData.userId),
+                    privateKey: ctx.metadata.newPrivateKey,
+                    keyId: ctx.metadata.newKeyId,
+                    algorithm: ctx.metadata.newAlgorithm,
+                    ...bindingSessionFields(userData, ctx.request.headers['user-agent']),
+                    ...rememberField(keptSession(ctx)),
+                });
+            }
+            else if (ctx.response.status === 200)
             {
                 authLogger.interceptor.login.error('No userId in response');
-                await next();
-
-                return;
-            }
-
-            try
-            {
-                // Get session TTL (priority: runtime > global > env > default)
-                const ttl = getSessionTtl(ctx.metadata.remember);
-
-                // Encrypt session data. The binding fields ride along when the
-                // sign-in said the account asked for a bound session; without
-                // them this is the same four-field literal it has always been.
-                const sessionData =
-                    {
-                        userId: userData.userId,
-                        privateKey: ctx.metadata.newPrivateKey,
-                        keyId: ctx.metadata.newKeyId,
-                        algorithm: ctx.metadata.newAlgorithm,
-                        ...bindingSessionFields(userData, ctx.request.headers['user-agent']),
-                    };
-
-                const sealed = await sealSession(sessionData, ttl);
-
-                // Set HttpOnly session cookie
-                ctx.setCookies.push({
-                    name: COOKIE_NAMES.SESSION,
-                    value: sealed,
-                    options: {
-                        httpOnly: true,
-                        secure: cookieSecure,
-                        sameSite: 'lax',
-                        maxAge: ttl,
-                        path: '/',
-                    },
-                });
-
-                // Set keyId cookie. Not read for the replacement decision — the
-                // proof above is signed from the sealed cookie alone
-                ctx.setCookies.push({
-                    name: COOKIE_NAMES.SESSION_KEY_ID,
-                    value: ctx.metadata.newKeyId,
-                    options: {
-                        httpOnly: true,
-                        secure: cookieSecure,
-                        sameSite: 'lax',
-                        maxAge: ttl,
-                        path: '/',
-                    },
-                });
-
-                // Set the readable CSRF cookie the client mirrors into a header
-                await pushCsrfCookie(ctx.setCookies, ctx.metadata.newKeyId, ttl);
-            }
-            catch (error)
-            {
-                const err = error as Error;
-                authLogger.interceptor.login.error('Failed to save session', err);
             }
 
             await next();
         },
     };
+
+/**
+ * Whether the session being sealed is a kept one: the sign-in asked, or — for a
+ * renewal, which continues the session it renews — the renewed one was.
+ */
+function keptSession(ctx: { path: string; metadata: Record<string, any> }): boolean
+{
+    return ctx.path === '/_auth/session/renew/verify'
+        ? ctx.metadata.inboundSession?.remember === true
+        : ctx.metadata.remember === true;
+}

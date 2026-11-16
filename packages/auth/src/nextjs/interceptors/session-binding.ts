@@ -25,13 +25,12 @@
 
 import type { InterceptorRule, ResponseInterceptorContext } from '@spfn/core/nextjs/server';
 import { SessionResealFailedError } from '@spfn/auth/errors';
-import { sealSession, unsealSession, type SessionData } from '../../server/lib/session';
+import { readSealedSession, type SessionData } from '../../server/lib/session';
 import { uaFamily } from '../../server/lib/ua-family';
-import { getSessionTtl, COOKIE_NAMES } from '../../server/lib/config';
+import { COOKIE_NAMES } from '../../server/lib/config';
 import { authLogger } from '../../server/logger';
-import { cookieSecure } from './cookie-options';
-import { pushCsrfCookie, pushCsrfCookieRemoval } from './csrf';
 import { refusalEnvelope } from './error-envelope';
+import { clear, refresh } from './session-decision';
 
 /** The binding half of a `LoginResult`, as it arrives on the wire. */
 export interface BindingResponseFields
@@ -77,13 +76,10 @@ export function bindingSessionFields(
 /**
  * Session Binding Interceptor
  *
- * Response: re-seal the session cookie from the 200 the binding route answered.
- *
- * Registered after `generalAuthInterceptor` so that its cookie is the later one
- * in `setCookies` — the response phases run in registration order, and the last
- * write of a name is the one the browser keeps. `general-auth` re-seals on this
- * path only in the rare window where the cookie is nearly expired, and that
- * re-seal carries the *old* fields.
+ * Response: re-seal the session cookie from the 200 the binding route answered,
+ * proposed as a *changed* refresh — which the session decision prefers over the
+ * near-expiry refresh `general-auth` may propose on the same path, since that
+ * one carries the *old* fields.
  */
 export const sessionBindingInterceptor: InterceptorRule =
     {
@@ -101,14 +97,15 @@ export const sessionBindingInterceptor: InterceptorRule =
                 return;
             }
 
-            try
+            const read = await readSealedSession(sessionCookie);
+
+            if ('session' in read)
             {
-                const session = await unsealSession(sessionCookie);
-                await pushResealed(ctx.setCookies, applyBinding(session, ctx.response.body, ctx.request.headers));
+                refresh(ctx, applyBinding(read.session, ctx.response.body, ctx.request.headers), true);
             }
-            catch (error)
+            else
             {
-                authLogger.interceptor.general.error('Failed to re-seal the session after a binding change', error as Error);
+                authLogger.interceptor.general.error('Failed to re-seal the session after a binding change', { failure: read.failure });
                 refuseAsUnsealable(ctx);
             }
 
@@ -135,12 +132,7 @@ function refuseAsUnsealable(ctx: ResponseInterceptorContext): void
     ctx.response.ok = false;
     ctx.response.body = refusal.body;
 
-    for (const name of [COOKIE_NAMES.SESSION, COOKIE_NAMES.SESSION_KEY_ID])
-    {
-        ctx.setCookies.push({ name, value: '', options: { maxAge: 0, path: '/' } });
-    }
-
-    pushCsrfCookieRemoval(ctx.setCookies);
+    clear(ctx, 'reseal-failed');
 }
 
 /**
@@ -173,24 +165,4 @@ function applyBinding(
     // that moved browsers between being sealed and being bound must not have the
     // check silently re-anchored to where it ended up. This is not a sign-in.
     return { ...unbound, ...fields, ...(sealedFamily ? { uaFamily: sealedFamily } : {}) };
-}
-
-/** Write the session, key-id and CSRF cookies the way every other seal site does. */
-async function pushResealed(
-    setCookies: Parameters<typeof pushCsrfCookie>[0],
-    session: SessionData,
-): Promise<void>
-{
-    const ttl = getSessionTtl();
-    const options = {
-        httpOnly: true,
-        secure: cookieSecure,
-        sameSite: 'lax' as const,
-        maxAge: ttl,
-        path: '/',
-    };
-
-    setCookies.push({ name: COOKIE_NAMES.SESSION, value: await sealSession(session, ttl), options });
-    setCookies.push({ name: COOKIE_NAMES.SESSION_KEY_ID, value: session.keyId, options });
-    await pushCsrfCookie(setCookies, session.keyId, ttl);
 }

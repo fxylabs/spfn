@@ -458,8 +458,20 @@ import { CLIENT_IDENTITY_HEADERS, CLIENT_KINDS, SERVER_CONTRACT_HEADERS } from '
  * same request will not succeed, a fresh code after that moment will. A
  * patch, by 0.10.1's rule: a code joins the open list, and no operation, type
  * or enum changes shape.
+ *
+ * 0.14.5 lists `KeyRevokedError` (401) and `AccountNotFoundError` (401), the
+ * admission refusals of a key that can no longer act — revoked, unknown, or of
+ * an ended key generation — and of an account that no longer exists. Both used
+ * to answer core's `UnauthorizedError`, the code every other 401 answers too, so
+ * no client could tell "this session is over" from a refusal that leaves it; a
+ * client that matched `UnauthorizedError` to sign its user out must match these
+ * (and `KeyExpiredError`, `AccountDisabledError`, `AccountPendingDeletionError`)
+ * instead. A patch, by 0.10.1's rule and 0.13.3's precedent — an answer that
+ * moves to a code of its own joins the open list, and no operation, type or enum
+ * changes shape; a 0.14.x consumer meets them as unlisted codes, so the
+ * supported range does not move.
  */
-export const CONTRACT_VERSION = '0.14.4';
+export const CONTRACT_VERSION = '0.14.5';
 export const CONTRACT_MAJOR = 0;
 export const CONTRACT_NAME = 'spfn-mobile-contract';
 
@@ -1322,6 +1334,20 @@ const REST_SURFACE_ERRORS: readonly RestSurfaceError[] = [
         httpStatus: 401,
         retryable: false,
         summary: 'the id_token failed signature, issuer, audience, expiry, nonce or subject verification',
+    },
+    {
+        code: 'KeyRevokedError',
+        httpStatus: 401,
+        retryable: false,
+        summary:
+            'the key the request was made with can no longer act — revoked, never registered, or of a key '
+            + 'generation that ended (a sign-out everywhere); the session is over and the device signs in again',
+    },
+    {
+        code: 'AccountNotFoundError',
+        httpStatus: 401,
+        retryable: false,
+        summary: 'the account the credential belongs to no longer exists; the session is over',
     },
     {
         code: 'AccountDisabledError',

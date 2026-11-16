@@ -39,6 +39,9 @@ vi.mock('@spfn/core/db', async (importActual) => ({
     Transactional: () => async (_c: unknown, next: () => Promise<void>) => await next(),
 }));
 
+// The finalize route answers the principal its door admitted; every key here is account 7's.
+vi.mock('../../server/middleware/oauth-finalize-auth', async () => (await import('../helpers/finalize-door')).finalizeDoorStandIn('7'));
+
 vi.mock('../../server/services/session-binding.service', async (importActual) => ({
     ...(await importActual<typeof import('../../server/services/session-binding.service')>()),
     keySessionBindingService: vi.fn(async () => ({})),
@@ -78,6 +81,8 @@ import {
     OAuthStateExpiredError,
     OAuthStateInvalidError,
 } from '@spfn/auth/errors';
+import { decidedRequest, decidedResponse } from '../helpers/session-decision';
+import { mountProxy } from '../helpers/rpc-proxy';
 
 const SECRET = 'test-secret-with-at-least-32-characters-for-security-testing';
 const GATE_PASSED = 'provider_error';
@@ -202,7 +207,7 @@ async function startIn(jar: Map<string, string>): Promise<Tab>
         metadata: {} as Record<string, unknown>,
     } as unknown as RequestInterceptorContext;
 
-    await oauthUrlInterceptor.request!(requestCtx, async () => undefined);
+    await decidedRequest(requestCtx, [oauthUrlInterceptor.request]);
 
     const responseCtx = {
         path: requestCtx.path,
@@ -213,7 +218,7 @@ async function startIn(jar: Map<string, string>): Promise<Tab>
         metadata: requestCtx.metadata,
     } as unknown as ResponseInterceptorContext;
 
-    await oauthUrlInterceptor.response!(responseCtx, async () => undefined);
+    await decidedResponse(responseCtx, [oauthUrlInterceptor.response]);
     applyToJar(jar, responseCtx.setCookies);
 
     const state = requestCtx.body.state as string;
@@ -246,7 +251,7 @@ async function callback(app: Hono, state: string, jar: Map<string, string>): Pro
 /** What answers in place of the backend: the real routes, or a fixed status and body. */
 type Backend = Hono | { status: number; body: unknown };
 
-async function callBackend(backend: Backend, path: string, body: unknown): Promise<{ status: number; body: unknown }>
+async function callBackend(backend: Backend, path: string, body: unknown, signed: Record<string, string>): Promise<{ status: number; body: unknown }>
 {
     if (!(backend instanceof Hono))
     {
@@ -255,7 +260,7 @@ async function callBackend(backend: Backend, path: string, body: unknown): Promi
 
     const response = await backend.request(path, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'x-forwarded-for': clientIp() },
+        headers: { 'Content-Type': 'application/json', 'x-forwarded-for': clientIp(), ...signed },
         body: JSON.stringify(body),
     });
 
@@ -286,7 +291,18 @@ async function throughTheChain(backend: Backend, path: string, body: unknown, ja
 
     await executeRequestInterceptors(requestCtx, matching.map(rule => rule.request).filter(phase => !!phase));
 
-    const answer = await callBackend(backend, path, requestCtx.body);
+    // Refused before the backend is asked: what the browser gets is the refusal
+    if (requestCtx.abort)
+    {
+        applyToJar(jar, requestCtx.abort.setCookies ?? []);
+
+        return {
+            response: { ok: false, status: requestCtx.abort.status, body: requestCtx.abort.body },
+            setCookies: requestCtx.abort.setCookies ?? [],
+        } as unknown as ResponseInterceptorContext;
+    }
+
+    const answer = await callBackend(backend, path, requestCtx.body, requestCtx.headers);
     const responseCtx = {
         path,
         method: 'POST',
@@ -887,6 +903,9 @@ describe('per-start OAuth cookies — case table (#126)', () =>
     {
         const handler = createOAuthCallbackHandler();
 
+        // The handler completes the sign-in through the app's own proxy
+        mountProxy(app);
+
         for (const order of [[0, 1], [1, 0]])
         {
             browser.jar = new Map();
@@ -895,7 +914,7 @@ describe('per-start OAuth cookies — case table (#126)', () =>
             for (const index of order)
             {
                 const url = new URL(`/api/auth/callback?userId=7&keyId=${tabs[index].keyId}&returnUrl=%2Fhome`, 'https://app.example');
-                const response = await handler(new NextRequest(url));
+                const response = await handler(new NextRequest(url, { headers: { cookie: cookieHeader(browser.jar) } }));
                 const expiredNow = applyHeadersToJar(browser.jar, response.headers.getSetCookie());
 
                 expect(new URL(response.headers.get('location')!).pathname).toBe('/home');
@@ -1220,10 +1239,9 @@ describe('no_cookie case table C — finalize interceptor (#129)', () =>
         expect(ctx.response.status).toBe(200);
         expect(ctx.response.body).toMatchObject({ userId: '7', keyId });
         expect(ctx.setCookies).toEqual([]);
-        expect(ctx.metadata.proxyWroteError).toBeUndefined();
     });
 
-    it('C2: no pending cookie, not a repeat — 401 no_cookie with the fixed sentence, proxyWroteError; no cookie expired, the held session untouched', async () =>
+    it('C2: no pending cookie, not a repeat — 401 no_cookie with the fixed sentence; no cookie expired, the held session untouched', async () =>
     {
         const { jar } = await signedIn();
         await startIn(jar);
@@ -1233,7 +1251,6 @@ describe('no_cookie case table C — finalize interceptor (#129)', () =>
 
         expect(ctx.response.status).toBe(401);
         expect(ctx.response.body).toEqual({ success: false, message: OAUTH_COOKIE_MISSING_MESSAGE, reason: 'no_cookie' });
-        expect(ctx.metadata.proxyWroteError).toBe(true);
         expect(ctx.setCookies).toEqual([]);
         expect(jar).toEqual(before);
     });
@@ -1243,7 +1260,6 @@ describe('no_cookie case table C — finalize interceptor (#129)', () =>
         const ctx = await finalize(app, generateKeyPair('ES256').keyId, new Map());
 
         expect(ctx.response.body).toEqual({ success: false, message: OAUTH_COOKIE_MISSING_MESSAGE, reason: 'no_cookie' });
-        expect(ctx.metadata.proxyWroteError).toBe(true);
         expect(ctx.setCookies).toEqual([]);
     });
 

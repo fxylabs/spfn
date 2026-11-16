@@ -28,7 +28,7 @@ import {
     requireMethod,
     type SecondFactorOptions,
 } from '@/server/lib/second-factor-policy';
-import { isEnrolmentRoute, registerEnrolmentGate } from '@/server/lib/enrolment-routes';
+import { isEnrolmentGate, isEnrolmentRoute, registerEnrolmentGate } from '@/server/lib/enrolment-routes';
 import { getPasskeyConfig } from '@/server/lib/config';
 import { createAuthLifecycle } from '@/server/lifecycle';
 import { buildMobileContractBundle } from '@/server/client-proof/contract-bundle';
@@ -219,6 +219,9 @@ describe('second-factor policy (#309)', () =>
             mfaStepUpOptions: 'always',
             getAuthSession: 'always',
             logout: 'always',
+            // The social sign-in's completion: it gives an enrolment-only
+            // account its session, as a password sign-in's 200 does.
+            oauthFinalize: 'always',
             sessionRenewOptions: 'unchecked',
             sessionRenewVerify: 'unchecked',
         });
@@ -291,7 +294,7 @@ describe('second-factor policy (#309)', () =>
             const gated = Object.hasOwn(ROUTE_SECOND_FACTOR_METHODS, key);
             const enrolment = routeClass === 'always' || routeClass === 'totp' || (routeClass === 'passkey' && gated);
 
-            return [key, routeClass === 'unchecked' || isPublic(key) ? undefined : enrolment];
+            return [key, ownAuthenticator(key) !== null || isPublic(key) ? undefined : enrolment];
         }));
 
         expect(answers).toEqual(expected);
@@ -343,7 +346,16 @@ describe('second-factor policy (#309)', () =>
         // an enrolment-only session renews, and the renewed key is held to
         // enrolment on its next request. Its class says it is admitted.
         expect(Object.fromEntries(notGlobal.filter(key => !isPublic(key)).map(key => [key, ownAuthenticator(key)])))
-            .toEqual({ sessionRenewOptions: 'authForRenewal', sessionRenewVerify: 'authForRenewal' });
+            .toEqual({ sessionRenewOptions: 'authForRenewal', sessionRenewVerify: 'authForRenewal', oauthFinalize: 'oauthFinalizeAuth' });
+
+        // Finalize's door hands every signed finalize to `authenticate` from its
+        // own place in the chain: it is a registered gate, so the route's marker
+        // (class 'always') answers to it — the integration row N3 drives an
+        // enrolment-only account through it.
+        const finalizeDoor = (mainAuthRouter.routes.oauthFinalize as { middlewares: { name?: string; handler?: Function }[] })
+            .middlewares.find(middleware => middleware?.name === 'oauthFinalizeAuth');
+        expect(isEnrolmentGate(finalizeDoor!.handler!)).toBe(true);
+        expect(classOf('oauthFinalize')).toBe('always');
         expect(readFileSync(join(__dirname, '..', '..', 'server', 'middleware', 'authenticate-for-renewal.ts'), 'utf8'))
             .not.toMatch(/assertSecondFactorAdmits|isEnrolmentOnly/);
         expect([classOf('sessionRenewOptions'), classOf('sessionRenewVerify')]).toEqual(['unchecked', 'unchecked']);

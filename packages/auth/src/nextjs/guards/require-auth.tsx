@@ -101,8 +101,10 @@ export async function RequireAuth({
 
     if (!serverSession)
     {
-        // Note: clearSession() cannot be called in Server Components (Next.js 16+)
-        // The RPC proxy interceptor handles session cleanup on 401 responses
+        // The backend refused the key or the account. clearSession() cannot be
+        // called in Server Components (Next.js 16+); the proxy already cleared
+        // the cookies on that same refusal. An outage never lands here — the
+        // lookup throws instead, for the app's error boundary.
         redirect(redirectTo);
     }
 

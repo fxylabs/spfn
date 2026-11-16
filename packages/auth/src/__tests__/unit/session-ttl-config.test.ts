@@ -70,14 +70,15 @@ describe('getSessionTtl precedence (#126 claim 3)', () =>
         expect(config.getSessionTtl()).toBe(THIRTY_DAYS);
     });
 
-    it('a per-call override wins over both', async () =>
+    it('a kept session lives SPFN_AUTH_SESSION_TTL_REMEMBER, whatever the other two say', async () =>
     {
         vi.stubEnv('SPFN_AUTH_SESSION_TTL', '12h');
+        vi.stubEnv('SPFN_AUTH_SESSION_TTL_REMEMBER', '45m');
         const config = await freshConfig();
 
         configureSessionTtl(config, '30d');
 
-        expect(config.getSessionTtl('45m')).toBe(45 * 60);
+        expect(config.getSessionTtl({ remember: true })).toBe(45 * 60);
     });
 
     it('with nothing configured the lifetime is seven days', async () =>
@@ -113,14 +114,15 @@ describe('getSessionTtl precedence (#126 claim 3)', () =>
         expect(config.getSessionTtl()).toBe(THIRTY_DAYS);
     });
 
-    it('T4: per-call 45m over configureAuth 30d over env 12h — forty-five minutes', async () =>
+    it('T4: a session that is not kept takes configureAuth 30d over env 12h, never the kept lifetime', async () =>
     {
         vi.stubEnv('SPFN_AUTH_SESSION_TTL', '12h');
+        vi.stubEnv('SPFN_AUTH_SESSION_TTL_REMEMBER', '45m');
         const config = await freshConfig();
 
         configureSessionTtl(config, '30d');
 
-        expect(config.getSessionTtl('45m')).toBe(45 * 60);
+        expect(config.getSessionTtl({ remember: false })).toBe(THIRTY_DAYS);
     });
 
     it('T5: an invalid SPFN_AUTH_SESSION_TTL throws, as an invalid configureAuth value does', async () =>
@@ -148,16 +150,15 @@ describe('getSessionTtl precedence (#126 claim 3)', () =>
         }
     });
 
-    it('T6: the `remember` argument login-register passes is still a per-call override', async () =>
+    it('T6: `remember` chooses which of the two operator lifetimes, never a lifetime of its own', async () =>
     {
-        // `loginRegisterInterceptor` lifts `remember` off the login body and calls
-        // `getSessionTtl(ctx.metadata.remember)`: a duration when the form sent
-        // one, undefined when it did not — which falls through to the env value.
+        // `loginRegisterInterceptor` refuses a non-boolean `remember` with a 400
+        // before anything is sealed, so a boolean is all that reaches here.
         vi.stubEnv('SPFN_AUTH_SESSION_TTL', '12h');
         const { getSessionTtl } = await freshConfig();
 
-        expect(getSessionTtl('30d')).toBe(THIRTY_DAYS);
-        expect(getSessionTtl(3600)).toBe(3600);
-        expect(getSessionTtl(undefined)).toBe(TWELVE_HOURS);
+        expect(getSessionTtl({ remember: true })).toBe(THIRTY_DAYS);
+        expect(getSessionTtl({ remember: false })).toBe(TWELVE_HOURS);
+        expect(getSessionTtl()).toBe(TWELVE_HOURS);
     });
 });

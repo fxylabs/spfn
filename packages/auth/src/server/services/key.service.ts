@@ -18,7 +18,7 @@ import {
     InvalidKeyFingerprintError,
     KeyIdAlreadyRegisteredError,
 } from '@spfn/auth/errors';
-import { NotFoundError, UnauthorizedError, ValidationError } from '@spfn/core/errors';
+import { NotFoundError, ValidationError } from '@spfn/core/errors';
 import { runInTransaction } from '@spfn/core/db';
 import {
     deviceAuthorizationsRepository,
@@ -30,7 +30,7 @@ import {
 } from '../repositories';
 import { revokeAllOAuth2GrantsForUser } from './oauth2-grant.service';
 import { emitDeviceRegistered } from './device-registration.service';
-import { accountRefusal, type AdmissionRefusal, type PrincipalCredential } from './admission.service';
+import { accountRefusal, admissionRefusalError, type AdmissionRefusal, type PrincipalCredential } from './admission.service';
 import {
     assertStepUp,
     carryStepUpVerification,
@@ -836,7 +836,7 @@ async function reRegisterOwnKey(
  * @throws InvalidKeyFingerprintError fingerprint가 newPublicKey와 맞지 않을 때
  * @throws KeyAlgorithmMismatchError 새 키의 SPKI 타입이 선언된 algorithm과 다를 때
  * @throws KeyIdAlreadyRegisteredError newKeyId가 이미 쓰인 값일 때 — 호출자 자신의 키(대기·활성)라도
- * @throws UnauthorizedError 이전 키가 이미 폐기됐을 때
+ * @throws KeyRevokedError 이전 키가 이미 폐기됐을 때
  */
 export async function rotateKeyService(
     params: RotateKeyParams,
@@ -854,7 +854,7 @@ export async function rotateKeyService(
         replaces: {
             signedBy: params.oldKeyId,
             reason: 'Replaced by key rotation',
-            refusal: new UnauthorizedError({ message: 'Invalid or revoked key' }),
+            refusal: admissionRefusalError({ reason: 'credentialRevoked' }),
         },
     }));
 

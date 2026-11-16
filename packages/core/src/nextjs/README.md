@@ -444,12 +444,23 @@ interface ResponseInterceptorContext {
     cookies: Map<string, string>;             // read-only
     setCookies: SetCookie[];                  // push to emit Set-Cookie on the NextResponse
     metadata: Record<string, any>;
+    callBackend?: (call: BackendCall) => Promise<BackendAnswer>; // set by createRpcProxy
 }
 ```
 
 Interceptors chain in registration order; each must `await next()` to continue (skip it to
 short-circuit). Mutating `ctx.headers` / `ctx.body` (request) and `ctx.response.body` /
 `ctx.setCookies` (response) is how you affect the forwarded request and returned response.
+Code after `await next()` runs after every later interceptor — a rule registered first and
+acting after `next()` sees the response the whole chain produced.
+
+`ctx.callBackend(call)` sends another request to the backend from a response phase, through the
+proxy's own fetch: the same base URL, forwarded headers, proxy-guard signature and timeout. With
+no `path` it repeats the request being answered (query and body included) with `call.headers`
+overriding the forwarded ones — a retry signed afresh; with a `path` it sends `call.body` there.
+It answers with `{ ok, status, statusText, headers, body }` and leaves `ctx.response` alone; a
+network failure or timeout rejects. `@spfn/auth` uses it to retry a request whose token the
+backend refused as expired, and to revoke a key whose session cookie could not be written.
 
 ### Package auto-registration
 

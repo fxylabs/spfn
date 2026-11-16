@@ -15,8 +15,8 @@
  *    request whose session it validated, and expires the session cookies.
  *
  * Fixed by answering a finalize that repeats the current session's key with the
- * backend's 200 unchanged, and by marking every 401 the finalize rule writes
- * itself (`proxyWroteError`) so the general rule leaves the session alone.
+ * backend's 200 unchanged; and a 401 the finalize rule writes itself carries no
+ * code of the key-refused family, so the session decision leaves the session.
  *
  * The chain is driven exactly the way `session-renew-proxy-chain.test.ts` does it:
  * `filterMatchingInterceptors` against the shipped `authInterceptors`, then the two
@@ -34,7 +34,13 @@ import {
 import type { SetCookie } from '@spfn/core/nextjs';
 import { registerRoutes } from '@spfn/core/route';
 
-import { authInterceptors, mfaVerifyInterceptor, oauthFinalizeInterceptor, generalAuthInterceptor } from '../../nextjs/interceptors';
+import {
+    authInterceptors,
+    mfaVerifyInterceptor,
+    oauthFinalizeInterceptor,
+    generalAuthInterceptor,
+    sessionDecisionInterceptor,
+} from '../../nextjs/interceptors';
 import { runOAuthCallback, type CallbackOptions } from '../../nextjs/components/oauth-callback-flow';
 import { sealPendingSession } from '../../nextjs/session-helpers';
 import { sealSession, unsealSession } from '../../server/lib/session';
@@ -43,6 +49,10 @@ import { COOKIE_NAMES } from '../../server/lib/config';
 import { CSRF_HEADER, deriveCsrfToken } from '../../server/lib/csrf';
 import { mainAuthRouter } from '../../server/routes';
 import { OAUTH_COOKIE_MISSING_MESSAGE } from '@spfn/auth/errors';
+
+// Every key in this file belongs to account 7: the route answers the principal
+// its door admitted, and there is no database here to hold the key row.
+vi.mock('../../server/middleware/oauth-finalize-auth', async () => (await import('../helpers/finalize-door')).finalizeDoorStandIn('7'));
 
 vi.mock('../../server/services/session-binding.service', async (importActual) => ({
     ...(await importActual<typeof import('../../server/services/session-binding.service')>()),
@@ -128,7 +138,7 @@ function responseContext(requestCtx: RequestInterceptorContext, status: number, 
 /** What answers in place of the backend: the real routes, or a fixed status and body. */
 type Backend = Hono | { status: number; body: unknown };
 
-async function callBackend(backend: Backend, path: string, body: unknown): Promise<{ status: number; body: unknown }>
+async function callBackend(backend: Backend, path: string, body: unknown, signed: Record<string, string>): Promise<{ status: number; body: unknown }>
 {
     if (!(backend instanceof Hono))
     {
@@ -137,7 +147,7 @@ async function callBackend(backend: Backend, path: string, body: unknown): Promi
 
     const response = await backend.request(path, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...signed },
         body: JSON.stringify(body),
     });
 
@@ -164,12 +174,18 @@ async function throughTheChain(backend: Backend, input: ChainInput)
         matching.map(rule => rule.request).filter((phase): phase is NonNullable<typeof phase> => !!phase),
     );
 
+    // Refused before the backend is asked: what the browser gets is the refusal
     if (requestCtx.abort)
     {
-        return { requestCtx, responseCtx: undefined, backendStatus: undefined };
+        const refused = {
+            response: { ok: false, status: requestCtx.abort.status, body: requestCtx.abort.body },
+            setCookies: requestCtx.abort.setCookies ?? [],
+        } as unknown as ResponseInterceptorContext;
+
+        return { requestCtx, responseCtx: refused, backendStatus: undefined };
     }
 
-    const answer = await callBackend(backend, path, requestCtx.body);
+    const answer = await callBackend(backend, path, requestCtx.body, requestCtx.headers);
     const responseCtx = responseContext(requestCtx, answer.status, answer.body);
 
     await executeResponseInterceptors(
@@ -232,7 +248,7 @@ describe('repeated POST /_auth/oauth/finalize (#126 claim 1)', () =>
         // mfaVerifyInterceptor acts on a 202 only, then oauthFinalizeInterceptor,
         // then generalAuthInterceptor. Response phases run in this order, so
         // general-auth sees the status finalize left behind.
-        expect(matches).toEqual([mfaVerifyInterceptor, oauthFinalizeInterceptor, generalAuthInterceptor]);
+        expect(matches).toEqual([sessionDecisionInterceptor, mfaVerifyInterceptor, oauthFinalizeInterceptor, generalAuthInterceptor]);
     });
 
     it('the backend answers a replayed finalize with 200 again — it keeps no state to refuse it', async () =>
@@ -262,9 +278,9 @@ describe('repeated POST /_auth/oauth/finalize (#126 claim 1)', () =>
         vi.stubEnv('SPFN_AUTH_CSRF', 'enforce');
         const { jar, keyId } = await signedInJar();
 
-        const { requestCtx, responseCtx } = await finalizeThroughTheChain(app, { userId: '7', keyId, returnUrl: '/' }, jar);
+        const { requestCtx, backendStatus } = await finalizeThroughTheChain(app, { userId: '7', keyId, returnUrl: '/' }, jar);
 
-        expect(responseCtx).toBeUndefined();
+        expect(backendStatus).toBeUndefined();
         expect(requestCtx.abort?.status).toBe(403);
         expect(expired(requestCtx.abort?.setCookies ?? [])).toEqual([]);
     });
@@ -370,7 +386,7 @@ describe('POST /_auth/oauth/finalize case table (#126)', () =>
 
     it('F7: the backend itself answers 401 with a valid session — the session cookies are expired', async () =>
     {
-        const refused = { status: 401, body: { __type: 'UnauthorizedError', message: 'Key revoked' } };
+        const refused = { status: 401, body: { __type: 'KeyRevokedError', message: 'Invalid or revoked key' } };
 
         for (const path of [FINALIZE, '/users/me/profile'])
         {

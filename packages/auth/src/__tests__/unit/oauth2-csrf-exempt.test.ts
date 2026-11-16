@@ -22,6 +22,7 @@ import type { NextRequest } from 'next/server';
 import type { RequestInterceptorContext } from '@spfn/core/nextjs/server';
 
 import { generalAuthInterceptor } from '../../nextjs/interceptors/general-auth';
+import { decidedRequest } from '../helpers/session-decision';
 import { generateKeyPair } from '../../server/lib/crypto';
 import { sealSession, type SessionData } from '../../server/lib/session';
 import { COOKIE_NAMES, configureAuth, getCsrfExemptPaths } from '../../server/lib/config';
@@ -73,7 +74,7 @@ async function reachesBackend(ctx: RequestInterceptorContext): Promise<boolean>
 {
     let continued = false;
 
-    await generalAuthInterceptor.request!(ctx, async () =>
+    await decidedRequest(ctx, [generalAuthInterceptor.request], async () =>
     {
         continued = true;
     });

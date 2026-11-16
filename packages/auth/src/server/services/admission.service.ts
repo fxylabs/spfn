@@ -36,18 +36,11 @@
  */
 
 import type { Context } from 'hono';
-import { UnauthorizedError } from '@spfn/core/errors';
-import {
-    AccountDisabledError,
-    AccountPendingDeletionError,
-    KeyExpiredError,
-    SecondFactorEnrolmentRequiredError,
-} from '@spfn/auth/errors';
 
 import type { User } from '../entities/users';
 import type { UserPublicKey } from '../entities/user-public-keys';
 import type { OAuth2Grant } from '../entities/oauth2-grants';
-import type { UserStatus } from '../types';
+import { admissionRefusalError, type AdmissionRefusal } from '../lib/admission-refusal';
 import { usersRepository, userSettingsRepository, accountDeletionRequestsRepository } from '../repositories';
 import type { UserWithStoredRole } from '../repositories/users.repository';
 import { isLiveGrant } from '../repositories/oauth2-grants.repository';
@@ -81,19 +74,7 @@ export type PrincipalCredential =
     | { kind: 'renewal'; keyId: string }
     | { kind: 'appProfile'; profile: string; keyId: string };
 
-/**
- * Why a person was not let in. Each door answers each reason in its own vocabulary.
- *
- * A purged account (`deletion: 'deleted'`) is answered as a disabled one, with
- * `'deleted'` where the status goes — the answer it has always had.
- */
-export type AdmissionRefusal =
-    | { reason: 'accountMissing' }
-    | { reason: 'accountDisabled'; status: Exclude<UserStatus, 'active'> | 'deleted' }
-    | { reason: 'pendingDeletion'; purgeScheduledAt: string | undefined }
-    | { reason: 'credentialRevoked' }
-    | { reason: 'credentialExpired' }
-    | { reason: 'enrolmentRequired' };
+export { admissionRefusalError, type AdmissionRefusal };
 
 export type Admission = { admitted: Principal } | { refused: AdmissionRefusal };
 
@@ -259,31 +240,6 @@ export function signingKeyOf(credential: PrincipalCredential): string | null
 export function sessionKeyOf(credential: PrincipalCredential): string
 {
     return sessionCredentialOf(credential)?.keyId ?? '';
-}
-
-/**
- * The error the cookie/Bearer surfaces answer an admission refusal with — the
- * same one per reason `authenticate` has always answered — and what a write
- * that re-admits its session under the account lock answers with, so a
- * session refused there is told what its next request would be told.
- */
-export function admissionRefusalError(refusal: AdmissionRefusal): Error
-{
-    switch (refusal.reason)
-    {
-        case 'accountMissing':
-            return new UnauthorizedError({ message: 'User not found' });
-        case 'accountDisabled':
-            return new AccountDisabledError({ status: refusal.status });
-        case 'pendingDeletion':
-            return new AccountPendingDeletionError({ purgeScheduledAt: refusal.purgeScheduledAt });
-        case 'credentialRevoked':
-            return new UnauthorizedError({ message: 'Invalid or revoked key' });
-        case 'credentialExpired':
-            return new KeyExpiredError();
-        case 'enrolmentRequired':
-            return new SecondFactorEnrolmentRequiredError();
-    }
 }
 
 function unreachable(credential: never): never

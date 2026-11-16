@@ -30,9 +30,9 @@ export {
 // Cookie names — an app that empties the session jar must never spell them
 export {
     sessionCookieNames,
-    clearSessionCookies,
     type SessionCookieNames,
 } from './cookie-names';
+export { clearSessionCookies } from './cookie-writer';
 
 // OAuth handlers
 export {

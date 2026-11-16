@@ -27,7 +27,7 @@ import type { Context, MiddlewareHandler } from 'hono';
 import type { NamedMiddleware, RouteDef } from '@spfn/core/route';
 
 import { requireChannel, type AuthChannel } from '../lib/channels-config';
-import { enrolmentMarker } from '../lib/enrolment-routes';
+import { enrolmentMarker, isEnrolmentGate } from '../lib/enrolment-routes';
 import { requireMethod, type SecondFactorFeature, type SecondFactorMethod } from '../lib/second-factor-policy';
 import type { VerificationPurpose } from './schema';
 
@@ -310,7 +310,7 @@ export const ROUTE_ENROLMENT = {
     oauthStart: 'none',
     oauthProviders: 'none',
     getGoogleOAuthUrl: 'none',
-    oauthFinalize: 'none',
+    oauthFinalize: 'always',
     oauthProviderStart: 'none',
     oauthProviderCallback: 'none',
     oauthProviderCallbackPost: 'none',
@@ -402,8 +402,22 @@ export function markEnrolmentRoutes<TRoutes extends Record<string, RouteDef<any,
         const gated = (ROUTE_SECOND_FACTOR_METHODS as Record<string, SecondFactorFeature>)[key] !== undefined;
         const marker = enrolmentMarker(routeClass === 'always' || gated ? null : routeClass);
 
-        return [key, { ...route, middlewares: [marker, ...route.middlewares ?? []] }];
+        return [key, { ...route, middlewares: withMarker(route.middlewares ?? [], marker) }];
     })) as TRoutes;
+}
+
+type RouteMiddleware = MiddlewareHandler | NamedMiddleware<string>;
+
+/**
+ * A route's middlewares with its marker in front — or, for a route that runs a
+ * registered gate of its own (`oauthFinalizeAuth`), right after that gate:
+ * `isEnrolmentRoute` searches the chain after the gate that asks.
+ */
+function withMarker(middlewares: RouteMiddleware[], marker: MiddlewareHandler): RouteMiddleware[]
+{
+    const gate = middlewares.findIndex(middleware => isEnrolmentGate(typeof middleware === 'function' ? middleware : middleware.handler));
+
+    return [...middlewares.slice(0, gate + 1), marker, ...middlewares.slice(gate + 1)];
 }
 
 /**

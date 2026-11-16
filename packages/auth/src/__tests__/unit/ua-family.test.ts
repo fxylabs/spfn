@@ -24,6 +24,7 @@ import { generateKeyPair } from '../../server/lib/crypto';
 import { sealSession, type SessionData } from '../../server/lib/session';
 import { COOKIE_NAMES } from '../../server/lib/config';
 import { uaFamily, UA_FAMILIES } from '../../server/lib/ua-family';
+import { decidedRequest } from '../helpers/session-decision';
 
 const SECRET = 'test-secret-with-at-least-32-characters-for-security-testing';
 
@@ -132,7 +133,7 @@ describe('the context check in the proxy (case table 6e, policy rows)', () =>
             metadata: {} as Record<string, unknown>,
         } as unknown as RequestInterceptorContext;
 
-        await generalAuthInterceptor.request?.(ctx, async () => undefined);
+        await decidedRequest(ctx, [generalAuthInterceptor.request]);
 
         return ctx;
     }

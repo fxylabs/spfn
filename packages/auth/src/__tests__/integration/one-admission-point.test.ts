@@ -890,7 +890,7 @@ describe.skipIf(!dbAvailable)('one admission point for a person principal (T1-T1
         await setAccountStatus(account.id, 'active', { from: 'suspended', reason: 'T4 reactivation' });
 
         expect((await refresh(clientId, tokens.refresh_token)).status).toBe(200);
-        await expectError(await post('/t/me', account, {}, session.authorization), 401, 'UnauthorizedError');
+        await expectError(await post('/t/me', account, {}, session.authorization), 401, 'KeyRevokedError');
         await admittedAs(await post('/t/me', account, {}, (await signIn(account)).authorization), account);
     });
 

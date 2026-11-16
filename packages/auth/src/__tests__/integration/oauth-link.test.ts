@@ -46,6 +46,7 @@ import {
     oauthLinkRemovedEvent,
     oauthUnlinkedEvent,
 } from '@/server/events';
+import { decidedRequest, decidedResponse } from '../helpers/session-decision';
 
 const { initializeAuth } = await import('@/server/services/rbac.service');
 const { getRoleByName } = await import('@/server/services/role.service');
@@ -593,7 +594,7 @@ describe.skipIf(!dbAvailable)('Battle.net sign-in and OAuth link/unlink (#154)',
                 metadata: {} as Record<string, unknown>,
             } as unknown as RequestInterceptorContext;
 
-            await oauthLinkInterceptor.request?.(requestCtx, vi.fn(async () => undefined));
+            await decidedRequest(requestCtx, [oauthLinkInterceptor.request]);
 
             expect(requestCtx.body).toMatchObject({
                 returnUrl: RETURN_URL,
@@ -615,7 +616,7 @@ describe.skipIf(!dbAvailable)('Battle.net sign-in and OAuth link/unlink (#154)',
                 metadata: requestCtx.metadata,
             } as unknown as ResponseInterceptorContext;
 
-            await oauthLinkInterceptor.response?.(responseCtx, vi.fn(async () => undefined));
+            await decidedResponse(responseCtx, [oauthLinkInterceptor.response]);
 
             const { nonce, startId } = requestCtx.body as { nonce: string; startId: string };
             expect(responseCtx.setCookies).toEqual([expect.objectContaining({

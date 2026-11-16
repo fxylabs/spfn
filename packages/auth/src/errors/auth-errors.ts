@@ -90,6 +90,38 @@ export class KeyExpiredError extends UnauthorizedError
 }
 
 /**
+ * Key Revoked Error (401)
+ *
+ * The key a request was signed with can no longer act: it was revoked, its key
+ * generation ended (a sign-out everywhere), or no such key was ever registered.
+ * A session holding it is over — sign in again. Answered only by an admission
+ * refusal (`admissionRefusalError`); every other 401 is some other class.
+ */
+export class KeyRevokedError extends UnauthorizedError
+{
+    constructor(data: { message?: string; details?: Record<string, any> } = {})
+    {
+        super({ message: data.message || 'Invalid or revoked key', details: data.details });
+        this.name = 'KeyRevokedError';
+    }
+}
+
+/**
+ * Account Not Found Error (401)
+ *
+ * The account a live credential belongs to no longer exists. A session of it is
+ * over. Answered only by an admission refusal (`admissionRefusalError`).
+ */
+export class AccountNotFoundError extends UnauthorizedError
+{
+    constructor(data: { message?: string; details?: Record<string, any> } = {})
+    {
+        super({ message: data.message || 'User not found', details: data.details });
+        this.name = 'AccountNotFoundError';
+    }
+}
+
+/**
  * Account Disabled Error (403)
  *
  * Thrown when user account is disabled or inactive
@@ -1578,6 +1610,58 @@ export class SessionResealFailedError extends InternalServerError
             details: data.details,
         });
         this.name = 'SessionResealFailedError';
+    }
+}
+
+/**
+ * Session Seal Failed Error (500)
+ *
+ * Minted by the Next.js proxy when the backend accepted a sign-in — a key was
+ * registered or rotated in — and the proxy could not seal or write the session
+ * that holds it.
+ *
+ * Answered instead of the backend's 200: a success with no session cookie is a
+ * sign-in that did not happen, and saying so is what lets the person try again.
+ * The proxy asks the backend to revoke the key it could not write, so no key is
+ * left on the account that no browser holds.
+ */
+export class SessionSealFailedError extends InternalServerError
+{
+    readonly code = 'SESSION_SEAL_FAILED';
+
+    constructor(data: { message?: string; details?: Record<string, any> } = {})
+    {
+        super({
+            message: data.message || 'Signed in, but this browser\'s session could not be saved. Sign in again.',
+            details: data.details,
+        });
+        this.name = 'SessionSealFailedError';
+    }
+}
+
+/**
+ * Session Decision Missing Error (500)
+ *
+ * Minted by the Next.js proxy when a rule of this package proposed a session
+ * outcome — a new session, a clear, a refresh, a pending cookie — on a request
+ * the session decision (`sessionDecisionInterceptor`) is not registered for.
+ * Nothing would write the proposal, so a sign-in would answer 200 with no
+ * cookie. It is a configuration error: a custom interceptor list must include
+ * the decision first, which `authInterceptors` does.
+ */
+export class SessionDecisionMissingError extends InternalServerError
+{
+    readonly code = 'SESSION_DECISION_MISSING';
+
+    constructor(data: { message?: string; details?: Record<string, any> } = {})
+    {
+        super({
+            message: data.message
+                || 'The session decision is not registered: a custom interceptor list must start with '
+                + 'sessionDecisionInterceptor — use authInterceptors.',
+            details: data.details,
+        });
+        this.name = 'SessionDecisionMissingError';
     }
 }
 

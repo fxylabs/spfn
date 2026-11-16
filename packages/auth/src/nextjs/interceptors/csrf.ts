@@ -16,13 +16,12 @@
 
 import { findRouteEntry } from '@spfn/core/nextjs/server';
 import type { ProxyAbort, RequestInterceptorContext } from '@spfn/core/nextjs/server';
-import type { SetCookie } from '@spfn/core/nextjs';
 
-import { getCsrfMode, getCsrfExemptPaths, getSessionTtl, COOKIE_NAMES, type CsrfMode } from '../../server/lib/config';
-import { CSRF_HEADER, deriveCsrfToken, matchesCsrfToken, timingSafeEqualString } from '../../server/lib/csrf';
+import { getCsrfMode, getCsrfExemptPaths, type CsrfMode } from '../../server/lib/config';
+import { CSRF_HEADER, deriveCsrfToken, matchesCsrfToken } from '../../server/lib/csrf';
 import { authLogger } from '../../server/logger';
 import { routeMap as authRouteMap } from '../../generated/route-map';
-import { cookieSecure } from './cookie-options';
+import { repairCsrf } from './session-decision';
 
 /**
  * Methods that cannot mutate, so they need no token.
@@ -37,27 +36,6 @@ const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
 
 /** Paths of CSRF-required routes an exempt list has already been warned about */
 const exemptionsReported = new Set<string>();
-
-/**
- * The readable CSRF cookie, as every place that issues one builds it.
- *
- * Mirrors the session cookie's attributes minus HttpOnly — the client has to read
- * it — and carries only the HMAC, never the key id it derives from.
- */
-function csrfCookie(token: string, ttl: number): SetCookie
-{
-    return {
-        name: COOKIE_NAMES.CSRF,
-        value: token,
-        options: {
-            httpOnly: false,
-            secure: cookieSecure,
-            sameSite: 'lax',
-            maxAge: ttl,
-            path: '/',
-        },
-    };
-}
 
 /**
  * The 403 a failed check answers with.
@@ -248,80 +226,11 @@ export async function refuseInvalidCsrf(
 
     ctx.abort = refusal();
 
-    // The repair is attached after the refusal is already in place. Building the
-    // cookie needs the session TTL, which parses configuration and throws on a
-    // malformed value — and a throw on the way out of here is swallowed upstream,
-    // which would hand the caller the backend's 401 instead of this 403. Refusing
-    // without the repair costs one user one extra page load; refusing with the
-    // wrong status changes what the check means.
-    ctx.abort.setCookies = [csrfCookie(expected, getSessionTtl())];
+    // The repair rides on the refusal: the session decision writes the token
+    // cookie for this key onto it. A refusal whose repair cannot be built is
+    // still the refusal — one extra page load for one user, never a different
+    // status.
+    repairCsrf(ctx, keyId);
 
     return true;
-}
-
-/**
- * Queue the readable CSRF cookie for a session.
- *
- * Set wherever a session is established or renewed.
- *
- * Queued in every mode, including `off`, so that turning enforcement on later
- * does not require everyone to sign in again.
- */
-export async function pushCsrfCookie(
-    setCookies: SetCookie[],
-    keyId: string,
-    ttl: number,
-): Promise<void>
-{
-    setCookies.push(csrfCookie(await deriveCsrfToken(keyId), ttl));
-}
-
-/**
- * Queue the readable CSRF cookie when the request's copy is missing or stale.
- *
- * The other half of the recovery path: a session that predates this feature
- * carries no cookie, and one whose value stopped matching — a key rotated down a
- * path that did not reissue, a jar half-cleared by an extension — would
- * otherwise sit broken until the session came within a day of expiry. A cookie
- * that is present but no longer matches is reissued; presence alone is not
- * proof. Any authenticated response repairs it, which is what makes one page
- * load enough.
- *
- * A derivation failure is logged rather than thrown: the request-side check
- * already refuses those, and turning every authenticated response into a 500 on
- * top of that helps nobody diagnose it.
- */
-export async function pushCsrfCookieIfStale(
-    setCookies: SetCookie[],
-    presented: string | undefined,
-    keyId: string,
-): Promise<void>
-{
-    try
-    {
-        const token = await deriveCsrfToken(keyId);
-
-        if (presented && timingSafeEqualString(token, presented))
-        {
-            return;
-        }
-
-        setCookies.push(csrfCookie(token, getSessionTtl()));
-    }
-    catch (error)
-    {
-        authLogger.interceptor.csrf.error('Cannot reissue the CSRF cookie', error as Error);
-    }
-}
-
-/**
- * Queue removal of the readable CSRF cookie (logout, expired session).
- */
-export function pushCsrfCookieRemoval(setCookies: SetCookie[]): void
-{
-    setCookies.push({
-        name: COOKIE_NAMES.CSRF,
-        value: '',
-        options: { maxAge: 0, path: '/' },
-    });
 }

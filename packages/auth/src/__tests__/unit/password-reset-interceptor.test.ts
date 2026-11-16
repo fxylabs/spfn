@@ -16,6 +16,7 @@ import type { RequestInterceptorContext, ResponseInterceptorContext } from '@spf
 import { passwordResetInterceptor } from '../../nextjs/interceptors/password-reset';
 import { loginRegisterInterceptor } from '../../nextjs/interceptors/login-register';
 import { COOKIE_NAMES } from '../../server/lib/config';
+import { decidedResponse } from '../helpers/session-decision';
 
 const CONFIRM_PATH = '/_auth/password/reset/confirm';
 const COMPLETE_PATH = '/_auth/password/reset/complete';
@@ -70,11 +71,11 @@ describe('password reset interceptor - which requests it touches', () =>
         expect(matches(path)).toBe(false);
     });
 
-    it('names its own cookie, never the signup one', () =>
+    it('names its own cookie, never the signup one', async () =>
     {
         const ctx = responseContext(CONFIRM_PATH, true, { setupSecret: 'secret-value' });
 
-        passwordResetInterceptor.response?.(ctx, vi.fn(async () => undefined));
+        await decidedResponse(ctx, [passwordResetInterceptor.response], vi.fn(async () => undefined));
 
         expect(COOKIE_NAMES.PASSWORD_RESET_SETUP).not.toBe(COOKIE_NAMES.SIGNUP_SETUP);
     });
@@ -93,7 +94,7 @@ describe('password reset interceptor - confirm response', () =>
         const ctx = responseContext(CONFIRM_PATH, true, { email: 'a@example.com', setupSecret: 'secret-value' });
         const next = vi.fn(async () => undefined);
 
-        await passwordResetInterceptor.response?.(ctx, next);
+        await decidedResponse(ctx, [passwordResetInterceptor.response], next);
 
         expect(ctx.response.body.setupSecret).toBeUndefined();
         expect(ctx.setCookies).toHaveLength(1);
@@ -106,7 +107,7 @@ describe('password reset interceptor - confirm response', () =>
     {
         const ctx = responseContext(CONFIRM_PATH, true, { setupSecret: 'secret-value' });
 
-        await passwordResetInterceptor.response?.(ctx, vi.fn(async () => undefined));
+        await decidedResponse(ctx, [passwordResetInterceptor.response], vi.fn(async () => undefined));
 
         expect(ctx.setCookies[0].options).toMatchObject({
             httpOnly: true,
@@ -119,7 +120,7 @@ describe('password reset interceptor - confirm response', () =>
     {
         const ctx = responseContext(CONFIRM_PATH, false, { message: 'nope' });
 
-        await passwordResetInterceptor.response?.(ctx, vi.fn(async () => undefined));
+        await decidedResponse(ctx, [passwordResetInterceptor.response], vi.fn(async () => undefined));
 
         expect(ctx.setCookies).toHaveLength(0);
     });
@@ -161,7 +162,7 @@ describe('password reset interceptor - complete response', () =>
     {
         const ctx = responseContext(COMPLETE_PATH, true, { userId: '1' });
 
-        await passwordResetInterceptor.response?.(ctx, vi.fn(async () => undefined));
+        await decidedResponse(ctx, [passwordResetInterceptor.response], vi.fn(async () => undefined));
 
         expect(ctx.setCookies).toHaveLength(1);
         expect(ctx.setCookies[0].value).toBe('');
@@ -172,7 +173,7 @@ describe('password reset interceptor - complete response', () =>
     {
         const ctx = responseContext(COMPLETE_PATH, false, { message: 'password too short' });
 
-        await passwordResetInterceptor.response?.(ctx, vi.fn(async () => undefined));
+        await decidedResponse(ctx, [passwordResetInterceptor.response], vi.fn(async () => undefined));
 
         expect(ctx.setCookies).toHaveLength(0);
     });

@@ -32,4 +32,6 @@ export type {
     ProxyConfig,
     ProxyAbort,
     RouteMapEntry,
+    BackendCall,
+    BackendAnswer,
 } from './proxy/interceptors/types';

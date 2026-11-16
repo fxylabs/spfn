@@ -436,37 +436,36 @@ export async function runBeforeRegister(context: BeforeRegisterContext): Promise
 /**
  * Get session TTL in seconds
  *
- * Priority:
- * 1. Runtime override (remember parameter)
- * 2. Global config (configureAuth)
- * 3. Environment variable (SPFN_AUTH_SESSION_TTL) - via config module
- * 4. Default (7 days)
+ * A kept session (the sign-in posted `remember: true`) lives
+ * `SPFN_AUTH_SESSION_TTL_REMEMBER`, thirty days unless set. Any other session:
  *
- * A malformed value at whichever level answers throws (see `parseDuration`);
- * it is not skipped in favour of the next level.
+ * 1. Global config (configureAuth)
+ * 2. Environment variable (SPFN_AUTH_SESSION_TTL) - via config module
+ * 3. Default (7 days)
+ *
+ * The client chooses only whether it is kept, never how long: both lifetimes
+ * are the operator's. A malformed value at whichever level answers throws (see
+ * `parseDuration`); it is not skipped in favour of the next level.
  */
-export function getSessionTtl(override?: string | number): number
+export function getSessionTtl(options: { remember?: boolean } = {}): number
 {
-    // 1. Runtime override
-    if (override !== undefined)
+    if (options.remember)
     {
-        return parseDuration(override);
+        return parseDuration(env.SPFN_AUTH_SESSION_TTL_REMEMBER ?? '30d');
     }
 
-    // 2. Global config
     if (globalConfig.sessionTtl !== undefined)
     {
         return parseDuration(globalConfig.sessionTtl);
     }
 
-    // 3. Environment variable (from config module)
     const envTtl = env.SPFN_AUTH_SESSION_TTL;
+
     if (envTtl)
     {
         return parseDuration(envTtl);
     }
 
-    // 4. Default: 7 days
     return 7 * 24 * 60 * 60;
 }
 

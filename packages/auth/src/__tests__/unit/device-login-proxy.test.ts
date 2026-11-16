@@ -28,7 +28,7 @@
  * | B5 | 200 approved, tampered / expired / MFA token | as B3 |
  * | B6 | 403 / 404 / 410 / 429 | passes through, no cookie |
  * | B7 | B2 on a browser with a session (another account's, an expired one) | the last session writes are the new ones |
- * | B8 | approved matching poll, the CSRF derivation throws | 401 `SessionPendingExpiredError`; no SESSION / SESSION_KEY_ID / CSRF / DEVICE_PENDING write |
+ * | B8 | approved matching poll, the CSRF derivation throws | 500 `SessionSealFailedError` (the session decision's); no SESSION / SESSION_KEY_ID / CSRF write |
  * | P1 | a valid session on a near-miss of a public path, or on the mobile `redeem` | signed by `generalAuthInterceptor` — not public |
  * | A1-client | `redeemDeviceLinkWeb`'s body schema and `{ userCode }` from an empty jar | accepted |
  */
@@ -44,7 +44,6 @@ import {
 import type { SetCookie } from '@spfn/core/nextjs';
 
 import { authInterceptors } from '../../nextjs/interceptors';
-import { cookieSecure } from '../../nextjs/interceptors/cookie-options';
 import {
     sealPendingDeviceSession,
     sealPendingMfaSession,
@@ -57,12 +56,11 @@ import { verifyClientToken } from '../../server/helpers/jwt';
 import { hashCredential } from '../../server/lib/link-credentials';
 import { COOKIE_NAMES } from '../../server/lib/config';
 import { CSRF_HEADER, deriveCsrfToken } from '../../server/lib/csrf';
-import { SessionPendingExpiredError, SessionPendingMismatchError } from '../../errors';
+import { SessionPendingExpiredError, SessionPendingMismatchError, SessionSealFailedError } from '../../errors';
 import { redeemDeviceLinkWeb } from '../../server/routes/auth';
 
-// Secure cookies, as in production: under test `cookieSecure` resolves false,
+// Secure cookies, as in production: under test the Secure flag resolves false,
 // and a rule that wrote `secure: false` would match it there (A3).
-vi.mock('../../nextjs/interceptors/cookie-options', () => ({ cookieSecure: true }));
 
 // Pass-through spies, so a row can make one call throw (A8, B8) while every
 // other caller — the rule and this file alike — gets the real function.
@@ -231,11 +229,14 @@ async function sessionCookies(userId: string, ttl: number): Promise<{ cookies: [
 }
 
 /** The B3 refusal, compared without its per-response request id. */
-function expectRefusal(responseCtx: ResponseInterceptorContext, error: SessionPendingExpiredError | SessionPendingMismatchError): void
+function expectRefusal(
+    responseCtx: ResponseInterceptorContext,
+    error: SessionPendingExpiredError | SessionPendingMismatchError | SessionSealFailedError,
+): void
 {
     const expected = refusalBody(error) as { error: Record<string, unknown> };
 
-    expect(responseCtx.response.status).toBe(401);
+    expect(responseCtx.response.status).toBe(error.statusCode);
     expect(responseCtx.response.body).toEqual({ ...expected, error: { ...expected.error, requestId: expect.any(String) } });
 }
 
@@ -254,6 +255,7 @@ describe('a browser as the new device: the proxy makes the key and seals the app
     {
         vi.stubEnv('SPFN_AUTH_SESSION_SECRET', SECRET);
         vi.stubEnv('SPFN_AUTH_CSRF', 'enforce');
+        vi.stubEnv('SPFN_AUTH_COOKIE_SECURE', 'true');
     });
 
     afterEach(() =>
@@ -314,7 +316,7 @@ describe('a browser as the new device: the proxy makes the key and seals the app
 
             const written = writesOf(responseCtx.setCookies, COOKIE_NAMES.DEVICE_PENDING);
             expect(written).toHaveLength(1);
-            expect(written[0].options).toMatchObject({ httpOnly: true, secure: cookieSecure, sameSite: 'lax', path: '/' });
+            expect(written[0].options).toMatchObject({ httpOnly: true, secure: true, sameSite: 'lax', path: '/' });
 
             const secondsLeft = ((answer.expiresAtMillis as number) - Date.now()) / 1000;
             expect(written[0].options!.maxAge).toBeGreaterThanOrEqual(Math.floor(secondsLeft) - 1);
@@ -522,15 +524,14 @@ describe('a browser as the new device: the proxy makes the key and seals the app
             expect(session.keyId).not.toBe(old.keyId);
         });
 
-        it('B8 a CSRF derivation that throws after the seal is refused as expired, with no cookie queued', async () =>
+        it('B8 a CSRF derivation that throws after the seal is answered as a session not written, with no session cookie queued', async () =>
         {
             vi.mocked(deriveCsrfToken).mockRejectedValueOnce(new Error('derivation failed'));
             const { jar } = await pendingJar();
             const { responseCtx } = await throughTheChain(path, { deviceCode: DEVICE_CODE }, jar, { status: 200, body: approvedBody() });
 
-            expectRefusal(responseCtx, new SessionPendingExpiredError());
+            expectRefusal(responseCtx, new SessionSealFailedError());
             expectNothingSealed(responseCtx.setCookies);
-            expect(writesOf(responseCtx.setCookies, COOKIE_NAMES.DEVICE_PENDING)).toHaveLength(0);
         });
     });
 

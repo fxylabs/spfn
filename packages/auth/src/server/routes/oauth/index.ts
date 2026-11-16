@@ -14,7 +14,7 @@
 
 import { Type } from '@sinclair/typebox';
 import { type Context } from 'hono';
-import { getCookie, setCookie, deleteCookie } from 'hono/cookie';
+import { getCookie, setCookie } from 'hono/cookie';
 import { Transactional } from '@spfn/core/db';
 import { ValidationError } from '@spfn/core/errors';
 import { rateLimitPolicy } from '@spfn/core/middleware';
@@ -24,9 +24,11 @@ import { OAuthProviderError, OAuthProviderLinkOnlyError } from '@spfn/auth/error
 import { KEY_ALGORITHM, SOCIAL_PROVIDERS, type SessionBindingType, type SocialProvider } from '../../types';
 import { DeviceNameSchema, OAuthNativeProfileSchema, PlatformSchema } from '../schema';
 import { buildStartCookieName, namesEvictedByStart } from '../../lib/oauth/start-cookies';
+import { packageCookieAttributes } from '../../lib/cookie-attributes';
 import { providerErrorReason } from '../../../lib/oauth-error-reason';
 import { byIpAndCaller, byIpAndIdToken } from '../../lib/rate-limit-keys';
 import { getAuth } from '../../helpers';
+import { oauthFinalizeAuth } from '../../middleware/oauth-finalize-auth';
 import { type OAuthLinkOutcome } from '../../../lib/oauth-link-outcome';
 import { deviceProvenance } from '../../lib/device-provenance';
 import {
@@ -151,7 +153,7 @@ async function completeOAuthCallback(
 {
     const csrf = await matchOAuthCallbackCsrf({ provider, state, cookies: getCookie(c) });
 
-    deleteCookie(c, csrf.name, { path: '/' });
+    setCookie(c, csrf.name, '', packageCookieAttributes(0));
 
     const result = await oauthCallbackService({
         provider,
@@ -184,7 +186,7 @@ async function oauthLinkCallbackRedirect(
 {
     const csrfName = matchOAuthLinkCsrf({ provider, link, cookies: getCookie(c) });
 
-    deleteCookie(c, csrfName, { path: '/' });
+    setCookie(c, csrfName, '', packageCookieAttributes(0));
 
     if (query.error)
     {
@@ -341,22 +343,17 @@ export const oauthStart = route.post('/_auth/oauth/start')
  * The same name the proxy's start writes, built from the start's keyId, so the
  * callback finds it the same way; a second start in another tab writes its own.
  * The oldest start past the cap of five has its cookie expired in this response.
+ * Its attributes are the package's one definition, `Secure` from
+ * `SPFN_AUTH_COOKIE_SECURE` included — as the proxy writes the same cookie.
  */
 function setStartCsrfCookie(c: Context, keyId: string, nonce: string): void
 {
-    const options = {
-        httpOnly: true,
-        secure: process.env.NODE_ENV === 'production',
-        sameSite: 'Lax',
-        path: '/',
-    } as const;
-
     for (const name of namesEvictedByStart('csrf', getCookie(c)))
     {
-        deleteCookie(c, name, options);
+        setCookie(c, name, '', packageCookieAttributes(0));
     }
 
-    setCookie(c, buildStartCookieName('csrf', keyId), nonce, { ...options, maxAge: 600 });
+    setCookie(c, buildStartCookieName('csrf', keyId), nonce, packageCookieAttributes(600));
 }
 
 /**
@@ -465,12 +462,19 @@ export interface OAuthFinalizeResponse
  *
  * 백엔드 콜백에서 이 라우트로 리다이렉트
  * Next.js 인터셉터가 pending session에서 세션 저장
+ *
+ * Authenticated by the key being finalized (`oauthFinalizeAuth`): the proxy
+ * signs the call with the private half its pending cookie holds, and the answer
+ * is that principal. The second-factor 202 branch passes without one.
  */
 export const oauthFinalize = route.post('/_auth/oauth/finalize')
     .input({
         body: Type.Object({
-            userId: Type.Optional(Type.String({ description: 'User ID from OAuth callback' })),
-            keyId: Type.Optional(Type.String({ description: 'Key ID from OAuth state' })),
+            userId: Type.Optional(Type.String({ description: 'Ignored. Accepted so a page that still sends it is not refused; the answer names the key\'s owner' })),
+            keyId: Type.Optional(Type.String({
+                description: 'Key ID from OAuth state: which start\'s pending cookie the Next.js proxy signs this request with. '
+                    + 'Not read for the answer, which names the key the request is signed by',
+            })),
             mfaChallenge: Type.Optional(Type.String({
                 minLength: 16,
                 maxLength: 256,
@@ -479,8 +483,7 @@ export const oauthFinalize = route.post('/_auth/oauth/finalize')
             returnUrl: Type.Optional(Type.String({ description: 'URL to redirect after login' })),
         }),
     })
-    .use([rateLimitPolicy('oauth-start', { limit: 20, windowMs: 60_000 })])
-    .skip(['auth'])
+    .use([oauthFinalizeAuth, rateLimitPolicy('oauth-start', { limit: 20, windowMs: 60_000 })])
     .handler(async (c): Promise<OAuthFinalizeResponse> =>
     {
         const { body } = await c.data();
@@ -517,38 +520,25 @@ export const oauthFinalize = route.post('/_auth/oauth/finalize')
             });
         }
 
-        if (!body.userId || !body.keyId)
-        {
-            throw new ValidationError({ message: 'userId and keyId are required unless mfaChallenge is sent' });
-        }
-
-        // 인터셉터가 세션을 저장함 — userId, keyId를 반환해야 인터셉터가 처리 가능.
-        //
-        // SECURITY (not a vuln — read before "fixing"): this unauthenticated route
-        // reflects the client-supplied userId. That is intentional and safe — the
-        // reflected userId is a convenience value, never a trust anchor:
-        //   1. The interceptor seals it into the session only after matching keyId
-        //      against the server-sealed `oauth_pending` cookie, and the session is
-        //      sealed with SPFN_AUTH_SESSION_SECRET (the client can't forge/tamper it).
-        //   2. Identity on every backend request is re-derived in `authenticate`
-        //      from the keyId → public-key → DB-owner binding (signature-verified),
-        //      never from this userId. That keyId↔userId binding is created
-        //      server-side in oauthCallbackService from the OAuth-verified identity.
-        // A substituted userId therefore cannot grant another user's identity; it
-        // only populates getSession().userId for client-side UI without a backend call.
+        // The principal `oauthFinalizeAuth` admitted: the request is signed by the
+        // key being finalized, so the session the Next.js proxy seals is the
+        // account that key belongs to — never anything the page posted. A body
+        // `keyId` only tells the proxy which start's pending cookie to sign with.
         //
         // The two binding fields are read off the key row rather than echoed:
         // this is the seam the Next.js interceptor seals a session from, and a
         // caller allowed to state its own binding could ask for a cookie that
         // believes a bound key is an ordinary one.
+        const { userId, keyId } = getAuth(c);
+
         return {
             success: true,
             mfaRequired: false,
-            userId: body.userId,
-            keyId: body.keyId,
+            userId: String(userId),
+            keyId,
             returnUrl: body.returnUrl || '/',
-            ...await keySessionBindingService(body.keyId),
-            ...await keySecondFactorEnrolmentFields(body.keyId),
+            ...await keySessionBindingService(keyId),
+            ...await keySecondFactorEnrolmentFields(keyId),
         };
     });
 

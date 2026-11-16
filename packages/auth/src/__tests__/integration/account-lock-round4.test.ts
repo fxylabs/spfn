@@ -234,7 +234,7 @@ describe.skipIf(!dbAvailable)('Credential spends under the account lock (round 4
         const codes = await getTestDb().select().from(oauth2AuthorizationCodes);
 
         expect({ change: changed.status, consent: response.status, code: (await response.json()).error?.code, grants: live.length, codes: codes.length })
-            .toEqual({ change: 204, consent: 401, code: 'UnauthorizedError', grants: 0, codes: 0 });
+            .toEqual({ change: 204, consent: 401, code: 'KeyRevokedError', grants: 0, codes: 0 });
     }, 30_000);
 
     it('R10 (B2) a recovery code checked before a regeneration commits is refused at its spend', async () =>

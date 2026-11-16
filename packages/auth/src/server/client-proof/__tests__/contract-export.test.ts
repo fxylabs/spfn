@@ -38,6 +38,8 @@ import {
     DeviceLinkNotFoundError,
     DeviceLinkWrongMatchError,
     KeyAlgorithmMismatchError,
+    KeyRevokedError,
+    AccountNotFoundError,
     OAuthEmailInUseError,
     OAuthProviderLinkOnlyError,
     SignupDisabledError,
@@ -1437,6 +1439,24 @@ describe('declared errors match the refusals', () =>
         ]);
     });
 
+    it.each([
+        [new KeyRevokedError()],
+        [new AccountNotFoundError()],
+    ])('B1: %s carries the status its error class carries, and is not core\'s UnauthorizedError code', (thrown) =>
+    {
+        // Added in 0.14.5. The session-ending admission refusals answer codes of
+        // their own; the class still extends UnauthorizedError for an app's
+        // instanceof, but the code a client matches is its own name.
+        const entry = declared.find((candidate) => candidate.code === thrown.name);
+
+        expect(entry).toBeDefined();
+        expect(entry?.httpStatus).toBe(thrown.statusCode);
+        expect(entry?.httpStatus).toBe(401);
+        expect(entry?.retryable).toBe(false);
+        expect(entry?.surface).toBe('rest');
+        expect(thrown.name).not.toBe('UnauthorizedError');
+    });
+
     it('the key-algorithm refusal carries the status its error class carries', () =>
     {
         // Added in 0.10.1. The class name is the code a client matches on, so the
@@ -1643,9 +1663,9 @@ describe('declared proof rules match the implementation', () =>
         replayWindowMillis: number;
     };
 
-    it('the contract line is the revision that lists SecondFactorLockedError (0.14.4, after AccountBusyError\'s 0.14.3)', () =>
+    it('the contract line is the revision that lists KeyRevokedError and AccountNotFoundError (0.14.5, after SecondFactorLockedError\'s 0.14.4)', () =>
     {
-        expect(bundle.contractVersion).toBe('0.14.4');
+        expect(bundle.contractVersion).toBe('0.14.5');
     });
 
     it('the supported range floor is the current minor, as the 0.x rule has it', () =>

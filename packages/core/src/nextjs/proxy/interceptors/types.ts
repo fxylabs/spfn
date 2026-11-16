@@ -219,7 +219,40 @@ export interface ResponseInterceptorContext
      * Metadata shared from request interceptors
      */
     metadata: Record<string, any>;
+
+    /**
+     * Send another request to the backend, through the proxy's own fetch
+     *
+     * Same base URL, forwarded headers, proxy-guard signature and timeout as
+     * the request this response answers. With no `path` it repeats that request
+     * (query and body included) with `headers` overriding the forwarded ones;
+     * with a `path` it sends `body` there instead. The answer is returned, and
+     * `response` is left alone — a rule that means to answer with it copies it
+     * across. A network failure or timeout rejects.
+     *
+     * Set by the RPC proxy; absent where a context is built by hand.
+     */
+    callBackend?: (call: BackendCall) => Promise<BackendAnswer>;
 }
+
+/**
+ * A request a response interceptor sends with `callBackend`
+ */
+export interface BackendCall
+{
+    method?: string;
+    /** Wire path with its leading slash; omitted, the request being answered */
+    path?: string;
+    /** Override the forwarded headers */
+    headers?: Record<string, string>;
+    /** JSON body, for a call with a `path` of its own */
+    body?: unknown;
+}
+
+/**
+ * What the backend answered a `callBackend` request with
+ */
+export type BackendAnswer = ResponseInterceptorContext['response'];
 
 /**
  * Request Interceptor Function

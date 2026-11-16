@@ -20,7 +20,8 @@
 import type { InterceptorRule } from '@spfn/core/nextjs/server';
 import { COOKIE_NAMES } from '../../server/lib/config';
 import { authLogger } from '../../server/logger';
-import { cookieSecure } from './cookie-options';
+import { packageCookie } from '../cookie-writer';
+import { writeCookie } from './session-decision';
 
 /**
  * Setup-session cookie lifetime, in seconds.
@@ -32,22 +33,10 @@ import { cookieSecure } from './cookie-options';
  */
 const SETUP_COOKIE_TTL_SECONDS = 60 * 60;
 
-/**
- * Cookie carrying the password-setup session.
- */
+/** The setup cookie, through the one cookie writer. */
 function setupCookie(value: string, maxAge: number)
 {
-    return {
-        name: COOKIE_NAMES.PASSWORD_RESET_SETUP,
-        value,
-        options: {
-            httpOnly: true,
-            secure: cookieSecure,
-            sameSite: 'lax' as const,
-            maxAge,
-            path: '/',
-        },
-    };
+    return packageCookie(COOKIE_NAMES.PASSWORD_RESET_SETUP, value, maxAge);
 }
 
 export const passwordResetInterceptor: InterceptorRule = {
@@ -99,7 +88,7 @@ export const passwordResetInterceptor: InterceptorRule = {
                 return;
             }
 
-            ctx.setCookies.push(setupCookie(secret, SETUP_COOKIE_TTL_SECONDS));
+            writeCookie(ctx, setupCookie(secret, SETUP_COOKIE_TTL_SECONDS));
 
             // The browser must never see it — an HttpOnly cookie that page
             // script can also read out of the JSON body is not HttpOnly.
@@ -110,7 +99,7 @@ export const passwordResetInterceptor: InterceptorRule = {
         {
             // Spent. Clearing it stops a stale cookie from being presented to a
             // session the server has already marked used.
-            ctx.setCookies.push(setupCookie('', 0));
+            writeCookie(ctx, setupCookie('', 0));
         }
 
         await next();

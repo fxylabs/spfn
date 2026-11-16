@@ -4,7 +4,7 @@
   "originStatement": "Generated from the route and contract definitions in SPFN primitives (packages/auth/src/server/client-proof) and published from that repository. This file is generated output: edit the source modules and re-export, never this file.",
   "contractName": "spfn-mobile-contract",
   "contractMajor": 0,
-  "contractVersion": "0.14.4",
+  "contractVersion": "0.14.5",
   "supportedRange": ">=0.14.0 <0.15.0",
   "exporterVersion": "@spfn/auth/contract-bundle@6.3.0",
   "authProfiles": { "allowed": ["clientProofV1"], "unknownProfilePolicy": "reject", "mixingWithinSession": "prohibited" },
@@ -864,6 +864,20 @@
       "httpStatus": 401,
       "retryable": false,
       "summary": "the id_token failed signature, issuer, audience, expiry, nonce or subject verification",
+      "surface": "rest"
+    },
+    {
+      "code": "KeyRevokedError",
+      "httpStatus": 401,
+      "retryable": false,
+      "summary": "the key the request was made with can no longer act — revoked, never registered, or of a key generation that ended (a sign-out everywhere); the session is over and the device signs in again",
+      "surface": "rest"
+    },
+    {
+      "code": "AccountNotFoundError",
+      "httpStatus": 401,
+      "retryable": false,
+      "summary": "the account the credential belongs to no longer exists; the session is over",
       "surface": "rest"
     },
     {
