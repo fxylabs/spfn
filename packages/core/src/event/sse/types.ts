@@ -84,7 +84,7 @@ export interface SSEHandlerAuthConfig
 
     /**
      * Extract the device key the token is minted for, so that revoking the key
-     * closes the streams it opened (`closeSSEConnectionsByKey`) and refuses a
+     * closes the streams it opened (`closeConnectionsByKey`) and refuses a
      * token minted before the revocation (`SSETokenManagerConfig.verifyKey`).
      * Empty, `null` or `undefined` → an untagged token, never closed by key.
      * @default (c) => c.get('auth')?.keyId

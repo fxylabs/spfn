@@ -7,7 +7,7 @@
  * with that key, and it is good only while the key is. A token whose key was
  * revoked — a logout, a sign-out-everywhere, a password change, a suspension —
  * is refused at use, and a stream opened with it is closed when the key is
- * revoked (`closeSSEConnectionsByKey`), on every instance.
+ * revoked (`closeConnectionsByKey`), on every instance.
  */
 
 import { ForbiddenError } from '@spfn/core/errors';

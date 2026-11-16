@@ -42,13 +42,14 @@ function hashToken(token: string): string
 }
 
 /**
- * Minimal cache client interface (compatible with ioredis Redis | Cluster)
+ * What `CacheTokenStore` needs of a cache client (ioredis `Redis | Cluster`
+ * offers both). `getdel` is the atomic take — Redis `GETDEL` (6.2+; every
+ * Valkey) — and is required: a read followed by a delete lets two concurrent
+ * consumes both read the token.
  */
-type CacheClient = {
+type TokenCacheClient = {
     set(key: string, value: string, ...args: any[]): Promise<any>;
-    getdel?(key: string): Promise<string | null>;
-    get(key: string): Promise<string | null>;
-    del(...keys: string[]): Promise<number>;
+    getdel(key: string): Promise<string | null>;
 };
 
 // ============================================================================
@@ -97,7 +98,10 @@ export interface SSETokenStore
     /** Store a token */
     set(token: string, data: SSEToken): Promise<void>;
 
-    /** Get and delete a token (one-time use) */
+    /**
+     * Take a token out (one-time use). Atomic: of concurrent consumes of one
+     * token, exactly one answers it — never a read and a separate delete.
+     */
     consume(token: string): Promise<SSEToken | null>;
 
     /** Remove expired tokens */
@@ -149,6 +153,7 @@ class InMemoryTokenStore implements SSETokenStore
         this.tokens.set(hashToken(token), data);
     }
 
+    /** The read and the delete are one synchronous step — no `await` between them — so it is atomic. */
     async consume(token: string): Promise<SSEToken | null>
     {
         const key = hashToken(token);
@@ -184,8 +189,13 @@ class InMemoryTokenStore implements SSETokenStore
 /**
  * Redis/Valkey-backed token store for multi-instance deployments.
  *
- * Uses SET EX for automatic TTL expiry and GETDEL for atomic one-time consumption.
- * No cleanup needed — Redis handles expiration automatically.
+ * Uses SET EX for automatic TTL expiry and GETDEL for atomic one-time consumption:
+ * of two concurrent consumes of one token, exactly one gets it. Needs Redis 6.2+
+ * or Valkey; on an older server GETDEL fails, so the consume throws and the
+ * token is never accepted. No cleanup needed — Redis handles expiration automatically.
+ *
+ * @throws Error at construction when the client offers no `getdel` — a store
+ *   that could only read and then delete is refused, never raced.
  *
  * @example
  * ```typescript
@@ -202,8 +212,16 @@ export class CacheTokenStore implements SSETokenStore
 {
     private prefix = 'sse:token:';
 
-    constructor(private cache: CacheClient) 
-    {}
+    constructor(private cache: TokenCacheClient)
+    {
+        if (typeof cache?.getdel !== 'function')
+        {
+            throw new Error(
+                'CacheTokenStore needs a cache client with getdel() (Redis GETDEL, 6.2+, or Valkey) ' +
+                'to consume a token exactly once; this client has none.',
+            );
+        }
+    }
 
     async set(token: string, data: SSEToken): Promise<void>
     {
@@ -218,30 +236,9 @@ export class CacheTokenStore implements SSETokenStore
 
     async consume(token: string): Promise<SSEToken | null>
     {
-        const key = this.prefix + hashToken(token);
+        const raw = await this.cache.getdel(this.prefix + hashToken(token));
 
-        // GETDEL (Redis 6.2+) for atomic consume, fallback to GET+DEL
-        let raw: string | null = null;
-
-        if (this.cache.getdel)
-        {
-            raw = await this.cache.getdel(key);
-        }
-        else
-        {
-            raw = await this.cache.get(key);
-            if (raw)
-            {
-                await this.cache.del(key);
-            }
-        }
-
-        if (!raw)
-        {
-            return null;
-        }
-
-        return JSON.parse(raw) as SSEToken;
+        return raw ? JSON.parse(raw) as SSEToken : null;
     }
 
     async cleanup(): Promise<void>

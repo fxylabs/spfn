@@ -273,7 +273,7 @@ describe('auth profile branch (case table G)', () =>
         {
             vi.mocked(decodeToken).mockReturnValue({ keyId: TEST_KEY_ID } as never);
             vi.mocked(keysRepository.findWithAccountEpochOnPrimary).mockResolvedValue(validKeyRecord() as never);
-            vi.mocked(verifyClientToken).mockReturnValue({ keyId: TEST_KEY_ID } as never);
+            vi.mocked(verifyClientToken).mockReturnValue({ payload: { keyId: TEST_KEY_ID } } as never);
 
             const driven = contextFor({ headers: { Authorization: 'Bearer valid-token' } });
             expect(await run(authenticate, driven)).toBeNull();
@@ -287,7 +287,7 @@ describe('auth profile branch (case table G)', () =>
         {
             vi.mocked(decodeToken).mockReturnValue({ keyId: TEST_KEY_ID } as never);
             vi.mocked(keysRepository.findWithAccountEpochOnPrimary).mockResolvedValue(validKeyRecord() as never);
-            vi.mocked(verifyClientToken).mockReturnValue({ keyId: TEST_KEY_ID } as never);
+            vi.mocked(verifyClientToken).mockReturnValue({ payload: { keyId: TEST_KEY_ID } } as never);
 
             const driven = contextFor({ headers: { Authorization: 'Bearer valid-token' } });
             expect(await run(optionalAuth, driven)).toBeNull();
@@ -304,7 +304,7 @@ describe('auth profile branch (case table G)', () =>
             vi.mocked(keysRepository.findWithAccountEpochOnPrimary).mockResolvedValue(
                 validKeyRecord({ keyEpoch: 0, accountKeyEpoch: 1 }) as never,
             );
-            vi.mocked(verifyClientToken).mockReturnValue({ keyId: TEST_KEY_ID } as never);
+            vi.mocked(verifyClientToken).mockReturnValue({ payload: { keyId: TEST_KEY_ID } } as never);
         });
 
         it('authenticate: the revoked-key 401, before the signature is checked', async () =>
@@ -557,7 +557,7 @@ describe('auth profile branch (case table G)', () =>
         {
             vi.mocked(decodeToken).mockReturnValue({ keyId: TEST_KEY_ID } as never);
             vi.mocked(keysRepository.findWithAccountEpochOnPrimary).mockResolvedValue(validKeyRecord() as never);
-            vi.mocked(verifyClientToken).mockReturnValue({ keyId: TEST_KEY_ID } as never);
+            vi.mocked(verifyClientToken).mockReturnValue({ payload: { keyId: TEST_KEY_ID } } as never);
 
             const driven = contextFor({ headers: { Authorization: 'Bearer valid-token' } });
             expect(await run(optionalAuth, driven)).toBeNull();

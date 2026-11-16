@@ -21,28 +21,12 @@ class FakeCache
         this.store.set(key, value);
     }
 
-    async get(key: string): Promise<string | null>
-    {
-        return this.store.get(key) ?? null;
-    }
-
     async getdel(key: string): Promise<string | null>
     {
         const v = this.store.get(key) ?? null;
         this.store.delete(key);
 
         return v;
-    }
-
-    async del(...keys: string[]): Promise<number>
-    {
-        let n = 0;
-        for (const k of keys)
-        {
-            if (this.store.delete(k)) n++;
-        }
-
-        return n;
     }
 }
 

@@ -16,12 +16,14 @@
  * so a call the app made is never lost to that window.
  *
  * Connections are also indexed by the device key their token was minted with,
- * so `closeByKey` ends every stream of a revoked key. A close that lands on a
- * pending admission of that key is recorded the same way, and the connection
- * never opens.
+ * in the streams-by-key index both transports share (`../key-close`), so a
+ * key close ends every stream of a revoked key. A close that lands on a
+ * pending admission of that key is recorded there, and the connection never
+ * opens.
  */
 
 import { logger } from '@spfn/core/logger';
+import { createStreamsByKey, KEY_REVOKED } from '../key-close';
 import type { SubscribeRequest, SubscriptionMatch } from '../types';
 
 const registryLogger = logger.child('@spfn/core:sse');
@@ -67,10 +69,7 @@ export type ConnectionRegistry = ReturnType<typeof createConnectionRegistry>;
 type SubscriptionChange = 'grant' | 'revoke';
 
 /** Why a pending admission does not open: the client left, or its key was revoked meanwhile. */
-export type AdmissionRefusal = 'aborted during admission' | 'key revoked';
-
-/** The reason `closeByKey` closes a connection with. */
-const KEY_REVOKED = 'key revoked';
+export type AdmissionRefusal = 'aborted during admission' | typeof KEY_REVOKED;
 
 /**
  * A connect of one subject between its first app-data read and its open.
@@ -90,10 +89,8 @@ export interface PendingAdmission
     readonly cancel: () => void;
 }
 
-/** One `grant` / `revoke` recorded on a pending admission, or a close of its key. */
-type RecordedChange =
-    | { kind: SubscriptionChange; eventName: string; match?: SubscriptionMatch }
-    | { kind: 'close' };
+/** One `grant` / `revoke` recorded on a pending admission. */
+type RecordedChange = { kind: SubscriptionChange; eventName: string; match?: SubscriptionMatch };
 
 /** The changes recorded on one pending admission, in call order (the last one wins). */
 type RecordedChanges = RecordedChange[];
@@ -105,9 +102,8 @@ type RecordedChanges = RecordedChange[];
 export function createConnectionRegistry()
 {
     const bySubject = new Map<string, Set<SSEConnection>>();
-    const byKey = new Map<string, Set<SSEConnection>>();
+    const byKey = createStreamsByKey();
     const pendingBySubject = new Map<string, Set<RecordedChanges>>();
-    const pendingByKey = new Map<string, Set<RecordedChanges>>();
 
     /**
      * Register a pending admission of `subject` (its token minted with
@@ -117,12 +113,12 @@ export function createConnectionRegistry()
     const beginAdmission = (subject: string, keyId: string | undefined, signal: AbortSignal): PendingAdmission =>
     {
         const changes: RecordedChanges = [];
+        const keyAdmission = byKey.beginAdmission(keyId);
         addToSet(pendingBySubject, subject, changes);
-        addToOptionalSet(pendingByKey, keyId, changes);
         const end = endOnce(signal, () =>
         {
             removeFromSet(pendingBySubject, subject, changes);
-            removeFromOptionalSet(pendingByKey, keyId, changes);
+            keyAdmission.end();
         });
 
         return {
@@ -134,14 +130,14 @@ export function createConnectionRegistry()
                     return 'aborted during admission';
                 }
 
-                if (changes.some(change => change.kind === 'close'))
+                if (keyAdmission.closed())
                 {
                     return KEY_REVOKED;
                 }
 
                 applyRecorded(connection, changes);
                 addToSet(bySubject, subject, connection);
-                addToOptionalSet(byKey, connection.keyId, connection);
+                byKey.add(connection.keyId, connection);
 
                 return null;
             },
@@ -170,23 +166,8 @@ export function createConnectionRegistry()
         }
     };
 
-    /**
-     * Close every open connection whose token was minted with `keyId`, and
-     * record the close on its pending admissions; answers how many open ones
-     * it closed. Iterates a copy: each close removes its connection.
-     */
-    const closeByKey = (keyId: string): number =>
-    {
-        const connections = [...byKey.get(keyId) ?? []];
-        pendingByKey.get(keyId)?.forEach(changes => changes.push({ kind: 'close' }));
-        connections.forEach(connection => connection.close(KEY_REVOKED));
-
-        return connections.length;
-    };
-
     return {
         beginAdmission,
-        closeByKey,
 
         remove: (connection: SSEConnection): void =>
         {
@@ -195,14 +176,14 @@ export function createConnectionRegistry()
                 removeFromSet(bySubject, connection.subject, connection);
             }
 
-            removeFromOptionalSet(byKey, connection.keyId, connection);
+            byKey.remove(connection.keyId, connection);
         },
 
         /** Open connections only — a pending admission is not counted. */
         count: (subject: string): number => bySubject.get(subject)?.size ?? 0,
 
         /** Open connections whose token was minted with `keyId`. */
-        countByKey: (keyId: string): number => byKey.get(keyId)?.size ?? 0,
+        countByKey: (keyId: string): number => byKey.countByKey(keyId),
 
         pendingCount: (subject: string): number => pendingBySubject.get(subject)?.size ?? 0,
 
@@ -253,23 +234,6 @@ function addToSet<T>(map: Map<string, Set<T>>, key: string, value: T): void
     map.set(key, set);
 }
 
-/** `addToSet` under a key that may be absent (an untagged token): absent → not indexed. */
-function addToOptionalSet<T>(map: Map<string, Set<T>>, key: string | undefined, value: T): void
-{
-    if (key)
-    {
-        addToSet(map, key, value);
-    }
-}
-
-function removeFromOptionalSet<T>(map: Map<string, Set<T>>, key: string | undefined, value: T): void
-{
-    if (key)
-    {
-        removeFromSet(map, key, value);
-    }
-}
-
 /** Remove `value` and drop the key once its set is empty, so neither map grows on reconnects. */
 function removeFromSet<T>(map: Map<string, Set<T>>, key: string, value: T): void
 {
@@ -303,7 +267,7 @@ function applyRecorded(connection: SSEConnection, changes: RecordedChanges): voi
 {
     changes.forEach((change) =>
     {
-        if (change.kind === 'close' || !matchesRequest(change.match, connection.request))
+        if (!matchesRequest(change.match, connection.request))
         {
             return;
         }

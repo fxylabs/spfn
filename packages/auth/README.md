@@ -906,6 +906,39 @@ backend carries an `X-Forwarded-For` naming the client, which the spfn proxy doe
 declare the hops (`SERVER_TRUSTED_PROXY_HOPS`). This release does not change the default. See
 *Client address* in the `@spfn/core/middleware` README.
 
+### Migration — a request token lives at most 15 minutes, and an expired one says so
+
+**BREAKING** (au9-N9). A Bearer request token — the JWT a device signs with its key, `iss`
+`spfn-client` — was valid for as long as its key when it carried no `exp`: `jwt.verify` checks
+`exp` only when it is there. And an expired token was answered as an invalid one, so a client
+could not tell "sign a new token" from "sign in again".
+
+- **A request token must carry `exp` and `iat`, `iat` at most 60 seconds ahead of the server's
+  clock, and `exp − iat` at most 15 minutes** (`REQUEST_TOKEN_MAX_LIFETIME_SECONDS`, 900). Every
+  first-party signer already signs for 15 minutes — the Next.js interceptors and
+  `generateClientToken`'s default. A token without `exp` or `iat`, or signed for longer, answers
+  **401 `InvalidTokenError`**.
+- **The signer's clock may differ from the server's by 60 seconds**
+  (`REQUEST_TOKEN_CLOCK_SKEW_SECONDS`, the conventional JWT leeway): the Next.js signer runs on
+  another host. The allowance applies to every comparison with the server's clock — `iat`, `exp`
+  and `nbf` — and not to `exp − iat`, which compares the token with itself. Because it applies at
+  both ends, the server accepts a token from `iat − 60` until (not including) `exp + 60` by its own
+  clock: a window of at most 900 + 2 × 60 = 1020 seconds (17 minutes). A signer whose clock runs
+  more than 60 seconds ahead is refused.
+- **An expired token answers 401 `TokenExpiredError`** (it answered `UnauthorizedError`
+  "Authentication failed"): sign a new token with the same key. A forged, malformed or
+  wrong-issuer token answers `InvalidTokenError`; a key past its `expiresAt` still answers
+  `KeyExpiredError`. `optionalAuth` continues anonymously on any of them, as before.
+- **`verifyClientToken` answers a typed outcome instead of throwing**:
+  `{ payload } | { refused: 'token-expired' | 'bad-signature' | 'malformed' |
+  'wrong-issuer-or-algorithm' | 'bad-lifetime' }` (`ClientTokenOutcome`). Code that called it
+  inside a `try` must switch on `refused` instead.
+- **Who must change:** a client that signs request tokens itself — `generateClientToken` with an
+  `expiresIn` above `'15m'`, or its own JWT library without `exp` — must sign for at most 15
+  minutes. Native clients on the mobile contract sign `clientProofV1` proofs, not these tokens,
+  and are not affected. The legacy server-signed `generateToken` / `verifyToken` pair is
+  unchanged; no route calls it.
+
 ### Migration — every character of a password counts
 
 **Behaviour change** (au9-N5). bcrypt reads at most 72 bytes of its input, and the password
@@ -1890,15 +1923,16 @@ await authApi.revokeAllKeys.call({ body: { includeCurrent: true } });   // every
 - **Revocation closes the key's live streams, after commit.** Every path that revokes a key —
   `revokeKey`, `revokeAllKeys`, `logout`, a password change or reset, an account deletion request,
   the sign-out-everywhere link, and the replacements (rotation, session renewal, a re-login whose
-  `replacementProof` the old key signed) — ends in the keys repository, which calls `closeSSEConnectionsByKey` from
-  `@spfn/core/event/sse` for each revoked key once the transaction commits (at once outside one;
-  never after a rollback). The SSE streams that key opened close on every pod, and a token it
+  `replacementProof` the old key signed) — ends in the keys repository, which calls `closeConnectionsByKey` from
+  `@spfn/core/event` for each revoked key once the transaction commits (at once outside one;
+  never after a rollback). The SSE streams and WebSockets that key opened close on every pod (a
+  socket with code `1008`, reason `Key revoked`), and a token it
   minted before the revocation is refused at open: every one-time token is issued tagged with
   the key that asked for it (`/_auth/tokens`, and the core SSE and WS token endpoints), and the
   token manager admits its subject on that key (`admitPrincipal` — key live, account active,
   read on the primary) when the token is consumed. A device whose key was
   replaced reconnects with the new one; a signed-out device's token mint answers 401 and its
-  client stops. An app that shares the manager with `.events()`
+  client stops. An app that shares the manager with `.events()` or `.websockets()`
   (`tokenManager: () => getOneTimeTokenManager()`) gets this with no change. A failed close is
   logged by count and never fails the revocation.
 - **`includeRevoked: true` shows what was already cut off**, with `revokedAt`. The default is only

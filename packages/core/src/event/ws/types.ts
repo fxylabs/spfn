@@ -79,10 +79,10 @@ export interface WSHandlerAuthConfig
     getSubject?: (c: Context) => string | null;
 
     /**
-     * Extract the device key the token is minted for, so that a token minted
-     * by a key revoked before the connect is refused at the connect
-     * (`SSETokenManagerConfig.verifyKey`). Empty, `null` or `undefined` → an
-     * untagged token, which no key check reaches.
+     * Extract the device key the token is minted for, so that revoking the key
+     * closes the sockets it opened (`closeConnectionsByKey`) and refuses a
+     * token minted before the revocation (`SSETokenManagerConfig.verifyKey`).
+     * Empty, `null` or `undefined` → an untagged token, never closed by key.
      * @default (c) => c.get('auth')?.keyId
      */
     getKeyId?: (c: Context) => string | null | undefined;
@@ -199,7 +199,7 @@ export interface WSHandlerConfig
      * browser sends Origin on the upgrade, so this blocks cross-site scripts from
      * connecting with the user's ambient cookies (WebSocket has no same-origin
      * policy / CORS of its own). Connections whose Origin isn't listed are closed
-     * with 1008. Undefined/empty = no Origin check (default; non-browser clients
+     * with 1008 `Origin not allowed`, which `createWSClient` does not retry. Undefined/empty = no Origin check (default; non-browser clients
      * such as native apps send no Origin and are always allowed).
      *
      * @example ['https://app.example.com', 'https://admin.example.com']
@@ -253,7 +253,9 @@ export interface WSClientConfig
     maxReconnectAttempts?: number;
 
     /**
-     * Acquire a one-time token before connecting
+     * Acquire a one-time token before connecting. A rejection whose
+     * `statusCode` or `status` is 401 or 403 closes the subscriptions
+     * (`onClose('unauthorized')`) instead of reconnecting.
      */
     acquireToken?: () => Promise<string>;
 }
@@ -283,7 +285,19 @@ export interface WSSubscribeOptions<TRouter extends WSRouterDef<any, any>>
     handlers: WSEventHandlers<TRouter>;
     onOpen?: () => void;
     onError?: (error: Event) => void;
-    onClose?: () => void;
+
+    /**
+     * Called when the subscription is closed for good: `unsubscribe()`,
+     * `client.close()`, reconnects exhausted, the server closed the socket
+     * `1008 Origin not allowed` (the allow-list does not change between
+     * retries; logged with `console.error`), or — reason `'unauthorized'` —
+     * the server closed it `1008 Key revoked` or `acquireToken` rejected with
+     * a 401 (`statusCode` or `status`): the session that minted tokens is
+     * gone. The client then stops instead of reconnecting. Any other close or
+     * rejection, a 403 included, is retried after `reconnectDelay`, as the SSE
+     * client does.
+     */
+    onClose?: (reason?: 'unauthorized') => void;
     onReconnect?: (attempt: number) => void;
 }
 

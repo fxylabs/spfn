@@ -209,7 +209,7 @@ describe('registerAuthProfile — the dispatch around a registered verifier', ()
         {
             vi.mocked(decodeToken).mockReturnValue({ keyId: TEST_KEY_ID } as never);
             vi.mocked(keysRepository.findWithAccountEpochOnPrimary).mockResolvedValue(validKeyRecord() as never);
-            vi.mocked(verifyClientToken).mockReturnValue({ keyId: TEST_KEY_ID } as never);
+            vi.mocked(verifyClientToken).mockReturnValue({ payload: { keyId: TEST_KEY_ID } } as never);
         });
 
         it('1 authenticate: a Bearer token still authenticates with scheme bearer', async () =>

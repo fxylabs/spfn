@@ -238,7 +238,7 @@ describe('a bound session renewing through the matching interceptor chain (#99)'
             'ES256',
         );
 
-        expect(proof.keyId).toBe(sent.keyId);
+        expect(proof).toMatchObject({ payload: { keyId: sent.keyId } });
 
         // And the binding survives, so the renewed session is still a bound one.
         expect(session.binding).toBe('passkey');
@@ -290,7 +290,7 @@ describe('a bound session renewing through the matching interceptor chain (#99)'
         // The backend's own check, run here: the bearer verifies against the
         // public key that was registered for the replacement.
         const bearer = nextCtx.headers['Authorization'].replace('Bearer ', '');
-        expect(verifyClientToken(bearer, sent.publicKey, 'ES256').keyId).toBe(sent.keyId);
+        expect(verifyClientToken(bearer, sent.publicKey, 'ES256')).toMatchObject({ payload: { keyId: sent.keyId } });
     });
 
     it('a cookie within a day of its own expiry is not re-sealed over the replacement', async () =>

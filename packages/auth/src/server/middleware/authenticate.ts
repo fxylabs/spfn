@@ -25,8 +25,8 @@ import { defineMiddleware } from '@spfn/core/route';
 import { getClientIp } from '@spfn/core/middleware';
 import { UnauthorizedError } from '@spfn/core/errors';
 
-import type { KeyAlgorithmType } from '@spfn/auth/server';
-import { verifyClientToken, decodeToken, authLogger, keysRepository } from '@spfn/auth/server';
+import type { ClientTokenRefusal, KeyAlgorithmType } from '@spfn/auth/server';
+import { verifyClientToken, decodeToken, authLogger, keysRepository, REQUEST_TOKEN_MAX_LIFETIME_SECONDS, REQUEST_TOKEN_CLOCK_SKEW_SECONDS } from '@spfn/auth/server';
 import {
     InvalidTokenError,
     TokenExpiredError,
@@ -80,9 +80,7 @@ export type BearerRefusal =
     | 'undecodable'
     | 'unknown'
     | 'expired'
-    | 'token-expired'
-    | 'bad-signature'
-    | 'unverifiable';
+    | ClientTokenRefusal;
 
 /** What a Bearer credential resolved to: the key row it named, or why not. */
 export type BearerOutcome = { key: UserPublicKey } | { refused: BearerRefusal };
@@ -161,39 +159,25 @@ export async function admitBearerKey(
 }
 
 /**
- * The signature check, as an outcome rather than an exception.
- *
- * Three refusals rather than one because `authenticate` has always answered
- * three different things here — a 15-minute token that ran out is not a forged
- * one, and neither is a verifier that failed for a third reason.
+ * The token check — signature, issuer, algorithm, expiry and lifetime — as
+ * the verifier's typed outcome. A token that ran out is told apart from every
+ * other refusal: its client signs a new one, it does not sign in again.
  */
 function signatureOutcome(token: string, key: UserPublicKey): BearerOutcome
 {
-    try
-    {
-        verifyClientToken(
-            token,
-            key.publicKey,
-            key.algorithm as KeyAlgorithmType, // entity.algorithm is always defined
-        );
-    }
-    catch (err)
-    {
-        const name = err instanceof Error ? err.name : '';
+    const verified = verifyClientToken(
+        token,
+        key.publicKey,
+        key.algorithm as KeyAlgorithmType, // entity.algorithm is always defined
+    );
 
-        if (name === 'TokenExpiredError')
-        {
-            return { refused: 'token-expired' };
-        }
-
-        return { refused: name === 'JsonWebTokenError' ? 'bad-signature' : 'unverifiable' };
-    }
-
-    return { key };
+    return 'refused' in verified ? verified : { key };
 }
 
 /**
- * The error `authenticate` answers each refusal with — unchanged, one per step.
+ * The error `authenticate` answers each refusal with, one per step. A token
+ * that ran out answers `TokenExpiredError` — sign a new one — and every other
+ * token refusal `InvalidTokenError`.
  *
  * `machine` and `undecodable` deliberately share a message: on this middleware
  * that makes the machine registry invisible (see INVALID_TOKEN_MESSAGE).
@@ -223,8 +207,14 @@ function bearerRefusal(c: Context, refused: BearerRefusal): Error
             return new TokenExpiredError();
         case 'bad-signature':
             return new InvalidTokenError({ message: 'Invalid token signature' });
-        default:
-            return new UnauthorizedError({ message: 'Authentication failed' });
+        case 'malformed':
+        case 'wrong-issuer-or-algorithm':
+            return new InvalidTokenError();
+        case 'bad-lifetime':
+            return new InvalidTokenError({
+                message: `Token must carry exp and iat, iat at most ${REQUEST_TOKEN_CLOCK_SKEW_SECONDS} seconds ahead, `
+                    + `and live at most ${REQUEST_TOKEN_MAX_LIFETIME_SECONDS / 60} minutes`,
+            });
     }
 }
 
@@ -444,19 +434,15 @@ export const optionalAuth = defineMiddleware('optionalAuth', async (c, next) =>
         // key past its window: this middleware's whole posture is that an
         // unusable credential is the same as none, and a route that works
         // signed-out must go on working. The renewal prompt belongs to the proxy
-        // and to the routes that do require a principal.
-        if (!keyRecord || keyLiveness(keyRecord) !== 'live')
+        // and to the routes that do require a principal. An unusable token —
+        // expired, forged, too long-lived — is the same.
+        if (!keyRecord || keyLiveness(keyRecord) !== 'live'
+            || 'refused' in verifyClientToken(token, keyRecord.publicKey, keyRecord.algorithm as KeyAlgorithmType))
         {
             await next();
 
             return undefined;
         }
-
-        verifyClientToken(
-            token,
-            keyRecord.publicKey,
-            keyRecord.algorithm as KeyAlgorithmType,
-        );
 
         // The admission `authenticate` asks, through the one function that
         // answers it. A refusal — an account that is not active, a key that

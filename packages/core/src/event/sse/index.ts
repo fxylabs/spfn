@@ -36,9 +36,6 @@ export { createSSEHandler } from './handler';
 export { SSETokenManager, CacheTokenStore } from './token-manager';
 export type { SSEToken, SSETokenStore, SSETokenManagerConfig, SSEKeyVerifier } from './token-manager';
 
-// Close the streams of a revoked device key (this pod and, with a cache, every pod)
-export { closeSSEConnectionsByKey } from './close-by-key';
-
 // Types
 export type {
     SSEMessage,

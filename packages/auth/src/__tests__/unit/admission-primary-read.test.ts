@@ -55,7 +55,7 @@ vi.mock('../../server/services/role-email-domain.service', () => roles);
 vi.mock('@spfn/auth/server', async (importOriginal) => ({
     ...(await importOriginal<typeof import('@spfn/auth/server')>()),
     decodeToken: vi.fn(() => ({ keyId: KEY_ID })),
-    verifyClientToken: vi.fn(() => ({ keyId: KEY_ID })),
+    verifyClientToken: vi.fn(() => ({ payload: { keyId: KEY_ID } })),
     keysRepository: bearerKeys,
 }));
 

@@ -10,7 +10,7 @@ import { users } from '../entities/users';
 import { mfaChallenges } from '../entities/mfa-challenges';
 import type { ClientIdentity } from '../client-proof/wire-version';
 import { onAfterCommit } from '@spfn/core/db';
-import { closeSSEConnectionsByKey } from '@spfn/core/event/sse';
+import { closeConnectionsByKey } from '@spfn/core/event';
 import { eq, and, or, isNull, lt, desc, sql, getTableColumns } from 'drizzle-orm';
 import { getConcurrentUseWindowMs } from '../lib/config';
 import { authLogger } from '../logger';
@@ -37,7 +37,7 @@ export interface RevokedKey
 }
 
 /**
- * Close the SSE streams each revoked key opened, once the revocation commits —
+ * Close the streams (SSE and WebSocket) each revoked key opened, once the revocation commits —
  * at once outside a transaction, never after a rollback. Every revocation ends
  * in one of the two statements below, so no revoke path can forget it. A
  * failed close is logged by count and never reaches the caller or the other
@@ -45,9 +45,9 @@ export interface RevokedKey
  */
 function closeStreamsAfterCommit(keyIds: string[]): void
 {
-    keyIds.forEach(keyId => onAfterCommit(() => closeSSEConnectionsByKey(keyId).catch(() =>
+    keyIds.forEach(keyId => onAfterCommit(() => closeConnectionsByKey(keyId).catch(() =>
     {
-        authLogger.session.warn('SSE streams of a revoked key could not be closed', { count: 1 });
+        authLogger.session.warn('Streams of a revoked key could not be closed', { count: 1 });
     })));
 }
 

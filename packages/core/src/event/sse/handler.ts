@@ -20,6 +20,7 @@ import type { Context } from 'hono';
 import { streamSSE } from 'hono/streaming';
 import type { SSEStreamingApi } from 'hono/streaming';
 import { logger } from '@spfn/core/logger';
+import { getClientIp } from '@spfn/core/middleware';
 import type { EventRouterDef } from '../router';
 import type { EventDef, SubscribeContext, SubscribeRequest, SubscriptionMatch } from '../types';
 import type { SSEHandlerConfig, SSEHandlerAuthConfig } from './types';
@@ -27,7 +28,6 @@ import type { SSEToken, SSETokenManager } from './token-manager';
 import { createBoundedWriter } from './bounded-writer';
 import type { BoundedWriter } from './bounded-writer';
 import { createConnectionRegistry, unsubscribeAll } from './connection-registry';
-import { registerKeyCloseRegistry } from './key-close';
 import type { ConnectionRegistry, PendingAdmission, SSEConnection } from './connection-registry';
 
 const sseLogger = logger.child('@spfn/core:sse');
@@ -116,7 +116,6 @@ export function createSSEHandler<TRouter extends EventRouterDef<any>>(
 
     const registry = createConnectionRegistry();
     registerSubscriptionControls(router, registry);
-    registerKeyCloseRegistry(registry);
 
     const streamConfig: StreamConfig = { router, authConfig, registry, pingInterval, maxQueue };
 
@@ -371,7 +370,7 @@ async function authorizeConnection(
         events: allowed,
         deniedEvents: denied,
         subject: subject || undefined,
-        clientIp: c.req.header('x-forwarded-for') || c.req.header('x-real-ip'),
+        clientIp: getClientIp(c),
     });
 
     return { subject, requested, allowed, denied, request, principal: resolved.principal };

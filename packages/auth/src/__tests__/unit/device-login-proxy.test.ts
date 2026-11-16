@@ -286,7 +286,7 @@ describe('a browser as the new device: the proxy makes the key and seals the app
             const pending = await unsealPendingDeviceSession(lastWrite(responseCtx.setCookies, COOKIE_NAMES.DEVICE_PENDING)!.value);
             const token = generateClientToken({ keyId: pending.keyId }, pending.privateKey, pending.algorithm, { expiresIn: '5m' });
 
-            expect(verifyClientToken(token, sent.publicKey as string, 'ES256').keyId).toBe(sent.keyId);
+            expect(verifyClientToken(token, sent.publicKey as string, 'ES256')).toMatchObject({ payload: { keyId: sent.keyId } });
         });
 
         it('A2 overwrites a key and a platform the page sent with its own', async () =>

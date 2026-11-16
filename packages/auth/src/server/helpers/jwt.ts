@@ -126,70 +126,129 @@ export function verifyToken(token: string): TokenPayload
     return jwt.verify(token, getJwtSecret(), { algorithms: ['HS256'] }) as TokenPayload;
 }
 
+/** The issuer every client-signed request token carries. */
+const CLIENT_TOKEN_ISSUER = 'spfn-client';
+
 /**
- * Verify client-signed JWT token with public key (DER format)
+ * The longest a request token may live, `exp − iat`, in seconds: 15 minutes,
+ * what every first-party signer signs for (the Next.js interceptors and
+ * `generateClientToken`). A token without `exp` and `iat`, or signed for
+ * longer, is refused — it would be replayable for as long as its key lives.
+ */
+export const REQUEST_TOKEN_MAX_LIFETIME_SECONDS = 15 * 60;
+
+/**
+ * How far apart, in seconds, the signer's clock and the server's may be: 60,
+ * the conventional JWT leeway. A first-party signer runs on another host (the
+ * Next.js server), whose clock is never exactly the server's. It applies to
+ * every comparison of a token claim with the server's clock — `iat` at most
+ * `now + 60`, `exp` and `nbf` through `jwt.verify`'s `clockTolerance` — and
+ * not to `exp − iat`, which compares the token with itself. Applied at both
+ * ends, it makes the server accept a token from `iat − 60` until (not
+ * including) `exp + 60` by its own clock: a window of at most
+ * `REQUEST_TOKEN_MAX_LIFETIME_SECONDS + 2 × 60` = 1020 seconds.
+ */
+export const REQUEST_TOKEN_CLOCK_SKEW_SECONDS = 60;
+
+/**
+ * Why a client-signed request token was refused:
+ * - `token-expired` — signed by the key, past its `exp`: sign a new token;
+ * - `bad-signature` — not signed by this key (or refused by a claim check);
+ * - `malformed` — not a JWT with an object payload;
+ * - `wrong-issuer-or-algorithm` — `iss` is not `spfn-client`, or `alg` is not the key's;
+ * - `bad-lifetime` — `exp` or `iat` missing, `iat` more than
+ *   {@link REQUEST_TOKEN_CLOCK_SKEW_SECONDS} ahead of the server's clock, or
+ *   `exp − iat` above {@link REQUEST_TOKEN_MAX_LIFETIME_SECONDS}.
+ */
+export type ClientTokenRefusal =
+    | 'token-expired'
+    | 'bad-signature'
+    | 'malformed'
+    | 'wrong-issuer-or-algorithm'
+    | 'bad-lifetime';
+
+/** What verifying a client-signed request token answers: its payload, or why not. */
+export type ClientTokenOutcome = { payload: TokenPayload } | { refused: ClientTokenRefusal };
+
+/**
+ * Verify a client-signed request token with the key's public key (Base64 DER, SPKI)
  *
- * Flow:
- * 1. Decode Base64 DER to Buffer
- * 2. Create KeyObject from DER
- * 3. Verify JWT signature with public key
- * 4. Validate issuer claim
+ * Answers a typed outcome rather than throwing, so every caller switches on
+ * why a token was refused. Checked in order: the shape, the issuer and
+ * algorithm, the signature and expiry, then the lifetime. Every comparison
+ * with the server's clock allows {@link REQUEST_TOKEN_CLOCK_SKEW_SECONDS}.
  *
  * @param token - JWT token signed by client's private key
  * @param publicKeyB64 - Base64 encoded DER public key (SPKI format)
  * @param algorithm - Algorithm used for signing (ES256 or RS256)
- * @returns Decoded token payload
- * @throws Error if verification fails
  *
  * @example
  * ```typescript
- * const payload = verifyClientToken(
- *     token,
- *     'MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE...',
- *     'ES256'
- * );
+ * const outcome = verifyClientToken(token, 'MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE...', 'ES256');
+ * if ('refused' in outcome) { ... }
  * ```
  */
 export function verifyClientToken(
     token: string,
     publicKeyB64: string,
     algorithm: KeyAlgorithmType,
-): TokenPayload
+): ClientTokenOutcome
 {
-    // Parse (or reuse a cached) key object from the Base64 DER
-    const publicKeyObject = getPublicKeyObject(publicKeyB64);
+    const decoded = jwt.decode(token, { complete: true });
 
-    let decoded;
+    if (!decoded || typeof decoded.payload !== 'object' || decoded.payload === null)
+    {
+        return { refused: 'malformed' };
+    }
 
+    if (decoded.header.alg !== algorithm || decoded.payload.iss !== CLIENT_TOKEN_ISSUER)
+    {
+        return { refused: 'wrong-issuer-or-algorithm' };
+    }
+
+    const refused = signatureRefusal(token, publicKeyB64, algorithm)
+        ?? lifetimeRefusal(decoded.payload as TokenPayload);
+
+    return refused ? { refused } : { payload: decoded.payload as TokenPayload };
+}
+
+/**
+ * The signature and `exp` check, with the algorithm and issuer pinned
+ * (algorithm confusion). `null` when both hold.
+ */
+function signatureRefusal(token: string, publicKeyB64: string, algorithm: KeyAlgorithmType): ClientTokenRefusal | null
+{
     try
     {
-        decoded = jwt.verify(token, publicKeyObject, {
-            algorithms: [algorithm],  // Prevent algorithm confusion attacks
-            issuer: 'spfn-client',    // Validate token issuer
+        jwt.verify(token, getPublicKeyObject(publicKeyB64), {
+            algorithms: [algorithm],
+            issuer: CLIENT_TOKEN_ISSUER,
+            clockTolerance: REQUEST_TOKEN_CLOCK_SKEW_SECONDS,
         });
+
+        return null;
     }
     catch (error)
     {
-        if (error instanceof jwt.TokenExpiredError)
-        {
-            throw new Error('Token has expired');
-        }
-
-        if (error instanceof jwt.JsonWebTokenError)
-        {
-            throw new Error('Invalid token signature');
-        }
-
-        throw new Error(`Token verification failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+        return error instanceof jwt.TokenExpiredError ? 'token-expired' : 'bad-signature';
     }
+}
 
-    // jwt.verify can return string, but we expect object payload
-    if (typeof decoded === 'string')
+/**
+ * `exp` and `iat` present, `iat` no further ahead of the server's clock than
+ * the skew allowance, and `exp − iat` within the maximum.
+ */
+function lifetimeRefusal(payload: TokenPayload): ClientTokenRefusal | null
+{
+    const { exp, iat } = payload;
+    const latestIssue = Math.floor(Date.now() / 1000) + REQUEST_TOKEN_CLOCK_SKEW_SECONDS;
+
+    if (typeof exp !== 'number' || typeof iat !== 'number' || iat > latestIssue)
     {
-        throw new Error('Invalid token format: expected object payload');
+        return 'bad-lifetime';
     }
 
-    return decoded as TokenPayload;
+    return exp - iat > REQUEST_TOKEN_MAX_LIFETIME_SECONDS ? 'bad-lifetime' : null;
 }
 
 /**

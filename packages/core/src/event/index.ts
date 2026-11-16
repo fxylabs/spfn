@@ -59,6 +59,9 @@ export { defineEventRouter } from './router';
 
 // WebSocket router
 export { defineWSRouter } from './ws';
+
+// Close the streams (SSE and WebSocket) of a revoked device key, on every pod
+export { closeConnectionsByKey } from './close-by-key';
 export type {
     EventRouterContract,
     EventRouterDef,

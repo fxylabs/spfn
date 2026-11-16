@@ -184,7 +184,7 @@ describe('Authenticate Middleware', () =>
             vi.mocked(decodeToken).mockReturnValue({ keyId: KEY_ID } as never);
             vi.mocked(keysRepository.findWithAccountEpochOnPrimary).mockResolvedValue(validKeyRecord() as never);
             // Signature verification passes for these tests
-            vi.mocked(verifyClientToken).mockReturnValue({ keyId: KEY_ID, iss: 'spfn-client' } as never);
+            vi.mocked(verifyClientToken).mockReturnValue({ payload: { keyId: KEY_ID, iss: 'spfn-client' } } as never);
         });
 
         it('rejects when the user is not found', async () =>
@@ -238,7 +238,7 @@ describe('Authenticate Middleware', () =>
             withBearer();
             vi.mocked(decodeToken).mockReturnValue({ keyId: KEY_ID } as never);
             vi.mocked(keysRepository.findWithAccountEpochOnPrimary).mockResolvedValue(validKeyRecord() as never);
-            vi.mocked(verifyClientToken).mockReturnValue({ keyId: KEY_ID, iss: 'spfn-client' } as never);
+            vi.mocked(verifyClientToken).mockReturnValue({ payload: { keyId: KEY_ID, iss: 'spfn-client' } } as never);
             vi.mocked(usersRepository.findByIdWithRoleAndKeyOnPrimary).mockResolvedValue(admissionRow('active', { name: 'user' }) as never);
 
             await authenticate.handler(mockContext as Context, mockNext);
@@ -262,7 +262,7 @@ describe('Authenticate Middleware', () =>
             withBearer();
             vi.mocked(decodeToken).mockReturnValue({ keyId: KEY_ID } as never);
             vi.mocked(keysRepository.findWithAccountEpochOnPrimary).mockResolvedValue(validKeyRecord() as never);
-            vi.mocked(verifyClientToken).mockReturnValue({ keyId: KEY_ID, iss: 'spfn-client' } as never);
+            vi.mocked(verifyClientToken).mockReturnValue({ payload: { keyId: KEY_ID, iss: 'spfn-client' } } as never);
             vi.mocked(usersRepository.findByIdWithRoleAndKeyOnPrimary).mockResolvedValue(admissionRow('active', { name: 'user' }) as never);
             vi.mocked(userSettingsRepository.findLocaleByUserId).mockResolvedValue(stored as never);
 
@@ -281,7 +281,7 @@ describe('Authenticate Middleware', () =>
             withBearer();
             vi.mocked(decodeToken).mockReturnValue({ keyId: KEY_ID } as never);
             vi.mocked(keysRepository.findWithAccountEpochOnPrimary).mockResolvedValue(validKeyRecord() as never);
-            vi.mocked(verifyClientToken).mockReturnValue({ keyId: KEY_ID, iss: 'spfn-client' } as never);
+            vi.mocked(verifyClientToken).mockReturnValue({ payload: { keyId: KEY_ID, iss: 'spfn-client' } } as never);
             vi.mocked(usersRepository.findByIdWithRoleAndKeyOnPrimary).mockResolvedValue(admissionRow('active', { name: 'user' }) as never);
 
             await authenticate.handler(mockContext as Context, mockNext);

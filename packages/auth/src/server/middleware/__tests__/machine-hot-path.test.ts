@@ -187,7 +187,7 @@ describe('with no machine verifier registered', () =>
     {
         vi.mocked(decodeToken).mockReturnValue({ keyId: KEY_ID } as never);
         vi.mocked(keysRepository.findWithAccountEpochOnPrimary).mockResolvedValue(validKeyRecord() as never);
-        vi.mocked(verifyClientToken).mockReturnValue({ keyId: KEY_ID } as never);
+        vi.mocked(verifyClientToken).mockReturnValue({ payload: { keyId: KEY_ID } } as never);
         const driven = contextFor({ Authorization: 'Bearer user-token' });
 
         expect(await run(authenticate, driven)).toBeNull();

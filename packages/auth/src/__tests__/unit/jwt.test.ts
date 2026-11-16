@@ -13,9 +13,19 @@ import {
     decodeToken,
     generateToken,
     verifyToken,
+    REQUEST_TOKEN_CLOCK_SKEW_SECONDS,
 } from '@/server/helpers/jwt';
+import type { ClientTokenOutcome, TokenPayload } from '@/server/helpers/jwt';
 import { generateKeyPair, generateClientToken } from '@/server/lib/crypto';
 import { KeyAlgorithmMismatchError } from '@spfn/auth/errors';
+
+/** The payload of a token the verifier accepted; a refusal fails the test. */
+function accepted(outcome: ClientTokenOutcome): TokenPayload
+{
+    expect(outcome).not.toHaveProperty('refused');
+
+    return (outcome as { payload: TokenPayload }).payload;
+}
 
 describe('JWT - Server-side Verification with ES256', () =>
 {
@@ -31,7 +41,7 @@ describe('JWT - Server-side Verification with ES256', () =>
 
         const token = generateClientToken(payload, privateKey, algorithm);
 
-        const decoded = verifyClientToken(token, publicKey, algorithm);
+        const decoded = accepted(verifyClientToken(token, publicKey, algorithm));
 
         expect(decoded.userId).toBe('12345');
         expect(decoded.action).toBe('test');
@@ -56,10 +66,7 @@ describe('JWT - Server-side Verification with ES256', () =>
             issuer: 'wrong-issuer', // Should be 'spfn-client'
         });
 
-        expect(() =>
-        {
-            verifyClientToken(token, publicKey, algorithm);
-        }).toThrow();
+        expect(verifyClientToken(token, publicKey, algorithm)).toEqual({ refused: 'wrong-issuer-or-algorithm' });
     });
 
     it('should validate algorithm', () =>
@@ -70,10 +77,7 @@ describe('JWT - Server-side Verification with ES256', () =>
         const token = generateClientToken(payload, privateKey, 'ES256');
 
         // Try to verify with wrong algorithm
-        expect(() =>
-        {
-            verifyClientToken(token, publicKey, 'RS256');
-        }).toThrow();
+        expect(verifyClientToken(token, publicKey, 'RS256')).toEqual({ refused: 'wrong-issuer-or-algorithm' });
     });
 });
 
@@ -90,7 +94,7 @@ describe('JWT - Server-side Verification with RS256', () =>
 
         const token = generateClientToken(payload, privateKey, algorithm);
 
-        const decoded = verifyClientToken(token, publicKey, algorithm);
+        const decoded = accepted(verifyClientToken(token, publicKey, algorithm));
 
         expect(decoded.userId).toBe('67890');
         expect(decoded.keyId).toBe('key-uuid');
@@ -107,39 +111,24 @@ describe('JWT - Verification Failures', () =>
         const token = generateClientToken({ userId: '123' }, key1.privateKey, key1.algorithm);
 
         // Try to verify with different public key
-        expect(() =>
-        {
-            verifyClientToken(token, key2.publicKey, key2.algorithm);
-        }).toThrow('Invalid token signature');
+        expect(verifyClientToken(token, key2.publicKey, key2.algorithm)).toEqual({ refused: 'bad-signature' });
     });
 
-    it('should reject expired token', async () =>
+    it('should reject expired token', () =>
     {
         const { privateKey, publicKey, algorithm } = generateKeyPair('ES256');
 
-        const token = generateClientToken(
-            { userId: '123' },
-            privateKey,
-            algorithm,
-            { expiresIn: '1ms' },
-        );
+        // Expired one second longer ago than the clock-skew allowance.
+        const token = generateClientToken({ userId: '123' }, privateKey, algorithm, { expiresIn: -(REQUEST_TOKEN_CLOCK_SKEW_SECONDS + 1) });
 
-        await new Promise(resolve => setTimeout(resolve, 10));
-
-        expect(() =>
-        {
-            verifyClientToken(token, publicKey, algorithm);
-        }).toThrow('Token has expired');
+        expect(verifyClientToken(token, publicKey, algorithm)).toEqual({ refused: 'token-expired' });
     });
 
     it('should reject malformed token', () =>
     {
         const { publicKey, algorithm } = generateKeyPair('ES256');
 
-        expect(() =>
-        {
-            verifyClientToken('not.a.valid.jwt', publicKey, algorithm);
-        }).toThrow();
+        expect(verifyClientToken('not.a.valid.jwt', publicKey, algorithm)).toEqual({ refused: 'malformed' });
     });
 
     it('should reject token with tampered payload', () =>
@@ -150,23 +139,17 @@ describe('JWT - Verification Failures', () =>
 
         // Tamper with payload
         const parts = token.split('.');
-        const tamperedPayload = Buffer.from(JSON.stringify({ userId: '999' })).toString('base64url');
+        const tamperedPayload = Buffer.from(JSON.stringify({ ...decodeToken(token), userId: '999' })).toString('base64url');
         const tamperedToken = `${parts[0]}.${tamperedPayload}.${parts[2]}`;
 
-        expect(() =>
-        {
-            verifyClientToken(tamperedToken, publicKey, algorithm);
-        }).toThrow();
+        expect(verifyClientToken(tamperedToken, publicKey, algorithm)).toEqual({ refused: 'bad-signature' });
     });
 
     it('should reject token with invalid Base64 encoding', () =>
     {
         const { publicKey, algorithm } = generateKeyPair('ES256');
 
-        expect(() =>
-        {
-            verifyClientToken('invalid!!!.base64!!!.token!!!', publicKey, algorithm);
-        }).toThrow();
+        expect(verifyClientToken('invalid!!!.base64!!!.token!!!', publicKey, algorithm)).toEqual({ refused: 'malformed' });
     });
 });
 
@@ -324,10 +307,7 @@ describe('JWT - Algorithm Enforcement', () =>
         const token = generateClientToken({ userId: '123' }, es256Key.privateKey, 'ES256');
 
         // Try to verify ES256 token with RS256 algorithm
-        expect(() =>
-        {
-            verifyClientToken(token, rs256Key.publicKey, 'RS256');
-        }).toThrow();
+        expect(verifyClientToken(token, rs256Key.publicKey, 'RS256')).toEqual({ refused: 'wrong-issuer-or-algorithm' });
     });
 
     it('should enforce algorithm in token header matches expected', () =>
@@ -337,10 +317,7 @@ describe('JWT - Algorithm Enforcement', () =>
         const token = generateClientToken({ userId: '123' }, privateKey, algorithm);
 
         // Token header specifies ES256, but we try to verify with RS256
-        expect(() =>
-        {
-            verifyClientToken(token, publicKey, 'RS256');
-        }).toThrow();
+        expect(verifyClientToken(token, publicKey, 'RS256')).toEqual({ refused: 'wrong-issuer-or-algorithm' });
     });
 
     it('legacy verifyToken round-trips an HS256 server-signed token', () =>
@@ -372,7 +349,7 @@ describe('JWT - Edge Cases', () =>
         };
 
         const token = generateClientToken(largePayload, privateKey, algorithm);
-        const decoded = verifyClientToken(token, publicKey, algorithm);
+        const decoded = accepted(verifyClientToken(token, publicKey, algorithm));
 
         expect(decoded.data).toBe('x'.repeat(10000));
     });
@@ -387,7 +364,7 @@ describe('JWT - Edge Cases', () =>
         };
 
         const token = generateClientToken(payload, privateKey, algorithm);
-        const decoded = verifyClientToken(token, publicKey, algorithm);
+        const decoded = accepted(verifyClientToken(token, publicKey, algorithm));
 
         expect(decoded.message).toBe('안녕하세요 🚀 こんにちは');
     });
@@ -402,7 +379,7 @@ describe('JWT - Edge Cases', () =>
         };
 
         const token = generateClientToken(payload, privateKey, algorithm);
-        const decoded = verifyClientToken(token, publicKey, algorithm);
+        const decoded = accepted(verifyClientToken(token, publicKey, algorithm));
 
         expect(decoded.optional).toBeNull();
     });
@@ -412,7 +389,7 @@ describe('JWT - Edge Cases', () =>
         const { privateKey, publicKey, algorithm } = generateKeyPair('ES256');
 
         const token = generateClientToken({ userId: '999' }, privateKey, algorithm);
-        const decoded = verifyClientToken(token, publicKey, algorithm);
+        const decoded = accepted(verifyClientToken(token, publicKey, algorithm));
 
         expect(decoded.userId).toBe('999');
         expect(typeof decoded.userId).toBe('string');
@@ -466,8 +443,8 @@ describe('JWT - Public key cache', () =>
 
         const spy = vi.spyOn(crypto, 'createPublicKey');
 
-        const first = verifyClientToken(token, publicKey, algorithm);
-        const second = verifyClientToken(token, publicKey, algorithm);
+        const first = accepted(verifyClientToken(token, publicKey, algorithm));
+        const second = accepted(verifyClientToken(token, publicKey, algorithm));
 
         expect(first.userId).toBe('cache-test');
         expect(second.userId).toBe('cache-test');

@@ -4,9 +4,12 @@ import { Agent, setGlobalDispatcher } from 'undici';
 import { getDatabase, migrationTargets } from '@spfn/core/db';
 import { getCache } from '@spfn/core/cache';
 import { env } from '@spfn/core/config';
+import { CacheTokenStore, SSETokenManager } from '../event/sse/token-manager';
+import type { SSETokenStore } from '../event/sse/token-manager';
 import { getMigrationSnapshot } from './migration-gate';
 import { CORE_HEALTH_PATH } from './namespace';
 import { getShutdownManager } from './shutdown-manager';
+import { serverLogger } from './logger';
 import type { NamedMiddleware, Router } from '@spfn/core/route';
 import type { ServerConfig } from './types';
 
@@ -228,6 +231,51 @@ export function createHealthCheckHandler(
 
         return c.json(response, statusCode);
     };
+}
+
+/**
+ * The one-time token store a stream endpoint (SSE `.events()`, WebSocket) uses
+ * when the app names none: the connected cache, or `undefined` for the
+ * in-memory store. A cache client that cannot take a token out atomically is
+ * refused here, at boot (`CacheTokenStore` throws) — never swapped for the
+ * in-memory store.
+ */
+function resolveCacheTokenStore(): CacheTokenStore | undefined
+{
+    const cache = getCache();
+
+    return cache ? new CacheTokenStore(cache) : undefined;
+}
+
+/** What a stream endpoint's auth config says about its token manager. */
+interface StreamTokenConfig
+{
+    tokenManager?: SSETokenManager | (() => SSETokenManager);
+    store?: SSETokenStore;
+    tokenTtl?: number;
+}
+
+/**
+ * The token manager of a stream endpoint (`transport` names it in the log):
+ * the app's own `tokenManager`, or the default one on the app's `store` or the
+ * connected cache. The cache is resolved only for the default manager — an app
+ * that supplies its own never depends on the cache client.
+ */
+export function resolveStreamTokenManager(auth: StreamTokenConfig, transport: 'SSE' | 'WS', debug: boolean): SSETokenManager
+{
+    const external = typeof auth.tokenManager === 'function' ? auth.tokenManager() : auth.tokenManager;
+    if (external)
+    {
+        return external;
+    }
+
+    const store = auth.store ?? resolveCacheTokenStore();
+    if (!auth.store && store && debug)
+    {
+        serverLogger.info(`${transport} token store: cache (Redis/Valkey)`);
+    }
+
+    return new SSETokenManager({ ttl: auth.tokenTtl, store });
 }
 
 /**

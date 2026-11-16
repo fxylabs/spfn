@@ -36,6 +36,7 @@
 
 import type { EventRouterDef, InferEventNames } from '../router';
 import { CSRF_HEADER, csrfHeaderValue, documentCookieEntries } from '../../nextjs/client/csrf';
+import { isTokenRequestUnauthorized } from '../stream-refusal';
 import type {
     ConnectedPayload,
     SSEClientConfig,
@@ -154,19 +155,6 @@ interface SSEConnection
     reconnectAttempts: number;
     closed: boolean;
     onClose?: (reason?: 'unauthorized') => void;
-}
-
-/**
- * Whether a failed token mint was answered 401: the session behind it is gone
- * (its key revoked), so no later mint will succeed. Both shapes the api client
- * throws carry it — a registered error class (`UnauthorizedError`) as
- * `statusCode`, the generic `ApiError` as `status`.
- */
-function isUnauthorized(error: unknown): boolean
-{
-    const answered = error as { statusCode?: unknown; status?: unknown } | null;
-
-    return answered?.statusCode === 401 || answered?.status === 401;
 }
 
 export function createSSEClient<TRouter extends EventRouterDef<any>>(
@@ -291,7 +279,7 @@ export function createSSEClient<TRouter extends EventRouterDef<any>>(
                 }
 
                 // A refused mint is final: retrying would mint-and-401 every reconnectDelay forever.
-                if (isUnauthorized(error))
+                if (isTokenRequestUnauthorized(error))
                 {
                     closeConn(conn, 'unauthorized');
 

@@ -17,9 +17,9 @@ import { setDefaultSafeFetchPolicy } from '@spfn/core/security';
 import { env } from '@spfn/core/config';
 import { createSSEHandler } from '../event/sse/handler';
 import { DEFAULT_SSE_STREAM_PATH, sseTokenPath } from '../event/sse/paths';
-import { SSETokenManager, CacheTokenStore } from '../event/sse/token-manager';
+import type { SSETokenManager } from '../event/sse/token-manager';
 import { wireEventRouterCache } from '../event/cache-transport';
-import { createHealthCheckHandler, resolveEndpointMiddlewares } from './helpers';
+import { createHealthCheckHandler, resolveEndpointMiddlewares, resolveStreamTokenManager } from './helpers';
 import { CORE_NAMESPACE, CORE_HEALTH_PATH, CORE_TIME_PATH, LEGACY_HEALTH_PATH } from './namespace';
 import { createCoreTimeRouter } from './server-time';
 import { serverLogger } from './logger';
@@ -607,37 +607,8 @@ async function registerSSEEndpoint(app: Hono, config?: ServerConfig): Promise<vo
 
     if (authConfig?.enabled)
     {
-        // Auto-detect cache for token store (multi-instance support)
-        let store = authConfig.store;
-        if (!store)
-        {
-            try
-            {
-                const { getCache } = await import('@spfn/core/cache');
-                const cache = getCache();
-                if (cache)
-                {
-                    store = new CacheTokenStore(cache);
-                    if (debug)
-                    {
-                        serverLogger.info('SSE token store: cache (Redis/Valkey)');
-                    }
-                }
-            }
-            catch
-            {
-                // Cache module not available, use in-memory
-            }
-        }
-
-        const externalManager = typeof authConfig.tokenManager === 'function'
-            ? authConfig.tokenManager()
-            : authConfig.tokenManager;
-
-        tokenManager = externalManager ?? new SSETokenManager({
-            ttl: authConfig.tokenTtl,
-            store,
-        });
+        // The app's own manager, or the default one on the cache (multi-instance support)
+        tokenManager = resolveStreamTokenManager(authConfig, 'SSE', debug);
 
         const tokenPath = sseTokenPath(streamPath);
 

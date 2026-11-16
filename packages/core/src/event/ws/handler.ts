@@ -14,7 +14,10 @@ import type {
     WSMessageHandlers,
     WSRawConnection,
 } from './types';
-import type { SSETokenManager } from '../sse/token-manager';
+import type { SSEToken, SSETokenManager } from '../sse/token-manager';
+import { createStreamsByKey } from '../key-close';
+import { POLICY_VIOLATION_CLOSE_CODE, KEY_REVOKED_CLOSE_REASON, ORIGIN_NOT_ALLOWED_CLOSE_REASON } from '../stream-refusal';
+import type { KeyedStream, StreamsByKey } from '../key-close';
 import { logger } from '@spfn/core/logger';
 
 const wsLogger = logger.child('@spfn/core:ws');
@@ -94,6 +97,8 @@ export async function attachWSHandler<
     const clients = new Set<any>();
     // Live connection count per authenticated subject (for the per-subject cap)
     const subjectCounts = new Map<string, number>();
+    // Open sockets and pending connects by device key, reached by `closeConnectionsByKey`
+    const streamsByKey = createStreamsByKey();
 
     wss.on('connection', (ws: any, req: any) =>
     {
@@ -104,7 +109,7 @@ export async function attachWSHandler<
         if (!isOriginAllowed(req.headers?.origin, originAllowList))
         {
             wsLogger.warn('WebSocket rejected: disallowed origin', { origin: req.headers?.origin });
-            ws.close(1008, 'Origin not allowed');
+            ws.close(POLICY_VIOLATION_CLOSE_CODE, ORIGIN_NOT_ALLOWED_CLOSE_REASON);
 
             return;
         }
@@ -124,6 +129,7 @@ export async function attachWSHandler<
             maxBufferedBytes,
             maxConnectionsPerSubject,
             subjectCounts,
+            streamsByKey,
         })
             .catch((err: Error) =>
             {
@@ -169,7 +175,13 @@ interface ConnectionOptions
     maxBufferedBytes: number;
     maxConnectionsPerSubject: number;
     subjectCounts: Map<string, number>;
+    streamsByKey: StreamsByKey;
 }
+
+/** What a connect that passed every check opens with, or the close that refuses it. */
+type SocketAdmission =
+    | { subject: string | undefined; allowedEvents: string[] }
+    | { refused: { code: number; reason: string } };
 
 async function handleConnection(
     ws: any,
@@ -180,7 +192,7 @@ async function handleConnection(
     opts: ConnectionOptions,
 ): Promise<void>
 {
-    const { pingInterval, maxBufferedBytes, maxConnectionsPerSubject, subjectCounts } = opts;
+    const { pingInterval, maxBufferedBytes, maxConnectionsPerSubject, subjectCounts, streamsByKey } = opts;
     // Register close handler before any await — ensures we never miss the event even during auth
     let pingTimer: ReturnType<typeof setInterval> | undefined;
     let connectionUnsubscribes: (() => void)[] = [];
@@ -201,38 +213,39 @@ async function handleConnection(
         return;
     }
 
-    // ── 1. Authenticate ──
-    const subject = await resolveSubject(url, authConfig?.enabled ? tokenManager : undefined);
-    if (subject === false)
+    // ── 1. Authenticate (the store half) ──
+    const token = await takeToken(url, authConfig?.enabled ? tokenManager : undefined);
+    if (token === false)
     {
         ws.close(4001, 'Missing token');
 
         return;
     }
-    if (subject === null)
+    if (token === null)
     {
-        ws.close(4001, 'Invalid or expired token');
+        ws.close(4001, INVALID_TOKEN_REASON);
 
         return;
     }
 
-    // ── 2. Resolve subscribed events ──
-    const requestedEvents = parseRequestedEvents(url, router.eventNames as string[]);
-    if (requestedEvents.length === 0)
+    // Synchronously after the take: a close of the token's key that lands while
+    // the checks below await is recorded, and the socket never opens.
+    const keyAdmission = streamsByKey.beginAdmission(token?.keyId);
+    const admission = await admitSocket(url, router, authConfig, tokenManager, token).finally(keyAdmission.end);
+    if ('refused' in admission)
     {
-        ws.close(4000, 'No valid event names specified');
+        ws.close(admission.refused.code, admission.refused.reason);
+
+        return;
+    }
+    if (keyAdmission.closed())
+    {
+        ws.close(POLICY_VIOLATION_CLOSE_CODE, KEY_REVOKED_CLOSE_REASON);
 
         return;
     }
 
-    // ── 3. Authorize ──
-    const allowedEvents = await resolveAllowedEvents(subject, requestedEvents, authConfig);
-    if (allowedEvents === null)
-    {
-        ws.close(4003, 'Not authorized for any requested events');
-
-        return;
-    }
+    const { subject, allowedEvents } = admission;
 
     // ── Per-subject connection cap (authenticated subjects only) ──
     if (maxConnectionsPerSubject > 0 && typeof subject === 'string')
@@ -275,9 +288,26 @@ async function handleConnection(
         return;
     }
 
+    // Indexed under its key with no `await` since the admission ended, so no
+    // key close falls between the two. Closing drops the subscriptions first:
+    // nothing published after the close reaches the socket.
+    const keyed: KeyedStream = {
+        close: () =>
+        {
+            connectionUnsubscribes.forEach(fn => fn());
+            connectionUnsubscribes = [];
+            ws.close(POLICY_VIOLATION_CLOSE_CODE, KEY_REVOKED_CLOSE_REASON);
+        },
+    };
+    streamsByKey.add(token?.keyId, keyed);
+    ws.on('close', () => streamsByKey.remove(token?.keyId, keyed));
+
     // ── 6. Handle incoming messages ──
     ws.on('message', (data: Buffer | string) =>
     {
+        // A socket closed server-side (its key revoked) no longer reaches the app's handlers.
+        if (ws.readyState !== 1) return;
+
         onClientMessage(data, router, connection, subject)
             .catch((err: Error) => wsLogger.error('Unhandled message error', err));
     });
@@ -333,17 +363,19 @@ function parseURL(req: any): URL | null
     }
 }
 
+/** The refusal of a token that is unknown, expired, consumed, or whose key is gone. */
+const INVALID_TOKEN_REASON = 'Invalid or expired token';
+
 /**
- * Resolve subject from token
- * - undefined: no auth required
- * - false: token param missing (when required)
- * - null: token invalid/expired
- * - string: authenticated subject
+ * Take the one-time token out of the store — its key is checked later, with
+ * the connect registered under it (`admitSocket`)
+ * @returns what the token was minted with, undefined if no auth required,
+ *          false if token missing, null if token invalid/expired/consumed
  */
-async function resolveSubject(
+async function takeToken(
     url: URL,
     tokenManager?: SSETokenManager,
-): Promise<string | undefined | false | null>
+): Promise<SSEToken | undefined | false | null>
 {
     if (!tokenManager)
     {
@@ -356,7 +388,41 @@ async function resolveSubject(
         return false;
     }
 
-    return await tokenManager.verify(token);
+    return tokenManager.take(token);
+}
+
+/**
+ * The checks that run with the connect registered under its key, as the SSE
+ * connect runs them: the token's key (`verifyKey`), the requested events, then
+ * authorization.
+ */
+async function admitSocket(
+    url: URL,
+    router: WSRouterDef<any, any>,
+    authConfig: WSHandlerAuthConfig | undefined,
+    tokenManager: SSETokenManager | undefined,
+    token: SSEToken | undefined,
+): Promise<SocketAdmission>
+{
+    if (token && tokenManager && !await tokenManager.checkKey(token))
+    {
+        return { refused: { code: 4001, reason: INVALID_TOKEN_REASON } };
+    }
+
+    const requestedEvents = parseRequestedEvents(url, router.eventNames as string[]);
+    if (requestedEvents.length === 0)
+    {
+        return { refused: { code: 4000, reason: 'No valid event names specified' } };
+    }
+
+    const subject = token?.subject;
+    const allowedEvents = await resolveAllowedEvents(subject, requestedEvents, authConfig);
+    if (allowedEvents === null)
+    {
+        return { refused: { code: 4003, reason: 'Not authorized for any requested events' } };
+    }
+
+    return { subject, allowedEvents };
 }
 
 function parseRequestedEvents(url: URL, validEventNames: string[]): string[]

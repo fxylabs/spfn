@@ -42,6 +42,8 @@ From `@spfn/core/event`:
 - `defineEventRouter(events)` — group events for SSE
 - `defineWSRouter({ events, messages? })` — group events + message handlers for WebSocket
 - `eventRouteMap` — `{ eventsToken: { method: 'POST', path: '/events/token' } }` (merge into RPC proxy)
+- `closeConnectionsByKey(keyId)` — close the streams (SSE and WebSocket) a device key opened, on
+  every pod (see [Closing the streams of a revoked device key](#closing-the-streams-of-a-revoked-device-key))
 - `.contract({ since, deprecatedIn?, removedIn? })` on an event and `.contract({ auth, streamPath? })`
   on an event router — publish the event in `contracts/current.json` (see
   [Contracted events](#contracted-events-for-separately-compiled-clients))
@@ -59,8 +61,6 @@ From `@spfn/core/event/sse`:
 
 - `createSSEHandler(router, config?, tokenManager?)` — Hono GET handler
 - `SSETokenManager` (class), `CacheTokenStore` (class)
-- `closeSSEConnectionsByKey(keyId)` — close the streams a device key opened, on every pod
-  (see [Closing the streams of a revoked device key](#closing-the-streams-of-a-revoked-device-key))
 - Types: `SSEToken`, `SSETokenStore`, `SSETokenManagerConfig`, `SSEKeyVerifier`, `SSEMessage`,
   `SSEHandlerConfig`, `SSEHandlerAuthConfig`, `SSEAuthConfig`, `SSEClientConfig`,
   `SSEEventHandler`, `SSEEventHandlers`, `SSESubscribeOptions`, `SSESubscriptionChange`,
@@ -317,6 +317,18 @@ auto-detects a cache at startup via `getCache()`:
 | Cache connected | `CacheTokenStore` (Redis/Valkey, `SET EX` + `GETDEL`, prefix `sse:token:`) | auto-detected |
 | Custom | your `SSETokenStore` impl | pass `auth.store` |
 
+**A token is taken out exactly once.** `consume` is atomic in every store: of two concurrent
+connects with one token, one opens and the other is refused. `CacheTokenStore` takes the
+token with `GETDEL` — Redis 6.2 or later, or any Valkey; on an older server the consume
+fails and the token is never accepted. Its client must offer `getdel()` (ioredis `Redis` and
+`Cluster`, which `getCache()` returns, do): a client without it is refused when the store is
+constructed — at boot for the auto-detected store — with an error naming `getdel`. There is
+no read-then-delete fallback.
+
+> **BREAKING (beta):** `new CacheTokenStore(client)` throws when `client.getdel` is not a
+> function; it used to fall back to `GET` then `DEL`, which let a token be spent twice.
+> Migration: pass an ioredis client (or any client with an atomic `getdel(key)`).
+
 Manual / custom store:
 
 ```typescript
@@ -334,7 +346,7 @@ import type { SSETokenStore, SSEToken } from '@spfn/core/event/sse';
 class DynamoTokenStore implements SSETokenStore
 {
     async set(token: string, data: SSEToken): Promise<void> { /* ... */ }
-    async consume(token: string): Promise<SSEToken | null> { /* one-time get+delete */ }
+    async consume(token: string): Promise<SSEToken | null> { /* atomic take: one caller gets it */ }
     async cleanup(): Promise<void> { /* remove expired */ }
 }
 ```
@@ -379,10 +391,18 @@ key ends what it opened.
   endpoint recorded as holding the key (`getKeyHolder(c)`, default `c.get('auth')?.userId`), so a
   verifier judges that person whatever `getSubject` returns; `false` or a throw refuses it (`401`). The token is
   consumed first, so a refused token is never retried. The throw is warned without its text.
-- **`closeSSEConnectionsByKey(keyId)` ends the open ones.** It closes, on this process, every
-  stream whose token carried `keyId` — every `createSSEHandler` of the process, not one — and a
-  connect of that key still in admission ends at open, with no `connected` frame and no
-  subscription. With a cache (resolved lazily from `getCache()`, so a pod serving no events
+- **The WebSocket connect does the same.** It takes the token out of the store, registers the
+  connect under the token's key, runs `verifyKey`, then `authorize` — the SSE connect's order —
+  and the open socket stays indexed under that key. An untagged token opens a socket that is
+  never closed by key, as on SSE.
+- **`closeConnectionsByKey(keyId)` ends the open ones.** It closes, on this process, every
+  stream whose token carried `keyId` — SSE connections and WebSockets, every handler of the
+  process, not one — and a connect of that key still in admission ends at open: no `connected`
+  frame and no subscription. A socket is closed with code **`1008`** (policy violation) and
+  reason **`Key revoked`** — a network drop is `1006` and a shutdown `1001`; `4001` stays
+  "invalid or expired token". Its subscriptions are dropped before the close, so nothing
+  published after the close resolved on that pod reaches it, and a message it sent that is
+  still queued no longer reaches your message handlers. With a cache (resolved lazily from `getCache()`, so a pod serving no events
   publishes too) it then publishes `{ kind: 'close', keyId }` on the same control channel as
   `grant` / `revoke`, `<channelPrefix>$control`
   ([Multi-instance broadcast](#multi-instance-broadcast-cross-pod-fan-out)), so every other pod
@@ -397,12 +417,17 @@ key ends what it opened.
   that the oldest is dropped, with a warning that gives the count. The log says how many closed and why — never the key id.
 
 ```typescript
-import { closeSSEConnectionsByKey } from '@spfn/core/event/sse';
+import { closeConnectionsByKey } from '@spfn/core/event';
 import { onAfterCommit } from '@spfn/core/db';
 
 // after your own revocation statement
-onAfterCommit(() => closeSSEConnectionsByKey(revokedKeyId));
+onAfterCommit(() => closeConnectionsByKey(revokedKeyId));
 ```
+
+> **BREAKING (beta):** `closeSSEConnectionsByKey` is removed from `@spfn/core/event/sse`; the close
+> is about a key, not a transport, and now closes WebSockets too. Migration: replace
+> `import { closeSSEConnectionsByKey } from '@spfn/core/event/sse'` with
+> `import { closeConnectionsByKey } from '@spfn/core/event'`.
 
 `@spfn/auth` does this for every key revocation (sign out one device, sign out everywhere,
 logout, password change and reset, account deletion, rotation, renewal, re-login): an app on
@@ -804,7 +829,7 @@ asymmetric case where the publish succeeds but **this pod's subscriber socket is
 echo — the only path to same-pod streams — wouldn't arrive). A sustained publish outage trips
 a short circuit breaker so emits fast-path to local instead of each paying the publish timeout.
 A publish never crashes `emit` or kills a stream. Events are not re-sent; a key close is (see
-`closeSSEConnectionsByKey`). ioredis auto-reconnects and re-subscribes
+`closeConnectionsByKey`). ioredis auto-reconnects and re-subscribes
 (autoResubscribe, default true). A per-event SUBSCRIBE failure at
 startup degrades that event to in-process (logged) rather than aborting boot. Same-pod
 delivery costs one Redis round-trip — for a single-replica deploy with a cache, prefer
@@ -962,6 +987,27 @@ client.send('ping', {});
 `WSRouterDef` extends `EventRouterDef` with a `messages` map. Message handlers receive
 `{ payload, subject?, ws }` (`WSMessageContext`). See `@spfn/core/event/ws` exports for
 `WSHandlerConfig`, `WSAuthConfig`, `WSClientConfig`, etc.
+
+A socket opened with a token tagged by a device key closes when that key is revoked
+(`closeConnectionsByKey`, code `1008`, reason `Key revoked`) — see
+[Closing the streams of a revoked device key](#closing-the-streams-of-a-revoked-device-key).
+
+**The client stops on a revoked key, and on a refused origin.** It decides by what the server
+said; a refusal that would only repeat is final, and nothing reconnects after it:
+
+| What ended the connection | Reconnects | `onClose` |
+|---|---|---|
+| close `1008`, reason `Key revoked` | no | `'unauthorized'`, once |
+| `acquireToken` rejects with `statusCode` or `status` `401` | no | `'unauthorized'`, once |
+| close `1008`, reason `Origin not allowed` | no | no reason, once; and one `console.error` |
+| `client.close()`, `unsubscribe()`, a close with `reconnect: false`, `maxReconnectAttempts` reached | no | no reason, once |
+| any other close or rejection — a `403` included | after `reconnectDelay` | not called |
+
+Sign the user out on `'unauthorized'` only: a refused origin is a deployment's allow-list
+(`allowedOrigins`) not naming the page, which no sign-in changes. The token rule is the SSE
+client's (*A `401` from the token mint is final*, under `createAuthSSEClient`); both clients read
+it through one predicate, and the server and the client share the close reasons as constants.
+`onClose` stays assignable from `() => void`.
 
 ### Resource limits & backpressure (`WSHandlerConfig`)
 

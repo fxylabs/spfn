@@ -12,7 +12,7 @@ import { closeCache, initCache } from '@spfn/core/cache';
 import { closeDatabase, initDatabase, getDatabase } from '@spfn/core/db';
 import { initBoss, stopBoss, stopFetching, registerJobs } from '../job';
 import { attachWSHandler } from '../event/ws/handler';
-import { SSETokenManager, CacheTokenStore } from '../event/sse/token-manager';
+import type { SSETokenManager } from '../event/sse/token-manager';
 import { wireEventRouterCache, closeEventTransport } from '../event/cache-transport';
 import { serverLogger } from './logger';
 import { printBanner } from './banner';
@@ -29,6 +29,7 @@ import {
     getShutdownTimeout,
     getTimeoutConfig,
     resolveEndpointMiddlewares,
+    resolveStreamTokenManager,
 } from './helpers';
 import { runEnvBootCheck } from './env-boot-check';
 import { runMigrationBootGate } from './migration-gate';
@@ -413,34 +414,8 @@ async function initializeWebSocket(
 
     if (authConfig?.enabled)
     {
-        // Auto-detect cache for token store (multi-instance support)
-        let store = authConfig.store;
-        if (!store)
-        {
-            try
-            {
-                const { getCache } = await import('@spfn/core/cache');
-                const cache = getCache();
-                if (cache)
-                {
-                    store = new CacheTokenStore(cache);
-                    if (debug) serverLogger.info('WS token store: cache (Redis/Valkey)');
-                }
-            }
-            catch
-            {
-                // Cache module not available, use in-memory
-            }
-        }
-
-        const externalManager = typeof authConfig.tokenManager === 'function'
-            ? authConfig.tokenManager()
-            : authConfig.tokenManager;
-
-        tokenManager = externalManager ?? new SSETokenManager({
-            ttl: authConfig.tokenTtl,
-            store,
-        });
+        // The app's own manager, or the default one on the cache (multi-instance support)
+        tokenManager = resolveStreamTokenManager(authConfig, 'WS', debug);
 
         // Register the WS token endpoint on the Hono app. The path replaces the WS
         // path's last segment with `token`, so the default '/ws' becomes '/token'.

@@ -2,7 +2,7 @@
  * @spfn/auth - a revoked key's SSE streams close, after the revocation commits
  *
  * Every revocation ends in `keysRepository`, which hands each revoked key id to
- * `closeSSEConnectionsByKey` through `onAfterCommit`. The core export is replaced
+ * `closeConnectionsByKey` through `onAfterCommit`. The core export is replaced
  * by a spy that, when it runs, reads the key's row over the test connection — a
  * connection of its own, to which an uncommitted revoke is invisible. So "after
  * commit" here means: every recorded close saw its key already `isActive = false`.
@@ -57,11 +57,11 @@ vi.mock('@spfn/notification/server', async (importOriginal) =>
     };
 });
 
-vi.mock('@spfn/core/event/sse', async (importOriginal) =>
+vi.mock('@spfn/core/event', async (importOriginal) =>
 {
-    const actual = await importOriginal<typeof import('@spfn/core/event/sse')>();
+    const actual = await importOriginal<typeof import('@spfn/core/event')>();
 
-    return { ...actual, closeSSEConnectionsByKey: (keyId: string) => closeSpy(keyId) };
+    return { ...actual, closeConnectionsByKey: (keyId: string) => closeSpy(keyId) };
 });
 
 const { mainAuthRouter } = await import('@/server/routes');

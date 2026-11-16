@@ -4,7 +4,7 @@
  *
  * | #   | state                                                        | action                         | expected                                                                 |
  * |-----|--------------------------------------------------------------|--------------------------------|--------------------------------------------------------------------------|
- * | R1  | user U, keys K1·K2, one stream each                          | `closeSSEConnectionsByKey(K1)` | K1 stream closed; K2 stream open, subscriptions intact, still receives frames |
+ * | R1  | user U, keys K1·K2, one stream each                          | `closeConnectionsByKey(K1)` | K1 stream closed; K2 stream open, subscriptions intact, still receives frames |
  * | R2  | user U key K1, user V key K3                                 | close K1                       | V's stream open                                                          |
  * | R3  | key K1 with two streams                                      | close K1                       | both closed, count 2                                                     |
  * | R3' | key K1 stream the client is leaving at the same moment       | close K1                       | count 1, no throw, nothing unsubscribed twice                            |
@@ -16,15 +16,16 @@
  * | R9  | `verifyKey` returns false                                    | consume                        | `null`; consumed (second consume `null`); 401 identical to an invalid token's, pending 0 |
  * | R10 | `verifyKey` throws                                           | consume                        | `null`, 401, the thrown text in neither the body nor the warning         |
  * | R11 | two handlers on two fake-Redis pods, K1 stream on pod B      | close published by pod A       | pod B's K1 stream closed                                                 |
+ * | R11w| same, a K1 WebSocket on pod B instead of an SSE stream       | close published by pod A       | pod B's K1 socket closed 1008 `Key revoked`                              |
  * | R12 | pod A receives its own `'close'` message                     | —                              | not applied: A's stream stays open                                       |
  * | R12'| malformed `'close'` messages (no `keyId`, wrong type)         | —                              | ignored, no throw                                                        |
  * | R13 | the cache's `publish` rejects with an error naming the key   | close                          | local stream closed, warn logged with no key id, promise resolves        |
  * | R13'| a cache whose `publish` rejects                              | `publishKeyClose`              | one warning: static message, `{ channel }` only; resolves                |
  * | R13b| the cache's `publish` rejects with an error naming the key   | `publishKeyClose`              | the warning carries no key id                                            |
- * | R13c| the transport client's `publish` rejects echoing the command | `closeSSEConnectionsByKey`     | resolves; the transport's warning carries no key id                      |
+ * | R13c| the transport client's `publish` rejects echoing the command | `closeConnectionsByKey`     | resolves; the transport's warning carries no key id                      |
  * | R13d| a grant publish failed, the throttle window still open        | a close publish fails          | warned twice: no publish site silences another                           |
  * | R13e| the rejected error's `name` is the key id                    | `publishKeyClose`              | the warning carries no key id                                            |
- * | R13f| through the transport, an event publish failed, breaker cooldown elapsed, throttle window open | `closeSSEConnectionsByKey` | the `$control` failure is warned: an event's never silences it |
+ * | R13f| through the transport, an event publish failed, breaker cooldown elapsed, throttle window open | `closeConnectionsByKey` | the `$control` failure is warned: an event's never silences it |
  * | R13g| the cache's `publish` rejects with an error naming the subject | `publishSubscriptionControl` | the warning carries no subject                                         |
  * | R13h| pod B has a K1 stream; pod A's breaker open after one failed emit | close K1 on pod A; cooldown elapses; no further traffic | the retry re-publishes; B's K1 stream closes; nothing pending |
  * | R13i| same, breaker open                                          | close K1; pod A emits (the half-open probe succeeds) before the retry | the flush delivers the close; B's stream closes  |
@@ -32,13 +33,15 @@
  * | R13k| breaker open                                                | close K1 twice, K2 once        | K1 held once and K2; after recovery each published once                  |
  * | R13l| breaker open                                                | 1001 distinct closes           | 1000 held, the oldest dropped, one warning with the count                |
  * | R13m| closes pending                                              | `closeEventTransport()`        | no timer left, nothing held; neither the old cache nor a later one sends them |
- * | R13n| breaker open, a K1 stream on this pod                       | `closeSSEConnectionsByKey(K1)` | this pod's K1 stream closes at once                                      |
+ * | R13n| breaker open, a K1 stream on this pod                       | `closeConnectionsByKey(K1)` | this pod's K1 stream closes at once                                      |
  * | R14 | each store (memory, cache)                                   | `issue(subject, { keyId })` → consume | `keyId` round-trips; `verify` still returns the subject string    |
  *
  * Rows 7–8 (the token endpoint's `getKeyId`) are in `server/__tests__/sse-subscription-auth.test.ts`.
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach, type Mock } from 'vitest';
+import { createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { Type } from '@sinclair/typebox';
 import { defineEvent } from '../../event';
 import { defineEventRouter } from '../../router';
@@ -52,8 +55,10 @@ import {
     resolveEventPubSubCache,
 } from '../../cache-transport';
 import { FakeBus, FakeRedis } from '../../__tests__/fake-redis';
-import { applyKeyClose } from '../key-close';
-import { closeSSEConnectionsByKey } from '../close-by-key';
+import { applyKeyClose } from '../../key-close';
+import { closeConnectionsByKey } from '../../close-by-key';
+import { attachWSHandler } from '../../ws/handler';
+import { defineWSRouter } from '../../ws';
 import { CacheTokenStore, SSETokenManager } from '../token-manager';
 import { closeAllStreams, countSubscriptions, createStreamApp, until } from './stream-harness';
 
@@ -66,7 +71,7 @@ vi.mock('@spfn/core/logger', () =>
 });
 import { logger } from '@spfn/core/logger';
 
-// No cache unless a row opts in: `closeSSEConnectionsByKey` resolves it lazily from here.
+// No cache unless a row opts in: `closeConnectionsByKey` resolves it lazily from here.
 vi.mock('@spfn/core/cache', () => ({ getCache: vi.fn(() => undefined) }));
 import { getCache } from '@spfn/core/cache';
 
@@ -123,22 +128,12 @@ class FakeCache
         this.store.set(key, value);
     }
 
-    async get(key: string): Promise<string | null>
-    {
-        return this.store.get(key) ?? null;
-    }
-
     async getdel(key: string): Promise<string | null>
     {
         const value = this.store.get(key) ?? null;
         this.store.delete(key);
 
         return value;
-    }
-
-    async del(...keys: string[]): Promise<number>
-    {
-        return keys.filter(key => this.store.delete(key)).length;
     }
 }
 
@@ -168,7 +163,7 @@ describe('closing the SSE streams of a device key', () =>
         await k1.frame('connected');
         await k2.frame('connected');
 
-        await closeSSEConnectionsByKey('K1');
+        await closeConnectionsByKey('K1');
         await until(() => k1.ended());
         await e.emit({ n: 1 });
 
@@ -189,7 +184,7 @@ describe('closing the SSE streams of a device key', () =>
         await u.frame('connected');
         await v.frame('connected');
 
-        await closeSSEConnectionsByKey('K1');
+        await closeConnectionsByKey('K1');
         await until(() => u.ended());
         await e.emit({ n: 1 });
 
@@ -240,8 +235,8 @@ describe('closing the SSE streams of a device key', () =>
         createStreamApp(router);
 
         expect(applyKeyClose('K9')).toBe(0);
-        await expect(closeSSEConnectionsByKey('K9')).resolves.toBeUndefined();
-        expect(logger.info).not.toHaveBeenCalledWith('SSE connections closed', expect.anything());
+        await expect(closeConnectionsByKey('K9')).resolves.toBeUndefined();
+        expect(logger.info).not.toHaveBeenCalledWith('Stream connections closed', expect.anything());
     });
 
     it('R5 close K1 while its connect is still in admission: the stream ends at open with no frame, no subscription and no registry entry', async () =>
@@ -278,7 +273,7 @@ describe('closing the SSE streams of a device key', () =>
         await entered;
         expect(handler._pendingAdmissions('u')).toBe(1);
 
-        await closeSSEConnectionsByKey('K1');
+        await closeConnectionsByKey('K1');
         gate.release!(true);
         const stream = await opening;
         await until(() => stream.ended());
@@ -464,6 +459,37 @@ describe('closing across pods', () =>
         expect(handler._openConnectionsByKey('K1')).toBe(0);
     });
 
+    it('R11w a close published by pod A reaches pod B\'s WebSocket through the bus: closed 1008 Key revoked', async () =>
+    {
+        const { podA, podB } = await twoPods();
+        const server = createServer();
+        const tokenManager = new SSETokenManager({ ttl: 5000 });
+        const closeWS = await attachWSHandler(server, defineWSRouter({ events: { e: podB.e } }), { auth: { enabled: true } }, tokenManager);
+        await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+        const { port } = server.address() as AddressInfo;
+        const token = await tokenManager.issue('u', { keyId: 'K1' });
+        const ws = new WebSocket(`ws://127.0.0.1:${port}/ws?events=e&token=${token}`);
+        const closed = new Promise<{ code: number; reason: string }>((resolve) =>
+        {
+            ws.addEventListener('close', event => resolve({ code: event.code, reason: event.reason }));
+        });
+        const connected = new Promise(resolve => ws.addEventListener('message', resolve, { once: true }));
+
+        try
+        {
+            await connected;
+            await publishKeyClose(podA.cache, 'K1');
+
+            expect(await closed).toEqual({ code: 1008, reason: 'Key revoked' });
+        }
+        finally
+        {
+            await closeWS();
+            tokenManager.destroy();
+            await new Promise(resolve => server.close(resolve));
+        }
+    });
+
     // Pod A alone on the bus: any other pod would apply A's message process-wide.
     it('R12 pod A\'s own close message coming back is skipped: A\'s stream stays open', async () =>
     {
@@ -509,7 +535,7 @@ describe('closing across pods', () =>
         const stream = await connect('u', { keyId: 'K1', query: 'events=e' });
         await stream.frame('connected');
 
-        await expect(closeSSEConnectionsByKey('K1')).resolves.toBeUndefined();
+        await expect(closeConnectionsByKey('K1')).resolves.toBeUndefined();
         await until(() => stream.ended());
 
         expect(handler._openConnectionsByKey('K1')).toBe(0);
@@ -537,7 +563,7 @@ describe('closing across pods', () =>
         expect(JSON.stringify((logger.warn as Mock).mock.calls)).not.toContain('K1');
     });
 
-    it('R13c: closeSSEConnectionsByKey through the cache transport logs no key id when the transport publish fails', async () =>
+    it('R13c: closeConnectionsByKey through the cache transport logs no key id when the transport publish fails', async () =>
     {
         (getCache as unknown as Mock).mockReturnValue({
             publish: vi.fn().mockRejectedValue(new Error('ERR publish {"kind":"close","keyId":"K1"} rejected')),
@@ -546,7 +572,7 @@ describe('closing across pods', () =>
             on: vi.fn(),
         });
 
-        await expect(closeSSEConnectionsByKey('K1')).resolves.toBeUndefined();
+        await expect(closeConnectionsByKey('K1')).resolves.toBeUndefined();
 
         expect(logger.warn).toHaveBeenCalled();
         expect(JSON.stringify((logger.warn as Mock).mock.calls)).not.toContain('K1');
@@ -588,7 +614,7 @@ describe('closing across pods', () =>
 
         await cache.publish('chat.message', { text: 'hi' }); // event publish fails → warn #1, breaker 10s
         vi.setSystemTime(Date.now() + 11_000);              // breaker cooldown elapsed, throttle window (30s) not
-        await closeSSEConnectionsByKey('K1');               // half-open probe on $control fails
+        await closeConnectionsByKey('K1');               // half-open probe on $control fails
 
         const channels = (logger.warn as Mock).mock.calls.map(call => call[1]?.channel);
         expect(channels.some(channel => String(channel).endsWith('$control'))).toBe(true);
@@ -705,7 +731,7 @@ describe('closing across pods', () =>
         expect(stream.ended()).toBe(false);
     });
 
-    it('R13n: with the breaker open, closeSSEConnectionsByKey still closes this pod\'s own K1 stream at once', async () =>
+    it('R13n: with the breaker open, closeConnectionsByKey still closes this pod\'s own K1 stream at once', async () =>
     {
         vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] });
         const client = new FakeRedis(new FakeBus());
@@ -718,7 +744,7 @@ describe('closing across pods', () =>
         const stream = await connect('u', { keyId: 'K1', query: 'events=e' });
         await stream.frame('connected');
 
-        await closeSSEConnectionsByKey('K1');
+        await closeConnectionsByKey('K1');
         vi.useRealTimers();
         await until(() => stream.ended());
 

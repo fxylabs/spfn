@@ -340,7 +340,7 @@ describe('the machine-principal case table', () =>
     {
         vi.mocked(decodeToken).mockReturnValue({ keyId: KEY_ID } as never);
         vi.mocked(keysRepository.findWithAccountEpochOnPrimary).mockResolvedValue(validKeyRecord() as never);
-        vi.mocked(verifyClientToken).mockReturnValue({ keyId: KEY_ID } as never);
+        vi.mocked(verifyClientToken).mockReturnValue({ payload: { keyId: KEY_ID } } as never);
     }
 
     describe('user bearer JWT', () =>

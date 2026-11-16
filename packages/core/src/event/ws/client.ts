@@ -28,6 +28,12 @@
  */
 
 import type { WSRouterDef, WSClientConfig, WSSubscribeOptions, WSUnsubscribe, WSConnectionState } from './types';
+import {
+    isTokenRequestUnauthorized,
+    POLICY_VIOLATION_CLOSE_CODE,
+    KEY_REVOKED_CLOSE_REASON,
+    ORIGIN_NOT_ALLOWED_CLOSE_REASON,
+} from '../stream-refusal';
 
 // ============================================================================
 // Public Interface
@@ -132,6 +138,22 @@ export function createWSClient<TRouter extends WSRouterDef<any, any>>(
         state = next;
     }
 
+    /** Close every active subscription for good: `onClose(reason)` once each, nothing reconnects. */
+    function closeSubscriptions(reason?: 'unauthorized')
+    {
+        setState('closed');
+        sentEvents = new Set();
+        for (const sub of subscriptions)
+        {
+            if (sub.active)
+            {
+                sub.options.onClose?.(reason);
+                sub.active = false;
+            }
+        }
+        subscriptions.clear();
+    }
+
     function buildURL(events: string[], token?: string): string
     {
         const params = new URLSearchParams();
@@ -199,7 +221,39 @@ export function createWSClient<TRouter extends WSRouterDef<any, any>>(
         }
     }
 
-    function onClose()
+    /**
+     * Close every subscription when the server refused the socket for good —
+     * a reconnect would only be refused again. By what the server said: its
+     * key revoked is the credential gone (`'unauthorized'`); its origin not
+     * allowed is a misconfiguration the allow-list keeps between retries, so
+     * no reason, and an error for whoever deploys it.
+     */
+    function closedForGood(evt: CloseEvent): boolean
+    {
+        if (evt.code !== POLICY_VIOLATION_CLOSE_CODE)
+        {
+            return false;
+        }
+
+        if (evt.reason === KEY_REVOKED_CLOSE_REASON)
+        {
+            closeSubscriptions('unauthorized');
+
+            return true;
+        }
+
+        if (evt.reason === ORIGIN_NOT_ALLOWED_CLOSE_REASON)
+        {
+            console.error(`[WS] ${baseUrl} closed the socket 1008 "${ORIGIN_NOT_ALLOWED_CLOSE_REASON}": this page's origin is not on its allow-list. Not reconnecting.`);
+            closeSubscriptions();
+
+            return true;
+        }
+
+        return false;
+    }
+
+    function onClose(evt: CloseEvent)
     {
         socket = null;
         connectedEvents = new Set();
@@ -207,17 +261,13 @@ export function createWSClient<TRouter extends WSRouterDef<any, any>>(
 
         if (destroyed)
         {
-            setState('closed');
-            for (const sub of subscriptions)
-            {
-                if (sub.active)
-                {
-                    sub.options.onClose?.();
-                    sub.active = false;
-                }
-            }
-            subscriptions.clear();
+            closeSubscriptions();
 
+            return;
+        }
+
+        if (closedForGood(evt))
+        {
             return;
         }
 
@@ -252,16 +302,7 @@ export function createWSClient<TRouter extends WSRouterDef<any, any>>(
 
         if (maxReconnectAttempts > 0 && reconnectAttempts >= maxReconnectAttempts)
         {
-            setState('closed');
-            for (const sub of subscriptions)
-            {
-                if (sub.active)
-                {
-                    sub.options.onClose?.();
-                    sub.active = false;
-                }
-            }
-            subscriptions.clear();
+            closeSubscriptions();
 
             return;
         }
@@ -312,7 +353,7 @@ export function createWSClient<TRouter extends WSRouterDef<any, any>>(
             {
                 token = await acquireToken();
             }
-            catch
+            catch (error)
             {
                 setState('error');
                 const errorEvent = new Event('error');
@@ -321,21 +362,20 @@ export function createWSClient<TRouter extends WSRouterDef<any, any>>(
                     if (sub.active) sub.options.onError?.(errorEvent);
                 }
 
+                // A 401 token request is final, like a revoked key's close; the SSE client reads it the same way.
+                if (!destroyed && isTokenRequestUnauthorized(error))
+                {
+                    closeSubscriptions('unauthorized');
+
+                    return;
+                }
+
                 const permanentlyClose = destroyed || !reconnect
                     || (maxReconnectAttempts > 0 && reconnectAttempts >= maxReconnectAttempts);
 
                 if (permanentlyClose)
                 {
-                    setState('closed');
-                    sentEvents = new Set();
-                    for (const sub of subscriptions)
-                    {
-                        if (sub.active) 
-                        {
-                            sub.options.onClose?.(); sub.active = false; 
-                        }
-                    }
-                    subscriptions.clear();
+                    closeSubscriptions();
 
                     return;
                 }
@@ -354,17 +394,7 @@ export function createWSClient<TRouter extends WSRouterDef<any, any>>(
             // close() may have been called while awaiting the token
             if (destroyed)
             {
-                setState('closed');
-                sentEvents = new Set();
-                for (const sub of subscriptions)
-                {
-                    if (sub.active)
-                    {
-                        sub.options.onClose?.();
-                        sub.active = false;
-                    }
-                }
-                subscriptions.clear();
+                closeSubscriptions();
 
                 return;
             }
@@ -394,9 +424,9 @@ export function createWSClient<TRouter extends WSRouterDef<any, any>>(
         // current socket reference. This can happen when onError fires (state→'error'),
         // subscribe() immediately calls connect() creating a new socket, and then the
         // old socket's onclose finally arrives and sets socket = null on the new one.
-        socket.onclose = () => 
+        socket.onclose = (evt: CloseEvent) =>
         {
-            if (socket === thisSocket) onClose(); 
+            if (socket === thisSocket) onClose(evt);
         };
         socket.onmessage = onMessage;
     }
@@ -469,17 +499,7 @@ export function createWSClient<TRouter extends WSRouterDef<any, any>>(
         else
         {
             // No socket (e.g. waiting for reconnect timer) — onClose won't fire, clean up directly
-            setState('closed');
-            sentEvents = new Set();
-            for (const sub of subscriptions)
-            {
-                if (sub.active)
-                {
-                    sub.options.onClose?.();
-                    sub.active = false;
-                }
-            }
-            subscriptions.clear();
+            closeSubscriptions();
         }
     }
 

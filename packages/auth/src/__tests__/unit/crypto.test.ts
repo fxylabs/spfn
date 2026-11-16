@@ -13,7 +13,16 @@ import {
     getKeySize,
     shouldRotateKey,
 } from '@/server/lib/crypto';
-import { verifyClientToken, decodeToken } from '@/server/helpers/jwt';
+import { verifyClientToken, decodeToken, REQUEST_TOKEN_CLOCK_SKEW_SECONDS } from '@/server/helpers/jwt';
+import type { ClientTokenOutcome, TokenPayload } from '@/server/helpers/jwt';
+
+/** The payload of a token the verifier accepted; a refusal fails the test. */
+function accepted(outcome: ClientTokenOutcome): TokenPayload
+{
+    expect(outcome).not.toHaveProperty('refused');
+
+    return (outcome as { payload: TokenPayload }).payload;
+}
 
 describe('Crypto - ES256 Key Generation', () =>
 {
@@ -138,7 +147,7 @@ describe('Crypto - JWT Signing with ES256', () =>
         expect(token).toBeTruthy();
         expect(token.split('.')).toHaveLength(3); // JWT format: header.payload.signature
 
-        const decoded = verifyClientToken(token, publicKey, algorithm);
+        const decoded = accepted(verifyClientToken(token, publicKey, algorithm));
 
         expect(decoded.userId).toBe('12345');
         expect(decoded.action).toBe('test');
@@ -149,7 +158,7 @@ describe('Crypto - JWT Signing with ES256', () =>
 
     it('should include custom expiration time', () =>
     {
-        const { privateKey, publicKey, algorithm } = generateKeyPairES256();
+        const { privateKey, algorithm } = generateKeyPairES256();
 
         const token = generateClientToken(
             { userId: '123' },
@@ -158,7 +167,8 @@ describe('Crypto - JWT Signing with ES256', () =>
             { expiresIn: '1h' },
         );
 
-        const decoded = verifyClientToken(token, publicKey, algorithm);
+        // Longer than a request token may live, so read it unverified
+        const decoded = decodeToken(token)!;
         const expiresIn = decoded.exp! - decoded.iat!;
 
         // Should be approximately 1 hour (3600 seconds)
@@ -189,7 +199,7 @@ describe('Crypto - JWT Signing with ES256', () =>
 
         const token = generateClientToken({ userId: '123' }, privateKey, algorithm);
 
-        const decoded = verifyClientToken(token, publicKey, algorithm);
+        const decoded = accepted(verifyClientToken(token, publicKey, algorithm));
         const expiresIn = decoded.exp! - decoded.iat!;
 
         // Should be approximately 15 minutes (900 seconds)
@@ -210,7 +220,7 @@ describe('Crypto - JWT Signing with RS256', () =>
         };
 
         const token = generateClientToken(payload, privateKey, algorithm);
-        const decoded = verifyClientToken(token, publicKey, algorithm);
+        const decoded = accepted(verifyClientToken(token, publicKey, algorithm));
 
         expect(decoded.userId).toBe('67890');
         expect(decoded.action).toBe('test-rs256');
@@ -226,30 +236,17 @@ describe('Crypto - JWT Verification Failures', () =>
 
         const token = generateClientToken({ test: 'data' }, key1.privateKey, key1.algorithm);
 
-        expect(() =>
-        {
-            verifyClientToken(token, key2.publicKey, key2.algorithm);
-        }).toThrow();
+        expect(verifyClientToken(token, key2.publicKey, key2.algorithm)).toEqual({ refused: 'bad-signature' });
     });
 
-    it('should reject expired token', async () =>
+    it('should reject expired token', () =>
     {
         const { privateKey, publicKey, algorithm } = generateKeyPairES256();
 
-        const token = generateClientToken(
-            { userId: '123' },
-            privateKey,
-            algorithm,
-            { expiresIn: '1ms' }, // 1 millisecond
-        );
+        // Expired one second longer ago than the clock-skew allowance.
+        const token = generateClientToken({ userId: '123' }, privateKey, algorithm, { expiresIn: -(REQUEST_TOKEN_CLOCK_SKEW_SECONDS + 1) });
 
-        // Wait for token to expire
-        await new Promise(resolve => setTimeout(resolve, 10));
-
-        expect(() =>
-        {
-            verifyClientToken(token, publicKey, algorithm);
-        }).toThrow();
+        expect(verifyClientToken(token, publicKey, algorithm)).toEqual({ refused: 'token-expired' });
     });
 
     it('should reject tampered token', () =>
@@ -260,23 +257,17 @@ describe('Crypto - JWT Verification Failures', () =>
 
         // Tamper with the payload
         const parts = token.split('.');
-        const tamperedPayload = Buffer.from('{"userId":"999"}').toString('base64url');
+        const tamperedPayload = Buffer.from(JSON.stringify({ ...decodeToken(token), userId: '999' })).toString('base64url');
         const tamperedToken = `${parts[0]}.${tamperedPayload}.${parts[2]}`;
 
-        expect(() =>
-        {
-            verifyClientToken(tamperedToken, publicKey, algorithm);
-        }).toThrow();
+        expect(verifyClientToken(tamperedToken, publicKey, algorithm)).toEqual({ refused: 'bad-signature' });
     });
 
     it('should reject malformed token', () =>
     {
         const { publicKey, algorithm } = generateKeyPairES256();
 
-        expect(() =>
-        {
-            verifyClientToken('not.a.valid.jwt', publicKey, algorithm);
-        }).toThrow();
+        expect(verifyClientToken('not.a.valid.jwt', publicKey, algorithm)).toEqual({ refused: 'malformed' });
     });
 });
 
@@ -289,10 +280,7 @@ describe('Crypto - Cross-Algorithm Verification', () =>
 
         const token = generateClientToken({ test: 'data' }, es256Key.privateKey, es256Key.algorithm);
 
-        expect(() =>
-        {
-            verifyClientToken(token, rs256Key.publicKey, rs256Key.algorithm);
-        }).toThrow();
+        expect(verifyClientToken(token, rs256Key.publicKey, rs256Key.algorithm)).toEqual({ refused: 'wrong-issuer-or-algorithm' });
     });
 
     it('should reject RS256 token verified with ES256 key', () =>
@@ -302,10 +290,7 @@ describe('Crypto - Cross-Algorithm Verification', () =>
 
         const token = generateClientToken({ test: 'data' }, rs256Key.privateKey, rs256Key.algorithm);
 
-        expect(() =>
-        {
-            verifyClientToken(token, es256Key.publicKey, es256Key.algorithm);
-        }).toThrow();
+        expect(verifyClientToken(token, es256Key.publicKey, es256Key.algorithm)).toEqual({ refused: 'wrong-issuer-or-algorithm' });
     });
 });
 

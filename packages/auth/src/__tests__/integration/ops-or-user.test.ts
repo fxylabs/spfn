@@ -22,6 +22,7 @@ import { setupTestDb, teardownTestDb, clearTables, getTestDb, isDatabaseAvailabl
 import { users } from '@/server/entities';
 import { hashPassword } from '@/server/helpers/password';
 import { generateKeyPair, generateClientToken } from '@/server/lib/crypto';
+import { REQUEST_TOKEN_CLOCK_SKEW_SECONDS } from '@/server/helpers/jwt';
 import { getAuth } from '@/server/helpers/context';
 import { authenticate } from '@/server/middleware/authenticate';
 import { getOpsToken } from '@/server/middleware/ops-token-auth';
@@ -308,8 +309,13 @@ describe.skipIf(!dbAvailable)('opsOrUser — one route, two credentials', () =>
     {
         const keyPair = await registerKey('admin@test.com');
 
-        // Its own key, already expired.
-        const expired = generateClientToken({ keyId: keyPair.keyId }, keyPair.privateKey, 'ES256', { expiresIn: '-1s' });
+        // Its own key, expired one second longer ago than the clock-skew allowance.
+        const expired = generateClientToken(
+            { keyId: keyPair.keyId },
+            keyPair.privateKey,
+            'ES256',
+            { expiresIn: -(REQUEST_TOKEN_CLOCK_SKEW_SECONDS + 1) },
+        );
 
         // Its keyId, signed with a private key the registered public half cannot verify.
         const forged = generateClientToken({ keyId: keyPair.keyId }, generateKeyPair('ES256').privateKey, 'ES256');

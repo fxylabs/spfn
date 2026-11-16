@@ -824,6 +824,28 @@ part of a whole backend.
   start while a function package has migrations the database has not applied. That is the
   gate working, not a bug — see
   [Why does the server refuse to start after a package upgrade?](#why-does-the-server-refuse-to-start-after-a-package-upgrade)
+- **`closeSSEConnectionsByKey` is now `closeConnectionsByKey` (BREAKING, beta).** Revoking a
+  device key closes the WebSockets its tokens opened as well as its SSE streams (code `1008`,
+  reason `Key revoked`), on every pod. Migration: replace
+  `import { closeSSEConnectionsByKey } from '@spfn/core/event/sse'` with
+  `import { closeConnectionsByKey } from '@spfn/core/event'`. See
+  [Closing the streams of a revoked device key](./src/event/README.md#closing-the-streams-of-a-revoked-device-key).
+- **The WebSocket client stops when its key is revoked.** `createWSClient` used to reconnect
+  every `reconnectDelay` after any close, so a revoked device asked the token endpoint every
+  3 seconds until the tab closed. A close with code `1008` (`Key revoked`), or an
+  `acquireToken` rejection whose `statusCode` or `status` is 401, now closes every
+  subscription and calls its `onClose('unauthorized')` once; nothing reconnects. Any other
+  rejection, a 403 included, is retried — the rule the SSE client already kept. A close
+  `1008 Origin not allowed` is final too, but calls `onClose()` with no reason and logs one
+  `console.error`: the allow-list is misconfigured, the credential is not gone. `onClose`
+  stays assignable from `() => void`. See the
+  [WebSocket section](./src/event/README.md#websocket-bidirectional-variant).
+- **A cache client without `getdel()` is refused as a token store (BREAKING, beta).**
+  `new CacheTokenStore(client)` throws at construction — at boot for the auto-detected
+  store — instead of consuming one-time tokens with `GET` then `DEL`, which let two
+  concurrent connects spend one token. Migration: pass an ioredis client (what `getCache()`
+  returns) or any client with an atomic `getdel(key)`; the server needs Redis 6.2+ or Valkey.
+  See [Token store](./src/event/README.md#token-store-multi-instance).
 - **A server config that fails to load stops the boot (BREAKING).** If
   `server.config` exists but its import fails — including top-level code that throws,
   such as `configureAuth()` refusing a policy value — `startServer()` rejects and nothing

@@ -14,7 +14,7 @@
 import { logger } from '@spfn/core/logger';
 import type { EventRouterBase } from './router';
 import type { PubSubCache, SubscriptionMatch } from './types';
-import { applyKeyClose } from './sse/key-close';
+import { applyKeyClose } from './key-close';
 
 const transportLogger = logger.child('@spfn/core:event-transport');
 
@@ -571,7 +571,7 @@ export interface SubscriptionControlMessage
     origin: string;
 }
 
-/** What one key close publishes: close the SSE streams that device key opened. */
+/** What one key close publishes: close the streams (SSE and WebSocket) that device key opened. */
 export interface KeyCloseControlMessage
 {
     kind: 'close';
@@ -759,7 +759,7 @@ export async function publishSubscriptionControl(
 }
 
 /**
- * Tell every other pod to close the SSE streams of a device key this pod
+ * Tell every other pod to close the streams (SSE and WebSocket) of a device key this pod
  * already closed locally. A failure is warned (throttled) and swallowed. On a
  * cache from {@link createRedisPubSubCache}, a close Redis did not take is held
  * and re-sent after the breaker cooldown or with the next successful publish;

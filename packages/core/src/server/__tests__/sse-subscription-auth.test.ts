@@ -20,7 +20,7 @@ import { defineEvent } from '../../event/event';
 import { defineEventRouter } from '../../event/router';
 import type { SubscribeRequest } from '../../event/types';
 import { SSETokenManager } from '../../event/sse/token-manager';
-import { applyKeyClose } from '../../event/sse/key-close';
+import { applyKeyClose } from '../../event/key-close';
 import { closeAllStreams, openStream } from '../../event/sse/__tests__/stream-harness';
 import { defineServerConfig } from '../config-builder';
 import { defineMiddleware } from '../../route/define-middleware';

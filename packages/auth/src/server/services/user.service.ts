@@ -146,7 +146,7 @@ export type AccountStatusChange = 'changed' | 'refused';
  * is revoked, so no session of the account is admitted again and none comes
  * back when the account is reactivated — a person signs in anew. The streams
  * those keys opened close once the transaction commits, on every instance, by
- * the mechanism every key revocation uses (`closeSSEConnectionsByKey`).
+ * the mechanism every key revocation uses (`closeConnectionsByKey`).
  *
  * The account lock (`usersRepository.lockAccount`) is its first statement, so
  * a status change and a sign-in in flight serialise instead of deadlocking.
