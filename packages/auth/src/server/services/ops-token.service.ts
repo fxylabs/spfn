@@ -12,9 +12,22 @@
  */
 
 import { createHash, randomBytes } from 'node:crypto';
+import { runInTransaction } from '@spfn/core/db';
+import { InsufficientPermissionsError } from '@spfn/auth/errors';
 import { opsTokensRepository } from '../repositories/ops-tokens.repository';
+import { usersRepository } from '../repositories/users.repository';
 import type { OpsToken } from '../entities/ops-tokens';
+import { BUILTIN_PERMISSIONS } from '../rbac/builtin';
 import { authLogger } from '../logger';
+import { resolveAuthority } from './permission.service';
+import { assertStepUp } from './mfa.service';
+import type { PrincipalCredential } from './admission.service';
+
+/**
+ * The permission that issues an ops token, and that its issuer has to keep
+ * holding for the token to keep working.
+ */
+export const OPS_TOKEN_ISSUE_PERMISSION = BUILTIN_PERMISSIONS.OPS_TOKEN_ISSUE.name;
 
 /**
  * The shape every ops-token secret carries.
@@ -58,17 +71,37 @@ function hashOpsToken(token: string): string
     return createHash('sha256').update(token).digest('hex');
 }
 
+/** Who issues a token, and the credential their request presented — its step-up is that credential's. */
+export interface OpsTokenIssuer
+{
+    userId: number;
+    credential: PrincipalCredential;
+}
+
 /**
  * Issue a new ops token.
+ *
+ * An ops token is a credential issued under the issuer's account, so issuance
+ * takes that account's lock (`usersRepository.lockAccount`) first and reads
+ * under it what entitles the issuer: an active account holding
+ * `ops:token:issue` (`resolveAuthority`), and a step-up on this device when the
+ * account has a second factor (`assertStepUp`). A suspension, demotion or
+ * step-up lapse that commits before the lock is seen here and leaves no token;
+ * one that commits after it waits for this insert and stops the token through
+ * `verifyOpsTokenService`. The token borrows the issuer's authority from then on.
  *
  * @param name - Operator-facing label
  * @param scopes - Permission strings the token grants ('*' grants all)
  * @param expiresAt - null for a non-expiring token
+ * @param issuer - The administrator issuing it, and their request's device key
+ * @throws InsufficientPermissionsError (403) when the issuer is not active or lacks `ops:token:issue`
+ * @throws StepUpRequiredError (403) when the issuer has a second factor and this device has not stepped up recently
  */
 export async function issueOpsTokenService(
     name: string,
     scopes: string[],
     expiresAt: Date | null,
+    issuer: OpsTokenIssuer,
 ): Promise<IssuedOpsToken>
 {
     if (scopes.length === 0)
@@ -76,19 +109,45 @@ export async function issueOpsTokenService(
         throw new Error('An ops token needs at least one scope (\'*\' grants all).');
     }
 
-    const token = OPS_TOKEN_PREFIX + randomBytes(32).toString('hex');
-    const record = await opsTokensRepository.create({
-        name,
-        tokenHash: hashOpsToken(token),
-        scopes,
-        expiresAt,
-    });
+    return runInTransaction(async () =>
+    {
+        await usersRepository.lockAccount(issuer.userId);
+        await assertMayIssue(issuer);
 
-    return { token, record };
+        const token = OPS_TOKEN_PREFIX + randomBytes(32).toString('hex');
+        const record = await opsTokensRepository.create({
+            name,
+            tokenHash: hashOpsToken(token),
+            scopes,
+            expiresAt,
+            issuedBy: issuer.userId,
+        });
+
+        return { token, record };
+    }, { context: 'auth:ops-token-issue' });
+}
+
+/** Under the issuer's account lock: their status and permission, then their step-up. */
+async function assertMayIssue(issuer: OpsTokenIssuer): Promise<void>
+{
+    const { permissions } = await resolveAuthority(issuer.userId);
+
+    if (!permissions.some(permission => permission.name === OPS_TOKEN_ISSUE_PERMISSION))
+    {
+        throw new InsufficientPermissionsError({ requiredPermissions: [OPS_TOKEN_ISSUE_PERMISSION] });
+    }
+
+    await assertStepUp(issuer);
 }
 
 /**
- * Verify a presented token. Null for unknown, revoked, and expired alike.
+ * Verify a presented token. Null for unknown, revoked, and expired alike —
+ * and for a token whose issuer could no longer issue it: one whose account is
+ * not active (suspended, inactive, pending deletion, deleted), or who no longer
+ * holds `ops:token:issue` (demoted, or the role deactivated). The issuer's
+ * authority is read as it is now, on every verification, so the token stops
+ * with it and comes back if it is restored. A token issued before issuers
+ * were recorded has none, and is refused.
  */
 export async function verifyOpsTokenService(token: string): Promise<VerifiedOpsToken | null>
 {
@@ -98,15 +157,7 @@ export async function verifyOpsTokenService(token: string): Promise<VerifiedOpsT
     }
 
     const record = await opsTokensRepository.findByTokenHash(hashOpsToken(token));
-    if (!record)
-    {
-        return null;
-    }
-    if (record.revokedAt !== null)
-    {
-        return null;
-    }
-    if (record.expiresAt !== null && new Date() > record.expiresAt)
+    if (!record || !isLiveOpsToken(record) || !await issuerStillAuthorizes(record))
     {
         return null;
     }
@@ -119,6 +170,23 @@ export async function verifyOpsTokenService(token: string): Promise<VerifiedOpsT
         name: record.name,
         scopes: record.scopes,
     };
+}
+
+function isLiveOpsToken(record: OpsToken): boolean
+{
+    return record.revokedAt === null && (record.expiresAt === null || new Date() <= record.expiresAt);
+}
+
+async function issuerStillAuthorizes(record: OpsToken): Promise<boolean>
+{
+    if (record.issuedBy === null)
+    {
+        return false;
+    }
+
+    const { permissions } = await resolveAuthority(record.issuedBy);
+
+    return permissions.some(permission => permission.name === OPS_TOKEN_ISSUE_PERMISSION);
 }
 
 export async function revokeOpsTokenService(id: number): Promise<OpsToken | null>

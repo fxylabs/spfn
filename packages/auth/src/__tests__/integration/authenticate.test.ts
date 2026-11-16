@@ -239,7 +239,7 @@ describe('Authenticate Middleware', () =>
             vi.mocked(decodeToken).mockReturnValue({ keyId: KEY_ID } as never);
             vi.mocked(keysRepository.findWithAccountEpochOnPrimary).mockResolvedValue(validKeyRecord() as never);
             vi.mocked(verifyClientToken).mockReturnValue({ payload: { keyId: KEY_ID, iss: 'spfn-client' } } as never);
-            vi.mocked(usersRepository.findByIdWithRoleAndKeyOnPrimary).mockResolvedValue(admissionRow('active', { name: 'user' }) as never);
+            vi.mocked(usersRepository.findByIdWithRoleAndKeyOnPrimary).mockResolvedValue(admissionRow('active', { name: 'user', isActive: true }) as never);
 
             await authenticate.handler(mockContext as Context, mockNext);
 
@@ -263,7 +263,7 @@ describe('Authenticate Middleware', () =>
             vi.mocked(decodeToken).mockReturnValue({ keyId: KEY_ID } as never);
             vi.mocked(keysRepository.findWithAccountEpochOnPrimary).mockResolvedValue(validKeyRecord() as never);
             vi.mocked(verifyClientToken).mockReturnValue({ payload: { keyId: KEY_ID, iss: 'spfn-client' } } as never);
-            vi.mocked(usersRepository.findByIdWithRoleAndKeyOnPrimary).mockResolvedValue(admissionRow('active', { name: 'user' }) as never);
+            vi.mocked(usersRepository.findByIdWithRoleAndKeyOnPrimary).mockResolvedValue(admissionRow('active', { name: 'user', isActive: true }) as never);
             vi.mocked(userSettingsRepository.findLocaleByUserId).mockResolvedValue(stored as never);
 
             await authenticate.handler(mockContext as Context, mockNext);
@@ -282,7 +282,7 @@ describe('Authenticate Middleware', () =>
             vi.mocked(decodeToken).mockReturnValue({ keyId: KEY_ID } as never);
             vi.mocked(keysRepository.findWithAccountEpochOnPrimary).mockResolvedValue(validKeyRecord() as never);
             vi.mocked(verifyClientToken).mockReturnValue({ payload: { keyId: KEY_ID, iss: 'spfn-client' } } as never);
-            vi.mocked(usersRepository.findByIdWithRoleAndKeyOnPrimary).mockResolvedValue(admissionRow('active', { name: 'user' }) as never);
+            vi.mocked(usersRepository.findByIdWithRoleAndKeyOnPrimary).mockResolvedValue(admissionRow('active', { name: 'user', isActive: true }) as never);
 
             await authenticate.handler(mockContext as Context, mockNext);
 

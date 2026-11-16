@@ -10,9 +10,7 @@ import {
     createRole as _createRole,
     updateRole as _updateRole,
     deleteRole as _deleteRole,
-    updateUserService,
-    getStoredUserRole,
-    assertCanAssignRole,
+    changeUserRole,
 } from '../../services';
 import { getAuth } from '../../helpers';
 import { ForbiddenError } from '@spfn/core/errors';
@@ -47,6 +45,9 @@ export const listRoles = route.get('/_auth/admin/roles')
 /**
  * POST /_auth/admin/roles
  * Create a new role
+ *
+ * Ranked below the caller's own role, with only permissions the caller holds
+ * (`assertCanChangeAuthority`, 403 otherwise); 409 for a name taken.
  */
 export const createAdminRole = route.post('/_auth/admin/roles')
     .input({
@@ -66,7 +67,7 @@ export const createAdminRole = route.post('/_auth/admin/roles')
     {
         const { body } = await c.data();
 
-        const role = await _createRole({
+        const role = await _createRole(Number(getAuth(c).userId), {
             name: body.name,
             displayName: body.displayName,
             description: body.description,
@@ -80,6 +81,12 @@ export const createAdminRole = route.post('/_auth/admin/roles')
 /**
  * PATCH /_auth/admin/roles/:id
  * Update an existing role
+ *
+ * Only a role ranked strictly below the caller's, and only to a priority below
+ * it (`assertCanChangeAuthority`, 403 otherwise); 404 unknown role, 409
+ * `ConfigOwnedRoleError` for changing the display name, description or
+ * priority of a role the configuration declares (its `isActive` is the
+ * operator's), 409 for deactivating `superadmin`.
  */
 export const updateAdminRole = route.patch('/_auth/admin/roles/:id')
     .input({
@@ -97,7 +104,7 @@ export const updateAdminRole = route.patch('/_auth/admin/roles/:id')
     .handler(async (c) =>
     {
         const { params, body } = await c.data();
-        const role = await _updateRole(params.id, body);
+        const role = await _updateRole(Number(getAuth(c).userId), params.id, body);
 
         return { role };
     });
@@ -105,6 +112,13 @@ export const updateAdminRole = route.patch('/_auth/admin/roles/:id')
 /**
  * DELETE /_auth/admin/roles/:id
  * Delete a role (non-builtin, non-system only)
+ *
+ * Only a role ranked strictly below the caller's (`assertCanChangeAuthority`,
+ * 403 otherwise — the highest role, `superadmin`, included); 404 unknown role,
+ * 409 `ConfigOwnedRoleError` for a role the configuration declares (the
+ * built-ins included), 409 for a system role, and 409 `RoleInUseError` while
+ * an account holds it, a pending invitation promises it or the email-domain
+ * policy names it — deleting a role never deletes an account.
  */
 export const deleteAdminRole = route.delete('/_auth/admin/roles/:id')
     .input({
@@ -116,7 +130,7 @@ export const deleteAdminRole = route.delete('/_auth/admin/roles/:id')
     .handler(async (c) =>
     {
         const { params } = await c.data();
-        await _deleteRole(params.id);
+        await _deleteRole(Number(getAuth(c).userId), params.id);
 
         return c.noContent();
     });
@@ -128,6 +142,13 @@ export const deleteAdminRole = route.delete('/_auth/admin/roles/:id')
 /**
  * PATCH /_auth/admin/users/:userId/role
  * Change a user's role
+ *
+ * The caller must outrank, by role priority, both the role the user holds and
+ * the role given (`assertCanChangeRole`): an admin changes users below admin,
+ * only a superadmin creates or demotes an admin, and nobody changes a
+ * superadmin. 404 for an unknown user or role, 409 for an inactive role. The
+ * caller's authority is read inside the change's transaction, after the
+ * target's account lock — not when this request's guard ran.
  */
 export const updateUserRole = route.patch('/_auth/admin/users/:userId/role')
     .input({
@@ -149,18 +170,7 @@ export const updateUserRole = route.patch('/_auth/admin/users/:userId/role')
             throw new ForbiddenError({ message: 'Cannot change your own role' });
         }
 
-        // The stored role, not the effective one: an out-of-policy superadmin is
-        // still a superadmin's row, and only a superadmin may change it.
-        const targetRole = await getStoredUserRole(params.userId);
-        if (targetRole === 'superadmin')
-        {
-            throw new ForbiddenError({ message: 'Cannot modify superadmin role' });
-        }
-
-        // Caller must have authority over the role being assigned
-        await assertCanAssignRole(auth.userId, body.roleId);
-
-        await updateUserService(params.userId, { roleId: body.roleId });
+        await changeUserRole(Number(auth.userId), params.userId, body.roleId);
 
         return { userId: params.userId, roleId: body.roleId };
     });

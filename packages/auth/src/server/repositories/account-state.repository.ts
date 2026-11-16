@@ -28,6 +28,7 @@ import { deviceAuthorizations } from '../entities/device-authorizations';
 import { oauth2AuthorizationCodes } from '../entities/oauth2-authorization-codes';
 import { oauth2Grants } from '../entities/oauth2-grants';
 import { oauth2Tokens } from '../entities/oauth2-tokens';
+import { opsTokens } from '../entities/ops-tokens';
 import { webauthnChallenges } from '../entities/webauthn-challenges';
 import { deviceLinks } from '../entities/device-links';
 import { keyRevokeAllTokens } from '../entities/key-revoke-all-tokens';
@@ -68,6 +69,7 @@ export const CREDENTIAL_TABLES: ReadonlyMap<PgTable, string> = new Map<PgTable, 
     [oauth2Grants, 'a consent: a standing way in to the account for a client'],
     [oauth2AuthorizationCodes, 'a grant\'s single-use code, minted for a signed-in person under their consent'],
     [oauth2Tokens, 'a client\'s access and refresh tokens under a grant'],
+    [opsTokens, 'an operator credential issued under its issuer\'s account, honoured while the issuer could issue it'],
 ]);
 
 /** How one write method answers the account lock. */

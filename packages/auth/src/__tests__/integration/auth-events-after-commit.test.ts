@@ -241,14 +241,14 @@ describe.skipIf(!dbAvailable)('auth events are published after the transaction c
         return { publicKey: key.publicKey, keyId: key.keyId, fingerprint: key.fingerprint, algorithm: key.algorithm };
     }
 
-    async function seedUser(email: string): Promise<number>
+    async function seedUser(email: string, roleName = 'user'): Promise<number>
     {
-        const userRole = await getRoleByName('user');
+        const role = await getRoleByName(roleName);
         const [row] = await getTestDb().insert(users).values({
             email,
             passwordHash: await hashPassword(PASSWORD),
             emailVerifiedAt: new Date(),
-            roleId: userRole!.id,
+            roleId: role!.id,
         }).returning({ id: users.id });
 
         return Number(row!.id);
@@ -262,7 +262,8 @@ describe.skipIf(!dbAvailable)('auth events are published after the transaction c
             email,
             tokenHash: hashCredential(INVITATION_TOKEN),
             roleId: userRole!.id,
-            invitedBy: await seedUser(`inviter-${email}`),
+            // An inviter who outranks the role given, as acceptance re-checks
+            invitedBy: await seedUser(`inviter-${email}`, 'admin'),
             status: 'pending',
             expiresAt: new Date(Date.now() + 86_400_000),
         });
@@ -550,7 +551,7 @@ describe.skipIf(!dbAvailable)('auth events are published after the transaction c
         {
             const created = capture(invitationCreatedEvent);
             const userRole = await getRoleByName('user');
-            const invitedBy = await seedUser('inviter-create-rollback@test.com');
+            const invitedBy = await seedUser('inviter-create-rollback@test.com', 'admin');
 
             await rolledBack(() => createInvitation({ email: 'never-mailed@test.com', roleId: userRole!.id, invitedBy }));
 

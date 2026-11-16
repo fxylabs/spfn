@@ -659,11 +659,13 @@ describe.skipIf(!dbAvailable)('replacing a key requires proof of the old key (bu
         notSql(await rotate.text());
         expect((await keyRow(owner.key.keyId)).isActive).toBe(true);
 
-        const [inviter] = await getTestDb().select().from(users).where(eq(users.email, OTHER));
+        // An inviter who outranks the role given, as acceptance re-checks
+        const [inviter] = await getTestDb().update(users).set({ roleId: (await getRoleByName('admin'))!.id })
+            .where(eq(users.email, OTHER)).returning();
         await getTestDb().insert(userInvitations).values({
             email: 'invitee@test.com',
             tokenHash: hashCredential(INVITATION_TOKEN),
-            roleId: inviter.roleId,
+            roleId: (await getRoleByName('user'))!.id,
             invitedBy: inviter.id,
             status: 'pending',
             expiresAt: new Date(Date.now() + 86_400_000),

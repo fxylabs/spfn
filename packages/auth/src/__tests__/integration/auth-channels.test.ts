@@ -455,7 +455,8 @@ describe.skipIf(!dbAvailable)('An app chooses which sign-in channels exist (#308
 
         it('C10: an invitation is still accepted, and creates its account', async () =>
         {
-            const inviterId = await createTestUser('inviter@ch308.test', await userRoleId());
+            // An inviter who outranks the role given, as acceptance re-checks
+            const inviterId = await createTestUser('inviter@ch308.test', (await getRoleByName('admin'))!.id);
             await getTestDb().insert(userInvitations).values({
                 email: 'invitee@ch308.test',
                 tokenHash: hashCredential(INVITATION_TOKEN),

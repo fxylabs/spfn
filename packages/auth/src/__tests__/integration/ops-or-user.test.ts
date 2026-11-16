@@ -163,6 +163,8 @@ describe.skipIf(!dbAvailable)('opsOrUser — one route, two credentials', () =>
         await teardownTestDb();
     });
 
+    let issuerId: number;
+
     beforeEach(async () =>
     {
         const db = getTestDb();
@@ -173,12 +175,15 @@ describe.skipIf(!dbAvailable)('opsOrUser — one route, two credentials', () =>
         const adminRole = await getRoleByName('admin');
         const userRole = await getRoleByName('user');
 
-        await db.insert(users).values({
+        const [admin] = await db.insert(users).values({
             email: 'admin@test.com',
             passwordHash: await hashPassword(PASSWORD),
             roleId: adminRole!.id,
             emailVerifiedAt: new Date(),
-        });
+        }).returning({ id: users.id });
+
+        // Every ops token records an issuer that could issue it; the administrator here can
+        issuerId = Number(admin!.id);
 
         await db.insert(users).values({
             email: 'user@test.com',
@@ -222,7 +227,7 @@ describe.skipIf(!dbAvailable)('opsOrUser — one route, two credentials', () =>
 
     async function opsToken(scopes: string[]): Promise<string>
     {
-        const { token } = await issueOpsTokenService('test', scopes, null);
+        const { token } = await issueOpsTokenService('test', scopes, null, { userId: issuerId, credential: { kind: 'deviceKey', keyId: 'unused-key' } });
 
         return `Bearer ${token}`;
     }
@@ -260,10 +265,10 @@ describe.skipIf(!dbAvailable)('opsOrUser — one route, two credentials', () =>
     {
         const unknown = `Bearer spfn_ops_${'0'.repeat(64)}`;
 
-        const issued = await issueOpsTokenService('revoked', [SCOPE], null);
+        const issued = await issueOpsTokenService('revoked', [SCOPE], null, { userId: issuerId, credential: { kind: 'deviceKey', keyId: 'unused-key' } });
         await revokeOpsTokenService(Number(issued.record.id));
 
-        const past = await issueOpsTokenService('expired', [SCOPE], new Date(Date.now() - 1000));
+        const past = await issueOpsTokenService('expired', [SCOPE], new Date(Date.now() - 1000), { userId: issuerId, credential: { kind: 'deviceKey', keyId: 'unused-key' } });
 
         for (const authorization of [unknown, `Bearer ${issued.token}`, `Bearer ${past.token}`])
         {

@@ -31,6 +31,7 @@ export * from './user-invitations';
 export * from './account-deletion-requests';
 
 // RBAC entities
+export * from './ownership';
 export * from './roles';
 export * from './permissions';
 export * from './role-permissions';

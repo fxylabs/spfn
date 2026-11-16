@@ -36,7 +36,11 @@ export const userInvitations = authSchema.table('user_invitations',
 
         // Role to be assigned when invitation is accepted
         // Foreign key to roles table
-        roleId: foreignKey('role', () => roles.id),
+        // Restrict: a pending invitation promises its role, so deleting a role
+        // a pending invitation names is refused (`deleteRole`, 409). The
+        // invitations that can no longer give it (accepted, cancelled,
+        // expired) are deleted with the role by `deleteRole` itself.
+        roleId: foreignKey('role', () => roles.id, { onDelete: 'restrict' }),
 
         // User who created this invitation
         // Foreign key to users table

@@ -254,13 +254,31 @@ export {
     getStoredUserRole,
     hasRole,
     hasAnyRole,
-    assertCanAssignRole,
+    resolveAuthority,
+    roleChangeRefusal,
+    assertCanChangeRole,
+    assertCanChangeAuthority,
+    runJudgedTransaction,
+    changeUserRole,
+    grantUserPermission,
+    revokeUserPermission,
+    assertRoleMayBeDeactivated,
+} from './permission.service';
+export type {
+    Authority,
+    AuthorityRole,
+    RoleChange,
+    RoleChangeRefusal,
+    AuthorityChange,
+    AuthorityChangeRefusal,
+    UserPermissionOptions,
 } from './permission.service';
 
 // Role Email-Domain Policy
 export {
     findUserWithEffectiveRole,
     findUserWithEffectiveRoleOnPrimary,
+    resolveRoleInForce,
     listRoleEmailDomainViolations,
     demoteRoleEmailDomainViolations,
     assertRoleEmailDomainPolicy,
@@ -413,11 +431,13 @@ export {
     listOpsTokensService,
     isOpsToken,
     OPS_TOKEN_PREFIX,
+    OPS_TOKEN_ISSUE_PERMISSION,
 } from './ops-token.service';
 
 export type {
     VerifiedOpsToken,
     IssuedOpsToken,
+    OpsTokenIssuer,
 } from './ops-token.service';
 
 // =============================================================================

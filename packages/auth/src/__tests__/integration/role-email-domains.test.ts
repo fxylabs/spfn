@@ -545,7 +545,8 @@ describe.skipIf(!dbAvailable)('Per-role email-domain policy', () =>
             const response = await assignRole(caller, target.id, 'user');
 
             expect(response.status).toBe(403);
-            expect((await response.json()).message).toBe('Cannot modify superadmin role');
+            // Judged by the stored superadmin role, which outranks the admin caller
+            expect((await response.json()).message).toBe('A role can be given or taken only by a caller whose own role ranks above it');
             expect(await storedRoleOf(target.id)).toBe(await roleId('superadmin'));
         });
 

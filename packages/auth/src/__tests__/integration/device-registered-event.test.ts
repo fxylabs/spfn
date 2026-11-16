@@ -192,14 +192,14 @@ describe.skipIf(!dbAvailable)('device-registered event (case table 7a)', () =>
         };
     }
 
-    async function seedUser(email: string)
+    async function seedUser(email: string, roleName = 'user')
     {
-        const userRole = await getRoleByName('user');
+        const role = await getRoleByName(roleName);
         const [row] = await getTestDb().insert(users).values({
             email,
             passwordHash: await hashPassword(PASSWORD),
             emailVerifiedAt: new Date(),
-            roleId: userRole!.id,
+            roleId: role!.id,
         }).returning();
 
         return row;
@@ -355,7 +355,8 @@ describe.skipIf(!dbAvailable)('device-registered event (case table 7a)', () =>
 
     it('invitation (acceptInvitation, keysRepository.create directly), new keyId: one emission, channel invitation, after the commit', async () =>
     {
-        const inviter = await seedUser('a3-inviter@test.com');
+        // An inviter who outranks the role given, as acceptance re-checks
+        const inviter = await seedUser('a3-inviter@test.com', 'admin');
         const userRole = await getRoleByName('user');
         const token = '11111111-1111-4111-8111-111111111111';
 

@@ -899,7 +899,11 @@ describe.skipIf(!dbAvailable)('second-factor policy (#309 case table)', () =>
     it('S16: an ops-token request works while the policy holds every unenrolled person', async () =>
     {
         usePolicy();
-        const { token } = await issueOpsTokenService('sf309-reports', ['reports:read'], null);
+        const [issuer] = await getTestDb().insert(users).values({
+            email: 'sf309-issuer@test.com',
+            roleId: (await getRoleByName('admin'))!.id,
+        }).returning({ id: users.id });
+        const { token } = await issueOpsTokenService('sf309-reports', ['reports:read'], null, { userId: Number(issuer!.id), credential: { kind: 'deviceKey', keyId: 'unused-key' } });
 
         const response = await request('GET', '/app/ops', `Bearer ${token}`);
 

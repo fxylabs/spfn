@@ -7,7 +7,7 @@
  *
  * The last block is a source scan: no middleware loads a principal's role
  * itself — the admission (`admitPrincipal`) does, through
- * `applyRoleEmailDomainPolicy` — so a middleware added later cannot skip the
+ * `resolveRoleInForce` — so a middleware added later cannot skip the
  * policy by calling the repository itself.
  */
 
@@ -173,6 +173,6 @@ describe('source scan: role resolution goes through findUserWithEffectiveRole', 
         const admission = readFileSync(join(MIDDLEWARE_DIR, '..', 'services', 'admission.service.ts'), 'utf8');
 
         expect(resolving).toEqual([]);
-        expect(admission).toContain('applyRoleEmailDomainPolicy(read.account)');
+        expect(admission).toContain('resolveRoleInForce(read.account)');
     });
 });

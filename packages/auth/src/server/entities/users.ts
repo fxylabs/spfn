@@ -54,7 +54,10 @@ export const users = authSchema.table('users',
         // Foreign key to roles table
         // References built-in roles: user (default), admin, superadmin
         // Can also reference custom roles created at runtime
-        roleId: foreignKey('role', () => roles.id),
+        // Restrict: an account is not part of its role. Deleting a role some
+        // account holds is refused (`deleteRole`, 409 RoleInUseError); the
+        // operator reassigns the accounts first.
+        roleId: foreignKey('role', () => roles.id, { onDelete: 'restrict' }),
 
         // Account status: whether an operator lets the account in
         // - active: Normal operation (default)

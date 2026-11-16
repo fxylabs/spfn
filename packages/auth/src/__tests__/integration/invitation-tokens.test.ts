@@ -164,7 +164,7 @@ describe.skipIf(!dbAvailable)('Invitation tokens are bearer credentials (w-etq2g
     async function invite(
         authorization: string,
         email: string,
-        role: 'superadmin' | 'user',
+        role: 'admin' | 'user',
     ): Promise<{ id: number; token: string }>
     {
         const response = await call('POST', '/_auth/invitations', { email, roleId: await roleId(role) }, authorization);
@@ -222,9 +222,10 @@ describe.skipIf(!dbAvailable)('Invitation tokens are bearer credentials (w-etq2g
         expect(text).not.toContain(hashCredential(token));
     });
 
-    it('T2: an admin cannot accept a pending superadmin invitation with anything the list answered', async () =>
+    it('T2: an admin cannot accept a pending admin invitation with anything the list answered', async () =>
     {
-        await invite(await caller('superadmin'), 'newroot@invitations.test', 'superadmin');
+        // An admin invitation is the most a caller can make (only a superadmin outranks admin)
+        await invite(await caller('superadmin'), 'newroot@invitations.test', 'admin');
         const admin = await caller('admin');
 
         const listed = await call('GET', '/_auth/invitations', undefined, admin);
@@ -312,9 +313,9 @@ describe.skipIf(!dbAvailable)('Invitation tokens are bearer credentials (w-etq2g
     // T5 — resend and cancel take the authority create takes
     // ========================================================================
 
-    it('T5: an admin resending or cancelling a superadmin invitation gets 403 and changes nothing', async () =>
+    it('T5: an admin resending or cancelling an admin invitation (a role they do not outrank) gets 403 and changes nothing', async () =>
     {
-        const { id } = await invite(await caller('superadmin'), 'root2@invitations.test', 'superadmin');
+        const { id } = await invite(await caller('superadmin'), 'root2@invitations.test', 'admin');
         const admin = await caller('admin');
         const before = await invitationRow(id);
 

@@ -30,10 +30,10 @@ const { keysRepository, usersRepository, bearerKeys, roles } = vi.hoisted(() => 
         updateLastUsedById: vi.fn(async () => undefined),
     },
     // `role-email-domain.service`, mocked whole below: the admission applies the
-    // policy to its primary read through `applyRoleEmailDomainPolicy`.
+    // role in force to its primary read through `resolveRoleInForce`.
     roles: {
         findUserWithEffectiveRole: vi.fn(),
-        applyRoleEmailDomainPolicy: vi.fn(async (read: unknown) => read),
+        resolveRoleInForce: vi.fn(async (read: { role: unknown }) => read.role),
     },
 }));
 

@@ -4,7 +4,7 @@
  * User invitation management for invite-only registration
  */
 
-import { onAfterCommit, runInTransaction } from '@spfn/core/db';
+import { onAfterCommit } from '@spfn/core/db';
 import type { InvitationSummary } from '@spfn/auth';
 import {
     invitationsRepository,
@@ -21,7 +21,7 @@ import { registerPublicKeyService, registeredBinding } from './key.service';
 import { BadRequestError, NotFoundError, ConflictError } from '@spfn/core/errors';
 import { InvitationChangedError, InvitationNoLongerValidError, InvitationNotFoundError } from '@spfn/auth/errors';
 import { secondFactorEnrolmentFields } from './second-factor-policy.service';
-import { assertCanAssignRole } from './permission.service';
+import { assertCanChangeRole, roleChangeRefusal, runJudgedTransaction, type RoleChange } from './permission.service';
 
 /**
  * An invitation row as the repository returns it — every column but the token hash
@@ -88,8 +88,16 @@ function assertMetadataIsObject(metadata: unknown): void
  * Create a new invitation
  *
  * @param params - Invitation parameters
+ * The inviter gives the role (`assertCanChangeRole`), and acceptance checks
+ * again that they still could.
+ *
+ * @param params - Invitation parameters
  * @returns The invitation and its link token — the only time the token is returned
  * @throws BadRequestError if `expiresAt` is beyond INVITATION_MAX_EXPIRY_DAYS, or `metadata` is not an object
+ * @throws NotFoundError (404) when the role does not exist
+ * @throws ConflictError (409) when the role is inactive
+ * @throws ForbiddenError (403) when the inviter does not outrank the role
+ * @throws AuthorityContendedError (409) when the caller's role changed under the judgement twice
  *
  * @example
  * ```typescript
@@ -122,6 +130,36 @@ export async function createInvitation(params: {
 
     assertMetadataIsObject(metadata);
 
+    // One transaction from the inviter's authority to the row: the authority
+    // is resolved inside it, so it is the inviter's as of this write.
+    return runJudgedTransaction(async () =>
+    {
+        await assertAddressFree(email);
+
+        // The inviter gives the role: it must exist, be active, and rank below
+        // theirs. Without this, a user:invite holder could invite with the
+        // superadmin roleId and self-accept.
+        await assertCanChangeRole(invitedBy, { targetUserCurrentRole: null, newRole: roleId });
+        const role = (await rolesRepository.findByIdOnPrimary(roleId))!;
+
+        // A pending grant: the domain must already be allowed for the role, while
+        // verification waits for acceptance, which is what proves the address.
+        assertEmailAllowedForRole({ email, emailVerifiedAt: null }, role.name, { requireVerified: false });
+
+        const expiresAt = expiresAtParam ?? calculateExpiresAt(expiresInDays);
+        assertExpiryWithinBound(expiresAt);
+
+        return insertInvitation({ email, roleId, invitedBy, expiresAt, metadata });
+    }, { context: 'auth:invitation-create' });
+}
+
+/**
+ * Refuse an invitation to an address that has an account or a pending invitation
+ *
+ * @throws ConflictError (409)
+ */
+async function assertAddressFree(email: string): Promise<void>
+{
     // Check if user already exists — an address stored in another case counts
     if ((await usersRepository.findByFoldedEmail(email)).kind !== 'none')
     {
@@ -135,30 +173,18 @@ export async function createInvitation(params: {
     {
         throw new ConflictError({ message: 'Pending invitation already exists for this email' });
     }
+}
 
-    // Verify role exists
-    const role = await rolesRepository.findById(roleId);
-
-    if (!role)
-    {
-        throw new NotFoundError({ message: `Role with id ${roleId} not found`, resource: 'Role' });
-    }
-
-    // A pending grant: the domain must already be allowed for the role, while
-    // verification waits for acceptance, which is what proves the address.
-    assertEmailAllowedForRole({ email, emailVerifiedAt: null }, role.name, { requireVerified: false });
-
-    // Verify inviter exists
-    const inviter = await usersRepository.findById(invitedBy);
-
-    if (!inviter)
-    {
-        throw new NotFoundError({ message: `User with id ${invitedBy} not found`, resource: 'User' });
-    }
-
-    const expiresAt = expiresAtParam ?? calculateExpiresAt(expiresInDays);
-    assertExpiryWithinBound(expiresAt);
-
+/** Store a new invitation with a fresh link token, and mail it once committed. */
+async function insertInvitation(params: {
+    email: string;
+    roleId: number;
+    invitedBy: number;
+    expiresAt: Date;
+    metadata?: Record<string, any>;
+}): Promise<IssuedInvitation>
+{
+    const { email, roleId, invitedBy, expiresAt, metadata } = params;
     const { secret: token, hash: tokenHash } = mintCredential();
 
     const invitation = await invitationsRepository.create({
@@ -331,7 +357,9 @@ interface AcceptInvitationParams
  * @returns Created user info
  * @throws InvitationNotFoundError (404) when the token names no invitation
  * @throws InvitationNoLongerValidError (410) when it can no longer be accepted, including
- *   when a resend, a cancel or another acceptance committed first
+ *   when a resend, a cancel or another acceptance committed first, and when the
+ *   inviter could no longer give its role
+ * @throws AuthorityContendedError (409) when the inviter's role changed under the judgement twice
  *
  * @example
  * ```typescript
@@ -348,8 +376,11 @@ interface AcceptInvitationParams
 export async function acceptInvitation(params: AcceptInvitationParams)
 {
     // One transaction from the claim to the key: whatever refuses the
-    // acceptance after the claim puts the invitation back to pending.
-    return await runInTransaction(async () =>
+    // acceptance after the claim puts the invitation back to pending. An
+    // inviter's role that moved under the judgement runs it all again, from
+    // the claim (`runJudgedTransaction`); the stale premise is found before
+    // `beforeRegister` runs and the event is after commit, so neither repeats.
+    return await runJudgedTransaction(async () =>
     {
         const invitation = await claimInvitation(params.token);
         const { role, emailVerifiedAt } = await admitInvitee(invitation);
@@ -372,7 +403,7 @@ export async function acceptInvitation(params: AcceptInvitationParams)
             role: role.name,
             ...await secondFactorEnrolmentFields(newUser.id),
         };
-    });
+    }, { context: 'auth:invitation-accept' });
 }
 
 /**
@@ -404,18 +435,15 @@ async function claimInvitation(token: string): Promise<InvitationRecord>
  * The role a claimed invitation grants, once the policy in force admits the invitee
  *
  * Read after the claim, so the configuration consulted is the one in force
- * when the row was locked, not the one the invitation was created under.
+ * when the row was locked, not the one the invitation was created under —
+ * and so is the inviter's authority (`assertInviterStillAuthorizes`).
  * Accepting verifies the address — the account is created with it verified —
  * so the domain rule is applied to that row.
  */
 async function admitInvitee(invitation: InvitationRecord)
 {
-    const role = await rolesRepository.findById(invitation.roleId);
-
-    if (!role)
-    {
-        throw new NotFoundError({ message: 'Role not found', resource: 'Role' });
-    }
+    await assertInviterStillAuthorizes(invitation);
+    const role = (await rolesRepository.findByIdOnPrimary(invitation.roleId))!;
 
     const emailVerifiedAt = new Date();
     assertEmailAllowedForRole({ email: invitation.email, emailVerifiedAt }, role.name);
@@ -429,6 +457,30 @@ async function admitInvitee(invitation: InvitationRecord)
     });
 
     return { role, emailVerifiedAt };
+}
+
+/**
+ * Refuse an invitation its inviter could not make now
+ *
+ * An invitation confers its role on the inviter's authority, so that
+ * authority is read again at acceptance (`resolveAuthority`): an inviter
+ * demoted, suspended or deleted since — or a role deactivated since — and the
+ * invitation no longer gives anything. The refusal rolls the claim back; the
+ * invitation stays pending, and accepting it works again once the inviter's
+ * authority is restored or another manager resends it.
+ *
+ * @throws InvitationNoLongerValidError (410)
+ */
+async function assertInviterStillAuthorizes(invitation: InvitationRecord): Promise<void>
+{
+    const refusal = await roleChangeRefusal(invitation.invitedBy, givesRole(invitation.roleId));
+
+    if (refusal !== null)
+    {
+        throw new InvitationNoLongerValidError({
+            message: 'This invitation can no longer be accepted: whoever sent it no longer has the authority to give its role',
+        });
+    }
 }
 
 /**
@@ -526,17 +578,20 @@ export async function listInvitations(params: {
 /**
  * The invitation a manager acts on, once their authority over it is established
  *
- * Resend and cancel each change who may become the invitee, so they take the
- * authority creating the invitation took: the right to assign its role. The
- * token hash comes with it for the conditional write that follows and goes no
- * further than this service.
+ * Resend and cancel each change who may become the invitee, so they are role
+ * changes on the caller's authority (`assertCanChangeRole`): a resend gives
+ * the invitation's role again, a cancel takes it away. The token hash comes
+ * with it for the conditional write that follows and goes no further than
+ * this service.
  *
  * @param id - Invitation ID
  * @param callerId - User performing the action
+ * @param change - The role change the action makes, given the invitation's role
  * @throws NotFoundError (404) when no invitation has the ID
- * @throws ForbiddenError (403) when the caller may not assign the invitation's role
+ * @throws ForbiddenError (403) when the caller does not outrank the invitation's role
+ * @throws ConflictError (409) when a resend would give an inactive role
  */
-async function findManagedInvitation(id: number, callerId: number)
+async function findManagedInvitation(id: number, callerId: number, change: (roleId: number) => RoleChange)
 {
     const invitation = await invitationsRepository.findByIdWithTokenHash(id);
 
@@ -545,9 +600,21 @@ async function findManagedInvitation(id: number, callerId: number)
         throw new NotFoundError({ message: 'Invitation not found', resource: 'Invitation' });
     }
 
-    await assertCanAssignRole(callerId, invitation.roleId);
+    await assertCanChangeRole(callerId, change(invitation.roleId));
 
     return invitation;
+}
+
+/** A resend gives the invitation's role again. */
+function givesRole(roleId: number): RoleChange
+{
+    return { targetUserCurrentRole: null, newRole: roleId };
+}
+
+/** A cancel takes the invitation's role away, before anyone holds it. */
+function takesRole(roleId: number): RoleChange
+{
+    return { targetUserCurrentRole: roleId, newRole: null };
 }
 
 /**
@@ -559,9 +626,10 @@ async function findManagedInvitation(id: number, callerId: number)
  * @param cancelledBy - User ID who cancelled
  * @param reason - Optional cancellation reason
  * @throws NotFoundError (404) when no invitation has the ID
- * @throws ForbiddenError (403) when the caller may not assign the invitation's role
+ * @throws ForbiddenError (403) when the caller does not outrank the invitation's role
  * @throws ConflictError (409) when the invitation is not pending
  * @throws InvitationChangedError (409) when it stopped being pending while this ran
+ * @throws AuthorityContendedError (409) when the caller's role changed under the judgement twice
  */
 export async function cancelInvitation(
     id: number,
@@ -569,19 +637,22 @@ export async function cancelInvitation(
     reason?: string,
 )
 {
-    const invitation = await findManagedInvitation(id, cancelledBy);
-
-    if (invitation.status !== 'pending')
+    await runJudgedTransaction(async () =>
     {
-        throw new ConflictError({ message: `Cannot cancel ${invitation.status} invitation` });
-    }
+        const invitation = await findManagedInvitation(id, cancelledBy, takesRole);
 
-    if (!await invitationsRepository.cancel(id, cancelledBy, reason))
-    {
-        throw new InvitationChangedError();
-    }
+        if (invitation.status !== 'pending')
+        {
+            throw new ConflictError({ message: `Cannot cancel ${invitation.status} invitation` });
+        }
 
-    console.log(`[Auth] ⚠️  Invitation cancelled: ${invitation.email} (reason: ${reason || 'none'})`);
+        if (!await invitationsRepository.cancel(id, cancelledBy, reason))
+        {
+            throw new InvitationChangedError();
+        }
+
+        console.log(`[Auth] ⚠️  Invitation cancelled: ${invitation.email} (reason: ${reason || 'none'})`);
+    }, { context: 'auth:invitation-cancel' });
 }
 
 /**
@@ -630,10 +701,11 @@ export async function expireOldInvitations()
  * @returns The invitation and its new link token — the only time that token is returned
  * @throws BadRequestError when the new expiry is beyond INVITATION_MAX_EXPIRY_DAYS
  * @throws NotFoundError (404) when no invitation has the ID
- * @throws ForbiddenError (403) when the caller may not assign the invitation's role
- * @throws ConflictError (409) when the invitation was accepted or cancelled
+ * @throws ForbiddenError (403) when the caller does not outrank the invitation's role
+ * @throws ConflictError (409) when the invitation's role is inactive, or it was accepted or cancelled
  * @throws InvitationChangedError (409) when another request reissued, accepted or
  *   cancelled it while this ran — the token minted here was never stored
+ * @throws AuthorityContendedError (409) when the caller's role changed under the judgement twice
  */
 export async function resendInvitation(params: {
     id: number;
@@ -645,33 +717,41 @@ export async function resendInvitation(params: {
     const newExpiresAt = calculateExpiresAt(expiresInDays);
     assertExpiryWithinBound(newExpiresAt);
 
-    const invitation = await findManagedInvitation(id, resentBy);
-
-    // Can only resend pending or expired invitations
-    if (!['pending', 'expired'].includes(invitation.status))
+    return runJudgedTransaction(async () =>
     {
-        throw new ConflictError({ message: `Cannot resend ${invitation.status} invitation` });
-    }
+        const invitation = await findManagedInvitation(id, resentBy, givesRole);
 
-    const { secret: token, hash: tokenHash } = mintCredential();
-    const updated = await invitationsRepository.resend(id, invitation, tokenHash, newExpiresAt);
+        // Can only resend pending or expired invitations
+        if (!['pending', 'expired'].includes(invitation.status))
+        {
+            throw new ConflictError({ message: `Cannot resend ${invitation.status} invitation` });
+        }
 
-    if (!updated)
-    {
-        throw new InvitationChangedError();
-    }
+        const { secret: token, hash: tokenHash } = mintCredential();
+        const updated = await invitationsRepository.resend(id, invitation, tokenHash, newExpiresAt);
 
-    // After the commit, like the invitation's first link
+        if (!updated)
+        {
+            throw new InvitationChangedError();
+        }
+
+        announceResend(invitation, token, newExpiresAt);
+
+        return { invitation: updated, token };
+    }, { context: 'auth:invitation-resend' });
+}
+
+/** Mail a resent invitation's new link once the resend commits, like its first link. */
+function announceResend(invitation: InvitationRecord, token: string, expiresAt: Date): void
+{
     onAfterCommit(() => invitationCreatedEvent.emit({
         invitationId: String(invitation.id),
         email: invitation.email,
         token,
         roleId: Number(invitation.roleId),
         invitedBy: String(invitation.invitedBy),
-        expiresAt: newExpiresAt.toISOString(),
+        expiresAt: expiresAt.toISOString(),
         isResend: true,
         metadata: invitation.metadata as Record<string, unknown> | undefined,
     }));
-
-    return { invitation: updated, token };
 }

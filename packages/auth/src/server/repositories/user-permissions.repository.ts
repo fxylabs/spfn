@@ -78,6 +78,24 @@ export class UserPermissionsRepository extends BaseRepository
     }
 
     /**
+     * A person's grant or revocation of one permission, replacing the one they
+     * had (one per person and permission, `user_permissions_unique`).
+     */
+    async upsert(data: NewUserPermission)
+    {
+        const result = await this.db
+            .insert(userPermissions)
+            .values(data)
+            .onConflictDoUpdate({
+                target: [userPermissions.userId, userPermissions.permissionId],
+                set: { granted: data.granted, expiresAt: data.expiresAt, reason: data.reason, updatedAt: new Date() },
+            })
+            .returning();
+
+        return result[0]!;
+    }
+
+    /**
      * 사용자 권한 오버라이드 업데이트
      */
     async updateById(id: number, data: Partial<NewUserPermission>)

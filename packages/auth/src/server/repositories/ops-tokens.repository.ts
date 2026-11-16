@@ -1,17 +1,26 @@
 /**
  * Ops Tokens Repository
  *
- * Data access for the ops-token credential store. Extends BaseRepository for
- * transaction context and read/write splitting like every other auth
- * repository.
+ * Data access for the ops-token credential store. An ops token is a credential
+ * issued under its issuer's account, so this is an `AccountStateRepository`:
+ * issuance writes under the issuer's account lock.
  */
 
 import { and, desc, eq, isNull } from 'drizzle-orm';
-import { BaseRepository } from '@spfn/core/db';
 import { opsTokens, type NewOpsToken, type OpsToken } from '../entities/ops-tokens';
+import { AccountStateRepository, type AccountWrites } from './account-state.repository';
 
-export class OpsTokensRepository extends BaseRepository
+/** A token as issuance writes it: always under an issuer. */
+export type NewIssuedOpsToken = NewOpsToken & { issuedBy: number };
+
+export class OpsTokensRepository extends AccountStateRepository
 {
+    static override readonly accountWrites: AccountWrites<OpsTokensRepository> = {
+        create: { account: data => data.issuedBy },
+        revokeById: { exempt: 'an operator\'s revocation only removes a way in, and it is terminal: no state of the issuer\'s account makes the token work again' },
+        updateLastUsedById: { exempt: 'bookkeeping after a verification: lastUsedAt is shown to operators and decides nothing' },
+    };
+
     /**
      * Lookup by the secret's hash — the verification path.
      *
@@ -31,7 +40,7 @@ export class OpsTokensRepository extends BaseRepository
         return result[0] ?? null;
     }
 
-    async create(data: NewOpsToken): Promise<OpsToken>
+    async create(data: NewIssuedOpsToken): Promise<OpsToken>
     {
         const result = await this.db
             .insert(opsTokens)

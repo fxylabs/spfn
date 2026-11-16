@@ -689,7 +689,8 @@ spfn ops token forget --app <url>
 ```
 
 `issue`, `list` and `revoke` call the app's own admin-only routes, so the CLI prompts for
-an administrator's email and password first — no database access. Only the token's SHA-256
+an administrator's email and password first — no database access. A token works only while
+the administrator who issued it is active and may still issue tokens (`ops:token:issue`). Only the token's SHA-256
 hash is ever stored, so the secret exists in the clear once, in the issuance answer;
 `--to-keychain` delivers it without printing it.
 

@@ -5,7 +5,7 @@
  * BaseRepository를 상속받아 자동 트랜잭션 컨텍스트 지원 및 Read/Write 분리
  */
 
-import { eq, and, gt, lt, desc, sql, getTableColumns } from 'drizzle-orm';
+import { eq, and, gt, lt, desc, sql, getTableColumns, type SQL } from 'drizzle-orm';
 import { BaseRepository } from '@spfn/core/db';
 
 import { users } from '../entities/users';
@@ -22,6 +22,19 @@ import { normalizeEmail } from '../helpers/email';
  * value a caller reads.
  */
 const { tokenHash: _tokenHash, ...invitationColumns } = getTableColumns(userInvitations);
+
+/**
+ * An invitation that can still be accepted at `now`: pending, and not past
+ * its expiry. The one definition: acceptance claims only such a row
+ * (`claimPendingByTokenHash`), and a role's deletion counts only these as
+ * promising the role (`rolesRepository.referencesOf`). A pending invitation
+ * past its expiry is settled whether or not the sweep
+ * (`updateExpiredInvitations`) has marked it yet.
+ */
+export function claimableAt(now: Date): SQL
+{
+    return and(eq(userInvitations.status, 'pending'), gt(userInvitations.expiresAt, now))!;
+}
 
 /**
  * Invitation columns joined with the role and the inviter, for list and details.
@@ -336,8 +349,7 @@ export class InvitationsRepository extends BaseRepository
             .where(
                 and(
                     eq(userInvitations.tokenHash, tokenHash),
-                    eq(userInvitations.status, 'pending'),
-                    gt(userInvitations.expiresAt, now),
+                    claimableAt(now),
                 ),
             )
             .returning(invitationColumns);

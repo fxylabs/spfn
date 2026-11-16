@@ -30,6 +30,8 @@ const {
 } = vi.hoisted(() =>
 {
     const emitMock = () => ({ emit: vi.fn(async () => undefined) });
+    // The invitation's role, read on the primary since the permission model
+    const findRole = vi.fn();
 
     return {
         usersRepository: {
@@ -43,7 +45,7 @@ const {
         invitationsRepository: {
             claimPendingByTokenHash: vi.fn(),
         },
-        rolesRepository: { findById: vi.fn() },
+        rolesRepository: { findById: findRole, findByIdOnPrimary: findRole },
         validateVerificationToken: vi.fn(),
         registerPublicKeyService: vi.fn(async () => ({ pending: false, binding: 'none', expiresAt: null })),
         getRoleByName: vi.fn(async () => ({ id: 1, name: 'user' })),
@@ -74,6 +76,13 @@ vi.mock('@spfn/core/db', async (importOriginal) => ({
 vi.mock('../../server/services/verification.service', () => ({ validateVerificationToken }));
 vi.mock('../../server/services/key.service', () => ({ registerPublicKeyService }));
 vi.mock('../../server/services/role.service', () => ({ getRoleByName }));
+// The inviter's authority is the permission model's to judge, not this file's:
+// every inviter here still could give the invitation's role.
+vi.mock('../../server/services/permission.service', () => ({
+    roleChangeRefusal: vi.fn(async () => null),
+    assertCanChangeRole: vi.fn(async () => undefined),
+    runJudgedTransaction: (work: () => Promise<unknown>) => work(),
+}));
 // normalizeEmail is the real one: the services compare a token's target against
 // the supplied address in canonical form, so a stub would make the comparison
 // pass or fail for reasons unrelated to the hook under test.

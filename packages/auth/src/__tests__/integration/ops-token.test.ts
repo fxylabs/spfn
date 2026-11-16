@@ -33,6 +33,9 @@ import {
     OPS_TOKEN_PREFIX,
 } from '@/server/services/ops-token.service';
 import { setupTestDb, teardownTestDb, clearTables, getTestDb, isDatabaseAvailable } from '../helpers/db';
+import { users } from '@/server/entities';
+import { initializeAuth } from '@/server/services/rbac.service';
+import { getRoleByName } from '@/server/services/role.service';
 
 const dbAvailable = await isDatabaseAvailable();
 
@@ -86,17 +89,27 @@ describe.skipIf(!dbAvailable)('Ops tokens', () =>
         await teardownTestDb();
     });
 
+    let issuerId: number;
+
     beforeEach(async () =>
     {
         await clearTables(getTestDb());
+        await initializeAuth();
         app = buildOpsApp();
+
+        // Every ops token records an issuer that could issue it: an active administrator
+        const [issuer] = await getTestDb().insert(users).values({
+            email: 'issuer@test.com',
+            roleId: (await getRoleByName('admin'))!.id,
+        }).returning({ id: users.id });
+        issuerId = Number(issuer!.id);
     });
 
     describe('case table', () =>
     {
         it('valid token + sufficient scope → 200', async () =>
         {
-            const { token } = await issueOpsTokenService('t', ['waitlist:read'], null);
+            const { token } = await issueOpsTokenService('t', ['waitlist:read'], null, { userId: issuerId, credential: { kind: 'deviceKey', keyId: 'unused-key' } });
             const res = await app.request('/_ops/signups', {
                 headers: { Authorization: `Bearer ${token}` },
             });
@@ -107,7 +120,7 @@ describe.skipIf(!dbAvailable)('Ops tokens', () =>
 
         it('valid token + insufficient scope → 403 naming the missing scope', async () =>
         {
-            const { token } = await issueOpsTokenService('t', ['waitlist:read'], null);
+            const { token } = await issueOpsTokenService('t', ['waitlist:read'], null, { userId: issuerId, credential: { kind: 'deviceKey', keyId: 'unused-key' } });
             const res = await app.request('/_ops/signups/export', {
                 method: 'POST',
                 headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
@@ -122,14 +135,14 @@ describe.skipIf(!dbAvailable)('Ops tokens', () =>
 
         it('expired token → 401', async () =>
         {
-            const { token } = await issueOpsTokenService('t', ['waitlist:read'], new Date(Date.now() - 1000));
+            const { token } = await issueOpsTokenService('t', ['waitlist:read'], new Date(Date.now() - 1000), { userId: issuerId, credential: { kind: 'deviceKey', keyId: 'unused-key' } });
 
             expect((await refusalMessage(app, token)).status).toBe(401);
         });
 
         it('revoked token → 401 regardless of scope', async () =>
         {
-            const { token, record } = await issueOpsTokenService('t', ['*'], null);
+            const { token, record } = await issueOpsTokenService('t', ['*'], null, { userId: issuerId, credential: { kind: 'deviceKey', keyId: 'unused-key' } });
             await revokeOpsTokenService(record.id);
 
             expect((await refusalMessage(app, token)).status).toBe(401);
@@ -149,8 +162,8 @@ describe.skipIf(!dbAvailable)('Ops tokens', () =>
 
         it('expired, revoked, and unknown share one refusal message', async () =>
         {
-            const expired = await issueOpsTokenService('e', ['*'], new Date(Date.now() - 1000));
-            const revoked = await issueOpsTokenService('r', ['*'], null);
+            const expired = await issueOpsTokenService('e', ['*'], new Date(Date.now() - 1000), { userId: issuerId, credential: { kind: 'deviceKey', keyId: 'unused-key' } });
+            const revoked = await issueOpsTokenService('r', ['*'], null, { userId: issuerId, credential: { kind: 'deviceKey', keyId: 'unused-key' } });
             await revokeOpsTokenService(revoked.record.id);
 
             const messages = new Set([
@@ -167,7 +180,7 @@ describe.skipIf(!dbAvailable)('Ops tokens', () =>
     {
         it("'*' grants every scope", async () =>
         {
-            const { token } = await issueOpsTokenService('root', ['*'], null);
+            const { token } = await issueOpsTokenService('root', ['*'], null, { userId: issuerId, credential: { kind: 'deviceKey', keyId: 'unused-key' } });
             const res = await app.request('/_ops/signups', {
                 headers: { Authorization: `Bearer ${token}` },
             });
@@ -177,7 +190,7 @@ describe.skipIf(!dbAvailable)('Ops tokens', () =>
 
         it('refuses issuance with no scopes', async () =>
         {
-            await expect(issueOpsTokenService('t', [], null)).rejects.toThrow(/at least one scope/);
+            await expect(issueOpsTokenService('t', [], null, { userId: issuerId, credential: { kind: 'deviceKey', keyId: 'unused-key' } })).rejects.toThrow(/at least one scope/);
         });
     });
 
@@ -185,7 +198,7 @@ describe.skipIf(!dbAvailable)('Ops tokens', () =>
     {
         it('answers command discovery to a valid token only', async () =>
         {
-            const { token } = await issueOpsTokenService('t', ['waitlist:read'], null);
+            const { token } = await issueOpsTokenService('t', ['waitlist:read'], null, { userId: issuerId, credential: { kind: 'deviceKey', keyId: 'unused-key' } });
 
             const unauthenticated = await app.request('/_ops/_manifest');
             expect(unauthenticated.status).toBe(401);
@@ -204,7 +217,7 @@ describe.skipIf(!dbAvailable)('Ops tokens', () =>
     {
         it('stores only the hash and returns the secret once', async () =>
         {
-            const { token, record } = await issueOpsTokenService('t', ['waitlist:read'], null);
+            const { token, record } = await issueOpsTokenService('t', ['waitlist:read'], null, { userId: issuerId, credential: { kind: 'deviceKey', keyId: 'unused-key' } });
 
             expect(token).toMatch(/^spfn_ops_[0-9a-f]{64}$/);
             expect(record.tokenHash).not.toBe(token);
@@ -217,7 +230,7 @@ describe.skipIf(!dbAvailable)('Ops tokens', () =>
 
         it('revocation is permanent and never overwrites the first timestamp', async () =>
         {
-            const { record } = await issueOpsTokenService('t', ['*'], null);
+            const { record } = await issueOpsTokenService('t', ['*'], null, { userId: issuerId, credential: { kind: 'deviceKey', keyId: 'unused-key' } });
 
             const first = await revokeOpsTokenService(record.id);
             expect(first?.revokedAt).toBeInstanceOf(Date);
@@ -231,7 +244,7 @@ describe.skipIf(!dbAvailable)('Ops tokens', () =>
 
         it('an issued token carries the exported shape, a session JWT does not', async () =>
         {
-            const { token } = await issueOpsTokenService('t', ['waitlist:read'], null);
+            const { token } = await issueOpsTokenService('t', ['waitlist:read'], null, { userId: issuerId, credential: { kind: 'deviceKey', keyId: 'unused-key' } });
 
             expect(token.startsWith(OPS_TOKEN_PREFIX)).toBe(true);
             expect(isOpsToken(token)).toBe(true);

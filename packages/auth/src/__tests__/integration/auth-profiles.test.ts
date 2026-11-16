@@ -99,7 +99,7 @@ function admissionRow(overrides: Record<string, unknown> = {})
 {
     return {
         user: { id: USER_ID, email: 'proof@example.com', status: 'active', deletion: null, keyEpoch: 0, ...overrides },
-        role: { name: 'user' },
+        role: { name: 'user', isActive: true },
         key: validKeyRecord(),
     };
 }

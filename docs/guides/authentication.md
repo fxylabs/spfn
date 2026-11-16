@@ -583,6 +583,24 @@ export default defineServerConfig()
     .build();
 ```
 
+The configuration owns the role→permission mappings it declares: every boot makes them exactly
+what it says, so a permission removed from `rolePermissions` leaves the role, and the role service
+cannot remove one (409 — remove it from the configuration). Mappings added at runtime with
+`addPermissionToRole` / `setRolePermissions` are the operator's and boot leaves them alone. The
+same holds for the roles it declares: every boot restores their display name, description and
+priority, and the admin API cannot change those or delete the role (409); only `isActive` is the
+operator's. Deleting a role never deletes an account: a role still held, or promised by a pending
+invitation, answers 409 until it is reassigned. See "Who owns a role" and "Who owns a mapping" in
+the `@spfn/auth` README.
+
+A role's `priority` decides who may give or take it: a caller changes only roles ranked strictly
+below their own — the role given and the role the person holds now — so an admin (80) can give
+`editor` (20) but not `admin`, and only a superadmin creates or demotes an admin. The same rule
+binds changing what a role is: a caller creates or re-ranks a role only below their own priority,
+edits, deactivates or deletes only a role they outrank, and attaches or grants only permissions
+they hold. A deactivated role (`updateRole(callerId, id, { isActive: false })`) confers nothing
+until it is reactivated.
+
 ### Checking Roles/Permissions in Handlers
 
 For middleware-based checks, use `requireRole` or `requirePermissions` (see [Middleware](#middleware)). For inline checks within handlers:

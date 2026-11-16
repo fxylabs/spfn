@@ -123,28 +123,23 @@ function resolvedSession(state: AuthSessionState): AuthSessionData | null
 }
 
 /**
- * Get user role
+ * Get user role — the role in force, as `requireRole` sees it; null for none
  */
 export async function getUserRole(): Promise<string | null>
 {
     const session = resolvedSession(await getAuthSessionData());
 
-    return session?.role?.name || null;
+    return session?.role?.name ?? null;
 }
 
 /**
- * Get user permissions
+ * Get user permissions — exactly the ones `requirePermissions` admits
  */
 export async function getUserPermissions(): Promise<string[]>
 {
     const session = resolvedSession(await getAuthSessionData());
 
-    if (!session)
-    {
-        return [];
-    }
-
-    return session.permissions?.map((p: any) => p.name) || [];
+    return session?.permissions.map(permission => permission.name) ?? [];
 }
 
 /**
@@ -152,13 +147,9 @@ export async function getUserPermissions(): Promise<string[]>
  */
 export async function hasAnyRole(requiredRoles: string[]): Promise<boolean>
 {
-    const session = resolvedSession(await getAuthSessionData());
-    if (!session)
-    {
-        return false;
-    }
+    const role = await getUserRole();
 
-    return requiredRoles.includes(session.role?.name);
+    return role !== null && requiredRoles.includes(role);
 }
 
 /**
@@ -166,14 +157,7 @@ export async function hasAnyRole(requiredRoles: string[]): Promise<boolean>
  */
 export async function hasAnyPermission(requiredPermissions: string[]): Promise<boolean>
 {
-    const session = resolvedSession(await getAuthSessionData());
+    const held = await getUserPermissions();
 
-    if (!session)
-    {
-        return false;
-    }
-
-    const userPermissionNames = session.permissions?.map((p: any) => p.name) || [];
-
-    return requiredPermissions.some(permission => userPermissionNames.includes(permission));
+    return requiredPermissions.some(permission => held.includes(permission));
 }

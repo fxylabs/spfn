@@ -11,7 +11,7 @@ import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js';
 import type { RepositoryDatabase } from '@spfn/core/db';
 import { EntityNotFoundError, NotFoundError } from '@spfn/core/errors';
 
-import { rolePermissions, roles, NewUser, users, permissions, type User } from '../entities';
+import { rolePermissions, roles, NewUser, users, permissions, userPermissions, type User } from '../entities';
 import { userPublicKeys, type UserPublicKey } from '../entities/user-public-keys';
 import { oauth2Grants, type OAuth2Grant } from '../entities/oauth2-grants';
 import { normalizeEmail, normalizeOptionalEmail } from '../helpers/email';
@@ -47,11 +47,56 @@ type Database = RepositoryDatabase<PostgresJsDatabase<EmptyRelations>>;
  */
 export type UserUpdate = Omit<Partial<NewUser>, 'status' | 'deletion'>;
 
+/**
+ * A role as a user-with-role read loads it. `isActive` travels with it because
+ * a deactivated role confers nothing (`resolveRoleInForce`), and the read that
+ * already runs is where that is learned.
+ */
+export interface StoredRole
+{
+    id: number;
+    name: string;
+    displayName: string;
+    priority: number;
+    isActive: boolean;
+}
+
 /** A user row with the role that row stores, as the admission reads load it. */
 export interface UserWithStoredRole
 {
     user: User;
-    role: { id: number; name: string; displayName: string; priority: number } | null;
+    role: StoredRole | null;
+}
+
+/** A permission as the authority read answers it — the shape `/_auth/session` lists. */
+export interface PermissionSummary
+{
+    id: number;
+    name: string;
+    displayName: string;
+    category: string | undefined;
+}
+
+/**
+ * One account's authority inputs, from one statement on the primary: the
+ * account and its stored role, the active permissions of that role, and the
+ * account's own overrides in force — grants of active permissions that have
+ * not expired, and revocations that have not expired.
+ */
+export interface AuthorityRead extends UserWithStoredRole
+{
+    rolePermissions: PermissionSummary[];
+    grants: PermissionSummary[];
+    /** When each of `grants` that expires does, by permission id. */
+    grantExpiries: GrantExpiry[];
+    revokes: string[];
+}
+
+/** A grant in force that expires, and when. */
+export interface GrantExpiry
+{
+    permissionId: number;
+    expiresAt: Date;
 }
 
 /** The role columns every user-with-role read selects beside the user row. */
@@ -60,16 +105,64 @@ const ROLE_COLUMNS = {
     roleName: roles.name,
     roleDisplayName: roles.displayName,
     rolePriority: roles.priority,
+    roleIsActive: roles.isActive,
 };
 
-type RoleColumns = { roleId: number | null; roleName: string | null; roleDisplayName: string | null; rolePriority: number | null };
+interface RoleColumns
+{
+    roleId: number | null;
+    roleName: string | null;
+    roleDisplayName: string | null;
+    rolePriority: number | null;
+    roleIsActive: boolean | null;
+}
 
 /** The stored role of a user-with-role row, or null for an account that holds none. */
-function storedRole(row: RoleColumns): UserWithStoredRole['role']
+function storedRole(row: RoleColumns): StoredRole | null
 {
     return row.roleName
-        ? { id: row.roleId!, name: row.roleName, displayName: row.roleDisplayName!, priority: row.rolePriority! }
+        ? { id: row.roleId!, name: row.roleName, displayName: row.roleDisplayName!, priority: row.rolePriority!, isActive: row.roleIsActive! }
         : null;
+}
+
+type PermissionJson = Omit<PermissionSummary, 'category'> & { category: string | null };
+
+const PERMISSION_JSON = sql`json_build_object('id', ${permissions.id}, 'name', ${permissions.name}, 'displayName', ${permissions.displayName}, 'category', ${permissions.category})`;
+
+/** An override that has not expired. */
+const OVERRIDE_IN_FORCE = sql`(${userPermissions.expiresAt} is null or ${userPermissions.expiresAt} > now())`;
+
+/** The active permissions mapped to the account's stored role, as a JSON array. */
+const ROLE_PERMISSIONS_JSON = sql<PermissionJson[]>`coalesce((
+    select json_agg(${PERMISSION_JSON}) from ${rolePermissions}
+    inner join ${permissions} on ${permissions.id} = ${rolePermissions.permissionId}
+    where ${rolePermissions.roleId} = ${users.roleId} and ${permissions.isActive}
+), '[]'::json)`;
+
+/** The account's grants in force of active permissions, as a JSON array. */
+const GRANTS_JSON = sql<PermissionJson[]>`coalesce((
+    select json_agg(${PERMISSION_JSON}) from ${userPermissions}
+    inner join ${permissions} on ${permissions.id} = ${userPermissions.permissionId}
+    where ${userPermissions.userId} = ${users.id} and ${userPermissions.granted} and ${permissions.isActive} and ${OVERRIDE_IN_FORCE}
+), '[]'::json)`;
+
+/** When each of the account's grants in force that expires does, as a JSON array. */
+const GRANT_EXPIRIES_JSON = sql<Array<{ permissionId: number; expiresAt: string }>>`coalesce((
+    select json_agg(json_build_object('permissionId', ${permissions.id}, 'expiresAt', ${userPermissions.expiresAt})) from ${userPermissions}
+    inner join ${permissions} on ${permissions.id} = ${userPermissions.permissionId}
+    where ${userPermissions.userId} = ${users.id} and ${userPermissions.granted} and ${permissions.isActive} and ${userPermissions.expiresAt} > now()
+), '[]'::json)`;
+
+/** The names of the account's revocations in force, as a JSON array. */
+const REVOKES_JSON = sql<string[]>`coalesce((
+    select json_agg(${permissions.name}) from ${userPermissions}
+    inner join ${permissions} on ${permissions.id} = ${userPermissions.permissionId}
+    where ${userPermissions.userId} = ${users.id} and not ${userPermissions.granted} and ${OVERRIDE_IN_FORCE}
+), '[]'::json)`;
+
+function toPermissionSummary(permission: PermissionJson): PermissionSummary
+{
+    return { ...permission, category: permission.category ?? undefined };
 }
 
 /**
@@ -383,6 +476,43 @@ export class UsersRepository extends AccountStateRepository
         const row = result[0];
 
         return row ? { user: row.user, role: storedRole(row) } : null;
+    }
+
+    /**
+     * Everything `resolveAuthority` decides on, in one statement on the
+     * primary — where the admission reads the role too, so a demotion takes
+     * effect on permission checks no later than on role checks.
+     *
+     * @returns null when no such user exists
+     */
+    async findAuthorityOnPrimary(id: number): Promise<AuthorityRead | null>
+    {
+        const result = await this.db
+            .select({
+                user: users,
+                ...ROLE_COLUMNS,
+                rolePermissions: ROLE_PERMISSIONS_JSON,
+                grants: GRANTS_JSON,
+                grantExpiries: GRANT_EXPIRIES_JSON,
+                revokes: REVOKES_JSON,
+            })
+            .from(users)
+            .leftJoin(roles, eq(users.roleId, roles.id))
+            .where(eq(users.id, id))
+            .limit(1);
+
+        const row = result[0];
+
+        return row
+            ? {
+                user: row.user,
+                role: storedRole(row),
+                rolePermissions: row.rolePermissions.map(toPermissionSummary),
+                grants: row.grants.map(toPermissionSummary),
+                grantExpiries: row.grantExpiries.map(grant => ({ permissionId: Number(grant.permissionId), expiresAt: new Date(grant.expiresAt) })),
+                revokes: row.revokes,
+            }
+            : null;
     }
 
     /**
@@ -702,43 +832,6 @@ export class UsersRepository extends AccountStateRepository
             .returning();
 
         return result[0] ?? null;
-    }
-
-    /**
-     * 역할의 활성 permissions 조회 (JOIN)
-     * Read replica 사용
-     *
-     * Takes the role rather than the user: the caller resolves which role
-     * applies — the stored one, or the `user` role when the email-domain policy
-     * refuses the stored one — and this reads that role's permissions.
-     *
-     * @param roleId - Role ID
-     * @returns Active permissions of the role
-     */
-    async fetchActiveRolePermissions(roleId: number)
-    {
-        const rolePerms = await this.readDb
-            .select({
-                id: permissions.id,
-                name: permissions.name,
-                displayName: permissions.displayName,
-                category: permissions.category,
-            })
-            .from(rolePermissions)
-            .innerJoin(permissions, eq(rolePermissions.permissionId, permissions.id))
-            .where(
-                and(
-                    eq(rolePermissions.roleId, roleId),
-                    eq(permissions.isActive, true),
-                ),
-            );
-
-        return rolePerms.map(perm => ({
-            id: perm.id,
-            name: perm.name,
-            displayName: perm.displayName,
-            category: perm.category ?? undefined,
-        }));
     }
 
     /**

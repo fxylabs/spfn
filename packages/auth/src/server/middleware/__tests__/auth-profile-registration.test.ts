@@ -84,7 +84,7 @@ function activeUser(status = 'active')
 {
     return {
         user: { id: USER_ID, email: 'registered@example.com', status, keyEpoch: 0 },
-        role: { name: 'user' },
+        role: { name: 'user', isActive: true },
     };
 }
 

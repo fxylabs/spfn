@@ -21,10 +21,12 @@ import { Type } from '@sinclair/typebox';
 import { route } from '@spfn/core/route';
 import { BadRequestError, NotFoundError } from '@spfn/core/errors';
 
-import { authenticate, requireRole } from '../../middleware';
+import { authenticate, requirePermissions, requireRole } from '../../middleware';
+import { getAuth } from '../../helpers';
 import {
     issueOpsTokenService,
     listOpsTokensService,
+    OPS_TOKEN_ISSUE_PERMISSION,
     revokeOpsTokenService,
 } from '../../services/ops-token.service';
 import type { OpsToken } from '../../entities/ops-tokens';
@@ -52,6 +54,8 @@ function toSummary(record: OpsToken)
         id: Number(record.id),
         name: record.name,
         scopes: record.scopes,
+        // The issuer's user id; null on a token from before issuers were recorded, which is refused
+        issuedBy: record.issuedBy,
         expiresAt: record.expiresAt ? record.expiresAt.toISOString() : null,
         revokedAt: record.revokedAt ? record.revokedAt.toISOString() : null,
         lastUsedAt: record.lastUsedAt ? record.lastUsedAt.toISOString() : null,
@@ -62,6 +66,13 @@ function toSummary(record: OpsToken)
 /**
  * POST /_auth/ops-tokens
  * Issue an ops token. The secret is in this answer and nowhere else.
+ *
+ * Needs `ops:token:issue` and, for an account with a second factor, a recent
+ * step-up on this device (`assertStepUp`, 403 `STEP_UP_REQUIRED`) — both
+ * checked again by the service under the issuer's account lock, so a
+ * suspension or demotion that lands after the guard leaves no token. The token
+ * records its issuer and works only while the issuer is active and still
+ * holds `ops:token:issue`.
  */
 export const issueOpsToken = route.post('/_auth/ops-tokens')
     .input({
@@ -79,11 +90,11 @@ export const issueOpsToken = route.post('/_auth/ops-tokens')
             })),
         }),
     })
-    .use([authenticate, requireRole('admin', 'superadmin')])
+    .use([authenticate, requirePermissions(OPS_TOKEN_ISSUE_PERMISSION)])
     .handler(async (c) =>
     {
         const { body } = await c.data();
-
+        const { userId, credential } = getAuth(c);
         const expiresInDays = body.expiresInDays ?? null;
         const expiresAt = expiresInDays === null
             ? null
@@ -96,7 +107,7 @@ export const issueOpsToken = route.post('/_auth/ops-tokens')
             });
         }
 
-        const { token, record } = await issueOpsTokenService(body.name, body.scopes, expiresAt);
+        const { token, record } = await issueOpsTokenService(body.name, body.scopes, expiresAt, { userId: Number(userId), credential });
 
         return { token, opsToken: toSummary(record) };
     });

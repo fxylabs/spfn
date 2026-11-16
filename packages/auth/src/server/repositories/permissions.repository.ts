@@ -8,7 +8,10 @@
 import { NewPermissionEntity, PermissionEntity, permissions } from '../entities/permissions';
 import type { PermissionCategory } from '../rbac';
 import { BaseRepository } from '@spfn/core/db';
-import { asc, eq, inArray } from 'drizzle-orm';
+import { asc, eq, inArray, sql } from 'drizzle-orm';
+
+/** A permission as the configuration declares it: every field `upsertDeclared` makes equal to it. */
+export type DeclaredPermission = Pick<NewPermissionEntity, 'name' | 'displayName' | 'description' | 'category' | 'isSystem' | 'isBuiltin'>;
 
 /**
  * Permissions Repository 클래스
@@ -68,6 +71,17 @@ export class PermissionsRepository extends BaseRepository
     }
 
     /**
+     * 모든 권한 조회 — Write primary, for the boot sync that has just written them.
+     */
+    async findAllOnPrimary(): Promise<PermissionEntity[]>
+    {
+        return this.db
+            .select()
+            .from(permissions)
+            .orderBy(asc(permissions.id));
+    }
+
+    /**
      * 활성 권한만 조회
      */
     async findActive(): Promise<PermissionEntity[]>
@@ -121,6 +135,36 @@ export class PermissionsRepository extends BaseRepository
             .returning();
 
         return result[0] ?? null;
+    }
+
+    /**
+     * Make every declared permission equal to its declaration — insert it, or
+     * update the fields the configuration declares. `isActive` and `metadata`
+     * are the app's: set on insert only. One statement, safe against a
+     * concurrent boot (`ON CONFLICT (name)`); a row already equal is not
+     * written. Permissions have no runtime creator, so there is no owner to
+     * record: every row is the configuration's.
+     */
+    async upsertDeclared(declared: DeclaredPermission[]): Promise<void>
+    {
+        if (declared.length === 0) return;
+
+        await this.db
+            .insert(permissions)
+            .values(declared.map(permission => ({ ...permission, isActive: true, metadata: null })))
+            .onConflictDoUpdate({
+                target: permissions.name,
+                set: {
+                    displayName: sql`excluded.display_name`,
+                    description: sql`excluded.description`,
+                    category: sql`excluded.category`,
+                    isSystem: sql`excluded.is_system`,
+                    isBuiltin: sql`excluded.is_builtin`,
+                    updatedAt: new Date(),
+                },
+                setWhere: sql`(${permissions.displayName}, ${permissions.description}, ${permissions.category}, ${permissions.isSystem}, ${permissions.isBuiltin})
+                    is distinct from (excluded.display_name, excluded.description, excluded.category, excluded.is_system, excluded.is_builtin)`,
+            });
     }
 
     /**

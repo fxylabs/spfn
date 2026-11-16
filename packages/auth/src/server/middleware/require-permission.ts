@@ -2,6 +2,11 @@
  * @spfn/auth - Permission Middleware
  *
  * Middleware functions for permission-based access control
+ *
+ * The permissions checked are `resolveAuthority`'s, read on the primary: the
+ * active permissions of the role in force (none for a deactivated role), plus
+ * the person's own unexpired grants of active permissions, minus their own
+ * unexpired revocations — the list `GET /_auth/session` reports.
  */
 
 import type { Context, Next } from 'hono';

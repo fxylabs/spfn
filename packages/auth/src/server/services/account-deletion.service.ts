@@ -342,7 +342,7 @@ export type RequestAccountDeletionParams = (
         /** The account password, for a session that did not prove a credential recently. */
         password?: string;
     }
-    | { requestedBy: Extract<AccountDeletionRequestedBy, 'admin'> }
+    | { requestedBy: Exclude<AccountDeletionRequestedBy, 'self'> }
 ) & {
     reason?: string;
     /** Skip the grace period: purge as soon as the request commits. Self-service requires `deletion.allowSelfImmediate`. */

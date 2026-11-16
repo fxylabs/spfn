@@ -13,6 +13,7 @@
 import { text, boolean, integer, index } from 'drizzle-orm/pg-core';
 import { id, timestamps } from '@spfn/core/db';
 import { authSchema } from './schema';
+import { AUTHORITY_SOURCES } from './ownership';
 
 export const roles = authSchema.table('roles',
     {
@@ -47,6 +48,15 @@ export const roles = authSchema.table('roles',
         // superadmin: 100, admin: 80, user: 10
         // Used for role hierarchy and conflict resolution
         priority: integer('priority').notNull().default(10),
+
+        // Who owns the role (`./ownership`). 'config': the configuration
+        // declares it, and every boot makes its name, display name,
+        // description, priority and built-in/system flags equal to the
+        // configuration; the admin API can neither change those nor delete
+        // the role. 'admin': an operator created it, and it is theirs entirely.
+        // `isActive` is the operator's either way. Rows from before the column
+        // existed are 'config' until the next boot settles them.
+        source: text('source', { enum: AUTHORITY_SOURCES }).notNull().default('config'),
 
         ...timestamps(),
     },

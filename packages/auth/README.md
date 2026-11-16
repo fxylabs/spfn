@@ -317,7 +317,7 @@ routes use `.skip(['auth'])`; the rest require `Authorization: Bearer <client-si
 | `sessionRenewOptions` | POST `/_auth/session/renew/options` | public | begin renewing a bound session key |
 | `sessionRenewVerify` | POST `/_auth/session/renew/verify` | public | verify the assertion; answers exactly as `login` |
 | `changePassword` | PUT `/_auth/password` | yes | change password |
-| `getAuthSession` | GET `/_auth/session` | yes | current session/user |
+| `getAuthSession` | GET `/_auth/session` | yes | current session/user, with the role in force (`null` for none) and the permissions `requirePermissions` enforces |
 | `issueOneTimeToken` | POST | yes | short-lived token (e.g. SSE handshake) |
 | `checkUsername` / `updateUsername` / `updateLocale` | — | mixed | username availability/update (answers the profile, as `getUserProfile` does); set or clear (`null`) the language choice |
 | `getUserProfile` / `updateUserProfile` | — | yes | profile read/update; `metadata` is checked against `defineProfileFields` when declared |
@@ -859,7 +859,8 @@ holding `user:read`, so an `admin` could accept a pending `superadmin` invitatio
   link from the list must call `resendInvitation` instead: it answers a new `token` and
   `invitationUrl` once, and the previous link stops working.
 - `resendInvitation` and `cancelInvitation` require the authority `createInvitation` requires —
-  `user:invite` and the right to assign the invitation's role (`assertCanAssignRole`).
+  `user:invite` and the right to assign the invitation's role (now `assertCanChangeRole`; see
+  [one permission model](#migration--one-permission-model)).
   `deleteInvitation` is unchanged: `superadmin` only.
 - Server API: `createInvitation` and `resendInvitation` return `{ invitation, token }`;
   `resendInvitation({ id, resentBy, expiresInDays? })` takes the caller and refuses an
@@ -1418,18 +1419,200 @@ by a method list and a user-verification setting that disagreed. Now:
 Run the migration (`spfn db migrate`); it creates `mfa_attempt_budgets`, adds
 `passkeys.registered_user_verified` and reshapes `mfa_verifications` in place.
 
+### Migration — one permission model
+
+**BREAKING** (au1, superself w-4grpy). What a person may do now has one answer, and who may give
+or take a role has one rule.
+
+- **A deactivated role confers nothing.** `updateRole(callerId, id, { isActive: false })` (`PATCH
+  /_auth/admin/roles/:id`) now takes the role from everyone holding it on their next request:
+  `getAuth(c).role` is `null`, `requireRole` and `requirePermissions` refuse what only the role
+  gave, and `GET /_auth/session` reports no role. The accounts still sign in; reactivating the
+  role restores it, and nothing is written to them. Deactivating `superadmin` is refused (409):
+  nobody could reactivate it.
+- **One resolver.** `resolveAuthority(userId)` answers `{ role, priority, permissions }`, read on
+  the primary in one statement: the active permissions of the role in force, plus the person's
+  own grants that are of an active permission and unexpired, minus their own unexpired
+  revocations. `requirePermissions`, `hasPermission` and the rest, `GET /_auth/session` and the
+  Next.js guards all read it, and the role half is the one `authenticate` resolves on the read it
+  already makes. Changes you may notice: **`GET /_auth/session` answers `role: null` for an account
+  with no role in force** (it answered 404 before) and lists per-user grants and revocations (it
+  listed the role's permissions only); a per-user grant of an inactive permission no longer
+  applies; an account that is not active holds no authority. Code reading `session.role.name`
+  must handle `null`. `usersRepository.fetchActiveRolePermissions` is gone.
+- **Role changes follow priority.** A caller gives or takes only roles ranked strictly below their
+  own — both the role given and the role the target holds now (its stored role, whatever its
+  state or the email-domain policy). Equals cannot change each other. `assertCanAssignRole` is
+  replaced by `assertCanChangeRole(callerId, { targetUserCurrentRole, newRole })` — 404 for an
+  unknown role, 409 for an inactive one, 403 otherwise — and `roleChangeRefusal(callerId, change)`,
+  its non-throwing form. Both take the caller's **user id** and resolve the caller's authority
+  themselves, on the primary, inside the writing transaction: call them there, after its lock. No
+  function that writes authority accepts an authority resolved beforehand, so a caller demoted
+  between the request's guard and the write is refused. The `admin:promote` permission and the
+  role-name exceptions are gone. Every path passes it: `PATCH /_auth/admin/users/:userId/role` (now
+  `changeUserRole(callerId, userId, roleId)`, judged under the target's account lock), invitation
+  create, resend (gives the role) and cancel (takes it), each judged in the transaction that writes
+  the invitation, and
+  invitation **acceptance**, which re-reads the inviter's authority: an inviter demoted,
+  suspended or deleted since, or a role deactivated since, and the invitation answers 410
+  `InvitationNoLongerValidError` and creates nothing (it stays pending). That includes invitations
+  pending at the upgrade that their inviter could not make under this rule — an admin's invitation
+  to `admin`, say: have a superadmin resend them. Consequences:
+  - an `admin` can no longer demote another `admin`, nor give `admin`; only a `superadmin` creates
+    or demotes an admin;
+  - **nobody gives `superadmin` or changes a superadmin through the API**, not even a superadmin —
+    new superadmins come from [admin seeding](#admin-seeding);
+  - app-defined roles are bound by their `priority` like the built-in ones (an admin, 80, cannot
+    give a role of priority 90, nor change the person holding it).
+- **Changing what a role is, and a person's own grants, follow the same rule** — a caller changes
+  only what ranks strictly below them and confers only what they hold
+  (`assertCanChangeAuthority(callerId, change)`, 403 otherwise). `createRole`, `updateRole`,
+  `deleteRole`, `addPermissionToRole`, `removePermissionFromRole` and `setRolePermissions` take the
+  caller's user id as their first argument, and the admin routes pass the signed-in caller:
+  - creating a role, or setting a role's priority, at or above the caller's own priority → 403 (a
+    superadmin, 100, can no longer create a role of priority 100 or 101);
+  - updating, deactivating or deleting a role, or changing its permissions, when the caller does not
+    strictly outrank it → 403. **`DELETE /_auth/admin/roles/:id` of `superadmin` answers 403** (it
+    answered 500 with a plain `Error`), and so does every change of the `superadmin` role through
+    the API;
+  - attaching to a role a permission the caller does not hold → 403, `createRole`'s
+    `permissionIds` included. An app permission no role holds therefore cannot be attached at
+    runtime until the configuration gives it to a role the operator holds (for example
+    `rolePermissions: { superadmin: ['post:publish'] }`);
+  - the role service's other refusals are typed: 404 for an unknown role, 409 for a taken name, a
+    config-declared role's fields or deletion (`ConfigOwnedRoleError`), deleting a system role, or
+    a role still in use (`RoleInUseError`) (they were plain `Error`s, 500).
+  Per-user grants and revocations have a service now, under the same rule:
+  `grantUserPermission(callerId, userId, permissionId, { expiresAt?, reason? })` and
+  `revokeUserPermission(…)` — 403 when the caller does not strictly outrank the person's stored
+  role, or (for a grant) does not hold the permission; written under the person's account lock.
+- **Ops tokens record their issuer and stop with them.** `ops_tokens.issued_by_id` (migration
+  adds it) names the administrator who issued a token, and a token is honoured only while that
+  account is active and still holds the new built-in permission **`ops:token:issue`** (granted to
+  `admin` and `superadmin`); demoting or suspending the issuer stops their tokens, restoring them
+  brings the tokens back. `POST /_auth/ops-tokens` requires `ops:token:issue` (it required the
+  `admin` / `superadmin` role) and, for an account with a second factor, a recent step-up
+  (`assertStepUp`, 403 `STEP_UP_REQUIRED`). `issueOpsTokenService(name, scopes, expiresAt,
+  { userId, credential })` takes the issuer and the credential of their request
+  (`getAuth(c).credential`, the one `assertStepUp` asks), and issues under the
+  issuer's account lock, reading there their status, `ops:token:issue` and step-up: a suspension
+  or demotion that lands after the route's guard leaves no token. Summaries carry `issuedBy`. **Tokens issued before this release
+  have no issuer and are refused** — tokens may be non-expiring, so honouring them until expiry
+  could mean forever. Re-issue each one after upgrading (`spfn ops token issue`) and revoke the old.
+- **A mapping has one owner.** `role_permissions.source` records it, and the rule is stated once,
+  in [Who owns a mapping](#how-do-i-define-roles-and-permissions): the configuration's mappings
+  equal the configuration after every boot, and the role service changes only the operator's
+  (409 `ConfigOwnedMappingError` for one the configuration owns; `setRolePermissions` no longer
+  deletes and re-inserts everything as the operator's). **The migration marks every existing
+  mapping `config`, and the first boot after upgrading removes every mapping the configuration
+  does not declare — including one an operator added before the upgrade.** Before upgrading, list
+  them:
+
+  ```sql
+  SELECT r.name AS role, p.name AS permission
+  FROM spfn_auth.role_permissions rp
+  JOIN spfn_auth.roles r ON r.id = rp.role_id
+  JOIN spfn_auth.permissions p ON p.id = rp.permission_id
+  ORDER BY 1, 2;
+  ```
+
+  and re-add the ones your configuration does not declare with `addPermissionToRole` afterwards
+  (or declare them in `rolePermissions`).
+- **A role has one owner too, and what the configuration declares is restored on every boot.**
+  `roles.source` (migration adds it) records it, stated in
+  [Who owns a role](#how-do-i-define-roles-and-permissions). The configuration hash
+  (`auth_metadata.rbac_config_hash`) is no longer read: every boot upserts each declared role and
+  permission, skipping rows already equal, so a config-declared role re-ranked or edited in the
+  table is put back. Through the API, **changing a config-declared role's display name,
+  description or priority, or deleting it, answers 409 `ConfigOwnedRoleError`**
+  (`CONFIG_OWNED_ROLE`, `details.fields`); `isActive` stays the operator's. This replaces the 409s
+  for re-ranking or deleting a built-in role. A role the configuration stops declaring becomes the
+  operator's. A configured role with no `priority` is now ranked 10 on every boot (an existing
+  row's priority used to be kept).
+- **Deleting a role never deletes an account.** `users.role_id` referenced `roles` `ON DELETE
+  cascade`: `DELETE /_auth/admin/roles/:id` deleted every account holding the role, and every
+  invitation naming it. The migration makes both `ON DELETE restrict`, and `deleteRole` answers
+  **409 `RoleInUseError`** (`ROLE_IN_USE`, `details: { roleId, accounts, pendingInvitations,
+  emailDomainPolicy }`) while an account holds the role, a pending invitation promises it, or this
+  instance's `SPFN_AUTH_ROLE_EMAIL_DOMAINS` names it (the next boot would refuse the policy).
+  Reassign the accounts (`PATCH /_auth/admin/users/:userId/role`), cancel the invitations and edit
+  the policy first. The role's settled invitations and its mappings are deleted with it. Settled
+  means what acceptance itself would refuse: accepted, cancelled, expired, **and pending past its
+  `expires_at`** — such an invitation is not counted in `pendingInvitations`, whether or not the
+  expiry sweep (`expireOldInvitations`) has marked it `expired` yet, so it never blocks a deletion.
+- **A role's rank is judged as it is when the change commits.** Every judgement that rests on a
+  role — the role given, the target's current role, the caller's own role, a role whose
+  definition or permissions change — is locked inside the writing transaction, after the
+  account lock, so a re-rank racing an admin's role change waits for it instead of being judged
+  on the old priority. The judging functions take role ids: `AuthorityChange.role` is now
+  `roleId`.
+- **Role locks are taken in one call, in id order.** `rolesRepository.lockInIdOrder` is the one
+  way role rows are locked: an operation takes every role it needs there, at once and in
+  ascending id — the role it changes `FOR UPDATE`, the roles a judgement reads (the caller's role
+  in force included) `FOR SHARE` — and none afterwards. Two role edits whose callers each hold the
+  other's role used to be able to deadlock, one answering 500; they now queue. A judgement whose
+  premise went stale — the caller's role (at acceptance, the inviter's) changed between the read
+  that names it and the lock — is made again by the operation, once, in a new transaction on fresh
+  reads (`runJudgedTransaction`): a demoted inviter is the 410 acceptance promises, a caller whose
+  role was deactivated a 403. Only a premise stale on that second judgement too answers **409
+  `AuthorityContendedError`** (`AUTHORITY_CONTENDED`); asking again resolves it. An app that calls
+  `assertCanChangeRole`, `roleChangeRefusal` or `assertCanChangeAuthority` itself opens its
+  transaction with `runJudgedTransaction(work, { context })` to get the same retry; inside a
+  transaction it opened otherwise, the stale premise is that 409 at once. `POST
+  /_auth/invitations/accept` no longer runs under a route-wide `Transactional()`: the acceptance
+  service opens its one transaction itself. `assertCanChangeAuthority` now returns the role it
+  changed, as locked.
+- **What is conferred cannot outlast what the caller holds.** A permission the caller holds only
+  through a per-user grant that expires can be granted per user only to expire no later than the
+  caller's own grant, and cannot be attached to a role — 403 otherwise
+  (`AuthorityChange.conferredUntil`; `Authority.expiringPermissions` lists such permissions).
+- **The boot's mapping sync is two statements that say their result**:
+  `INSERT … ON CONFLICT (role_id, permission_id) DO UPDATE SET source = 'config'`, then
+  `DELETE … WHERE source = 'config'` of what the configuration no longer declares, in one
+  transaction holding the mapped roles `FOR SHARE`. Two instances booting together, or an
+  operator adding the same mapping, no longer fail a boot on the unique constraint; the role
+  service's deletes carry `source = 'admin'`, so a mapping a boot took over meanwhile answers 409
+  rather than being deleted. `rolePermissionsRepository.findAllOnPrimary`, `markConfigOwned` and
+  `deleteByIds` are gone.
+- **One configuration sync at a time, in one transaction.** The role sync, the permission sync,
+  the release of roles no longer declared and the mapping sync run in one transaction, which
+  first takes a PostgreSQL advisory lock (`rolesRepository.lockConfigSync`): a second instance's
+  sync starts only once the first one's has committed. The lock and the sync share that
+  transaction's one connection, so a write pool of one connection (`DB_POOL_MAX=1`) boots; it
+  used to hang there, the lock's own transaction holding the only connection the sync waited for. **A rolling deploy that boots two configurations side by side ends
+  in exactly the configuration of the instance whose sync ran last** — the later boot — and never
+  in a mix (an operator-owned role carrying config-owned mappings, for one). A boot waits at most
+  30 s for the lock and is then refused with `RbacSyncBusyError`, naming the holder's backend pid,
+  application name, client address and since when; restart it once that instance is up. The
+  sync locks every existing role it writes or maps in one call, in id order — `FOR NO KEY UPDATE`
+  for a role it declares or owns, `FOR SHARE` for one it only maps — the rule operators' role
+  changes follow, so an operator's change of such a role queues behind a boot's sync (bounded by
+  its own transaction's `statement_timeout`) and never deadlocks with it; a signup naming the
+  role does not wait. An operator change that waits behind a boot's sync longer than its own
+  `statement_timeout` is cancelled and answered **503** (core maps the cancellation, `57014`, to
+  a `ConnectionError`); send it again. Every lock wait of the sync is bounded by the same 30 s
+  (`lock_timeout`): a boot that waits that long for a role an operator's change holds is refused
+  with `RbacSyncBusyError` too — `details.lock` is `'role'` (`'configSync'` for the sync lock),
+  and the message names the backends holding role rows, or says they released them since; start
+  the instance again once that change is done. A role the configuration declares that an
+  operator creates after the sync read the roles makes the sync start again once, on a fresh
+  read. A role the configuration only maps (does not declare) that an operator creates after the
+  sync read the roles gets its configured mappings at the next boot. `rolesRepository.findUndeclared`
+  is gone; `insertDeclared`, `findRoleLockHolders` and the `noKeyUpdate` strength of
+  `lockInIdOrder` are new.
+
 ### Invitations
 
-An invitation lets an account with `user:invite` bring someone in with a role it is allowed to
-assign. The token in the link is a bearer credential, so it is treated like every other link
+An invitation lets an account with `user:invite` bring someone in with a role ranked below its
+own (`assertCanChangeRole`); acceptance checks again that the inviter still could. The token in the link is a bearer credential, so it is treated like every other link
 credential (`mintCredential` / `hashCredential`): 32 random bytes, stored only as a hash.
 
 | Route | Who | Answers |
 |---|---|---|
-| `POST /_auth/invitations` | `user:invite` + may assign `roleId` | `{ id, email, token, roleId, expiresAt, invitationUrl }` — the only answer that carries the token |
+| `POST /_auth/invitations` | `user:invite` + outranks `roleId` | `{ id, email, token, roleId, expiresAt, invitationUrl }` — the only answer that carries the token |
 | `GET /_auth/invitations` | `user:read` | `{ invitations: InvitationSummary[], total, page, limit, totalPages }` — no token, no hash |
-| `POST /_auth/invitations/resend` | `user:invite` + may assign the invitation's role | `{ expiresAt, token, invitationUrl }` — a new token; the old link stops working |
-| `POST /_auth/invitations/cancel` | `user:invite` + may assign the invitation's role | `{ cancelledAt }` |
+| `POST /_auth/invitations/resend` | `user:invite` + outranks the invitation's role | `{ expiresAt, token, invitationUrl }` — a new token; the old link stops working |
+| `POST /_auth/invitations/cancel` | `user:invite` + outranks the invitation's role | `{ cancelledAt }` |
 | `POST /_auth/invitations/delete` | `superadmin` | 204 |
 | `GET /_auth/invitations/:token` | public | what the acceptance page shows; 404 / 410 as below |
 | `POST /_auth/invitations/accept` | public | the new account; 404 / 410 as below |
@@ -1439,14 +1622,21 @@ credential (`mintCredential` / `hashCredential`): 32 random bytes, stored only a
 - **Resend reissues.** It mints a new token for a pending or expired invitation and replaces the
   stored hash, with a fresh expiry (`expiresInDays`, at most 30). It never extends an old link.
 - **`expiresAt` and `expiresInDays` share one bound**, 30 days.
-- Refused with 403 and nothing changed: a caller without the right to assign the invitation's
-  role, for resend and cancel as for create.
+- Refused with 403 and nothing changed: a caller whose role does not outrank the invitation's
+  role, for resend and cancel as for create (404 for an unknown role, 409 for an inactive one on
+  create and resend).
+- **Acceptance re-checks the inviter.** An invitation whose inviter has since been demoted,
+  suspended or deleted, or whose role was deactivated, answers 410 and creates no account; it
+  stays pending, for another manager to resend. So does one demoted while the acceptance is being
+  judged: the acceptance is judged again on fresh reads, never answered with a retry message about
+  the inviter's role.
 
 | Error | HTTP | When |
 |---|---|---|
 | `InvitationNotFoundError` | 404 | the token names no invitation — never issued, replaced by a resend, or deleted |
-| `InvitationNoLongerValidError` | 410 | already accepted, cancelled, or expired (the message says which) |
+| `InvitationNoLongerValidError` | 410 | already accepted, cancelled, or expired, or its inviter can no longer give its role (the message says which) |
 | `InvitationChangedError` | 409 | a resend or cancel found the invitation changed by another request since it read it; nothing was written |
+| `AuthorityContendedError` | 409 | create, resend, cancel or **accept**: the role of the person judged (the caller; the inviter at acceptance) changed under the judgement, and again when it was judged once more — a single change is judged again on fresh reads and answers what it finds (410 for a demoted inviter); `code: 'AUTHORITY_CONTENDED'`, nothing was written, ask again |
 
 ### Verified-email signup
 
@@ -4078,7 +4268,9 @@ export default async function AdminPage()
 ```
 
 Also exported: `getAuthSessionData`, `getUserRole`, `getUserPermissions`, `hasAnyRole`,
-`hasAnyPermission`, the OAuth pending-session helpers, and `createOAuthCallbackHandler`.
+`hasAnyPermission`, the OAuth pending-session helpers, and `createOAuthCallbackHandler`. The
+guards read `GET /_auth/session`, whose role and permissions are `resolveAuthority`'s — the ones
+`requireRole` and `requirePermissions` enforce on the API.
 
 #### Loading the entry outside Next (tests)
 
@@ -4295,9 +4487,9 @@ generation — has to include the CSRF cookie itself.
 ## How do I define roles and permissions?
 
 Built-in roles: `superadmin` (priority 100), `admin` (80), `user` (10). Built-in permissions:
-`auth:self:manage`, `user:read|write|delete|invite`, `rbac:role:manage`, `rbac:permission:manage`.
-Custom roles/permissions are declared on the lifecycle (preferred — runs on startup) or via
-`initializeAuth(options)`.
+`auth:self:manage`, `user:read|write|delete|invite`, `rbac:role:manage`, `rbac:permission:manage`,
+`ops:token:issue`. Custom roles/permissions are declared on the lifecycle (preferred — runs on
+startup) or via `initializeAuth(options)`.
 
 ```typescript
 createAuthLifecycle({
@@ -4307,10 +4499,98 @@ createAuthLifecycle({
 });
 ```
 
-Programmatic checks (server): `hasPermission`, `hasAnyPermission`, `hasAllPermissions`, `hasRole`,
-`hasAnyRole`, `getUserRole`, `getUserPermissions` (all by the effective role — see below), `getStoredUserRole`. Runtime role admin: `createRole`, `updateRole`,
+Programmatic checks (server): `resolveAuthority(userId)` — `{ role, priority, permissions, expiringPermissions }`, the
+one answer every check below and `GET /_auth/session` read — and `hasPermission`,
+`hasAnyPermission`, `hasAllPermissions`, `hasRole`, `hasAnyRole`, `getUserRole`,
+`getUserPermissions` over it; `getStoredUserRole`. Runtime authority admin — each takes the
+caller's user id first and holds them to the rule below: `createRole`, `updateRole`,
 `deleteRole`, `setRolePermissions`, `addPermissionToRole`, `removePermissionFromRole`,
-`getAllRoles`, `getRoleByName`, `getRolePermissions`.
+`changeUserRole`, `grantUserPermission`, `revokeUserPermission`; and `getAllRoles`,
+`getRoleByName`, `getRolePermissions`.
+
+- **Authority now.** The role in force is the stored role, unless it is deactivated (then none:
+  no name, no priority, no permissions — reactivating restores it) or the
+  [email-domain policy](#restricting-roles-to-email-domains) refuses it (then `user`).
+  Permissions = the active permissions of that role + the person's own grants of active
+  permissions that have not expired − their own revocations that have not expired. An account
+  that is not active holds nothing. Read on the primary.
+- **Who may change authority.** One rule: a caller changes only what ranks strictly below them,
+  by `priority`, and confers only what they hold. Judged inside the transaction that writes the
+  change, on the caller's authority as it is then.
+  - *Giving or taking a role* (`assertCanChangeRole`): the caller outranks both the role given
+    and the role the target holds now — 404 unknown role, 409 inactive role, 403 otherwise.
+    Equals cannot change each other, so only a superadmin creates or demotes an admin, and nobody
+    changes a superadmin or gives that role through the API (seed superadmins with
+    [admin seeding](#admin-seeding)). The admin role change, invitation create, resend, cancel and
+    acceptance all pass it.
+  - *Changing what a role is, or a person's own grants* (`assertCanChangeAuthority`, 403): a role
+    is created or re-ranked only below the caller's priority; a role is updated, deactivated,
+    deleted or given or relieved of permissions only if the caller outranks it; a permission is
+    attached to a role or granted to a person only if the caller holds it — and for as long: one
+    the caller holds only through an expiring per-user grant is granted per user only to expire
+    no later than theirs, and never attached to a role; a person's grants and revocations are
+    changed only if the caller outranks the person's stored role.
+  - Every role these judgements rest on is locked in the writing transaction, after the account
+    lock where there is one, so a re-rank or deactivation of it waits for the change to commit:
+    all of them in one call, in id order (`rolesRepository.lockInIdOrder`) — the role changed `FOR
+    UPDATE`, the others `FOR SHARE` — so concurrent role edits queue and never deadlock. A caller
+    whose role changes between the read naming it and the lock is judged again by the operation,
+    once, on fresh reads (`runJudgedTransaction`); only a premise stale twice is a 409
+    `AuthorityContendedError`, and asking again works. `updateRole` and `deleteRole` take no
+    account lock.
+- **Who owns a role.** Each role has exactly one owner (`roles.source`), by the same rule as a
+  mapping:
+  - `config` — declared by your configuration (`roles`, with the built-ins). **After every boot
+    the fields the configuration declares equal it**: `name`, `displayName`, `description`,
+    `priority` (10 when omitted), `isSystem`, `isBuiltin` (`RoleConfig`). Whatever changed them at
+    runtime, by any means, is put back. Through the API those fields cannot be changed and the
+    role cannot be deleted: 409 `ConfigOwnedRoleError`. `isActive` is the operator's —
+    deactivating works, `superadmin` excepted.
+  - `admin` — created by an operator (`createRole`). Entirely the operator's: boot leaves it alone
+    unless the configuration comes to declare it, which makes it the configuration's. A role the
+    configuration stops declaring becomes the operator's.
+  - Permissions are declared only by the configuration (there is no runtime API that creates
+    one), and every boot makes their `displayName`, `description`, `category`, `isSystem` and
+    `isBuiltin` equal to it; `isActive` is the app's.
+  - **Deleting a role never deletes an account**: while an account holds it, a pending invitation
+    promises it or the email-domain policy names it, `deleteRole` answers 409 `RoleInUseError`
+    with the counts. Its mappings and settled invitations go with it — a pending invitation past
+    its `expires_at` is settled, since acceptance would refuse it, so it blocks nothing even before
+    the expiry sweep marks it.
+- **Who owns a mapping.** Each role→permission mapping has exactly one owner (`source`):
+  - `config` — declared by your configuration (`rolePermissions`, with the built-ins). **After
+    every boot these equal the configuration**: a mapping you remove from `rolePermissions` leaves
+    the role, and one removed from the database by any other means is back. The boot sync is an
+    upsert (`ON CONFLICT … SET source = 'config'`) and a delete of the configuration's mappings it
+    no longer declares, so concurrent boots and operator adds meet in the conflict clause.
+    The role service never removes one: `removePermissionFromRole` or a `setRolePermissions` that
+    leaves it out answers 409 `ConfigOwnedMappingError` and changes nothing — remove it from the
+    configuration instead. Adding one that already exists changes nothing: it stays the
+    configuration's and disappears when the configuration drops it.
+  - `admin` — added by an operator at runtime (`createRole`'s `permissionIds`,
+    `addPermissionToRole`, `setRolePermissions`). Boot leaves these alone; the role service adds,
+    replaces and removes only these (`setRolePermissions` keeps every existing mapping with its
+    owner, deletes only the operator's that were dropped, and inserts new ones as the operator's).
+    If the configuration comes to declare one, it becomes the configuration's.
+- `superadmin` cannot be deactivated (409 for a role ranked above it; 403 for everyone else, who
+  does not outrank it).
+- **One configuration sync at a time.** Every boot's sync of roles, permissions, their release
+  and mappings runs in one transaction under one advisory lock across instances, on one
+  connection (a one-connection write pool boots), so a rolling deploy with two configurations
+  ends in the configuration of the boot that synced last, never a mix. While it runs, an
+  operator's change of a role the configuration declares or maps waits for it — answered 503 if
+  that wait outlasts its own `statement_timeout`. A boot that waits 30 s for another instance's
+  sync, or for a role an operator's change holds, is refused (`RbacSyncBusyError`, naming which
+  lock and the backends holding it).
+
+The typed refusals of the authority routes (each body carries `code`):
+
+| Error | HTTP | Routes | When |
+|---|---|---|---|
+| `ConfigOwnedRoleError` (`CONFIG_OWNED_ROLE`) | 409 | `PATCH`, `DELETE /_auth/admin/roles/:id` | a field the configuration declares, or the deletion, of a role it owns (`details.fields`) |
+| `RoleInUseError` (`ROLE_IN_USE`) | 409 | `DELETE /_auth/admin/roles/:id` | an account holds the role, an invitation that can still be accepted promises it, or the email-domain policy names it (`details` counts each) |
+| `ConfigOwnedMappingError` (`CONFIG_OWNED_MAPPING`) | 409 | `removePermissionFromRole`, `setRolePermissions` (no route) | a mapping the configuration owns |
+| `AuthorityContendedError` (`AUTHORITY_CONTENDED`) | 409 | `POST /_auth/admin/roles`, `PATCH` and `DELETE /_auth/admin/roles/:id`, `PATCH /_auth/admin/users/:userId/role`, `POST /_auth/invitations`, `/resend`, `/cancel`, `/accept`; the role-permission and per-user grant services | the role in force of the person the change is judged on — the caller, or the inviter at acceptance — changed between the read naming it and its lock, and again when the change was judged once more; nothing was written, ask again |
 
 ### Restricting roles to email domains
 
@@ -4343,8 +4623,8 @@ SPFN_AUTH_ROLE_EMAIL_DOMAINS="admin=example.com;support=example.com,partner.exam
   the email. `users.roleId` is not touched: reverting the configuration restores the role on
   the next request. The check reads the row the request already loads; only a downgrade reads
   the `user` role.
-- **Authority.** A caller is judged by the effective role; a **target** by the stored one, so
-  an out-of-policy superadmin's row still only yields to a superadmin (`getStoredUserRole`).
+- **Authority.** A caller is judged by the role in force; a **target** by the stored one, so
+  an out-of-policy superadmin's row still only yields to someone who outranks superadmin — nobody.
 - **At boot — refused.** After RBAC initialization and admin seeding, startup throws, naming the
   variable and the entry, when the value is malformed, when it restricts `user` (the fallback
   must always be satisfiable), when it names a role that does not exist, and when `superadmin`
@@ -4960,9 +5240,19 @@ router:
 | `GET /_auth/ops-tokens` | List. Only hashes were stored, so no secret can be returned. |
 | `DELETE /_auth/ops-tokens/:id` | Revoke. Permanent, and effective immediately. |
 
-Each requires `authenticate` plus `requireRole('admin', 'superadmin')`. The administrator
-seeded from `SPFN_AUTH_ADMIN_*` (see [Admin seeding](#admin-seeding))
-signs in with a password, so this works in an app whose end users only sign in socially.
+Issuing requires `authenticate`, the `ops:token:issue` permission (built-in `admin` and
+`superadmin` hold it) and, for an account with a second factor, a recent step-up
+(`STEP_UP_REQUIRED`, 403, otherwise); listing and revoking require
+`requireRole('admin', 'superadmin')`. The administrator seeded from `SPFN_AUTH_ADMIN_*` (see
+[Admin seeding](#admin-seeding)) signs in with a password, so this works in an app whose end
+users only sign in socially.
+
+**A token borrows its issuer's authority.** The row records who issued it (`issuedBy`), and
+every verification reads that account as it is now: a token whose issuer is no longer active
+(suspended, inactive, pending deletion, deleted) or no longer holds `ops:token:issue` (demoted,
+or their role deactivated) is refused like a revoked one, and works again if that is restored.
+A token issued before issuers were recorded has none and is refused — re-issue it
+([migration](#migration--one-permission-model)).
 
 Issuance takes `expiresInDays` from 1 to 36500 (about a century), or `null` for a token that
 never expires. There is an upper bound because a day count becomes a date by arithmetic, and

@@ -55,7 +55,7 @@ import { keyLiveness, type KeyLiveness } from '../lib/key-liveness';
 import { getBoundKeyRenewGraceMs } from '../lib/config';
 import { profileLocale } from '../lib/profile-locale';
 import type { StartingCredential } from '../lib/deferred-stamp';
-import { applyRoleEmailDomainPolicy } from './role-email-domain.service';
+import { resolveRoleInForce } from './role-email-domain.service';
 import { secondFactorAdmits } from './second-factor-policy.service';
 import { isMethodListed } from '../lib/second-factor-policy';
 import type { RouteEnrolment } from '../routes/channels';
@@ -316,8 +316,9 @@ export function admitsForRenewal(key: UserPublicKey): boolean
  * renewal — without catching anything.
  *
  * The queries are the ones `authenticate` always made: one read of the
- * account, its role and the credential's row together, the locale beside it,
- * and the second-factor read only while the policy requires a factor.
+ * account, its role (with whether that role is active) and the credential's
+ * row together, the locale beside it, and the second-factor read only while
+ * the policy requires a factor.
  *
  * **Renewal and the second factor (au9-N8).** A `renewal` credential is not
  * held to the second-factor policy, deliberately. Renewal does not admit a
@@ -384,10 +385,17 @@ async function admit(params: AdmitPrincipalParams, enrolment: RouteEnrolment | n
         return { refused: refusal };
     }
 
-    const { user, role } = (await applyRoleEmailDomainPolicy(read.account))!;
+    // The role in force, decided on the row this read loaded — the role half
+    // of `resolveAuthority`, at no query beyond it.
+    const role = await resolveRoleInForce(read.account);
 
     return {
-        admitted: new Principal(SEAL, { user, role: role?.name ?? null, ...profileLocale(chosenLocale), credential: params.credential }),
+        admitted: new Principal(SEAL, {
+            user: read.account.user,
+            role: role?.name ?? null,
+            ...profileLocale(chosenLocale),
+            credential: params.credential,
+        }),
     };
 }
 

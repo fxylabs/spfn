@@ -104,6 +104,17 @@ export const BUILTIN_PERMISSIONS: Record<string, PermissionConfig> = {
         isSystem: true,
         isBuiltin: true,
     },
+
+    // Ops surface: issuing an ops token, and keeping it working — a token is
+    // honoured only while its issuer still holds this
+    OPS_TOKEN_ISSUE: {
+        name: 'ops:token:issue',
+        displayName: 'Issue Ops Tokens',
+        description: 'Issue machine tokens for the ops surface; a token stops working when its issuer loses this',
+        category: 'system',
+        isSystem: true,
+        isBuiltin: true,
+    },
 } as const;
 
 /**
@@ -119,6 +130,7 @@ export const BUILTIN_ROLE_PERMISSIONS: Record<string, string[]> = {
         'user:invite',
         'rbac:role:manage',
         'rbac:permission:manage',
+        'ops:token:issue',
     ],
     admin: [
         'auth:self:manage',
@@ -126,6 +138,7 @@ export const BUILTIN_ROLE_PERMISSIONS: Record<string, string[]> = {
         'user:write',
         'user:delete',
         'user:invite',
+        'ops:token:issue',
     ],
     user: [
         'auth:self:manage',

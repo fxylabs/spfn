@@ -47,6 +47,19 @@ describe('RBAC System', () =>
         await clearTables(db);
     });
 
+    /** The caller the role service holds to the permission model's rule: a superadmin. */
+    async function createSuperadmin(): Promise<number>
+    {
+        const [user] = await getDatabase()!.insert(users).values({
+            email: 'root@example.com',
+            passwordHash: await hashPassword('password'),
+            roleId: (await getRoleByName('superadmin'))!.id,
+            emailVerifiedAt: new Date(),
+        }).returning();
+
+        return user!.id;
+    }
+
     describe('initializeAuth()', () =>
     {
         it('should create built-in roles (user, admin, superadmin)', async () =>
@@ -185,14 +198,17 @@ describe('RBAC System', () =>
 
     describe('Role Management', () =>
     {
+        let caller: number;
+
         beforeEach(async () =>
         {
             await initializeAuth();
+            caller = await createSuperadmin();
         });
 
         it('should create a custom role', async () =>
         {
-            const role = await createRole({
+            const role = await createRole(caller, {
                 name: 'moderator',
                 displayName: 'Moderator',
                 description: 'Community moderator',
@@ -208,12 +224,12 @@ describe('RBAC System', () =>
 
         it('should not allow duplicate role names', async () =>
         {
-            await createRole({
+            await createRole(caller, {
                 name: 'moderator',
                 displayName: 'Moderator',
             });
 
-            await expect(createRole({
+            await expect(createRole(caller, {
                 name: 'moderator',
                 displayName: 'Another Moderator',
             })).rejects.toThrow('already exists');
@@ -221,13 +237,13 @@ describe('RBAC System', () =>
 
         it('should update role', async () =>
         {
-            const role = await createRole({
+            const role = await createRole(caller, {
                 name: 'moderator',
                 displayName: 'Moderator',
                 priority: 40,
             });
 
-            const updated = await updateRole(role.id, {
+            const updated = await updateRole(caller, role.id, {
                 displayName: 'Senior Moderator',
                 priority: 50,
             });
@@ -240,19 +256,19 @@ describe('RBAC System', () =>
         {
             const userRole = await getRoleByName('user');
 
-            await expect(updateRole(userRole!.id, {
-                priority: 999,
-            })).rejects.toThrow('built-in');
+            await expect(updateRole(caller, userRole!.id, {
+                priority: 50,
+            })).rejects.toMatchObject({ statusCode: 409, code: 'CONFIG_OWNED_ROLE' });
         });
 
         it('should delete custom role', async () =>
         {
-            const role = await createRole({
+            const role = await createRole(caller, {
                 name: 'moderator',
                 displayName: 'Moderator',
             });
 
-            await deleteRole(role.id);
+            await deleteRole(caller, role.id);
 
             const deleted = await getRoleByName('moderator');
             expect(deleted).toBeNull();
@@ -262,10 +278,10 @@ describe('RBAC System', () =>
         {
             const userRole = await getRoleByName('user');
 
-            await expect(deleteRole(userRole!.id)).rejects.toThrow('built-in');
+            await expect(deleteRole(caller, userRole!.id)).rejects.toMatchObject({ statusCode: 409, code: 'CONFIG_OWNED_ROLE' });
         });
 
-        it('should not allow deleting system roles', async () =>
+        it('should not allow deleting system roles, once the configuration no longer declares them', async () =>
         {
             await initializeAuth({
                 roles: [
@@ -276,15 +292,18 @@ describe('RBAC System', () =>
                     },
                 ],
             });
+            await initializeAuth();
 
             const presetRole = await getRoleByName('preset-role');
 
-            await expect(deleteRole(presetRole!.id)).rejects.toThrow('system role');
+            await expect(deleteRole(caller, presetRole!.id)).rejects.toThrow('system role');
         });
     });
 
     describe('Permission Management', () =>
     {
+        let caller: number;
+
         beforeEach(async () =>
         {
             await initializeAuth({
@@ -293,7 +312,10 @@ describe('RBAC System', () =>
                     { name: 'post:publish', displayName: 'Publish Posts', category: 'custom' },
                     { name: 'post:delete', displayName: 'Delete Posts', category: 'custom' },
                 ],
+                // A caller attaches only permissions they hold
+                rolePermissions: { superadmin: ['post:create', 'post:publish', 'post:delete'] },
             });
+            caller = await createSuperadmin();
         });
 
         it('should add permission to role', async () =>
@@ -303,33 +325,32 @@ describe('RBAC System', () =>
             const userRole = await getRoleByName('user');
             const [postCreatePerm] = await db.select().from(permissions).where(eq(permissions.name, 'post:create')).limit(1);
 
-            await addPermissionToRole(userRole!.id, postCreatePerm.id);
+            await addPermissionToRole(caller, userRole!.id, postCreatePerm.id);
 
             const userPerms = await getRolePermissions(userRole!.id);
             expect(userPerms).toContain('post:create');
         });
 
-        it('should set role permissions (replace all)', async () =>
+        it('should set role permissions (replace the operator\'s, keep the configuration\'s)', async () =>
         {
             const db = getDatabase()!;
 
             const userRole = await getRoleByName('user');
             const perms = await db.select().from(permissions).where(eq(permissions.category, 'custom'));
+            const [selfManage] = await db.select().from(permissions).where(eq(permissions.name, 'auth:self:manage'));
 
-            await setRolePermissions(userRole!.id, perms.map(p => p.id));
+            await setRolePermissions(caller, userRole!.id, perms.map(p => p.id).concat(selfManage!.id));
+            await setRolePermissions(caller, userRole!.id, [perms[0]!.id, selfManage!.id]);
 
             const userPerms = await getRolePermissions(userRole!.id);
-            expect(userPerms).toHaveLength(3);
-            expect(userPerms).toContain('post:create');
-            expect(userPerms).toContain('post:publish');
-            expect(userPerms).toContain('post:delete');
-            expect(userPerms).not.toContain('auth:self:manage');  // Replaced
+            expect(userPerms.sort()).toEqual(['auth:self:manage', perms[0]!.name].sort());
         });
     });
 
     describe('User Permission Checking', () =>
     {
         let testUserId: number;
+        let caller: number;
 
         beforeEach(async () =>
         {
@@ -338,7 +359,9 @@ describe('RBAC System', () =>
                     { name: 'post:create', displayName: 'Create Posts' },
                     { name: 'post:publish', displayName: 'Publish Posts' },
                 ],
+                rolePermissions: { superadmin: ['post:create'] },
             });
+            caller = await createSuperadmin();
 
             const db = getDatabase()!;
             const userRole = await getRoleByName('user');
@@ -385,7 +408,7 @@ describe('RBAC System', () =>
             const userRole = await getRoleByName('user');
             const [postCreatePerm] = await db.select().from(permissions).where(eq(permissions.name, 'post:create')).limit(1);
 
-            await addPermissionToRole(userRole!.id, postCreatePerm.id);
+            await addPermissionToRole(caller, userRole!.id, postCreatePerm.id);
 
             const hasAll = await hasAllPermissions(testUserId, ['auth:self:manage', 'post:create']);
             expect(hasAll).toBe(true);

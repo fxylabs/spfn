@@ -623,12 +623,25 @@ describe.skipIf(!dbAvailable)('account status and deletion are separate facts (T
     }
 
     /**
+     * The role the seeded accounts hold, as the release before this one stored
+     * it — in SQL, as the accounts are: the entities, and the boot that writes
+     * through them, may name columns a later migration adds, which this schema
+     * lacks. The boot runs once the schema is fully migrated.
+     */
+    async function seedPreUpgradeRole(): Promise<number>
+    {
+        const [row] = await getTestDb().execute<{ id: number }>(sql`
+            INSERT INTO spfn_auth.roles (name, display_name) VALUES ('user', 'User') RETURNING id`);
+
+        return Number(row!.id);
+    }
+
+    /**
      * A user row as the release before this one stored it, and its request row —
      * in SQL: the entity already names `users.deletion`, which this schema lacks.
      */
-    async function seedPreUpgrade(email: string, status: string, requestStatus: 'pending' | 'completed' | null): Promise<Account>
+    async function seedPreUpgrade(roleId: number, email: string, status: string, requestStatus: 'pending' | 'completed' | null): Promise<Account>
     {
-        const roleId = (await getRoleByName('user'))!.id;
         const passwordHash = await hashPassword(TEST_PASSWORD);
         const [row] = await getTestDb().execute<{ id: number }>(sql`
             INSERT INTO spfn_auth.users (email, password_hash, role_id, status, email_verified_at)
@@ -652,14 +665,15 @@ describe.skipIf(!dbAvailable)('account status and deletion are separate facts (T
         const { before, from } = migrationsAroundThisChange();
         await getTestDb().execute(sql`DROP SCHEMA IF EXISTS spfn_auth CASCADE`);
         await apply(before);
-        await initializeAuth();
+        const roleId = await seedPreUpgradeRole();
 
-        const pending = await seedPreUpgrade('t5-pending@test.com', 'pending_deletion', 'pending');
-        const deleted = await seedPreUpgrade('t5-deleted@test.com', 'deleted', 'completed');
-        const suspended = await seedPreUpgrade('t5-suspended@test.com', 'suspended', null);
-        const active = await seedPreUpgrade('t5-active@test.com', 'active', null);
+        const pending = await seedPreUpgrade(roleId, 't5-pending@test.com', 'pending_deletion', 'pending');
+        const deleted = await seedPreUpgrade(roleId, 't5-deleted@test.com', 'deleted', 'completed');
+        const suspended = await seedPreUpgrade(roleId, 't5-suspended@test.com', 'suspended', null);
+        const active = await seedPreUpgrade(roleId, 't5-active@test.com', 'active', null);
 
         await apply(from);
+        await initializeAuth();
 
         expect(await stateOf(pending)).toEqual({ status: 'active', deletion: 'pending' });
         expect(await stateOf(deleted)).toEqual({ status: 'inactive', deletion: 'deleted' });

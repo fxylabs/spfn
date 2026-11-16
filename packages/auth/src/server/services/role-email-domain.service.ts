@@ -1,9 +1,10 @@
 /**
  * @spfn/auth - Role Email-Domain Policy Service
  *
- * Applies `SPFN_AUTH_ROLE_EMAIL_DOMAINS` (see `lib/role-email-domains.ts`) where
- * a principal's role is resolved, reports and demotes the accounts it refuses,
- * and refuses boot on a policy that cannot work.
+ * Resolves the role an account holds now (`resolveRoleInForce`): a deactivated
+ * role is none, and `SPFN_AUTH_ROLE_EMAIL_DOMAINS` (see
+ * `lib/role-email-domains.ts`) is applied. Reports and demotes the accounts the
+ * policy refuses, and refuses boot on a policy that cannot work.
  *
  * Check time never writes: an account outside the policy for its stored role is
  * resolved as the built-in `user` role for that call, and `users.roleId` keeps
@@ -14,6 +15,7 @@
 
 import { authLogger } from '../logger';
 import { rolesRepository, usersRepository } from '../repositories';
+import type { StoredRole, UserWithStoredRole } from '../repositories/users.repository';
 import {
     getRoleEmailDomainPolicy,
     isEmailAllowedForRole,
@@ -27,7 +29,7 @@ import { updateUserService } from './user.service';
 const FALLBACK_ROLE = 'user';
 
 /** A user row with the role that applies to it. */
-export type UserWithEffectiveRole = NonNullable<Awaited<ReturnType<typeof usersRepository.findByIdWithRole>>>;
+export type UserWithEffectiveRole = UserWithStoredRole;
 
 /** An account whose stored role is restricted and who fails the rule. No address. */
 export interface RoleEmailDomainViolation
@@ -37,23 +39,15 @@ export interface RoleEmailDomainViolation
     reason: RoleEmailDomainViolationReason;
 }
 
-async function fallbackRole(): Promise<UserWithEffectiveRole['role']>
+async function fallbackRole(): Promise<StoredRole | null>
 {
-    const role = await rolesRepository.findByName(FALLBACK_ROLE);
+    const role = await rolesRepository.findByNameOnPrimary(FALLBACK_ROLE);
 
-    return role && { id: role.id, name: role.name, displayName: role.displayName, priority: role.priority };
+    return role && { id: role.id, name: role.name, displayName: role.displayName, priority: role.priority, isActive: role.isActive };
 }
 
 /**
- * Load a user and the role that applies to them now.
- *
- * The one place a principal's role is resolved: every authenticating
- * middleware and every permission-service reader goes through here (or through
- * `findUserWithEffectiveRoleOnPrimary`), so the policy cannot be skipped by a
- * caller that forgets it. The rule is evaluated on the row already loaded, so
- * an account inside the policy costs no query beyond today's; only a downgrade
- * reads the `user` role. Should that role not exist, the account resolves with
- * no role and therefore no permissions.
+ * Load a user and the role that applies to them now (`resolveRoleInForce`).
  *
  * Reads the replica. A caller that decides whether a request is admitted uses
  * `findUserWithEffectiveRoleOnPrimary`.
@@ -62,42 +56,61 @@ async function fallbackRole(): Promise<UserWithEffectiveRole['role']>
  */
 export async function findUserWithEffectiveRole(userId: number): Promise<UserWithEffectiveRole | null>
 {
-    return applyRoleEmailDomainPolicy(await usersRepository.findByIdWithRole(userId));
+    return withRoleInForce(await usersRepository.findByIdWithRole(userId));
 }
 
 /**
  * `findUserWithEffectiveRole` over a read of the write primary.
  *
- * For the admission gates (clientProofV1, `authenticate`, `optionalAuth`): an
- * account suspended a moment ago must be refused on the next request, not
- * once a read replica catches up.
- *
  * @returns null when no such user exists
  */
 export async function findUserWithEffectiveRoleOnPrimary(userId: number): Promise<UserWithEffectiveRole | null>
 {
-    return applyRoleEmailDomainPolicy(await usersRepository.findByIdWithRoleOnPrimary(userId));
+    return withRoleInForce(await usersRepository.findByIdWithRoleOnPrimary(userId));
+}
+
+async function withRoleInForce(result: UserWithStoredRole | null): Promise<UserWithEffectiveRole | null>
+{
+    return result && { user: result.user, role: await resolveRoleInForce(result) };
 }
 
 /**
- * Resolve a loaded user's stored role through the email-domain policy — for a
- * read that loads the user with more beside it (the admission's), which
- * cannot go through the two finders above.
+ * The role a loaded account holds now — the one place that is decided. The
+ * admission resolves its principal's role here, on the row its own read
+ * loaded, and `resolveAuthority` the role whose permissions apply, so a role
+ * check and a permission check cannot disagree on it.
+ *
+ * - **A deactivated role is no role**: no name, no priority, no permissions.
+ *   The account still signs in, as an account with no role, and reactivating
+ *   the role restores it — nothing is written.
+ * - **A role the email-domain policy refuses the account** resolves as the
+ *   built-in `user` role (or none, should that role be missing or inactive).
+ *   The rule is evaluated on the row already loaded, so an account inside the
+ *   policy costs no query; only a downgrade reads the `user` role.
+ *
+ * Check time never writes: `users.roleId` keeps the stored role either way.
  */
-export async function applyRoleEmailDomainPolicy(result: UserWithEffectiveRole | null): Promise<UserWithEffectiveRole | null>
+export async function resolveRoleInForce(account: UserWithStoredRole): Promise<StoredRole | null>
 {
-    if (!result?.role || isEmailAllowedForRole(result.user, result.role.name))
+    if (!account.role?.isActive)
     {
-        return result;
+        return null;
+    }
+
+    if (isEmailAllowedForRole(account.user, account.role.name))
+    {
+        return account.role;
     }
 
     authLogger.service.warn('Stored role not applied: the account is outside the email-domain policy for it', {
         reason: 'role_email_domain_policy',
-        userId: result.user.id,
-        storedRole: result.role.name,
+        userId: account.user.id,
+        storedRole: account.role.name,
     });
 
-    return { user: result.user, role: await fallbackRole() };
+    const fallback = await fallbackRole();
+
+    return fallback?.isActive ? fallback : null;
 }
 
 /**
@@ -185,27 +198,40 @@ async function assertRestrictedRolesExist(roleNames: string[]): Promise<void>
 }
 
 /**
- * Only active superadmins count: one that is suspended, inactive, pending
- * deletion or deleted cannot sign in, so it neither keeps the policy safe nor
- * makes it a lock-out.
+ * Refuse a policy that admits none of the active holders of the highest role
+ * anyone holds — `superadmin`, as the built-ins stand. Nobody outranks that
+ * role, so nobody could give it back through the admin routes: the role is
+ * asked for by rank, not by name, and an app role ranked above it is judged
+ * the same way.
+ *
+ * Only active holders count: one that is suspended, inactive, pending deletion
+ * or deleted cannot sign in, so it neither keeps the policy safe nor makes it
+ * a lock-out.
  */
-async function assertSuperadminReachable(): Promise<void>
+async function assertHighestRoleReachable(): Promise<void>
 {
-    if (!getRoleEmailDomainPolicy().has('superadmin'))
-    {
-        return;
-    }
+    const holders = await highestRoleHolders();
+    const restricted = [...new Set(holders.map(holder => holder.roleName))].filter(name => getRoleEmailDomainPolicy().has(name));
 
-    const holders = await usersRepository.findRoleHolders(['superadmin'], true);
-
-    if (holders.length > 0 && !holders.some(holder => isEmailAllowedForRole(holder, 'superadmin')))
+    if (restricted.length > 0 && !holders.some(holder => isEmailAllowedForRole(holder, holder.roleName)))
     {
         throw new Error(
-            `${ROLE_EMAIL_DOMAINS_VAR} entry '${policyEntry('superadmin')}' admits none of the ${holders.length} `
-            + 'superadmin account(s): every one would resolve as a plain user and nobody could fix it through '
-            + 'the admin routes. Add a domain a superadmin holds with a verified email, or drop the entry.',
+            `${ROLE_EMAIL_DOMAINS_VAR} entry ${restricted.map(name => `'${policyEntry(name)}'`).join(', ')} admits none of the `
+            + `${holders.length} '${restricted.join("', '")}' account(s), the highest role anyone holds: every one would `
+            + 'resolve as a plain user and nobody could fix it through the admin routes. Add a domain one of them '
+            + 'holds with a verified email, or drop the entry.',
         );
     }
+}
+
+/** The active accounts holding an active role of the highest priority any active account holds. */
+async function highestRoleHolders()
+{
+    const priorityOf = new Map((await rolesRepository.findActive()).map(role => [role.name, role.priority]));
+    const holders = await usersRepository.findRoleHolders([...priorityOf.keys()], true);
+    const highest = Math.max(...holders.map(holder => priorityOf.get(holder.roleName)!));
+
+    return holders.filter(holder => priorityOf.get(holder.roleName) === highest);
 }
 
 /**
@@ -214,8 +240,9 @@ async function assertSuperadminReachable(): Promise<void>
  * Runs after RBAC initialization and admin seeding, so the roles and accounts
  * it reads are the ones this instance will serve. Refuses a malformed value, a
  * restriction on `user` (the fallback must always be satisfiable), a role that
- * does not exist, and a superadmin restriction that at least one stored
- * superadmin exists for and none satisfies. Silent when no policy is configured.
+ * does not exist, and a restriction on the highest role anyone holds that none
+ * of its active holders satisfies (`superadmin`, as the built-ins stand).
+ * Silent when no policy is configured.
  *
  * @throws Error naming the variable and the offending entry — never an address
  */
@@ -237,5 +264,5 @@ export async function assertRoleEmailDomainPolicy(): Promise<void>
     }
 
     await assertRestrictedRolesExist([...policy.keys()]);
-    await assertSuperadminReachable();
+    await assertHighestRoleReachable();
 }

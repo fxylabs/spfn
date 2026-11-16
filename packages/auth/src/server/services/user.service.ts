@@ -65,19 +65,24 @@ function emailAfterUpdate(user: User, updates: UserUpdate)
 /**
  * Refuse a role the email-domain policy does not let this account hold.
  *
+ * Judged on the account as locked, and on the role's name read on the
+ * primary: a replica that has not seen a role just created would skip the
+ * check. The name is all it reads, and nothing renames a role, so the row is
+ * not locked; a role deleted meanwhile fails the write's foreign-key check.
+ *
  * Reads nothing when no policy is configured, so an install without one
  * behaves exactly as before.
  */
-async function assertRoleGrantAllowed(userId: number, roleId: number, updates: UserUpdate): Promise<void>
+async function assertRoleGrantAllowed(user: User, roleId: number, updates: UserUpdate): Promise<void>
 {
     if (getRoleEmailDomainPolicy().size === 0)
     {
         return;
     }
 
-    const [user, role] = await Promise.all([usersRepository.findById(userId), rolesRepository.findById(roleId)]);
+    const role = await rolesRepository.findByIdOnPrimary(roleId);
 
-    if (user && role)
+    if (role)
     {
         assertEmailAllowedForRole(emailAfterUpdate(user, updates), role.name);
     }
@@ -89,6 +94,14 @@ async function assertRoleGrantAllowed(userId: number, roleId: number, updates: U
  * A `roleId` in `updates` is a grant, and is refused when the role is
  * restricted by `SPFN_AUTH_ROLE_EMAIL_DOMAINS` and the account's email is
  * outside it, unverified, or absent.
+ *
+ * It judges no authority and holds no role: a `roleId` is written as given,
+ * with no caller held to the permission model and no lock on the role, so a
+ * re-rank, deactivation or deletion of it may land between whatever the
+ * caller checked and this write. `changeUserRole` is the path that judges the
+ * caller and holds the role until the write commits; a caller passing
+ * `roleId` here holds the role's existence and state itself — this is for the
+ * app's own trusted paths, such as admin seeding at boot.
  *
  * `status` is not an update this takes: an account's status changes through
  * `setAccountStatus`, which ends what the new status forbids.
@@ -104,11 +117,11 @@ export async function updateUserService(
     {
         // The account row is written under its lock (`usersRepository.lockAccount`),
         // and a role grant is judged against the email read under it.
-        await usersRepository.lockAccount(userId);
+        const user = await usersRepository.lockAccount(userId);
 
-        if (updates.roleId != null)
+        if (user && updates.roleId != null)
         {
-            await assertRoleGrantAllowed(userId, updates.roleId, updates);
+            await assertRoleGrantAllowed(user, updates.roleId, updates);
         }
 
         await usersRepository.updateById(userId, updates);

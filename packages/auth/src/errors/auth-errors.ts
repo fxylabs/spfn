@@ -394,6 +394,101 @@ export class InvitationChangedError extends ConflictError
 }
 
 /**
+ * Config-Owned Mapping Error (409)
+ *
+ * A runtime change to a role's permissions named a mapping the configuration
+ * declares (`rolePermissions`, with the built-ins). Such a mapping is the
+ * configuration's: every boot makes it equal to the configuration again, so it
+ * is removed there — by dropping it from `rolePermissions` — not through the
+ * role service. Nothing was changed.
+ */
+export class ConfigOwnedMappingError extends ConflictError
+{
+    readonly code = 'CONFIG_OWNED_MAPPING';
+
+    constructor(data: { message?: string; details?: Record<string, any> } = {})
+    {
+        super({
+            message: data.message || 'This role-permission mapping is declared in the configuration; remove it from rolePermissions instead.',
+            details: data.details,
+        });
+        this.name = 'ConfigOwnedMappingError';
+    }
+}
+
+/**
+ * Config-Owned Role Error (409)
+ *
+ * A runtime change named a role the configuration declares (`roles`, with the
+ * built-ins): deleting it, or changing a field the configuration declares for
+ * it — display name, description, priority. Every boot makes those equal to
+ * the configuration again, so they are changed there. `isActive` stays the
+ * operator's. Nothing was changed. `details.fields` names the fields refused.
+ */
+export class ConfigOwnedRoleError extends ConflictError
+{
+    readonly code = 'CONFIG_OWNED_ROLE';
+
+    constructor(data: { message?: string; details?: Record<string, any> } = {})
+    {
+        super({
+            message: data.message || 'This role is declared in the configuration; change or remove it there instead.',
+            details: data.details,
+        });
+        this.name = 'ConfigOwnedRoleError';
+    }
+}
+
+/**
+ * Role In Use Error (409)
+ *
+ * A role was to be deleted while something still names it: accounts that hold
+ * it, pending invitations that promise it, or this instance's email-domain
+ * policy (`SPFN_AUTH_ROLE_EMAIL_DOMAINS`), which would refuse the next boot.
+ * Deleting a role never deletes an account: the operator reassigns the
+ * accounts, cancels the invitations and edits the policy first. `details`
+ * carries `roleId`, `accounts`, `pendingInvitations` and `emailDomainPolicy`.
+ * Nothing was changed.
+ */
+export class RoleInUseError extends ConflictError
+{
+    readonly code = 'ROLE_IN_USE';
+
+    constructor(data: { message?: string; details?: Record<string, any> } = {})
+    {
+        super({
+            message: data.message || 'This role is still in use: reassign its accounts, cancel its pending invitations and remove it from the email-domain policy first.',
+            details: data.details,
+        });
+        this.name = 'RoleInUseError';
+    }
+}
+
+/**
+ * Authority Contended Error (409)
+ *
+ * A change judged on someone's authority — a caller's, or an inviter's at
+ * acceptance — found that person's role in force changed between the read
+ * that named it and the lock that holds it, and found it again when the
+ * change was judged once more from the start. Each read was right when it was
+ * made; the authority kept moving. Asking again resolves it. Nothing was
+ * written.
+ */
+export class AuthorityContendedError extends ConflictError
+{
+    readonly code = 'AUTHORITY_CONTENDED';
+
+    constructor(data: { message?: string; details?: Record<string, any> } = {})
+    {
+        super({
+            message: data.message || 'The role this change is judged on changed twice while it was being judged. Try again.',
+            details: data.details,
+        });
+        this.name = 'AuthorityContendedError';
+    }
+}
+
+/**
  * Device Auth Not Found Error (404)
  *
  * Thrown when a device-code operation names a code the server cannot act on: one
@@ -1507,6 +1602,37 @@ export class PasskeyConfigError extends HttpError
             details: data.details,
         });
         this.name = 'PasskeyConfigError';
+    }
+}
+
+/**
+ * RBAC Sync Busy Error
+ *
+ * Thrown at boot when a lock the configuration sync (`initializeAuth`) waits
+ * for was held for the whole wait; nothing of the sync is written, and the
+ * instance is to be started again. `details.lock` says which:
+ *
+ * - `'configSync'` — another instance's sync held the sync lock. Two syncs
+ *   never interleave, so the state a rolling deploy ends in is one
+ *   configuration's; this one could not take its turn. `details.holder`
+ *   names that instance's backend.
+ * - `'role'` — a running change (an operator's transaction) held a role the
+ *   sync writes or maps. `details.holders` names the backends holding role
+ *   rows once the wait ran out; empty when they have released them since.
+ *
+ * Each holder as Postgres sees it — backend pid, application name, client
+ * address, since when its transaction runs.
+ */
+export class RbacSyncBusyError extends HttpError
+{
+    constructor(data: { message: string; details?: Record<string, any> })
+    {
+        super({
+            message: data.message,
+            statusCode: 500,
+            details: data.details,
+        });
+        this.name = 'RbacSyncBusyError';
     }
 }
 

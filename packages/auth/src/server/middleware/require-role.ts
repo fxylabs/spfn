@@ -2,6 +2,10 @@
  * @spfn/auth - Role Middleware
  *
  * Middleware functions for role-based access control
+ *
+ * The role checked is the principal's (`getAuth(c).role`): the role in force
+ * as the admission resolved it (`resolveRoleInForce`) — null for an account
+ * whose role is deactivated, which therefore passes no role check.
  */
 
 import type { Context, Next } from 'hono';

@@ -18,11 +18,9 @@ import {
     cancelInvitation as _cancelInvitation,
     resendInvitation as _resendInvitation,
     deleteInvitation as _deleteInvitation,
-    assertCanAssignRole,
 } from '../../services';
 import { Type } from '@sinclair/typebox';
 import { env as coreEnv } from '@spfn/core/config';
-import { Transactional } from '@spfn/core/db';
 import { rateLimitPolicy } from '@spfn/core/middleware';
 import { defineRouter, route } from '@spfn/core/route';
 
@@ -80,6 +78,11 @@ export const getInvitation = route.get('/_auth/invitations/:token')
 /**
  * POST /_auth/invitations/accept
  * Accept invitation and create user account
+ *
+ * No `Transactional()`: the service opens the acceptance's one transaction
+ * itself, and must be its outermost — an inviter's role that moved under the
+ * judgement is judged again in a new transaction (`runJudgedTransaction`),
+ * which a route-wide transaction would turn into a second lock inside it.
  */
 export const acceptInvitation = route.post('/_auth/invitations/accept')
     .input({
@@ -96,7 +99,7 @@ export const acceptInvitation = route.post('/_auth/invitations/accept')
             algorithm: Type.Union(KEY_ALGORITHM.map(algo => Type.Literal(algo)), { description: 'Signature algorithm' }),
         }),
     })
-    .use([rateLimitPolicy('auth-invitation-accept', { limit: 10, windowMs: 60_000 }), Transactional()])
+    .use([rateLimitPolicy('auth-invitation-accept', { limit: 10, windowMs: 60_000 })])
     .skip(['auth'])
     .handler(async (c) =>
     {
@@ -119,7 +122,8 @@ export const acceptInvitation = route.post('/_auth/invitations/accept')
 
 /**
  * POST /_auth/invitations
- * Create new invitation (requires user:invite permission)
+ * Create new invitation (requires user:invite permission and a role that
+ * outranks the one given)
  */
 export const createInvitation = route.post('/_auth/invitations')
     .input({
@@ -151,10 +155,7 @@ export const createInvitation = route.post('/_auth/invitations')
         const { body } = await c.data();
         const { userId } = getAuth(c);
 
-        // Caller must have authority over the role being assigned — without this,
-        // a user:invite holder could invite with the superadmin roleId and self-accept
-        await assertCanAssignRole(userId, body.roleId);
-
+        // The service holds the caller to the role rule (`assertCanChangeRole`)
         const { invitation, token } = await _createInvitation({
             email: body.email,
             roleId: body.roleId,
