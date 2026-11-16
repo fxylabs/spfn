@@ -6,6 +6,7 @@
 
 import PgBoss from 'pg-boss';
 import { logger } from '@spfn/core/logger';
+import { recordWorkers, runningJobs, stopWorkers } from './boss-workers';
 
 const jobLogger = logger.child('@spfn/core:job');
 
@@ -205,6 +206,7 @@ export async function initBoss(options: BossOptions): Promise<PgBoss>
     }
 
     const boss = new PgBoss(pgBossOptions);
+    recordWorkers(boss);
 
     // Event handlers
     boss.on('error', (error) =>
@@ -223,6 +225,10 @@ export async function initBoss(options: BossOptions): Promise<PgBoss>
 
 /**
  * Get the current pg-boss instance
+ *
+ * Workers started on it with `work()` — here or by registerJobs() — are
+ * recorded by the instance itself, so `stopFetching()` stops them all. Once
+ * `stopFetching()` ran, `work()` on it rejects: the instance is shutting down.
  */
 export function getBoss(): PgBoss | null
 {
@@ -230,9 +236,21 @@ export function getBoss(): PgBoss | null
 }
 
 /**
- * Stop pg-boss gracefully
+ * Stop fetching: every worker started on the current instance stops polling
+ *
+ * The first step of a graceful shutdown. Every worker started on the instance
+ * `getBoss()` returns counts — by registerJobs() or by the app's own
+ * `getBoss().work(...)` — and from here until the instance is stopped a
+ * `work()` call on it rejects instead of starting a worker.
+ *
+ * A handler already running continues and its job completes or fails as
+ * usual; a job not yet fetched stays `created` for another instance. A fetch
+ * already in flight when this is called still hands its jobs to the handler —
+ * pg-boss cannot recall it. Sending stays open — `send()` and event publishes
+ * keep working until `stopBoss()`; so does pg-boss's own timekeeping, whose
+ * cron ticks only insert job rows for a running instance to fetch.
  */
-export async function stopBoss(): Promise<void>
+export async function stopFetching(): Promise<void>
 {
     const boss = getBossInstance();
     if (!boss)
@@ -240,12 +258,49 @@ export async function stopBoss(): Promise<void>
         return;
     }
 
-    jobLogger.info('Stopping pg-boss...');
+    const stopped = await stopWorkers(boss);
+
+    jobLogger.info(`Stopped job fetch: ${stopped} worker(s); sending stays open`);
+}
+
+/**
+ * The shortest handler wait pg-boss can do: `stop({ graceful: true })` waits
+ * at least this long, whatever timeout it is given.
+ */
+export const BOSS_MIN_HANDLER_WAIT = 1000;
+
+/**
+ * Stop pg-boss: wait for running job handlers, then stop
+ *
+ * With `handlerWait` of at least 1000 (pg-boss's minimum wait), pg-boss waits
+ * that long for running handlers; with less, it does not wait at all. Either
+ * way, a handler still running then has its job failed by pg-boss ("pg-boss
+ * shut down while active") before its pool closes: a job with attempts left
+ * goes to `retry` and runs again on a live instance after its retry delay; a
+ * job on its last attempt ends `failed`. Sending stops here.
+ *
+ * Only this instance's state is cleared: if a newer instance was initialised
+ * while this one was stopping, `getBoss()` keeps returning the newer one.
+ */
+export async function stopBoss(handlerWait = 30000): Promise<void>
+{
+    const boss = getBossInstance();
+    if (!boss)
+    {
+        return;
+    }
+
+    const graceful = handlerWait >= BOSS_MIN_HANDLER_WAIT;
+
+    jobLogger.info(graceful
+        ? `Stopping pg-boss (running handlers get ${handlerWait}ms)...`
+        : 'Stopping pg-boss without waiting for running handlers...');
 
     try
     {
-        await boss.stop({ graceful: true, timeout: 30000 });
-        jobLogger.info('pg-boss stopped gracefully');
+        await boss.stop(graceful ? { graceful, timeout: handlerWait } : { graceful });
+        logJobsFailedAtStop(runningJobs(boss));
+        jobLogger.info('pg-boss stopped');
     }
     catch (error)
     {
@@ -254,9 +309,31 @@ export async function stopBoss(): Promise<void>
     }
     finally
     {
-        setBossInstance(null);
-        setBossConfig(null);
+        if (getBossInstance() === boss)
+        {
+            setBossInstance(null);
+            setBossConfig(null);
+        }
     }
+}
+
+/**
+ * A handler still running once `stop()` resolved was running when pg-boss
+ * failed the jobs in progress — its job is one of them.
+ */
+function logJobsFailedAtStop(cut: { id: string; queue: string }[]): void
+{
+    if (cut.length === 0)
+    {
+        return;
+    }
+
+    jobLogger.error(
+        `${cut.length} job handler(s) were still running when pg-boss stopped; pg-boss failed their jobs ` +
+        '("pg-boss shut down while active") — retried on a live instance if attempts remain, left failed ' +
+        'on the last attempt',
+        { jobs: cut },
+    );
 }
 
 /**

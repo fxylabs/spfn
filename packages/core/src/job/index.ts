@@ -96,6 +96,7 @@ export {
     initBoss,
     getBoss,
     stopBoss,
+    stopFetching,
     isBossRunning,
     shouldClearOnStart,
     type BossOptions,

@@ -34,8 +34,13 @@ From `@spfn/core/job`:
 - Router: `defineJobRouter(jobs)`, `mergeJobRouters(base, extra)`, `collectJobs(router, prefix?)`,
   `isJobDef(v)`, `isJobRouter(v)`
 - Queue policy: `resolveQueuePolicy(job)`
-- pg-boss lifecycle: `initBoss(options)`, `getBoss()`, `stopBoss()`, `isBossRunning()`,
-  `shouldClearOnStart()`
+- pg-boss lifecycle: `initBoss(options)`, `getBoss()`, `stopFetching()`, `stopBoss(handlerWait?)`,
+  `isBossRunning()`, `shouldClearOnStart()` — `stopFetching()` stops every worker started on the
+  instance `getBoss()` returns (by `registerJobs()` or by the app's own `getBoss().work()`) while
+  `send()` keeps working, and from then on `getBoss().work()` rejects; `stopBoss(handlerWait =
+  30000)` waits that long for running handlers (with less than 1000ms, pg-boss's minimum, it does
+  not wait), then stops pg-boss — a job still running is failed: retried if attempts remain.
+  The server's graceful shutdown calls both — see the server README
 - Registration: `registerJobs(router)` — **takes a `JobRouter`, not an array**
 - Types: `JobDef`, `JobRouter`, `JobRouterEntry`, `JobOptions`, `JobQueuePolicy`,
   `JobSendOptions`, `JobHandler`, `CompensateHandler`, `InferJobInput`, `InferJobOutput`,

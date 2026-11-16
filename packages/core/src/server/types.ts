@@ -496,8 +496,12 @@ export interface ServerConfig
     shutdown?: {
         /**
          * Graceful shutdown timeout in milliseconds
-         * Maximum time to wait for in-flight operations to drain and resource cleanup
-         * After timeout, forces process.exit() before k8s SIGKILL
+         * One deadline for the whole shutdown, taken when it starts, shared by
+         * proportion: waiting for accepted work (HTTP close, drain) gets at least
+         * half, the hooks a fifth, the enabled infrastructure closes three tenths
+         * in proportion to their caps (see shutdown-budget.ts). Below about 47 s
+         * with all infrastructure on, the closes get less than their caps.
+         * At the deadline, forces process.exit() before k8s SIGKILL
          *
          * Formula: terminationGracePeriodSeconds - preStopSleep - safetyMargin
          * Default: 300s - 5s - 15s = 280s
@@ -759,7 +763,14 @@ export interface ServerConfig
 
         /**
          * Hook: Run before graceful shutdown
-         * Infrastructure (DB/Redis) is still available
+         * Runs after tracked operations drained and `onShutdown` hooks ran.
+         * Infrastructure (DB/Redis) is still available, and the job queue
+         * still accepts sends: a job this hook enqueues is kept. Job workers
+         * have stopped fetching, but handlers already running may still be.
+         * Bounded by the shutdown budget: it shares the hooks' budget with
+         * the `onShutdown` hooks — at least a fifth of `shutdown.timeout`,
+         * which the drain cannot spend — and gets what they left of it; it is
+         * skipped only when that is spent.
          * Use this to cleanup custom resources and services
          *
          * @example

@@ -44,8 +44,9 @@ export interface AuthLifecycleConfig
  * - `beforeInfrastructure`: Validates environment variables before DB connection
  * - `afterInfrastructure`: Sets up admin accounts and initializes RBAC after DB is ready
  * - `beforeShutdown`: Waits, bounded, for link mail and codes still being sent
- *   inline after a request answered, before the database closes; an enqueue
- *   still in flight when pg-boss stops (before this hook) is logged, not delivered
+ *   inline after a request answered, before the database closes. Queued mail
+ *   is not its concern: the enqueue after a commit is an after-commit
+ *   callback, which `@spfn/core`'s shutdown drain waits for
  *
  * @param options - Auth initialization options (custom roles, permissions, mappings)
  *
@@ -512,8 +513,10 @@ export function createAuthLifecycle(options: AuthLifecycleOptions = {}): AuthLif
         /**
          * A request answers before its link mail or code is sent or queued
          * (`deliverLinkMail`); this waits for the inline sends, at most ten
-         * seconds, while the database is still open, and logs what it abandons.
-         * pg-boss has already stopped here, so it cannot help queued delivery.
+         * seconds and at most what core's hooks' budget leaves it, while the
+         * database is still open (see `settleLinkMail` for what is logged
+         * when either bound ends it). Queued sends were waited for by core's
+         * drain, before this hook.
          */
         beforeShutdown: () => settleLinkMail(),
     };

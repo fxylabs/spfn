@@ -987,9 +987,12 @@ covers SMS too: the job sends by the row's `targetType`. See [Link mail delivery
 - `createAuthLifecycle()` now returns a `beforeShutdown` hook: a graceful shutdown waits up to
   ten seconds for inline sends still running after their request answered, then closes the
   database; what is still running at the bound is logged by kind and row id (`Link mail still in
-  flight at shutdown was abandoned`). `settleLinkMail` is that hook. It does not protect queued
-  delivery: `@spfn/core` stops pg-boss before `beforeShutdown`, so an after-commit enqueue still
-  in flight then is logged (`Link mail was not queued after the commit`) and not delivered.
+  flight at shutdown was abandoned`). `settleLinkMail` is that hook. Queued delivery is waited
+  for by `@spfn/core` itself: the enqueue is the after-commit callback's own work, core's shutdown
+  drain waits for after-commit callbacks, and the queue accepts sends until after `beforeShutdown`
+  (the stopping instance's workers only stop fetching), so the job reaches the queue and a live
+  instance delivers it. Both waits are inside core's shutdown budget — see [Link mail
+  delivery](#link-mail-delivery) for what is logged when the budget ends either one.
 
 ### Migration — verification codes: two purposes, deliverable targets; phone signups are verified
 
@@ -5853,9 +5856,27 @@ at once. After a commit the request has already answered 200, so an enqueue fail
 missing queue in `auto`) means no mail and one log line (kind, row id) — no inline resend, since
 a "failed" enqueue may have reached the queue — and the person asks again. On a graceful shutdown,
 `createAuthLifecycle()`'s `beforeShutdown` waits up to ten seconds for inline sends still in
-flight, before the database closes, and logs what it abandons. It does not protect queued
-delivery: `@spfn/core` stops pg-boss before this hook runs, so an after-commit enqueue still in
-flight then fails and is logged like any other enqueue failure — no mail.
+flight, before the database closes, and logs what it abandons. What holds, exactly:
+
+- **Queued sends after a commit** are waited for by `@spfn/core`'s shutdown drain: the enqueue is
+  the after-commit callback's own work, and the drain waits for every after-commit callback until
+  it settles (one that starts during the drain included). The queue accepts sends until after
+  `beforeShutdown` — the stopping instance only stops *fetching* at the start — so the job is in
+  the queue and a live instance sends it. If the drain's budget ends first, core logs
+  `Shutdown manager: drain timeout — abandoning operations` (`after-commit` among them); that
+  enqueue fails once pg-boss stops and is logged as `Link mail was not queued after the commit`
+  — no mail.
+- **Inline sends** (`inline`, or `auto` without pg-boss) are detached from the callback — the
+  request does not wait for the provider — so core's drain does not see them. `settleLinkMail`
+  waits for them, at most ten seconds, and names what is still running at its bound
+  (`Link mail still in flight at shutdown was abandoned`, kind and row id).
+- **Both are bounded by core's shutdown budget.** `beforeShutdown` runs for what the hooks'
+  budget leaves it: at least a fifth of `shutdown.timeout` while the deadline has not passed,
+  minus what `onShutdown` hooks used first. When that is under ten seconds and a send is still
+  running, core cuts the hook before `settleLinkMail` writes its line: the log reads
+  `beforeShutdown lifecycle hook failed or timed out`, the rows are not named, and the database
+  closes under the send. Give `shutdown.timeout` at least 50 seconds (the default is 280) for the
+  per-row line to be reached.
 In no mode does a request wait for the provider: an answer that waited for a send would
 take longer for the branch that sends something than for the one that sends nothing, which says
 whether the address has an account.

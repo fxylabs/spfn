@@ -16,6 +16,6 @@ export type { ServerClock, ServerTimeResponse } from './server-time';
 export { startServer } from './start-server';
 export { validateServerConfig } from './validation';
 export { printBanner } from './banner';
-export { getShutdownManager } from './shutdown-manager';
+export { getShutdownManager, endShutdownRun } from './shutdown-manager';
 export type { ShutdownHookOptions } from './shutdown-manager';
 export * from './types';

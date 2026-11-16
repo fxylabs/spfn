@@ -20,7 +20,10 @@ export interface ShutdownHookOptions
 {
     /**
      * Timeout for this hook in milliseconds
-     * If the hook exceeds this time, it is skipped and the next hook runs
+     * If the hook exceeds this time, it is skipped and the next hook runs.
+     * The shutdown budget can cut it shorter: a hook never runs past the
+     * hooks' budget, which all hooks and `beforeShutdown` share (see
+     * shutdown-budget.ts).
      * @default 10000 (10s)
      */
     timeout?: number;
@@ -71,6 +74,8 @@ export class ShutdownManager
      * Register a shutdown hook
      *
      * Hooks run in order during shutdown, after all tracked operations drain.
+     * The job queue still accepts sends while they run; job handlers that were
+     * already running may still be running too.
      * Each hook has its own timeout — failure does not block subsequent hooks.
      *
      * @example
@@ -123,6 +128,32 @@ export class ShutdownManager
             throw new Error(`Cannot start operation '${name}': server is shutting down`);
         }
 
+        return this.track(name, operation);
+    }
+
+    /**
+     * Track work core itself started and did not await — an after-commit
+     * callback — so the drain waits for it like any tracked operation
+     *
+     * Unlike `trackOperation()`, it is accepted while the shutdown is draining:
+     * the work was accepted before the shutdown began (its transaction
+     * committed) and is finishing now. Once the drain and hooks are over
+     * (state `closed`) nothing waits any more, so it is not recorded.
+     *
+     * @internal called by the transaction runner
+     */
+    trackDetached(name: string, work: Promise<unknown>): void
+    {
+        if (this.state === 'closed')
+        {
+            return;
+        }
+
+        void this.track(name, work).catch(() => undefined);
+    }
+
+    private async track<T>(name: string, operation: Promise<T>): Promise<T>
+    {
         const id = `${name}-${++this.operationCounter}`;
 
         this.operations.set(id, {
@@ -159,7 +190,7 @@ export class ShutdownManager
     }
 
     /**
-     * Number of currently active tracked operations
+     * Number of currently active tracked operations, after-commit callbacks included
      */
     getActiveOperationCount(): number
     {
@@ -192,9 +223,14 @@ export class ShutdownManager
      * 3. Run shutdown hooks in order
      * 4. State → closed
      *
-     * @param drainTimeout - Max time to wait for operations to drain (ms)
+     * The server's own shutdown runs `drain()` and `runHooks()` separately, so
+     * the hooks get a share of the budget the drain cannot spend.
+     *
+     * @param timeout - Max time for the drain and the hooks together (ms):
+     *   the drain may use all of it, and each hook gets the lesser of its own
+     *   timeout and what is left; a hook with nothing left is skipped
      */
-    async execute(drainTimeout: number): Promise<void>
+    async execute(timeout: number): Promise<void>
     {
         // beginShutdown() may have already been called
         if (this.state === 'closed')
@@ -204,42 +240,31 @@ export class ShutdownManager
             return;
         }
 
+        const deadline = Date.now() + timeout;
+
+        await this.drain(timeout);
+        await this.runHooks(deadline);
+    }
+
+    /**
+     * Wait, at most `timeout` ms, until no tracked operation is in flight
+     *
+     * The drain is done the first time it finds none in flight. Work tracked
+     * while it waits — an after-commit callback started by a transaction that
+     * committed during the drain, or by another callback — is in flight from
+     * the moment it starts, so it is waited for like the rest. Work started
+     * after the drain ended is not waited for by it.
+     */
+    async drain(timeout: number): Promise<void>
+    {
         this.state = 'draining';
         serverLogger.info('Shutdown manager: draining started', {
             activeOperations: this.operations.size,
             registeredHooks: this.hooks.length,
-            drainTimeout: `${drainTimeout}ms`,
+            timeout: `${timeout}ms`,
         });
 
-        // Phase 1: Drain — wait for all tracked operations to complete
-        await this.drain(drainTimeout);
-
-        // Phase 2: Run shutdown hooks in order
-        await this.executeHooks();
-
-        this.state = 'closed';
-        serverLogger.info('Shutdown manager: all hooks executed');
-    }
-
-    // ========================================================================
-    // Private
-    // ========================================================================
-
-    /**
-     * Wait for all tracked operations to complete, up to drainTimeout
-     */
-    private async drain(drainTimeout: number): Promise<void>
-    {
-        if (this.operations.size === 0)
-        {
-            serverLogger.info('Shutdown manager: no active operations, drain skipped');
-
-            return;
-        }
-
-        serverLogger.info(`Shutdown manager: waiting for ${this.operations.size} operations to drain...`);
-
-        const deadline = Date.now() + drainTimeout;
+        const deadline = Date.now() + timeout;
 
         while (this.operations.size > 0 && Date.now() < deadline)
         {
@@ -258,6 +283,34 @@ export class ShutdownManager
             await sleep(Math.min(DRAIN_POLL_INTERVAL, remaining));
         }
 
+        this.logDrainResult();
+    }
+
+    /**
+     * Run the registered hooks in order, none past `deadline`; state → closed
+     */
+    async runHooks(deadline: number): Promise<void>
+    {
+        if (this.hooks.length > 0)
+        {
+            serverLogger.info(`Shutdown manager: executing ${this.hooks.length} hooks...`);
+        }
+
+        for (const hook of this.hooks)
+        {
+            await this.executeHook(hook, Math.min(hook.timeout, deadline - Date.now()));
+        }
+
+        this.state = 'closed';
+        serverLogger.info('Shutdown manager: all hooks executed');
+    }
+
+    // ========================================================================
+    // Private
+    // ========================================================================
+
+    private logDrainResult(): void
+    {
         if (this.operations.size > 0)
         {
             const abandoned = Array.from(this.operations.values()).map(op => op.name);
@@ -272,38 +325,34 @@ export class ShutdownManager
     }
 
     /**
-     * Execute registered shutdown hooks in order
+     * Run one hook for at most `timeout` ms; failure does not block the next hook
      */
-    private async executeHooks(): Promise<void>
+    private async executeHook(hook: ShutdownHook, timeout: number): Promise<void>
     {
-        if (this.hooks.length === 0)
+        if (timeout <= 0)
         {
+            serverLogger.warn(`Shutdown hook [${hook.name}] skipped: the shutdown budget is spent`);
+
             return;
         }
 
-        serverLogger.info(`Shutdown manager: executing ${this.hooks.length} hooks...`);
+        serverLogger.debug(`Shutdown hook [${hook.name}] starting (timeout: ${timeout}ms)`);
 
-        for (const hook of this.hooks)
+        try
         {
-            serverLogger.debug(`Shutdown hook [${hook.name}] starting (timeout: ${hook.timeout}ms)`);
-
-            try
-            {
-                await withTimeout(
-                    hook.handler(),
-                    hook.timeout,
-                    `Shutdown hook '${hook.name}' timeout after ${hook.timeout}ms`,
-                );
-                serverLogger.info(`Shutdown hook [${hook.name}] completed`);
-            }
-            catch (error)
-            {
-                serverLogger.error(
-                    `Shutdown hook [${hook.name}] failed`,
-                    error as Error,
-                );
-                // Continue with next hook — don't block shutdown
-            }
+            await withTimeout(
+                hook.handler(),
+                timeout,
+                `Shutdown hook '${hook.name}' timeout after ${timeout}ms`,
+            );
+            serverLogger.info(`Shutdown hook [${hook.name}] completed`);
+        }
+        catch (error)
+        {
+            serverLogger.error(
+                `Shutdown hook [${hook.name}] failed`,
+                error as Error,
+            );
         }
     }
 }
@@ -312,7 +361,14 @@ export class ShutdownManager
 // Singleton
 // ============================================================================
 
-let instance: ShutdownManager | null = null;
+/**
+ * On globalThis, not in a module variable: core's entry points are bundled
+ * separately, and the transaction runner (in `@spfn/core/db`) must reach the
+ * same manager the server (in `@spfn/core/server`) drains.
+ */
+const MANAGER_KEY = Symbol.for('spfn:shutdown-manager');
+
+const g = globalThis as { [MANAGER_KEY]?: ShutdownManager | null };
 
 /**
  * Get the global ShutdownManager instance
@@ -335,12 +391,46 @@ let instance: ShutdownManager | null = null;
  */
 export function getShutdownManager(): ShutdownManager
 {
-    if (!instance)
+    g[MANAGER_KEY] ??= new ShutdownManager();
+
+    return g[MANAGER_KEY];
+}
+
+/**
+ * The manager for a server run that starts now
+ *
+ * A manager whose shutdown has begun belonged to an earlier run — one that was
+ * closed, or whose shutdown was driven by hand — and is replaced by a fresh
+ * one, so the new run neither starts "shutting down" nor loses its
+ * after-commit callbacks. A manager whose shutdown has not begun is kept with
+ * its hooks: those were registered for this run before it started.
+ *
+ * @internal called by startServer()
+ */
+export function startShutdownRun(): ShutdownManager
+{
+    if (g[MANAGER_KEY]?.isShuttingDown())
     {
-        instance = new ShutdownManager();
+        g[MANAGER_KEY] = null;
     }
 
-    return instance;
+    return getShutdownManager();
+}
+
+/**
+ * End the run `manager` belongs to, once its shutdown is complete: the next
+ * `getShutdownManager()` returns a fresh manager, without that run's hooks or
+ * shutdown state. A newer run's manager is left alone.
+ *
+ * The server calls it when `close()` finishes; call it after driving a
+ * manager's shutdown yourself (`drain()` / `execute()`).
+ */
+export function endShutdownRun(manager: ShutdownManager): void
+{
+    if (g[MANAGER_KEY] === manager)
+    {
+        g[MANAGER_KEY] = null;
+    }
 }
 
 /**
@@ -349,7 +439,7 @@ export function getShutdownManager(): ShutdownManager
  */
 export function resetShutdownManager(): void
 {
-    instance = null;
+    g[MANAGER_KEY] = null;
 }
 
 // ============================================================================

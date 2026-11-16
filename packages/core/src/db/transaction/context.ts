@@ -17,6 +17,7 @@ import type {
     DefaultDatabase,
     DrizzleDatabase,
 } from '../manager/types';
+import { startAfterCommitCallback } from './after-commit';
 
 /**
  * Transaction type belonging to a PostgreSQL Drizzle database.
@@ -311,6 +312,9 @@ function rootBinding(id: number | undefined, level: number): TransactionBinding
  *   Register hooks in the awaited call chain, not from detached work
  * - Callbacks run outside transaction context (new connection for DB access)
  * - Errors are logged but never thrown (commit already succeeded)
+ * - A graceful shutdown's drain waits for a running callback until the
+ *   promise it returns settles — return the work, do not detach it, if the
+ *   shutdown must not cut it
  *
  * @example
  * ```typescript
@@ -333,8 +337,8 @@ export function onAfterCommit(callback: AfterCommitCallback): void
 
     if (!context)
     {
-        // No active transaction → execute immediately
-        Promise.resolve().then(callback).catch((err) =>
+        // No active transaction → execute immediately (tracked for the shutdown drain)
+        startAfterCommitCallback(callback, (err) =>
         {
             txLogger.error('afterCommit callback failed (no transaction)', {
                 error: err instanceof Error ? err.message : String(err),

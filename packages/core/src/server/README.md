@@ -187,7 +187,7 @@ Hook signatures (`ServerConfig['lifecycle']`):
 | `beforeRoutes` | `(app: Hono) => void \| Promise<void>` | inside `createServer`, before routes |
 | `afterRoutes` | `(app: Hono) => void \| Promise<void>` | inside `createServer`, after routes/SSE |
 | `afterStart` | `(instance: ServerInstance) => Promise<void>` | server listening; throwing is logged, not fatal |
-| `beforeShutdown` | `() => Promise<void>` | shutdown Phase 4 (DB/Redis still open) |
+| `beforeShutdown` | `() => Promise<void>` | shutdown Phase 4 (DB, Redis and job sends still open; bounded by the shutdown budget) |
 
 ---
 
@@ -400,19 +400,134 @@ and call the router's `_init(getDatabase(), workflowsConfig)` after infrastructu
 
 ## Graceful shutdown & `ShutdownManager`
 
-`SIGTERM`/`SIGINT` (and `instance.close()`) trigger an outer timeout
-(`shutdown.timeout`, env `SHUTDOWN_TIMEOUT`, default 280000ms) wrapping 5 phases:
+`SIGTERM`/`SIGINT` (and `instance.close()`) start a shutdown with one deadline:
+`shutdown.timeout` (env `SHUTDOWN_TIMEOUT`, default 280000ms) from the moment it starts. On a
+signal the forced exit (`process.exit(1)`) fires at that same deadline.
 
 ```
 beginShutdown()                    health → 503, trackOperation() now rejects
-Phase 1  HTTP server.close()       stop new connections (5s cap), drain in-flight requests
-Phase 1.5 WS cleanup               (if websockets)
-Phase 2  stopBoss()                (if jobs)
-Phase 3  ShutdownManager.execute() drain tracked ops then run hooks (drainTimeout = 80% of shutdown.timeout)
-Phase 4  lifecycle.beforeShutdown()
-Phase 5  closeDatabase + closeCache (5s each)
+Phase 1  HTTP server.close()       stop new connections (≤5s), finish in-flight requests
+Phase 1.5 WS cleanup               (if websockets; ≤5s)
+Phase 2  stopFetching()            (if jobs) every worker on getBoss() stops fetching; running
+                                   handlers continue, send() keeps working
+Phase 3  ShutdownManager.drain()   wait for tracked operations and after-commit callbacks
+Phase 3.5 ShutdownManager.runHooks() onShutdown hooks, in order   ┐ one hooks' budget
+Phase 4  lifecycle.beforeShutdown()                               ┘
+Phase 5  stopBoss(wait)            (if jobs) wait for running job handlers, then stop pg-boss,
+                                   failing what still runs; sending stops here (≤31s)
+Phase 6  closeDatabase, closeEventTransport, closeCache  (≤5s, ≤2s, ≤5s)
          process.exit(0)
 ```
+
+**The job queue is two things.** Fetching stops in Phase 2: from then on the stopping instance
+starts no job, so a job that is due during the drain stays `created` for another instance (or
+for this app's next start). That covers every worker started on the instance `getBoss()`
+returns — by `registerJobs()` or by the app's own `getBoss().work(queue, handler)` (per-tenant or
+dynamic queues): the instance records its workers itself. From Phase 2 until the instance is
+stopped, `getBoss().work(...)` **rejects** with an error saying the instance stopped fetching for
+a shutdown — it starts no worker. Sending stays open until Phase 5: a tracked operation, an
+after-commit callback, an `onShutdown` hook or `beforeShutdown` that enqueues as it finishes
+puts its job in the queue. pg-boss's own timekeeping also runs until Phase 5 — a cron tick only
+inserts the job row, which a running instance fetches; the stopping instance never runs it.
+`stopFetching()` cannot recall a fetch already in flight when Phase 2 starts: that fetch still
+hands its jobs to the handler, so the log line `Stopped job fetch` may precede one last job
+starting on the stopping instance; that handler counts as running. Job handlers that were running may still be running
+while `onShutdown` hooks and `beforeShutdown` run — do not close something a handler uses there.
+
+**What the drain waits for.** Every operation passed to `trackOperation()` before the shutdown
+began, and every **after-commit callback** (`onAfterCommit`) core starts — including one whose
+transaction commits during the drain, or that another callback's transaction starts. A
+callback counts until the promise it returns settles, so return the work rather than detaching
+it if the shutdown must not cut it. The drain is done the first time it finds nothing in flight
+(it checks every 500ms); work started after that is not waited for by it. The common case is a
+**job handler** that commits while Phase 5 waits for it: its after-commit callbacks are not
+waited for, and an enqueue among them fails once pg-boss closes (sending stops in Phase 5). A
+job handler that enqueues should do it inside its transaction or before it returns, awaited —
+not in `onAfterCommit` — so the handler's wait covers it.
+
+**One budget rule** (`shutdown-budget.ts`). `shutdown.timeout` T is shared by proportion:
+
+- **waiting for accepted work** — the HTTP close, then the drain — is entitled to **at least half**;
+- the **hooks** — `onShutdown` hooks and `beforeShutdown`, one budget — to **a fifth**;
+- the enabled **infrastructure closes** share the remaining **three tenths in proportion to their
+  caps**, each never above its cap: `reserve_i = min(cap_i, 0.3 · T · cap_i / Σ caps of enabled)`.
+  The caps: the job queue 2000ms (pg-boss's 1000ms minimum handler wait + 1000ms to fail what is
+  left and close its pool), the database 5000ms, the event transport 2000ms, Redis 5000ms — each
+  only when the server runs it; disabled infrastructure reserves nothing.
+
+What the reserves do not need goes to the work: once `0.3 · T ≥ Σ caps` each close holds exactly
+its cap and the drain gets `T − hooks − Σ caps`. Inside the work share, the HTTP close and the
+WebSocket close keep their own 5s caps and together take at most half of it; the other half is
+the drain's, so a slow HTTP close cannot starve the drain. A reserve is time an earlier phase
+cannot spend; time a phase does not use flows forward to the phases after it. So a phase starting
+now gets
+
+```
+max(min(its own cap, time left − the reserves of the later phases that are enabled),
+    min(its own reserve, time left))
+```
+
+There is one deadline, shared with the forced-exit timer; a phase is skipped (gets 0) only when
+the deadline itself has passed. The hooks' budget is set when the drain ends: each `onShutdown`
+hook gets the lesser of its `timeout` and what is left of it, then `beforeShutdown` gets the rest.
+So a drain that never ends still leaves the hooks a fifth of the timeout, and when every phase
+stays inside its budget the database closes before the forced exit with its reserve.
+
+The budgets when every phase takes its whole budget, all infrastructure on (printed from
+`createShutdownBudget`; ms):
+
+| `shutdown.timeout` | HTTP + WS close (at most) | drain (at least) | hooks | jobs | database | event transport | Redis |
+|---|---|---|---|---|---|---|---|
+| 10000 | 2501 | 2501 | 2000 | 428 | 1071 | 428 | 1071 |
+| 30000 | 7501 | 7501 | 6000 | 1285 | 3214 | 1285 | 3214 |
+| 280000 (default) | 10000 | 200000 | 56000 | 2000 | 5000 | 2000 | 5000 |
+
+An HTTP close that ends at once leaves its part to the drain (at 10000: a drain of about 5000ms).
+
+**Do not set `shutdown.timeout` below about 47s with every piece of infrastructure on** (below
+about 17s with only the database): under `Σ caps / 0.3` the closes get less than their caps — the
+database pool is given less than 5s to end, and the job queue gets less than pg-boss's 2000ms
+graceful minimum, so when the drain and hooks use their shares, pg-boss fails running handlers'
+jobs without waiting for them. And set it to at least twice the longest request or after-commit
+callback that must finish: the work share is only guaranteed half.
+
+**A job handler still running in Phase 5.** The outcome depends on the jobs' budget:
+
+- **2000ms or more** (the normal case): pg-boss waits up to the budget minus 1000ms (at most 30s)
+  for running handlers. A handler that finishes in that time completes its job as usual.
+- **Less than 2000ms** — a short `shutdown.timeout` (below about 47s with all infrastructure on)
+  whose earlier phases took their whole budgets: pg-boss cannot wait less than 1000ms, so it does
+  not wait; it stops at once.
+
+Either way, a handler still running when the wait ends has its job failed by pg-boss before its
+pool closes and before the database closes (output `"pg-boss shut down while active"`):
+
+- with attempts left (`retry_count < retryLimit`) the job goes to `retry` and runs again on a
+  live instance after its retry delay — it is not lost, but the handler may have done part (or
+  all) of its work already;
+- on its last attempt it ends `failed` and is not run again.
+
+The server logs it from what it observed: `N job handler(s) were still running when pg-boss
+stopped; pg-boss failed their jobs …`, with each job's id and queue. The stop is abandoned only
+when the jobs' budget is 0 (the deadline has passed) or pg-boss's fail and pool close outlast the
+1000ms held for them; on a signal `process.exit` follows, and the job stays `active` until its
+expiry (`expireInSeconds`) before it is retried.
+
+**Two runs of one job can overlap at a shutdown.** The cut handler is not stopped — pg-boss has no
+way to abort it — and its code keeps running in the dying process: on a signal until
+`process.exit`, which comes after Phase 6 (the database stays open up to 5s longer); after
+`instance.close()` for as long as the process lives. Meanwhile its job is already `retry`, and a
+live instance can fetch it as soon as the retry delay has passed — while the old handler still
+writes. So:
+
+- make every job handler **idempotent**, and know that check-then-act is not enough: both runs can
+  check "not done yet" before either acts. Make the effect itself conditional — a unique
+  constraint, an `INSERT … ON CONFLICT DO NOTHING`, an `UPDATE … WHERE state = 'pending'` whose row
+  count says who won, or an external API's idempotency key;
+- what an app can rely on: one fetch hands a job to one worker; the cut run's late completion is
+  ignored (its job already moved on); the retry starts only after the retry delay, never before
+  the stopping instance failed the job; the old run gets no signal that it was cut;
+- keep `retryLimit` above 0 for a job that must not be lost to a deploy.
 
 `uncaughtException` / `unhandledRejection` are **logged, not fatal** — the server keeps
 running.
@@ -424,7 +539,7 @@ import { getShutdownManager } from '@spfn/core/server';
 
 const shutdown = getShutdownManager();
 
-// Register an independent cleanup hook (runs in Phase 3, ordered)
+// Register an independent cleanup hook (runs in Phase 3.5, ordered; sends still open)
 shutdown.onShutdown('ai-client', async () => { await aiClient.close(); },
     { timeout: 5000, order: 10 });
 
@@ -440,13 +555,22 @@ if (shutdown.isShuttingDown())
 
 | Method | Description |
 |--------|-------------|
-| `onShutdown(name, handler, opts?)` | Register cleanup hook. `opts.timeout` default 10000ms, `opts.order` default 100 (lower runs first). Hook failure/timeout does not block later hooks. |
+| `onShutdown(name, handler, opts?)` | Register cleanup hook. `opts.timeout` default 10000ms, cut to what the hooks' budget leaves; `opts.order` default 100 (lower runs first). Hook failure/timeout does not block later hooks. |
 | `trackOperation(name, promise)` | Await + track an op; drain waits for it. **Throws** if shutdown already started. |
 | `isShuttingDown()` | `true` once `beginShutdown()` ran (state ≠ `running`). |
-| `getActiveOperationCount()` | Number of in-flight tracked operations. |
+| `getActiveOperationCount()` | Number of in-flight tracked operations, after-commit callbacks included. |
 
 State machine: `running → draining → closed`. `beginShutdown()` / `execute()` are driven by
 the server's shutdown sequence — application code uses the four methods above.
+
+**The state belongs to one server run.** A completed `close()` (or signal shutdown) ends its
+run: the next `getShutdownManager()` returns a fresh manager, and a later `startServer()` in the
+same process starts `running`, tracks its own after-commit callbacks and answers health 200.
+`startServer()` also replaces a manager whose shutdown began but never completed. Hooks do not
+carry over from a run that shut down — register them again for the next run. What carries over
+is a manager whose shutdown has not begun: hooks registered before `startServer()` belong to the
+run it starts. After driving a shutdown by hand (`drain()` / `execute()`, e.g. in a test), call
+`endShutdownRun(getShutdownManager())` from `@spfn/core/server`.
 
 ---
 

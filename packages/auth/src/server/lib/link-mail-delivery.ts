@@ -27,10 +27,16 @@
  * Both the send and the enqueue wait for the caller's transaction to commit:
  * the job runs on pg-boss's own connection, so enqueued inside the transaction
  * it could run before the row it names is visible, and find nothing to send.
- * Inline sends left running after the answer are drained on a graceful
- * shutdown (`settleLinkMail`), before the database closes under them. Queued
- * delivery has no such protection: `@spfn/core` stops pg-boss before that
- * drain, so an enqueue still in flight then fails, is logged and not delivered.
+ * On a graceful shutdown, both are waited for inside `@spfn/core`'s shutdown
+ * budget, by different steps. The enqueue after a commit is the after-commit
+ * callback's own work, and core's drain waits for an after-commit callback
+ * until it settles — so it reaches the queue, which accepts sends until after
+ * `beforeShutdown`. An inline send is detached from its callback (the request
+ * must not wait for the provider), so core does not see it: `settleLinkMail`,
+ * auth's `beforeShutdown`, waits for those before the database closes. An
+ * enqueue still in flight when the drain's budget ends is abandoned by the
+ * drain (core logs `drain timeout — abandoning operations`) and fails once
+ * pg-boss stops: logged here, not delivered.
  */
 
 import { env } from '@spfn/auth/config';
@@ -138,17 +144,19 @@ async function enqueueLinkMail(payload: LinkMailPayload): Promise<unknown>
  */
 function sendInline(inlineSend: () => Promise<void>, payload: LinkMailPayload): void
 {
-    track(payload, inlineSend().catch((error: unknown) =>
+    void track(payload, inlineSend().catch((error: unknown) =>
     {
         authLogger.email.error('Link mail was not sent on the request path', { ...describe(payload), error });
     }));
 }
 
-/** Keep `work` where a shutdown can wait for it, until it settles. */
-function track(payload: LinkMailPayload, work: Promise<void>): void
+/** Keep `work` where a shutdown can wait for it, until it settles; returns `work`. */
+function track(payload: LinkMailPayload, work: Promise<void>): Promise<void>
 {
     inFlight.set(work, payload);
     void work.finally(() => inFlight.delete(work));
+
+    return work;
 }
 
 /** What a log line may say about a payload: its kind and row, never its recipient. */
@@ -161,11 +169,21 @@ function describe(payload: LinkMailPayload): { kind: string; rowId: number | nul
  * Wait, at most `timeoutMs`, until every inline send started after a commit
  * has finished — the auth lifecycle's `beforeShutdown`, so a graceful shutdown
  * does not close the database under them. What is still running at the bound
- * is abandoned and logged by kind and row.
+ * is abandoned and logged by kind and row (`Link mail still in flight at
+ * shutdown was abandoned`).
  *
- * It does not protect queued delivery: `@spfn/core` stops pg-boss before
- * `beforeShutdown`, so an after-commit enqueue still in flight then fails and
- * is logged (`Link mail was not queued after the commit`) — no mail.
+ * That line needs `timeoutMs` to end inside the hook's own shutdown budget:
+ * `@spfn/core` runs `beforeShutdown` for what its hooks' budget has left
+ * (at least a fifth of `shutdown.timeout`, minus what `onShutdown` hooks
+ * used). When that is less, core cuts this wait first and logs
+ * `beforeShutdown lifecycle hook failed or timed out` — the rows still in
+ * flight are not named, and the database closes under them.
+ *
+ * Queued delivery is waited for elsewhere: the enqueue is the after-commit
+ * callback's own work, and core's drain waits for it (see the module
+ * comment). An enqueue the drain abandoned and that is still in flight once
+ * pg-boss stops fails and is logged (`Link mail was not queued after the
+ * commit`) — no mail.
  *
  * A request no longer waits for its mail, so a test that reads what was sent
  * waits here as well.
@@ -236,6 +254,8 @@ export async function deliverLinkMail(
         return;
     }
 
+    // Returned, not detached: core's shutdown drain waits for an after-commit
+    // callback until the promise it returns settles
     onAfterCommit(() => track(payload, queueLinkMail(payload, inlineSend, mode).catch((error: unknown) =>
     {
         authLogger.email.error('Link mail was not queued after the commit', { ...describe(payload), error });

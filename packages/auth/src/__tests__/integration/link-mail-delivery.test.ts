@@ -67,6 +67,7 @@ const { resetLinkMailFallbackWarning, settleLinkMail } = await import('@/server/
 const { authLogger } = await import('@/server/logger');
 const { requestPasswordResetService } = await import('@/server/services/password-reset.service');
 const { createAuthLifecycle } = await import('@/server/lifecycle');
+const { endShutdownRun, getShutdownManager } = await import('@spfn/core/server');
 
 // See the file comment: the definition's own `send` would reach for the real
 // pg-boss, so the enqueue is pointed at the fake the `getBoss` mock hands out.
@@ -839,6 +840,49 @@ describe.skipIf(!dbAvailable)('Link mail delivery', () =>
 
             expect(boss.send).not.toHaveBeenCalled();
             expect(sendEmail).not.toHaveBeenCalled();
+        });
+
+        it('row S5: core\'s shutdown drain waits for the enqueue after an app commit — no auth hook involved', async () =>
+        {
+            await seedResettable('s5@example.com');
+            let releaseSend!: () => void;
+            const sendHeld = new Promise<void>((resolve) =>
+            {
+                releaseSend = resolve;
+            });
+            boss.send.mockImplementation(async () =>
+            {
+                await sendHeld;
+
+                return 'job-1';
+            });
+
+            await runInTransaction(async () =>
+            {
+                await requestPasswordResetService({ email: 's5@example.com' });
+            });
+            await vi.waitFor(() => expect(boss.send).toHaveBeenCalledTimes(1));
+
+            try
+            {
+                let drained = false;
+                const drain = getShutdownManager().drain(5_000).then(() =>
+                {
+                    drained = true;
+                });
+                // Longer than one drain poll: a drain that saw nothing in flight is over by now.
+                await new Promise(resolve => setTimeout(resolve, 700));
+                expect(drained).toBe(false);
+
+                releaseSend();
+                await drain;
+            }
+            finally
+            {
+                // This drain ended a run: the rows after this get a fresh manager.
+                endShutdownRun(getShutdownManager());
+                releaseSend();
+            }
         });
     });
 

@@ -65,6 +65,7 @@ import {
     type AfterRollbackCallback,
 } from './context';
 import { TransactionError } from '@spfn/core/errors';
+import { startAfterCommitCallback } from './after-commit';
 import { isTenantId } from '../tenant/condition';
 import {
     assertTransactionBinding,
@@ -834,9 +835,11 @@ export async function runInTransaction<T, TDatabase extends DrizzleDatabase = De
                 }));
             }
 
+            // Detached from the caller, but tracked: a graceful shutdown's
+            // drain waits for them (see after-commit.ts)
             for (const cb of afterCommitCallbacks)
             {
-                Promise.resolve().then(cb).catch((err) => logSafely(() =>
+                startAfterCommitCallback(cb, (err) => logSafely(() =>
                 {
                     txLogger.error('afterCommit callback failed', {
                         txId,

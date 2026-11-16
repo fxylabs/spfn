@@ -10,7 +10,7 @@ import type { Server } from 'http';
 
 import { closeCache, initCache } from '@spfn/core/cache';
 import { closeDatabase, initDatabase, getDatabase } from '@spfn/core/db';
-import { initBoss, stopBoss, registerJobs } from '../job';
+import { initBoss, stopBoss, stopFetching, registerJobs } from '../job';
 import { attachWSHandler } from '../event/ws/handler';
 import { SSETokenManager, CacheTokenStore } from '../event/sse/token-manager';
 import { wireEventRouterCache, closeEventTransport } from '../event/cache-transport';
@@ -33,7 +33,10 @@ import {
 import { runEnvBootCheck } from './env-boot-check';
 import { runMigrationBootGate } from './migration-gate';
 import { runTenancyBootGate } from './tenancy-gate';
-import { getShutdownManager, resetShutdownManager } from './shutdown-manager';
+import { endShutdownRun, resetShutdownManager, startShutdownRun } from './shutdown-manager';
+import type { ShutdownManager } from './shutdown-manager';
+import { createShutdownBudget, JOB_FAIL_TIME } from './shutdown-budget';
+import type { ShutdownBudget, ShutdownInfrastructure } from './shutdown-budget';
 
 import type { ServerConfig, ServerInstance } from './types';
 import { validateServerConfig } from './validation';
@@ -46,7 +49,6 @@ import { env } from '@spfn/core/config';
 const DEFAULT_MAX_LISTENERS = 15;
 
 const TIMEOUTS = {
-    SERVER_CLOSE: 5000,
     DATABASE_CLOSE: 5000,
     REDIS_CLOSE: 5000,
     PRODUCTION_ERROR_SHUTDOWN: 10000,
@@ -63,11 +65,13 @@ interface InfrastructureConfig
 }
 
 /**
- * Shutdown state manager to prevent race conditions
+ * One server run's shutdown state: whether its shutdown began (to prevent
+ * re-entry), and the manager its drain and hooks run on
  */
 interface ShutdownState
 {
     isShuttingDown: boolean;
+    manager: ShutdownManager;
 }
 
 // ============================================================================
@@ -127,6 +131,7 @@ export async function startServer(config?: ServerConfig): Promise<ServerInstance
     // Create shutdown state for this server instance
     const shutdownState: ShutdownState = {
         isShuttingDown: false,
+        manager: startShutdownRun(),
     };
 
     try
@@ -525,16 +530,26 @@ function logServerStarted(
 // Graceful Shutdown
 // ============================================================================
 
+/**
+ * Build the graceful shutdown sequence
+ *
+ * The job queue is two things and they stop at different times: fetching
+ * stops first, so the stopping instance starts no job it may have to fail;
+ * sending stays open until everything that may still enqueue — tracked
+ * operations, `onShutdown` hooks, `beforeShutdown` — has run. Every phase is
+ * bounded by one deadline (see shutdown-budget.ts).
+ *
+ * @returns a function taking the epoch-ms deadline (default: now + shutdown.timeout)
+ */
 function createShutdownHandler(
     server: Server,
     config: ServerConfig,
     shutdownState: ShutdownState,
     wsCleanup?: () => Promise<void>,
-): () => Promise<void>
+): (deadline?: number) => Promise<void>
 {
-    return async () =>
+    return async (deadline = Date.now() + getShutdownTimeout(config.shutdown)) =>
     {
-        // Prevent re-entry
         if (shutdownState.isShuttingDown)
         {
             serverLogger.debug('Shutdown already in progress for this instance, skipping');
@@ -544,92 +559,178 @@ function createShutdownHandler(
 
         shutdownState.isShuttingDown = true;
 
-        const shutdownTimeout = getShutdownTimeout(config.shutdown);
-        const shutdownManager = getShutdownManager();
+        const budget = createShutdownBudget(deadline, getShutdownInfrastructure(config));
 
-        // Immediately mark as draining so health check returns 503
-        // and trackOperation() rejects new work
-        shutdownManager.beginShutdown();
+        serverLogger.info('Shutdown started', {
+            deadlineIn: `${deadline - Date.now()}ms`,
+            reservedForHooksAndInfrastructure: `${budget.reserved}ms`,
+        });
 
-        // ── Phase 1: Stop accepting new connections ──
-        serverLogger.info('Phase 1: Closing HTTP server (stop accepting new connections)...');
-        await closeHttpServer(server);
+        // Health check returns 503 and trackOperation() rejects new work from here on
+        shutdownState.manager.beginShutdown();
 
-        // ── Phase 1.5: Close WebSocket server ──
-        if (wsCleanup)
-        {
-            serverLogger.info('Phase 1.5: Closing WebSocket server...');
-            try
-            {
-                await wsCleanup();
-                serverLogger.info('WebSocket server closed');
-            }
-            catch (error)
-            {
-                serverLogger.error('WebSocket server close failed', error as Error);
-            }
-        }
+        await stopAcceptingWork(server, config, budget, wsCleanup);
+        await drainWork(config, budget, shutdownState.manager);
+        await stopJobQueue(config, budget);
+        await closeInfrastructureWithin(config, budget);
 
-        // ── Phase 2: Stop pg-boss (stop accepting new jobs) ──
-        if (config.jobs)
-        {
-            serverLogger.info('Phase 2: Stopping pg-boss...');
-            try
-            {
-                await stopBoss();
-                serverLogger.info('pg-boss stopped');
-            }
-            catch (error)
-            {
-                serverLogger.error('pg-boss stop failed', error as Error);
-            }
-        }
-
-        // ── Phase 3: Drain — wait for all tracked operations to complete ──
-        // Use 80% of remaining shutdown timeout for drain + hooks
-        const drainTimeout = Math.floor(shutdownTimeout * 0.8);
-        serverLogger.info(`Phase 3: Draining tracked operations (timeout: ${drainTimeout}ms)...`);
-        await shutdownManager.execute(drainTimeout);
-
-        // ── Phase 4: Execute beforeShutdown lifecycle hook (backward compat) ──
-        if (config.lifecycle?.beforeShutdown)
-        {
-            serverLogger.info('Phase 4: Executing beforeShutdown lifecycle hook...');
-            try
-            {
-                await config.lifecycle.beforeShutdown();
-            }
-            catch (error)
-            {
-                serverLogger.error('beforeShutdown lifecycle hook failed', error as Error);
-            }
-        }
-
-        // ── Phase 5: Close infrastructure (DB, Redis) ──
-        serverLogger.info('Phase 5: Closing infrastructure...');
-        const infraConfig = getInfrastructureConfig(config);
-
-        if (infraConfig.database)
-        {
-            await closeInfrastructure(closeDatabase, 'Database', TIMEOUTS.DATABASE_CLOSE);
-        }
-
-        if (infraConfig.redis)
-        {
-            // Quit the event pub/sub subscriber (a duplicate connection) before
-            // the cache write/read connections it was duplicated from.
-            await closeEventTransport();
-            await closeInfrastructure(closeCache, 'Redis', TIMEOUTS.REDIS_CLOSE);
-        }
-
+        // This run is over: the next startServer() in the process starts clean
+        endShutdownRun(shutdownState.manager);
         serverLogger.info('Server shutdown completed');
     };
+}
+
+function getShutdownInfrastructure(config: ServerConfig): ShutdownInfrastructure
+{
+    return { ...getInfrastructureConfig(config), jobs: Boolean(config.jobs) };
+}
+
+/**
+ * Phases 1–2: close HTTP and WebSocket, then stop fetching jobs
+ *
+ * Handlers already running continue; `send` keeps working.
+ */
+async function stopAcceptingWork(
+    server: Server,
+    config: ServerConfig,
+    budget: ShutdownBudget,
+    wsCleanup?: () => Promise<void>,
+): Promise<void>
+{
+    serverLogger.info('Phase 1: Closing HTTP server (stop accepting new connections)...');
+    await closeHttpServer(server, budget.phase('http'));
+
+    if (wsCleanup)
+    {
+        serverLogger.info('Phase 1.5: Closing WebSocket server...');
+        await runWithin(wsCleanup, 'WebSocket server close', budget.phase('websocket'));
+    }
+
+    if (config.jobs)
+    {
+        serverLogger.info('Phase 2: Stopping job fetch (sending stays open)...');
+        await stopFetching();
+    }
+}
+
+/**
+ * Phases 3–4: drain tracked operations, then the hooks — `onShutdown` hooks
+ * and `beforeShutdown` share the hooks' budget, which the drain cannot spend.
+ * The queue still accepts what they enqueue.
+ */
+async function drainWork(config: ServerConfig, budget: ShutdownBudget, manager: ShutdownManager): Promise<void>
+{
+    const drainBudget = budget.phase('drain');
+    serverLogger.info(`Phase 3: Draining tracked operations and after-commit callbacks (budget: ${drainBudget}ms)...`);
+    await manager.drain(drainBudget);
+
+    const hooksDeadline = Date.now() + budget.phase('hooks');
+    serverLogger.info(`Phase 3.5: Running shutdown hooks (budget: ${hooksDeadline - Date.now()}ms)...`);
+    await manager.runHooks(hooksDeadline);
+
+    await runBeforeShutdown(config, hooksDeadline - Date.now());
+}
+
+/**
+ * Phase 4: the `beforeShutdown` lifecycle hook, for what the hooks' budget has left
+ */
+async function runBeforeShutdown(config: ServerConfig, hookBudget: number): Promise<void>
+{
+    const beforeShutdown = config.lifecycle?.beforeShutdown;
+
+    if (!beforeShutdown)
+    {
+        return;
+    }
+
+    if (hookBudget <= 0)
+    {
+        serverLogger.warn('Phase 4: beforeShutdown lifecycle hook skipped: the hooks\' budget is spent');
+
+        return;
+    }
+
+    serverLogger.info(`Phase 4: Executing beforeShutdown lifecycle hook (budget: ${hookBudget}ms)...`);
+    await runWithin(beforeShutdown, 'beforeShutdown lifecycle hook', hookBudget);
+}
+
+/**
+ * Phase 5: wait for running job handlers, then stop pg-boss
+ *
+ * A handler still running when its wait ends has its job failed by pg-boss
+ * before the database closes: retried on a live instance if attempts remain,
+ * left failed on the last one. With less budget than pg-boss's shortest wait
+ * plus the fail, it fails them without waiting.
+ */
+async function stopJobQueue(config: ServerConfig, budget: ShutdownBudget): Promise<void>
+{
+    if (!config.jobs)
+    {
+        return;
+    }
+
+    const jobsBudget = budget.phase('jobs');
+    serverLogger.info(`Phase 5: Waiting for running job handlers, then stopping pg-boss (budget: ${jobsBudget}ms)...`);
+    await runWithin(() => stopBoss(jobsBudget - JOB_FAIL_TIME), 'pg-boss stop', jobsBudget);
+}
+
+/**
+ * Phase 6: close the database, then the event transport and Redis
+ */
+async function closeInfrastructureWithin(config: ServerConfig, budget: ShutdownBudget): Promise<void>
+{
+    const infraConfig = getInfrastructureConfig(config);
+
+    if (infraConfig.database)
+    {
+        const databaseBudget = budget.phase('database');
+        serverLogger.info(`Phase 6: Closing database (budget: ${databaseBudget}ms)...`);
+        await closeInfrastructure(closeDatabase, 'Database', databaseBudget);
+    }
+
+    if (infraConfig.redis)
+    {
+        serverLogger.info('Phase 6: Closing event transport and Redis...');
+        // Quit the event pub/sub subscriber (a duplicate connection) before
+        // the cache write/read connections it was duplicated from.
+        await runWithin(closeEventTransport, 'Event transport close', budget.phase('eventTransport'));
+        await closeInfrastructure(closeCache, 'Redis', budget.phase('redis'));
+    }
+}
+
+/**
+ * Run a shutdown step for at most `timeout` ms; a failure or timeout is
+ * logged and the shutdown continues
+ */
+async function runWithin(step: () => Promise<void>, name: string, timeout: number): Promise<void>
+{
+    let timeoutId: NodeJS.Timeout | undefined;
+
+    try
+    {
+        await Promise.race([
+            step(),
+            new Promise<void>((_, reject) =>
+            {
+                timeoutId = setTimeout(() => reject(new Error(`${name} timeout after ${timeout}ms`)), timeout);
+            }),
+        ]);
+        serverLogger.info(`${name} done`);
+    }
+    catch (error)
+    {
+        serverLogger.error(`${name} failed or timed out`, error as Error);
+    }
+    finally
+    {
+        clearTimeout(timeoutId);
+    }
 }
 
 /**
  * Close HTTP server with timeout
  */
-async function closeHttpServer(server: Server): Promise<void>
+async function closeHttpServer(server: Server, timeout: number): Promise<void>
 {
     let timeoutId: NodeJS.Timeout | undefined;
 
@@ -656,8 +757,8 @@ async function closeHttpServer(server: Server): Promise<void>
         {
             timeoutId = setTimeout(() =>
             {
-                reject(new Error(`HTTP server close timeout after ${TIMEOUTS.SERVER_CLOSE}ms`));
-            }, TIMEOUTS.SERVER_CLOSE);
+                reject(new Error(`HTTP server close timeout after ${timeout}ms`));
+            }, timeout);
         }),
     ]).catch((error) =>
     {
@@ -703,7 +804,7 @@ async function closeInfrastructure(
 }
 
 function createGracefulShutdown(
-    shutdownServer: () => Promise<void>,
+    shutdownServer: (deadline: number) => Promise<void>,
     config: ServerConfig,
     shutdownState: ShutdownState,
 ): (signal: string) => Promise<void>
@@ -720,13 +821,15 @@ function createGracefulShutdown(
 
         serverLogger.info(`${signal} received, starting graceful shutdown...`);
 
+        // One deadline: the phases' budgets and the forced exit share it
         const shutdownTimeout = getShutdownTimeout(config.shutdown);
+        const deadline = Date.now() + shutdownTimeout;
         let timeoutId: NodeJS.Timeout | undefined;
 
         try
         {
             await Promise.race([
-                shutdownServer().then(() =>
+                shutdownServer(deadline).then(() =>
                 {
                     if (timeoutId) clearTimeout(timeoutId);
                 }),
@@ -735,7 +838,7 @@ function createGracefulShutdown(
                     timeoutId = setTimeout(() =>
                     {
                         reject(new Error(`Graceful shutdown timeout after ${shutdownTimeout}ms`));
-                    }, shutdownTimeout);
+                    }, deadline - Date.now());
                 }),
             ]);
 
