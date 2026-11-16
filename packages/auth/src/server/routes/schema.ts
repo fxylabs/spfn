@@ -222,3 +222,13 @@ export const VerificationPurposeSchema = Type.Union([
 export type VerificationPurpose = Static<typeof VerificationPurposeSchema>;
 
 export const VERIFICATION_PURPOSES = ['registration', 'account_deletion'] as const;
+
+/**
+ * A passkey assertion made for one procedure that lets another credential into
+ * an account with session binding on (`session/passkey-proof/options`), passed
+ * through unchanged to the WebAuthn adapter — the library decides what a valid
+ * response is, for the passkey routes' reason.
+ */
+export const PasskeyProofResponseSchema = Type.Unknown({
+    description: 'The assertion from @simplewebauthn/browser over session/passkey-proof/options, for an account with session binding on',
+});

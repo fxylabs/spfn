@@ -120,13 +120,54 @@ describe('the proxy and a bound session (case table 6c)', () =>
         expect(forwarded).toHaveBeenCalledOnce();
         expect(ctx.abort).toBeUndefined();
         expect(ctx.headers['X-Key-Id']).toBe(keyId);
-        expect(ctx.metadata.sessionBound).toBe(true);
     });
 
-    it('bound, the backend answers 401 KeyExpiredError: the SessionRenewalRequiredError envelope, cookies kept', async () =>
+    it('T4: sign-out on an expired bound session clears the cookies, whether the backend revoked the key (204) or reports it gone (401 KeyExpiredError, past grace)', async () =>
     {
-        const ctx = responseContext('/_auth/users/me', 401, { __type: 'KeyExpiredError', message: 'Public key has expired' }, {
-            metadata: { sessionValid: true, sessionBound: true },
+        const revoked = responseContext('/_auth/logout', 204, undefined, { metadata: { sessionValid: true } });
+        const gone = responseContext('/_auth/logout', 401, { __type: 'KeyExpiredError', message: 'Public key has expired' }, {
+            metadata: { sessionValid: true },
+        });
+
+        for (const ctx of [revoked, gone])
+        {
+            await decidedResponse(ctx, [generalAuthInterceptor.response], next);
+
+            const cleared = ctx.setCookies.filter(cookie => cookie.value === '' && cookie.options?.maxAge === 0).map(cookie => cookie.name);
+            expect(cleared).toEqual(expect.arrayContaining([COOKIE_NAMES.SESSION, COOKIE_NAMES.SESSION_KEY_ID, COOKIE_NAMES.CSRF]));
+        }
+
+        expect(gone.response.body).toMatchObject({ __type: 'KeyExpiredError' });
+    });
+
+    it('RV326C-L1: a sign-out that presented no session (a cross-site POST: the Lax cookie is not sent) and got 401: no cookie cleared', async () =>
+    {
+        const request = requestContext('/_auth/logout', new Map(), CHROME);
+        (request as { method: string }).method = 'POST';
+        const forwarded = vi.fn(next);
+        await decidedRequest(request, [generalAuthInterceptor.request], forwarded);
+        expect(forwarded).toHaveBeenCalledOnce();
+
+        const ctx = responseContext('/_auth/logout', 401, {
+            __type: 'UnauthorizedError',
+            message: 'Authentication header missing or invalid: Bearer {token}',
+        }, { metadata: request.metadata });
+
+        await decidedResponse(ctx, [generalAuthInterceptor.response], next);
+
+        expect(ctx.setCookies.filter(cookie => cookie.value === '' && cookie.options?.maxAge === 0)).toEqual([]);
+    });
+
+    it('the backend answers 401 KeyExpiredError for a renewable key: the SessionRenewalRequiredError envelope, cookies kept — whatever the cookie says', async () =>
+    {
+        // The cookie was sealed unbound (no `binding`); the key row is bound and
+        // inside its grace, which the refusal says.
+        const ctx = responseContext('/_auth/users/me', 401, {
+            __type: 'KeyExpiredError',
+            message: 'Public key has expired',
+            details: { renewable: true },
+        }, {
+            metadata: { sessionValid: true, inboundSession: { userId: '7', keyId: 'k' } },
         });
 
         await decidedResponse(ctx, [generalAuthInterceptor.response], next);
@@ -235,7 +276,7 @@ describe('the proxy and a bound session (case table 6c)', () =>
     it('bound, backend answers a 401 about the request token: 401 passed through and the cookies stay', async () =>
     {
         const ctx = responseContext('/_auth/users/me', 401, { __type: 'InvalidTokenError', message: 'no' }, {
-            metadata: { sessionValid: true, sessionBound: true },
+            metadata: { sessionValid: true },
         });
 
         await decidedResponse(ctx, [generalAuthInterceptor.response], next);
@@ -245,10 +286,12 @@ describe('the proxy and a bound session (case table 6c)', () =>
         expect(ctx.setCookies.filter(cookie => cookie.value === '')).toEqual([]);
     });
 
-    it('unbound, backend answers 401 KeyExpiredError: 401 passed through and the cookies are cleared, exactly as today', async () =>
+    it('the backend answers 401 KeyExpiredError for a key it does not call renewable: passed through and the cookies cleared — even under a bound cookie', async () =>
     {
+        // An unbound key, or a bound one past its grace: the refusal carries no
+        // `renewable`, and the cookie's `binding` decides nothing.
         const ctx = responseContext('/_auth/users/me', 401, { __type: 'KeyExpiredError', message: 'Public key has expired' }, {
-            metadata: { sessionValid: true },
+            metadata: { sessionValid: true, inboundSession: { userId: '7', keyId: 'k', binding: 'passkey' } },
         });
 
         await decidedResponse(ctx, [generalAuthInterceptor.response], next);

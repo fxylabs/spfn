@@ -244,3 +244,25 @@ export class FixtureAuthenticator
         };
     }
 }
+
+/** Posts a JSON body as the session in question, through whichever request helper a suite drives. */
+export type SessionPost = (path: string, body: unknown) => Response | Promise<Response>;
+
+/**
+ * Turn session binding on as a browser does: the `bindingEnable` passkey proof
+ * over `session/passkey-proof/options`, then `session/binding` with it.
+ *
+ * Counter 0 unless given — the value a synced passkey reports forever — so a
+ * row's own later assertions at counter 1 and up are not a regression.
+ */
+export async function enableBinding(
+    post: SessionPost,
+    authenticator: FixtureAuthenticator,
+    ceremony: Omit<CeremonyInput, 'challenge'> & { counter?: number },
+): Promise<Response>
+{
+    const options = await post('/_auth/session/passkey-proof/options', { procedure: 'bindingEnable' });
+    const passkeyResponse = authenticator.assert({ counter: 0, ...ceremony, challenge: (await options.json()).challenge });
+
+    return await post('/_auth/session/binding', { mode: 'passkey', passkeyResponse });
+}

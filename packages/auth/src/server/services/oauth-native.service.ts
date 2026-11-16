@@ -199,8 +199,8 @@ async function persistNativeLogin(
 
         // 공개키 등록 (같은 사용자의 활성 키 재등록만 무시 — 그 밖의 keyId 충돌은 409)
         //
-        // No `binding`, so the key is an ordinary 90-day one even on an account
-        // that turned session binding on. This route exists for a native SDK
+        // No `webProxy`, so the key is not a web key and stays an ordinary
+        // 90-day one even on an account that turned session binding on. This route exists for a native SDK
         // holding a provider id_token: there is no session cookie for a copy to
         // be made of and no browser to run the renewal ceremony in, and
         // `clientType` on a request that reached the backend directly is never

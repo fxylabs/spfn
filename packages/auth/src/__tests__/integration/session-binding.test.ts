@@ -37,7 +37,7 @@ vi.mock('next/headers.js', () => ({
 }));
 
 import { setupTestDb, teardownTestDb, clearTables, getTestDb, isDatabaseAvailable } from '../helpers/db';
-import { FixtureAuthenticator } from '../helpers/webauthn-fixture';
+import { enableBinding, FixtureAuthenticator } from '../helpers/webauthn-fixture';
 import { userPublicKeys, users } from '@/server/entities';
 import { hashPassword } from '@/server/helpers/password';
 import { generateClientToken, generateKeyPair } from '@/server/lib/crypto';
@@ -206,11 +206,17 @@ describe.skipIf(!dbAvailable)('session binding (case tables 6a, 6b, 6g)', () =>
     {
         const session = await signIn();
         const authenticator = await enrollPasskey(session);
-        const enabled = await post('/_auth/session/binding', { mode: 'passkey' }, session);
+        const enabled = await enable(session, authenticator);
 
         expect(enabled.status).toBe(200);
 
         return { session, authenticator };
+    }
+
+    /** `{ mode: passkey }` with the `bindingEnable` proof this authenticator makes. */
+    function enable(session: Session, authenticator: FixtureAuthenticator, userVerified = true)
+    {
+        return enableBinding((path, body) => post(path, body, session), authenticator, { origin: ORIGIN, rpId: RP_ID, userVerified });
     }
 
     async function keyRow(keyId: string)
@@ -263,14 +269,49 @@ describe.skipIf(!dbAvailable)('session binding (case tables 6a, 6b, 6g)', () =>
             expect((await userRow()).sessionBinding).toBe('none');
         });
 
-        it('no passkey, { mode: passkey }: 400, the setting does not move', async () =>
+        it('no passkey, { mode: passkey }: 403 PASSKEY_PROOF_REQUIRED, the setting does not move', async () =>
         {
             const session = await signIn();
 
             const response = await post('/_auth/session/binding', { mode: 'passkey' }, session);
 
-            expect(response.status).toBe(400);
+            expect(response.status).toBe(403);
+            expect((await response.json()).__type).toBe('PasskeyProofRequiredError');
             expect((await userRow()).sessionBinding).toBe('none');
+        });
+
+        it('RV326C-B: only a passkey that never verified the person, { mode: passkey }: without a proof 403, with its presence-only assertion 403, with a verifying assertion 200', async () =>
+        {
+            // Every renewal of a bound session asks an assertion that verified
+            // the person. An account that cannot make one would be bound into
+            // sessions it could never renew, and could not add a better passkey
+            // (that asks the same proof): it is refused instead.
+            const session = await signIn();
+            const pinless = await FixtureAuthenticator.create();
+            const options = await post('/_auth/passkeys/register/options', {}, session);
+            const registered = await post('/_auth/passkeys/register/verify', {
+                response: pinless.attest({ challenge: (await options.json()).challenge, origin: ORIGIN, rpId: RP_ID, userVerified: false }),
+            }, session);
+            expect(registered.status).toBe(200);
+
+            for (const attempt of [
+                () => post('/_auth/session/binding', { mode: 'passkey' }, session),
+                () => enable(session, pinless, false),
+            ])
+            {
+                const refused = await attempt();
+
+                expect(refused.status).toBe(403);
+                expect((await refused.json()).__type).toBe('PasskeyProofRequiredError');
+                expect((await userRow()).sessionBinding).toBe('none');
+                expect((await keyRow(session.keyId)).binding).toBe('none');
+            }
+
+            const enabled = await enable(session, pinless);
+
+            expect(enabled.status).toBe(200);
+            expect((await userRow()).sessionBinding).toBe('passkey');
+            expect((await keyRow(session.keyId)).binding).toBe('passkey');
         });
 
         it('a passkey, no recent authentication: RecentAuthenticationRequiredError', async () =>
@@ -289,9 +330,9 @@ describe.skipIf(!dbAvailable)('session binding (case tables 6a, 6b, 6g)', () =>
         it('a passkey and recent authentication: 200 { keyExpiresAtMillis }, users updated, the current key binding=passkey and expiring in about 24h', async () =>
         {
             const session = await signIn();
-            await enrollPasskey(session);
+            const authenticator = await enrollPasskey(session);
 
-            const response = await post('/_auth/session/binding', { mode: 'passkey' }, session);
+            const response = await enable(session, authenticator);
             const body = await response.json();
 
             expect(response.status).toBe(200);
@@ -306,10 +347,10 @@ describe.skipIf(!dbAvailable)('session binding (case tables 6a, 6b, 6g)', () =>
 
         it('already on, { mode: passkey } again: 200, and the expiry is not recomputed', async () =>
         {
-            const { session } = await boundSession();
+            const { session, authenticator } = await boundSession();
             const before = (await keyRow(session.keyId)).expiresAt!.getTime();
 
-            const response = await post('/_auth/session/binding', { mode: 'passkey' }, session);
+            const response = await enable(session, authenticator);
 
             expect(response.status).toBe(200);
             expect((await response.json()).keyExpiresAtMillis).toBe(before);
@@ -419,7 +460,7 @@ describe.skipIf(!dbAvailable)('session binding (case tables 6a, 6b, 6g)', () =>
             // client's. The account is bound; this session is not.
             const native = await signIn(false);
 
-            const response = await get('/_auth/session/binding', native);
+            const response = await get('/_auth/session/binding', native, false);
             const body = await response.json();
 
             expect(body.mode).toBe('passkey');

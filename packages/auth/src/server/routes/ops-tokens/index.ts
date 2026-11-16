@@ -23,6 +23,8 @@ import { BadRequestError, NotFoundError } from '@spfn/core/errors';
 
 import { authenticate, requirePermissions, requireRole } from '../../middleware';
 import { getAuth } from '../../helpers';
+import { checkPasskeyProof } from '../../services/passkey.service';
+import { PasskeyProofResponseSchema } from '../schema';
 import {
     issueOpsTokenService,
     listOpsTokensService,
@@ -73,6 +75,13 @@ function toSummary(record: OpsToken)
  * suspension or demotion that lands after the guard leaves no token. The token
  * records its issuer and works only while the issuer is active and still
  * holds `ops:token:issue`.
+ *
+ * An account with session binding on issues only with `passkeyResponse`, an
+ * assertion over `session/passkey-proof/options { procedure: 'opsTokenIssue' }`;
+ * without it, 403 `PASSKEY_PROOF_REQUIRED`. A token outlives every key of the
+ * account, so a copied bound session must not be able to mint one. The
+ * assertion is checked here, before the service's transaction, so one that does
+ * not verify spends its challenge.
  */
 export const issueOpsToken = route.post('/_auth/ops-tokens')
     .input({
@@ -88,6 +97,7 @@ export const issueOpsToken = route.post('/_auth/ops-tokens')
             ], {
                 description: `Days until expiry, up to ${MAX_EXPIRY_DAYS}; null issues a non-expiring token`,
             })),
+            passkeyResponse: Type.Optional(PasskeyProofResponseSchema),
         }),
     })
     .use([authenticate, requirePermissions(OPS_TOKEN_ISSUE_PERMISSION)])
@@ -107,7 +117,16 @@ export const issueOpsToken = route.post('/_auth/ops-tokens')
             });
         }
 
-        const { token, record } = await issueOpsTokenService(body.name, body.scopes, expiresAt, { userId: Number(userId), credential });
+        const { token, record } = await issueOpsTokenService(body.name, body.scopes, expiresAt, {
+            userId: Number(userId),
+            credential,
+            passkeyProof: await checkPasskeyProof({
+                userId: Number(userId),
+                credential,
+                procedure: 'opsTokenIssue',
+                response: body.passkeyResponse,
+            }),
+        });
 
         return { token, opsToken: toSummary(record) };
     });

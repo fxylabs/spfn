@@ -6,7 +6,7 @@
 
 import { type KeyAlgorithmType, type KeyPlatformType, type SessionBindingType } from '../types';
 import { assertKeyMatchesAlgorithm, verifyKeyFingerprint } from '../helpers/jwt';
-import { KEY_TTL_DAYS } from '../lib/key-policy';
+import { KEY_TTL_DAYS, decideKeyBinding } from '../lib/key-policy';
 import { exemptsNewDevice, type PasskeyAssertionProof } from '../lib/passkey-assertion';
 import { getBoundKeyTtlMs } from '../lib/config';
 import { uaFamily } from '../lib/ua-family';
@@ -42,6 +42,7 @@ import type { MfaChallengeHandle } from './login-result';
 import { MFA_CHALLENGE_CHANNELS, type DeferredLoginEvent, type MfaChallengeChannel } from '../entities/mfa-challenges';
 import type { DeviceRegistrationChannel } from '../events';
 import type { NewUserPublicKey, UserPublicKey } from '../entities/user-public-keys';
+import type { User } from '../entities/users';
 
 /**
  * Every door a key row is written through: the eleven sign-in channels, and
@@ -101,17 +102,20 @@ export interface RegisterPublicKeyParams
     /** `user-agent` of the registering request, already truncated. */
     userAgent?: string;
     /**
-     * Whether this key is bound to a passkey, as the registering path decided.
+     * Whether `proxy-guard` recognised the registering request as the trusted
+     * Next.js proxy's (`deviceProvenance(c).webProxy`) — whether this is a web
+     * session's key.
      *
-     * Decided by the caller from two facts it is the only one holding: the
-     * owner's `session_binding` setting, and whether `proxy-guard` recognised the
-     * request as coming through the trusted Next.js proxy (`decideKeyBinding`).
-     * Never read off a request body, and `platform` is not consulted — that field
-     * is display-only, usually absent on a proxy-made key, and a native client
-     * may declare `'web'` freely. Omitted means `'none'`, which is what every
-     * path that has no opinion gets.
+     * Whether the key is bound is not the caller's to say: it is decided here,
+     * under the account lock, from the account's `session_binding` and this
+     * (`decideKeyBinding`), so a sign-in racing binding being turned on cannot
+     * write an unbound web key onto a bound account. Never read off a request
+     * body, and `platform` is not consulted — that field is display-only and a
+     * native client may declare `'web'` freely. Omitted reads as "not the
+     * proxy"; a replacement by signature (rotation, renewal) is the same device
+     * as the key it replaces and stays a web key when that one was.
      */
-    binding?: SessionBindingType;
+    webProxy?: boolean;
     /**
      * The claim that this key replaces one the device already holds.
      *
@@ -190,6 +194,12 @@ export interface RotateKeyParams
     /** Omitted: the replaced key's label carries over, so rotation keeps its name. */
     deviceName?: string;
     platform?: KeyPlatformType;
+    /**
+     * Whether the rotation came through the trusted Next.js proxy
+     * (`deviceProvenance(c).webProxy`). The new key is a web key when it did, or
+     * when the key it replaces was one (`RegisterPublicKeyParams.webProxy`).
+     */
+    webProxy?: boolean;
 }
 
 export interface RotateKeyResult
@@ -340,7 +350,7 @@ export interface RegisteredKeyBinding
  * short life is the protection, and the only thing allowed to give it a new one
  * is a renewal carrying a fresh WebAuthn assertion.
  */
-function getKeyExpiryDate(binding: SessionBindingType): Date
+export function getKeyExpiryDate(binding: SessionBindingType): Date
 {
     if (binding === 'passkey')
     {
@@ -434,6 +444,7 @@ function stepUpChannel(channel: KeyRegistrationChannel): MfaChallengeChannel | u
 async function answerForExistingKey(
     existing: KeyWithAccountEpoch,
     params: RegisterPublicKeyParams,
+    account: User,
 ): Promise<RegisterPublicKeyResult>
 {
     if (params.replaces && 'signedBy' in params.replaces)
@@ -447,7 +458,7 @@ async function answerForExistingKey(
 
     if (sameKey && keyLiveness(existing) !== 'revoked')
     {
-        return { pending: false, ...await reRegisterOwnKey(existing, params) };
+        return { pending: false, ...await reRegisterOwnKey(existing, params, account) };
     }
 
     const resumed = sameKey && existing.pendingMfaChallengeId && stepUpChannel(params.channel)
@@ -518,7 +529,7 @@ export async function registerPublicKeyService(
         const existing = await keysRepository.findWithAccountEpochOnPrimary(params.keyId);
         if (existing)
         {
-            return await answerForExistingKey(existing, params);
+            return await answerForExistingKey(existing, params, account);
         }
 
         // The defaulted algorithm is what gets stored, so it is the one the key has
@@ -526,7 +537,7 @@ export async function registerPublicKeyService(
         // at proof verification, after the caller believes it is enrolled.
         assertKeyMatchesAlgorithm(params.publicKey, params.algorithm ?? DEFAULT_KEY_ALGORITHM);
 
-        return await registerNewKey(params, account.keyEpoch);
+        return await registerNewKey(params, account);
     }, { context: 'auth:register-key' });
 }
 
@@ -536,7 +547,7 @@ export async function registerPublicKeyService(
  *
  * @throws the channel's answer for an account that may not open a session
  */
-async function lockAdmittedAccount(params: RegisterPublicKeyParams): Promise<{ keyEpoch: number }>
+async function lockAdmittedAccount(params: RegisterPublicKeyParams): Promise<User>
 {
     const account = await usersRepository.lockAccount(params.userId);
     if (!account)
@@ -581,7 +592,7 @@ function inactiveAccountError(refusal: AdmissionRefusal, params: RegisterPublicK
  * Write a key id nobody holds yet: settle the replacement claim, then write the
  * row as a replacement or as a new device, and do what follows from which.
  */
-async function registerNewKey(params: RegisterPublicKeyParams, accountKeyEpoch: number): Promise<RegisterPublicKeyResult>
+async function registerNewKey(params: RegisterPublicKeyParams, account: User): Promise<RegisterPublicKeyResult>
 {
     const replaced = await claimReplacement(params);
 
@@ -589,8 +600,8 @@ async function registerNewKey(params: RegisterPublicKeyParams, accountKeyEpoch: 
     // exists. Deciding afterwards would leave a window, however short, in which
     // the key an unproven second factor is meant to be holding back is live.
     const stepUp = replaced ? null : await decideStepUp(params);
-    const keyEpoch = replaced?.keyEpoch ?? accountKeyEpoch;
-    const row = await keysRepository.create(newKeyRow(params, replaced, keyEpoch, stepUp === null));
+    const keyEpoch = replaced?.keyEpoch ?? account.keyEpoch;
+    const row = await keysRepository.create(newKeyRow(params, replaced, account, keyEpoch, stepUp === null));
 
     if (stepUp)
     {
@@ -717,15 +728,22 @@ async function keyIdProvenByProof(proof: string, params: RegisterPublicKeyParams
  * and so inherits when a person last proved one on this device. Treating a
  * rotation as a fresh authentication is what let a stale session satisfy the
  * recent-authentication gate by rotating.
+ *
+ * Whether it is bound is decided here, for every path at once, from the
+ * account's setting as locked and whether the key is a web session's
+ * (`decideKeyBinding`): every web key of a bound account is a bound key.
  */
 function newKeyRow(
     params: RegisterPublicKeyParams,
     replaced: UserPublicKey | null,
+    account: User,
     keyEpoch: number,
     isActive: boolean,
 ): NewUserPublicKey
 {
     const rotated = params.channel === 'rotation' ? replaced : null;
+    const viaWebProxy = params.webProxy === true || replaced?.viaWebProxy === true;
+    const binding = decideKeyBinding(account.sessionBinding, viaWebProxy);
 
     return {
         userId: params.userId,
@@ -736,19 +754,18 @@ function newKeyRow(
         keyEpoch,
         authenticatedAt: rotated?.authenticatedAt ?? new Date(),
         isActive,
-        ...(rotated ? rotatedDevice(params, rotated) : registeringDevice(params)),
+        viaWebProxy,
+        binding,
+        ...(rotated ? rotatedDevice(params, rotated, binding) : registeringDevice(params, binding)),
     };
 }
 
 /** What a registration knows about the device: what this request said about it. */
-function registeringDevice(params: RegisterPublicKeyParams)
+function registeringDevice(params: RegisterPublicKeyParams, binding: SessionBindingType)
 {
-    const binding = params.binding ?? 'none';
-
     return {
         deviceName: params.deviceName,
         platform: params.platform,
-        binding,
         registeredIp: params.ip ?? null,
         registeredUserAgent: params.userAgent ?? null,
         registeredUaFamily: params.userAgent ? uaFamily(params.userAgent) : null,
@@ -761,8 +778,8 @@ function registeringDevice(params: RegisterPublicKeyParams)
  * What a rotation knows about the device: everything the replaced row said.
  *
  * The label and platform carry over unless the client renames them; where and
- * what it registered from, and the binding — the owner's setting rather than
- * anything this request chose — carry over always.
+ * what it registered from carry over always. The binding is the account's
+ * setting applied to the device (`newKeyRow`), not anything this request chose.
  *
  * A *bound* key's expiry carries over verbatim, rather than being recomputed.
  * A rotation is not a renewal: recomputing would hand a bound key another full
@@ -775,16 +792,17 @@ function registeringDevice(params: RegisterPublicKeyParams)
  * documented reason `rotateKey` exists — rotating on day 89 into a key that
  * expires tomorrow, and signing every one of its users out on day 91.
  */
-function rotatedDevice(params: RegisterPublicKeyParams, replaced: UserPublicKey)
+function rotatedDevice(params: RegisterPublicKeyParams, replaced: UserPublicKey, binding: SessionBindingType)
 {
     return {
         deviceName: params.deviceName ?? replaced.deviceName,
         platform: params.platform ?? replaced.platform,
-        binding: replaced.binding,
         registeredIp: replaced.registeredIp,
         registeredUserAgent: replaced.registeredUserAgent,
         registeredUaFamily: replaced.registeredUaFamily,
-        expiresAt: replaced.binding === 'passkey' ? replaced.expiresAt : getKeyExpiryDate('none'),
+        expiresAt: binding === 'passkey' && replaced.binding === 'passkey'
+            ? replaced.expiresAt
+            : getKeyExpiryDate(binding),
     };
 }
 
@@ -807,21 +825,81 @@ function rotatedDevice(params: RegisterPublicKeyParams, replaced: UserPublicKey)
  * credential binding exists to require — would hand back the ninety days this
  * setting was turned on to withhold. It is left expired and `session/renew`,
  * which needs a fresh WebAuthn assertion, is the only way to a live key.
+ *
+ * An unbound web key signing in again on a bound account is bound now, like a
+ * new key would be (`decideKeyBinding`), with a bound key's short life.
  */
 async function reRegisterOwnKey(
     existing: UserPublicKey,
     params: RegisterPublicKeyParams,
+    account: User,
 ): Promise<RegisteredKeyBinding>
 {
-    const extended = existing.binding !== 'passkey' && isExpired(existing.expiresAt)
-        ? getKeyExpiryDate('none')
-        : null;
+    const renewed = existing.binding === 'passkey' ? null : renewedUnboundKey(existing, params, account);
 
-    await keysRepository.markReauthenticated(existing.keyId, params.userId, extended ?? undefined);
+    await keysRepository.markReauthenticated(existing.keyId, params.userId, renewed ?? undefined);
 
-    return extended
-        ? { binding: 'none', expiresAt: extended }
-        : { binding: existing.binding, expiresAt: existing.expiresAt };
+    return renewed ?? { binding: existing.binding, expiresAt: existing.expiresAt };
+}
+
+/**
+ * What an unbound key signing in again changes to: bound, when it is a web key
+ * of a bound account; otherwise ninety days again, only once it has expired.
+ * Null when nothing changes.
+ */
+function renewedUnboundKey(existing: UserPublicKey, params: RegisterPublicKeyParams, account: User)
+{
+    const viaWebProxy = params.webProxy === true || existing.viaWebProxy;
+    const binding = decideKeyBinding(account.sessionBinding, viaWebProxy);
+
+    if (binding === 'none' && !isExpired(existing.expiresAt))
+    {
+        return null;
+    }
+
+    return { binding, viaWebProxy, expiresAt: getKeyExpiryDate(binding) };
+}
+
+/**
+ * Whether a key waits to be bound: a web key — recorded as one, or used through
+ * the attested proxy on this request — that is unbound, on an account whose
+ * binding is on. A state rather than an event, so a bind that failed once is
+ * tried again whenever the key is used. The caller holds a live key; under the
+ * account lock `bindWebKeyService` asks liveness too.
+ */
+export function awaitsWebBinding(
+    key: Pick<UserPublicKey, 'binding' | 'viaWebProxy'>,
+    account: Pick<User, 'sessionBinding'>,
+    webProxy: boolean,
+): boolean
+{
+    return key.binding === 'none' && decideKeyBinding(account.sessionBinding, key.viaWebProxy || webProxy) === 'passkey';
+}
+
+/**
+ * Bind a web session's key whose account is bound (au3-A5): one registered
+ * before `via_web_proxy` existed, or a successor of one, carries no answer
+ * until it is used through the proxy, and a bind attempted then may have
+ * failed. Under the account lock the state is read again (`awaitsWebBinding`,
+ * and the key live); when it still holds, the key gets the rule a web sign-in
+ * on a bound account gets, with a bound key's short life (`getKeyExpiryDate`),
+ * and is recorded as a web key by the same statement (`bindKeys`). The request
+ * that used it is served; the key asks for a passkey at its next expiry.
+ *
+ * @param webProxy - the request using the key came through the attested proxy
+ */
+export async function bindWebKeyService(userId: number, keyId: string, webProxy: boolean): Promise<void>
+{
+    await runInTransaction(async () =>
+    {
+        const account = await usersRepository.lockAccount(userId);
+        const key = await keysRepository.findWithAccountEpochOnPrimary(keyId);
+
+        if (account && key?.userId === userId && keyLiveness(key) === 'live' && awaitsWebBinding(key, account, webProxy))
+        {
+            await keysRepository.bindKeys(userId, [keyId], getKeyExpiryDate('passkey'));
+        }
+    }, { context: 'auth:bind-web-key' });
 }
 
 /**
@@ -850,6 +928,7 @@ export async function rotateKeyService(
         algorithm: params.algorithm,
         deviceName: params.deviceName,
         platform: params.platform,
+        webProxy: params.webProxy,
         channel: 'rotation',
         replaces: {
             signedBy: params.oldKeyId,

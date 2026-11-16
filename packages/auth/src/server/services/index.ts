@@ -135,6 +135,7 @@ export {
     revokePasskeyService,
     assertRecentAuthentication,
     assertNotLastRecoveryCredential,
+    checkPasskeyProof,
 } from './passkey.service';
 
 export type {
@@ -146,6 +147,7 @@ export type {
     RenamePasskeyParams,
     RevokePasskeyParams,
     PasskeySummary,
+    PasskeyProofParams,
 } from './passkey.service';
 
 // Second Factor Service (MFA)
@@ -519,6 +521,8 @@ export {
     enableSessionBindingService,
     disableSessionBindingService,
     startSessionBindingDisableService,
+    startPasskeyProofService,
+    resetSessionBindingService,
 } from './session-binding.service';
 
 export type {

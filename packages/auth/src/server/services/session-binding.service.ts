@@ -23,6 +23,12 @@
  * a credential the copy does not hold: a renewal-grade assertion, or the account
  * password.
  *
+ * Turning it *on* asks the passkey proof (`bindingEnable`): an assertion that
+ * verified the person, which is exactly what every renewal will ask. An account
+ * whose passkeys cannot give one — no live passkey, or only one that never
+ * verifies the person — would otherwise be bound and then locked out by its own
+ * setting.
+ *
  * Enabling twice is idempotent. Recomputing the expiry on a repeat call would
  * make this route a way to extend a bound key without presenting anything, which
  * is the thing the short life exists to prevent.
@@ -30,23 +36,28 @@
 
 import { runInTransaction } from '@spfn/core/db';
 import { RecentAuthenticationRequiredError, SessionBindingUnavailableError } from '@spfn/auth/errors';
-import { ValidationError } from '@spfn/core/errors';
+import { NotFoundError, ValidationError } from '@spfn/core/errors';
 
-import { getBoundKeyTtlMs } from '../lib/config';
 import type { PublicKeyCredentialRequestOptionsJSON } from '../lib/webauthn';
-import { keysRepository, passkeysRepository, usersRepository } from '../repositories';
-import { KEY_TTL_DAYS } from '../lib/key-policy';
+import { keysRepository, usersRepository } from '../repositories';
 import type { SessionBindingType } from '../types';
 import { getDummyPasswordHash, verifyPassword } from '../helpers';
 import {
     assertRecentAuthentication,
+    checkPasskeyProof,
     checkRenewalAssertionService,
     startRenewalCeremonyService,
     type RenewalProof,
 } from './passkey.service';
 import { stampFor } from '../lib/deferred-stamp';
+import { spendPasskeyProof } from '../lib/passkey-proof';
 import { startingCredentialOf } from './deferred-admission.service';
-import type { PrincipalCredential } from './admission.service';
+import { isRenewable, renewalGraceCutoff, type PrincipalCredential } from './admission.service';
+import { sweepEachAccount, SWEEP_BATCH } from './account-sweep.service';
+import { keyLiveness, type KeyWithAccountEpoch } from '../lib/key-liveness';
+import { getKeyExpiryDate } from './key.service';
+import { authLogger } from '../logger';
+import type { PasskeyProofProcedure } from '../entities/webauthn-challenges';
 
 /** What every one of the three reads and writes here answers with. */
 export interface SessionBindingResult
@@ -77,6 +88,8 @@ export interface EnableSessionBindingParams extends SessionBindingParams
 {
     /** The credential this request presented (`getAuth(c).credential`): its recent authentication is asked. */
     credential: PrincipalCredential;
+    /** The `bindingEnable` passkey proof, as the request body carried it (`passkeyResponse`). */
+    passkeyResponse?: unknown;
 }
 
 export interface DisableSessionBindingParams extends SessionBindingParams
@@ -131,7 +144,7 @@ export async function keySessionBindingService(
 }
 
 /**
- * Turn session binding on, and bind the key this request is signed with.
+ * Turn session binding on, and bind every web session the account has.
  *
  * The current key is bound here rather than only at the next sign-in, because
  * otherwise the setting would not apply to the session that asked for it until
@@ -139,9 +152,17 @@ export async function keySessionBindingService(
  * to re-seal the cookie with the new expiry, so the browser and the key row
  * agree from this moment on.
  *
+ * The account's other web sessions are bound with it (au3-A5), the copy the
+ * owner may be reacting to included: each gets a bound key's short life, and
+ * at its expiry is asked for a passkey renewal a copy cannot give. A key that
+ * is no web session's (`viaWebProxy` false — a native client, a device-code
+ * device) is left as it is: it has no cookie to copy and no browser to renew
+ * in. Keys registered afterwards are bound where every key is written
+ * (`registerPublicKeyService`).
+ *
  * @throws SessionBindingUnavailableError proxy-guard가 설정되지 않은 배포일 때
- * @throws ValidationError 살아 있는 패스키가 하나도 없을 때
  * @throws RecentAuthenticationRequiredError 최근 인증이 없을 때
+ * @throws PasskeyProofRequiredError 사용자 검증을 거친 패스키 증명이 없을 때
  */
 export async function enableSessionBindingService(
     params: EnableSessionBindingParams,
@@ -152,25 +173,33 @@ export async function enableSessionBindingService(
         throw new SessionBindingUnavailableError();
     }
 
-    await assertLivePasskey(params.userId);
     await assertRecentAuthentication({ userId: params.userId, credential: params.credential });
 
-    // The route runs no transaction (see `disableSessionBindingService`); the
-    // writes open their own.
-    return await runInTransaction(() => bindAccount(params), { context: 'auth:session-binding-enable' });
+    // An assertion that does not verify spends its challenge, so the proof is
+    // checked before the transaction a refusal would roll that spend back with.
+    const proof = await checkPasskeyProof({
+        userId: params.userId,
+        credential: params.credential,
+        procedure: 'bindingEnable',
+        response: params.passkeyResponse,
+    });
+
+    return await runInTransaction(() => bindAccount(params, proof), { context: 'auth:session-binding-enable' });
 }
 
 /**
- * The proof (which may verify a password) done, the account is locked before
- * its setting is read and its key is bound (`usersRepository.lockAccount`).
- * The live passkey is asked for again under it: one revoked since the check
- * before it would leave the account bound with nothing to renew with.
+ * The account locked (`usersRepository.lockAccount`), the proof is spent
+ * before its setting is read and its key is bound: a passkey revoked since the
+ * check fails the spend, so the account is never bound with nothing to renew
+ * with.
+ *
+ * @throws PasskeyProofRequiredError
  */
-async function bindAccount(params: SessionBindingParams): Promise<SessionBindingResult>
+async function bindAccount(params: SessionBindingParams, proof: RenewalProof | null): Promise<SessionBindingResult>
 {
     const user = await usersRepository.lockAccount(params.userId);
 
-    await assertLivePasskey(params.userId);
+    await spendPasskeyProof(proof, BINDING_ENABLE_PROOF_MESSAGE);
 
     if (user?.sessionBinding === 'passkey')
     {
@@ -182,36 +211,49 @@ async function bindAccount(params: SessionBindingParams): Promise<SessionBinding
         sessionBindingChangedAt: new Date(),
     });
 
-    const bound = await keysRepository.bindByKeyIdAndUserId(
-        params.keyId,
+    const bound = await keysRepository.bindKeys(
         params.userId,
-        new Date(Date.now() + getBoundKeyTtlMs()),
+        await webSessionKeyIds(params),
+        getKeyExpiryDate('passkey'),
     );
 
-    return { mode: 'passkey', keyExpiresAtMillis: bound?.expiresAt?.getTime() };
+    return { mode: 'passkey', keyExpiresAtMillis: bound.find(key => key.keyId === params.keyId)?.expiresAt?.getTime() };
 }
 
 /**
- * Refuse binding an account that holds no live passkey to renew with.
- *
- * @throws ValidationError
+ * The keys turning binding on binds, read under the account lock: the one this
+ * request is signed with, and every web key (`viaWebProxy`) that still opens a
+ * session — live (`keyLiveness`), or waiting on a second factor, which would
+ * otherwise be activated unbound. An expired or revoked key is not given a new
+ * life by being bound.
  */
-async function assertLivePasskey(userId: number): Promise<void>
+async function webSessionKeyIds(params: SessionBindingParams): Promise<string[]>
 {
-    if ((await passkeysRepository.listLiveByUserId(userId)).length === 0)
-    {
-        throw new ValidationError({
-            message: 'Session binding needs a passkey to renew with. Enroll one first.',
-        });
-    }
+    const keys = await keysRepository.findUnrevokedWithAccountEpochByUserId(params.userId);
+
+    return keys
+        .filter(key => (key.viaWebProxy || key.keyId === params.keyId) && opensASession(key))
+        .map(key => key.keyId);
 }
+
+function opensASession(key: KeyWithAccountEpoch): boolean
+{
+    return keyLiveness(key) === 'live' || key.pendingMfaChallengeId !== null;
+}
+
+/** What turning binding on without a proof is refused with: what every renewal will ask. */
+const BINDING_ENABLE_PROOF_MESSAGE =
+    'Session binding renews with a passkey that verifies you (PIN or biometric). Confirm with one to turn it on.';
 
 /**
  * Turn session binding off, once the caller has proved they are still the owner.
  *
- * Every bound key returns to an ordinary ninety-day life in the same call. A row
- * left marked `'passkey'` would keep expiring in hours with nothing left to
- * renew it, which is the state the person just asked not to be in.
+ * Every bound key not yet expired returns to an ordinary ninety-day life in the
+ * same call. A row left marked `'passkey'` would keep expiring in hours with
+ * nothing left to renew it, which is the state the person just asked not to be
+ * in. A bound key already expired is not one of them, inside its grace or past
+ * it: only a passkey could have renewed it, and it is revoked
+ * (`releaseBoundKeys`).
  *
  * @throws RecentAuthenticationRequiredError 새 자격증명 없이 껐을 때
  */
@@ -249,16 +291,129 @@ async function unbindAccount(userId: number, proof: RenewalProof): Promise<Sessi
         });
     }
 
+    await releaseAccount(userId);
+
+    return { mode: 'none' };
+}
+
+/**
+ * Turn session binding off for an account, with no proof — the operator's way
+ * out for an owner who lost every passkey and has neither a password nor a
+ * verified e-mail to reset one with: such an account can neither renew, nor
+ * turn binding off, nor enrol a passkey (that asks the passkey proof). The keys
+ * are released as turning it off releases them (`releaseBoundKeys`).
+ *
+ * A service, not a route: the application decides who may call it. Once
+ * committed it logs the account and how many keys it released and revoked. It
+ * ends no session; an operator who suspects a takeover also calls
+ * `revokeAllKeysService({ userId, includeCurrent: true })`.
+ *
+ * @throws NotFoundError for an account that does not exist
+ */
+export async function resetSessionBindingService(userId: number): Promise<void>
+{
+    const keys = await runInTransaction(async () =>
+    {
+        if (!await usersRepository.lockAccount(userId))
+        {
+            throw new NotFoundError({ message: 'User not found', resource: 'User' });
+        }
+
+        return await releaseAccount(userId);
+    }, { context: 'auth:session-binding-reset' });
+
+    authLogger.service.info('Session binding reset by operator', { userId, ...keys });
+}
+
+/** How many bound keys turning binding off returned to ordinary keys, and how many it revoked. */
+interface ReleasedKeys
+{
+    released: number;
+    revoked: number;
+}
+
+/** Under the account lock: the setting off, and its bound keys released. */
+async function releaseAccount(userId: number): Promise<ReleasedKeys>
+{
     await usersRepository.updateById(userId, {
         sessionBinding: 'none',
         sessionBindingChangedAt: new Date(),
     });
 
-    const unbound = new Date();
-    unbound.setDate(unbound.getDate() + KEY_TTL_DAYS);
-    await keysRepository.unbindActiveByUserId(userId, unbound);
+    return await releaseBoundKeys(userId);
+}
 
-    return { mode: 'none' };
+/**
+ * Under the account lock: every bound key not yet expired that opens a session
+ * — live (`keyLiveness`), or still waiting on a second factor — becomes an
+ * ordinary key with ninety days; every other bound key — expired, inside its
+ * renewal grace or past it, parked or not — is revoked (au3-A1). Before the
+ * switch only a passkey could renew an expired one; handing it ninety days
+ * would revive, with no proof, exactly the copied session binding exists to
+ * end. `isRenewable` stays what renewal admission and the sweep use.
+ */
+async function releaseBoundKeys(userId: number): Promise<ReleasedKeys>
+{
+    const bound = (await keysRepository.findUnrevokedWithAccountEpochByUserId(userId))
+        .filter(key => key.binding === 'passkey');
+    const released = bound.filter(key => opensASession(key) && !hasExpired(key));
+
+    await keysRepository.unbindKeys(userId, released.map(key => key.keyId), getKeyExpiryDate('none'));
+
+    return {
+        released: released.length,
+        revoked: await revokeDead(userId, bound.filter(key => !released.includes(key)), EXPIRED_AT_UNBIND_REASON),
+    };
+}
+
+function hasExpired(key: KeyWithAccountEpoch): boolean
+{
+    return key.expiresAt !== null && Date.now() > key.expiresAt.getTime();
+}
+
+/** Revoke dead bound keys one at a time, a parked one with its pending mark. */
+async function revokeDead(userId: number, keys: KeyWithAccountEpoch[], reason: string): Promise<number>
+{
+    for (const key of keys)
+    {
+        await keysRepository.revokeUnrevokedByKeyIdAndUserId(key.keyId, userId, reason);
+    }
+
+    return keys.length;
+}
+
+/** What a bound key revoked for being past its renewal grace records. */
+export const PAST_GRACE_REASON = 'Bound key past its renewal grace';
+
+/** What a bound key already expired when binding was turned off records. */
+export const EXPIRED_AT_UNBIND_REASON = 'Bound key expired when session binding was turned off';
+
+/**
+ * Revoke the bound keys that are past their renewal grace, one account at a
+ * time under its lock (`sweepEachAccount`), so an expired bound key does not
+ * linger as an "active" row a later write could mistake for a live one. The
+ * candidates are picked by the grace boundary (`renewalGraceCutoff`); under
+ * the lock, `isRenewable` decides.
+ *
+ * @returns number of keys revoked
+ */
+export async function sweepPastGraceBoundKeysService(): Promise<{ revoked: number }>
+{
+    const revoked = await sweepEachAccount(
+        await keysRepository.findAccountsWithBoundKeysExpiredBefore(renewalGraceCutoff(), SWEEP_BATCH),
+        'auth:bound-key-sweep',
+        revokePastGrace,
+    );
+
+    return { revoked };
+}
+
+/** One account's sweep, under its lock: its active bound keys that are no longer renewable. */
+async function revokePastGrace(userId: number): Promise<number>
+{
+    const keys = await keysRepository.findUnrevokedWithAccountEpochByUserId(userId);
+
+    return await revokeDead(userId, keys.filter(key => key.binding === 'passkey' && key.isActive && !isRenewable(key)), PAST_GRACE_REASON);
 }
 
 /**
@@ -280,6 +435,29 @@ export async function startSessionBindingDisableService(
     }
 
     return await startRenewalCeremonyService('bindingOff', stampFor(user, startingCredentialOf(credential)));
+}
+
+/**
+ * The challenge one procedure that lets another credential in asks of a bound
+ * account (`lib/passkey-proof.ts`) — its own kind, stamped with this request's
+ * credential, as binding-off's is. Minted for any account: a client may ask
+ * before it knows whether the account is bound, and an unbound account's
+ * procedure ignores the proof.
+ */
+export async function startPasskeyProofService(
+    userId: number,
+    credential: PrincipalCredential,
+    procedure: PasskeyProofProcedure,
+): Promise<PublicKeyCredentialRequestOptionsJSON>
+{
+    const user = await usersRepository.findByIdOnPrimary(userId);
+
+    if (!user)
+    {
+        throw new ValidationError({ message: 'User not found' });
+    }
+
+    return await startRenewalCeremonyService(procedure, stampFor(user, startingCredentialOf(credential)));
 }
 
 /**

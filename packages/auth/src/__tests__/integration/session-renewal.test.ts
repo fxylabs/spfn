@@ -23,7 +23,7 @@ import { Hono } from 'hono';
 import { and, eq } from 'drizzle-orm';
 
 import { setupTestDb, teardownTestDb, clearTables, getTestDb, isDatabaseAvailable } from '../helpers/db';
-import { FixtureAuthenticator } from '../helpers/webauthn-fixture';
+import { enableBinding, FixtureAuthenticator } from '../helpers/webauthn-fixture';
 import { passkeys, userPublicKeys, users, webauthnChallenges } from '@/server/entities';
 import { hashPassword } from '@/server/helpers/password';
 import { generateClientToken, generateKeyPair } from '@/server/lib/crypto';
@@ -183,7 +183,7 @@ describe.skipIf(!dbAvailable)('renewing a bound session key (case table 6d)', ()
         }, session.authorization);
 
         expect(verify.status).toBe(200);
-        expect((await post('/_auth/session/binding', { mode: 'passkey' }, session.authorization)).status).toBe(200);
+        expect((await enableBinding((path, body) => post(path, body, session.authorization), authenticator, { origin: ORIGIN, rpId: RP_ID })).status).toBe(200);
 
         return { ...session, authenticator, email };
     }
@@ -332,12 +332,19 @@ describe.skipIf(!dbAvailable)('renewing a bound session key (case table 6d)', ()
         const stranger = await bound('other@test.com');
         const unbound = await signIn('owner@test.com');
         const revoked = await bound();
-        const expired = await bound();
+        // A second web sign-in on the now bound account is a bound key; enrolling
+        // another passkey there would ask a passkey proof (`passkeyAdd`).
+        const expired = await signIn('owner@test.com');
         const nobody = generateKeyPair('ES256');
 
         await getTestDb().update(userPublicKeys)
             .set({ isActive: false })
             .where(eq(userPublicKeys.keyId, revoked.keyId));
+        // Turning binding on binds every web session of the account, this one
+        // included; an unbound key on a bound account is a non-web one.
+        await getTestDb().update(userPublicKeys)
+            .set({ binding: 'none', viaWebProxy: false })
+            .where(eq(userPublicKeys.keyId, unbound.keyId));
         await expireKey(expired.keyId, (BOUND_KEY_RENEW_GRACE_HOURS + 1) * HOUR_MS);
 
         const credentials = [

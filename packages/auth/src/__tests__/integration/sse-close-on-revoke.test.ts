@@ -36,7 +36,7 @@ import { Hono } from 'hono';
 import { eq } from 'drizzle-orm';
 
 import { setupTestDb, teardownTestDb, clearTables, getTestDb, isDatabaseAvailable } from '../helpers/db';
-import { FixtureAuthenticator } from '../helpers/webauthn-fixture';
+import { enableBinding, FixtureAuthenticator } from '../helpers/webauthn-fixture';
 import { userPublicKeys, users } from '@/server/entities';
 import { generateClientToken, generateKeyPair } from '@/server/lib/crypto';
 import { signKeyReplacementProof } from '@/server/lib/key-replacement-proof';
@@ -308,7 +308,7 @@ describe.skipIf(!dbAvailable)('SSE streams close after a key revocation commits 
         }, session.authorization);
 
         expect(verified.status).toBe(200);
-        expect((await post('/_auth/session/binding', { mode: 'passkey' }, session.authorization)).status).toBe(200);
+        expect((await enableBinding((path, body) => post(path, body, session.authorization), authenticator, { origin: ORIGIN, rpId: RP_ID })).status).toBe(200);
 
         return authenticator;
     }

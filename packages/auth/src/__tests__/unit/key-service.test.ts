@@ -185,10 +185,10 @@ describe('registerPublicKeyService - keyId collisions', () =>
         await expect(registerPublicKeyService(params())).resolves.toMatchObject({ binding: 'none' });
 
         expect(keysRepository.markReauthenticated).toHaveBeenCalledTimes(1);
-        const [keyId, userId, expiresAt] = keysRepository.markReauthenticated.mock.calls[0] as unknown as [string, number, Date];
+        const [keyId, userId, renewed] = keysRepository.markReauthenticated.mock.calls[0] as unknown as [string, number, { expiresAt: Date }];
         expect(keyId).toBe(KEY_ID);
         expect(userId).toBe(OWNER_ID);
-        expect(expiresAt.getTime()).toBeGreaterThan(Date.now());
+        expect(renewed.expiresAt.getTime()).toBeGreaterThan(Date.now());
         expect(keysRepository.create).not.toHaveBeenCalled();
     });
 

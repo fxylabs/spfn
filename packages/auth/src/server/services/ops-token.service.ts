@@ -22,6 +22,7 @@ import { authLogger } from '../logger';
 import { resolveAuthority } from './permission.service';
 import { assertStepUp } from './mfa.service';
 import type { PrincipalCredential } from './admission.service';
+import { assertPasskeyProven, type PasskeyProof } from '../lib/passkey-proof';
 
 /**
  * The permission that issues an ops token, and that its issuer has to keep
@@ -76,6 +77,8 @@ export interface OpsTokenIssuer
 {
     userId: number;
     credential: PrincipalCredential;
+    /** The passkey proof for `opsTokenIssue` (`checkPasskeyProof`), asked of an account with session binding on. */
+    passkeyProof?: PasskeyProof | null;
 }
 
 /**
@@ -84,8 +87,10 @@ export interface OpsTokenIssuer
  * An ops token is a credential issued under the issuer's account, so issuance
  * takes that account's lock (`usersRepository.lockAccount`) first and reads
  * under it what entitles the issuer: an active account holding
- * `ops:token:issue` (`resolveAuthority`), and a step-up on this device when the
- * account has a second factor (`assertStepUp`). A suspension, demotion or
+ * `ops:token:issue` (`resolveAuthority`), a step-up on this device when the
+ * account has a second factor (`assertStepUp`), and the passkey proof when the
+ * account has session binding on (`assertPasskeyProven`): a token outlives
+ * every key, so a copied bound session must not mint one. A suspension, demotion or
  * step-up lapse that commits before the lock is seen here and leaves no token;
  * one that commits after it waits for this insert and stops the token through
  * `verifyOpsTokenService`. The token borrows the issuer's authority from then on.
@@ -96,6 +101,7 @@ export interface OpsTokenIssuer
  * @param issuer - The administrator issuing it, and their request's device key
  * @throws InsufficientPermissionsError (403) when the issuer is not active or lacks `ops:token:issue`
  * @throws StepUpRequiredError (403) when the issuer has a second factor and this device has not stepped up recently
+ * @throws PasskeyProofRequiredError (403) when the issuer has session binding on and no proof for `opsTokenIssue` holds
  */
 export async function issueOpsTokenService(
     name: string,
@@ -111,8 +117,9 @@ export async function issueOpsTokenService(
 
     return runInTransaction(async () =>
     {
-        await usersRepository.lockAccount(issuer.userId);
+        const account = await usersRepository.lockAccount(issuer.userId);
         await assertMayIssue(issuer);
+        await assertPasskeyProven(account, issuer.passkeyProof ?? null);
 
         const token = OPS_TOKEN_PREFIX + randomBytes(32).toString('hex');
         const record = await opsTokensRepository.create({

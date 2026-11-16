@@ -44,6 +44,8 @@ import {
     isPkceS256ChallengeShaped,
 } from '../lib/oauth2/tokens';
 import { admissionRefusalError, admitPrincipal, type PrincipalCredential } from './admission.service';
+import { checkPasskeyProof } from './passkey.service';
+import { assertPasskeyProven } from '../lib/passkey-proof';
 
 /** An authorize request as the web handler forwards it, before anything is trusted. */
 export interface OAuth2AuthorizeParams
@@ -258,6 +260,11 @@ export interface OAuth2Approver
 {
     userId: number;
     credential: PrincipalCredential;
+    /**
+     * A passkey assertion made for this procedure (`oauth2Consent`), which an
+     * account with session binding on must send (`assertPasskeyProven`).
+     */
+    passkeyResponse?: unknown;
 }
 
 /**
@@ -278,6 +285,13 @@ export interface OAuth2Approver
  * this request has revoked the session's key and every grant; this consent is
  * then refused with what the session's next request would be told, and writes
  * no grant and no code.
+ *
+ * An account with session binding on consents only with a passkey assertion
+ * made for it (`lib/passkey-proof.ts`): the grant's refresh token is tied to no
+ * key and outlives the bound one. It is checked before the transaction (a
+ * failed one spends its challenge) and spent under the lock.
+ *
+ * @throws PasskeyProofRequiredError when the account is bound and no proof holds
  */
 export async function approveOAuth2AuthorizeService(
     params: OAuth2AuthorizeParams,
@@ -287,11 +301,18 @@ export async function approveOAuth2AuthorizeService(
     const config = requireConfig();
     const validated = await validate(params);
     const code = generateAuthorizationCode();
+    const proof = await checkPasskeyProof({
+        userId: approver.userId,
+        credential: approver.credential,
+        procedure: 'oauth2Consent',
+        response: approver.passkeyResponse,
+    });
 
     await runInTransaction(async () =>
     {
-        await usersRepository.lockAccount(approver.userId);
+        const account = await usersRepository.lockAccount(approver.userId);
         await assertApproverAdmitted(approver);
+        await assertPasskeyProven(account, proof);
 
         const grant = await recordConsent(validated, approver.userId, config);
 

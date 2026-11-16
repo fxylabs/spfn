@@ -213,6 +213,13 @@ export interface OAuthLinkState
     startedByKeyId: string | null;
     /** The account's key generation at the start; null in a state sealed before stamps existed. */
     keyEpoch: number | null;
+    /**
+     * Whether the start spent a passkey proof (`socialLink`) — true only for an
+     * account with session binding on at the start. The callback refuses a
+     * bound account's link without it, so turning binding on while a link is
+     * in flight does not let it finish unproven. Absent in an older state.
+     */
+    passkeyProven?: boolean;
 }
 
 async function getLinkStateKey(): Promise<Uint8Array>
@@ -277,6 +284,7 @@ function linkStateOf(payload: jose.JWTPayload): OAuthLinkState | null
         ...link as OAuthLinkState,
         startedByKeyId: typeof link!.startedByKeyId === 'string' ? link!.startedByKeyId : null,
         keyEpoch: typeof link!.keyEpoch === 'number' ? link!.keyEpoch : null,
+        passkeyProven: link!.passkeyProven === true,
     };
 }
 

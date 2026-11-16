@@ -391,6 +391,12 @@ describe('native sign-in answers each failure path with its own code', () =>
         // classes in contract-export.test.ts.
         const sessionEndingCodes = ['KeyRevokedError', 'AccountNotFoundError'];
 
+        // Session binding's passkey proof is the eighth (contract 0.14.6): a
+        // bound account's device approval without a passkey assertion made for
+        // it, which this surface cannot carry. Held to its error class in
+        // contract-export.test.ts.
+        const passkeyProofCodes = ['PasskeyProofRequiredError'];
+
         expect(declared.filter(e => e.surface === 'rest').map(e => e.code).sort())
             .toEqual([
                 ...table.map(cell => cell.code),
@@ -400,6 +406,7 @@ describe('native sign-in answers each failure path with its own code', () =>
                 ...channelCodes,
                 ...secondFactorCodes,
                 ...sessionEndingCodes,
+                ...passkeyProofCodes,
             ].sort());
     });
 

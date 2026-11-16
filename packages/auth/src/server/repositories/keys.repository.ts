@@ -5,13 +5,14 @@
  * BaseRepository를 상속받아 자동 트랜잭션 컨텍스트 지원 및 Read/Write 분리
  */
 
-import { NewUserPublicKey, userPublicKeys } from '../entities/user-public-keys';
+import { NewUserPublicKey, UserPublicKey, userPublicKeys } from '../entities/user-public-keys';
+import type { SessionBindingType } from '../types';
 import { users } from '../entities/users';
 import { mfaChallenges } from '../entities/mfa-challenges';
 import type { ClientIdentity } from '../client-proof/wire-version';
 import { onAfterCommit } from '@spfn/core/db';
 import { closeConnectionsByKey } from '@spfn/core/event';
-import { eq, and, or, isNull, lt, desc, sql, getTableColumns } from 'drizzle-orm';
+import { eq, and, or, isNull, isNotNull, inArray, lt, min, desc, sql, getTableColumns } from 'drizzle-orm';
 import { getConcurrentUseWindowMs } from '../lib/config';
 import { authLogger } from '../logger';
 import type { KeyWithAccountEpoch } from '../lib/key-liveness';
@@ -71,14 +72,15 @@ export class KeysRepository extends AccountStateRepository
     static override readonly accountWrites: AccountWrites<KeysRepository> = {
         create: { account: data => data.userId },
         revokeByKeyIdAndUserId: { account: (_keyId, userId) => userId },
+        revokeUnrevokedByKeyIdAndUserId: { account: (_keyId, userId) => userId },
         revokeForReplacement: { account: (_keyId, userId) => userId },
         revokeActive: { account: userId => userId },
         deleteByKeyIdAndUserId: { account: (_keyId, userId) => userId },
         deleteAllByUserId: { account: userId => userId },
         markReauthenticated: { account: (_keyId, userId) => userId },
-        bindByKeyIdAndUserId: { account: (_keyId, userId) => userId },
-        unbindActiveByUserId: { account: userId => userId },
-        updateLastUsedById: { exempt: '`authenticate`\'s throttled lastUsedAt / client identity / last-seen address: one single-row statement outside any transaction, on columns no admission reads' },
+        bindKeys: { account: userId => userId },
+        unbindKeys: { account: userId => userId },
+        updateLastUsedById: { exempt: '`authenticate`\'s throttled lastUsedAt / client identity / last-seen address / web-key flag: one single-row statement outside any transaction, on columns no admission reads; the flag is only ever set, and binding is decided apart from it, under the account lock (`bindWebKeyService`)' },
     };
 
     /**
@@ -223,6 +225,29 @@ export class KeysRepository extends AccountStateRepository
                     eq(userPublicKeys.isActive, true),
                 ),
             )
+            .returning();
+
+        closeStreamsAfterCommit(result.map(row => row.keyId));
+
+        return result[0] ?? null;
+    }
+
+    /**
+     * Revoke a key that is active or still waiting on a second factor — the
+     * keys `findUnrevokedWithAccountEpochByUserId` reads. A parked key loses its
+     * pending mark with it, so the challenge that gated it activates nothing.
+     * Write primary 사용
+     */
+    async revokeUnrevokedByKeyIdAndUserId(keyId: string, userId: number, reason: string)
+    {
+        const result = await this.db
+            .update(userPublicKeys)
+            .set({ isActive: false, pendingMfaChallengeId: null, revokedAt: new Date(), revokedReason: reason })
+            .where(and(
+                eq(userPublicKeys.keyId, keyId),
+                eq(userPublicKeys.userId, userId),
+                or(eq(userPublicKeys.isActive, true), isNotNull(userPublicKeys.pendingMfaChallengeId)),
+            ))
             .returning();
 
         closeStreamsAfterCommit(result.map(row => row.keyId));
@@ -432,15 +457,19 @@ export class KeysRepository extends AccountStateRepository
 
     /**
      * 같은 사용자가 이 키로 신원을 다시 증명했다 — `authenticatedAt`을 지금으로,
-     * `expiresAt`이 주어지면 만료 시각도 함께 연장한다.
+     * `renewed`가 주어지면 만료 시각과 바인딩도 함께 바꾼다 (`reRegisterOwnKey`).
      * Write primary 사용
      */
-    async markReauthenticated(keyId: string, userId: number, expiresAt?: Date)
+    async markReauthenticated(
+        keyId: string,
+        userId: number,
+        renewed?: { expiresAt: Date; binding: SessionBindingType; viaWebProxy: boolean },
+    )
     {
 
         const result = await this.db
             .update(userPublicKeys)
-            .set({ authenticatedAt: new Date(), ...(expiresAt ? { expiresAt } : {}) })
+            .set({ authenticatedAt: new Date(), ...renewed })
             .where(
                 and(
                     eq(userPublicKeys.keyId, keyId),
@@ -453,55 +482,86 @@ export class KeysRepository extends AccountStateRepository
     }
 
     /**
-     * Bind one live key to the account's passkey, and give it the short life
-     * that goes with it.
+     * Every key of an account that is not revoked — active, or still waiting on
+     * a second factor — with the account's current key generation, read on the
+     * primary.
      *
-     * Scoped by user and by `isActive`, like every other targeted update here, so
-     * the answer is "this call bound something" rather than "a row exists".
-     * Write primary 사용
+     * What turning session binding on or off and the bound-key sweep decide
+     * over, under the account lock: the caller asks `keyLiveness` /
+     * `isRenewable` of each row, so the rule stays where it is stated and the
+     * statements below only carry out its answer.
      */
-    async bindByKeyIdAndUserId(keyId: string, userId: number, expiresAt: Date)
+    async findUnrevokedWithAccountEpochByUserId(userId: number): Promise<KeyWithAccountEpoch[]>
     {
-
-        const result = await this.db
-            .update(userPublicKeys)
-            .set({ binding: 'passkey', expiresAt })
-            .where(
-                and(
-                    eq(userPublicKeys.keyId, keyId),
-                    eq(userPublicKeys.userId, userId),
-                    eq(userPublicKeys.isActive, true),
-                ),
-            )
-            .returning();
-
-        return result[0] ?? null;
+        return this.db
+            .select({ ...getTableColumns(userPublicKeys), accountKeyEpoch: users.keyEpoch })
+            .from(userPublicKeys)
+            .innerJoin(users, eq(users.id, userPublicKeys.userId))
+            .where(and(
+                eq(userPublicKeys.userId, userId),
+                or(eq(userPublicKeys.isActive, true), isNotNull(userPublicKeys.pendingMfaChallengeId)),
+            ));
     }
 
     /**
-     * Return every one of a user's bound keys to an ordinary long-lived key.
+     * Bind the named keys of an account to its passkey, with the short life that
+     * goes with it. A bound key is a web key by definition, so the flag is set
+     * with it.
      *
-     * One statement, because turning the setting off has to leave no key behind:
-     * a row still marked `'passkey'` would keep expiring in hours with nothing
-     * left to renew it, and its owner has just said they do not want that.
+     * The caller chose the keys under the account lock; this only writes them.
      * Write primary 사용
      */
-    async unbindActiveByUserId(userId: number, expiresAt: Date): Promise<number>
+    async bindKeys(userId: number, keyIds: string[], expiresAt: Date): Promise<UserPublicKey[]>
     {
+        return keyIds.length === 0 ? [] : this.db
+            .update(userPublicKeys)
+            .set({ binding: 'passkey', viaWebProxy: true, expiresAt })
+            .where(and(eq(userPublicKeys.userId, userId), inArray(userPublicKeys.keyId, keyIds)))
+            .returning();
+    }
 
-        const result = await this.db
+    /**
+     * Return the named bound keys of an account to ordinary long-lived keys.
+     *
+     * The caller chose them under the account lock, as the ones live now: an
+     * expired bound key is revoked instead, never handed a new life here.
+     * Write primary 사용
+     */
+    async unbindKeys(userId: number, keyIds: string[], expiresAt: Date): Promise<UserPublicKey[]>
+    {
+        return keyIds.length === 0 ? [] : this.db
             .update(userPublicKeys)
             .set({ binding: 'none', expiresAt })
-            .where(
-                and(
-                    eq(userPublicKeys.userId, userId),
-                    eq(userPublicKeys.isActive, true),
-                    eq(userPublicKeys.binding, 'passkey'),
-                ),
-            )
+            .where(and(eq(userPublicKeys.userId, userId), inArray(userPublicKeys.keyId, keyIds)))
             .returning();
+    }
 
-        return result.length;
+    /**
+     * Up to `limit` accounts holding an active bound key that expired before
+     * `cutoff` — the renewal grace's boundary (`renewalGraceCutoff`). Read on the
+     * primary; each is then swept under its own lock, where the rule itself
+     * decides.
+     *
+     * Oldest expiry first: a swept account's keys are revoked and it drops out,
+     * so the next run reaches the accounts after it. Ordered by account id, the
+     * first `limit` accounts would be the same ones each run while those beyond
+     * them waited.
+     */
+    async findAccountsWithBoundKeysExpiredBefore(cutoff: Date, limit: number): Promise<number[]>
+    {
+        const rows = await this.db
+            .select({ userId: userPublicKeys.userId })
+            .from(userPublicKeys)
+            .where(and(
+                eq(userPublicKeys.isActive, true),
+                eq(userPublicKeys.binding, 'passkey'),
+                lt(userPublicKeys.expiresAt, cutoff),
+            ))
+            .groupBy(userPublicKeys.userId)
+            .orderBy(min(userPublicKeys.expiresAt), userPublicKeys.userId)
+            .limit(limit);
+
+        return rows.map(row => row.userId);
     }
 
     /**
@@ -652,8 +712,7 @@ export class KeysRepository extends AccountStateRepository
      *
      * Throttled: only writes when lastUsedAt is stale (older than
      * LAST_USED_THROTTLE_MS), so a busy key isn't UPDATEd on every request. The
-     * throttle lives in the WHERE clause — atomic, no read-then-write race. No
-     * RETURNING (callers fire-and-forget and discard the row).
+     * throttle lives in the WHERE clause — atomic, no read-then-write race.
      *
      * `identity` is what the client said about itself on this request. It is
      * recorded on the same row, and the throttle does not apply to it: a version
@@ -676,11 +735,21 @@ export class KeysRepository extends AccountStateRepository
      * read followed by a write: the row comes off the read replica, and a
      * replica-lagged address compared in application code both misses real
      * switches and invents ones that did not happen.
+     *
+     * `webProxy` is whether proxy-guard attested this request as the trusted
+     * Next.js proxy's. Such a request makes the key a web session's key
+     * (`via_web_proxy`), whenever the key was registered — so a key registered
+     * before the column existed, or a successor of one, is recognised at its
+     * first use through the proxy. The flag is only ever set, never cleared, and
+     * setting it is exempt from the throttle: it happens once per key. Binding
+     * is not decided here: the caller binds a web key of a bound account from
+     * its state, under the account lock (`bindWebKeyService`).
      */
     async updateLastUsedById(
         id: number,
         identity?: ClientIdentity | null,
         ip?: string | null,
+        webProxy = false,
     ): Promise<void>
     {
         const now = new Date();
@@ -725,11 +794,13 @@ export class KeysRepository extends AccountStateRepository
                 OR ${userPublicKeys.clientContractVersion} IS DISTINCT FROM ${identity.contractVersion}
             )`
             : sql`false`;
+        const becomesWeb = webProxy ? sql`NOT ${userPublicKeys.viaWebProxy}` : sql`false`;
 
         await this.db
             .update(userPublicKeys)
             .set({
                 lastUsedAt: now,
+                ...(webProxy ? { viaWebProxy: true } : {}),
                 lastSeenIp: ip ?? null,
                 lastSeenAt: now,
                 // `last_seen_ip IS NOT NULL` is the second observation this needs:
@@ -752,7 +823,7 @@ export class KeysRepository extends AccountStateRepository
             })
             .where(and(
                 eq(userPublicKeys.id, id),
-                or(lastUsedIsStale, identityChanged, sql`(${ipChanged} AND ${notStampedThisWindow})`),
+                or(lastUsedIsStale, identityChanged, sql`(${ipChanged} AND ${notStampedThisWindow})`, becomesWeb),
             ));
     }
 

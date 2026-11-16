@@ -6,7 +6,7 @@
 
 import {
     EmailSchema, PhoneSchema, PasswordSchema, TargetTypeSchema, VerificationPurposeSchema,
-    DeviceNameSchema, PlatformSchema, UserCodeSchema, DeviceAuthPollResponseSchema,
+    DeviceNameSchema, PlatformSchema, UserCodeSchema, PasskeyProofResponseSchema, DeviceAuthPollResponseSchema,
     PublicKeySchema, KeyIdSchema, FingerprintSchema, LinkIdSchema, MatchChoiceSchema,
 } from '../schema';
 import { getAuth, getUser } from '../../helpers';
@@ -43,6 +43,7 @@ import {
     denyDeviceLinkService,
     cancelDeviceLinkService,
     pollDeviceLinkService,
+    checkPasskeyProof,
     type DeviceLinkIssuer,
 } from '../../services';
 import { Type, type Static } from '@sinclair/typebox';
@@ -52,6 +53,7 @@ import { rateLimitPolicy } from '@spfn/core/middleware';
 import { byIpAndAccount, byIpAndTarget, byIpAndCaller } from '../../lib/rate-limit-keys';
 import { defineRouter, route } from '@spfn/core/route';
 import { deviceProvenance } from '../../lib/device-provenance';
+import { authenticateForSignOut } from '../../middleware/authenticate-for-sign-out';
 import { deviceAuthLongPoll, DEVICE_AUTH_WAITED_MILLIS } from '../../middleware/device-auth-long-poll';
 import {
     deviceLinkPollLongPoll,
@@ -506,23 +508,36 @@ export const getDeviceAuthInfo = route.post('/_auth/device/info')
  *
  * Answers with the device it just let in, so a client that skipped `info` can
  * still show the user what they approved.
+ *
+ * An account with session binding on sends `passkeyResponse`, an assertion over
+ * `session/passkey-proof/options { procedure: 'deviceApprove' }`; without it the
+ * approval is refused with 403 `PASSKEY_PROOF_REQUIRED`. No `Transactional()`:
+ * an assertion that does not verify spends its challenge before the refusal,
+ * which a route-wide transaction would roll back (au9-N7); the service opens
+ * its own.
  */
 export const approveDeviceAuth = route.post('/_auth/device/approve')
     .input({
         body: Type.Object({
             userCode: UserCodeSchema,
+            passkeyResponse: Type.Optional(PasskeyProofResponseSchema),
         }),
     })
     .use([
         rateLimitPolicy('auth-device-approve', { limit: 10, windowMs: 60_000, by: byIpAndCaller({ ipLimit: 50 }) }),
-        Transactional(),
     ])
     .handler(async (c) =>
     {
         const { body } = await c.data();
-        const { userId, keyId } = getAuth(c);
+        const { userId, keyId, credential } = getAuth(c);
 
-        return await approveDeviceAuthService({ userCode: body.userCode, userId: Number(userId), keyId });
+        return await approveDeviceAuthService({
+            userCode: body.userCode,
+            userId: Number(userId),
+            keyId,
+            credential,
+            passkeyResponse: body.passkeyResponse,
+        });
     });
 
 /**
@@ -579,15 +594,30 @@ function issuerOf(c: Parameters<typeof getAuth>[0]): DeviceLinkIssuer
  *
  * Replaces any link the calling key still has in play: one live link per
  * issuing key.
+ *
+ * An account with session binding on sends `passkeyResponse`, an assertion over
+ * `session/passkey-proof/options { procedure: 'linkIssue' }`; without it the
+ * issue is refused with 403 `PASSKEY_PROOF_REQUIRED`. Takes a JSON body (`{}`
+ * when there is nothing to send). No `Transactional()`, for `device/approve`'s
+ * reason.
  */
 export const issueDeviceLink = route.post('/_auth/device/link/issue')
+    .input({
+        body: Type.Object({
+            passkeyResponse: Type.Optional(PasskeyProofResponseSchema),
+        }),
+    })
     .use([
         rateLimitPolicy('auth-device-link-issue', { limit: 10, windowMs: 60_000, by: byIpAndCaller({ ipLimit: 50 }) }),
-        Transactional(),
     ])
     .handler(async (c) =>
     {
-        return await issueDeviceLinkService(issuerOf(c));
+        const { body } = await c.data();
+
+        return await issueDeviceLinkService(issuerOf(c), {
+            credential: getAuth(c).credential,
+            passkeyResponse: body.passkeyResponse,
+        });
     });
 
 /**
@@ -777,20 +807,16 @@ export const pollDeviceLink = route.post('/_auth/device/link/poll')
 
 /**
  * POST /_auth/logout - Logout user
- * Revokes current key (requires authentication)
+ * Revokes current key. Authenticated as any route is, and besides that a bound
+ * session's key that has expired but is still inside its renewal grace
+ * (`authenticateForSignOut`) — it is revoked like any other, rather than left
+ * renewable by whoever holds that browser.
  */
 export const logout = route.post('/_auth/logout')
+    .use([authenticateForSignOut])
     .handler(async (c) =>
     {
-        const auth = getAuth(c);
-
-        // If no auth (expired/invalid session), logout is still considered successful
-        if (!auth)
-        {
-            return c.noContent();
-        }
-
-        const { keyId, userId } = auth;
+        const { keyId, userId } = getAuth(c);
         await logoutService({ userId: Number(userId), keyId });
 
         return c.noContent();
@@ -826,6 +852,7 @@ export const rotateKey = route.post('/_auth/keys/rotate')
             algorithm: body.algorithm,
             deviceName: body.deviceName,
             platform: body.platform,
+            webProxy: deviceProvenance(c.raw).webProxy,
         });
     });
 
@@ -924,6 +951,12 @@ export const revokeAllKeys = route.post('/_auth/keys/revoke-all')
  * PUT /_auth/password - Change user password
  * Allows authenticated users to change their password
  * Requires current password for verification
+ *
+ * An account with no password that has session binding on sets its first one
+ * only with `passkeyResponse`, an assertion over
+ * `session/passkey-proof/options { procedure: 'passwordSet' }`; without it,
+ * 403 `PASSKEY_PROOF_REQUIRED`. The assertion is checked here, before the
+ * service's transaction, so one that does not verify spends its challenge.
  */
 export const changePassword = route.put('/_auth/password')
     .input({
@@ -933,6 +966,7 @@ export const changePassword = route.put('/_auth/password')
                 description: 'Current password for verification (required when changing existing password)',
             })),
             newPassword: PasswordSchema,
+            passkeyResponse: Type.Optional(PasskeyProofResponseSchema),
         }),
     })
     .use([rateLimitPolicy('auth-password-change', { limit: 10, windowMs: 60_000 })])
@@ -948,6 +982,12 @@ export const changePassword = route.put('/_auth/password')
             currentPassword: body.currentPassword,
             newPassword: body.newPassword,
             passwordHash: user.passwordHash || undefined,
+            passkeyProof: await checkPasskeyProof({
+                userId: user.id,
+                credential,
+                procedure: 'passwordSet',
+                response: body.passkeyResponse,
+            }),
         });
 
         return c.noContent();

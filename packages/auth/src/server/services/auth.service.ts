@@ -17,6 +17,7 @@ import {
 import { usersRepository, keysRepository, deviceAuthorizationsRepository, deviceLinksRepository } from '../repositories';
 import { revokeAllOAuth2GrantsForUser } from './oauth2-grant.service';
 import { runBeforeRegister } from '../lib/config';
+import { assertPasskeyProven, type PasskeyProof } from '../lib/passkey-proof';
 import { type KeyAlgorithmType, type KeyPlatformType } from '../types';
 import {
     hashPassword,
@@ -30,7 +31,6 @@ import { validateVerificationToken } from './verification.service';
 import { registerPublicKeyService, revokeKeyService } from './key.service';
 import { assertStepUp, mfaEnrolledForUser } from './mfa.service';
 import { secondFactorEnrolmentFields } from './second-factor-policy.service';
-import { decideKeyBinding } from '../lib/key-policy';
 import { updateLastLoginService } from './user.service';
 import { accountRefusal, admissionRefusalError, type PrincipalCredential } from './admission.service';
 import { authLoginEvent, authRegisterEvent } from '../events';
@@ -54,8 +54,9 @@ export interface RegisterParams
     userAgent?: string;
     /**
      * Whether proxy-guard recognised the trusted Next.js proxy, from the same
-     * helper. Carried for shape rather than effect: a brand-new account is on the
-     * default `session_binding: 'none'`, so its first key is never bound.
+     * helper. A brand-new account is on the default `session_binding: 'none'`,
+     * so its first key is never bound — but it is recorded as a web key, which
+     * turning binding on later binds.
      */
     webProxy?: boolean;
 }
@@ -138,6 +139,12 @@ export interface ChangePasswordParams
     currentPassword?: string;
     newPassword: string;
     passwordHash?: string; // Optional: pass user's password hash to avoid re-fetch
+    /**
+     * A verified passkey assertion made for this procedure (`passwordSet`,
+     * `checkPasskeyProof`), which an account with session binding on must
+     * show to set its first password (`assertPasskeyProven`).
+     */
+    passkeyProof?: PasskeyProof | null;
 }
 
 /**
@@ -282,6 +289,7 @@ export async function createVerifiedAccount(
         channel: params.channel,
         ip: params.ip,
         userAgent: params.userAgent,
+        webProxy: params.webProxy,
     });
 
     const result = {
@@ -379,7 +387,7 @@ export async function loginService(
         missingAccount: () => new InvalidCredentialsError(),
         ip: params.ip,
         userAgent: params.userAgent,
-        binding: decideKeyBinding(user.sessionBinding, params.webProxy),
+        webProxy: params.webProxy,
         replaces: params.replacementProof ? { proof: params.replacementProof } : undefined,
         loginEvent: {
             provider: email ? 'email' : 'phone',
@@ -477,6 +485,14 @@ export async function logoutService(
  * to take the account over by setting a new password. An unenrolled account is
  * unaffected — including the OAuth-only account with no password and a key
  * older than ten minutes, which still sets a first password and gets a 200.
+ *
+ * Setting a first password on an account with session binding on asks a
+ * passkey proof (`lib/passkey-proof.ts`): it is a first factor the session
+ * would otherwise hand out with nothing but itself, and a sign-in with it
+ * outside the proxy is an unbound 90-day key. Changing an existing password
+ * proves that password, and is not asked.
+ *
+ * @throws PasskeyProofRequiredError when a bound account sets its first password without the proof
  */
 export async function changePasswordService(
     params: ChangePasswordParams,
@@ -490,7 +506,7 @@ export async function changePasswordService(
     // Hashed before the account lock is taken: the hash is the slow step.
     const newPasswordHash = await hashPassword(params.newPassword);
 
-    if (await replaceVerifiedPassword(userId, verifiedHash, newPasswordHash))
+    if (await replaceVerifiedPassword(userId, verifiedHash, newPasswordHash, params.passkeyProof ?? null))
     {
         return;
     }
@@ -509,7 +525,7 @@ export async function changePasswordService(
     // again, or a password that no longer matches, is refused as before.
     const reverifiedHash = await verifyCurrentPassword({ ...params, passwordHash: undefined });
 
-    if (!await replaceVerifiedPassword(userId, reverifiedHash, newPasswordHash))
+    if (!await replaceVerifiedPassword(userId, reverifiedHash, newPasswordHash, null))
     {
         throw new InvalidCredentialsError({ message: 'Current password is incorrect' });
     }
@@ -518,7 +534,8 @@ export async function changePasswordService(
 /**
  * The change itself, under the account lock, when the hash the current
  * password was verified against is still the one stored — read again under the
- * lock, since a change committed while it was being verified moves it.
+ * lock, since a change committed while it was being verified moves it. A first
+ * password (`verifiedHash` null) spends the passkey proof a bound account owes.
  *
  * @returns false, with nothing written, when the stored hash moved
  */
@@ -526,6 +543,7 @@ async function replaceVerifiedPassword(
     userId: number,
     verifiedHash: string | null,
     newPasswordHash: string,
+    passkeyProof: PasskeyProof | null,
 ): Promise<boolean>
 {
     return await runInTransaction(async () =>
@@ -539,6 +557,11 @@ async function replaceVerifiedPassword(
         if (account.passwordHash !== verifiedHash)
         {
             return false;
+        }
+
+        if (verifiedHash === null)
+        {
+            await assertPasskeyProven(account, passkeyProof);
         }
 
         await usersRepository.updatePassword(userId, newPasswordHash, true);

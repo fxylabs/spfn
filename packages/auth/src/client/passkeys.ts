@@ -316,10 +316,10 @@ export interface DisableSessionBindingOptions
  * first and the assertion is what proves ownership — the same ceremony renewal
  * uses, for the same reason.
  *
- * Turning binding *on* needs no ceremony and no helper: it is
- * `api.setSessionBinding.call({ body: { mode: 'passkey' } })`. Leaving is the
- * privileged direction here, which is the reverse of the usual posture and is
- * the whole reason this helper exists.
+ * Turning binding *on* is `provePasskey(api, 'bindingEnable')`, then
+ * `api.setSessionBinding.call({ body: { mode: 'passkey', passkeyResponse } })`.
+ * Leaving is the privileged direction here, which is the reverse of the usual
+ * posture and is the whole reason this helper exists.
  */
 export async function disableSessionBinding(
     api: AuthApi,
@@ -356,6 +356,62 @@ export async function disableSessionBinding(
     await api.setSessionBinding.call({ body: { mode: 'none', response } });
 
     return { ok: true, mode: 'none' };
+}
+
+/**
+ * The procedures by which a session lets another credential into an account —
+ * each asks a passkey proof when the account has session binding on — and
+ * turning binding on, which asks one of every account.
+ */
+export type PasskeyProofProcedure =
+    | 'deviceApprove'
+    | 'linkIssue'
+    | 'passkeyAdd'
+    | 'passwordSet'
+    | 'socialLink'
+    | 'oauth2Consent'
+    | 'bindingEnable';
+
+/** The assertion to send as that procedure's `passkeyResponse`. */
+export interface PasskeyProofValue
+{
+    passkeyResponse: AuthenticationResponseJSON;
+}
+
+/**
+ * Run the passkey ceremony one procedure asks of an account with session
+ * binding on — after it answered 403 `PASSKEY_PROOF_REQUIRED`, or up front —
+ * and hand back the assertion to send with it.
+ *
+ * @example
+ * const proof = await provePasskey(api, 'deviceApprove');
+ * if (proof.ok)
+ * {
+ *     await api.approveDeviceAuth.call({ body: { userCode, passkeyResponse: proof.passkeyResponse } });
+ * }
+ */
+export async function provePasskey(
+    api: AuthApi,
+    procedure: PasskeyProofProcedure,
+): Promise<PasskeyResult<PasskeyProofValue>>
+{
+    if (!isPasskeySupported())
+    {
+        return { ok: false, reason: 'unsupported' };
+    }
+
+    const optionsJSON = await api.passkeyProofOptions.call({
+        body: { procedure },
+    }) as PublicKeyCredentialRequestOptionsJSON;
+
+    try
+    {
+        return { ok: true, passkeyResponse: await startAuthentication({ optionsJSON }) };
+    }
+    catch (error)
+    {
+        return { ok: false, reason: failureReason(error, 'no-credential'), error };
+    }
 }
 
 // ============================================================================

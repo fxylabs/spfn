@@ -30,17 +30,15 @@ import { verifyClientToken, decodeToken, authLogger, keysRepository, REQUEST_TOK
 import {
     InvalidTokenError,
     TokenExpiredError,
-    KeyExpiredError,
     SecondFactorEnrolmentRequiredError,
 } from '@spfn/auth/errors';
 
 import type { UserPublicKey } from '../entities/user-public-keys';
-import { readContextClientIdentity } from '../client-proof/version-middleware';
-import { attestedClientIp } from '../lib/device-provenance';
-import { keyLiveness } from '../lib/key-liveness';
+import { recordKeyUse } from './record-key-use';
+import { keyLiveness, type KeyWithAccountEpoch } from '../lib/key-liveness';
 import { runAuthProfile, type AuthContext, type AuthProfileOutcome } from './auth-profiles';
 import { matchesMachineDiscriminator } from './machine-principals';
-import { admissionRefusalError, admitPrincipal, authContextFor, type Admission } from '../services/admission.service';
+import { admissionRefusalError, admitPrincipal, authContextFor, isRenewable, type Admission } from '../services/admission.service';
 import { registerEnrolmentGate } from '../lib/enrolment-routes';
 
 // Auth context type — one principal shape for every scheme (see admission.service).
@@ -82,8 +80,14 @@ export type BearerRefusal =
     | 'expired'
     | ClientTokenRefusal;
 
-/** What a Bearer credential resolved to: the key row it named, or why not. */
-export type BearerOutcome = { key: UserPublicKey } | { refused: BearerRefusal };
+/**
+ * What a Bearer credential resolved to: the key row it named, or why not — and,
+ * for an expired key, whether renewal still admits it (`isRenewable`).
+ */
+export type BearerOutcome =
+    | { key: KeyWithAccountEpoch }
+    | { refused: Exclude<BearerRefusal, 'expired'> }
+    | { refused: 'expired'; renewable: boolean };
 
 /**
  * Admit the Bearer credential on this request, or say what stopped it.
@@ -102,8 +106,8 @@ export type BearerOutcome = { key: UserPublicKey } | { refused: BearerRefusal };
  *
  * @param c - the Hono context of the request being authenticated
  * @param admitsExpired - whether a key past its `expiresAt` may still be
- *   admitted. Renewal is the only caller that says yes, and only for a bound key
- *   inside its grace.
+ *   admitted. Renewal and sign-out are the only callers that say yes, and only
+ *   for a bound key inside its grace.
  */
 export async function admitBearerKey(
     c: Context,
@@ -152,7 +156,7 @@ export async function admitBearerKey(
 
     if (liveness === 'expired' && !admitsExpired(key))
     {
-        return { refused: 'expired' };
+        return { refused: 'expired', renewable: isRenewable(key) };
     }
 
     return signatureOutcome(token, key);
@@ -163,7 +167,7 @@ export async function admitBearerKey(
  * the verifier's typed outcome. A token that ran out is told apart from every
  * other refusal: its client signs a new one, it does not sign in again.
  */
-function signatureOutcome(token: string, key: UserPublicKey): BearerOutcome
+function signatureOutcome(token: string, key: KeyWithAccountEpoch): BearerOutcome
 {
     const verified = verifyClientToken(
         token,
@@ -182,9 +186,9 @@ function signatureOutcome(token: string, key: UserPublicKey): BearerOutcome
  * `machine` and `undecodable` deliberately share a message: on this middleware
  * that makes the machine registry invisible (see INVALID_TOKEN_MESSAGE).
  */
-function bearerRefusal(c: Context, refused: BearerRefusal): Error
+function bearerRefusal(c: Context, outcome: Extract<BearerOutcome, { refused: unknown }>): Error
 {
-    if (refused === 'absent')
+    if (outcome.refused === 'absent')
     {
         authLogger.middleware.error('Missing or invalid authorization header. If using Next.js API routes, ensure you have imported \'@spfn/auth/nextjs/api\' in your API route handler (e.g., src/app/api/actions/[[...path]]/route.ts) to enable automatic authentication header forwarding from client to backend.', {
             headers: c.req.header(),
@@ -194,7 +198,7 @@ function bearerRefusal(c: Context, refused: BearerRefusal): Error
         return new UnauthorizedError({ message: 'Authentication header missing or invalid: Bearer {token}' });
     }
 
-    switch (refused)
+    switch (outcome.refused)
     {
         case 'machine':
         case 'undecodable':
@@ -202,7 +206,7 @@ function bearerRefusal(c: Context, refused: BearerRefusal): Error
         case 'unknown':
             return admissionRefusalError({ reason: 'credentialRevoked' });
         case 'expired':
-            return new KeyExpiredError();
+            return admissionRefusalError({ reason: 'credentialExpired', renewable: outcome.renewable });
         case 'token-expired':
             return new TokenExpiredError();
         case 'bad-signature':
@@ -292,7 +296,7 @@ export const authenticate = defineMiddleware('auth', async (c, next) =>
 
     if ('refused' in outcome)
     {
-        throw bearerRefusal(c, outcome.refused);
+        throw bearerRefusal(c, outcome);
     }
 
     const keyRecord = outcome.key;
@@ -310,18 +314,8 @@ export const authenticate = defineMiddleware('auth', async (c, next) =>
 
     const { user } = admission.admitted;
 
-    // 7. Update last used timestamp (fire-and-forget)
-    // Don't await to avoid blocking the request
-    // Useful for:
-    // - Security audits
-    // - Detecting inactive keys
-    // - Key rotation reminders
-    // The client address joins the same statement — see updateLastUsedById — and
-    // only where proxy-guard attested it, see attestedClientIp. A failure here
-    // still never blocks the request: it is the audit trail and the concurrent-use
-    // signal, neither of which is worth a 500.
-    keysRepository.updateLastUsedById(keyRecord.id, readContextClientIdentity(c), attestedClientIp(c))
-        .catch((err: unknown) => authLogger.middleware.error('Failed to update lastUsedAt', err));
+    // 7. Record the key's use (fire-and-forget) — see recordKeyUse
+    recordKeyUse(c, keyRecord, user);
 
     // 8. Attach auth data to context
     // Available in downstream route handlers via c.get('auth')
@@ -453,8 +447,7 @@ export const optionalAuth = defineMiddleware('optionalAuth', async (c, next) =>
 
         if ('admitted' in admission)
         {
-            keysRepository.updateLastUsedById(keyRecord.id, readContextClientIdentity(c), attestedClientIp(c))
-                .catch((err: unknown) => authLogger.middleware.error('Failed to update lastUsedAt', err));
+            recordKeyUse(c, keyRecord, admission.admitted.user);
 
             c.set('auth', authContextFor(admission.admitted, 'bearer'));
         }

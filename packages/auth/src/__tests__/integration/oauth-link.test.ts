@@ -538,6 +538,17 @@ describe.skipIf(!dbAvailable)('Battle.net sign-in and OAuth link/unlink (#154)',
             expect(wrong.status).toBe(403);
         });
 
+        it('S9: an account with session binding on, no passkey proof → 403 PASSKEY_PROOF_REQUIRED and no state', async () =>
+        {
+            const session = await signIn('owner@test.com');
+            await getTestDb().update(users).set({ sessionBinding: 'passkey' }).where(eq(users.id, ownerId));
+
+            const response = await linkStartRequest(session);
+
+            expect(response.status).toBe(403);
+            expect((await response.json()).code).toBe('PASSKEY_PROOF_REQUIRED');
+        });
+
         it('S6: a session key older than the window with the right password may start', async () =>
         {
             const session = await signIn('owner@test.com');
@@ -653,6 +664,18 @@ describe.skipIf(!dbAvailable)('Battle.net sign-in and OAuth link/unlink (#154)',
 
             const [profile] = await getTestDb().select().from(userProfiles).where(eq(userProfiles.userId, ownerId));
             expect(profile).toBeUndefined();
+        });
+
+        it('C16: a link started before binding was turned on, finished after → failed, nothing attached', async () =>
+        {
+            const session = await signIn('owner@test.com');
+            const started = await startLink(session);
+            await getTestDb().update(users).set({ sessionBinding: 'passkey' }).where(eq(users.id, ownerId));
+
+            const location = await finishLink(started, 'code-flash');
+
+            expect(outcomeOf(location)).toEqual(linked('failed'));
+            expect(await linkOf(ownerId)).toBeUndefined();
         });
 
         it('C2: an identity another account holds is refused, and neither account changes', async () =>

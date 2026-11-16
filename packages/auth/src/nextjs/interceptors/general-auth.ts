@@ -12,7 +12,7 @@ import type { InterceptorRule, RequestInterceptorContext, ResponseInterceptorCon
 import { SessionContextChangedError, SessionRenewalRequiredError } from '@spfn/auth/errors';
 import { readSealedSession, shouldRefreshSession, type SessionData } from '../../server/lib/session';
 import { COOKIE_NAMES } from '../../server/lib/config';
-import { isSessionEndingCode } from '../../server/lib/admission-refusal';
+import { isRenewableExpiry, isSessionEndingCode } from '../../server/lib/admission-refusal';
 import { authLogger } from '../../server/logger';
 import { uaFamily } from '../../server/lib/ua-family';
 import { refuseInvalidCsrf } from './csrf';
@@ -146,7 +146,6 @@ async function authenticateFromCookie(ctx: RequestInterceptorContext, sessionCoo
     ctx.metadata.userId = session.userId;
     ctx.metadata.keyId = session.keyId;
     ctx.metadata.sessionValid = true;
-    ctx.metadata.sessionBound = session.binding === 'passkey';
 
     return true;
 }
@@ -186,9 +185,13 @@ async function retryExpiredToken(ctx: ResponseInterceptorContext): Promise<void>
  * What the backend's answer means for the session the request was signed with.
  *
  * Decided by the error code, never by the status alone: only the key-refused
- * family (`isSessionEndingCode`) ends the session. A bound session's expired key
- * is the exception — renewable, not finished — and is answered with the renewal
- * prompt, cookies kept. The renewal paths themselves never clear: their refusals
+ * family (`isSessionEndingCode`) ends the session. An expired key the backend
+ * says renewal still admits (`isRenewableExpiry`) is the exception — renewable,
+ * not finished — and is answered with the renewal prompt, cookies kept. That is
+ * the key row's fact, read off the refusal, never the cookie's own `binding`: a
+ * key bound after the cookie was sealed (at its first use, or by the owner
+ * turning binding on elsewhere) still has a cookie saying unbound, and one past
+ * its grace is not renewable whatever the cookie says. The renewal paths themselves never clear: their refusals
  * are answered by the renewal ceremony, and clearing there would end the session
  * the person was in the middle of repairing.
  */
@@ -196,7 +199,7 @@ function judgeAnswer(ctx: ResponseInterceptorContext): void
 {
     const code = errorCodeOf(ctx.response.body);
 
-    if (ctx.metadata.sessionBound && code === 'KeyExpiredError')
+    if (isRenewableExpiry(ctx.response.body))
     {
         ctx.response.body = refusalEnvelope(new SessionRenewalRequiredError()).body;
 
@@ -215,6 +218,26 @@ function judgeAnswer(ctx: ResponseInterceptorContext): void
     {
         refresh(ctx, ctx.metadata.inboundSession);
     }
+}
+
+/**
+ * Whether this sign-out's answer ends everything this package keeps in the
+ * browser, whatever state the session cookie was in: the backend revoked its
+ * key (2xx), or answered 401 to the session this request presented — its
+ * cookie unsealed and signed the request (`sessionValid`). That 401 is
+ * deliberate: a key past its grace, or revoked elsewhere, answers 401 to the
+ * sign-out, and keeping its cookies would leave a browser that cannot sign
+ * out — nor is a renewal prompt the answer to a sign-out.
+ *
+ * A 401 to a sign-out that presented no session says nothing about the
+ * browser's: a cross-site form POST arrives without the `SameSite=Lax` cookie,
+ * and clearing on its 401 would sign the victim out with the key left live.
+ * A 5xx or a network failure keeps the cookies — the key may still be live —
+ * and the user retries.
+ */
+function signedOut(ctx: ResponseInterceptorContext): boolean
+{
+    return ctx.response.ok || (ctx.response.status === 401 && ctx.metadata.sessionValid === true);
 }
 
 /**
@@ -251,14 +274,15 @@ export const generalAuthInterceptor: InterceptorRule =
             if (ctx.metadata.sessionValid)
             {
                 await retryExpiredToken(ctx);
-                judgeAnswer(ctx);
             }
 
-            // A sign-out ends everything this package keeps in the browser,
-            // whatever state the session cookie was in.
-            if (ctx.path === '/_auth/logout' && ctx.response.ok)
+            if (ctx.path === '/_auth/logout' && signedOut(ctx))
             {
                 clear(ctx, 'signed-out');
+            }
+            else if (ctx.metadata.sessionValid)
+            {
+                judgeAnswer(ctx);
             }
 
             await next();

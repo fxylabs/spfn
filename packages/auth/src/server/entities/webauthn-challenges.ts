@@ -22,6 +22,25 @@ import { users } from './users';
 import { authSchema } from './schema';
 
 /**
+ * The procedures by which a session lets another credential into an account,
+ * each a challenge kind of its own: on an account with session binding on,
+ * each asks a passkey assertion made for it (`lib/passkey-proof.ts`). And
+ * turning binding on (`bindingEnable`), which asks one of every account.
+ */
+export const PASSKEY_PROOF_PROCEDURES = [
+    'deviceApprove',
+    'linkIssue',
+    'passkeyAdd',
+    'passwordSet',
+    'socialLink',
+    'oauth2Consent',
+    'opsTokenIssue',
+    'bindingEnable',
+] as const;
+
+export type PasskeyProofProcedure = typeof PASSKEY_PROOF_PROCEDURES[number];
+
+/**
  * Which ceremony the challenge was minted for — one kind per procedure, and
  * each kind is spent by exactly one route.
  *
@@ -38,6 +57,20 @@ import { authSchema } from './schema';
  * | `newDevice`      | `mfa/verify/options`                       | `mfa/verify`                          | no — the sign-in's challenge handle names its pending key |
  * | `renewal`        | `session/renew/options`                    | `session/renew/verify`                | yes, with the key it renews |
  * | `bindingOff`     | `session/binding/disable/options`          | `session/binding` (`mode: 'none'`)    | yes     |
+ * | `deviceApprove`  | `session/passkey-proof/options`            | `device/approve`                      | yes     |
+ * | `linkIssue`      | `session/passkey-proof/options`            | `device/link/issue`                   | yes     |
+ * | `passkeyAdd`     | `session/passkey-proof/options`            | `passkeys/register/verify`            | yes     |
+ * | `passwordSet`    | `session/passkey-proof/options`            | `PUT password` (no password stored)   | yes     |
+ * | `socialLink`     | `session/passkey-proof/options`            | `oauth/:provider/link`                | yes     |
+ * | `oauth2Consent`  | `session/passkey-proof/options`            | `POST oauth2/authorize` (approve)     | yes     |
+ * | `opsTokenIssue`  | `session/passkey-proof/options`            | `POST ops-tokens`                     | yes     |
+ * | `bindingEnable`  | `session/passkey-proof/options`            | `session/binding` with `mode: 'passkey'` | yes  |
+ *
+ * The last eight are the passkey proof an account with session binding on shows
+ * to let another credential in, and the one turning binding on shows
+ * (`lib/passkey-proof.ts`): one
+ * options route mints them, by the procedure named, and each is spent only by
+ * that procedure's route.
  *
  * A stamped kind is spent only through `admitDeferred` (`lib/deferred-stamp.ts`),
  * and an unstamped row of one is refused. `'mfa'`, the kind a step-up and a
@@ -45,7 +78,15 @@ import { authSchema } from './schema';
  * a row of it left from before the upgrade is refused everywhere, and the
  * sweep takes it with the expired.
  */
-export const WEBAUTHN_CHALLENGE_KINDS = ['registration', 'authentication', 'stepUp', 'newDevice', 'renewal', 'bindingOff'] as const;
+export const WEBAUTHN_CHALLENGE_KINDS = [
+    'registration',
+    'authentication',
+    'stepUp',
+    'newDevice',
+    'renewal',
+    'bindingOff',
+    ...PASSKEY_PROOF_PROCEDURES,
+] as const;
 
 export type WebAuthnChallengeKind = typeof WEBAUTHN_CHALLENGE_KINDS[number];
 

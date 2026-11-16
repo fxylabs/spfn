@@ -48,7 +48,6 @@ import { revokeAllOAuth2GrantsForUser } from './oauth2-grant.service';
 import { registerPublicKeyService, type RegisterPublicKeyResult } from './key.service';
 import { admitsAccount } from './admission.service';
 import { secondFactorEnrolmentFields } from './second-factor-policy.service';
-import { decideKeyBinding } from '../lib/key-policy';
 import { updateLastLoginService } from './user.service';
 import { loginBindingFields, type LoginResult } from './auth.service';
 import type { KeyAlgorithmType, KeyPlatformType, SessionBindingType } from '../types';
@@ -317,7 +316,7 @@ async function replaceCredentials(
         channel: 'password-reset',
         ip: params.ip,
         userAgent: params.userAgent,
-        binding: decideKeyBinding(user.sessionBinding, params.webProxy),
+        webProxy: params.webProxy,
         inactiveAccount: () => new PasswordResetSessionError(),
     });
 

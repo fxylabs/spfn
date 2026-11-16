@@ -100,7 +100,7 @@ vi.mock('@spfn/notification/server', async (importOriginal) =>
 });
 
 import { setupTestDb, teardownTestDb, clearTables, getTestDb, isDatabaseAvailable } from '../helpers/db';
-import { FixtureAuthenticator } from '../helpers/webauthn-fixture';
+import { enableBinding, FixtureAuthenticator } from '../helpers/webauthn-fixture';
 import { mountProxy, type MountedProxy, type ProxiedBackend } from '../helpers/rpc-proxy';
 import { userInvitations, userPublicKeys, users, verificationCodes } from '@/server/entities';
 import { hashPassword } from '@/server/helpers/password';
@@ -674,7 +674,7 @@ describe.skipIf(!dbAvailable)('the Next.js proxy decides the session once per re
     {
         const authenticator = await passkeyFor(OWNER);
         const device = await signedInDevice(OWNER);
-        const bound = await direct('/_auth/session/binding', { mode: 'passkey' }, device.authorization);
+        const bound = await enableBinding((path, body) => direct(path, body, device.authorization), authenticator, { origin: ORIGIN, rpId: RP_ID });
         expect(bound.status).toBe(200);
         renewing = { authenticator };
 
@@ -770,7 +770,7 @@ describe.skipIf(!dbAvailable)('the Next.js proxy decides the session once per re
         'SecondFactorMethodDisabledError', 'SecondFactorRequiredError', 'MfaConfigError', 'SessionPendingMismatchError',
         'SessionPendingExpiredError', 'UserSettingNotDeclaredError', 'AccountBusyError', 'SecondFactorLockedError',
         'ConfigOwnedMappingError', 'ConfigOwnedRoleError', 'RoleInUseError', 'AuthorityContendedError', 'RbacSyncBusyError',
-        'PasskeyUserVerificationRequiredError',
+        'PasskeyUserVerificationRequiredError', 'PasskeyProofRequiredError',
         'HttpError', 'BadRequestError', 'ValidationError', 'ForbiddenError', 'NotFoundError', 'ConflictError', 'GoneError',
         'TooManyRequestsError', 'UnsupportedMediaTypeError', 'UnprocessableEntityError', 'InternalServerError',
         'ServiceUnavailableError', 'DatabaseError', 'ConnectionError', 'QueryError', 'EntityNotFoundError',

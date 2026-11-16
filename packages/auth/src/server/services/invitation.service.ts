@@ -348,6 +348,8 @@ interface AcceptInvitationParams
     ip?: string;
     /** `user-agent` of the request, already truncated at the route. */
     userAgent?: string;
+    /** Whether proxy-guard recognised the trusted Next.js proxy (`deviceProvenance`). */
+    webProxy?: boolean;
 }
 
 /**
@@ -515,6 +517,7 @@ async function createInvitedAccount(
         channel: 'invitation',
         ip: params.ip,
         userAgent: params.userAgent,
+        webProxy: params.webProxy,
     }));
 
     return newUser;

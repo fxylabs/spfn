@@ -470,8 +470,18 @@ import { CLIENT_IDENTITY_HEADERS, CLIENT_KINDS, SERVER_CONTRACT_HEADERS } from '
  * moves to a code of its own joins the open list, and no operation, type or enum
  * changes shape; a 0.14.x consumer meets them as unlisted codes, so the
  * supported range does not move.
+ *
+ * 0.14.6 lists `PasskeyProofRequiredError` (403, not retryable) for
+ * `auth.device.approve`. An account with session binding on approves a
+ * device-code sign-in only with a passkey assertion made for that approval —
+ * the device's key is an ordinary 90-day key, which a copied bound session
+ * must not be able to mint for itself — and the passkey ceremony is not on
+ * this surface, so a native approver of such an account is refused with this
+ * code and nothing is approved. Accounts without binding are answered as
+ * before. A patch, by 0.10.1's rule: a code joins the open list, and no
+ * operation, type or enum changes shape.
  */
-export const CONTRACT_VERSION = '0.14.5';
+export const CONTRACT_VERSION = '0.14.6';
 export const CONTRACT_MAJOR = 0;
 export const CONTRACT_NAME = 'spfn-mobile-contract';
 
@@ -1513,6 +1523,15 @@ const REST_SURFACE_ERRORS: readonly RestSurfaceError[] = [
         summary:
             'the request was already approved or denied, and a decision on a device is made once; it is also what '
             + 'the loser of two concurrent approvals is told',
+    },
+    {
+        code: 'PasskeyProofRequiredError',
+        httpStatus: 403,
+        retryable: false,
+        summary:
+            'the account has session binding on, and approving a device lets another credential in: it needs a '
+            + 'passkey assertion made for the approval, which this surface does not carry. Nothing was approved; '
+            + 'the owner approves from a browser signed in to the account',
     },
     {
         code: 'DeviceLinkExpiredError',

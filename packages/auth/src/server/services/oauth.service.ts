@@ -57,7 +57,6 @@ import {
 } from '../lib/oauth';
 import { providerAccountFields } from '../lib/oauth/provider-account';
 import { registerPublicKeyService } from './key.service';
-import { decideKeyBinding } from '../lib/key-policy';
 import { updateLastLoginService } from './user.service';
 import { accountRefusal, admissionRefusalError } from './admission.service';
 import { mfaEnrolledForUser } from './mfa.service';
@@ -380,8 +379,8 @@ async function persistWebSignIn(signIn: WebSignIn): Promise<OAuthCallbackResult>
     // 세션(공개키) 발급 전 계정 상태 검사 — both branches of `signInAccount` meet here.
     await assertActiveForOAuthSession(userId, () => new OAuthAccountNotFoundError());
 
-    // Read once: registering the key needs the account's session_binding
-    // setting, and the event payload needs the same row.
+    // The event payload's row. Whether the key is bound is decided where it is
+    // written, under the account lock (`registerPublicKeyService`).
     const user = await usersRepository.findById(userId);
 
     // No deviceName or platform: the sealed state the start step wrote carries
@@ -396,7 +395,7 @@ async function persistWebSignIn(signIn: WebSignIn): Promise<OAuthCallbackResult>
         missingAccount: () => new OAuthAccountNotFoundError(),
         ip: params.ip,
         userAgent: params.userAgent,
-        binding: decideKeyBinding(user?.sessionBinding ?? 'none', params.webProxy),
+        webProxy: params.webProxy,
         loginEvent: signInEventFields(params.provider, user, stateData, identity),
     });
 

@@ -20,6 +20,11 @@
  * And it sweeps step-up records the configured window has passed, which grant
  * nothing: an application profile's has no key row whose deletion would take it.
  *
+ * And it revokes bound session keys past their renewal grace (#97). Such a key
+ * can never sign or be renewed again, but nothing else flips its `is_active`,
+ * and an "active" row is one a later write could mistake for a live key —
+ * which is how turning binding off once revived them (au3-A1).
+ *
  * Registration is NOT automatic, for the reason `deletion-purge.ts` sets out at
  * length: `createAuthLifecycle()`'s `afterInfrastructure` hook runs before
  * `registerJobs` in `@spfn/core`'s startup, so the lifecycle cannot register a
@@ -29,6 +34,7 @@
 
 import { job } from '@spfn/core/job';
 import { sweepMfaChallengesService, sweepStaleStepUpsService, sweepUnconfirmedMfaService } from '../services/mfa.service';
+import { sweepPastGraceBoundKeysService } from '../services/session-binding.service';
 import { authLogger } from '../logger';
 
 /** Daily at 07:00, an hour after the sign-out-everywhere link sweep. */
@@ -49,10 +55,11 @@ export function createMfaSweepJob(cronExpression: string = DEFAULT_MFA_SWEEP_CRO
             const { deleted } = await sweepUnconfirmedMfaService();
             const { deleted: challenges } = await sweepMfaChallengesService();
             const { deleted: stepUps } = await sweepStaleStepUpsService();
+            const { revoked: boundKeys } = await sweepPastGraceBoundKeysService();
 
-            if (deleted > 0 || challenges > 0 || stepUps > 0)
+            if (deleted > 0 || challenges > 0 || stepUps > 0 || boundKeys > 0)
             {
-                authLogger.service.info('[auth.mfa.sweep] sweep complete', { deleted, challenges, stepUps });
+                authLogger.service.info('[auth.mfa.sweep] sweep complete', { deleted, challenges, stepUps, boundKeys });
             }
         });
 }

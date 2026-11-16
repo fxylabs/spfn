@@ -307,7 +307,7 @@ routes use `.skip(['auth'])`; the rest require `Authorization: Bearer <client-si
 | `mfaStepUpOptions` | POST `/_auth/mfa/step-up/options` | yes | options for a step-up by passkey |
 | `mfaVerify` | POST `/_auth/mfa/verify` | public | finish a sign-in that answered `202 { mfaRequired: true }` — see [Step-up on a new device](#step-up-on-a-new-device) |
 | `mfaVerifyOptions` | POST `/_auth/mfa/verify/options` | public | options for finishing that sign-in with a passkey |
-| `logout` | POST `/_auth/logout` | yes | revoke current key |
+| `logout` | POST `/_auth/logout` | yes | revoke current key — also a bound session's key that expired and is still inside its renewal grace |
 | `rotateKey` | POST `/_auth/keys/rotate` | yes | rotate public key before 90-day expiry |
 | `listKeys` | POST `/_auth/keys/list` | yes | the caller's registered devices — see [Registered devices](#registered-devices-key-management) |
 | `revokeKey` | POST `/_auth/keys/revoke` | yes | sign one device out |
@@ -315,6 +315,7 @@ routes use `.skip(['auth'])`; the rest require `Authorization: Bearer <client-si
 | `setSessionBinding` | POST `/_auth/session/binding` | yes | turn session binding on or off — see [Session binding](#session-binding) |
 | `getSessionBinding` | GET `/_auth/session/binding` | yes | whether it is on, and when this session's key expires |
 | `sessionBindingDisableOptions` | POST `/_auth/session/binding/disable/options` | yes | the challenge that proves it is you before turning it off |
+| `passkeyProofOptions` | POST `/_auth/session/passkey-proof/options` | yes | the challenge a bound account answers to let another credential in — see [Letting another credential in](#letting-another-credential-in) |
 | `sessionRenewOptions` | POST `/_auth/session/renew/options` | public | begin renewing a bound session key |
 | `sessionRenewVerify` | POST `/_auth/session/renew/verify` | public | verify the assertion; answers exactly as `login` |
 | `changePassword` | PUT `/_auth/password` | yes | change password |
@@ -488,7 +489,8 @@ classification puts a marker on each one, and `authenticate` looks for it inside
 is running in. So mounting the server under a prefix (`root.route('/api', app)`) changes nothing,
 and nothing an app declares can be taken for one — not an app route at the same path on another
 method, not an app `'*'` middleware, not a path no route matched (404). Only the global
-`authenticate` reads the marker; `optionalAuth`, `opsOrUser` and a one-time token exempt nothing.
+`authenticate` reads the marker — and `logout`'s own `authenticateForSignOut`, which runs it there,
+with the marker placed after it; `optionalAuth`, `opsOrUser` and a one-time token exempt nothing.
 
 The session-renewal pair (`sessionRenewOptions`, `sessionRenewVerify`) is classified on its own,
 `'unchecked'`: it is authenticated by `authenticateForRenewal`, which never asks the policy, so a
@@ -1737,6 +1739,82 @@ person signs in again.
 id: nothing reads it for a decision — the replacement proof is signed from the sealed session.
 The proxy-guard default stays `'off'`.
 
+### Migration — an expired bound key is a dead key
+
+**BREAKING.** Session binding stated "this key is dead" two ways — revocation as `is_active = false`,
+expiry as a comparison — so a statement that rewrote `expires_at` revived an expired key, and the
+account setting's effect was patched onto key rows one at a time (audit au3-A1, au3-A4, au3-A5,
+au3-B8). What changes:
+
+- **Turning binding off** (`POST /_auth/session/binding { mode: 'none' }`) no longer gives every
+  bound key ninety days. Only a bound key not yet expired becomes an ordinary 90-day key; one
+  already expired — inside its renewal grace or past it — is revoked (`revokedReason`
+  `Bound key expired when session binding was turned off`). The owner's other browsers whose bound
+  session had already expired sign in again after binding is turned off.
+- **Turning binding on** binds every live web key of the account, not only the caller's: the
+  account's other browser sessions get a bound key's short life at once and must renew with the
+  passkey at their expiry. Native and device-code keys are untouched.
+- **`POST /_auth/logout`** answers 204 and revokes the key for a bound session whose key has
+  expired but is inside its grace (it answered 401 `KeyExpiredError` and left the key renewable).
+  The Next.js proxy clears the session cookies on a sign-out the backend answered 401 too; on a
+  5xx or a network failure it keeps them and the user retries.
+- **`auth.mfa.sweep`** also revokes bound keys past their grace.
+- **`registerPublicKeyService`** takes `webProxy?: boolean` (from `deviceProvenance(c).webProxy`)
+  instead of `binding`: whether a key is bound is decided inside it, under the account lock. An app
+  that called it directly with `binding` passes `webProxy` instead.
+- **`keysRepository.updateLastUsedById`** takes an optional fourth argument, `webProxy`; binding is
+  decided apart from it.
+- **Schema.** `spfn_auth.user_public_keys.via_web_proxy` (boolean, default false). The migration
+  sets it on every key already bound and on every key whose `last_seen_ip` is set — that column is
+  written only from a request `proxy-guard` attested as the proxy's, so a stored address means the
+  key's last recorded use came through it. `client_kind` is not used: the proxy never forwards
+  `x-spfn-client-kind`, so `ios` / `android` marks a key a native SDK used directly, and it stays
+  false. A key neither signal classifies (not used since `last_seen_ip` existed, or last used
+  without an attested address) stays false until its first request through the proxy, which sets
+  the flag. On a bound account, every use of an unbound web key binds it (`bindWebKeyService`,
+  under the account lock, tried again at the next use if it fails): the request is served and the
+  key is asked for a passkey at its next expiry. A copied cookie only works through the proxy that can
+  unseal it, so a legacy web session cannot be used without being bound.
+- **`KeyExpiredError` says whether the key can be renewed** (`details.renewable: true` for a bound
+  key inside its grace; absent otherwise), and the Next.js proxy decides on that rather than on the
+  cookie's `binding`: a session whose key was bound after its cookie was sealed gets the renewal
+  prompt at its expiry instead of being signed out. The cookie still carries `binding` — the
+  user-agent family check and a key rotation read it.
+- **`keys/rotate` through the proxy** registers the new key as a web key, as a sign-in through the
+  proxy does (`rotateKeyService` takes `webProxy`).
+- **A bound account shows a passkey to let another credential in.** `device/approve`,
+  `device/link/issue`, `passkeys/register/verify`, `PUT /_auth/password` setting a first
+  password, `oauth/:provider/link` and `POST /_auth/oauth2/authorize` (approve) answer 403
+  `PASSKEY_PROOF_REQUIRED` on an account with session binding on unless the body carries
+  `passkeyResponse` — an assertion over `POST /_auth/session/passkey-proof/options { procedure }`
+  (`provePasskey(api, procedure)`). A second factor or the password does not satisfy it. Accounts
+  without binding are unchanged. A native approver of a bound account cannot approve a
+  device-code sign-in (the passkey ceremony is not on the mobile surface; contract 0.14.6 lists
+  the code): approve from a browser.
+- **A passkey proves the person or it proves nothing here.** Every renewal-grade assertion —
+  `session/renew/verify`, `POST /_auth/session/binding { mode: 'none' }` with a passkey, and the
+  passkey proof of the procedures above and of turning binding on — needs `userVerified` in the assertion, whatever
+  `SPFN_AUTH_PASSKEY_USER_VERIFICATION` says (bundle 6's rule for a second factor), and their options
+  ask the browser for it (`userVerification: 'required'`); sign-in keeps the configured value. **A security
+  key with no PIN cannot renew a bound session**: set a PIN or a biometric on it, or turn binding
+  off with the password. Without user verification renewal answers `SessionRenewalRefusedError`,
+  binding-off `RecentAuthenticationRequiredError`, a proof `PASSKEY_PROOF_REQUIRED`.
+- **Turning binding on asks the passkey proof** (`bindingEnable`), of every account: `POST
+  /_auth/session/binding { mode: 'passkey' }` answers 403 `PASSKEY_PROOF_REQUIRED` unless the body
+  carries `passkeyResponse` — `provePasskey(api, 'bindingEnable')` — with user verification, which
+  is what every renewal of the bound session will ask. An account with no passkey that can give it
+  (none at all, or only one without a PIN) is refused rather than bound and locked out by its own
+  setting; the former 400 for an account with no live passkey is this 403.
+- **`POST /_auth/ops-tokens` asks the passkey proof too** (`opsTokenIssue`) on an account with
+  session binding on: an ops token outlives every key. `spfn ops token issue`, which signs in with
+  the password, is refused 403 for such an account; issue from a browser holding the passkey.
+- **`device/link/issue` takes a JSON body** (`{}`, or `{ passkeyResponse }`); a request with no
+  body is refused 400.
+- **`device/approve`, `device/link/issue` and `passkeys/register/verify` run no route-wide
+  transaction**; the services open their own, so a failed assertion's spent challenge commits.
+  `issueDeviceLinkService` takes a second argument (`{ credential, passkeyResponse }`), and
+  `approveDeviceAuthService` takes `credential`.
+
 ### Invitations
 
 An invitation lets an account with `user:invite` bring someone in with a role ranked below its
@@ -2836,6 +2914,13 @@ Ask for a password, an address, or a social link before, or shortly after, the p
   | `newDevice` | `mfa/verify/options` | `mfa/verify` | no — the 202 handle names its pending key |
   | `renewal` | `session/renew/options` | `session/renew/verify` | yes, with the key it renews |
   | `bindingOff` | `session/binding/disable/options` | `session/binding` with `mode: 'none'` | yes |
+  | `deviceApprove` | `session/passkey-proof/options` | `device/approve` | yes |
+  | `linkIssue` | `session/passkey-proof/options` | `device/link/issue` | yes |
+  | `passkeyAdd` | `session/passkey-proof/options` | `passkeys/register/verify` | yes |
+  | `passwordSet` | `session/passkey-proof/options` | `PUT /_auth/password` setting a first password | yes |
+  | `socialLink` | `session/passkey-proof/options` | `oauth/:provider/link` | yes |
+  | `oauth2Consent` | `session/passkey-proof/options` | `POST /_auth/oauth2/authorize` with `approve: true` | yes |
+  | `bindingEnable` | `session/passkey-proof/options` | `session/binding` with `mode: 'passkey'` | yes |
 
   The retired `mfa` kind, which a step-up and a new-device sign-in once shared, is accepted by
   nothing.
@@ -2857,6 +2942,7 @@ Ask for a password, an address, or a social link before, or shortly after, the p
 | `PasskeyNotFoundError` | 404 | — | a passkey the caller does not own, or one already revoked |
 | `PasskeyAlreadyRegisteredError` | 409 | — | that credential is on file for some account, revoked ones included |
 | `RecentAuthenticationRequiredError` | 403 | `RECENT_AUTH_REQUIRED` | the session proved itself too long ago and carried no password |
+| `PasskeyProofRequiredError` | 403 | `PASSKEY_PROOF_REQUIRED` | session binding is on and `register/verify` carried no `passkeyResponse` for `passkeyAdd` — see [Letting another credential in](#letting-another-credential-in) |
 | `LastRecoveryCredentialError` | 409 | `LAST_RECOVERY_CREDENTIAL` | revoking it would leave no way back in |
 | `PasskeyUserVerificationRequiredError` | 409 | `PASSKEY_USER_VERIFICATION_REQUIRED` | `mfa/passkey/mark` on a passkey registered without user verification |
 | `PasskeyConfigError` | boot | — | an origin off the rpId or not https, or an unsupported user-verification value |
@@ -3295,6 +3381,7 @@ the session itself, and `authLoginEvent` says so in `secondFactorEnrolmentRequir
 | `MfaNotEnrolledError` | 400 | — | `confirm` with no pending secret, or `regenerate` on an account with no second factor |
 | `PasskeyUserVerificationRequiredError` | 409 | `PASSKEY_USER_VERIFICATION_REQUIRED` | `passkey/mark` on a passkey registered without user verification |
 | `StepUpRequiredError` | 403 | `STEP_UP_REQUIRED` | an enrolled account's device is outside the window |
+| `PasskeyProofRequiredError` | 403 | `PASSKEY_PROOF_REQUIRED` | session binding is on and a procedure that lets another credential in carried no passkey proof for it — a step-up does not satisfy it; see [Letting another credential in](#letting-another-credential-in) |
 | `SecondFactorEnrolmentRequiredError` | 403 | `SECOND_FACTOR_ENROLMENT_REQUIRED` | the app requires a factor and this account has no listed one; every route but the enrolment routes — see [Requiring a second factor](#requiring-a-second-factor-secondfactor) |
 | `SecondFactorMethodDisabledError` | 404 | `SECOND_FACTOR_METHOD_DISABLED` | a route of a method the policy does not list, or `recovery/regenerate` with `recoveryCodes: false` |
 | `SecondFactorRequiredError` | 409 | `SECOND_FACTOR_REQUIRED` | removing the last listed factor through a route while one is required |
@@ -3322,7 +3409,9 @@ account gets from `login`, `changePassword`, `keys/revoke-all` and `passkeys/rev
 `auth.mfa.sweep` runs daily at 07:00 and deletes enrolments still unconfirmed after 24 hours,
 plus step-up challenges that have expired or been spent and the inactive keys they were
 holding, and step-up records older than the step-up window — which grant nothing — of every
-credential, an application profile's included. It is carried by `authJobRouter` beside the other sweeps; pass `mfaSweepCron` to
+credential, an application profile's included. It also revokes session-bound keys past their
+renewal grace (see [Session binding](#session-binding)), one account at a time under its lock. It
+is carried by `authJobRouter` beside the other sweeps; pass `mfaSweepCron` to
 `createAuthJobRouter()` to move it. A confirmed enrolment is never touched.
 
 ### Session binding
@@ -3341,9 +3430,15 @@ days, and only a fresh WebAuthn assertion can put a new one in the cookie. The c
 the assertion, so it stops working at the first renewal.
 
 ```typescript
-// Turn it on. Needs a live passkey and a recently-proved session.
-await authApi.setSessionBinding.call({ body: { mode: 'passkey' } });
-// → { mode: 'passkey', keyExpiresAtMillis }
+// Turn it on. Needs a recently-proved session and a passkey assertion that verified the person —
+// what every renewal will ask.
+import { provePasskey } from '@spfn/auth/client';
+const proof = await provePasskey(api, 'bindingEnable');
+if (proof.ok)
+{
+    await authApi.setSessionBinding.call({ body: { mode: 'passkey', passkeyResponse: proof.passkeyResponse } });
+    // → { mode: 'passkey', keyExpiresAtMillis }
+}
 
 await authApi.getSessionBinding.call();          // → { mode, keyExpiresAtMillis? }
 
@@ -3368,15 +3463,117 @@ posture: `assertRecentAuthentication` is satisfied by the age of the device key 
 with, and a cookie copied in the ten minutes after a sign-in carries exactly that — so leaving
 `'passkey'` mode asks for a passkey assertion or the account password, never key age alone.
 
-**The renewal page.** Once the key has run out, the backend refuses with `KeyExpiredError`, the
-proxy turns that into 401 `SessionRenewalRequiredError` and keeps the cookies: the session is
-waiting on one prompt, not finished. A client component calls `renewSession(api)`, which runs the
+**Every web session of the account is bound, and a bound key past its grace is dead.**
+
+- *A web key* is one registered or used on a request `proxy-guard` tagged `clientType: 'web'`, or
+  one that replaced such a key by rotation or renewal — recorded on the key row (`via_web_proxy`)
+  when it is written and, by the throttled last-use statement, at its first use through the proxy;
+  never read from the request body or the declared
+  `platform`, and never cleared. A native client's key, a
+  device-code device's and a session of an application's own auth profile are not web keys, and
+  binding never touches them: they hold no cookie to copy and no browser to renew in.
+- *Turning it on* binds, in the same transaction and under the account lock, every web key of the
+  account that is live or still waiting on a second factor — not just the one that asked. Each gets
+  a bound key's short life from that moment and is asked for a passkey renewal at its expiry, so a
+  copied session the owner is reacting to ends there. Expired and revoked keys are not given a new
+  life by being bound.
+- *A web key that is unbound on a bound account* — a key registered before `via_web_proxy`
+  existed, recognised at its first use through the proxy — is bound whenever it is used, from that
+  state rather than from the moment the flag was set: the request is served, and the bind, under
+  the account lock, re-reads the state. A bind that fails (a lock timeout, a busy account, the
+  process exiting) is tried again at the key's next use.
+- *Keys written afterwards* are bound where every key is written (`registerPublicKeyService`),
+  under the account lock, from the account's setting and whether the key is a web key: a web
+  sign-in, a re-registration of an unbound web key, and a rotation of one all come out bound.
+- *Turning it off* returns to ordinary 90-day keys only the bound keys not yet expired — live, or
+  still waiting on a second factor — and **revokes** the others in the same transaction (their
+  streams close): an expired bound key, inside its renewal grace or past it, parked behind a second
+  factor or not, could only have been renewed with the passkey, and turning binding off never
+  hands it a new life. A parked one loses its pending mark, so its challenge activates nothing.
+- *The sweep* (`auth.mfa.sweep`) revokes bound keys past their grace daily, so an expired bound key
+  does not linger as an "active" row.
+- *Signing out* accepts a bound key that has expired but is still inside its grace, admitted as
+  renewal admits it, and revokes it; the proxy clears the cookies whenever sign-out revoked the key
+  or the backend answers 401 to the session the request presented. A key past its grace gets the
+  answer any dead key gets, and the cookies are cleared all the same. A 401 to a sign-out that
+  presented no session — a cross-site form POST arrives without the `SameSite=Lax` cookie — clears
+  nothing. On a 5xx, or when the backend cannot be reached,
+  the cookies are kept — the key may still be live, and clearing them would leave it signing in a
+  copy the browser no longer shows — and the user signs out again.
+
+**An owner who lost every passkey.** A bound session cannot be renewed without one, and adding a
+passkey asks the passkey proof — so the way back goes through turning binding off:
+
+- *With a password*: sign in with it (the new session is bound, live for its short life), turn
+  binding off with the password (`disableSessionBinding(api, { currentPassword })`), then add a
+  passkey and turn binding on again.
+- *With a verified e-mail and no password*: reset the password by e-mail
+  ([Password reset](#password-reset-verified-email)), then the same.
+- *With neither*: only the operator. `resetSessionBindingService(userId)` turns binding off with
+  no proof and releases the keys as turning it off does; it is a service, not a route — the
+  application decides who may call it. `resetSecondFactorService(userId)` does not touch binding.
+
+<a id="letting-another-credential-in"></a>
+**Letting another credential in.** A copy of a bound cookie works until its key expires. A
+session that could, in those hours, hand out a credential that outlives its key would make the
+copy permanent — so on an account with binding on, every procedure by which a session lets
+another credential in asks a **passkey assertion made for that procedure**. A second factor or
+the password does not satisfy it; binding's premise is the passkey. Accounts without binding are
+not asked. The assertion must have **verified the person** (a PIN, a biometric —
+`userVerified`), whatever `SPFN_AUTH_PASSKEY_USER_VERIFICATION` says; one that shows only
+presence is refused 403 like no proof at all. The same holds for renewing a bound session and for
+turning binding off with a passkey: each rests on the passkey as proof of the person, and a key
+with no PIN proves only that someone holds it.
+
+| Procedure | Route | Credential it would let in |
+|---|---|---|
+| `deviceApprove` | `POST /_auth/device/approve` | the waiting device's key — an ordinary 90-day key |
+| `linkIssue` | `POST /_auth/device/link/issue` (`confirm` is bound to the issuing key) | the redeeming device's key — an ordinary 90-day key |
+| `passkeyAdd` | `POST /_auth/passkeys/register/verify` | a passkey: renews bound sessions, signs in natively, turns binding off |
+| `passwordSet` | `PUT /_auth/password` on an account with no password | a first factor; changing an existing password proves that password and is not asked |
+| `socialLink` | `POST /_auth/oauth/:provider/link` | an identity that signs in natively; the callback refuses a bound account's link started without the proof |
+| `oauth2Consent` | `POST /_auth/oauth2/authorize` with `approve: true` | a grant (180 days) and refresh token tied to no key |
+| `opsTokenIssue` | `POST /_auth/ops-tokens` | an operator token that outlives every key, revoked only by `DELETE /_auth/ops-tokens/:id` |
+
+Turning binding on asks the same proof (`bindingEnable`) of every account, bound or not: binding
+then depends on exactly that assertion, so an account whose passkeys cannot make it is refused
+rather than bound into sessions it could never renew.
+
+The client asks `POST /_auth/session/passkey-proof/options { procedure }`, runs
+`navigator.credentials.get()`, and sends the assertion as the route's `passkeyResponse` —
+`provePasskey(api, procedure)` from `@spfn/auth/client` does the first two. Without it the
+route answers **403 `PASSKEY_PROOF_REQUIRED`** and writes nothing. Each procedure is its own
+challenge kind, stamped with the session that asked: an assertion made to approve a device
+does not issue a link, and only that session can spend it. It is checked before the write and
+spent under the account lock with it; an assertion that does not verify spends its challenge.
+The device a device-code or device-link sign-in lets in still gets an ordinary key: a TV or a
+CLI cannot renew with a passkey.
+
+What else a live session can do, and why it is not asked: `keys/rotate` and `session/renew`
+replace the session's own key under binding's rules; `POST /_auth/tokens` mints a 30-second
+one-time token tied to its key; `mfa/totp/enroll` and `mfa/recovery/regenerate` add a second
+factor, which signs nobody in. Promoting another account (`PATCH /_auth/admin/users/:userId/role`)
+and admin invitations are not asked either: they give authority to **another** account, not a
+credential of this one. Binding protects this account's sessions, not what an admin session may
+administer while it lives. An admin with binding on issues ops tokens from a browser that holds
+the passkey: the `spfn` CLI, which signs in with the password, is refused 403
+`PASSKEY_PROOF_REQUIRED` for such an account.
+
+**The renewal page.** Once the key has run out, the backend refuses with `KeyExpiredError`, and
+for a key renewal still admits — bound, not revoked, inside its grace — the refusal says so
+(`details.renewable: true`, defined once in `server/lib/admission-refusal.ts`). The proxy turns
+that refusal into 401 `SessionRenewalRequiredError` and keeps the cookies: the session is waiting
+on one prompt, not finished. Any other `KeyExpiredError` — an unbound key, a bound one past its
+grace — clears the session. The decision is the key row's, read off the refusal, never the
+cookie's `binding`: a key bound after its cookie was sealed (at its first use through the proxy,
+or when the owner turned binding on from another browser) still has a cookie saying unbound, and
+is asked to renew all the same. The renewed session is sealed from what `renew/verify` answers. A client component calls `renewSession(api)`, which runs the
 ceremony and gets a new bound key sealed into the cookie.
 
 The proxy never refuses on the cookie's own copy of the expiry. `keyExpiresAt` inside the cookie is
 a hint written at the last seal; the key row is the fact, and only a request that reached the
 backend can read it. That matters on the second device: turning binding **off** rewrites every
-active key to an ordinary 90-day one, but only the browser that asked gets a re-sealed cookie, so
+live bound key to an ordinary 90-day one, but only the browser that asked gets a re-sealed cookie, so
 another device keeps a cookie that says `passkey` with an expiry that no longer applies. Because
 nothing is decided from that hint, its next request is forwarded, the backend sees an ordinary key
 and answers 200 — no renewal prompt for a session that does not need one. What that device does
@@ -3431,7 +3628,9 @@ different browser family is refused 401 `SessionContextChangedError` and its thr
 cleared. Browsers do not share cookie jars, so that move cannot happen without a copy. The
 comparison is coarse on purpose — five families, `edge` / `chrome` / `firefox` / `safari` /
 `other`, and **no desktop/mobile axis** — so a version bump, a user-agent reduction and Android's
-"Request desktop site" are all the same browser.
+"Request desktop site" are all the same browser. The check covers only sessions whose cookie was
+sealed bound — a session bound after its cookie was sealed is checked from its first renewal;
+bundle 8 part 2 moves the check to the backend.
 
 - **Chrome on iOS and Safari on iOS are different families.** They are different cookie jars, so a
   session moving between them moved by being copied. An in-app `SFSafariViewController` shares

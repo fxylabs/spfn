@@ -44,7 +44,7 @@ import { admissionRefusalError, type AdmissionRefusal } from '../lib/admission-r
 import { usersRepository, userSettingsRepository, accountDeletionRequestsRepository } from '../repositories';
 import type { UserWithStoredRole } from '../repositories/users.repository';
 import { isLiveGrant } from '../repositories/oauth2-grants.repository';
-import { keyLiveness, type KeyLiveness } from '../lib/key-liveness';
+import { keyLiveness, type KeyLiveness, type KeyWithAccountEpoch } from '../lib/key-liveness';
 import { getBoundKeyRenewGraceMs } from '../lib/config';
 import { profileLocale } from '../lib/profile-locale';
 import type { StartingCredential } from '../lib/deferred-stamp';
@@ -260,7 +260,29 @@ export function admitsForRenewal(key: UserPublicKey): boolean
 {
     return key.binding === 'passkey'
         && key.expiresAt !== null
-        && Date.now() < key.expiresAt.getTime() + getBoundKeyRenewGraceMs();
+        && key.expiresAt > renewalGraceCutoff();
+}
+
+/**
+ * The grace rule's one boundary: a bound key that expired before this moment
+ * is past its grace. `admitsForRenewal` compares against it, and the sweep
+ * picks its candidates by it, so the two cannot disagree about the window.
+ */
+export function renewalGraceCutoff(): Date
+{
+    return new Date(Date.now() - getBoundKeyRenewGraceMs());
+}
+
+/**
+ * Whether a bound key is still renewable — what renewal admits: not revoked,
+ * of the account's current generation, and inside its grace
+ * (`admitsForRenewal`). A bound key that is not is a dead key whatever its row
+ * says, and turning binding off and the sweep revoke it as one
+ * (`session-binding.service`).
+ */
+export function isRenewable(key: KeyWithAccountEpoch): boolean
+{
+    return keyLiveness(key) !== 'revoked' && admitsForRenewal(key);
 }
 
 /**
@@ -333,7 +355,7 @@ async function admit(params: AdmitPrincipalParams, enrolment: RouteEnrolment | n
 
     // In the documented order; each step runs only when the one before it admitted.
     const refusal = await accountRefusal(read.account.user)
-        ?? credentialRefusal(read.liveness)
+        ?? credentialRefusal(read)
         ?? await secondFactorRefusal(params, enrolment);
 
     if (refusal !== null)
@@ -359,6 +381,8 @@ interface AdmissionRead
 {
     account: UserWithStoredRole;
     liveness: KeyLiveness;
+    /** An expired key that renewal still admits (`isRenewable`): its refusal says so. */
+    renewable?: boolean;
 }
 
 /** The account and the liveness of what it presented, from one read of the primary. */
@@ -395,14 +419,14 @@ function keyAdmission(
         return null;
     }
 
-    const liveness = row.key ? keyLiveness({ ...row.key, accountKeyEpoch: row.user.keyEpoch }) : 'revoked';
+    const key = row.key && { ...row.key, accountKeyEpoch: row.user.keyEpoch };
 
     if (credential.kind !== 'renewal')
     {
-        return { account: row, liveness };
+        return { account: row, liveness: key ? keyLiveness(key) : 'revoked', renewable: key !== null && isRenewable(key) };
     }
 
-    return { account: row, liveness: liveness !== 'revoked' && admitsForRenewal(row.key!) ? 'live' : 'revoked' };
+    return { account: row, liveness: key && isRenewable(key) ? 'live' : 'revoked' };
 }
 
 /**
@@ -463,14 +487,16 @@ export async function accountRefusal(user: Pick<User, 'id' | 'status' | 'deletio
 }
 
 /** Step 2. Revocation is told apart from expiry because some doors answer them differently. */
-function credentialRefusal(liveness: KeyLiveness): AdmissionRefusal | null
+function credentialRefusal({ liveness, renewable }: AdmissionRead): AdmissionRefusal | null
 {
     if (liveness === 'live')
     {
         return null;
     }
 
-    return { reason: liveness === 'expired' ? 'credentialExpired' : 'credentialRevoked' };
+    return liveness === 'expired'
+        ? { reason: 'credentialExpired', renewable: renewable === true }
+        : { reason: 'credentialRevoked' };
 }
 
 /** Step 3, for every credential but renewal (see `admitPrincipal`). */

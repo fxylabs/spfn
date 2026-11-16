@@ -57,7 +57,7 @@ import { eq, sql } from 'drizzle-orm';
 
 import { setupTestDb, teardownTestDb, clearTables, getTestDb, isDatabaseAvailable } from '../helpers/db';
 import * as serverEntry from '@/server';
-import { FixtureAuthenticator } from '../helpers/webauthn-fixture';
+import { enableBinding, FixtureAuthenticator } from '../helpers/webauthn-fixture';
 import {
     mfaRecoveryCodes,
     mfaTotp,
@@ -593,7 +593,7 @@ describe.skipIf(!dbAvailable)('deferred artefacts are stamped and re-admitted at
         const authenticator = await FixtureAuthenticator.create();
 
         expect((await finishPasskey(a, await startPasskey(a), authenticator)).status).toBe(200);
-        expect((await post('/_auth/session/binding', { mode: 'passkey' }, a.authorization)).status).toBe(200);
+        expect((await enableBinding((path, body) => post(path, body, a.authorization), authenticator, { origin: ORIGIN, rpId: RP_ID })).status).toBe(200);
 
         const b = await signIn();
 

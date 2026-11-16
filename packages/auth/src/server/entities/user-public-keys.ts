@@ -120,13 +120,32 @@ export const userPublicKeys = authSchema.table(
 
         // Whether this key is bound to a passkey — decided by the server when the
         // key was registered, from the owner's session_binding setting and
-        // whether the request came through the trusted Next.js proxy
+        // whether it is a web key (viaWebProxy, below); turning the setting on
+        // binds the account's live web keys, turning it off unbinds those not yet
+        // expired and revokes the rest
         // 'none' (default): a 90-day key, the behaviour that predates #97
         // 'passkey': a short-lived key; only a fresh WebAuthn assertion renews it,
         //   and a login that re-registers it does not extend its expiry
         // Never read off a request body, and `platform` is not consulted: that
         // field is display-only and a native client may declare any value it likes
         binding: enumText('binding', SESSION_BINDINGS).notNull().default('none'),
+
+        // Whether this key is a web session's — what session binding applies to
+        // true: the registering request came through the trusted Next.js proxy
+        //   (proxy-guard's `clientType === 'web'`, never a header the caller
+        //   writes), or the key replaced one that did — a rotation or a renewal
+        //   is the same device — or any request signed by it did: the
+        //   throttled last-use statement sets it (`updateLastUsedById`), and a
+        //   key of a bound account that turns web there is bound then
+        // false: no request of this key has come through the proxy — a native
+        //   or SDK client, a device-code device, an application profile's own
+        //   credential — or none has since the column existed
+        // Only ever set, never cleared. Turning binding on binds every live key
+        // that has this set, and only those; a key with `binding = 'passkey'`
+        // always has it set. The migration that added it backfilled it from what
+        // the rows already proved: bound, or `last_seen_ip` written (which only
+        // an attested proxy request does)
+        viaWebProxy: boolean('via_web_proxy').notNull().default(false),
 
         // What the client said about itself on the last request signed by this key.
         //

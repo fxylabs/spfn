@@ -58,6 +58,7 @@ import {
     setSessionBinding,
     getSessionBinding,
     sessionBindingDisableOptions,
+    passkeyProofOptions,
 } from './auth/session-binding';
 import { sessionRenewOptions, sessionRenewVerify } from './auth/session-renew';
 import {
@@ -192,6 +193,7 @@ const authRoutes = {
     setSessionBinding,
     getSessionBinding,
     sessionBindingDisableOptions,
+    passkeyProofOptions,
     // Session renewal routes (#97) — public, like the sign-in paths
     sessionRenewOptions,
     sessionRenewVerify,

@@ -34,7 +34,7 @@ import {
     RecentAuthenticationRequiredError,
 } from '@spfn/auth/errors';
 import { authLogger } from '../logger';
-import { getPasskeyConfig, isSignInProvider } from '../lib/config';
+import { getPasskeyConfig, isSignInProvider, type PasskeyConfig } from '../lib/config';
 import {
     challengeIsLive,
     liveChallenge,
@@ -43,6 +43,7 @@ import {
     spendChallenge,
 } from './webauthn-challenge.service';
 import { stampFor, stampOf, type DeferredStamp } from '../lib/deferred-stamp';
+import { assertPasskeyProven } from '../lib/passkey-proof';
 import { admitDeferred, deferredRefusalError, startingCredentialOf } from './deferred-admission.service';
 import { accountRefusal, admissionRefusalError, signingKeyOf, type PrincipalCredential } from './admission.service';
 import {
@@ -56,6 +57,7 @@ import {
 import type {
     AuthenticationResponseJSON,
     PresentedResponse,
+    RegistrationOutcome,
     PublicKeyCredentialCreationOptionsJSON,
     PublicKeyCredentialRequestOptionsJSON,
 } from '../lib/webauthn';
@@ -66,7 +68,7 @@ import {
     usersRepository,
 } from '../repositories';
 import type { Passkey, PasskeyDeviceType } from '../entities/passkeys';
-import type { WebAuthnChallenge, WebAuthnChallengeKind } from '../entities/webauthn-challenges';
+import type { PasskeyProofProcedure, WebAuthnChallenge, WebAuthnChallengeKind } from '../entities/webauthn-challenges';
 import type { User } from '../entities/users';
 import { getDummyPasswordHash, verifyPassword } from '../helpers';
 import type { KeyAlgorithmType, KeyPlatformType } from '../types';
@@ -75,7 +77,6 @@ import { assertEnrolmentProven, assertStepUp, mfaEnrolledForUser, mfaStatusServi
 import { assertNotLastListedFactor, isEnrolmentOnly, secondFactorEnrolmentFields } from './second-factor-policy.service';
 import { isMethodListed } from '../lib/second-factor-policy';
 import type { PasskeyAssertionProof } from '../lib/passkey-assertion';
-import { decideKeyBinding } from '../lib/key-policy';
 import { updateLastLoginService } from './user.service';
 import { authLoginEvent, passkeyEnrolledEvent, passkeyRevokedEvent } from '../events';
 import { loginBindingFields, type LoginResult } from './auth.service';
@@ -441,6 +442,11 @@ export interface FinishPasskeyEnrollmentParams
     /** The attestation as it arrived; read by `parseAttestation`. */
     response: unknown;
     label?: string;
+    /**
+     * A passkey assertion made for this procedure (`passkeyAdd`), which an
+     * account with session binding on must send (`assertPasskeyProven`).
+     */
+    passkeyResponse?: unknown;
 }
 
 export interface FinishPasskeyEnrollmentResult
@@ -460,11 +466,17 @@ export interface FinishPasskeyEnrollmentResult
 /**
  * Step 2 of enrollment — verify the attestation and keep the credential.
  *
- * Runs under `Transactional()`. The challenge is read, the attestation
- * verified, and then — under the account lock — the challenge is spent and the
- * row written together: a failure after the spend, the lock's own
+ * The challenge is read, the attestation verified, and then — in one
+ * transaction, under the account lock — the challenge is spent and the row
+ * written together: a failure after the spend, the lock's own
  * `AccountBusyError` included, leaves the challenge live and the ceremony
  * retryable, while a success can never be replayed.
+ *
+ * An account with session binding on adds a passkey only with an assertion of
+ * one it already holds, made for this procedure (`lib/passkey-proof.ts`): a
+ * passkey of the copy's own would renew bound sessions, sign in natively and
+ * turn binding off. It is checked before the transaction (a failed one spends
+ * its challenge) and spent under the lock.
  *
  * In the policy's enrolment-only state (#309) with `'passkey'` listed, the new
  * passkey is marked as the second factor in the same transaction — when the
@@ -483,7 +495,7 @@ export interface FinishPasskeyEnrollmentResult
  * options were asked for (au7-A3).
  *
  * @throws StepUpRequiredError | RecentAuthenticationRequiredError | PasskeyChallengeError
- *   | PasskeyVerificationError | PasskeyAlreadyRegisteredError
+ *   | PasskeyVerificationError | PasskeyAlreadyRegisteredError | PasskeyProofRequiredError
  */
 export async function finishPasskeyEnrollmentService(
     params: FinishPasskeyEnrollmentParams,
@@ -515,11 +527,32 @@ export async function finishPasskeyEnrollmentService(
         throw new PasskeyVerificationError();
     }
 
+    const proof = await checkPasskeyProof({
+        userId: params.userId,
+        credential: params.credential,
+        procedure: 'passkeyAdd',
+        response: params.passkeyResponse,
+    });
+
+    return await runInTransaction(
+        () => keepPasskey(params, challenge, verified, proof),
+        { context: 'auth:passkey-enrol' },
+    );
+}
+
+/** The verified registration, kept under the account lock. */
+async function keepPasskey(
+    params: FinishPasskeyEnrollmentParams,
+    challenge: string,
+    verified: RegistrationOutcome,
+    proof: RenewalProof | null,
+): Promise<FinishPasskeyEnrollmentResult>
+{
     // The attestation verified, the account is locked before the challenge is
     // spent and the row written: an operator's `resetSecondFactorService`
     // either lands first and this enrols after it, or waits and revokes what
     // this enrolled.
-    await usersRepository.lockAccount(params.userId);
+    await assertPasskeyProven(await usersRepository.lockAccount(params.userId), proof);
     await assertMayRegister(challenge, params);
     assertChallenge(await spendChallenge(challenge, 'registration', params.userId), 'registration');
 
@@ -633,18 +666,30 @@ export async function startRenewalCeremonyService(
 ): Promise<PublicKeyCredentialRequestOptionsJSON>
 {
     return await buildAuthenticationOptions({
-        config: getPasskeyConfig(),
+        config: renewalGradePasskeyConfig(),
         challenge: await mintStampedChallenge(ceremony, stamp),
     });
 }
 
-/** The two renewal-grade ceremonies, each its own challenge kind. */
-export type RenewalGradeCeremony = Extract<WebAuthnChallengeKind, 'renewal' | 'bindingOff'>;
+/**
+ * The renewal-grade ceremonies, each its own challenge kind: renewal,
+ * binding-off, and the passkey proof of each procedure that lets another
+ * credential into a bound account (`PASSKEY_PROOF_PROCEDURES`).
+ */
+export type RenewalGradeCeremony = Extract<WebAuthnChallengeKind, 'renewal' | 'bindingOff' | PasskeyProofProcedure>;
 
 /** The route each renewal-grade ceremony completes on (`ROUTE_ENROLMENT`). */
 const COMPLETING_ROUTE = {
     renewal: 'sessionRenewVerify',
     bindingOff: 'setSessionBinding',
+    deviceApprove: 'approveDeviceAuth',
+    linkIssue: 'issueDeviceLink',
+    passkeyAdd: 'passkeyRegisterVerify',
+    passwordSet: 'changePassword',
+    socialLink: 'oauthLinkStart',
+    oauth2Consent: 'createOAuth2AuthorizationCode',
+    opsTokenIssue: 'issueOpsToken',
+    bindingEnable: 'setSessionBinding',
 } as const satisfies Record<RenewalGradeCeremony, string>;
 
 export interface RenewalAssertionParams
@@ -711,6 +756,37 @@ export async function checkRenewalAssertionService(params: RenewalAssertionParam
     return { spend: () => spendRenewalProof(params, challenge, verified) };
 }
 
+export interface PasskeyProofParams
+{
+    userId: number;
+    /** The credential this request presented (`getAuth(c).credential`): the one the challenge was asked with. */
+    credential: PrincipalCredential;
+    procedure: PasskeyProofProcedure;
+    /** The assertion, as the request body carried it (`passkeyResponse`); absent when none was sent. */
+    response?: unknown;
+}
+
+/**
+ * Outside any transaction: whether the assertion a request sent to let another
+ * credential in verified for its procedure (`lib/passkey-proof.ts`), as a
+ * proof to spend under the account lock (`assertPasskeyProven`) — or null when
+ * none was sent or it did not verify (its challenge is then spent).
+ */
+export async function checkPasskeyProof(params: PasskeyProofParams): Promise<RenewalProof | null>
+{
+    if (params.response === undefined)
+    {
+        return null;
+    }
+
+    return await checkRenewalAssertionService({
+        userId: params.userId,
+        ceremony: params.procedure,
+        credential: params.credential,
+        response: params.response,
+    });
+}
+
 interface VerifiedAssertion
 {
     passkey: Passkey;
@@ -724,6 +800,14 @@ interface VerifiedAssertion
  * is the condition §5.3 asks for, and it holds the line a layer deeper than the
  * renewal middleware does: even a caller who somehow reached this step for a key
  * that is not theirs cannot finish the ceremony with their own passkey.
+ *
+ * And the assertion must have verified the person (`userVerified`), whatever
+ * `SPFN_AUTH_PASSKEY_USER_VERIFICATION` says: every renewal-grade ceremony —
+ * renewing a bound session, turning binding off, the passkey proof of a
+ * procedure that lets another credential in — rests on the passkey as proof of
+ * the person, and an assertion without verification proves only that someone
+ * holds the key. The rule bundle 6 applies to a second factor, judged from the
+ * assertion, not from the configuration ("what a passkey proves").
  */
 async function verifiedRenewalAssertion(
     userId: number,
@@ -738,13 +822,25 @@ async function verifiedRenewalAssertion(
     }
 
     const outcome = await verifyAuthentication({
-        config: getPasskeyConfig(),
+        config: renewalGradePasskeyConfig(),
         response: assertion.response,
         expectedChallenge: assertion.challenge,
         credential: passkey,
     });
 
-    return outcome.verified ? { passkey, newCounter: outcome.newCounter } : null;
+    return outcome.verified && outcome.userVerified ? { passkey, newCounter: outcome.newCounter } : null;
+}
+
+/**
+ * The passkey configuration of every renewal-grade ceremony: the configured
+ * one with user verification required — asked of the browser in the options
+ * (`startRenewalCeremonyService`), so it does not skip a verification the
+ * key could have done, and of the assertion here. Sign-in keeps the
+ * configured value.
+ */
+function renewalGradePasskeyConfig(): PasskeyConfig
+{
+    return { ...getPasskeyConfig(), userVerification: 'required' };
 }
 
 /** Spend the challenge of an assertion that did not verify, in a transaction of its own (au9-N7). */
@@ -894,7 +990,7 @@ async function startSession(
         missingAccount: () => new PasskeyVerificationError(),
         ip: params.ip,
         userAgent: params.userAgent,
-        binding: decideKeyBinding(user.sessionBinding, params.webProxy),
+        webProxy: params.webProxy,
         replaces: params.replacementProof ? { proof: params.replacementProof } : undefined,
         loginEvent: {
             provider: 'passkey',

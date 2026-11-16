@@ -32,6 +32,8 @@ import {
     TEST_RESOURCE,
 } from '../helpers/oauth2';
 import { oauth2GrantsRepository } from '@/server/repositories';
+import { users } from '@/server/entities';
+import { eq } from 'drizzle-orm';
 
 const dbAvailable = await isDatabaseAvailable();
 
@@ -333,6 +335,20 @@ describe.skipIf(!dbAvailable)('OAuth2 authorize, API side (8b)', () =>
         expect(issued.code).toHaveLength(43);
         expect(issued.redirectUri).toBe('http://127.0.0.1:7777/callback');
         expect(issued.state).toBe('opaque state with spaces & symbols');
+    });
+
+    it('signed in on an account with session binding on, POST approve without a passkey proof → 403 PASSKEY_PROOF_REQUIRED, no grant', async () =>
+    {
+        await getTestDb().update(users).set({ sessionBinding: 'passkey' }).where(eq(users.id, userId));
+
+        const response = await decideAuthorize(app, authorization, {
+            client_id: clientId,
+            approve: true,
+        }, pkcePair('bound').challenge);
+
+        expect(response.status).toBe(403);
+        expect((await response.json() as Envelope).error?.code).toBe('PasskeyProofRequiredError');
+        expect(await oauth2GrantsRepository.listLiveByUserId(userId)).toEqual([]);
     });
 
     it('signed in, POST approve with no state → a code and no state', async () =>

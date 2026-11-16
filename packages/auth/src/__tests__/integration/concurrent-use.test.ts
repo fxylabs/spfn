@@ -391,6 +391,6 @@ describe.skipIf(!dbAvailable)('the concurrent-use signal (case table 6f)', () =>
         await settle();
 
         expect(write).toHaveBeenCalled();
-        expect(logged).toHaveBeenCalledWith('Failed to update lastUsedAt', expect.any(Error));
+        expect(logged).toHaveBeenCalledWith('Failed to record key use', expect.any(Error));
     });
 });

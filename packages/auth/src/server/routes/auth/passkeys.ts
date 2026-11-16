@@ -20,7 +20,7 @@ import { KEY_ALGORITHM } from '../../types';
 import { byIpAndCaller } from '../../lib/rate-limit-keys';
 import { deviceProvenance } from '../../lib/device-provenance';
 import { PASSKEY_LABEL_MAX_LENGTH } from '../../entities/passkeys';
-import { DeviceNameSchema, PlatformSchema } from '../schema';
+import { DeviceNameSchema, PasskeyProofResponseSchema, PlatformSchema } from '../schema';
 import {
     finishPasskeyEnrollmentService,
     finishPasskeyLoginService,
@@ -106,9 +106,13 @@ export const passkeyRegisterOptions = route.post('/_auth/passkeys/register/optio
 /**
  * POST /_auth/passkeys/register/verify - Finish enrolling a passkey
  *
- * `Transactional()`: spending the challenge and writing the row commit together,
- * so a refusal after the spend leaves the ceremony retryable and a success can
- * never be replayed.
+ * The service spends the challenge and writes the row in one transaction, so a
+ * refusal after the spend leaves the ceremony retryable and a success can never
+ * be replayed. No route-wide `Transactional()`: an account with session binding
+ * on sends `passkeyResponse` — an assertion of a passkey it already holds, over
+ * `session/passkey-proof/options { procedure: 'passkeyAdd' }`, or 403
+ * `PASSKEY_PROOF_REQUIRED` — and one that does not verify spends its challenge
+ * before the refusal (au9-N7).
  *
  * Under a required second factor, a session that may only enrol has the new
  * passkey marked as its second factor in the same transaction, and the answer
@@ -120,13 +124,13 @@ export const passkeyRegisterVerify = route.post('/_auth/passkeys/register/verify
         body: Type.Object({
             response: CredentialResponseSchema,
             label: Type.Optional(PasskeyLabelSchema),
+            passkeyResponse: Type.Optional(PasskeyProofResponseSchema),
         }),
     })
     .use([
         rateLimitPolicy('auth-passkey-register-verify', {
             limit: 10, windowMs: 60_000, by: byIpAndCaller({ ipLimit: 100 }),
         }),
-        Transactional(),
     ])
     .handler(async (c) =>
     {
@@ -138,6 +142,7 @@ export const passkeyRegisterVerify = route.post('/_auth/passkeys/register/verify
             credential,
             response: body.response,
             label: body.label,
+            passkeyResponse: body.passkeyResponse,
         });
     });
 

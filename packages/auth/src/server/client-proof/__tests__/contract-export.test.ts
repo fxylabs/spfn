@@ -42,6 +42,7 @@ import {
     AccountNotFoundError,
     OAuthEmailInUseError,
     OAuthProviderLinkOnlyError,
+    PasskeyProofRequiredError,
     SignupDisabledError,
 } from '../../../errors/auth-errors';
 import { CLIENT_PROOF_CONTENT_TYPE, CLIENT_PROOF_HEADERS } from '../admission';
@@ -1485,6 +1486,21 @@ describe('declared errors match the refusals', () =>
         expect(entry?.surface).toBe('rest');
     });
 
+    it('the passkey-proof refusal carries the status its error class carries', () =>
+    {
+        // Added in 0.14.6: a bound account's device approval without a passkey
+        // assertion made for it. Compared with its class for the key-algorithm
+        // refusal's reason.
+        const thrown = new PasskeyProofRequiredError();
+        const entry = declared.find((candidate) => candidate.code === thrown.name);
+
+        expect(entry).toBeDefined();
+        expect(entry?.httpStatus).toBe(thrown.statusCode);
+        expect(entry?.httpStatus).toBe(403);
+        expect(entry?.retryable).toBe(false);
+        expect(entry?.surface).toBe('rest');
+    });
+
     it('C2: the email-in-use refusal carries the status its error class carries', () =>
     {
         // Added in 0.13.7 (#156), compared with its class for the same reason
@@ -1663,9 +1679,9 @@ describe('declared proof rules match the implementation', () =>
         replayWindowMillis: number;
     };
 
-    it('the contract line is the revision that lists KeyRevokedError and AccountNotFoundError (0.14.5, after SecondFactorLockedError\'s 0.14.4)', () =>
+    it('the contract line is the revision that lists PasskeyProofRequiredError (0.14.6, after KeyRevokedError\'s and AccountNotFoundError\'s 0.14.5)', () =>
     {
-        expect(bundle.contractVersion).toBe('0.14.5');
+        expect(bundle.contractVersion).toBe('0.14.6');
     });
 
     it('the supported range floor is the current minor, as the 0.x rule has it', () =>

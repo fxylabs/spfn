@@ -26,6 +26,7 @@ const LINK: OAuthLinkState = {
     codeVerifier: 'c'.repeat(43),
     startedByKeyId: 'd'.repeat(36),
     keyEpoch: 3,
+    passkeyProven: false,
 };
 
 describe('OAuth link state', () =>

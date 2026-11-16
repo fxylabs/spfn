@@ -1346,6 +1346,10 @@ import { authApi } from '@spfn/auth';
 await authApi.logout.call({});
 ```
 
+A bound session (below) whose key has expired but is still inside its renewal grace can sign out
+too: the key is revoked rather than left renewable. Past the grace the key is already dead, and the
+proxy clears the cookies either way.
+
 ### Session TTL
 
 Configure via environment variable:
@@ -1403,9 +1407,21 @@ What turning it on changes:
   attested addresses at once. Show it and notify on it — it is never a refusal, because
   addresses change legitimately several times an hour.
 
-Turning it **off** asks for a fresh passkey assertion or the account password —
+Turning it on binds **every** web session of the account — the copy the owner may be reacting
+to included — not only the one that asked; native and device-code keys are untouched. Turning
+it **off** asks for a fresh passkey assertion or the account password —
 `disableSessionBinding(api)` from `@spfn/auth/client` — and never for key age alone, since a
-cookie copied minutes after a sign-in carries exactly that.
+cookie copied minutes after a sign-in carries exactly that. It returns the bound keys not yet
+expired to ordinary ones and revokes those already expired, inside their grace or past it — only a
+passkey could have renewed them — and the daily `auth.mfa.sweep` revokes those past their grace:
+a bound key past its grace is a dead key. The owner's other browsers whose bound session had
+already expired sign in again.
+
+While binding is on, a session lets no other credential in without the passkey: approving a
+device-code sign-in, issuing a device link, adding a passkey, setting a first password, linking a
+social identity and consenting to an OAuth2 client each answer 403 `PASSKEY_PROOF_REQUIRED` until
+the request carries an assertion made for it — `provePasskey(api, procedure)` from
+`@spfn/auth/client` runs the ceremony.
 
 > It needs a deployment where `proxy-guard` is configured: a key is bound only on a request
 > tagged `clientType: 'web'`, the one signal the backend has that a request came through the

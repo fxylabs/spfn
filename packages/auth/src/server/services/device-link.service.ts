@@ -77,6 +77,9 @@ import {
 } from '../lib/device-code';
 import { DEFAULT_KEY_ALGORITHM, KEY_FINGERPRINT_PREFIX_LENGTH } from './key.service';
 import { completeDeviceLogin, type ParkedDeviceKey, type PollDeviceAuthResult } from './device-auth.service';
+import type { PrincipalCredential } from './admission.service';
+import { assertPasskeyProven } from '../lib/passkey-proof';
+import { checkPasskeyProof } from './passkey.service';
 
 /** The signed-in device a link belongs to, read from the request's principal. Never from a body. */
 export interface DeviceLinkIssuer
@@ -84,6 +87,18 @@ export interface DeviceLinkIssuer
     userId: number;
     /** The key that signed the request. */
     keyId: string;
+}
+
+/** What an issue request proves beyond its signature: a passkey, when the account is bound. */
+export interface DeviceLinkIssueProof
+{
+    /** The credential the issue was signed with (`getAuth(c).credential`): a passkey proof is stamped with it. */
+    credential: PrincipalCredential;
+    /**
+     * A passkey assertion made for this procedure (`linkIssue`), which an
+     * account with session binding on must send (`assertPasskeyProven`).
+     */
+    passkeyResponse?: unknown;
 }
 
 export interface IssueDeviceLinkResult
@@ -310,15 +325,43 @@ function describeDevice(record: DeviceLink): Partial<DeviceLinkStatusResult>
  * Issue a link from the signed-in device that asked, replacing any link that
  * device still has in play — one live link per issuing key, so a screen that was
  * closed without cancelling leaves nothing behind that a later redeem could use.
+ *
+ * An account with session binding on issues only with a passkey assertion made
+ * for it (`passkey-proof.service`): the redeeming device's key is an ordinary
+ * 90-day key, which a copied bound session must not be able to mint for
+ * itself. The assertion is checked first, outside any transaction (a failed
+ * one spends its challenge), and spent under the account lock with the write.
+ *
+ * @throws PasskeyProofRequiredError when the account is bound and no proof holds
  */
-export async function issueDeviceLinkService(issuer: DeviceLinkIssuer): Promise<IssueDeviceLinkResult>
+export async function issueDeviceLinkService(
+    issuer: DeviceLinkIssuer,
+    proof: DeviceLinkIssueProof,
+): Promise<IssueDeviceLinkResult>
 {
+    const passkeyProof = await checkPasskeyProof({
+        userId: issuer.userId,
+        credential: proof.credential,
+        procedure: 'linkIssue',
+        response: proof.passkeyResponse,
+    });
+
     // The issuer's account lock (`usersRepository.lockAccount`) first, as every
-    // writer of its credential state takes it: the route's transaction holds it
-    // through the insert below, so a second issue from the same key waits here
-    // and then expires the link this one inserts, and a password change or a
+    // writer of its credential state takes it: this transaction holds it
+    // through the insert, so a second issue from the same key waits here and
+    // then expires the link this one inserts, and a password change or a
     // revoke-all that expires links and revokes keys queues on the same row.
-    await usersRepository.lockAccount(issuer.userId);
+    return await runInTransaction(async () =>
+    {
+        await assertPasskeyProven(await usersRepository.lockAccount(issuer.userId), passkeyProof);
+
+        return await insertLink(issuer);
+    }, { context: 'auth:device-link-issue' });
+}
+
+/** Expire the issuing key's live link and insert a new one, under the account lock. */
+async function insertLink(issuer: DeviceLinkIssuer): Promise<IssueDeviceLinkResult>
+{
     await deviceLinksRepository.expireLiveByIssuerKey(issuer.userId, issuer.keyId);
 
     const expiresAt = new Date(Date.now() + getDeviceLinkConfig().ttlMs);

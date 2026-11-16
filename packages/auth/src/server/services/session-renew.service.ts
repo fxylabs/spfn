@@ -172,7 +172,8 @@ async function renewKey(params: FinishSessionRenewParams, key: UserPublicKey, us
         // the same family, so `registered_ua_family` carries over unchanged.
         ip: key.registeredIp ?? undefined,
         userAgent: key.registeredUserAgent ?? undefined,
-        binding: 'passkey',
+        // No `webProxy`: the replacement is the same device as the bound key it
+        // replaces, a web key, so it is bound while the account is.
         // The request is signed by the expiring key, which is the replacement's
         // proof. Its revocation is the race winner: two verifies that both got
         // past their own challenges meet at the same conditional UPDATE, and the

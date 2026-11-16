@@ -13,7 +13,7 @@ import { Hono } from 'hono';
 import { and, eq, desc } from 'drizzle-orm';
 import { setupTestDb, teardownTestDb, clearTables, getTestDb, isDatabaseAvailable } from '../helpers/db';
 import { verificationCodes } from '@/server/entities';
-import { generateKeyPair } from '@/server/lib/crypto';
+import { generateClientToken, generateKeyPair } from '@/server/lib/crypto';
 
 // OTP delivery is a no-op in tests; the code is persisted before delivery, so
 // the verify step reads it straight from the database.
@@ -152,8 +152,11 @@ describe.skipIf(!dbAvailable)('API Flow Integration', () =>
         const loginData = await loginResponse.json();
         expect(loginData.userId).toBeDefined();
 
-        // Logout returns 204 No Content (idempotent even without a valid session)
-        const logoutResponse = await app.request('/_auth/logout', { method: 'POST' });
+        // Logout, signed by the session's key, returns 204 No Content
+        const logoutResponse = await app.request('/_auth/logout', {
+            method: 'POST',
+            headers: { Authorization: `Bearer ${generateClientToken({ keyId: loginKey.keyId }, loginKey.privateKey, 'ES256', { expiresIn: '5m' })}` },
+        });
         expect(logoutResponse.status).toBe(204);
     });
 

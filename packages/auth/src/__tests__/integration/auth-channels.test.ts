@@ -601,7 +601,10 @@ describe.skipIf(!dbAvailable)('An app chooses which sign-in channels exist (#308
             configureChannels(ALL_OFF);
 
             await startDeviceAuthService({ ...deviceKeyBody(), deviceName: 'TV', platform: 'desktop' });
-            await runInTransaction(() => issueDeviceLinkService({ userId: issuerId, keyId: 'c12-issuer-key' }));
+            await runInTransaction(() => issueDeviceLinkService(
+                { userId: issuerId, keyId: 'c12-issuer-key' },
+                { credential: { kind: 'deviceKey', keyId: 'c12-issuer-key' } },
+            ));
             await requestSignupLinkService({ email: 'c12-new@ch308.test' });
             await requestPasswordResetService({ email: 'c12@ch308.test' });
             await sendVerificationCodeService({ target: 'c12-code@ch308.test', targetType: 'email', purpose: 'registration' });

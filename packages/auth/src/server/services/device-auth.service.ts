@@ -42,7 +42,7 @@ import {
     InvalidKeyFingerprintError,
     SecondFactorEnrolmentRequiredError,
 } from '@spfn/auth/errors';
-import { onAfterCommit } from '@spfn/core/db';
+import { onAfterCommit, runInTransaction } from '@spfn/core/db';
 import { getShutdownManager } from '@spfn/core/server';
 
 import { deviceAuthorizationsRepository, usersRepository } from '../repositories';
@@ -66,9 +66,10 @@ import {
     DEFAULT_KEY_ALGORITHM,
     KEY_FINGERPRINT_PREFIX_LENGTH,
 } from './key.service';
-import { decideKeyBinding } from '../lib/key-policy';
 import { updateLastLoginService } from './user.service';
-import { admitPrincipal } from './admission.service';
+import { admitPrincipal, type PrincipalCredential } from './admission.service';
+import { assertPasskeyProven } from '../lib/passkey-proof';
+import { checkPasskeyProof } from './passkey.service';
 import { loginBindingFields, type LoginResult } from './auth.service';
 import { mfaEnrolledForUser } from './mfa.service';
 import { secondFactorEnrolmentFields } from './second-factor-policy.service';
@@ -128,6 +129,15 @@ export interface ApproveDeviceAuthParams
 
     /** The device key the approver signed with — collection needs it still live. */
     keyId: string;
+
+    /** The credential the approval was signed with (`getAuth(c).credential`): a passkey proof is stamped with it. */
+    credential: PrincipalCredential;
+
+    /**
+     * A passkey assertion made for this procedure (`deviceApprove`), which an
+     * account with session binding on must send (`assertPasskeyProven`).
+     */
+    passkeyResponse?: unknown;
 }
 
 export interface DenyDeviceAuthParams
@@ -403,10 +413,36 @@ export async function getDeviceAuthInfoService(
  * a user approve without looking first can still show them what they just let
  * in — which is the moment someone talked into approving an attacker's device
  * has to notice and revoke it.
+ *
+ * An account with session binding on approves only with a passkey assertion
+ * made for it (`passkey-proof.service`): the device's key is an ordinary
+ * 90-day key, which a copied bound session must not be able to mint for
+ * itself. The assertion is checked first, outside any transaction (a failed
+ * one spends its challenge), and spent under the account lock with the write.
+ *
+ * @throws PasskeyProofRequiredError when the account is bound and no proof holds
  */
 export async function approveDeviceAuthService(
     params: ApproveDeviceAuthParams,
 ): Promise<DeviceAuthInfoResult>
+{
+    const proof = await checkPasskeyProof({
+        userId: params.userId,
+        credential: params.credential,
+        procedure: 'deviceApprove',
+        response: params.passkeyResponse,
+    });
+
+    return await runInTransaction(async () =>
+    {
+        await assertPasskeyProven(await usersRepository.lockAccount(params.userId), proof);
+
+        return await approveUnderLock(params);
+    }, { context: 'auth:device-approve' });
+}
+
+/** The approval itself, under the approver's account lock. */
+async function approveUnderLock(params: ApproveDeviceAuthParams): Promise<DeviceAuthInfoResult>
 {
     const userCode = normalizeUserCode(params.userCode);
     const record = assertActionable(
@@ -417,10 +453,9 @@ export async function approveDeviceAuthService(
     // the refusal message only. A record that moved between the two — a second
     // approver, a deny from another device — or one that passed its expiry in the
     // same gap fails the transition rather than overwriting it. It binds the
-    // record to the approving account, so that account's lock comes first
-    // (`usersRepository.lockAccount`): a revoke-all denies its approved records
+    // record to the approving account, so that account's lock is held
+    // (`approveDeviceAuthService`): a revoke-all denies its approved records
     // under the same lock.
-    await usersRepository.lockAccount(params.userId);
     const approved = await deviceAuthorizationsRepository.approve(record.id, params.userId, params.keyId);
 
     if (!approved)
@@ -709,7 +744,7 @@ export async function completeDeviceLogin(params: CompleteDeviceLoginParams): Pr
         missingAccount: params.missingAccount,
         ip: provenance.ip,
         userAgent: provenance.userAgent,
-        binding: decideKeyBinding(user.sessionBinding, provenance.webProxy),
+        webProxy: provenance.webProxy,
     });
 
     await updateLastLoginService(user.id);

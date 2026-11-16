@@ -33,7 +33,7 @@
 import type { Context } from 'hono';
 import { getClientIp } from '@spfn/core/middleware';
 
-import { attestedClientIp } from '../lib/device-provenance';
+import { recordKeyUse } from './record-key-use';
 import { keyLiveness } from '../lib/key-liveness';
 import {
     SerializableError,
@@ -63,7 +63,6 @@ import {
 import { ClientProofRefusal } from '../client-proof/refusal';
 import { clientProofRefusalResponse } from '../client-proof/refusal-response';
 import { getClientProofReplayStore } from '../client-proof/replay-store';
-import { readContextClientIdentity } from '../client-proof/version-middleware';
 import {
     admissionRefusalError,
     admitPrincipal,
@@ -389,11 +388,10 @@ async function admitClientProofProfile(c: Context): Promise<AuthContext>
         throw clientProofAdmissionRefusal(admission.refused);
     }
 
-    // Fire-and-forget, as the Bearer path does — and with the address under the
-    // same rule, so this surface neither erases `last_seen_ip` on every throttle
-    // window nor writes one a proxy did not attest.
-    keysRepository.updateLastUsedById(keyRecord.id, readContextClientIdentity(c), attestedClientIp(c))
-        .catch((err: unknown) => authLogger.middleware.error('Failed to update lastUsedAt', err));
+    // As the Bearer path does — and with the address under the same rule, so
+    // this surface neither erases `last_seen_ip` on every throttle window nor
+    // writes one a proxy did not attest.
+    recordKeyUse(c, keyRecord, admission.admitted.user);
 
     authLogger.middleware.info('API access', {
         userId: admission.admitted.user.id,

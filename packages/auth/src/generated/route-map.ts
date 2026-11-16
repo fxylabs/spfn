@@ -71,6 +71,7 @@ export const routeMap: Record<string, RouteInfo> = {
     setSessionBinding: { method: 'POST', path: '/_auth/session/binding' },
     getSessionBinding: { method: 'GET', path: '/_auth/session/binding' },
     sessionBindingDisableOptions: { method: 'POST', path: '/_auth/session/binding/disable/options' },
+    passkeyProofOptions: { method: 'POST', path: '/_auth/session/passkey-proof/options' },
     sessionRenewOptions: { method: 'POST', path: '/_auth/session/renew/options' },
     sessionRenewVerify: { method: 'POST', path: '/_auth/session/renew/verify' },
     issueOneTimeToken: { method: 'POST', path: '/_auth/tokens' },

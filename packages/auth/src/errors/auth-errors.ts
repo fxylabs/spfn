@@ -1960,6 +1960,37 @@ export class StepUpRequiredError extends ForbiddenError
 }
 
 /**
+ * Passkey Proof Required Error (403)
+ *
+ * An account with session binding on was asked to let another credential in —
+ * approve a device-code sign-in, issue a device link, add a passkey, set a
+ * first password, link a social identity, consent to an OAuth2 client —
+ * without a passkey assertion made for that procedure. Binding's premise is
+ * that a copied session cannot produce the passkey; a session that could hand
+ * out a credential outliving its own key without one would make the copy's
+ * hours a way in for good. A second factor or a password does not satisfy it.
+ * Turning binding on asks the same proof of every account (`bindingEnable`).
+ *
+ * 403 and not 401, for `StepUpRequiredError`'s reason. Clients branch on
+ * `code`: ask `POST /_auth/session/passkey-proof/options` with the procedure,
+ * run `navigator.credentials.get()`, and send the request again with the
+ * assertion as `passkeyResponse`.
+ */
+export class PasskeyProofRequiredError extends ForbiddenError
+{
+    readonly code = 'PASSKEY_PROOF_REQUIRED';
+
+    constructor(data: { message?: string; details?: Record<string, any> } = {})
+    {
+        super({
+            message: data.message || 'Confirm with your passkey before letting another device or credential into this account.',
+            details: data.details,
+        });
+        this.name = 'PasskeyProofRequiredError';
+    }
+}
+
+/**
  * Second Factor Enrolment Required Error (403)
  *
  * The application requires a second factor

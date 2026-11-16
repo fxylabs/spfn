@@ -100,6 +100,7 @@ const ALLOWED_SECRET_KEYS: Record<string, string> = {
     'mfaStepUpOptions:.extensions.hmacCreateSecret': 'a WebAuthn extension flag (boolean), not a secret',
     'mfaVerifyOptions:.extensions.hmacCreateSecret': 'a WebAuthn extension flag (boolean), not a secret',
     'sessionBindingDisableOptions:.extensions.hmacCreateSecret': 'a WebAuthn extension flag (boolean), not a secret',
+    'passkeyProofOptions:.extensions.hmacCreateSecret': 'a WebAuthn extension flag (boolean), not a secret',
     'sessionRenewOptions:.extensions.hmacCreateSecret': 'a WebAuthn extension flag (boolean), not a secret',
 };
 
@@ -134,6 +135,7 @@ const ALLOWED_OPAQUE: Record<string, string> = {
     'mfaStepUpOptions:.extensions.prf.evalByCredential:index-signature': 'WebAuthn PRF salts keyed by public credential id',
     'mfaVerifyOptions:.extensions.prf.evalByCredential:index-signature': 'WebAuthn PRF salts keyed by public credential id',
     'sessionBindingDisableOptions:.extensions.prf.evalByCredential:index-signature': 'WebAuthn PRF salts keyed by public credential id',
+    'passkeyProofOptions:.extensions.prf.evalByCredential:index-signature': 'WebAuthn PRF salts keyed by public credential id',
     'sessionRenewOptions:.extensions.prf.evalByCredential:index-signature': 'WebAuthn PRF salts keyed by public credential id',
     'listSettings:.settings[].value:unknown': 'a declared setting\'s value, checked against the key\'s schema',
     'getSetting:.value:unknown': 'a declared setting\'s value, checked against the key\'s schema',

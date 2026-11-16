@@ -22,7 +22,7 @@ import { defineRouter, route } from '@spfn/core/route';
 import { OAuthProviderError, OAuthProviderLinkOnlyError } from '@spfn/auth/errors';
 
 import { KEY_ALGORITHM, SOCIAL_PROVIDERS, type SessionBindingType, type SocialProvider } from '../../types';
-import { DeviceNameSchema, OAuthNativeProfileSchema, PlatformSchema } from '../schema';
+import { DeviceNameSchema, OAuthNativeProfileSchema, PasskeyProofResponseSchema, PlatformSchema } from '../schema';
 import { buildStartCookieName, namesEvictedByStart } from '../../lib/oauth/start-cookies';
 import { packageCookieAttributes } from '../../lib/cookie-attributes';
 import { providerErrorReason } from '../../../lib/oauth-error-reason';
@@ -971,7 +971,10 @@ function linkStartToken(description: string)
  *
  * Authenticated: the account is the session's. Gated like a passkey change —
  * step-up for an enrolled account, then recent authentication — because a linked
- * identity is one more way to sign in. The Next.js interceptor
+ * identity is one more way to sign in — and, for an account with session
+ * binding on, `passkeyResponse`, an assertion over
+ * `session/passkey-proof/options { procedure: 'socialLink' }` (else 403
+ * `PASSKEY_PROOF_REQUIRED`). The Next.js interceptor
  * (`oauthLinkInterceptor`) injects `nonce` and `startId` and sets the matching
  * CSRF cookie; the provider then returns to the ordinary callback route, which
  * tells a link state from a sign-in state by the key it opens under.
@@ -994,6 +997,7 @@ export const oauthLinkStart = route.post('/_auth/oauth/:provider/link')
             currentPassword: Type.Optional(LinkCurrentPasswordSchema),
             nonce: Type.Optional(linkStartToken('CSRF nonce (injected by interceptor)')),
             startId: Type.Optional(linkStartToken('Names the CSRF cookie (injected by interceptor)')),
+            passkeyResponse: Type.Optional(PasskeyProofResponseSchema),
         }),
     })
     .use([rateLimitPolicy('oauth-link', { limit: 10, windowMs: 60_000, by: byIpAndCaller({ ipLimit: 100 }) })])
@@ -1017,6 +1021,7 @@ export const oauthLinkStart = route.post('/_auth/oauth/:provider/link')
             returnUrl: body.returnUrl || '/',
             nonce: body.nonce,
             startId: body.startId,
+            passkeyResponse: body.passkeyResponse,
         });
     });
 

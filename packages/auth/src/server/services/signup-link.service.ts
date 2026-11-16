@@ -212,6 +212,8 @@ export interface CompleteSignupParams
     ip?: string;
     /** `user-agent` of the request, already truncated at the route. */
     userAgent?: string;
+    /** Whether proxy-guard recognised the trusted Next.js proxy (`deviceProvenance`). */
+    webProxy?: boolean;
 }
 
 /**
@@ -297,6 +299,7 @@ export async function completeSignupService(
         metadata: params.metadata,
         ip: params.ip,
         userAgent: params.userAgent,
+        webProxy: params.webProxy,
         channel: 'signup-link',
     });
 }

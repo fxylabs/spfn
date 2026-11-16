@@ -346,7 +346,7 @@ describe('second-factor policy (#309)', () =>
         // an enrolment-only session renews, and the renewed key is held to
         // enrolment on its next request. Its class says it is admitted.
         expect(Object.fromEntries(notGlobal.filter(key => !isPublic(key)).map(key => [key, ownAuthenticator(key)])))
-            .toEqual({ sessionRenewOptions: 'authForRenewal', sessionRenewVerify: 'authForRenewal', oauthFinalize: 'oauthFinalizeAuth' });
+            .toEqual({ logout: 'authForSignOut', sessionRenewOptions: 'authForRenewal', sessionRenewVerify: 'authForRenewal', oauthFinalize: 'oauthFinalizeAuth' });
 
         // Finalize's door hands every signed finalize to `authenticate` from its
         // own place in the chain: it is a registered gate, so the route's marker
@@ -359,6 +359,11 @@ describe('second-factor policy (#309)', () =>
         expect(readFileSync(join(__dirname, '..', '..', 'server', 'middleware', 'authenticate-for-renewal.ts'), 'utf8'))
             .not.toMatch(/assertSecondFactorAdmits|isEnrolmentOnly/);
         expect([classOf('sessionRenewOptions'), classOf('sessionRenewVerify')]).toEqual(['unchecked', 'unchecked']);
+
+        // Sign-out runs the global gate itself, registered as one, except for an
+        // expired bound key it admits as renewal does — so it keeps the class
+        // an enrolment-only session reaches it under (S4 in the integration suite).
+        expect(classOf('logout')).toBe('always');
 
         // A public route authenticates no session, so it can neither admit nor
         // refuse one, and is never an enrolment route — the marker answers only

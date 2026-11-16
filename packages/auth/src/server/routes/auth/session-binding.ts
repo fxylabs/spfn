@@ -22,10 +22,13 @@ import { route } from '@spfn/core/route';
 import { getAuth } from '../../helpers';
 import { byIpAndCaller } from '../../lib/rate-limit-keys';
 import { deviceProvenance } from '../../lib/device-provenance';
+import { PASSKEY_PROOF_PROCEDURES } from '../../entities/webauthn-challenges';
+import { PasskeyProofResponseSchema } from '../schema';
 import {
     disableSessionBindingService,
     enableSessionBindingService,
     getSessionBindingService,
+    startPasskeyProofService,
     startSessionBindingDisableService,
 } from '../../services';
 
@@ -47,10 +50,11 @@ const CurrentPasswordSchema = Type.String({
 /**
  * POST /_auth/session/binding - Turn session binding on or off
  *
- * On needs recent authentication and a live passkey to renew with; off needs a
- * fresh credential rather than key age, because a cookie copied minutes after a
- * sign-in satisfies key age and would otherwise be able to switch the protection
- * off. The 200 is what the Next.js interceptor re-seals the session cookie from,
+ * On needs recent authentication and the passkey proof (`bindingEnable`, as
+ * `passkeyResponse`) — an assertion that verified the person, which every
+ * renewal will ask; off needs a fresh credential rather than key age, because a
+ * cookie copied minutes after a sign-in satisfies key age and would otherwise be
+ * able to switch the protection off. The 200 is what the Next.js interceptor re-seals the session cookie from,
  * so the browser stops believing in an expiry that no longer applies.
  *
  * No `Transactional()`: a passkey assertion that does not verify spends its
@@ -66,6 +70,7 @@ export const setSessionBinding = route.post('/_auth/session/binding')
             }),
             response: Type.Optional(CredentialResponseSchema),
             currentPassword: Type.Optional(CurrentPasswordSchema),
+            passkeyResponse: Type.Optional(PasskeyProofResponseSchema),
         }),
     })
     .use([
@@ -89,7 +94,7 @@ export const setSessionBinding = route.post('/_auth/session/binding')
             });
         }
 
-        return await enableSessionBindingService({ ...params, credential });
+        return await enableSessionBindingService({ ...params, credential, passkeyResponse: body.passkeyResponse });
     });
 
 /**
@@ -131,4 +136,35 @@ export const sessionBindingDisableOptions = route.post('/_auth/session/binding/d
         const { userId, credential } = getAuth(c);
 
         return await startSessionBindingDisableService(Number(userId), credential);
+    });
+
+/**
+ * POST /_auth/session/passkey-proof/options - Challenge for letting another credential in
+ *
+ * An account with session binding on shows a passkey assertion to approve a
+ * device-code sign-in, issue a device link, add a passkey, set a first
+ * password, link a social identity or consent to an OAuth2 client
+ * (`PasskeyProofRequiredError`); every account shows one to turn binding on.
+ * This mints the challenge for the one
+ * `procedure` named, stamped with this session: the assertion goes back as
+ * that route's `passkeyResponse`, and no other route or session can spend it.
+ * `allowCredentials` is empty, for `sessionBindingDisableOptions`' reason.
+ */
+export const passkeyProofOptions = route.post('/_auth/session/passkey-proof/options')
+    .input({
+        body: Type.Object({
+            procedure: Type.Union(PASSKEY_PROOF_PROCEDURES.map(procedure => Type.Literal(procedure)), {
+                description: 'The procedure the assertion is for',
+            }),
+        }, { additionalProperties: false }),
+    })
+    .use([rateLimitPolicy('auth-passkey-proof-options', {
+        limit: 10, windowMs: 60_000, by: byIpAndCaller({ ipLimit: 100 }),
+    })])
+    .handler(async (c) =>
+    {
+        const { body } = await c.data();
+        const { userId, credential } = getAuth(c);
+
+        return await startPasskeyProofService(Number(userId), credential, body.procedure);
     });

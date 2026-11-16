@@ -41,8 +41,11 @@ import { assertStepUp } from './mfa.service';
 import {
     assertNotLastRecoveryCredential,
     assertRecentAuthentication,
+    checkPasskeyProof,
     type RecentAuthenticationParams,
 } from './passkey.service';
+import { assertPasskeyProven } from '../lib/passkey-proof';
+import type { User } from '../entities/users';
 import { stampOf } from '../lib/deferred-stamp';
 import { admitDeferred, startingCredentialOf } from './deferred-admission.service';
 import type { AdmissionRefusal, PrincipalCredential } from './admission.service';
@@ -65,6 +68,11 @@ export interface StartOAuthLinkParams
     nonce: string;
     /** Names that cookie. */
     startId: string;
+    /**
+     * A passkey assertion made for this procedure (`socialLink`), which an
+     * account with session binding on must send (`assertPasskeyProven`).
+     */
+    passkeyResponse?: unknown;
 }
 
 /**
@@ -82,6 +90,13 @@ export interface StartOAuthLinkParams
  * the account as it is when the provider sends the browser back, and that is
  * the decision.
  *
+ * An account with session binding on links only with a passkey assertion made
+ * for it (`lib/passkey-proof.ts`): a social identity of the copy's own would
+ * sign in natively to an unbound 90-day key. It is checked before, and spent
+ * under the account lock; the sealed state records it (`passkeyProven`) for
+ * the callback, which refuses a bound account's link without it.
+ *
+ * @throws PasskeyProofRequiredError when the account is bound and no proof holds
  * @throws OAuthLinkCredentialUnsupportedError for a session signed in through an application's auth profile
  * @throws ValidationError for a provider that is not configured or a returnUrl off the app
  * @throws StepUpRequiredError
@@ -114,7 +129,7 @@ export async function startOAuthLinkService(params: StartOAuthLinkParams): Promi
         throw new OAuthProviderAlreadyLinkedError({ details: { provider: params.provider } });
     }
 
-    const account = await usersRepository.findByIdOnPrimary(params.userId);
+    const account = await lockedForLink(params);
 
     if (!account)
     {
@@ -131,9 +146,34 @@ export async function startOAuthLinkService(params: StartOAuthLinkParams): Promi
         codeVerifier,
         startedByKeyId: startedBy.keyId,
         keyEpoch: account.keyEpoch,
+        passkeyProven: account.sessionBinding === 'passkey',
     });
 
     return { authUrl: buildAuthorizationUrl(oauthProvider, state, codeVerifier) };
+}
+
+/**
+ * The account a link starts on, read under its lock after the passkey proof a
+ * bound account owes is spent (`assertPasskeyProven`). The proof is checked
+ * first, outside the transaction, so one that does not verify spends its
+ * challenge.
+ */
+async function lockedForLink(params: StartOAuthLinkParams): Promise<User | null>
+{
+    const proof = await checkPasskeyProof({
+        userId: params.userId,
+        credential: params.credential,
+        procedure: 'socialLink',
+        response: params.passkeyResponse,
+    });
+
+    return await runInTransaction(async () =>
+    {
+        const account = await usersRepository.lockAccount(params.userId);
+        await assertPasskeyProven(account, proof);
+
+        return account;
+    }, { context: 'auth:oauth-link-start' });
 }
 
 export interface OAuthLinkCallbackParams
@@ -171,9 +211,11 @@ export async function oauthLinkCallbackService(params: OAuthLinkCallbackParams):
         // Lock first, then admit: a sign-out or a status change that commits
         // between an earlier read and the lock would otherwise attach the
         // identity for a session or an account that is no longer there.
-        await usersRepository.lockAccount(userId);
+        const account = await usersRepository.lockAccount(userId);
 
-        return await linkRefusal(params.link) ?? await attachIdentity(userId, params.provider, identity, tokens);
+        return await linkRefusal(params.link)
+            ?? unprovenLinkRefusal(account, params.link)
+            ?? await attachIdentity(userId, params.provider, identity, tokens);
     }, { context: 'auth:oauth-link-callback' });
 }
 
@@ -204,6 +246,15 @@ async function linkRefusal(link: OAuthLinkState): Promise<OAuthLinkOutcome | nul
     return admission.refused.reason === 'admission' && ACCOUNT_REFUSALS.has(admission.refused.refusal.reason)
         ? 'account_unavailable'
         : 'failed';
+}
+
+/**
+ * A bound account's link that did not spend a passkey proof at its start —
+ * started before binding was turned on — is `failed`: start it again.
+ */
+function unprovenLinkRefusal(account: User | null, link: OAuthLinkState): OAuthLinkOutcome | null
+{
+    return account?.sessionBinding === 'passkey' && !link.passkeyProven ? 'failed' : null;
 }
 
 /**

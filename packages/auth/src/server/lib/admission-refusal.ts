@@ -13,6 +13,11 @@
  * longer act, so the cookie that holds the key is dead weight. A refusal that asks
  * the same session to do something first — enrol a second factor — leaves it.
  *
+ * An expired key is the family's one member a session may survive: a bound key
+ * inside its renewal grace is renewed with the passkey, not signed in again. The
+ * refusal says which (`KeyExpiredDetails`), from the key row, so the proxy decides
+ * on the backend's answer rather than on its cookie's copy of the binding.
+ *
  * Every class of the family is its own (`KeyRevokedError`, `KeyExpiredError`,
  * `AccountNotFoundError`, `AccountDisabledError`, `AccountPendingDeletionError`)
  * and none is core's `UnauthorizedError` itself: that code is what every other
@@ -48,7 +53,7 @@ export type AdmissionRefusal =
     | { reason: 'accountDisabled'; status: Exclude<UserStatus, 'active'> | 'deleted' }
     | { reason: 'pendingDeletion'; purgeScheduledAt: string | undefined }
     | { reason: 'credentialRevoked' }
-    | { reason: 'credentialExpired' }
+    | { reason: 'credentialExpired'; renewable: boolean }
     | { reason: 'enrolmentRequired' };
 
 type RefusalReason = AdmissionRefusal['reason'];
@@ -85,7 +90,7 @@ const REFUSAL_ANSWERS: { [R in RefusalReason]: RefusalAnswer<R> } = {
     credentialExpired: {
         errorType: KeyExpiredError,
         endsSession: true,
-        error: () => new KeyExpiredError(),
+        error: refusal => keyExpiredError(refusal.renewable),
     },
     enrolmentRequired: {
         errorType: SecondFactorEnrolmentRequiredError,
@@ -105,6 +110,38 @@ export function admissionRefusalError(refusal: AdmissionRefusal): Error
     const answer = REFUSAL_ANSWERS[refusal.reason] as RefusalAnswer<typeof refusal.reason>;
 
     return answer.error(refusal as never);
+}
+
+/**
+ * What a `KeyExpiredError` says about its key: `renewable: true` for a bound key
+ * renewal still admits (`isRenewable` — inside its grace, not revoked), and
+ * nothing for any other expired key, a bound one past its grace included.
+ */
+export interface KeyExpiredDetails
+{
+    renewable?: true;
+}
+
+/** The `KeyExpiredError` an expired key is answered with. */
+export function keyExpiredError(renewable: boolean): KeyExpiredError
+{
+    const details: KeyExpiredDetails = renewable ? { renewable: true } : {};
+
+    return new KeyExpiredError({ details });
+}
+
+/**
+ * Whether a backend answer is the refusal of an expired key that can still be
+ * renewed — read off the response body, as the proxy holds it.
+ *
+ * @param body - the backend's error body (`__type`, `details`, the envelope)
+ */
+export function isRenewableExpiry(body: unknown): boolean
+{
+    const answer = body as { __type?: unknown; error?: { code?: unknown }; details?: KeyExpiredDetails } | null;
+    const code = answer?.error?.code ?? answer?.__type;
+
+    return code === KeyExpiredError.name && answer?.details?.renewable === true;
 }
 
 /** The error codes (class names, as the response envelope carries them) of the key-refused family. */

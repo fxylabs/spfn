@@ -33,6 +33,7 @@ import {
     type OAuth2AuthorizeParams,
 } from '../../services/oauth2-authorize.service';
 import { requireAuthorizationServer } from './http';
+import { PasskeyProofResponseSchema } from '../schema';
 
 /** The request the consent screen is deciding about, as query or as body. */
 const AUTHORIZE_FIELDS = {
@@ -96,12 +97,17 @@ export const getOAuth2Authorize = route.get('/_auth/oauth2/authorize')
  *
  * CSRF-required: it issues a code for a third-party client on the strength of
  * the session cookie alone, so the proxy checks it whatever `SPFN_AUTH_CSRF` says.
+ *
+ * An account with session binding on approves with `passkeyResponse`, an
+ * assertion over `session/passkey-proof/options { procedure: 'oauth2Consent' }`;
+ * without it, 403 `PASSKEY_PROOF_REQUIRED` and no grant or code is written.
  */
 export const createOAuth2AuthorizationCode = route.post('/_auth/oauth2/authorize')
     .input({
         body: Type.Object({
             ...AUTHORIZE_FIELDS,
             approve: Type.Boolean({ description: 'What the account owner decided' }),
+            passkeyResponse: Type.Optional(PasskeyProofResponseSchema),
         }),
     })
     .use([authenticate, authorizeRateLimit])
@@ -120,5 +126,9 @@ export const createOAuth2AuthorizationCode = route.post('/_auth/oauth2/authorize
 
         const { userId, credential } = getAuth(c);
 
-        return await approveOAuth2AuthorizeService(params, { userId: Number(userId), credential });
+        return await approveOAuth2AuthorizeService(params, {
+            userId: Number(userId),
+            credential,
+            passkeyResponse: body.passkeyResponse,
+        });
     });

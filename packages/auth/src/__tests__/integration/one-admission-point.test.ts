@@ -50,7 +50,7 @@ import { eq } from 'drizzle-orm';
 import { Type } from '@sinclair/typebox';
 
 import { setupTestDb, teardownTestDb, clearTables, getTestDb, isDatabaseAvailable } from '../helpers/db';
-import { FixtureAuthenticator } from '../helpers/webauthn-fixture';
+import { enableBinding, FixtureAuthenticator } from '../helpers/webauthn-fixture';
 import {
     configureTestAuthorizationServer,
     createTestUser,
@@ -398,7 +398,7 @@ describe.skipIf(!dbAvailable)('one admission point for a person principal (T1-T1
         }, session.authorization);
 
         expect(verified.status).toBe(200);
-        expect((await post('/_auth/session/binding', account, { mode: 'passkey' }, session.authorization)).status).toBe(200);
+        expect((await enableBinding((path, body) => post(path, account, body, session.authorization), authenticator, { origin: ORIGIN, rpId: RP_ID })).status).toBe(200);
     }
 
     function totpCode(secret: string, offsetSteps = 0): string
@@ -616,6 +616,21 @@ describe.skipIf(!dbAvailable)('one admission point for a person principal (T1-T1
             admitted: async (response) => expect(response.status).toBe(200),
             refused: async (response) => expectError(response, 401, 'SessionRenewalRefusedError'),
         },
+        signOut: {
+            name: 'authenticateForSignOut, an expired bound key inside its grace',
+            prepare: async (account) =>
+            {
+                const session = await signIn(account);
+                await bindToPasskey(account, session);
+                await getTestDb().update(userPublicKeys)
+                    .set({ expiresAt: new Date(Date.now() - 60_000) })
+                    .where(eq(userPublicKeys.keyId, session.keyId));
+
+                return () => post('/_auth/logout', account, {}, session.authorization);
+            },
+            admitted: async (response) => expect(response.status).toBe(204),
+            refused: expectAccountRefusal,
+        },
         oauth2AccessToken: {
             name: 'verifyAccessToken, behind /mcp',
             prepare: async (account) =>
@@ -739,6 +754,7 @@ describe.skipIf(!dbAvailable)('one admission point for a person principal (T1-T1
         'lib/one-time-token.ts': ['sseStream'],
         'middleware/auth-profiles.ts': ['clientProofV1', 'appProfile'],
         'middleware/authenticate-for-renewal.ts': ['renewal'],
+        'middleware/authenticate-for-sign-out.ts': ['signOut'],
         'middleware/authenticate.ts': ['bearer', 'optionalAuth'],
         'middleware/one-time-token-auth.ts': ['oneTimeToken'],
         'services/device-auth.service.ts': ['deviceCode'],
