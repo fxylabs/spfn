@@ -56,6 +56,7 @@ export const oneTimeTokenAuth = defineMiddleware('oneTimeTokenAuth', async (c, n
         userId: redeemed.userId,
         credential: { kind: 'oneTimeToken', issuedByKeyId: redeemed.issuedByKeyId },
         route: null,
+        presentedOn: null,
     });
 
     if ('refused' in admission)
@@ -84,6 +85,7 @@ function oneTimeTokenRefusal(refusal: AdmissionRefusal): Error
             return new UnauthorizedError({ message: 'Account is not active' });
         case 'credentialRevoked':
         case 'credentialExpired':
+        case 'contextChanged':
             return new UnauthorizedError({ message: 'Invalid or expired one-time token' });
         case 'enrolmentRequired':
             return new SecondFactorEnrolmentRequiredError();

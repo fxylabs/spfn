@@ -754,6 +754,9 @@ describe.skipIf(!dbAvailable)('one admission point for a person principal (T1-T1
         'lib/one-time-token.ts': ['sseStream'],
         'middleware/auth-profiles.ts': ['clientProofV1', 'appProfile'],
         'middleware/authenticate-for-renewal.ts': ['renewal'],
+        // Sign-out is the one Bearer door that does not compare a bound key's
+        // browser family (`presentedOn: null`): ending a session from a changed
+        // browser must work, and a thief ending it does no harm.
         'middleware/authenticate-for-sign-out.ts': ['signOut'],
         'middleware/authenticate.ts': ['bearer', 'optionalAuth'],
         'middleware/one-time-token-auth.ts': ['oneTimeToken'],
@@ -1043,7 +1046,7 @@ describe.skipIf(!dbAvailable)('one admission point for a person principal (T1-T1
         await setAccountStatus(account.id, 'active', { from: 'suspended', reason: 'T9 reactivation' });
 
         expect(await getTestDb().select().from(userPublicKeys).where(eq(userPublicKeys.keyId, session.keyId))).toHaveLength(0);
-        const admission = await admitPrincipal({ userId: account.id, credential: { kind: 'deviceKey', keyId: session.keyId }, route: null });
+        const admission = await admitPrincipal({ userId: account.id, credential: { kind: 'deviceKey', keyId: session.keyId }, route: null, presentedOn: null });
         expect('admitted' in admission).toBe(false);
     });
 

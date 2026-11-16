@@ -66,6 +66,7 @@ async function admitsTokenHolder(keyId: string, _subject: string, keyHolder: str
         userId,
         credential: { kind: 'oneTimeToken', issuedByKeyId: keyId },
         route: null,
+        presentedOn: null,
     });
 
     return 'admitted' in admission;

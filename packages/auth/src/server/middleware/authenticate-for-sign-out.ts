@@ -15,6 +15,11 @@
  * grace, no credential — is `authenticate`'s, and answered as `authenticate`
  * answers it: a dead key gets the answer a dead key gets everywhere.
  *
+ * One difference from `authenticate`: a bound key's browser family is not
+ * compared. A thief who ends the owner's session does no harm, and the owner
+ * ending it from a browser whose user-agent changed family must work — so the
+ * Bearer path runs with no request to compare against (`authenticateBearer`).
+ *
  * @module server/middleware/authenticate-for-sign-out
  */
 
@@ -31,7 +36,7 @@ import {
     authContextFor,
     type Admission,
 } from '../services/admission.service';
-import { admitBearerKey, authenticate } from './authenticate';
+import { admitBearerKey, authenticate, authenticateBearer } from './authenticate';
 
 /**
  * Sign-out authentication middleware
@@ -52,7 +57,8 @@ export const authenticateForSignOut = defineMiddleware('authForSignOut', async (
 
     if (expired === null)
     {
-        return await authenticate.handler(c, next);
+        // A profile's credential is no web key, so never bound: `authenticate` answers it.
+        return presentsProfile(c) ? await authenticate.handler(c, next) : await authenticateBearer(c, next, null);
     }
 
     if ('refused' in expired)
@@ -74,18 +80,19 @@ registerEnrolmentGate(authenticateForSignOut.handler);
 /**
  * The admission of a Bearer key that has expired but is still renewable —
  * signature checked, then `admitPrincipal` with a `renewal` credential — or
- * null when the request is not one.
+ * null when the request is not one. A request whose signature did not verify
+ * is not one: `authenticate` answers it, as it answers any forged request.
  */
 async function expiredBoundSession(c: Context): Promise<Admission | null>
 {
-    if (c.req.header(CLIENT_PROOF_HEADERS.profile) !== undefined)
+    if (presentsProfile(c))
     {
         return null;
     }
 
-    const outcome = await admitBearerKey(c, admitsForRenewal);
+    const outcome = await admitBearerKey(c);
 
-    if ('refused' in outcome || keyLiveness(outcome.key) !== 'expired')
+    if ('refused' in outcome || keyLiveness(outcome.key) !== 'expired' || !admitsForRenewal(outcome.key))
     {
         return null;
     }
@@ -94,5 +101,12 @@ async function expiredBoundSession(c: Context): Promise<Admission | null>
         userId: outcome.key.userId,
         credential: { kind: 'renewal', keyId: outcome.key.keyId },
         route: null,
+        presentedOn: null,
     });
+}
+
+/** Whether the request names an auth profile rather than carrying a Bearer key. */
+function presentsProfile(c: Context): boolean
+{
+    return c.req.header(CLIENT_PROOF_HEADERS.profile) !== undefined;
 }

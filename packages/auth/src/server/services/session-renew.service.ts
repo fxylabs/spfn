@@ -54,6 +54,11 @@ export interface StartSessionRenewParams
 {
     /** The key that ran out, read off the JWT the request was signed with. */
     expiredKeyId: string;
+    /**
+     * The renewing request's `user-agent`: compared with the key row's browser
+     * family, and recorded as that family when the row has none.
+     */
+    userAgent: string | undefined;
 }
 
 export interface FinishSessionRenewParams extends StartSessionRenewParams
@@ -97,7 +102,7 @@ export async function startSessionRenewService(
     params: StartSessionRenewParams,
 ): Promise<PublicKeyCredentialRequestOptionsJSON>
 {
-    const { key, user } = await admitForRenewal(params.expiredKeyId);
+    const { key, user } = await admitForRenewal(params);
 
     return await startRenewalCeremonyService('renewal', stampFor(user, { kind: 'deviceKey', keyId: key.keyId }));
 }
@@ -124,7 +129,7 @@ export async function finishSessionRenewService(
     params: FinishSessionRenewParams,
 ): Promise<SessionRenewResult>
 {
-    const { key, user } = await admitForRenewal(params.expiredKeyId);
+    const { key, user } = await admitForRenewal(params);
     const proof = await checkRenewalAssertionService({
         userId: key.userId,
         ceremony: 'renewal',
@@ -167,11 +172,10 @@ async function renewKey(params: FinishSessionRenewParams, key: UserPublicKey, us
         deviceName: key.deviceName ?? undefined,
         platform: key.platform ?? undefined,
         channel: 'renewal',
-        // The old row's provenance, not this request's: renewing is not appearing
-        // for the first time. Passing the recorded `user-agent` also re-derives
-        // the same family, so `registered_ua_family` carries over unchanged.
-        ip: key.registeredIp ?? undefined,
-        userAgent: key.registeredUserAgent ?? undefined,
+        // The old row's provenance carries over (the `renewal` channel reads it
+        // off the replaced row); this request's `user-agent` is recorded as the
+        // browser family only where that row has none.
+        userAgent: params.userAgent,
         // No `webProxy`: the replacement is the same device as the bound key it
         // replaces, a web key, so it is bound while the account is.
         // The request is signed by the expiring key, which is the replacement's
@@ -205,16 +209,17 @@ async function renewKey(params: FinishSessionRenewParams, key: UserPublicKey, us
  *
  * Whether the person may renew is `admitPrincipal`'s, with a `renewal`
  * credential — the account active on the primary, the key of the account's
- * current generation, bound, and inside its renewal grace — and the caller
+ * current generation, bound, inside its renewal grace, and presented from the
+ * browser family its row recorded — and the caller
  * learns which of them failed only by not being told. Suspended and
  * pending-deletion accounts do not get a new key by this door any more than
  * they get one by the sign-in door.
  *
  * @throws SessionRenewalRefusedError
  */
-async function admitForRenewal(expiredKeyId: string): Promise<{ key: UserPublicKey; user: User }>
+async function admitForRenewal(params: StartSessionRenewParams): Promise<{ key: UserPublicKey; user: User }>
 {
-    const key = expiredKeyId ? await keysRepository.findByKeyIdOnPrimary(expiredKeyId) : null;
+    const key = params.expiredKeyId ? await keysRepository.findByKeyIdOnPrimary(params.expiredKeyId) : null;
 
     if (!key)
     {
@@ -225,6 +230,7 @@ async function admitForRenewal(expiredKeyId: string): Promise<{ key: UserPublicK
         userId: key.userId,
         credential: { kind: 'renewal', keyId: key.keyId },
         route: null,
+        presentedOn: { userAgent: params.userAgent },
     });
 
     if ('refused' in admission)

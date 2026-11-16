@@ -9,12 +9,11 @@
  */
 
 import type { InterceptorRule, RequestInterceptorContext, ResponseInterceptorContext } from '@spfn/core/nextjs/server';
-import { SessionContextChangedError, SessionRenewalRequiredError } from '@spfn/auth/errors';
+import { SessionRenewalRequiredError } from '@spfn/auth/errors';
 import { readSealedSession, shouldRefreshSession, type SessionData } from '../../server/lib/session';
 import { COOKIE_NAMES } from '../../server/lib/config';
 import { isRenewableExpiry, isSessionEndingCode } from '../../server/lib/admission-refusal';
 import { authLogger } from '../../server/logger';
-import { uaFamily } from '../../server/lib/ua-family';
 import { refuseInvalidCsrf } from './csrf';
 import { errorCodeOf, refusalEnvelope } from './error-envelope';
 import { SESSION_RENEW_PATH_PATTERN } from './session-renew';
@@ -52,59 +51,14 @@ function requiresAuth(path: string): boolean
 }
 
 /**
- * Whether a bound session arrived from a different browser than it was sealed in.
- *
- * Three terms, and each one is a rule.
- *
- * Bound only. An unbound session is not checked and nothing is logged for it —
- * the check would be a warn line per request for every account that did not opt
- * in, which is the noisy half of a protection they did not ask for.
- *
- * A `user-agent` has to be present. Absent is no signal, not a different family:
- * a server component's `api.` call reaches this proxy as Node `fetch` and the
- * isomorphic client sets `Content-Type`, `Cookie` and the CSRF header and nothing
- * else, so fail-closed on absence would refuse every server-rendered page view.
- *
- * And the comparison is between families rather than strings, so a version bump,
- * a user-agent reduction, or "Request desktop site" on Android are all the same
- * browser. What is left is a session presented from a different cookie jar, which
- * is a thing that does not happen without a copy.
- */
-function contextChanged(session: SessionData, userAgent: string | null): boolean
-{
-    return session.binding === 'passkey'
-        && Boolean(session.uaFamily)
-        && Boolean(userAgent)
-        && uaFamily(userAgent) !== session.uaFamily;
-}
-
-/**
- * Refuse a bound session presented from another browser, and empty the jar.
- *
- * The opposite of the renewal refusal the response phase mints: this session is
- * not waiting for a prompt, it is one whose cookie is somewhere it was never
- * sealed. The clear goes with the refusal, which is the only moment a refused
- * request can touch the cookies — and it is the one check this layer makes
- * alone, because the backend never sees the browser's `user-agent`.
- */
-function refuseAsContextChanged(ctx: RequestInterceptorContext, session: SessionData, presented: string | null): void
-{
-    authLogger.interceptor.general.warn('Bound session presented from a different browser family', {
-        path: ctx.path,
-        sealed: session.uaFamily,
-        presented: uaFamily(presented),
-    });
-
-    clear(ctx, 'context-changed');
-    ctx.abort = refusalEnvelope(new SessionContextChangedError());
-}
-
-/**
  * Read the session cookie and sign the request with its key.
  *
  * An unreadable cookie — whichever way it is unreadable — is proposed for
- * clearing and the request goes on anonymous; a session from another browser is
- * refused; a session near its end is marked for re-sealing.
+ * clearing and the request goes on anonymous; a session near its end is marked
+ * for re-sealing. Whether a bound session is presented from the browser it
+ * started in is not decided here: the backend compares the request's
+ * `user-agent`, which this proxy forwards, with the key row's family, and its
+ * `SessionContextChangedError` is a key refusal like any other (`judgeAnswer`).
  */
 async function authenticateFromCookie(ctx: RequestInterceptorContext, sessionCookie: string): Promise<boolean>
 {
@@ -126,17 +80,6 @@ async function authenticateFromCookie(ctx: RequestInterceptorContext, sessionCoo
     // Refusals stop before the backend is called.
     if (await refuseInvalidCsrf(ctx, session.keyId))
     {
-        return false;
-    }
-
-    // Context before expiry. A session whose cookie has moved to another browser
-    // is finished whether or not its key is still live.
-    const presented = ctx.request.headers.get('user-agent');
-
-    if (contextChanged(session, presented))
-    {
-        refuseAsContextChanged(ctx, session, presented);
-
         return false;
     }
 
@@ -185,13 +128,14 @@ async function retryExpiredToken(ctx: ResponseInterceptorContext): Promise<void>
  * What the backend's answer means for the session the request was signed with.
  *
  * Decided by the error code, never by the status alone: only the key-refused
- * family (`isSessionEndingCode`) ends the session. An expired key the backend
- * says renewal still admits (`isRenewableExpiry`) is the exception — renewable,
- * not finished — and is answered with the renewal prompt, cookies kept. That is
- * the key row's fact, read off the refusal, never the cookie's own `binding`: a
- * key bound after the cookie was sealed (at its first use, or by the owner
- * turning binding on elsewhere) still has a cookie saying unbound, and one past
- * its grace is not renewable whatever the cookie says. The renewal paths themselves never clear: their refusals
+ * family (`isSessionEndingCode`) ends the session — `SessionContextChangedError`,
+ * a bound key presented from another browser family, among them. An expired key
+ * the backend says renewal still admits (`isRenewableExpiry`) is the exception —
+ * renewable, not finished — and is answered with the renewal prompt, cookies
+ * kept. That is the key row's fact, read off the refusal: the cookie holds no
+ * copy of the binding, and a key bound after it was sealed (at its first use, or
+ * by the owner turning binding on elsewhere) is asked to renew all the same.
+ * The renewal paths themselves never clear: their refusals
  * are answered by the renewal ceremony, and clearing there would end the session
  * the person was in the middle of repairing.
  */

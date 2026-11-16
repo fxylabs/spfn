@@ -86,13 +86,6 @@ export const keyRotationInterceptor: InterceptorRule =
                 ctx.metadata.newKeyId = newKeyPair.keyId;
                 ctx.metadata.newAlgorithm = newKeyPair.algorithm;
                 ctx.metadata.userId = currentSession.userId;
-                ctx.metadata.bindingFields = currentSession.binding
-                    ? {
-                        binding: currentSession.binding,
-                        keyExpiresAt: currentSession.keyExpiresAt,
-                        ...(currentSession.uaFamily ? { uaFamily: currentSession.uaFamily } : {}),
-                    }
-                    : {};
                 ctx.metadata.rotatedRemember = currentSession.remember;
             }
             catch (error)
@@ -122,18 +115,13 @@ export const keyRotationInterceptor: InterceptorRule =
                 return;
             }
 
-            // The binding fields come from the session being replaced, not from
-            // the response: rotation registers a key that inherits the replaced
-            // key's binding and its expiry verbatim, so the cookie must inherit
-            // them too. Re-deriving would be wrong twice over — the rotate
-            // response says nothing about binding, and a fresh expiry is exactly
-            // what rotation must not hand a bound key. A kept session stays kept.
+            // A kept session stays kept. Whether the key is bound, and the browser
+            // family it is checked against, are the key row's (rotation copies them).
             await establish(ctx, {
                 userId: ctx.metadata.userId,
                 privateKey: ctx.metadata.newPrivateKey,
                 keyId: ctx.metadata.newKeyId,
                 algorithm: ctx.metadata.newAlgorithm,
-                ...ctx.metadata.bindingFields,
                 ...rememberField(ctx.metadata.rotatedRemember),
             });
 

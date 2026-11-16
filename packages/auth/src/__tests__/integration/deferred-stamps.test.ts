@@ -923,7 +923,7 @@ describe.skipIf(!dbAvailable)('deferred artefacts are stamped and re-admitted at
         const session = await signIn();
         const forged = { kind: 'deferred', keyId: session.key.keyId, enrolment: 'always' } as unknown as PrincipalCredential;
 
-        await expect(admitPrincipal({ userId: ownerId, credential: forged, route: null })).rejects.toThrow(/Unknown credential kind/);
+        await expect(admitPrincipal({ userId: ownerId, credential: forged, route: null, presentedOn: null })).rejects.toThrow(/Unknown credential kind/);
         expect('admitCompletion' in serverEntry).toBe(false);
         expect('admitPrincipal' in serverEntry).toBe(true);
     });

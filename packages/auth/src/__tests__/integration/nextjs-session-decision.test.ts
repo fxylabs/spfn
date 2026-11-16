@@ -678,14 +678,8 @@ describe.skipIf(!dbAvailable)('the Next.js proxy decides the session once per re
         expect(bound.status).toBe(200);
         renewing = { authenticator };
 
-        const { keyExpiresAtMillis } = await bound.json();
-
         return new Map([
-            [COOKIE_NAMES.SESSION, await sealSession(sessionData(device.key, await userId(OWNER), {
-                binding: 'passkey',
-                keyExpiresAt: keyExpiresAtMillis,
-                uaFamily: 'chrome',
-            }))],
+            [COOKIE_NAMES.SESSION, await sealSession(sessionData(device.key, await userId(OWNER)))],
             [COOKIE_NAMES.CSRF, await deriveCsrfToken(device.key.keyId)],
         ]);
     }
@@ -740,7 +734,7 @@ describe.skipIf(!dbAvailable)('the Next.js proxy decides the session once per re
     // ========================================================================
 
     /** The key-refused family: this key or this account can no longer act. */
-    const CLEARS = ['KeyRevokedError', 'AccountNotFoundError', 'AccountDisabledError', 'AccountPendingDeletionError', 'KeyExpiredError'];
+    const CLEARS = ['KeyRevokedError', 'AccountNotFoundError', 'AccountDisabledError', 'AccountPendingDeletionError', 'KeyExpiredError', 'SessionContextChangedError'];
 
     /** Every other code the server can answer: none of them says anything about the session. */
     const KEEPS = [
@@ -763,7 +757,7 @@ describe.skipIf(!dbAvailable)('the Next.js proxy decides the session once per re
         'OAuthSignInContendedError', 'OAuthLinkNotFoundError', 'OAuthProviderLinkOnlyError',
         'OAuthLinkCredentialUnsupportedError', 'DeferredCredentialUnsupportedError', 'OAuthEmailInUseError',
         'SignupDisabledError', 'ChannelDisabledError', 'PasskeyConfigError', 'SessionBindingUnavailableError',
-        'SessionRenewalRequiredError', 'SessionRenewalRefusedError', 'SessionContextChangedError',
+        'SessionRenewalRequiredError', 'SessionRenewalRefusedError',
         'SessionResealFailedError', 'SessionSealFailedError', 'SessionDecisionMissingError', 'OAuth2UnknownClientError', 'OAuth2RedirectUriMismatchError',
         'OAuth2AuthorizeRedirectError', 'OAuth2GrantNotFoundError', 'MfaAlreadyEnrolledError', 'MfaNotEnrolledError',
         'MfaVerificationFailedError', 'StepUpRequiredError', 'SecondFactorEnrolmentRequiredError',

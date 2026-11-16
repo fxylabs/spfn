@@ -54,9 +54,6 @@ async function expiringJar(cookieTtlSeconds = SEVEN_DAYS): Promise<{ jar: Map<st
         privateKey: keyPair.privateKey,
         keyId: keyPair.keyId,
         algorithm: keyPair.algorithm,
-        binding: 'passkey',
-        keyExpiresAt: Date.now() - 1_000,
-        uaFamily: 'chrome',
     }, cookieTtlSeconds);
 
     const jar = new Map([
@@ -239,10 +236,6 @@ describe('a bound session renewing through the matching interceptor chain (#99)'
         );
 
         expect(proof).toMatchObject({ payload: { keyId: sent.keyId } });
-
-        // And the binding survives, so the renewed session is still a bound one.
-        expect(session.binding).toBe('passkey');
-        expect(session.uaFamily).toBe('chrome');
     });
 
     it('leaves the retired key id in none of the cookies it returns', async () =>
@@ -359,7 +352,6 @@ describe('the flows that share the login interceptor keep their behaviour (#99)'
 
         expect(session.keyId).toBe(sent.keyId);
         expect(session.userId).toBe('7');
-        expect(session.binding).toBeUndefined();
     });
 
     it('a password reset completed while a session cookie is still in the jar seals the new pair, not the old key', async () =>

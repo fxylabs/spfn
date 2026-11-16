@@ -64,7 +64,7 @@ export const sessionRenewOptions = route.post('/_auth/session/renew/options')
     .use([rateLimitPolicy('auth-session-renew', RENEW_RATE_LIMIT), authenticateForRenewal])
     .handler(async (c) =>
     {
-        return await startSessionRenewService({ expiredKeyId: getAuth(c).keyId });
+        return await startSessionRenewService({ expiredKeyId: getAuth(c).keyId, userAgent: c.raw.req.header('user-agent') });
     });
 
 /**
@@ -106,6 +106,7 @@ export const sessionRenewVerify = route.post('/_auth/session/renew/verify')
         return await finishSessionRenewService({
             ...body,
             expiredKeyId: getAuth(c).keyId,
+            userAgent: c.raw.req.header('user-agent'),
             response: body.response,
         });
     });

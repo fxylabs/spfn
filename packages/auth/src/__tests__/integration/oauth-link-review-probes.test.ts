@@ -340,7 +340,6 @@ describe.skipIf(!dbAvailable)('OAuth link/unlink beyond the case table (#154)', 
             privateKey: session.key.privateKey,
             keyId: session.key.keyId,
             algorithm: session.key.algorithm,
-            uaFamily: 'chrome',
         });
         const jar = new Map([
             [COOKIE_NAMES.SESSION, sealed],

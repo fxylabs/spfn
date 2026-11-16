@@ -1532,15 +1532,16 @@ export class SessionRenewalRefusedError extends UnauthorizedError
 /**
  * Session Context Changed Error (401)
  *
- * Minted by the Next.js proxy: a bound session presented from a different
- * browser family than the one it was sealed from. Browsers do not share cookie
- * jars, so a session that moves between two of them moved because somebody
- * copied it — this is the only defence that acts before the bound key runs out,
- * and it is the reason the three session cookies are cleared with the refusal.
+ * Answered by the backend when a bound key is admitted on a request whose
+ * `user-agent` names a different browser family than the one the key row
+ * recorded (`registered_ua_family`). Browsers do not share cookie jars, so a
+ * session that moves between two of them moved because somebody copied it —
+ * this is the only defence that acts before the bound key runs out, and it is
+ * in the key-refused family: the Next.js proxy's session decision clears the
+ * three session cookies on it.
  *
- * Only for bound sessions, and only when the request carried a `user-agent` at
- * all. An absent one is no signal rather than a different family: a server
- * component calling the RPC proxy sends none.
+ * An absent `user-agent` is the family `'other'`, compared like any other. A
+ * server-side call through the SPFN client carries the browser's own.
  */
 export class SessionContextChangedError extends UnauthorizedError
 {

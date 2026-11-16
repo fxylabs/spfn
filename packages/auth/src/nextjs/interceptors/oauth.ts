@@ -24,7 +24,6 @@ import {
     type PendingSessionData,
 } from '../session-helpers';
 import { expiredCookie, packageCookie } from '../cookie-writer';
-import { bindingSessionFields } from './session-binding';
 import { establish, writeCookie } from './session-decision';
 import { rememberField, takeRemember } from './remember';
 import { signedRequestHeaders } from './request-token';
@@ -410,7 +409,6 @@ async function finalizeFromPendingKey(
         privateKey: pending.session.privateKey,
         keyId: pending.session.keyId,
         algorithm: pending.session.algorithm,
-        ...bindingSessionFields(ctx.response.body, ctx.request.headers['user-agent']),
         ...rememberField(pending.session.remember),
     });
 

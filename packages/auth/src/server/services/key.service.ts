@@ -9,7 +9,7 @@ import { assertKeyMatchesAlgorithm, verifyKeyFingerprint } from '../helpers/jwt'
 import { KEY_TTL_DAYS, decideKeyBinding } from '../lib/key-policy';
 import { exemptsNewDevice, type PasskeyAssertionProof } from '../lib/passkey-assertion';
 import { getBoundKeyTtlMs } from '../lib/config';
-import { uaFamily } from '../lib/ua-family';
+import { uaFamily, type UaFamily } from '../lib/ua-family';
 import { keyIdClaimedByProof, verifyKeyReplacementProof } from '../lib/key-replacement-proof';
 import { keyLiveness, type KeyWithAccountEpoch } from '../lib/key-liveness';
 import {
@@ -756,8 +756,30 @@ function newKeyRow(
         isActive,
         viaWebProxy,
         binding,
-        ...(rotated ? rotatedDevice(params, rotated, binding) : registeringDevice(params, binding)),
+        ...deviceFields(params, replaced, binding),
     };
+}
+
+/** What the new row records about the device, by how it came to be written. */
+function deviceFields(params: RegisterPublicKeyParams, replaced: UserPublicKey | null, binding: SessionBindingType)
+{
+    if (replaced && params.channel === 'rotation')
+    {
+        return rotatedDevice(params, replaced, binding);
+    }
+
+    if (replaced && params.channel === 'renewal')
+    {
+        return renewedDevice(params, replaced, binding);
+    }
+
+    return registeringDevice(params, binding);
+}
+
+/** The browser family a registering request's `user-agent` names; null when it sent none. */
+function recordedFamily(userAgent: string | undefined): UaFamily | null
+{
+    return userAgent ? uaFamily(userAgent) : null;
 }
 
 /** What a registration knows about the device: what this request said about it. */
@@ -768,7 +790,7 @@ function registeringDevice(params: RegisterPublicKeyParams, binding: SessionBind
         platform: params.platform,
         registeredIp: params.ip ?? null,
         registeredUserAgent: params.userAgent ?? null,
-        registeredUaFamily: params.userAgent ? uaFamily(params.userAgent) : null,
+        registeredUaFamily: recordedFamily(params.userAgent),
         // Hours for a bound key, 90 days otherwise
         expiresAt: getKeyExpiryDate(binding),
     };
@@ -803,6 +825,28 @@ function rotatedDevice(params: RegisterPublicKeyParams, replaced: UserPublicKey,
         expiresAt: binding === 'passkey' && replaced.binding === 'passkey'
             ? replaced.expiresAt
             : getKeyExpiryDate(binding),
+    };
+}
+
+/**
+ * What a passkey renewal knows about the device: the replaced row's provenance —
+ * renewing is not appearing for the first time — and a fresh bound window.
+ *
+ * The browser family is the one value a renewal may add. A bound key's family
+ * is what admission compares every request against (`familyRefusal`), so it is
+ * carried over and never overwritten; only a row that recorded none (it
+ * predates the column, or was registered without a `user-agent`) takes the
+ * renewing request's, and is compared from then on.
+ */
+function renewedDevice(params: RegisterPublicKeyParams, replaced: UserPublicKey, binding: SessionBindingType)
+{
+    return {
+        deviceName: params.deviceName ?? replaced.deviceName,
+        platform: params.platform ?? replaced.platform,
+        registeredIp: replaced.registeredIp,
+        registeredUserAgent: replaced.registeredUserAgent,
+        registeredUaFamily: replaced.registeredUaFamily ?? recordedFamily(params.userAgent),
+        expiresAt: getKeyExpiryDate(binding),
     };
 }
 

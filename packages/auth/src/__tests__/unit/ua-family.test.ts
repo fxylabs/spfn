@@ -1,32 +1,21 @@
 /**
- * @spfn/auth - the user-agent family check (design #97 v2, case table 6e)
+ * @spfn/auth - the user-agent family classifier (design #97 v2, case table 6e)
  *
- * Two halves, both here because they are the same table read at two levels.
+ * The classifier's own table: one `it` per user-agent the design enumerates,
+ * including the two that are only distinguishable by matching order (`Edg/`
+ * before `Chrome/`) and the iOS badges, which are the only thing that tells one
+ * iOS browser from another.
  *
- * The first half is the policy: `generalAuthInterceptor` comparing the family a
- * bound session was sealed from against the one the request arrived with. Each
- * row is a real-world transition somebody will make — a version bump, an Android
- * "Request desktop site", an in-app browser — and the row says whether it signs
- * them out. Driven through the interceptor rather than through `uaFamily`,
- * because the rows are about the refusal and not about the classifier.
- *
- * The second half is the classifier's own table: one `it` per user-agent the
- * design enumerates, including the two that are only distinguishable by matching
- * order (`Edg/` before `Chrome/`) and the iOS badges, which are the only thing
- * that tells one iOS browser from another.
+ * The policy rows that drove the Next.js proxy's comparison are gone with it
+ * (bundle 8 part 2): admission compares a bound key's recorded family with the
+ * request's, by this classifier, and the bound-session proxy rows in
+ * `integration/session-binding-renewal-proxy.test.ts` (T5a–T5e, E1–E2) drive
+ * that through the real chain.
  */
 
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import type { RequestInterceptorContext } from '@spfn/core/nextjs/server';
+import { describe, it, expect } from 'vitest';
 
-import { generalAuthInterceptor } from '../../nextjs/interceptors/general-auth';
-import { generateKeyPair } from '../../server/lib/crypto';
-import { sealSession, type SessionData } from '../../server/lib/session';
-import { COOKIE_NAMES } from '../../server/lib/config';
 import { uaFamily, UA_FAMILIES } from '../../server/lib/ua-family';
-import { decidedRequest } from '../helpers/session-decision';
-
-const SECRET = 'test-secret-with-at-least-32-characters-for-security-testing';
 
 /** Real strings, as the browsers that send them send them. */
 const AGENTS = {
@@ -93,135 +82,5 @@ describe('uaFamily — the classifier (case table 6e, unit rows)', () =>
     it('has no desktop/mobile axis, so the two Chromes are one family', () =>
     {
         expect(uaFamily(AGENTS.chromeDesktop)).toBe(uaFamily(AGENTS.chromeAndroid));
-    });
-});
-
-describe('the context check in the proxy (case table 6e, policy rows)', () =>
-{
-    beforeEach(() =>
-    {
-        vi.stubEnv('SPFN_AUTH_SESSION_SECRET', SECRET);
-    });
-
-    afterEach(() =>
-    {
-        vi.unstubAllEnvs();
-        vi.restoreAllMocks();
-    });
-
-    /** A bound session sealed from `sealedWith`, presented with `presentedAs`. */
-    async function runRequest(
-        session: Partial<SessionData>,
-        presentedAs: string | undefined,
-    ): Promise<RequestInterceptorContext>
-    {
-        const keyPair = generateKeyPair('ES256');
-        const sealed = await sealSession({
-            userId: '1',
-            privateKey: keyPair.privateKey,
-            keyId: keyPair.keyId,
-            algorithm: keyPair.algorithm,
-            ...session,
-        } as SessionData, 3600);
-
-        const ctx = {
-            path: '/_auth/users/me',
-            method: 'GET',
-            headers: {} as Record<string, string>,
-            cookies: new Map([[COOKIE_NAMES.SESSION, sealed]]),
-            request: { headers: new Headers(presentedAs ? { 'user-agent': presentedAs } : {}) },
-            metadata: {} as Record<string, unknown>,
-        } as unknown as RequestInterceptorContext;
-
-        await decidedRequest(ctx, [generalAuthInterceptor.request]);
-
-        return ctx;
-    }
-
-    /** Whether the refusal (if any) emptied the three session cookies. */
-    function clearedCookieNames(ctx: RequestInterceptorContext): string[]
-    {
-        return (ctx.abort?.setCookies ?? []).filter(cookie => cookie.value === '').map(cookie => cookie.name);
-    }
-
-    const bound = { binding: 'passkey' as const, keyExpiresAt: Date.now() + 3_600_000 };
-
-    it('sealed chrome, presented a different Chrome version: passes', async () =>
-    {
-        const ctx = await runRequest({ ...bound, uaFamily: 'chrome' }, AGENTS.chromeNewer);
-
-        expect(ctx.abort).toBeUndefined();
-        expect(ctx.metadata.sessionValid).toBe(true);
-    });
-
-    it('sealed chrome, presented Firefox: 401 and the cookies are cleared', async () =>
-    {
-        const ctx = await runRequest({ ...bound, uaFamily: 'chrome' }, AGENTS.firefoxDesktop);
-
-        expect(ctx.abort?.status).toBe(401);
-        expect((ctx.abort?.body as { __type: string }).__type).toBe('SessionContextChangedError');
-        expect(clearedCookieNames(ctx)).toEqual([
-            COOKIE_NAMES.SESSION,
-            COOKIE_NAMES.SESSION_KEY_ID,
-            COOKIE_NAMES.CSRF,
-        ]);
-    });
-
-    it('sealed chrome, presented Edge (which carries Chrome/ too): 401 — Edge is judged before Chrome', async () =>
-    {
-        const ctx = await runRequest({ ...bound, uaFamily: 'chrome' }, AGENTS.edgeDesktop);
-
-        expect(ctx.abort?.status).toBe(401);
-        expect((ctx.abort?.body as { __type: string }).__type).toBe('SessionContextChangedError');
-    });
-
-    it('sealed chrome, presented Chrome Android asking for the desktop site: passes — there is no axis', async () =>
-    {
-        const ctx = await runRequest({ ...bound, uaFamily: 'chrome' }, AGENTS.chromeAndroidDesktopSite);
-
-        expect(ctx.abort).toBeUndefined();
-    });
-
-    it('sealed safari, presented an in-app SFSafariViewController: passes — same cookie jar', async () =>
-    {
-        const ctx = await runRequest({ ...bound, uaFamily: 'safari' }, AGENTS.safariInApp);
-
-        expect(ctx.abort).toBeUndefined();
-    });
-
-    it('sealed safari, presented Chrome iOS (CriOS): 401 — a different cookie jar, so a copy happened', async () =>
-    {
-        const ctx = await runRequest({ ...bound, uaFamily: 'safari' }, AGENTS.chromeIos);
-
-        expect(ctx.abort?.status).toBe(401);
-        expect((ctx.abort?.body as { __type: string }).__type).toBe('SessionContextChangedError');
-    });
-
-    it('sealed other, presented another unrecognised agent: passes — other is a family like any other', async () =>
-    {
-        const ctx = await runRequest({ ...bound, uaFamily: 'other' }, AGENTS.bot);
-
-        expect(ctx.abort).toBeUndefined();
-    });
-
-    it('any sealed family, no user-agent at all: passes — absence is no signal, not a different family', async () =>
-    {
-        const ctx = await runRequest({ ...bound, uaFamily: 'chrome' }, undefined);
-
-        expect(ctx.abort).toBeUndefined();
-        expect(ctx.metadata.sessionValid).toBe(true);
-    });
-
-    it('an unbound session with a changed family: passes, and nothing is logged', async () =>
-    {
-        const warn = vi.spyOn(
-            (await import('../../server/logger')).authLogger.interceptor.general,
-            'warn',
-        ).mockImplementation(() => undefined);
-
-        const ctx = await runRequest({ uaFamily: 'chrome' }, AGENTS.firefoxDesktop);
-
-        expect(ctx.abort).toBeUndefined();
-        expect(warn).not.toHaveBeenCalled();
     });
 });

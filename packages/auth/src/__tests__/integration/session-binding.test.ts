@@ -699,7 +699,7 @@ describe.skipIf(!dbAvailable)('session binding (case tables 6a, 6b, 6g)', () =>
             expect(Math.abs(rotated.expiresAt!.getTime() - (Date.now() + KEY_TTL_DAYS * DAY_MS))).toBeLessThan(60_000);
         });
 
-        it('an app calling saveSession() by hand: the fields are optional there, so it seals an unbound session', async () =>
+        it('an app calling saveSession() by hand: it seals the four session fields and no binding copy', async () =>
         {
             const { saveSession } = await import('@/nextjs/session-helpers');
             const { unsealSession } = await import('@/server/lib/session');
@@ -714,9 +714,9 @@ describe.skipIf(!dbAvailable)('session binding (case tables 6a, 6b, 6g)', () =>
             });
 
             const session = await unsealSession(savedCookies.get(COOKIE_NAMES.SESSION)!);
-            expect(session.binding).toBeUndefined();
-            expect(session.keyExpiresAt).toBeUndefined();
-            expect(session.uaFamily).toBeUndefined();
+            expect(session).not.toHaveProperty('binding');
+            expect(session).not.toHaveProperty('keyExpiresAt');
+            expect(session).not.toHaveProperty('uaFamily');
         });
 
         it('the route map: authApi exposes the five new routes at the paths the design names', () =>

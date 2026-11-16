@@ -206,6 +206,7 @@ async function grantAdmitted(grant: OAuth2Grant): Promise<boolean>
         userId: grant.user,
         credential: { kind: 'oauth2Grant', grantId: grant.id },
         route: null,
+        presentedOn: null,
     });
 
     return 'admitted' in admission;

@@ -260,13 +260,25 @@ interface CallOptions {
 }
 ```
 
-### Automatic cookie forwarding (SSR)
+### Automatic cookie and `User-Agent` forwarding (SSR)
 
-When `createApi` runs **on the server** (RSC / route handler) it auto-detects request
-cookies via `next/headers` `cookies()` and forwards them as the `Cookie` header. In the
-browser, cookies are sent by the browser automatically. You only need `.cookies({...})` /
-`options.cookies` to **override**. Outside a request context (static generation, build) the
-cookie read silently yields none.
+When `createApi` runs **on the server** (RSC / route handler / server action) it reads the
+inbound request once via `next/headers` and speaks for the browser that sent it:
+
+- its cookies (`cookies()`) go out as the `Cookie` header — `.cookies({...})` /
+  `options.cookies` only **override**;
+- its `user-agent` goes out as `User-Agent`, unless the caller set that header itself. The
+  proxy forwards it to the backend, which compares a bound session's browser family against
+  the key row (`@spfn/auth` session binding) — without it every server-side call would arrive
+  as Node's `fetch` (`user-agent: node`).
+
+In the browser, the browser sends both itself. Outside a request context (static generation,
+build, a job) nothing is read and nothing is added: the call carries no cookies and Node's own
+`user-agent`, which is correct — there is no browser to speak for.
+
+> **BREAKING (`@spfn/auth` session binding).** A custom server-side caller that reaches the
+> RPC proxy or the backend without this client must forward the browser's `User-Agent`
+> itself; otherwise a bound session is refused (`SessionContextChangedError`).
 
 ### SSR base URL resolution
 

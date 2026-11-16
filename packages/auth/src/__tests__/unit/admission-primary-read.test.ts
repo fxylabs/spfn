@@ -89,6 +89,7 @@ function boundKey()
         keyEpoch: 0,
         accountKeyEpoch: 0,
         binding: 'passkey',
+        registeredUaFamily: null,
         expiresAt: new Date(Date.now() + HOUR_MS),
     };
 }
@@ -128,7 +129,7 @@ describe('admission reads the write primary (replica-lag guards, #133)', () =>
         keysRepository.findByKeyIdOnPrimary.mockResolvedValue(boundKey());
         usersRepository.findByIdWithRoleAndKeyOnPrimary.mockResolvedValue(admissionRow());
 
-        await expect(startSessionRenewService({ expiredKeyId: KEY_ID })).resolves.toEqual({ challenge: 'challenge' });
+        await expect(startSessionRenewService({ expiredKeyId: KEY_ID, userAgent: undefined })).resolves.toEqual({ challenge: 'challenge' });
 
         expect(keysRepository.findByKeyIdOnPrimary).toHaveBeenCalledWith(KEY_ID);
         expect(keysRepository.findByKeyId).not.toHaveBeenCalled();
@@ -143,6 +144,7 @@ describe('admission reads the write primary (replica-lag guards, #133)', () =>
 
         await expect(finishSessionRenewService({
             expiredKeyId: KEY_ID,
+            userAgent: undefined,
             response: {} as never,
             keyId: 'key-new',
             publicKey: 'public-key-new',
@@ -158,7 +160,7 @@ describe('admission reads the write primary (replica-lag guards, #133)', () =>
         keysRepository.findByKeyIdOnPrimary.mockResolvedValue(boundKey());
         usersRepository.findByIdWithRoleAndKeyOnPrimary.mockResolvedValue(admissionRow('suspended'));
 
-        await expect(startSessionRenewService({ expiredKeyId: KEY_ID })).rejects.toThrow(SessionRenewalRefusedError);
+        await expect(startSessionRenewService({ expiredKeyId: KEY_ID, userAgent: undefined })).rejects.toThrow(SessionRenewalRefusedError);
 
         expect(usersRepository.findByIdWithRoleAndKeyOnPrimary).toHaveBeenCalledWith(USER_ID, KEY_ID);
         expect(usersRepository.findById).not.toHaveBeenCalled();

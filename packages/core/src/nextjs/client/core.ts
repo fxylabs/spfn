@@ -45,15 +45,39 @@ import {
     fetchInAbortScope,
     errorFromResponse,
     buildCookieHeader,
-    autoDetectServerCookies,
+    readInboundRequest,
 } from './helpers';
 import { CSRF_HEADER, csrfHeaderValue, documentCookieEntries } from './csrf';
 import { RouteCallBuilder } from './builder';
-import type { ScopedFetchResult } from './helpers';
+import type { InboundRequest, ScopedFetchResult } from './helpers';
 import type { ApiConfig, ApiOutcome, CallOptions } from './types';
 import type { Client } from './builder';
 
 const apiLogger = logger.child('@spfn/core:api-client');
+
+/**
+ * The app's own origin from the inbound request's host, for a server-side call when
+ * `SPFN_APP_URL` is unset — or empty, a relative URL, when there is none
+ */
+function inboundAppUrl(inbound: InboundRequest | null): string
+{
+    const host = inbound?.headers.get('host');
+
+    return inbound && host ? `${inbound.headers.get('x-forwarded-proto') || 'http'}://${host}` : '';
+}
+
+/**
+ * Set a header the client derives, unless the caller already set it under any casing
+ */
+function setUnlessCallerDid(headers: Record<string, string>, name: string, value: string | null | undefined): void
+{
+    const lower = name.toLowerCase();
+
+    if (value && !Object.keys(headers).some(key => key.toLowerCase() === lower))
+    {
+        headers[name] = value;
+    }
+}
 
 /**
  * Where a failed call went, for the log line its transport error writes
@@ -244,36 +268,11 @@ export function createApi<TRouter extends Router<any>>(
         const hasFormData = input.formData !== undefined && Object.keys(input.formData).length > 0;
         const method = (hasBody || hasFormData) ? 'POST' : 'GET';
 
-        // Build full URL - handle SSR case where SPFN_APP_URL might not be set
-        let appUrl = env.SPFN_APP_URL || '';
+        // Server-side, the browser request this call is made for; null in the browser
+        const inbound = await readInboundRequest();
 
-        // In SSR environment, if SPFN_APP_URL is not set, try to get host from request headers
-        if (!appUrl && typeof window === 'undefined')
-        {
-            try
-            {
-                const { headers } = await import('next/headers.js');
-                const headersList = await headers();
-                const host = headersList.get('host');
-                const protocol = headersList.get('x-forwarded-proto') || 'http';
-                if (host)
-                {
-                    appUrl = `${protocol}://${host}`;
-                    if (debug)
-                    {
-                        apiLogger.debug(`Auto-detected app URL from headers: ${appUrl}`);
-                    }
-                }
-            }
-            catch
-            {
-                // Fallback: use relative URL and let fetch handle it
-                if (debug)
-                {
-                    apiLogger.warn('Could not determine app URL in SSR environment, using relative URL');
-                }
-            }
-        }
+        // Build full URL - in SSR without SPFN_APP_URL, from the inbound request's host
+        const appUrl = env.SPFN_APP_URL || inboundAppUrl(inbound);
 
         // Build URL based on method
         let fullUrl: string;
@@ -297,10 +296,9 @@ export function createApi<TRouter extends Router<any>>(
             ...options.headers,
         };
 
-        // Auto-detect server cookies and merge with user-provided cookies
-        const autoDetectedCookies = await autoDetectServerCookies();
+        // Forward the browser's cookies, merged with user-provided ones
         const cookiesToSend = {
-            ...autoDetectedCookies,
+            ...inbound?.cookies,
             ...(options.cookies || {}),
         };
 
@@ -323,17 +321,16 @@ export function createApi<TRouter extends Router<any>>(
             typeof window === 'undefined' ? Object.entries(cookiesToSend) : documentCookieEntries(),
         );
 
-        const csrfSetByCaller = Object.keys(headers).some(name => name.toLowerCase() === CSRF_HEADER);
+        setUnlessCallerDid(headers, CSRF_HEADER, csrfToken);
 
-        if (csrfToken && !csrfSetByCaller)
-        {
-            headers[CSRF_HEADER] = csrfToken;
-        }
+        // Server-side, the call speaks for the browser: its `user-agent` goes with it,
+        // the way its cookies do, so the backend sees the browser and not Node's fetch.
+        setUnlessCallerDid(headers, 'User-Agent', inbound?.headers.get('user-agent'));
 
         // Log cookie auto-detection if debug enabled
-        if (debug && Object.keys(autoDetectedCookies).length > 0)
+        if (debug && inbound && Object.keys(inbound.cookies).length > 0)
         {
-            const cookieArray = Object.entries(autoDetectedCookies).map(([name, value]) => ({ name, value }));
+            const cookieArray = Object.entries(inbound.cookies).map(([name, value]) => ({ name, value }));
             debugLogs.logCookieAutoDetection(apiLogger, cookieArray);
         }
 

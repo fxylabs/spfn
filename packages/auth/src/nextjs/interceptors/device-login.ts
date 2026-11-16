@@ -43,7 +43,6 @@ import { expiredCookie, packageCookie } from '../cookie-writer';
 import { refusalBody } from './error-envelope';
 import { establish, writeCookie } from './session-decision';
 import { rememberField, takeRemember } from './remember';
-import { bindingSessionFields } from './session-binding';
 
 /**
  * The two browser calls that park a key: device link's and device-code login's.
@@ -193,7 +192,6 @@ async function sealApprovedSession(ctx: ResponseInterceptorContext): Promise<voi
         privateKey: pending.privateKey,
         keyId: pending.keyId,
         algorithm: pending.algorithm,
-        ...bindingSessionFields(ctx.response.body, ctx.request.headers['user-agent']),
         ...rememberField(pending.remember),
     });
 

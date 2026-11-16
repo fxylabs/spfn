@@ -11,46 +11,58 @@ export { buildCookieHeader, parseResponseBody } from '../shared';
 const cookieLogger = logger.child('@spfn/core:auto-cookies');
 
 /**
- * Auto-detect cookies from Next.js server environment
- * Returns empty object if not in server environment or if cookies are not accessible
+ * What a server-side call carries over from the browser request it is made for
+ *
+ * The browser's cookies, which the call forwards as its own, and the request's
+ * headers: the host the app URL is built from when `SPFN_APP_URL` is unset, and
+ * the browser's `user-agent`, so the backend compares a bound session against
+ * the browser it belongs to rather than against Node's `fetch`.
  */
-export async function autoDetectServerCookies(): Promise<Record<string, string>>
+export interface InboundRequest
 {
-    // Client environment — browser sends cookies automatically
+    cookies: Record<string, string>;
+    headers: Pick<Headers, 'get'>;
+}
+
+/**
+ * Read the inbound request through `next/headers`, once per call
+ *
+ * Null in the browser, which sends its own cookies and `user-agent`, and outside a
+ * request scope — static generation, build time, a job — where there is no browser
+ * to speak for: such a call goes out with Node's own `user-agent`.
+ */
+export async function readInboundRequest(): Promise<InboundRequest | null>
+{
     if (typeof window !== 'undefined')
     {
-        return {};
+        return null;
     }
 
     try
     {
-        // Next.js cookies() API is only available in server environment
-        const { cookies } = await import('next/headers.js');
-        const cookieStore = await cookies();
+        const { cookies, headers } = await import('next/headers.js');
+        const [cookieStore, headerList] = await Promise.all([cookies(), headers()]);
         const allCookies = cookieStore.getAll();
-
-        const result = Object.fromEntries(
-            allCookies.map(cookie => [cookie.name, cookie.value]),
-        );
 
         cookieLogger.debug('Server cookies detected', {
             count: allCookies.length,
             names: allCookies.map(c => c.name),
         });
 
-        return result;
+        return {
+            cookies: Object.fromEntries(allCookies.map(cookie => [cookie.name, cookie.value])),
+            headers: headerList,
+        };
     }
     catch (error)
     {
-        // Server environment but cookies() not accessible
-        // (e.g. static generation, build time, or outside request context)
         const err = error as Error;
-        cookieLogger.warn('Failed to read server cookies', {
+        cookieLogger.warn('Failed to read the inbound request', {
             message: err.message,
             name: err.name,
         });
 
-        return {};
+        return null;
     }
 }
 

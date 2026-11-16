@@ -488,6 +488,7 @@ async function assertSignInAdmitted(row: MfaChallenge): Promise<void>
         userId: row.userId,
         credential: { kind: 'deviceKey', keyId: row.keyId },
         route: null,
+        presentedOn: null,
     });
 
     if ('refused' in admission)

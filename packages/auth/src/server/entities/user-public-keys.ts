@@ -75,11 +75,18 @@ export const userPublicKeys = authSchema.table(
 
         // Browser family the registering request's user-agent named — one of the
         // five badges uaFamily() answers with, never the raw string
-        // null: the request sent no user-agent, or the key predates this column
-        // Written once at registration, like the two columns above. The proxy is
-        // what compares a family against a request (the browser's user-agent does
-        // not survive a server-component hop), so this is the displayable record
-        // of where the key came from rather than the value any check reads
+        // null: the request sent no user-agent, the key predates this column, or
+        // the family was 'other' when the check moved here — migration
+        // 20261116140755_clear_server_hop_ua_family cleared that value on every
+        // key, since a sign-in through a server-side hop recorded the hop's own
+        // user-agent (Node's `node`, the app's HTTP client) as 'other', and no
+        // browser of the five badges reads as 'other'
+        // The value the session-binding check reads: a bound key is admitted
+        // only on a request whose user-agent names this family (admission's
+        // familyRefusal). Written at registration, carried over by rotation and
+        // renewal, and never overwritten — a passkey renewal fills it only where
+        // it is null, from the renewing request. A bound key with null here is
+        // not compared until then
         registeredUaFamily: text('registered_ua_family'),
 
         // Client address this key was last seen signing from, as getClientIp

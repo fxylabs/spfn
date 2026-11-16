@@ -67,6 +67,7 @@ import {
     admissionRefusalError,
     admitPrincipal,
     authContextFor,
+    presentingRequest,
     type AdmissionRefusal,
     type AuthContext,
     type AuthScheme,
@@ -259,6 +260,7 @@ async function admitAppProfile(c: Context, profile: string, verifier: AuthProfil
         userId,
         credential: { kind: 'appProfile', profile, keyId: identity.keyId },
         route: c,
+        presentedOn: presentingRequest(c),
     });
 
     if ('refused' in admission)
@@ -381,6 +383,7 @@ async function admitClientProofProfile(c: Context): Promise<AuthContext>
         userId: keyRecord.userId,
         credential: { kind: 'deviceKey', keyId: credentials.keyId },
         route: c,
+        presentedOn: presentingRequest(c),
     });
 
     if ('refused' in admission)

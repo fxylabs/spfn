@@ -1698,7 +1698,8 @@ seal that failed answered the backend's 200 with no session and an ownerless key
   setup cookies, every OAuth start's) — from one list, `packageCookieNames(jar)`. So do
   `clearSession()` and `clearSessionCookies()`.
 - **The guards treat an outage as an error, not a sign-out.** `getAuthSessionData()` answers
-  `null` only for the key-refused family (and a bound session presented from another browser);
+  `null` only for the key-refused family (a bound session presented from another browser family
+  among them);
   a 5xx, a network failure or `SPFN_AUTH_GUARD_TIMEOUT` running out is thrown, so the app's error
   boundary renders, the cookies stay, and nobody is sent to sign in by an outage. Wrap a guard in
   your error boundary if you rendered a sign-in page for these before.
@@ -1778,8 +1779,8 @@ au3-B8). What changes:
 - **`KeyExpiredError` says whether the key can be renewed** (`details.renewable: true` for a bound
   key inside its grace; absent otherwise), and the Next.js proxy decides on that rather than on the
   cookie's `binding`: a session whose key was bound after its cookie was sealed gets the renewal
-  prompt at its expiry instead of being signed out. The cookie still carries `binding` — the
-  user-agent family check and a key rotation read it.
+  prompt at its expiry instead of being signed out. (Since bundle 8 part 2 the cookie carries no
+  copy of the binding at all — see below.)
 - **`keys/rotate` through the proxy** registers the new key as a web key, as a sign-in through the
   proxy does (`rotateKeyService` takes `webProxy`).
 - **A bound account shows a passkey to let another credential in.** `device/approve`,
@@ -1814,6 +1815,82 @@ au3-B8). What changes:
   transaction**; the services open their own, so a failed assertion's spent challenge commits.
   `issueDeviceLinkService` takes a second argument (`{ credential, passkeyResponse }`), and
   `approveDeviceAuthService` takes `credential`.
+
+### Migration — a bound session's browser family is checked by the backend, against the key row
+
+**BREAKING.** Bundle 8 part 2 of the audit (au8-A1, au8-B2). The Next.js proxy compared the
+request's `user-agent` family with a `uaFamily` sealed in the session cookie and let a request
+without the header through, on the premise that a server component's call sends none. Node's
+`fetch` sends `user-agent: node`, so every server-rendered page of a bound account was refused and
+sent to sign-in; and a session bound on the server (at its first use through the proxy, or by the
+owner turning binding on elsewhere) had a cookie saying unbound, so the check never ran for it.
+Now:
+
+- **The backend compares, at admission, against the key row.** When a bound key
+  (`binding = 'passkey'`) is admitted, the family of the request's `user-agent` must equal the
+  row's `registered_ua_family`; otherwise **401 `SessionContextChangedError`** — the same code
+  (`SESSION_CONTEXT_CHANGED`), status and class as before, now answered by the backend. It is in
+  the key-refused family (`server/lib/admission-refusal.ts`), so the proxy's session decision
+  clears the three session cookies on it and `getAuthSessionData()` answers `null`, as for a
+  revoked key. An absent `user-agent` is the family `other`, compared like any other value — there
+  is no "no signal" exception and no exception for Node's string. Every door that admits a bound
+  key for its own request compares: `authenticate` (and `oauthFinalizeAuth`, which runs it),
+  `optionalAuth` (a refusal is the anonymous caller there), the clientProofV1 profile, and
+  renewal (`session/renew/*` answer their one `SessionRenewalRefusedError`). A one-time token is
+  compared where it is minted (`POST /_auth/tokens`, behind `authenticate`), not where it is
+  redeemed. **Sign-out is not compared**: a thief ending the owner's session does no harm, and the
+  owner ending it from a changed browser must work.
+- **`@spfn/core`'s server-side client forwards the browser's `User-Agent`** with its cookies, from
+  the inbound request (`next/headers`), unless the caller set the header; outside a request scope
+  (build, a job) nothing is added and a bound session is refused there — there is no browser.
+  **This needs the matching `@spfn/core` release.** A custom server-side caller that reaches the
+  RPC proxy or the backend without the SPFN client must forward the browser's `User-Agent` itself,
+  or a bound session is refused. `createOAuthCallbackHandler`'s in-process finalize already
+  forwards the callback request's headers, and `ctx.callBackend` re-sends the proxied request's.
+- **`registered_ua_family` is the value the check reads.** It is written at registration, copied
+  by rotation and by renewal, and never overwritten. A passkey renewal fills it from the renewing
+  request **only where the row has none** — a key that predates the column, or was registered
+  without a `user-agent`; **such a bound key is admitted unchecked until that renewal**.
+  `startSessionRenewService` / `finishSessionRenewService` take `userAgent` (the renewing
+  request's); a renewal no longer re-derives the family from the old row's `user-agent` string.
+- **Keys registered through a server-side hop recorded Node's family.** Before this release a
+  sign-in completed through the SPFN client on the server (a server action or route handler
+  calling `login`, `register`, `signup/password`, `password/reset/complete`, `invitations/accept`,
+  `passkeys/login/verify` or a device poll) sent `user-agent: node`, so its key recorded `other`
+  and would now refuse the real browser; renewal and rotation carried the value on. **The migration
+  `20261116140755_clear_server_hop_ua_family` sets `registered_ua_family` to `NULL` wherever it is
+  `other`, on every key, bound or not**, and those rows then follow the rule above: unchecked until
+  the next passkey renewal records the renewing request's family. No list of server-client
+  user-agents can tell such a row from a real one; what is certain is that a browser of the
+  five-badge table never reads as `other`. A browser that genuinely reads as `other` gets it
+  recorded again at that renewal. Rows of any other family are untouched.
+- **The session cookie carries no binding copy.** `SessionData.binding`, `keyExpiresAt` and
+  `uaFamily` are gone: nothing read them once the decisions moved to the key row (`KeyExpiredError`'s
+  `renewable` for renewal, admission for the family). A cookie sealed earlier still unseals and the
+  fields are ignored. With them go `bindingSessionFields`, `sessionBindingInterceptor` (the re-seal
+  after a binding change, which had nothing left to write) and its 500 `SessionResealFailedError`
+  (the class stays exported, and nothing answers it), and the proxy's `contextChanged` /
+  `refuseAsContextChanged`. `ClearReason` loses `context-changed` and `reseal-failed`; `refresh()`
+  loses its `changed` argument.
+- **Admission takes `presentedOn`.** `AdmitPrincipalParams` gains `presentedOn: { userAgent } | null`
+  (`presentingRequest(c)` builds it), and `AdmissionRefusal` gains `{ reason: 'contextChanged' }`.
+  `admitBearerPrincipal(c, key, presentedOn)` takes the third argument; `authenticateBearer(c, next,
+  presentedOn)` is `authenticate`'s Bearer path, exported for sign-out.
+- **An expired key is answered by admission, after the signature and after the family.** The
+  Bearer step (`admitBearerKey(c)`, which loses its `admitsExpired` argument; `BearerOutcome` and
+  `BearerRefusal` lose `expired`) no longer answers expiry: it verifies the signature and hands a
+  live or expired key to `admitPrincipal`, whose order is account → revoked → **family** → expired
+  → second factor. So an expired bound key presented from another browser family answers **401
+  `SessionContextChangedError`** (cookies cleared), not the renewal prompt; from its own family it
+  is the renewal prompt as before. A request for an expired key whose signature does not verify
+  (none, or a wrong key's) now answers **401 `InvalidTokenError`**, as for a live key, instead of
+  `KeyExpiredError` — the expired answer told anyone holding a key id that the key was expired and
+  renewable. An expired key whose account is refused answers the account's refusal. Per door, for
+  an expired bound key from another family: `authenticate` → `SessionContextChangedError`;
+  `optionalAuth` → the anonymous caller, as for any key that is not live (unchanged); renewal →
+  `SessionRenewalRefusedError` (unchanged); sign-out → admitted and revoked (unchanged, not
+  compared); the clientProofV1 profile → `SESSION_REVOKED` at its first step, before the proof, by
+  the contract's order (unchanged — it never had a renewal answer).
 
 ### Invitations
 
@@ -3456,7 +3533,7 @@ await disableSessionBinding(api, { currentPassword: '…' });   // or the accoun
 
 **What a copied cookie can and cannot do.** Before the bound key expires, a copy is
 indistinguishable from the original by anything the server sees — that is the honest statement, and
-the user-agent family check below is the only thing standing in front of it. After the key
+the browser-family check below is the only thing standing in front of it. After the key
 expires, the copy has nothing: renewal needs the passkey, and the account's own browser is the one
 holding it. Turning binding *off* is the privileged direction here, the reverse of the usual
 posture: `assertRecentAuthentication` is satisfied by the age of the device key a request is signed
@@ -3493,7 +3570,8 @@ with, and a cookie copied in the ten minutes after a sign-in carries exactly tha
 - *The sweep* (`auth.mfa.sweep`) revokes bound keys past their grace daily, so an expired bound key
   does not linger as an "active" row.
 - *Signing out* accepts a bound key that has expired but is still inside its grace, admitted as
-  renewal admits it, and revokes it; the proxy clears the cookies whenever sign-out revoked the key
+  renewal admits it, and revokes it — from any browser family (the family check below does not
+  apply to sign-out); the proxy clears the cookies whenever sign-out revoked the key
   or the backend answers 401 to the session the request presented. A key past its grace gets the
   answer any dead key gets, and the cookies are cleared all the same. A 401 to a sign-out that
   presented no session — a cross-site form POST arrives without the `SameSite=Lax` cookie — clears
@@ -3565,20 +3643,16 @@ for a key renewal still admits — bound, not revoked, inside its grace — the 
 that refusal into 401 `SessionRenewalRequiredError` and keeps the cookies: the session is waiting
 on one prompt, not finished. Any other `KeyExpiredError` — an unbound key, a bound one past its
 grace — clears the session. The decision is the key row's, read off the refusal, never the
-cookie's `binding`: a key bound after its cookie was sealed (at its first use through the proxy,
-or when the owner turned binding on from another browser) still has a cookie saying unbound, and
-is asked to renew all the same. The renewed session is sealed from what `renew/verify` answers. A client component calls `renewSession(api)`, which runs the
+cookie: the cookie holds no copy of the binding, so a key bound after its cookie was sealed (at its
+first use through the proxy, or when the owner turned binding on from another browser) is asked to
+renew like any other. The renewed session is sealed around the new key `renew/verify` registered. A client component calls `renewSession(api)`, which runs the
 ceremony and gets a new bound key sealed into the cookie.
 
-The proxy never refuses on the cookie's own copy of the expiry. `keyExpiresAt` inside the cookie is
-a hint written at the last seal; the key row is the fact, and only a request that reached the
-backend can read it. That matters on the second device: turning binding **off** rewrites every
-live bound key to an ordinary 90-day one, but only the browser that asked gets a re-sealed cookie, so
-another device keeps a cookie that says `passkey` with an expiry that no longer applies. Because
-nothing is decided from that hint, its next request is forwarded, the backend sees an ordinary key
-and answers 200 — no renewal prompt for a session that does not need one. What that device does
-keep until it signs in again is its sealed `uaFamily`, so the user-agent family check below goes on
-applying to it.
+The proxy decides nothing from the cookie about binding: the key row is the fact, and only a
+request that reached the backend can read it. That matters on the second device: turning binding
+**off** rewrites every live bound key to an ordinary 90-day one, and another device's next request
+is forwarded, the backend sees an ordinary key and answers 200 — no renewal prompt for a session that
+does not need one, and no browser-family check for a key that is no longer bound.
 
 > **Renewal is bound to the expiring key's own signature.** `session/renew/options` and
 > `session/renew/verify` are not public: they take the ordinary bearer JWT the proxy signs with the
@@ -3623,23 +3697,30 @@ to the sign-in page:
 `getAuthSessionData()` answers a third state, `'renewal-required'`, for apps writing their own
 guard.
 
-**The user-agent family check.** Independently of expiry, a bound session presented from a
-different browser family is refused 401 `SessionContextChangedError` and its three cookies are
-cleared. Browsers do not share cookie jars, so that move cannot happen without a copy. The
-comparison is coarse on purpose — five families, `edge` / `chrome` / `firefox` / `safari` /
-`other`, and **no desktop/mobile axis** — so a version bump, a user-agent reduction and Android's
-"Request desktop site" are all the same browser. The check covers only sessions whose cookie was
-sealed bound — a session bound after its cookie was sealed is checked from its first renewal;
-bundle 8 part 2 moves the check to the backend.
+**The browser-family check.** Independently of expiry, a bound key presented from a different
+browser family than the one its row recorded (`registered_ua_family`) is refused 401
+`SessionContextChangedError` **by the backend**, at admission, and the proxy's session decision
+clears the three cookies on it (it is in the key-refused family). Browsers do not share cookie
+jars, so that move cannot happen without a copy. The comparison is coarse on purpose — five
+families, `edge` / `chrome` / `firefox` / `safari` / `other`, and **no desktop/mobile axis** — so a
+version bump, a user-agent reduction and Android's "Request desktop site" are all the same browser.
 
+- **The key row decides, not the cookie.** A session bound after its cookie was sealed — at its
+  first use through the proxy, or when the owner turned binding on in another browser — is checked
+  from its next request. The family is the one recorded when the key was registered, copied by
+  rotation and renewal and never overwritten; a bound key with **no recorded family** (one that
+  predates the column, or was registered without a `user-agent`) is admitted unchecked until a
+  passkey renewal records the renewing browser's.
+- **A server-rendered page carries the browser's `user-agent`.** `@spfn/core`'s server-side client
+  forwards the inbound request's `User-Agent` with its cookies, and the proxy forwards it to the
+  backend. A request without one is the family `other`, compared like any other: a custom
+  server-side caller that does not use the SPFN client must forward the browser's `User-Agent`
+  itself, or a bound session is refused.
 - **Chrome on iOS and Safari on iOS are different families.** They are different cookie jars, so a
   session moving between them moved by being copied. An in-app `SFSafariViewController` shares
   Safari's jar and carries no badge of its own, so it reads as `safari` and passes.
-- **A request with no `user-agent` is no signal, not a different family.** A server component's
-  `api.` call reaches the proxy as Node `fetch` and carries none; refusing those would refuse every
-  server-rendered page view.
-- **Unbound accounts are neither checked nor logged.** The check exists for sessions that asked
-  for it.
+- **Sign-out is not checked**, and neither are unbound keys: the check exists for sessions that
+  asked for it.
 
 **The concurrent-use signal.** `listKeys` rows carry `concurrentUseAtMillis` — the last time one
 key was seen from two client addresses inside `SPFN_AUTH_CONCURRENT_USE_WINDOW_MS`. It is a signal
@@ -3654,16 +3735,9 @@ move. Where proxy-guard is not configured the signal simply never fires. One key
 address change per window, so a phone flipping between cellular and wifi costs one row update rather
 than one per request.
 
-**A binding change that cannot re-seal the cookie fails closed.** Turning binding on or off commits
-on the backend and then re-seals the session cookie in the proxy's response. If that re-seal cannot
-happen, the answer is 500 `SessionResealFailedError` with the three session cookies cleared, never
-the route's 200: a cookie that disagrees with the account is the state the feature exists to avoid,
-and signing in again is what produces one that agrees.
-
-**Unbound accounts are unchanged.** Every response, every cookie and every query count is what it
-was: nothing above applies to an account that did not opt in, and a sign-in that answers without
-the two binding fields seals exactly the session it always did — which is also what an app calling
-`saveSession()` by hand gets.
+**Unbound accounts are unchanged.** Every response and every query count is what it was: nothing
+above applies to an account that did not opt in. No session cookie, bound or not, carries a copy
+of the binding — the same four fields an app calling `saveSession()` by hand seals.
 
 Contract 0.12.0. `KeySummary.binding`, `KeySummary.concurrentUseAtMillis`,
 `LoginResponse.sessionBinding` and `LoginResponse.keyExpiresAtMillis` are all optional and absent
@@ -5392,19 +5466,32 @@ const admission = await admitPrincipal({
 // { admitted: Principal } | { refused: { reason: 'accountDisabled' | 'pendingDeletion' | 'credentialRevoked' | ... } }
 ```
 
-It decides in this order:
+It decides in this order. Every step runs only after the door verified the credential the
+request presented — a device key's request signature (the Bearer step, which hands a live or an
+expired key alike to admission; a signature that does not verify is `InvalidTokenError` and never
+reaches step 1), a one-time token's redemption, an OAuth 2.1 grant's token, an app profile's
+verifier — and only when the step before it admitted. The cookie/Bearer error each step answers
+is named after it; the other doors answer in their own vocabulary (below).
 
-1. **The account**, read on the write primary — a deletion asked for is refused with the
-   pending-deletion answer (a purged account with the disabled one), then a status other than
-   `active` with the disabled answer. Both are columns of the users row, so this is still one
-   read; `admitsAccount(user)` is the yes/no form for a reader that needs no reason.
-2. **The credential is live** — a device key by `keyLiveness` (active, unexpired, of the
-   account's current key generation); a one-time token by the key that issued it; a renewal key
-   by the renewal grace rule (bound, inside its grace); an OAuth 2.1 grant by not being revoked;
-   an app profile's credential by its verifier having admitted it on this request.
-3. **The second-factor policy** (#309) — except for renewal, deliberately: renewal admits no
-   request, it continues a key the person holds into its replacement, which meets the policy on
-   its first request like any key.
+1. **The account**, read on the write primary — no such account is `AccountNotFoundError`; a
+   deletion asked for is `AccountPendingDeletionError` (a purged account `AccountDisabledError`);
+   then a status other than `active` is `AccountDisabledError`. Both are columns of the users
+   row, so this is still one read; `admitsAccount(user)` is the yes/no form for a reader that
+   needs no reason.
+2. **The credential is not revoked** — `KeyRevokedError`. A device key by `keyLiveness` (not
+   revoked, of the account's current key generation); a one-time token by the key that issued
+   it; a renewal key by the renewal grace rule (bound, inside its grace); an OAuth 2.1 grant by
+   not being revoked; an app profile's credential by its verifier having admitted it on this
+   request.
+3. **A bound key comes from its browser family** — `SessionContextChangedError`. A key bound to
+   a passkey must be presented from the browser family its row recorded; an unbound key, a key
+   with no recorded family, and sign-out are not compared.
+4. **The key has not expired** — `KeyExpiredError`, `renewable` for a bound key inside its
+   grace. It comes after the family so that a copy presented from another browser is told it is
+   one, never offered the owner's renewal.
+5. **The second-factor policy** (#309) — `SecondFactorEnrolmentRequiredError`. Except for
+   renewal, deliberately: renewal admits no request, it continues a key the person holds into its
+   replacement, which meets the policy on its first request like any key.
 
 The account, its role and the credential's row are one primary read, so `authenticate` makes
 no query it did not make before. Each door answers a refusal as it always has: 401/403 with the
@@ -5418,6 +5505,7 @@ alone — so a client can tell "this session is over" from any other 401:
 | refusal | error | status | ends the browser session |
 |---------|-------|--------|--------------------------|
 | key revoked, unknown, or of an ended key generation | `KeyRevokedError` | 401 | yes |
+| bound key presented from another browser family | `SessionContextChangedError` | 401 | yes |
 | key expired (unbound) | `KeyExpiredError` | 401 | yes (a bound one is renewable) |
 | account missing | `AccountNotFoundError` | 401 | yes |
 | account disabled / deleted | `AccountDisabledError` | 403 | yes |

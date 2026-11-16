@@ -46,7 +46,7 @@ const JSON_HEADERS = { 'Content-Type': 'application/json' };
 /** The principal an account resolves to — through `admitPrincipal`, as every door reaches it. */
 async function resolveAuthenticatedUser(userId: number)
 {
-    const admission = await admitPrincipal({ userId, credential: { kind: 'appProfile', profile: 'test', keyId: 'test' }, route: null });
+    const admission = await admitPrincipal({ userId, credential: { kind: 'appProfile', profile: 'test', keyId: 'test' }, route: null, presentedOn: null });
 
     if (!('admitted' in admission))
     {

@@ -10,17 +10,16 @@ import { env } from '@spfn/auth/config';
 import { env as coreEnv } from '@spfn/core/config';
 import { authLogger } from '../logger';
 
-import { type KeyAlgorithmType, type SessionBindingType } from '../types';
-import type { UaFamily } from './ua-family';
+import { type KeyAlgorithmType } from '../types';
 
 /**
  * What the sealed cookie carries.
  *
- * The first four fields are the session itself and have always been here. The
- * last three are what #97 added, and all three are optional together: a cookie
- * without them is an unbound session, which is every session an account that did
- * not opt in gets and every session an app seals by hand with `saveSession()`.
- * The proxy reads their absence as "behave exactly as before".
+ * The first four fields are the session itself. Whether its key is bound, when
+ * that key expires and which browser family it started in are facts of the key
+ * row, which the backend reads at every request: they are not sealed here. A
+ * cookie sealed before that — carrying `binding`, `keyExpiresAt` or `uaFamily` —
+ * unseals as before, and nothing reads those fields.
  */
 export interface SessionData
 {
@@ -29,26 +28,6 @@ export interface SessionData
     keyId: string;
     algorithm: KeyAlgorithmType;
 
-    /**
-     * `'passkey'` when the key sealed here is bound.
-     *
-     * The backend is the only party that knows an account opted in — the proxy
-     * generated the key but never saw the setting — so this is copied out of the
-     * `LoginResult` the sign-in answered with. Absent means unbound.
-     */
-    binding?: SessionBindingType;
-
-    /** Epoch milliseconds the bound key expires at. Only set alongside `binding`. */
-    keyExpiresAt?: number;
-
-    /**
-     * Browser family the session was sealed from, per `uaFamily`.
-     *
-     * Recorded here rather than read off the key row because the comparison
-     * happens in the proxy: it is the only hop that sees the browser's own
-     * `user-agent`, and a server component's call to the RPC proxy carries none.
-     */
-    uaFamily?: UaFamily;
     /**
      * The sign-in asked to be kept signed in (`remember: true`). Sealed so that
      * every later re-seal of this session keeps the lifetime it was given —

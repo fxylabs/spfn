@@ -1398,11 +1398,13 @@ What turning it on changes:
   `SPFN_AUTH_SESSION_RENEW_PATH`, `/auth/renew`) to send a server-rendered page there, since
   a server component cannot run a ceremony. Renewal stays possible for **seven days** past
   expiry (`SPFN_AUTH_BOUND_KEY_RENEW_GRACE_HOURS`, default `168`); past that, sign in again.
-- A bound session presented from a different **browser family** is refused 401
-  `SessionContextChangedError` and its cookies are cleared. The comparison is coarse on
-  purpose — five families, no desktop/mobile axis — so a version bump or "Request desktop
-  site" is the same browser, and a request with no `user-agent` is no signal rather than a
-  mismatch.
+- A bound session presented from a different **browser family** than its key row recorded is
+  refused 401 `SessionContextChangedError` by the backend, and the proxy clears its cookies.
+  The comparison is coarse on purpose — five families, no desktop/mobile axis — so a version
+  bump or "Request desktop site" is the same browser. A request with no `user-agent` is the
+  family `other`, like any other value: the SPFN client forwards the browser's `User-Agent`
+  from a server component, and a custom server-side caller must do the same. Sign-out is not
+  checked.
 - `listKeys` rows gain `concurrentUseAtMillis`: the last time one key was seen from two
   attested addresses at once. Show it and notify on it — it is never a refusal, because
   addresses change legitimately several times an hour.

@@ -7,9 +7,9 @@
  * 1. Extract Authorization header
  * 2. Decode JWT to extract keyId
  * 3. Fetch public key from database
- * 4. Check key expiration
- * 5. Verify JWT signature with public key
- * 6. Validate user status
+ * 4. Verify JWT signature with public key
+ * 5. Admission: user status, key revocation, a bound key's browser family,
+ *    key expiration, the second-factor policy
  * 7. Update last used timestamp
  * 8. Attach user to context
  *
@@ -20,7 +20,7 @@
  * - Key revocation check (isActive flag and the account's key generation)
  */
 
-import type { Context } from 'hono';
+import type { Context, Next } from 'hono';
 import { defineMiddleware } from '@spfn/core/route';
 import { getClientIp } from '@spfn/core/middleware';
 import { UnauthorizedError } from '@spfn/core/errors';
@@ -38,7 +38,14 @@ import { recordKeyUse } from './record-key-use';
 import { keyLiveness, type KeyWithAccountEpoch } from '../lib/key-liveness';
 import { runAuthProfile, type AuthContext, type AuthProfileOutcome } from './auth-profiles';
 import { matchesMachineDiscriminator } from './machine-principals';
-import { admissionRefusalError, admitPrincipal, authContextFor, isRenewable, type Admission } from '../services/admission.service';
+import {
+    admissionRefusalError,
+    admitPrincipal,
+    authContextFor,
+    presentingRequest,
+    type Admission,
+    type PresentingRequest,
+} from '../services/admission.service';
 import { registerEnrolmentGate } from '../lib/enrolment-routes';
 
 // Auth context type — one principal shape for every scheme (see admission.service).
@@ -77,26 +84,31 @@ export type BearerRefusal =
     | 'machine'
     | 'undecodable'
     | 'unknown'
-    | 'expired'
     | ClientTokenRefusal;
 
 /**
- * What a Bearer credential resolved to: the key row it named, or why not — and,
- * for an expired key, whether renewal still admits it (`isRenewable`).
+ * What a Bearer credential resolved to: the key row it named — live or
+ * expired, never revoked — or why not.
  */
 export type BearerOutcome =
     | { key: KeyWithAccountEpoch }
-    | { refused: Exclude<BearerRefusal, 'expired'> }
-    | { refused: 'expired'; renewable: boolean };
+    | { refused: BearerRefusal };
 
 /**
  * Admit the Bearer credential on this request, or say what stopped it.
  *
  * The one lookup-and-verify path every Bearer middleware takes — header, machine
- * discriminator, decode, key row, expiry, signature — kept in one place because
- * the order is itself a rule: a machine credential never reaches a decode, and a
+ * discriminator, decode, key row, signature — kept in one place because the
+ * order is itself a rule: a machine credential never reaches a decode, and a
  * key row is found before its signature is checked so that an unknown key and a
  * forged one cost the same work.
+ *
+ * An expired key is not answered here: it comes back like a live one once its
+ * signature verified, and admission says what it gets — after the account, and
+ * for a bound key after the browser family (`admitPrincipal`). Answering it
+ * here would tell anyone who knows a key id, without its private key, that the
+ * key is expired and renewable, and would prompt a copy presented from another
+ * browser to renew the owner's session.
  *
  * It answers rather than throws, which is what lets two middlewares share it.
  * `authenticate` turns each refusal into the error that step has always
@@ -105,14 +117,8 @@ export type BearerOutcome =
  * dead one. A shared step that threw would have to be unwound to get there.
  *
  * @param c - the Hono context of the request being authenticated
- * @param admitsExpired - whether a key past its `expiresAt` may still be
- *   admitted. Renewal and sign-out are the only callers that say yes, and only
- *   for a bound key inside its grace.
  */
-export async function admitBearerKey(
-    c: Context,
-    admitsExpired: (key: UserPublicKey) => boolean,
-): Promise<BearerOutcome>
+export async function admitBearerKey(c: Context): Promise<BearerOutcome>
 {
     const authHeader = c.req.header('Authorization');
 
@@ -147,16 +153,10 @@ export async function admitBearerKey(
     // A revoked key — and one of an ended key generation, which is the same
     // thing (see keyLiveness) — is an unknown one.
     const key = await keysRepository.findWithAccountEpochOnPrimary(decoded.keyId as string);
-    const liveness = key ? keyLiveness(key) : 'revoked';
 
-    if (!key || liveness === 'revoked')
+    if (!key || keyLiveness(key) === 'revoked')
     {
         return { refused: 'unknown' };
-    }
-
-    if (liveness === 'expired' && !admitsExpired(key))
-    {
-        return { refused: 'expired', renewable: isRenewable(key) };
     }
 
     return signatureOutcome(token, key);
@@ -186,7 +186,7 @@ function signatureOutcome(token: string, key: KeyWithAccountEpoch): BearerOutcom
  * `machine` and `undecodable` deliberately share a message: on this middleware
  * that makes the machine registry invisible (see INVALID_TOKEN_MESSAGE).
  */
-function bearerRefusal(c: Context, outcome: Extract<BearerOutcome, { refused: unknown }>): Error
+function bearerRefusal(c: Context, outcome: { refused: BearerRefusal }): Error
 {
     if (outcome.refused === 'absent')
     {
@@ -205,8 +205,6 @@ function bearerRefusal(c: Context, outcome: Extract<BearerOutcome, { refused: un
             return new UnauthorizedError({ message: INVALID_TOKEN_MESSAGE });
         case 'unknown':
             return admissionRefusalError({ reason: 'credentialRevoked' });
-        case 'expired':
-            return admissionRefusalError({ reason: 'credentialExpired', renewable: outcome.renewable });
         case 'token-expired':
             return new TokenExpiredError();
         case 'bad-signature':
@@ -223,18 +221,23 @@ function bearerRefusal(c: Context, outcome: Extract<BearerOutcome, { refused: un
 }
 
 /**
- * The admission of a verified Bearer key: the account, the key's liveness on
- * the same read, and the second-factor policy — `admitPrincipal`, as every
- * door asks it. `route` is the request for the global `authenticate`, whose
- * enrolment routes the policy exempts, and for `optionalAuth`, which is no
- * enrolment gate and so exempts none.
+ * The admission of a verified Bearer key: the account, the key's revocation on
+ * the same read, a bound key's browser family, its expiry, and the
+ * second-factor policy —
+ * `admitPrincipal`, as every door asks it. `route` is the request for the
+ * global `authenticate`, whose enrolment routes the policy exempts, and for
+ * `optionalAuth`, which is no enrolment gate and so exempts none.
+ *
+ * @param presentedOn - the request a bound key's family is compared against;
+ *   null only for sign-out, which is not family-checked
  */
-export async function admitBearerPrincipal(c: Context, key: UserPublicKey): Promise<Admission>
+export async function admitBearerPrincipal(c: Context, key: UserPublicKey, presentedOn: PresentingRequest | null): Promise<Admission>
 {
     return await admitPrincipal({
         userId: key.userId,
         credential: { kind: 'deviceKey', keyId: key.keyId },
         route: c,
+        presentedOn,
     });
 }
 
@@ -288,11 +291,23 @@ export const authenticate = defineMiddleware('auth', async (c, next) =>
         return undefined;
     }
 
+    return await authenticateBearer(c, next, presentingRequest(c));
+});
+
+/**
+ * `authenticate`'s Bearer path, for a request that names no auth profile.
+ *
+ * Exported for `authenticateForSignOut`, which runs it with `presentedOn` null:
+ * a sign-out is not family-checked — a thief ending the owner's session does no
+ * harm, and the owner ending it from a changed browser must work.
+ *
+ * @param presentedOn - the request a bound key's family is compared against
+ */
+export async function authenticateBearer(c: Context, next: Next, presentedOn: PresentingRequest | null): Promise<undefined>
+{
     // 1.–4. The shared Bearer step: header, machine discriminator, decode, key
-    //        row, expiry, signature. No key past its `expiresAt` is admitted
-    //        here — `authenticateForRenewal` is the only caller that says
-    //        otherwise, and only for a bound key inside its renewal grace.
-    const outcome = await admitBearerKey(c, () => false);
+    //        row, signature. An expired key passes it; admission refuses it.
+    const outcome = await admitBearerKey(c);
 
     if ('refused' in outcome)
     {
@@ -303,9 +318,10 @@ export const authenticate = defineMiddleware('auth', async (c, next) =>
     const keyId = keyRecord.keyId;
 
     // 5.–6. The admission every door takes (admitPrincipal): the account's
-    // status, the key's liveness on the same read, then the second-factor
-    // policy, which an enrolment route exempts here.
-    const admission = await admitBearerPrincipal(c, keyRecord);
+    // status, the key's revocation on the same read, a bound key's browser
+    // family, its expiry, then the second-factor policy, which an enrolment
+    // route exempts here.
+    const admission = await admitBearerPrincipal(c, keyRecord, presentedOn);
 
     if ('refused' in admission)
     {
@@ -338,7 +354,7 @@ export const authenticate = defineMiddleware('auth', async (c, next) =>
     await next();
 
     return undefined;
-});
+}
 
 /**
  * Optional authentication middleware
@@ -443,7 +459,7 @@ export const optionalAuth = defineMiddleware('optionalAuth', async (c, next) =>
         // died, a person the policy holds to enrolling — continues
         // anonymously, which is this middleware's answer to an unusable
         // principal.
-        const admission = await admitBearerPrincipal(c, keyRecord);
+        const admission = await admitBearerPrincipal(c, keyRecord, presentingRequest(c));
 
         if ('admitted' in admission)
         {

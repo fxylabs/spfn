@@ -122,6 +122,7 @@ export async function verifyAccessToken(
         userId: pair.grant.user,
         credential: { kind: 'oauth2Grant', grantId: pair.grant.id },
         route: null,
+        presentedOn: null,
     });
 
     if ('refused' in admission)
@@ -155,6 +156,7 @@ function refuseToken(refusal: AdmissionRefusal): null
         case 'accountMissing':
         case 'credentialRevoked':
         case 'credentialExpired':
+        case 'contextChanged':
             return null;
         case 'accountDisabled':
             throw new AccountDisabledError({ status: refusal.status });

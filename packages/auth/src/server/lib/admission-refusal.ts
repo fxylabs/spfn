@@ -19,7 +19,8 @@
  * on the backend's answer rather than on its cookie's copy of the binding.
  *
  * Every class of the family is its own (`KeyRevokedError`, `KeyExpiredError`,
- * `AccountNotFoundError`, `AccountDisabledError`, `AccountPendingDeletionError`)
+ * `SessionContextChangedError`, `AccountNotFoundError`, `AccountDisabledError`,
+ * `AccountPendingDeletionError`)
  * and none is core's `UnauthorizedError` itself: that code is what every other
  * 401 answers — a stale one-time token, an ops token, an app's own refusal — and
  * a family that held it would sign the user out on any of them. The subclasses
@@ -38,6 +39,7 @@ import {
     KeyExpiredError,
     KeyRevokedError,
     SecondFactorEnrolmentRequiredError,
+    SessionContextChangedError,
 } from '@spfn/auth/errors';
 
 import type { UserStatus } from '../types';
@@ -54,6 +56,7 @@ export type AdmissionRefusal =
     | { reason: 'pendingDeletion'; purgeScheduledAt: string | undefined }
     | { reason: 'credentialRevoked' }
     | { reason: 'credentialExpired'; renewable: boolean }
+    | { reason: 'contextChanged' }
     | { reason: 'enrolmentRequired' };
 
 type RefusalReason = AdmissionRefusal['reason'];
@@ -91,6 +94,11 @@ const REFUSAL_ANSWERS: { [R in RefusalReason]: RefusalAnswer<R> } = {
         errorType: KeyExpiredError,
         endsSession: true,
         error: refusal => keyExpiredError(refusal.renewable),
+    },
+    contextChanged: {
+        errorType: SessionContextChangedError,
+        endsSession: true,
+        error: () => new SessionContextChangedError(),
     },
     enrolmentRequired: {
         errorType: SecondFactorEnrolmentRequiredError,

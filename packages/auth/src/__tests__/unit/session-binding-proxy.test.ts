@@ -20,7 +20,6 @@ import { generalAuthInterceptor } from '../../nextjs/interceptors/general-auth';
 import { loginRegisterInterceptor } from '../../nextjs/interceptors/login-register';
 import { keyRotationInterceptor } from '../../nextjs/interceptors/key-rotation';
 import { oauthFinalizeInterceptor } from '../../nextjs/interceptors/oauth';
-import { sessionBindingInterceptor } from '../../nextjs/interceptors/session-binding';
 import { SESSION_RENEW_PATH_PATTERN } from '../../nextjs/interceptors/session-renew';
 import { sealPendingSession, unsealPendingSession } from '../../nextjs/session-helpers';
 import { sealSession, unsealSession, type SessionData } from '../../server/lib/session';
@@ -28,17 +27,19 @@ import { generateKeyPair } from '../../server/lib/crypto';
 import { COOKIE_NAMES } from '../../server/lib/config';
 import { buildStartCookieName } from '../../server/lib/oauth/start-cookies';
 import { refusalEnvelope } from '../../nextjs/interceptors/error-envelope';
-import { authErrorRegistry, KeyRevokedError, SessionContextChangedError, SessionRenewalRequiredError, SessionResealFailedError } from '../../errors';
+import { authErrorRegistry, KeyRevokedError, SessionRenewalRequiredError } from '../../errors';
 import { decidedRequest, decidedResponse } from '../helpers/session-decision';
 
 const SECRET = 'test-secret-with-at-least-32-characters-for-security-testing';
 const CHROME = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36';
-const FIREFOX = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:133.0) Gecko/20100101 Firefox/133.0';
 
 const BOUND = { sessionBinding: 'passkey', keyExpiresAtMillis: Date.now() + 3_600_000 };
 
-/** A session as a sign-in would have sealed it. */
-async function sealedSession(overrides: Partial<SessionData> = {}): Promise<{ sealed: string; keyId: string }>
+/**
+ * A session as a sign-in would have sealed it — `overrides` may carry the
+ * binding fields a cookie sealed before bundle 8 part 2 still holds.
+ */
+async function sealedSession(overrides: Record<string, unknown> = {}): Promise<{ sealed: string; keyId: string }>
 {
     const keyPair = generateKeyPair('ES256');
     const sealed = await sealSession({
@@ -92,6 +93,14 @@ function responseContext(
 }
 
 const next = async (): Promise<void> => undefined;
+
+/** The cookie copies bundle 8 part 2 stopped sealing: the key row is the fact. */
+function expectNoBindingFields(session: SessionData): void
+{
+    expect(session).not.toHaveProperty('binding');
+    expect(session).not.toHaveProperty('keyExpiresAt');
+    expect(session).not.toHaveProperty('uaFamily');
+}
 
 describe('the proxy and a bound session (case table 6c)', () =>
 {
@@ -232,47 +241,6 @@ describe('the proxy and a bound session (case table 6c)', () =>
         expect(ctx.setCookies.filter(cookie => cookie.value === '')).toEqual([]);
     });
 
-    it('bound, the user-agent family does not match: 401 SessionContextChangedError envelope, the three cookies cleared', async () =>
-    {
-        const { sealed } = await sealedSession({ binding: 'passkey', keyExpiresAt: Date.now() + 3_600_000, uaFamily: 'chrome' });
-        const ctx = requestContext('/_auth/users/me', new Map([[COOKIE_NAMES.SESSION, sealed]]), FIREFOX);
-
-        await decidedRequest(ctx, [generalAuthInterceptor.request], next);
-
-        expect(ctx.abort?.status).toBe(401);
-        expect((ctx.abort?.body as { __type: string }).__type).toBe('SessionContextChangedError');
-        expect(ctx.abort?.setCookies?.map(cookie => cookie.name)).toEqual([
-            COOKIE_NAMES.SESSION,
-            COOKIE_NAMES.SESSION_KEY_ID,
-            COOKIE_NAMES.CSRF,
-        ]);
-    });
-
-    it('bound, no user-agent (a server component calling the RPC proxy): passed through, cookies kept', async () =>
-    {
-        const { sealed } = await sealedSession({ binding: 'passkey', keyExpiresAt: Date.now() + 3_600_000, uaFamily: 'chrome' });
-        const ctx = requestContext('/_auth/users/me', new Map([[COOKIE_NAMES.SESSION, sealed]]));
-        const forwarded = vi.fn(next);
-
-        await decidedRequest(ctx, [generalAuthInterceptor.request], forwarded);
-
-        expect(forwarded).toHaveBeenCalledOnce();
-        expect(ctx.abort).toBeUndefined();
-    });
-
-    it('unbound, the user-agent family does not match: passed through, and nothing is logged', async () =>
-    {
-        const { authLogger } = await import('../../server/logger');
-        const warn = vi.spyOn(authLogger.interceptor.general, 'warn').mockImplementation(() => undefined);
-        const { sealed } = await sealedSession({ uaFamily: 'chrome' });
-        const ctx = requestContext('/_auth/users/me', new Map([[COOKIE_NAMES.SESSION, sealed]]), FIREFOX);
-
-        await decidedRequest(ctx, [generalAuthInterceptor.request], next);
-
-        expect(ctx.abort).toBeUndefined();
-        expect(warn).not.toHaveBeenCalled();
-    });
-
     it('bound, backend answers a 401 about the request token: 401 passed through and the cookies stay', async () =>
     {
         const ctx = responseContext('/_auth/users/me', 401, { __type: 'InvalidTokenError', message: 'no' }, {
@@ -305,22 +273,7 @@ describe('the proxy and a bound session (case table 6c)', () =>
         ]);
     });
 
-    it('a sign-in response without the two fields: the session is sealed unbound', async () =>
-    {
-        const ctx = responseContext('/_auth/login', 200, { userId: '7' }, {
-            metadata: { privateKey: 'k', keyId: 'key-1', algorithm: 'ES256' },
-            userAgent: CHROME,
-        });
-
-        await decidedResponse(ctx, [loginRegisterInterceptor.response], next);
-
-        const session = await queuedSession(ctx.setCookies);
-        expect(session.binding).toBeUndefined();
-        expect(session.keyExpiresAt).toBeUndefined();
-        expect(session.uaFamily).toBeUndefined();
-    });
-
-    it('a sign-in response with the two fields: the session carries binding, keyExpiresAt and the inbound family', async () =>
+    it('a sign-in response with the two binding fields: the session seals none of binding, keyExpiresAt or a browser family — the key row holds them', async () =>
     {
         const ctx = responseContext('/_auth/login', 200, { userId: '7', ...BOUND }, {
             metadata: { privateKey: 'k', keyId: 'key-1', algorithm: 'ES256' },
@@ -329,14 +282,10 @@ describe('the proxy and a bound session (case table 6c)', () =>
 
         await decidedResponse(ctx, [loginRegisterInterceptor.response], next);
 
-        expect(await queuedSession(ctx.setCookies)).toMatchObject({
-            binding: 'passkey',
-            keyExpiresAt: BOUND.keyExpiresAtMillis,
-            uaFamily: 'chrome',
-        });
+        expectNoBindingFields(await queuedSession(ctx.setCookies));
     });
 
-    it('bound, keys/rotate answers 200: the new cookie inherits both fields and the family', async () =>
+    it('bound, keys/rotate answers 200: the new cookie carries the new key and none of the old cookie\'s binding fields', async () =>
     {
         const { sealed } = await sealedSession({
             binding: 'passkey',
@@ -353,11 +302,7 @@ describe('the proxy and a bound session (case table 6c)', () =>
         // name the *new* key — it is what the renewal and CSRF paths key on — and
         // the session cookie has to carry the private half of that same pair.
         const session = await queuedSession(ctx.setCookies);
-        expect(session).toMatchObject({
-            binding: 'passkey',
-            keyExpiresAt: BOUND.keyExpiresAtMillis,
-            uaFamily: 'chrome',
-        });
+        expectNoBindingFields(session);
         expect(session.keyId).toBe(ctx.metadata.newKeyId);
         expect(session.privateKey).toBe(ctx.metadata.newPrivateKey);
 
@@ -367,7 +312,7 @@ describe('the proxy and a bound session (case table 6c)', () =>
         expect(ctx.setCookies.find(cookie => cookie.name === COOKIE_NAMES.SESSION_KEY_ID)!.value).toBe(session.keyId);
     });
 
-    it('bound, the OAuth finalize interceptor: the sealed session carries both fields', async () =>
+    it('bound, the OAuth finalize interceptor: the sealed session carries none of the binding fields', async () =>
     {
         const keyPair = generateKeyPair('ES256');
         const pending = await sealPendingSession({
@@ -385,63 +330,14 @@ describe('the proxy and a bound session (case table 6c)', () =>
 
         await decidedResponse(ctx, [oauthFinalizeInterceptor.response], next);
 
-        expect(await queuedSession(ctx.setCookies)).toMatchObject({
-            binding: 'passkey',
-            keyExpiresAt: BOUND.keyExpiresAtMillis,
-            uaFamily: 'chrome',
-        });
+        expectNoBindingFields(await queuedSession(ctx.setCookies));
     });
 
-    it('bound, shouldRefreshSession fires: the re-seal preserves all three fields', async () =>
-    {
-        const { sealed } = await sealedSession({
-            binding: 'passkey',
-            keyExpiresAt: BOUND.keyExpiresAtMillis,
-            uaFamily: 'chrome',
-        });
-        const session = await unsealSession(sealed);
-        const ctx = responseContext('/_auth/users/me', 200, { ok: true }, {
-            metadata: { refreshSession: true, inboundSession: session, sessionValid: true, keyId: session.keyId },
-        });
-
-        await decidedResponse(ctx, [generalAuthInterceptor.response], next);
-
-        expect(await queuedSession(ctx.setCookies)).toMatchObject({
-            binding: 'passkey',
-            keyExpiresAt: BOUND.keyExpiresAtMillis,
-            uaFamily: 'chrome',
-        });
-    });
-
-    it('session/binding answers 200 with mode passkey: the cookie is re-sealed with both fields', async () =>
-    {
-        const { sealed, keyId } = await sealedSession();
-        const ctx = responseContext('/_auth/session/binding', 200, { mode: 'passkey', keyExpiresAtMillis: BOUND.keyExpiresAtMillis }, {
-            cookies: new Map([[COOKIE_NAMES.SESSION, sealed]]),
-            userAgent: CHROME,
-        });
-
-        await decidedResponse(ctx, [sessionBindingInterceptor.response], next);
-
-        const session = await queuedSession(ctx.setCookies);
-        expect(session.binding).toBe('passkey');
-        expect(session.keyExpiresAt).toBe(BOUND.keyExpiresAtMillis);
-        expect(session.uaFamily).toBe('chrome');
-        expect(session.keyId).toBe(keyId);
-        expect(ctx.setCookies.map(cookie => cookie.name)).toEqual([
-            COOKIE_NAMES.SESSION,
-            COOKIE_NAMES.SESSION_KEY_ID,
-            COOKIE_NAMES.CSRF,
-        ]);
-        expect(ctx.setCookies.find(cookie => cookie.name === COOKIE_NAMES.SESSION_KEY_ID)!.value).toBe(keyId);
-    });
-
-    it('bound, password/reset/complete: the cookie the reset seals carries all three fields', async () =>
+    it('bound, password/reset/complete: the cookie the reset seals carries none of the binding fields', async () =>
     {
         // A reset is a sign-in for cookie purposes — same interceptor, same path
-        // list — and on a bound account it registers a 24-hour key. A cookie
-        // without the fields would skip the user-agent check for that key's whole
-        // life and be cleared rather than renewed when it ran out.
+        // list. Its key's binding and browser family are the key row's, read by
+        // the backend at every request.
         const ctx = responseContext('/_auth/password/reset/complete', 200, { userId: '7', ...BOUND }, {
             metadata: { privateKey: 'k', keyId: 'key-1', algorithm: 'ES256' },
             userAgent: CHROME,
@@ -449,64 +345,7 @@ describe('the proxy and a bound session (case table 6c)', () =>
 
         await decidedResponse(ctx, [loginRegisterInterceptor.response], next);
 
-        expect(await queuedSession(ctx.setCookies)).toMatchObject({
-            binding: 'passkey',
-            keyExpiresAt: BOUND.keyExpiresAtMillis,
-            uaFamily: 'chrome',
-        });
-    });
-
-    it('session/binding answers 200 but the session cannot be re-sealed: 500, no 200 body, and the three cookies cleared', async () =>
-    {
-        // The setting is already committed and the cookie cannot be made to agree
-        // with it. Answering the route's 200 would leave the browser holding a
-        // session that contradicts the account — bound key with an unbound cookie,
-        // or the reverse — so the answer is the failure and the jar is emptied.
-        const ctx = responseContext('/_auth/session/binding', 200, { mode: 'passkey', keyExpiresAtMillis: BOUND.keyExpiresAtMillis }, {
-            cookies: new Map([[COOKIE_NAMES.SESSION, 'not-a-sealed-session']]),
-            userAgent: CHROME,
-        });
-
-        await decidedResponse(ctx, [sessionBindingInterceptor.response], next);
-
-        expect(ctx.response.status).toBe(500);
-        expect(ctx.response.ok).toBe(false);
-        expect(ctx.response.body).toMatchObject({
-            __type: 'SessionResealFailedError',
-            error: { code: 'SessionResealFailedError' },
-        });
-        expect(ctx.setCookies.map(cookie => cookie.name)).toEqual([
-            COOKIE_NAMES.SESSION,
-            COOKIE_NAMES.SESSION_KEY_ID,
-            COOKIE_NAMES.CSRF,
-        ]);
-        expect(ctx.setCookies.every(cookie => cookie.value === '')).toBe(true);
-    });
-
-    it('session/binding answers 200 with mode none: the cookie is re-sealed with the fields removed', async () =>
-    {
-        const { sealed, keyId } = await sealedSession({
-            binding: 'passkey',
-            keyExpiresAt: BOUND.keyExpiresAtMillis,
-            uaFamily: 'chrome',
-        });
-        const ctx = responseContext('/_auth/session/binding', 200, { mode: 'none' }, {
-            cookies: new Map([[COOKIE_NAMES.SESSION, sealed]]),
-            userAgent: CHROME,
-        });
-
-        await decidedResponse(ctx, [sessionBindingInterceptor.response], next);
-
-        const session = await queuedSession(ctx.setCookies);
-        expect(session.binding).toBeUndefined();
-        expect(session.keyExpiresAt).toBeUndefined();
-        expect(session.uaFamily).toBeUndefined();
-        expect(session.keyId).toBe(keyId);
-        expect(ctx.setCookies.map(cookie => cookie.name)).toEqual([
-            COOKIE_NAMES.SESSION,
-            COOKIE_NAMES.SESSION_KEY_ID,
-            COOKIE_NAMES.CSRF,
-        ]);
+        expectNoBindingFields(await queuedSession(ctx.setCookies));
     });
 
     it('a refusal the proxy minted: the body refusalEnvelope actually produces carries __type, error.code and a requestId, and the client restores the class', () =>
@@ -517,8 +356,6 @@ describe('the proxy and a bound session (case table 6c)', () =>
         // while the helper drifted.
         const refusals = [
             [new SessionRenewalRequiredError(), SessionRenewalRequiredError, 401],
-            [new SessionContextChangedError(), SessionContextChangedError, 401],
-            [new SessionResealFailedError(), SessionResealFailedError, 500],
         ] as const;
 
         for (const [error, expected, status] of refusals)
@@ -535,19 +372,6 @@ describe('the proxy and a bound session (case table 6c)', () =>
         }
     });
 
-    it('the refusal a request-phase branch aborts with is that same body', async () =>
-    {
-        const { sealed } = await sealedSession({ binding: 'passkey', keyExpiresAt: Date.now() + 3_600_000, uaFamily: 'chrome' });
-        const ctx = requestContext('/_auth/users/me', new Map([[COOKIE_NAMES.SESSION, sealed]]), FIREFOX);
-
-        await decidedRequest(ctx, [generalAuthInterceptor.request], next);
-
-        const body = ctx.abort!.body as { __type: string; error: { code: string; requestId: string } };
-        expect(ctx.abort!.status).toBe(401);
-        expect(body.error.code).toBe('SessionContextChangedError');
-        expect(body.error.requestId).toMatch(/^[0-9a-f]{32}$/);
-        expect(authErrorRegistry.deserialize(body as never)).toBeInstanceOf(SessionContextChangedError);
-    });
 });
 
 describe('the renewal request shape the proxy builds (case table 6d, browser rows)', () =>

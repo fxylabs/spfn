@@ -682,6 +682,7 @@ async function admittedApprover(params: CompleteDeviceLoginParams): Promise<User
         userId: params.userId,
         credential: { kind: 'deviceKey', keyId: params.approvingKeyId },
         route: null,
+        presentedOn: null,
     });
 
     if ('admitted' in admission)

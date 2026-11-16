@@ -1,8 +1,8 @@
 /**
  * The browser family a `user-agent` names — five badges, and nothing else.
  *
- * A bound session records the family it was sealed from and the Next.js proxy
- * compares every later request against it (#97). The comparison has to be coarse
+ * A bound key's row records the family it was registered from, and admission
+ * compares every later request presenting that key against it (#97). The comparison has to be coarse
  * on purpose: a version bump, a minor-version reduction, a platform token that
  * changes when someone taps "Request desktop site" must all still be the same
  * browser, or the check signs people out for ordinary acts instead of catching
@@ -59,9 +59,9 @@ const FAMILY_MARKERS: readonly { family: UaFamily; marker: RegExp }[] = [
  * throwing or answering null. `'other'` is a family like any other — two requests
  * from two different crawlers both read as `'other'` and compare equal — so a
  * caller that needs "no signal" has to check for the header's absence itself
- * rather than read it off this answer. The proxy does exactly that: no inbound
- * `user-agent` means no comparison, because a server component's call to the RPC
- * proxy carries no browser string to compare.
+ * rather than read it off this answer. Admission does not: a request without a
+ * `user-agent` presents the family `'other'`, compared like any other — a
+ * server-side call through the SPFN client carries the browser's own.
  *
  * @param userAgent - the header as it arrived, or nothing
  * @returns one of `UA_FAMILIES`

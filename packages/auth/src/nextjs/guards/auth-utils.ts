@@ -96,17 +96,16 @@ function failedLookupState(error: unknown): typeof RENEWAL_REQUIRED | null
 /**
  * Whether the backend (or the proxy in front of it) said the session is over.
  *
- * The key-refused family, read off the restored error's class name — the
- * envelope's code — and a bound session presented from another browser, whose
- * cookies the proxy has just cleared. Matched by name rather than `instanceof`,
- * for `isRenewalRequired`'s reason.
+ * The key-refused family — a bound session presented from another browser
+ * family among them — read off the restored error's class name, the
+ * envelope's code. Matched by name rather than `instanceof`, for
+ * `isRenewalRequired`'s reason.
  */
 function isSignedOut(error: unknown): boolean
 {
     const name = (error as { name?: unknown } | null)?.name;
 
-    return typeof name === 'string'
-        && (isSessionEndingCode(name) || name === 'SessionContextChangedError');
+    return typeof name === 'string' && isSessionEndingCode(name);
 }
 
 /**

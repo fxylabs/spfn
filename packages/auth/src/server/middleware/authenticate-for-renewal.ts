@@ -19,7 +19,8 @@
  *
  * Every refusal is the same refusal. No credential, a bad signature, a key
  * nobody registered, an unbound key, a revoked key, one past its grace, an
- * account that is not active — all `SessionRenewalRefusedError`, with one body.
+ * account that is not active, a request from another browser family than the
+ * key row recorded — all `SessionRenewalRefusedError`, with one body.
  * Anything finer would answer "is this key id live" to whoever asked, and the
  * cookie-copying adversary holds exactly one key id and would want it confirmed.
  *
@@ -29,7 +30,7 @@
 import { defineMiddleware } from '@spfn/core/route';
 import { SessionRenewalRefusedError } from '@spfn/auth/errors';
 
-import { admitPrincipal, admitsForRenewal, authContextFor } from '../services/admission.service';
+import { admitPrincipal, authContextFor, presentingRequest } from '../services/admission.service';
 import { admitBearerKey } from './authenticate';
 
 /**
@@ -39,10 +40,11 @@ import { admitBearerKey } from './authenticate';
  * that carries this one must not also be asked for a live key.
  *
  * The signature is checked by the Bearer step every middleware shares, which
- * lets an expired key through only when `admitsForRenewal` would; whether the
- * person may renew — the account active on the primary, the key bound and
- * inside its grace — is `admitPrincipal`'s, with a `renewal` credential. Every
- * refusal of either is the one `SessionRenewalRefusedError`.
+ * passes an expired key like a live one; whether the person may renew — the
+ * account active on the primary, the key bound and inside its grace
+ * (`admitsForRenewal`), the request from the key's browser family — is
+ * `admitPrincipal`'s, with a `renewal` credential. Every refusal of either is
+ * the one `SessionRenewalRefusedError`.
  *
  * @example
  * ```typescript
@@ -53,7 +55,7 @@ import { admitBearerKey } from './authenticate';
  */
 export const authenticateForRenewal = defineMiddleware('authForRenewal', async (c, next) =>
 {
-    const outcome = await admitBearerKey(c, admitsForRenewal);
+    const outcome = await admitBearerKey(c);
 
     if ('refused' in outcome)
     {
@@ -64,6 +66,7 @@ export const authenticateForRenewal = defineMiddleware('authForRenewal', async (
         userId: outcome.key.userId,
         credential: { kind: 'renewal', keyId: outcome.key.keyId },
         route: null,
+        presentedOn: presentingRequest(c),
     });
 
     if ('refused' in admission)

@@ -162,17 +162,36 @@ describe('Authenticate Middleware', () =>
             expect(mockNext).not.toHaveBeenCalled();
         });
 
-        it('rejects an expired key', async () =>
+        it('rejects an expired key once its signature verified — admission answers the expiry', async () =>
         {
             const expiredDate = new Date();
             expiredDate.setDate(expiredDate.getDate() - 1);
-            vi.mocked(keysRepository.findWithAccountEpochOnPrimary).mockResolvedValue(
-                validKeyRecord({ expiresAt: expiredDate }) as never,
+            const expiredKey = validKeyRecord({ expiresAt: expiredDate });
+            vi.mocked(keysRepository.findWithAccountEpochOnPrimary).mockResolvedValue(expiredKey as never);
+            vi.mocked(verifyClientToken).mockReturnValue({ payload: { keyId: KEY_ID, iss: 'spfn-client' } } as never);
+            vi.mocked(usersRepository.findByIdWithRoleAndKeyOnPrimary).mockResolvedValue(
+                { ...admissionRow('active', { name: 'user', isActive: true }), key: expiredKey } as never,
             );
 
             await expect(authenticate.handler(mockContext as Context, mockNext))
                 .rejects.toThrow('Public key has expired');
             expect(mockNext).not.toHaveBeenCalled();
+        });
+
+        it('an expired key whose signature does not verify: the invalid-signature refusal, never the expiry', async () =>
+        {
+            // The expiry (and whether the key is renewable) is no answer for whoever
+            // holds only the key id.
+            const expiredDate = new Date();
+            expiredDate.setDate(expiredDate.getDate() - 1);
+            vi.mocked(keysRepository.findWithAccountEpochOnPrimary).mockResolvedValue(
+                validKeyRecord({ expiresAt: expiredDate }) as never,
+            );
+            vi.mocked(verifyClientToken).mockReturnValue({ refused: 'bad-signature' } as never);
+
+            await expect(authenticate.handler(mockContext as Context, mockNext))
+                .rejects.toThrow('Invalid token signature');
+            expect(usersRepository.findByIdWithRoleAndKeyOnPrimary).not.toHaveBeenCalled();
         });
     });
 

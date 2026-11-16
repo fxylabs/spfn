@@ -23,7 +23,6 @@ import { unsealSession } from '../../server/lib/session';
 import { signKeyReplacementProof } from '../../server/lib/key-replacement-proof';
 import { COOKIE_NAMES } from '../../server/lib/config';
 import { authLogger } from '../../server/logger';
-import { bindingSessionFields } from './session-binding';
 import { establish } from './session-decision';
 import { rememberField, takeRemember } from './remember';
 
@@ -171,7 +170,6 @@ export const loginRegisterInterceptor: InterceptorRule =
                     privateKey: ctx.metadata.newPrivateKey,
                     keyId: ctx.metadata.newKeyId,
                     algorithm: ctx.metadata.newAlgorithm,
-                    ...bindingSessionFields(userData, ctx.request.headers['user-agent']),
                     ...rememberField(keptSession(ctx)),
                 });
             }

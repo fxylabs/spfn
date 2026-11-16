@@ -18,8 +18,12 @@
  * 1. the account — its deletion and its status, read on the write primary, so
  *    a suspension or a deletion request is refused on the next request and
  *    not once a replica catches up;
- * 2. the credential is live — a device key by `keyLiveness`, a renewal key by
- *    the renewal grace rule, a grant by not being revoked;
+ * 2. the credential is not revoked — a device key by `keyLiveness`, a renewal
+ *    key by the renewal grace rule, a grant by not being revoked; then a bound
+ *    key is presented from the browser family its row recorded
+ *    (`familyRefusal`); then the key has not expired. The family comes before
+ *    the expiry so that a copy presented from another browser is told it is
+ *    one, never asked to renew the owner's session;
  * 3. the second-factor policy (#309) — except for renewal, below.
  *
  * The principal it answers with is a `Principal`, and the two shapes the doors
@@ -47,6 +51,7 @@ import { isLiveGrant } from '../repositories/oauth2-grants.repository';
 import { keyLiveness, type KeyLiveness, type KeyWithAccountEpoch } from '../lib/key-liveness';
 import { getBoundKeyRenewGraceMs } from '../lib/config';
 import { profileLocale } from '../lib/profile-locale';
+import { uaFamily } from '../lib/ua-family';
 import type { StartingCredential } from '../lib/deferred-stamp';
 import { resolveRoleInForce } from './role-email-domain.service';
 import { secondFactorAdmits } from './second-factor-policy.service';
@@ -84,6 +89,28 @@ export interface AdmitPrincipalParams
     credential: PrincipalCredential;
     /** The matched request, for the #309 enrolment-route exception; null where there is none. */
     route: Context | null;
+    /**
+     * The request the credential is presented on, which a bound key's browser
+     * family is compared against (`familyRefusal`). Null at a door that does
+     * not compare: sign-out, and every door whose request is not the key's
+     * own — a one-time token's redemption, a device collecting what another
+     * key approved, a grant, the completion of a procedure that door already
+     * compared at its start.
+     */
+    presentedOn: PresentingRequest | null;
+}
+
+/** What admission reads of the request a credential is presented on. */
+export interface PresentingRequest
+{
+    /** The `user-agent` header; undefined when the request sent none. */
+    userAgent: string | undefined;
+}
+
+/** The request a door's Hono context is, as admission reads it. */
+export function presentingRequest(c: Context): PresentingRequest
+{
+    return { userAgent: c.req.header('user-agent') };
 }
 
 /** The scheme an `AuthContext` names. Informational — downstream code never branches on it. */
@@ -337,7 +364,7 @@ export interface AdmitCompletionParams
  */
 export async function admitCompletion(params: AdmitCompletionParams): Promise<Admission>
 {
-    return await admit({ userId: params.userId, credential: params.credential, route: null }, params.enrolment);
+    return await admit({ userId: params.userId, credential: params.credential, route: null, presentedOn: null }, params.enrolment);
 }
 
 /** The decision both entries make; `enrolment` is a completing route's class, null for a door. */
@@ -355,7 +382,9 @@ async function admit(params: AdmitPrincipalParams, enrolment: RouteEnrolment | n
 
     // In the documented order; each step runs only when the one before it admitted.
     const refusal = await accountRefusal(read.account.user)
-        ?? credentialRefusal(read)
+        ?? revokedRefusal(read)
+        ?? familyRefusal(read.key, params.presentedOn)
+        ?? expiredRefusal(read)
         ?? await secondFactorRefusal(params, enrolment);
 
     if (refusal !== null)
@@ -383,6 +412,8 @@ interface AdmissionRead
     liveness: KeyLiveness;
     /** An expired key that renewal still admits (`isRenewable`): its refusal says so. */
     renewable?: boolean;
+    /** The key row a key credential named; absent for a grant or an application profile. */
+    key?: UserPublicKey | null;
 }
 
 /** The account and the liveness of what it presented, from one read of the primary. */
@@ -423,10 +454,10 @@ function keyAdmission(
 
     if (credential.kind !== 'renewal')
     {
-        return { account: row, liveness: key ? keyLiveness(key) : 'revoked', renewable: key !== null && isRenewable(key) };
+        return { account: row, key, liveness: key ? keyLiveness(key) : 'revoked', renewable: key !== null && isRenewable(key) };
     }
 
-    return { account: row, liveness: key && isRenewable(key) ? 'live' : 'revoked' };
+    return { account: row, key, liveness: key && isRenewable(key) ? 'live' : 'revoked' };
 }
 
 /**
@@ -486,17 +517,43 @@ export async function accountRefusal(user: Pick<User, 'id' | 'status' | 'deletio
     return user.status === 'active' ? null : { reason: 'accountDisabled', status: user.status };
 }
 
-/** Step 2. Revocation is told apart from expiry because some doors answer them differently. */
-function credentialRefusal({ liveness, renewable }: AdmissionRead): AdmissionRefusal | null
+/** Step 2, first: a revoked credential, whatever else it is. */
+function revokedRefusal({ liveness }: AdmissionRead): AdmissionRefusal | null
 {
-    if (liveness === 'live')
+    return liveness === 'revoked' ? { reason: 'credentialRevoked' } : null;
+}
+
+/**
+ * Step 2, last: an expired key, told apart from a revoked one because some
+ * doors answer them differently — `renewable` is what makes the proxy offer
+ * the renewal prompt, so it is answered only once the family admitted the
+ * request.
+ */
+function expiredRefusal({ liveness, renewable }: AdmissionRead): AdmissionRefusal | null
+{
+    return liveness === 'expired' ? { reason: 'credentialExpired', renewable: renewable === true } : null;
+}
+
+/**
+ * Step 2, for a bound key: the request must come from the browser family the
+ * key row recorded (`registered_ua_family`). Browsers do not share cookie jars,
+ * so a bound session presented from another family is a copied one.
+ *
+ * The row is the fact, never a copy in the session cookie: a key bound after
+ * its cookie was sealed is checked like any other. An absent `user-agent` is
+ * the family `uaFamily` gives it, `'other'`, compared like any other value. A
+ * bound key with no recorded family — one that predates the column, or was
+ * registered without a header — is not compared until a passkey renewal
+ * records one (`registerPublicKeyService`, channel `renewal`).
+ */
+function familyRefusal(key: UserPublicKey | null | undefined, presentedOn: PresentingRequest | null): AdmissionRefusal | null
+{
+    if (presentedOn === null || key?.binding !== 'passkey' || key.registeredUaFamily === null)
     {
         return null;
     }
 
-    return liveness === 'expired'
-        ? { reason: 'credentialExpired', renewable: renewable === true }
-        : { reason: 'credentialRevoked' };
+    return uaFamily(presentedOn.userAgent) === key.registeredUaFamily ? null : { reason: 'contextChanged' };
 }
 
 /** Step 3, for every credential but renewal (see `admitPrincipal`). */

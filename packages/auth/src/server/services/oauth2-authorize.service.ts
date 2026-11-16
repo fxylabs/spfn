@@ -340,6 +340,7 @@ async function assertApproverAdmitted(approver: OAuth2Approver): Promise<void>
         userId: approver.userId,
         credential: approver.credential,
         route: null,
+        presentedOn: null,
     });
 
     if ('refused' in admission)

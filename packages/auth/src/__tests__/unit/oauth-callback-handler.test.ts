@@ -148,10 +148,10 @@ describe('createOAuthCallbackHandler - returnUrl', () =>
 /**
  * The binding half of the same handler (design #97 v2, case table 6c).
  *
- * The handler seals nothing itself any more: the proxy's finalize rule seals,
- * from the finalize route's answer, which reads the binding off the key row. So
- * the binding a callback query claims is never read — a cookie believing a bound
- * key is an ordinary one cannot be asked for from the address bar.
+ * The handler seals nothing itself: the proxy's finalize rule seals, and since
+ * bundle 8 part 2 no binding field is sealed at all — whether the key is bound,
+ * and the browser family it is checked against, are the key row's. So neither
+ * the finalize answer nor a callback query puts one in the cookie.
  */
 describe('createOAuthCallbackHandler - the session binding fields', () =>
 {
@@ -200,31 +200,14 @@ describe('createOAuthCallbackHandler - the session binding fields', () =>
         return await unsealSession(decodeURIComponent(sealed));
     }
 
-    it('a bound key: the sealed session carries binding, keyExpiresAt and the inbound family', async () =>
+    it('a bound key, and a query claiming a binding: the sealed session carries none of the binding fields — the key row holds them', async () =>
     {
         vi.mocked(keySessionBindingService).mockResolvedValueOnce({ sessionBinding: 'passkey', keyExpiresAtMillis: EXPIRES_AT });
 
-        const session = await callbackSealing({});
-
-        expect(session.binding).toBe('passkey');
-        expect(session.keyExpiresAt).toBe(EXPIRES_AT);
-        expect(session.uaFamily).toBe('chrome');
-    });
-
-    it('an unbound key: the sealed session is the four-field one it has always been', async () =>
-    {
-        const session = await callbackSealing({});
-
-        expect(session.binding).toBeUndefined();
-        expect(session.keyExpiresAt).toBeUndefined();
-        expect(session.uaFamily).toBeUndefined();
-    });
-
-    it('a query claiming a binding the key row does not have seals unbound', async () =>
-    {
         const session = await callbackSealing({ sessionBinding: 'passkey', keyExpiresAtMillis: String(EXPIRES_AT) });
 
-        expect(session.binding).toBeUndefined();
-        expect(session.keyExpiresAt).toBeUndefined();
+        expect(session).not.toHaveProperty('binding');
+        expect(session).not.toHaveProperty('keyExpiresAt');
+        expect(session).not.toHaveProperty('uaFamily');
     });
 });

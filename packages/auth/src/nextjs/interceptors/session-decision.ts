@@ -8,8 +8,7 @@
  *
  * - `establish(session)` — a sign-in-like rule installed a new session
  * - `clear(reason)` — a rule learned the session is gone
- * - `refresh(session)` — the same session, re-sealed (near its end, or its
- *   binding changed)
+ * - `refresh(session)` — the same session, re-sealed near its end
  *
  * and `sessionDecisionInterceptor`, registered first so that its response phase
  * runs after every other rule's, decides once: `establish` > `clear` >
@@ -36,7 +35,7 @@
 import type { BackendAnswer, InterceptorRule, ResponseInterceptorContext, RequestInterceptorContext } from '@spfn/core/nextjs/server';
 import type { SetCookie } from '@spfn/core/nextjs';
 import type { HttpError } from '@spfn/core/errors';
-import { SessionDecisionMissingError, SessionResealFailedError, SessionSealFailedError } from '@spfn/auth/errors';
+import { SessionDecisionMissingError, SessionSealFailedError } from '@spfn/auth/errors';
 
 import { readSealedSession, type SessionData, type SessionUnsealFailure } from '../../server/lib/session';
 import { deriveCsrfToken, timingSafeEqualString } from '../../server/lib/csrf';
@@ -56,17 +55,16 @@ import { signedRequestHeaders } from './request-token';
  * Why a session is cleared.
  *
  * An unreadable cookie by its unsealing failure; `key-refused` when the backend
- * answered with the key-refused family; `context-changed` for a bound session
- * presented from another browser; `reseal-failed` when a binding change could not
- * be written; `signed-out` for a sign-out, which expires every cookie of this
- * package rather than the session's three.
+ * answered with the key-refused family — a bound session presented from another
+ * browser family included; `signed-out` for a sign-out, which expires every
+ * cookie of this package rather than the session's three.
  */
-export type ClearReason = SessionUnsealFailure | 'key-refused' | 'context-changed' | 'reseal-failed' | 'signed-out';
+export type ClearReason = SessionUnsealFailure | 'key-refused' | 'signed-out';
 
 type Proposal =
     | { kind: 'establish'; session: SessionData }
     | { kind: 'clear'; reason: ClearReason }
-    | { kind: 'refresh'; session: SessionData; changed: boolean };
+    | { kind: 'refresh'; session: SessionData };
 
 /** What the rules of one request proposed. */
 interface SessionOutcome
@@ -150,15 +148,10 @@ export function clear(ctx: ProposalContext, reason: ClearReason): void
     proposalsOf(ctx)?.proposals.push({ kind: 'clear', reason });
 }
 
-/**
- * The same session, re-sealed.
- *
- * @param changed - its content changed (a binding setting), so failing to write
- *   it is answered as a failure rather than left for the next request
- */
-export function refresh(ctx: ProposalContext, session: SessionData, changed = false): void
+/** The same session, re-sealed. */
+export function refresh(ctx: ProposalContext, session: SessionData): void
 {
-    proposalsOf(ctx)?.proposals.push({ kind: 'refresh', session, changed });
+    proposalsOf(ctx)?.proposals.push({ kind: 'refresh', session });
 }
 
 /** A pending cookie a flow holds mid-way, or its expiry — built by the cookie writer. */
@@ -180,11 +173,10 @@ export function repairCsrf(ctx: ProposalContext, keyId: string): void
 
 const RANK: Record<Proposal['kind'], number> = { establish: 3, clear: 2, refresh: 1 };
 
-/** A changed refresh over a plain one; a sign-out over any other clear, since it expires more. */
+/** A sign-out over any other clear, since it expires more. */
 function outranksItsKind(proposal: Proposal): boolean
 {
-    return (proposal.kind === 'refresh' && proposal.changed)
-        || (proposal.kind === 'clear' && proposal.reason === 'signed-out');
+    return proposal.kind === 'clear' && proposal.reason === 'signed-out';
 }
 
 /** The proposal that decides: the highest rank, the first of equals. */
@@ -278,7 +270,7 @@ async function decidedCookies(ctx: ResponseInterceptorContext, proposals: Propos
         case 'clear':
             return proposal.reason === 'signed-out' ? signedOutCookies(ctx.cookies) : clearedSessionCookies();
         case 'refresh':
-            return await refreshedCookies(ctx, proposal.session, proposal.changed);
+            return await refreshedCookies(proposal.session);
         default:
             return await healedCsrfCookies(ctx);
     }
@@ -383,27 +375,17 @@ async function retirePrevious(ctx: ResponseInterceptorContext, session: SessionD
 }
 
 /**
- * The re-sealed session. Failing to write a session whose content did not change
- * leaves the cookie the browser has, still valid; failing to write a changed one
- * is answered as `SessionResealFailedError` and clears it.
+ * The re-sealed session. Failing to write it leaves the cookie the browser has,
+ * still valid, for the next request to re-seal.
  */
-async function refreshedCookies(ctx: ResponseInterceptorContext, session: SessionData, changed: boolean): Promise<SetCookie[]>
+async function refreshedCookies(session: SessionData): Promise<SetCookie[]>
 {
-    const built = await sessionCookies(session).catch((error) =>
+    return await sessionCookies(session).catch((error) =>
     {
         authLogger.interceptor.general.error('Failed to re-seal the session', error as Error);
 
-        return null;
+        return [];
     });
-
-    if (built || !changed)
-    {
-        return built ?? [];
-    }
-
-    answerWith(ctx, new SessionResealFailedError());
-
-    return clearedSessionCookies();
 }
 
 /**
