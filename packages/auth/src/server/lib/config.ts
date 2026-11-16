@@ -12,7 +12,6 @@ import { BOUND_KEY_RENEW_GRACE_HOURS, BOUND_KEY_TTL_HOURS, CONCURRENT_USE_WINDOW
 import { normalizeOptionalEmail } from '../helpers/email';
 import { parseDuration } from '../../lib/duration';
 import { authLogger } from '../logger';
-import { isPasskeyOnly } from './second-factor-policy';
 import { assertPolicyValues } from './auth-config-values';
 
 export { parseDuration };
@@ -721,13 +720,13 @@ function assertOriginServesRpId(origin: string, rpId: string): void
 }
 
 /**
- * `SPFN_AUTH_PASSKEY_USER_VERIFICATION`, or its default.
+ * `SPFN_AUTH_PASSKEY_USER_VERIFICATION`, or its default `preferred`.
  *
- * The default is `preferred`, raised to `required` by one thing only: a
- * second-factor policy whose sole method is the passkey, where the assertion is
- * the second factor and an unverified one would be possession alone. An
- * explicit value is never overridden — a weaker one beside that policy refuses
- * boot instead (`assertSecondFactorPolicy`).
+ * This is what the browser is asked for and whether a sign-in without user
+ * verification is refused outright. It says nothing about second factors: an
+ * assertion counts as one only when it carried user verification itself
+ * (`lib/passkey-assertion.ts`), whatever this is set to, so the second-factor
+ * policy no longer raises it.
  */
 function resolveUserVerification(env: PasskeyEnvSource): PasskeyUserVerification
 {
@@ -735,7 +734,7 @@ function resolveUserVerification(env: PasskeyEnvSource): PasskeyUserVerification
 
     if (!configured)
     {
-        return isPasskeyOnly() ? 'required' : 'preferred';
+        return 'preferred';
     }
 
     const normalized = configured.trim().toLowerCase() as PasskeyUserVerification;

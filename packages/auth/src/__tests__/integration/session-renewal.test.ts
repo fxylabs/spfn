@@ -403,6 +403,20 @@ describe.skipIf(!dbAvailable)('renewing a bound session key (case table 6d)', ()
         expect((await keyRow(subject.keyId)).isActive).toBe(true);
     });
 
+    it('bodies that are no assertion at all — {}, null, 5, [], no id, a clientDataJSON that is no string: the same 401 each, never 500', async () =>
+    {
+        const subject = await bound();
+        await expireKey(subject.keyId, 1_000);
+        const authorization = bearer(subject.keyId, subject.privateKey);
+
+        for (const response of [{}, null, 5, [], { response: {} }, { id: 'x', response: { clientDataJSON: 5 } }])
+        {
+            await expectOneRefusal(await post('/_auth/session/renew/verify', { response, ...freshPair() }, authorization));
+        }
+
+        expect((await keyRow(subject.keyId)).isActive).toBe(true);
+    });
+
     it('another account\'s passkey: 401', async () =>
     {
         const subject = await bound();

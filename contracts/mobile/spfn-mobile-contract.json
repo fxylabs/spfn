@@ -4,7 +4,7 @@
   "originStatement": "Generated from the route and contract definitions in SPFN primitives (packages/auth/src/server/client-proof) and published from that repository. This file is generated output: edit the source modules and re-export, never this file.",
   "contractName": "spfn-mobile-contract",
   "contractMajor": 0,
-  "contractVersion": "0.14.3",
+  "contractVersion": "0.14.4",
   "supportedRange": ">=0.14.0 <0.15.0",
   "exporterVersion": "@spfn/auth/contract-bundle@6.3.0",
   "authProfiles": { "allowed": ["clientProofV1"], "unknownProfilePolicy": "reject", "mixingWithinSession": "prohibited" },
@@ -962,6 +962,13 @@
       "httpStatus": 401,
       "retryable": false,
       "summary": "the second factor did not verify. One code for every way it can fail — a challenge that never existed, expired, was already spent or has run out of attempts, and a wrong or stale proof — because which one applies describes state the caller is guessing at",
+      "surface": "rest"
+    },
+    {
+      "code": "SecondFactorLockedError",
+      "httpStatus": 429,
+      "retryable": false,
+      "summary": "the account gave five wrong second-factor proofs in fifteen minutes and accepts none, right or wrong, until the Retry-After header's seconds have passed; then send a fresh code. The owner was told. Not the rate limit: it is the account's failures, not this client's pace",
       "surface": "rest"
     },
     {

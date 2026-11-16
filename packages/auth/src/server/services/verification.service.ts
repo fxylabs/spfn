@@ -52,6 +52,9 @@ const VERIFICATION_TOKEN_EXPIRY_MINUTES = 15;
  */
 const MAX_VERIFICATION_ATTEMPTS = 5;
 
+/** The refusal of a guess at a code whose attempts are spent. */
+const TOO_MANY_ATTEMPTS = 'Too many attempts, please request a new code';
+
 /**
  * Verification token payload
  */
@@ -194,6 +197,13 @@ async function storeVerificationCode(
 /**
  * Validate verification code
  *
+ * The attempt limit and single use are conditions of the statements that
+ * count a guess and use a code (`spendAttempt`, `markAsUsed`): concurrent wrong
+ * guesses each count and none past the limit, and concurrent right ones use the
+ * code once (au4-A8). The limit is also read first, so a guess at a code whose
+ * attempts are spent is refused without being compared — the right code and a
+ * wrong one get the same answer.
+ *
  * @param target - Email or phone number
  * @param code - 6-digit code to validate
  * @param purpose - Purpose of verification
@@ -205,7 +215,6 @@ async function validateVerificationCode(
     purpose: VerificationPurpose,
 ): Promise<{ valid: boolean; codeId?: number; error?: string }>
 {
-    // Find the verification code
     const record = await verificationCodesRepository.findValidByTargetAndPurpose(target, purpose);
 
     if (!record)
@@ -213,54 +222,40 @@ async function validateVerificationCode(
         return { valid: false, error: 'Invalid verification code' };
     }
 
-    // Enforce the attempt cap on EVERY attempt — BEFORE the code comparison.
-    // Previously this ran only after a correct match (the wrong-code branch returns
-    // early), so it was dead code: wrong guesses incremented `attempts` forever but
-    // were never blocked — unlimited OTP brute force (account takeover via
-    // password_reset). findValidByTargetAndPurpose does not filter on attempts, so
-    // the cap must be enforced here.
+    // Before the comparison: once the tries are spent, the right code and a
+    // wrong one get the same answer, so neither tells which is which
     if (record.attempts >= MAX_VERIFICATION_ATTEMPTS)
     {
-        return { valid: false, error: 'Too many attempts, please request a new code' };
+        return { valid: false, error: TOO_MANY_ATTEMPTS };
     }
 
-    // Check if code matches
     if (record.code !== code)
     {
-        // Increment attempt count
-        await verificationCodesRepository.incrementAttempts(record.id);
-
-        return { valid: false, error: 'Invalid verification code' };
-    }
-
-    // Check if code is already used
-    if (record.usedAt)
-    {
-        return { valid: false, error: 'Verification code already used' };
-    }
-
-    // Check if code is expired
-    if (new Date() > new Date(record.expiresAt))
-    {
-        return { valid: false, error: 'Verification code expired' };
+        return await verificationCodesRepository.spendAttempt(record.id, MAX_VERIFICATION_ATTEMPTS)
+            ? { valid: false, error: 'Invalid verification code' }
+            : { valid: false, error: TOO_MANY_ATTEMPTS };
     }
 
     return { valid: true, codeId: record.id };
 }
 
 /**
- * Mark a verified code used, and keep its row for as long as the token minted
- * from it lives (`VERIFICATION_TOKEN_EXPIRY_MINUTES`).
+/**
+ * Use a verified code, and keep its row for as long as the token minted from
+ * it lives (`VERIFICATION_TOKEN_EXPIRY_MINUTES`). One statement does both, and
+ * only while the code is still unused, unexpired and under the limit: the use
+ * is the decision.
  *
  * @param codeId - Verification code ID
- * @returns when the token minted from it expires
+ * @returns when the token minted from it expires; null when it was not used by this call
  */
-async function markCodeAsUsed(codeId: number): Promise<Date>
+async function markCodeAsUsed(codeId: number): Promise<Date | null>
 {
     const tokenExpiresAt = verificationTokenExpiry();
-    await verificationCodesRepository.markAsUsed(codeId, tokenExpiresAt);
 
-    return tokenExpiresAt;
+    return await verificationCodesRepository.markAsUsed(codeId, MAX_VERIFICATION_ATTEMPTS, tokenExpiresAt)
+        ? tokenExpiresAt
+        : null;
 }
 
 function verificationTokenExpiry(): Date
@@ -462,12 +457,19 @@ export async function verifyCodeService(params: VerifyCodeParams)
         throw new InvalidVerificationCodeError({ message: validation.error || 'Invalid verification code' });
     }
 
+    const tokenExpiresAt = await markCodeAsUsed(validation.codeId!);
+
+    if (!tokenExpiresAt)
+    {
+        throw new InvalidVerificationCodeError({ message: 'Verification code already used or expired' });
+    }
+
     const verificationToken = createVerificationToken({
         target,
         targetType,
         purpose,
         codeId: validation.codeId!,
-    }, await markCodeAsUsed(validation.codeId!));
+    }, tokenExpiresAt);
 
     return {
         valid: true,

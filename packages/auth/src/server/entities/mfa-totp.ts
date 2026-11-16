@@ -16,17 +16,6 @@ import { id, foreignKey, timestamps, utcTimestamp } from '@spfn/core/db';
 import { users } from './users';
 import { authSchema } from './schema';
 
-/**
- * How many wrong codes an unconfirmed enrolment survives.
- *
- * Small, because the row is throwaway: five wrong codes means the person is
- * reading the wrong entry in their app, and starting over with a fresh secret
- * is both the remedy and the thing that resets the counter. A confirmed row is
- * never deleted this way — that would be a remote way to strip someone's second
- * factor.
- */
-export const MFA_CONFIRM_ATTEMPT_LIMIT = 5;
-
 export const mfaTotp = authSchema.table('mfa_totp',
     {
         id: id(),
@@ -45,9 +34,6 @@ export const mfaTotp = authSchema.table('mfa_totp',
         // rather than per device: the cost is that a second device signing in
         // within the same step is refused and retries on the next one.
         lastUsedStep: bigint('last_used_step', { mode: 'number' }),
-
-        // Wrong codes against the unconfirmed row. Reset by a fresh `enroll`.
-        failedConfirmAttempts: integer('failed_confirm_attempts').notNull().default(0),
 
         // The procedure stamp (`lib/deferred-stamp.ts`): the credential that
         // started this — a device key's id, or an application profile's name

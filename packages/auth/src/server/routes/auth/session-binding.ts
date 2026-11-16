@@ -28,7 +28,6 @@ import {
     getSessionBindingService,
     startSessionBindingDisableService,
 } from '../../services';
-import type { AuthenticationResponseJSON } from '../../lib/webauthn';
 
 /**
  * The credential the browser hands back, passed through to the WebAuthn adapter
@@ -85,12 +84,12 @@ export const setSessionBinding = route.post('/_auth/session/binding')
             return await disableSessionBindingService({
                 ...params,
                 credential,
-                response: body.response as AuthenticationResponseJSON | undefined,
+                response: body.response,
                 currentPassword: body.currentPassword,
             });
         }
 
-        return await enableSessionBindingService(params);
+        return await enableSessionBindingService({ ...params, credential });
     });
 
 /**

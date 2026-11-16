@@ -57,9 +57,7 @@ export interface StartOAuthLinkParams
 {
     provider: SocialProvider;
     userId: number;
-    /** The device key the request is signed with — the recent-authentication window is read off its `authenticatedAt`. */
-    keyId: string;
-    /** The credential the request presented (`getAuth(c).credential`): the link is stamped with it. */
+    /** The credential the request presented (`getAuth(c).credential`): the link is stamped with it, and its recent authentication asked. */
     credential: PrincipalCredential;
     currentPassword?: string;
     returnUrl: string;
@@ -292,7 +290,8 @@ export interface UnlinkOAuthParams
 {
     provider: SocialProvider;
     userId: number;
-    keyId: string;
+    /** The credential the request presented (`getAuth(c).credential`): its step-up window and recent authentication are asked. */
+    credential: PrincipalCredential;
     currentPassword?: string;
 }
 

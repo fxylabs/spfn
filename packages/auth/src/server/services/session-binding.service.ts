@@ -16,9 +16,10 @@
  * the configuration error it is.
  *
  * Turning it *off* is the privileged direction, which is the reverse of the
- * usual posture. `assertRecentAuthentication` is satisfied by when a credential
- * was last proved on the device key this request is signed with — and a cookie
- * copied in the ten minutes after a sign-in carries exactly that. So leaving `'passkey'` asks for
+ * usual posture. `assertRecentAuthentication` is satisfied by when this
+ * session's credential last authenticated — for a device key, its own sign-in —
+ * and a cookie copied in the ten minutes after a sign-in carries exactly that.
+ * So leaving `'passkey'` asks for
  * a credential the copy does not hold: a renewal-grade assertion, or the account
  * password.
  *
@@ -32,7 +33,7 @@ import { RecentAuthenticationRequiredError, SessionBindingUnavailableError } fro
 import { ValidationError } from '@spfn/core/errors';
 
 import { getBoundKeyTtlMs } from '../lib/config';
-import type { AuthenticationResponseJSON, PublicKeyCredentialRequestOptionsJSON } from '../lib/webauthn';
+import type { PublicKeyCredentialRequestOptionsJSON } from '../lib/webauthn';
 import { keysRepository, passkeysRepository, usersRepository } from '../repositories';
 import { KEY_TTL_DAYS } from '../lib/key-policy';
 import type { SessionBindingType } from '../types';
@@ -72,12 +73,18 @@ export interface SessionBindingParams
     webProxy?: boolean;
 }
 
+export interface EnableSessionBindingParams extends SessionBindingParams
+{
+    /** The credential this request presented (`getAuth(c).credential`): its recent authentication is asked. */
+    credential: PrincipalCredential;
+}
+
 export interface DisableSessionBindingParams extends SessionBindingParams
 {
     /** The credential this request presented (`getAuth(c).credential`): the one the challenge was asked with. */
     credential: PrincipalCredential;
     /** A renewal-grade assertion, from `binding/disable/options`. */
-    response?: AuthenticationResponseJSON;
+    response?: unknown;
     /** The account password, for a browser with no passkey to hand. */
     currentPassword?: string;
 }
@@ -137,7 +144,7 @@ export async function keySessionBindingService(
  * @throws RecentAuthenticationRequiredError 최근 인증이 없을 때
  */
 export async function enableSessionBindingService(
-    params: SessionBindingParams,
+    params: EnableSessionBindingParams,
 ): Promise<SessionBindingResult>
 {
     if (!params.webProxy)
@@ -146,7 +153,7 @@ export async function enableSessionBindingService(
     }
 
     await assertLivePasskey(params.userId);
-    await assertRecentAuthentication({ userId: params.userId, keyId: params.keyId });
+    await assertRecentAuthentication({ userId: params.userId, credential: params.credential });
 
     // The route runs no transaction (see `disableSessionBindingService`); the
     // writes open their own.

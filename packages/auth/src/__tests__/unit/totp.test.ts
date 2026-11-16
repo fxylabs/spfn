@@ -81,15 +81,6 @@ describe('TOTP - RFC 6238 over RFC 4226', () =>
         expect(verifyTotp({ secret: SEED_BASE32, code: '359-152', atMillis: now })).toBe(2);
     });
 
-    it('refuses a step at or below the one already spent', () =>
-    {
-        const now = millisForStep(5);
-
-        expect(verifyTotp({ secret: SEED_BASE32, code: APPENDIX_D[5], atMillis: now, lastUsedStep: 5 })).toBeNull();
-        expect(verifyTotp({ secret: SEED_BASE32, code: APPENDIX_D[4], atMillis: now, lastUsedStep: 5 })).toBeNull();
-        expect(verifyTotp({ secret: SEED_BASE32, code: APPENDIX_D[6], atMillis: now, lastUsedStep: 5 })).toBe(6);
-    });
-
     it('refuses anything that is not six digits without consulting the secret', () =>
     {
         const now = millisForStep(1);

@@ -214,9 +214,12 @@ export class PasskeysRepository extends AccountStateRepository
      *
      * Owner-scoped and live-only, so somebody else's passkey and an already
      * revoked one are both "no such row" — the same answer every other
-     * management statement here gives.
+     * management statement here gives. A mark is given only to a credential
+     * registered with user verification: that is a condition of this
+     * statement, so no read before it decides it.
      *
-     * @returns the updated row, or null if it is not theirs or already revoked
+     * @returns the updated row, or null if it is not theirs, already revoked,
+     *   or — when marking — registered without user verification
      */
     async markSecondFactorByIdAndUserId(id: number, userId: number, secondFactor: boolean): Promise<Passkey | null>
     {
@@ -227,6 +230,7 @@ export class PasskeysRepository extends AccountStateRepository
                 eq(passkeys.id, id),
                 eq(passkeys.userId, userId),
                 isNull(passkeys.revokedAt),
+                secondFactor ? eq(passkeys.registeredUserVerified, true) : undefined,
             ))
             .returning();
 

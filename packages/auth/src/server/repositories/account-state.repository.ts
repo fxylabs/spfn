@@ -31,6 +31,7 @@ import { oauth2Tokens } from '../entities/oauth2-tokens';
 import { webauthnChallenges } from '../entities/webauthn-challenges';
 import { deviceLinks } from '../entities/device-links';
 import { keyRevokeAllTokens } from '../entities/key-revoke-all-tokens';
+import { mfaAttemptBudgets } from '../entities/mfa-attempt-budgets';
 import { mfaChallenges } from '../entities/mfa-challenges';
 import { mfaRecoveryCodes } from '../entities/mfa-recovery-codes';
 import { mfaTotp } from '../entities/mfa-totp';
@@ -52,7 +53,8 @@ type Database = RepositoryDatabase<PostgresJsDatabase<EmptyRelations>>;
 export const CREDENTIAL_TABLES: ReadonlyMap<PgTable, string> = new Map<PgTable, string>([
     [users, 'status, key generation and password hash: what every admission reads'],
     [userPublicKeys, 'the device keys — the session credential itself'],
-    [mfaChallenges, 'a pending key\'s gate: its mark activates the key, its last wrong proof deletes it'],
+    [mfaChallenges, 'a pending key\'s gate: its mark activates the key'],
+    [mfaAttemptBudgets, 'the second-factor failure budget: past its limit no proof is accepted'],
     [mfaVerifications, 'step-up records: a recent one admits the sensitive operations'],
     [mfaTotp, 'a second factor'],
     [mfaRecoveryCodes, 'a second factor, single-use'],

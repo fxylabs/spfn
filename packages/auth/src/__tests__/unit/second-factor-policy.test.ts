@@ -95,44 +95,25 @@ describe('second-factor policy (#309)', () =>
     {
         configureSecondFactor({ required: false, methods: ['passkey'] });
 
-        expect(() => assertSecondFactorPolicy(PASSKEY_ENV)).not.toThrow();
+        expect(() => assertSecondFactorPolicy()).not.toThrow();
     });
 
-    it('B3: methods [\'passkey\'] with SPFN_AUTH_PASSKEY_USER_VERIFICATION set to anything but required refuses boot', async () =>
+    it('B3: methods [\'passkey\'] with SPFN_AUTH_PASSKEY_USER_VERIFICATION preferred boots — a second factor is judged per assertion', () =>
     {
         process.env.SPFN_AUTH_PASSKEY_USER_VERIFICATION = 'preferred';
-        const lifecycle = lifecycleWith({ methods: ['passkey'] });
+        configureSecondFactor({ methods: ['passkey'] });
 
-        await expect(lifecycle.afterInfrastructure!()).rejects.toThrow(/SPFN_AUTH_PASSKEY_USER_VERIFICATION is "preferred"/);
+        expect(() => assertSecondFactorPolicy()).not.toThrow();
     });
 
-    it('B3: the variable set to required beside methods [\'passkey\'] boots', () =>
+    it('B4: methods [\'passkey\'] leaves user verification as configured, preferred when unset', () =>
     {
         configureSecondFactor({ methods: ['passkey'] });
 
-        expect(() => assertSecondFactorPolicy({ ...PASSKEY_ENV, SPFN_AUTH_PASSKEY_USER_VERIFICATION: 'required' }))
-            .not.toThrow();
-    });
-
-    it('B4: methods [\'passkey\'] with the variable unset boots, and the effective user verification is required', () =>
-    {
+        expect(() => assertSecondFactorPolicy()).not.toThrow();
         expect(getPasskeyConfig(PASSKEY_ENV).userVerification).toBe('preferred');
-
-        configureSecondFactor({ methods: ['passkey'] });
-
-        expect(() => assertSecondFactorPolicy(PASSKEY_ENV)).not.toThrow();
-        expect(getPasskeyConfig(PASSKEY_ENV).userVerification).toBe('required');
         expect(getPasskeyConfig({ ...PASSKEY_ENV, SPFN_AUTH_PASSKEY_USER_VERIFICATION: 'required' }).userVerification)
             .toBe('required');
-    });
-
-    it('B4: a policy listing totp beside the passkey leaves user verification as configured', () =>
-    {
-        configureSecondFactor({ methods: ['totp', 'passkey'] });
-
-        expect(getPasskeyConfig(PASSKEY_ENV).userVerification).toBe('preferred');
-        expect(() => assertSecondFactorPolicy({ ...PASSKEY_ENV, SPFN_AUTH_PASSKEY_USER_VERIFICATION: 'preferred' }))
-            .not.toThrow();
     });
 
     it('B5: required TOTP-only without SPFN_AUTH_TOKEN_ENCRYPTION_KEYS refuses boot', async () =>
@@ -149,7 +130,7 @@ describe('second-factor policy (#309)', () =>
         configureChannels(DEVICE_CHANNELS_OFF);
         configureSecondFactor({ required: true, methods: ['totp'] });
 
-        expect(() => assertSecondFactorPolicy(PASSKEY_ENV)).not.toThrow();
+        expect(() => assertSecondFactorPolicy()).not.toThrow();
     });
 
     it('B6: two constructions stating different policies refuse boot, and the first stays in force meanwhile', async () =>
@@ -170,7 +151,7 @@ describe('second-factor policy (#309)', () =>
         createAuthLifecycle({});
 
         expect(getSecondFactorPolicy()).toEqual({ required: true, methods: ['passkey'], recoveryCodes: true });
-        expect(() => assertSecondFactorPolicy(PASSKEY_ENV)).not.toThrow();
+        expect(() => assertSecondFactorPolicy()).not.toThrow();
     });
 
     it('B7: no secondFactor option boots as today, on the defaults', () =>
@@ -178,7 +159,7 @@ describe('second-factor policy (#309)', () =>
         createAuthLifecycle({});
 
         expect(getSecondFactorPolicy()).toEqual({ required: false, methods: ['totp', 'passkey'], recoveryCodes: true });
-        expect(() => assertSecondFactorPolicy({ ...PASSKEY_ENV, SPFN_AUTH_PASSKEY_USER_VERIFICATION: 'preferred' }))
+        expect(() => assertSecondFactorPolicy())
             .not.toThrow();
     });
 

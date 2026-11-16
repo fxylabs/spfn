@@ -8,7 +8,7 @@
 import { NewVerificationCode, verificationCodes } from '../entities/verification-codes';
 import type { VerificationPurpose } from '../routes/schema';
 import { BaseRepository } from '@spfn/core/db';
-import { eq, and, lt, gt, isNull } from 'drizzle-orm';
+import { eq, and, lt, gt, isNull, sql } from 'drizzle-orm';
 
 /**
  * Verification Codes Repository 클래스
@@ -23,7 +23,8 @@ export class VerificationCodesRepository extends BaseRepository
     /**
      * Target과 Purpose로 유효한 인증 코드 조회
      * (만료되지 않고, 사용되지 않은 코드)
-     * Read replica 사용
+     * Primary: a submitted code is compared with what this returns, and a
+     * replica behind the last use would answer a code already spent.
      */
     async findValidByTargetAndPurpose(
         target: string,
@@ -32,7 +33,7 @@ export class VerificationCodesRepository extends BaseRepository
     {
         const now = new Date();
 
-        const result = await this.readDb
+        const result = await this.db
             .select()
             .from(verificationCodes)
             .where(
@@ -97,12 +98,16 @@ export class VerificationCodesRepository extends BaseRepository
     }
 
     /**
-     * 인증 코드 사용 처리 — and keep the row until `retainedUntil`, the expiry of
-     * the verification token minted from it: the row is what `spendToken`
-     * spends, so it lives as long as the token (`VERIFICATION_TOKEN_EXPIRY_MINUTES`).
-     * Write primary 사용
+     * Use a code — only while it is unused, unexpired and under the attempt
+     * limit — and keep the row until `retainedUntil`, the expiry of the
+     * verification token minted from it: the row is what `spendToken` spends,
+     * so it lives as long as the token (`VERIFICATION_TOKEN_EXPIRY_MINUTES`).
+     * One conditional UPDATE: of any number of requests carrying the right
+     * code at once, exactly one uses it (au4-A8). Write primary.
+     *
+     * @returns true when this call used it
      */
-    async markAsUsed(id: number, retainedUntil: Date)
+    async markAsUsed(id: number, attemptLimit: number, retainedUntil: Date): Promise<boolean>
     {
         const result = await this.db
             .update(verificationCodes)
@@ -110,30 +115,37 @@ export class VerificationCodesRepository extends BaseRepository
                 usedAt: new Date(),
                 expiresAt: retainedUntil,
             })
-            .where(eq(verificationCodes.id, id))
-            .returning();
+            .where(and(
+                eq(verificationCodes.id, id),
+                isNull(verificationCodes.usedAt),
+                gt(verificationCodes.expiresAt, new Date()),
+                lt(verificationCodes.attempts, attemptLimit),
+            ))
+            .returning({ id: verificationCodes.id });
 
-        return result[0] ?? null;
+        return result.length > 0;
     }
 
     /**
-     * 시도 횟수 증가
-     * Write primary 사용
+     * Count a wrong guess — only while the code is unused and under the
+     * attempt limit. One conditional UPDATE, so concurrent wrong guesses each
+     * count and none counts past the limit. Write primary.
+     *
+     * @returns true when this guess was counted; false when the code had no attempts left
      */
-    async incrementAttempts(id: number)
+    async spendAttempt(id: number, attemptLimit: number): Promise<boolean>
     {
-        const code = await this.findById(id);
-        if (!code) return null;
-
         const result = await this.db
             .update(verificationCodes)
-            .set({
-                attempts: code.attempts + 1,
-            })
-            .where(eq(verificationCodes.id, id))
-            .returning();
+            .set({ attempts: sql`${verificationCodes.attempts} + 1` })
+            .where(and(
+                eq(verificationCodes.id, id),
+                isNull(verificationCodes.usedAt),
+                lt(verificationCodes.attempts, attemptLimit),
+            ))
+            .returning({ id: verificationCodes.id });
 
-        return result[0] ?? null;
+        return result.length > 0;
     }
 
     /**

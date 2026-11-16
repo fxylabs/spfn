@@ -398,10 +398,10 @@ describe.skipIf(!dbAvailable)('MFA enrolment (case table 6a)', () =>
         expect((await post('/_auth/mfa/totp/confirm', { code: spaced }, session.authorization)).status).toBe(200);
     });
 
-    it('row: unconfirmed — five failed confirms delete the row, and the sixth says nothing is enrolled', async () =>
+    it('row: unconfirmed — five failed confirms lock the second factor: the sixth is 429, even with the right code, and the enrolment stays', async () =>
     {
         const session = await signIn('owner@test.com');
-        await enroll(session);
+        const secret = await enroll(session);
 
         for (let attempt = 1; attempt <= 5; attempt += 1)
         {
@@ -410,17 +410,11 @@ describe.skipIf(!dbAvailable)('MFA enrolment (case table 6a)', () =>
             expect(response.status).toBe(401);
         }
 
-        expect(await totpRow('owner@test.com')).toBeUndefined();
+        const sixth = await post('/_auth/mfa/totp/confirm', { code: codeFor(secret) }, session.authorization);
 
-        const sixth = await post('/_auth/mfa/totp/confirm', { code: '000000' }, session.authorization);
-
-        expect(sixth.status).toBe(400);
-        expect((await sixth.json()).error.code).toBe('MfaNotEnrolledError');
-
-        // A fresh enrol is the remedy, and it resets the counter.
-        const secret = await enroll(session);
-        expect((await post('/_auth/mfa/totp/confirm', { code: codeFor(secret) }, session.authorization)).status)
-            .toBe(200);
+        expect(sixth.status).toBe(429);
+        expect((await sixth.json()).error.code).toBe('SecondFactorLockedError');
+        expect((await totpRow('owner@test.com'))?.confirmedAt).toBeNull();
     });
 
     it('row: enrolled — enroll is a 409 rather than a replaced secret', async () =>

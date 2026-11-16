@@ -9,8 +9,9 @@
  * bytes minted by `mintCredential()`, the secret goes back in the 202 once, and
  * `verify` looks the row up by hashing what it was given — the same rule the
  * link flows and `webauthn_challenges` follow. A sequence value on an
- * unauthenticated route would let anyone walk it and burn a stranger's five
- * attempts, which under the rules below deletes their pending key.
+ * unauthenticated route would let anyone walk it. Wrong proofs are not counted
+ * here: they spend the account's one second-factor budget
+ * (`mfa_attempt_budgets`), so signing in again buys no new tries.
  *
  * `key_epoch` is the second lock. `revokeActive` already deletes this account's
  * pending keys and expires its live challenges in the statement that revokes
@@ -31,10 +32,9 @@ import type { AuthLoginProvider } from '../events';
  * A subset of `DeviceRegistrationChannel`, and the subset is the decision: the
  * first four are where a stolen first credential — a password, a social
  * account, a mailbox — is enough to reach a new device on its own. `passkey`
- * is asked only when the second-factor policy does not list passkeys
- * (`createAuthLifecycle({ secondFactor: { methods: ['totp'] } })`): otherwise
- * the assertion already was the second proof, and the sign-in is exempt (see
- * `decideStepUp`). `device-code` is exempt because its approval already carried
+ * is asked when its assertion was not a second proof: no user verification, or
+ * a second-factor policy that does not list passkeys (see `decideStepUp`).
+ * `device-code` is exempt because its approval already carried
  * one, and `register`, `signup-link`, `invitation` and `renewal` cannot apply (a
  * brand-new account has nothing enrolled, and a renewal replaces a key on a
  * device that is already signed in).
@@ -44,9 +44,6 @@ import type { AuthLoginProvider } from '../events';
 export const MFA_CHALLENGE_CHANNELS = ['password', 'oauth', 'oauth-native', 'password-reset', 'passkey'] as const;
 
 export type MfaChallengeChannel = typeof MFA_CHALLENGE_CHANNELS[number];
-
-/** How many wrong proofs a challenge survives before it is spent for good. */
-export const MFA_CHALLENGE_ATTEMPT_LIMIT = 5;
 
 /**
  * The `authLoginEvent` payload this registration would have emitted.
@@ -84,9 +81,8 @@ export const mfaChallenges = authSchema.table('mfa_challenges',
         challengeHash: text('challenge_hash').notNull(),
 
         // The inactive key this challenge would activate. Cascade, so deleting a
-        // pending key — the sweep, five wrong proofs, a global revocation —
-        // takes the challenge with it rather than leaving one pointing at
-        // nothing.
+        // pending key — the sweep or a global revocation — takes the challenge
+        // with it rather than leaving one pointing at nothing.
         keyId: text('key_id')
             .notNull()
             .references(() => userPublicKeys.keyId, { onDelete: 'cascade' }),
@@ -96,10 +92,6 @@ export const mfaChallenges = authSchema.table('mfa_challenges',
         // The account's key generation when this was minted. A challenge from an
         // earlier generation verifies nothing.
         keyEpoch: integer('key_epoch').notNull(),
-
-        // Wrong proofs so far. MFA_CHALLENGE_ATTEMPT_LIMIT of them expire the
-        // challenge and delete the pending key.
-        attempts: integer('attempts').notNull().default(0),
 
         // SPFN_AUTH_MFA_CHALLENGE_TTL_MINUTES from creation.
         expiresAt: utcTimestamp('expires_at').notNull(),

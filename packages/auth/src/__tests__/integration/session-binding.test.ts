@@ -397,6 +397,21 @@ describe.skipIf(!dbAvailable)('session binding (case tables 6a, 6b, 6g)', () =>
             expect(Math.abs(key.expiresAt!.getTime() - (Date.now() + KEY_TTL_DAYS * DAY_MS))).toBeLessThan(60_000);
         });
 
+        it('on, { mode: none, response } with a body that is no assertion: 403 RECENT_AUTH_REQUIRED each, never 500; binding stays on', async () =>
+        {
+            const { session } = await boundSession();
+
+            for (const response of [{}, 5, [], { response: {} }, { id: 'x', response: { clientDataJSON: 5 } }])
+            {
+                const refused = await post('/_auth/session/binding', { mode: 'none', response }, session);
+
+                expect(refused.status).toBe(403);
+                expect((await refused.json()).__type).toBe('RecentAuthenticationRequiredError');
+            }
+
+            expect((await userRow()).sessionBinding).toBe('passkey');
+        });
+
         it('on, asked from a key that is not itself bound: { mode: passkey } with no keyExpiresAtMillis', async () =>
         {
             const { session } = await boundSession();

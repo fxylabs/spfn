@@ -34,7 +34,7 @@ import { authSchema } from './schema';
  * |------------------|--------------------------------------------|---------------------------------------|---------|
  * | `authentication` | `passkeys/login/options`                   | `passkeys/login/verify`               | no — names nobody (D3) |
  * | `registration`   | `passkeys/register/options`                | `passkeys/register/verify`            | yes     |
- * | `stepUp`         | `mfa/step-up/options`                      | `mfa/step-up` (`attemptSecondFactor`) | yes     |
+ * | `stepUp`         | `mfa/step-up/options`                      | `mfa/step-up` (`checkSecondFactorProof`) | yes |
  * | `newDevice`      | `mfa/verify/options`                       | `mfa/verify`                          | no — the sign-in's challenge handle names its pending key |
  * | `renewal`        | `session/renew/options`                    | `session/renew/verify`                | yes, with the key it renews |
  * | `bindingOff`     | `session/binding/disable/options`          | `session/binding` (`mode: 'none'`)    | yes     |

@@ -32,7 +32,7 @@ import { assertStepUp, mfaEnrolledForUser } from './mfa.service';
 import { secondFactorEnrolmentFields } from './second-factor-policy.service';
 import { decideKeyBinding } from '../lib/key-policy';
 import { updateLastLoginService } from './user.service';
-import { accountRefusal, admissionRefusalError } from './admission.service';
+import { accountRefusal, admissionRefusalError, type PrincipalCredential } from './admission.service';
 import { authLoginEvent, authRegisterEvent } from '../events';
 
 export interface RegisterParams
@@ -128,13 +128,13 @@ export interface ChangePasswordParams
 {
     userId: number;
     /**
-     * The device key this request is signed with.
+     * The credential this request presented (`getAuth(c).credential`).
      *
      * Only read to measure the second-factor window of an enrolled account —
      * an account with nothing enrolled is answered exactly as before, so this
      * adds no refusal for anybody who has not opted in.
      */
-    keyId: string;
+    credential: PrincipalCredential;
     currentPassword?: string;
     newPassword: string;
     passwordHash?: string; // Optional: pass user's password hash to avoid re-fetch
@@ -484,7 +484,7 @@ export async function changePasswordService(
 {
     const { userId } = params;
 
-    await assertStepUp({ userId, keyId: params.keyId });
+    await assertStepUp({ userId, credential: params.credential });
 
     const verifiedHash = await verifyCurrentPassword(params);
     // Hashed before the account lock is taken: the hash is the slow step.

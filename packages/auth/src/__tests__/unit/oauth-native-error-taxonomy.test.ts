@@ -345,12 +345,13 @@ describe('native sign-in answers each failure path with its own code', () =>
         ];
 
         // Second-factor step-up is the third enumerated family (contract 0.13.0,
-        // #95). It adds exactly one code: every way `auth.mfa.verify` can refuse
-        // a proof is one 401 with one body, deliberately, so that a guess cannot
-        // be told from a stale code. Its other two refusals — a body naming two
-        // proofs or none, and the rate limit — are `ValidationError` and
+        // #95). Every way `auth.mfa.verify` can refuse a proof is one 401 with one
+        // body, deliberately, so that a guess cannot be told from a stale code;
+        // the account's failure budget, spent, is the 429 `SecondFactorLockedError`
+        // (contract 0.14.4). Its other two refusals — a body naming two proofs or
+        // none, and the rate limit — are `ValidationError` and
         // `TooManyRequestsError`, both already in the table above.
-        const mfaCodes = ['MfaVerificationFailedError'];
+        const mfaCodes = ['MfaVerificationFailedError', 'SecondFactorLockedError'];
 
         // Device link is the fourth enumerated family (contract 0.13.2), device-code
         // login's mirror image: the refusals a new device can meet while it

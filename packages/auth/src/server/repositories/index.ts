@@ -17,6 +17,7 @@ export * from './webauthn-challenges.repository';
 export * from './mfa-totp.repository';
 export * from './mfa-recovery-codes.repository';
 export * from './mfa-verifications.repository';
+export * from './mfa-attempt-budgets.repository';
 export * from './mfa-challenges.repository';
 export * from './mfa-enrolment.repository';
 export * from './device-authorizations.repository';

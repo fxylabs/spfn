@@ -7,13 +7,15 @@
  *
  * Every lookup here is by `challenge_hash` and never by id. The secret is what
  * the caller holds; the hash is what this table has, so a row can only be found
- * by someone who already had the secret — a guess reaches no row at all, which
- * is what keeps a guess from touching another challenge's `attempts`.
+ * by someone who already had the secret — a guess reaches no row at all.
+ * Wrong proofs are not counted on the row: they spend the account's one
+ * budget (`mfa-attempt-budgets.repository.ts`), which a new sign-in does not
+ * refill.
  */
 
-import { and, eq, gt, inArray, isNotNull, isNull, lte, or, sql } from 'drizzle-orm';
+import { and, eq, gt, inArray, isNotNull, isNull, lte, or } from 'drizzle-orm';
 
-import { mfaChallenges, MFA_CHALLENGE_ATTEMPT_LIMIT } from '../entities/mfa-challenges';
+import { mfaChallenges } from '../entities/mfa-challenges';
 import type { MfaChallenge, NewMfaChallenge } from '../entities/mfa-challenges';
 import { userPublicKeys } from '../entities/user-public-keys';
 import { AccountStateRepository, type AccountWrites } from './account-state.repository';
@@ -23,10 +25,8 @@ export class MfaChallengesRepository extends AccountStateRepository
     static override readonly accountWrites: AccountWrites<MfaChallengesRepository> = {
         create: { account: data => data.userId },
         markVerified: { account: challenge => challenge.userId },
-        countFailure: { account: challenge => challenge.userId },
         markKeyPending: { account: challenge => challenge.userId },
         resecret: { account: challenge => challenge.userId },
-        dropPendingKey: { account: challenge => challenge.userId },
         activateKey: { account: challenge => challenge.userId },
         sweepFinishedOf: { account: userId => userId },
     };
@@ -104,24 +104,6 @@ export class MfaChallengesRepository extends AccountStateRepository
     }
 
     /**
-     * Count a wrong proof, and say whether that was the last one allowed.
-     *
-     * The increment is on the row the presented secret actually hashed to, which
-     * is the whole reason lookup is by hash: there is no id for a caller to name,
-     * so no counter but their own can be moved.
-     */
-    async countFailure(challenge: MfaChallenge): Promise<boolean>
-    {
-        const result = await this.db
-            .update(mfaChallenges)
-            .set({ attempts: sql`${mfaChallenges.attempts} + 1` })
-            .where(and(eq(mfaChallenges.id, challenge.id), eq(mfaChallenges.userId, challenge.userId)))
-            .returning({ attempts: mfaChallenges.attempts });
-
-        return (result[0]?.attempts ?? 0) >= MFA_CHALLENGE_ATTEMPT_LIMIT;
-    }
-
-    /**
      * Point an inactive key at the challenge that gates it.
      *
      * A second statement rather than a column on the insert, because the
@@ -140,9 +122,8 @@ export class MfaChallengesRepository extends AccountStateRepository
     /**
      * Give a live challenge a fresh secret, leaving everything else alone.
      *
-     * What a retried registration gets. The row keeps its id, its expiry and its
-     * spent attempts, so retrying is not a way to reset the counter or buy
-     * another ten minutes; only the secret is new, because the old one was never
+     * What a retried registration gets. The row keeps its id and its expiry, so
+     * retrying is not a way to buy another ten minutes; only the secret is new, because the old one was never
      * stored and cannot be handed out twice.
      */
     async resecret(challenge: MfaChallenge, challengeHash: string): Promise<boolean>
@@ -159,24 +140,6 @@ export class MfaChallengesRepository extends AccountStateRepository
             .returning({ id: mfaChallenges.id });
 
         return result.length > 0;
-    }
-
-    /**
-     * Delete the pending key a challenge was gating, which takes the challenge
-     * with it through the cascade.
-     *
-     * Scoped to `pending_mfa_challenge_id`, so a key that has since been
-     * activated is never deleted by a late failure or a sweep.
-     */
-    async dropPendingKey(challenge: MfaChallenge): Promise<void>
-    {
-        await this.db
-            .delete(userPublicKeys)
-            .where(and(
-                eq(userPublicKeys.keyId, challenge.keyId),
-                eq(userPublicKeys.userId, challenge.userId),
-                eq(userPublicKeys.pendingMfaChallengeId, challenge.id),
-            ));
     }
 
     /**

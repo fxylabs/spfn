@@ -162,14 +162,14 @@ export {
     mfaStatusService,
     startStepUpService,
     stepUpService,
-    attemptSecondFactor,
-    verifySecondFactor,
+    checkSecondFactorProof,
     openStepUpChallengeService,
     resumeStepUpChallengeService,
     verifyMfaChallengeService,
     startMfaChallengeAssertionService,
     sweepUnconfirmedMfaService,
     sweepMfaChallengesService,
+    sweepStaleStepUpsService,
 } from './mfa.service';
 
 export type {
@@ -179,6 +179,9 @@ export type {
     MarkPasskeyParams,
     MfaStatus,
     OpenStepUpChallengeParams,
+    PresentedSecondFactor,
+    SecondFactorProof,
+    SecondFactorPurpose,
     StepUpParams,
     TotpEnrolmentResult,
     VerifyMfaChallengeParams,

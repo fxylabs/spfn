@@ -37,6 +37,7 @@ import {
     TEST_RESOURCE,
 } from '../helpers/oauth2';
 import {
+    mfaAttemptBudgets,
     mfaChallenges,
     mfaRecoveryCodes,
     mfaTotp,
@@ -795,7 +796,7 @@ describe.skipIf(!dbAvailable)('second-factor policy (#309 case table)', () =>
         const response = await post('/_auth/mfa/verify', { challenge: pending.challenge.secret, code: codeFor(secret) });
 
         expect(response.status).toBe(401);
-        expect((await challengeFor(session.keyId))!.attempts).toBe(1);
+        expect((await getTestDb().select().from(mfaAttemptBudgets)).map(row => row.failedAt.length)).toEqual([1]);
         expect((await keyRow(session.keyId))!.isActive).toBe(false);
     });
 
@@ -808,7 +809,7 @@ describe.skipIf(!dbAvailable)('second-factor policy (#309 case table)', () =>
         const response = await post('/_auth/mfa/verify', { challenge: pending.challenge.secret, recoveryCode: recoveryCodes[0] });
 
         expect(response.status).toBe(401);
-        expect((await challengeFor(session.keyId))!.attempts).toBe(1);
+        expect((await getTestDb().select().from(mfaAttemptBudgets)).map(row => row.failedAt.length)).toEqual([1]);
         expect((await keyRow(session.keyId))!.isActive).toBe(false);
         expect(unusedBefore).toBe(10);
         expect(await unusedRecoveryCodes()).toBe(10);

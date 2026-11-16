@@ -22,7 +22,7 @@ import { eq } from 'drizzle-orm';
 import { setupTestDb, teardownTestDb, clearTables, getTestDb, isDatabaseAvailable } from '../helpers/db';
 import { pinClockInsideTotpStep } from '../helpers/totp-clock';
 import { FixtureAuthenticator } from '../helpers/webauthn-fixture';
-import { mfaChallenges, mfaRecoveryCodes, userPublicKeys, users } from '@/server/entities';
+import { mfaAttemptBudgets, mfaChallenges, mfaRecoveryCodes, userPublicKeys, users } from '@/server/entities';
 import { hashPassword } from '@/server/helpers/password';
 import { generateKeyPair, generateClientToken } from '@/server/lib/crypto';
 import { decodeBase32, hotp, totpStep } from '@/server/lib/totp';
@@ -290,16 +290,16 @@ describe.skipIf(!dbAvailable)('second-factor verify (case table 6c)', () =>
         expect(outcomes.sort()).toEqual([200, 401]);
     });
 
-    it('row: a live challenge and a wrong code — 401, attempts 1', async () =>
+    it('row: a live challenge and a wrong code — 401, one failure on the account\'s budget', async () =>
     {
         await enrol();
-        const { challenge, session } = await openChallenge();
+        const { challenge } = await openChallenge();
 
         expect((await verify(challenge, { code: '000000' })).status).toBe(401);
-        expect((await challengeRow(session.keyId)).attempts).toBe(1);
+        expect((await getTestDb().select().from(mfaAttemptBudgets)).map(row => row.failedAt.length)).toEqual([1]);
     });
 
-    it('row: five wrong codes — the challenge is gone, the pending key deleted, the sixth attempt the same 401', async () =>
+    it('row: five wrong codes — the sixth attempt is 429, the pending key stays inactive', async () =>
     {
         await enrol();
         const { challenge, session } = await openChallenge();
@@ -309,9 +309,8 @@ describe.skipIf(!dbAvailable)('second-factor verify (case table 6c)', () =>
             expect((await verify(challenge, { code: '000000' })).status).toBe(401);
         }
 
-        expect(await keyRow(session.keyId)).toBeUndefined();
-        expect(await challengeRow(session.keyId)).toBeUndefined();
-        expect((await verify(challenge, { code: '000000' })).status).toBe(401);
+        expect((await verify(challenge, { code: '000000' })).status).toBe(429);
+        expect((await keyRow(session.keyId))?.isActive).toBe(false);
     });
 
     it('row: a live challenge and a recovery code — 200, the code is used, nine remain', async () =>
@@ -402,8 +401,9 @@ describe.skipIf(!dbAvailable)('second-factor verify (case table 6c)', () =>
         expect((await verify(none.challenge, {})).status).toBe(400);
     });
 
-    it('row: expired, already verified, unknown and guessed challenges — the same 401, and nobody else\'s attempts move', async () =>
+    it('row: expired, already verified, unknown and guessed challenges — the same 401, and no failure is counted', async () =>
     {
+        pinClockInsideTotpStep();
         const { secret } = await enrol();
         const live = await openChallenge();
         const expired = await openChallenge();
@@ -414,20 +414,25 @@ describe.skipIf(!dbAvailable)('second-factor verify (case table 6c)', () =>
             .set({ expiresAt: new Date(Date.now() - 1000) })
             .where(eq(mfaChallenges.keyId, expired.session.keyId));
 
-        expect((await verify(spent.challenge, { code: codeFor(secret, 1) })).status).toBe(200);
+        // The previous step spends `spent`; the current one, unspent, is a code
+        // each challenge below would accept — its own state is all that refuses it.
+        await clearUsedStep();
+        expect((await verify(spent.challenge, { code: codeFor(secret, -1) })).status).toBe(200);
 
+        const code = codeFor(secret);
         const statuses = await Promise.all([
-            verify(expired.challenge, { code: codeFor(secret, 2) }),
-            verify(spent.challenge, { code: codeFor(secret, 2) }),
-            verify('a'.repeat(43), { code: codeFor(secret, 2) }),
-            verify('guessed-value-that-hashes-to-no-row', { code: codeFor(secret, 2) }),
+            verify(expired.challenge, { code }),
+            verify(spent.challenge, { code }),
+            verify('a'.repeat(43), { code }),
+            verify('guessed-value-that-hashes-to-no-row', { code }),
         ]);
 
         expect(statuses.map(response => response.status)).toEqual([401, 401, 401, 401]);
 
-        // The guesses reached no row, so the one live challenge is untouched:
-        // there is no id for a stranger to name, only a secret they do not hold.
-        expect((await challengeRow(live.session.keyId)).attempts).toBe(0);
+        // The guesses reached no row, so no proof was judged and the account's
+        // budget is untouched: a guess at a secret is not a guess at the factor.
+        expect(await getTestDb().select().from(mfaAttemptBudgets)).toEqual([]);
+        expect((await challengeRow(live.session.keyId)).verifiedAt).toBeNull();
     });
 
     it('row: the key generation moved after the challenge was issued — 401', async () =>

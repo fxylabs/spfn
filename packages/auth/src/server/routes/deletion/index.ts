@@ -21,9 +21,10 @@ import { byIpAndAccount } from '../../lib/rate-limit-keys';
  * POST /_auth/deletion/request - Request account deletion (authenticated)
  *
  * The gates every sensitive change passes: an account with a second factor
- * re-proves it on this device (403 `STEP_UP_REQUIRED`), and the device proved a
- * credential recently or the body carries the account `password` (403
- * `RECENT_AUTH_REQUIRED`) — a passwordless account signs in again.
+ * re-proves it on this device (403 `STEP_UP_REQUIRED`), and the session's
+ * credential authenticated recently — never an application profile's — or the
+ * body carries the account `password` (403 `RECENT_AUTH_REQUIRED`); a
+ * passwordless account signs in again.
  *
  * On success: the account's deletion -> pending (its status is left as it is),
  * all sessions revoked, purge scheduled `deletion.gracePeriodDays` days out (or

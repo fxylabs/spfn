@@ -22,16 +22,19 @@ export class MfaTotpRepository extends AccountStateRepository
         repointStamp: { account: userId => userId },
         confirm: { account: userId => userId },
         recordUsedStep: { account: userId => userId },
-        countFailedConfirm: { account: userId => userId },
         updateSecret: { account: userId => userId },
         deleteByUserId: { account: userId => userId },
         deleteUnconfirmedOf: { account: userId => userId },
     };
 
-    /** The account's enrolment row, confirmed or not. */
+    /**
+     * The account's enrolment row, confirmed or not. Primary: a code is checked
+     * against what this returns, and a replica behind the last spend or confirm
+     * would answer a state that is gone.
+     */
     async findByUserId(userId: number): Promise<MfaTotp | null>
     {
-        const result = await this.readDb
+        const result = await this.db
             .select()
             .from(mfaTotp)
             .where(eq(mfaTotp.userId, userId))
@@ -45,15 +48,18 @@ export class MfaTotpRepository extends AccountStateRepository
      *
      * Upsert rather than insert: calling `enroll` twice is the ordinary case —
      * a user closes the app before scanning — and the second call must hand out
-     * a fresh secret rather than a 409. The failed-attempt counter resets with
-     * it, which is what makes "start over" the documented remedy for a row that
-     * spent its five tries.
+     * a fresh secret rather than a 409.
      *
      * A **confirmed** row is refused by the service before this is reached, so
      * this can never overwrite a working second factor.
      *
      * The row carries the stamp of the start (`lib/deferred-stamp.ts`): the
      * credential that started it and the account's key generation then.
+     *
+     * A fresh start is a fresh row id: the id names the enrolment — the secret
+     * — a code was verified against, and `confirm` and `recordUsedStep` write
+     * only to the enrolment they were handed. Rewriting the ciphertext under
+     * another key (`updateSecret`) keeps it, as it keeps the secret.
      */
     async startEnrolment(userId: number, secretEnc: string, stamp: DeferredStamp): Promise<MfaTotp>
     {
@@ -63,7 +69,7 @@ export class MfaTotpRepository extends AccountStateRepository
             .values({ userId, ...started })
             .onConflictDoUpdate({
                 target: mfaTotp.userId,
-                set: { ...started, confirmedAt: null, lastUsedStep: null, failedConfirmAttempts: 0 },
+                set: { ...started, id: sql`DEFAULT`, confirmedAt: null, lastUsedStep: null },
             })
             .returning();
 
@@ -90,31 +96,42 @@ export class MfaTotpRepository extends AccountStateRepository
     }
 
     /**
-     * Mark the enrolment confirmed and record the step its first code spent.
-     * Write primary.
+     * Mark the enrolment confirmed and record the step its first code spent —
+     * only while it is still the enrolment the code was verified against
+     * (`enrolmentId`) and still unconfirmed, so of two confirms with one code
+     * exactly one confirms it, and issues the recovery codes; and a code for a
+     * secret an `enroll` since then replaced confirms nothing. Write primary.
+     *
+     * @returns true when this call confirmed it
      */
-    async confirm(userId: number, step: number): Promise<void>
+    async confirm(userId: number, enrolmentId: number, step: number): Promise<boolean>
     {
-        await this.db
+        const result = await this.db
             .update(mfaTotp)
-            .set({ confirmedAt: new Date(), lastUsedStep: step, failedConfirmAttempts: 0 })
-            .where(eq(mfaTotp.userId, userId));
+            .set({ confirmedAt: new Date(), lastUsedStep: step })
+            .where(and(eq(mfaTotp.id, enrolmentId), eq(mfaTotp.userId, userId), isNull(mfaTotp.confirmedAt)))
+            .returning({ userId: mfaTotp.userId });
+
+        return result.length > 0;
     }
 
     /**
      * Record the newest step this account has spent, so it cannot be replayed —
-     * only while the enrolment is confirmed and the step is newer than the last
-     * one spent: the check the code was verified against, restated under the
-     * account lock, so two requests with one code produce one winner.
+     * only while the enrolment is the one the code was verified against
+     * (`enrolmentId`), confirmed, and the step is newer than the last one
+     * spent: the check the code passed, restated under the account lock, so
+     * two requests with one code produce one winner, and a code of a secret
+     * replaced in between spends nothing on the new one.
      *
      * @returns true when this call spent the step
      */
-    async recordUsedStep(userId: number, step: number): Promise<boolean>
+    async recordUsedStep(userId: number, enrolmentId: number, step: number): Promise<boolean>
     {
         const result = await this.db
             .update(mfaTotp)
             .set({ lastUsedStep: step })
             .where(and(
+                eq(mfaTotp.id, enrolmentId),
                 eq(mfaTotp.userId, userId),
                 isNotNull(mfaTotp.confirmedAt),
                 or(isNull(mfaTotp.lastUsedStep), lt(mfaTotp.lastUsedStep, step)),
@@ -122,22 +139,6 @@ export class MfaTotpRepository extends AccountStateRepository
             .returning({ userId: mfaTotp.userId });
 
         return result.length > 0;
-    }
-
-    /**
-     * Count one wrong code against an unconfirmed row.
-     *
-     * @returns the count after this attempt
-     */
-    async countFailedConfirm(userId: number): Promise<number>
-    {
-        const result = await this.db
-            .update(mfaTotp)
-            .set({ failedConfirmAttempts: sql`${mfaTotp.failedConfirmAttempts} + 1` })
-            .where(and(eq(mfaTotp.userId, userId), isNull(mfaTotp.confirmedAt)))
-            .returning();
-
-        return result[0]?.failedConfirmAttempts ?? 0;
     }
 
     /**

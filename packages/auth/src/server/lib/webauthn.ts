@@ -5,8 +5,10 @@
  * speaks in the four parameter types below, which are ours.
  *
  * Two reasons for the seam. The library refuses by throwing plain `Error`s whose
- * messages are its own — a service that caught those directly would be matching
- * on strings the next minor release is free to reword. And a service test that
+ * messages are its own — nothing here or above it reads those messages, so the
+ * next minor release is free to reword them (the one refusal a caller tells
+ * apart, a counter that went backwards, is decided here by comparing counters,
+ * not by the library's wording: au7-B5). And a service test that
  * needs a controlled verifier result (a bad signature, a regressed counter) can
  * stub this module, while the happy paths keep running the real cryptography
  * against a fixture authenticator.
@@ -42,6 +44,121 @@ export type {
     PublicKeyCredentialRequestOptionsJSON,
 } from '@simplewebauthn/server';
 
+/**
+ * A WebAuthn response as it was presented, read once into the form every check
+ * of it uses: the credential it names, the challenge its authenticator signed
+ * over, and the response itself, of the shape the library verifies.
+ */
+export interface PresentedResponse<Response>
+{
+    /** The credential the response names (`id`). */
+    credentialId: string;
+    /** The challenge the browser echoed back in `clientDataJSON`. */
+    challenge: string;
+    response: Response;
+}
+
+/**
+ * Read a presented sign-in assertion (`navigator.credentials.get()`): every
+ * field this package or the library dereferences, with its type. The routes
+ * take the body as `Unknown`, so this is where its shape is judged — and a
+ * body that does not read is not a malformed request but an assertion that
+ * does not verify: the caller answers it as it answers a wrong signature.
+ *
+ * @returns null when the value is not an assertion
+ */
+export function parseAssertion(presented: unknown): PresentedResponse<AuthenticationResponseJSON> | null
+{
+    const credential = credentialFields(presented);
+
+    if (!credential || !isString(credential.response.authenticatorData) || !isString(credential.response.signature)
+        || !isOptional(credential.response.userHandle, isString))
+    {
+        return null;
+    }
+
+    return { credentialId: credential.credentialId, challenge: credential.challenge, response: presented as AuthenticationResponseJSON };
+}
+
+/**
+ * Read a presented registration attestation (`navigator.credentials.create()`),
+ * as `parseAssertion` reads an assertion.
+ *
+ * @returns null when the value is not an attestation
+ */
+export function parseAttestation(presented: unknown): PresentedResponse<RegistrationResponseJSON> | null
+{
+    const credential = credentialFields(presented);
+
+    if (!credential || !isString(credential.response.attestationObject)
+        || !isOptional(credential.response.transports, isStringArray))
+    {
+        return null;
+    }
+
+    return { credentialId: credential.credentialId, challenge: credential.challenge, response: presented as RegistrationResponseJSON };
+}
+
+/** The fields an assertion and an attestation share, or null when one is missing or mistyped. */
+function credentialFields(presented: unknown): { credentialId: string; challenge: string; response: Record<string, unknown> } | null
+{
+    if (!isRecord(presented) || !isString(presented.id) || !isString(presented.rawId)
+        || presented.type !== 'public-key' || !isRecord(presented.response) || !isString(presented.response.clientDataJSON))
+    {
+        return null;
+    }
+
+    const challenge = echoedChallenge(presented.response.clientDataJSON);
+
+    return challenge === null ? null : { credentialId: presented.id, challenge, response: presented.response };
+}
+
+/**
+ * The challenge in `clientDataJSON` — the value the authenticator signed over,
+ * which the library compares with the one we expect. Read from there rather
+ * than from anywhere else in the body, which would let a caller point us at a
+ * challenge row that has nothing to do with the assertion.
+ */
+function echoedChallenge(clientDataJSON: string): string | null
+{
+    const decoded = parseJson(Buffer.from(clientDataJSON, 'base64url').toString('utf8'));
+
+    return isRecord(decoded) && isString(decoded.challenge) ? decoded.challenge : null;
+}
+
+/** `JSON.parse` that answers null instead of throwing: the text is whatever a caller sent. */
+function parseJson(text: string): unknown
+{
+    try
+    {
+        return JSON.parse(text);
+    }
+    catch
+    {
+        return null;
+    }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown>
+{
+    return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function isString(value: unknown): value is string
+{
+    return typeof value === 'string';
+}
+
+function isStringArray(value: unknown): value is string[]
+{
+    return Array.isArray(value) && value.every(isString);
+}
+
+function isOptional(value: unknown, is: (value: unknown) => boolean): boolean
+{
+    return value === undefined || is(value);
+}
+
 /** A credential the caller already has, offered so the same one is not enrolled twice. */
 export interface KnownCredential
 {
@@ -71,6 +188,12 @@ export interface VerifyRegistrationParams
 /** What enrollment keeps from a verified attestation. */
 export interface RegistrationOutcome
 {
+    /**
+     * The authenticator verified the person (PIN, biometric) during this
+     * registration, not only their presence. Only such a credential may be
+     * marked as a second factor.
+     */
+    userVerified: boolean;
     credentialId: string;
     /** COSE public key, base64url — the form the column stores. */
     publicKey: string;
@@ -104,6 +227,10 @@ export interface VerifyAuthenticationParams
 /**
  * A verified assertion, or why it was refused.
  *
+ * `userVerified` is what this assertion proved beyond possession: the
+ * authenticator verified the person (PIN, biometric). An assertion without it
+ * signs its owner in, and is never a second factor.
+ *
  * `counterRegression` is called out because it is the one refusal that is not
  * "this did not verify": the signature was good and the credential is the right
  * one, but the authenticator reported a counter at or below the stored value.
@@ -112,7 +239,7 @@ export interface VerifyAuthenticationParams
  * on a false positive.
  */
 export type AuthenticationOutcome =
-    | { verified: true; newCounter: number; deviceType: PasskeyDeviceType; backedUp: boolean }
+    | { verified: true; newCounter: number; userVerified: boolean; deviceType: PasskeyDeviceType; backedUp: boolean }
     | { verified: false; counterRegression: boolean };
 
 /**
@@ -192,9 +319,10 @@ export async function verifyRegistration(
         return null;
     }
 
-    const { credential, credentialDeviceType, credentialBackedUp, aaguid } = verification.registrationInfo;
+    const { credential, credentialDeviceType, credentialBackedUp, aaguid, userVerified } = verification.registrationInfo;
 
     return {
+        userVerified,
         credentialId: credential.id,
         publicKey: encodeBase64Url(credential.publicKey),
         counter: credential.counter,
@@ -225,14 +353,24 @@ export async function buildAuthenticationOptions(
     });
 }
 
-/** Whether a library refusal was the counter check rather than the cryptography. */
-function isCounterRegression(error: unknown): boolean
+/**
+ * The counter rule of WebAuthn §6.1.1, on the counter the signature covered:
+ * a credential that counts must report more than the stored value; one that
+ * reports 0 against a stored 0 implements no counter and is never a regression.
+ */
+function counterRegressed(stored: number, reported: number): boolean
 {
-    return error instanceof Error && /counter value/i.test(error.message);
+    return (stored > 0 || reported > 0) && reported <= stored;
 }
 
 /**
  * Verify an assertion against the stored credential.
+ *
+ * The library is asked to verify everything but the counter — it is handed a
+ * stored counter of 0, which its own counter check never refuses — and the
+ * counter it then reports as signed is compared here, against the stored one.
+ * A regression is therefore recognised from the two numbers, not from the
+ * wording of a library error (au7-B5).
  *
  * @returns the verified result, or why it was refused
  */
@@ -240,38 +378,37 @@ export async function verifyAuthentication(
     params: VerifyAuthenticationParams,
 ): Promise<AuthenticationOutcome>
 {
-    try
+    const verification = await verifyAuthenticationResponse({
+        response: params.response,
+        expectedChallenge: params.expectedChallenge,
+        expectedOrigin: params.config.origins,
+        expectedRPID: params.config.rpId,
+        requireUserVerification: params.config.userVerification === 'required',
+        credential: {
+            id: params.credential.credentialId,
+            publicKey: decodeBase64Url(params.credential.publicKey),
+            counter: 0,
+            transports: params.credential.transports ?? undefined,
+        },
+    }).catch(() => null);
+
+    if (!verification?.verified)
     {
-        const verification = await verifyAuthenticationResponse({
-            response: params.response,
-            expectedChallenge: params.expectedChallenge,
-            expectedOrigin: params.config.origins,
-            expectedRPID: params.config.rpId,
-            requireUserVerification: params.config.userVerification === 'required',
-            credential: {
-                id: params.credential.credentialId,
-                publicKey: decodeBase64Url(params.credential.publicKey),
-                counter: params.credential.counter,
-                transports: params.credential.transports ?? undefined,
-            },
-        });
-
-        if (!verification.verified)
-        {
-            return { verified: false, counterRegression: false };
-        }
-
-        const { newCounter, credentialDeviceType, credentialBackedUp } = verification.authenticationInfo;
-
-        return {
-            verified: true,
-            newCounter,
-            deviceType: credentialDeviceType,
-            backedUp: credentialBackedUp,
-        };
+        return { verified: false, counterRegression: false };
     }
-    catch (error)
+
+    const { newCounter, userVerified, credentialDeviceType, credentialBackedUp } = verification.authenticationInfo;
+
+    if (counterRegressed(params.credential.counter, newCounter))
     {
-        return { verified: false, counterRegression: isCounterRegression(error) };
+        return { verified: false, counterRegression: true };
     }
+
+    return {
+        verified: true,
+        newCounter,
+        userVerified,
+        deviceType: credentialDeviceType,
+        backedUp: credentialBackedUp,
+    };
 }

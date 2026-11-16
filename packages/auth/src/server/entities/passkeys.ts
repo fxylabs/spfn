@@ -87,6 +87,14 @@ export const passkeys = authSchema.table('passkeys',
         // not removing a way into the account.
         secondFactor: boolean('second_factor').notNull().default(false),
 
+        // The registration ceremony carried user verification (the
+        // authenticator's PIN or biometric, not only its presence). A mark is
+        // given only to a credential registered with it: one that never showed
+        // it is possession alone. false on rows written before this was
+        // recorded — a mark already on one stays, and every use is judged by
+        // its own assertion's flag, which is what decides a second factor.
+        registeredUserVerified: boolean('registered_user_verified').notNull().default(false),
+
         lastUsedAt: utcTimestamp('last_used_at'),
 
         // null = live. A timestamp retires the credential permanently; the row

@@ -15,6 +15,7 @@ import {
     InternalServerError,
     GoneError,
     ServiceUnavailableError,
+    TooManyRequestsError,
 } from '@spfn/core/errors';
 
 /**
@@ -1666,6 +1667,57 @@ export class MfaVerificationFailedError extends UnauthorizedError
             details: data.details,
         });
         this.name = 'MfaVerificationFailedError';
+    }
+}
+
+/**
+ * Second Factor Locked Error (429)
+ *
+ * The account gave five wrong second-factor proofs in fifteen minutes, on any
+ * route that takes one — `mfa/verify`, `mfa/step-up`, `mfa/totp/confirm` — and
+ * accepts none for fifteen minutes after the fifth, right or wrong. One budget
+ * per account: signing in again, or trying another route, buys no new tries.
+ * The lock ends by itself; the owner was told when it began
+ * (`auth.mfa.locked`), and signing in with the first factor is not blocked.
+ *
+ * Carries `retryAfter` (seconds until the lock ends), which the error handler
+ * answers as the `Retry-After` header. `code` is stable for a client to branch
+ * on: tell the person when to try again rather than that the code was wrong.
+ */
+export class SecondFactorLockedError extends TooManyRequestsError
+{
+    readonly code = 'SECOND_FACTOR_LOCKED';
+
+    constructor(data: { message?: string; retryAfter?: number; details?: Record<string, any> } = {})
+    {
+        super({
+            message: data.message || 'Too many wrong second-factor codes. Try again later.',
+            retryAfter: data.retryAfter,
+            details: data.details,
+        });
+        this.name = 'SecondFactorLockedError';
+    }
+}
+
+/**
+ * Passkey User Verification Required Error (409)
+ *
+ * `mfa/passkey/mark` on a passkey whose registration did not verify the
+ * person — a security key with no PIN, say. Such a credential is possession
+ * alone and cannot be a second factor; it still signs its owner in. Register
+ * it again with a PIN or biometric set up to mark it.
+ */
+export class PasskeyUserVerificationRequiredError extends ConflictError
+{
+    readonly code = 'PASSKEY_USER_VERIFICATION_REQUIRED';
+
+    constructor(data: { message?: string; details?: Record<string, any> } = {})
+    {
+        super({
+            message: data.message || 'This passkey was registered without user verification and cannot be a second factor.',
+            details: data.details,
+        });
+        this.name = 'PasskeyUserVerificationRequiredError';
     }
 }
 

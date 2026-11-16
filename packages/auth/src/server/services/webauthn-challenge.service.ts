@@ -144,38 +144,3 @@ export async function spendChallenge(
 {
     return await webauthnChallengesRepository.consume(accountId, hashChallenge(challenge), kind);
 }
-
-/**
- * The challenge the browser echoed back, read out of `clientDataJSON`.
- *
- * Read here rather than trusted from elsewhere in the body: this is the value
- * the authenticator actually signed over, and the library compares it against
- * what we say we expect. Taking it from anywhere else would let a caller point
- * us at a challenge row that has nothing to do with the assertion.
- */
-export function presentedChallenge(clientDataJSON: string): string
-{
-    const decoded = parseJson(Buffer.from(clientDataJSON, 'base64url').toString('utf8')) as { challenge?: unknown };
-
-    return typeof decoded?.challenge === 'string' ? decoded.challenge : '';
-}
-
-/**
- * `JSON.parse` that answers null instead of throwing.
- *
- * The body is whatever a caller sent, and a malformed `clientDataJSON` has to
- * come out as the ordinary refusal rather than as a 500: the empty challenge it
- * yields matches no row, which is exactly the answer an unusable ceremony
- * deserves.
- */
-function parseJson(text: string): Record<string, unknown> | null
-{
-    try
-    {
-        return JSON.parse(text) as Record<string, unknown>;
-    }
-    catch
-    {
-        return null;
-    }
-}

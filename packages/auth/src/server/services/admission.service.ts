@@ -54,6 +54,7 @@ import { isLiveGrant } from '../repositories/oauth2-grants.repository';
 import { keyLiveness, type KeyLiveness } from '../lib/key-liveness';
 import { getBoundKeyRenewGraceMs } from '../lib/config';
 import { profileLocale } from '../lib/profile-locale';
+import type { StartingCredential } from '../lib/deferred-stamp';
 import { applyRoleEmailDomainPolicy } from './role-email-domain.service';
 import { secondFactorAdmits } from './second-factor-policy.service';
 import { isMethodListed } from '../lib/second-factor-policy';
@@ -212,21 +213,26 @@ export function accessTokenPrincipalFor(
 }
 
 /**
- * The device key a credential signs with: the key itself, or for a one-time
- * token the key that issued it. Null for a credential that is no device key —
- * a grant, or an application profile's own scheme.
+ * Which credential a session is — the one answer every reader of it uses: a
+ * step-up record (`mfa_verifications`), a procedure stamp
+ * (`lib/deferred-stamp.ts`), the session's key id (`sessionKeyOf`) and the key
+ * it signs with (`signingKeyOf`). A device key by its key id — a one-time token
+ * by the key that issued it — and an application profile by its name and the
+ * key id its verifier reported, which is never a device key even when it equals
+ * one's id. Null for a grant, which is no session.
  */
-export function signingKeyOf(credential: PrincipalCredential): string | null
+export function sessionCredentialOf(credential: PrincipalCredential): StartingCredential | null
 {
     switch (credential.kind)
     {
         case 'deviceKey':
         case 'renewal':
-            return credential.keyId;
+            return { kind: 'deviceKey', keyId: credential.keyId };
         case 'oneTimeToken':
-            return credential.issuedByKeyId;
-        case 'oauth2Grant':
+            return { kind: 'deviceKey', keyId: credential.issuedByKeyId };
         case 'appProfile':
+            return { kind: 'appProfile', profile: credential.profile, keyId: credential.keyId };
+        case 'oauth2Grant':
             return null;
         default:
             return unreachable(credential);
@@ -234,12 +240,25 @@ export function signingKeyOf(credential: PrincipalCredential): string | null
 }
 
 /**
+ * The device key a credential signs with: the key itself, or for a one-time
+ * token the key that issued it. Null for a credential that is no device key —
+ * a grant, or an application profile's own scheme.
+ */
+export function signingKeyOf(credential: PrincipalCredential): string | null
+{
+    const session = sessionCredentialOf(credential);
+
+    return session?.kind === 'deviceKey' ? session.keyId : null;
+}
+
+/**
  * The key id a session is known by (`AuthContext.keyId`): the device key it
  * signs with, the key id an application profile reported, `''` for a grant.
+ * Only an id — which credential holds it is `sessionCredentialOf`.
  */
 export function sessionKeyOf(credential: PrincipalCredential): string
 {
-    return signingKeyOf(credential) ?? (credential.kind === 'appProfile' ? credential.keyId : '');
+    return sessionCredentialOf(credential)?.keyId ?? '';
 }
 
 /**

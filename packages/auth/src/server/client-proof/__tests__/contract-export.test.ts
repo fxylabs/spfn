@@ -1643,9 +1643,9 @@ describe('declared proof rules match the implementation', () =>
         replayWindowMillis: number;
     };
 
-    it('the contract line is the revision that lists AccountBusyError (0.14.3, after au5-A3\'s 0.14.2)', () =>
+    it('the contract line is the revision that lists SecondFactorLockedError (0.14.4, after AccountBusyError\'s 0.14.3)', () =>
     {
-        expect(bundle.contractVersion).toBe('0.14.3');
+        expect(bundle.contractVersion).toBe('0.14.4');
     });
 
     it('the supported range floor is the current minor, as the 0.x rule has it', () =>

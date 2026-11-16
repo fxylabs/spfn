@@ -230,7 +230,7 @@ real secret values out of band, never commit them.
 | `SPFN_AUTH_REVOKE_ALL_CONFIRM_PATH` | `.env.server` | — | default `/account/revoke-all`; the page in your app the link opens |
 | `SPFN_AUTH_LINK_MAIL_DELIVERY` | `.env.server` | — | `auto` (default) \| `inline` \| `queued`; who sends signup-link, reset and account-exists mail and verification codes — see [Link mail delivery](#link-mail-delivery) |
 | `SPFN_AUTH_PASSKEY_RP_ID` / `_RP_NAME` / `_ORIGINS` | `.env.server` | — | relying party for passkeys; defaults derive from `{NEXT_PUBLIC_SPFN_APP_URL\|\|SPFN_APP_URL}` and are **checked at boot** — see [Passkeys](#passkeys-webauthn) |
-| `SPFN_AUTH_PASSKEY_USER_VERIFICATION` | `.env.server` | — | `preferred` (default) or `required`; `discouraged` refuses boot |
+| `SPFN_AUTH_PASSKEY_USER_VERIFICATION` | `.env.server` | — | `preferred` (default) or `required`; `discouraged` refuses boot. Says what the browser is asked for; a second factor is judged by each assertion's own flag |
 | `SPFN_AUTH_PASSKEY_CHALLENGE_TTL_SECONDS` / `_RECENT_AUTH_MINUTES` | `.env.server` | — | defaults `300` / `10` — see [Passkeys](#passkeys-webauthn) |
 | `SPFN_AUTH_MFA_ISSUER` | `.env.server` | — | name the authenticator app files the account under; defaults to the passkey relying-party name, then the app URL host — see [Second factor](#second-factor-mfa) |
 | `SPFN_AUTH_MFA_STEP_UP_MINUTES` | `.env.server` | — | default `10`; how recently an enrolled account's device must have proved its second factor for a sensitive change — see [Second factor](#second-factor-mfa) |
@@ -516,8 +516,9 @@ decision is the account's state as the request reads it on the primary. The
 recent-authentication rule on the passkey routes (`RECENT_AUTH_REQUIRED`) runs as it always has.
 
 In the enrolment-only state with `'passkey'` listed, `passkeys/register/verify` **marks the passkey
-it registered as the second factor in the same transaction** — the ceremony with user verification
-is the proof — and its answer carries `mfaStatus` (the `mfa/status` shape), so the session is
+it registered as the second factor in the same transaction** — when the ceremony carried user
+verification, which is the proof; a registration without it (a security key with no PIN) is kept
+unmarked and the account stays in the enrolment-only state — and its answer carries `mfaStatus` (the `mfa/status` shape), so the session is
 ordinary from its next request without a second call. With no policy, or outside that state, it
 marks nothing and its answer has no `mfaStatus`, as before.
 
@@ -525,7 +526,7 @@ The client flow, by what the account holds (`secondFactorEnrolmentRequired: true
 
 | the account holds | flow |
 |---|---|
-| nothing | register a passkey (`enrollPasskey`) — done, it is marked; or `totp/enroll`, `totp/confirm` |
+| nothing | register a passkey (`enrollPasskey`) with user verification — done, it is marked; or `totp/enroll`, `totp/confirm` |
 | a passkey it never marked | `mfa/step-up/options` → assert with that passkey → `mfa/step-up`, then `passkey/mark` with `secondFactor: true` (or register another, which is marked) |
 | a confirmed TOTP the policy does not list | `mfa/step-up` with `{ code }`, then register a passkey — it is marked |
 
@@ -551,23 +552,25 @@ must prove before it enrols again.
 
 Only a listed method counts as enrolled, is reported by `mfa/status`, and is accepted as a proof.
 A proof of an unlisted method — a TOTP code the account enrolled before the policy, say — is a
-failed proof: at `mfa/verify` it counts against the challenge's five attempts exactly as a wrong
-code does, and at `mfa/step-up` it is the uniform 401 and opens no window. An unlisted method's
+failed proof: the uniform 401, counted against the account's
+[failure budget](#wrong-proofs-one-budget-per-account) exactly as a wrong code is, and it opens no
+window. An unlisted method's
 enrolment routes answer **404 `SECOND_FACTOR_METHOD_DISABLED`** (`SecondFactorMethodDisabledError`,
 `details.method`): `totp/enroll` and `totp/confirm` for `'totp'`, `passkey/mark` for `'passkey'`.
 Passkey *sign-in* registration stays, since a passkey is also a way in.
 
-`methods: ['passkey']` makes the passkey the second factor, so it raises the effective
-`SPFN_AUTH_PASSKEY_USER_VERIFICATION` to `required` when the variable is unset, and refuses boot
-when it is set to anything else. When `'passkey'` is not listed, a passkey sign-in is no longer a
-second proof: an enrolled account signing in with one on a new device gets the same 202 challenge
-a password sign-in gets, and the proxy handles it the same way.
+`methods: ['passkey']` makes the passkey the second factor. It no longer touches
+`SPFN_AUTH_PASSKEY_USER_VERIFICATION`: an assertion is a second factor only when it carried user
+verification itself, whatever that variable says ([what a passkey proves](#what-a-passkey-proves)).
+When `'passkey'` is not listed, a passkey sign-in is no longer a second proof: an enrolled account
+signing in with one on a new device gets the same 202 challenge a password sign-in gets, and the
+proxy handles it the same way.
 
 #### `recoveryCodes: false`
 
 None are issued — `totp/confirm` answers `recoveryCodes: []` and writes no row — and none are
-accepted: a recovery code at `mfa/verify` is a failed proof (counted, and the code is **not**
-spent), at `mfa/step-up` a 401. `recovery/regenerate` answers 404 `SECOND_FACTOR_METHOD_DISABLED`
+accepted: a recovery code at `mfa/verify` or `mfa/step-up` is a failed proof (a 401, counted, and
+the code is **not** spent). `recovery/regenerate` answers 404 `SECOND_FACTOR_METHOD_DISABLED`
 with `details.method: 'recoveryCodes'`, and `mfa/status` reports `recoveryCodesRemaining: 0`.
 Rows from before are ignored, not deleted.
 
@@ -588,7 +591,6 @@ In `afterInfrastructure`, beside the channel check:
 |---|---|
 | `methods: []` | refused — nothing could ever be enrolled |
 | `required: true` with `channels.deviceCode` or `channels.deviceLink` on | refused, naming the channel: an approval signs a device in with no listed factor |
-| `methods: ['passkey']` with `SPFN_AUTH_PASSKEY_USER_VERIFICATION` set but not `required` | refused |
 | `required: true`, `methods: ['totp']`, no `SPFN_AUTH_TOKEN_ENCRYPTION_KEYS` | refused — no TOTP secret could be stored |
 | two lifecycles stating different policies | refused |
 
@@ -1243,8 +1245,9 @@ the account as it is then. What changes:
   STEP_UP_REQUIRED`** at `confirm`; step up and confirm again.
 - **`POST /_auth/passkeys/register/verify`** asks step-up and recent authentication again, at the
   verify. A challenge another session asked for, or one of an ended key generation, is
-  **`401 PasskeyChallengeError`**. Recent authentication at the verify is the device key's
-  `authenticatedAt`, or a `currentPassword` sent to **this ceremony's** `register/options`: that
+  **`401 PasskeyChallengeError`**. Recent authentication at the verify is the session
+  credential's (a device key's `authenticatedAt`; never an application profile's), or a
+  `currentPassword` sent to **this ceremony's** `register/options`: that
   proof is recorded on the ceremony's challenge (`password_proven_at`) and read back by its verify
   alone. It does not touch the key's `authenticatedAt`, so it satisfies no other route's recent
   authentication (a social link, turning session binding on).
@@ -1291,8 +1294,8 @@ the account as it is then. What changes:
   `startStepUpService(userId, credential)`, `startSessionBindingDisableService(userId, credential)`,
   and a `credential` field on the params of `confirmTotpEnrolmentService`,
   `startPasskeyEnrollmentService`, `finishPasskeyEnrollmentService`, `stepUpService`,
-  `attemptSecondFactor` / `verifySecondFactor` (an app route that verifies a step-up by passkey
-  passes it too), `disableSessionBindingService` and `startOAuthLinkService`.
+  `checkSecondFactorProof` (an app route that verifies a step-up by passkey passes it in the
+  purpose, `{ kind: 'stepUp', credential }`), `disableSessionBindingService` and `startOAuthLinkService`.
   `startRenewalCeremonyService(ceremony, stamp)` takes the ceremony (`'renewal' | 'bindingOff'`)
   and the stamp; `verifyRenewalAssertionService` is `checkRenewalAssertionService({ userId,
   ceremony, credential, response })`, which answers a proof to `spend()` under the account lock in
@@ -1310,6 +1313,110 @@ The migration adds `started_by_key_id`, `started_by_profile` and `key_epoch` to 
 `webauthn_challenges`, `password_proven_at` to `webauthn_challenges`, and `replaced_by_key_id` to
 `user_public_keys`, all nullable and without a backfill. Run it with the release. The mobile
 contract does not change.
+
+### Migration — one second-factor check, one failure budget, passkeys judged by what they proved
+
+**BREAKING.** Bundle 6 of the audit (au7-A2, au2-A2, au2-A3 = au7-A4, au7-A5, au7-A7, au7-A8,
+au4-A8, au7-B5). A wrong second-factor proof was counted per new-device challenge and not at all at
+`mfa/step-up`; "used once" was a value compared in code; and a passkey counted as a second factor
+by a method list and a user-verification setting that disagreed. Now:
+
+- **One failure budget per account** ([details](#wrong-proofs-one-budget-per-account)): five
+  wrong proofs in fifteen minutes on any route lock the second factor for fifteen minutes —
+  **429 `SECOND_FACTOR_LOCKED`** with `Retry-After`, and `auth.mfa.locked` fires once. Handle the
+  429 on your confirm and step-up screens ("try again at …", not "wrong code"), and subscribe to
+  the event to mail the owner. The per-challenge five-strike rule is gone — a challenge's pending
+  key is no longer deleted by wrong proofs, it expires — and so is the per-enrolment confirm
+  counter: five wrong confirms no longer discard the pending TOTP secret, they lock like any
+  other five. Mobile contract **0.14.4** lists `SecondFactorLockedError` for `auth.mfa.verify`
+  (a patch: the supported range does not move).
+- **A passkey without user verification is not a second factor**
+  ([what a passkey proves](#what-a-passkey-proves)). A new device signed in with one is asked for
+  the second factor (202) where it used to sign straight in; `mfa/verify` and `mfa/step-up` refuse
+  it; `mfa/passkey/mark` refuses a passkey registered without it (409
+  `PASSKEY_USER_VERIFICATION_REQUIRED`), and the enrolment-only registration no longer marks it.
+  **PIN-less security keys need a PIN (or a biometric) set up to count** — register them again
+  once they have one. A passkey sign-in **with** user verification is exempt from the new-device
+  check whether or not it is marked. Passkeys already marked keep their mark (their registrations
+  recorded nothing, `registered_user_verified = false`): user verification is a property of each
+  assertion, so each use is judged — a marked key used with its PIN still proves the factor, the
+  same key used without one does not.
+
+  **An account whose only second factor is such a passkey, on a key with no PIN, is stopped at
+  the second factor.** A sign-in on a new device gets the 202 and then 401 at `mfa/verify`;
+  `mfa/step-up` answers 401; and every change gated by step-up — unmarking
+  the passkey, disabling the second factor, registering another passkey — answers 403
+  `STEP_UP_REQUIRED`. This follows from the rule above and stays. The two ways out: **a recovery
+  code** (accepted at `mfa/verify` and `mfa/step-up`; the owner can then set a PIN on the key and
+  register it again, or enrol TOTP), or **the operator's `resetSecondFactorService(userId)`**, which
+  takes every second factor off the account.
+
+  **Find these accounts before you upgrade.** Before the migration nothing records whether a
+  passkey's registration verified the person, and afterwards every passkey registered before it
+  has `registered_user_verified = false` — so the candidates are the accounts with a live passkey
+  marked as their second factor (`passkeys.second_factor` and no `revoked_at`) and no confirmed
+  TOTP (`mfa_totp.confirmed_at`); among them, those with no unused recovery code
+  (`mfa_recovery_codes.used_at IS NULL` in the newest `generation`) have neither exit of their own:
+
+  ```sql
+  SELECT DISTINCT p.user_id
+  FROM spfn_auth.passkeys p
+  WHERE p.second_factor AND p.revoked_at IS NULL
+    AND NOT EXISTS (SELECT 1 FROM spfn_auth.mfa_totp t
+                    WHERE t.user_id = p.user_id AND t.confirmed_at IS NOT NULL);
+  ```
+
+  Whether a candidate's key has a PIN shows only at its next use. Ask those owners to set one, or
+  to save their recovery codes, before the upgrade; after it, a passkey registered again records
+  `registered_user_verified = true` when the registration verified the person.
+- **`methods: ['passkey']` no longer raises `SPFN_AUTH_PASSKEY_USER_VERIFICATION` to `required`,**
+  and `preferred` beside it no longer refuses boot: the variable only says what the browser is
+  asked for. Set `required` yourself to refuse unverified passkey sign-ins outright.
+- **Step-up records belong to the credential that proved them.** `mfa_verifications` gains an `id`
+  primary key and `profile` / `profile_key_id` beside a now-nullable `key_id`: a session of an
+  [application profile](#custom-auth-profiles-registerauthprofile) records its step-up as the
+  profile and its reported key id (it used to answer 500 at `totp/confirm` and at a successful
+  step-up when that key id had no device-key row, and to record on the device key whose id it
+  reported). Existing rows are device keys' and keep working.
+- **Recent authentication belongs to the credential too** ([the gate](#the-recent-authentication-gate)).
+  A profile session whose verifier reported a device key's id was answered as if it had just
+  authenticated whenever that device key had: it started passkey registrations, revoked passkeys,
+  linked and unlinked social accounts, turned session binding on and requested the account's
+  deletion on that key's sign-in. **An application-profile session is now never recently
+  authenticated by itself** — `@spfn/auth` has no record of when it authenticated — so those
+  routes answer it **403 `RECENT_AUTH_REQUIRED`** unless the body carries the account password
+  (`currentPassword`, `password` at `deletion/request`). Turning session binding on reads no
+  password, so a profile session cannot turn it on. An app whose profile reported real device
+  key ids and relied on the borrowed freshness sends the password, or makes those requests from a
+  device-key session.
+- **Signatures.** `assertStepUp({ userId, credential })` takes the request's credential
+  (`getAuth(c).credential`) instead of `keyId`, and so do `changePasswordService` (`credential`
+  replaces `keyId`), `revokeAllKeysService` (a new optional `credential`; the step-up is asked
+  only when it is given), `unlinkOAuthService` and `revokePasskeyService` (a new `credential`).
+  Recent authentication is asked of the credential as well:
+  `assertRecentAuthentication`, `proveRecentAuthentication` and `recentAuthenticationHolds` take
+  `{ userId, credential, currentPassword? }` instead of `keyId`; `startPasskeyEnrollmentService`,
+  `finishPasskeyEnrollmentService`, `revokePasskeyService`, `startOAuthLinkService` and
+  `unlinkOAuthService` no longer take `keyId`, and `enableSessionBindingService` takes the
+  `credential` beside it.
+  `confirmTotpEnrolmentService` and `stepUpService` no longer take `keyId`.
+  `attemptSecondFactor` and `verifySecondFactor` are removed: call
+  `checkSecondFactorProof(userId, proof, purpose)` outside any transaction and `spend()` its answer
+  under the account lock. `mfaVerificationsRepository.findByKeyId(keyId)` is
+  `findFor(userId, credential)`, and `record(keyId, userId, method)` is
+  `record(userId, credential, method)`. `verifyTotp` no longer takes `lastUsedStep` — the spend is
+  conditional. `mfaTotpRepository.confirm` answers whether it confirmed; `countFailedConfirm`,
+  `mfaChallengesRepository.countFailure` / `dropPendingKey`, `MFA_CHALLENGE_ATTEMPT_LIMIT` and
+  `MFA_CONFIRM_ATTEMPT_LIMIT` are removed, with the columns `mfa_challenges.attempts` and
+  `mfa_totp.failed_confirm_attempts`. `verificationCodesRepository.incrementAttempts(id)` is
+  `spendAttempt(id, limit)` and `markAsUsed(id, retainedUntil)` is
+  `markAsUsed(id, limit, retainedUntil)`, answering whether it used the code — both conditional,
+  so concurrent requests with one e-mail or phone code produce one verification token.
+- **`mfa/step-up` has no route-wide transaction any more**, for the reason `mfa/verify` and
+  `totp/confirm` never had one: a wrong proof's count has to commit before its refusal.
+
+Run the migration (`spfn db migrate`); it creates `mfa_attempt_budgets`, adds
+`passkeys.registered_user_verified` and reshapes `mfa_verifications` in place.
 
 ### Invitations
 
@@ -2182,7 +2289,7 @@ configuration for a one-origin app.
 | `SPFN_AUTH_PASSKEY_RP_ID` | `.env.server` | domain credentials are bound to — no protocol, no port. Default: the app URL's host. **Changing it orphans every passkey already enrolled** |
 | `SPFN_AUTH_PASSKEY_RP_NAME` | `.env.server` | name the authenticator's own prompt shows. Default: the rpId |
 | `SPFN_AUTH_PASSKEY_ORIGINS` | `.env.server` | comma-separated full origins allowed to run a ceremony. Default: the app URL's origin |
-| `SPFN_AUTH_PASSKEY_USER_VERIFICATION` | `.env.server` | `preferred` (default) or `required`. `discouraged` refuses boot |
+| `SPFN_AUTH_PASSKEY_USER_VERIFICATION` | `.env.server` | `preferred` (default) or `required`. `discouraged` refuses boot. What the browser is asked for, and whether a sign-in without user verification is refused outright — not whether an assertion is a second factor: [that is each assertion's own flag](#what-a-passkey-proves) |
 | `SPFN_AUTH_PASSKEY_CHALLENGE_TTL_SECONDS` | `.env.server` | default `300` — one ceremony at the authenticator, not an abandoned tab |
 | `SPFN_AUTH_PASSKEY_RECENT_AUTH_MINUTES` | `.env.server` | default `10` — see [the recent-authentication gate](#the-recent-authentication-gate). Also the provider link window when `oauthLink.recentAuthMinutes` is unset |
 
@@ -2291,10 +2398,21 @@ someone who simply changed their mind.
 Adding a credential is adding a way in, and removing one can lock an account. Both are refused
 unless the caller has recently proved themselves, in one of two ways:
 
-- **a person proved a credential on the device key this request is signed with within
-  `SPFN_AUTH_PASSKEY_RECENT_AUTH_MINUTES`** — the key's `authenticatedAt`, which a sign-in sets and
-  a `rotateKey` only inherits, so rotating does not make a stale session fresh; or
+- **this session's credential authenticated within `SPFN_AUTH_PASSKEY_RECENT_AUTH_MINUTES`**; or
 - **the body carries `currentPassword`** and it verifies.
+
+"When did this session last authenticate" is asked of the credential the request presented
+(`getAuth(c).credential`), never of a key id it reports:
+
+| Credential | Recently authenticated when |
+|---|---|
+| a device key | its own key row's `authenticatedAt` is inside the window — a sign-in sets it and a `rotateKey` only inherits it, so rotating does not make a stale session fresh |
+| a one-time token | the device key that issued it is: the token is that session's hand-off and nobody proves anything to obtain it, so it is exactly as fresh as its issuer |
+| an [application profile](#custom-auth-profiles-registerauthprofile) | **never by itself** — it has no key row, and `@spfn/auth` has no record of when it authenticated. The key id its verifier reports is the profile's own, even when it equals a device key's id, so it borrows nothing from that key's sign-in. It presents the password instead |
+| an OAuth 2.1 grant | never — a grant is no session, and these routes do not admit it |
+
+A profile session's password proof is not stored anywhere a later request reads, except at
+passkey registration, where `register/options` records it on that ceremony's challenge (below).
 
 A password in the body is the proof offered, and it is judged: a wrong one answers
 `RECENT_AUTH_REQUIRED` even on a device that signed in a moment ago. A presented password is always
@@ -2388,7 +2506,7 @@ Ask for a password, an address, or a social link before, or shortly after, the p
   |---|---|---|---|
   | `authentication` | `passkeys/login/options` | `passkeys/login/verify` | no — names nobody |
   | `registration` | `passkeys/register/options` | `passkeys/register/verify` | yes |
-  | `stepUp` | `mfa/step-up/options` | `mfa/step-up` (and `attemptSecondFactor` / `verifySecondFactor`) | yes |
+  | `stepUp` | `mfa/step-up/options` | `mfa/step-up` (and `checkSecondFactorProof` with `{ kind: 'stepUp' }`) | yes |
   | `newDevice` | `mfa/verify/options` | `mfa/verify` | no — the 202 handle names its pending key |
   | `renewal` | `session/renew/options` | `session/renew/verify` | yes, with the key it renews |
   | `bindingOff` | `session/binding/disable/options` | `session/binding` with `mode: 'none'` | yes |
@@ -2399,6 +2517,8 @@ Ask for a password, an address, or a social link before, or shortly after, the p
   is the signal a cloned authenticator would produce — but a synced passkey reports 0 forever
   and a restored device can hit it, so auto-revoking would lock people out on a false
   positive. The refusal is logged at `warn` with the passkey id; a human decides what it meant.
+  The regression is recognised by comparing the signed counter with the stored one, not by the
+  wording of the WebAuthn library's error, so a reworded message cannot silence the warning.
 - **Attestation is `none`.** Verifying an attestation statement would tell us which
   authenticator model was used and nothing about who is holding it.
 
@@ -2412,6 +2532,7 @@ Ask for a password, an address, or a social link before, or shortly after, the p
 | `PasskeyAlreadyRegisteredError` | 409 | — | that credential is on file for some account, revoked ones included |
 | `RecentAuthenticationRequiredError` | 403 | `RECENT_AUTH_REQUIRED` | the session proved itself too long ago and carried no password |
 | `LastRecoveryCredentialError` | 409 | `LAST_RECOVERY_CREDENTIAL` | revoking it would leave no way back in |
+| `PasskeyUserVerificationRequiredError` | 409 | `PASSKEY_USER_VERIFICATION_REQUIRED` | `mfa/passkey/mark` on a passkey registered without user verification |
 | `PasskeyConfigError` | boot | — | an origin off the rpId or not https, or an unsupported user-verification value |
 
 #### Events
@@ -2473,7 +2594,9 @@ chooses the methods and whether recovery codes exist.
 
 Two forms. A **TOTP** authenticator app (RFC 6238, SHA-1, 30-second steps, six digits, one
 step of drift), or a **passkey** the owner already enrolled through `/_auth/passkeys/*` and
-has marked as a second factor. Either one comes with ten single-use recovery codes.
+has marked as a second factor, used with user verification
+([what a passkey proves](#what-a-passkey-proves)). Either one comes with ten single-use recovery
+codes.
 
 ```
 enrol   → POST /_auth/mfa/totp/enroll      → { secret, otpauthUri }, shown once
@@ -2511,13 +2634,17 @@ account as it is then: an account that enrolled a factor since `enroll` answers 
 STEP_UP_REQUIRED`. The checks at `enroll` are an early refusal only.
 
 A submitted code has its spaces and dashes stripped, so `123 456` and `123-456` are the same
-code. Five wrong codes discard the pending secret — the sixth attempt says there is nothing to
-confirm, and a fresh `totp/enroll` is the remedy and what resets the counter. A **confirmed**
-enrolment is never discarded that way; `totp/enroll` on one is a 409, because replacing a
-working second factor is `disable` followed by a fresh enrolment, both step-up gated.
+code; anything else that is not six ASCII digits — full-width digits, letters, the wrong length —
+is a wrong code, answered and counted as one. A wrong code spends the account's
+[failure budget](#wrong-proofs-one-budget-per-account) like any other wrong proof, and the pending
+secret stays. `totp/enroll` on a **confirmed** enrolment is a 409, because replacing a working
+second factor is `disable` followed by a fresh enrolment, both step-up gated. The confirmation is
+conditional on the enrolment still being unconfirmed, so two confirms with one code issue one set
+of recovery codes.
 
 The **same code cannot be spent twice**, which is what makes it single-use: the newest step
-the account has spent is remembered, and a code presented again inside its own thirty seconds
+the account has spent is remembered, the statement that spends a step is conditional on it being
+newer, and a code presented again inside its own thirty seconds — or by several requests at once —
 is refused. That includes the legitimate case of a second device signing in during the same
 step — it gets a 401 with the same body as a wrong code, and the client should **retry on the
 next step** rather than treat it as a bad credential.
@@ -2542,10 +2669,12 @@ For an **enrolled** account, four kinds of change ask for the second factor agai
 | `POST /_auth/mfa/disable`, `recovery/regenerate`, `passkey/mark`, `totp/enroll` | the second factor itself |
 | `POST /_auth/passkeys/register/options`, `passkeys/revoke` | the account's credentials |
 
-The rule is per **device key**: this device must have proved the second factor within
+The rule is per **credential** — a device key, or an [application profile](#custom-auth-profiles-registerauthprofile)
+with the key id its verifier reports, which is the profile's own and never the device key that
+happens to have the same id: this device must have proved the second factor within
 `SPFN_AUTH_MFA_STEP_UP_MINUTES` (default 10). Otherwise the answer is **403
 `STEP_UP_REQUIRED`**, and the client sends the user to `POST /_auth/mfa/step-up` — a TOTP
-code, a recovery code, or an assertion from a marked passkey (options from
+code, a recovery code, or an assertion with user verification from a marked passkey (options from
 `POST /_auth/mfa/step-up/options`) — and retries. 403 rather than 401 on purpose, and for the
 reason `RECENT_AUTH_REQUIRED` is: a 401 on an authenticated route is what a web client reads
 as "the session is gone", so it would sign the user out instead of asking for a code.
@@ -2562,7 +2691,7 @@ it met before. Unmarking the last second-factor passkey is likewise independent 
 `passkey/mark false` succeeds where `passkeys/revoke` on the same credential is still refused.
 
 Two sign-ins deliberately produce a session with no verification of its own: a
-[device-code login](#device-code-login) and a passkey sign-in. Both are exempt at
+[device-code login](#device-code-login) and a passkey sign-in with user verification. Both are exempt at
 *registration* and both still step up for a sensitive change, which is what
 `POST /_auth/mfa/step-up` is for. Marking a passkey as a second factor is likewise not proving
 it, so the device that marks one steps up before it may change the second factor again.
@@ -2584,10 +2713,13 @@ POST /_auth/mfa/verify       → 200 the LoginResult the sign-in would have give
 ```
 
 Four channels stop: **password**, **oauth** (web), **oauth-native** and **password-reset** —
-the four where one stolen credential would otherwise be enough. A device-code approval and a
-passkey sign-in do not, because each already carried a second proof — the passkey only while
-the [policy](#requiring-a-second-factor-secondfactor) lists passkeys; when it does not, a passkey
-sign-in is the fifth channel that stops, and `passkeys/login/verify` answers the same 202; nor does a key rotation,
+the four where one stolen credential would otherwise be enough. A device-code approval does not,
+because it already carried a second proof, and neither does a passkey sign-in whose assertion
+carried user verification, marked or not — possession and verification were both shown — while the
+[policy](#requiring-a-second-factor-secondfactor) lists passkeys. A passkey sign-in without user
+verification (a security key with no PIN), or any passkey sign-in when the policy does not list
+passkeys, is the fifth channel that stops, and `passkeys/login/verify` answers the same 202. The
+exemption is read from what the assertion proved, not from the route it came by. Nor does a key rotation,
 a renewal, or any path that is creating the account. A sign-in that **replaces** the device's key is
 not stopped either — but only when the old private key proves it with `replacementProof`; a sign-in
 that merely names an `oldKeyId` is a new device and is challenged
@@ -2606,11 +2738,11 @@ link, a password reset — **deletes** it and kills its challenge in the same st
 owner who reacts to an unexpected prompt by signing out everywhere really has.
 
 The challenge is 32 random bytes. Only its hash is stored, so a guess reaches no row and
-cannot touch anybody's attempt counter; it is single use, it lives
-`SPFN_AUTH_MFA_CHALLENGE_TTL_MINUTES` (default 10), it dies with the account's key generation,
-and five wrong proofs end it and delete the pending key. Retrying the same registration while
-a challenge is live resumes it — same row, same expiry, same spent attempts — rather than
-answering 409.
+spends nothing; it is single use, it lives `SPFN_AUTH_MFA_CHALLENGE_TTL_MINUTES` (default 10),
+and it dies with the account's key generation. A wrong proof at it spends the account's
+[failure budget](#wrong-proofs-one-budget-per-account), not the challenge's — a fresh sign-in mints
+a fresh challenge and no fresh tries. Retrying the same registration while a challenge is live
+resumes it — same row, same expiry — rather than answering 409.
 
 **Recovery codes work here**, which is the point of having them: somebody whose authenticator
 is on the phone they just lost signs in on the replacement with a written-down code.
@@ -2740,7 +2872,7 @@ export function MfaForm()
 |---------|-------|----------------------|
 | `idle` | nothing submitted, or a passkey sheet closed (`cancelled`, `no-credential`, `unsupported`) | the inputs |
 | `submitting` | a proof is in flight; another submit is ignored; stays so while navigating away | a disabled button |
-| `wrong` | `MfaVerificationFailedError` (401) — a wrong code, or a challenge spent by five wrong ones | try again |
+| `wrong` | `MfaVerificationFailedError` (401) — a wrong code | try again |
 | `expired` | `SESSION_PENDING_EXPIRED` or `SESSION_PENDING_MISMATCH` from the proxy | sign in again |
 | `failed` | anything else — network, rate limit, a passkey ceremony `error` | try again; the page's inputs are untouched |
 
@@ -2748,6 +2880,76 @@ export function MfaForm()
 is never logged or handed to a callback. A challenge that outlives its ten minutes **at the
 backend** is refused like a wrong code, so it reads as `wrong` rather than `expired`; the
 backend answers both with one body on purpose.
+
+#### Wrong proofs: one budget per account
+
+Every second-factor proof — a TOTP code, a recovery code, a passkey assertion — is judged in one
+place, `checkSecondFactorProof`, whichever route it arrived on: `mfa/verify`, `mfa/step-up`,
+`mfa/totp/confirm`. A wrong one spends the **account's** budget:
+
+- **Five failures within any fifteen minutes**: each failure counts those of the fifteen minutes
+  before it, so no burst on either side of a window's edge gets more than five. The fifth locks the
+  second factor: for fifteen minutes from that failure no proof is accepted, right or wrong —
+  **429 `SECOND_FACTOR_LOCKED`** (`SecondFactorLockedError`) with a `Retry-After` header — and no
+  further failure is counted. The lock ends by itself. Signing in with the first factor is not blocked; the 202 it answers waits.
+- **One budget, not one per attempt.** A fresh sign-in mints a fresh new-device challenge and no
+  fresh tries; `mfa/step-up` and `mfa/verify` spend the same budget.
+- **A success resets nothing.** Failures leave the count only when their window passes, so a
+  correct code from the owner does not hand a guesser five more.
+- **Malformed is wrong.** A code that is not six ASCII digits, a `response` that is not a passkey
+  assertion at all (`null`, `{}`, a number), a passkey assertion without user verification, a proof
+  of a method the policy does not list: each is a 401, counted. A replayed
+  code that verified but whose step was already spent is a 401 and is not counted — it is not a guess.
+- **The owner is told.** The failure that locks emits `auth.mfa.locked` after commit, exactly once.
+
+The count is the data's, not a comparison in code: one conditional upsert on
+`mfa_attempt_budgets` that writes nothing while the account is locked, so of any number of
+concurrent failures exactly one reaches the limit. It runs under the account lock in a transaction
+of its own that commits before the refusal — which is why the routes that take a proof have no
+route-wide transaction, and why `checkSecondFactorProof` refuses to run inside one. A proof that
+checked out is spent under the account lock by a statement conditional on what it was checked
+against: the TOTP step newer than the last spent, the recovery code unused, the enrolment
+unconfirmed, the WebAuthn challenge unspent; and the budget is asked again there.
+
+An app route that takes a second-factor proof calls it the same way, outside a transaction, then
+spends what it answers under the account lock in its own:
+
+```typescript
+import { runInTransaction } from '@spfn/core/db';
+import { MfaVerificationFailedError } from '@spfn/auth/errors';
+import { checkSecondFactorProof, usersRepository } from '@spfn/auth/server';
+
+const proof = await checkSecondFactorProof(userId, { code }, { kind: 'stepUp', credential });
+
+await runInTransaction(async () =>
+{
+    await usersRepository.lockAccount(userId);
+
+    if (!await proof.spend())
+    {
+        throw new MfaVerificationFailedError();
+    }
+    // ...what the proof authorizes
+});
+```
+
+#### What a passkey proves
+
+A passkey assertion says what it showed: the credential, whether the authenticator **verified the
+person** (a PIN, a biometric) rather than only their presence, and whether the owner marked the
+credential as their second factor. Every rule reads that, on every use:
+
+- **Without user verification it is never a second factor** — possession alone. It still signs its
+  owner in. A new device signed in with it is asked for the second factor (202); it is refused at
+  `mfa/verify` and `mfa/step-up`; and it cannot be marked.
+- **With user verification, a passkey sign-in is exempt** from the new-device check, marked or not:
+  possession and verification were both shown. At `mfa/verify` and `mfa/step-up` a passkey must also
+  be marked (or, in the enrolment-only state, any live one).
+- **Marking needs a registration that verified the person.** Registration records it
+  (`passkeys.registered_user_verified`); `mfa/passkey/mark` on one that did not answers **409
+  `PASSKEY_USER_VERIFICATION_REQUIRED`**, and the enrolment-only registration does not mark it.
+- `SPFN_AUTH_PASSKEY_USER_VERIFICATION` is what the browser is asked for, and with `required`, a
+  sign-in without verification is refused outright. It no longer decides what a second factor is.
 
 #### Telling people it exists
 
@@ -2762,8 +2964,10 @@ the session itself, and `authLoginEvent` says so in `secondFactorEnrolmentRequir
 
 | error | status | `code` | when |
 |-------|--------|--------|------|
-| `MfaVerificationFailedError` | 401 | — | a wrong or stale code, a spent step, a used / old-generation / foreign recovery code, or an assertion from an unmarked passkey |
-| `MfaNotEnrolledError` | 400 | — | `confirm` with no pending secret (the five-strike deletion included), or `regenerate` on an account with no second factor |
+| `MfaVerificationFailedError` | 401 | — | a wrong or stale code, a spent step, a code that is not six ASCII digits, a used / old-generation / foreign recovery code, or an assertion from an unmarked passkey or without user verification |
+| `SecondFactorLockedError` | 429 | `SECOND_FACTOR_LOCKED` | five wrong proofs in fifteen minutes on this account: none is accepted, right or wrong, until `Retry-After` |
+| `MfaNotEnrolledError` | 400 | — | `confirm` with no pending secret, or `regenerate` on an account with no second factor |
+| `PasskeyUserVerificationRequiredError` | 409 | `PASSKEY_USER_VERIFICATION_REQUIRED` | `passkey/mark` on a passkey registered without user verification |
 | `StepUpRequiredError` | 403 | `STEP_UP_REQUIRED` | an enrolled account's device is outside the window |
 | `SecondFactorEnrolmentRequiredError` | 403 | `SECOND_FACTOR_ENROLMENT_REQUIRED` | the app requires a factor and this account has no listed one; every route but the enrolment routes — see [Requiring a second factor](#requiring-a-second-factor-secondfactor) |
 | `SecondFactorMethodDisabledError` | 404 | `SECOND_FACTOR_METHOD_DISABLED` | a route of a method the policy does not list, or `recovery/regenerate` with `recoveryCodes: false` |
@@ -2781,8 +2985,9 @@ not on that surface.
 
 Asserted row by row in `src/__tests__/integration/mfa-enrolment.test.ts` (enrolment),
 `mfa-step-up.test.ts` (the window), `mfa-step-up-registration.test.ts` (which channels stop a
-new device), `mfa-verify.test.ts` (verify × input) and `src/__tests__/unit/mfa-proxy.test.ts`
-(the Next.js proxy); each `it` is named for its row.
+new device), `mfa-verify.test.ts` (verify × input), `second-factor-hardening.test.ts` (the
+failure budget, single use under concurrency, what a passkey proves, the profile's step-up record)
+and `src/__tests__/unit/mfa-proxy.test.ts` (the Next.js proxy); each `it` is named for its row.
 `mfa-unenrolled-regression.test.ts` pins the status and the body shape an **unenrolled**
 account gets from `login`, `changePassword`, `keys/revoke-all` and `passkeys/revoke`.
 
@@ -2790,7 +2995,8 @@ account gets from `login`, `changePassword`, `keys/revoke-all` and `passkeys/rev
 
 `auth.mfa.sweep` runs daily at 07:00 and deletes enrolments still unconfirmed after 24 hours,
 plus step-up challenges that have expired or been spent and the inactive keys they were
-holding. It is carried by `authJobRouter` beside the other sweeps; pass `mfaSweepCron` to
+holding, and step-up records older than the step-up window — which grant nothing — of every
+credential, an application profile's included. It is carried by `authJobRouter` beside the other sweeps; pass `mfaSweepCron` to
 `createAuthJobRouter()` to move it. A confirmed enrolment is never touched.
 
 ### Session binding
@@ -4352,6 +4558,11 @@ and a passkey has to be enrolled from a session that already exists, so neither 
 `passkeyEnrolledEvent` (`auth.passkey.enrolled`) and `passkeyRevokedEvent`
 (`auth.passkey.revoked`) fire after commit when a passkey is added or retired.
 
+`mfaLockedEvent` (`auth.mfa.locked`: `userId`, `lockedUntil`) fires after commit, once, when an
+account's fifth wrong second-factor proof in fifteen minutes locks its second factor
+([the budget](#wrong-proofs-one-budget-per-account)). Subscribe to tell the owner: somebody is
+guessing, or they are reading the wrong entry in their authenticator, and only they can say which.
+
 On an OAuth sign-in, web or native, `authLoginEvent` and `authRegisterEvent` also carry
 `providerUserId` and, when the provider reports one, `providerHandle` — the current
 [BattleTag](#battlenet). `oauthLinkedEvent` (`auth.oauth.linked`) and `oauthLinkRemovedEvent`
@@ -5724,7 +5935,8 @@ users.status (active | inactive | suspended) is not written by any of them.
 - **Request** — `POST /_auth/deletion/request` (authenticated). The gates every sensitive
   change passes, with the shared functions: an account with a second factor re-proves it on this
   device (`assertStepUp` — **403 `STEP_UP_REQUIRED`**, as `keys/revoke-all` answers), and the
-  device proved a credential within the recent-authentication window
+  session's credential authenticated within the recent-authentication window (never an
+  application profile's: [the gate](#the-recent-authentication-gate))
   (`SPFN_AUTH_PASSKEY_RECENT_AUTH_MINUTES`, default 10) or the body carries the account
   `password` (**403 `RECENT_AUTH_REQUIRED`**; a passwordless account signs in again; a password
   that is presented and wrong is refused even on a recent session). The proofs are checked before

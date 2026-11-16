@@ -40,23 +40,24 @@ import {
     liveChallenge,
     mintChallenge,
     mintStampedChallenge,
-    presentedChallenge,
     spendChallenge,
 } from './webauthn-challenge.service';
 import { stampFor, stampOf, type DeferredStamp } from '../lib/deferred-stamp';
 import { admitDeferred, deferredRefusalError, startingCredentialOf } from './deferred-admission.service';
-import type { PrincipalCredential } from './admission.service';
+import { accountRefusal, admissionRefusalError, signingKeyOf, type PrincipalCredential } from './admission.service';
 import {
     buildAuthenticationOptions,
     buildRegistrationOptions,
+    parseAssertion,
+    parseAttestation,
     verifyAuthentication,
     verifyRegistration,
 } from '../lib/webauthn';
 import type {
     AuthenticationResponseJSON,
+    PresentedResponse,
     PublicKeyCredentialCreationOptionsJSON,
     PublicKeyCredentialRequestOptionsJSON,
-    RegistrationResponseJSON,
 } from '../lib/webauthn';
 import {
     keysRepository,
@@ -73,9 +74,9 @@ import { registerPublicKeyService } from './key.service';
 import { assertEnrolmentProven, assertStepUp, mfaEnrolledForUser, mfaStatusService, type MfaStatus } from './mfa.service';
 import { assertNotLastListedFactor, isEnrolmentOnly, secondFactorEnrolmentFields } from './second-factor-policy.service';
 import { isMethodListed } from '../lib/second-factor-policy';
+import type { PasskeyAssertionProof } from '../lib/passkey-assertion';
 import { decideKeyBinding } from '../lib/key-policy';
 import { updateLastLoginService } from './user.service';
-import { accountRefusal, admissionRefusalError } from './admission.service';
 import { authLoginEvent, passkeyEnrolledEvent, passkeyRevokedEvent } from '../events';
 import { loginBindingFields, type LoginResult } from './auth.service';
 
@@ -142,19 +143,20 @@ function assertChallenge(held: boolean, kind: WebAuthnChallengeKind): void
 export interface RecentAuthenticationParams
 {
     userId: number;
-    /** The device key this request is signed with — when it last proved a credential is the signal. */
-    keyId: string;
+    /** The credential this request presented (`getAuth(c).credential`) — when it last authenticated is the signal. */
+    credential: PrincipalCredential;
     currentPassword?: string;
 }
 
 /**
  * Refuse a passkey change unless the caller has recently proved themselves (D4).
  *
- * Two ways to satisfy it. A person proved a credential on the device key this
- * request is signed with within the window — its `authenticatedAt`, which a
- * sign-in sets and a `keys/rotate` only inherits. Not `createdAt`: a rotation
- * writes a new row without anybody proving anything, so a stale session could
- * rotate its way past this gate. Or the body carries the account password.
+ * Two ways to satisfy it. This session's credential authenticated within the
+ * window (`credentialRecentlyAuthenticated`) — for a device key its own
+ * `authenticatedAt`, which a sign-in sets and a `keys/rotate` only inherits.
+ * Not `createdAt`: a rotation writes a new row without anybody proving
+ * anything, so a stale session could rotate its way past this gate. Or the body
+ * carries the account password.
  *
  * A password in the body is the proof offered, and it is judged: a wrong one
  * is refused even on a device that signed in a moment ago. Either suffices
@@ -166,7 +168,7 @@ export interface RecentAuthenticationParams
  * "no password on file" costs exactly what "wrong password" costs. Skipping it
  * would turn response time into an oracle for which accounts are OAuth-only.
  *
- * @param windowMs - The window to hold the key's `authenticatedAt` to. Omitted, it is the
+ * @param windowMs - The window to hold the credential's authentication to. Omitted, it is the
  *                   passkey window; a provider link passes its own (#155), so
  *                   that path never resolves the passkey configuration.
  * @returns which of the two satisfied it
@@ -180,7 +182,7 @@ export async function assertRecentAuthentication(
     return (await proveRecentAuthentication(params, windowMs)).by;
 }
 
-/** What satisfied recent authentication: the key's own sign-in, or the password and the hash it was verified against. */
+/** What satisfied recent authentication: the credential's own sign-in, or the password and the hash it was verified against. */
 export type RecentAuthenticationProof = { by: 'key' } | { by: 'password'; verifiedHash: string };
 
 /**
@@ -196,7 +198,7 @@ export async function proveRecentAuthentication(
     windowMs?: number,
 ): Promise<RecentAuthenticationProof>
 {
-    if (!params.currentPassword && await keyRecentlyAuthenticated(params, windowMs))
+    if (!params.currentPassword && await credentialRecentlyAuthenticated(params, windowMs))
     {
         return { by: 'key' };
     }
@@ -217,13 +219,13 @@ export async function proveRecentAuthentication(
 
 /**
  * Whether a proof from `proveRecentAuthentication` still holds, asked under the
- * account lock with the row the lock read: the key's sign-in still inside the
- * window, or the hash the password was verified against still the one stored.
+ * account lock with the row the lock read: the credential's sign-in still
+ * inside the window, or the hash the password was verified against still the one stored.
  * Nothing hashes here.
  *
  * @returns false when the stored hash moved since it was verified — the proof
  *   is stale, not wrong: the caller verifies again outside the lock
- * @throws RecentAuthenticationRequiredError when the key's window closed meanwhile
+ * @throws RecentAuthenticationRequiredError when the credential's window closed meanwhile
  */
 export async function recentAuthenticationHolds(
     params: RecentAuthenticationParams,
@@ -237,7 +239,7 @@ export async function recentAuthenticationHolds(
         return account.passwordHash === proof.verifiedHash;
     }
 
-    if (!await keyRecentlyAuthenticated(params, windowMs))
+    if (!await credentialRecentlyAuthenticated(params, windowMs))
     {
         throw new RecentAuthenticationRequiredError();
     }
@@ -247,8 +249,8 @@ export async function recentAuthenticationHolds(
 
 /**
  * Recent authentication as a registration's completion asks it, under the
- * account lock and with no password in the body: a person proved a credential
- * on this device key within the passkey window, or answered this ceremony's
+ * account lock and with no password in the body: this session's credential
+ * authenticated within the passkey window, or answered this ceremony's
  * options with the account password within it (`passwordProvenAt` on its
  * challenge). The password proof is the procedure's own — no other route
  * reads it, and the key's `authenticatedAt` never learns of it.
@@ -267,15 +269,29 @@ async function assertRegistrationRecentlyAuthenticated(
         return;
     }
 
-    if (!await keyRecentlyAuthenticated(params))
+    if (!await credentialRecentlyAuthenticated(params))
     {
         throw new RecentAuthenticationRequiredError();
     }
 }
 
-async function keyRecentlyAuthenticated(params: RecentAuthenticationParams, windowMs?: number): Promise<boolean>
+/**
+ * Whether this session's credential authenticated within the window — asked of
+ * the credential (`signingKeyOf`), never of a key id it reports.
+ *
+ * A device key answers with its own row's `authenticatedAt`. A one-time token
+ * answers as the key that issued it: it is that session's hand-off, minted on
+ * that key's request and admitted only while that key is, and nobody proves
+ * anything to obtain it — so it is exactly as fresh as its issuer, never
+ * fresher. An application profile has no key row, and `@spfn/auth` has no
+ * record of when it authenticated — the key id its verifier reports is the
+ * profile's, even when it equals a device key's — so it never is: it presents
+ * the password instead. A grant is no session and never is either.
+ */
+async function credentialRecentlyAuthenticated(params: RecentAuthenticationParams, windowMs?: number): Promise<boolean>
 {
-    const key = await keysRepository.findByKeyIdAndUserId(params.keyId, params.userId);
+    const signingKey = signingKeyOf(params.credential);
+    const key = signingKey === null ? null : await keysRepository.findByKeyIdAndUserId(signingKey, params.userId);
 
     return key !== null && Date.now() - key.authenticatedAt.getTime() <= (windowMs ?? getPasskeyConfig().recentAuthMs);
 }
@@ -358,7 +374,6 @@ function displayNameOf(user: User): string
 export interface StartPasskeyEnrollmentParams
 {
     userId: number;
-    keyId: string;
     /** The credential this request presented (`getAuth(c).credential`): the ceremony is stamped with it. */
     credential: PrincipalCredential;
     currentPassword?: string;
@@ -421,11 +436,10 @@ export async function startPasskeyEnrollmentService(
 export interface FinishPasskeyEnrollmentParams
 {
     userId: number;
-    /** The device key this request is signed with — its step-up window is the enrolment proof (#309). */
-    keyId: string;
     /** The credential this request presented: the one the options were asked with. */
     credential: PrincipalCredential;
-    response: RegistrationResponseJSON;
+    /** The attestation as it arrived; read by `parseAttestation`. */
+    response: unknown;
     label?: string;
 }
 
@@ -453,11 +467,15 @@ export interface FinishPasskeyEnrollmentResult
  * retryable, while a success can never be replayed.
  *
  * In the policy's enrolment-only state (#309) with `'passkey'` listed, the new
- * passkey is marked as the second factor in the same transaction: the ceremony
- * with user verification is the proof, and the session is ordinary on its next
- * request. An account that already held a credential reaches this only from a
- * device that proved it (`assertEnrolmentProven`). With no policy, or outside
- * that state, nothing is marked.
+ * passkey is marked as the second factor in the same transaction — when the
+ * ceremony carried user verification, which is the proof; a registration
+ * without it is possession alone, is kept unmarked, and the account stays in
+ * that state (au7-A4). Every registration records whether it verified the
+ * person (`registered_user_verified`), which a later mark requires.
+ * Otherwise the session is ordinary on its next request. An account that
+ * already held a credential reaches this only from a device that proved it
+ * (`assertEnrolmentProven`). With no policy, or outside that state, nothing is
+ * marked.
  *
  * **The decision is made here, under the account lock** (`assertMayRegister`):
  * the challenge's stamp admitted for this key, then step-up and recent
@@ -474,13 +492,21 @@ export async function finishPasskeyEnrollmentService(
     // Early refusal (#309), before the attestation is verified; `assertMayRegister` is the decision.
     await assertEnrolmentProven(params);
 
-    const challenge = presentedChallenge(params.response.response.clientDataJSON);
+    // A body that is no attestation is refused as one that does not verify
+    const attestation = parseAttestation(params.response);
+
+    if (!attestation)
+    {
+        throw new PasskeyVerificationError();
+    }
+
+    const { challenge } = attestation;
 
     assertChallenge(await challengeIsLive(challenge, 'registration', params.userId), 'registration');
 
     const verified = await verifyRegistration({
         config: getPasskeyConfig(),
-        response: params.response,
+        response: attestation.response,
         expectedChallenge: challenge,
     });
 
@@ -506,7 +532,7 @@ export async function finishPasskeyEnrollmentService(
         throw new PasskeyAlreadyRegisteredError();
     }
 
-    const marksFactor = isMethodListed('passkey') && await isEnrolmentOnly(params.userId);
+    const marksFactor = verified.userVerified && isMethodListed('passkey') && await isEnrolmentOnly(params.userId);
     const row = await passkeysRepository.create({
         userId: params.userId,
         credentialId: verified.credentialId,
@@ -518,6 +544,7 @@ export async function finishPasskeyEnrollmentService(
         aaguid: verified.aaguid,
         label: params.label ?? null,
         secondFactor: marksFactor,
+        registeredUserVerified: verified.userVerified,
     });
 
     onAfterCommit(() => passkeyEnrolledEvent.emit({
@@ -541,8 +568,8 @@ export async function finishPasskeyEnrollmentService(
  * may not spend — `PasskeyChallengeError`, the one answer for every unusable
  * challenge. Then the rules for adding a credential, against the account as
  * it is now: a step-up when the account is enrolled, and recent
- * authentication — on this key, or by the password this ceremony's options
- * were answered with.
+ * authentication — of this session's credential, or by the password this
+ * ceremony's options were answered with.
  *
  * @throws PasskeyChallengeError | StepUpRequiredError | RecentAuthenticationRequiredError | the admission's errors
  */
@@ -630,7 +657,8 @@ export interface RenewalAssertionParams
      * a live key; for binding-off, the session's own credential.
      */
     credential: PrincipalCredential;
-    response: AuthenticationResponseJSON;
+    /** The assertion as it arrived; read by `parseAssertion`. */
+    response: unknown;
 }
 
 /** A renewal-grade assertion that verified, not yet spent. `spend` runs in the caller's transaction. */
@@ -661,18 +689,17 @@ export interface RenewalProof
  */
 export async function checkRenewalAssertionService(params: RenewalAssertionParams): Promise<RenewalProof | null>
 {
-    const challenge = params.response?.response?.clientDataJSON
-        ? presentedChallenge(params.response.response.clientDataJSON)
-        : '';
+    const assertion = parseAssertion(params.response);
 
-    if (!await challengeIsLive(challenge, params.ceremony, params.userId))
+    if (!assertion || !await challengeIsLive(assertion.challenge, params.ceremony, params.userId))
     {
         authLogger.service.warn('Renewal challenge refused', { kind: params.ceremony });
 
         return null;
     }
 
-    const verified = await verifiedRenewalAssertion(params.userId, params.response, challenge);
+    const { challenge } = assertion;
+    const verified = await verifiedRenewalAssertion(params.userId, assertion);
 
     if (!verified)
     {
@@ -700,11 +727,10 @@ interface VerifiedAssertion
  */
 async function verifiedRenewalAssertion(
     userId: number,
-    response: AuthenticationResponseJSON,
-    challenge: string,
+    assertion: PresentedResponse<AuthenticationResponseJSON>,
 ): Promise<VerifiedAssertion | null>
 {
-    const passkey = await passkeysRepository.findLiveByCredentialId(response.id);
+    const passkey = await passkeysRepository.findLiveByCredentialId(assertion.credentialId);
 
     if (!passkey || passkey.userId !== userId)
     {
@@ -713,14 +739,9 @@ async function verifiedRenewalAssertion(
 
     const outcome = await verifyAuthentication({
         config: getPasskeyConfig(),
-        response,
-        expectedChallenge: challenge,
-        credential: {
-            credentialId: passkey.credentialId,
-            publicKey: passkey.publicKey,
-            counter: passkey.counter,
-            transports: passkey.transports,
-        },
+        response: assertion.response,
+        expectedChallenge: assertion.challenge,
+        credential: passkey,
     });
 
     return outcome.verified ? { passkey, newCounter: outcome.newCounter } : null;
@@ -768,7 +789,8 @@ async function spendRenewalProof(
 
 export interface FinishPasskeyLoginParams
 {
-    response: AuthenticationResponseJSON;
+    /** The assertion as it arrived; read by `parseAssertion`. */
+    response: unknown;
     publicKey: string;
     keyId: string;
     fingerprint: string;
@@ -804,11 +826,17 @@ export async function finishPasskeyLoginService(params: FinishPasskeyLoginParams
 
     return runInTransaction(async () =>
     {
-        const challenge = presentedChallenge(params.response.response.clientDataJSON);
+        const presented = parseAssertion(params.response);
 
-        assertChallenge(await challengeIsLive(challenge, 'authentication', null), 'authentication');
+        // A body that is no assertion is refused as one that does not verify
+        if (!presented)
+        {
+            throw new PasskeyVerificationError();
+        }
 
-        const passkey = await passkeysRepository.findLiveByCredentialId(params.response.id);
+        assertChallenge(await challengeIsLive(presented.challenge, 'authentication', null), 'authentication');
+
+        const passkey = await passkeysRepository.findLiveByCredentialId(presented.credentialId);
 
         // A revoked credential and one that was never here answer identically
         // (L4/L5): anything else says whether this account once had it.
@@ -818,7 +846,7 @@ export async function finishPasskeyLoginService(params: FinishPasskeyLoginParams
         }
 
         await assertActiveForPasskeyLogin(await usersRepository.findById(passkey.userId));
-        const newCounter = await verifiedCounter(passkey, params.response, challenge);
+        const { newCounter, assertion } = await verifiedAssertion(passkey, presented);
 
         // The verification done, the account is locked (`lockAccount`) before
         // the challenge is spent and the passkey row written, and its status
@@ -827,14 +855,14 @@ export async function finishPasskeyLoginService(params: FinishPasskeyLoginParams
         // verified against, and a revocation that landed meanwhile refuses the
         // sign-in as a revoked credential is refused (L4/L5).
         const user = await assertActiveForPasskeyLogin(await usersRepository.lockAccount(passkey.userId));
-        assertChallenge(await spendChallenge(challenge, 'authentication', user.id), 'authentication');
+        assertChallenge(await spendChallenge(presented.challenge, 'authentication', user.id), 'authentication');
 
         if (!await passkeysRepository.recordUse(passkey, newCounter))
         {
             throw new PasskeyVerificationError();
         }
 
-        return await startSession(user, params);
+        return await startSession(user, params, assertion);
     }, { context: 'auth:passkey-login' });
 }
 
@@ -847,7 +875,11 @@ export async function finishPasskeyLoginService(params: FinishPasskeyLoginParams
  * prove identity, not a second way to hold a session, so this must stay the
  * same steps in the same order.
  */
-async function startSession(user: User, params: FinishPasskeyLoginParams): Promise<LoginResult>
+async function startSession(
+    user: User,
+    params: FinishPasskeyLoginParams,
+    assertion: PasskeyAssertionProof,
+): Promise<LoginResult>
 {
     const registered = await registerPublicKeyService({
         userId: user.id,
@@ -858,6 +890,7 @@ async function startSession(user: User, params: FinishPasskeyLoginParams): Promi
         deviceName: params.deviceName,
         platform: params.platform,
         channel: 'passkey',
+        passkeyAssertion: assertion,
         missingAccount: () => new PasskeyVerificationError(),
         ip: params.ip,
         userAgent: params.userAgent,
@@ -870,10 +903,10 @@ async function startSession(user: User, params: FinishPasskeyLoginParams): Promi
         },
     });
 
-    // A passkey sign-in steps up only when the second-factor policy does not
-    // list passkeys: then the assertion is not a second factor, and an enrolled
-    // account on a new device is asked for one like a password sign-in (#309).
-    // Nothing below runs — `verify` does it instead.
+    // A passkey sign-in steps up when its assertion was not a second proof —
+    // no user verification, or a policy that does not list passkeys: an
+    // enrolled account on a new device is then asked for one like a password
+    // sign-in (`decideStepUp`). Nothing below runs — `verify` does it instead.
     if (registered.pending)
     {
         return { mfaRequired: true, challenge: registered.challenge };
@@ -958,8 +991,9 @@ async function assertActiveForPasskeyLogin(user: User | null): Promise<User>
 }
 
 /**
- * Check the assertion, or refuse; the counter it moves to is the caller's to
- * record, under the account lock.
+ * Check the assertion, or refuse: the counter it moves to is the caller's to
+ * record, under the account lock, and what it proved is the sign-in's to judge
+ * (`PasskeyAssertionProof`).
  *
  * A regressed counter is logged by passkey id and left alone (D11). It is the
  * signal a cloned authenticator would produce, but a synced passkey reports 0
@@ -969,22 +1003,16 @@ async function assertActiveForPasskeyLogin(user: User | null): Promise<User>
  *
  * @throws PasskeyVerificationError
  */
-async function verifiedCounter(
+async function verifiedAssertion(
     passkey: Passkey,
-    response: AuthenticationResponseJSON,
-    challenge: string,
-): Promise<number>
+    presented: PresentedResponse<AuthenticationResponseJSON>,
+): Promise<{ newCounter: number; assertion: PasskeyAssertionProof }>
 {
     const outcome = await verifyAuthentication({
         config: getPasskeyConfig(),
-        response,
-        expectedChallenge: challenge,
-        credential: {
-            credentialId: passkey.credentialId,
-            publicKey: passkey.publicKey,
-            counter: passkey.counter,
-            transports: passkey.transports,
-        },
+        response: presented.response,
+        expectedChallenge: presented.challenge,
+        credential: passkey,
     });
 
     if (!outcome.verified)
@@ -1000,7 +1028,14 @@ async function verifiedCounter(
         throw new PasskeyVerificationError();
     }
 
-    return outcome.newCounter;
+    return {
+        newCounter: outcome.newCounter,
+        assertion: {
+            credentialId: passkey.credentialId,
+            userVerified: outcome.userVerified,
+            markedSecondFactor: passkey.secondFactor,
+        },
+    };
 }
 
 /**
@@ -1048,7 +1083,8 @@ export async function renamePasskeyService(
 export interface RevokePasskeyParams
 {
     userId: number;
-    keyId: string;
+    /** The credential the request presented (`getAuth(c).credential`): its step-up window is asked. */
+    credential: PrincipalCredential;
     passkeyId: string;
     currentPassword?: string;
 }

@@ -212,7 +212,7 @@ describe.skipIf(!dbAvailable)('replacing a key requires proof of the old key (bu
 
     async function stepUpRecordKeyIds(): Promise<string[]>
     {
-        return (await getTestDb().select().from(mfaVerifications)).map(row => row.keyId);
+        return (await getTestDb().select().from(mfaVerifications)).map(row => row.keyId!);
     }
 
     async function authenticates(authorization: string): Promise<boolean>

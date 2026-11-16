@@ -259,6 +259,35 @@ export const passkeyRevokedEvent = defineEvent(
 );
 
 /**
+ * auth.mfa.locked — the account's second factor stopped accepting proofs
+ *
+ * 발행 시점:
+ * - the fifth wrong second-factor proof in fifteen minutes, on any route that
+ *   takes one (`mfa/verify`, `mfa/step-up`, `mfa/totp/confirm`), once its
+ *   transaction commits — exactly once per lock
+ *
+ * Until `lockedUntil` no second-factor proof is accepted for the account. Five
+ * wrong codes is somebody guessing, or the owner on the wrong authenticator
+ * entry: tell the owner, who is the one person able to say which. No code or
+ * secret is in the payload.
+ *
+ * @example
+ * ```typescript
+ * mfaLockedEvent.subscribe(async (payload) => {
+ *     await notifyOwner(payload.userId, 'Several wrong sign-in codes were entered for your account');
+ * });
+ * ```
+ */
+export const mfaLockedEvent = defineEvent(
+    'auth.mfa.locked',
+    Type.Object({
+        userId: Type.String(),
+        /** ISO 8601: when the account accepts second-factor proofs again. */
+        lockedUntil: Type.String(),
+    }),
+);
+
+/**
  * auth.invitation.created - 초대 생성 이벤트
  *
  * 발행 시점:
@@ -485,6 +514,7 @@ export const authPasswordResetEvent = defineEvent(
 export type AuthLoginPayload = typeof authLoginEvent._payload;
 export type PasskeyEnrolledPayload = typeof passkeyEnrolledEvent._payload;
 export type PasskeyRevokedPayload = typeof passkeyRevokedEvent._payload;
+export type MfaLockedPayload = typeof mfaLockedEvent._payload;
 export type AuthRegisterPayload = typeof authRegisterEvent._payload;
 export type AuthPasswordResetPayload = typeof authPasswordResetEvent._payload;
 export type AuthDeviceRegisteredPayload = typeof authDeviceRegisteredEvent._payload;

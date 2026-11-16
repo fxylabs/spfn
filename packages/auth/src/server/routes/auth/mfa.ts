@@ -21,7 +21,13 @@
  *
  * `confirm` and `step-up` carry the `auth-mfa-verify` policy, the same numbers
  * as `auth-login`: both take a guessable six-digit value, so they are bounded
- * the way the other route taking a guessable value is.
+ * the way the other route taking a guessable value is. The rate limit is not
+ * what bounds guessing, though: every route here that takes a second-factor
+ * proof judges it through `checkSecondFactorProof`, which spends the account's
+ * one failure budget — five wrong proofs in fifteen minutes, on any of them,
+ * and none is accepted for fifteen minutes (`SecondFactorLockedError`, 429).
+ * Those routes run without a route-wide transaction, so a wrong proof's count
+ * commits before its refusal.
  *
  * The plaintext secret and the plaintext recovery codes leave the server in
  * three response bodies and nowhere else. `status` carries neither.
@@ -72,9 +78,10 @@ const RecoveryCodeSchema = Type.String({
 });
 
 /**
- * The assertion from a passkey marked as a second factor, passed through as it
- * arrived — the WebAuthn library decides what a valid response is, as it does
- * on the passkey routes.
+ * The assertion from a passkey marked as a second factor, made with user
+ * verification, passed through as it arrived. Its shape is judged with the
+ * proof (`parseAssertion`): a body that is no assertion is a wrong proof —
+ * 401, counted — not a 400 that escapes the failure budget.
  */
 const AssertionSchema = Type.Unknown({
     description: 'The credential from @simplewebauthn/browser, passed through unchanged',
@@ -99,11 +106,11 @@ export const mfaTotpEnroll = route.post('/_auth/mfa/totp/enroll')
     .use([Transactional()])
     .handler(async (c) =>
     {
-        const { userId, keyId, credential } = getAuth(c);
+        const { userId, credential } = getAuth(c);
 
         // An early refusal: `confirm` asks the same rule again of the account
         // as it is then, and that is the decision.
-        await assertStepUp({ userId: Number(userId), keyId });
+        await assertStepUp({ userId: Number(userId), credential });
 
         return await startTotpEnrolmentService(Number(userId), credential);
     });
@@ -120,16 +127,14 @@ export const mfaTotpEnroll = route.post('/_auth/mfa/totp/enroll')
  * the proof, and gating it would make enrolling impossible for the account it
  * is being enrolled on; enrolled since `enroll` ran, a step-up on this device
  * (`STEP_UP_REQUIRED`); in the policy's enrolment-only state (#309), a device
- * that proved a credential the account already holds. Five wrong codes
- * discard the pending secret, and the sixth attempt says there is nothing to
- * confirm.
+ * that proved a credential the account already holds. A wrong code spends the
+ * account's failure budget; the pending secret stays.
  *
- * No `Transactional()`, which is the one route here without it. The
- * failed-attempt counter has to survive the refusal that increments it, and a
- * route-wide transaction would roll it back with the error — leaving a wrong
- * code free. The service opens its own transaction for the success path, where
- * the confirmation, the recovery codes and the first verification do have to
- * commit together.
+ * No `Transactional()`: a wrong code's count has to survive the refusal that
+ * raised it, and a route-wide transaction would roll it back with the error —
+ * leaving a wrong code free. The service opens its own transaction for the
+ * success path, where the confirmation, the recovery codes and the first
+ * verification do have to commit together.
  */
 export const mfaTotpConfirm = route.post('/_auth/mfa/totp/confirm')
     .input({
@@ -141,9 +146,9 @@ export const mfaTotpConfirm = route.post('/_auth/mfa/totp/confirm')
     .handler(async (c) =>
     {
         const { body } = await c.data();
-        const { userId, keyId, credential } = getAuth(c);
+        const { userId, credential } = getAuth(c);
 
-        return await confirmTotpEnrolmentService({ userId: Number(userId), keyId, credential, code: body.code });
+        return await confirmTotpEnrolmentService({ userId: Number(userId), credential, code: body.code });
     });
 
 /**
@@ -165,9 +170,9 @@ export const mfaDisable = route.post('/_auth/mfa/disable')
     .use([Transactional()])
     .handler(async (c) =>
     {
-        const { userId, keyId } = getAuth(c);
+        const { userId, credential } = getAuth(c);
 
-        await assertStepUp({ userId: Number(userId), keyId });
+        await assertStepUp({ userId: Number(userId), credential });
         await assertNotLastListedFactor(Number(userId), { all: true });
         await disableMfaService(Number(userId));
 
@@ -197,9 +202,9 @@ export const mfaMarkPasskey = route.post('/_auth/mfa/passkey/mark')
     .handler(async (c) =>
     {
         const { body } = await c.data();
-        const { userId, keyId } = getAuth(c);
+        const { userId, credential } = getAuth(c);
 
-        await assertStepUp({ userId: Number(userId), keyId });
+        await assertStepUp({ userId: Number(userId), credential });
 
         return await markPasskeySecondFactorService({ userId: Number(userId), ...body });
     });
@@ -217,9 +222,9 @@ export const mfaRegenerateRecoveryCodes = route.post('/_auth/mfa/recovery/regene
     .use([Transactional()])
     .handler(async (c) =>
     {
-        const { userId, keyId } = getAuth(c);
+        const { userId, credential } = getAuth(c);
 
-        await assertStepUp({ userId: Number(userId), keyId });
+        await assertStepUp({ userId: Number(userId), credential });
 
         return await regenerateRecoveryCodesService(Number(userId));
     });
@@ -244,9 +249,8 @@ export const mfaStatus = route.get('/_auth/mfa/status')
  * Per client address, and nothing else: there is no session on either of them —
  * that is the point of the flow — so `byIpAndCaller` would degrade to this
  * anyway, with a second dimension that never fires. The number is `auth-login`'s,
- * because the exposure is the same six-digit value, and the challenge's own
- * five-attempt counter is the tighter bound on guessing one particular
- * registration.
+ * because the exposure is the same six-digit value; the account's failure
+ * budget, which no new sign-in refills, is the bound on guessing it.
  */
 const CHALLENGE_LIMIT = { limit: 10, windowMs: 60_000 };
 
@@ -267,10 +271,9 @@ const ChallengeSchema = Type.String({
  * `challengeHash` for the Next.js interceptor to match against the pending
  * cookie it baked at the 202. Every refusal is one 401 with one body.
  *
- * No `Transactional()`, for the reason `totp/confirm` has none: the challenge's
- * attempt counter has to survive the refusal that raised it, and a route-wide
- * transaction would roll it back with the error — five wrong codes would never
- * reach five. The service opens its own for the success path.
+ * No `Transactional()`, for the reason `totp/confirm` has none: a wrong proof's
+ * count against the account's budget has to survive the refusal that raised
+ * it. The service opens its own transaction for the success path.
  */
 export const mfaVerify = route.post('/_auth/mfa/verify')
     .input({
@@ -291,7 +294,7 @@ export const mfaVerify = route.post('/_auth/mfa/verify')
             challenge: body.challenge,
             code: body.code,
             recoveryCode: body.recoveryCode,
-            response: body.response as Parameters<typeof verifyMfaChallengeService>[0]['response'],
+            response: body.response,
         });
     });
 
@@ -329,6 +332,10 @@ export const mfaVerifyOptions = route.post('/_auth/mfa/verify/options')
  * gives before it enrols on an account that already holds a credential (#309):
  * in that state only, any live passkey of the account and a confirmed TOTP
  * count whatever the policy lists, and recovery codes while they are on.
+ *
+ * Wrong proofs spend the account's failure budget, shared with `mfa/verify`
+ * (au7-A2). No `Transactional()`, for the reason `totp/confirm` has none; the
+ * service spends the proof and records the verification in its own.
  */
 export const mfaStepUp = route.post('/_auth/mfa/step-up')
     .input({
@@ -338,19 +345,18 @@ export const mfaStepUp = route.post('/_auth/mfa/step-up')
             response: Type.Optional(AssertionSchema),
         }),
     })
-    .use([rateLimitPolicy('auth-mfa-verify', VERIFY_LIMIT), Transactional()])
+    .use([rateLimitPolicy('auth-mfa-verify', VERIFY_LIMIT)])
     .handler(async (c) =>
     {
         const { body } = await c.data();
-        const { userId, keyId, credential } = getAuth(c);
+        const { userId, credential } = getAuth(c);
 
         await stepUpService({
             userId: Number(userId),
-            keyId,
             credential,
             code: body.code,
             recoveryCode: body.recoveryCode,
-            response: body.response as Parameters<typeof stepUpService>[0]['response'],
+            response: body.response,
         });
 
         return c.noContent();

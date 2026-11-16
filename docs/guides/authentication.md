@@ -1076,6 +1076,20 @@ password, signing every device out, or changing the second factor itself. Otherw
 is **403 `STEP_UP_REQUIRED`** and the remedy is `POST /_auth/mfa/step-up` followed by a retry.
 An account with nothing enrolled never sees it.
 
+### Wrong codes
+
+Every wrong second-factor proof counts against one budget per account, whichever route it came
+through — the new-device `mfa/verify`, `mfa/step-up`, the TOTP `confirm` — so signing in again buys
+no new tries. Five in fifteen minutes, and the account accepts no second-factor proof, right or
+wrong, for fifteen minutes: **429 `SECOND_FACTOR_LOCKED`** with a `Retry-After` header. Show the
+person when to try again rather than "wrong code". The lock ends by itself, the password sign-in
+itself is not blocked, and `auth.mfa.locked` fires once when it begins — subscribe to it and mail
+the owner. A code that is not six ASCII digits is simply a wrong code.
+
+A passkey counts as a second factor only when its authenticator verified the person (a PIN or a
+biometric). A security key with no PIN still signs its owner in, but a new device signed in with it
+is asked for the second factor, and it cannot be marked as one.
+
 ---
 
 ## Registered devices

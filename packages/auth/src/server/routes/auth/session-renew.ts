@@ -27,7 +27,6 @@ import { getAuth } from '../../helpers';
 import { authenticateForRenewal } from '../../middleware/authenticate-for-renewal';
 import { KEY_ALGORITHM } from '../../types';
 import { finishSessionRenewService, startSessionRenewService } from '../../services';
-import type { AuthenticationResponseJSON } from '../../lib/webauthn';
 
 /**
  * The credential the browser hands back, passed through unchanged — the same
@@ -107,6 +106,6 @@ export const sessionRenewVerify = route.post('/_auth/session/renew/verify')
         return await finishSessionRenewService({
             ...body,
             expiredKeyId: getAuth(c).keyId,
-            response: body.response as AuthenticationResponseJSON,
+            response: body.response,
         });
     });

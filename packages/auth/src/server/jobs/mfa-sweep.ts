@@ -17,6 +17,9 @@
  * than two, because they are the same table's leavings and a second cron entry
  * would be a second thing to remember to register.
  *
+ * And it sweeps step-up records the configured window has passed, which grant
+ * nothing: an application profile's has no key row whose deletion would take it.
+ *
  * Registration is NOT automatic, for the reason `deletion-purge.ts` sets out at
  * length: `createAuthLifecycle()`'s `afterInfrastructure` hook runs before
  * `registerJobs` in `@spfn/core`'s startup, so the lifecycle cannot register a
@@ -25,7 +28,7 @@
  */
 
 import { job } from '@spfn/core/job';
-import { sweepMfaChallengesService, sweepUnconfirmedMfaService } from '../services/mfa.service';
+import { sweepMfaChallengesService, sweepStaleStepUpsService, sweepUnconfirmedMfaService } from '../services/mfa.service';
 import { authLogger } from '../logger';
 
 /** Daily at 07:00, an hour after the sign-out-everywhere link sweep. */
@@ -45,10 +48,11 @@ export function createMfaSweepJob(cronExpression: string = DEFAULT_MFA_SWEEP_CRO
         {
             const { deleted } = await sweepUnconfirmedMfaService();
             const { deleted: challenges } = await sweepMfaChallengesService();
+            const { deleted: stepUps } = await sweepStaleStepUpsService();
 
-            if (deleted > 0 || challenges > 0)
+            if (deleted > 0 || challenges > 0 || stepUps > 0)
             {
-                authLogger.service.info('[auth.mfa.sweep] sweep complete', { deleted, challenges });
+                authLogger.service.info('[auth.mfa.sweep] sweep complete', { deleted, challenges, stepUps });
             }
         });
 }

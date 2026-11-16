@@ -95,8 +95,8 @@ const {
     // one, revokes every key in the same transaction.
     setAccountDeletion: vi.fn(async (_id: number, _deletion: string | null, _transition: { from: string | null; reason: string }): Promise<'changed' | 'refused'> => 'changed'),
     // The gates every sensitive change passes; each a no-op answer here unless a test refuses it.
-    assertStepUp: vi.fn(async (_params: { userId: number; keyId: string }) => undefined),
-    proveRecentAuthentication: vi.fn(async (_params: { userId: number; keyId: string; currentPassword?: string }, _windowMs?: number): Promise<{ by: 'key' } | { by: 'password'; verifiedHash: string }> => ({ by: 'key' })),
+    assertStepUp: vi.fn(async (_params: { userId: number; credential: unknown }) => undefined),
+    proveRecentAuthentication: vi.fn(async (_params: { userId: number; credential: unknown; currentPassword?: string }, _windowMs?: number): Promise<{ by: 'key' } | { by: 'password'; verifiedHash: string }> => ({ by: 'key' })),
     // The same proof, confirmed under the account lock: it holds unless a test says otherwise.
     recentAuthenticationHolds: vi.fn(async (): Promise<boolean> => true),
     // The session re-admitted under the account lock: admitted unless a test says otherwise.
@@ -129,7 +129,6 @@ vi.mock('../../server/services/mfa.service', () => ({ assertStepUp }));
 vi.mock('../../server/services/passkey.service', () => ({ proveRecentAuthentication, recentAuthenticationHolds }));
 vi.mock('../../server/services/admission.service', () => ({
     admitCompletion,
-    sessionKeyOf: (credential: { keyId: string }) => credential.keyId,
     admissionRefusalError: (refusal: { reason: string }) => new Error(refusal.reason),
 }));
 vi.mock('@spfn/notification/server', () => ({ sendEmail }));
@@ -216,11 +215,11 @@ describe('account-deletion.service', () =>
                 password: 'correct-password',
             });
 
-            expect(assertStepUp).toHaveBeenCalledWith({ userId: user.id, keyId: 'key-1' });
+            expect(assertStepUp).toHaveBeenCalledWith({ userId: user.id, credential: KEY_1 });
             // Under the lock, the session is asked of the admission again, for this route.
             expect(admitCompletion).toHaveBeenCalledWith({ userId: user.id, credential: KEY_1, enrolment: 'none' });
             expect(proveRecentAuthentication).toHaveBeenCalledWith(
-                { userId: user.id, keyId: 'key-1', currentPassword: 'correct-password' },
+                { userId: user.id, credential: KEY_1, currentPassword: 'correct-password' },
                 expect.any(Number),
             );
             expect(setAccountDeletion).toHaveBeenCalledWith(user.id, 'pending', { from: null, reason: expect.any(String) });

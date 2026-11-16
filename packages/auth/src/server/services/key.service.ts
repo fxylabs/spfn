@@ -7,7 +7,7 @@
 import { type KeyAlgorithmType, type KeyPlatformType, type SessionBindingType } from '../types';
 import { assertKeyMatchesAlgorithm, verifyKeyFingerprint } from '../helpers/jwt';
 import { KEY_TTL_DAYS } from '../lib/key-policy';
-import { isMethodListed } from '../lib/second-factor-policy';
+import { exemptsNewDevice, type PasskeyAssertionProof } from '../lib/passkey-assertion';
 import { getBoundKeyTtlMs } from '../lib/config';
 import { uaFamily } from '../lib/ua-family';
 import { keyIdClaimedByProof, verifyKeyReplacementProof } from '../lib/key-replacement-proof';
@@ -30,7 +30,7 @@ import {
 } from '../repositories';
 import { revokeAllOAuth2GrantsForUser } from './oauth2-grant.service';
 import { emitDeviceRegistered } from './device-registration.service';
-import { accountRefusal, type AdmissionRefusal } from './admission.service';
+import { accountRefusal, type AdmissionRefusal, type PrincipalCredential } from './admission.service';
 import {
     assertStepUp,
     carryStepUpVerification,
@@ -89,6 +89,13 @@ export interface RegisterPublicKeyParams
      * added later has to say what it is rather than inherit an answer.
      */
     channel: KeyRegistrationChannel;
+    /**
+     * What the passkey assertion this sign-in was made with proved, on a
+     * passkey sign-in. An assertion with user verification is a second proof,
+     * and exempts the registration from the new-device second factor
+     * (`decideStepUp`); one without it does not.
+     */
+    passkeyAssertion?: PasskeyAssertionProof;
     /** Client address of the registering request, absent when none resolved. */
     ip?: string;
     /** `user-agent` of the registering request, already truncated. */
@@ -212,6 +219,13 @@ export interface RevokeAllKeysParams
      * gets into a result.
      */
     currentKeyId?: string;
+    /**
+     * The credential the request presented (`getAuth(c).credential`), whose
+     * step-up window an enrolled account is asked for. Absent where no
+     * session makes the call: the signed revoke-all link proved itself by a
+     * mailbox round trip, which is a credential this window cannot measure.
+     */
+    credential?: PrincipalCredential;
     /** true signs the caller out too. Default false: "my other devices". */
     includeCurrent?: boolean;
     reason: string;
@@ -357,11 +371,14 @@ function isExpired(expiresAt: Date | null): boolean
  * Asked only of a registration that is not a verified replacement — a device
  * already signed in swapping its key, proved by the old key itself, is not an
  * arrival and not a moment to challenge. Two terms remain. The account has a
- * second factor, or there is nothing to ask for. And the channel is one of the
- * four where a single stolen credential would be enough on its own; a
- * device-code approval and a passkey sign-in each already carried a second
- * proof (the passkey only while the second-factor policy lists passkeys; when it
- * does not, a passkey sign-in is challenged like the four), and `register`,
+ * second factor, or there is nothing to ask for. And the sign-in did not
+ * already carry a second proof: the channel is one of those where a single
+ * stolen credential would be enough on its own (a device-code approval
+ * carried one), and a passkey sign-in's assertion did not show user
+ * verification (`exemptsNewDevice`) — decided from what the assertion proved,
+ * marked or not, never from the route it came by (au2-A3, au7-A4). A passkey
+ * without user verification is possession alone, and a new device signed in
+ * with one is asked for the second factor like a password sign-in. `register`,
  * `signup-link`, `invitation`, `renewal` and `rotation` cannot reach this at
  * all — the first three create the account, which is by construction
  * unenrolled, and the last two are replacements. The brand-new social account is
@@ -372,7 +389,7 @@ async function decideStepUp(params: RegisterPublicKeyParams): Promise<MfaChallen
 {
     const channel = stepUpChannel(params.channel);
 
-    if (!channel || (channel === 'passkey' && isMethodListed('passkey')))
+    if (!channel || (params.passkeyAssertion && exemptsNewDevice(params.passkeyAssertion)))
     {
         return null;
     }
@@ -940,12 +957,10 @@ export async function revokeAllKeysService(
     {
         await usersRepository.lockAccount(userId);
 
-        // Only when a device is making the call. The signed sign-out-everywhere
-        // link has no key to name and no session at all — it proved itself by a
-        // mailbox round trip, which is a credential this window cannot measure.
-        if (currentKeyId)
+        // Only when a session is making the call (see `credential`).
+        if (params.credential)
         {
-            await assertStepUp({ userId, keyId: currentKeyId });
+            await assertStepUp({ userId, credential: params.credential });
         }
 
         const revoked = !includeCurrent && currentKeyId

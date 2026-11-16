@@ -35,7 +35,7 @@
 import { runInTransaction } from '@spfn/core/db';
 import { SessionRenewalRefusedError } from '@spfn/auth/errors';
 
-import type { AuthenticationResponseJSON, PublicKeyCredentialRequestOptionsJSON } from '../lib/webauthn';
+import type { PublicKeyCredentialRequestOptionsJSON } from '../lib/webauthn';
 import { keysRepository } from '../repositories';
 import type { UserPublicKey } from '../entities/user-public-keys';
 import type { User } from '../entities/users';
@@ -59,7 +59,7 @@ export interface StartSessionRenewParams
 export interface FinishSessionRenewParams extends StartSessionRenewParams
 {
     /** The assertion, from `navigator.credentials.get()`. */
-    response: AuthenticationResponseJSON;
+    response: unknown;
     /**
      * The new key pair, in the vocabulary the Next.js login interceptor already
      * writes: `renew/verify` is on that interceptor's path list, so these arrive

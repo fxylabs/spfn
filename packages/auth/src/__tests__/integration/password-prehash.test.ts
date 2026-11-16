@@ -185,7 +185,7 @@ describe.skipIf(!dbAvailable)('T2: passwords longer than 72 bytes', () =>
         const pausedSignIn = signIn('race@example.com', 'Old-Password-0!');
         await entered;
         await changePasswordService({
-            userId: user.id, keyId: 'unused-unenrolled', currentPassword: 'Old-Password-0!', newPassword: 'New-Password-1!',
+            userId: user.id, credential: { kind: 'deviceKey', keyId: 'unused-unenrolled' }, currentPassword: 'Old-Password-0!', newPassword: 'New-Password-1!',
         });
         release();
 
@@ -230,7 +230,7 @@ describe.skipIf(!dbAvailable)('T2: passwords longer than 72 bytes', () =>
         // a sign-in with the same password replaces the legacy hash meanwhile.
         const held = holdNextHash();
         const change = changePasswordService({
-            userId, keyId: 'unused-unenrolled', currentPassword: 'Old-Password-0!', newPassword: 'New-Password-1!',
+            userId, credential: { kind: 'deviceKey', keyId: 'unused-unenrolled' }, currentPassword: 'Old-Password-0!', newPassword: 'New-Password-1!',
         });
         const release = await held;
         expect(await signIn('stale@example.com', 'Old-Password-0!')).toBe(200);
@@ -248,11 +248,11 @@ describe.skipIf(!dbAvailable)('T2: passwords longer than 72 bytes', () =>
 
         const held = holdNextHash();
         const change = changePasswordService({
-            userId, keyId: 'unused-unenrolled', currentPassword: 'Old-Password-0!', newPassword: 'Mine-Password-1!',
+            userId, credential: { kind: 'deviceKey', keyId: 'unused-unenrolled' }, currentPassword: 'Old-Password-0!', newPassword: 'Mine-Password-1!',
         });
         const release = await held;
         await changePasswordService({
-            userId, keyId: 'unused-unenrolled', currentPassword: 'Old-Password-0!', newPassword: 'Theirs-Password-2!',
+            userId, credential: { kind: 'deviceKey', keyId: 'unused-unenrolled' }, currentPassword: 'Old-Password-0!', newPassword: 'Theirs-Password-2!',
         });
         release();
 

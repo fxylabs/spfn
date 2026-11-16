@@ -186,7 +186,7 @@ function describeDifference(first: SecondFactorPolicy, second: SecondFactorPolic
  * its reason: a contradicting second statement is only known once every
  * `createAuthLifecycle()` call has run. Silent when no policy was stated.
  */
-export function assertSecondFactorPolicy(env: Record<string, string | undefined> = process.env): void
+export function assertSecondFactorPolicy(): void
 {
     if (contradiction !== null)
     {
@@ -200,7 +200,6 @@ export function assertSecondFactorPolicy(env: Record<string, string | undefined>
 
     assertSomeMethodListed();
     assertNoUnprovenChannel();
-    assertPasskeyUserVerification(env);
     assertTotpEnrollable();
 }
 
@@ -232,18 +231,6 @@ function assertNoUnprovenChannel(): void
             throw new Error(`secondFactor.required is true, but the ${channel} channel is on, and it signs a device in `
                 + `with no listed second factor. Turn it off with createAuthLifecycle({ channels: { ${channel}: false } }).`);
         }
-    }
-}
-
-function assertPasskeyUserVerification(env: Record<string, string | undefined>): void
-{
-    const configured = env.SPFN_AUTH_PASSKEY_USER_VERIFICATION?.trim().toLowerCase();
-
-    if (isPasskeyOnly() && configured && configured !== 'required')
-    {
-        throw new Error('secondFactor.methods is [\'passkey\'], which needs passkey user verification, but '
-            + `SPFN_AUTH_PASSKEY_USER_VERIFICATION is "${env.SPFN_AUTH_PASSKEY_USER_VERIFICATION}". `
-            + 'Set it to required, or unset it and the policy raises it.');
     }
 }
 
@@ -281,12 +268,6 @@ export function isSecondFactorRequired(): boolean
 export function isMethodListed(feature: SecondFactorFeature): boolean
 {
     return feature === 'recoveryCodes' ? policy.recoveryCodes : policy.methods.includes(feature);
-}
-
-/** Whether the passkey is the one listed method — the case that raises user verification. */
-export function isPasskeyOnly(): boolean
-{
-    return policy.methods.length === 1 && policy.methods[0] === 'passkey';
 }
 
 /**

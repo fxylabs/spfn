@@ -50,8 +50,9 @@ import {
  * `RegistrationResponseJSON` / `AuthenticationResponseJSON`: the library is the
  * thing that decides what a valid response is, and a second copy of that shape
  * here would be a second opinion — one that starts refusing responses the moment
- * the spec grows a field. Anything malformed comes back as the ordinary
- * verification refusal.
+ * the spec grows a field. What this package reads of it is read once
+ * (`parseAttestation`, `parseAssertion`), and a body that does not read comes
+ * back as the ordinary verification refusal, never a 500.
  */
 const CredentialResponseSchema = Type.Unknown({
     description: 'The credential from @simplewebauthn/browser, passed through unchanged',
@@ -93,11 +94,10 @@ export const passkeyRegisterOptions = route.post('/_auth/passkeys/register/optio
     .handler(async (c) =>
     {
         const { body } = await c.data();
-        const { userId, keyId, credential } = getAuth(c);
+        const { userId, credential } = getAuth(c);
 
         return await startPasskeyEnrollmentService({
             userId: Number(userId),
-            keyId,
             credential,
             currentPassword: body.currentPassword,
         });
@@ -131,13 +131,12 @@ export const passkeyRegisterVerify = route.post('/_auth/passkeys/register/verify
     .handler(async (c) =>
     {
         const { body } = await c.data();
-        const { userId, keyId, credential } = getAuth(c);
+        const { userId, credential } = getAuth(c);
 
         return await finishPasskeyEnrollmentService({
             userId: Number(userId),
-            keyId,
             credential,
-            response: body.response as Parameters<typeof finishPasskeyEnrollmentService>[0]['response'],
+            response: body.response,
             label: body.label,
         });
     });
@@ -202,7 +201,7 @@ export const passkeyLoginVerify = route.post('/_auth/passkeys/login/verify')
         const result = await finishPasskeyLoginService({
             ...body,
             ...deviceProvenance(c.raw),
-            response: body.response as Parameters<typeof finishPasskeyLoginService>[0]['response'],
+            response: body.response,
         });
 
         return result.mfaRequired ? c.accepted(result) : result;
@@ -268,7 +267,7 @@ export const revokePasskey = route.post('/_auth/passkeys/revoke')
     .handler(async (c) =>
     {
         const { body } = await c.data();
-        const { userId, keyId } = getAuth(c);
+        const { userId, credential } = getAuth(c);
 
-        return await revokePasskeyService({ userId: Number(userId), keyId, ...body });
+        return await revokePasskeyService({ userId: Number(userId), credential, ...body });
     });

@@ -426,7 +426,7 @@ export const authEnvSchema = defineEnvSchema({
 
     SPFN_AUTH_PASSKEY_USER_VERIFICATION: {
         ...envString({
-            description: "How hard the authenticator must prove the person is present: 'preferred' or 'required'. 'discouraged' is refused at boot — a passkey is the whole credential here, so an assertion that skipped user verification would sign someone in on an unlocked device alone.",
+            description: "How hard the authenticator must prove the person is present: 'preferred' or 'required'. 'discouraged' is refused at boot — a passkey is the whole credential here, so an assertion that skipped user verification would sign someone in on an unlocked device alone. Second factors do not read this: an assertion counts as one only when it carried user verification itself.",
             default: 'preferred',
             required: false,
             examples: ['preferred', 'required'],

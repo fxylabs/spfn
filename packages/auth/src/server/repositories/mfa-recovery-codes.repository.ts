@@ -28,11 +28,12 @@ export class MfaRecoveryCodesRepository extends AccountStateRepository
      * The account's newest generation, or 0 when it has never had codes.
      *
      * 0 rather than null so the caller's `+ 1` is the same expression on both
-     * paths: a first enrolment writes generation 1.
+     * paths: a first enrolment writes generation 1. Primary, as every read a
+     * proof is checked against.
      */
     async currentGeneration(userId: number): Promise<number>
     {
-        const result = await this.readDb
+        const result = await this.db
             .select({ generation: max(mfaRecoveryCodes.generation) })
             .from(mfaRecoveryCodes)
             .where(eq(mfaRecoveryCodes.userId, userId));
@@ -48,10 +49,10 @@ export class MfaRecoveryCodesRepository extends AccountStateRepository
             .values(hashes.map(codeHash => ({ userId, generation, codeHash })));
     }
 
-    /** The account's unspent codes of one generation. */
+    /** The account's unspent codes of one generation. Primary: a code is matched against these. */
     async listUnused(userId: number, generation: number): Promise<MfaRecoveryCode[]>
     {
-        return await this.readDb
+        return await this.db
             .select()
             .from(mfaRecoveryCodes)
             .where(and(

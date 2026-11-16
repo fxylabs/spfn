@@ -14,13 +14,14 @@
  * No secret, code or key value printed by these tests is a real one.
  */
 
-import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
 import { Hono } from 'hono';
 import { eq } from 'drizzle-orm';
 
 import { setupTestDb, teardownTestDb, clearTables, getTestDb, isDatabaseAvailable } from '../helpers/db';
+import { pinClockInsideTotpStep } from '../helpers/totp-clock';
 import { FixtureAuthenticator } from '../helpers/webauthn-fixture';
-import { mfaChallenges, userPublicKeys, users } from '@/server/entities';
+import { mfaChallenges, mfaTotp, userPublicKeys, users } from '@/server/entities';
 import { hashPassword } from '@/server/helpers/password';
 import { generateKeyPair, generateClientToken } from '@/server/lib/crypto';
 import { signKeyReplacementProof } from '@/server/lib/key-replacement-proof';
@@ -131,6 +132,12 @@ describe.skipIf(!dbAvailable)('new-device step-up (case table 6b)', () =>
             roleId: userRole!.id,
             emailVerifiedAt: new Date(),
         });
+    });
+
+    afterEach(() =>
+    {
+        // A row that pinned the clock to a TOTP step lets it go.
+        vi.useRealTimers();
     });
 
     // ========================================================================
@@ -558,6 +565,7 @@ describe.skipIf(!dbAvailable)('new-device step-up (case table 6b)', () =>
 
     it('row: enrolled, a global revocation after the 202 — the pending key is deleted, its challenge expired, verify 401', async () =>
     {
+        pinClockInsideTotpStep();
         const first = await signIn();
         const secret = await enrolled(first.session);
 
@@ -582,11 +590,15 @@ describe.skipIf(!dbAvailable)('new-device step-up (case table 6b)', () =>
             newPassword: NEW_PASSWORD,
         }, first.session.authorization)).status).toBe(204);
 
-        expect(await keyRow(viaChangePassword.session.keyId)).toBeUndefined();
+        // The current step, which the enrolment spent, made spendable again: a
+        // code this challenge would accept, so the revocation is all that refuses it.
+        await getTestDb().update(mfaTotp).set({ lastUsedStep: null });
+
         expect((await post('/_auth/mfa/verify', {
             challenge: changePasswordChallenge,
-            code: codeFor(secret, 2),
+            code: codeFor(secret),
         })).status).toBe(401);
+        expect(await keyRow(viaChangePassword.session.keyId)).toBeUndefined();
     });
 
     it('row: enrolled, ten minutes after the 202 — the sweep takes the pending key and its challenge', async () =>

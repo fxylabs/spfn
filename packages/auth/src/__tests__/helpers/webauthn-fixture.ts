@@ -125,6 +125,17 @@ export interface CeremonyInput
     challenge: string;
     origin: string;
     rpId: string;
+    /** false: the authenticator showed presence only — a security key with no PIN. Default true. */
+    userVerified?: boolean;
+}
+
+/** The user-verified bit of the authenticator-data flags. */
+const USER_VERIFIED_FLAG = 0x04;
+
+/** `flags` with the user-verified bit cleared when the ceremony carried none. */
+function withUserVerification(flags: number, input: CeremonyInput): number
+{
+    return input.userVerified === false ? flags & ~USER_VERIFIED_FLAG : flags;
 }
 
 /** User present + user verified + attested credential data. */
@@ -180,7 +191,7 @@ export class FixtureAuthenticator
     /** The registration response for a `create()` ceremony. */
     attest(input: CeremonyInput): Record<string, unknown>
     {
-        const authData = authenticatorData(input.rpId, REGISTRATION_FLAGS, 0, {
+        const authData = authenticatorData(input.rpId, withUserVerification(REGISTRATION_FLAGS, input), 0, {
             credentialId: this.credentialIdBytes,
             cose: this.cose,
         });
@@ -207,7 +218,7 @@ export class FixtureAuthenticator
     /** The authentication response for a `get()` ceremony at the given counter. */
     assert(input: CeremonyInput & { counter: number; tamper?: boolean }): Record<string, unknown>
     {
-        const authData = authenticatorData(input.rpId, ASSERTION_FLAGS, input.counter);
+        const authData = authenticatorData(input.rpId, withUserVerification(ASSERTION_FLAGS, input), input.counter);
         const clientDataJSON = clientData('webauthn.get', input.challenge, input.origin);
         const signature = new Uint8Array(crypto.sign(
             'sha256',

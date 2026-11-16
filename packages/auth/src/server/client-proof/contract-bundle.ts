@@ -449,8 +449,17 @@ import { CLIENT_IDENTITY_HEADERS, CLIENT_KINDS, SERVER_CONTRACT_HEADERS } from '
  * a connection error, with nothing written. `deviceAuthorization.pendingRule`
  * names it beside TooManyRequestsError as a retryable answer that does not end
  * a poll's wait. A patch, by 0.10.1's rule.
+ *
+ * 0.14.4 lists `SecondFactorLockedError` (429, not retryable) for
+ * `auth.mfa.verify` (au7-A2, au2-A2). An account has one budget of wrong
+ * second-factor proofs — five in fifteen minutes, wherever they were given —
+ * and past it no proof is accepted for fifteen minutes, right or wrong; the
+ * `Retry-After` header says when. Not `retryable` in the contract's sense: the
+ * same request will not succeed, a fresh code after that moment will. A
+ * patch, by 0.10.1's rule: a code joins the open list, and no operation, type
+ * or enum changes shape.
  */
-export const CONTRACT_VERSION = '0.14.3';
+export const CONTRACT_VERSION = '0.14.4';
 export const CONTRACT_MAJOR = 0;
 export const CONTRACT_NAME = 'spfn-mobile-contract';
 
@@ -1225,12 +1234,14 @@ interface RestSurfaceError
  * `DeviceLinkWrongMatchError`, joins them in 0.13.3: the issuer's wrong pick,
  * which the poll now answers apart from a refusal.
  *
- * `auth.mfa.*` is the third enumerated family (contract 0.13.0) and adds exactly
- * one code. Everything `auth.mfa.verify` can refuse with is one of two things: a
+ * `auth.mfa.*` is the third enumerated family (contract 0.13.0) and adds two
+ * codes. Everything `auth.mfa.verify` can refuse with is one of three things: a
  * proof that did not verify, which is `MfaVerificationFailedError` whatever was
  * wrong with it — an unknown challenge, an expired one, one already spent, a
- * stale code, a used recovery code — and the rate limit, which is
- * `TooManyRequestsError` and already listed above. A body naming two proofs or
+ * stale code, a used recovery code, a code that is not six digits, a passkey
+ * without user verification; the account's second factor locked after five
+ * wrong proofs, which is `SecondFactorLockedError` (contract 0.14.4); and the
+ * rate limit, which is `TooManyRequestsError` and already listed above. A body naming two proofs or
  * none is `ValidationError`, also already listed. `auth.mfa.status` refuses only
  * by the admission rules every proven operation shares.
  *
@@ -1417,6 +1428,15 @@ const REST_SURFACE_ERRORS: readonly RestSurfaceError[] = [
             'the second factor did not verify. One code for every way it can fail — a challenge that never '
             + 'existed, expired, was already spent or has run out of attempts, and a wrong or stale proof — '
             + 'because which one applies describes state the caller is guessing at',
+    },
+    {
+        code: 'SecondFactorLockedError',
+        httpStatus: 429,
+        retryable: false,
+        summary:
+            'the account gave five wrong second-factor proofs in fifteen minutes and accepts none, right or '
+            + 'wrong, until the Retry-After header\'s seconds have passed; then send a fresh code. The owner was '
+            + 'told. Not the rate limit: it is the account\'s failures, not this client\'s pace',
     },
     {
         code: 'TooManyRequestsError',

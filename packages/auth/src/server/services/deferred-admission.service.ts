@@ -16,6 +16,7 @@ import { ROUTE_ENROLMENT } from '../routes/channels';
 import {
     admissionRefusalError,
     admitCompletion,
+    sessionCredentialOf,
     type AdmissionRefusal,
     type Principal,
     type PrincipalCredential,
@@ -43,29 +44,21 @@ export type DeferredRefusal =
 export type DeferredAdmission = { admitted: Principal } | { refused: DeferredRefusal };
 
 /**
- * What a credential a session presents is, as a stamp records it: an
- * application profile by its name and reported key id, anything else by the
- * device key it signs with — a one-time token by the key that issued it.
- *
- * Exhaustive over `PrincipalCredential`: a new kind fails to compile here
- * until it is decided whether it can start a procedure.
+ * What a credential a session presents is, as a stamp records it
+ * (`sessionCredentialOf`).
  *
  * @throws DeferredCredentialUnsupportedError for a grant, which signs with no key and is no session
  */
 export function startingCredentialOf(credential: PrincipalCredential): StartingCredential
 {
-    switch (credential.kind)
+    const session = sessionCredentialOf(credential);
+
+    if (!session)
     {
-        case 'deviceKey':
-        case 'renewal':
-            return { kind: 'deviceKey', keyId: credential.keyId };
-        case 'oneTimeToken':
-            return { kind: 'deviceKey', keyId: credential.issuedByKeyId };
-        case 'appProfile':
-            return { kind: 'appProfile', profile: credential.profile, keyId: credential.keyId };
-        case 'oauth2Grant':
-            throw new DeferredCredentialUnsupportedError();
+        throw new DeferredCredentialUnsupportedError();
     }
+
+    return session;
 }
 
 /**

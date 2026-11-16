@@ -1010,7 +1010,7 @@ export const oauthLinkStart = route.post('/_auth/oauth/:provider/link')
     .handler(async (c) =>
     {
         const { params, body } = await c.data();
-        const { userId, keyId, credential } = getAuth(c);
+        const { userId, credential } = getAuth(c);
 
         if (!body.nonce || !body.startId)
         {
@@ -1022,7 +1022,6 @@ export const oauthLinkStart = route.post('/_auth/oauth/:provider/link')
         return await startOAuthLinkService({
             provider: params.provider,
             userId: Number(userId),
-            keyId,
             credential,
             currentPassword: body.currentPassword,
             returnUrl: body.returnUrl || '/',
@@ -1053,12 +1052,12 @@ export const oauthUnlink = route.post('/_auth/oauth/:provider/unlink')
     .handler(async (c) =>
     {
         const { params, body } = await c.data();
-        const { userId, keyId } = getAuth(c);
+        const { userId, credential } = getAuth(c);
 
         return await unlinkOAuthService({
             provider: params.provider,
             userId: Number(userId),
-            keyId,
+            credential,
             currentPassword: body.currentPassword,
         });
     });

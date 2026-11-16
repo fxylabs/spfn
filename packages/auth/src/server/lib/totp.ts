@@ -152,19 +152,21 @@ export interface VerifyTotpParams
     code: string;
     /** Moment to judge against. Defaults to now; tests pin it. */
     atMillis?: number;
-    /**
-     * The newest step this account has already spent, if any.
-     *
-     * Per account rather than per device, which is what makes a code single-use:
-     * a code read off the screen and replayed within its 30 seconds is refused.
-     * The cost is that two devices signing in inside one step see the second
-     * refused — the client retries on the next step.
-     */
-    lastUsedStep?: number | null;
 }
+
+/** Six ASCII digits — not any other script's digits, which `\d` in some engines and a person's keyboard both offer. */
+const TOTP_CODE_PATTERN = new RegExp(`^[0-9]{${TOTP_DIGITS}}$`);
 
 /**
  * Check a submitted code, and say which step it was.
+ *
+ * Anything but six ASCII digits after normalisation — the wrong length,
+ * letters, full-width digits (`１２３４５６`) — matches no step: it is a wrong
+ * code, answered and counted as one (au7-A7).
+ *
+ * Whether the step was already spent is not asked here: that is the condition
+ * of the statement that spends it (`mfaTotpRepository.recordUsedStep`), which
+ * is what keeps a code single-use under concurrent requests.
  *
  * @returns the step the code belongs to, or null if no accepted step matches
  */
@@ -172,7 +174,7 @@ export function verifyTotp(params: VerifyTotpParams): number | null
 {
     const code = normalizeTotpCode(params.code);
 
-    if (code.length !== TOTP_DIGITS)
+    if (!TOTP_CODE_PATTERN.test(code))
     {
         return null;
     }
@@ -183,11 +185,10 @@ export function verifyTotp(params: VerifyTotpParams): number | null
     for (let offset = -TOTP_DRIFT_STEPS; offset <= TOTP_DRIFT_STEPS; offset += 1)
     {
         const step = current + offset;
+
         // A negative step exists only for a clock inside the first 30 seconds of
         // 1970, and `hotp` has no counter to write for it.
-        const spent = step < 0 || (params.lastUsedStep != null && step <= params.lastUsedStep);
-
-        if (!spent && crypto.timingSafeEqual(Buffer.from(hotp(secret, step)), Buffer.from(code)))
+        if (step >= 0 && crypto.timingSafeEqual(Buffer.from(hotp(secret, step)), Buffer.from(code)))
         {
             return step;
         }

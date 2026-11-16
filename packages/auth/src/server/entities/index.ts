@@ -24,6 +24,7 @@ export * from './mfa-totp';
 export * from './mfa-recovery-codes';
 export * from './mfa-verifications';
 export * from './mfa-challenges';
+export * from './mfa-attempt-budgets';
 export * from './device-authorizations';
 export * from './device-links';
 export * from './user-invitations';

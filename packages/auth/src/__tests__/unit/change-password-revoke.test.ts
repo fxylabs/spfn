@@ -65,7 +65,7 @@ describe('changePasswordService — session revocation', () =>
     {
         await changePasswordService({
             userId: 7,
-            keyId: 'key-of-the-calling-device',
+            credential: { kind: 'deviceKey', keyId: 'key-of-the-calling-device' },
             currentPassword: 'old-password',
             newPassword: 'new-password',
             passwordHash: 'old-hash',
@@ -83,7 +83,7 @@ describe('changePasswordService — session revocation', () =>
         // other, which is the opposite of "log me out everywhere".
         await changePasswordService({
             userId: 7,
-            keyId: 'key-of-the-calling-device',
+            credential: { kind: 'deviceKey', keyId: 'key-of-the-calling-device' },
             currentPassword: 'old-password',
             newPassword: 'new-password',
             passwordHash: 'old-hash',
@@ -108,7 +108,7 @@ describe('changePasswordService — session revocation', () =>
 
         await expect(changePasswordService({
             userId: 7,
-            keyId: 'key-of-the-calling-device',
+            credential: { kind: 'deviceKey', keyId: 'key-of-the-calling-device' },
             currentPassword: 'old-password',
             newPassword: 'new-password',
             passwordHash: 'old-hash',
@@ -130,7 +130,7 @@ describe('changePasswordService — session revocation', () =>
 
         await changePasswordService({
             userId: 7,
-            keyId: 'key-of-the-calling-device',
+            credential: { kind: 'deviceKey', keyId: 'key-of-the-calling-device' },
             currentPassword: 'old-password',
             newPassword: 'new-password',
             passwordHash: 'old-hash',

@@ -25,7 +25,7 @@ import { eq, sql } from 'drizzle-orm';
 import { clearTables, getTestDb, isDatabaseAvailable, setupTestDb, teardownTestDb } from '../helpers/db';
 import { createTestUser, mountAuthApp, resetMemoryRateLimitStore, TEST_PASSWORD } from '../helpers/oauth2';
 import { FixtureAuthenticator } from '../helpers/webauthn-fixture';
-import { mfaChallenges, mfaTotp, passkeys, userPublicKeys, userSocialAccounts, users } from '@/server/entities';
+import { mfaAttemptBudgets, mfaChallenges, mfaTotp, passkeys, userPublicKeys, userSocialAccounts, users } from '@/server/entities';
 import {
     deviceLinksRepository,
     mfaChallengesRepository,
@@ -191,7 +191,7 @@ describe.skipIf(!dbAvailable)('Every credential writer under the account lock', 
 
     it('R2 (B3) the fifth wrong proof and the right proof on one challenge: the right one 200, the wrong one 401, no deadlock', async () =>
     {
-        const { email, key } = await signedInAccount();
+        const { email, userId, key } = await signedInAccount();
         const code = (secret: string) => hotp(decodeBase32(secret), totpStep(Date.now()));
         const secret = (await (await send('POST', '/_auth/mfa/totp/enroll', {}, bearer(key))).json()).secret as string;
         expect((await send('POST', '/_auth/mfa/totp/confirm', { code: code(secret) }, bearer(key))).status).toBe(200);
@@ -200,7 +200,7 @@ describe.skipIf(!dbAvailable)('Every credential writer under the account lock', 
         const second = await send('POST', '/_auth/login', { email, password: TEST_PASSWORD, ...deviceKeyBody() });
         expect(second.status).toBe(202);
         const challenge = (await second.json()).challenge.secret as string;
-        await getTestDb().update(mfaChallenges).set({ attempts: 4 });
+        await getTestDb().insert(mfaAttemptBudgets).values({ userId, failedAt: [1, 2, 3, 4].map(() => new Date()) });
 
         const atMark = gate();
         const goMark = gate();
@@ -217,8 +217,8 @@ describe.skipIf(!dbAvailable)('Every credential writer under the account lock', 
         const right = send('POST', '/_auth/mfa/verify', { challenge, code: code(secret) });
         await atMark.opened;
         const wrong = send('POST', '/_auth/mfa/verify', { challenge, code: code(secret) === '000000' ? '111111' : '000000' }, undefined, '203.0.113.20');
-        // The wrong proof's count and drop wait for the lock instead of taking
-        // the key and challenge rows in the other order.
+        // The wrong proof's count waits for the lock instead of taking the
+        // account's rows in the other order.
         await someoneWaitsOnALock().finally(goMark.open);
 
         const [r, w] = await Promise.all([right, wrong]);
@@ -227,7 +227,6 @@ describe.skipIf(!dbAvailable)('Every credential writer under the account lock', 
 
         expect({ right: r.status, wrong: w.status, deadlock: /deadlock/i.test(bodies.join(' ')) })
             .toEqual({ right: 200, wrong: 401, deadlock: false });
-        // The drop is scoped to a key still pending: the one just activated stays.
         expect(activated!.pendingMfaChallengeId).toBeNull();
     }, 30_000);
 

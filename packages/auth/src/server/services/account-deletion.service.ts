@@ -49,7 +49,7 @@ import { revokeAllOAuth2GrantsForUser } from './oauth2-grant.service';
 import { setAccountDeletion } from './user.service';
 import { assertStepUp } from './mfa.service';
 import { proveRecentAuthentication, recentAuthenticationHolds, type RecentAuthenticationProof } from './passkey.service';
-import { admissionRefusalError, admitCompletion, sessionKeyOf, type PrincipalCredential } from './admission.service';
+import { admissionRefusalError, admitCompletion, type PrincipalCredential } from './admission.service';
 import { ROUTE_ENROLMENT } from '../routes/channels';
 import { getDeletionConfig } from '../lib/deletion-config';
 import { getRecentAuthMs } from '../lib/config';
@@ -101,8 +101,8 @@ interface ProvenRequester
 /**
  * A request from a session passes the gates every sensitive change does: the
  * second factor re-proved on this device (`assertStepUp` — a no-op for an
- * account without one), and a credential proved recently on it or the password
- * now (`proveRecentAuthentication`). Before the account lock: the second may
+ * account without one), and this session's credential authenticated recently or
+ * the password now (`proveRecentAuthentication`). Before the account lock: the second may
  * hash. `requesterStillProven` asks both again under it. An administrator's
  * request proves nothing here.
  *
@@ -115,12 +115,14 @@ async function proveRequester(userId: number, params: RequestAccountDeletionPara
         return null;
     }
 
-    const keyId = sessionKeyOf(params.credential);
-    await assertStepUp({ userId, keyId });
+    await assertStepUp({ userId, credential: params.credential });
 
     return {
         credential: params.credential,
-        proof: await proveRecentAuthentication({ userId, keyId, currentPassword: params.password }, getRecentAuthMs()),
+        proof: await proveRecentAuthentication(
+            { userId, credential: params.credential, currentPassword: params.password },
+            getRecentAuthMs(),
+        ),
     };
 }
 
@@ -148,10 +150,14 @@ async function requesterStillProven(user: User, requester: ProvenRequester): Pro
         throw admissionRefusalError(admission.refused);
     }
 
-    const params = { userId: user.id, keyId: sessionKeyOf(requester.credential) };
-    await assertStepUp(params);
+    await assertStepUp({ userId: user.id, credential: requester.credential });
 
-    return await recentAuthenticationHolds(params, requester.proof, user, getRecentAuthMs());
+    return await recentAuthenticationHolds(
+        { userId: user.id, credential: requester.credential },
+        requester.proof,
+        user,
+        getRecentAuthMs(),
+    );
 }
 
 /**

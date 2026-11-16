@@ -909,11 +909,12 @@ export const revokeAllKeys = route.post('/_auth/keys/revoke-all')
     .handler(async (c) =>
     {
         const { body } = await c.data();
-        const { userId, keyId } = getAuth(c);
+        const { userId, keyId, credential } = getAuth(c);
 
         return await revokeAllKeysService({
             userId: Number(userId),
             currentKeyId: keyId,
+            credential,
             includeCurrent: body.includeCurrent,
             reason: 'Revoked by user',
         });
@@ -939,11 +940,11 @@ export const changePassword = route.put('/_auth/password')
     {
         const { body } = await c.data();
         const user = getUser(c);
-        const { keyId } = getAuth(c);
+        const { credential } = getAuth(c);
 
         await changePasswordService({
             userId: user.id,
-            keyId,
+            credential,
             currentPassword: body.currentPassword,
             newPassword: body.newPassword,
             passwordHash: user.passwordHash || undefined,
