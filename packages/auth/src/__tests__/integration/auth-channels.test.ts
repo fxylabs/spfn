@@ -1,9 +1,9 @@
 /**
  * @spfn/auth - An app chooses which sign-in channels exist (#308)
  *
- * One test per row C2–C12 of the #308 case table. C1 is every other suite
- * staying green; C13 and the option's own validation are in
- * unit/auth-channels.test.ts.
+ * One test per row C2–C12 of the #308 case table, and R1 for passkey sign-in
+ * (#330). C1 is every other suite staying green; C13 and the option's own
+ * validation are in unit/auth-channels.test.ts.
  *
  * Driven against the mounted auth router with `authenticate` as the
  * server-level middleware, the way a real server mounts it: a public route of
@@ -42,6 +42,7 @@ import {
 } from '@/server/entities';
 import { generateKeyPair, type KeyPair } from '@/server/lib/crypto';
 import { hashCredential } from '@/server/lib/link-credentials';
+import { decodeBase32, hotp, totpStep } from '@/server/lib/totp';
 import { __resetChannelsForTests, configureChannels, type AuthChannel } from '@/server/lib/channels-config';
 import { registerOAuthProvider, type NormalizedIdentity, type OAuthProvider } from '@/server/lib/oauth';
 import { kakaoProvider } from '@/server/lib/oauth/kakao-provider';
@@ -357,6 +358,48 @@ describe.skipIf(!dbAvailable)('An app chooses which sign-in channels exist (#308
         });
     });
 
+    describe('passkeyLogin: false', () =>
+    {
+        /** A password sign-in from a device the account has never seen: 202 once it has a TOTP. */
+        function passwordLogin(email: string): Promise<Response>
+        {
+            return post('/_auth/login', { email, password: TEST_PASSWORD, ...deviceKeyBody() });
+        }
+
+        async function enrolTotp(authorization: string): Promise<void>
+        {
+            const enrolled = await post('/_auth/mfa/totp/enroll', {}, authorization);
+            const secret: string = (await enrolled.json()).secret;
+            const code = hotp(decodeBase32(secret), totpStep(Date.now()));
+
+            expect((await post('/_auth/mfa/totp/confirm', { code }, authorization)).status).toBe(200);
+        }
+
+        it('R1: both passkey sign-in routes answer 404 naming passkeyLogin; passkey registration and mfa/verify/options answer as before', async () =>
+        {
+            const email = 'r1@ch308.test';
+            await createTestUser(email, await userRoleId());
+            const authorization = await signIn(app, email, nextIp());
+            await enrolTotp(authorization);
+            configureChannels({ passkeyLogin: false });
+
+            await expectChannelClosed(await post('/_auth/passkeys/login/options', {}), 'passkeyLogin', 'passkeyLoginOptions');
+            await expectChannelClosed(await post('/_auth/passkeys/login/verify', {
+                response: { id: 'r1-credential' }, ...deviceKeyBody(),
+            }), 'passkeyLogin', 'passkeyLoginVerify');
+
+            const registerOptions = await post('/_auth/passkeys/register/options', {}, authorization);
+            expect(registerOptions.status, await registerOptions.clone().text()).toBe(200);
+            expect(await registerOptions.json()).toMatchObject({ challenge: expect.any(String) });
+
+            const pending = await passwordLogin(email);
+            expect(pending.status, await pending.clone().text()).toBe(202);
+            const verifyOptions = await post('/_auth/mfa/verify/options', { challenge: (await pending.json()).challenge.secret });
+            expect(verifyOptions.status, await verifyOptions.clone().text()).toBe(200);
+            expect(await verifyOptions.json()).toMatchObject({ challenge: expect.any(String) });
+        });
+    });
+
     // ========================================================================
     // C5–C10: sign-up
     // ========================================================================
@@ -592,7 +635,7 @@ describe.skipIf(!dbAvailable)('An app chooses which sign-in channels exist (#308
     describe('every channel off', () =>
     {
         const ALL_OFF: Record<AuthChannel, false> = {
-            signup: false, passwordReset: false, deviceCode: false, deviceLink: false,
+            signup: false, passwordReset: false, deviceCode: false, deviceLink: false, passkeyLogin: false,
         };
 
         it('C12: each group\'s service function, called directly, still works', async () =>

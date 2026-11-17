@@ -58,7 +58,7 @@ describe('channels (#308)', () =>
 
     it('every channel is on until the app says otherwise', () =>
     {
-        expect(AUTH_CHANNELS.map(isChannelEnabled)).toEqual([true, true, true, true]);
+        expect(AUTH_CHANNELS.map(isChannelEnabled)).toEqual([true, true, true, true, true]);
         expect(() => AUTH_CHANNELS.forEach(requireChannel)).not.toThrow();
     });
 
@@ -90,7 +90,7 @@ describe('channels (#308)', () =>
         createAuthLifecycle({ channels: { signup: false, deviceCode: false } });
         createAuthLifecycle({ channels: { signup: false, deviceCode: false } });
 
-        expect(AUTH_CHANNELS.map(isChannelEnabled)).toEqual([false, true, false, true]);
+        expect(AUTH_CHANNELS.map(isChannelEnabled)).toEqual([false, true, false, true, true]);
         expect(() => assertChannelsConsistent()).not.toThrow();
     });
 

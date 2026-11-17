@@ -361,12 +361,13 @@ createAuthLifecycle({
         passwordReset: true,
         deviceCode: false,
         deviceLink: false,
+        passkeyLogin: true,
     },
 })
 ```
 
 Every key is optional and defaults to `true`, so an app that passes nothing serves exactly what it
-served before. A key that is not one of these four, or a value that is not a boolean, is refused at
+served before. A key that is not one of these five, or a value that is not a boolean, is refused at
 startup — either would leave open a channel the app believes it closed.
 
 A closed channel stays closed until the app itself says otherwise. A second `createAuthLifecycle()`
@@ -383,8 +384,14 @@ not a merge.
 | `passwordReset` | `requestPasswordReset`, `confirmPasswordReset`, `completePasswordReset` |
 | `deviceCode` | `startDeviceAuth`, `startDeviceAuthWeb`, `pollDeviceAuth`, `getDeviceAuthInfo`, `approveDeviceAuth`, `denyDeviceAuth` |
 | `deviceLink` | `issueDeviceLink`, `redeemDeviceLink`, `redeemDeviceLinkWeb`, `getDeviceLinkStatus`, `confirmDeviceLink`, `denyDeviceLink`, `cancelDeviceLink`, `pollDeviceLink` |
+| `passkeyLogin` | `passkeyLoginOptions`, `passkeyLoginVerify` |
 
-Every other route is always on. There is no key for password sign-in, so no setting leaves an app
+Every other route is always on. `passkeyLogin: false` closes only signing in with a passkey alone:
+registering, listing, renaming and revoking passkeys, proving one at `mfa/verify` and `mfa/step-up`,
+marking one as the second factor, session renewal and the passkey proofs of a bound session stay on.
+No other route signs a person in by a passkey alone — the device-code approval, the device-link
+confirmation and the authorization server's consent ask for a passkey only beside the session that
+is already signed in. There is no key for password sign-in, so no setting leaves an app
 with no way in; whether a second factor is asked for is the second-factor policy's business, not
 this option's.
 
@@ -423,7 +430,9 @@ social path above, because an account made by a first social sign-in is sign-up 
 The mobile contract lists `SignupDisabledError` and `ChannelDisabledError` since 0.13.8, and marks
 each operation a closed channel answers `ChannelDisabledError` on with `closedChannel`:
 `auth.enroll.register` (`signup`), the five `auth.device.*` (`deviceCode`) and
-`auth.deviceLink.redeem` / `auth.deviceLink.poll` (`deviceLink`).
+`auth.deviceLink.redeem` / `auth.deviceLink.poll` (`deviceLink`). `passkeyLogin` marks nothing there:
+the passkey ceremonies need a browser WebAuthn API and are not contract operations, so the contract
+is unchanged. In the browser, `signInWithPasskey` meets the 404 as a rejected call.
 
 ### Requiring a second factor (`secondFactor`)
 
@@ -567,7 +576,9 @@ Passkey *sign-in* registration stays, since a passkey is also a way in.
 verification itself, whatever that variable says ([what a passkey proves](#what-a-passkey-proves)).
 When `'passkey'` is not listed, a passkey sign-in is no longer a second proof: an enrolled account
 signing in with one on a new device gets the same 202 challenge a password sign-in gets, and the
-proxy handles it the same way.
+proxy handles it the same way. While it is listed, a passkey sign-in with user verification needs no
+second factor at all, so an app that wants a password plus a passkey on every sign-in also closes
+passkey sign-in with `channels: { passkeyLogin: false }` ([channels](#which-sign-in-channels-exist-channels)).
 
 #### `recoveryCodes: false`
 

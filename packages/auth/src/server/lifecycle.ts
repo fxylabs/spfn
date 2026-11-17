@@ -336,6 +336,12 @@ export interface AuthLifecycleOptions extends AuthInitOptions
      * - `passwordReset` — the reset link
      * - `deviceCode` — device-code login
      * - `deviceLink` — device link
+     * - `passkeyLogin` — passkey sign-in (`passkeys/login/options`,
+     *   `passkeys/login/verify`). An app whose every sign-in is a password
+     *   plus a passkey (`secondFactor: { required: true, methods: ['passkey'] }`)
+     *   closes it, since a passkey sign-in with user verification needs no
+     *   second factor. Registering a passkey and proving one as a second
+     *   factor stay on.
      *
      * Password sign-in has no key. Service functions ignore this setting and
      * stay callable by the application — invitations and admin seeding create

@@ -149,7 +149,7 @@ Environment variables are not checked here. Each `SPFN_AUTH_*` value is validate
 first time it is read, against the schema in `@spfn/auth/config`.
 
 `createAuthLifecycle({ channels })` chooses which sign-in channels the app offers — `signup`,
-`passwordReset`, `deviceCode`, `deviceLink`, each `true` unless set to `false`. A channel turned off
+`passwordReset`, `deviceCode`, `deviceLink`, `passkeyLogin`, each `true` unless set to `false`. A channel turned off
 answers 404 `CHANNEL_DISABLED` (`ChannelDisabledError`, `details.channel`) on every one of its routes,
 before the route's rate limit — after the global `auth` middleware, so a signed-in route still answers
 an anonymous caller 401. A later `createAuthLifecycle()` without `channels` does not reopen one, and
@@ -170,7 +170,9 @@ holds a passkey or a TOTP proves it with `mfa/step-up` first, or its enrolment c
 `STEP_UP_REQUIRED`. An unlisted method's routes answer 404 `SECOND_FACTOR_METHOD_DISABLED`, and
 removing the last listed factor is 409 `SECOND_FACTOR_REQUIRED` (`resetSecondFactorService(userId)` is the
 operator's re-issue path). Boot is refused for `methods: []`, for `required` beside `deviceCode` or
-`deviceLink`, and for two lifecycles stating different policies. See
+`deviceLink`, and for two lifecycles stating different policies. A passkey sign-in with user
+verification needs no second factor while `'passkey'` is listed, so an app that wants a password plus a
+passkey on every sign-in also closes `channels.passkeyLogin`. See
 [Requiring a second factor](../../packages/auth/README.md#requiring-a-second-factor-secondfactor).
 
 ### 5. Register Router and Middleware in `router.ts`

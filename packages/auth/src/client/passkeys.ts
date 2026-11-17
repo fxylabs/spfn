@@ -182,6 +182,10 @@ export interface SignInWithPasskeyValue
  * The device key the session runs on is generated and stored by the Next.js
  * proxy interceptor, exactly as on a password login — nothing here handles a
  * private key.
+ *
+ * An app that closed passkey sign-in (`createAuthLifecycle({ channels:
+ * { passkeyLogin: false } })`) answers both calls 404 `CHANNEL_DISABLED`
+ * (`ChannelDisabledError`); the rejection reaches the caller as thrown.
  */
 export async function signInWithPasskey(
     api: AuthApi,

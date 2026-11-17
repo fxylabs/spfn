@@ -20,7 +20,7 @@
 import { ChannelDisabledError } from '@spfn/auth/errors';
 
 /** The channels an application can turn off. */
-export const AUTH_CHANNELS = ['signup', 'passwordReset', 'deviceCode', 'deviceLink'] as const;
+export const AUTH_CHANNELS = ['signup', 'passwordReset', 'deviceCode', 'deviceLink', 'passkeyLogin'] as const;
 
 export type AuthChannel = typeof AUTH_CHANNELS[number];
 
@@ -32,6 +32,8 @@ export type AuthChannel = typeof AUTH_CHANNELS[number];
  * - `passwordReset` — the reset link and a password-reset code
  * - `deviceCode` — device-code login (`/_auth/device/*`)
  * - `deviceLink` — device link (`/_auth/device/link/*`)
+ * - `passkeyLogin` — passkey sign-in (`/_auth/passkeys/login/*`). Passkey
+ *   registration, the second-factor ceremonies and session renewal stay on.
  */
 export type AuthChannelsOptions = Partial<Record<AuthChannel, boolean>>;
 
@@ -45,7 +47,7 @@ let contradiction: string | null = null;
 
 function allEnabled(): Record<AuthChannel, boolean>
 {
-    return { signup: true, passwordReset: true, deviceCode: true, deviceLink: true };
+    return Object.fromEntries(AUTH_CHANNELS.map(name => [name, true])) as Record<AuthChannel, boolean>;
 }
 
 /**
