@@ -123,7 +123,10 @@ export async function loadAuthCrypto(): Promise<AuthCrypto>
             throw new Error(
                 `This project's @spfn/auth is older than ${CRYPTO_ENTRY_SINCE}, the release that exposes `
                 + '@spfn/auth/crypto — the request signing this command authenticates with.\n'
-                + `   Update it: pnpm add @spfn/auth@'>=${CRYPTO_ENTRY_SINCE} <0.4.0'`,
+                + '   Update it together with @spfn/core to the current release line: '
+                + 'pnpm add @spfn/core@beta @spfn/auth@beta\n'
+                + '   and update spfn the same way where it is installed: pnpm add spfn@beta for a project '
+                + 'dependency, or run it as npx spfn@beta / pnpm dlx spfn@beta.',
             );
         }
 
