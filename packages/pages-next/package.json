@@ -1,6 +1,6 @@
 {
   "name": "@spfn/pages-next",
-  "version": "0.1.0-beta.12",
+  "version": "0.2.0-beta.1",
   "type": "module",
   "description": "Next.js integration for @spfn/pages — layouts, catch-all route helpers, static export support, and the sync CLI for self-deploying a site repo to Vercel/Cloudflare or SPFN hosting.",
   "exports": {
@@ -44,7 +44,7 @@
     "publish:latest": "node ../../scripts/publish-package.mjs latest"
   },
   "peerDependencies": {
-    "@spfn/pages": ">=0.1.0-beta.1",
+    "@spfn/pages": ">=0.2.0-beta.1 <0.3.0-0",
     "next": "^16.4.5",
     "react": "^19.2.1",
     "react-dom": "^19.2.1"

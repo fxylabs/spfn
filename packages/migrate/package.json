@@ -1,6 +1,6 @@
 {
     "name": "@spfn/migrate",
-    "version": "0.2.0-beta.1",
+    "version": "0.3.0-beta.1",
     "description": "Code-based data migrations with a run-once ledger for SPFN apps.",
     "type": "module",
     "exports": {
@@ -33,7 +33,7 @@
         }
     },
     "peerDependencies": {
-        "@spfn/core": ">=0.3.0-beta.1 <0.4.0",
+        "@spfn/core": ">=0.4.0-beta.1 <0.5.0-0",
         "drizzle-orm": ">=1.0.0-rc.4 <2"
     },
     "devDependencies": {

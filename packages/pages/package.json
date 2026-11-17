@@ -1,6 +1,6 @@
 {
   "name": "@spfn/pages",
-  "version": "0.1.0-beta.4",
+  "version": "0.2.0-beta.1",
   "type": "module",
   "description": "Serve a website from a public GitHub repo — AI-authored markdown content, validated site spec, tenant-ready renderer core.",
   "exports": {
