@@ -21,6 +21,12 @@ belongs to what stays in your tables.
 pnpm add @spfn/storage
 ```
 
+The AWS SDK comes with it, and the GCS provider's `@google-cloud/storage` `^8.3.0` is an
+optional dependency your package manager installs alongside. 8.3.0 is a security floor: every
+7.x release, and 8.0–8.2, reach a `uuid` with GHSA-w5hq-g745-h8pq. If your app depends on
+`@google-cloud/storage` itself, raise it to `^8.3.0` too, or the GCS provider and your code
+load two copies.
+
 ## How does a user upload a file?
 
 The browser uploads to the provider; your server only signs the request and records
@@ -132,6 +138,20 @@ file descriptor or HTTP connection stays open. `download(key)` still returns a
   non-overlapping if you plan to switch providers. `deletePrefix` may leave empty
   directories behind; they are invisible to `list`, which reports files only.
   Symlinks are neither listed nor followed, so a link cannot escape the storage root.
+
+### GCS credentials
+
+With `GCS_CREDENTIALS_JSON_BASE64` (or `credentialsJsonBase64`) set, the provider hands the
+decoded key to `new Storage({ credentials })`, the option `@google-cloud/storage` 8 documents.
+Without it, the client uses Application Default Credentials.
+
+With the base64 key set and google-auth-library 11.3.2 or later (what `@google-cloud/storage` 8
+installs), the process prints one deprecation line at start: "The `credentials` option is
+deprecated…". It is cosmetic: signed URLs and requests are correct. The replacement the warning
+points to, `authClient`, cannot be used, because with it V4 signed URLs name the wrong account
+(the compute default account on GCE) or fail elsewhere. An app that wants no warning sets
+`GOOGLE_APPLICATION_CREDENTIALS` to the path of the key file and leaves the base64 variable
+unset; that is silent and signs as the key's account.
 
 ## Key validation
 

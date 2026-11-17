@@ -83,7 +83,7 @@
     "devDependencies": {
         "@spfn/core": "workspace:*",
         "@types/node": "^20.11.0",
-        "hono": "^4.13.11",
+        "hono": "^4.13.16",
         "madge": "^8.0.0",
         "tsup": "^8.5.0",
         "typescript": "^5.9.3",

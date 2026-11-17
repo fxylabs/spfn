@@ -23,7 +23,7 @@ Underneath: asymmetric client-signed JWTs (ES256/RS256), OTP verification, OAuth
 through a pluggable provider registry (Google, Apple, GitHub, Kakao and Naver built in), session
 cookies for Next.js, and runtime RBAC. Routes mount under `/_auth/*` and are reached
 through a typed `authApi` client. Requires `@spfn/core`; Next.js is an optional peer
-(`^16.4.1`).
+(`^16.4.5`).
 
 ## Install
 
@@ -34,7 +34,7 @@ pnpm add @spfn/auth drizzle-orm@1.0.0-rc.4
 Requires `@spfn/core` **0.3.0-beta.18** or later — the guards bound their session lookup with its
 per-call `.timeout()`, and the OAuth callback page uses its CSRF helpers.
 
-`hono` is a peer as well, in the range `@spfn/core` depends on (`^4.13.11`): the
+`hono` is a peer as well, in the range `@spfn/core` depends on (`^4.13.16`): the
 [second-factor policy](#requiring-a-second-factor-secondfactor) reads which route a request matched,
 and only the copy of Hono that built the request can say. If your install resolves a different copy
 for this package, an enrolment-only session is refused on every route, enrolment routes included,

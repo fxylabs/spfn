@@ -463,8 +463,8 @@ export const notifications = notificationSchema.table('history', {
         "@spfn/core": "workspace:*"
     },
     "peerDependencies": {
-        "@aws-sdk/client-sesv2": "^3.0.0",
-        "@aws-sdk/client-sns": "^3.0.0"
+        "@aws-sdk/client-sesv2": "^3.1074.0",
+        "@aws-sdk/client-sns": "^3.1074.0"
     },
     "peerDependenciesMeta": {
         "@aws-sdk/client-sesv2": { "optional": true },

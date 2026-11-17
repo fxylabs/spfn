@@ -13,6 +13,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 #### Dependencies (all packages)
 
+- **BREAKING: Next.js `^16.4.5`, `hono` `^4.13.16` and `@hono/node-server` `^2.1.6` are
+  required**. Every package that couples to Next.js requires `^16.4.5`, the release that clears
+  the seven advisories of 2026-11-03 (information disclosure through `use cache` functions and
+  root params, a poisoned fallback shell, response desynchronisation, Edge cookie exposure and
+  SVG image optimization). `@spfn/core` depends on `hono` `^4.13.16` (RegExpRouter skipping
+  wildcard middleware, `mount()` prefix bypass, `validator('form')`, `csrf()` and `css` fixes)
+  and `@hono/node-server` `^2.1.6`, which answers 400 to a raw backslash in the request path
+  instead of routing `/admin\x` as `/admin/x`, and no longer crashes on a reset during a
+  WebSocket upgrade; an app gets both through core. `@spfn/auth`'s `hono` peer moves to
+  `^4.13.16`, the range core depends on. `@spfn/mcp` and `spfn` use hono only in their tests,
+  so nothing they publish changes.
+    - **Migration**: upgrade Next.js to 16.4.5 or later; an app that declares `hono` itself
+      raises it to `^4.13.16`. A server behind a path-matching reverse proxy now refuses a
+      request-target with a raw `\`.
+
+- **BREAKING: the AWS and Google Cloud SDKs these packages accept have security floors**. A
+  root override in this repository only moved the repository; an app installing the published
+  ranges could still resolve the vulnerable graphs, so the ranges move. `@spfn/signing`:
+  `@google-cloud/kms` `^5.0.0` → `^6.0.0` (5 reaches, through google-gax and gaxios 7, a rimraf
+  on glob 10 and minimatch 9 with no patched release — GHSA-3g3m-2fjr-6pw4, GHSA-g3hv-75wg-m249;
+  6 changes no API signing uses and requires Node 22, as signing already does) and
+  `@aws-sdk/client-kms` `^3.0.0` → `^3.1074.0`. `@spfn/notification`: `@aws-sdk/client-sns`
+  `^3.0.0` → `^3.1074.0` and `@aws-sdk/client-sesv2` `^3.0.0` → `^3.1074.0`. `@spfn/storage`:
+  `@aws-sdk/client-s3` and `@aws-sdk/s3-request-presigner` `^3.1022.0` → `^3.1074.0`. Every AWS
+  client before 3.974.0 pins `@aws-sdk/core` exactly, and through it an XML builder on a
+  vulnerable `fast-xml-parser` (one critical advisory among them); from 3.974.0 until 3.1074.0
+  the core is a caret range whose lowest release still reaches one, so a lockfile holding it keeps it.
+  3.1074.0 is the first release of each client whose lowest admitted graph has no advisory.
+  `@spfn/storage`'s optional `@google-cloud/storage` `^7.19.0` → `^8.3.0` (every 7.x and 8.0–8.2
+  reach a `uuid` with GHSA-w5hq-g745-h8pq; 8 requires Node 22, and with a base64 key its
+  google-auth-library prints one cosmetic deprecation line at start — see below).
+  `@spfn/pages`: `yaml` `^2.5.0` → `^2.8.3` (GHSA-48c2-rrv3-qjmp, stack overflow on deeply
+  nested YAML). `@spfn/auth`: `jsonwebtoken` `^9.0.2` → `^9.0.3`; 9.0.2 admits `jws` 3.2.2
+  (GHSA-869p-cjfg-cm3x, HMAC signatures verified improperly), 9.0.3 depends on `jws` `^4.0.1`.
+    - **Migration**: an app using a KMS or notification provider upgrades the SDK it installed:
+      `pnpm add @google-cloud/kms@^6`, `pnpm add @aws-sdk/client-kms@^3.1074.0`, `pnpm add
+      @aws-sdk/client-sns@^3.1074.0 @aws-sdk/client-sesv2@^3.1074.0`. An app that depends on
+      `@google-cloud/storage` itself raises it to `^8.3.0`. Storage's AWS SDK, auth's
+      `jsonwebtoken` and pages' `yaml` are dependencies and need nothing.
+
 - **BREAKING: Node 20 is no longer supported, and Next.js `^16.4.1` is required** (#282).
   `engines.node` is `^22.23.4 || ^24.22.1 || >=26.12.1` in the repository root and in every
   package that declares `engines` (core, spfn, i18n, mcp, signing, workflow): Node 20 reached end
@@ -180,6 +220,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   expired, revoked or wrong-resource token. `@spfn/mcp` 0.3.0-beta.3.
 
 #### @spfn/storage
+
+- **`engines.node` is declared**: `^22.23.4 || ^24.22.1 || >=26.12.1`, the range of every other
+  package that declares one. Storage had none, while its optional `@google-cloud/storage` 8 needs
+  Node 22.
+
+- **One deprecation line at start with a base64 GCS key**: with `GCS_CREDENTIALS_JSON_BASE64` /
+  `credentialsJsonBase64` set, google-auth-library 11.3.2 and later (what `@google-cloud/storage`
+  8 installs) print "The `credentials` option is deprecated…" once per process. It is cosmetic;
+  the provider keeps passing the key as `credentials`, which storage 8.4.0 still documents. The
+  replacement the warning names, `authClient`, signs URLs with the wrong account, so it is not
+  used. For no warning, point `GOOGLE_APPLICATION_CREDENTIALS` at a key file instead of setting
+  the base64 variable: that is silent and signs as the key's account.
 
 - The local S3-compatible example in the documentation is **SeaweedFS** (`weed server -s3`,
   S3 on `:8333`, bucket versioning supported), not MinIO: open-source MinIO is archived and

@@ -122,7 +122,7 @@
     "@simplewebauthn/browser": "^14.0.0",
     "@simplewebauthn/server": "^14.0.1",
     "jose": "^6.1.0",
-    "jsonwebtoken": "^9.0.2",
+    "jsonwebtoken": "^9.0.3",
     "postgres": "^3.4.0"
   },
   "devDependencies": {
@@ -136,9 +136,9 @@
     "@vitest/coverage-v8": "^4.0.6",
     "drizzle-kit": "1.0.0-rc.4",
     "drizzle-orm": "1.0.0-rc.4",
-    "hono": "^4.13.11",
+    "hono": "^4.13.16",
     "madge": "^8.0.0",
-    "next": "^16.4.1",
+    "next": "^16.4.5",
     "spfn": "workspace:*",
     "tsup": "^8.5.0",
     "tsx": "^4.20.6",
@@ -149,8 +149,8 @@
     "@spfn/core": ">=0.3.0-beta.38 <0.4.0",
     "@spfn/notification": ">=0.2.0-beta.5 <0.3.0",
     "drizzle-orm": ">=1.0.0-rc.4 <2",
-    "hono": "^4.13.11",
-    "next": "^16.4.1"
+    "hono": "^4.13.16",
+    "next": "^16.4.5"
   },
   "peerDependenciesMeta": {
     "next": {

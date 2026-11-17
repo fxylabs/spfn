@@ -24,7 +24,7 @@ pnpm dlx spfn@beta <command>
 Or add it as a project dependency (`spfn init`/`spfn create` do this for you), then
 call it via `pnpm spfn <command>` / `npm run spfn:<script>`.
 
-Requirements: Node.js 22.23.4+ (or 24.22.1+, 26.12.1+) in both modes, Next.js 16.4.1+ (App Router, `src/` dir),
+Requirements: Node.js 22.23.4+ (or 24.22.1+, 26.12.1+) in both modes, Next.js 16.4.5+ (App Router, `src/` dir),
 PostgreSQL 14+ (Redis optional). Next.js 15
 is not supported — see [the root README](../../README.md#what-do-i-need-installed).
 
@@ -1102,8 +1102,10 @@ and `docker compose up -d` is also the convenient way to get PostgreSQL and Redi
 pointing at your own PostgreSQL works too. PostgreSQL itself is not optional.
 
 **Which Node version do I need?**
-20 or later, in both modes. `@spfn/core` runs on `@hono/node-server` 2, which declares
-that floor, and full mode's `@spfn/auth` needs the same.
+`^22.23.4 || ^24.22.1 || >=26.12.1`, in both modes — the releases that fix CVE-2026-111497,
+remote code execution in Node's bundled Brotli decoder; the `package.json` that `spfn init`
+writes declares the same range. `@spfn/core` runs on `@hono/node-server` `^2.1.6`, which
+itself accepts Node 20, so the floor is the security one, not the server's.
 
 **When do I have to run codegen by hand?**
 Whenever routes change outside `spfn dev`, which runs a codegen watcher for you. A stale or

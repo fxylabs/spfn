@@ -31,11 +31,17 @@ Install providers as needed:
 
 ```bash
 # For AWS SES v2 (Email)
-pnpm add @aws-sdk/client-sesv2
+pnpm add @aws-sdk/client-sesv2@^3.1074.0
 
 # For AWS SNS (SMS)
-pnpm add @aws-sdk/client-sns
+pnpm add @aws-sdk/client-sns@^3.1074.0
 ```
+
+The floors are a security requirement, not a feature one. Every AWS client before 3.1074.0
+admits, through `@aws-sdk/core` and its XML builder, a `fast-xml-parser` with known advisories
+(one critical among them; before 3.974.0 the client pins it outright), and a lockfile that
+already holds one keeps it through an upgrade of this package. An app already on an older
+client upgrades it: `pnpm add @aws-sdk/client-sesv2@^3.1074.0 @aws-sdk/client-sns@^3.1074.0`.
 
 ## Quick Start
 

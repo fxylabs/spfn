@@ -61,8 +61,8 @@
         "node": "^22.23.4 || ^24.22.1 || >=26.12.1"
     },
     "peerDependencies": {
-        "@aws-sdk/client-kms": "^3.0.0",
-        "@google-cloud/kms": "^5.0.0"
+        "@aws-sdk/client-kms": "^3.1074.0",
+        "@google-cloud/kms": "^6.0.0"
     },
     "peerDependenciesMeta": {
         "@aws-sdk/client-kms": {

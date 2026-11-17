@@ -47,9 +47,16 @@ Nothing else. The KMS SDKs are optional peer dependencies — install one only i
 that provider:
 
 ```bash
-pnpm add @google-cloud/kms      # for provider: 'gcp-kms'
-pnpm add @aws-sdk/client-kms    # for provider: 'aws-kms'
+pnpm add @google-cloud/kms@^6            # for provider: 'gcp-kms'
+pnpm add @aws-sdk/client-kms@^3.1074.0   # for provider: 'aws-kms'
 ```
+
+Both floors are security floors. `@google-cloud/kms` 5 reaches, through google-gax and gaxios,
+a rimraf on a glob and a minimatch with no patched release; 6 reaches neither and changes no
+API this package uses (it requires Node 22, which this package already does). Every
+`@aws-sdk/client-kms` before 3.1074.0 admits, through `@aws-sdk/core` and its XML builder, a
+vulnerable `fast-xml-parser` (before 3.974.0 it pins one). An app on an older SDK upgrades it:
+`pnpm add @google-cloud/kms@^6` or `pnpm add @aws-sdk/client-kms@^3.1074.0`.
 
 ## The two entry points
 

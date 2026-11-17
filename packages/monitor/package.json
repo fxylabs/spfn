@@ -93,7 +93,7 @@
     "@spfn/core": ">=0.3.0-beta.14 <0.4.0",
     "@spfn/notification": ">=0.2.0-beta.1 <0.3.0",
     "drizzle-orm": ">=1.0.0-rc.4 <2",
-    "next": "^16.4.1"
+    "next": "^16.4.5"
   },
   "peerDependenciesMeta": {
     "next": {

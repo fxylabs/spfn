@@ -71,8 +71,15 @@ pnpm db:generate        # drizzle-kit generate — create a migration from schem
 
 A published `peerDependencies` range is what an adopter resolves against, so a range
 that still admits a vulnerable release ships that vulnerability to every app installing
-the package. `@spfn/*` packages that couple to Next.js require `^16.4.1` — the floor
-that clears GHSA-2464-fhr4-w9xw and GHSA-673q-mjm6-r5xr (both critical remote code
+the package. `@spfn/*` packages that couple to Next.js require `^16.4.5` — the floor
+that clears the seven advisories of the 2026-11-03 release, all fixed in 16.4.5: three
+information disclosures through `use cache` functions (GHSA-mfr8-8qww-v76h across root params
+called through `unstable_cache()`, GHSA-vc7v-qv4w-wrv8 through nested functions,
+GHSA-rhh4-g77r-r9qj through binary arguments), GHSA-vvgp-ww4w-46vf (a poisoned fallback shell
+under Cache Components), GHSA-pc58-hwjq-p385 (response desynchronisation when a route returns
+a fetched `Response` behind a pipelining proxy), GHSA-f3mh-rxg3-f5g2 (cookies set by an Edge
+route handler exposed in a response header) and GHSA-7qx7-33qx-rqx2 (image optimization of
+an attacker-supplied SVG); GHSA-2464-fhr4-w9xw and GHSA-673q-mjm6-r5xr (both critical remote code
 execution, through image optimization of SVG files and through `use cache` functions returning
 typed arrays) and GHSA-p3m5-59mp-jv5r (Server Actions denial of service), all fixed in 16.4.1;
 GHSA-vcvr-r3jv-pc5j (critical, fixed in 16.3.6) and GHSA-cjq9-62q9-8jv4 (high,
@@ -121,6 +128,67 @@ version it first resolved — a lockfile update, and even an override, left it o
 whose dev server reads files it should refuse. pnpm resolves peers from the workspace root
 first, so the root entry is what moves every package's vitest onto a patched vite. Raise it
 when vite publishes a fix, the same way as any other floor.
+
+A root `pnpm.overrides` entry moves this workspace and nobody who installs a published
+package, so it cannot be what makes a published package safe. The check is an adopter's
+install, at its worst: each of a package's `dependencies`, `optionalDependencies` and
+`peerDependencies` at the lowest version its range admits, and below it every transitive at
+the lowest version its parent's range admits — what an adopter keeps whose lockfile already
+holds those versions, since upgrading our package re-resolves only what our ranges no longer
+admit. `npm install` resolves the newest, so it cannot build that tree; resolve it from the
+registry metadata (`npm view <pkg>@<version> dependencies`, a peer satisfied by the version
+an ancestor or the package itself provides) and send the name → versions map to the bulk
+advisory endpoint, `POST https://registry.npmjs.org/-/npm/v1/security/advisories/bulk`. Where
+a later release of our direct dependency excludes what that finds, the published range moves
+to it. That is why `@spfn/signing` requires `@google-cloud/kms` `^6.0.0` (5 reaches, through
+google-gax and gaxios 7, a rimraf on glob 10 and minimatch 9, which have no release fixing
+GHSA-3g3m-2fjr-6pw4 or GHSA-g3hv-75wg-m249); `@spfn/auth` `jsonwebtoken` `^9.0.3` (9.0.2
+admits `jws` 3.2.2, GHSA-869p-cjfg-cm3x; 9.0.3 requires `jws` `^4.0.1`); `@spfn/storage`
+`@google-cloud/storage` `^8.3.0` (every 7.x and 8.0–8.2 reach a `uuid` with
+GHSA-w5hq-g745-h8pq); and every AWS client — signing's `@aws-sdk/client-kms`, notification's
+`@aws-sdk/client-sns` and `@aws-sdk/client-sesv2`, storage's `@aws-sdk/client-s3` and
+`@aws-sdk/s3-request-presigner` — requires `^3.1074.0`. A client before 3.974.0 pins
+`@aws-sdk/core` exactly, and later ones admit by caret a core whose XML builder reaches a
+vulnerable `fast-xml-parser`; 3.1074.0 is the first release whose lowest graph is clean. The
+lowest-graph standard counts every severity, not only critical and high: the last step, 3.1073.0
+→ 3.1074.0, is driven by a low advisory (`fast-xml-parser` 5.7.3, GHSA-474x-hrwr-fgx4). An optional
+peer is a range like any other. pnpm installs it into this workspace from the peer range
+itself, so raising the range is also what moves the version the tests run against;
+`@spfn/notification` names its AWS clients as devDependencies as well, and `@spfn/signing`
+deliberately does not (its X1 test keeps the KMS SDKs out of every dependency field).
+
+The table lists every key of the root `pnpm.overrides`, what it is for, and where it is
+reached. An override moves this workspace and nobody who installs a published package. Where a
+row says "no upstream fix", an adopter installing today gets a patched release inside the third
+party's own range, but an adopter whose lockfile already holds the vulnerable release keeps it,
+and no range of ours can exclude it until that third party publishes one that does.
+
+| Key | Reason | Path |
+| --- | --- | --- |
+| `react` | One React in the workspace. The packages' peers admit 18 and 19 and the examples pin 19.2.3; two copies side by side broke Next.js's types. | Tooling; an adopter brings its own React. |
+| `react-dom` | Same, for react-dom. | Tooling. |
+| `@types/react` | One set of React types, for the same reason. | Tooling. |
+| `@types/react-dom` | Same, for react-dom's types. | Tooling. |
+| `drizzle-kit` | Pins drizzle-kit to the same release candidate as drizzle-orm. | Tooling: spfn, the packages' `db:generate`, examples. |
+| `drizzle-orm` | One Drizzle release candidate in the workspace. A prerelease satisfies no plain range, so `drizzle-typebox`'s peer `drizzle-orm >=0.36.0` would otherwise pull a separate 0.x drizzle-orm next to the RC. | Workspace; production code reaches it through core's `drizzle-typebox`. |
+| `next` | Every Next.js in the workspace on the floor the packages require (`^16.4.5`), including one pnpm installs to satisfy a peer. | Workspace; an adopter gets the floor from our `next` peer ranges. |
+| `picomatch@2` | GHSA-c2c7-rcm5-vvqj, GHSA-3v7f-55p6-f55p. | Production: core → micromatch 4.0.8 → picomatch `^2.3.1`. No upstream fix: 4.0.8 is micromatch's latest release. |
+| `shell-quote` | GHSA-w7jw-789q-3m8p, GHSA-395f-4hp3-45gv. | Dev: concurrently, in spfn's devDependencies. |
+| `lodash-es` | Added before cms raised its own range; cms now depends on `^4.18.1`, so it changes nothing. | Production: cms, directly. |
+| `minimatch@>=7 <11.0.1` | GHSA-g3hv-75wg-m249: eslint and @typescript-eslint reach a minimatch 10 with no fix. | Tooling. |
+| `rollup` | GHSA-mw96-cpmx-2vgc. | Production: spfn → tsup 8.5 → rollup `^4.34.8`. No upstream fix inside tsup 8 (9.0.0 raises it); also vite, in dev. |
+| `yaml` | GHSA-48c2-rrv3-qjmp. spfn and pages depend on `^2.8.3` themselves; the override covers vite's and postcss-load-config's. | Tooling. |
+| `js-yaml@3` | The js-yaml 3 advisories fixed in 3.15. | Production: pages → gray-matter 4.0.3 → js-yaml `^3.13.1`. No upstream fix: 4.0.3 is gray-matter's latest release. |
+| `nanoid@<3.3.18` | GHSA-2v37-7h3g-55p8. | Production: Next.js pins postcss 8.5.23 → nanoid `^3.3.16`. No upstream fix: Next.js 16.4.5 and 16.4.6 both pin that postcss. |
+| `@babel/core@<7.29.6` | GHSA-4x5r-pxfx-6jf8. | Dev: styled-jsx's optional peer under the Next.js the packages test against, and the examples' `@svgr/webpack`. An adopter's Next.js install does not install the optional peer. |
+| `browserslist@<4.28.7` | GHSA-c83g-rgw3-j3cx, GHSA-73wf-gq98-2v4g. | Dev: the same Babel helpers. |
+| `@grpc/grpc-js@<1.14.5` | GHSA-m9gg-hp2v-232j. | Production, optional peer: signing → `@google-cloud/kms` 6 → google-gax 6 → `@grpc/grpc-js` `^1.12.6`. A fresh install at kms 6.0.0 resolves 1.14.7 and audits clean. No upstream fix: no kms or google-gax release excludes grpc-js below 1.14.5. |
+| `source-map-js@<1.2.2` | GHSA-68fv-2mgg-jv7q. | Production: Next.js's pinned postcss 8.5.23 → source-map-js `^1.2.1`. No upstream fix, as for nanoid. |
+| `sharp@<0.35.5` | Next.js 16.4.5 itself requires sharp `^0.35.5`, so with our `next` floor this changes nothing. | Production: Next.js. |
+
+Scope an override to the major it repairs (`picomatch@2`, not `picomatch`). A blanket one also
+drags packages that ask for the next major back onto the old one, and the workspace then tests a
+graph no adopter gets.
 
 ## Running the tests
 
