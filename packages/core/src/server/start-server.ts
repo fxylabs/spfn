@@ -41,6 +41,7 @@ import type { ShutdownBudget, ShutdownInfrastructure } from './shutdown-budget';
 
 import type { ServerConfig, ServerInstance } from './types';
 import { validateServerConfig } from './validation';
+import { markServerProcess } from '../module-evaluation';
 import { env } from '@spfn/core/config';
 
 // ============================================================================
@@ -102,6 +103,10 @@ let processHandlersRegistered = false;
  */
 export async function startServer(config?: ServerConfig): Promise<ServerInstance>
 {
+    // Before anything of the app loads: from here on, a second copy of
+    // @spfn/core is refused by the import that would bring it in.
+    markServerProcess(message => serverLogger.error(message));
+
     loadEnv();
 
     const finalConfig = await loadAndMergeConfig(config);

@@ -7,6 +7,7 @@ export default defineConfig({
     entry: {
         index: 'src/index.ts',
         surface: 'src/surface/index.ts',
+        'dev-loader/register': 'src/dev-loader/register.ts',
     },
     format: ['esm'],
     dts: true,

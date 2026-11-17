@@ -19,7 +19,8 @@
 #
 # Measured on a developer machine with turbo's cache disabled, which is the state
 # a fresh checkout is always in: build 59s, lint 6s, type-check 46s, the two
-# checks 1s, the smoke 4s, the suite 198s.
+# checks 1s, the smoke 4s, the suite 198s. The `spfn dev` smoke in `test` adds
+# about 20s.
 #
 # A pull request builds, type-checks and tests only the packages it changes and
 # everything that depends on them. Pipeline 521 changed one line — the `version`
@@ -277,4 +278,25 @@ steps:
             # Scoped exactly as `verify` scoped the build, computed again because
             # each step is its own container and shell.
             - FILTERS="$(node scripts/ci-scope.mjs filters)"
+
+            # Boot examples/03-auth under `spfn dev` (issue #329). The example
+            # declares no `"type": "module"`, which is the shape a scaffolded app
+            # has and the one `spfn dev` once ran as CommonJS beside an ESM
+            # server: two copies of @spfn/core, a boot the server now refuses.
+            # Nothing else in CI runs `spfn dev`, so without this a dev runner
+            # that splits the formats again stays green and only developers'
+            # machines see the refusal. Here, not in `verify`, because the
+            # example needs PostgreSQL; its own database, so the suites' are
+            # untouched. Scoped like the 01 smoke: exit 1 is "not in scope".
+            # Measured at about 20s, the migration included.
+            - |
+                IN_SCOPE=0
+                node scripts/ci-scope.mjs includes 03-auth || IN_SCOPE=$?
+                case "$IN_SCOPE" in
+                    0) createdb -h 127.0.0.1 -U postgres spfn_smoke_dev_03
+                       SMOKE_DATABASE_URL=postgres://postgres@127.0.0.1:5432/spfn_smoke_dev_03 node scripts/smoke-dev-example-03.mjs ;;
+                    1) echo "smoke-dev-example-03: skipped, 03-auth is outside this pull request's scope" ;;
+                    *) exit "$IN_SCOPE" ;;
+                esac
+
             - pnpm exec turbo run test --concurrency=1 $FILTERS

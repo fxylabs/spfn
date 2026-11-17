@@ -38,6 +38,7 @@ import type { RouterRoute } from 'hono/types';
 import { matchedRoutes } from 'hono/route';
 import { COMPOSED_HANDLER } from 'hono/utils/constants';
 
+import { assertRequestFromThisHono } from './hono-copy';
 import { isMethodListed, type SecondFactorMethod } from './second-factor-policy';
 
 /**
@@ -99,24 +100,20 @@ function registeredHandler(handler: Function): Function
 }
 
 /**
- * The handlers Hono matched for this request, or none when they cannot be read.
+ * The handlers Hono matched for this request.
  *
  * `matchedRoutes` reads them off the request under a symbol private to the copy
- * of Hono that built it. Another copy — an install that gave this package a
- * different `hono` than `@spfn/core` — finds nothing there and throws; the
- * answer is then "no enrolment route", which refuses an enrolment-only session
- * and asks nothing of any other.
+ * of Hono that built it. Within one copy a request always carries them, so a
+ * request it cannot read was built by another copy (see `hono-copy.ts`) — a
+ * broken process, refused as an error. It used to read as "no enrolment route",
+ * which answered every enrolment-only session 403 on the very routes it may use,
+ * as if that were policy.
  */
 function readMatchedRoutes(c: Context): RouterRoute[]
 {
-    try
-    {
-        return matchedRoutes(c);
-    }
-    catch
-    {
-        return [];
-    }
+    assertRequestFromThisHono(c);
+
+    return matchedRoutes(c);
 }
 
 /**
@@ -129,7 +126,8 @@ function readMatchedRoutes(c: Context): RouterRoute[]
  * the next appearance of the gate, which is where the next route at this path
  * begins, since every route behind the gate runs it before its own middlewares.
  *
- * A request whose match result cannot be read is not on an enrolment route.
+ * @throws Error when the request was built by another copy of Hono, whose match
+ *   result cannot be read
  */
 export function isEnrolmentRoute(c: Context): boolean
 {

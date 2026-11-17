@@ -51,6 +51,34 @@ function writeAgentInstructions(cwd: string, agentFiles: boolean): void
 }
 
 /**
+ * Registers the module hook that runs the app's own source in the format
+ * `spfn build` gives it (see `dev-loader/hooks.ts`), for the application rooted
+ * at `cwd`. Built next to this file, so it is resolved from the CLI's location,
+ * never from the app's cwd.
+ */
+function devLoader(cwd: string): string
+{
+    const loader = new URL('./dev-loader/register.js', import.meta.url);
+
+    loader.searchParams.set('root', cwd);
+
+    return loader.href;
+}
+
+/**
+ * The command that runs a generated entry under the app's tsx, with the dev
+ * module hook registered first.
+ */
+function tsxCommand(pm: string, cwd: string, entry: string): { command: string; args: string[] }
+{
+    const tsxArgs = ['tsx', '--import', devLoader(cwd), entry];
+
+    return pm === 'npm'
+        ? { command: 'npx', args: tsxArgs }
+        : { command: pm, args: ['exec', ...tsxArgs] };
+}
+
+/**
  * Wait for a file to be created (server writes ready signal to it)
  */
 function waitForReadyFile(filePath: string, timeoutMs = 30000): Promise<string>
@@ -299,12 +327,9 @@ catch (error)
             // Start codegen watcher
             const startWatcher = () =>
             {
-                const watcherCmd = pm === 'npm' ? 'npx' : pm;
-                const watcherArgs = pm === 'npm'
-                    ? ['tsx', watcherEntry]
-                    : ['exec', 'tsx', watcherEntry];
+                const watcher = tsxCommand(pm, cwd, watcherEntry);
 
-                watcherProcess = execa(watcherCmd, watcherArgs, {
+                watcherProcess = execa(watcher.command, watcher.args, {
                     cwd,
                     stdio: 'inherit',
                     reject: false,
@@ -323,12 +348,9 @@ catch (error)
             // Start server process
             const startServer = () =>
             {
-                const serverCmd = pm === 'npm' ? 'npx' : pm;
-                const serverArgs = pm === 'npm'
-                    ? ['tsx', serverEntry]
-                    : ['exec', 'tsx', serverEntry];
+                const server = tsxCommand(pm, cwd, serverEntry);
 
-                serverProcess = execa(serverCmd, serverArgs, {
+                serverProcess = execa(server.command, server.args, {
                     cwd,
                     stdio: 'inherit',
                     reject: false,
@@ -448,12 +470,9 @@ catch (error)
         // Start codegen watcher
         const startWatcher = () =>
         {
-            const watcherCmd = pm === 'npm' ? 'npx' : pm;
-            const watcherArgs = pm === 'npm'
-                ? ['tsx', watcherEntry]
-                : ['exec', 'tsx', watcherEntry];
+            const watcher = tsxCommand(pm, cwd, watcherEntry);
 
-            watcherProcess = execa(watcherCmd, watcherArgs, {
+            watcherProcess = execa(watcher.command, watcher.args, {
                 cwd,
                 stdio: 'inherit',
                 reject: false,
@@ -499,12 +518,9 @@ catch (error)
         // Start server process
         const startServer = () =>
         {
-            const serverCmd = pm === 'npm' ? 'npx' : pm;
-            const serverArgs = pm === 'npm'
-                ? ['tsx', serverEntry]
-                : ['exec', 'tsx', serverEntry];
+            const server = tsxCommand(pm, cwd, serverEntry);
 
-            serverProcess = execa(serverCmd, serverArgs, {
+            serverProcess = execa(server.command, server.args, {
                 cwd,
                 stdio: 'inherit',
                 reject: false,

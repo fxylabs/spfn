@@ -1,13 +1,17 @@
 #!/usr/bin/env node
 // An ESM-only exports map passes install, typecheck and the IDE, then breaks the first
-// consumer that resolves it through a require path — `spfn dev` loads server.config.ts
-// via tsx's CJS register, so a subpath without a `require` condition throws
-// ERR_PACKAGE_PATH_NOT_EXPORTED at boot (issue #102: @spfn/i18n and @spfn/mcp shipped
-// this way and every fresh `spfn create --mode full` scaffold failed its first run).
+// consumer that resolves it through a require path — a CommonJS consumer under plain
+// Node, or any app code a TypeScript loader runs as CommonJS — with
+// ERR_PACKAGE_PATH_NOT_EXPORTED (issue #102: @spfn/i18n and @spfn/mcp shipped this way
+// and every fresh `spfn create --mode full` scaffold failed its first run, back when
+// `spfn dev` ran the app's server.config.ts as CommonJS).
 //
 // One mechanical rule: every conditional exports subpath in every published package
-// declares a `require` condition. Pointing it at the same ESM file is fine — Node 20.19+
-// and tsx both handle require(esm) — the condition just has to exist.
+// declares a `require` condition. Pointing it at the same ESM file is fine for plain
+// Node 20.19+, whose require(esm) shares the one instance `import` gets. tsx does not:
+// its CommonJS handler transforms the ESM file into a second instance with its own
+// module state (issue #329) — which is why `spfn dev` now runs the app as ESM, not a
+// reason to drop the condition. The condition just has to exist.
 
 import { readFileSync, readdirSync, existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';

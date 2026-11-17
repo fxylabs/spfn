@@ -8,12 +8,13 @@
  * difference rather than an edit.
  */
 
-import type { HttpMethod } from '@spfn/core/route';
+import type { HttpMethod, RouteCsrf } from '@spfn/core/route';
 
 export interface RouteInfo
 {
     method: HttpMethod;
     path: string;
+    csrf?: RouteCsrf;
 }
 
 export const routeMap: Record<string, RouteInfo> = {

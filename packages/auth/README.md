@@ -36,9 +36,20 @@ per-call `.timeout()`, and the OAuth callback page uses its CSRF helpers.
 
 `hono` is a peer as well, in the range `@spfn/core` depends on (`^4.13.16`): the
 [second-factor policy](#requiring-a-second-factor-secondfactor) reads which route a request matched,
-and only the copy of Hono that built the request can say. If your install resolves a different copy
-for this package, an enrolment-only session is refused on every route, enrolment routes included,
-while every enrolled account is unaffected — `pnpm why hono` should show one version.
+and only the copy of Hono that built the request can say. A process with two copies — the install
+resolves a different `hono` for this package than for `@spfn/core`, or one `hono` is loaded in two
+module formats (an app run as CommonJS beside an ESM server; `@spfn/core` refuses that boot) — is
+refused, not served, where the policy would read a route: with `secondFactor.required: true` —
+the only setting that makes an enrolment-only account — `createAuthLifecycle()`'s `afterRoutes`
+refuses to boot an app built by another copy. Wherever an enrolment-only session's request reaches
+the gate on another copy (a custom `app.ts`, where that hook does not run), it answers **500** with a
+logged error naming the two copies. Without a required second factor nothing reads a route, and the
+app boots as before. `pnpm why hono` should show one version.
+
+> **BREAKING.** This used to answer an enrolment-only session 403 `SECOND_FACTOR_ENROLMENT_REQUIRED`
+> on every route, enrolment routes included — a broken process that read as policy. An app that
+> boots today has one copy and sees no change; one that had two and requires a second factor now
+> fails at boot (or with a 500) and names the cause.
 
 `@simplewebauthn/server` and `@simplewebauthn/browser` come along as dependencies —
 [passkeys](#passkeys-webauthn) need them, and standards conformance is the whole risk there.

@@ -455,6 +455,71 @@ The serverless path (`createServerlessApp`) has no boot to gate — run
 
 ---
 
+## Why does the server refuse "a second copy of @spfn/core"?
+
+Because the process would hold two copies of `@spfn/core`, and each keeps its own module state.
+The app configures one — rate-limit policies, trusted proxy hops, the router — and the server
+runs the other, so the configuration silently does not apply. Two roads lead there:
+
+- **One file, two evaluators.** A TypeScript loader runs a CommonJS file of the app beside a server
+  running as ESM: `tsx` transforms every ESM-only `@spfn/*` file that file `require`s into a
+  second, CommonJS instance. (Plain Node shares one instance between `import` and `require()` of
+  an ES module.) A test that has vitest inline `@spfn/core` while a package it leaves to Node
+  imports it too does the same.
+- **Two installs.** The app and a package it uses resolve two installs of `@spfn/core` — two
+  versions, or one version installed twice — each evaluated once.
+
+Each built entry of this package records, as it is evaluated, where it was loaded from (its own
+file) and what evaluated it — Node's ESM loader, a CommonJS evaluation (tsx's transform), vitest's
+module runner, or a bundler. The same file evaluated again by the same evaluator is the same copy;
+another file — a second install — or the same file by another evaluator is a second copy.
+`startServer()` marks the process as a server before it loads anything of the app, refusing a second
+copy recorded before that; from then on the second copy is refused where it is recorded — the
+`import` or `require` that would bring it in throws, whether that is `server.config`, a custom
+`app.ts`, or a route handler, job or event handler loading a file lazily after the server is up. The
+lazy case is logged once at error level besides failing the request or job that triggered it, and
+the server keeps serving with its one copy:
+
+```
+Refusing a second copy of @spfn/core in this process: @spfn/core/logger
+(`/app/node_modules/@spfn/core/dist/logger/index.js`, 0.3.0-beta.38) was evaluated twice: natively
+as ESM and as CommonJS, required by /app/src/server/legacy.cjs. … /app/src/server/legacy.cjs is
+CommonJS, and under `spfn dev` a CommonJS file that requires @spfn/* gets a copy of its own: import
+@spfn/* from an ES module (.ts, .mts, or .js written with import/export).
+```
+
+The message says what tells the two copies apart, and the remedy follows from it:
+
+- **Two installs** — the message names both files. Make `@spfn/core` resolve to one install for the
+  app and every `@spfn` package (`pnpm why @spfn/core`). One version installed twice is this case
+  too: pnpm installs a package once per resolution of its peers (`drizzle-orm`, `next`, `react`), and
+  a non-deduped `node_modules/@spfn/auth/node_modules/@spfn/core` is a second install.
+- **One file, natively and as CommonJS** — the message names the file the chain of `require()`
+  calls starts at, the one loaded as CommonJS — the app's own, or a dependency's when the chain
+  starts there. A TypeScript file means the `spfn` CLI is older than
+  this `@spfn/core` or the process was not started through `spfn dev`; a `.cjs`, `.cts` or CommonJS
+  `.js` file must import `@spfn/*` from ESM.
+- **One file, by vitest's module runner and natively** — the test loads `@spfn/core` both inlined
+  (`server.deps.inline`) and externally, through a package vitest leaves to Node: inline every
+  package that imports `@spfn/core` together with it, or none. `"type": "module"` changes nothing
+  here.
+
+The shapes `spfn dev` refuses, beside what `spfn build` + `spfn start` does with them, are tabled in
+the [spfn CLI README](../cli/README.md#your-server-source-runs-as-esm-as-it-does-in-production).
+
+`spfn dev` loads app source as ESM from this release on, and `spfn build` always bundled it as
+ESM, so neither trips it. The same entry evaluated again from the same file by the same
+evaluator (a test runner resetting its module registry, HMR) is the same copy, not refused.
+Processes that never start a server — `spfn codegen`, the codegen watcher, `spfn db generate`,
+scripts, a Next.js server bundling the package — record and never refuse.
+
+> **BREAKING.** An app run by an older `spfn` CLI — which ran app source as CommonJS — is refused
+> by this `@spfn/core`; so is a `.cjs`/`.cts`/CommonJS `.js` server file that requires `@spfn/*`
+> under `spfn dev` (it fails in `spfn build` + `spfn start` too). Upgrade `spfn` and
+> `@spfn/core` together, or add `"type": "module"`.
+
+---
+
 ## Which path does the health endpoint answer on?
 
 `/_core/health`. That is the whole answer — `@spfn/core` registers nothing on `/health`.

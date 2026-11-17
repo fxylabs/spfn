@@ -74,10 +74,12 @@ export async function setupPackageJson(
     }
 
     // Add SPFN dev dependencies (fixes Issue #2)
-    // - tsx: TypeScript executor for development (spfn dev)
+    // - tsx: TypeScript executor for development (spfn dev). 4.22 is the first
+    //   that registers with module.registerHooks on Node 26; an older one prints
+    //   DEP0205 (module.register() deprecated) at every spfn dev start there.
     // - tsup: TypeScript bundler for server build with @/ alias support
     packageJson.devDependencies['@types/node'] = '^20.11.0';
-    packageJson.devDependencies['tsx'] = '^4.20.6';
+    packageJson.devDependencies['tsx'] = '^4.22.4';
     packageJson.devDependencies['tsup'] = '^8.5.0';
     packageJson.devDependencies['drizzle-kit'] = '1.0.0-rc.4';
     packageJson.devDependencies['dotenv'] = '^17.2.3';

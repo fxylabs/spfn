@@ -8,7 +8,9 @@ import type { AuthInitOptions } from './rbac';
 import type { SSETokenStore } from '@spfn/core/event/sse';
 import type { PurgeStrategy } from './types';
 import type { AccountDeletionPurgeUser } from './lib/deletion-config';
+import type { Hono } from 'hono';
 import { ensureAdminExists } from './setup';
+import { assertAppFromThisHono } from './lib/hono-copy';
 import { authLogger } from './logger';
 import { assertRoleEmailDomainPolicy, initializeAuth, normalizeStoredEmails } from './services';
 import { initOneTimeTokenManager } from './lib/one-time-token';
@@ -17,7 +19,12 @@ import { configureDeletion } from './lib/deletion-config';
 import { configureDeviceAuth } from './lib/device-auth-config';
 import { configureDeviceLink } from './lib/device-link-config';
 import { assertChannelsConsistent, configureChannels, type AuthChannelsOptions } from './lib/channels-config';
-import { assertSecondFactorPolicy, configureSecondFactor, type SecondFactorOptions } from './lib/second-factor-policy';
+import {
+    assertSecondFactorPolicy,
+    configureSecondFactor,
+    isSecondFactorRequired,
+    type SecondFactorOptions,
+} from './lib/second-factor-policy';
 import { assertOAuthRedirectUris } from './lib/oauth/redirect-uri-check';
 import { assertAppleWebConfig } from './lib/oauth/apple-config-check';
 import { assertAndroidAssetLinks, assertAppleRelayUrls } from './lib/oauth/android-config-check';
@@ -34,6 +41,7 @@ export interface AuthLifecycleConfig
 {
     beforeInfrastructure?: () => Promise<void>;
     afterInfrastructure?: () => Promise<void>;
+    afterRoutes?: (app: Hono) => Promise<void>;
     beforeShutdown?: () => Promise<void>;
 }
 
@@ -43,6 +51,8 @@ export interface AuthLifecycleConfig
  * Provides essential initialization hooks:
  * - `beforeInfrastructure`: Validates environment variables before DB connection
  * - `afterInfrastructure`: Sets up admin accounts and initializes RBAC after DB is ready
+ * - `afterRoutes`: Refuses an app built by another copy of `hono` than this
+ *   package's, when the second-factor policy makes the enrolment gate read routes
  * - `beforeShutdown`: Waits, bounded, for link mail and codes still being sent
  *   inline after a request answered, before the database closes. Queued mail
  *   is not its concern: the enqueue after a commit is an after-commit
@@ -514,6 +524,24 @@ export function createAuthLifecycle(options: AuthLifecycleOptions = {}): AuthLif
             // superadmins it counts are the ones this instance will serve.
             await assertRoleEmailDomainPolicy();
             initOneTimeTokenManager(options.oneTimeToken);
+        },
+
+        /**
+         * Refuses the boot when the server's app was built by another copy of
+         * Hono than this package's and the enrolment gate would read its
+         * routes: the gate could not read a single request's route. It reads
+         * one only for an enrolment-only account, and `secondFactor.required`
+         * is the only thing that makes one (`isEnrolmentOnly`) — without it,
+         * nothing here reads a route and the app boots. Core runs this hook for
+         * the app it configures, not for a custom `app.ts`; there the first
+         * such request is refused instead.
+         */
+        afterRoutes: async (app) =>
+        {
+            if (isSecondFactorRequired())
+            {
+                assertAppFromThisHono(app);
+            }
         },
 
         /**

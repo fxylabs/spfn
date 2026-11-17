@@ -2,8 +2,8 @@
  * @spfn/auth - A second-factor policy (#309)
  *
  * One test per row of the #309 case table — S1–S19, R1–R7, K1–K5 — of the
- * first review round — F1, F2 and P1–P12 — and of the second — G1, G2, RV-A,
- * RV-D and the recovery-code generation — named for its row. The boot
+ * first review round — F1, F2 and P1–P12 — of the second — G1, G2, RV-A,
+ * RV-D and the recovery-code generation — and D2 of #329, named for its row. The boot
  * rows B1–B7 and the classification's own guarantees (F4 among them) are in
  * unit/second-factor-policy.test.ts.
  *
@@ -21,6 +21,7 @@
  * No secret, code or key value here is a real one.
  */
 
+import { createRequire } from 'node:module';
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
 import type { Hono } from 'hono';
 import { and, eq, isNull } from 'drizzle-orm';
@@ -74,6 +75,7 @@ const { disableMfaService, resetSecondFactorService } = await import('@/server/s
 const { NotFoundError } = await import('@spfn/core/errors');
 const { issueOpsTokenService } = await import('@/server/services/ops-token.service');
 const { verifyAccessToken } = await import('@/server/services/oauth2-access-token.service');
+const { createAuthLifecycle } = await import('@/server/lifecycle');
 
 // G1: the route recognition, observed — every call still goes to the real one.
 vi.mock('@/server/lib/enrolment-routes', async (importOriginal) =>
@@ -198,40 +200,21 @@ function registerAppProfile(): void
     });
 }
 
-type ServerMiddleware = { name: string; handler: typeof authenticate.handler };
-
 /**
- * G1: a server middleware ahead of `authenticate` that hands every later one a
- * request whose match result cannot be read — what a second copy of Hono sees,
- * since the result sits under a symbol private to the copy that built it.
+ * D2 (#329): `hono` evaluated a second time, from its CommonJS build — the copy
+ * an app run as CommonJS beside an ESM server built its requests with. Its
+ * requests keep their match result under that copy's own private symbol.
  */
-const hideMatchResult: ServerMiddleware = {
-    name: 'hideMatchResult',
-    handler: async (c, next) =>
-    {
-        const req = c.req;
-        const hidden = new Proxy(req, {
-            get: (target, key) =>
-            {
-                const value = typeof key === 'symbol' ? undefined : Reflect.get(target, key);
-
-                return typeof value === 'function' ? value.bind(target) : value;
-            },
-        });
-        Object.defineProperty(c, 'req', { value: hidden });
-        await next();
-    },
-};
+const { Hono: OtherHonoCopy } = createRequire(import.meta.url)('hono') as typeof import('hono');
 
 /**
  * The app as core assembles it: the app's own routes registered before the
  * package routers, each behind the server-level middlewares.
  */
-function mountApp(appRoutes = appRouter(), leading: ServerMiddleware[] = []): Hono
+function mountApp(appRoutes = appRouter(), HonoCopy: typeof HonoApp = HonoApp): Hono
 {
-    const app = new HonoApp();
+    const app = new HonoCopy();
     const serverMiddlewares = [
-        ...leading,
         { name: authenticate.name, handler: authenticate.handler },
         {
             name: 'actor',
@@ -1388,17 +1371,38 @@ describe.skipIf(!dbAvailable)('second-factor policy (#309 case table)', () =>
         expect(isEnrolmentRoute).toHaveBeenCalled();
     });
 
-    it('G1: a match result that cannot be read is no enrolment route — 403 for an enrolment-only session, the enrolled admitted, never a 500', async () =>
+    it('D2: a request built by another copy of hono reaching the enrolment gate is a 500 naming the two copies, not 403 SECOND_FACTOR_ENROLMENT_REQUIRED', async () =>
     {
-        const unreadable = mountApp(appRouter(), [hideMatchResult]);
-        const { session } = await passkeyEnrolledAccount();
+        usePolicy();
+        const otherCopy = mountApp(appRouter(), OtherHonoCopy);
         const enrolling = await signInOther();
-        const get = (path: string, who: Session) => requestWith(unreadable, 'GET', path, { Authorization: who.authorization });
 
-        await expectRefused(await get('/_auth/session', enrolling), 403, 'SECOND_FACTOR_ENROLMENT_REQUIRED', 'enrolment-only');
-        expect((await get('/_auth/session', session)).status).toBe(200);
-        expect((await get('/app/whoami', session)).status).toBe(200);
-        expect(handled).toEqual(['whoami']);
+        const response = await requestWith(otherCopy, 'GET', '/_auth/session', { Authorization: enrolling.authorization });
+        const text = await response.text();
+
+        expect(response.status, text).toBe(500);
+        expect(text).toContain('two copies of hono are loaded in this process');
+        expect(text).not.toContain('SECOND_FACTOR_ENROLMENT_REQUIRED');
+    });
+
+    it('D2: afterRoutes refuses the boot of an app built by another copy of hono, and passes this package\'s', async () =>
+    {
+        const { afterRoutes } = createAuthLifecycle({ channels: { deviceCode: false, deviceLink: false }, secondFactor: TABLE_POLICY });
+
+        await expect(afterRoutes!(new OtherHonoCopy() as unknown as Hono)).rejects.toThrow(/^Refusing to start: .*two copies of hono are loaded in this process/);
+        await expect(afterRoutes!(new HonoApp())).resolves.toBeUndefined();
+    });
+
+    it('D2: afterRoutes boots an app built by another copy of hono while no second factor is required — nothing reads its routes', async () =>
+    {
+        const channels = { deviceCode: false, deviceLink: false };
+        const withoutPolicy = createAuthLifecycle({ channels });
+
+        await expect(withoutPolicy.afterRoutes!(new OtherHonoCopy() as unknown as Hono)).resolves.toBeUndefined();
+
+        const notRequired = createAuthLifecycle({ channels, secondFactor: { required: false, methods: ['passkey'] } });
+
+        await expect(notRequired.afterRoutes!(new OtherHonoCopy() as unknown as Hono)).resolves.toBeUndefined();
     });
 
     it('G2: an unmarked passkey is the only credential — enrolment is 403 STEP_UP_REQUIRED; after resetSecondFactorService a passkey registers on first use, marked, and the old one no longer signs in', async () =>

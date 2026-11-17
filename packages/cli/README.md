@@ -157,6 +157,83 @@ its content actually changed.
 Pending migrations stop the boot — see [Database](#spfn-db) for what the refusal looks
 like and how to override it.
 
+#### Your server source runs as ESM, as it does in production
+
+`spfn build` bundles `src/server` as ESM with esbuild whatever your `package.json` says, and
+esbuild decides each `.js` file by its own syntax. `spfn dev` gives your source the same formats:
+it registers a Node module hook (`module.registerHooks`) in the server process and in the codegen
+watcher that states the format of every file of yours that `tsx` would otherwise guess from
+`package.json`:
+
+- `.ts` and `.tsx` run as ESM, with or without `"type": "module"`, also when imported with a query
+  of your own (`./route.ts?v=2`), which reaches the module as you wrote it — one evaluation per
+  distinct query, as Node does.
+- `.js` and `.jsx` in a package with no `"type"` are decided by the file's own syntax, as Node's
+  detection decides it: static `import`/`export`, `import.meta` or top-level `await` make it ESM,
+  anything else CommonJS. The parser is esbuild's, the one `spfn build` bundles the file with.
+- A stated `"type"`, and a stated extension — `.mjs`, `.cjs`, `.mts`, `.cts` — is yours and is left
+  alone.
+
+A file is yours unless it is a dependency: a `node_modules` directory appears in its real path
+below the longest common ancestor of that path and the directory `spfn dev` was started in. So a
+workspace package beside the app, consumed as source, is yours; what is installed under it is
+not; and a `node_modules` directory above the app (a project checked out under one) does not
+count. A workspace package that pnpm materialises under `node_modules/.pnpm` (`injected: true`)
+is a dependency, and its TypeScript is not transformed here — production cannot strip its types
+either.
+
+Before this, a project without `"type": "module"` — every `spfn create` scaffold — ran its
+source as CommonJS under `tsx`, and `tsx` loaded a second, CommonJS copy of every `@spfn/*`
+package the app imported beside the server's ESM one. The app configured one copy and the
+server ran the other: rate-limit `policies` and `.trustedProxyHops()` were ignored by
+`@spfn/auth`'s routes, and with `secondFactor.required` an account without a factor got 403
+`SECOND_FACTOR_ENROLMENT_REQUIRED` on the enrolment routes too. In dev only (issue #329).
+`@spfn/core` now refuses a second copy of itself, naming the file that loaded it
+([why](../core/README.md#why-does-the-server-refuse-a-second-copy-of-spfncore)).
+
+> **BREAKING (dev only).** CommonJS shapes in server source no longer run under `spfn dev`.
+> What was observed, in a scaffolded app without `"type": "module"`, against `spfn build` +
+> `spfn start` of the same file:
+>
+> | In `src/server` | `spfn dev` now | `spfn build` + `spfn start` |
+> |---|---|---|
+> | `require('node:path')` in a `.ts` file | `ReferenceError: require is not defined` | `Error: Dynamic require of "path" is not supported` |
+> | `__dirname`, `__filename` | `ReferenceError: … is not defined` | `ReferenceError: … is not defined` |
+> | a `.cts`, `.cjs` or CommonJS `.js` file that `require`s `@spfn/*` | boot refused: a second copy of `@spfn/core`, naming the file | `Error: Dynamic require of "@spfn/core/logger" is not supported` |
+> | a file written with `module.exports = { value }`, default import | works | works |
+> | the same file as `.js`, `import { value } from …` | boot refused: `does not provide an export named 'value'` | **works** |
+> | the same file as `.cjs`, `import { value } from …` | boot refused: `does not provide an export named 'value'` | **works** |
+> | top-level `await` in a server file | works | **build fails**: `Top-level await is not available in the configured target environment ("es2020")` (in a file the router reaches, codegen fails first: `await is only valid in async functions…`) |
+>
+> So the named import of a `module.exports` file — by its contents or by its `.cjs` extension —
+> is what worked in production and now fails in dev: write that file as ESM
+> (`export const value = …`). A CommonJS file that requires `@spfn/*` already failed in
+> production; under `tsx` it cannot share `@spfn/*` with the server (`tsx`'s CommonJS handler
+> transforms the ESM-only packages into a copy of their own), so it is refused rather than run
+> split — import `@spfn/*` from an ES module. Top-level `await` is the reverse: it runs in dev and
+> the production build rejects it. Use `import.meta.url` / `import.meta.dirname` and `import` for
+> the rest.
+>
+> Not a break — dev now matches production: a named import from a CommonJS npm package whose
+> exports Node cannot analyse (`import { red } from 'chalk'` v4, `{ sign } from 'jsonwebtoken'`,
+> `{ enable } from 'debug'`) fails under `spfn dev` (`does not provide an export named …`) as it
+> already failed under `spfn build` + `spfn start` (`Named export … not found. The requested
+> module … is a CommonJS module`). Use the default import (`import jwt from 'jsonwebtoken'`).
+>
+> **Upgrade `spfn` and `@spfn/core` together.** An older `spfn` CLI runs the app the old way,
+> and the new `@spfn/core` refuses that boot, naming the TypeScript file loaded as CommonJS and
+> saying to upgrade the CLI together with `@spfn/core` and start the app with `spfn dev`.
+
+The hook is registered with `module.registerHooks`, which every Node line the packages support has.
+`tsx` before 4.22 registers its own hooks with the deprecated `module.register()` and prints
+`DEP0205` on Node 26; a scaffold depends on `tsx` `^4.22.4`.
+
+`spfn codegen` and `spfn db generate` still load your source the old way (codegen through
+`jiti`, as CommonJS, beside an ESM `@spfn/core`); they read route and schema definitions,
+never the state a second copy splits, and do not refuse. The codegen watcher `spfn dev`
+starts loads your router the same way — the hook is registered there, but `jiti` loads the
+router through its own `require`, which no Node module hook sees.
+
 ### `spfn build`
 
 Runs codegen, builds Next.js (via the project's `build` script), and compiles
