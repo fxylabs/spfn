@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { Hono } from 'hono';
 import { registerRoutes } from '@spfn/core/route';
+import type { RouteDef } from '@spfn/core/route';
 import { createMcpRoute } from '../server';
 import type { McpRouteConfig } from '../index';
 
@@ -230,4 +231,251 @@ describe('createMcpRoute', () =>
         expect(response.status).toBe(403);
         expect(validated).toBe(false);
     });
+});
+
+describe('createMcpRoute with a lazy appUrl', () =>
+{
+    const METADATA_PATH = '/.well-known/oauth-protected-resource';
+
+    function lazyConfig(
+        appUrl: () => string,
+        validateToken: McpRouteConfig<TestAuth, { userId: number }>['validateToken'],
+    )
+    {
+        return {
+            appUrl,
+            serverInfo: { name: 'test-server', version: '1.0.0' },
+            validateToken,
+            resolveContext: async (auth: TestAuth) => ({ userId: auth.userId }),
+            listTools: () => [],
+        };
+    }
+
+    function routeTable(router: ReturnType<typeof createMcpRoute>): Record<string, string>
+    {
+        return Object.fromEntries(Object.entries(router.routes).map(
+            ([name, def]) => [name, `${(def as RouteDef).method} ${(def as RouteDef).path}`],
+        ));
+    }
+
+    it('reads the origin at first use, not when the router is created', async () =>
+    {
+        let origin: string | undefined;
+        let calls = 0;
+        const resources: string[] = [];
+        const router = createMcpRoute(lazyConfig(
+            () =>
+            {
+                calls++;
+                if (!origin)
+                {
+                    throw new Error('SPFN_APP_URL is not set');
+                }
+
+                return origin;
+            },
+            async (_token, resource) =>
+            {
+                resources.push(resource);
+
+                return null;
+            },
+        ));
+        const reference = createMcpRoute({
+            ...lazyConfig(() => '', async () => null),
+            appUrl: 'https://example.com',
+        });
+        expect(routeTable(router)).toEqual(routeTable(reference));
+        expect(calls).toBe(0);
+
+        const errors: string[] = [];
+        const app = new Hono();
+        app.onError((error, c) =>
+        {
+            errors.push(error.message);
+
+            return c.text('Internal Server Error', 500);
+        });
+        registerRoutes(app, router);
+
+        const unset = await app.request('/mcp', { method: 'POST' });
+        expect(unset.status).toBe(500);
+        expect(unset.headers.get('www-authenticate')).toBeNull();
+        expect((await app.request(METADATA_PATH)).status).toBe(500);
+        expect(errors).toEqual(['SPFN_APP_URL is not set', 'SPFN_APP_URL is not set']);
+
+        origin = 'https://app.example/ignored/path';
+        calls = 0;
+        const metadata = await (await app.request(`${METADATA_PATH}/mcp`)).json();
+        expect(metadata.resource).toBe('https://app.example/mcp');
+        expect(metadata.authorization_servers).toEqual(['https://app.example']);
+
+        const challenged = await app.request('/mcp', {
+            method: 'POST',
+            headers: { authorization: 'Bearer some-token' },
+        });
+        expect(challenged.status).toBe(401);
+        expect(challenged.headers.get('www-authenticate')).toBe(
+            'Bearer error="invalid_token", '
+            + `resource_metadata="https://app.example${METADATA_PATH}/mcp"`,
+        );
+        expect(resources).toEqual(['https://app.example/mcp']);
+
+        await app.request(METADATA_PATH);
+        await app.request('/mcp', { method: 'POST' });
+        expect(calls).toBe(1);
+    });
+
+    it('fails a request clearly when appUrl returns something that is not an http(s) URL', async () =>
+    {
+        const errors: string[] = [];
+        const app = new Hono();
+        app.onError((error, c) =>
+        {
+            errors.push(error.message);
+
+            return c.text('Internal Server Error', 500);
+        });
+        registerRoutes(app, createMcpRoute(lazyConfig(() => 'app.example', async () => null)));
+
+        expect((await app.request('/mcp', { method: 'POST' })).status).toBe(500);
+        expect(errors).toEqual([
+            '@spfn/mcp: `appUrl` must be an absolute http(s) URL; got "app.example".',
+        ]);
+    });
+
+    it('does not remember a non-http(s) URL from appUrl, and uses the next good one', async () =>
+    {
+        const returns = ['ftp://x', 'file:///x', 'https://app.example'];
+        const errors: string[] = [];
+        const resources: string[] = [];
+        const app = new Hono();
+        app.onError((error, c) =>
+        {
+            errors.push(error.message);
+
+            return c.text('Internal Server Error', 500);
+        });
+        registerRoutes(app, createMcpRoute({
+            ...lazyConfig(
+                () => returns.shift()!,
+                async (_token, resource) =>
+                {
+                    resources.push(resource);
+
+                    return null;
+                },
+            ),
+            resourceMetadataUrl: 'https://meta.example/doc',
+        }));
+        const post = () => app.request('/mcp', {
+            method: 'POST',
+            headers: { authorization: 'Bearer some-token' },
+        });
+
+        expect((await post()).status).toBe(500);
+        expect((await post()).status).toBe(500);
+        expect(errors).toEqual([
+            '@spfn/mcp: `appUrl` must be an absolute http(s) URL; got "ftp://x".',
+            '@spfn/mcp: `appUrl` must be an absolute http(s) URL; got "file:///x".',
+        ]);
+        expect((await post()).status).toBe(401);
+        expect(resources).toEqual(['https://app.example/mcp']);
+    });
+
+    it('serves a bare-origin resource with no path-aware metadata route', async () =>
+    {
+        const router = createMcpRoute({
+            ...lazyConfig(() => 'https://app.example/x', async () => null),
+            resourcePath: '/',
+        });
+        const app = new Hono();
+        registerRoutes(app, router);
+
+        expect(Object.keys(router.routes)).not.toContain('mcpResourceMetadataForPath');
+        expect((await (await app.request(METADATA_PATH)).json()).resource).toBe('https://app.example');
+    });
+
+    it('puts resourcePath on the origin of a string appUrl', async () =>
+    {
+        const router = createMcpRoute({
+            ...lazyConfig(() => '', async () => null),
+            appUrl: 'https://app.example/base',
+            resourcePath: '/tools',
+        });
+        const app = new Hono();
+        registerRoutes(app, router);
+
+        const metadata = await (await app.request(`${METADATA_PATH}/tools`)).json();
+        expect(metadata.resource).toBe('https://app.example/tools');
+    });
+
+    it('refuses resource beside a lazy appUrl or beside resourcePath', () =>
+    {
+        const base = lazyConfig(() => 'https://app.example', async () => null);
+
+        // @ts-expect-error a lazy appUrl takes resourcePath, not resource
+        expect(() => createMcpRoute({
+            ...base,
+            resource: 'https://app.example/mcp',
+        })).toThrow('`resource` is not accepted with a lazy `appUrl`');
+        // @ts-expect-error resource and resourcePath are two sources of one fact
+        expect(() => createMcpRoute({
+            ...base,
+            appUrl: 'https://app.example',
+            resource: 'https://app.example/mcp',
+            resourcePath: '/x',
+        })).toThrow('`resource` and `resourcePath` are two sources of one fact');
+        expect(() => createMcpRoute({ ...base, resourcePath: 'mcp?x' }))
+            .toThrow('`resourcePath` must start with "/"');
+    });
+
+    it('refuses an appUrl that is neither a string nor a function', () =>
+    {
+        expect(() => createMcpRoute({
+            ...lazyConfig(() => '', async () => null),
+            appUrl: undefined as unknown as string,
+        })).toThrow(
+            '@spfn/mcp: `appUrl` was undefined; a string `appUrl` is read when the router is '
+            + 'created. For an origin known only at run time, such as one read from the '
+            + 'environment, give a function that returns it.',
+        );
+    });
+
+    it('refuses a resourcePath the URL parser or the router would read as another path', () =>
+    {
+        const base = lazyConfig(() => 'https://app.example', async () => null);
+
+        for (const given of [
+            '/a/../mcp', '/a b', '/a%2e%2e/mcp', '/a\\b',
+            '/:id', '/a*', '/a{b}', '/.', '/mcp/', '/a//b',
+        ])
+        {
+            expect(() => createMcpRoute({ ...base, resourcePath: given })).toThrow(
+                `joined by single "/" with no trailing "/"; got ${JSON.stringify(given)}.`,
+            );
+        }
+    });
+
+    it.each(['/mcp', '/api/mcp', '/v1.2/mcp_x-y~z'])(
+        'publishes resourcePath %s as the resource, the metadata route and the challenge URL',
+        async (resourcePath) =>
+        {
+            const router = createMcpRoute({
+                ...lazyConfig(() => 'https://app.example', async () => null),
+                resourcePath,
+            });
+            const app = new Hono();
+            registerRoutes(app, router);
+
+            const metadataUrl = `https://app.example${METADATA_PATH}${resourcePath}`;
+            expect(routeTable(router).mcpResourceMetadataForPath)
+                .toBe(`GET ${METADATA_PATH}${resourcePath}`);
+            const metadata = await (await app.request(metadataUrl)).json();
+            expect(metadata.resource).toBe(`https://app.example${resourcePath}`);
+            const challenged = await app.request('/mcp', { method: 'POST' });
+            expect(challenged.headers.get('www-authenticate'))
+                .toBe(`Bearer resource_metadata="${metadataUrl}"`);
+        },
+    );
 });

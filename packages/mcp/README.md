@@ -181,6 +181,57 @@ export const appRouter = defineRouter({
 }).packages([mcpRouter]);
 ```
 
+### Reading the origin at request time
+
+The router is created when `router.ts` is imported, and `spfn codegen run` imports it to read
+its routes — in a checkout that may have no env file, and refusing a route set that changes
+with the environment. An origin read from the environment at module scope therefore breaks
+code generation. Give `appUrl` as a function instead: it is called at first use — the first
+`/mcp` request or the first answer of a metadata route — never when the router is created.
+
+```ts
+import { env } from '@spfn/core/config';
+
+function appUrl(): string
+{
+    if (!env.SPFN_APP_URL)
+    {
+        throw new Error('SPFN_APP_URL is not set');
+    }
+
+    return env.SPFN_APP_URL;
+}
+
+export const mcpRouter = createMcpRoute<Auth, Context>({
+    appUrl,
+    resourcePath: '/mcp',
+    // validateToken, resolveContext, listTools … as above
+});
+```
+
+- Only the **origin** of what the function returns is used. The resource is
+  `<origin><resourcePath>`; a path in the returned URL is ignored.
+- `resourcePath` defaults to `/mcp`. `''` or `/` makes the bare origin the resource, which has
+  no path-aware metadata route. Any other value must be one or more `/`-led segments of URL
+  unreserved characters (`A-Z a-z 0-9 - . _ ~`), none of them `.` or `..`, with no trailing
+  `/` — the one form the URL parser and the router both read as the same literal path, so
+  anything else (`/a/../mcp`, `/a%2e`, `/:id`, `/a*`) is refused when the router is created.
+  The path names a route, so it is fixed in code and the route set is the same whatever the
+  environment holds.
+- `resource` is not accepted beside a function `appUrl` — its path cannot be known without
+  calling it — and not beside `resourcePath` either; both are refused by the config type and
+  again at run time.
+- The resolved resource, the metadata document and the default `authorization_servers` and
+  `resourceMetadataUrl` are derived once, on the first call that succeeds. A call that throws
+  is not remembered: the request that hit it is answered by the application's error handler
+  (a `500` naming the thrown message in the log, not a `401` challenge pointing at a made-up
+  URL), and the next request calls again. A function that returns something other than an
+  absolute `http`/`https` URL fails the same way.
+
+A string `appUrl` behaves as it always has: `resource` (a full URL or a function of `appUrl`)
+or the default `<appUrl without trailing slash>/mcp`, which keeps a path inside `appUrl`.
+`resourcePath` is accepted there too and, as with a function, is put on the origin of `appUrl`.
+
 `verifyAccessToken` returns `userId` as a **string** — it is the token's subject claim,
 not your user table's column type — so `Auth` declares `userId: string` and
 `resolveContext` converts it at the one place the application's own numeric id is needed.
@@ -219,8 +270,9 @@ at two paths:
 
 - `GET /.well-known/oauth-protected-resource`
 - `GET /.well-known/oauth-protected-resource/mcp` — the path-aware form, whose suffix is
-  the path of the resolved `resource`. A `resource` of `https://app.example.com/tools` is
-  published at `/.well-known/oauth-protected-resource/tools` instead.
+  the path of the resolved `resource`. A `resource` of `https://app.example.com/tools` (or a
+  `resourcePath` of `/tools`) is published at `/.well-known/oauth-protected-resource/tools`
+  instead.
 
 Both answer the same bytes:
 

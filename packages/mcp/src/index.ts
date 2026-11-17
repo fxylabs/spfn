@@ -151,9 +151,40 @@ export type McpDispatcher<Auth, Ctx> = {
     };
 };
 
-type McpHttpTransportConfig<Auth extends McpAuth, Ctx> = {
-    appUrl: string;
-    resource?: string | ((appUrl: string) => string);
+/**
+ * Where the protected resource is: an origin, and a path fixed in code.
+ *
+ * The path names a route, so it is needed when the router is created; the origin differs
+ * per deployment and is needed only when a request is answered. `appUrl` as a function is
+ * called at first use — the first `/mcp` request or the first answer of a metadata route —
+ * never when the router is created, so a route module can read it from the environment
+ * without making the router depend on the environment. Only the origin of what it returns
+ * is used: the resource is `<origin><resourcePath>`, and `resource` is not accepted beside
+ * it because its path cannot be known without calling it.
+ *
+ * With `appUrl` as a string, `resource` (a full URL, or a function of `appUrl`) and
+ * `resourcePath` are two sources of one fact: give one or neither.
+ */
+export type McpResourceLocation =
+    | {
+        appUrl: string;
+        /** Defaults to `<appUrl without trailing slash>/mcp`. */
+        resource?: string | ((appUrl: string) => string);
+        resourcePath?: never;
+    }
+    | {
+        appUrl: string | (() => string);
+        resource?: never;
+        /**
+         * The resource's path on the origin of `appUrl`; defaults to `/mcp`. `''` or `/`
+         * makes the bare origin the resource, which has no path-aware metadata route. Any
+         * other value must be one or more `/`-led segments of URL unreserved characters
+         * (`A-Z a-z 0-9 - . _ ~`), none of them `.` or `..`, with no trailing `/`.
+         */
+        resourcePath?: string;
+    };
+
+type McpHttpTransportConfig<Auth extends McpAuth, Ctx> = McpResourceLocation & {
     resourceMetadataUrl?: string;
     authorizationServers?: string[];
     scopesSupported?: string[];

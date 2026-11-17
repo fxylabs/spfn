@@ -28,12 +28,22 @@ type RuntimeState<Auth, Ctx> = {
 
 const RUNTIME_STATE_KEY = 'spfn.runtime';
 const RESOURCE_METADATA_PATH = '/.well-known/oauth-protected-resource';
+const DEFAULT_RESOURCE_PATH = '/mcp';
+const LITERAL_RESOURCE_PATH = /^(?:\/(?!\.{1,2}(?:\/|$))[A-Za-z0-9\-._~]+)+$/;
 
 type ResourceMetadata = {
     resource: string;
     authorization_servers: string[];
     scopes_supported?: string[];
     bearer_methods_supported: string[];
+};
+
+type ResolvedResource = {
+    resource: string;
+    /** The path the path-aware metadata route is named by; empty for a bare origin. */
+    path: string;
+    metadata: string;
+    metadataUrl: string;
 };
 
 export function createMcpRoute<Auth extends McpAuth, Ctx>(
@@ -50,7 +60,9 @@ export function createMcpHttpRoute<Auth extends McpAuth, Ctx>(
     config: McpHttpRouteConfig<Auth, Ctx>,
 ): Router<Record<string, RouteDef>>
 {
-    const resource = resolveResource(config);
+    refuseInvalidLocation(config);
+    const path = acceptedResourcePath(config);
+    const resolve = resourceResolver(config, path);
     const handler = createMcpHandler(
         request => createDispatcherServer(
             config.dispatcher,
@@ -68,7 +80,7 @@ export function createMcpHttpRoute<Auth extends McpAuth, Ctx>(
     const handle = (c: RouteBuilderContext) => handleRequest(
         config,
         handler.fetch,
-        resource,
+        resolve,
         c,
     );
 
@@ -76,8 +88,162 @@ export function createMcpHttpRoute<Auth extends McpAuth, Ctx>(
         mcpPost: route.post('/mcp').skip('*').handler(handle),
         mcpGet: route.get('/mcp').skip('*').handler(handle),
         mcpDelete: route.delete('/mcp').skip('*').handler(handle),
-        ...metadataRoutes(config, resource),
+        ...metadataRoutes(path ?? resolve().path, resolve),
     });
+}
+
+/**
+ * Refuse what the config type refuses, for a caller the type did not reach.
+ */
+function refuseInvalidLocation<Auth extends McpAuth, Ctx>(config: McpHttpRouteConfig<Auth, Ctx>): void
+{
+    const appUrl: unknown = config.appUrl;
+    if (typeof appUrl !== 'string' && typeof appUrl !== 'function')
+    {
+        throw new Error(
+            `@spfn/mcp: \`appUrl\` was ${appUrl === null ? 'null' : typeof appUrl}; a string `
+            + '`appUrl` is read when the router is created. For an origin known only at run '
+            + 'time, such as one read from the environment, give a function that returns it.',
+        );
+    }
+    if (config.resource !== undefined && typeof config.appUrl === 'function')
+    {
+        throw new Error(
+            '@spfn/mcp: `resource` is not accepted with a lazy `appUrl`: its path cannot be '
+            + 'known without calling `appUrl`. Give `resourcePath` instead.',
+        );
+    }
+    if (config.resource !== undefined && config.resourcePath !== undefined)
+    {
+        throw new Error(
+            '@spfn/mcp: `resource` and `resourcePath` are two sources of one fact; give one.',
+        );
+    }
+}
+
+/**
+ * The resource's path, fixed when the router is created, or `undefined` when it is taken
+ * from `resource` or the default as it always was.
+ *
+ * The one value the resource, the path-aware metadata route and the challenge URL are all
+ * built from, so it is accepted only in a form the URL parser and the router both read as
+ * the same literal path: one or more segments of URL unreserved characters
+ * (`A-Z a-z 0-9 - . _ ~`), none of them `.` or `..`, each led by a single `/`. Anything
+ * else — an escape, a query, a trailing `/`, or router syntax such as `:id`, `*` or `{…}` —
+ * could publish one path and route another. `''` and `/` both name the bare origin,
+ * returned as `''`.
+ */
+function acceptedResourcePath<Auth extends McpAuth, Ctx>(
+    config: McpHttpRouteConfig<Auth, Ctx>,
+): string | undefined
+{
+    const given: unknown = config.resourcePath;
+    if (given === undefined)
+    {
+        return typeof config.appUrl === 'function' ? DEFAULT_RESOURCE_PATH : undefined;
+    }
+    if (given === '' || given === '/')
+    {
+        return '';
+    }
+
+    if (typeof given !== 'string' || !LITERAL_RESOURCE_PATH.test(given))
+    {
+        throw new Error(
+            '@spfn/mcp: `resourcePath` must start with "/" and be segments of URL unreserved '
+            + 'characters (A-Z a-z 0-9 - . _ ~), none "." or "..", joined by single "/" with no '
+            + `trailing "/"; got ${JSON.stringify(given)}.`,
+        );
+    }
+
+    return given;
+}
+
+/**
+ * Everything derived from the resource, built on first use and kept once it succeeds.
+ *
+ * A string `appUrl` is resolved here, when the router is created, as it always was. A
+ * lazy one is called on the first request that needs it; a call that throws is not
+ * remembered, so the request that hit it fails with that error and the next one calls
+ * again.
+ */
+function resourceResolver<Auth extends McpAuth, Ctx>(
+    config: McpHttpRouteConfig<Auth, Ctx>,
+    path: string | undefined,
+): () => ResolvedResource
+{
+    const appUrl = config.appUrl;
+    if (typeof appUrl === 'string')
+    {
+        const resolved = resolveResource(config, path, appUrl);
+
+        return () => resolved;
+    }
+
+    let resolved: ResolvedResource | undefined;
+
+    return () => resolved ??= resolveResource(config, path, appUrl());
+}
+
+/**
+ * With an accepted `path`, the resource is that path on the origin of `appUrl`; without
+ * one, `resource` or the default is taken as it always was, and the path the metadata is
+ * served under is read from it.
+ */
+function resolveResource<Auth extends McpAuth, Ctx>(
+    config: McpHttpRouteConfig<Auth, Ctx>,
+    path: string | undefined,
+    appUrl: string,
+): ResolvedResource
+{
+    const location = path === undefined
+        ? configuredResource(config, appUrl)
+        : resourceOnOrigin(appOrigin(appUrl), path);
+
+    return {
+        resource: location.resource,
+        path: location.path,
+        metadata: JSON.stringify(resourceMetadata(config, location.resource, appUrl)),
+        metadataUrl: config.resourceMetadataUrl
+            ?? `${location.origin}${RESOURCE_METADATA_PATH}${location.path}`,
+    };
+}
+
+type ResourceLocation = {
+    resource: string;
+    origin: string;
+    path: string;
+};
+
+function resourceOnOrigin(origin: string, path: string): ResourceLocation
+{
+    return { resource: `${origin}${path}`, origin, path };
+}
+
+function configuredResource<Auth extends McpAuth, Ctx>(
+    config: McpHttpRouteConfig<Auth, Ctx>,
+    appUrl: string,
+): ResourceLocation
+{
+    const resource = (typeof config.resource === 'function'
+        ? config.resource(appUrl)
+        : config.resource) ?? `${appUrl.replace(/\/$/, '')}${DEFAULT_RESOURCE_PATH}`;
+    const url = new URL(resource);
+
+    return { resource, origin: url.origin, path: url.pathname.replace(/\/$/, '') };
+}
+
+function appOrigin(appUrl: unknown): string
+{
+    const url = typeof appUrl === 'string' && URL.canParse(appUrl) ? new URL(appUrl) : undefined;
+    if (url?.protocol !== 'http:' && url?.protocol !== 'https:')
+    {
+        throw new Error(
+            `@spfn/mcp: \`appUrl\` must be an absolute http(s) URL; got ${JSON.stringify(appUrl)}.`,
+        );
+    }
+
+    return url.origin;
 }
 
 /**
@@ -86,16 +252,14 @@ export function createMcpHttpRoute<Auth extends McpAuth, Ctx>(
  * Served at the root path and, when the resource has a path of its own, at the
  * path-aware alias the 401 challenge points a client to. Both answer the same bytes.
  */
-function metadataRoutes<Auth extends McpAuth, Ctx>(
-    config: McpHttpRouteConfig<Auth, Ctx>,
-    resource: string,
+function metadataRoutes(
+    suffix: string,
+    resolve: () => ResolvedResource,
 ): Record<string, RouteDef>
 {
-    const body = JSON.stringify(resourceMetadata(config, resource));
-    const respond = () => new Response(body, {
+    const respond = () => new Response(resolve().metadata, {
         headers: { 'content-type': 'application/json' },
     });
-    const suffix = resourcePath(resource);
     const routes: Record<string, RouteDef> = {
         mcpResourceMetadata: route.get(RESOURCE_METADATA_PATH).skip('*').handler(respond),
     };
@@ -114,40 +278,20 @@ function metadataRoutes<Auth extends McpAuth, Ctx>(
 function resourceMetadata<Auth extends McpAuth, Ctx>(
     config: McpHttpRouteConfig<Auth, Ctx>,
     resource: string,
+    appUrl: string,
 ): ResourceMetadata
 {
     return {
         resource,
-        authorization_servers: config.authorizationServers ?? [new URL(config.appUrl).origin],
+        authorization_servers: config.authorizationServers ?? [new URL(appUrl).origin],
         ...(config.scopesSupported ? { scopes_supported: config.scopesSupported } : {}),
         bearer_methods_supported: ['header'],
     };
 }
-
-/**
- * The resource's own path, with no trailing slash.
- *
- * Empty when the resource is a bare origin, which is the one case with no path-aware
- * metadata document to serve.
- */
-function resourcePath(resource: string): string
-{
-    return new URL(resource).pathname.replace(/\/$/, '');
-}
-
-function resolveResource<Auth extends McpAuth, Ctx>(config: McpHttpRouteConfig<Auth, Ctx>): string
-{
-    const resource = typeof config.resource === 'function'
-        ? config.resource(config.appUrl)
-        : config.resource;
-
-    return resource ?? `${config.appUrl.replace(/\/$/, '')}/mcp`;
-}
-
 async function handleRequest<Auth extends McpAuth, Ctx>(
     config: McpHttpRouteConfig<Auth, Ctx>,
     fetch: ReturnType<typeof createMcpHandler>['fetch'],
-    resource: string,
+    resolve: () => ResolvedResource,
     c: RouteBuilderContext,
 ): Promise<Response>
 {
@@ -158,10 +302,13 @@ async function handleRequest<Auth extends McpAuth, Ctx>(
         return rejected;
     }
 
+    // A lazy appUrl that throws is answered like any other server error, through the
+    // application's error handler: a challenge would point the client at a made-up URL.
+    const { resource, metadataUrl } = resolve();
     const bearer = bearerToken(request.headers.get('authorization'));
     if (!bearer)
     {
-        return challenge(config, resource, false);
+        return challenge(metadataUrl, false);
     }
 
     // A throw is not a refusal: it propagates to the application's error
@@ -171,7 +318,7 @@ async function handleRequest<Auth extends McpAuth, Ctx>(
     const auth = await config.validateToken(bearer, resource);
     if (!auth)
     {
-        return challenge(config, resource, true);
+        return challenge(metadataUrl, true);
     }
 
     const requestId = randomUUID();
@@ -223,13 +370,8 @@ function bearerToken(header: string | null): string | undefined
  * `rejectedBearer` distinguishes a token the client should replace from an absent one it
  * should go and obtain: RFC 6750 §3 marks the former with `error="invalid_token"`.
  */
-function challenge<Auth extends McpAuth, Ctx>(
-    config: McpHttpRouteConfig<Auth, Ctx>,
-    resource: string,
-    rejectedBearer: boolean,
-): Response
+function challenge(metadataUrl: string, rejectedBearer: boolean): Response
 {
-    const metadataUrl = config.resourceMetadataUrl ?? defaultMetadataUrl(resource);
     const error = rejectedBearer ? 'error="invalid_token", ' : '';
 
     return Response.json(
@@ -241,11 +383,6 @@ function challenge<Auth extends McpAuth, Ctx>(
             },
         },
     );
-}
-
-function defaultMetadataUrl(resource: string): string
-{
-    return `${new URL(resource).origin}${RESOURCE_METADATA_PATH}${resourcePath(resource)}`;
 }
 
 function toAuthInfo<Auth, Ctx>(
@@ -307,6 +444,7 @@ export type {
     McpProtocolEra,
     McpRequestInfo,
     McpResourceDefinition,
+    McpResourceLocation,
     McpResourceResult,
     McpRouteConfig,
     McpServerInfo,

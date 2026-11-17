@@ -813,6 +813,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The example migration folders use the drizzle-kit 1.0 journal layout, so `spfn db migrate`
   applies them again (#261).
 
+#### @spfn/mcp
+
+- **The app origin is read at first use, not when the router is created** (#337), so an app
+  that mounts the MCP route passes `spfn codegen run` without an env file. `createMcpRoute`
+  and `createMcpHttpRoute` accept `appUrl` as a function, called on the first `/mcp` request
+  or the first answer of a metadata route and kept once it succeeds; a call that throws fails
+  that request with a `500` through the application's error handler, and the next request
+  calls again. The new `resourcePath` option (default `/mcp`) names the resource's path in
+  code, so the route set does not depend on the environment; with a function `appUrl` the
+  resource is `<origin of appUrl()><resourcePath>`, and `resource` is not accepted beside it
+  (nor beside `resourcePath`) — a type error, and refused at run time. A string `appUrl`
+  behaves as before.
+
 #### @spfn/auth
 
 - **`next/navigation` stays a bare import**, so a route handler builds under Turbopack (#151).
