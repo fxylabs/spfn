@@ -43,5 +43,5 @@ the code.
 ## Versioning
 
 Packages currently ship as alpha or beta prereleases (`0.x.y-alpha.N` /
-`0.x.y-beta.N`). APIs can move between prereleases; release notes will land on
-this site when they start shipping.
+`0.x.y-beta.N`). APIs can move between prereleases; each release's notes are
+a [post](/posts) on this site, starting with [SPFN 0.4](../../posts/2026-11-18-spfn-0.4.md).

@@ -9,9 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [@spfn/core@0.4.0-beta.1, @spfn/auth@0.4.0-beta.1, spfn@0.4.0-beta.1, @spfn/storage@0.4.0-beta.1, @spfn/cms@0.4.0-beta.1, @spfn/mcp@0.4.0-beta.1, @spfn/notification@0.3.0-beta.1, @spfn/monitor@0.3.0-beta.1, @spfn/i18n@0.3.0-beta.1, @spfn/migrate@0.3.0-beta.1, @spfn/pages-next@0.2.0-beta.1, @spfn/pages@0.2.0-beta.1, @spfn/signing@0.2.0-alpha.1, @spfn/workflow@0.3.0-alpha.1] - 2026-11-18
+
+**Upgrading.** 0.3 and 0.4 packages cannot be mixed: upgrade every `@spfn/*` package and `spfn`
+together, then `tsx`, and regenerate with `pnpm codegen`. The order, who has to act on each
+BREAKING item, and the error each missed step produces are in
+[Upgrading from 0.3 to 0.4](./docs/guides/migration/upgrade-0.4.md).
+
 ### Changed
 
 #### Dependencies (all packages)
+
+- **BREAKING: each `@spfn/*` package requires the others' 0.4 line; 0.3 and 0.4 packages cannot
+  be mixed**. Every peer range one `@spfn/*` package has on another moves to the new line — for
+  example `@spfn/core` `>=0.4.0-beta.1 <0.5.0-0`, `@spfn/notification` `>=0.3.0-beta.1 <0.4.0-0`,
+  and `@spfn/pages-next`'s `@spfn/pages` `>=0.2.0-beta.1 <0.3.0-0`. pnpm checks peers with
+  prereleases included, and `0.5.0-beta.1` orders below `0.5.0`, so a range ending `<0.5.0` would
+  admit the next line's betas; the 0.4 ranges end `-0`, which refuses them. The published 0.3
+  ranges end `<0.4.0` and cannot change, so they admit `0.4.0-beta.1`. pnpm therefore reports only
+  one direction of a mix: a 0.4 package beside a 0.3 one is an unmet peer (`✕ unmet peer
+  @spfn/core@">=0.4.0-beta.1 <0.5.0-0": found 0.3.0-beta.38`), while a 0.3 package beside a 0.4
+  `@spfn/core` installs without a warning — hence upgrade every `@spfn/*` package together.
+    - **Migration**: upgrade every `@spfn/*` package and `spfn` in one step: the beta packages by
+      `@beta`, `@spfn/signing` and `@spfn/workflow` by `@alpha`.
 
 - **BREAKING: Next.js `^16.4.5`, `hono` `^4.13.16` and `@hono/node-server` `^2.1.6` are
   required**. Every package that couples to Next.js requires `^16.4.5`, the release that clears
@@ -52,6 +72,170 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
       @aws-sdk/client-sns@^3.1074.0 @aws-sdk/client-sesv2@^3.1074.0`. An app that depends on
       `@google-cloud/storage` itself raises it to `^8.3.0`. Storage's AWS SDK, auth's
       `jsonwebtoken` and pages' `yaml` are dependencies and need nothing.
+
+#### @spfn/auth
+
+- **BREAKING: a second copy of `hono` is refused, not answered as policy** (#329). The
+  enrolment gate reads which route a request matched, and only the copy of Hono that built the
+  request can say. Under `secondFactor.required: true`, `createAuthLifecycle()`'s `afterRoutes`
+  refuses to boot an app built by another `hono` copy (`Refusing to start: @spfn/auth cannot read
+  the server's routes — two copies of hono are loaded in this process …`). A request from another
+  copy that reaches the gate — under a custom `app.ts`, where that hook does not run — is a 500
+  with a logged error instead of 403 `SECOND_FACTOR_ENROLMENT_REQUIRED`. Without a required second
+  factor nothing reads a route, and the app boots as before.
+    - **Migration**: make `hono` resolve to one install for the app, `@spfn/core` and
+      `@spfn/auth` (`pnpm why hono`), and run the server as one module format: under `spfn dev`
+      from a `spfn` CLI of the same release as `@spfn/core`.
+
+#### @spfn/storage
+
+- **`engines.node` is declared**: `^22.23.4 || ^24.22.1 || >=26.12.1`, the range of every other
+  package that declares one. Storage had none, while its optional `@google-cloud/storage` 8 needs
+  Node 22.
+
+- **One deprecation line at start with a base64 GCS key**: with `GCS_CREDENTIALS_JSON_BASE64` /
+  `credentialsJsonBase64` set, google-auth-library 11.3.2 and later (what `@google-cloud/storage`
+  8 installs) print "The `credentials` option is deprecated…" once per process. It is cosmetic;
+  the provider keeps passing the key as `credentials`, which storage 8.4.0 still documents. The
+  replacement the warning names, `authClient`, signs URLs with the wrong account, so it is not
+  used. For no warning, point `GOOGLE_APPLICATION_CREDENTIALS` at a key file instead of setting
+  the base64 variable: that is silent and signs as the key's account.
+
+#### @spfn/core
+
+- **BREAKING: a server process refuses a second copy of `@spfn/core`** (#329). Each built entry
+  records where it was loaded from and what evaluated it — Node's ESM loader, a CommonJS
+  evaluation (as `tsx` runs one), vitest's module runner, or a bundler. `startServer` marks the
+  process as a server before it loads anything of the app; from then on another file (a second
+  install: two versions, or one version installed twice) or the same file by another evaluator is
+  refused where it is evaluated — at boot, or later by the `import` or `require` that would load
+  it, which fails that request or job and is logged once while the server keeps serving. The
+  message starts `Refusing a second copy of @spfn/core in this process:` and names the files,
+  the evaluators and the remedy. Processes that never call `startServer` — `spfn codegen`, the
+  codegen watcher, `spfn db generate`, scripts, a Next.js server bundling core — record and
+  never refuse.
+    - **Migration**: upgrade `spfn` and `@spfn/core` together — an older `spfn` CLI runs a
+      project without `"type": "module"` as CommonJS, and this core refuses that boot. Make
+      `@spfn/core` resolve to one install (`pnpm why @spfn/core`), and import `@spfn/*` from ES
+      modules only.
+
+- **BREAKING: code generation runs under `NODE_ENV=production`, and the route map refuses any
+  environment-dependent content** (#334). The committed route map was written by two
+  generators under two environments — `spfn dev`'s watcher under `development`, `spfn codegen
+  run` / `spfn build` under `production` (pinned only when unset) — and the environment probe
+  compared only name → method + path, so a `csrf` declared in one environment, an
+  environment-dependent entry order, or a `.packages()` mount present only in development
+  produced two different files that both passed. Code generation now runs under `production`
+  unconditionally, logging once when it replaces a different value. The value belongs to the
+  generating process and is set before any project code is evaluated — `spfn dev` starts its
+  watcher with `NODE_ENV=production`; `loadCodegenConfig`, `createGeneratorsFromConfig` and
+  the `CodegenOrchestrator` constructor pin — so `.spfnrc.ts` and a custom generator listed
+  before or after the route map see `production` on every watcher run, not `development` on
+  the first one only. The built-in generators no longer pin for themselves. A programmatic
+  caller's process keeps `NODE_ENV=production` from its first codegen call on. The probe
+  compares the whole file it would write and names the difference (`~ ping: csrf 'required' →
+  none`, `order of the app's routes: a, b → b, a`, else the first differing line); when
+  the header's mount lines differ it shows both lists in full, each under the environment that
+  wrote it, since no part of a mount line identifies the same mount across two loads. It varies `NODE_ENV` over each conventional value other than `production` —
+  `development` and `test`, one load each — and names the value that produced the difference,
+  so a route registered only under `test` is refused too. Any other key is varied once (set →
+  deleted, unset → `'true'`), so a comparison of such a key against one particular value
+  (`=== 'on'`) is not covered; nor is a `NODE_ENV` value outside the three.
+  The `Generated with NODE_ENV=…` header line is gone from the route map and the state
+  manifest. A route a package registers only outside production is served by `spfn dev` but is
+  not in the map.
+    - **Migration**: register routes, `.csrf()` and `.packages()` mounts unconditionally and
+      gate behaviour inside the handler; regenerate committed files (`pnpm codegen`), which
+      drops the header line.
+
+#### spfn (CLI)
+
+- **BREAKING: `spfn dev` runs application server source as ESM, as `spfn build` does** (#329).
+  A project without `"type": "module"` — every `spfn create` scaffold — ran its `.ts` source as
+  CommonJS under `tsx`, which loaded a second, CommonJS copy of each `@spfn/*` package beside the
+  server's ESM one: rate-limit `policies` and `.trustedProxyHops()` were ignored by `@spfn/auth`'s
+  routes, and with `secondFactor.required` an account without a factor got 403
+  `SECOND_FACTOR_ENROLMENT_REQUIRED` on the enrolment routes too. `spfn dev` now passes `tsx` a
+  module hook (`--import`, registered with `module.registerHooks`) in the server process and the
+  codegen watcher: `.ts` and `.tsx` run as ESM whatever the `"type"`; `.js` and `.jsx` in a
+  package with no `"type"` are decided by their own syntax; a stated `"type"` or a `.mjs`,
+  `.cjs`, `.mts` or `.cts` extension is left alone; dependencies are not touched. Dev only:
+  `spfn build` already bundled server source as ESM.
+    - **Migration**: CommonJS shapes in server source stop running under `spfn dev` — `require`,
+      `__dirname`/`__filename`, a named import from a file written with `module.exports`, and a
+      CommonJS file that requires `@spfn/*`. Write them as ESM (`import`, `import.meta.dirname`,
+      `export const`). The full table, against `spfn build` + `spfn start`, is in the CLI README
+      under "Your server source runs as ESM, as it does in production".
+
+- **BREAKING: the scaffold requires `tsx` `^4.22.4`** (#329). `spfn dev` runs the project's own
+  `tsx`, and one before 4.22 registers its hooks with the deprecated `module.register()` and
+  prints `DEP0205` at every start on Node 26. `spfn init`, which `spfn create` runs, writes
+  `^4.22.4`, and so do the examples.
+    - **Migration**: `pnpm add -D tsx@^4.22.4`.
+
+- **BREAKING: the `spfn dev` codegen watcher runs under `NODE_ENV=production`** (#334): it is
+  started with it in its environment, so the watcher entry, `.spfnrc.ts` and every generator
+  load under it from the first run, as under `spfn codegen run` and `spfn build`, so all three write the same generated bytes; the
+  dev server keeps `development`. An app whose generated content differs by environment beyond
+  its route set is now refused at generation by all three (see `@spfn/core`).
+  `scripts/smoke-dev-example-03.mjs` asserts the watcher generates the route map and leaves it
+  byte-identical to the committed blob (`git show HEAD:…`) instead of restoring it; a watcher
+  that exits before writing fails the run.
+    - **Migration**: as for `@spfn/core` above — register routes, `.csrf()` and `.packages()`
+      mounts unconditionally, then regenerate (`pnpm codegen`) and commit.
+
+- **BREAKING: `spfn build` runs under `NODE_ENV=production` from its codegen step on** (#334).
+  Codegen pins `production` in the building process whatever the shell set, so with
+  `NODE_ENV=development spfn build` (or `test`) the later steps of the same process — the
+  project's `build` script (`next build`) and the tsup server build — now inherit `production`
+  where they used to inherit the shell's value. A build that needs another value for those steps
+  has to run them itself.
+
+### Added
+
+#### @spfn/auth
+
+- **A `passkeyLogin` channel** (#330). `createAuthLifecycle({ channels: { passkeyLogin: false } })`
+  closes signing in with a passkey alone: `passkeyLoginOptions` and `passkeyLoginVerify` answer 404
+  `CHANNEL_DISABLED` (`details.channel: 'passkeyLogin'`) from the first of the route's own
+  middlewares, so no rate-limit budget is spent. An app whose rule is a password plus a passkey
+  (`secondFactor: { required: true, methods: ['passkey'] }`) can now close the routes that
+  bypassed the password. Registering, listing, renaming and revoking passkeys, proving one at
+  `mfa/verify` and `mfa/step-up`, session renewal and a bound session's passkey proofs stay on.
+  The channel is on by default, so an app that states nothing serves what it served before.
+
+### Fixed
+
+#### @spfn/mcp
+
+- **The app origin is read at first use, not when the router is created** (#337), so an app
+  that mounts the MCP route passes `spfn codegen run` without an env file. `createMcpRoute`
+  and `createMcpHttpRoute` accept `appUrl` as a function, called on the first `/mcp` request
+  or the first answer of a metadata route and kept once it succeeds; a call that throws fails
+  that request with a `500` through the application's error handler, and the next request
+  calls again. The new `resourcePath` option (default `/mcp`) names the resource's path in
+  code, so the route set does not depend on the environment; with a function `appUrl` the
+  resource is `<origin of appUrl()><resourcePath>`, and `resource` is not accepted beside it
+  (nor beside `resourcePath`) — a type error, and refused at run time. A string `appUrl`
+  behaves as before.
+
+#### spfn (CLI)
+
+- **The `spfn ops token` hint for an `@spfn/auth` without `@spfn/auth/crypto` names the release
+  line, not a range** (#340). It said `pnpm add @spfn/auth@'>=0.3.0-beta.2 <0.4.0'`, which after
+  this release installs an auth of the previous line. It now says to update `@spfn/auth`
+  together with `@spfn/core` by dist-tag (`pnpm add @spfn/core@beta @spfn/auth@beta`), and `spfn`
+  the same way where it is installed.
+
+## [0.3 beta line: @spfn/core@0.3.0-beta.5…0.3.0-beta.38, @spfn/auth@0.3.0-beta.5…0.3.0-beta.53, spfn@0.3.0-beta.5…0.3.0-beta.22, @spfn/storage@0.3.0-beta.2…0.3.0-beta.3, @spfn/cms@0.3.0-beta.2…0.3.0-beta.6, @spfn/mcp@0.3.0-beta.2…0.3.0-beta.5, @spfn/notification@0.2.0-beta.2…0.2.0-beta.13, @spfn/monitor@0.2.0-beta.2…0.2.0-beta.5, @spfn/i18n@0.2.0-beta.3…0.2.0-beta.10, @spfn/pages-next@0.1.0-beta.8…0.1.0-beta.12, @spfn/signing@0.1.0-alpha.1…0.1.0-alpha.3, @spfn/workflow@0.2.0-alpha.2] - 2026-08-11 to 2026-11-17
+
+Released across these versions between the 2026-08-10 release and 2026-11-17; where an entry names
+the version it shipped in, it says so. `@spfn/migrate` (0.2.0-beta.1) and `@spfn/pages` (0.1.0-beta.4)
+were not released in this span.
+
+### Changed
+
+#### Dependencies (all packages)
 
 - **BREAKING: Node 20 is no longer supported, and Next.js `^16.4.1` is required** (#282).
   `engines.node` is `^22.23.4 || ^24.22.1 || >=26.12.1` in the repository root and in every
@@ -221,53 +405,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 #### @spfn/storage
 
-- **`engines.node` is declared**: `^22.23.4 || ^24.22.1 || >=26.12.1`, the range of every other
-  package that declares one. Storage had none, while its optional `@google-cloud/storage` 8 needs
-  Node 22.
-
-- **One deprecation line at start with a base64 GCS key**: with `GCS_CREDENTIALS_JSON_BASE64` /
-  `credentialsJsonBase64` set, google-auth-library 11.3.2 and later (what `@google-cloud/storage`
-  8 installs) print "The `credentials` option is deprecated…" once per process. It is cosmetic;
-  the provider keeps passing the key as `credentials`, which storage 8.4.0 still documents. The
-  replacement the warning names, `authClient`, signs URLs with the wrong account, so it is not
-  used. For no warning, point `GOOGLE_APPLICATION_CREDENTIALS` at a key file instead of setting
-  the base64 variable: that is silent and signs as the key's account.
-
 - The local S3-compatible example in the documentation is **SeaweedFS** (`weed server -s3`,
   S3 on `:8333`, bucket versioning supported), not MinIO: open-source MinIO is archived and
   its binaries are no longer served. The `STORAGE_CONTRACT_S3_*` variables and the provider
   contract suite are unchanged — only the server you point them at.
 
 #### @spfn/core
-
-- **BREAKING: code generation runs under `NODE_ENV=production`, and the route map refuses any
-  environment-dependent content** (#334). The committed route map was written by two
-  generators under two environments — `spfn dev`'s watcher under `development`, `spfn codegen
-  run` / `spfn build` under `production` (pinned only when unset) — and the environment probe
-  compared only name → method + path, so a `csrf` declared in one environment, an
-  environment-dependent entry order, or a `.packages()` mount present only in development
-  produced two different files that both passed. Code generation now runs under `production`
-  unconditionally, logging once when it replaces a different value. The value belongs to the
-  generating process and is set before any project code is evaluated — `spfn dev` starts its
-  watcher with `NODE_ENV=production`; `loadCodegenConfig`, `createGeneratorsFromConfig` and
-  the `CodegenOrchestrator` constructor pin — so `.spfnrc.ts` and a custom generator listed
-  before or after the route map see `production` on every watcher run, not `development` on
-  the first one only. The built-in generators no longer pin for themselves. A programmatic
-  caller's process keeps `NODE_ENV=production` from its first codegen call on. The probe
-  compares the whole file it would write and names the difference (`~ ping: csrf 'required' →
-  none`, `order of the app's routes: a, b → b, a`, else the first differing line); when
-  the header's mount lines differ it shows both lists in full, each under the environment that
-  wrote it, since no part of a mount line identifies the same mount across two loads. It varies `NODE_ENV` over each conventional value other than `production` —
-  `development` and `test`, one load each — and names the value that produced the difference,
-  so a route registered only under `test` is refused too. Any other key is varied once (set →
-  deleted, unset → `'true'`), so a comparison of such a key against one particular value
-  (`=== 'on'`) is not covered; nor is a `NODE_ENV` value outside the three.
-  The `Generated with NODE_ENV=…` header line is gone from the route map and the state
-  manifest. A route a package registers only outside production is served by `spfn dev` but is
-  not in the map.
-    - **Migration**: register routes, `.csrf()` and `.packages()` mounts unconditionally and
-      gate behaviour inside the handler; regenerate committed files (`pnpm codegen`), which
-      drops the header line.
 
 - **Behaviour change: the server checks the environment at boot** (#119). `startServer` runs
   `validateAllEnv` over `@spfn/core`'s registry plus the registries the app passes with
@@ -351,22 +494,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
       describing a merge that no longer exists.
 
 #### spfn (CLI)
-
-- **BREAKING: the `spfn dev` codegen watcher runs under `NODE_ENV=production`** (#334): it is
-  started with it in its environment, so the watcher entry, `.spfnrc.ts` and every generator
-  load under it from the first run, as under `spfn codegen run` and `spfn build`, so all three write the same generated bytes; the
-  dev server keeps `development`. An app whose generated content differs by environment beyond
-  its route set is now refused at generation by all three (see `@spfn/core`).
-  `scripts/smoke-dev-example-03.mjs` asserts the watcher generates the route map and leaves it
-  byte-identical to the committed blob (`git show HEAD:…`) instead of restoring it; a watcher
-  that exits before writing fails the run.
-
-- **BREAKING: `spfn build` runs under `NODE_ENV=production` from its codegen step on** (#334).
-  Codegen pins `production` in the building process whatever the shell set, so with
-  `NODE_ENV=development spfn build` (or `test`) the later steps of the same process — the
-  project's `build` script (`next build`) and the tsup server build — now inherit `production`
-  where they used to inherit the shell's value. A build that needs another value for those steps
-  has to run them itself.
 
 - **Behaviour change: an env entry without `layer` may come from any layer** (#124). An unset
   `layer` was read as `environment`, so a value a package declares without one (each
@@ -858,19 +985,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The example migration folders use the drizzle-kit 1.0 journal layout, so `spfn db migrate`
   applies them again (#261).
 
-#### @spfn/mcp
-
-- **The app origin is read at first use, not when the router is created** (#337), so an app
-  that mounts the MCP route passes `spfn codegen run` without an env file. `createMcpRoute`
-  and `createMcpHttpRoute` accept `appUrl` as a function, called on the first `/mcp` request
-  or the first answer of a metadata route and kept once it succeeds; a call that throws fails
-  that request with a `500` through the application's error handler, and the next request
-  calls again. The new `resourcePath` option (default `/mcp`) names the resource's path in
-  code, so the route set does not depend on the environment; with a function `appUrl` the
-  resource is `<origin of appUrl()><resourcePath>`, and `resource` is not accepted beside it
-  (nor beside `resourcePath`) — a type error, and refused at run time. A string `appUrl`
-  behaves as before.
-
 #### @spfn/auth
 
 - **`next/navigation` stays a bare import**, so a route handler builds under Turbopack (#151).
@@ -1159,7 +1273,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
       and a top-level import of it cost every consumer of that entry ~0.3s and ~70MB —
       `spfn dev` startup, the watcher child, every `.spfnrc.ts` evaluation and
       `spfn codegen list`, none of which resolve an alias or parse a router.
-
 
 ## [@spfn/core@0.3.0-beta.4, @spfn/auth@0.3.0-beta.4] - 2026-08-10
 
