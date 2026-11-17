@@ -20,6 +20,9 @@ import { dirname, join, resolve } from 'path';
 import { createJiti } from 'jiti';
 import { Logger } from '@spfn/core/logger';
 import { createRouteMapGenerator, RouteMapGeneratorError } from '../generators/route-map';
+import { CodegenOrchestrator } from '../core/orchestrator';
+import { createGeneratorsFromConfig, loadCodegenConfig } from '../core/config-loader';
+import type { Generator } from '../core/generator';
 import { ConditionalRegistrationError } from '../generators/contract-guard';
 
 const OUTPUT_PATH = 'src/generated/route-map.ts';
@@ -49,17 +52,29 @@ function writeRouter(body: string): void
     writeFile('src/server/router.ts', IMPORTS + body);
 }
 
-async function generate(): Promise<string>
+function routeMapGenerator(): Generator
 {
-    const generator = createRouteMapGenerator({
+    return createRouteMapGenerator({
         name: '@spfn/core:route-map',
         routerPath: './src/server/router.ts',
         outputPath: `./${OUTPUT_PATH}`,
     });
+}
 
-    await generator.generate({ cwd: projectDir, trigger: { type: 'manual' } });
+/**
+ * Generate through the orchestrator, as every command does: it is the
+ * orchestrator, not the generator, that pins the environment generation runs in.
+ */
+async function generateIn(cwd: string): Promise<string>
+{
+    await new CodegenOrchestrator({ generators: [routeMapGenerator()], cwd, throwOnError: true }).generateAll('manual');
 
-    return readFileSync(join(projectDir, OUTPUT_PATH), 'utf-8');
+    return readFileSync(join(cwd, OUTPUT_PATH), 'utf-8');
+}
+
+async function generate(): Promise<string>
+{
+    return generateIn(projectDir);
 }
 
 /** The `name: { method, path }` lines, in the order they were written. */
@@ -466,41 +481,6 @@ describe('route-map generator - what it refuses, and what it only warns about', 
 
 describe('route-map generator - output', () =>
 {
-    it('names the NODE_ENV it was generated under in the header', async () =>
-    {
-        // What a route registered behind an environment condition depends on,
-        // and the only place it is written down: `spfn dev` regenerates under
-        // `development` where `spfn build` pins `production`, and this line is
-        // what makes the two maps differing visible in a diff.
-        const shellValue = process.env.NODE_ENV;
-        process.env.NODE_ENV = 'development';
-
-        writeRouter(
-            'const getRoot = route.get(\'/\').handler(async () => ({}));\n\n'
-            + 'export const appRouter = defineRouter({ getRoot });\n',
-        );
-
-        try
-        {
-            expect(await generate()).toContain(' * Generated with NODE_ENV=development.');
-
-            process.env.NODE_ENV = 'production';
-
-            expect(await generate()).toContain(' * Generated with NODE_ENV=production.');
-        }
-        finally
-        {
-            if (shellValue === undefined)
-            {
-                delete process.env.NODE_ENV;
-            }
-            else
-            {
-                process.env.NODE_ENV = shellValue;
-            }
-        }
-    });
-
     it('is byte-identical across runs', async () =>
     {
         writeRouter(
@@ -611,6 +591,253 @@ describe('route-map generator - conditional registration', () =>
             expect(error?.message).toContain('production → development');
             expect(error?.message).toContain('~ env: GET /production → GET /development');
             expect(process.env.NODE_ENV).toBe('production');
+        });
+    });
+});
+
+describe('route-map generator - one file whichever environment generates it (#334)', () =>
+{
+    const refusalOf = () => generate().then(() => undefined, (reason: Error) => reason);
+    const PROD = 'process.env.NODE_ENV === \'production\'';
+
+    /** The three shapes a route-set comparison let through, each with and without its condition. */
+    const SHAPES = {
+        csrf: (condition: string) => `const ping = route.post('/ping').csrf('required').handler(async () => ({}));\n`
+            + 'const pingOpen = route.post(\'/ping\').handler(async () => ({}));\n'
+            + `const routes = ${condition} ? { ping } : { ping: pingOpen };\n\n`
+            + 'export const appRouter = defineRouter(routes);\n',
+        order: (condition: string) => 'const a = route.get(\'/a\').handler(async () => ({}));\n'
+            + 'const b = route.get(\'/b\').handler(async () => ({}));\n'
+            + `const routes = ${condition} ? { a, b } : { b, a };\n\n`
+            + 'export const appRouter = defineRouter(routes);\n',
+    };
+
+    it.each([
+        ['csrf', '~ ping: csrf \'required\' → none'],
+        ['order', 'order of the app\'s routes: a, b → b, a'],
+    ] as const)('G1 a router whose %s differs by NODE_ENV is refused, naming the difference', async (shape, named) =>
+    {
+        await withShellEnv({ NODE_ENV: undefined }, async () =>
+        {
+            writeRouter(SHAPES[shape](PROD));
+
+            const error = await refusalOf();
+
+            expect(error).toBeInstanceOf(ConditionalRegistrationError);
+            expect(error?.message).toMatch(/NODE_ENV \(read at src\/server\/router\.ts:\d+\), production → development/);
+            expect(error?.message).toContain(named);
+            expect(existsSync(join(projectDir, OUTPUT_PATH))).toBe(false);
+        });
+    });
+
+    /** A router whose app routes are `routes`, mounting `mounted`, of which `authRouter` holds `auth`. */
+    const mountingRouter = ({ mounted, routes = '{ getRoot }', auth = '{ login }' }: Record<string, string>) =>
+        'const getRoot = route.get(\'/\').handler(async () => ({}));\n'
+        + 'const debug = route.get(\'/debug\').handler(async () => ({}));\n'
+        + 'const login = route.post(\'/_auth/login\').handler(async () => ({}));\n'
+        + 'const logout = route.post(\'/_auth/logout\').handler(async () => ({}));\n'
+        + `const authRouter = defineRouter(${auth});\n`
+        + 'const opsRouter = defineUnmappedRouter({});\n'
+        + `const mounted = ${mounted};\n\n`
+        + `export const appRouter = defineRouter(${routes}).packages(mounted);\n`;
+
+    it('Y1 an unchanged mount the project builds is not reported: only the route that changed is', async () =>
+    {
+        // opsRouter is a new object in every load, and contributes no route to
+        // match it by. Matching mounts across the loads read it as removed and
+        // added on every refusal, sending the adopter to a mount they never changed.
+        await withShellEnv({ NODE_ENV: undefined }, async () =>
+        {
+            writeRouter(mountingRouter({
+                mounted: '[authRouter, opsRouter]',
+                routes: `${PROD} ? { getRoot } : { getRoot, debug }`,
+            }));
+
+            const error = await refusalOf();
+
+            expect(error).toBeInstanceOf(ConditionalRegistrationError);
+            expect(error?.message).toContain('    + debug (GET /debug)\n');
+            expect(error?.message).not.toContain('mount line');
+        });
+    });
+
+    it('Y1 a mount inserted at the front shows both mount lists as each environment writes them', async () =>
+    {
+        await withShellEnv({ NODE_ENV: undefined }, async () =>
+        {
+            writeRouter(mountingRouter({ mounted: `${PROD} ? [authRouter] : [opsRouter, authRouter]` }));
+
+            const error = await refusalOf();
+
+            expect(error).toBeInstanceOf(ConditionalRegistrationError);
+            expect(error?.message).toContain('production → development\n'
+                + '    mount lines under production:\n'
+                + '      router.packages[0] — 1 route under /_auth\n'
+                + '    mount lines under development:\n'
+                + '      router.packages[0] — no routes (publishes no route map)\n'
+                + '      router.packages[1] — 1 route under /_auth\n');
+        });
+    });
+
+    it('Y1 a route added inside a mount is named, with both mount lists', async () =>
+    {
+        await withShellEnv({ NODE_ENV: undefined }, async () =>
+        {
+            writeRouter(mountingRouter({ mounted: '[authRouter]', auth: `${PROD} ? { login } : { login, logout }` }));
+
+            const error = await refusalOf();
+
+            expect(error).toBeInstanceOf(ConditionalRegistrationError);
+            expect(error?.message).toContain('production → development\n'
+                + '    + logout (POST /_auth/logout)\n'
+                + '    mount lines under production:\n'
+                + '      router.packages[0] — 1 route under /_auth\n'
+                + '    mount lines under development:\n'
+                + '      router.packages[0] — 2 routes under /_auth\n');
+        });
+    });
+
+    it('G3 a route registered only under NODE_ENV=test is refused, naming test', async () =>
+    {
+        // NODE_ENV is varied over each conventional value, not to one
+        // alternative: a test server serves this route and a development one does not.
+        await withShellEnv({ NODE_ENV: undefined }, async () =>
+        {
+            writeRouter('const ping = route.get(\'/ping\').handler(async () => ({}));\n'
+                + 'const reset = route.post(\'/reset\').handler(async () => ({}));\n'
+                + 'const routes = process.env.NODE_ENV === \'test\' ? { ping, reset } : { ping };\n\n'
+                + 'export const appRouter = defineRouter(routes);\n');
+
+            const error = await refusalOf();
+
+            expect(error).toBeInstanceOf(ConditionalRegistrationError);
+            expect(error?.message).toMatch(/NODE_ENV \(read at src\/server\/router\.ts:\d+\), production → test\n {4}\+ reset \(POST \/reset\)/);
+            expect(error?.message).not.toContain('production → development');
+            expect(existsSync(join(projectDir, OUTPUT_PATH))).toBe(false);
+        });
+    });
+
+    it.each(['csrf', 'order'] as const)('G1 the same %s router without the condition generates', async (shape) =>
+    {
+        await withShellEnv({ NODE_ENV: undefined }, async () =>
+        {
+            writeRouter(SHAPES[shape]('true'));
+
+            expect(await generate()).toContain('export const routeMap');
+        });
+    });
+
+    /**
+     * A package's own module scope, which the probe does not vary: the map is
+     * the production one because the pin made every load production, not
+     * because anything compared the two.
+     */
+    function writePackageApp(dir: string): void
+    {
+        const write = (path: string, content: string) =>
+        {
+            mkdirSync(dirname(join(dir, path)), { recursive: true });
+            writeFileSync(join(dir, path), content, 'utf-8');
+        };
+
+        write('node_modules/probe-debug-pkg/package.json', JSON.stringify({ name: 'probe-debug-pkg', main: 'index.ts' }));
+        write('node_modules/probe-debug-pkg/index.ts', IMPORTS
+            + 'const ping = route.get(\'/_pkg/ping\').handler(async () => ({}));\n'
+            + 'const debug = route.get(\'/_pkg/debug\').handler(async () => ({}));\n'
+            + `export const pkgRouter = defineRouter(${PROD} ? { ping } : { ping, debug });\n`);
+        write('src/server/router.ts', IMPORTS + 'import { pkgRouter } from \'probe-debug-pkg\';\n'
+            + 'const getRoot = route.get(\'/\').handler(async () => ({}));\n\n'
+            + 'export const appRouter = defineRouter({ getRoot }).packages([pkgRouter]);\n');
+    }
+
+    it('G2 NODE_ENV=development in the environment writes the bytes an unset one does, and a package-scope debug route stays out', async () =>
+    {
+        const unsetDir = mkdtempSync(join(tmpdir(), 'spfn-route-map-unset-'));
+
+        try
+        {
+            writePackageApp(projectDir);
+            writePackageApp(unsetDir);
+
+            let underDevelopment = '';
+            const info = await withShellEnv({ NODE_ENV: 'development' }, () => infoOf(async () =>
+            {
+                underDevelopment = await generate();
+            }));
+            const underUnset = await withShellEnv({ NODE_ENV: undefined }, () => generateIn(unsetDir));
+
+            expect(underDevelopment).toBe(underUnset);
+            expect(entriesOf(underDevelopment)).toEqual([
+                'getRoot: { method: \'GET\', path: \'/\' },',
+                'ping: { method: \'GET\', path: \'/_pkg/ping\' },',
+            ]);
+            expect(info).toContain('NODE_ENV was "development"; pinned to "production"');
+        }
+        finally
+        {
+            rmSync(unsetDir, { recursive: true, force: true });
+        }
+    });
+});
+
+describe('route-map generator - the environment is the generating process\'s, from its first line (#339)', () =>
+{
+    it('P1 a custom generator before and after the route map sees production on every run, started under development', async () =>
+    {
+        // The `spfn dev` watcher shape: two runs of one orchestrator, a custom
+        // generator on either side of the route map. While the route map pinned
+        // for itself, the one before it saw development on the first run only.
+        await withShellEnv({ NODE_ENV: 'development' }, async () =>
+        {
+            writeRouter('export const appRouter = defineRouter({ a: route.get(\'/a\').handler(async () => ({})) });\n');
+            const seen: string[] = [];
+            const custom = (name: string): Generator => ({
+                name,
+                watchPatterns: [],
+                generate: async () =>
+                {
+                    seen.push(`${name}: ${process.env.NODE_ENV}`);
+                },
+            });
+            const orchestrator = new CodegenOrchestrator({
+                generators: [custom('before'), routeMapGenerator(), custom('after')],
+                cwd: projectDir,
+                throwOnError: true,
+            });
+
+            await orchestrator.generateAll('manual');
+            await orchestrator.generateAll('manual');
+
+            expect(seen).toEqual([
+                'before: production', 'after: production',
+                'before: production', 'after: production',
+            ]);
+        });
+    });
+
+    it('P2 .spfnrc.ts is evaluated under production, started under development', async () =>
+    {
+        await withShellEnv({ NODE_ENV: 'development' }, async () =>
+        {
+            writeFile('.spfnrc.ts', 'export default { generators: [], seen: process.env.NODE_ENV };\n');
+
+            expect(loadCodegenConfig(projectDir)).toMatchObject({ seen: 'production' });
+        });
+    });
+
+    it('P3 a custom generator module in a config built by hand is evaluated under production, started under development', async () =>
+    {
+        // No .spfnrc.ts and no loadCodegenConfig: the config type is public, so a
+        // programmatic caller can name the module itself, and createGeneratorsFromConfig
+        // is then the first codegen code to run.
+        await withShellEnv({ NODE_ENV: 'development' }, async () =>
+        {
+            writeFile('generators/custom.ts', 'const seen = process.env.NODE_ENV;\n\n'
+                + 'export default () => ({ name: `custom under ${seen}`, watchPatterns: [], generate: async () => {} });\n');
+
+            const generators = await createGeneratorsFromConfig({ generators: [{ path: './generators/custom.ts' }] }, projectDir);
+
+            expect(generators.map(generator => generator.name)).toEqual(['custom under production']);
         });
     });
 });
@@ -1073,10 +1300,6 @@ describe('route-map generator - the routes of the packages an app mounts', () =>
             + ' * Route Map (Auto-generated)\n'
             + ' *\n'
             + ' * DO NOT EDIT - This file is generated by @spfn/core:route-map generator\n'
-            + ' *\n'
-            + ` * Generated with NODE_ENV=${process.env.NODE_ENV}. A route registered only under one environment is\n`
-            + ' * named here only when the generator ran under it, so this line changing is that\n'
-            + ' * difference rather than an edit.\n'
             + ' */\n'
             + '\n'
             + 'import type { HttpMethod, RouteCsrf } from \'@spfn/core/route\';\n'
@@ -1371,7 +1594,7 @@ describe('route-map generator - environment probe (#102)', () =>
         expect((await refusalOf())?.message).toMatch(/PROBE_ENABLE_ADMIN \(read at src\/server\/routes\/admin\.ts:\d+\)/);
     });
 
-    it.each(['production', 'development'])('E5 a destructured NODE_ENV that gates a route is refused under %s', async (nodeEnv) =>
+    it.each(['production', 'development'])('E5 a destructured NODE_ENV that gates a route is refused under %s, varied from the pinned production', async (nodeEnv) =>
     {
         await withShellEnv({ NODE_ENV: nodeEnv }, async () =>
         {
@@ -1382,8 +1605,9 @@ describe('route-map generator - environment probe (#102)', () =>
             const error = await refusalOf();
 
             expect(error?.message).toContain(`NODE_ENV (read at src/server/router.ts`);
-            expect(error?.message).toContain(nodeEnv === 'production' ? 'production → development' : 'development → production');
-            expect(process.env.NODE_ENV).toBe(nodeEnv);
+            expect(error?.message).toContain('production → development');
+            expect(error?.message).toContain('+ admin (GET /admin)');
+            expect(process.env.NODE_ENV).toBe('production');
         });
     });
 

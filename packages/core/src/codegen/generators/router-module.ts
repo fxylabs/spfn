@@ -1,15 +1,13 @@
 /**
  * Loading a router for a generator
  *
- * `@spfn/core:route-map` and `@spfn/core:contract` both read the router by
- * importing it, and both need the same things settled before that import runs:
- * the environment the module observes, which otherwise follows whichever shell
- * invoked the generator, and the project's own path aliases, which jiti does not
- * read on its own.
+ * `@spfn/core:route-map`, `@spfn/core:contract` and `@spfn/core:states` all read
+ * the router by importing it, and all need the project's own path aliases
+ * settled before that import runs, which jiti does not read on its own. They
+ * live here rather than in one generator so the generators cannot drift.
  *
- * Both live here rather than in one generator so the two cannot drift: a
- * process-wide `NODE_ENV` pinned by whichever generator `.spfnrc.ts` happens to
- * list first would otherwise decide what the other one loads.
+ * The environment the router observes is not settled here: it is the
+ * generating process's, pinned where generation begins (`../core/node-env`).
  */
 
 import { existsSync, readdirSync, statSync } from 'fs';
@@ -21,44 +19,6 @@ import { logger } from '@spfn/core/logger';
 import { typescript } from './typescript';
 
 const loadLogger = logger.child('@spfn/core:codegen');
-
-// ============================================================================
-// Environment
-// ============================================================================
-
-/**
- * Pin NODE_ENV before a router loads.
- *
- * A route module that reads the environment at import — a schema built from a
- * flag, a config module with a `development` branch — would otherwise make the
- * generated output depend on how the generator happened to be invoked. For the
- * contract and states generators it is also what stands in for the source scan
- * against a condition the scan cannot see, such as one hoisted to a variable
- * before the spread that registers it — but only when the shell left NODE_ENV
- * unset. The route map refuses such a router outright: its environment probe
- * varies NODE_ENV and every other key the load read.
- *
- * The pin is process-wide and deliberately only applies when NODE_ENV is unset,
- * so calling it from both generators in one run is the same as calling it once:
- * the second call finds the value the first one set and leaves it alone.
- *
- * It is unconditional nowhere, and `spfn dev` is why: it sets `development`
- * before spawning the watcher, and output that depends on it has to describe
- * development there or `spfn dev` itself serves something else.
- * `spfn build` pins `production` and generates before it compiles, so what ships
- * is right; the cost is churn between the two, which the generated header makes
- * visible by naming the NODE_ENV the map was written under.
- */
-export function pinNodeEnv(): void
-{
-    if (process.env.NODE_ENV)
-    {
-        return;
-    }
-
-    process.env.NODE_ENV = 'production';
-    loadLogger.info('NODE_ENV was unset; pinned to "production" so generated output does not depend on the shell');
-}
 
 // ============================================================================
 // tsconfig path aliases

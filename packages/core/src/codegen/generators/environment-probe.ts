@@ -1,10 +1,10 @@
 /**
- * Environment probe — does the router's route set depend on the environment?
+ * Environment probe — does the generated file depend on the environment?
  *
  * The source scan (`assertUnconditionalRegistration`) refuses a conditional
  * spread written inline in the router file. It reads spelling, not behaviour: a
  * condition hoisted one line up, or one inside an imported route module, passes
- * it, and the generated map then describes whatever environment the generator
+ * it, and the generated file then describes whatever environment the generator
  * ran in. This reads behaviour instead.
  *
  * The router is loaded, so the generator can see what the load reads. While the
@@ -20,20 +20,30 @@
  * cached — so varying what a package read could change nothing.
  *
  * With no such read, nothing more happens: one load, as before. Otherwise the
- * router is loaded again with every one of those keys varied (`NODE_ENV`
- * between `development` and `production`, a set key deleted, an unset key set
- * to `'true'`) and the route sets are compared — name, method and path. When
- * they differ, or the varied load fails, up to `MAX_SINGLE_KEY_LOADS` keys are
- * varied one at a time to find which of them changes the route set. A
- * difference is refused with a `ConditionalRegistrationError`.
+ * router is loaded again with every one of those keys varied (a set key
+ * deleted, an unset key set to `'true'`, and `NODE_ENV` set to each
+ * conventional value it does not hold — `production`, `development`, `test` —
+ * one load per value) and the content the generator would write is compared
+ * with the content it is about to write — the whole file, so a route's `csrf`,
+ * the order of the entries and a header line count as much as a name or a path.
+ * When they differ, or a varied load fails, up to `MAX_SINGLE_KEY_LOADS` keys
+ * are varied one at a time (`NODE_ENV` once per value) to find which of them
+ * changes it. A difference is refused with a `ConditionalRegistrationError` that
+ * says what changed, naming the `NODE_ENV` value that produced it: in the
+ * generator's own terms where it can, else the first line that differs.
+ *
+ * Generation runs under `NODE_ENV=production` (`pinNodeEnv`, where it begins),
+ * so the baseline is the production file and the variations are `development`
+ * and `test`. The probe sets each value itself around its own load, which is
+ * why the pin does not hide them.
  *
  * A key read at module scope for use inside a handler is not a defect, and this
- * does not flag it: it compares route sets rather than reads.
+ * does not flag it: it compares what is written rather than what is read.
  *
- * Not covered: a condition comparing a key against one particular value
- * (`=== 'on'`), a key first read under a varied environment, a package's own
- * module scope, and anything but the environment — a file's existence, the
- * clock. Each variation runs the project's module scope again under the
+ * Not covered: a condition comparing a key other than `NODE_ENV` against one
+ * particular value (`=== 'on'`), a `NODE_ENV` value outside the three, a key
+ * first read under a varied environment, a package's own module scope, and
+ * anything but the environment — a file's existence, the clock. Each variation runs the project's module scope again under the
  * changed environment, which is why a route module must be importable without
  * side effects.
  */
@@ -46,7 +56,7 @@ import { ConditionalRegistrationError } from './contract-guard';
 
 const probeLogger = logger.child('@spfn/core:codegen');
 
-/** How many keys are varied one at a time, at most, after the joint variation. */
+/** How many keys are varied one at a time, at most, after the joint variations. */
 export const MAX_SINGLE_KEY_LOADS = 4;
 
 /** Frames collected per read: deep enough to climb out of a library to the route module that called it. */
@@ -68,11 +78,18 @@ export interface StackFrame
     readonly line: number | undefined;
 }
 
-/** Route name → `METHOD path`: what the generated map holds per name. */
-export type RouteSet = ReadonlyMap<string, string>;
+/** The environment each of two loads ran under, as the refusal names it: `production`, `development`. */
+export interface LoadEnvironments
+{
+    baseline: string;
+    varied: string;
+}
 
-/** What the probe needs from the generator. */
-export interface EnvironmentProbe
+/**
+ * What the probe needs from the generator, for a generator whose one load of
+ * the router produces a `T` that it writes as a file.
+ */
+export interface EnvironmentProbe<T>
 {
     /** Project root. */
     cwd: string;
@@ -80,11 +97,23 @@ export interface EnvironmentProbe
     /** The reads the first load made, from `observeEnvironmentReads`. */
     reads: EnvironmentRead[];
 
-    /** The route set of the first load. */
-    baseline: RouteSet;
+    /** What the first load produced. */
+    baseline: T;
 
-    /** Load the router again and return its route set. A throw means it cannot load in this environment. */
-    routeSet: () => RouteSet;
+    /** Load the router again and collect it. A throw means it cannot load in this environment. */
+    collect: () => T;
+
+    /** The file content the generator writes for a collection. */
+    render: (collection: T) => string;
+
+    /**
+     * What differs between two collections, one line each, in terms a person can
+     * act on: `~ ping: csrf 'required' → none`. Empty when the difference is not
+     * one it knows how to name; the refusal then shows the first line that differs.
+     * `environments` names the environment each load ran under, for a difference
+     * best shown as what each one wrote.
+     */
+    describe: (baseline: T, varied: T, environments: LoadEnvironments) => string[];
 
     /** What is being generated, named in the refusal: `route map`. */
     subject: string;
@@ -257,15 +286,62 @@ function describeFrame(roots: string[], frame: StackFrame): string
 // Varying the environment
 // ============================================================================
 
-/** The value a key is varied to: the other common NODE_ENV, or the key's absence flipped. */
-function variedValue(key: string, current: string | undefined): string | undefined
+/**
+ * The values tooling sets `NODE_ENV` to on its own: `next build` and `spfn start`
+ * production, `next dev` and `spfn dev` development, vitest and jest test.
+ *
+ * It is the one key with a conventional closed set, so it is varied over each
+ * of them rather than to one alternative: a route registered only under `test`
+ * is as much a difference as one registered only under `development`.
+ */
+const NODE_ENV_VALUES = ['production', 'development', 'test'];
+
+/** One key and the value it is varied to; `undefined` deletes it. */
+interface Change
 {
+    key: string;
+    value: string | undefined;
+}
+
+/** Keys varied together for one load of the router. */
+type Variation = Change[];
+
+function currentValue(key: string): string | undefined
+{
+    return Object.hasOwn(process.env, key) ? process.env[key] : undefined;
+}
+
+/** The values a key is varied to: every other conventional NODE_ENV, or the key's absence flipped. */
+function variedValues(key: string): (string | undefined)[]
+{
+    const current = currentValue(key);
+
     if (key === 'NODE_ENV')
     {
-        return current === 'development' ? 'production' : 'development';
+        return NODE_ENV_VALUES.filter(value => value !== current);
     }
 
-    return current === undefined ? 'true' : undefined;
+    return [current === undefined ? 'true' : undefined];
+}
+
+/**
+ * Every key varied at once: one variation per alternative `NODE_ENV`, each
+ * with every other key flipped, or a single variation when `NODE_ENV` was not
+ * read.
+ */
+function jointVariations(keys: string[]): Variation[]
+{
+    const alternatives = keys.map(variedValues);
+    const count = Math.max(...alternatives.map(values => values.length));
+
+    return Array.from({ length: count }, (_, index) => keys.map((key, at) =>
+        ({ key, value: alternatives[at][Math.min(index, alternatives[at].length - 1)] })));
+}
+
+/** Each key varied alone, once per value it is varied to. */
+function singleVariations(keys: string[]): Variation[]
+{
+    return keys.flatMap(key => variedValues(key).map(value => [{ key, value }]));
 }
 
 function setVariable(key: string, value: string | undefined): void
@@ -281,50 +357,41 @@ function setVariable(key: string, value: string | undefined): void
 }
 
 /**
- * Run `fn` with `keys` varied, and put every one of them back afterwards.
+ * Run `fn` with `variation` applied, and put every key back afterwards.
  *
  * Synchronous on purpose: the router loads synchronously, so no other code runs
  * while the environment is changed.
  */
-function withVaried<T>(keys: string[], fn: () => T): T
+function withVaried<T>(variation: Variation, fn: () => T): T
 {
-    const original = new Map(keys.map(key => [key, Object.hasOwn(process.env, key) ? process.env[key] : undefined]));
+    const original = variation.map(({ key }) => ({ key, value: currentValue(key) }));
 
     try
     {
-        for (const [key, value] of original)
-        {
-            setVariable(key, variedValue(key, value));
-        }
+        variation.forEach(({ key, value }) => setVariable(key, value));
 
         return fn();
     }
     finally
     {
-        for (const [key, value] of original)
-        {
-            setVariable(key, value);
-        }
+        original.forEach(({ key, value }) => setVariable(key, value));
     }
 }
 
-type Attempt = { ok: true; routes: RouteSet } | { ok: false };
+type Attempt<T> = (Difference<T> & { ok: true }) | { variation: Variation; ok: false };
 
-function attempt(keys: string[], routeSet: () => RouteSet): Attempt
+function attempt<T>(variation: Variation, probe: EnvironmentProbe<T>): Attempt<T>
 {
     try
     {
-        return { ok: true, routes: withVaried(keys, routeSet) };
+        const collection = withVaried(variation, probe.collect);
+
+        return { variation, ok: true, collection, content: probe.render(collection) };
     }
     catch
     {
-        return { ok: false };
+        return { variation, ok: false };
     }
-}
-
-function sameRouteSet(left: RouteSet, right: RouteSet): boolean
-{
-    return left.size === right.size && [...left].every(([name, route]) => right.get(name) === route);
 }
 
 // ============================================================================
@@ -332,43 +399,47 @@ function sameRouteSet(left: RouteSet, right: RouteSet): boolean
 // ============================================================================
 
 /**
- * Refuse a router whose route set changes with an environment key its project
- * files read while it loaded.
+ * Refuse a router whose generated file changes with an environment key its
+ * project files read while it loaded.
  */
-export function assertRouteSetIndependentOfEnvironment(probe: EnvironmentProbe): void
+export function assertContentIndependentOfEnvironment<T>(probe: EnvironmentProbe<T>): void
 {
     if (probe.reads.length === 0)
     {
         return;
     }
 
+    const written = probe.render(probe.baseline);
     const keys = probe.reads.map(read => read.key);
-    const joint = attempt(keys, probe.routeSet);
+    const joint = jointVariations(keys).map(variation => attempt(variation, probe));
 
-    if (joint.ok && sameRouteSet(joint.routes, probe.baseline))
+    if (joint.every(result => result.ok && result.content === written))
     {
         return;
     }
 
-    const tried = keys.slice(0, MAX_SINGLE_KEY_LOADS);
-    const singles = tried.map(key => ({ key, result: attempt([key], probe.routeSet) }));
-    const gating = singles.flatMap(({ key, result }) =>
-        result.ok && !sameRouteSet(result.routes, probe.baseline) ? [{ key, routes: result.routes }] : []);
+    const singles = singleVariations(keys.slice(0, MAX_SINGLE_KEY_LOADS)).map(variation => attempt(variation, probe));
+    const differs = (result: Attempt<T>): result is Difference<T> & { ok: true } => result.ok && result.content !== written;
+    const gating = singles.filter(differs);
     const untried = keys.slice(MAX_SINGLE_KEY_LOADS);
 
     if (gating.length > 0)
     {
-        throw refusal(probe, gating.map(({ key, routes }) => ({ keys: [key], routes })), untried);
+        throw refusal(probe, gating, untried);
     }
 
-    if (joint.ok)
+    const jointDifference = joint.find(differs);
+
+    if (jointDifference)
     {
-        throw refusal(probe, [{ keys, routes: joint.routes }], untried);
+        throw refusal(probe, [jointDifference], untried);
     }
 
-    const failed = singles.flatMap(({ key, result }) => result.ok ? [] : [key]);
-
-    logNotVaried(probe.subject, failed, untried);
+    logNotVaried(
+        probe.subject,
+        singles.filter(result => !result.ok).map(result => describeVaried(result.variation[0])),
+        untried,
+    );
 }
 
 function logNotVaried(subject: string, failed: string[], untried: string[]): void
@@ -394,74 +465,101 @@ function logNotVaried(subject: string, failed: string[], untried: string[]): voi
 // The refusal
 // ============================================================================
 
-interface Difference
+interface Difference<T>
 {
-    keys: string[];
-    routes: RouteSet;
+    variation: Variation;
+    collection: T;
+    content: string;
 }
 
-function refusal(probe: EnvironmentProbe, differences: Difference[], untried: string[]): ConditionalRegistrationError
+function refusal<T>(probe: EnvironmentProbe<T>, differences: Difference<T>[], untried: string[]): ConditionalRegistrationError
 {
     const where = new Map(probe.reads.map(read => [read.key, read.where]));
-    const sections = differences.map(difference => describeDifference(difference, where, probe.baseline));
+    const sections = differences.map(difference => describeDifference(probe, difference, where));
 
     return new ConditionalRegistrationError(
-        `The ${probe.subject} depends on the environment. The router registers a different route set when these `
-        + 'keys change, so a map generated under one environment leaves out or misroutes a route another one serves, '
-        + 'and the client that names it gets a 404:\n\n'
+        `The ${probe.subject} depends on the environment. The file generated from this router changes when these `
+        + 'keys change, so a file generated under one environment describes something another one does not serve — '
+        + 'a route the client names that 404s, a CSRF token it never sends:\n\n'
         + `${sections.join('\n\n')}\n${jointNote(differences, untried)}\n`
         + 'Register the routes unconditionally and gate their behaviour inside the handler instead.',
     );
 }
 
-/** Said when only varying every key together changed the route set. */
-function jointNote(differences: Difference[], untried: string[]): string
+/** Said when only varying every key together changed the file. */
+function jointNote<T>(differences: Difference<T>[], untried: string[]): string
 {
-    if (differences.length !== 1 || differences[0].keys.length === 1)
+    if (differences.length !== 1 || differences[0].variation.length === 1)
     {
         return '';
     }
 
-    const tried = Math.min(differences[0].keys.length, MAX_SINGLE_KEY_LOADS);
+    const tried = Math.min(differences[0].variation.length, MAX_SINGLE_KEY_LOADS);
     const rest = untried.length > 0 ? ` ${untried.join(', ')} ${untried.length === 1 ? 'was' : 'were'} not varied alone.` : '';
 
     return `\nThese keys change it together; none of the ${tried} varied alone does.${rest}\n`;
 }
 
-/** One key's (or one set of keys') change, and the routes it adds, drops and moves. */
-function describeDifference(difference: Difference, where: Map<string, string>, baseline: RouteSet): string
+/** One variation, and what it changes in the file. */
+function describeDifference<T>(probe: EnvironmentProbe<T>, difference: Difference<T>, where: Map<string, string>): string
 {
-    const header = difference.keys
-        .map(key => `  ${key} (read at ${where.get(key)}), ${describeChange(key)}`)
+    const header = difference.variation
+        .map(change => `  ${change.key} (read at ${where.get(change.key)}), ${describeChange(change)}`)
         .join('\n');
+    const environments = { baseline: environmentOf([]), varied: environmentOf(difference.variation) };
+    const named = probe.describe(probe.baseline, difference.collection, environments);
+    const changes = named.length > 0 ? named : firstDifferingLine(probe.render(probe.baseline), difference.content);
 
-    return `${header}\n${routeChanges(baseline, difference.routes).map(line => `    ${line}`).join('\n')}`;
+    return `${header}\n${changes.map(line => `    ${line}`).join('\n')}`;
 }
 
 /**
  * How the key was varied. Only NODE_ENV's values are named: any other key may
  * hold a secret, so it is described as set or unset.
  */
-function describeChange(key: string): string
+function describeChange(change: Change): string
 {
-    const current = process.env[key];
+    const current = currentValue(change.key);
 
-    if (key === 'NODE_ENV')
+    if (change.key === 'NODE_ENV')
     {
-        return `${current ?? 'unset'} → ${variedValue(key, current)}`;
+        return `${current ?? 'unset'} → ${change.value}`;
     }
 
     return current === undefined ? 'unset → set' : 'set → unset';
 }
 
-/** `+ admin (GET /admin)`, `- legacy (GET /old)`, `~ env: GET /production → GET /development`. */
-function routeChanges(baseline: RouteSet, varied: RouteSet): string[]
+/**
+ * The environment a load ran under: its `NODE_ENV`, and any other key it
+ * varied, by name only, as `describeChange` does.
+ */
+function environmentOf(variation: Variation): string
 {
-    const added = [...varied].filter(([name]) => !baseline.has(name)).map(([name, route]) => `+ ${name} (${route})`);
-    const dropped = [...baseline].filter(([name]) => !varied.has(name)).map(([name, route]) => `- ${name} (${route})`);
-    const moved = [...baseline]
-        .filter(([name, route]) => varied.has(name) && varied.get(name) !== route)
-        .map(([name, route]) => `~ ${name}: ${route} → ${varied.get(name)}`);
+    const nodeEnv = variation.find(change => change.key === 'NODE_ENV');
+    const value = nodeEnv ? nodeEnv.value : currentValue('NODE_ENV');
+    const others = variation.filter(change => change.key !== 'NODE_ENV').map(change => change.key);
+    const name = value ?? 'NODE_ENV unset';
 
-    return [...added, ...dropped, ...moved];
+    return others.length > 0 ? `${name} with ${others.join(', ')} varied` : name;
+}
+
+/** A key as a log line names it: with the value only for NODE_ENV, as `describeChange` does. */
+function describeVaried(change: Change): string
+{
+    return change.key === 'NODE_ENV' ? `NODE_ENV (as "${change.value}")` : change.key;
+}
+
+/**
+ * The first line the two contents disagree on, for a difference the generator
+ * has no name for. A missing line is shown as `(end of file)`.
+ */
+export function firstDifferingLine(written: string, varied: string): string[]
+{
+    const left = written.split('\n');
+    const right = varied.split('\n');
+    const index = left.findIndex((line, at) => line !== right[at]);
+    const at = index === -1 ? left.length : index;
+    const show = (line: string | undefined) => line === undefined ? '(end of file)' : JSON.stringify(line);
+
+    return [`line ${at + 1}: ${show(left[at])} → ${show(right[at])}`];
 }

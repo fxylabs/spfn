@@ -134,7 +134,8 @@ dependency of the app so `hono/vercel` resolves.
 
 ### `spfn dev`
 
-Starts the SPFN server + Next.js (and a codegen watcher). The server must report ready
+Starts the SPFN server + Next.js (and a codegen watcher, which generates under
+`NODE_ENV=production` — see [`spfn codegen`](#spfn-codegen)). The server must report ready
 (via a `.spfn/server-ready` signal file) before Next.js launches. Runs through `tsx`,
 no pre-build needed.
 
@@ -246,6 +247,12 @@ Runs codegen, builds Next.js (via the project's `build` script), and compiles
 | `--next-only` | Build only Next.js (skip the SPFN server) |
 | `--turbo` | Use Turbopack for the Next.js build |
 
+> **BREAKING.** `spfn build` runs under `NODE_ENV=production` from its codegen step on,
+> whatever the shell set. Codegen pins it in the building process, so `NODE_ENV=development spfn
+> build` (or `test`) now runs the later steps — the project's `build` script (`next build`) and
+> the tsup server build — under `production` as well; before, they inherited the shell's
+> value. A build that needs another value for those steps has to run them itself.
+
 ### `spfn start`
 
 Starts the production servers from build output. Requires `spfn build` first — it errors
@@ -287,6 +294,27 @@ automatically during `spfn dev` and `spfn build`.
 | `codegen run` | Run all generators once (no watch) |
 
 `package.json` exposes this as the `codegen` script (`spfn codegen run`).
+
+Code generation runs under `NODE_ENV=production`, whatever the shell or the parent process set,
+and logs once when it replaces a different value. It is set before any of your code is
+evaluated — the `spfn dev` watcher process starts with it, the other commands set it before
+reading `.spfnrc.ts` — so `.spfnrc.ts`, custom generators and the built-in ones all see it, on
+every run. `spfn codegen run`, `spfn build` and the watcher `spfn dev` starts therefore write
+the same bytes; the generated header no longer names an environment. Only the generating
+process is pinned: the `spfn dev` server keeps `development`. For `spfn build` the generating
+process is the building one, so its later steps run under `production` too (see
+[`spfn build`](#spfn-build)).
+
+The route map generator refuses a router whose generated file would differ under
+`NODE_ENV=development` or `test`, or with another key it read set or unset — a route, a route's
+`csrf`, the entry order, a `.packages()` mount line — naming the key, the `NODE_ENV` value and
+the difference. A key other than `NODE_ENV` compared against one particular value (`=== 'on'`)
+is not covered. A route a package registers only outside production is served by `spfn dev`
+but is not in the map. See [@spfn/core codegen](../core/src/codegen/README.md#when-it-refuses).
+
+> **BREAKING.** An app whose generated content differs by environment beyond its route set is
+> now refused at generation — by `spfn codegen run`, `spfn build` and the `spfn dev` watcher
+> alike. The watcher loads the app under `production`; the dev server keeps `development`.
 
 To add a custom generator, implement the `Generator` interface from `@spfn/core/codegen`
 and reference it in `.spfnrc.ts`:

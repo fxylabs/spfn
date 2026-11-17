@@ -28,7 +28,7 @@
  * `.packages()` list assembled conditionally. For the route map, the
  * environment probe (`environment-probe.ts`) catches those when the condition
  * reads the environment: it loads the router again with the keys the first load
- * read varied, and refuses when the route set changes. This scan stays first
+ * read varied, and refuses when the file it would write changes. This scan stays first
  * because it names an inline conditional by its line without a second load.
  * The contract and states generators have this scan only.
  */

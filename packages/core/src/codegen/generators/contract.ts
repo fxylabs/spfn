@@ -39,7 +39,7 @@ import {
 import type { EventRouterDef } from '@spfn/core/event';
 import type { Generator, GeneratorOptions } from '../core/generator';
 import { assertUnconditionalRegistration } from './contract-guard';
-import { loadRouterModule, pinNodeEnv, resolveRouterExport, type ResolvedRouter } from './router-module';
+import { loadRouterModule, resolveRouterExport, type ResolvedRouter } from './router-module';
 
 const genLogger = logger.child('@spfn/core:contract-generator');
 
@@ -143,7 +143,7 @@ interface ResolvedEventRouter
 
 /**
  * Load the event router through the same loader as the route router: the same
- * `NODE_ENV` pin, the same tsconfig aliases.
+ * tsconfig aliases.
  */
 function loadEventRouter(cwd: string, absolutePath: string, eventRouterExport?: string): ResolvedEventRouter
 {
@@ -253,8 +253,6 @@ export function createContractGenerator(config: ContractGeneratorConfig): Genera
                     + 'The contract generator is configured but has nothing to read.',
                 );
             }
-
-            pinNodeEnv();
 
             // Loaded before the guard reads the source, because which router the
             // guard reads is decided by which export the loader found.

@@ -8,6 +8,7 @@ import { watch as chokidarWatch } from 'chokidar';
 import { join, relative, sep } from 'path';
 import mm from 'micromatch';
 import type { Generator, GeneratorOptions, GeneratorTrigger } from './generator';
+import { pinNodeEnv } from './node-env';
 import { logger } from '@spfn/core/logger';
 
 const orchestratorLogger = logger.child('@spfn/core:orchestrator');
@@ -45,8 +46,14 @@ export class CodegenOrchestrator
     private watcher?: ReturnType<typeof chokidarWatch>;
     private watcherClosePromise?: { resolve: () => void; reject: (error: Error) => void };
 
+    /**
+     * Pins `NODE_ENV` to `production` (`pinNodeEnv`), for a caller that builds
+     * its generators by hand rather than through `loadCodegenConfig`: every
+     * generator of every run then sees the one value.
+     */
     constructor(options: OrchestratorOptions)
     {
+        pinNodeEnv();
         this.generators = options.generators;
         this.cwd = options.cwd ?? process.cwd();
         this.debug = options.debug ?? false;

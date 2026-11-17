@@ -384,6 +384,33 @@ not from your backend. That is almost always a codegen you did not re-run.
 
 Generated files are output. Never hand-edit them.
 
+Code generation runs under `NODE_ENV=production`, whatever the shell or the parent process set
+— `spfn codegen run`, `spfn build` and the codegen watcher `spfn dev` starts alike. The committed
+file is what ships, so it describes what ships, and the three write the same bytes. The value is
+set where a generation begins, before any of your code is evaluated: `spfn dev` starts its
+watcher process with it, and every other command sets it before it reads `.spfnrc.ts`. So
+`.spfnrc.ts`, a custom generator and the built-in ones see one value, on every watcher run.
+Only the generating process is pinned; the dev server keeps `development`. For `spfn build` the
+generating process is the building one: `next build` and the server build after codegen run
+under `production` too. The header
+no longer carries a `Generated with NODE_ENV=…` line: there is one environment.
+
+The route map generator refuses an app whose generated file would differ under
+`NODE_ENV=development` or `NODE_ENV=test`, or with another key it read set or unset — not only
+a route that appears or moves, but a route's `csrf`, the order of the entries, or a
+`.packages()` mount line. The refusal names the key, where it was read, the `NODE_ENV` value
+that produced the difference, and the difference (`~ ping: csrf 'required' → none`). A key
+other than `NODE_ENV` compared against one particular value (`=== 'on'`) is not covered. A route a **package** registers only outside
+production, from its own module scope, is served by `spfn dev` but is not in the map. Details:
+[src/codegen](./src/codegen/README.md#when-it-refuses).
+
+> **BREAKING.** An app whose generated content differs by environment beyond its route set —
+> a `.csrf()` declared only in one environment, routes registered in an environment-dependent
+> order, a package router mounted only in development — passed codegen before and is now
+> refused at generation. Register those unconditionally and gate behaviour inside the handler.
+> The codegen watcher `spfn dev` starts now loads the app under `production` (it used to inherit
+> `development`), so route modules read `production` while the map is generated.
+
 ---
 
 ## Why does the server refuse to start after a package upgrade?
@@ -878,6 +905,10 @@ part of a whole backend.
 - **`db/manager`, `db/schema` and `db/transaction` are not subpaths.** Importing
   `@spfn/core/db/transaction` fails to resolve. Import those symbols from `@spfn/core/db`.
 - **The client needs no codegen; the proxy does.** A missing route name is a proxy 404.
+- **Codegen always runs under `production` (BREAKING).** A route map that would differ under
+  `development` — a route, a `csrf`, the entry order, a mount line — is refused at generation,
+  and the `spfn dev` watcher generates under `production` too. See
+  [Do I have to run codegen?](#do-i-have-to-run-codegen)
 - **Contracts are for clients TypeScript cannot reach.** `.contract()` and the build gate
   exist for a mobile app or an external consumer, compiled and shipped separately. A web
   client takes its types from `AppRouter` in the same build, so a removed response field

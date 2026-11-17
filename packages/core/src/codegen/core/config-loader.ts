@@ -8,6 +8,7 @@ import { existsSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { createJiti } from 'jiti';
 import type { Generator } from './generator';
+import { pinNodeEnv } from './node-env';
 import { logger } from '@spfn/core/logger';
 
 const configLogger = logger.child('@spfn/core:codegen-config');
@@ -84,9 +85,15 @@ export function defineConfig(config: CodegenConfig): CodegenConfig
 
 /**
  * Load codegen configuration from .spfnrc.ts, .spfnrc.json or package.json
+ *
+ * Pins `NODE_ENV` to `production` first (`pinNodeEnv`): this is where every
+ * CLI generation begins, and `.spfnrc.ts` with what it imports is the first
+ * project code a generation evaluates.
  */
 export function loadCodegenConfig(cwd: string): CodegenConfig
 {
+    pinNodeEnv();
+
     // 1. Check .spfnrc.ts (highest priority)
     const rcTsPath = join(cwd, '.spfnrc.ts');
     if (existsSync(rcTsPath))
@@ -238,9 +245,15 @@ function capitalize(str: string): string
 
 /**
  * Create generator instances from configuration
+ *
+ * Pins `NODE_ENV` to `production` (`pinNodeEnv`) before loading any of them.
  */
 export async function createGeneratorsFromConfig(config: CodegenConfig, cwd: string): Promise<Generator[]>
 {
+    // A caller may hand over a config it built itself; the custom generator
+    // modules loaded below are project code all the same.
+    pinNodeEnv();
+
     const generators: Generator[] = [];
 
     if (!config.generators || config.generators.length === 0)

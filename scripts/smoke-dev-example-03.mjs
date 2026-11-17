@@ -20,34 +20,41 @@
  *   2. GET /_core/health answers 200
  *   3. GET /_auth/session without credentials answers @spfn/auth's 401 — a
  *      route of the package, behind its middleware, served by core's router
+ *   4. the codegen watcher generated the route map, and left it byte-identical
+ *      to the committed one (`git show HEAD:…`, not the working tree)
  *
- * It leaves the workspace as it found it. `--server-only` still starts the
- * codegen watcher, which writes the example's route map on its first run, so
- * the script waits for that write to finish before it stops `spfn dev` — a
- * stop in the middle of it would leave a cut-off file — and then puts back the
- * bytes it found. The watcher runs under `development` and the committed map
- * is what `pnpm codegen` writes, so the two differ by their header alone and a
- * difference says nothing about whether the committed map is current.
+ * The fourth is issue #334. `--server-only` still starts the codegen watcher,
+ * which writes the example's route map on its first run, and `spfn dev` sets
+ * `development` where `pnpm codegen` runs under `production`. The watcher now
+ * runs under `production` from its first line, so it writes the bytes
+ * `pnpm codegen` committed; a watcher that writes anything else is two
+ * generators drifting apart again, and the changed file is left in place for
+ * the diff to show. The script waits for that write to finish before it stops
+ * `spfn dev`, so a stop in the middle of it cannot pass for a change, and a
+ * watcher that exits without writing fails rather than leaving the file
+ * untouched for the comparison to pass on.
  *
  * It needs PostgreSQL: SMOKE_DATABASE_URL names an empty database the script
  * may migrate. The secrets it sets are generated per run.
  */
 
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { createServer } from 'node:net';
-import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 
 const EXAMPLE_DIR = join(process.cwd(), 'examples', '03-auth');
 const READY_FILE = join(EXAMPLE_DIR, '.spfn', 'server-ready');
-const ROUTE_MAP = join(EXAMPLE_DIR, 'src', 'generated', 'route-map.ts');
+const ROUTE_MAP_PATH = 'examples/03-auth/src/generated/route-map.ts';
+const ROUTE_MAP = join(process.cwd(), ROUTE_MAP_PATH);
 const PORT = process.env.SMOKE_PORT ?? '8896';
 const BASE = `http://127.0.0.1:${PORT}`;
 const BOOT_TIMEOUT_MS = 90_000;
 const CODEGEN_TIMEOUT_MS = 60_000;
 const STOP_TIMEOUT_MS = 10_000;
 const POLL_INTERVAL_MS = 500;
+const OUTPUT_TAIL_LINES = 40;
 
 const failures = [];
 let serverOutput = '';
@@ -208,10 +215,17 @@ async function assertServes()
     );
 }
 
+/** The last lines `spfn dev` and its children printed, for a failure that has to show them. */
+function outputTail()
+{
+    return serverOutput.trimEnd().split('\n').slice(-OUTPUT_TAIL_LINES).join('\n');
+}
+
 /**
- * The codegen watcher's first run has written the route map: the generator logs
- * the line below after its write returns. A watcher that exits instead is
- * reported by `spfn dev`, and there is nothing left to wait for.
+ * Whether the codegen watcher's first run wrote the route map: the generator
+ * logs the line below after its write returns. A watcher that exits first is
+ * reported by `spfn dev`, and is a failure here — it wrote nothing, so the
+ * file being unchanged afterwards would prove nothing.
  */
 async function waitForCodegen()
 {
@@ -219,9 +233,16 @@ async function waitForCodegen()
 
     while (Date.now() < deadline)
     {
-        if (serverOutput.includes('Generated route map:') || serverOutput.includes('Codegen watcher exited'))
+        if (serverOutput.includes('Generated route map:'))
         {
-            return;
+            return true;
+        }
+
+        if (serverOutput.includes('Codegen watcher exited'))
+        {
+            check('the codegen watcher generated the route map', false, `it exited first:\n${outputTail()}`);
+
+            return false;
         }
 
         await new Promise(resolve => setTimeout(resolve, POLL_INTERVAL_MS));
@@ -230,13 +251,24 @@ async function waitForCodegen()
     throw new Error(`the codegen watcher did not finish its first run within ${CODEGEN_TIMEOUT_MS / 1000}s`);
 }
 
-/** Put back the route map the run found, if the watcher rewrote it. */
-function restoreRouteMap(found)
+/**
+ * The route map as committed. Read from git rather than the working tree, so
+ * a local re-run over a file an earlier run (or an edit) already changed
+ * compares against what `pnpm codegen` committed, not against the drift.
+ */
+function committedRouteMap()
 {
-    if (readFileSync(ROUTE_MAP, 'utf-8') !== found)
-    {
-        writeFileSync(ROUTE_MAP, found);
-    }
+    return execFileSync('git', ['show', `HEAD:${ROUTE_MAP_PATH}`], { encoding: 'utf-8' });
+}
+
+/** The watcher wrote exactly the route map `pnpm codegen` committed. */
+function assertRouteMapUnchanged(committed)
+{
+    check(
+        'the codegen watcher left the committed route map byte-identical',
+        readFileSync(ROUTE_MAP, 'utf-8') === committed,
+        `${ROUTE_MAP_PATH} differs from HEAD — see git diff`,
+    );
 }
 
 /**
@@ -281,22 +313,28 @@ async function main()
     // A signal left by an earlier run would read as this one's.
     rmSync(READY_FILE, { force: true });
 
-    const routeMap = readFileSync(ROUTE_MAP, 'utf-8');
+    const routeMap = committedRouteMap();
 
     log(`starting spfn dev on ${BASE}`);
     server = startDev(env);
+
+    let generated = false;
 
     try
     {
         const port = await waitForReady();
         log(`server ready on port ${port} — checking it serves`);
         await assertServes();
-        await waitForCodegen();
+        generated = await waitForCodegen();
     }
     finally
     {
         await stopDev();
-        restoreRouteMap(routeMap);
+    }
+
+    if (generated)
+    {
+        assertRouteMapUnchanged(routeMap);
     }
 
     if (failures.length > 0)

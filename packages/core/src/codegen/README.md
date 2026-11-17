@@ -175,9 +175,28 @@ way `registerRoutes` walks it. How the router is *written* does not matter: a on
   rather than ending the search. `baseUrl` is honoured, so the scaffold's `"baseUrl": "../.."`
   resolves against the project root as tsc resolves it. The failure names the specifier that
   did not resolve.
-- `NODE_ENV` is pinned to `production` when the shell left it unset, so the same router
-  does not load two ways depending on how codegen was invoked. A value the shell *did* set
-  is left alone.
+- `NODE_ENV` is pinned to `production` **whatever the shell or the parent process set**,
+  with one log line when a different value is replaced, naming both. The generated file is
+  committed once and shipped, so it describes what ships: `spfn codegen run`, `spfn build`
+  and the watcher `spfn dev` starts all load the router under `production` and write the
+  same bytes. The pin belongs to the generating process, not to a generator, and is set
+  where generation begins, before any project code is evaluated: `spfn dev` starts its
+  watcher process with `NODE_ENV=production` in its environment, and `loadCodegenConfig` —
+  the first step of `spfn codegen run`, `spfn contract` and `spfn build`'s codegen step —
+  pins before it reads `.spfnrc.ts`. So `.spfnrc.ts` and what it imports, a custom generator
+  listed before or after the route map, and the built-in generators all see `production`, on
+  the first watcher run and every later one. A **programmatic caller** gets the same from
+  its first codegen call: `loadCodegenConfig`, `createGeneratorsFromConfig` and
+  `new CodegenOrchestrator(...)` each pin, so the process's `NODE_ENV` is `production` from
+  then on — for the rest of the process, not only during generation. Modules it loaded
+  before that call are its own and keep whatever they read. Calling a generator's
+  `generate()` without any of the three does not pin. Only the generating process is pinned
+  — `spfn dev` runs its watcher as a process of its own, so the dev server beside it keeps
+  `development`. For `spfn build` the generating process is the building one, so the steps
+  after codegen (`next build`, the server build) run under `production` too. The file names no
+  environment in its header any more: there is one. A route a **package** registers only
+  outside production (from its own module scope, which the probe below does not vary) is
+  served by `spfn dev` but is not in the map.
 
 ### When it refuses
 
@@ -203,27 +222,44 @@ Unlike the old source parser, which dropped what it could not read, the generato
   built by a factory, a condition hoisted to a variable before the spread, and a
   `.packages()` list assembled conditionally. The environment probe (next bullet) is what
   catches those when the condition reads the environment.
-- The route set **depends on the environment** (#102). While the router loads, the generator
+- The generated file **depends on the environment** (#102, #334). While the router loads, the generator
   records every `process.env` key a project file reads — direct access, destructuring and
   `in`, and a read through a library such as the `@spfn/core/env` registry, which is
   attributed to the route module that asked. Reads that jiti, babel or a package make while
   loading themselves are not counted: a package does not run again on a second load, so
   varying them could change nothing. With no read, nothing more happens. Otherwise the router
-  is loaded again with every one of those keys varied — `NODE_ENV` between `development` and
-  `production`, a set key deleted, an unset key set to `'true'` — and the route sets (name,
-  method and path, package routes included) are compared. When they differ, or the varied
-  load fails, up to four keys are varied one at a time to say which one changes the set. The
-  refusal names each key, where it was read (`src/server/routes/admin.ts:6`), and the routes
-  it adds, drops or moves; it names a key's values only for `NODE_ENV`, since any other key
-  may hold a secret. A key the router cannot load without (a module-scope
+  is loaded again with every one of those keys varied — a set key deleted, an unset key set to
+  `'true'`, and `NODE_ENV` set to each conventional value it does not hold (`production`,
+  `development`, `test`; one load per value), because it is the one key tooling sets on its
+  own to a known value — and the whole file the generator would write is compared with the
+  one it is about to write. So a route's `csrf`,
+  the order of the entries and a `.packages()` mount line in the header count as much as a
+  name, a method or a path: a map committed from one environment would otherwise disagree with
+  what ships (a `csrf: 'required'` the client never sends a token for). `NODE_ENV` is pinned
+  first, so the baseline is `production` and the variations `development` and `test`; the probe
+  sets each varied value itself around its own load, which is why the pin does not hide it.
+  When the files differ, or a varied load fails, up to four keys are varied one at a time
+  (`NODE_ENV` once per value) to say which one changes it. The refusal names each key, the
+  `NODE_ENV` value that produced the difference (`production → test`), where it was read
+  (`src/server/routes/admin.ts:6`), and what changes: a route added, dropped or moved
+  (`+ admin (GET /admin)`, `~ env: GET /production → GET /development`), a field
+  (`~ ping: csrf 'required' → none`), an order (`order of the app's routes: a, b → b, a`), a
+  mount-line list, or else the first line that differs. When the header's mount lines differ,
+  the refusal shows both lists in full, each under the environment that wrote it
+  (`mount lines under production:`, `mount lines under development:`): no part of a mount line
+  — its `packages[i]` position, its router, its routes — identifies the same mount across two
+  loads, so a `+`/`-` per mount would name changes nobody made. It names a key's values only for `NODE_ENV`, since any other key may hold a
+  secret. A key the router cannot load without (a module-scope
   `if (!process.env.API_KEY) throw`) is left as it is and logged at info. Cost: one load when
   nothing in the project reads the environment while loading — the examples in this
-  repository read nothing — two when a key is read and the set does not change, at most six.
-  Not covered: a comparison against one particular value (`=== 'on'`), a key first read under
+  repository read nothing — then one more load per `NODE_ENV` value varied (two when
+  `NODE_ENV` is read, else one) when the file does not change, at most eight. Not covered: a
+  key other than `NODE_ENV` compared against one particular value (`=== 'on'`), a `NODE_ENV`
+  value outside the three, a key first read under
   a varied environment, a package's own module scope, and nondeterminism that is not the
   environment. Each varied load runs the project's module scope again, which is one more
   reason a route module must be importable without side effects. A key read at module scope
-  for use inside a handler is not refused: the route sets are compared, not the reads.
+  for use inside a handler is not refused: the written files are compared, not the reads.
 - Two routes reach the same name (the message names both places).
 - An **app route and a package route** reach the same name, where that package publishes a
   route map. Both register at runtime, and both want the single entry that name has in this
@@ -410,7 +446,7 @@ A **missing router file** is only a warning: the generator returns and writes no
 ### Generated output
 
 ```typescript
-// src/generated/states.ts  — DO NOT EDIT (header names the NODE_ENV it was written under)
+// src/generated/states.ts  — DO NOT EDIT (written under NODE_ENV=production, like every generated file)
 export const stateIds = ['consent', 'member', 'workspaces'] as const;
 
 export type StateId = (typeof stateIds)[number];

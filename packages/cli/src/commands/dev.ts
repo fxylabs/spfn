@@ -183,6 +183,12 @@ export const devCommand = new Command('dev')
 
         const serverEnv: NodeJS.ProcessEnv = { ...process.env, ...keychainEnv };
 
+        // The codegen watcher generates the files production ships, so it runs
+        // under production from its first line: the watcher entry's imports,
+        // `.spfnrc.ts` and every generator load under the one value on every
+        // run. The dev server keeps `development`.
+        const watcherEnv: NodeJS.ProcessEnv = { ...process.env, NODE_ENV: 'production' };
+
         // A package bumped without `spfn db migrate` boots fine and then 500s on the
         // first request touching a missing column. Refuse here instead; the server
         // refuses the same boot by itself, this only makes the message immediate.
@@ -333,6 +339,7 @@ catch (error)
                     cwd,
                     stdio: 'inherit',
                     reject: false,
+                    env: watcherEnv,
                 });
 
                 watcherProcess.then((result) =>
@@ -476,6 +483,7 @@ catch (error)
                 cwd,
                 stdio: 'inherit',
                 reject: false,
+                env: watcherEnv,
             });
 
             watcherProcess.then((result) =>

@@ -46,8 +46,9 @@ import { logger } from '@spfn/core/logger';
 import type { Generator, GeneratorOptions } from '../core/generator';
 import { assertUnconditionalRegistration } from './contract-guard';
 import { toObjectKey, toStringLiteral } from './emit';
-import { assertRouteSetIndependentOfEnvironment, observeEnvironmentReads, type RouteSet } from './environment-probe';
-import { isRouter, loadRouterModule, pinNodeEnv, resolveRouterExport, type ResolvedRouter } from './router-module';
+import { assertContentIndependentOfEnvironment, observeEnvironmentReads } from './environment-probe';
+import type { LoadEnvironments } from './environment-probe';
+import { isRouter, loadRouterModule, resolveRouterExport, type ResolvedRouter } from './router-module';
 
 const genLogger = logger.child('@spfn/core:route-map-generator');
 
@@ -531,10 +532,116 @@ function collectRouteMap(router: Router<any>): Collection
     return collection;
 }
 
-/** What the map holds per name — `METHOD path` — to compare one load's routes against another's. */
-function routeSetOf(collection: Collection): RouteSet
+// ============================================================================
+// What differs between two loads
+// ============================================================================
+
+/** Every entry the map holds, with the section it is written under. */
+function entriesOf(collection: Collection): Map<string, { route: CollectedRoute; section: string }>
 {
-    return new Map([...collection.app, ...collection.packages].map(([name, route]) => [name, `${route.method} ${route.path}`]));
+    const section = (label: string) => ([name, route]: [string, CollectedRoute]) =>
+        [name, { route, section: label }] as [string, { route: CollectedRoute; section: string }];
+
+    return new Map([
+        ...[...collection.app].map(section('the app\'s own')),
+        ...[...collection.packages].map(section('a mounted package\'s')),
+    ]);
+}
+
+/** `GET /admin`, as a refusal names a route. */
+function describeRoute(route: CollectedRoute): string
+{
+    return `${route.method} ${route.path}`;
+}
+
+/** `~ ping: csrf 'required' → none` and its kin: what moved in one entry present in both loads. */
+function entryFieldChanges(name: string, left: CollectedRoute, right: CollectedRoute): string[]
+{
+    const csrf = (route: CollectedRoute) => route.csrf ? `'${route.csrf}'` : 'none';
+    const changes: string[] = [];
+
+    if (describeRoute(left) !== describeRoute(right))
+    {
+        changes.push(`~ ${name}: ${describeRoute(left)} → ${describeRoute(right)}`);
+    }
+
+    if (csrf(left) !== csrf(right))
+    {
+        changes.push(`~ ${name}: csrf ${csrf(left)} → ${csrf(right)}`);
+    }
+
+    return changes;
+}
+
+/** Entries added, dropped, or changed in a field or in the section they are written under. */
+function entryChanges(baseline: Collection, varied: Collection): string[]
+{
+    const before = entriesOf(baseline);
+    const after = entriesOf(varied);
+    const added = [...after].filter(([name]) => !before.has(name))
+        .map(([name, { route }]) => `+ ${name} (${describeRoute(route)})`);
+    const dropped = [...before].filter(([name]) => !after.has(name))
+        .map(([name, { route }]) => `- ${name} (${describeRoute(route)})`);
+    const changed = [...before].filter(([name]) => after.has(name)).flatMap(([name, left]) =>
+    {
+        const right = after.get(name)!;
+        const moved = left.section === right.section ? [] : [`~ ${name}: ${left.section} → ${right.section}`];
+
+        return [...moved, ...entryFieldChanges(name, left.route, right.route)];
+    });
+
+    return [...added, ...dropped, ...changed];
+}
+
+/** An order change within one section, among the names both loads write there. */
+function orderChange(label: string, before: Map<string, CollectedRoute>, after: Map<string, CollectedRoute>): string[]
+{
+    const left = [...before.keys()].filter(name => after.has(name));
+    const right = [...after.keys()].filter(name => before.has(name));
+
+    return left.join() === right.join() ? [] : [`order of ${label}: ${left.join(', ')} → ${right.join(', ')}`];
+}
+
+/** The header's mount lines as written, or none when no package contributed and the header names no mount. */
+function headerMountLines(collection: Collection): string[]
+{
+    return collection.packages.size > 0 ? collection.mounts.map(describeMount) : [];
+}
+
+/**
+ * Both loads' mount lines in full, each under the environment that wrote it,
+ * when they differ.
+ *
+ * Not a `+`/`-` per mount: nothing in a mount line survives a second load as
+ * the same mount. Its label is a position, its router a new object whenever the
+ * project built it, its route names change with its routes. Matching on any of
+ * them names a change the adopter never made whenever the guess misses.
+ */
+function mountChanges(baseline: Collection, varied: Collection, environments: LoadEnvironments): string[]
+{
+    const before = headerMountLines(baseline);
+    const after = headerMountLines(varied);
+    const list = (environment: string, lines: string[]) =>
+        [`mount lines under ${environment}:`, ...(lines.length > 0 ? lines : ['(none)']).map(line => `  ${line}`)];
+
+    return before.join('\n') === after.join('\n')
+        ? []
+        : [...list(environments.baseline, before), ...list(environments.varied, after)];
+}
+
+/**
+ * What the environment probe reports when two loads write different maps: the
+ * entries, the order, the mount lines. Whatever else differs is shown by the
+ * probe as the first line that does.
+ */
+function describeRouteMapChanges(baseline: Collection, varied: Collection, environments: LoadEnvironments): string[]
+{
+    return [
+        ...entryChanges(baseline, varied),
+        ...orderChange('the app\'s routes', baseline.app, varied.app),
+        ...orderChange('the package routes', baseline.packages, varied.packages),
+        ...mountChanges(baseline, varied, environments),
+    ];
 }
 
 // ============================================================================
@@ -589,25 +696,17 @@ function packageHeaderLines(collection: Collection): string[]
 /**
  * Generate route map file content
  *
- * The environment is written into the header because it decides what the map
- * holds and nothing else records it. A route registered behind a condition the
- * guard cannot see — one hoisted to a variable, one inside an imported route
- * module — is named here only when the generator ran under the environment that
- * registers it, and `spfn build` pins `production` where `spfn dev` leaves
- * `development`. Writing the value makes that difference a line in the diff
- * instead of a route that typechecks in the editor and vanishes at build.
+ * Code generation runs under `NODE_ENV=production` (`pinNodeEnv`), and the
+ * environment probe refuses a router whose content would differ under
+ * `development` or `test`, so the file names no environment: there is one.
  */
-function generateRouteMapContent(collection: Collection, nodeEnv: string): string
+function generateRouteMapContent(collection: Collection): string
 {
     const lines: string[] = [
         '/**',
         ' * Route Map (Auto-generated)',
         ' *',
         ' * DO NOT EDIT - This file is generated by @spfn/core:route-map generator',
-        ' *',
-        ` * Generated with NODE_ENV=${nodeEnv}. A route registered only under one environment is`,
-        ' * named here only when the generator ran under it, so this line changing is that',
-        ' * difference rather than an edit.',
         ...packageHeaderLines(collection),
         ' */',
         '',
@@ -715,8 +814,6 @@ export function createRouteMapGenerator(config: RouteMapGeneratorConfig): Genera
                 genLogger.info('Loading router', { path: absoluteRouterPath });
             }
 
-            pinNodeEnv();
-
             // Loaded before the guard reads the source, because which router the
             // guard reads is decided by which export the loader found. Observed,
             // because the environment probe varies what this load read.
@@ -734,11 +831,13 @@ export function createRouteMapGenerator(config: RouteMapGeneratorConfig): Genera
 
             // After the scan, which names an inline conditional by its line without
             // a second load; this catches what the scan cannot see.
-            assertRouteSetIndependentOfEnvironment({
+            assertContentIndependentOfEnvironment({
                 cwd,
                 reads,
-                baseline: routeSetOf(collection),
-                routeSet: () => routeSetOf(collectRouteMap(loadRouter(cwd, absoluteRouterPath).router)),
+                baseline: collection,
+                collect: () => collectRouteMap(loadRouter(cwd, absoluteRouterPath).router),
+                render: generateRouteMapContent,
+                describe: describeRouteMapChanges,
                 subject: 'route map',
             });
 
@@ -758,11 +857,7 @@ export function createRouteMapGenerator(config: RouteMapGeneratorConfig): Genera
                 mkdirSync(outputDir, { recursive: true });
             }
 
-            // Read after `pinNodeEnv`, which is what makes it a value at all when
-            // the shell left it unset.
-            const nodeEnv = process.env.NODE_ENV ?? 'unset';
-
-            writeFileSync(absoluteOutputPath, generateRouteMapContent(collection, nodeEnv), 'utf-8');
+            writeFileSync(absoluteOutputPath, generateRouteMapContent(collection), 'utf-8');
 
             genLogger.info(
                 `Generated route map: ${relative(cwd, absoluteOutputPath)} `
