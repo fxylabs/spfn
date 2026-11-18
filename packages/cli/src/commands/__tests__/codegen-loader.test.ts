@@ -376,13 +376,16 @@ console.log(JSON.stringify({ perGeneration: (heap() - settled) / 40, packageEval
                 + 'export const getProbe = route.get(\'/probe/plain\').handler(async () => ({}));\n');
             await watcher.until(() => routeMapPaths().includes('/probe/plain'));
 
-            const regenerations = watcher.output().split('Regenerated').length;
+            expect(watcher.output()).not.toContain('Regeneration failed');
+
+            // The edit is not counted against "Regenerated" lines: a deletion is two
+            // changes, and the generation queued for the second loads whatever is on
+            // disk when it runs, so the map can show a later edit before that edit's
+            // own generation. What is checked is that the watcher is never told.
+            const mentions = (): number => watcher.output().split('src/server/lib/segment.ts').length;
+            const mentioned = mentions();
 
             write('src/server/lib/segment.ts', 'export const segment: string = \'three\';\n');
-            await new Promise(settle => setTimeout(settle, 1500));
-
-            expect(watcher.output().split('Regenerated').length).toBe(regenerations);
-            expect(watcher.output()).not.toContain('Regeneration failed');
 
             // An import of a file that does not exist: the load fails; creating it regenerates.
             const failures = (): number => watcher.output().split('Regeneration failed').length;
@@ -394,6 +397,8 @@ console.log(JSON.stringify({ perGeneration: (heap() - settled) / 40, packageEval
             await watcher.until(() => failures() > failed);
             write('src/server/lib/later.ts', 'export const later: string = \'later\';\n');
             await watcher.until(() => routeMapPaths().includes('/probe/later'));
+            // Written before probe.ts: reported, if at all, before this generation ran.
+            expect(mentions()).toBe(mentioned);
 
             // The same, in a directory that does not exist yet.
             const failedAgain = failures();
