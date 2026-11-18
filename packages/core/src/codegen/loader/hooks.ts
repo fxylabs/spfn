@@ -34,6 +34,9 @@
  * - **Generation tag.** Appended to files under the project root and outside
  *   `node_modules` only. A workspace package's source beside the app is
  *   transformed but not tagged: like a package, it is evaluated once.
+ * - **What a load reached.** The tagged files, and, for a relative or `paths`
+ *   specifier that resolved nowhere, every path under the root it was looked
+ *   for at (`closeGeneration`): the watcher retries the load when one appears.
  *
  * A file the rule leaves CommonJS (`.cts`, `.cjs`, a CommonJS-syntax `.js`) is
  * handed back to the chain untagged: the chain loads it as CommonJS, and what
@@ -105,6 +108,9 @@ interface Generation
 
     /** Real paths of the project files the load reached. */
     touched: Set<string>;
+
+    /** Paths under the root a resolution that failed looked for: a file created at one is to be noticed. */
+    tried: Set<string>;
 }
 
 /** A file the hooks resolved for a load, by the URL it was given. */
@@ -124,17 +130,19 @@ const sourceMaps = new Map<string, SourceMap>();
 /** Start a load under `token`, reading the project at `root`. */
 export function openGeneration(token: string, root: string): void
 {
-    generations.set(token, { root: realpathSync(root), paths: new Map(), compilerOptions: new Map(), touched: new Set() });
+    generations.set(token, { root: realpathSync(root), paths: new Map(), compilerOptions: new Map(), touched: new Set(), tried: new Set() });
 }
 
 /**
  * End a load: forget what only resolution needed, and return the project files
- * it touched. A module stays in Node's cache, so a later load under the same
- * token reuses it without resolving again.
+ * it touched with the paths a failed resolution looked for — what a watcher
+ * has to watch for the load to be retried. A module stays in Node's cache, so
+ * a later load under the same token reuses it without resolving again.
  */
 export function closeGeneration(token: string): string[]
 {
-    const touched = [...generations.get(token)?.touched ?? []];
+    const generation = generations.get(token);
+    const touched = [...generation?.touched ?? [], ...generation?.tried ?? []];
 
     generations.delete(token);
 
@@ -199,19 +207,35 @@ function isFile(path: string): boolean
     return existsSync(path) && statSync(path).isFile();
 }
 
-/** The file `path` names as TypeScript resolves an import: as written, its source, with an extension, an index. */
-function sourceFile(path: string): string | undefined
+/** The files `path` may name as TypeScript resolves an import, in order: as written, its source, with an extension, an index. */
+function candidatesFor(path: string): string[]
 {
     const extension = extname(path);
     const stem = path.slice(0, path.length - extension.length);
-    const candidates = [
+
+    return [
         path,
         ...(SOURCE_FOR[extension] ?? []).map(source => stem + source),
         ...SOURCE_EXTENSIONS.map(source => path + source),
         ...SOURCE_EXTENSIONS.map(source => resolve(path, `index${source}`)),
     ];
+}
 
-    return candidates.find(isFile);
+/** The file `path` names as TypeScript resolves an import. */
+function sourceFile(path: string): string | undefined
+{
+    return candidatesFor(path).find(isFile);
+}
+
+/** Note what a resolution that failed looked for under the root (`Generation.tried`). */
+function recordTried(token: string, paths: string[]): void
+{
+    const generation = generations.get(token)!;
+
+    paths
+        .flatMap(candidatesFor)
+        .filter(path => isWithin(generation.root, path) && !isDependency(path, generation.root))
+        .forEach(path => generation.tried.add(path));
 }
 
 /** A relative, absolute or `file:` specifier as a path, or undefined for a bare one. */
@@ -460,6 +484,8 @@ function resolveBare(specifier: string, context: ResolveContext, nextResolve: Ne
 
     if ('error' in chained)
     {
+        recordTried(token, match?.candidates ?? []);
+
         throw match === undefined ? unresolvedBare(specifier, context.parentURL, chained.error) : unresolvedAlias(specifier, context.parentURL, match);
     }
 
@@ -520,6 +546,8 @@ export function resolveHook(specifier: string, context: ResolveContext, nextReso
 
     if ('error' in chained)
     {
+        recordTried(token, [path]);
+
         throw unresolvedPath(specifier, context.parentURL, chained.error);
     }
 

@@ -207,7 +207,9 @@ load (`src/codegen/loader/`).
   project file the latest load of a router reached — `src/server/lib/segment.ts` imported
   through `@/` included — besides the generators' `watchPatterns` (kept for what no load has
   reached yet: a new route file, the router). A file a load no longer reaches, a deleted one,
-  leaves the set.
+  leaves the set. A load that failed on an import that resolved nowhere (a relative path or a
+  `paths` alias) records every path it looked for under the project root; creating a file at
+  any of them — in a directory that does not exist yet too — regenerates.
 
 ## Built-in: `@spfn/core:route-map`
 

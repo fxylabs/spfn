@@ -116,9 +116,11 @@ const sharedLoads = new Map<string, Promise<ObservedLoad>>();
 const filesByRouter = new Map<string, Set<string>>();
 
 /**
- * The project files the latest load of each router reached, by router path:
- * what the watcher has to watch beside its patterns, so an edit to a file the
- * router imports through `@/` regenerates too.
+ * The project files the latest load of each router reached, by router path,
+ * with the paths an import that resolved nowhere was looked for at: what the
+ * watcher has to watch beside its patterns, so an edit to a file the router
+ * imports through `@/` regenerates too, and so does creating a file a failed
+ * load was missing.
  */
 export function routerFiles(): ReadonlyMap<string, ReadonlySet<string>>
 {

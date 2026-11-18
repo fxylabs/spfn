@@ -61,8 +61,9 @@ export function newGeneration(): string
 
 /**
  * What a load evaluated, or what it threw — rewritten to name the project's
- * files as written (`./errors`) — and the project files it reached either way:
- * a load that failed on a file is to be retried when that file changes.
+ * files as written (`./errors`) — and the project files it reached either way,
+ * with the paths an import that resolved nowhere was looked for at: a load that
+ * failed on a file is to be retried when that file changes or appears.
  */
 export type ProjectLoad =
     | { ok: true; module: Record<string, unknown>; touched: string[] }

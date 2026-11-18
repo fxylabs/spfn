@@ -16,11 +16,12 @@
  * what no load has reached yet: a new route file, the router itself.
  */
 
-import { realpathSync } from 'fs';
+import { existsSync, realpathSync } from 'fs';
 import { join, relative, sep } from 'path';
 import { watch as chokidarWatch } from 'chokidar';
 import mm from 'micromatch';
 import type { Generator, GeneratorOptions, GeneratorTrigger } from './generator';
+import { MissingFiles } from './missing-files';
 import { pinNodeEnv } from './node-env';
 import { logger } from '@spfn/core/logger';
 import { newGeneration } from '../loader/register';
@@ -60,6 +61,7 @@ export class CodegenOrchestrator
     private pendingRegenerations = new Set<string>();
     private watcher?: ReturnType<typeof chokidarWatch>;
     private watchedFiles = new Set<string>();
+    private missingFiles?: MissingFiles;
     private watcherClosePromise?: { resolve: () => void; reject: (error: Error) => void };
 
     /**
@@ -90,6 +92,9 @@ export class CodegenOrchestrator
             await this.watcher.close();
             this.watcher = undefined;
         }
+
+        this.missingFiles?.close();
+        this.missingFiles = undefined;
 
         // Resolve the watch promise if it exists
         if (this.watcherClosePromise)
@@ -202,10 +207,18 @@ export class CodegenOrchestrator
                 mm.isMatch(filePath, pattern) || routers.some(router => mm.isMatch(router, pattern))));
     }
 
-    /** Watch every file the routers' latest loads reached, and stop watching the ones they no longer do. */
+    /**
+     * Watch every file the routers' latest loads reached, and stop watching the
+     * ones they no longer do. The paths a failed import was looked for at, which
+     * do not exist, are watched for by `MissingFiles`.
+     */
     private syncWatchedFiles(): void
     {
-        const wanted = new Set([...this.routerFileSets().values()].flatMap(files => [...files]));
+        const files = [...this.routerFileSets().values()].flatMap(set => [...set]);
+
+        this.missingFiles?.sync(files);
+
+        const wanted = new Set(files.filter(file => existsSync(join(this.cwd, file))));
         const added = [...wanted].filter(file => !this.watchedFiles.has(file));
         const removed = [...this.watchedFiles].filter(file => !wanted.has(file));
 
@@ -282,8 +295,6 @@ export class CodegenOrchestrator
             },
         });
 
-        this.syncWatchedFiles();
-
         const handleChange = async (absolutePath: string, event: 'add' | 'change' | 'unlink') =>
         {
             // Convert absolute path to relative path for pattern matching
@@ -356,6 +367,9 @@ export class CodegenOrchestrator
                 await handleChange(next, 'change');
             }
         };
+
+        this.missingFiles = new MissingFiles(this.cwd, file => handleChange(join(this.cwd, file), 'add'));
+        this.syncWatchedFiles();
 
         this.watcher
             .on('add', (path) => handleChange(path, 'add'))

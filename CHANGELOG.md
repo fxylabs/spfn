@@ -37,7 +37,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **@spfn/core: the `spfn dev` codegen watcher regenerates for every project file the router
   reaches.** It watched only `src/server/routes/**` and the router, so editing
   `src/server/lib/segment.ts` imported through `@/` regenerated nothing. The watched set follows each
-  load; a file no load reaches any more leaves it.
+  load; a file no load reaches any more leaves it. A load that failed on an import that resolved
+  nowhere is retried when a file appears at any path the import was looked for at (a directory
+  that does not exist yet included).
 - **@spfn/core: the environment probe's header is true now.** A package does not run again on a
   varied load, as it said; with jiti it did, so a package's `NODE_ENV`-dependent route was refused
   or not depending on an unrelated project file, and the refusal blamed that file.

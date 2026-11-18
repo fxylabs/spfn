@@ -21,8 +21,9 @@
  * |    | env read so the probe varies NODE_ENV                        | entry and the fixture package evaluated exactly once      |
  * | R2 | the `spfn dev` watcher entry under tsx and the dev hook:    | a generation tag that does not reach a transitive module  |
  * |    | edit a route, change the router only, edit an `@/` import    | (stale map); an `@/` file outside `routes/` nobody        |
- * |    | under `routes/` and one outside it, delete a route; a file   | watches; a file that left the import graph still watched  |
- * |    | no longer imported is no longer watched                      |                                                          |
+ * |    | under `routes/` and one outside it, delete a route; a file   | watches; a file that left the import graph still watched; |
+ * |    | no longer imported is no longer watched; import a missing    | a missing file nobody watches for, so creating it         |
+ * |    | file, create it; the same in a directory not there yet       | regenerates nothing                                       |
  * | R8 | `spfn codegen run` on a `.cts` route requiring @spfn/core    | a CommonJS copy of @spfn/core passing silently (tsx 4.20, |
  * |    |                                                             | 4.23; 4.22 shares the instance, and the row checks so)    |
  * | R9 | 50 generations in one process, @spfn/core installed in the   | packages re-evaluated per load: MBs per reload, count > 1 |
@@ -358,6 +359,27 @@ console.log(JSON.stringify({ perGeneration: (heap() - settled) / 40, packageEval
 
             expect(watcher.output().split('Regenerated').length).toBe(regenerations);
             expect(watcher.output()).not.toContain('Regeneration failed');
+
+            // An import of a file that does not exist: the load fails; creating it regenerates.
+            const failures = (): number => watcher.output().split('Regeneration failed').length;
+            const failed = failures();
+
+            write('src/server/routes/probe.ts', 'import { route } from \'@spfn/core/route\';\n'
+                + 'import { later } from \'@/server/lib/later\';\n'
+                + 'export const getProbe = route.get(`/probe/${later}`).handler(async () => ({}));\n');
+            await watcher.until(() => failures() > failed);
+            write('src/server/lib/later.ts', 'export const later: string = \'later\';\n');
+            await watcher.until(() => routeMapPaths().includes('/probe/later'));
+
+            // The same, in a directory that does not exist yet.
+            const failedAgain = failures();
+
+            write('src/server/routes/probe.ts', 'import { route } from \'@spfn/core/route\';\n'
+                + 'import { fresh } from \'@/server/fresh/value\';\n'
+                + 'export const getProbe = route.get(`/probe/${fresh}`).handler(async () => ({}));\n');
+            await watcher.until(() => failures() > failedAgain);
+            write('src/server/fresh/value.ts', 'export const fresh: string = \'fresh\';\n');
+            await watcher.until(() => routeMapPaths().includes('/probe/fresh'));
         }
         finally
         {
