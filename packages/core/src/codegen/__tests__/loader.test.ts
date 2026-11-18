@@ -42,15 +42,16 @@
  * | R26 | `with { type: 'javascript' }` and an unknown attribute on JSON;       | the hook's JSON loading dropping Node's attribute   |
  * |     | `with { type: 'json' }` on a TypeScript module                       | checks                                              |
  * | R27 | a JSON file starting with U+FEFF                                     | a byte-order mark Node, tsx and esbuild accept      |
- * | R28 | watch mode, a missing import in a directory `fs.watch` cannot watch  | the watch failing out of the generation: the        |
- * |     | (mode 0), then an edit to the route                                  | watcher process ends, nothing regenerates           |
- * | R29 | a directory watcher reporting an error (EPERM, as Windows does on    | an unhandled 'error' event throwing                 |
- * |     | deleting it)                                                         |                                                     |
+ * | R28 | watch mode, a missing import in a directory `fs.watch` throws EACCES | the watch failing out of the generation: the        |
+ * |     | for (injected), then an edit to the route                            | watcher process ends, nothing regenerates           |
+ * | R29 | a directory watcher (injected) reporting an error (EPERM, as Windows | an unhandled 'error' event throwing                 |
+ * |     | does on deleting it)                                                 |                                                     |
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Logger } from '@spfn/core/logger';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync, type FSWatcher } from 'fs';
+import { EventEmitter } from 'events';
 import { tmpdir } from 'os';
 import { dirname, join, resolve } from 'path';
 import { createRouteMapGenerator } from '../generators/route-map';
@@ -64,6 +65,22 @@ const CORE_PACKAGE = resolve(__dirname, '../../..');
 const OUTPUT_PATH = 'src/generated/route-map.ts';
 
 let appDir: string;
+
+/**
+ * What `fs.watch` does for a path, in place of watching it. The watch rows
+ * inject the failure here rather than arranging it through the OS: a mode-0
+ * directory is watchable for root, as CI's container runs.
+ */
+const watchOverrides = vi.hoisted(() => new Map<string, () => FSWatcher>());
+
+vi.mock('fs', async (importOriginal) =>
+{
+    const actual = await importOriginal<typeof import('fs')>();
+    const watch = (path: string, ...rest: unknown[]): FSWatcher =>
+        watchOverrides.get(path)?.() ?? (actual.watch as (...args: unknown[]) => FSWatcher)(path, ...rest);
+
+    return { ...actual, watch };
+});
 
 function write(path: string, content: string, root = appDir): void
 {
@@ -130,6 +147,7 @@ beforeEach(() =>
 
 afterEach(() =>
 {
+    watchOverrides.clear();
     apps.splice(0).forEach(root => rmSync(root, { recursive: true, force: true }));
 });
 
@@ -582,7 +600,10 @@ describe('codegen loader - watch mode', () =>
         write('src/server/router.ts', 'import { defineRouter } from \'@spfn/core/route\';\n'
             + 'import { getProbe } from \'./routes/probe\';\n'
             + 'export const appRouter = defineRouter({ getProbe });\n');
-        chmodSync(join(appDir, 'src/server/locked'), 0);
+        watchOverrides.set(join(appDir, 'src/server/locked'), () =>
+        {
+            throw Object.assign(new Error('EACCES: permission denied, watch'), { code: 'EACCES', syscall: 'watch' });
+        });
 
         const generator = createRouteMapGenerator({ name: '@spfn/core:route-map', routerPath: './src/server/router.ts', outputPath: `./${OUTPUT_PATH}` });
         const orchestrator = new CodegenOrchestrator({ generators: [generator], cwd: appDir });
@@ -607,7 +628,6 @@ describe('codegen loader - watch mode', () =>
         finally
         {
             await orchestrator.close();
-            chmodSync(join(appDir, 'src/server/locked'), 0o755);
             warn.mockRestore();
             info.mockRestore();
         }
@@ -618,17 +638,17 @@ describe('codegen loader - watch mode', () =>
         const warn = vi.spyOn(Logger.prototype, 'warn').mockImplementation(() =>
         {
         });
+        const watcher = Object.assign(new EventEmitter(), { close: vi.fn() });
         const missing = new MissingFiles(appDir, () => undefined);
+
+        watchOverrides.set(appDir, () => watcher as unknown as FSWatcher);
 
         try
         {
             missing.sync(['src/later.ts']);
 
-            const watchers = (missing as unknown as { watchers: Map<string, NodeJS.EventEmitter> }).watchers;
-            const watcher = watchers.get('.')!;
-
             expect(() => watcher.emit('error', Object.assign(new Error('operation not permitted'), { code: 'EPERM' }))).not.toThrow();
-            expect(watchers.size).toBe(0);
+            expect(watcher.close).toHaveBeenCalledOnce();
             expect(warn.mock.calls.map(([message]) => String(message)).join('\n')).toMatch(/Cannot watch \. for src\/later\.ts \(EPERM\)/);
         }
         finally
