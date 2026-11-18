@@ -192,7 +192,10 @@ load (`src/codegen/loader/`).
   `module: ESNext`, `target: ES2022`, `sourceMap: true` and `isolatedModules: true`. Nothing
   else is read (`importsNotUsedAsValues`/`preserveValueImports` were removed in TypeScript
   5.5). `spfn build` reads the same file (`src/server/tsconfig.json`); the `spfn dev` server,
-  under tsx, reads only the root `tsconfig.json`.
+  under tsx, reads only the root `tsconfig.json`. A project file outside `src/server/` is
+  governed here by its own nearest tsconfig, while `spfn build` bundles every file with
+  `src/server/tsconfig.json`: where the two configs differ in one of these options, that file
+  runs with different semantics in codegen and in the build.
 - **Resolution.** Extensionless and `.js` → `.ts` specifiers and a directory's `index`, as
   TypeScript resolves them; and tsconfig `paths`, as tsc reads them — see the alias gotcha
   below.
@@ -357,7 +360,12 @@ Unlike the old source parser, which dropped what it could not read, the generato
   value outside the three, a key first read under
   a varied environment, a package's own module scope, and nondeterminism that is not the
   environment. Each varied load runs the project's module scope again, which is one more
-  reason a route module must be importable without side effects. A key read at module scope
+  reason a route module must be importable without side effects. There is one environment per
+  process, so loads that observe or vary it take turns: two generations run side by side (a
+  `Promise.all` over a monorepo's apps) wait for each other load by load. A load that never
+  settles — a top-level `await` that hangs — therefore holds the environment and blocks every
+  later load in the process, other apps' included; the watcher already ran one generation at a
+  time. A key read at module scope
   for use inside a handler is not refused: the written files are compared, not the reads.
 - Two routes reach the same name (the message names both places).
 - An **app route and a package route** reach the same name, where that package publishes a

@@ -15,6 +15,8 @@ type Plugin = NonNullable<Options['esbuildPlugins']>[number];
  * `codegen/loader` is built from `src/codegen/loader-entry.ts`, next to
  * `src/codegen/index.ts`, not from a `src/codegen/loader/index.ts` of its own.
  * A new entry belongs in an existing entry's directory, listed right after it.
+ * That placement avoids the cost for one entry, it does not remove it: issue
+ * #352 tracks the one-program-per-directory cost itself.
  */
 const entry = {
     'nextjs/index': 'src/nextjs/index.ts',
