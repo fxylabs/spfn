@@ -135,17 +135,17 @@ export function requireProjectModule(file: string, root: string): Record<string,
     return settled.module;
 }
 
-/** Import a package's module natively, by the specifier resolved from `root` (else from this package). */
-export function importPackageModule(specifier: string, root: string): Promise<Record<string, unknown>>
+/** Import a package's module natively, by its file (`resolvePackageModule`). */
+export function importPackageModule(file: string): Promise<Record<string, unknown>>
 {
-    return nativeImport(pathToFileURL(resolvePackage(specifier, root)).href);
+    return nativeImport(pathToFileURL(file).href);
 }
 
-function resolvePackage(specifier: string, root: string): string
+/** The file a package specifier names, resolved from `root`, else from this package; undefined when neither resolves it. */
+export function resolvePackageModule(specifier: string, root: string): string | undefined
 {
-    const fromRoot = tryResolve(createRequire(pathToFileURL(`${root}/`)), specifier);
-
-    return fromRoot ?? createRequire(import.meta.url).resolve(specifier);
+    return tryResolve(createRequire(pathToFileURL(`${root}/`)), specifier)
+        ?? tryResolve(createRequire(import.meta.url), specifier);
 }
 
 function tryResolve(require: NodeJS.Require, specifier: string): string | undefined

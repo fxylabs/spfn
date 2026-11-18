@@ -115,7 +115,11 @@ If none declares a config, you get `{ generators: [] }` and nothing runs. A conf
 exists and fails to load — a `.spfnrc.ts` that throws or does not compile, a `.spfnrc.json` or
 `package.json` that is not JSON — throws `Failed to load <file> (at <file>:<line>:<col>):
 <message>` instead; `spfn codegen run` and `spfn build` exit non-zero with it. The same holds for
-a custom generator whose file fails to load.
+every generator the config names (BREAKING): a custom generator whose file fails to load or
+exports no factory, a package generator that is not found (`Cannot load generator
+"@spfn/core:route-mapp": …`, naming where it was looked for, or the generators the package does
+export), whose `<package>/codegen` throws on import or whose factory throws (its error), and an
+entry that names no generator. Only `enabled: false` skips an entry.
 
 `.spfnrc.ts` and custom generators are ES modules: `__dirname`, `__filename`, `require` and
 `module.exports` are not defined — write `import.meta.dirname`, `import.meta.filename`, `import`

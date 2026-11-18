@@ -33,6 +33,8 @@
  * | R15| `.spfnrc.ts` writing its `import.meta` beside itself, through | a config that sees a file that does not exist (the        |
  * |    | `fileURLToPath(import.meta.url)`                              | `.spfn-esm` name tsx is kept away by)                     |
  * | R20| `spfn codegen run` with a `.spfnrc.ts` using `__dirname`      | "No generators configured" and exit 0: CI skips codegen   |
+ * | R31| `spfn codegen run` with a misspelt package generator, then   | "No generators configured" / "Make sure it is installed"  |
+ * |    | one whose `/codegen` throws on import                        | and exit 0: a configured generator silently skipped       |
  * | R22| the bin, and the tsx child it re-spawns, recording their     | the codegen mark set where the CLI starts, inherited by   |
  * |    | environment at exit                                          | the dev server, `next` and `spfn db` (every descendant)   |
  */
@@ -300,6 +302,30 @@ describe.each(TSX)('codegen in CLI processes, tsx $version', (tsx) =>
         expect(status, output).toBe(1);
         expect(output).toMatch(/Failed to load \.spfnrc\.ts \(at \.spfnrc\.ts:4:\d+\): __dirname is not defined in ES module scope/);
         expect(output).not.toContain('No generators configured');
+    });
+
+    it('R31 spfn codegen run exits non-zero naming a package generator that cannot be loaded, with the reason', () =>
+    {
+        const configWith = (name: string): string => 'import { defineConfig, defineGenerator } from \'@spfn/core/codegen\';\n\n'
+            + `export default defineConfig({ generators: [defineGenerator({ name: '${name}', routerPath: './src/server/router.ts' })] });\n`;
+
+        write('.spfnrc.ts', configWith('@spfn/core:route-mapp'));
+
+        const misspelt = codegenRun(tsx);
+
+        expect(misspelt.status, misspelt.output).toBe(1);
+        expect(misspelt.output).toContain('Cannot load generator "@spfn/core:route-mapp"');
+        expect(misspelt.output).not.toContain('No generators configured');
+
+        write('node_modules/throwing-gen/package.json', JSON.stringify({ name: 'throwing-gen', type: 'module', exports: { './codegen': './codegen.js' } }));
+        write('node_modules/throwing-gen/codegen.js', 'throw new Error(\'codegen module boom\');\n');
+        write('.spfnrc.ts', configWith('throwing-gen:gen'));
+
+        const throwing = codegenRun(tsx);
+
+        expect(throwing.status, throwing.output).toBe(1);
+        expect(throwing.output).toContain('Failed to load generator throwing-gen:gen from node_modules/throwing-gen/codegen.js: codegen module boom');
+        expect(throwing.output).not.toContain('installed');
     });
 
     it('R9 fifty generations retain a bounded heap each and evaluate the packages once, @spfn/core installed in the app', () =>

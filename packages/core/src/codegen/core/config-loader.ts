@@ -10,7 +10,7 @@ import type { Generator } from './generator';
 import { pinNodeEnv } from './node-env';
 import { logger } from '@spfn/core/logger';
 import { projectOrigin } from '../loader/errors';
-import { importPackageModule, importProjectModule, newGeneration, requireProjectModule } from '../loader/register';
+import { importPackageModule, importProjectModule, newGeneration, requireProjectModule, resolvePackageModule } from '../loader/register';
 
 const configLogger = logger.child('@spfn/core:codegen-config');
 
@@ -214,64 +214,80 @@ export function loadCodegenConfig(cwd: string): CodegenConfig
 }
 
 /**
- * Load generator from package
- *
- * Supports format: "package:generator-name" or "@scope/package:generator-name"
+ * A package generator, `<package>:<generator>`: the factory `<package>/codegen`
+ * exports for it, called with the entry's options.
  *
  * `<package>/codegen` is imported natively, resolved from the project root (and
  * from this package when the project cannot resolve it): for `@spfn/core` that
  * is the module this process already imported, so the generator that runs is
- * this process's own.
+ * this process's own. A generator the config names and that cannot be produced
+ * — not found, a module that throws, a factory that throws — fails the
+ * configuration, with the reason.
  */
 async function loadGeneratorFromPackage(
     packageName: string,
     generatorName: string,
     config: Record<string, any>,
     cwd: string,
-): Promise<Generator | null>
+): Promise<Generator>
 {
-    try
+    const name = `${packageName}:${generatorName}`;
+    const specifier = `${packageName}/codegen`;
+    const file = resolvePackageModule(specifier, cwd);
+
+    if (file === undefined)
     {
-        const generatorsModule: Record<string, any> = await importPackageModule(`${packageName}/codegen`, cwd);
-
-        // Look for generator by name in registry
-        if (generatorsModule.generators?.[generatorName])
-        {
-            const createFn = generatorsModule.generators[generatorName];
-            const generator = createFn(config);
-            configLogger.info(`Loaded ${packageName}:${generatorName}`);
-
-            return generator;
-        }
-
-        // Fallback: try conventional name (createXxxGenerator)
-        const conventionalName = `create${capitalize(generatorName)}Generator`;
-        if (generatorsModule[conventionalName])
-        {
-            const createFn = generatorsModule[conventionalName];
-            const generator = createFn(config);
-            configLogger.info(`Loaded ${packageName}:${generatorName} (via ${conventionalName})`);
-
-            return generator;
-        }
-
-        configLogger.warn(
-            `Generator "${generatorName}" not found in ${packageName}/codegen. ` +
-            `Expected: generators.${generatorName} or ${conventionalName}`,
+        throw new Error(
+            `Cannot load generator "${name}": "${specifier}" resolves neither from the project (${cwd}) nor from `
+            + '@spfn/core. A package generator is named "<package>:<generator>" and its factory is loaded from '
+            + `"<package>/codegen": is ${packageName} installed, and does it export "./codegen"?`,
         );
-
-        return null;
     }
-    catch (error)
+
+    const loaded = await importPackageModule(file).then(
+        module => ({ ok: true as const, module }),
+        (error: unknown) => ({ ok: false as const, error }),
+    );
+
+    if (!loaded.ok)
     {
-        const err = error instanceof Error ? error : new Error(String(error));
-        configLogger.warn(
-            `Failed to load ${packageName}:${generatorName}. ` +
-            `Make sure ${packageName} is installed. Error: ${err.message}`,
-        );
-
-        return null;
+        throw configFailure(cwd, `generator ${name} from ${relative(cwd, file)}`, loaded.error);
     }
+
+    const factory = packageFactory(name, generatorName, loaded.module);
+    const created = attempt(() => factory(config) as Generator);
+
+    if (!created.ok)
+    {
+        throw configFailure(cwd, `generator ${name}`, created.error);
+    }
+
+    configLogger.info(`Loaded ${name}`);
+
+    return created.value;
+}
+
+/**
+ * The factory `<package>/codegen` exports for `generatorName`: in its
+ * `generators` registry, or by the conventional name (`createXxxGenerator`).
+ */
+function packageFactory(name: string, generatorName: string, module: Record<string, any>): (config: Record<string, any>) => unknown
+{
+    const conventionalName = `create${capitalize(generatorName)}Generator`;
+    const factory = module.generators?.[generatorName] ?? module[conventionalName];
+
+    if (typeof factory !== 'function')
+    {
+        const known = Object.keys(module.generators ?? {});
+
+        throw new Error(
+            `Cannot load generator "${name}": its package's codegen module exports neither `
+            + `generators["${generatorName}"] nor ${conventionalName}.`
+            + (known.length > 0 ? ` Its generators are: ${known.join(', ')}.` : ''),
+        );
+    }
+
+    return factory;
 }
 
 /**
@@ -300,8 +316,8 @@ async function importCustomGenerator(generatorPath: string, cwd: string): Promis
     return load.module;
 }
 
-/** A custom generator from its file's factory, or null when the file exports none. */
-async function loadCustomGenerator(path: string, cwd: string): Promise<Generator | null>
+/** A custom generator from its file's factory; a file that exports none fails the configuration. */
+async function loadCustomGenerator(path: string, cwd: string): Promise<Generator>
 {
     const generatorPath = path.startsWith('.') ? join(cwd, path) : path;
 
@@ -312,9 +328,7 @@ async function loadCustomGenerator(path: string, cwd: string): Promise<Generator
 
     if (typeof createGenerator !== 'function')
     {
-        configLogger.warn(`Invalid generator at ${generatorPath}: expected function`);
-
-        return null;
+        throw new Error(`Cannot load generator ${relative(cwd, generatorPath)}: it exports no factory (a default export or createGenerator).`);
     }
 
     const generator = createGenerator();
@@ -324,7 +338,7 @@ async function loadCustomGenerator(path: string, cwd: string): Promise<Generator
     return generator;
 }
 
-/** The generator one config entry stands for, or null for an entry that names none it can load. */
+/** The generator one config entry stands for, or null for one disabled (`enabled: false`). */
 async function generatorFor(generatorConfig: GeneratorConfig, cwd: string): Promise<Generator | null>
 {
     // Already instantiated Generator (has generate function)
@@ -341,39 +355,35 @@ async function generatorFor(generatorConfig: GeneratorConfig, cwd: string): Prom
         return loadCustomGenerator(generatorConfig.path, cwd);
     }
 
-    if (typeof generatorConfig.name !== 'string')
+    if (typeof generatorConfig.name !== 'string' || !generatorConfig.name.includes(':'))
+    {
+        throw new Error(
+            `Invalid codegen generator entry ${JSON.stringify(generatorConfig)}: name a package generator as `
+            + '"<package>:<generator>" (e.g. "@spfn/core:contract"), or a generator file with "path".',
+        );
+    }
+
+    if (generatorConfig.enabled === false)
     {
         return null;
     }
 
     // Package-based generator: "package:name" or "@scope/package:name"
-    if (generatorConfig.name.includes(':'))
-    {
-        if (generatorConfig.enabled === false)
-        {
-            return null;
-        }
+    const [packageName, generatorName] = generatorConfig.name.split(':');
+    const { enabled, name, ...generatorOptions } = generatorConfig;
 
-        const [packageName, generatorName] = generatorConfig.name.split(':');
-        const { enabled, name, ...generatorOptions } = generatorConfig;
-
-        return loadGeneratorFromPackage(packageName, generatorName, generatorOptions, cwd);
-    }
-
-    configLogger.warn(
-        `Invalid generator name "${generatorConfig.name}". ` +
-        `Use package:name format (e.g., "@spfn/core:contract")`,
-    );
-
-    return null;
+    return loadGeneratorFromPackage(packageName, generatorName, generatorOptions, cwd);
 }
 
 /**
  * Create generator instances from configuration
  *
  * Pins `NODE_ENV` to `production` (`pinNodeEnv`) before loading any of them.
- * A custom generator whose file fails to load, or whose factory throws, throws;
- * a package generator that cannot be found is warned about and skipped.
+ * Every generator the config names loads or throws, with the reason: a package
+ * or generator not found (where it was looked for), a module or factory that
+ * throws (its error, located as a failed load is), an entry that names none.
+ * Only an entry with `enabled: false` is skipped, and only a config naming no
+ * generator yields none.
  */
 export async function createGeneratorsFromConfig(config: CodegenConfig, cwd: string): Promise<Generator[]>
 {

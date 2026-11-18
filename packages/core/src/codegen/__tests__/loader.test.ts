@@ -33,6 +33,8 @@
  * | R18 | a route module importing a file that does not exist                  | the missing path named before the importer          |
  * | R19 | `.spfnrc.ts` using `__dirname` (CommonJS) at line 4                   | a config that fails to load read as "no generators" |
  * | R21 | a custom generator file using `__dirname`                            | a configured generator skipped with a log line      |
+ * | R30 | a package generator misspelt, one whose package is not installed,    | a generator the config names skipped with a warning |
+ * |     | one whose `/codegen` throws on import, one whose factory throws      | ("not installed"), the run exiting 0                |
  * | R24 | a route module failing to read `src/server/data/missing.txt`         | the file named in the message taken for the origin  |
  * | R25 | an import of a name the module does not export                       | V8's source line above the message not read         |
  * | R26 | `with { type: 'javascript' }` and an unknown attribute on JSON;       | the hook's JSON loading dropping Node's attribute   |
@@ -488,6 +490,27 @@ describe('codegen loader - .spfnrc.ts', () =>
 
         await expect(createGeneratorsFromConfig({ generators: [{ path: './src/generators/custom.ts' }] }, appDir))
             .rejects.toThrow(/^Failed to load src\/generators\/custom\.ts \(at src\/generators\/custom\.ts:2:\d+\): __dirname is not defined/);
+    });
+
+    it('R30 a package generator the config names and that cannot be produced fails, with the reason', async () =>
+    {
+        const create = (name: string): Promise<unknown> => createGeneratorsFromConfig({ generators: [{ name, routerPath: './src/server/router.ts' }] }, appDir);
+
+        write('node_modules/throwing-gen/package.json', JSON.stringify({ name: 'throwing-gen', type: 'module', exports: { './codegen': './codegen.js' } }));
+        write('node_modules/throwing-gen/codegen.js', 'throw new Error(\'codegen module boom\');\n');
+        write('node_modules/factory-gen/package.json', JSON.stringify({ name: 'factory-gen', type: 'module', exports: { './codegen': './codegen.js' } }));
+        write('node_modules/factory-gen/codegen.js', 'export const generators = { gen: () => { throw new Error(\'factory boom\'); } };\n');
+
+        await expect(create('@spfn/core:route-mapp')).rejects.toThrow(
+            /^Cannot load generator "@spfn\/core:route-mapp": .*generators\["route-mapp"\] nor createRoute-mappGenerator\. Its generators are: .*route-map/,
+        );
+        await expect(create('@acme/absent:gen')).rejects.toThrow(
+            /^Cannot load generator "@acme\/absent:gen": "@acme\/absent\/codegen" resolves neither from the project \(.*\) nor from @spfn\/core/,
+        );
+        await expect(create('throwing-gen:gen')).rejects.toThrow(
+            /^Failed to load generator throwing-gen:gen from node_modules\/throwing-gen\/codegen\.js: codegen module boom$/,
+        );
+        await expect(create('factory-gen:gen')).rejects.toThrow(/^Failed to load generator factory-gen:gen: factory boom$/);
     });
 
     it('R10 loadCodegenConfig returns the config itself, synchronously, from a .spfnrc.ts importing @spfn/core/codegen', () =>
