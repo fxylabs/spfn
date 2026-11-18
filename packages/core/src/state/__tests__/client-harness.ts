@@ -278,6 +278,7 @@ function whatSettleWaitsFor(row: Row): string
  */
 function countCalls(client: StateClient<FixtureStates>, tracked: Tracked): void
 {
+    // A renamed field fails here; a second call path that bypasses `this.api` would silently go uncounted.
     const target = client as unknown as { api: RouteCalls };
     target.api = new Proxy(target.api, {
         get: (routes, route: string) => ({
