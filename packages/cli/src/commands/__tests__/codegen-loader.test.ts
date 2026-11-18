@@ -26,6 +26,8 @@
  * |    | file, create it; the same in a directory not there yet       | regenerates nothing                                       |
  * | R8 | `spfn codegen run` on a `.cts` route requiring @spfn/core    | a CommonJS copy of @spfn/core passing silently (tsx 4.20, |
  * |    |                                                             | 4.23; 4.22 shares the instance, and the row checks so)    |
+ * | R23| `spfn codegen run` on a route importing a package that       | the refusal itself on every tsx (R8 reaches it only where |
+ * |    | imports @spfn/core/route's file again under a query          | tsx makes a CommonJS copy, not on 4.22 in CI)             |
  * | R9 | 50 generations in one process, @spfn/core installed in the   | packages re-evaluated per load: MBs per reload, count > 1 |
  * |    | app's node_modules as real files                              |                                                          |
  * | R15| `.spfnrc.ts` writing its `import.meta` beside itself, through | a config that sees a file that does not exist (the        |
@@ -242,6 +244,28 @@ describe.each(TSX)('codegen in CLI processes, tsx $version', (tsx) =>
         expect(output).toContain('Refusing a second copy of @spfn/core in this process');
         expect(output).toContain('required by');
         expect(output).toContain('src/server/routes/legacy.cts');
+        expect(output).not.toContain('Warned, not refused');
+    });
+
+    it('R23 a second native evaluation of an @spfn/core entry is refused in spfn codegen run', () =>
+    {
+        // A package the loader leaves to Node, importing the entry's file by another URL.
+        write('node_modules/copy-pkg/package.json', JSON.stringify({ name: 'copy-pkg', type: 'module', main: 'index.js' }));
+        write('node_modules/copy-pkg/index.js', 'import { createRequire } from \'node:module\';\n'
+            + 'import { pathToFileURL } from \'node:url\';\n'
+            + 'const entry = createRequire(import.meta.url).resolve(\'@spfn/core/route\');\n'
+            + 'await import(`${pathToFileURL(entry).href}?second-copy`);\n'
+            + 'export const copied = true;\n');
+        write('src/server/routes/copy.ts', 'import { route } from \'@spfn/core/route\';\n'
+            + 'import { copied } from \'copy-pkg\';\n'
+            + 'export const getCopy = route.get(`/copy/${copied}`).handler(async () => ({}));\n');
+        writeRouter(['getProbe', 'getCopy']);
+
+        const { status, output } = codegenRun(tsx);
+
+        expect(readDump().entries['@spfn/core/route']).toEqual(['esm×2']);
+        expect(status, output).not.toBe(0);
+        expect(output).toContain('Refusing a second copy of @spfn/core in this process');
         expect(output).not.toContain('Warned, not refused');
     });
 

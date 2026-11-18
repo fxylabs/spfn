@@ -90,6 +90,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   used to be chosen for the whole load (the first that held anything), with warnings about the
   others; an import now resolves through whichever target has it, and a failure lists every target
   tried.
+- **BREAKING: TypeScript outside the app root is evaluated once per process and not watched.** A
+  sibling workspace package's source reached through tsconfig `paths` (or a link) is transformed
+  and evaluated once, like a package; jiti re-ran it on every load. After editing it, restart
+  `spfn dev`'s watcher (or whatever runs codegen) for the route map to see the change.
 - **BREAKING: `.spfnrc.ts` and custom `.ts` generators are ES modules.** `__dirname`, `__filename`,
   `require` and `module.exports` are not defined in them (jiti ran them as CommonJS). Write
   `import.meta.dirname` and `import.meta.filename`, `import`, and `export default`.

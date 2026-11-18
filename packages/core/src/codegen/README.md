@@ -154,8 +154,10 @@ load (`src/codegen/loader/`).
   `node_modules`), and to nothing else. Node keys an ES module by its URL, so a new
   generation re-runs the project's modules while a package — `@spfn/core`, `@spfn/auth`,
   anything installed — is the one module the process already holds, evaluated once, under
-  the pinned `production` environment. A workspace package's own source beside the app is
-  transformed but not re-run either.
+  the pinned `production` environment. A workspace package's own source beside the app — any
+  file outside the project root, a sibling package reached through `paths` included — is
+  transformed but not re-run either, and not watched: after editing it, restart `spfn dev` (or
+  the process that generates) for codegen to see the change.
 - **One load per generation.** The orchestrator gives every generator of one run the same
   `generation`; the three built-in generators share one load of each router under it. A
   generator called without one loads on its own.
