@@ -211,15 +211,16 @@ export function harness(
     const onError = vi.fn();
     const tracked: Tracked = { open: new Map(), held: new Map(), activity: 0 };
     const { maxReconnectAttempts, acquireToken, ...clientConfig } = config;
-    const client = createStateClient<FixtureStates>({
+    const row = callersRow();
+    const created = createStateClient<FixtureStates>({
         sse: createSSEClient({ url: 'http://test/stream', reconnectDelay: 10, maxReconnectAttempts, acquireToken }),
         api: { baseUrl: '/api/rpc', fetch: fakeFetch(calls, all, tracked) },
         onError,
         retryDelay: 10,
         ...clientConfig,
     });
-    countCalls(client, tracked);
-    const row = callersRow();
+    countCalls(created, tracked);
+    const client = ownedBy(row, created);
     row.clients.push(client);
     row.tracked.push(tracked);
 
@@ -297,6 +298,48 @@ function whatSettleWaitsFor(row: Row): string
 
     return `settle() was still waiting when the row ended, on route calls in flight that no deferred() holds: ${unheld.join(', ')}. `
         + 'A responder that holds its answer open on purpose must return a deferred(); settle() waits for every other answer.';
+}
+
+/**
+ * What a client does that starts work, or listens for it, once its row has
+ * ended: a read, a write, a stream open, a restart, a connection listener.
+ * Left open: `close()`, which the row's own end and the harness's auto-close
+ * call after the row has ended; the pure reads `current()` and
+ * `connection()`; and the unsubscribes handed out before the end, which on a
+ * closed client only close what is already closed.
+ */
+const STARTS_WORK = new Set(['get', 'snapshot', 'subscribe', 'write', 'subscribeConnection', 'retry']);
+
+/**
+ * The client as the row sees it: `close()` is not terminal — a later
+ * `subscribe()` reopens the stream, by design — so once the row has ended,
+ * every call in `STARTS_WORK` throws, as `settle()` and `harness()` do, and
+ * a body that a timeout abandoned cannot open a stream in the next row.
+ * Methods run on the client itself, so its own calls never pass the guard.
+ */
+function ownedBy(row: Row, client: StateClient<FixtureStates>): StateClient<FixtureStates>
+{
+    return new Proxy(client, {
+        get: (target, name, receiver) =>
+        {
+            const value = Reflect.get(target, name, receiver);
+
+            if (typeof value !== 'function')
+            {
+                return value;
+            }
+
+            return (...args: unknown[]) =>
+            {
+                if (row.finished && STARTS_WORK.has(name as string))
+                {
+                    throw new Error(ROW_ENDED);
+                }
+
+                return value.apply(target, args);
+            };
+        },
+    });
 }
 
 /**
