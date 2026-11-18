@@ -77,20 +77,28 @@ type Responder = (input: Record<string, any>) => unknown;
 type RouteCalls = Record<string, { call(input: object): Promise<unknown> }>;
 
 /**
- * The route calls of one client: `open` started and not settled, `held` of
- * those whose answer is a `deferred()` the row has not settled yet.
+ * One harness's client as `settle()` sees it: by route, its calls `open`
+ * (started, not settled) and `held` (of those, answered by a `deferred()` the
+ * row has not settled yet); `activity` is bumped whenever one of its calls
+ * starts or settles.
  */
-interface CallCount
+interface Tracked
 {
-    open: number;
-    held: number;
+    open: Map<string, number>;
+    held: Map<string, number>;
+    activity: number;
 }
 
-/** The call counts of every harness the running row made; each leaves when its row finishes. */
-const live = new Set<CallCount>();
+/** What a row's harnesses made, one of each per `harness()`, and whether the row has finished. */
+interface Row
+{
+    clients: StateClient<FixtureStates>[];
+    tracked: Tracked[];
+    finished: boolean;
+}
 
-/** Bumped whenever a route call starts or settles anywhere, so `settle()` sees a turn that changed nothing. */
-let activity = 0;
+/** The running row, from its first `harness()` until it finishes. */
+let running: Row | undefined;
 
 /** The promises `deferred()` made: an answer the row holds open on purpose, until it settles it. */
 const heldAnswers = new WeakSet<Promise<unknown>>();
@@ -111,22 +119,27 @@ function inputOf(url: string, init: RequestInit): Record<string, any>
     return JSON.parse(query ?? (init.body as string) ?? '{}');
 }
 
+function add(counts: Map<string, number>, route: string, by: number): void
+{
+    counts.set(route, (counts.get(route) ?? 0) + by);
+}
+
 /** A held answer does not count as in flight until the row settles it. */
-function holdWhileUnsettled(answer: unknown, count: CallCount): void
+function holdWhileUnsettled(answer: unknown, route: string, tracked: Tracked): void
 {
     if (heldAnswers.has(answer as Promise<unknown>))
     {
-        count.held++;
+        add(tracked.held, route, 1);
         const release = () =>
         {
-            count.held--;
-            activity++;
+            add(tracked.held, route, -1);
+            tracked.activity++;
         };
         (answer as Promise<unknown>).then(release, release);
     }
 }
 
-function fakeFetch(calls: RpcCall[], responders: Record<string, Responder>, count: CallCount): typeof fetch
+function fakeFetch(calls: RpcCall[], responders: Record<string, Responder>, tracked: Tracked): typeof fetch
 {
     return (async (url: string, init: RequestInit) =>
     {
@@ -134,7 +147,7 @@ function fakeFetch(calls: RpcCall[], responders: Record<string, Responder>, coun
         const input = inputOf(url, init);
         calls.push({ route, input });
         const reply = responders[route]?.(input);
-        holdWhileUnsettled(reply, count);
+        holdWhileUnsettled(reply, route, tracked);
         const body = await reply ?? {};
         const answer = route === 'getStates' ? { ...body as object, manifest } : body;
 
@@ -180,23 +193,45 @@ export function harness(
     const calls: RpcCall[] = [];
     const all: Record<string, Responder> = { getStates: input => ({ at: at(0), states: servedStates(input.query) }), ...responders };
     const onError = vi.fn();
-    const count: CallCount = { open: 0, held: 0 };
+    const tracked: Tracked = { open: new Map(), held: new Map(), activity: 0 };
     const { maxReconnectAttempts, acquireToken, ...clientConfig } = config;
     const client = createStateClient<FixtureStates>({
         sse: createSSEClient({ url: 'http://test/stream', reconnectDelay: 10, maxReconnectAttempts, acquireToken }),
-        api: { baseUrl: '/api/rpc', fetch: fakeFetch(calls, all, count) },
+        api: { baseUrl: '/api/rpc', fetch: fakeFetch(calls, all, tracked) },
         onError,
         retryDelay: 10,
         ...clientConfig,
     });
-    countCalls(client, count);
-    live.add(count);
-    onTestFinished(() =>
-    {
-        live.delete(count);
-    });
+    countCalls(client, tracked);
+    const row = runningRow();
+    row.clients.push(client);
+    row.tracked.push(tracked);
 
     return { client, calls, responders: all, onError };
+}
+
+/**
+ * The running row, made at its first `harness()`. When the row finishes it
+ * closes every client it made: one the row did not close — a row that failed
+ * early, or never meant to — would keep its retry timer and stream running
+ * into the next row. `close()` may run twice: a second call only clears what
+ * is already cleared.
+ */
+function runningRow(): Row
+{
+    if (!running)
+    {
+        const row: Row = { clients: [], tracked: [], finished: false };
+        onTestFinished(() =>
+        {
+            row.finished = true;
+            running = undefined;
+            row.clients.forEach(client => client.close());
+        });
+        running = row;
+    }
+
+    return running;
 }
 
 /**
@@ -207,20 +242,20 @@ export function harness(
  * any length, before `fetch` is reached. The client keeps its route calls in
  * its private `api`; the count wraps them there.
  */
-function countCalls(client: StateClient<FixtureStates>, count: CallCount): void
+function countCalls(client: StateClient<FixtureStates>, tracked: Tracked): void
 {
     const target = client as unknown as { api: RouteCalls };
     target.api = new Proxy(target.api, {
         get: (routes, route: string) => ({
             call: (input: object) =>
             {
-                count.open++;
-                activity++;
+                add(tracked.open, route, 1);
+                tracked.activity++;
 
                 return routes[route].call(input).finally(() =>
                 {
-                    count.open--;
-                    activity++;
+                    add(tracked.open, route, -1);
+                    tracked.activity++;
                 });
             },
         }),
@@ -271,33 +306,46 @@ function turn(): Promise<unknown>
     return vi.isFakeTimers() ? vi.advanceTimersByTimeAsync(0) : new Promise(resolve => setTimeout(resolve, 0));
 }
 
-/** Whether a client of the running row has a route call in flight that no `deferred()` holds. */
-function callsInFlight(): boolean
+/** The routes of `row`'s calls in flight that no `deferred()` holds, each with its count. */
+function unheldCalls(row: Row): [string, number][]
 {
-    return [...live].some(count => count.open > count.held);
+    return row.tracked.flatMap(({ open, held }) => [...open]
+        .map(([route, n]): [string, number] => [route, n - (held.get(route) ?? 0)])
+        .filter(([, n]) => n > 0));
+}
+
+function activityOf(row: Row): number
+{
+    return row.tracked.reduce((sum, tracked) => sum + tracked.activity, 0);
 }
 
 /**
- * Wait until the clients of the running row are quiescent: every route call
+ * Wait until the clients the running row made are quiescent: every route call
  * they started has settled — except one whose answer is a `deferred()` the row
  * has not settled, which the row holds on purpose — and a whole turn has then
- * passed in which no call started or settled. That is sufficient because
- * between route calls the client runs only synchronous code and microtasks
- * (the batched sync, the stream open, applying an answer), and a turn runs
- * every queued microtask: what the last answer set off has run, and any call
- * it started was seen. Real timers (`retryDelay`, the SSE `reconnectDelay`)
- * are not waited for; under fake timers the clock does not move.
+ * passed in which none of their calls started or settled. That is sufficient
+ * because between route calls the client runs only synchronous code and
+ * microtasks (the batched sync, the stream open, applying an answer), and a
+ * turn runs every queued microtask: what the last answer set off has run, and
+ * any call it started was seen. Real timers (`retryDelay`, the SSE
+ * `reconnectDelay`) are not waited for; under fake timers the clock does not
+ * move.
+ *
+ * Only the running row's clients count: an earlier row's were closed when it
+ * finished and were never this row's to wait for. A wait the row's end
+ * overtook — a timeout — stops there.
  */
 export async function settle(): Promise<void>
 {
+    const row = running ?? { clients: [], tracked: [], finished: false };
     let seen: number;
 
     do
     {
-        seen = activity;
+        seen = activityOf(row);
         await turn();
     }
-    while (activity !== seen || callsInFlight());
+    while (!row.finished && (activityOf(row) !== seen || unheldCalls(row).length > 0));
 }
 
 /**
