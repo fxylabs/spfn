@@ -942,6 +942,11 @@ describe('per-start OAuth cookies — case table (#126)', () =>
 
     it('B14: API-mode oauthStart then callback — per-start CSRF cookie written and matched; a second start does not break the first', async () =>
     {
+        // The server dates the name inside the request and the expectation dates
+        // it again after; one frozen second serves both. The two starts' names
+        // still differ by their key ids.
+        vi.useFakeTimers({ toFake: ['Date'] });
+        vi.setSystemTime(new Date('2026-10-05T10:00:00Z'));
         const jar = new Map<string, string>();
 
         async function apiStart(): Promise<string>
