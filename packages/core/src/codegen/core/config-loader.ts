@@ -9,7 +9,6 @@ import { join, relative } from 'path';
 import type { Generator } from './generator';
 import { pinNodeEnv } from './node-env';
 import { logger } from '@spfn/core/logger';
-import { markCodegenProcess } from '../../module-evaluation';
 import { projectOrigin } from '../loader/errors';
 import { importPackageModule, importProjectModule, newGeneration, requireProjectModule } from '../loader/register';
 
@@ -193,20 +192,10 @@ function configFromJson(cwd: string, name: string, select: (json: any) => unknow
  * does not compile, a `.spfnrc.json` or `package.json` that is not JSON —
  * throws, naming the file and where it failed. Only when none of the three
  * declares a config is the default (no generators) returned.
- *
- * In a process the spfn CLI started (`SPFN_CODEGEN_PROCESS=1`, set by its bin
- * and by the `spfn dev` watcher entry) it also marks the process
- * (`markCodegenProcess`): a second copy of `@spfn/core` found after a router
- * load is then refused, not only warned about.
  */
 export function loadCodegenConfig(cwd: string): CodegenConfig
 {
     pinNodeEnv();
-
-    if (process.env.SPFN_CODEGEN_PROCESS === '1')
-    {
-        markCodegenProcess();
-    }
 
     const config = configFromRcTs(cwd)
         ?? configFromJson(cwd, '.spfnrc.json', json => json.codegen)

@@ -195,9 +195,10 @@ load (`src/codegen/loader/`).
   or for a programmatic caller.
 - **One copy of `@spfn/core`.** After each router load, an `@spfn/core` entry evaluated more
   than once — as CommonJS beside ESM (a `.cts` route requiring `@spfn/*` under tsx), from two
-  installs, or natively twice — is refused in a process the spfn CLI started
-  (`SPFN_CODEGEN_PROCESS=1`, set by its bin and by the `spfn dev` watcher entry), with the
-  message `startServer` refuses with. A programmatic caller or a test is warned instead.
+  installs, or natively twice — is refused in a process the spfn CLI started to generate code
+  (`markCodegenProcess()`, called in-process by `spfn codegen run`, `spfn build`'s generation
+  step, `spfn contract` and the `spfn dev` watcher entry — not an environment variable, so the
+  dev server and `next` inherit nothing), with the message `startServer` refuses with. A programmatic caller or a test is warned instead.
 - **Retained memory, accepted.** Node never frees an ES module, so every load keeps its
   project modules: measured about 100 KB per reload for a small app, more for a large one,
   once per file change under `spfn dev` (a generation that varies the environment loads up

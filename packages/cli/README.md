@@ -234,8 +234,8 @@ watcher `spfn dev` starts — imports your router the same way, in its own proce
 `@spfn/core` registers a hook of its own (`module.registerHooks`) that runs your TypeScript as ESM
 by the same rule, resolves tsconfig `paths` as tsc does, and re-runs only your project's files on
 each reload; every package is evaluated once. A second copy of `@spfn/core` found after a router
-load — a `.cts` route requiring `@spfn/*` — is refused in these processes (the bin and the watcher
-entry set `SPFN_CODEGEN_PROCESS=1`). The watcher regenerates for any project file the router
+load — a `.cts` route requiring `@spfn/*` — is refused in these processes (each marks itself with
+`markCodegenProcess()` from `@spfn/core/codegen`; nothing it spawns inherits the mark). The watcher regenerates for any project file the router
 reached, not only `src/server/routes/**`: an edit to `src/server/lib/segment.ts` imported through
 `@/` regenerates too. Each reload keeps about 100 KB per small app in memory, by design
 ([@spfn/core codegen](../core/src/codegen/README.md#how-the-router-is-loaded)).

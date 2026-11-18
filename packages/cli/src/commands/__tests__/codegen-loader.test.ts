@@ -30,6 +30,8 @@
  * | R15| `.spfnrc.ts` writing its `import.meta` beside itself, through | a config that sees a file that does not exist (the        |
  * |    | `fileURLToPath(import.meta.url)`                              | `.spfn-esm` name tsx is kept away by)                     |
  * | R20| `spfn codegen run` with a `.spfnrc.ts` using `__dirname`      | "No generators configured" and exit 0: CI skips codegen   |
+ * | R22| the bin, and the tsx child it re-spawns, recording their     | the codegen mark set where the CLI starts, inherited by   |
+ * |    | environment at exit                                          | the dev server, `next` and `spfn db` (every descendant)   |
  */
 
 import { spawn, spawnSync } from 'node:child_process';
@@ -169,6 +171,32 @@ beforeEach(() =>
 afterEach(() =>
 {
     rmSync(appDir, { recursive: true, force: true });
+});
+
+describe('codegen in CLI processes - the codegen mark', () =>
+{
+    it('R22 the bin and what it spawns carry no codegen mark in their environment', () =>
+    {
+        const record = join(appDir, 'mark.log');
+
+        write('record-mark.mjs', 'import { appendFileSync } from \'node:fs\';\n'
+            + `process.on('exit', () => appendFileSync(${JSON.stringify(record)}, \`\${process.env.SPFN_CODEGEN_PROCESS ?? 'unset'}\\n\`));\n`);
+
+        const env: NodeJS.ProcessEnv = { ...process.env };
+
+        delete env.SPFN_CODEGEN_PROCESS;
+        delete env.NODE_OPTIONS;
+
+        const result = spawnSync(
+            process.execPath,
+            ['--import', pathToFileURL(join(appDir, 'record-mark.mjs')).href, bin, '--version'],
+            { cwd: appDir, env, encoding: 'utf8', timeout: 60_000 },
+        );
+
+        expect(result.status, `${result.stdout}${result.stderr}`).toBe(0);
+        // The bin, and the child it re-spawns under tsx with the same --import.
+        expect(readFileSync(record, 'utf8').trim().split('\n')).toEqual(['unset', 'unset']);
+    });
 });
 
 describe.each(TSX)('codegen in CLI processes, tsx $version', (tsx) =>

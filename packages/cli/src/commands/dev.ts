@@ -69,11 +69,12 @@ export function watcherEntrySource(): string
 //     pool: { max: 3 }  // Watcher needs fewer connections than server
 // });
 
-import { CodegenOrchestrator, loadCodegenConfig, createGeneratorsFromConfig } from '@spfn/core/codegen';
+import { CodegenOrchestrator, loadCodegenConfig, createGeneratorsFromConfig, markCodegenProcess } from '@spfn/core/codegen';
 
-// Started by the spfn CLI: a second copy of @spfn/core after a router load is
-// refused, not only warned about (see loadCodegenConfig).
-process.env.SPFN_CODEGEN_PROCESS = '1';
+// Started by the spfn CLI to generate code: a second copy of @spfn/core after a
+// router load is refused, not only warned about. In-process, so nothing
+// inherits it.
+markCodegenProcess();
 
 const cwd = process.cwd();
 

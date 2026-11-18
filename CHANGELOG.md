@@ -30,7 +30,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   300 ms. `jiti` is no longer a dependency of `@spfn/core`.
 - **@spfn/core: the module-evaluation registry counts evaluations**, and codegen refuses a second
   copy of an `@spfn/core` entry after each router load in a process the spfn CLI started
-  (`SPFN_CODEGEN_PROCESS=1`, set by the `spfn` bin and the `spfn dev` watcher entry); a
+  (`markCodegenProcess()`, called in-process by `spfn codegen run`, `spfn build`'s generation
+  step, `spfn contract` and the `spfn dev` watcher entry, so nothing they spawn inherits it); a
   programmatic caller or a test is warned. The registry used to merge evaluations of one path by one
   evaluator, and reported "ESM + CJS" where 1 + 7 existed. `startServer`'s refusal is unchanged.
 - **@spfn/core: the `spfn dev` codegen watcher regenerates for every project file the router

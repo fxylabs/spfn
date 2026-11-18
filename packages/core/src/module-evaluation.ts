@@ -32,8 +32,8 @@
  * repeated evaluation of one path counts too: the codegen loader evaluates the
  * project again on every load and a package never, so a package evaluated
  * twice natively — given a generation query by mistake — is as much a second
- * copy as one evaluated as CommonJS. A process the spfn CLI started
- * (`SPFN_CODEGEN_PROCESS=1`, marked by `markCodegenProcess`) refuses it; any
+ * copy as one evaluated as CommonJS. A process the spfn CLI started to
+ * generate code (marked by `markCodegenProcess`) refuses it; any
  * other caller of codegen — a script, a test — is warned. vitest's own
  * re-evaluations, which a module reset makes, are not counted. Processes that
  * neither serve nor generate (scripts, a Next.js server bundling the package)
@@ -319,7 +319,10 @@ export function markServerProcess(logError: (message: string) => void): void
 /**
  * Marks this process as one the spfn CLI started to generate code: a second
  * copy `codegenSecondCopy` finds is then to be refused rather than warned
- * about. Called by `loadCodegenConfig` when `SPFN_CODEGEN_PROCESS=1`.
+ * about. Called in-process by the spfn CLI's codegen commands — `codegen
+ * run`, `build`'s generation step, `contract` — and the `spfn dev` watcher
+ * entry; the mark is not an environment variable, so no process they spawn
+ * (the dev server, `next`) inherits it.
  */
 export function markCodegenProcess(): void
 {
