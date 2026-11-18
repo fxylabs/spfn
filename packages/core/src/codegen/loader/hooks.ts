@@ -56,6 +56,7 @@ import type * as ts from 'typescript';
 import { typescript } from '../generators/typescript';
 import { governingCompilerOptions, matchPaths, projectPaths, isWithin, type PathsMatch, type ProjectPaths } from './aliases';
 import { transpileOptions } from './compiler-options';
+import { raisedAt } from './errors';
 import { applicationFormat, isDependency, packageType, type ModuleFormat } from './format';
 
 /** The query parameter a load's files carry. */
@@ -278,7 +279,7 @@ function unresolvedAlias(specifier: string, parentURL: string | undefined, match
         + `file: ${match.candidates.join(', ')}`,
     );
 
-    return Object.assign(error, { code: 'ERR_MODULE_NOT_FOUND' });
+    return raisedAt(Object.assign(error, { code: 'ERR_MODULE_NOT_FOUND' }), from);
 }
 
 /**
@@ -295,11 +296,11 @@ function unresolvedPath(specifier: string, parentURL: string | undefined, error:
 
     const from = parentURL?.startsWith('file:') ? fileURLToPath(parentURL) : String(parentURL);
 
-    return Object.assign(
+    return raisedAt(Object.assign(
         new Error(`Cannot find module '${specifier}' imported from ${from}: no file by that name, with a JavaScript or `
             + 'TypeScript extension, or as a directory\'s index'),
         { code: 'ERR_MODULE_NOT_FOUND' },
-    );
+    ), from);
 }
 
 function chainResolves(
@@ -332,11 +333,11 @@ function unresolvedBare(specifier: string, parentURL: string | undefined, error:
 
     const from = parentURL?.startsWith('file:') ? fileURLToPath(parentURL) : String(parentURL);
 
-    return Object.assign(
+    return raisedAt(Object.assign(
         new Error(`Cannot find module '${specifier}' imported from ${from}: no tsconfig "paths" entry maps it, and `
             + `Node did not resolve it (${(error as Error).message.split('\n')[0]})`),
         { code: 'ERR_MODULE_NOT_FOUND' },
-    );
+    ), from);
 }
 
 // ============================================================================
@@ -581,7 +582,7 @@ function jsonModule(file: string, source: string): string
 
     if (problem !== undefined)
     {
-        throw new SyntaxError(`${file}: ${problem}`);
+        throw raisedAt(new SyntaxError(`${file}: ${problem}`), file);
     }
 
     const value: unknown = JSON.parse(source);
@@ -613,7 +614,12 @@ function syntaxError(compiler: typeof ts, file: string, diagnostic: ts.Diagnosti
 {
     const { line, character } = diagnostic.file!.getLineAndCharacterOfPosition(diagnostic.start ?? 0);
 
-    return new SyntaxError(`${file}:${line + 1}:${character + 1} ${compiler.flattenDiagnosticMessageText(diagnostic.messageText, ' ')}`);
+    return raisedAt(
+        new SyntaxError(`${file}:${line + 1}:${character + 1} ${compiler.flattenDiagnosticMessageText(diagnostic.messageText, ' ')}`),
+        file,
+        line + 1,
+        character + 1,
+    );
 }
 
 function transform(url: string, { file, token }: OwnedFile): string

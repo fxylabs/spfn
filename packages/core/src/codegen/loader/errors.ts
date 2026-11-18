@@ -16,10 +16,15 @@
  * programmatically, and in a CLI process the loader's own maps already cover
  * every project file.
  *
- * `projectOrigin` names where the failure arose: the first place under the
- * project root, outside `node_modules`, that the rewritten error names — the
- * frame that threw, the file a syntax error is in, the importer of what did
- * not resolve.
+ * `projectOrigin` names where the failure arose. That is a fact of the
+ * error's frames, never of its message: a message is free text and may name
+ * any file — the one a route failed to read, say. So the origin is the first
+ * frame under the project root, outside `node_modules` (or the source line V8
+ * puts above the message of an error found while linking: an import of a name
+ * the module does not export). A failure the loader itself raises has no
+ * frame in the project — a transform's syntax error, an import that resolved
+ * nowhere — and the loader knows the file: it carries it on the error
+ * (`raisedAt`), and that is the origin when no frame gives one.
  */
 
 import type { SourceMap } from 'node:module';
@@ -78,12 +83,53 @@ export function locateLoadError(error: unknown, fileAt: ProjectFileAt): unknown
     return error;
 }
 
+/** Where the loader raised a failure, on the error: a `Symbol.for` key, so the hooks and the generators may be two bundles. */
+const RAISED_AT = Symbol.for('@spfn/core/codegen:raised-at');
+
+/** Mark a failure the loader raises as found in `file` (an absolute path), at `line:column` when it knows them. */
+export function raisedAt<E extends Error>(error: E, file: string, line?: number, column?: number): E
+{
+    return Object.assign(error, { [RAISED_AT]: line === undefined ? file : `${file}:${line}:${column}` });
+}
+
+/**
+ * The lines of an error that say where it arose, its message left out: V8's
+ * source line above the message, and the frames below it.
+ */
+function locationLines(error: Error): string[]
+{
+    const stack = error.stack ?? '';
+    const messageAt = error.message === '' ? -1 : stack.indexOf(error.message);
+    const isFrame = (line: string): boolean => /^\s+at /.test(line);
+
+    if (messageAt === -1)
+    {
+        return stack.split('\n').filter(isFrame);
+    }
+
+    return [stack.slice(0, messageAt).split('\n')[0], ...stack.slice(messageAt + error.message.length).split('\n').filter(isFrame)];
+}
+
+/** The first place under `root`, outside `node_modules`, that one of `lines` names, relative to `root`. */
+function firstPlace(lines: string[], root: string): string | undefined
+{
+    const prefix = root + sep;
+    const place = lines
+        .flatMap(line => line.split(/[\s'"()]+/))
+        .find(token => token.startsWith(prefix) && !token.includes(`${sep}node_modules${sep}`));
+
+    return place === undefined ? undefined : relative(root, place.replace(/[:,.]+$/, ''));
+}
+
 /** Where under `root` (a real path) a rewritten error arose, relative to it: `src/server/routes/admin.ts:3:7`. */
 export function projectOrigin(error: unknown, root: string): string | undefined
 {
-    const text = error instanceof Error ? error.stack ?? error.message : String(error);
-    const prefix = root + sep;
-    const places = text.split(/[\s'"()]+/).filter(place => place.startsWith(prefix) && !place.includes(`${sep}node_modules${sep}`));
+    if (!(error instanceof Error))
+    {
+        return undefined;
+    }
 
-    return places.length === 0 ? undefined : relative(root, places[0].replace(/[:,.]+$/, ''));
+    const raised = (error as { [RAISED_AT]?: string })[RAISED_AT];
+
+    return firstPlace(locationLines(error), root) ?? (raised === undefined ? undefined : firstPlace([raised], root));
 }

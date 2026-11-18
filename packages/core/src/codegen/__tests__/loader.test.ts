@@ -33,6 +33,8 @@
  * | R18 | a route module importing a file that does not exist                  | the missing path named before the importer          |
  * | R19 | `.spfnrc.ts` using `__dirname` (CommonJS) at line 4                   | a config that fails to load read as "no generators" |
  * | R21 | a custom generator file using `__dirname`                            | a configured generator skipped with a log line      |
+ * | R24 | a route module failing to read `src/server/data/missing.txt`         | the file named in the message taken for the origin  |
+ * | R25 | an import of a name the module does not export                       | V8's source line above the message not read         |
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -334,6 +336,35 @@ describe('codegen loader - a failed load names the file and line of the source',
         const { message } = await failure();
 
         expect(message).toMatch(/^Failed to load src\/server\/router\.ts \(at src\/server\/routes\/needs\.ts\): Cannot find module '\.\.\/lib\/later' imported from /);
+    });
+
+    it('R24 a project file a route reads is not where the load failed: the route line that read it is', async () =>
+    {
+        write('src/server/routes/probe.ts', 'import { readFileSync } from \'node:fs\';\n'
+            + 'import { join } from \'node:path\';\n'
+            + 'import { route } from \'@spfn/core/route\';\n'
+            + 'const text = readFileSync(join(import.meta.dirname, \'../data/missing.txt\'), \'utf8\');\n'
+            + 'export const getProbe = route.get(`/probe/${text}`).handler(async () => ({}));\n');
+        write('src/server/router.ts', 'import { defineRouter } from \'@spfn/core/route\';\n'
+            + 'import { getProbe } from \'./routes/probe\';\n'
+            + 'export const appRouter = defineRouter({ getProbe });\n');
+
+        const { message } = await failure();
+
+        expect(message).toContain('src/server/data/missing.txt');
+        expect(message).toMatch(/^Failed to load src\/server\/router\.ts \(at src\/server\/routes\/probe\.ts:4:\d+\): ENOENT/);
+    });
+
+    it('R25 an import of a name the module does not export is named at the importing line', async () =>
+    {
+        write('src/server/routes/named.ts', 'export const other = 1;\n');
+        write('src/server/router.ts', 'import { defineRouter } from \'@spfn/core/route\';\n'
+            + 'import { missing } from \'./routes/named\';\n'
+            + 'export const appRouter = defineRouter({ missing });\n');
+
+        const { message } = await failure();
+
+        expect(message).toMatch(/^Failed to load src\/server\/router\.ts \(at src\/server\/router\.ts:2\): .*does not provide an export named 'missing'/);
     });
 });
 

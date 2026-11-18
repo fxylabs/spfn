@@ -190,7 +190,8 @@ load (`src/codegen/loader/`).
   missing export, an import that does not resolve — is reported as `Failed to load
   src/server/router.ts (at src/server/routes/admin.ts:3:7): <message>`: the project file and
   source line where it arose (for an unresolved import, the importer), without the
-  `?spfn-gen=` query. The generator's error carries the load's own error as its `cause`, with
+  `?spfn-gen=` query. Where it arose is read from the error's frames, never from its message:
+  a route that fails reading `src/server/data/x.txt` is reported at the route's line. The generator's error carries the load's own error as its `cause`, with
   every stack frame in a project file at its source line and frames of code the transform
   added dropped; the CLI prints it. This uses the source maps the loader keeps while the
   load runs — process-wide source maps (`--enable-source-maps`) are not turned on, in the CLI
