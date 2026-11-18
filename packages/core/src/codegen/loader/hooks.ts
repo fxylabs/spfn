@@ -574,10 +574,13 @@ const TRANSFORMED = new Set(['.ts', '.tsx', '.mts', '.jsx']);
  * A JSON file as the ES module tsx serves it to `spfn dev`: the parsed value as
  * the default export, and an object's top-level keys as named exports, as
  * esbuild bundles it for `spfn build`. Node's own JSON module would need
- * `with { type: 'json' }` and has only the default; here both forms load.
+ * `with { type: 'json' }` and has only the default; here both forms load. A
+ * leading byte-order mark is dropped, as all three drop it.
  */
-function jsonModule(file: string, source: string): string
+function jsonModule(file: string, text: string): string
 {
+    // A leading byte-order mark is not JSON, and Node, tsx and esbuild drop it.
+    const source = text.replace(/^\uFEFF/, '');
     const problem = jsonProblem(source);
 
     if (problem !== undefined)
