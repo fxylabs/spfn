@@ -31,6 +31,8 @@
  * |     | lines                                                                | helper frames, the router named as what failed      |
  * | R17 | a TypeScript syntax error in a route module                          | `Unexpected token` naming no file                   |
  * | R18 | a route module importing a file that does not exist                  | the missing path named before the importer          |
+ * | R19 | `.spfnrc.ts` using `__dirname` (CommonJS) at line 4                   | a config that fails to load read as "no generators" |
+ * | R21 | a custom generator file using `__dirname`                            | a configured generator skipped with a log line      |
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -39,7 +41,7 @@ import { tmpdir } from 'os';
 import { dirname, join, resolve } from 'path';
 import { createRouteMapGenerator } from '../generators/route-map';
 import { CodegenOrchestrator } from '../core/orchestrator';
-import { loadCodegenConfig } from '../core/config-loader';
+import { createGeneratorsFromConfig, loadCodegenConfig } from '../core/config-loader';
 import { ConditionalRegistrationError } from '../generators/contract-guard';
 import { routerFiles } from '../generators/router-module';
 
@@ -375,6 +377,29 @@ describe('codegen loader - generations side by side', () =>
 
 describe('codegen loader - .spfnrc.ts', () =>
 {
+    it('R19 a .spfnrc.ts that fails to load throws, naming the file and line, with what to write instead', () =>
+    {
+        write('.spfnrc.ts', 'import { join } from \'node:path\';\n'
+            + 'import { defineConfig } from \'@spfn/core/codegen\';\n'
+            + '\n'
+            + 'const routerPath = join(__dirname, \'src/server/router.ts\');\n'
+            + 'export default defineConfig({ generators: [{ name: \'@spfn/core:route-map\', routerPath }] });\n');
+
+        expect(() => loadCodegenConfig(appDir)).toThrow(
+            /^Failed to load \.spfnrc\.ts \(at \.spfnrc\.ts:4:\d+\): __dirname is not defined in ES module scope\n\n\.spfnrc\.ts is an ES module: use import\.meta\.dirname/,
+        );
+    });
+
+    it('R21 a custom generator that fails to load rejects, naming the file and line', async () =>
+    {
+        write('src/generators/custom.ts', 'import { join } from \'node:path\';\n'
+            + 'const template = join(__dirname, \'template.txt\');\n'
+            + 'export default () => ({ name: \'custom\', watchPatterns: [], generate: async () => { void template; } });\n');
+
+        await expect(createGeneratorsFromConfig({ generators: [{ path: './src/generators/custom.ts' }] }, appDir))
+            .rejects.toThrow(/^Failed to load src\/generators\/custom\.ts \(at src\/generators\/custom\.ts:2:\d+\): __dirname is not defined/);
+    });
+
     it('R10 loadCodegenConfig returns the config itself, synchronously, from a .spfnrc.ts importing @spfn/core/codegen', () =>
     {
         write('.spfnrc.ts', 'import { defineConfig, defineGenerator } from \'@spfn/core/codegen\';\n'

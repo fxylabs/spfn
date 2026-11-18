@@ -76,8 +76,16 @@ import { CodegenOrchestrator, loadCodegenConfig, createGeneratorsFromConfig } fr
 process.env.SPFN_CODEGEN_PROCESS = '1';
 
 const cwd = process.cwd();
-const config = loadCodegenConfig(cwd);
-const generators = await createGeneratorsFromConfig(config, cwd);
+
+// A config or custom generator that fails to load is reported, not read as
+// "no generators"; the dev server keeps running without the watcher.
+const generators = await Promise.resolve()
+    .then(() => createGeneratorsFromConfig(loadCodegenConfig(cwd), cwd))
+    .catch((error) =>
+    {
+        console.error('[SPFN] Codegen watcher could not load the codegen config:', error instanceof Error ? error.message : error);
+        process.exit(1);
+    });
 
 const orchestrator = new CodegenOrchestrator({
     generators,

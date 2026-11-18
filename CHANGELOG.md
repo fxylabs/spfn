@@ -87,6 +87,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   used to be chosen for the whole load (the first that held anything), with warnings about the
   others; an import now resolves through whichever target has it, and a failure lists every target
   tried.
+- **BREAKING: `.spfnrc.ts` and custom `.ts` generators are ES modules.** `__dirname`, `__filename`,
+  `require` and `module.exports` are not defined in them (jiti ran them as CommonJS). Write
+  `import.meta.dirname` and `import.meta.filename`, `import`, and `export default`.
+- **BREAKING: a codegen config that exists and fails to load is an error.** A `.spfnrc.ts` that
+  throws or does not compile, a `.spfnrc.json` or `package.json` that is not JSON, or a custom
+  generator whose file fails to load (or whose factory throws) used to be logged as a warning and
+  read as "no generators": `spfn codegen run` printed "No generators configured" and exited 0, so a
+  CI build skipped codegen. It now fails — `spfn codegen run` and `spfn build` exit non-zero with
+  `Failed to load .spfnrc.ts (at .spfnrc.ts:4:17): <message>`, and the `spfn dev` watcher reports
+  it and stops (the server keeps running). Only an absent config means the default.
 
 ## [@spfn/core@0.4.0-beta.1, @spfn/auth@0.4.0-beta.1, spfn@0.4.0-beta.1, @spfn/storage@0.4.0-beta.1, @spfn/cms@0.4.0-beta.1, @spfn/mcp@0.4.0-beta.1, @spfn/notification@0.3.0-beta.1, @spfn/monitor@0.3.0-beta.1, @spfn/i18n@0.3.0-beta.1, @spfn/migrate@0.3.0-beta.1, @spfn/pages-next@0.2.0-beta.1, @spfn/pages@0.2.0-beta.1, @spfn/signing@0.2.0-alpha.1, @spfn/workflow@0.3.0-alpha.1] - 2026-11-18
 

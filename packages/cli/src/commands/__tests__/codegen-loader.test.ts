@@ -29,6 +29,7 @@
  * |    | app's node_modules as real files                              |                                                          |
  * | R15| `.spfnrc.ts` writing its `import.meta` beside itself, through | a config that sees a file that does not exist (the        |
  * |    | `fileURLToPath(import.meta.url)`                              | `.spfn-esm` name tsx is kept away by)                     |
+ * | R20| `spfn codegen run` with a `.spfnrc.ts` using `__dirname`      | "No generators configured" and exit 0: CI skips codegen   |
  */
 
 import { spawn, spawnSync } from 'node:child_process';
@@ -231,6 +232,21 @@ describe.each(TSX)('codegen in CLI processes, tsx $version', (tsx) =>
         expect(status, output).toBe(0);
         expect({ ...meta, url: meta.url.replace(/\?.*$/, '') })
             .toEqual({ url: pathToFileURL(config).href, filename: config, dirname: dirname(config) });
+    });
+
+    it('R20 spfn codegen run exits non-zero naming the file and line of a .spfnrc.ts that fails to load', () =>
+    {
+        write('.spfnrc.ts', 'import { join } from \'node:path\';\n'
+            + 'import { defineConfig } from \'@spfn/core/codegen\';\n'
+            + '\n'
+            + 'const routerPath = join(__dirname, \'src/server/router.ts\');\n'
+            + 'export default defineConfig({ generators: [{ name: \'@spfn/core:route-map\', routerPath }] });\n');
+
+        const { status, output } = codegenRun(tsx);
+
+        expect(status, output).toBe(1);
+        expect(output).toMatch(/Failed to load \.spfnrc\.ts \(at \.spfnrc\.ts:4:\d+\): __dirname is not defined in ES module scope/);
+        expect(output).not.toContain('No generators configured');
     });
 
     it('R9 fifty generations retain a bounded heap each and evaluate the packages once, @spfn/core installed in the app', () =>

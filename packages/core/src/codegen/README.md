@@ -111,7 +111,15 @@ This writes `src/generated/route-map.ts`, which the RPC proxy imports.
    `{ "codegen": { "generators": [...] } }`.
 3. `package.json` — read from **`spfn.codegen`**: `{ "spfn": { "codegen": { ... } } }`.
 
-If none exist (or parsing fails), you get `{ generators: [] }` and nothing runs.
+If none declares a config, you get `{ generators: [] }` and nothing runs. A config file that
+exists and fails to load — a `.spfnrc.ts` that throws or does not compile, a `.spfnrc.json` or
+`package.json` that is not JSON — throws `Failed to load <file> (at <file>:<line>:<col>):
+<message>` instead; `spfn codegen run` and `spfn build` exit non-zero with it. The same holds for
+a custom generator whose file fails to load.
+
+`.spfnrc.ts` and custom generators are ES modules: `__dirname`, `__filename`, `require` and
+`module.exports` are not defined — write `import.meta.dirname`, `import.meta.filename`, `import`
+and `export default`.
 
 > Precedence is "first file found wins", not a deep merge. A `.spfnrc.ts` fully shadows
 > `.spfnrc.json` and `package.json`.
