@@ -1,14 +1,18 @@
 /**
- * Environment probe — rows S1–S7 of the #102 design case table
+ * Environment probe — rows S1–S7 of the #102 design case table, and Q1
  *
  * Which frame an environment read is attributed to. The generator-level rows
  * (E1–E17) live in route-map.test.ts; these pin the rule on synthetic stacks,
  * so a frame layout no fixture produces is still decided the documented way.
+ *
+ * Q1: two observed loads started together, the second settling first, run one
+ * after the other and leave the real `process.env` behind (#351 review).
+ * Two generations of real apps side by side are loader.test.ts R12.
  */
 
 import { describe, it, expect } from 'vitest';
 import { pathToFileURL } from 'url';
-import { readerOf, type StackFrame } from '../generators/environment-probe';
+import { observeEnvironmentReads, readerOf, type StackFrame } from '../generators/environment-probe';
 
 const ROOT = '/work/app';
 const ROOTS = [ROOT];
@@ -68,5 +72,33 @@ describe('environment probe - which frame a read belongs to', () =>
         expect(readerOf(ROOTS, [frame('/work/spfn/packages/core/dist/logger/index.js')])).toBeUndefined();
         expect(readerOf(ROOTS, [frame(undefined), APP])).toBeUndefined();
         expect(readerOf(ROOTS, [frame('/work/app-other/src/a.ts')])).toBeUndefined();
+    });
+});
+
+describe('environment probe - one environment per process', () =>
+{
+    it('Q1 two observed loads, the second quicker, run one at a time and leave the real process.env', async () =>
+    {
+        const original = process.env;
+        const events: string[] = [];
+        let releaseFirst = (): void => undefined;
+
+        const first = observeEnvironmentReads(ROOT, () => new Promise<void>((settle) =>
+        {
+            events.push(`first starts, proxied: ${process.env !== original}`);
+            releaseFirst = settle;
+        }));
+        const second = observeEnvironmentReads(ROOT, async () =>
+        {
+            events.push(`second starts, proxied: ${process.env !== original}`);
+        });
+
+        await new Promise(resolve => setImmediate(resolve));
+        events.push('first released');
+        releaseFirst();
+        await Promise.all([first, second]);
+
+        expect(events).toEqual(['first starts, proxied: true', 'first released', 'second starts, proxied: true']);
+        expect(process.env).toBe(original);
     });
 });

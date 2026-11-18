@@ -21,6 +21,8 @@
  * | R10 | `.spfnrc.ts` importing `@spfn/core/codegen` in a type-less app       | `loadCodegenConfig` turning asynchronous            |
  * | R11 | a `"type": "module"` app importing JSON with and without             | JSON served as a module's source (`Unexpected token`)|
  * |     | `with { type: 'json' }`, then the JSON edited                        | or read once per process (a stale map)              |
+ * | R12 | two apps, each refused alone (a route gated on its own key), whose   | loads sharing one process.env: one app accepted,    |
+ * |     | generations run side by side                                         | process.env left a Proxy                            |
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -38,10 +40,10 @@ const OUTPUT_PATH = 'src/generated/route-map.ts';
 
 let appDir: string;
 
-function write(path: string, content: string): void
+function write(path: string, content: string, root = appDir): void
 {
-    mkdirSync(dirname(join(appDir, path)), { recursive: true });
-    writeFileSync(join(appDir, path), content, 'utf-8');
+    mkdirSync(dirname(join(root, path)), { recursive: true });
+    writeFileSync(join(root, path), content, 'utf-8');
 }
 
 /** A counter on `globalThis`, bumped each time the module it is written into is evaluated. */
@@ -62,7 +64,7 @@ function writePackage(name: string, source: string): void
     write(`node_modules/${name}/index.js`, source);
 }
 
-async function generate(): Promise<string>
+async function generate(root = appDir): Promise<string>
 {
     const generator = createRouteMapGenerator({
         name: '@spfn/core:route-map',
@@ -70,9 +72,9 @@ async function generate(): Promise<string>
         outputPath: `./${OUTPUT_PATH}`,
     });
 
-    await new CodegenOrchestrator({ generators: [generator], cwd: appDir, throwOnError: true }).generateAll('manual');
+    await new CodegenOrchestrator({ generators: [generator], cwd: root, throwOnError: true }).generateAll('manual');
 
-    return readFileSync(join(appDir, OUTPUT_PATH), 'utf-8');
+    return readFileSync(join(root, OUTPUT_PATH), 'utf-8');
 }
 
 function pathsOf(content: string): string[]
@@ -80,17 +82,30 @@ function pathsOf(content: string): string[]
     return [...content.matchAll(/path: '([^']+)'/g)].map(match => match[1]);
 }
 
+/** Every app a row made, removed after it. */
+const apps: string[] = [];
+
+/** A type-less app in a temporary directory, with `@spfn/core` linked into its `node_modules`. */
+function makeApp(): string
+{
+    const root = mkdtempSync(join(tmpdir(), 'spfn-codegen-loader-'));
+
+    apps.push(root);
+    write('package.json', JSON.stringify({ name: 'loader-fixture', private: true }), root);
+    mkdirSync(join(root, 'node_modules/@spfn'), { recursive: true });
+    symlinkSync(CORE_PACKAGE, join(root, 'node_modules/@spfn/core'), 'dir');
+
+    return root;
+}
+
 beforeEach(() =>
 {
-    appDir = mkdtempSync(join(tmpdir(), 'spfn-codegen-loader-'));
-    write('package.json', JSON.stringify({ name: 'loader-fixture', private: true }));
-    mkdirSync(join(appDir, 'node_modules/@spfn'), { recursive: true });
-    symlinkSync(CORE_PACKAGE, join(appDir, 'node_modules/@spfn/core'), 'dir');
+    appDir = makeApp();
 });
 
 afterEach(() =>
 {
-    rmSync(appDir, { recursive: true, force: true });
+    apps.splice(0).forEach(root => rmSync(root, { recursive: true, force: true }));
 });
 
 describe('codegen loader - packages evaluate once, the project on every load', () =>
@@ -220,6 +235,44 @@ describe('codegen loader - the environment probe across the asynchronous load', 
         expect(refusal).toBeInstanceOf(ConditionalRegistrationError);
         expect(refusal?.message).toContain('NODE_ENV (read at src/server/routes/admin.ts:7), production → development');
         expect(refusal?.message).toContain('+ admin (GET /admin)');
+    });
+});
+
+describe('codegen loader - generations side by side', () =>
+{
+    /** An app whose route map is refused: a route registered only when `key` is set. */
+    function gatedApp(key: string): string
+    {
+        const root = makeApp();
+
+        write('src/server/routes/admin.ts', 'import { route } from \'@spfn/core/route\';\n'
+            + `const enabled = process.env.${key} !== undefined;\n`
+            + 'const admin = route.get(\'/admin\').handler(async () => ({}));\n'
+            + 'export const adminRoutes = enabled ? { admin } : {};\n', root);
+        write('src/server/router.ts', 'import { defineRouter, route } from \'@spfn/core/route\';\n'
+            + 'import { adminRoutes } from \'./routes/admin\';\n'
+            + 'const getRoot = route.get(\'/\').handler(async () => ({}));\n'
+            + 'export const appRouter = defineRouter({ getRoot, ...adminRoutes });\n', root);
+
+        return root;
+    }
+
+    it('R12 two apps refused alone are both refused when their generations overlap, and process.env is the real object after', async () =>
+    {
+        const original = process.env;
+        const first = gatedApp('R12_FIRST_ADMIN');
+        const second = gatedApp('R12_SECOND_ADMIN');
+
+        for (const root of [first, second])
+        {
+            await expect(generate(root)).rejects.toBeInstanceOf(ConditionalRegistrationError);
+        }
+
+        const together = await Promise.allSettled([generate(first), generate(second)]);
+
+        expect(together.map(result => result.status === 'rejected' && result.reason instanceof ConditionalRegistrationError))
+            .toEqual([true, true]);
+        expect(process.env).toBe(original);
     });
 });
 

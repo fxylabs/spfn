@@ -23,8 +23,20 @@
  * registers it. A frame is named by the line of the project file's source, not
  * of its transform.
  *
- * The proxy and the varied values span the load's `await`: other asynchronous
- * work in the generating process sees them while a load runs.
+ * There is one environment per process, so loads that observe or vary it run
+ * one at a time per process. Every router load (`observeEnvironmentReads`) and
+ * every varied load (`withVaried`) holds the environment through one
+ * process-wide queue (`holdEnvironment`), kept on a `Symbol.for` global so
+ * that two copies of this module would share it; a load started inside a held
+ * load — the router load inside a varied one — runs inside it rather than
+ * behind it. The queue captures the real `process.env` when it hands the
+ * environment to a load, and that is what the load puts back. So each load of a
+ * generation is atomic with respect to the environment: it sees no other
+ * load's proxy or varied value, and between loads `process.env` is the real
+ * object again — two generations run side by side (two orchestrators, a
+ * `Promise.all` over a monorepo's apps) take turns load by load. Other
+ * asynchronous work in the process, which does not go through the queue, still
+ * sees the proxy and the varied values while a load runs.
  *
  * With no such read, nothing more happens: one load, as before. Otherwise the
  * router is loaded again with every one of those keys varied (a set key
@@ -56,6 +68,7 @@
  * effects.
  */
 
+import { AsyncLocalStorage } from 'async_hooks';
 import { realpathSync } from 'fs';
 import { relative, resolve, sep } from 'path';
 import { fileURLToPath } from 'url';
@@ -129,31 +142,86 @@ export interface EnvironmentProbe<T>
 }
 
 // ============================================================================
+// Holding the environment
+// ============================================================================
+
+/** The process's environment, held by one load at a time. */
+interface EnvironmentQueue
+{
+    /** Settles once every load queued so far has settled. */
+    tail: Promise<void>;
+
+    /** Inside a held load: the real `process.env` the queue captured for it. */
+    holder: AsyncLocalStorage<NodeJS.ProcessEnv>;
+}
+
+const QUEUE_KEY = Symbol.for('@spfn/core/codegen:environment-queue');
+
+function environmentQueue(): EnvironmentQueue
+{
+    const global = globalThis as { [QUEUE_KEY]?: EnvironmentQueue };
+
+    global[QUEUE_KEY] ??= { tail: Promise.resolve(), holder: new AsyncLocalStorage() };
+
+    return global[QUEUE_KEY];
+}
+
+/**
+ * Run `load` holding the process's environment, handing it the real
+ * `process.env`: once every load queued before it has settled, or at once
+ * inside a load that already holds it.
+ */
+function holdEnvironment<T>(load: (real: NodeJS.ProcessEnv) => Promise<T>): Promise<T>
+{
+    const queue = environmentQueue();
+    const held = queue.holder.getStore();
+
+    if (held !== undefined)
+    {
+        return load(held);
+    }
+
+    const run = queue.tail.then(() =>
+    {
+        const real = process.env;
+
+        return queue.holder.run(real, () => load(real));
+    });
+
+    queue.tail = run.then(() => undefined, () => undefined);
+
+    return run;
+}
+
+// ============================================================================
 // Observing reads
 // ============================================================================
 
 /**
- * Run `load` with `process.env` behind a proxy that records which keys project
- * files read. `process.env` is the real object again when its promise settles.
+ * Run `load`, holding the environment, with `process.env` behind a proxy that
+ * records which keys project files read. `process.env` is the real object again
+ * when its promise settles.
  */
-export async function observeEnvironmentReads<T>(
+export function observeEnvironmentReads<T>(
     cwd: string,
     load: () => Promise<T>,
 ): Promise<{ value: T; reads: EnvironmentRead[] }>
 {
-    const reads = new Map<string, EnvironmentRead>();
-    const real = process.env;
-
-    process.env = new Proxy(real, recordingHandler(projectRoots(cwd), reads));
-
-    try
+    return holdEnvironment(async (real) =>
     {
-        return { value: await load(), reads: [...reads.values()] };
-    }
-    finally
-    {
-        process.env = real;
-    }
+        const reads = new Map<string, EnvironmentRead>();
+
+        process.env = new Proxy(real, recordingHandler(projectRoots(cwd), reads));
+
+        try
+        {
+            return { value: await load(), reads: [...reads.values()] };
+        }
+        finally
+        {
+            process.env = real;
+        }
+    });
 }
 
 type Trap = (...args: any[]) => unknown;
@@ -373,29 +441,31 @@ function setVariable(key: string, value: string | undefined): void
 }
 
 /**
- * Run `fn` with `variation` applied, and put every key back once its promise
- * settles. The router's load is asynchronous, so other asynchronous work in the
- * process sees the varied values meanwhile.
+ * Run `fn`, holding the environment, with `variation` applied, and put every
+ * key back once its promise settles.
  */
-async function withVaried<T>(variation: Variation, fn: () => Promise<T>): Promise<T>
+function withVaried<T>(variation: Variation, fn: () => Promise<T>): Promise<T>
 {
-    const original = variation.map(({ key }) => ({ key, value: currentValue(key) }));
-
-    try
+    return holdEnvironment(async () =>
     {
-        variation.forEach(({ key, value }) => setVariable(key, value));
+        const original = variation.map(({ key }) => ({ key, value: currentValue(key) }));
 
-        return await fn();
-    }
-    finally
-    {
-        original.forEach(({ key, value }) => setVariable(key, value));
-    }
+        try
+        {
+            variation.forEach(({ key, value }) => setVariable(key, value));
+
+            return await fn();
+        }
+        finally
+        {
+            original.forEach(({ key, value }) => setVariable(key, value));
+        }
+    });
 }
 
 type Attempt<T> = (Difference<T> & { ok: true }) | { variation: Variation; ok: false };
 
-/** One variation at a time: the environment is process-wide, so two loads must not overlap. */
+/** One variation at a time: each holds the environment (`withVaried`). */
 async function attemptEach<T>(variations: Variation[], probe: EnvironmentProbe<T>): Promise<Attempt<T>[]>
 {
     const attempts: Attempt<T>[] = [];
