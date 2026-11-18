@@ -35,6 +35,8 @@
  * | R20| `spfn codegen run` with a `.spfnrc.ts` using `__dirname`      | "No generators configured" and exit 0: CI skips codegen   |
  * | R31| `spfn codegen run` with a misspelt package generator, then   | "No generators configured" / "Make sure it is installed"  |
  * |    | one whose `/codegen` throws on import                        | and exit 0: a configured generator silently skipped       |
+ * | R32| R23's second copy under `spfn build --server-only`, `spfn     | a codegen entry point that no longer marks its process:   |
+ * |    | contract check` and the watcher entry `spfn dev` writes      | the refusal silently a warning there                      |
  * | R22| the bin, and the tsx child it re-spawns, recording their     | the codegen mark set where the CLI starts, inherited by   |
  * |    | environment at exit                                          | the dev server, `next` and `spfn db` (every descendant)   |
  */
@@ -130,6 +132,25 @@ function writeRouter(routes: string[], inline = ''): void
         + `export const appRouter = defineRouter({ ${[...routes, ...(inline ? ['getInline'] : [])].join(', ')} }).packages([pkgRouter]);\n`);
 }
 
+/**
+ * A route importing a package the loader leaves to Node, which imports
+ * `@spfn/core/route`'s file again by another URL: a second native copy, on
+ * every tsx (R23).
+ */
+function writeSecondCopy(): void
+{
+    write('node_modules/copy-pkg/package.json', JSON.stringify({ name: 'copy-pkg', type: 'module', main: 'index.js' }));
+    write('node_modules/copy-pkg/index.js', 'import { createRequire } from \'node:module\';\n'
+        + 'import { pathToFileURL } from \'node:url\';\n'
+        + 'const entry = createRequire(import.meta.url).resolve(\'@spfn/core/route\');\n'
+        + 'await import(`${pathToFileURL(entry).href}?second-copy`);\n'
+        + 'export const copied = true;\n');
+    write('src/server/routes/copy.ts', 'import { route } from \'@spfn/core/route\';\n'
+        + 'import { copied } from \'copy-pkg\';\n'
+        + 'export const getCopy = route.get(`/copy/${copied}`).handler(async () => ({}));\n');
+    writeRouter(['getProbe', 'getCopy']);
+}
+
 function routeMapPaths(): string[]
 {
     const file = join(appDir, 'src/generated/route-map.ts');
@@ -150,6 +171,12 @@ function plain(output: string): string
 
 function codegenRun(tsx: Tsx): { status: number | null; output: string }
 {
+    return binRun(tsx, ['codegen', 'run']);
+}
+
+/** The bin under tsx, as a package script runs it, with `args`. */
+function binRun(tsx: Tsx, args: string[]): { status: number | null; output: string }
+{
     const env: NodeJS.ProcessEnv = { ...process.env, DUMP_FILE: join(appDir, 'dump.json') };
 
     delete env.SPFN_APP_URL;
@@ -158,7 +185,7 @@ function codegenRun(tsx: Tsx): { status: number | null; output: string }
 
     const result = spawnSync(
         process.execPath,
-        ['--import', tsx.loader, '--import', pathToFileURL(join(appDir, 'dump.mjs')).href, bin, 'codegen', 'run'],
+        ['--import', tsx.loader, '--import', pathToFileURL(join(appDir, 'dump.mjs')).href, bin, ...args],
         { cwd: appDir, env, encoding: 'utf8', timeout: 60_000 },
     );
 
@@ -251,17 +278,7 @@ describe.each(TSX)('codegen in CLI processes, tsx $version', (tsx) =>
 
     it('R23 a second native evaluation of an @spfn/core entry is refused in spfn codegen run', () =>
     {
-        // A package the loader leaves to Node, importing the entry's file by another URL.
-        write('node_modules/copy-pkg/package.json', JSON.stringify({ name: 'copy-pkg', type: 'module', main: 'index.js' }));
-        write('node_modules/copy-pkg/index.js', 'import { createRequire } from \'node:module\';\n'
-            + 'import { pathToFileURL } from \'node:url\';\n'
-            + 'const entry = createRequire(import.meta.url).resolve(\'@spfn/core/route\');\n'
-            + 'await import(`${pathToFileURL(entry).href}?second-copy`);\n'
-            + 'export const copied = true;\n');
-        write('src/server/routes/copy.ts', 'import { route } from \'@spfn/core/route\';\n'
-            + 'import { copied } from \'copy-pkg\';\n'
-            + 'export const getCopy = route.get(`/copy/${copied}`).handler(async () => ({}));\n');
-        writeRouter(['getProbe', 'getCopy']);
+        writeSecondCopy();
 
         const { status, output } = codegenRun(tsx);
 
@@ -269,6 +286,40 @@ describe.each(TSX)('codegen in CLI processes, tsx $version', (tsx) =>
         expect(status, output).not.toBe(0);
         expect(output).toContain('Refusing a second copy of @spfn/core in this process');
         expect(output).not.toContain('Warned, not refused');
+    });
+
+    it.each([
+        { entry: 'spfn build --server-only', args: ['build', '--server-only'] },
+        { entry: 'spfn contract check', args: ['contract', 'check'] },
+    ])('R32 $entry marks its process: a second copy of @spfn/core is refused, not warned about', ({ args }) =>
+    {
+        writeSecondCopy();
+
+        const { status, output } = binRun(tsx, args);
+
+        expect(status, output).not.toBe(0);
+        expect(output).toContain('Refusing a second copy of @spfn/core in this process');
+        expect(output).not.toContain('Warned, not refused');
+    });
+
+    it('R32 the watcher entry spfn dev starts marks its process: a second copy of @spfn/core is refused, not warned about', async () =>
+    {
+        writeSecondCopy();
+        write('.spfn/watcher.mjs', watcherEntrySource());
+
+        const watcher = startWatcher(tsx);
+
+        try
+        {
+            await watcher.until(() => /Refusing a second copy|Warned, not refused/.test(watcher.output()));
+
+            expect(watcher.output()).toContain('Refusing a second copy of @spfn/core in this process');
+            expect(watcher.output()).not.toContain('Warned, not refused');
+        }
+        finally
+        {
+            await watcher.stop();
+        }
     });
 
     it('R15 .spfnrc.ts sees its own file in import.meta.url, filename and dirname', () =>
