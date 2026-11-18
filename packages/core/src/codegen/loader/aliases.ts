@@ -91,7 +91,7 @@ function readCompilerOptions(configPath: string, root: string): ts.CompilerOptio
 
     if (error || !config)
     {
-        aliasLogger.warn(`Could not read ${relative(root, configPath)}; its path aliases will not resolve`);
+        aliasLogger.warn(`Could not read ${relative(root, configPath)}; its path aliases and compiler options will not apply`);
 
         return undefined;
     }
@@ -170,6 +170,19 @@ export function projectPaths(root: string, startDir: string): ProjectPaths | und
     }
 
     return undefined;
+}
+
+/**
+ * The compiler options of the tsconfig that governs a file in `startDir`: the
+ * nearest one up to `root`, `extends` merged; undefined when there is none.
+ */
+export function governingCompilerOptions(root: string, startDir: string): ts.CompilerOptions | undefined
+{
+    const configPath = searchDirectories(resolve(root), startDir)
+        .map(directory => join(directory, 'tsconfig.json'))
+        .find(path => existsSync(path));
+
+    return configPath === undefined ? undefined : readCompilerOptions(configPath, root);
 }
 
 /** The part of `specifier` a pattern's `*` stands for, or undefined when the pattern does not match it. */

@@ -152,9 +152,25 @@ load (`src/codegen/loader/`).
 - **Format.** Project TypeScript is ESM whatever the `"type"` in `package.json` — the rule
   `spfn dev` runs the app by (`@spfn/core/codegen/loader`, shared with the CLI's dev hook),
   and what `spfn build` bundles: `.ts`/`.tsx` are ESM, a type-less `.js` is decided by its
-  syntax, a stated extension or `type` is the author's. Project TypeScript is transformed
+  syntax, a stated extension or `type` is the author's. A `.json` file is served as tsx serves
+  it to `spfn dev`: an ES module whose default export is the parsed value (its top-level keys
+  are named exports too), so `import data from './data.json'` and the form with
+  `with { type: 'json' }` both load; it is re-read on every generation and watched. Any other
+  extension is left to Node and whatever else is registered. Project TypeScript is transformed
   file by file with TypeScript's `transpileModule`; a frame inside it is named by its source
   line.
+- **Compiler options.** The transform takes, from the tsconfig that governs the file (the
+  nearest `tsconfig.json` above it up to the project root, `extends` merged; for a file outside
+  the root, the root's), exactly the options that change what runs:
+  `experimentalDecorators`, `emitDecoratorMetadata`, `useDefineForClassFields` (unstated: from
+  `target` as TypeScript and esbuild decide it — assign below ES2022, define from ES2022 or
+  with no `target`; `target` is read for nothing else), `jsx` (`preserve` and `react-native`,
+  which leave JSX Node cannot run, become `react-jsx`, as does an unstated `jsx`),
+  `jsxFactory`, `jsxFragmentFactory`, `jsxImportSource`, `verbatimModuleSyntax`. It forces
+  `module: ESNext`, `target: ES2022`, `sourceMap: true` and `isolatedModules: true`. Nothing
+  else is read (`importsNotUsedAsValues`/`preserveValueImports` were removed in TypeScript
+  5.5). `spfn build` reads the same file (`src/server/tsconfig.json`); the `spfn dev` server,
+  under tsx, reads only the root `tsconfig.json`.
 - **Resolution.** Extensionless and `.js` → `.ts` specifiers and a directory's `index`, as
   TypeScript resolves them; and tsconfig `paths`, as tsc reads them — see the alias gotcha
   below.

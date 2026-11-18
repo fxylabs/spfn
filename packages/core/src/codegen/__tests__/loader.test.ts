@@ -23,6 +23,10 @@
  * |     | `with { type: 'json' }`, then the JSON edited                        | or read once per process (a stale map)              |
  * | R12 | two apps, each refused alone (a route gated on its own key), whose   | loads sharing one process.env: one app accepted,    |
  * |     | generations run side by side                                         | process.env left a Proxy                            |
+ * | R13 | `experimentalDecorators: true`, a decorator that accepts only the    | standard decorators for an app written for legacy   |
+ * |     | legacy call                                                          | ones: the router throws at load                     |
+ * | R14 | `useDefineForClassFields: false`, a field declared over a value the  | define semantics resetting the field to undefined   |
+ * |     | base constructor sets                                                |                                                     |
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -235,6 +239,36 @@ describe('codegen loader - the environment probe across the asynchronous load', 
         expect(refusal).toBeInstanceOf(ConditionalRegistrationError);
         expect(refusal?.message).toContain('NODE_ENV (read at src/server/routes/admin.ts:7), production → development');
         expect(refusal?.message).toContain('+ admin (GET /admin)');
+    });
+});
+
+describe('codegen loader - the tsconfig\'s runtime options', () =>
+{
+    it('R13 a legacy decorator runs as one under experimentalDecorators', async () =>
+    {
+        write('tsconfig.json', JSON.stringify({ compilerOptions: { experimentalDecorators: true } }));
+        write('src/server/router.ts', 'import { defineRouter, route } from \'@spfn/core/route\';\n'
+            + 'function legacyOnly(target: unknown, ...rest: unknown[]): void\n'
+            + '{\n'
+            + '    if (typeof target !== \'function\' || rest.length !== 0) throw new Error(\'expected legacy decorator invocation\');\n'
+            + '}\n'
+            + '@legacyOnly class Decorated {}\n'
+            + 'const decorated = route.get(`/${Decorated.name}`).handler(async () => ({}));\n'
+            + 'export const appRouter = defineRouter({ decorated });\n');
+
+        expect(pathsOf(await generate())).toEqual(['/Decorated']);
+    });
+
+    it('R14 a declared field keeps what the base constructor set under useDefineForClassFields: false', async () =>
+    {
+        write('src/server/tsconfig.json', JSON.stringify({ compilerOptions: { useDefineForClassFields: false } }));
+        write('src/server/router.ts', 'import { defineRouter, route } from \'@spfn/core/route\';\n'
+            + 'class Base { constructor() { (this as { segment?: string }).segment = \'base-set\'; } }\n'
+            + 'class Child extends Base { segment!: string; }\n'
+            + 'const child = route.get(`/${new Child().segment}`).handler(async () => ({}));\n'
+            + 'export const appRouter = defineRouter({ child });\n');
+
+        expect(pathsOf(await generate())).toEqual(['/base-set']);
     });
 });
 

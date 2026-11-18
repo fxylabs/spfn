@@ -24,9 +24,11 @@
  *   an ES module with the parsed value as its default export, as tsx serves it
  *   to `spfn dev` (so both `import data from './data.json'` and the form
  *   `with { type: 'json' }` load). Any other extension goes down the chain.
- * - **Transform.** TypeScript's `transpileModule`, file by file. Its source map
- *   is kept while the load runs, so a stack frame inside a project file can be
- *   named by its own line (`originalLine`).
+ * - **Transform.** TypeScript's `transpileModule`, file by file, with the
+ *   options of the governing tsconfig that change what runs — decorators,
+ *   class fields, JSX — and ESM output forced (`./compiler-options`). Its source
+ *   map is kept while the load runs, so a stack frame inside a project file can
+ *   be named by its own line (`originalLine`).
  * - **Generation tag.** Appended to files under the project root and outside
  *   `node_modules` only. A workspace package's source beside the app is
  *   transformed but not tagged: like a package, it is evaluated once.
@@ -47,7 +49,8 @@ import { dirname, extname, isAbsolute, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import type * as ts from 'typescript';
 import { typescript } from '../generators/typescript';
-import { matchPaths, projectPaths, isWithin, type PathsMatch, type ProjectPaths } from './aliases';
+import { governingCompilerOptions, matchPaths, projectPaths, isWithin, type PathsMatch, type ProjectPaths } from './aliases';
+import { transpileOptions } from './compiler-options';
 import { applicationFormat, isDependency, packageType, type ModuleFormat } from './format';
 
 /** The query parameter a load's files carry. */
@@ -95,6 +98,9 @@ interface Generation
     root: string;
     paths: Map<string, ProjectPaths | undefined>;
 
+    /** The governing tsconfig's compiler options, by directory. */
+    compilerOptions: Map<string, ts.CompilerOptions>;
+
     /** Real paths of the project files the load reached. */
     touched: Set<string>;
 }
@@ -113,7 +119,7 @@ const sourceMaps = new Map<string, SourceMap>();
 /** Start a load under `token`, reading the project at `root`. */
 export function openGeneration(token: string, root: string): void
 {
-    generations.set(token, { root: realpathSync(root), paths: new Map(), touched: new Set() });
+    generations.set(token, { root: realpathSync(root), paths: new Map(), compilerOptions: new Map(), touched: new Set() });
 }
 
 /**
@@ -443,15 +449,17 @@ export function resolveHook(specifier: string, context: ResolveContext, nextReso
     return file === undefined ? nextResolve(specifier, context) : own(file, token, context, nextResolve, tokenOf(specifier) !== undefined);
 }
 
-/** Compiler options for one file: ESM out, the syntax Node runs, a source map for the probe's line numbers. */
-function transpileOptions(compiler: typeof ts): ts.CompilerOptions
+/** The compiler options of the tsconfig that governs `file`, read once per directory per load. */
+function projectOptions(generation: Generation, file: string): ts.CompilerOptions
 {
-    return {
-        module: compiler.ModuleKind.ESNext,
-        target: compiler.ScriptTarget.ES2022,
-        jsx: compiler.JsxEmit.ReactJSX,
-        sourceMap: true,
-    };
+    const directory = dirname(file);
+
+    if (!generation.compilerOptions.has(directory))
+    {
+        generation.compilerOptions.set(directory, governingCompilerOptions(generation.root, directory) ?? {});
+    }
+
+    return generation.compilerOptions.get(directory)!;
 }
 
 const TRANSFORMED = new Set(['.ts', '.tsx', '.mts', '.jsx']);
@@ -473,7 +481,7 @@ function jsonModule(source: string): string
     return [`const data = JSON.parse(${JSON.stringify(source)});`, 'export default data;', ...named].join('\n');
 }
 
-function transform(url: string, file: string): string
+function transform(url: string, { file, token }: OwnedFile): string
 {
     const source = readFileSync(file, 'utf8');
 
@@ -488,7 +496,10 @@ function transform(url: string, file: string): string
     }
 
     const compiler = typescript();
-    const output = compiler.transpileModule(source, { fileName: file, compilerOptions: transpileOptions(compiler) });
+    const output = compiler.transpileModule(source, {
+        fileName: file,
+        compilerOptions: transpileOptions(compiler, projectOptions(generations.get(token)!, file)),
+    });
 
     if (output.sourceMapText !== undefined)
     {
@@ -502,5 +513,5 @@ export function loadHook(url: string, context: unknown, nextLoad: NextLoad): Loa
 {
     const file = owned.get(url);
 
-    return file === undefined ? nextLoad(url, context) : { format: 'module', source: transform(url, file.file), shortCircuit: true };
+    return file === undefined ? nextLoad(url, context) : { format: 'module', source: transform(url, file), shortCircuit: true };
 }
