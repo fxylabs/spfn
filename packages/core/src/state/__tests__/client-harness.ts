@@ -13,7 +13,7 @@
  */
 
 import { Type } from '@sinclair/typebox';
-import { expect, onTestFinished, vi } from 'vitest';
+import { expect, onTestFailed, onTestFinished, vi } from 'vitest';
 import { createSSEClient } from '../../event/sse/client';
 import { FakeEventSource, type FakeConnected } from '../../event/sse/__tests__/fake-event-source';
 import { createStateClient } from '../client';
@@ -89,11 +89,15 @@ interface Tracked
     activity: number;
 }
 
-/** What a row's harnesses made, one of each per `harness()`, and whether the row has finished. */
+/**
+ * What a row's harnesses made, one of each per `harness()`; whether a
+ * `settle()` is waiting on them, and whether the row has finished.
+ */
 interface Row
 {
     clients: StateClient<FixtureStates>[];
     tracked: Tracked[];
+    waiting: boolean;
     finished: boolean;
 }
 
@@ -210,28 +214,58 @@ export function harness(
     return { client, calls, responders: all, onError };
 }
 
-/**
- * The running row, made at its first `harness()`. When the row finishes it
- * closes every client it made: one the row did not close — a row that failed
- * early, or never meant to — would keep its retry timer and stream running
- * into the next row. `close()` may run twice: a second call only clears what
- * is already cleared.
- */
+/** The running row, made at its first `harness()`. */
 function runningRow(): Row
 {
     if (!running)
     {
-        const row: Row = { clients: [], tracked: [], finished: false };
-        onTestFinished(() =>
-        {
-            row.finished = true;
-            running = undefined;
-            row.clients.forEach(client => client.close());
-        });
-        running = row;
+        running = { clients: [], tracked: [], waiting: false, finished: false };
+        endWithTheRow(running);
     }
 
     return running;
+}
+
+/**
+ * When the row finishes, close every client it made: one the row did not
+ * close — a row that failed early, or never meant to — would keep its retry
+ * timer and stream running into the next row. `close()` may run twice: a
+ * second call only clears what is already cleared. When the row failed with a
+ * `settle()` waiting (a timeout, most often), the failure also says what it
+ * was waiting for.
+ */
+function endWithTheRow(row: Row): void
+{
+    let waitedFor: string | undefined;
+    onTestFinished(() =>
+    {
+        waitedFor = row.waiting ? whatSettleWaitsFor(row) : undefined;
+        row.finished = true;
+        running = undefined;
+        row.clients.forEach(client => client.close());
+    });
+    onTestFailed(() =>
+    {
+        if (waitedFor)
+        {
+            throw new Error(waitedFor);
+        }
+    });
+}
+
+function whatSettleWaitsFor(row: Row): string
+{
+    const unheld = [...unheldCalls(row)].map(([route, n]) => `${route} ×${n}`);
+
+    if (unheld.length === 0)
+    {
+        return 'settle() was still waiting when the row ended: no route call was in flight, but the row\'s clients '
+            + 'kept starting and settling calls every turn. A client that keeps calling by itself (a retry with no '
+            + 'delay) is never quiescent.';
+    }
+
+    return `settle() was still waiting when the row ended, on route calls in flight that no deferred() holds: ${unheld.join(', ')}. `
+        + 'A responder that holds its answer open on purpose must return a deferred(); settle() waits for every other answer.';
 }
 
 /**
@@ -306,12 +340,13 @@ function turn(): Promise<unknown>
     return vi.isFakeTimers() ? vi.advanceTimersByTimeAsync(0) : new Promise(resolve => setTimeout(resolve, 0));
 }
 
-/** The routes of `row`'s calls in flight that no `deferred()` holds, each with its count. */
-function unheldCalls(row: Row): [string, number][]
+/** The calls of `row`'s clients in flight that no `deferred()` holds, counted by route. */
+function unheldCalls(row: Row): Map<string, number>
 {
-    return row.tracked.flatMap(({ open, held }) => [...open]
-        .map(([route, n]): [string, number] => [route, n - (held.get(route) ?? 0)])
-        .filter(([, n]) => n > 0));
+    const unheld = new Map<string, number>();
+    row.tracked.forEach(({ open, held }) => open.forEach((n, route) => add(unheld, route, n - (held.get(route) ?? 0))));
+
+    return new Map([...unheld].filter(([, n]) => n > 0));
 }
 
 function activityOf(row: Row): number
@@ -333,19 +368,23 @@ function activityOf(row: Row): number
  *
  * Only the running row's clients count: an earlier row's were closed when it
  * finished and were never this row's to wait for. A wait the row's end
- * overtook — a timeout — stops there.
+ * overtook — a timeout — stops there, and the row's failure names what it was
+ * waiting for: the calls in flight, or a client that kept calling.
  */
 export async function settle(): Promise<void>
 {
-    const row = running ?? { clients: [], tracked: [], finished: false };
+    const row = running ?? { clients: [], tracked: [], waiting: false, finished: false };
     let seen: number;
+    row.waiting = true;
 
     do
     {
         seen = activityOf(row);
         await turn();
     }
-    while (!row.finished && (activityOf(row) !== seen || unheldCalls(row).length > 0));
+    while (!row.finished && (activityOf(row) !== seen || unheldCalls(row).size > 0));
+
+    row.waiting = false;
 }
 
 /**
