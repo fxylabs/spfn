@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **spfn: `tsup` `^9.0.0` and `esbuild` `^0.28.2`, so no range spfn publishes admits
+  GHSA-g7r4-m6w7-qqqr** (esbuild `>=0.27.3 <0.28.1`, low: file read through esbuild's dev server
+  on Windows). spfn depended on `tsup` `^8.5.0` and `esbuild` `^0.27.0`, and a fresh resolve of
+  either brought esbuild 0.27.x; no tsup 8 release excludes it. tsup 9 requires esbuild `^0.28.2`
+  and rollup `^4.64.6`. `spfn init` now writes `tsup` `^9.0.0` into a new app's devDependencies,
+  and every package builds with tsup 9. `spfn build` output for the examples and a fresh
+  scaffold is byte-identical, and `@/` aliases still resolve through the app's tsconfig `paths`,
+  with or without `baseUrl`. tsup 9 requires Node `^22.18.0 || ^24.11.0 || >=26.0.0`, which
+  spfn's own floor (`^22.23.4 || ^24.22.1 || >=26.12.1`) already satisfies, so the Node floor
+  does not move.
+
 ## [@spfn/core@0.4.0-beta.1, @spfn/auth@0.4.0-beta.1, spfn@0.4.0-beta.1, @spfn/storage@0.4.0-beta.1, @spfn/cms@0.4.0-beta.1, @spfn/mcp@0.4.0-beta.1, @spfn/notification@0.3.0-beta.1, @spfn/monitor@0.3.0-beta.1, @spfn/i18n@0.3.0-beta.1, @spfn/migrate@0.3.0-beta.1, @spfn/pages-next@0.2.0-beta.1, @spfn/pages@0.2.0-beta.1, @spfn/signing@0.2.0-alpha.1, @spfn/workflow@0.3.0-alpha.1] - 2026-11-18
 
 **Upgrading.** 0.3 and 0.4 packages cannot be mixed: upgrade every `@spfn/*` package and `spfn`

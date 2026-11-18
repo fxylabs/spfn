@@ -176,7 +176,7 @@ and no range of ours can exclude it until that third party publishes one that do
 | `shell-quote` | GHSA-w7jw-789q-3m8p, GHSA-395f-4hp3-45gv. | Dev: concurrently, in spfn's devDependencies. |
 | `lodash-es` | Added before cms raised its own range; cms now depends on `^4.18.1`, so it changes nothing. | Production: cms, directly. |
 | `minimatch@>=7 <11.0.1` | GHSA-g3hv-75wg-m249: eslint and @typescript-eslint reach a minimatch 10 with no fix. | Tooling. |
-| `rollup` | GHSA-mw96-cpmx-2vgc. | Production: spfn → tsup 8.5 → rollup `^4.34.8`. No upstream fix inside tsup 8 (9.0.0 raises it); also vite, in dev. |
+| `rollup` | GHSA-mw96-cpmx-2vgc. | Dev: vite 7.3.7 → rollup `^4.43.0`. spfn's own path no longer needs it: tsup 9 requires rollup `^4.64.6`. |
 | `yaml` | GHSA-48c2-rrv3-qjmp. spfn and pages depend on `^2.8.3` themselves; the override covers vite's and postcss-load-config's. | Tooling. |
 | `js-yaml@3` | The js-yaml 3 advisories fixed in 3.15. | Production: pages → gray-matter 4.0.3 → js-yaml `^3.13.1`. No upstream fix: 4.0.3 is gray-matter's latest release. |
 | `nanoid@<3.3.18` | GHSA-2v37-7h3g-55p8. | Production: Next.js pins postcss 8.5.23 → nanoid `^3.3.16`. No upstream fix: Next.js 16.4.5 and 16.4.6 both pin that postcss. |

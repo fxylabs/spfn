@@ -80,7 +80,7 @@ export async function setupPackageJson(
     // - tsup: TypeScript bundler for server build with @/ alias support
     packageJson.devDependencies['@types/node'] = '^20.11.0';
     packageJson.devDependencies['tsx'] = '^4.22.4';
-    packageJson.devDependencies['tsup'] = '^8.5.0';
+    packageJson.devDependencies['tsup'] = '^9.0.0';
     packageJson.devDependencies['drizzle-kit'] = '1.0.0-rc.4';
     packageJson.devDependencies['dotenv'] = '^17.2.3';
 
