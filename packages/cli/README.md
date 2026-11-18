@@ -229,11 +229,20 @@ The hook is registered with `module.registerHooks`, which every Node line the pa
 `tsx` before 4.22 registers its own hooks with the deprecated `module.register()` and prints
 `DEP0205` on Node 26; a scaffold depends on `tsx` `^4.22.4`.
 
-`spfn codegen` and `spfn db generate` still load your source the old way (codegen through
-`jiti`, as CommonJS, beside an ESM `@spfn/core`); they read route and schema definitions,
-never the state a second copy splits, and do not refuse. The codegen watcher `spfn dev`
-starts loads your router the same way — the hook is registered there, but `jiti` loads the
-router through its own `require`, which no Node module hook sees.
+Codegen — `spfn codegen run`, `spfn build`'s generation step, `spfn contract`, and the codegen
+watcher `spfn dev` starts — imports your router the same way, in its own process's module graph:
+`@spfn/core` registers a hook of its own (`module.registerHooks`) that runs your TypeScript as ESM
+by the same rule, resolves tsconfig `paths` as tsc does, and re-runs only your project's files on
+each reload; every package is evaluated once. A second copy of `@spfn/core` found after a router
+load — a `.cts` route requiring `@spfn/*` — is refused in these processes (the bin and the watcher
+entry set `SPFN_CODEGEN_PROCESS=1`). The watcher regenerates for any project file the router
+reached, not only `src/server/routes/**`: an edit to `src/server/lib/segment.ts` imported through
+`@/` regenerates too. Each reload keeps about 100 KB per small app in memory, by design
+([@spfn/core codegen](../core/src/codegen/README.md#how-the-router-is-loaded)).
+
+`spfn db generate` still loads your schema files the old way (tsx, as CommonJS in an app without
+`"type": "module"`, beside an ESM `@spfn/core`); it reads schema definitions, never the state a
+second copy splits, and does not refuse (#349).
 
 ### `spfn build`
 

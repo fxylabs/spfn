@@ -18,6 +18,7 @@ const entry = {
     'authz/index': 'src/authz/index.ts',
     'cache/index': 'src/cache/index.ts',
     'codegen/index': 'src/codegen/index.ts',
+    'codegen/loader/index': 'src/codegen/loader/index.ts',
     'contract/index': 'src/contract/index.ts',
     'ops/index': 'src/ops/index.ts',
     'surface/index': 'src/surface/index.ts',

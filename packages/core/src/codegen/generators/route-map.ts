@@ -46,9 +46,9 @@ import { logger } from '@spfn/core/logger';
 import type { Generator, GeneratorOptions } from '../core/generator';
 import { assertUnconditionalRegistration } from './contract-guard';
 import { toObjectKey, toStringLiteral } from './emit';
-import { assertContentIndependentOfEnvironment, observeEnvironmentReads } from './environment-probe';
-import type { LoadEnvironments } from './environment-probe';
-import { isRouter, loadRouterModule, resolveRouterExport, type ResolvedRouter } from './router-module';
+import { assertContentIndependentOfEnvironment } from './environment-probe';
+import type { EnvironmentRead, LoadEnvironments } from './environment-probe';
+import { isRouter, loadRouterModule, resolveRouterExport, type ResolvedRouter, type RouterModuleLoad } from './router-module';
 
 const genLogger = logger.child('@spfn/core:route-map-generator');
 
@@ -185,11 +185,16 @@ function isRouteDef(value: unknown): value is RouteDef<any>
 
 const ROUTER_EXPORTS = ['appRouter', 'default', 'router'];
 
-function loadRouter(cwd: string, absoluteRouterPath: string): ResolvedRouter
+/** The router a load found, and the environment keys its project files read while it loaded. */
+interface LoadedRouter extends ResolvedRouter
 {
-    const module = loadRouterModule({
-        cwd,
-        absoluteRouterPath,
+    reads: EnvironmentRead[];
+}
+
+async function loadRouter(load: Omit<RouterModuleLoad, 'subject' | 'fail'>): Promise<LoadedRouter>
+{
+    const { module, reads } = await loadRouterModule({
+        ...load,
         subject: 'route map',
         fail: message => new RouteMapGeneratorError(message),
     });
@@ -198,11 +203,11 @@ function loadRouter(cwd: string, absoluteRouterPath: string): ResolvedRouter
 
     if (resolved)
     {
-        return resolved;
+        return { ...resolved, reads };
     }
 
     throw new RouteMapGeneratorError(
-        `No router found in ${relative(cwd, absoluteRouterPath)}. `
+        `No router found in ${relative(load.cwd, load.absoluteRouterPath)}. `
         + `Looked for: ${ROUTER_EXPORTS.join(', ')}. `
         + 'Export the defineRouter() result under one of those names.',
     );
@@ -797,7 +802,7 @@ export function createRouteMapGenerator(config: RouteMapGeneratorConfig): Genera
 
         async generate(options: GeneratorOptions): Promise<void>
         {
-            const { cwd, debug } = options;
+            const { cwd, debug, generation } = options;
 
             const absoluteRouterPath = join(cwd, routerPath);
             const absoluteOutputPath = join(cwd, outputPath);
@@ -815,10 +820,9 @@ export function createRouteMapGenerator(config: RouteMapGeneratorConfig): Genera
             }
 
             // Loaded before the guard reads the source, because which router the
-            // guard reads is decided by which export the loader found. Observed,
-            // because the environment probe varies what this load read.
-            const { value: { router, exportName }, reads } =
-                observeEnvironmentReads(cwd, () => loadRouter(cwd, absoluteRouterPath));
+            // guard reads is decided by which export the loader found. The load
+            // records what it read, which the environment probe varies.
+            const { router, exportName, reads } = await loadRouter({ cwd, absoluteRouterPath, generation });
 
             assertUnconditionalRegistration({
                 routerPath,
@@ -831,11 +835,11 @@ export function createRouteMapGenerator(config: RouteMapGeneratorConfig): Genera
 
             // After the scan, which names an inline conditional by its line without
             // a second load; this catches what the scan cannot see.
-            assertContentIndependentOfEnvironment({
+            await assertContentIndependentOfEnvironment({
                 cwd,
                 reads,
                 baseline: collection,
-                collect: () => collectRouteMap(loadRouter(cwd, absoluteRouterPath).router),
+                collect: async () => collectRouteMap((await loadRouter({ cwd, absoluteRouterPath, variation: true })).router),
                 render: generateRouteMapContent,
                 describe: describeRouteMapChanges,
                 subject: 'route map',

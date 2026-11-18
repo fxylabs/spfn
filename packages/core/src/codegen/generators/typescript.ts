@@ -1,9 +1,10 @@
 /**
  * TypeScript, loaded on first use
  *
- * Two things here read TypeScript's own parser: the `paths` a router's imports
- * resolve through, and the guard that reads `defineRouter({...})` out of the
- * router file. Both run only while a router is being read.
+ * Codegen reads TypeScript's own compiler for the `paths` a router's imports
+ * resolve through, the codegen loader's transform of project TypeScript, and
+ * the guard that reads `defineRouter({...})` out of the router file. All of them
+ * run only while a router is being read.
  *
  * `generators/index.ts` is re-exported from `@spfn/core/codegen`, so a
  * top-level `import ts from 'typescript'` loaded the whole compiler wherever

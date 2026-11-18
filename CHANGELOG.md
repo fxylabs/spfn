@@ -11,6 +11,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **@spfn/core, spfn: codegen loads the app as ESM in the process's own module graph; one copy of
+  `@spfn/core` (#335).** Codegen loaded the router (and `.spfnrc.ts`, the generator module, custom
+  generators) with jiti, and every jiti load evaluated the app **and the `node_modules` packages it
+  imports** again as CommonJS beside the ESM copy the process held: `@spfn/core/logger` 1 ESM + 7
+  CommonJS in one `spfn codegen run`, `@spfn/auth/server` ×123 over 41 watcher rounds. The router is
+  now `import()`ed under a hook core registers with `module.registerHooks`
+  (`@spfn/core/codegen/loader`): project TypeScript runs as ESM by the rule `spfn dev` uses (now
+  shared through `@spfn/core/codegen/loader`), is transformed with TypeScript's `transpileModule`,
+  and is re-run on each load through a generation query appended to project files only; every
+  package is evaluated once, under the pinned `production`. One load per generation is shared by
+  the route-map, contract and states generators. `loadCodegenConfig` stays synchronous
+  (`.spfnrc.ts` is `require()`d as an ES module); `<package>/codegen` and custom `.ts` generators
+  are imported natively, so the generator that runs is the process's own. Measured on a copy of
+  `examples/03-auth` with a state router, an `@/` import and all three generators: every
+  `@spfn/*` entry evaluated once in `spfn codegen run`, the watcher (20 rounds), `spfn build
+  --server-only` and `spfn contract check`; a watcher reload took about 35 ms instead of about
+  300 ms. `jiti` is no longer a dependency of `@spfn/core`.
+- **@spfn/core: the module-evaluation registry counts evaluations**, and codegen refuses a second
+  copy of an `@spfn/core` entry after each router load in a process the spfn CLI started
+  (`SPFN_CODEGEN_PROCESS=1`, set by the `spfn` bin and the `spfn dev` watcher entry); a
+  programmatic caller or a test is warned. The registry used to merge evaluations of one path by one
+  evaluator, and reported "ESM + CJS" where 1 + 7 existed. `startServer`'s refusal is unchanged.
+- **@spfn/core: the `spfn dev` codegen watcher regenerates for every project file the router
+  reaches.** It watched only `src/server/routes/**` and the router, so editing
+  `src/server/lib/segment.ts` imported through `@/` regenerated nothing. The watched set follows each
+  load; a file no load reaches any more leaves it.
+- **@spfn/core: the environment probe's header is true now.** A package does not run again on a
+  varied load, as it said; with jiti it did, so a package's `NODE_ENV`-dependent route was refused
+  or not depending on an unrelated project file, and the refusal blamed that file.
+
 - **spfn: `tsup` `^9.0.0` and `esbuild` `^0.28.2`, so no range spfn publishes admits
   GHSA-g7r4-m6w7-qqqr** (esbuild `>=0.27.3 <0.28.1`, low: file read through esbuild's dev server
   on Windows). spfn depended on `tsup` `^8.5.0` and `esbuild` `^0.27.0`. tsup 8.4.0 and 8.5.0
@@ -41,6 +71,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   This is new only relative to an older lockfile. A fresh install of spfn 0.4.0-beta.1 already
   resolves esbuild 0.27.7 and builds this way.
+
+### Changed
+
+- **BREAKING: route modules are ES modules in codegen**, as they already are in `spfn dev` and `spfn build`.
+  A type-only name imported or re-exported without `type` fails to link there too; top-level await
+  in a route module now loads (in `.spfnrc.ts` it cannot: it is `require()`d).
+- **BREAKING: a `.cts` route that requires `@spfn/*` is refused in CLI codegen** when tsx evaluates what it
+  requires as a CommonJS copy (tsx 4.20, 4.23), with the message `startServer` refuses with, naming
+  the file. Import `@spfn/*` from an ES module.
+- **BREAKING: a package's `NODE_ENV`-dependent route is no longer refused** — it was only by accident, when a
+  project file also read `NODE_ENV`. The map has the route as production registers it.
+- **BREAKING: tsconfig `paths`: every target of an entry is tried per import, in order, as tsc does**, the
+  pattern with the longest prefix wins, and a `*` may sit anywhere in a pattern. One target per key
+  used to be chosen for the whole load (the first that held anything), with warnings about the
+  others; an import now resolves through whichever target has it, and a failure lists every target
+  tried.
 
 ## [@spfn/core@0.4.0-beta.1, @spfn/auth@0.4.0-beta.1, spfn@0.4.0-beta.1, @spfn/storage@0.4.0-beta.1, @spfn/cms@0.4.0-beta.1, @spfn/mcp@0.4.0-beta.1, @spfn/notification@0.3.0-beta.1, @spfn/monitor@0.3.0-beta.1, @spfn/i18n@0.3.0-beta.1, @spfn/migrate@0.3.0-beta.1, @spfn/pages-next@0.2.0-beta.1, @spfn/pages@0.2.0-beta.1, @spfn/signing@0.2.0-alpha.1, @spfn/workflow@0.3.0-alpha.1] - 2026-11-18
 

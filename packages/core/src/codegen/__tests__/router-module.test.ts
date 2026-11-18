@@ -1,49 +1,23 @@
 /**
- * tsconfig path aliases
+ * tsconfig path aliases, as the codegen loader reads them
  *
- * jiti resolves an import through its `alias` option or not at all, so what
- * this function returns is exactly what a router may import while a generator
- * loads it. Each case is a real tsconfig.json in a temporary directory, read by
+ * `projectPaths` finds the tsconfig whose `paths` apply to a file, and
+ * `matchPaths` substitutes a specifier into each target of the entry tsc would
+ * take for it, in order; the loader's hook then takes the first candidate that
+ * names a file (`loader.test.ts` and `route-map.test.ts` load routers through
+ * it). Each case is a real tsconfig.json in a temporary directory, read by
  * TypeScript's own parser — the point being that `extends`, comments and
  * trailing commas are its problem and not this code's.
- *
- * A wildcard alias is keyed with its trailing slash (`@/*` → `@/`), which is
- * what leaves the exact form of the same prefix free for the `paths` entry that
- * maps it. jiti resolves `@/x` through either spelling; `route-map.test.ts`
- * covers that end of it by loading a router through the alias.
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { dirname, join } from 'path';
 import { Logger } from '@spfn/core/logger';
-import { tsconfigAliases } from '../generators/router-module';
+import { matchPaths, projectPaths } from '../loader/aliases';
 
 let projectDir: string;
-
-/** Directories a case made unreadable, so `afterEach` can give the mode back and remove them. */
-const unreadableDirs: string[] = [];
-
-/**
- * A directory the process may not read, holding a file at `contentPath` under it: the shape
- * issue #103 crashed the generator on.
- *
- * The content is what makes a case using this assert anything. Where the mode bit does not
- * bite — Windows, a process holding `CAP_DAC_OVERRIDE`, a filesystem mounted without
- * permission enforcement — the target resolves, the alias comes out as this directory rather
- * than `src`, and the case fails. Left empty it would read as "exists and resolves nothing"
- * there instead, which is the case above and passes whether or not the mode is enforced.
- */
-function makeUnreadableDir(relativePath: string, contentPath: string): void
-{
-    writeFile(contentPath, 'export const x = 1;\n');
-
-    const absolutePath = join(projectDir, relativePath);
-
-    chmodSync(absolutePath, 0o000);
-    unreadableDirs.push(absolutePath);
-}
 
 function writeFile(relativePath: string, content: string): void
 {
@@ -82,45 +56,48 @@ beforeEach(() =>
     projectDir = mkdtempSync(join(tmpdir(), 'spfn-tsconfig-'));
 });
 
+/**
+ * What `specifier`, imported from a file in `startDir`, is substituted to: one
+ * path per target, in order. Undefined when no `paths` entry applies.
+ */
+function candidatesFor(specifier: string, root: string = projectDir, startDir: string = root): string[] | undefined
+{
+    const paths = projectPaths(root, startDir);
+
+    return paths === undefined ? undefined : matchPaths(specifier, paths)?.candidates;
+}
+
 afterEach(() =>
 {
-    // `rmSync` cannot walk an unreadable directory either, so give the mode back first.
-    for (const path of unreadableDirs)
-    {
-        chmodSync(path, 0o700);
-    }
-
-    unreadableDirs.length = 0;
-
     rmSync(projectDir, { recursive: true, force: true });
 });
 
-describe('tsconfigAliases', () =>
+describe('projectPaths and matchPaths', () =>
 {
     it('is empty when the project has no tsconfig.json', () =>
     {
-        expect(tsconfigAliases(projectDir)).toEqual({});
+        expect(candidatesFor('@/x')).toBeUndefined();
     });
 
     it('is empty when the tsconfig declares no paths', () =>
     {
         writeFile('tsconfig.json', '{ "compilerOptions": { "strict": true } }');
 
-        expect(tsconfigAliases(projectDir)).toEqual({});
+        expect(candidatesFor('@/x')).toBeUndefined();
     });
 
     it('does not walk up: a tsconfig in a parent directory is not this project\'s', () =>
     {
         writeFile('tsconfig.json', '{ "compilerOptions": { "paths": { "@/*": ["./src/*"] } } }');
 
-        expect(tsconfigAliases(join(projectDir, 'packages/app'))).toEqual({});
+        expect(candidatesFor('@/x', join(projectDir, 'packages/app'))).toBeUndefined();
     });
 
     it('is empty, and does not throw, when the tsconfig cannot be parsed', () =>
     {
         writeFile('tsconfig.json', 'not json at all {');
 
-        expect(tsconfigAliases(projectDir)).toEqual({});
+        expect(candidatesFor('@/x')).toBeUndefined();
     });
 
     it('reads a prefix mapping, comments and trailing commas included', () =>
@@ -133,7 +110,7 @@ describe('tsconfigAliases', () =>
             + '}\n',
         );
 
-        expect(tsconfigAliases(projectDir)).toEqual({ '@/': join(projectDir, 'src') });
+        expect(candidatesFor('@/server/routes')).toEqual([join(projectDir, 'src/server/routes')]);
     });
 
     it('resolves a target against baseUrl', () =>
@@ -143,7 +120,7 @@ describe('tsconfigAliases', () =>
             JSON.stringify({ compilerOptions: { baseUrl: './app', paths: { '@/*': ['./src/*'] } } }),
         );
 
-        expect(tsconfigAliases(projectDir)).toEqual({ '@/': join(projectDir, 'app/src') });
+        expect(candidatesFor('@/x')).toEqual([join(projectDir, 'app/src/x')]);
     });
 
     it('resolves a target of an extended config against that config, not this one', () =>
@@ -154,7 +131,7 @@ describe('tsconfigAliases', () =>
         );
         writeFile('tsconfig.json', JSON.stringify({ extends: './config/base.json' }));
 
-        expect(tsconfigAliases(projectDir)).toEqual({ '@/': join(projectDir, 'config/src') });
+        expect(candidatesFor('@/x')).toEqual([join(projectDir, 'config/src/x')]);
     });
 
     it('follows a chain of extends, the nearest config winning', () =>
@@ -166,7 +143,7 @@ describe('tsconfigAliases', () =>
             JSON.stringify({ extends: './b.json', compilerOptions: { baseUrl: '.', paths: { '@/*': ['./src/*'] } } }),
         );
 
-        expect(tsconfigAliases(projectDir)).toEqual({ '@/': join(projectDir, 'src') });
+        expect(candidatesFor('@/x')).toEqual([join(projectDir, 'src/x')]);
     });
 
     it('maps a specifier that carries no wildcard to its file', () =>
@@ -176,7 +153,8 @@ describe('tsconfigAliases', () =>
             JSON.stringify({ compilerOptions: { paths: { 'env-config': ['./src/config/env.ts'] } } }),
         );
 
-        expect(tsconfigAliases(projectDir)).toEqual({ 'env-config': join(projectDir, 'src/config/env.ts') });
+        expect(candidatesFor('env-config')).toEqual([join(projectDir, 'src/config/env.ts')]);
+        expect(candidatesFor('env-config/other')).toBeUndefined();
     });
 
     it('keeps an exact mapping beside the wildcard that reduces to the same prefix', () =>
@@ -193,13 +171,11 @@ describe('tsconfigAliases', () =>
             }),
         );
 
-        expect(tsconfigAliases(projectDir)).toEqual({
-            '@spfn/auth': join(projectDir, 'src/index.ts'),
-            '@spfn/auth/': join(projectDir, 'lib'),
-        });
+        expect(candidatesFor('@spfn/auth')).toEqual([join(projectDir, 'src/index.ts')]);
+        expect(candidatesFor('@spfn/auth/server')).toEqual([join(projectDir, 'lib/server')]);
     });
 
-    it('refuses a wildcard that is not a directory prefix, and keeps the rest', () =>
+    it('substitutes a wildcard in the middle of a pattern, as tsc does', () =>
     {
         writeFile(
             'tsconfig.json',
@@ -213,11 +189,30 @@ describe('tsconfigAliases', () =>
             }),
         );
 
-        expect(tsconfigAliases(projectDir)).toEqual({ '@/': join(projectDir, 'src') });
+        expect(candidatesFor('legacy/billing/entry')).toEqual([join(projectDir, 'src/legacy/billing/entry.ts')]);
+        expect(candidatesFor('@/x')).toEqual([join(projectDir, 'src/x')]);
+    });
+
+    it('takes the pattern with the longest prefix, as tsc does', () =>
+    {
+        writeFile(
+            'tsconfig.json',
+            JSON.stringify({ compilerOptions: { paths: { '@/*': ['./src/*'], '@/server/*': ['./server/*'] } } }),
+        );
+
+        expect(candidatesFor('@/server/routes')).toEqual([join(projectDir, 'server/routes')]);
+        expect(candidatesFor('@/lib/x')).toEqual([join(projectDir, 'src/lib/x')]);
+    });
+
+    it('substitutes every target of the entry, in order, whether or not it exists', () =>
+    {
+        writeFile('tsconfig.json', JSON.stringify({ compilerOptions: { paths: { '@/*': ['./dist/*', './src/*'] } } }));
+
+        expect(candidatesFor('@/x')).toEqual([join(projectDir, 'dist/x'), join(projectDir, 'src/x')]);
     });
 });
 
-describe('tsconfigAliases - which tsconfig holds the paths', () =>
+describe('projectPaths - which tsconfig holds the paths', () =>
 {
     /** What `spfn init` scaffolds: the aliases live with the server, not at the root. */
     function writeServerConfig(): void
@@ -232,9 +227,7 @@ describe('tsconfigAliases - which tsconfig holds the paths', () =>
     {
         writeServerConfig();
 
-        expect(tsconfigAliases(projectDir, join(projectDir, 'src/server'))).toEqual({
-            '@/': join(projectDir, 'src'),
-        });
+        expect(candidatesFor('@/x', projectDir, join(projectDir, 'src/server'))).toEqual([join(projectDir, 'src/x')]);
     });
 
     it('honours that config\'s baseUrl, which points back at the project root', () =>
@@ -244,9 +237,7 @@ describe('tsconfigAliases - which tsconfig holds the paths', () =>
             JSON.stringify({ compilerOptions: { baseUrl: '../..', paths: { '@/*': ['./generated/*'] } } }),
         );
 
-        expect(tsconfigAliases(projectDir, join(projectDir, 'src/server'))).toEqual({
-            '@/': join(projectDir, 'generated'),
-        });
+        expect(candidatesFor('@/x', projectDir, join(projectDir, 'src/server'))).toEqual([join(projectDir, 'generated/x')]);
     });
 
     it('takes the nearest config that declares paths, the server\'s over the root\'s', () =>
@@ -254,9 +245,7 @@ describe('tsconfigAliases - which tsconfig holds the paths', () =>
         writeServerConfig();
         writeFile('tsconfig.json', JSON.stringify({ compilerOptions: { paths: { '@/*': ['./root/*'] } } }));
 
-        expect(tsconfigAliases(projectDir, join(projectDir, 'src/server'))).toEqual({
-            '@/': join(projectDir, 'src'),
-        });
+        expect(candidatesFor('@/x', projectDir, join(projectDir, 'src/server'))).toEqual([join(projectDir, 'src/x')]);
     });
 
     it('passes over a nearer config that declares none, as a Next.js app\'s server config does', () =>
@@ -264,9 +253,7 @@ describe('tsconfigAliases - which tsconfig holds the paths', () =>
         writeFile('src/server/tsconfig.json', JSON.stringify({ compilerOptions: { strict: true } }));
         writeFile('tsconfig.json', JSON.stringify({ compilerOptions: { paths: { '@/*': ['./src/*'] } } }));
 
-        expect(tsconfigAliases(projectDir, join(projectDir, 'src/server'))).toEqual({
-            '@/': join(projectDir, 'src'),
-        });
+        expect(candidatesFor('@/x', projectDir, join(projectDir, 'src/server'))).toEqual([join(projectDir, 'src/x')]);
     });
 
     it('stops at the project root, never reading the config above it', () =>
@@ -276,18 +263,18 @@ describe('tsconfigAliases - which tsconfig holds the paths', () =>
         const app = join(projectDir, 'app');
         writeFile('app/src/server/.keep', '');
 
-        expect(tsconfigAliases(app, join(app, 'src/server'))).toEqual({});
+        expect(candidatesFor('@/x', app, join(app, 'src/server'))).toBeUndefined();
     });
 
     it('reads the root config when the router is outside the project root', () =>
     {
         writeFile('tsconfig.json', JSON.stringify({ compilerOptions: { paths: { '@/*': ['./src/*'] } } }));
 
-        expect(tsconfigAliases(projectDir, tmpdir())).toEqual({ '@/': join(projectDir, 'src') });
+        expect(candidatesFor('@/x', projectDir, tmpdir())).toEqual([join(projectDir, 'src/x')]);
     });
 });
 
-describe('tsconfigAliases - what it warns about', () =>
+describe('projectPaths - what it warns about', () =>
 {
     it('warns when TypeScript could not read an extends target, instead of dropping its paths silently', () =>
     {
@@ -296,12 +283,12 @@ describe('tsconfigAliases - what it warns about', () =>
         // developer used to be told to look at a config that is correct.
         writeFile('tsconfig.json', JSON.stringify({ extends: './missing/base.json' }));
 
-        let aliases: Record<string, string> = {};
-        const warnings = warningsOf(() => (aliases = tsconfigAliases(projectDir)));
+        let candidates: string[] | undefined;
+        const warnings = warningsOf(() => (candidates = candidatesFor('@/x')));
 
         expect(warnings).toMatch(/missing[/\\]base\.json/);
         expect(warnings).toMatch(/aliases/);
-        expect(aliases).toEqual({});
+        expect(candidates).toBeUndefined();
     });
 
     it('warns and keeps the paths the unreadable config\'s extender declared itself', () =>
@@ -311,193 +298,17 @@ describe('tsconfigAliases - what it warns about', () =>
             compilerOptions: { paths: { '@/*': ['./src/*'] } },
         }));
 
-        let aliases: Record<string, string> = {};
-        const warnings = warningsOf(() => (aliases = tsconfigAliases(projectDir)));
+        let candidates: string[] | undefined;
+        const warnings = warningsOf(() => (candidates = candidatesFor('@/x')));
 
         expect(warnings).toMatch(/missing[/\\]base\.json/);
-        expect(aliases).toEqual({ '@/': join(projectDir, 'src') });
+        expect(candidates).toEqual([join(projectDir, 'src/x')]);
     });
 
     it('says nothing about the inputs the stubbed readDirectory never finds', () =>
     {
         writeFile('tsconfig.json', JSON.stringify({ compilerOptions: { paths: { '@/*': ['./src/*'] } } }));
 
-        expect(warningsOf(() => tsconfigAliases(projectDir))).toBe('');
-    });
-
-    it('warns about a pattern jiti cannot express', () =>
-    {
-        writeFile('tsconfig.json', JSON.stringify({
-            compilerOptions: { paths: { 'legacy/*/entry': ['./src/legacy/*/entry.ts'] } },
-        }));
-
-        expect(warningsOf(() => tsconfigAliases(projectDir))).toMatch(/not a directory prefix mapping/);
-    });
-});
-
-describe('tsconfigAliases - several targets for one pattern', () =>
-{
-    it('falls back to the target that exists, as tsc and tsup do', () =>
-    {
-        writeFile('src/routes.ts', 'export const x = 1;\n');
-        writeFile(
-            'tsconfig.json',
-            JSON.stringify({ compilerOptions: { paths: { '@/*': ['./dist/*', './src/*'] } } }),
-        );
-
-        let aliases: Record<string, string> = {};
-        const warnings = warningsOf(() => (aliases = tsconfigAliases(projectDir)));
-
-        expect(aliases).toEqual({ '@/': join(projectDir, 'src') });
-        expect(warnings).toBe('');
-    });
-
-    it('takes the first of the targets that exist, and says so', () =>
-    {
-        writeFile('dist/routes.js', 'exports.x = 1;\n');
-        writeFile('src/routes.ts', 'export const x = 1;\n');
-        writeFile(
-            'tsconfig.json',
-            JSON.stringify({ compilerOptions: { paths: { '@/*': ['./dist/*', './src/*'] } } }),
-        );
-
-        let aliases: Record<string, string> = {};
-        const warnings = warningsOf(() => (aliases = tsconfigAliases(projectDir)));
-
-        expect(aliases).toEqual({ '@/': join(projectDir, 'dist') });
-        expect(warnings).toMatch(/only the first/);
-    });
-
-    it('takes the first when no target exists, and warns that an import will name itself', () =>
-    {
-        writeFile(
-            'tsconfig.json',
-            JSON.stringify({ compilerOptions: { paths: { '@/*': ['./dist/*', './src/*'] } } }),
-        );
-
-        let aliases: Record<string, string> = {};
-        const warnings = warningsOf(() => (aliases = tsconfigAliases(projectDir)));
-
-        expect(aliases).toEqual({ '@/': join(projectDir, 'dist') });
-        expect(warnings).toMatch(/none of them exist/);
-    });
-
-    it('passes over a target directory that exists but is empty', () =>
-    {
-        // `rm -rf dist/*` leaves the directory. tsc and tsup substitute the next
-        // target when the requested module is not under this one; jiti holds one
-        // alias per key, so the nearest equivalent is refusing a directory that
-        // can resolve nothing at all.
-        mkdirSync(join(projectDir, 'dist'), { recursive: true });
-        writeFile('src/routes.ts', 'export const x = 1;\n');
-        writeFile(
-            'tsconfig.json',
-            JSON.stringify({ compilerOptions: { paths: { '@/*': ['./dist/*', './src/*'] } } }),
-        );
-
-        let aliases: Record<string, string> = {};
-        const warnings = warningsOf(() => (aliases = tsconfigAliases(projectDir)));
-
-        expect(aliases).toEqual({ '@/': join(projectDir, 'src') });
-        expect(warnings).toBe('');
-    });
-
-    it('takes the first when every target is empty, and warns that an import will name itself', () =>
-    {
-        mkdirSync(join(projectDir, 'dist'), { recursive: true });
-        mkdirSync(join(projectDir, 'src'), { recursive: true });
-        writeFile(
-            'tsconfig.json',
-            JSON.stringify({ compilerOptions: { paths: { '@/*': ['./dist/*', './src/*'] } } }),
-        );
-
-        let aliases: Record<string, string> = {};
-        const warnings = warningsOf(() => (aliases = tsconfigAliases(projectDir)));
-
-        expect(aliases).toEqual({ '@/': join(projectDir, 'dist') });
-        expect(warnings).toMatch(/none of them exist/);
-    });
-
-    it('passes over a target directory the process cannot read', ctx =>
-    {
-        if (process.getuid?.() === 0)
-        {
-            ctx.skip('runs as root, which bypasses the permission bits: a mode-000 directory would '
-                + 'read fine and this case would pass without exercising the guard');
-        }
-
-        // `statSync`'s `throwIfNoEntry: false` suppresses only ENOENT, so a
-        // directory with no read permission used to reach the developer as a bare
-        // `EACCES: permission denied, scandir` out of `readdirSync` — thrown before
-        // the catch that names the router file and the cause.
-        makeUnreadableDir('dist', 'dist/routes.js');
-        writeFile('src/routes.ts', 'export const x = 1;\n');
-        writeFile(
-            'tsconfig.json',
-            JSON.stringify({ compilerOptions: { paths: { '@/*': ['./dist/*', './src/*'] } } }),
-        );
-
-        let aliases: Record<string, string> = {};
-        const warnings = warningsOf(() => (aliases = tsconfigAliases(projectDir)));
-
-        expect(aliases).toEqual({ '@/': join(projectDir, 'src') });
-        expect(warnings).toBe('');
-    });
-
-    it('passes over a target whose parent directory the process cannot read', ctx =>
-    {
-        if (process.getuid?.() === 0)
-        {
-            ctx.skip('runs as root, which bypasses the permission bits: a mode-000 directory would '
-                + 'read fine and this case would pass without exercising the guard');
-        }
-
-        // The `statSync` above the `readdirSync` has the same hole: `throwIfNoEntry:
-        // false` suppresses ENOENT, not the EACCES an unsearchable path component
-        // raises. `./build/dist/*` under a mode-000 `build` is that shape. `build/dist`
-        // is real and holds a file, so the failure this case sees is EACCES on the
-        // parent rather than ENOENT on a directory nobody created.
-        makeUnreadableDir('build', 'build/dist/routes.js');
-        writeFile('src/routes.ts', 'export const x = 1;\n');
-        writeFile(
-            'tsconfig.json',
-            JSON.stringify({ compilerOptions: { paths: { '@/*': ['./build/dist/*', './src/*'] } } }),
-        );
-
-        let aliases: Record<string, string> = {};
-        const warnings = warningsOf(() => (aliases = tsconfigAliases(projectDir)));
-
-        expect(aliases).toEqual({ '@/': join(projectDir, 'src') });
-        expect(warnings).toBe('');
-    });
-
-    it('propagates a filesystem error that is not a refusal to read', () =>
-    {
-        // The guard passes over a target the filesystem refuses to read and rethrows
-        // everything else, and this is the only case holding it to the second half:
-        // replacing the whole `catch` with `return false` leaves every other case in this
-        // file passing, and that swallow is the `existsSync` defect #216 removed coming
-        // back by another route.
-        //
-        // A path component past the filesystem's name limit raises ENAMETOOLONG out of
-        // `statSync`. It needs no fixture and no permissions, so it does the same thing as
-        // root and on every platform. ENOTDIR cannot serve here: `throwIfNoEntry: false`
-        // suppresses it along with ENOENT, so a target under a regular file comes back
-        // `undefined` and is merely unresolvable.
-        writeFile('src/routes.ts', 'export const x = 1;\n');
-        writeFile(
-            'tsconfig.json',
-            JSON.stringify({ compilerOptions: { paths: { '@/*': [`./${'n'.repeat(300)}/*`, './src/*'] } } }),
-        );
-
-        expect(() => tsconfigAliases(projectDir)).toThrow(/ENAMETOOLONG/);
-    });
-
-    it('says nothing when a pattern has one target', () =>
-    {
-        writeFile('src/routes.ts', 'export const x = 1;\n');
-        writeFile('tsconfig.json', JSON.stringify({ compilerOptions: { paths: { '@/*': ['./src/*'] } } }));
-
-        expect(warningsOf(() => tsconfigAliases(projectDir))).toBe('');
+        expect(warningsOf(() => candidatesFor('@/x'))).toBe('');
     });
 });

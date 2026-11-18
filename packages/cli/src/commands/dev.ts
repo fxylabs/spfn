@@ -51,6 +51,71 @@ function writeAgentInstructions(cwd: string, agentFiles: boolean): void
 }
 
 /**
+ * The codegen watcher's entry, `.spfn/watcher.mjs`: the generators of the
+ * app's codegen config, run by an orchestrator in watch mode. Started under
+ * tsx with the `spfn dev` hook (`devLoader`), as the server is.
+ */
+export function watcherEntrySource(): string
+{
+    return `
+// Load environment variables
+// const { loadEnvFiles } = await import('@spfn/core/server');
+// loadEnvFiles();
+// await import('@spfn/core/config');
+//
+// // Initialize database for generators that need it
+// const { initDatabase, closeDatabase } = await import('@spfn/core/db');
+// await initDatabase({
+//     pool: { max: 3 }  // Watcher needs fewer connections than server
+// });
+
+import { CodegenOrchestrator, loadCodegenConfig, createGeneratorsFromConfig } from '@spfn/core/codegen';
+
+// Started by the spfn CLI: a second copy of @spfn/core after a router load is
+// refused, not only warned about (see loadCodegenConfig).
+process.env.SPFN_CODEGEN_PROCESS = '1';
+
+const cwd = process.cwd();
+const config = loadCodegenConfig(cwd);
+const generators = await createGeneratorsFromConfig(config, cwd);
+
+const orchestrator = new CodegenOrchestrator({
+    generators,
+    cwd,
+    debug: true
+});
+
+// Setup graceful shutdown
+const cleanup = async () =>
+{
+    await orchestrator.close();
+};
+
+process.on('SIGTERM', async () =>
+{
+    await cleanup();
+    process.exit(0);
+});
+process.on('SIGINT', async () =>
+{
+    await cleanup();
+    process.exit(0);
+});
+
+// Start watching - this will run indefinitely until the watcher is closed
+try
+{
+    await orchestrator.watch();
+}
+catch (error)
+{
+    console.error('[SPFN] Codegen watcher error:', error);
+    process.exit(1);
+}
+`;
+}
+
+/**
  * Registers the module hook that runs the app's own source in the format
  * `spfn build` gives it (see `dev-loader/hooks.ts`), for the application rooted
  * at `cwd`. Built next to this file, so it is resolved from the CLI's location,
@@ -264,59 +329,7 @@ const instance = await startServer({
 writeFileSync(${JSON.stringify(readyFile)}, String(instance.config.port));
 `);
 
-        // Codegen orchestrator entry
-        writeFileSync(watcherEntry, `
-// Load environment variables
-// const { loadEnvFiles } = await import('@spfn/core/server');
-// loadEnvFiles();
-// await import('@spfn/core/config');
-//
-// // Initialize database for generators that need it
-// const { initDatabase, closeDatabase } = await import('@spfn/core/db');
-// await initDatabase({
-//     pool: { max: 3 }  // Watcher needs fewer connections than server
-// });
-
-import { CodegenOrchestrator, loadCodegenConfig, createGeneratorsFromConfig } from '@spfn/core/codegen';
-
-const cwd = process.cwd();
-const config = loadCodegenConfig(cwd);
-const generators = await createGeneratorsFromConfig(config, cwd);
-
-const orchestrator = new CodegenOrchestrator({
-    generators,
-    cwd,
-    debug: true
-});
-
-// Setup graceful shutdown
-const cleanup = async () =>
-{
-    await orchestrator.close();
-};
-
-process.on('SIGTERM', async () =>
-{
-    await cleanup();
-    process.exit(0);
-});
-process.on('SIGINT', async () =>
-{
-    await cleanup();
-    process.exit(0);
-});
-
-// Start watching - this will run indefinitely until the watcher is closed
-try
-{
-    await orchestrator.watch();
-}
-catch (error)
-{
-    console.error('[SPFN] Codegen watcher error:', error);
-    process.exit(1);
-}
-`);
+        writeFileSync(watcherEntry, watcherEntrySource());
 
         const pm = detectPackageManager(cwd);
 

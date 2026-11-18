@@ -11,6 +11,11 @@
 const TSX_FLAG = '--import';
 const TSX_MODULE = 'tsx';
 
+// Marks every process this CLI runs, and what it spawns, as started by the spfn
+// CLI: codegen (`loadCodegenConfig`) then refuses a second copy of @spfn/core
+// instead of only warning about it, as it does for a programmatic caller.
+process.env.SPFN_CODEGEN_PROCESS = '1';
+
 // Already running with tsx loader — just run
 if (process.execArgv.some(arg => arg.includes(TSX_MODULE)))
 {

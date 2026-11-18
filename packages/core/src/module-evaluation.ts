@@ -8,7 +8,8 @@
  * code below is inlined into every entry — each copy of an entry carries its
  * own — which is what lets a copy name its own evaluator.
  *
- * An evaluation's identity is its file path and its evaluator. The same path
+ * An evaluation's identity is its file path and its evaluator, and each one
+ * counts how many times it was evaluated. To the server, the same path
  * evaluated again by the same evaluator — a test runner resetting its module
  * registry, HMR — is the same copy again. The same path by another evaluator,
  * or another path, is a second copy, with its own module state: a policy
@@ -25,9 +26,18 @@
  * server before it loads anything of the app, refusing a second copy recorded
  * before that; from then on `recordEvaluation` refuses one itself, so the
  * import that would bring it in — at boot or lazily in a request, a job, an
- * event handler — throws, and the copy never reaches its importer. Processes
- * that never start a server (codegen, the watcher, scripts, a Next.js server
- * bundling the package) record and never refuse.
+ * event handler — throws, and the copy never reaches its importer.
+ *
+ * Codegen checks after each router load (`codegenSecondCopy`), and there a
+ * repeated evaluation of one path counts too: the codegen loader evaluates the
+ * project again on every load and a package never, so a package evaluated
+ * twice natively — given a generation query by mistake — is as much a second
+ * copy as one evaluated as CommonJS. A process the spfn CLI started
+ * (`SPFN_CODEGEN_PROCESS=1`, marked by `markCodegenProcess`) refuses it; any
+ * other caller of codegen — a script, a test — is warned. vitest's own
+ * re-evaluations, which a module reset makes, are not counted. Processes that
+ * neither serve nor generate (scripts, a Next.js server bundling the package)
+ * record and never refuse.
  *
  * The registry lives on `globalThis` under a `Symbol.for` key, so every copy
  * and every version reads and writes the same one: its shape is a contract
@@ -62,6 +72,8 @@ interface Evaluation
     version: string;
     /** For a CommonJS copy, the file that required it, as far as it is known. */
     requiredBy?: string;
+    /** How many times this copy was evaluated. Absent in a record an older version wrote: once, as far as it said. */
+    count?: number;
 }
 
 interface Registry
@@ -69,6 +81,8 @@ interface Registry
     evaluations: Map<string, Evaluation[]>;
     /** Set by `startServer`; from then on a second copy is refused where it is recorded. */
     server?: { logError: (message: string) => void; logged: Set<string> };
+    /** Set by `markCodegenProcess`: a second copy found after a router load is refused, not warned about. */
+    codegen?: { refuse: true };
 }
 
 /** The wrapper argument vitest's module runner evaluates a module with; undeclared anywhere else. */
@@ -183,7 +197,8 @@ function synchronousCallerFiles(): string[]
  * knowing where the app is: Node's internals and the loader's (tsx's) frames
  * around the require. This package's own frames are not: they are the
  * outermost only when it synchronously loads app code itself, which only
- * codegen does, and codegen never refuses.
+ * codegen's `require()` of `.spfnrc.ts` does — as an ES module, which shares
+ * the process's instance and records no CommonJS copy.
  */
 function requiringFile(): string | undefined
 {
@@ -264,8 +279,12 @@ export function recordEvaluation(entry: string, url: unknown, version: string): 
     const evaluation = thisEvaluation(url, version);
     const seen = registry().evaluations.get(entry) ?? [];
 
-    if (seen.some(other => sameCopy(other, evaluation)))
+    const same = seen.find(other => sameCopy(other, evaluation));
+
+    if (same !== undefined)
     {
+        same.count = (same.count ?? 1) + 1;
+
         return;
     }
 
@@ -295,6 +314,41 @@ export function markServerProcess(logError: (message: string) => void): void
     {
         throw new Error(secondCopyMessage(new Map(split)));
     }
+}
+
+/**
+ * Marks this process as one the spfn CLI started to generate code: a second
+ * copy `codegenSecondCopy` finds is then to be refused rather than warned
+ * about. Called by `loadCodegenConfig` when `SPFN_CODEGEN_PROCESS=1`.
+ */
+export function markCodegenProcess(): void
+{
+    registry().codegen ??= { refuse: true };
+}
+
+/** An evaluation, once per time it was evaluated — vitest's re-evaluations, from a module reset, once in all. */
+function codegenEvaluations(evaluation: Evaluation): Evaluation[]
+{
+    const count = evaluation.evaluator === 'vitest' ? 1 : evaluation.count ?? 1;
+
+    return Array.from({ length: count }, () => evaluation);
+}
+
+/**
+ * Every entry evaluated more than once in this process — by two evaluators, from
+ * two installs, or one path natively twice — as the refusal describes it, and
+ * whether this process refuses it (`markCodegenProcess`); undefined when each
+ * entry was evaluated once.
+ */
+export function codegenSecondCopy(): { message: string; refuse: boolean } | undefined
+{
+    const split = [...registry().evaluations]
+        .map(([entry, evaluations]) => [entry, evaluations.flatMap(codegenEvaluations)] as const)
+        .filter(([, evaluations]) => evaluations.length > 1);
+
+    return split.length === 0
+        ? undefined
+        : { message: secondCopyMessage(new Map(split)), refuse: registry().codegen !== undefined };
 }
 
 function refuseSecondCopy(split: Map<string, Evaluation[]>): never
@@ -382,8 +436,13 @@ function evaluatorRemedies(evaluations: Evaluation[]): string[]
     const bundle = evaluators.has('bundle') && evaluators.size > 1
         ? ['A bundled copy of @spfn/core runs beside a loaded one: bundle every importer of @spfn/core, or none.']
         : [];
+    const repeated = evaluations.filter(evaluation => evaluation.evaluator === 'esm').length > 1
+        ? ['One file was evaluated natively more than once, which Node does only for an import URL that differs by '
+            + 'its query: import @spfn/* without a query. If no code of yours does, the codegen loader tagged a '
+            + 'package as project source — report it.']
+        : [];
 
-    return [...commonJs, ...vitest, ...bundle];
+    return [...commonJs, ...vitest, ...bundle, ...repeated];
 }
 
 /** What to do about a CommonJS copy, by the file that required it. */

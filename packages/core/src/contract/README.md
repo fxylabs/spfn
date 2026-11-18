@@ -393,10 +393,11 @@ JSON body and upload the file through its own uncontracted route.
   schema that reads the environment cannot make the contract depend on the shell it ran in. The pin
   is process-wide and shared with `@spfn/core:route-map`, so both generators in one run read the
   same environment whichever `.spfnrc.ts` lists first.
-- **Path aliases come from the project root's `tsconfig.json`.** `compilerOptions.paths` is read
-  (`extends` followed) and handed to jiti, so a router importing `@/server/routes/users` loads. A
-  mapping held in any other tsconfig is not read, and the failure names the specifier that did not
-  resolve.
+- **Path aliases come from the nearest `tsconfig.json` that declares `paths`.** The codegen loader
+  reads it (`extends` followed), from the importing file up to the project root, and resolves as tsc
+  does — every target of an entry, per import — so a router importing `@/server/routes/users`
+  loads. The failure names the specifier that did not resolve, and every target it tried. See
+  [How the router is loaded](../codegen/README.md#how-the-router-is-loaded).
 - **A failed build still rewrites `current.json`.** That is deliberate — the regenerated file is
   what the gate compared, so `git diff` shows exactly what broke.
 - **Constraint changes count as type changes.** Narrowing `maxLength`, an `enum` or a `format` is

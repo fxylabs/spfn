@@ -33,11 +33,15 @@ describe('environment probe - which frame a read belongs to', () =>
         expect(readerOf(ROOTS, [frame('/work/spfn/packages/core/dist/env/index.js'), APP])).toBe(APP);
     });
 
-    it('S3 a read made while jiti loads a module is not the project\'s, even with a project file above it', () =>
+    it('S3 a read made by the codegen loader, as it resolves or transforms a project file, is not the project\'s', () =>
     {
-        expect(readerOf(ROOTS, [frame(`${ROOT}/node_modules/jiti/dist/babel.cjs`), APP])).toBeUndefined();
-        expect(readerOf(ROOTS, [frame('/work/node_modules/.pnpm/jiti@2.6.1/node_modules/jiti/dist/jiti.cjs'), APP]))
-            .toBeUndefined();
+        // The loader's hooks run in this thread, under Node's module loading: the
+        // stack above a read TypeScript or the hook makes reaches Node's internals
+        // before any project file.
+        const hook = frame('/work/spfn/packages/core/dist/codegen/index.js');
+        const typescript = frame('/work/node_modules/.pnpm/typescript@5.9.3/node_modules/typescript/lib/typescript.js');
+
+        expect(readerOf(ROOTS, [typescript, hook, frame('node:internal/modules/esm/hooks'), APP])).toBeUndefined();
     });
 
     it('S4 a read made while node loads a module is not the project\'s', () =>

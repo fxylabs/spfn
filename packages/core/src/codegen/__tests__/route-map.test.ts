@@ -2,7 +2,7 @@
  * Route Map Generator Tests
  *
  * Every fixture is a real router file written to a temporary directory and
- * loaded for real — jiti is not mocked. The point of the change these tests
+ * loaded for real, through the codegen loader — nothing is mocked. The point of the change these tests
  * cover is that the generator stopped reading the source text, so a test that
  * stubbed the loading away would test the thing that was removed.
  *
@@ -1000,12 +1000,26 @@ describe('route-map generator - tsconfig path aliases', () =>
         expect(entriesOf(await generate())).toEqual(['listUsers: { method: \'GET\', path: \'/users\' },']);
     });
 
-    it('names the targets the pattern also listed when the one it took did not resolve', async () =>
+    it('resolves each import through the target that has it, past a stale dist that holds other files', async () =>
     {
-        // A stale `dist`: it holds something, so it is taken, and the module the
-        // router wants is only under `src`. jiti tried no other target, and the
-        // message is the only place that can say so.
+        // A stale `dist`: it holds something, but not the module the router
+        // wants, which is only under `src`. jiti held one alias per key and took
+        // `dist` for every import; the loader substitutes every target per
+        // import, in order, as tsc does.
         writeAliasedRoutes();
+        writeFile('dist/keep.js', 'exports.x = 1;\n');
+        writeFile(
+            'tsconfig.json',
+            JSON.stringify({ compilerOptions: { paths: { '@/*': ['./dist/*', './src/*'] } } }),
+        );
+
+        expect(entriesOf(await generate())).toEqual(['listUsers: { method: \'GET\', path: \'/users\' },']);
+    });
+
+    it('names every target it tried when none of them has the module', async () =>
+    {
+        writeAliasedRoutes();
+        rmSync(join(projectDir, 'src/server/routes/users.ts'));
         writeFile('dist/keep.js', 'exports.x = 1;\n');
         writeFile(
             'tsconfig.json',
@@ -1015,9 +1029,9 @@ describe('route-map generator - tsconfig path aliases', () =>
         const thrown = await generate().catch((error: Error) => error);
 
         expect((thrown as Error).message).toContain('did not resolve');
-        expect((thrown as Error).message).toContain('"./dist/*"');
-        expect((thrown as Error).message).toContain('"./src/*"');
-        expect((thrown as Error).message).toContain('never tried');
+        expect((thrown as Error).message).toContain('"./dist/*", "./src/*"');
+        expect((thrown as Error).message).toContain(join(projectDir, 'dist/server/routes/users'));
+        expect((thrown as Error).message).toContain(join(projectDir, 'src/server/routes/users'));
     });
 
     it('names the unresolved specifier when the alias is not configured', async () =>

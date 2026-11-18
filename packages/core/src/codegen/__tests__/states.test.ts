@@ -23,7 +23,7 @@
  * | G17 | the `.spfnrc.ts` fence of `state/README.md`, as a project's config     | `loadCodegenConfig` finds the `@spfn/core:states` entry    |
  *
  * Every fixture is a real router file written to a temporary directory and
- * loaded for real — jiti is not mocked. The state modules import
+ * loaded for real, through the codegen loader. The state modules import
  * `@spfn/core/state` and `@spfn/core/route` as an app does; the fixture's
  * `tsconfig.json` maps `@spfn/core/*` to this package's sources, the alias
  * mechanism the route-map tests exercise. `@sinclair/typebox` is imported by

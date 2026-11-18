@@ -182,10 +182,32 @@ describe('Orchestrator', () =>
             expect(receivedOptions).toEqual({
                 cwd: TEST_DIR,
                 debug: true,
+                generation: expect.any(String),
                 trigger: {
                     type: 'manual',
                 },
             });
+        });
+
+        it('hands every generator of one run the same generation, and the next run another', async () =>
+        {
+            const received: (string | undefined)[] = [];
+            const generator = (name: string): Generator => ({
+                name,
+                watchPatterns: [],
+                async generate(options: GeneratorOptions)
+                {
+                    received.push(options.generation);
+                },
+            });
+            const orchestrator = new CodegenOrchestrator({ generators: [generator('a'), generator('b')], cwd: TEST_DIR });
+
+            await orchestrator.generateAll();
+            await orchestrator.generateAll();
+
+            expect(received[0]).toBe(received[1]);
+            expect(received[2]).toBe(received[3]);
+            expect(received[2]).not.toBe(received[0]);
         });
     });
 

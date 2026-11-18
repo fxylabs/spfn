@@ -6,10 +6,11 @@
 
 import { existsSync, readFileSync } from 'fs';
 import { join } from 'path';
-import { createJiti } from 'jiti';
 import type { Generator } from './generator';
 import { pinNodeEnv } from './node-env';
 import { logger } from '@spfn/core/logger';
+import { markCodegenProcess } from '../../module-evaluation';
+import { importPackageModule, importProjectModule, newGeneration, requireProjectModule } from '../loader/register';
 
 const configLogger = logger.child('@spfn/core:codegen-config');
 
@@ -89,10 +90,26 @@ export function defineConfig(config: CodegenConfig): CodegenConfig
  * Pins `NODE_ENV` to `production` first (`pinNodeEnv`): this is where every
  * CLI generation begins, and `.spfnrc.ts` with what it imports is the first
  * project code a generation evaluates.
+ *
+ * Synchronous, as `.spfn/watcher.mjs` entries written by older CLIs call it:
+ * `.spfnrc.ts` is `require()`d as an ES module through the codegen loader, so
+ * the `@spfn/core/codegen` it imports is this process's own. A `.spfnrc.ts`
+ * whose imports use top-level await cannot be required, and is reported as
+ * failing to load.
+ *
+ * In a process the spfn CLI started (`SPFN_CODEGEN_PROCESS=1`, set by its bin
+ * and by the `spfn dev` watcher entry) it also marks the process
+ * (`markCodegenProcess`): a second copy of `@spfn/core` found after a router
+ * load is then refused, not only warned about.
  */
 export function loadCodegenConfig(cwd: string): CodegenConfig
 {
     pinNodeEnv();
+
+    if (process.env.SPFN_CODEGEN_PROCESS === '1')
+    {
+        markCodegenProcess();
+    }
 
     // 1. Check .spfnrc.ts (highest priority)
     const rcTsPath = join(cwd, '.spfnrc.ts');
@@ -100,12 +117,7 @@ export function loadCodegenConfig(cwd: string): CodegenConfig
     {
         try
         {
-            const jiti = createJiti(cwd, {
-                interopDefault: true,
-                moduleCache: false,
-            });
-
-            const module = jiti(rcTsPath);
+            const module = requireProjectModule(rcTsPath, cwd);
             const config = module.default || module;
 
             if (config && typeof config === 'object')
@@ -178,22 +190,22 @@ export function loadCodegenConfig(cwd: string): CodegenConfig
  * Load generator from package
  *
  * Supports format: "package:generator-name" or "@scope/package:generator-name"
+ *
+ * `<package>/codegen` is imported natively, resolved from the project root (and
+ * from this package when the project cannot resolve it): for `@spfn/core` that
+ * is the module this process already imported, so the generator that runs is
+ * this process's own.
  */
 async function loadGeneratorFromPackage(
     packageName: string,
     generatorName: string,
     config: Record<string, any>,
+    cwd: string,
 ): Promise<Generator | null>
 {
     try
     {
-        // Try to load package/generators export using jiti for better module resolution
-        const jiti = createJiti(import.meta.url, {
-            interopDefault: true,
-            moduleCache: false,
-        });
-
-        const generatorsModule = jiti(`${packageName}/codegen`);
+        const generatorsModule: Record<string, any> = await importPackageModule(`${packageName}/codegen`, cwd);
 
         // Look for generator by name in registry
         if (generatorsModule.generators?.[generatorName])
@@ -244,6 +256,23 @@ function capitalize(str: string): string
 }
 
 /**
+ * A custom generator's module, through the codegen loader like the router:
+ * TypeScript and the project's aliases resolve, and what it imports of
+ * `@spfn/*` is this process's own.
+ */
+async function importCustomGenerator(generatorPath: string, cwd: string): Promise<Record<string, unknown>>
+{
+    const load = await importProjectModule(generatorPath, cwd, newGeneration());
+
+    if (!load.ok)
+    {
+        throw load.error;
+    }
+
+    return load.module;
+}
+
+/**
  * Create generator instances from configuration
  *
  * Pins `NODE_ENV` to `production` (`pinNodeEnv`) before loading any of them.
@@ -283,20 +312,7 @@ export async function createGeneratorsFromConfig(config: CodegenConfig, cwd: str
 
                 configLogger.info(`Loading custom generator: ${generatorPath}`);
 
-                let module: any;
-
-                // Use jiti for .ts files, regular import for .js
-                if (generatorPath.endsWith('.ts'))
-                {
-                    const jiti = createJiti(cwd, {
-                        interopDefault: true,
-                    });
-                    module = jiti(generatorPath);
-                }
-                else
-                {
-                    module = await import(generatorPath);
-                }
+                const module: any = await importCustomGenerator(generatorPath, cwd);
 
                 const createGenerator = module.default || module.createGenerator || module;
 
@@ -323,6 +339,7 @@ export async function createGeneratorsFromConfig(config: CodegenConfig, cwd: str
                         packageName,
                         generatorName,
                         generatorOptions,
+                        cwd,
                     );
 
                     if (generator)

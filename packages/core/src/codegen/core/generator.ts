@@ -36,6 +36,15 @@ export interface GeneratorOptions
         };
     };
 
+    /**
+     * One run of the orchestrator: every generator it runs for one trigger gets
+     * the same value. The built-in generators load each router once per
+     * generation through it, so the project is evaluated once per run however
+     * many generators read the router. A generator called without one loads on
+     * its own.
+     */
+    generation?: string;
+
     /** Custom configuration options */
     [key: string]: any;
 }

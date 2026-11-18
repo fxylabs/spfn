@@ -1,15 +1,30 @@
 /**
  * Codegen Orchestrator
  *
- * Manages multiple code generators and coordinates their execution
+ * Manages multiple code generators and coordinates their execution.
+ *
+ * Every run — `generateAll`, and each file change in watch mode — is one
+ * generation (`GeneratorOptions.generation`): the generators that read the
+ * router share one load of it.
+ *
+ * In watch mode a change is matched against each generator's `watchPatterns`,
+ * and against the project files the latest load of each router reached: an edit
+ * to `src/server/lib/segment.ts`, imported through `@/` by a route, regenerates
+ * whatever reads that router, though no pattern names it. Those files are
+ * watched beside the patterns' directories, and the set follows each load — a
+ * file a load no longer reaches, a deleted one, leaves it. The patterns stay for
+ * what no load has reached yet: a new route file, the router itself.
  */
 
-import { watch as chokidarWatch } from 'chokidar';
+import { realpathSync } from 'fs';
 import { join, relative, sep } from 'path';
+import { watch as chokidarWatch } from 'chokidar';
 import mm from 'micromatch';
 import type { Generator, GeneratorOptions, GeneratorTrigger } from './generator';
 import { pinNodeEnv } from './node-env';
 import { logger } from '@spfn/core/logger';
+import { newGeneration } from '../loader/register';
+import { routerFiles } from '../generators/router-module';
 
 const orchestratorLogger = logger.child('@spfn/core:orchestrator');
 
@@ -44,6 +59,7 @@ export class CodegenOrchestrator
     private isGenerating = false;
     private pendingRegenerations = new Set<string>();
     private watcher?: ReturnType<typeof chokidarWatch>;
+    private watchedFiles = new Set<string>();
     private watcherClosePromise?: { resolve: () => void; reject: (error: Error) => void };
 
     /**
@@ -115,6 +131,8 @@ export class CodegenOrchestrator
             trigger,
         });
 
+        const generation = newGeneration();
+
         for (const generator of this.generators)
         {
             // Check if generator should run for this trigger
@@ -135,6 +153,7 @@ export class CodegenOrchestrator
                 const genOptions: GeneratorOptions = {
                     cwd: this.cwd,
                     debug: this.debug,
+                    generation,
                     trigger: {
                         type: trigger,
                     },
@@ -156,6 +175,51 @@ export class CodegenOrchestrator
                 }
             }
         }
+    }
+
+    /** The project files the routers' latest loads reached, relative to the project root. */
+    private routerFileSets(): Map<string, Set<string>>
+    {
+        const root = realpathSync(this.cwd);
+
+        return new Map([...routerFiles()].map(([router, files]) =>
+            [relative(this.cwd, router), new Set([...files].map(file => relative(root, file)))]));
+    }
+
+    /**
+     * The generators a change to `filePath` (relative to the project root)
+     * regenerates: those whose patterns match it, and those whose patterns
+     * match a router whose latest load reached it.
+     */
+    private generatorsFor(filePath: string): Generator[]
+    {
+        const routers = [...this.routerFileSets()]
+            .filter(([, files]) => files.has(filePath))
+            .map(([router]) => router);
+
+        return this.generators.filter(generator => this.shouldRun(generator, 'watch')
+            && generator.watchPatterns.some(pattern =>
+                mm.isMatch(filePath, pattern) || routers.some(router => mm.isMatch(router, pattern))));
+    }
+
+    /** Watch every file the routers' latest loads reached, and stop watching the ones they no longer do. */
+    private syncWatchedFiles(): void
+    {
+        const wanted = new Set([...this.routerFileSets().values()].flatMap(files => [...files]));
+        const added = [...wanted].filter(file => !this.watchedFiles.has(file));
+        const removed = [...this.watchedFiles].filter(file => !wanted.has(file));
+
+        if (added.length > 0)
+        {
+            this.watcher?.add(added.map(file => join(this.cwd, file)));
+        }
+
+        if (removed.length > 0)
+        {
+            this.watcher?.unwatch(removed.map(file => join(this.cwd, file)));
+        }
+
+        this.watchedFiles = wanted;
     }
 
     /**
@@ -218,6 +282,8 @@ export class CodegenOrchestrator
             },
         });
 
+        this.syncWatchedFiles();
+
         const handleChange = async (absolutePath: string, event: 'add' | 'change' | 'unlink') =>
         {
             // Convert absolute path to relative path for pattern matching
@@ -239,48 +305,38 @@ export class CodegenOrchestrator
 
             // Find matching generators
             let regeneratedCount = 0;
-            for (const generator of this.generators)
+            const generation = newGeneration();
+
+            for (const generator of this.generatorsFor(filePath))
             {
-                // Check if generator should run for 'watch' trigger
-                if (!this.shouldRun(generator, 'watch'))
+                try
                 {
-                    continue;
-                }
+                    const startTime = Date.now();
 
-                const matches = generator.watchPatterns.some(pattern =>
-                    mm.isMatch(filePath, pattern),
-                );
-
-                if (matches)
-                {
-                    try
-                    {
-                        const startTime = Date.now();
-
-                        // Call generate() with trigger information
-                        const genOptions: GeneratorOptions = {
-                            cwd: this.cwd,
-                            debug: this.debug,
-                            trigger: {
-                                type: 'watch',
-                                changedFile: {
-                                    path: filePath,
-                                    event,
-                                },
+                    // Call generate() with trigger information
+                    const genOptions: GeneratorOptions = {
+                        cwd: this.cwd,
+                        debug: this.debug,
+                        generation,
+                        trigger: {
+                            type: 'watch',
+                            changedFile: {
+                                path: filePath,
+                                event,
                             },
-                        };
+                        },
+                    };
 
-                        await generator.generate(genOptions);
+                    await generator.generate(genOptions);
 
-                        const duration = Date.now() - startTime;
-                        orchestratorLogger.info(`[${generator.name}] ✓ Regenerated (${duration}ms)`);
-                        regeneratedCount++;
-                    }
-                    catch (error)
-                    {
-                        const err = error instanceof Error ? error : new Error(String(error));
-                        orchestratorLogger.error(`[${generator.name}] ✗ Regeneration failed`, err);
-                    }
+                    const duration = Date.now() - startTime;
+                    orchestratorLogger.info(`[${generator.name}] ✓ Regenerated (${duration}ms)`);
+                    regeneratedCount++;
+                }
+                catch (error)
+                {
+                    const err = error instanceof Error ? error : new Error(String(error));
+                    orchestratorLogger.error(`[${generator.name}] ✗ Regeneration failed`, err);
                 }
             }
 
@@ -288,6 +344,8 @@ export class CodegenOrchestrator
             {
                 orchestratorLogger.info('No generators matched this file');
             }
+
+            this.syncWatchedFiles();
 
             this.isGenerating = false;
 
