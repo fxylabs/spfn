@@ -19,16 +19,19 @@
  * |     |                                                                      | a line number of the transform, not the source      |
  * | R7  | a package's NODE_ENV-dependent route, and an unrelated project read  | the verdict flipping on an unrelated project file   |
  * | R10 | `.spfnrc.ts` importing `@spfn/core/codegen` in a type-less app       | `loadCodegenConfig` turning asynchronous            |
+ * | R11 | a `"type": "module"` app importing JSON with and without             | JSON served as a module's source (`Unexpected token`)|
+ * |     | `with { type: 'json' }`, then the JSON edited                        | or read once per process (a stale map)              |
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'fs';
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { dirname, join, resolve } from 'path';
 import { createRouteMapGenerator } from '../generators/route-map';
 import { CodegenOrchestrator } from '../core/orchestrator';
 import { loadCodegenConfig } from '../core/config-loader';
 import { ConditionalRegistrationError } from '../generators/contract-guard';
+import { routerFiles } from '../generators/router-module';
 
 const CORE_PACKAGE = resolve(__dirname, '../../..');
 const OUTPUT_PATH = 'src/generated/route-map.ts';
@@ -166,6 +169,31 @@ describe('codegen loader - resolution', () =>
             + 'export const appRouter = defineRouter({ listUsers });\n');
 
         expect(pathsOf(await generate())).toEqual(['/from-dist']);
+    });
+});
+
+describe('codegen loader - JSON', () =>
+{
+    it('R11 a "type": "module" app imports JSON in both forms, and the next generation reads an edited file', async () =>
+    {
+        write('package.json', JSON.stringify({ name: 'loader-fixture', private: true, type: 'module' }));
+        write('src/server/segments.json', JSON.stringify({ first: 'one' }));
+        write('src/server/more.json', JSON.stringify({ second: 'two' }));
+        write('src/server/router.ts', 'import { defineRouter, route } from \'@spfn/core/route\';\n'
+            + 'import segments from \'./segments.json\' with { type: \'json\' };\n'
+            + 'import more from \'./more.json\';\n'
+            + 'import { second } from \'./more.json\';\n'
+            + 'const first = route.get(`/${segments.first}`).handler(async () => ({}));\n'
+            + 'const other = route.get(`/${more.second}/${second}`).handler(async () => ({}));\n'
+            + 'export const appRouter = defineRouter({ first, other });\n');
+
+        expect(pathsOf(await generate())).toEqual(['/one', '/two/two']);
+
+        write('src/server/segments.json', JSON.stringify({ first: 'uno' }));
+
+        expect(pathsOf(await generate())).toEqual(['/uno', '/two/two']);
+        expect([...routerFiles().get(join(appDir, 'src/server/router.ts')) ?? []])
+            .toContain(realpathSync(join(appDir, 'src/server/segments.json')));
     });
 });
 

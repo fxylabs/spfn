@@ -17,8 +17,13 @@
  *   extensionless and `.js` → `.ts` specifiers, and a directory's `index`, as
  *   TypeScript resolves them. A bare specifier no `paths` entry claims goes on
  *   down the chain (tsx, Node).
- * - **Format.** The rule `spfn dev` runs the app by (`./format`): `.ts` is ESM
- *   whatever the package's `type`; a type-less `.js` by its syntax.
+ * - **Format.** Only for the extensions the hooks serve: JavaScript and
+ *   TypeScript source (`.ts .tsx .mts .cts .js .jsx .mjs .cjs`) by the rule
+ *   `spfn dev` runs the app by (`./format`) — `.ts` is ESM whatever the
+ *   package's `type`, a type-less `.js` by its syntax — and `.json`, served as
+ *   an ES module with the parsed value as its default export, as tsx serves it
+ *   to `spfn dev` (so both `import data from './data.json'` and the form
+ *   `with { type: 'json' }` load). Any other extension goes down the chain.
  * - **Transform.** TypeScript's `transpileModule`, file by file. Its source map
  *   is kept while the load runs, so a stack frame inside a project file can be
  *   named by its own line (`originalLine`).
@@ -306,10 +311,24 @@ function formatBySyntax(file: string): ModuleFormat
 
 const STATED_FORMATS: Record<string, ModuleFormat> = { '.mts': 'module', '.mjs': 'module', '.cts': 'commonjs', '.cjs': 'commonjs' };
 
-/** The rule's format, else the one its author stated. */
-function formatOf(file: string): ModuleFormat
+/**
+ * What the hooks serve `file` as: JSON as an ES module; JavaScript and
+ * TypeScript source by the rule, else by the format its author stated; any
+ * other extension not at all (undefined), which leaves it to the chain.
+ */
+function formatOf(file: string): ModuleFormat | undefined
 {
     const extension = extname(file);
+
+    if (extension === '.json')
+    {
+        return 'module';
+    }
+
+    if (!SOURCE_EXTENSIONS.includes(extension))
+    {
+        return undefined;
+    }
 
     return applicationFormat(file, formatBySyntax)
         ?? STATED_FORMATS[extension]
@@ -336,7 +355,7 @@ function ownedURL(file: string, token: string, required: boolean): string
     return url.href;
 }
 
-/** Resolve `file` for the load under `token`: owned when it is an ES module, else back to the chain. */
+/** Resolve `file` for the load under `token`: owned when the hooks serve it as an ES module, else back to the chain. */
 function own(file: string, token: string, context: ResolveContext, nextResolve: NextResolve, entry: boolean): ResolveResult
 {
     const real = realpathSync(file);
@@ -437,9 +456,31 @@ function transpileOptions(compiler: typeof ts): ts.CompilerOptions
 
 const TRANSFORMED = new Set(['.ts', '.tsx', '.mts', '.jsx']);
 
+/**
+ * A JSON file as the ES module tsx serves it to `spfn dev`: the parsed value as
+ * the default export, and an object's top-level keys as named exports, as
+ * esbuild bundles it for `spfn build`. Node's own JSON module would need
+ * `with { type: 'json' }` and has only the default; here both forms load.
+ */
+function jsonModule(source: string): string
+{
+    const value: unknown = JSON.parse(source);
+    const keys = value !== null && typeof value === 'object' && !Array.isArray(value) ? Object.keys(value) : [];
+    const named = keys
+        .filter(key => key !== 'default')
+        .map((key, index) => `const key${index} = data[${JSON.stringify(key)}];\nexport { key${index} as ${JSON.stringify(key)} };`);
+
+    return [`const data = JSON.parse(${JSON.stringify(source)});`, 'export default data;', ...named].join('\n');
+}
+
 function transform(url: string, file: string): string
 {
     const source = readFileSync(file, 'utf8');
+
+    if (extname(file) === '.json')
+    {
+        return jsonModule(source);
+    }
 
     if (!TRANSFORMED.has(extname(file)))
     {
