@@ -167,7 +167,13 @@ load (`src/codegen/loader/`).
   syntax, a stated extension or `type` is the author's. A `.json` file is served as tsx serves
   it to `spfn dev`: an ES module whose default export is the parsed value (its top-level keys
   are named exports too), so `import data from './data.json'` and the form with
-  `with { type: 'json' }` both load; it is re-read on every generation and watched. Any other
+  `with { type: 'json' }` both load; it is re-read on every generation and watched. A leading
+  byte-order mark is dropped, as Node, tsx and esbuild drop it. Import attributes are checked
+  as Node checks them, with Node's error (`ERR_IMPORT_ATTRIBUTE_UNSUPPORTED`,
+  `ERR_IMPORT_ATTRIBUTE_TYPE_INCOMPATIBLE`): no attribute but `type`, `type` only `'json'`, and
+  `'json'` only on a `.json` file. The one departure is the bare JSON import, which Node
+  refuses (`ERR_IMPORT_ATTRIBUTE_MISSING`) and codegen accepts, because the dev server (tsx)
+  and the build (esbuild) accept it. Any other
   extension is left to Node and whatever else is registered. Project TypeScript is transformed
   file by file with TypeScript's `transpileModule`; a frame inside it is named by its source
   line.

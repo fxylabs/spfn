@@ -35,6 +35,8 @@
  * | R21 | a custom generator file using `__dirname`                            | a configured generator skipped with a log line      |
  * | R24 | a route module failing to read `src/server/data/missing.txt`         | the file named in the message taken for the origin  |
  * | R25 | an import of a name the module does not export                       | V8's source line above the message not read         |
+ * | R26 | `with { type: 'javascript' }` and an unknown attribute on JSON;       | the hook's JSON loading dropping Node's attribute   |
+ * |     | `with { type: 'json' }` on a TypeScript module                       | checks                                              |
  * | R27 | a JSON file starting with U+FEFF                                     | a byte-order mark Node, tsx and esbuild accept      |
  */
 
@@ -222,6 +224,44 @@ describe('codegen loader - JSON', () =>
         expect(pathsOf(await generate())).toEqual(['/uno', '/two/two']);
         expect([...routerFiles().get(join(appDir, 'src/server/router.ts')) ?? []])
             .toContain(realpathSync(join(appDir, 'src/server/segments.json')));
+    });
+
+    it('R26 an import attribute other than type: json is refused as Node refuses it, on JSON and on a module', async () =>
+    {
+        write('package.json', JSON.stringify({ name: 'loader-fixture', private: true, type: 'module' }));
+        write('src/server/segments.json', JSON.stringify({ first: 'one' }));
+        write('src/server/routes/first.ts', 'export const first: string = \'one\';\n');
+
+        // The imported name is used: TypeScript drops an import nothing reads.
+        const refusal = async (importLine: string): Promise<{ name: string; code: string; message: string }> =>
+        {
+            write('src/server/router.ts', 'import { defineRouter, route } from \'@spfn/core/route\';\n'
+                + `${importLine}\n`
+                + `export const imported = ${/import \{? ?(\w+)/.exec(importLine)![1]};\n`
+                + 'export const appRouter = defineRouter({ root: route.get(\'/\').handler(async () => ({})) });\n');
+
+            const error = await generate().then(() => undefined, (thrown: Error) => thrown.cause as Error & { code: string });
+
+            return { name: error?.constructor.name ?? '', code: error?.code ?? '', message: error?.message ?? '' };
+        };
+        const segments = realpathSync(join(appDir, 'src/server/segments.json'));
+        const first = realpathSync(join(appDir, 'src/server/routes/first.ts'));
+
+        expect(await refusal('import segments from \'./segments.json\' with { type: \'javascript\' };')).toEqual({
+            name: 'TypeError',
+            code: 'ERR_IMPORT_ATTRIBUTE_UNSUPPORTED',
+            message: `Import attribute "type" with value "javascript" is not supported in ${segments}`,
+        });
+        expect(await refusal('import segments from \'./segments.json\' with { type: \'json\', mode: \'x\' };')).toEqual({
+            name: 'TypeError',
+            code: 'ERR_IMPORT_ATTRIBUTE_UNSUPPORTED',
+            message: `Import attribute "mode" with value "x" is not supported in ${segments}`,
+        });
+        expect(await refusal('import { first } from \'./routes/first\' with { type: \'json\' };')).toEqual({
+            name: 'TypeError',
+            code: 'ERR_IMPORT_ATTRIBUTE_TYPE_INCOMPATIBLE',
+            message: `Module "${first}" is not of type "json"`,
+        });
     });
 
     it('R27 a project JSON file starting with a byte-order mark loads, as Node, tsx and esbuild load it', async () =>

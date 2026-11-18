@@ -23,7 +23,8 @@
  *   package's `type`, a type-less `.js` by its syntax — and `.json`, served as
  *   an ES module with the parsed value as its default export, as tsx serves it
  *   to `spfn dev` (so both `import data from './data.json'` and the form
- *   `with { type: 'json' }` load). Any other extension goes down the chain.
+ *   `with { type: 'json' }` load; any other attribute fails as Node fails it,
+ *   `checkAttributes`). Any other extension goes down the chain.
  * - **Transform.** TypeScript's `transpileModule`, file by file, with the
  *   options of the governing tsconfig that change what runs — decorators,
  *   class fields, JSX — and ESM output forced (`./compiler-options`). A syntax
@@ -97,6 +98,12 @@ export interface LoadResult
 type NextResolve = (specifier: string, context?: ResolveContext) => ResolveResult;
 
 type NextLoad = (url: string, context?: unknown) => LoadResult;
+
+export interface LoadContext
+{
+    importAttributes?: Record<string, string>;
+    [key: string]: unknown;
+}
 
 /** One load: the project root it reads, and what it touched. */
 interface Generation
@@ -660,7 +667,36 @@ function transform(url: string, { file, token }: OwnedFile): string
     return output.outputText.replace(/\n\/\/# sourceMappingURL=.*$/, '');
 }
 
-export function loadHook(url: string, context: unknown, nextLoad: NextLoad): LoadResult
+/** Node's error for an import attribute, as its own loader raises it: a `TypeError` with Node's code. */
+function attributeError(code: string, message: string): TypeError
+{
+    return Object.assign(new TypeError(message), { code });
+}
+
+/**
+ * The import attribute checks Node makes on a file it loads, which serving the
+ * file here would otherwise skip: no attribute but `type`, `type` only
+ * `json`, and `json` only on a JSON file — with Node's codes and messages. A
+ * JSON import with no attribute is the one departure: tsx (`spfn dev`) and
+ * esbuild (`spfn build`) accept it, so the generator does.
+ */
+function checkAttributes(url: string, file: string, attributes: Record<string, string> = {}): void
+{
+    for (const [key, value] of Object.entries(attributes))
+    {
+        if (key !== 'type' || value !== 'json')
+        {
+            throw attributeError('ERR_IMPORT_ATTRIBUTE_UNSUPPORTED', `Import attribute "${key}" with value "${value}" is not supported in ${url}`);
+        }
+    }
+
+    if (attributes.type === 'json' && extname(file) !== '.json')
+    {
+        throw attributeError('ERR_IMPORT_ATTRIBUTE_TYPE_INCOMPATIBLE', `Module "${url}" is not of type "json"`);
+    }
+}
+
+export function loadHook(url: string, context: LoadContext, nextLoad: NextLoad): LoadResult
 {
     const file = owned.get(url);
 
@@ -668,6 +704,8 @@ export function loadHook(url: string, context: unknown, nextLoad: NextLoad): Loa
     {
         return nextLoad(url, context);
     }
+
+    checkAttributes(url, file.file, context.importAttributes);
 
     return { format: 'module', source: file.reexports === undefined ? transform(url, file) : standInSource(file.reexports), shortCircuit: true };
 }
