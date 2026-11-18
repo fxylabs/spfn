@@ -37,6 +37,8 @@
  * |    | one whose `/codegen` throws on import                        | and exit 0: a configured generator silently skipped       |
  * | R32| R23's second copy under `spfn build --server-only`, `spfn     | a codegen entry point that no longer marks its process:   |
  * |    | contract check` and the watcher entry `spfn dev` writes      | the refusal silently a warning there                      |
+ * | R33| the watcher entry with a `.spfnrc.ts` that fails to load     | a watcher that exits while the server runs on, saying     |
+ * |    |                                                              | nothing of regeneration being off until a restart         |
  * | R22| the bin, and the tsx child it re-spawns, recording their     | the codegen mark set where the CLI starts, inherited by   |
  * |    | environment at exit                                          | the dev server, `next` and `spfn db` (every descendant)   |
  */
@@ -320,6 +322,27 @@ describe.each(TSX)('codegen in CLI processes, tsx $version', (tsx) =>
         {
             await watcher.stop();
         }
+    });
+
+    it('R33 the watcher entry, given a .spfnrc.ts that fails to load, exits 1 saying to fix it and restart spfn dev', () =>
+    {
+        write('.spfnrc.ts', 'export default __dirname;\n');
+        write('.spfn/watcher.mjs', watcherEntrySource());
+
+        const loader = pathToFileURL(devLoader);
+        const env: NodeJS.ProcessEnv = { ...process.env, NODE_ENV: 'production' };
+
+        loader.searchParams.set('root', appDir);
+        delete env.SPFN_APP_URL;
+        delete env.NODE_OPTIONS;
+
+        const result = spawnSync(process.execPath, [tsx.cli, '--import', loader.href, join(appDir, '.spfn/watcher.mjs')],
+            { cwd: appDir, env, encoding: 'utf8', timeout: 60_000 });
+        const output = plain(`${result.stdout}${result.stderr}`);
+
+        expect(result.status, output).toBe(1);
+        expect(output).toContain('Codegen watcher could not load the codegen config: Failed to load .spfnrc.ts');
+        expect(output).toContain('Route maps are not regenerated meanwhile: fix the config and restart spfn dev.');
     });
 
     it('R15 .spfnrc.ts sees its own file in import.meta.url, filename and dirname', () =>

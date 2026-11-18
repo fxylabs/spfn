@@ -78,13 +78,15 @@ markCodegenProcess();
 
 const cwd = process.cwd();
 
-// A config or custom generator that fails to load is reported, not read as
-// "no generators"; the dev server keeps running without the watcher.
+// A config or generator that fails to load is reported, not read as "no
+// generators"; the dev server keeps running without the watcher, and the
+// watcher does not read the config again, so the message says to restart.
 const generators = await Promise.resolve()
     .then(() => createGeneratorsFromConfig(loadCodegenConfig(cwd), cwd))
     .catch((error) =>
     {
         console.error('[SPFN] Codegen watcher could not load the codegen config:', error instanceof Error ? error.message : error);
+        console.error('[SPFN] Route maps are not regenerated meanwhile: fix the config and restart spfn dev.');
         process.exit(1);
     });
 

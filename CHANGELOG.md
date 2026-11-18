@@ -107,7 +107,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   configured" (or "Make sure X is installed") and exited 0, so a CI build skipped codegen. It now
   fails — `spfn codegen run` and `spfn build` exit non-zero with the reason (`Failed to load
   .spfnrc.ts (at .spfnrc.ts:4:17): <message>`, `Cannot load generator "@spfn/core:route-mapp":
-  …`), and the `spfn dev` watcher reports it and stops (the server keeps running). Only an absent
+  …`), and the `spfn dev` watcher reports it and stops, saying route maps are not regenerated
+  until the config is fixed and `spfn dev` restarted (the server keeps running). Only an absent
   config, or one naming no generator, means none; `enabled: false` still skips an entry.
 
 ## [@spfn/core@0.4.0-beta.1, @spfn/auth@0.4.0-beta.1, spfn@0.4.0-beta.1, @spfn/storage@0.4.0-beta.1, @spfn/cms@0.4.0-beta.1, @spfn/mcp@0.4.0-beta.1, @spfn/notification@0.3.0-beta.1, @spfn/monitor@0.3.0-beta.1, @spfn/i18n@0.3.0-beta.1, @spfn/migrate@0.3.0-beta.1, @spfn/pages-next@0.2.0-beta.1, @spfn/pages@0.2.0-beta.1, @spfn/signing@0.2.0-alpha.1, @spfn/workflow@0.3.0-alpha.1] - 2026-11-18
