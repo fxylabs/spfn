@@ -369,8 +369,9 @@ function activityOf(row: Row): number
  *
  * Only the running row's clients count: an earlier row's were closed when it
  * finished and were never this row's to wait for. A wait the row's end
- * overtook — a timeout — stops there, and the row's failure names what it was
- * waiting for: the calls in flight, or a client that kept calling.
+ * overtook — a timeout — rejects, so the abandoned body does not run on into
+ * the next row, and the row's failure names what it was waiting for: the calls
+ * in flight, or a client that kept calling.
  */
 export async function settle(): Promise<void>
 {
@@ -386,6 +387,11 @@ export async function settle(): Promise<void>
     while (!row.finished && (activityOf(row) !== seen || unheldCalls(row).size > 0));
 
     row.waiting = false;
+
+    if (row.finished)
+    {
+        throw new Error('The row ended while settle() waited: the rest of its body does not run.');
+    }
 }
 
 /**
