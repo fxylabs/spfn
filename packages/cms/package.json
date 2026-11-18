@@ -43,7 +43,6 @@
     "watch": "tsup --watch",
     "clean": "rm -rf dist",
     "db:generate": "drizzle-kit generate",
-    "codegen": "node ../cli/bin/spfn.js codegen run",
     "rebuild-cache": "tsx src/scripts/rebuild-published-cache.ts",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",

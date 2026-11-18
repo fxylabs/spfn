@@ -12,30 +12,21 @@
  * each with its own module state (issue #329).
  *
  * This resolve hook states the format of every application source file tsx
- * would otherwise guess:
- *
- * - `.ts` and `.tsx` are ESM, whatever the `type`.
- * - `.js` and `.jsx` in a package with no `type` are decided by the file's own
- *   syntax, as Node's detection decides it: static `import`/`export`,
- *   `import.meta` or top-level await make it ESM, anything else CommonJS. The
- *   parser is esbuild's — the one `spfn build` bundles the file with.
- * - A stated `type`, and a stated extension (`.mjs`, `.cjs`, `.mts`, `.cts`), is
- *   the author's statement and is left alone.
- *
- * A file is application source unless it is a dependency: a `node_modules`
- * directory appears in its real path below the longest common ancestor of that
- * path and the application root's. So a workspace package beside the app is
- * application source, what is installed under it is not, and a directory named
- * `node_modules` above the app (an app checked out under one) does not count.
+ * would otherwise guess, by the rule `@spfn/core/codegen/loader` holds — the
+ * one codegen loads the router by, so `spfn dev` and the codegen watcher agree
+ * on every file: `.ts` and `.tsx` are ESM whatever the `type`; a type-less `.js`
+ * or `.jsx` is decided by its own syntax, parsed here by esbuild — the parser
+ * `spfn build` bundles the file with; a stated `type` or extension is left
+ * alone; and a file is application source unless a `node_modules` directory
+ * appears in its real path below its common ancestor with the application root.
  *
  * The hook runs in the thread that loads the app (`module.registerHooks`), and
  * the root is handed to it as data by `register.ts`.
  */
 
-import { existsSync, readFileSync, realpathSync } from 'node:fs';
-import nodeModule from 'node:module';
-import { extname, sep } from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { existsSync, realpathSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { applicationFormat, isDependency } from '@spfn/core/codegen/loader';
 import { buildSync } from 'esbuild';
 
 export interface ResolveResult
@@ -49,36 +40,12 @@ export type NextResolve = (specifier: string, context?: unknown) => ResolveResul
 
 export type ResolveHook = (specifier: string, context: unknown, nextResolve: NextResolve) => ResolveResult;
 
-/** `module.findPackageJSON` (Node 22.14+); the `@types/node` this package builds with predates it. */
-const { findPackageJSON } = nodeModule as unknown as { findPackageJSON(specifier: URL): string | undefined };
-
-/**
- * Whether `file` is a dependency of the application at `root` (both real
- * paths): a `node_modules` segment below their longest common ancestor.
- */
-export function isDependency(file: string, root: string): boolean
-{
-    const fileSegments = file.split(sep);
-    const rootSegments = root.split(sep);
-    const common = fileSegments.findIndex((segment, index) => segment !== rootSegments[index]);
-
-    return fileSegments.slice(common === -1 ? fileSegments.length : common).includes('node_modules');
-}
-
-/** The `type` of the package `file` belongs to, if it states one. */
-function packageType(file: string): string | undefined
-{
-    const packageJson = findPackageJSON(pathToFileURL(file));
-
-    return packageJson === undefined ? undefined : JSON.parse(readFileSync(packageJson, 'utf8')).type;
-}
-
 /**
  * `module` when esbuild finds ESM syntax in the file — static `import`/`export`,
  * `import.meta`, top-level await — and `commonjs` otherwise, including a file
  * it cannot parse: Node compiles that as CommonJS too and reports the error.
  */
-function formatBySyntax(file: string): string
+function formatBySyntax(file: string): 'module' | 'commonjs'
 {
     try
     {
@@ -90,21 +57,6 @@ function formatBySyntax(file: string): string
     {
         return 'commonjs';
     }
-}
-
-/** The format to state for an application source file, or undefined to leave the chain's. */
-function applicationFormat(file: string): string | undefined
-{
-    const extension = extname(file);
-
-    if (extension === '.ts' || extension === '.tsx')
-    {
-        return 'module';
-    }
-
-    return (extension === '.js' || extension === '.jsx') && packageType(file) === undefined
-        ? formatBySyntax(file)
-        : undefined;
 }
 
 /** The query parameter tsx (4.22 on) marks a virtual path with: the URL's query appended after `%3F`. */
@@ -165,7 +117,7 @@ export function createResolveHook(root: string): ResolveHook
     {
         if (!formats.has(file))
         {
-            formats.set(file, isDependency(file, realRoot) ? undefined : applicationFormat(file));
+            formats.set(file, isDependency(file, realRoot) ? undefined : applicationFormat(file, formatBySyntax));
         }
 
         return formats.get(file);

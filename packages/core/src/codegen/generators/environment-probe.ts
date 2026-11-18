@@ -8,16 +8,37 @@
  * ran in. This reads behaviour instead.
  *
  * The router is loaded, so the generator can see what the load reads. While the
- * first load runs, `process.env` is a proxy that records every key read through
- * `get` or `has` — direct access, destructuring and `in` alike. A read counts
- * when the stack above it reaches a file of the project (inside the project
- * root, outside `node_modules`) before it reaches a module-loading frame (jiti,
- * `node:` internals): `env.ENABLE_ADMIN` through the env registry of
- * `@spfn/core/env` counts, because the registry's frames lead back to the route
- * module that asked, while jiti, babel and pg reading their own settings as they
- * load do not. A package does not run again on a second load either way — jiti
- * re-evaluates the project's modules on every load and leaves `node_modules`
- * cached — so varying what a package read could change nothing.
+ * first load runs — until its promise settles — `process.env` is a proxy that
+ * records every key read through `get` or `has`: direct access, destructuring
+ * and `in` alike. A read counts when the stack above it reaches a file of the
+ * project (inside the project root, outside `node_modules`) before it reaches a
+ * module-loading frame (`node:` internals): `env.ENABLE_ADMIN` through the env
+ * registry of `@spfn/core/env` counts, because the registry's frames lead back
+ * to the route module that asked, while a package reading its own settings as
+ * Node loads it does not. A package does not run again on a second load — the
+ * codegen loader (`../loader`) evaluates the project's modules again on every
+ * load and a package once, in the pinned production environment — so varying
+ * what a package read could change nothing, and a package's own
+ * environment-dependent route is not refused: it is in the map as production
+ * registers it. A frame is named by the line of the project file's source, not
+ * of its transform.
+ *
+ * There is one environment per process, so loads that observe or vary it run
+ * one at a time per process. Every router load (`observeEnvironmentReads`) and
+ * every varied load (`withVaried`) holds the environment through one
+ * process-wide queue (`holdEnvironment`), kept on a `Symbol.for` global so
+ * that two copies of this module would share it; a load started inside the
+ * load holding the environment — the router load inside a varied one — runs
+ * inside it rather than behind it. Inside is decided by identity, not by
+ * ancestry: a timer a finished load left behind still descends from it, and a
+ * load it starts queues like any other. The queue captures the real `process.env` when it hands the
+ * environment to a load, and that is what the load puts back. So each load of a
+ * generation is atomic with respect to the environment: it sees no other
+ * load's proxy or varied value, and between loads `process.env` is the real
+ * object again — two generations run side by side (two orchestrators, a
+ * `Promise.all` over a monorepo's apps) take turns load by load. Other
+ * asynchronous work in the process, which does not go through the queue, still
+ * sees the proxy and the varied values while a load runs.
  *
  * With no such read, nothing more happens: one load, as before. Otherwise the
  * router is loaded again with every one of those keys varied (a set key
@@ -42,16 +63,19 @@
  *
  * Not covered: a condition comparing a key other than `NODE_ENV` against one
  * particular value (`=== 'on'`), a `NODE_ENV` value outside the three, a key
- * first read under a varied environment, a package's own module scope, and
- * anything but the environment — a file's existence, the clock. Each variation runs the project's module scope again under the
- * changed environment, which is why a route module must be importable without
- * side effects.
+ * first read under a varied environment, a package's own module scope (by
+ * design, above), and anything but the environment — a file's existence, the
+ * clock. Each variation runs the project's module scope again under the changed
+ * environment, which is why a route module must be importable without side
+ * effects.
  */
 
+import { AsyncLocalStorage } from 'async_hooks';
 import { realpathSync } from 'fs';
 import { relative, resolve, sep } from 'path';
 import { fileURLToPath } from 'url';
 import { logger } from '@spfn/core/logger';
+import { originalLine } from '../loader/hooks';
 import { ConditionalRegistrationError } from './contract-guard';
 
 const probeLogger = logger.child('@spfn/core:codegen');
@@ -100,8 +124,8 @@ export interface EnvironmentProbe<T>
     /** What the first load produced. */
     baseline: T;
 
-    /** Load the router again and collect it. A throw means it cannot load in this environment. */
-    collect: () => T;
+    /** Load the router again and collect it. A rejection means it cannot load in this environment. */
+    collect: () => Promise<T>;
 
     /** The file content the generator writes for a collection. */
     render: (collection: T) => string;
@@ -120,28 +144,100 @@ export interface EnvironmentProbe<T>
 }
 
 // ============================================================================
+// Holding the environment
+// ============================================================================
+
+/** One load's hold on the environment: the real `process.env` the queue captured for it. */
+interface Hold
+{
+    readonly real: NodeJS.ProcessEnv;
+}
+
+/** The process's environment, held by one load at a time. */
+interface EnvironmentQueue
+{
+    /** Settles once every load queued so far has settled. */
+    tail: Promise<void>;
+
+    /** The hold of the load this code descends from, if any — which may have ended. */
+    holder: AsyncLocalStorage<Hold>;
+
+    /** The hold of the load holding the environment now. */
+    current?: Hold;
+}
+
+const QUEUE_KEY = Symbol.for('@spfn/core/codegen:environment-queue');
+
+function environmentQueue(): EnvironmentQueue
+{
+    const global = globalThis as { [QUEUE_KEY]?: EnvironmentQueue };
+
+    global[QUEUE_KEY] ??= { tail: Promise.resolve(), holder: new AsyncLocalStorage() };
+
+    return global[QUEUE_KEY];
+}
+
+/**
+ * Run `load` holding the process's environment, handing it the real
+ * `process.env`: once every load queued before it has settled, or at once
+ * inside the load that holds it now.
+ */
+function holdEnvironment<T>(load: (real: NodeJS.ProcessEnv) => Promise<T>): Promise<T>
+{
+    const queue = environmentQueue();
+    const held = queue.holder.getStore();
+
+    if (held !== undefined && held === queue.current)
+    {
+        return load(held.real);
+    }
+
+    const run = queue.tail.then(() =>
+    {
+        const hold: Hold = { real: process.env };
+
+        queue.current = hold;
+
+        return queue.holder.run(hold, () => load(hold.real)).finally(() =>
+        {
+            queue.current = undefined;
+        });
+    });
+
+    queue.tail = run.then(() => undefined, () => undefined);
+
+    return run;
+}
+
+// ============================================================================
 // Observing reads
 // ============================================================================
 
 /**
- * Run `load` with `process.env` behind a proxy that records which keys project
- * files read. `process.env` is the real object again when this returns or throws.
+ * Run `load`, holding the environment, with `process.env` behind a proxy that
+ * records which keys project files read. `process.env` is the real object again
+ * when its promise settles.
  */
-export function observeEnvironmentReads<T>(cwd: string, load: () => T): { value: T; reads: EnvironmentRead[] }
+export function observeEnvironmentReads<T>(
+    cwd: string,
+    load: () => Promise<T>,
+): Promise<{ value: T; reads: EnvironmentRead[] }>
 {
-    const reads = new Map<string, EnvironmentRead>();
-    const real = process.env;
-
-    process.env = new Proxy(real, recordingHandler(projectRoots(cwd), reads));
-
-    try
+    return holdEnvironment(async (real) =>
     {
-        return { value: load(), reads: [...reads.values()] };
-    }
-    finally
-    {
-        process.env = real;
-    }
+        const reads = new Map<string, EnvironmentRead>();
+
+        process.env = new Proxy(real, recordingHandler(projectRoots(cwd), reads));
+
+        try
+        {
+            return { value: await load(), reads: [...reads.values()] };
+        }
+        finally
+        {
+            process.env = real;
+        }
+    });
 }
 
 type Trap = (...args: any[]) => unknown;
@@ -215,7 +311,7 @@ function framesBelow(trap: Trap): StackFrame[]
 
         return (holder.stack as NodeJS.CallSite[]).map(site => ({
             file: site.getFileName() ?? undefined,
-            line: site.getLineNumber() ?? undefined,
+            line: sourceLine(site),
         }));
     }
     finally
@@ -223,6 +319,15 @@ function framesBelow(trap: Trap): StackFrame[]
         Error.stackTraceLimit = limit;
         Error.prepareStackTrace = prepare;
     }
+}
+
+/** The frame's line in the file as written: the loader transforms project TypeScript. */
+function sourceLine(site: NodeJS.CallSite): number | undefined
+{
+    const file = site.getFileName();
+    const line = site.getLineNumber();
+
+    return file && line ? originalLine(file, line, site.getColumnNumber() ?? 1) : line ?? undefined;
 }
 
 /**
@@ -260,11 +365,6 @@ function frameKind(roots: string[], file: string | undefined): 'project' | 'load
     }
 
     const path = file.startsWith('file:') ? fileURLToPath(file) : file;
-
-    if (path.includes(`${sep}node_modules${sep}jiti${sep}`))
-    {
-        return 'loader';
-    }
 
     if (path.includes(`${sep}node_modules${sep}`))
     {
@@ -357,34 +457,48 @@ function setVariable(key: string, value: string | undefined): void
 }
 
 /**
- * Run `fn` with `variation` applied, and put every key back afterwards.
- *
- * Synchronous on purpose: the router loads synchronously, so no other code runs
- * while the environment is changed.
+ * Run `fn`, holding the environment, with `variation` applied, and put every
+ * key back once its promise settles.
  */
-function withVaried<T>(variation: Variation, fn: () => T): T
+function withVaried<T>(variation: Variation, fn: () => Promise<T>): Promise<T>
 {
-    const original = variation.map(({ key }) => ({ key, value: currentValue(key) }));
-
-    try
+    return holdEnvironment(async () =>
     {
-        variation.forEach(({ key, value }) => setVariable(key, value));
+        const original = variation.map(({ key }) => ({ key, value: currentValue(key) }));
 
-        return fn();
-    }
-    finally
-    {
-        original.forEach(({ key, value }) => setVariable(key, value));
-    }
+        try
+        {
+            variation.forEach(({ key, value }) => setVariable(key, value));
+
+            return await fn();
+        }
+        finally
+        {
+            original.forEach(({ key, value }) => setVariable(key, value));
+        }
+    });
 }
 
 type Attempt<T> = (Difference<T> & { ok: true }) | { variation: Variation; ok: false };
 
-function attempt<T>(variation: Variation, probe: EnvironmentProbe<T>): Attempt<T>
+/** One variation at a time: each holds the environment (`withVaried`). */
+async function attemptEach<T>(variations: Variation[], probe: EnvironmentProbe<T>): Promise<Attempt<T>[]>
+{
+    const attempts: Attempt<T>[] = [];
+
+    for (const variation of variations)
+    {
+        attempts.push(await attempt(variation, probe));
+    }
+
+    return attempts;
+}
+
+async function attempt<T>(variation: Variation, probe: EnvironmentProbe<T>): Promise<Attempt<T>>
 {
     try
     {
-        const collection = withVaried(variation, probe.collect);
+        const collection = await withVaried(variation, probe.collect);
 
         return { variation, ok: true, collection, content: probe.render(collection) };
     }
@@ -402,7 +516,7 @@ function attempt<T>(variation: Variation, probe: EnvironmentProbe<T>): Attempt<T
  * Refuse a router whose generated file changes with an environment key its
  * project files read while it loaded.
  */
-export function assertContentIndependentOfEnvironment<T>(probe: EnvironmentProbe<T>): void
+export async function assertContentIndependentOfEnvironment<T>(probe: EnvironmentProbe<T>): Promise<void>
 {
     if (probe.reads.length === 0)
     {
@@ -411,14 +525,14 @@ export function assertContentIndependentOfEnvironment<T>(probe: EnvironmentProbe
 
     const written = probe.render(probe.baseline);
     const keys = probe.reads.map(read => read.key);
-    const joint = jointVariations(keys).map(variation => attempt(variation, probe));
+    const joint = await attemptEach(jointVariations(keys), probe);
 
     if (joint.every(result => result.ok && result.content === written))
     {
         return;
     }
 
-    const singles = singleVariations(keys.slice(0, MAX_SINGLE_KEY_LOADS)).map(variation => attempt(variation, probe));
+    const singles = await attemptEach(singleVariations(keys.slice(0, MAX_SINGLE_KEY_LOADS)), probe);
     const differs = (result: Attempt<T>): result is Difference<T> & { ok: true } => result.ok && result.content !== written;
     const gating = singles.filter(differs);
     const untried = keys.slice(MAX_SINGLE_KEY_LOADS);

@@ -522,9 +522,6 @@ importers:
       hono:
         specifier: ^4.13.16
         version: 4.13.19
-      jiti:
-        specifier: ^2.6.1
-        version: 2.6.1
       micromatch:
         specifier: ^4.0.8
         version: 4.0.8
@@ -578,6 +575,9 @@ importers:
       drizzle-orm:
         specifier: 1.0.0-rc.4
         version: 1.0.0-rc.4(@electric-sql/pglite@0.5.4)(@opentelemetry/api@1.10.0)(@sinclair/typebox@0.34.41)(@types/pg@8.15.6)(pg@8.16.3)(postgres@3.4.7)(zod@4.6.7)
+      jiti:
+        specifier: ^2.6.1
+        version: 2.6.1
       jsdom:
         specifier: ^27.0.0
         version: 27.4.0

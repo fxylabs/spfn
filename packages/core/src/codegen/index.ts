@@ -13,6 +13,9 @@ export {
     defineGenerator,
 } from './core/config-loader';
 
+// Marks a process the spfn CLI started to generate code (see module-evaluation)
+export { markCodegenProcess } from '../module-evaluation';
+
 export type {
     RouteContractMapping,
     ResourceRoutes,

@@ -401,8 +401,16 @@ a route that appears or moves, but a route's `csrf`, the order of the entries, o
 `.packages()` mount line. The refusal names the key, where it was read, the `NODE_ENV` value
 that produced the difference, and the difference (`~ ping: csrf 'required' → none`). A key
 other than `NODE_ENV` compared against one particular value (`=== 'on'`) is not covered. A route a **package** registers only outside
-production, from its own module scope, is served by `spfn dev` but is not in the map. Details:
-[src/codegen](./src/codegen/README.md#when-it-refuses).
+production, from its own module scope, is served by `spfn dev` but is not in the map — and is not
+refused: codegen evaluates every package once, under `production`, and only your project again
+on every load. Details: [src/codegen](./src/codegen/README.md#when-it-refuses).
+
+Codegen imports your router in its own process's module graph (`spfn codegen run`, `spfn build`,
+`spfn contract` and the `spfn dev` watcher alike): one `@spfn/core`, your route modules as ESM as
+`spfn dev` and `spfn build` run them, tsconfig `paths` resolved as tsc resolves them (every target
+of an entry, per import), and the watcher regenerating for any file the router reaches — an `@/`
+import under `src/server/lib` included. Each reload keeps about 100 KB per small app in memory
+(ES modules are never freed). See [How the router is loaded](./src/codegen/README.md#how-the-router-is-loaded).
 
 > **BREAKING.** An app whose generated content differs by environment beyond its route set —
 > a `.csrf()` declared only in one environment, routes registered in an environment-dependent
@@ -537,8 +545,11 @@ the [spfn CLI README](../cli/README.md#your-server-source-runs-as-esm-as-it-does
 `spfn dev` loads app source as ESM from this release on, and `spfn build` always bundled it as
 ESM, so neither trips it. The same entry evaluated again from the same file by the same
 evaluator (a test runner resetting its module registry, HMR) is the same copy, not refused.
-Processes that never start a server — `spfn codegen`, the codegen watcher, `spfn db generate`,
-scripts, a Next.js server bundling the package — record and never refuse.
+Codegen processes the CLI starts — `spfn codegen`, `spfn build`'s generation, `spfn contract`, the
+codegen watcher — refuse a second copy after each router load (a programmatic caller or a test is
+warned), counting evaluations: an entry evaluated natively twice is a second copy there too.
+Processes that neither serve nor generate — `spfn db generate`, scripts, a Next.js server
+bundling the package — record and never refuse.
 
 > **BREAKING.** An app run by an older `spfn` CLI — which ran app source as CommonJS — is refused
 > by this `@spfn/core`; so is a `.cjs`/`.cts`/CommonJS `.js` server file that requires `@spfn/*`

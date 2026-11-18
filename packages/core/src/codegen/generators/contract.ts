@@ -98,11 +98,17 @@ export class ContractGeneratorError extends Error
     }
 }
 
-function loadRouter(cwd: string, absoluteRouterPath: string, routerExport?: string): ResolvedRouter
+async function loadRouter(
+    cwd: string,
+    absoluteRouterPath: string,
+    generation: string | undefined,
+    routerExport?: string,
+): Promise<ResolvedRouter>
 {
-    const module = loadRouterModule({
+    const { module } = await loadRouterModule({
         cwd,
         absoluteRouterPath,
+        generation,
         subject: 'contract',
         fail: message => new ContractGeneratorError(message),
     });
@@ -145,11 +151,17 @@ interface ResolvedEventRouter
  * Load the event router through the same loader as the route router: the same
  * tsconfig aliases.
  */
-function loadEventRouter(cwd: string, absolutePath: string, eventRouterExport?: string): ResolvedEventRouter
+async function loadEventRouter(
+    cwd: string,
+    absolutePath: string,
+    generation: string | undefined,
+    eventRouterExport?: string,
+): Promise<ResolvedEventRouter>
 {
-    const module = loadRouterModule({
+    const { module } = await loadRouterModule({
         cwd,
         absoluteRouterPath: absolutePath,
+        generation,
         subject: 'contract',
         fail: message => new ContractGeneratorError(message),
     });
@@ -175,7 +187,12 @@ function loadEventRouter(cwd: string, absolutePath: string, eventRouterExport?: 
  * Its source is scanned like the route router's: an event registered behind a
  * flag would make the published event set depend on how the generator ran.
  */
-function readEventRouter(cwd: string, eventRouterPath?: string, eventRouterExport?: string): EventRouterDef<any> | undefined
+async function readEventRouter(
+    cwd: string,
+    generation: string | undefined,
+    eventRouterPath?: string,
+    eventRouterExport?: string,
+): Promise<EventRouterDef<any> | undefined>
 {
     if (!eventRouterPath)
     {
@@ -192,7 +209,7 @@ function readEventRouter(cwd: string, eventRouterPath?: string, eventRouterExpor
         );
     }
 
-    const { eventRouter, exportName } = loadEventRouter(cwd, absolutePath, eventRouterExport);
+    const { eventRouter, exportName } = await loadEventRouter(cwd, absolutePath, generation, eventRouterExport);
 
     assertUnconditionalRegistration({
         routerPath: eventRouterPath,
@@ -256,7 +273,7 @@ export function createContractGenerator(config: ContractGeneratorConfig): Genera
 
             // Loaded before the guard reads the source, because which router the
             // guard reads is decided by which export the loader found.
-            const { router, exportName } = loadRouter(cwd, absoluteRouterPath, routerExport);
+            const { router, exportName } = await loadRouter(cwd, absoluteRouterPath, options.generation, routerExport);
 
             assertUnconditionalRegistration({
                 routerPath,
@@ -265,7 +282,8 @@ export function createContractGenerator(config: ContractGeneratorConfig): Genera
                 subject: 'contract',
             });
 
-            const document = collectContractDocument(router, readEventRouter(cwd, eventRouterPath, eventRouterExport));
+            const eventRouter = await readEventRouter(cwd, options.generation, eventRouterPath, eventRouterExport);
+            const document = collectContractDocument(router, eventRouter);
 
             const changed = writeCurrentDocument(contractsDir, document);
             genLogger.info(

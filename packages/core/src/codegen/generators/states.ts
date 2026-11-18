@@ -101,11 +101,12 @@ interface CollectedState
 
 const ROUTER_EXPORTS = ['appRouter', 'default', 'router'];
 
-function loadRouter(cwd: string, absoluteRouterPath: string): ResolvedRouter
+async function loadRouter(cwd: string, absoluteRouterPath: string, generation: string | undefined): Promise<ResolvedRouter>
 {
-    const module = loadRouterModule({
+    const { module } = await loadRouterModule({
         cwd,
         absoluteRouterPath,
+        generation,
         subject: 'state manifest',
         fail: message => new StatesGeneratorError(message),
     });
@@ -325,7 +326,7 @@ export function createStatesGenerator(config: StatesGeneratorConfig): Generator
 
             // Loaded before the guard reads the source, because which router the
             // guard reads is decided by which export the loader found.
-            const { router, exportName } = loadRouter(cwd, absoluteRouterPath);
+            const { router, exportName } = await loadRouter(cwd, absoluteRouterPath, options.generation);
 
             assertUnconditionalRegistration({
                 routerPath,

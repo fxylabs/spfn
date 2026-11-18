@@ -1,14 +1,24 @@
 /**
- * Environment probe — rows S1–S7 of the #102 design case table
+ * Environment probe — rows S1–S7 of the #102 design case table, and Q1
  *
  * Which frame an environment read is attributed to. The generator-level rows
  * (E1–E17) live in route-map.test.ts; these pin the rule on synthetic stacks,
  * so a frame layout no fixture produces is still decided the documented way.
+ *
+ * Q1: two observed loads started together, the second settling first, run one
+ * after the other and leave the real `process.env` behind (#351 review).
+ * Two generations of real apps side by side are loader.test.ts R12.
+ *
+ * Q2: a load started by a timer an earlier, finished load left behind queues
+ * behind the load holding the environment now, rather than running inside it
+ * because it descends from a load that once held it (#351 review round 2). A
+ * load inside the one holding now still runs inside it: the router load of a
+ * varied load, loader.test.ts R6, which deadlocks otherwise.
  */
 
 import { describe, it, expect } from 'vitest';
 import { pathToFileURL } from 'url';
-import { readerOf, type StackFrame } from '../generators/environment-probe';
+import { observeEnvironmentReads, readerOf, type StackFrame } from '../generators/environment-probe';
 
 const ROOT = '/work/app';
 const ROOTS = [ROOT];
@@ -33,11 +43,15 @@ describe('environment probe - which frame a read belongs to', () =>
         expect(readerOf(ROOTS, [frame('/work/spfn/packages/core/dist/env/index.js'), APP])).toBe(APP);
     });
 
-    it('S3 a read made while jiti loads a module is not the project\'s, even with a project file above it', () =>
+    it('S3 a read made by the codegen loader, as it resolves or transforms a project file, is not the project\'s', () =>
     {
-        expect(readerOf(ROOTS, [frame(`${ROOT}/node_modules/jiti/dist/babel.cjs`), APP])).toBeUndefined();
-        expect(readerOf(ROOTS, [frame('/work/node_modules/.pnpm/jiti@2.6.1/node_modules/jiti/dist/jiti.cjs'), APP]))
-            .toBeUndefined();
+        // The loader's hooks run in this thread, under Node's module loading: the
+        // stack above a read TypeScript or the hook makes reaches Node's internals
+        // before any project file.
+        const hook = frame('/work/spfn/packages/core/dist/codegen/index.js');
+        const typescript = frame('/work/node_modules/.pnpm/typescript@5.9.3/node_modules/typescript/lib/typescript.js');
+
+        expect(readerOf(ROOTS, [typescript, hook, frame('node:internal/modules/esm/hooks'), APP])).toBeUndefined();
     });
 
     it('S4 a read made while node loads a module is not the project\'s', () =>
@@ -64,5 +78,83 @@ describe('environment probe - which frame a read belongs to', () =>
         expect(readerOf(ROOTS, [frame('/work/spfn/packages/core/dist/logger/index.js')])).toBeUndefined();
         expect(readerOf(ROOTS, [frame(undefined), APP])).toBeUndefined();
         expect(readerOf(ROOTS, [frame('/work/app-other/src/a.ts')])).toBeUndefined();
+    });
+});
+
+describe('environment probe - one environment per process', () =>
+{
+    it('Q1 two observed loads, the second quicker, run one at a time and leave the real process.env', async () =>
+    {
+        const original = process.env;
+        const events: string[] = [];
+        let releaseFirst = (): void => undefined;
+
+        const first = observeEnvironmentReads(ROOT, () => new Promise<void>((settle) =>
+        {
+            events.push(`first starts, proxied: ${process.env !== original}`);
+            releaseFirst = settle;
+        }));
+        const second = observeEnvironmentReads(ROOT, async () =>
+        {
+            events.push(`second starts, proxied: ${process.env !== original}`);
+        });
+
+        await new Promise(resolve => setImmediate(resolve));
+        events.push('first released');
+        releaseFirst();
+        await Promise.all([first, second]);
+
+        expect(events).toEqual(['first starts, proxied: true', 'first released', 'second starts, proxied: true']);
+        expect(process.env).toBe(original);
+    });
+
+    it('Q2 a load a finished load left a timer for queues behind the load holding the environment now', async () =>
+    {
+        const events: string[] = [];
+        let fire = (): void => undefined;
+        const fired = new Promise<void>(resolve => (fire = resolve));
+        let armed = (): void => undefined;
+        const timerRan = new Promise<void>(resolve => (armed = resolve));
+        let delayed: Promise<unknown> | undefined;
+
+        await observeEnvironmentReads(ROOT, async () =>
+        {
+            setTimeout(() =>
+            {
+                armed();
+                void fired.then(() =>
+                {
+                    delayed = observeEnvironmentReads(ROOT, async () =>
+                    {
+                        events.push('delayed');
+                    });
+                });
+            }, 0);
+        });
+
+        let release = (): void => undefined;
+        let holding = (): void => undefined;
+        const held = new Promise<void>(resolve => (holding = resolve));
+        const current = observeEnvironmentReads(ROOT, () => new Promise<void>((settle) =>
+        {
+            events.push('current');
+            holding();
+            release = () =>
+            {
+                events.push('release current');
+                settle();
+            };
+        }));
+
+        await Promise.all([held, timerRan]);
+        fire();
+        // Every promise reaction runs first: the delayed load has started, or queued.
+        await new Promise(resolve => setImmediate(resolve));
+        release();
+        await current;
+        await delayed;
+
+        expect(delayed).toBeDefined();
+        expect(events).toEqual(['current', 'release current', 'delayed']);
     });
 });

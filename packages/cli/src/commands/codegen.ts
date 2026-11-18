@@ -102,28 +102,26 @@ async function listGenerators(): Promise<void>
 }
 
 /**
- * Run code generation once (no watch)
+ * Generate once; false when no generator is configured. A config or generator
+ * that fails to load throws, as a generator that refuses does.
  */
-async function runGenerators(): Promise<void>
+async function generateOnce(cwd: string): Promise<boolean>
 {
-    const cwd = process.cwd();
+    const { loadCodegenConfig, createGeneratorsFromConfig, CodegenOrchestrator, markCodegenProcess } = await import('@spfn/core/codegen');
 
-    logger.info('Running code generators...\n');
+    // A codegen process: a second copy of @spfn/core after a router load is refused.
+    markCodegenProcess();
 
-    // Load configuration and create generators
-    const { loadCodegenConfig, createGeneratorsFromConfig, CodegenOrchestrator } = await import('@spfn/core/codegen');
-    const config = loadCodegenConfig(cwd);
-    const generators = await createGeneratorsFromConfig(config, cwd);
+    const generators = await createGeneratorsFromConfig(loadCodegenConfig(cwd), cwd);
 
     if (generators.length === 0)
     {
         logger.warn('No generators configured');
         logger.info('Run "spfn codegen init" to initialize configuration');
 
-        return;
+        return false;
     }
 
-    // Create orchestrator and run once
     const orchestrator = new CodegenOrchestrator({
         generators,
         cwd,
@@ -136,18 +134,31 @@ async function runGenerators(): Promise<void>
         throwOnError: true,
     });
 
-    try
-    {
-        await orchestrator.generateAll();
-    }
-    catch (error)
+    await orchestrator.generateAll();
+
+    return true;
+}
+
+/**
+ * Run code generation once (no watch). Any failure — a config that does not
+ * load included, which would otherwise read as "no generators" and let a CI
+ * build skip codegen — exits non-zero.
+ */
+async function runGenerators(): Promise<void>
+{
+    logger.info('Running code generators...\n');
+
+    const generated = await generateOnce(process.cwd()).catch((error: unknown) =>
     {
         logger.error(error instanceof Error ? error.message : String(error));
         console.log('\n' + chalk.red.bold('✗ Code generation failed'));
         process.exit(1);
-    }
+    });
 
-    console.log('\n' + chalk.green.bold('✓ Code generation completed'));
+    if (generated)
+    {
+        console.log('\n' + chalk.green.bold('✓ Code generation completed'));
+    }
 }
 
 // Codegen command group

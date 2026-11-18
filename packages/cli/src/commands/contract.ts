@@ -35,7 +35,10 @@ async function resolveContractsDir(cwd: string, override?: string): Promise<stri
  */
 async function regenerate(cwd: string): Promise<void>
 {
-    const { loadCodegenConfig, createGeneratorsFromConfig, CodegenOrchestrator } = await import('@spfn/core/codegen');
+    const { loadCodegenConfig, createGeneratorsFromConfig, CodegenOrchestrator, markCodegenProcess } = await import('@spfn/core/codegen');
+
+    // A codegen process: a second copy of @spfn/core after a router load is refused.
+    markCodegenProcess();
 
     const config = loadCodegenConfig(cwd);
     const generators = (await createGeneratorsFromConfig(config, cwd))

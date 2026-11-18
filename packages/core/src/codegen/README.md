@@ -38,7 +38,8 @@ Functions:
 - `loadCodegenConfig(cwd: string): CodegenConfig` — reads `.spfnrc.ts` → `.spfnrc.json` →
   `package.json` (first hit wins). Returns `{ generators: [] }` if none found.
 - `createGeneratorsFromConfig(config, cwd): Promise<Generator[]>` — resolves each config
-  entry into a live `Generator` (loads packages / `.ts` files via jiti).
+  entry into a live `Generator` (imports packages natively and `.ts` files through the
+  codegen loader — see [How the router is loaded](#how-the-router-is-loaded)).
 
 Class:
 
@@ -99,13 +100,30 @@ This writes `src/generated/route-map.ts`, which the RPC proxy imports.
 
 `loadCodegenConfig(cwd)` checks these in order and returns the **first** that exists:
 
-1. `.spfnrc.ts` — loaded with jiti (supports `defineConfig`/`defineGenerator` + TS types).
-   The default export (or the module itself) is the `CodegenConfig`.
+1. `.spfnrc.ts` — `require()`d as an ES module through the codegen loader, synchronously
+   (supports `defineConfig`/`defineGenerator` + TS types; the `@spfn/core/codegen` it imports
+   is the process's own). `import.meta.url`, `import.meta.filename` and `import.meta.dirname`
+   are the file's own (the URL carries a `?spfn-gen=` query). The default export (or the
+   module itself) is the `CodegenConfig`.
+   A `.spfnrc.ts` whose import graph uses top-level await cannot be required and is reported
+   as failing to load.
 2. `.spfnrc.json` — the config is read from the top-level **`codegen`** key:
    `{ "codegen": { "generators": [...] } }`.
 3. `package.json` — read from **`spfn.codegen`**: `{ "spfn": { "codegen": { ... } } }`.
 
-If none exist (or parsing fails), you get `{ generators: [] }` and nothing runs.
+If none declares a config, you get `{ generators: [] }` and nothing runs. A config file that
+exists and fails to load — a `.spfnrc.ts` that throws or does not compile, a `.spfnrc.json` or
+`package.json` that is not JSON — throws `Failed to load <file> (at <file>:<line>:<col>):
+<message>` instead; `spfn codegen run` and `spfn build` exit non-zero with it. The same holds for
+every generator the config names (BREAKING): a custom generator whose file fails to load or
+exports no factory, a package generator that is not found (`Cannot load generator
+"@spfn/core:route-mapp": …`, naming where it was looked for, or the generators the package does
+export), whose `<package>/codegen` throws on import or whose factory throws (its error), and an
+entry that names no generator. Only `enabled: false` skips an entry.
+
+`.spfnrc.ts` and custom generators are ES modules: `__dirname`, `__filename`, `require` and
+`module.exports` are not defined — write `import.meta.dirname`, `import.meta.filename`, `import`
+and `export default`.
 
 > Precedence is "first file found wins", not a deep merge. A `.spfnrc.ts` fully shadows
 > `.spfnrc.json` and `package.json`.
@@ -117,15 +135,97 @@ A `generators[]` entry is one of three shapes:
 | Shape | Example | Meaning |
 |-------|---------|---------|
 | Package generator | `{ name: 'pkg:gen', enabled?: true, ...opts }` | Loaded from `${pkg}/codegen`. `name` **must** contain `:`. `enabled: false` skips it. Extra keys are passed to the factory. |
-| File generator | `{ path: './src/generators/x.ts' }` | A `.ts`/`.js` file whose default export is a `() => Generator` factory. `.ts` loaded via jiti. |
+| File generator | `{ path: './src/generators/x.ts' }` | A `.ts`/`.js` file whose default export is a `() => Generator` factory, imported through the codegen loader (TypeScript and the project's aliases resolve). |
 | Pre-built instance | `defineGenerator({...})` result that already has a `generate` fn | Pushed as-is (guards against accidentally calling a factory yourself). |
 
 For package generators, `name` is split on `:` into `package:generatorName`. The loader
-imports `${package}/codegen` and looks for `generators[generatorName]`, falling back to a
-`create<Name>Generator` export. So `@spfn/core:route-map` → import `@spfn/core/codegen`,
-call `generators['route-map'](config)`.
+imports `${package}/codegen` — resolved from the project root, natively, so for `@spfn/core`
+it is the module the process already holds — and looks for `generators[generatorName]`,
+falling back to a `create<Name>Generator` export. So `@spfn/core:route-map` → import
+`@spfn/core/codegen`, call `generators['route-map'](config)`.
 
 ---
+
+## How the router is loaded
+
+`@spfn/core:route-map`, `@spfn/core:contract` and `@spfn/core:states` read the router by
+importing it — `await import('<router>?spfn-gen=<n>')` — in the generating process's own
+module graph, through a module hook core registers with `module.registerHooks` on the first
+load (`src/codegen/loader/`).
+
+- **Packages evaluate once; the project on every load.** The hook hands the generation
+  query on to every file of the project the load reaches (under the project root, outside
+  `node_modules`), and to nothing else. Node keys an ES module by its URL, so a new
+  generation re-runs the project's modules while a package — `@spfn/core`, `@spfn/auth`,
+  anything installed — is the one module the process already holds, evaluated once, under
+  the pinned `production` environment. A workspace package's own source beside the app — any
+  file outside the project root, a sibling package reached through `paths` included — is
+  transformed but not re-run either, and not watched: after editing it, restart `spfn dev` (or
+  the process that generates) for codegen to see the change.
+- **One load per generation.** The orchestrator gives every generator of one run the same
+  `generation`; the three built-in generators share one load of each router under it. A
+  generator called without one loads on its own.
+- **Format.** Project TypeScript is ESM whatever the `"type"` in `package.json` — the rule
+  `spfn dev` runs the app by (`@spfn/core/codegen/loader`, shared with the CLI's dev hook),
+  and what `spfn build` bundles: `.ts`/`.tsx` are ESM, a type-less `.js` is decided by its
+  syntax, a stated extension or `type` is the author's. A `.json` file is served as tsx serves
+  it to `spfn dev`: an ES module whose default export is the parsed value (its top-level keys
+  are named exports too), so `import data from './data.json'` and the form with
+  `with { type: 'json' }` both load; it is re-read on every generation and watched. A leading
+  byte-order mark is dropped, as Node, tsx and esbuild drop it. Import attributes are checked
+  as Node checks them, with Node's error (`ERR_IMPORT_ATTRIBUTE_UNSUPPORTED`,
+  `ERR_IMPORT_ATTRIBUTE_TYPE_INCOMPATIBLE`): no attribute but `type`, `type` only `'json'`, and
+  `'json'` only on a `.json` file. The one departure is the bare JSON import, which Node
+  refuses (`ERR_IMPORT_ATTRIBUTE_MISSING`) and codegen accepts, because the dev server (tsx)
+  and the build (esbuild) accept it. Any other
+  extension is left to Node and whatever else is registered. Project TypeScript is transformed
+  file by file with TypeScript's `transpileModule`; a frame inside it is named by its source
+  line.
+- **Compiler options.** The transform takes, from the tsconfig that governs the file (the
+  nearest `tsconfig.json` above it up to the project root, `extends` merged; for a file outside
+  the root, the root's), exactly the options that change what runs:
+  `experimentalDecorators`, `emitDecoratorMetadata`, `useDefineForClassFields` (unstated: from
+  `target` as TypeScript and esbuild decide it — assign below ES2022, define from ES2022 or
+  with no `target`; `target` is read for nothing else), `jsx` (`preserve` and `react-native`,
+  which leave JSX Node cannot run, become `react-jsx`, as does an unstated `jsx`),
+  `jsxFactory`, `jsxFragmentFactory`, `jsxImportSource`, `verbatimModuleSyntax`. It forces
+  `module: ESNext`, `target: ES2022`, `sourceMap: true` and `isolatedModules: true`. Nothing
+  else is read (`importsNotUsedAsValues`/`preserveValueImports` were removed in TypeScript
+  5.5). `spfn build` reads the same file (`src/server/tsconfig.json`); the `spfn dev` server,
+  under tsx, reads only the root `tsconfig.json`. A project file outside `src/server/` is
+  governed here by its own nearest tsconfig, while `spfn build` bundles every file with
+  `src/server/tsconfig.json`: where the two configs differ in one of these options, that file
+  runs with different semantics in codegen and in the build.
+- **Resolution.** Extensionless and `.js` → `.ts` specifiers and a directory's `index`, as
+  TypeScript resolves them; and tsconfig `paths`, as tsc reads them — see the alias gotcha
+  below.
+- **Errors name the source.** A load that fails — a syntax error, a module-scope throw, a
+  missing export, an import that does not resolve — is reported as `Failed to load
+  src/server/router.ts (at src/server/routes/admin.ts:3:7): <message>`: the project file and
+  source line where it arose (for an unresolved import, the importer), without the
+  `?spfn-gen=` query. Where it arose is read from the error's frames, never from its message:
+  a route that fails reading `src/server/data/x.txt` is reported at the route's line. The generator's error carries the load's own error as its `cause`, with
+  every stack frame in a project file at its source line and frames of code the transform
+  added dropped; the CLI prints it. This uses the source maps the loader keeps while the
+  load runs — process-wide source maps (`--enable-source-maps`) are not turned on, in the CLI
+  or for a programmatic caller.
+- **One copy of `@spfn/core`.** After each router load, an `@spfn/core` entry evaluated more
+  than once — as CommonJS beside ESM (a `.cts` route requiring `@spfn/*` under tsx), from two
+  installs, or natively twice — is refused in a process the spfn CLI started to generate code
+  (`markCodegenProcess()`, called in-process by `spfn codegen run`, `spfn build`'s generation
+  step, `spfn contract` and the `spfn dev` watcher entry — not an environment variable, so the
+  dev server and `next` inherit nothing), with the message `startServer` refuses with. A programmatic caller or a test is warned instead.
+- **Retained memory, accepted.** Node never frees an ES module, so every load keeps its
+  project modules: measured about 100 KB per reload for a small app, more for a large one,
+  once per file change under `spfn dev` (a generation that varies the environment loads up
+  to three times). The watcher is not recycled.
+- **The watch set follows the loads.** `spfn dev`'s watcher regenerates for a change to any
+  project file the latest load of a router reached — `src/server/lib/segment.ts` imported
+  through `@/` included — besides the generators' `watchPatterns` (kept for what no load has
+  reached yet: a new route file, the router). A file a load no longer reaches, a deleted one,
+  leaves the set. A load that failed on an import that resolved nowhere (a relative path or a
+  `paths` alias) records every path it looked for under the project root; creating a file at
+  any of them — in a directory that does not exist yet too — regenerates.
 
 ## Built-in: `@spfn/core:route-map`
 
@@ -145,7 +245,8 @@ importing server code into the client bundle.
 
 ### What it reads
 
-The router module is loaded with jiti (`appRouter` → `default` → `router`) and walked the
+The router module is loaded ([How the router is loaded](#how-the-router-is-loaded);
+`appRouter` → `default` → `router`) and walked the
 way `registerRoutes` walks it. How the router is *written* does not matter: a one-line
 `defineRouter({ createUser })`, an aliased key `create: createUser`, and a second
 `defineRouter(` in the same file all produce the same map.
@@ -225,9 +326,10 @@ Unlike the old source parser, which dropped what it could not read, the generato
 - The generated file **depends on the environment** (#102, #334). While the router loads, the generator
   records every `process.env` key a project file reads — direct access, destructuring and
   `in`, and a read through a library such as the `@spfn/core/env` registry, which is
-  attributed to the route module that asked. Reads that jiti, babel or a package make while
-  loading themselves are not counted: a package does not run again on a second load, so
-  varying them could change nothing. With no read, nothing more happens. Otherwise the router
+  attributed to the route module that asked. Reads a package makes while it loads are not
+  counted: a package does not run again on a second load — it is evaluated once, under the
+  pinned `production` — so varying them could change nothing, and a package's own
+  environment-dependent route is not refused: the map has it as production registers it. With no read, nothing more happens. Otherwise the router
   is loaded again with every one of those keys varied — a set key deleted, an unset key set to
   `'true'`, and `NODE_ENV` set to each conventional value it does not hold (`production`,
   `development`, `test`; one load per value), because it is the one key tooling sets on its
@@ -258,7 +360,12 @@ Unlike the old source parser, which dropped what it could not read, the generato
   value outside the three, a key first read under
   a varied environment, a package's own module scope, and nondeterminism that is not the
   environment. Each varied load runs the project's module scope again, which is one more
-  reason a route module must be importable without side effects. A key read at module scope
+  reason a route module must be importable without side effects. There is one environment per
+  process, so loads that observe or vary it take turns: two generations run side by side (a
+  `Promise.all` over a monorepo's apps) wait for each other load by load. A load that never
+  settles — a top-level `await` that hangs — therefore holds the environment and blocks every
+  later load in the process, other apps' included; the watcher already ran one generation at a
+  time. A key read at module scope
   for use inside a handler is not refused: the written files are compared, not the reads.
 - Two routes reach the same name (the message names both places).
 - An **app route and a package route** reach the same name, where that package publishes a
@@ -657,20 +764,22 @@ regeneration when it's absent (build/manual passes don't set it).
   concerned. How the registration is *spelled* no longer matters.
 - **route-map loads your router, so route modules must import cleanly.** Reading a
   required environment value at module scope now fails `spfn build` and `spfn codegen run`,
-  not just `spfn dev`. Move that read inside the handler. Top-level `await` in a route or
-  router module does not load either — jiti transforms to CJS — the same limit
-  `@spfn/core:contract` has always had.
-- **A path alias resolves only if a tsconfig between the router and the project root maps
-  it.** Both loading generators read `compilerOptions.paths` from the nearest such
-  `tsconfig.json` (following `extends`) and hand it to jiti, so `@/server/routes/users`
-  resolves from the root config or from `src/server/tsconfig.json`. A mapping that lives
-  *above* the project root — a monorepo's solution-style config — is not read; a `paths`
-  entry whose `*` is not a trailing `/*` is skipped (jiti matches a prefix, not a template);
-  and a `baseUrl` with no `paths` resolves nothing (an alias map cannot say "try this
-  directory for every bare specifier"). Several targets for one pattern are supported: the
-  first that exists on disk is used, as tsc and tsup use it. Each skip is warned about, an
-  `extends` target TypeScript could not read is warned about instead of silently dropping
-  its `paths`, and an import that then fails to resolve names the specifier.
+  not just `spfn dev`. Move that read inside the handler. Route modules are ES modules here,
+  as under `spfn dev` and `spfn build`: a type-only name imported or re-exported without
+  `type` (`export { User } from './types'`) fails to link, as it does there.
+- **A path alias resolves only if a tsconfig between the importing file and the project root
+  maps it.** The loader reads `compilerOptions.paths` from the nearest such `tsconfig.json`
+  (following `extends`), so `@/server/routes/users` resolves from the root config or from
+  `src/server/tsconfig.json`. It matches as tsc does: a pattern without `*` matches only
+  itself and wins, otherwise the matching pattern with the longest prefix, and a `*` may sit
+  anywhere in the pattern (`legacy/*/entry`). **Every target of the entry is tried for each
+  import, in order**, and the first that names a file is taken — a partial `dist` before
+  `./src/*` resolves each import through whichever has it. (Before #335 one target per key
+  was chosen for the whole load.) A mapping that lives *above* the project root — a
+  monorepo's solution-style config — is not read, and a `baseUrl` with no `paths` resolves
+  nothing. An `extends` target TypeScript could not read is warned about instead of silently
+  dropping its `paths`; an import that fails to resolve names the specifier and, for an
+  alias, every target it tried.
 - **Custom generators must default-export a factory.** `createGeneratorsFromConfig` calls
   `module.default()` (a zero-arg function) for `{ path }` entries. Exporting the Generator
   object directly, or a factory that needs args, won't load.
