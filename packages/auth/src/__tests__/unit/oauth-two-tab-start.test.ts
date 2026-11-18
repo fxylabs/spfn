@@ -974,6 +974,7 @@ describe('per-start OAuth cookies — case table (#126)', () =>
         }
 
         const firstState = await apiStart();
+        vi.setSystemTime(new Date('2026-10-05T10:00:05Z'));
         const secondState = await apiStart();
 
         expect(listStartCookies('csrf', jar)).toHaveLength(2);
