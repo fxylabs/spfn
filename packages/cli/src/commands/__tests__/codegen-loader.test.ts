@@ -27,10 +27,12 @@
  * |    |                                                             | 4.23; 4.22 shares the instance, and the row checks so)    |
  * | R9 | 50 generations in one process, @spfn/core installed in the   | packages re-evaluated per load: MBs per reload, count > 1 |
  * |    | app's node_modules as real files                              |                                                          |
+ * | R15| `.spfnrc.ts` writing its `import.meta` beside itself, through | a config that sees a file that does not exist (the        |
+ * |    | `fileURLToPath(import.meta.url)`                              | `.spfn-esm` name tsx is kept away by)                     |
  */
 
 import { spawn, spawnSync } from 'node:child_process';
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -211,6 +213,24 @@ describe.each(TSX)('codegen in CLI processes, tsx $version', (tsx) =>
         expect(output).toContain('required by');
         expect(output).toContain('src/server/routes/legacy.cts');
         expect(output).not.toContain('Warned, not refused');
+    });
+
+    it('R15 .spfnrc.ts sees its own file in import.meta.url, filename and dirname', () =>
+    {
+        write('.spfnrc.ts', 'import { writeFileSync } from \'node:fs\';\n'
+            + 'import { dirname, join } from \'node:path\';\n'
+            + 'import { fileURLToPath } from \'node:url\';\n'
+            + 'const meta = { url: import.meta.url, filename: import.meta.filename, dirname: import.meta.dirname };\n'
+            + 'writeFileSync(join(dirname(fileURLToPath(import.meta.url)), \'meta.json\'), JSON.stringify(meta));\n'
+            + readFileSync(join(appDir, '.spfnrc.ts'), 'utf8'));
+
+        const { status, output } = codegenRun(tsx);
+        const config = realpathSync(join(appDir, '.spfnrc.ts'));
+        const meta = JSON.parse(readFileSync(join(appDir, 'meta.json'), 'utf8'));
+
+        expect(status, output).toBe(0);
+        expect({ ...meta, url: meta.url.replace(/\?.*$/, '') })
+            .toEqual({ url: pathToFileURL(config).href, filename: config, dirname: dirname(config) });
     });
 
     it('R9 fifty generations retain a bounded heap each and evaluate the packages once, @spfn/core installed in the app', () =>

@@ -57,11 +57,11 @@ import { applicationFormat, isDependency, packageType, type ModuleFormat } from 
 export const GENERATION_PARAMETER = 'spfn-gen';
 
 /**
- * Appended to the file name of an entry loaded with `require()`. tsx claims
- * `require()` of `.ts`, `.js` and `.mjs` through `Module._extensions` and
- * compiles them as CommonJS whatever format a hook states; a name ending in an
- * extension it does not claim reaches Node's own handler, which takes the hook's
- * format and source.
+ * Appended to the file name of the module that stands in for an entry loaded
+ * with `require()` (`requiredEntry`). tsx claims `require()` of `.ts`, `.js`
+ * and `.mjs` through `Module._extensions` and compiles them as CommonJS
+ * whatever format a hook states; a name ending in an extension it does not
+ * claim reaches Node's own handler, which takes the hook's format and source.
  */
 export const REQUIRE_SUFFIX = '.spfn-esm';
 
@@ -110,6 +110,9 @@ interface OwnedFile
 {
     file: string;
     token: string;
+
+    /** Set for the stand-in of a `require()`d entry: the URL of the entry it re-exports. */
+    reexports?: string;
 }
 
 const generations = new Map<string, Generation>();
@@ -206,7 +209,7 @@ function pathOf(specifier: string, parentURL: string | undefined): string | unde
 {
     if (specifier.startsWith('file:'))
     {
-        return fileURLToPath(specifier.replace(/[?#].*$/, '')).replace(new RegExp(`${REQUIRE_SUFFIX}$`), '');
+        return fileURLToPath(specifier.replace(/[?#].*$/, ''));
     }
 
     if (isAbsolute(specifier))
@@ -345,12 +348,12 @@ function formatOf(file: string): ModuleFormat | undefined
 // The hooks
 // ============================================================================
 
-/** The URL a load's own ES module is given: tagged when it is the project's, renamed when it is `require()`d. */
-function ownedURL(file: string, token: string, required: boolean): string
+/** The URL a load's own ES module is given: tagged when it is the project's. */
+function ownedURL(file: string, token: string): string
 {
     const generation = generations.get(token)!;
     const tagged = isWithin(generation.root, file) && !isDependency(file, generation.root);
-    const url = pathToFileURL(required ? file + REQUIRE_SUFFIX : file);
+    const url = pathToFileURL(file);
 
     if (tagged)
     {
@@ -371,11 +374,42 @@ function own(file: string, token: string, context: ResolveContext, nextResolve: 
         return nextResolve(pathToFileURL(real).href, context);
     }
 
-    const url = ownedURL(real, token, entry && context.conditions?.includes('require') === true);
+    const url = ownedURL(real, token);
+
+    if (entry && context.conditions?.includes('require') === true)
+    {
+        return requiredEntry(url, real, token);
+    }
 
     owned.set(url, { file: real, token });
 
     return { url, format: 'module', shortCircuit: true };
+}
+
+/**
+ * An entry loaded with `require()` — `.spfnrc.ts`, which `loadCodegenConfig`
+ * reads synchronously — is handed a stand-in: a module of the hooks' own,
+ * named `<file>.spfn-esm` so that Node's handler rather than tsx's runs it,
+ * which imports the entry under the entry's own URL and re-exports it. The
+ * entry is then an ES module Node imported, and its `import.meta.url`,
+ * `filename` and `dirname` are those of the file.
+ */
+function requiredEntry(url: string, file: string, token: string): ResolveResult
+{
+    const standIn = new URL(url);
+
+    standIn.pathname += REQUIRE_SUFFIX;
+    owned.set(standIn.href, { file, token, reexports: url });
+
+    return { url: standIn.href, format: 'module', shortCircuit: true };
+}
+
+/** The stand-in's source: the entry's exports, and its default export (undefined when it has none). */
+function standInSource(entry: string): string
+{
+    return `import * as entry from ${JSON.stringify(entry)};\n`
+        + `export * from ${JSON.stringify(entry)};\n`
+        + 'export default entry.default;\n';
 }
 
 /** A bare specifier: through `paths` when an entry claims it, else down the chain. */
@@ -513,5 +547,10 @@ export function loadHook(url: string, context: unknown, nextLoad: NextLoad): Loa
 {
     const file = owned.get(url);
 
-    return file === undefined ? nextLoad(url, context) : { format: 'module', source: transform(url, file), shortCircuit: true };
+    if (file === undefined)
+    {
+        return nextLoad(url, context);
+    }
+
+    return { format: 'module', source: file.reexports === undefined ? transform(url, file) : standInSource(file.reexports), shortCircuit: true };
 }

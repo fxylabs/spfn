@@ -102,7 +102,9 @@ This writes `src/generated/route-map.ts`, which the RPC proxy imports.
 
 1. `.spfnrc.ts` — `require()`d as an ES module through the codegen loader, synchronously
    (supports `defineConfig`/`defineGenerator` + TS types; the `@spfn/core/codegen` it imports
-   is the process's own). The default export (or the module itself) is the `CodegenConfig`.
+   is the process's own). `import.meta.url`, `import.meta.filename` and `import.meta.dirname`
+   are the file's own (the URL carries a `?spfn-gen=` query). The default export (or the
+   module itself) is the `CodegenConfig`.
    A `.spfnrc.ts` whose import graph uses top-level await cannot be required and is reported
    as failing to load.
 2. `.spfnrc.json` — the config is read from the top-level **`codegen`** key:
