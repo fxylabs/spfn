@@ -12,8 +12,9 @@
  * - `seat`: keyed `{ workspaceId, teamId }`, no write — a key of two fields.
  */
 
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { Type } from '@sinclair/typebox';
-import { expect, onTestFailed, onTestFinished, vi } from 'vitest';
+import { aroundEach, expect, onTestFailed, onTestFinished, vi } from 'vitest';
 import { createSSEClient } from '../../event/sse/client';
 import { FakeEventSource, type FakeConnected } from '../../event/sse/__tests__/fake-event-source';
 import { createStateClient } from '../client';
@@ -101,8 +102,19 @@ interface Row
     finished: boolean;
 }
 
-/** The running row, from its first `harness()` until it finishes. */
-let running: Row | undefined;
+/**
+ * Each row runs — its `beforeEach` hooks, its body, its `afterEach` hooks —
+ * with a slot of its own, which its first `harness()` fills. A helper finds
+ * the row that called it through the caller's own async chain, wherever it
+ * was called from: a body that a timeout abandoned still finds its own,
+ * ended row, never the next one. Registered for every file that imports the
+ * harness.
+ */
+const rowSlots = new AsyncLocalStorage<{ row?: Row }>();
+
+aroundEach(runTest => rowSlots.run({}, runTest));
+
+const ROW_ENDED = 'The row that called this has ended (a timeout, most often): the rest of its body does not run.';
 
 /** The promises `deferred()` made: an answer the row holds open on purpose, until it settles it. */
 const heldAnswers = new WeakSet<Promise<unknown>>();
@@ -207,23 +219,43 @@ export function harness(
         ...clientConfig,
     });
     countCalls(client, tracked);
-    const row = runningRow();
+    const row = callersRow();
     row.clients.push(client);
     row.tracked.push(tracked);
 
     return { client, calls, responders: all, onError };
 }
 
-/** The running row, made at its first `harness()`. */
-function runningRow(): Row
+/** The calling row's slot; outside a row there is none. */
+function callersSlot(helper: string): { row?: Row }
 {
-    if (!running)
+    const slot = rowSlots.getStore();
+
+    if (!slot)
     {
-        running = { clients: [], tracked: [], waiting: false, finished: false };
-        endWithTheRow(running);
+        throw new Error(`${helper} runs only inside a row — its body or its beforeEach/afterEach — the row its clients belong to.`);
     }
 
-    return running;
+    return slot;
+}
+
+/** The calling row, made at its first `harness()`; a body whose row has ended stops here. */
+function callersRow(): Row
+{
+    const slot = callersSlot('harness()');
+
+    if (!slot.row)
+    {
+        slot.row = { clients: [], tracked: [], waiting: false, finished: false };
+        endWithTheRow(slot.row);
+    }
+
+    if (slot.row.finished)
+    {
+        throw new Error(ROW_ENDED);
+    }
+
+    return slot.row;
 }
 
 /**
@@ -241,7 +273,6 @@ function endWithTheRow(row: Row): void
     {
         waitedFor = row.waiting ? whatSettleWaitsFor(row) : undefined;
         row.finished = true;
-        running = undefined;
         row.clients.forEach(client => client.close());
     });
     onTestFailed(() =>
@@ -356,7 +387,7 @@ function activityOf(row: Row): number
 }
 
 /**
- * Wait until the clients the running row made are quiescent: every route call
+ * Wait until the clients the calling row made are quiescent: every route call
  * they started has settled — except one whose answer is a `deferred()` the row
  * has not settled, which the row holds on purpose — and a whole turn has then
  * passed in which none of their calls started or settled. That is sufficient
@@ -367,15 +398,17 @@ function activityOf(row: Row): number
  * `reconnectDelay`) are not waited for; under fake timers the clock does not
  * move.
  *
- * Only the running row's clients count: an earlier row's were closed when it
- * finished and were never this row's to wait for. A wait the row's end
- * overtook — a timeout — rejects, so the abandoned body does not run on into
- * the next row, and the row's failure names what it was waiting for: the calls
- * in flight, or a client that kept calling.
+ * Only the calling row's clients count, found through the caller's own async
+ * chain: an earlier row's were closed when it finished and were never this
+ * row's to wait for. A row with no harness rejects: there is nothing to wait
+ * for. A row that has ended — a timeout, whether it overtook this wait or an
+ * await before it — rejects, so the abandoned body does not run on into the
+ * next row; when it overtook this wait, the row's failure names what it was
+ * waiting for: the calls in flight, or a client that kept calling.
  */
 export async function settle(): Promise<void>
 {
-    const row = running ?? { clients: [], tracked: [], waiting: false, finished: false };
+    const row = harnessedRow();
     let seen: number;
     row.waiting = true;
 
@@ -390,8 +423,26 @@ export async function settle(): Promise<void>
 
     if (row.finished)
     {
-        throw new Error('The row ended while settle() waited: the rest of its body does not run.');
+        throw new Error(ROW_ENDED);
     }
+}
+
+/** The calling row, which a `harness()` must have made: with no client, there is nothing to wait for. */
+function harnessedRow(): Row
+{
+    const { row } = callersSlot('settle()');
+
+    if (!row)
+    {
+        throw new Error('settle() found no harness in this row: create the row\'s clients with harness() first; settle() waits only for those.');
+    }
+
+    if (row.finished)
+    {
+        throw new Error(ROW_ENDED);
+    }
+
+    return row;
 }
 
 /**
