@@ -235,6 +235,19 @@ export class CodegenOrchestrator
         this.watchedFiles = wanted;
     }
 
+    private logWatching(watchDirs: string[], patterns: string[]): void
+    {
+        orchestratorLogger.info('Watch mode started', {
+            watching: watchDirs.length === 1 ? watchDirs[0] : `${watchDirs.length} directories`,
+            generators: this.generators.filter(g => this.shouldRun(g, 'watch')).map(g => g.name).join(', '),
+        });
+
+        if (this.debug)
+        {
+            orchestratorLogger.info('Watch mode details', { patterns, watchDirs, cwd: this.cwd });
+        }
+    }
+
     /**
      * Start watch mode
      */
@@ -264,21 +277,6 @@ export class CodegenOrchestrator
         }
 
         const watchDirs = Array.from(dirsToWatch);
-
-        // Always log watch mode start
-        orchestratorLogger.info('Watch mode started', {
-            watching: watchDirs.length === 1 ? watchDirs[0] : `${watchDirs.length} directories`,
-            generators: this.generators.filter(g => this.shouldRun(g, 'watch')).map(g => g.name).join(', '),
-        });
-
-        if (this.debug)
-        {
-            orchestratorLogger.info('Watch mode details', {
-                patterns: allPatterns,
-                watchDirs,
-                cwd: this.cwd,
-            });
-        }
 
         this.watcher = chokidarWatch(watchDirs, {
             // Ignore dotfiles by path segments relative to cwd — matching the absolute
@@ -375,6 +373,11 @@ export class CodegenOrchestrator
             .on('add', (path) => handleChange(path, 'add'))
             .on('change', (path) => handleChange(path, 'change'))
             .on('unlink', (path) => handleChange(path, 'unlink'));
+
+        // Said once chokidar's first scan is done: it reports no change to a file
+        // before it has scanned it (`ignoreInitial`), so an edit made between the
+        // initial generation and this line is not noticed.
+        this.watcher.on('ready', () => this.logWatching(watchDirs, allPatterns));
 
         // Return a promise that resolves when the watcher is closed
         // This allows the caller to await the watch() method and keep the process alive

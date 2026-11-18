@@ -528,12 +528,11 @@ describe('codegen loader - .spfnrc.ts', () =>
 
 describe('codegen loader - watch mode', () =>
 {
-    /** Poll for `condition`, calling `again` every half second meanwhile. */
-    async function until(condition: () => boolean, again = (): void => undefined): Promise<void>
+    async function until(condition: () => boolean): Promise<void>
     {
         const deadline = Date.now() + 10_000;
 
-        for (let poll = 1; !condition(); poll++)
+        while (!condition())
         {
             if (Date.now() > deadline)
             {
@@ -541,11 +540,6 @@ describe('codegen loader - watch mode', () =>
             }
 
             await new Promise(resolve => setTimeout(resolve, 50));
-
-            if (poll % 10 === 0)
-            {
-                again();
-            }
         }
     }
 
@@ -553,6 +547,9 @@ describe('codegen loader - watch mode', () =>
     {
         const map = join(appDir, OUTPUT_PATH);
         const warn = vi.spyOn(Logger.prototype, 'warn').mockImplementation(() =>
+        {
+        });
+        const info = vi.spyOn(Logger.prototype, 'info').mockImplementation(() =>
         {
         });
 
@@ -580,19 +577,17 @@ describe('codegen loader - watch mode', () =>
             );
             expect(existsSync(map)).toBe(false);
 
-            // chokidar reports nothing before its first scan is done, and the
-            // orchestrator does not say when that is: the edit is made again until seen.
-            const edit = (): void => write('src/server/routes/probe.ts', 'import { route } from \'@spfn/core/route\';\n'
+            await until(() => info.mock.calls.some(([message]) => message === 'Watch mode started'));
+            write('src/server/routes/probe.ts', 'import { route } from \'@spfn/core/route\';\n'
                 + 'export const getProbe = route.get(\'/probe/edited\').handler(async () => ({}));\n');
-
-            edit();
-            await until(() => existsSync(map) && pathsOf(readFileSync(map, 'utf-8')).includes('/probe/edited'), edit);
+            await until(() => existsSync(map) && pathsOf(readFileSync(map, 'utf-8')).includes('/probe/edited'));
         }
         finally
         {
             await orchestrator.close();
             chmodSync(join(appDir, 'src/server/locked'), 0o755);
             warn.mockRestore();
+            info.mockRestore();
         }
     });
 
