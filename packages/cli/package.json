@@ -86,14 +86,14 @@
     "dotenv": "^17.2.3",
     "drizzle-kit": "1.0.0-rc.4",
     "drizzle-orm": "1.0.0-rc.4",
-    "esbuild": "^0.27.0",
+    "esbuild": "^0.28.2",
     "execa": "^8.0.1",
     "fs-extra": "^11.2.0",
     "ora": "^7.0.1",
     "pg": "^8.16.3",
     "postgres": "^3.4.0",
     "prompts": "^2.4.2",
-    "tsup": "^8.5.0",
+    "tsup": "^9.0.0",
     "yaml": "^2.8.3"
   },
   "optionalDependencies": {

@@ -9,6 +9,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **spfn: `tsup` `^9.0.0` and `esbuild` `^0.28.2`, so no range spfn publishes admits
+  GHSA-g7r4-m6w7-qqqr** (esbuild `>=0.27.3 <0.28.1`, low: file read through esbuild's dev server
+  on Windows). spfn depended on `tsup` `^8.5.0` and `esbuild` `^0.27.0`. tsup 8.4.0 and 8.5.0
+  depend on esbuild `^0.25.0`, outside the advisory, but 8.5.1 moved to `^0.27.0`, and a fresh
+  resolve of `^8.5.0` takes 8.5.1 and with it esbuild 0.27.7, inside the advisory; so did spfn's
+  own `^0.27.0`. tsup 9 requires esbuild `^0.28.2` and rollup `^4.64.6`. `spfn init` now writes
+  `tsup` `^9.0.0` into a new app's devDependencies, and every package builds with tsup 9.
+  `@/` aliases still resolve through the app's tsconfig `paths`, with or without `baseUrl`. tsup 9
+  requires Node `^22.18.0 || ^24.11.0 || >=26.0.0`, which spfn's own floor
+  (`^22.23.4 || ^24.22.1 || >=26.12.1`) already satisfies, so the Node floor does not move.
+
+  **Class fields in `spfn build` output, if your server tsconfig targets ES2022 or later.** Check
+  `target` (and `useDefineForClassFields`) in `src/server/tsconfig.json`. Below ES2022 — the
+  examples and a fresh scaffold target ES2020 — `spfn build` output is byte-identical to before.
+  At ES2022 or later (unless `useDefineForClassFields` is `false`), or with
+  `useDefineForClassFields: true` at any target, esbuild 0.27.5 and later emit a
+  TypeScript parameter property as a class field (define semantics), as `tsc` does at that target
+  and as `spfn dev` (tsx) already does at any target. Before, the build assigned it in the
+  constructor. What you can see:
+  - a parameter property named like an inherited property becomes an own enumerable field. For an
+    error class `constructor(public readonly message: string)` extending `SerializableError`,
+    `message` is then a field `toJSON()` serialises, and `message` is a reserved response key:
+    `toJSON()` throws `<YourError> declares the reserved field "message"` under test and logs that
+    ERROR in production, omitting the field. Drop the modifier and pass the value to `super`;
+  - a parameter property with the name of an accessor the base class defines shadows the
+    accessor;
+  - `Object.keys()` and `JSON.stringify` list such fields in a different order.
+
+  This is new only relative to an older lockfile. A fresh install of spfn 0.4.0-beta.1 already
+  resolves esbuild 0.27.7 and builds this way.
+
 ## [@spfn/core@0.4.0-beta.1, @spfn/auth@0.4.0-beta.1, spfn@0.4.0-beta.1, @spfn/storage@0.4.0-beta.1, @spfn/cms@0.4.0-beta.1, @spfn/mcp@0.4.0-beta.1, @spfn/notification@0.3.0-beta.1, @spfn/monitor@0.3.0-beta.1, @spfn/i18n@0.3.0-beta.1, @spfn/migrate@0.3.0-beta.1, @spfn/pages-next@0.2.0-beta.1, @spfn/pages@0.2.0-beta.1, @spfn/signing@0.2.0-alpha.1, @spfn/workflow@0.3.0-alpha.1] - 2026-11-18
 
 **Upgrading.** 0.3 and 0.4 packages cannot be mixed: upgrade every `@spfn/*` package and `spfn`
