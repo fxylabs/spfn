@@ -13,7 +13,7 @@
  */
 
 import { Type } from '@sinclair/typebox';
-import { expect, vi } from 'vitest';
+import { expect, onTestFinished, vi } from 'vitest';
 import { createSSEClient } from '../../event/sse/client';
 import { FakeEventSource, type FakeConnected } from '../../event/sse/__tests__/fake-event-source';
 import { createStateClient } from '../client';
@@ -74,6 +74,27 @@ export interface RpcCall
 
 type Responder = (input: Record<string, any>) => unknown;
 
+type RouteCalls = Record<string, { call(input: object): Promise<unknown> }>;
+
+/**
+ * The route calls of one client: `open` started and not settled, `held` of
+ * those whose answer is a `deferred()` the row has not settled yet.
+ */
+interface CallCount
+{
+    open: number;
+    held: number;
+}
+
+/** The call counts of every harness the running row made; each leaves when its row finishes. */
+const live = new Set<CallCount>();
+
+/** Bumped whenever a route call starts or settles anywhere, so `settle()` sees a turn that changed nothing. */
+let activity = 0;
+
+/** The promises `deferred()` made: an answer the row holds open on purpose, until it settles it. */
+const heldAnswers = new WeakSet<Promise<unknown>>();
+
 export interface Harness
 {
     client: StateClient<FixtureStates>;
@@ -90,14 +111,31 @@ function inputOf(url: string, init: RequestInit): Record<string, any>
     return JSON.parse(query ?? (init.body as string) ?? '{}');
 }
 
-function fakeFetch(calls: RpcCall[], responders: Record<string, Responder>): typeof fetch
+/** A held answer does not count as in flight until the row settles it. */
+function holdWhileUnsettled(answer: unknown, count: CallCount): void
+{
+    if (heldAnswers.has(answer as Promise<unknown>))
+    {
+        count.held++;
+        const release = () =>
+        {
+            count.held--;
+            activity++;
+        };
+        (answer as Promise<unknown>).then(release, release);
+    }
+}
+
+function fakeFetch(calls: RpcCall[], responders: Record<string, Responder>, count: CallCount): typeof fetch
 {
     return (async (url: string, init: RequestInit) =>
     {
         const route = new URL(url, 'http://app.test').pathname.split('/').pop()!;
         const input = inputOf(url, init);
         calls.push({ route, input });
-        const body = await responders[route]?.(input) ?? {};
+        const reply = responders[route]?.(input);
+        holdWhileUnsettled(reply, count);
+        const body = await reply ?? {};
         const answer = route === 'getStates' ? { ...body as object, manifest } : body;
 
         return new Response(JSON.stringify(answer), { status: 200, headers: { 'content-type': 'application/json' } });
@@ -142,16 +180,51 @@ export function harness(
     const calls: RpcCall[] = [];
     const all: Record<string, Responder> = { getStates: input => ({ at: at(0), states: servedStates(input.query) }), ...responders };
     const onError = vi.fn();
+    const count: CallCount = { open: 0, held: 0 };
     const { maxReconnectAttempts, acquireToken, ...clientConfig } = config;
     const client = createStateClient<FixtureStates>({
         sse: createSSEClient({ url: 'http://test/stream', reconnectDelay: 10, maxReconnectAttempts, acquireToken }),
-        api: { baseUrl: '/api/rpc', fetch: fakeFetch(calls, all) },
+        api: { baseUrl: '/api/rpc', fetch: fakeFetch(calls, all, count) },
         onError,
         retryDelay: 10,
         ...clientConfig,
     });
+    countCalls(client, count);
+    live.add(count);
+    onTestFinished(() =>
+    {
+        live.delete(count);
+    });
 
     return { client, calls, responders: all, onError };
+}
+
+/**
+ * Count each route call of `client` from `.call()` until it settles. Not in
+ * the fake `fetch`: `createApi` first awaits `import('next/headers.js')`, and
+ * for the second of two calls started in one tick vitest's module runner
+ * answers that import over an RPC to its main process — a real round trip of
+ * any length, before `fetch` is reached. The client keeps its route calls in
+ * its private `api`; the count wraps them there.
+ */
+function countCalls(client: StateClient<FixtureStates>, count: CallCount): void
+{
+    const target = client as unknown as { api: RouteCalls };
+    target.api = new Proxy(target.api, {
+        get: (routes, route: string) => ({
+            call: (input: object) =>
+            {
+                count.open++;
+                activity++;
+
+                return routes[route].call(input).finally(() =>
+                {
+                    count.open--;
+                    activity++;
+                });
+            },
+        }),
+    });
 }
 
 /** `connected` as the server answers `query`: a keyed state whose key fields it lacks denied, the rest served. */
@@ -168,16 +241,22 @@ export function servedBy(query: Record<string, string>): Required<FakeConnected>
     };
 }
 
-/** A promise and the function that resolves it. */
-export function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void }
+/**
+ * A promise and the functions that settle it. A responder that returns it
+ * holds its call open: `settle()` does not wait for it until it is settled.
+ */
+export function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void; reject: (error: unknown) => void }
 {
     let resolve!: (value: T) => void;
-    const promise = new Promise<T>(done =>
+    let reject!: (error: unknown) => void;
+    const promise = new Promise<T>((done, fail) =>
     {
         resolve = done;
+        reject = fail;
     });
+    heldAnswers.add(promise);
 
-    return { promise, resolve };
+    return { promise, resolve, reject };
 }
 
 /** The routes called so far, in order. */
@@ -186,13 +265,39 @@ export function routes(h: Harness): string[]
     return h.calls.map(call => call.route);
 }
 
-/** Let queued microtasks and the fake fetch's promises settle; under fake timers, without moving the clock. */
+/** One macrotask turn: every queued microtask runs first. Under fake timers the clock does not move. */
+function turn(): Promise<unknown>
+{
+    return vi.isFakeTimers() ? vi.advanceTimersByTimeAsync(0) : new Promise(resolve => setTimeout(resolve, 0));
+}
+
+/** Whether a client of the running row has a route call in flight that no `deferred()` holds. */
+function callsInFlight(): boolean
+{
+    return [...live].some(count => count.open > count.held);
+}
+
+/**
+ * Wait until the clients of the running row are quiescent: every route call
+ * they started has settled — except one whose answer is a `deferred()` the row
+ * has not settled, which the row holds on purpose — and a whole turn has then
+ * passed in which no call started or settled. That is sufficient because
+ * between route calls the client runs only synchronous code and microtasks
+ * (the batched sync, the stream open, applying an answer), and a turn runs
+ * every queued microtask: what the last answer set off has run, and any call
+ * it started was seen. Real timers (`retryDelay`, the SSE `reconnectDelay`)
+ * are not waited for; under fake timers the clock does not move.
+ */
 export async function settle(): Promise<void>
 {
-    for (let i = 0; i < 5; i++)
+    let seen: number;
+
+    do
     {
-        await (vi.isFakeTimers() ? vi.advanceTimersByTimeAsync(0) : new Promise(resolve => setTimeout(resolve, 0)));
+        seen = activity;
+        await turn();
     }
+    while (activity !== seen || callsInFlight());
 }
 
 /**
