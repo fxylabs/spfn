@@ -190,6 +190,28 @@ function readDist(name: string): string | undefined
     return existsSync(path) ? readFileSync(path, 'utf8') : undefined;
 }
 
+function declaresRegistry(declarations: string): boolean
+{
+    return /^(?:export\s+)?(?:declare\s+)?(?:interface|type)\s+I18nTypeRegistry\b/m.test(declarations);
+}
+
+/** Names in `export { … }` and `export type { … }` clauses, either spelling. */
+function exportedNames(declarations: string): string[]
+{
+    return [...declarations.matchAll(/^export (?:type )?\{([^}]*)\}/gm)]
+        .flatMap((clause) => clause[1].split(','))
+        .map((name) => name.trim().replace(/^type\s+/, ''));
+}
+
+/** Names in `import { … }` and `import type { … }` clauses from one module, either spelling. */
+function importedNames(declarations: string, module: string): string[]
+{
+    return [...declarations.matchAll(/^import (?:type )?\{([^}]*)\} from '([^']+)'/gm)]
+        .filter((clause) => clause[2] === module)
+        .flatMap((clause) => clause[1].split(','))
+        .map((name) => name.trim().replace(/^type\s+/, ''));
+}
+
 describe('published type surface', () =>
 {
     // These assertions describe dist, so they stand down before a build.
@@ -206,11 +228,11 @@ describe('published type surface', () =>
 
         // An inlined copy of the registry would be a separate declaration, and
         // an application's `declare module '@spfn/i18n'` would never reach it.
-        expect(index).toContain('type I18nTypeRegistry');
-        expect(client).toContain(`from './index.js'`);
-        expect(client).not.toContain('interface I18nTypeRegistry');
-        expect(client).toMatch(/import \{[^}]*\bQualifiedKey\b[^}]*\} from '\.\/index\.js'/);
-        expect(server).toContain(`from './index.js'`);
-        expect(server).not.toContain('interface I18nTypeRegistry');
+        expect(declaresRegistry(index)).toBe(true);
+        expect(exportedNames(index)).toContain('I18nTypeRegistry');
+        expect(declaresRegistry(client)).toBe(false);
+        expect(importedNames(client, './index.js')).toContain('QualifiedKey');
+        expect(declaresRegistry(server)).toBe(false);
+        expect(importedNames(server, './index.js')).toContain('QualifiedKey');
     });
 });
