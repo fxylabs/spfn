@@ -77,8 +77,16 @@ export function locateLoadError(error: unknown, fileAt: ProjectFileAt): unknown
         return error;
     }
 
-    error.message = rewrite(error.message, fileAt);
-    error.stack = error.stack === undefined ? undefined : rewrite(error.stack, fileAt);
+    // Any code can set `message` and `stack`; one that is not a string is left as it is.
+    if (typeof error.message === 'string')
+    {
+        error.message = rewrite(error.message, fileAt);
+    }
+
+    if (typeof error.stack === 'string')
+    {
+        error.stack = rewrite(error.stack, fileAt);
+    }
 
     return error;
 }
@@ -98,8 +106,10 @@ export function raisedAt<E extends Error>(error: E, file: string, line?: number,
  */
 function locationLines(error: Error): string[]
 {
-    const stack = error.stack ?? '';
-    const messageAt = error.message === '' ? -1 : stack.indexOf(error.message);
+    // Any code can set `stack` and `message`; one that is not a string is none.
+    const stack = typeof error.stack === 'string' ? error.stack : '';
+    const message = typeof error.message === 'string' ? error.message : '';
+    const messageAt = message === '' ? -1 : stack.indexOf(message);
     const isFrame = (line: string): boolean => /^\s+at /.test(line);
 
     if (messageAt === -1)
@@ -107,7 +117,7 @@ function locationLines(error: Error): string[]
         return stack.split('\n').filter(isFrame);
     }
 
-    return [stack.slice(0, messageAt).split('\n')[0], ...stack.slice(messageAt + error.message.length).split('\n').filter(isFrame)];
+    return [stack.slice(0, messageAt).split('\n')[0], ...stack.slice(messageAt + message.length).split('\n').filter(isFrame)];
 }
 
 /** The first place under `root`, outside `node_modules`, that one of `lines` names, relative to `root`. */

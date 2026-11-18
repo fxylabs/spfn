@@ -35,6 +35,8 @@
  * | R21 | a custom generator file using `__dirname`                            | a configured generator skipped with a log line      |
  * | R30 | a package generator misspelt, one whose package is not installed,    | a generator the config names skipped with a warning |
  * |     | one whose `/codegen` throws on import, one whose factory throws      | ("not installed"), the run exiting 0                |
+ * | R31 | a package `/codegen`, a factory and a custom generator file each     | a TypeError from reading the stack replacing the    |
+ * |     | throwing an error whose `stack` is a number or an object             | failure's own message                               |
  * | R24 | a route module failing to read `src/server/data/missing.txt`         | the file named in the message taken for the origin  |
  * | R25 | an import of a name the module does not export                       | V8's source line above the message not read         |
  * | R26 | `with { type: 'javascript' }` and an unknown attribute on JSON;       | the hook's JSON loading dropping Node's attribute   |
@@ -511,6 +513,26 @@ describe('codegen loader - .spfnrc.ts', () =>
             /^Failed to load generator throwing-gen:gen from node_modules\/throwing-gen\/codegen\.js: codegen module boom$/,
         );
         await expect(create('factory-gen:gen')).rejects.toThrow(/^Failed to load generator factory-gen:gen: factory boom$/);
+    });
+
+    it('R31 a generator failing with an error whose stack is not a string reports its message, at no origin', async () =>
+    {
+        const create = (name: string): Promise<unknown> => createGeneratorsFromConfig({ generators: [{ name, routerPath: './src/server/router.ts' }] }, appDir);
+
+        write('node_modules/numeric-stack/package.json', JSON.stringify({ name: 'numeric-stack', type: 'module', exports: { './codegen': './codegen.js' } }));
+        write('node_modules/numeric-stack/codegen.js', 'const error = new Error(\'numeric stack boom\');\nerror.stack = 42;\nthrow error;\n');
+        write('node_modules/object-stack/package.json', JSON.stringify({ name: 'object-stack', type: 'module', exports: { './codegen': './codegen.js' } }));
+        write('node_modules/object-stack/codegen.js', 'export const generators = { gen: () => { throw Object.assign(new Error(\'object stack boom\'), { stack: {} }); } };\n');
+
+        await expect(create('numeric-stack:gen')).rejects.toThrow(
+            /^Failed to load generator numeric-stack:gen from node_modules\/numeric-stack\/codegen\.js: numeric stack boom$/,
+        );
+        await expect(create('object-stack:gen')).rejects.toThrow(/^Failed to load generator object-stack:gen: object stack boom$/);
+
+        write('src/generators/numeric-stack.ts', 'const error = new Error(\'project stack boom\');\nObject.assign(error, { stack: 42 });\nthrow error;\n');
+
+        await expect(createGeneratorsFromConfig({ generators: [{ path: './src/generators/numeric-stack.ts' }] }, appDir))
+            .rejects.toThrow(/^Failed to load src\/generators\/numeric-stack\.ts: project stack boom$/);
     });
 
     it('R10 loadCodegenConfig returns the config itself, synchronously, from a .spfnrc.ts importing @spfn/core/codegen', () =>
