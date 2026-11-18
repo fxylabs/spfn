@@ -26,9 +26,11 @@
  *   `with { type: 'json' }` load). Any other extension goes down the chain.
  * - **Transform.** TypeScript's `transpileModule`, file by file, with the
  *   options of the governing tsconfig that change what runs — decorators,
- *   class fields, JSX — and ESM output forced (`./compiler-options`). Its source
- *   map is kept while the load runs, so a stack frame inside a project file can
- *   be named by its own line (`originalLine`).
+ *   class fields, JSX — and ESM output forced (`./compiler-options`). A syntax
+ *   error it finds is thrown naming the file, line and column. Its source map is
+ *   kept while the load runs, so a stack frame inside a project file can be
+ *   named by its own line (`originalLine`), and a failed load's error by the
+ *   source's (`./errors`).
  * - **Generation tag.** Appended to files under the project root and outside
  *   `node_modules` only. A workspace package's source beside the app is
  *   transformed but not tagged: like a package, it is evaluated once.
@@ -148,6 +150,14 @@ export function closeGeneration(token: string): string[]
     return touched;
 }
 
+/** A file of a running load, by the URL it was given, and the source map of its transform (`./errors`). */
+export function projectFileAt(url: string): { file: string; sourceMap?: SourceMap } | undefined
+{
+    const file = owned.get(url);
+
+    return file === undefined ? undefined : { file: file.file, sourceMap: sourceMaps.get(url) };
+}
+
 /** The line a frame of a transformed project file stands for in its source, while its load runs. */
 export function originalLine(url: string, line: number, column: number): number
 {
@@ -245,6 +255,27 @@ function unresolvedAlias(specifier: string, parentURL: string | undefined, match
     );
 
     return Object.assign(error, { code: 'ERR_MODULE_NOT_FOUND' });
+}
+
+/**
+ * A relative or absolute specifier the chain did not resolve either, worded as
+ * Node words it but naming the specifier as written before the importer, so
+ * the importer is the first project file the message names.
+ */
+function unresolvedPath(specifier: string, parentURL: string | undefined, error: unknown): unknown
+{
+    if ((error as { code?: string } | null)?.code !== 'ERR_MODULE_NOT_FOUND')
+    {
+        return error;
+    }
+
+    const from = parentURL?.startsWith('file:') ? fileURLToPath(parentURL) : String(parentURL);
+
+    return Object.assign(
+        new Error(`Cannot find module '${specifier}' imported from ${from}: no file by that name, with a JavaScript or `
+            + 'TypeScript extension, or as a directory\'s index'),
+        { code: 'ERR_MODULE_NOT_FOUND' },
+    );
 }
 
 function chainResolves(
@@ -480,7 +511,19 @@ export function resolveHook(specifier: string, context: ResolveContext, nextReso
 
     const file = sourceFile(path);
 
-    return file === undefined ? nextResolve(specifier, context) : own(file, token, context, nextResolve, tokenOf(specifier) !== undefined);
+    if (file !== undefined)
+    {
+        return own(file, token, context, nextResolve, tokenOf(specifier) !== undefined);
+    }
+
+    const chained = chainResolves(specifier, context, nextResolve);
+
+    if ('error' in chained)
+    {
+        throw unresolvedPath(specifier, context.parentURL, chained.error);
+    }
+
+    return chained.result;
 }
 
 /** The compiler options of the tsconfig that governs `file`, read once per directory per load. */
@@ -504,8 +547,15 @@ const TRANSFORMED = new Set(['.ts', '.tsx', '.mts', '.jsx']);
  * esbuild bundles it for `spfn build`. Node's own JSON module would need
  * `with { type: 'json' }` and has only the default; here both forms load.
  */
-function jsonModule(source: string): string
+function jsonModule(file: string, source: string): string
 {
+    const problem = jsonProblem(source);
+
+    if (problem !== undefined)
+    {
+        throw new SyntaxError(`${file}: ${problem}`);
+    }
+
     const value: unknown = JSON.parse(source);
     const keys = value !== null && typeof value === 'object' && !Array.isArray(value) ? Object.keys(value) : [];
     const named = keys
@@ -515,13 +565,36 @@ function jsonModule(source: string): string
     return [`const data = JSON.parse(${JSON.stringify(source)});`, 'export default data;', ...named].join('\n');
 }
 
+/** Why `source` is not JSON, or undefined when it is. */
+function jsonProblem(source: string): string | undefined
+{
+    try
+    {
+        JSON.parse(source);
+
+        return undefined;
+    }
+    catch (error)
+    {
+        return (error as Error).message;
+    }
+}
+
+/** A syntax error TypeScript found, naming the file, line and column: Node would name none of them. */
+function syntaxError(compiler: typeof ts, file: string, diagnostic: ts.Diagnostic): SyntaxError
+{
+    const { line, character } = diagnostic.file!.getLineAndCharacterOfPosition(diagnostic.start ?? 0);
+
+    return new SyntaxError(`${file}:${line + 1}:${character + 1} ${compiler.flattenDiagnosticMessageText(diagnostic.messageText, ' ')}`);
+}
+
 function transform(url: string, { file, token }: OwnedFile): string
 {
     const source = readFileSync(file, 'utf8');
 
     if (extname(file) === '.json')
     {
-        return jsonModule(source);
+        return jsonModule(file, source);
     }
 
     if (!TRANSFORMED.has(extname(file)))
@@ -533,7 +606,14 @@ function transform(url: string, { file, token }: OwnedFile): string
     const output = compiler.transpileModule(source, {
         fileName: file,
         compilerOptions: transpileOptions(compiler, projectOptions(generations.get(token)!, file)),
+        reportDiagnostics: true,
     });
+    const error = output.diagnostics?.find(diagnostic => diagnostic.category === compiler.DiagnosticCategory.Error && diagnostic.file);
+
+    if (error !== undefined)
+    {
+        throw syntaxError(compiler, file, error);
+    }
 
     if (output.sourceMapText !== undefined)
     {

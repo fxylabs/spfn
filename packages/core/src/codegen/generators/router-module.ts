@@ -26,10 +26,12 @@
  * generating process's, pinned where generation begins (`../core/node-env`).
  */
 
+import { realpathSync } from 'fs';
 import { relative } from 'path';
 import type { RouteDef, Router } from '@spfn/core/route';
 import { logger } from '@spfn/core/logger';
 import { codegenSecondCopy } from '../../module-evaluation';
+import { projectOrigin } from '../loader/errors';
 import { importProjectModule, newGeneration, type ProjectLoad } from '../loader/register';
 import { observeEnvironmentReads, type EnvironmentRead } from './environment-probe';
 
@@ -181,6 +183,20 @@ function checkOneCopy(load: RouterModuleLoad): void
 }
 
 /**
+ * The caller's error for a load that failed: naming the router, and the project
+ * file and source line where the load failed, with the load's own error — its
+ * stack naming the project's files as written — as its `cause`.
+ */
+function loadFailure(load: RouterModuleLoad, error: unknown): Error
+{
+    const origin = projectOrigin(error, realpathSync(load.cwd));
+    const where = origin === undefined ? '' : ` (at ${origin})`;
+    const message = `Failed to load ${relative(load.cwd, load.absoluteRouterPath)}${where}: ${describeFailure(error, load.subject)}`;
+
+    return Object.assign(load.fail(message), { cause: error });
+}
+
+/**
  * Import the router module, or throw the caller's error describing why not.
  */
 export async function loadRouterModule(load: RouterModuleLoad): Promise<LoadedRouterModule>
@@ -191,9 +207,7 @@ export async function loadRouterModule(load: RouterModuleLoad): Promise<LoadedRo
 
     if (!outcome.ok)
     {
-        throw load.fail(
-            `Failed to load ${relative(load.cwd, load.absoluteRouterPath)}: ${describeFailure(outcome.error, load.subject)}`,
-        );
+        throw loadFailure(load, outcome.error);
     }
 
     checkOneCopy(load);

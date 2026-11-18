@@ -27,6 +27,10 @@
  * |     | legacy call                                                          | ones: the router throws at load                     |
  * | R14 | `useDefineForClassFields: false`, a field declared over a value the  | define semantics resetting the field to undefined   |
  * |     | base constructor sets                                                |                                                     |
+ * | R16 | a route module whose decorator throws at module scope, below type    | a line of the transform, the generation query,      |
+ * |     | lines                                                                | helper frames, the router named as what failed      |
+ * | R17 | a TypeScript syntax error in a route module                          | `Unexpected token` naming no file                   |
+ * | R18 | a route module importing a file that does not exist                  | the missing path named before the importer          |
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -269,6 +273,65 @@ describe('codegen loader - the tsconfig\'s runtime options', () =>
             + 'export const appRouter = defineRouter({ child });\n');
 
         expect(pathsOf(await generate())).toEqual(['/base-set']);
+    });
+});
+
+describe('codegen loader - a failed load names the file and line of the source', () =>
+{
+    /** The generation's error, and the stack of the load error it carries. */
+    async function failure(): Promise<{ message: string; stack: string }>
+    {
+        const error = await generate().then(() => undefined, (thrown: Error) => thrown);
+
+        return { message: error?.message ?? '', stack: String((error?.cause as Error | undefined)?.stack) };
+    }
+
+    it('R16 a decorator throwing at module scope is named at its source line, without the query or helper frames', async () =>
+    {
+        write('src/server/routes/boom.ts', 'import type { RouteDef } from \'@spfn/core/route\';\n'
+            + 'type Unused = RouteDef<any>;\n'
+            + 'function tag(value: unknown, context: unknown): void { throw new Error(\'boom in a decorator\'); }\n'
+            + '@tag class Tagged {}\n'
+            + 'export const tagged = Tagged;\n');
+        write('src/server/router.ts', 'import { defineRouter } from \'@spfn/core/route\';\n'
+            + 'import { tagged } from \'./routes/boom\';\n'
+            + 'export const appRouter = defineRouter({ tagged });\n');
+
+        const { message, stack } = await failure();
+        const boom = realpathSync(join(appDir, 'src/server/routes/boom.ts'));
+
+        expect(message).toMatch(/^Failed to load src\/server\/router\.ts \(at src\/server\/routes\/boom\.ts:3:\d+\): boom in a decorator/);
+        expect(stack.split('\n')[1]).toMatch(new RegExp(`^\\s+at tag \\(${boom}:3:\\d+\\)$`));
+        expect(stack).toContain(`${boom}:4:`);
+        expect(stack).not.toContain('spfn-gen');
+        expect(stack).not.toContain('__esDecorate');
+    });
+
+    it('R17 a TypeScript syntax error names the file, line and column', async () =>
+    {
+        write('src/server/routes/broken.ts', 'import { route } from \'@spfn/core/route\';\n'
+            + '\n'
+            + 'export const broken = ;\n');
+        write('src/server/router.ts', 'import { defineRouter } from \'@spfn/core/route\';\n'
+            + 'import { broken } from \'./routes/broken\';\n'
+            + 'export const appRouter = defineRouter({ broken });\n');
+
+        const { message } = await failure();
+
+        expect(message).toMatch(/^Failed to load src\/server\/router\.ts \(at src\/server\/routes\/broken\.ts:3:23\): .*broken\.ts:3:23 Expression expected/);
+    });
+
+    it('R18 a missing import names the importer', async () =>
+    {
+        write('src/server/routes/needs.ts', 'import { later } from \'../lib/later\';\n'
+            + 'export const needs = later;\n');
+        write('src/server/router.ts', 'import { defineRouter } from \'@spfn/core/route\';\n'
+            + 'import { needs } from \'./routes/needs\';\n'
+            + 'export const appRouter = defineRouter({ needs });\n');
+
+        const { message } = await failure();
+
+        expect(message).toMatch(/^Failed to load src\/server\/router\.ts \(at src\/server\/routes\/needs\.ts\): Cannot find module '\.\.\/lib\/later' imported from /);
     });
 });
 
