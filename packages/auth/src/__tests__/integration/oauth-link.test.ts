@@ -627,6 +627,9 @@ describe.skipIf(!dbAvailable)('Battle.net sign-in and OAuth link/unlink (#154)',
                 metadata: requestCtx.metadata,
             } as unknown as ResponseInterceptorContext;
 
+            // The interceptor dates the cookie's name and the expectation dates it
+            // again after; one frozen second serves both.
+            vi.useFakeTimers({ toFake: ['Date'] });
             await decidedResponse(responseCtx, [oauthLinkInterceptor.response]);
 
             const { nonce, startId } = requestCtx.body as { nonce: string; startId: string };
