@@ -40,7 +40,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ConnectionStatus } from '../client';
 import { UnauthorizedError } from '../../errors/http-errors';
-import { at, FakeEventSource, harness, initialOf, opened, servedStates, settle } from './client-harness';
+import { at, deferred, FakeEventSource, harness, initialOf, opened, servedStates, settle } from './client-harness';
 
 // The api client reads the request's cookies and host on the server-side arm; there is no request here.
 vi.mock('next/headers', () => ({
@@ -393,26 +393,21 @@ describe('state client — connection status', () =>
 
     it('S19 retry() while a failing first read is in flight: onError once, one retry chain', async () =>
     {
-        let reject!: () => void;
+        const first = deferred<unknown>();
         const times: number[] = [];
         const h = harness({
             getStates: () =>
             {
                 times.push(performance.now());
 
-                return times.length === 1
-                    ? new Promise((_, fail) =>
-                    {
-                        reject = () => fail(new TypeError('fetch failed'));
-                    })
-                    : Promise.reject(new TypeError('fetch failed'));
+                return times.length === 1 ? first.promise : Promise.reject(new TypeError('fetch failed'));
             },
         }, { retryDelay: 40 });
         h.client.subscribe('consent', () => undefined);
         await settle();
 
         h.client.retry();
-        reject();
+        first.reject(new TypeError('fetch failed'));
         await settle();
         expect(h.onError).toHaveBeenCalledTimes(1);
 

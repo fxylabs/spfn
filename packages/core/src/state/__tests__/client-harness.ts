@@ -12,8 +12,9 @@
  * - `seat`: keyed `{ workspaceId, teamId }`, no write — a key of two fields.
  */
 
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { Type } from '@sinclair/typebox';
-import { expect, vi } from 'vitest';
+import { aroundEach, expect, onTestFailed, onTestFinished, vi } from 'vitest';
 import { createSSEClient } from '../../event/sse/client';
 import { FakeEventSource, type FakeConnected } from '../../event/sse/__tests__/fake-event-source';
 import { createStateClient } from '../client';
@@ -74,6 +75,50 @@ export interface RpcCall
 
 type Responder = (input: Record<string, any>) => unknown;
 
+type RouteCalls = Record<string, { call(input: object): Promise<unknown> }>;
+
+/**
+ * One harness's client as `settle()` sees it: by route, its calls `open`
+ * (started, not settled) and `held` (of those, answered by a `deferred()` the
+ * row has not settled yet); `activity` is bumped whenever one of its calls
+ * starts or settles.
+ */
+interface Tracked
+{
+    open: Map<string, number>;
+    held: Map<string, number>;
+    activity: number;
+}
+
+/**
+ * What a row's harnesses made, one of each per `harness()`; whether a
+ * `settle()` is waiting on them, and whether the row has finished.
+ */
+interface Row
+{
+    clients: StateClient<FixtureStates>[];
+    tracked: Tracked[];
+    waiting: boolean;
+    finished: boolean;
+}
+
+/**
+ * Each row runs — its `beforeEach` hooks, its body, its `afterEach` hooks —
+ * with a slot of its own, which its first `harness()` fills. A helper finds
+ * the row that called it through the caller's own async chain, wherever it
+ * was called from: a body that a timeout abandoned still finds its own,
+ * ended row, never the next one. Registered for every file that imports the
+ * harness.
+ */
+const rowSlots = new AsyncLocalStorage<{ row?: Row }>();
+
+aroundEach(runTest => rowSlots.run({}, runTest));
+
+const ROW_ENDED = 'The row that called this has ended (a timeout, most often): the rest of its body does not run.';
+
+/** The promises `deferred()` made: an answer the row holds open on purpose, until it settles it. */
+const heldAnswers = new WeakSet<Promise<unknown>>();
+
 export interface Harness
 {
     client: StateClient<FixtureStates>;
@@ -90,14 +135,36 @@ function inputOf(url: string, init: RequestInit): Record<string, any>
     return JSON.parse(query ?? (init.body as string) ?? '{}');
 }
 
-function fakeFetch(calls: RpcCall[], responders: Record<string, Responder>): typeof fetch
+function add(counts: Map<string, number>, route: string, by: number): void
+{
+    counts.set(route, (counts.get(route) ?? 0) + by);
+}
+
+/** A held answer does not count as in flight until the row settles it. */
+function holdWhileUnsettled(answer: unknown, route: string, tracked: Tracked): void
+{
+    if (heldAnswers.has(answer as Promise<unknown>))
+    {
+        add(tracked.held, route, 1);
+        const release = () =>
+        {
+            add(tracked.held, route, -1);
+            tracked.activity++;
+        };
+        (answer as Promise<unknown>).then(release, release);
+    }
+}
+
+function fakeFetch(calls: RpcCall[], responders: Record<string, Responder>, tracked: Tracked): typeof fetch
 {
     return (async (url: string, init: RequestInit) =>
     {
         const route = new URL(url, 'http://app.test').pathname.split('/').pop()!;
         const input = inputOf(url, init);
         calls.push({ route, input });
-        const body = await responders[route]?.(input) ?? {};
+        const reply = responders[route]?.(input);
+        holdWhileUnsettled(reply, route, tracked);
+        const body = await reply ?? {};
         const answer = route === 'getStates' ? { ...body as object, manifest } : body;
 
         return new Response(JSON.stringify(answer), { status: 200, headers: { 'content-type': 'application/json' } });
@@ -142,16 +209,166 @@ export function harness(
     const calls: RpcCall[] = [];
     const all: Record<string, Responder> = { getStates: input => ({ at: at(0), states: servedStates(input.query) }), ...responders };
     const onError = vi.fn();
+    const tracked: Tracked = { open: new Map(), held: new Map(), activity: 0 };
     const { maxReconnectAttempts, acquireToken, ...clientConfig } = config;
-    const client = createStateClient<FixtureStates>({
+    const row = callersRow();
+    const created = createStateClient<FixtureStates>({
         sse: createSSEClient({ url: 'http://test/stream', reconnectDelay: 10, maxReconnectAttempts, acquireToken }),
-        api: { baseUrl: '/api/rpc', fetch: fakeFetch(calls, all) },
+        api: { baseUrl: '/api/rpc', fetch: fakeFetch(calls, all, tracked) },
         onError,
         retryDelay: 10,
         ...clientConfig,
     });
+    countCalls(created, tracked);
+    const client = ownedBy(row, created);
+    row.clients.push(client);
+    row.tracked.push(tracked);
 
     return { client, calls, responders: all, onError };
+}
+
+/** The calling row's slot; outside a row there is none. */
+function callersSlot(helper: string): { row?: Row }
+{
+    const slot = rowSlots.getStore();
+
+    if (!slot)
+    {
+        throw new Error(`${helper} runs only inside a row — its body or its beforeEach/afterEach — the row its clients belong to.`);
+    }
+
+    return slot;
+}
+
+/** The calling row, made at its first `harness()`; a body whose row has ended stops here. */
+function callersRow(): Row
+{
+    const slot = callersSlot('harness()');
+
+    if (!slot.row)
+    {
+        slot.row = { clients: [], tracked: [], waiting: false, finished: false };
+        endWithTheRow(slot.row);
+    }
+
+    if (slot.row.finished)
+    {
+        throw new Error(ROW_ENDED);
+    }
+
+    return slot.row;
+}
+
+/**
+ * When the row finishes, close every client it made: one the row did not
+ * close — a row that failed early, or never meant to — would keep its retry
+ * timer and stream running into the next row. `close()` may run twice: a
+ * second call only clears what is already cleared. When the row failed with a
+ * `settle()` waiting (a timeout, most often), the failure also says what it
+ * was waiting for.
+ */
+function endWithTheRow(row: Row): void
+{
+    let waitedFor: string | undefined;
+    onTestFinished(() =>
+    {
+        waitedFor = row.waiting ? whatSettleWaitsFor(row) : undefined;
+        row.finished = true;
+        row.clients.forEach(client => client.close());
+    });
+    onTestFailed(() =>
+    {
+        if (waitedFor)
+        {
+            throw new Error(waitedFor);
+        }
+    });
+}
+
+function whatSettleWaitsFor(row: Row): string
+{
+    const unheld = [...unheldCalls(row)].map(([route, n]) => `${route} ×${n}`);
+
+    if (unheld.length === 0)
+    {
+        return 'settle() was still waiting when the row ended: no route call was in flight, but the row\'s clients '
+            + 'kept starting and settling calls every turn. A client that keeps calling by itself (a retry with no '
+            + 'delay) is never quiescent.';
+    }
+
+    return `settle() was still waiting when the row ended, on route calls in flight that no deferred() holds: ${unheld.join(', ')}. `
+        + 'A responder that holds its answer open on purpose must return a deferred(); settle() waits for every other answer.';
+}
+
+/**
+ * What a client does that starts work, or listens for it, once its row has
+ * ended: a read, a write, a stream open, a restart, a connection listener.
+ * Left open: `close()`, which the row's own end and the harness's auto-close
+ * call after the row has ended; the pure reads `current()` and
+ * `connection()`; and the unsubscribes handed out before the end, which on a
+ * closed client only close what is already closed.
+ */
+const STARTS_WORK = new Set(['get', 'snapshot', 'subscribe', 'write', 'subscribeConnection', 'retry']);
+
+/**
+ * The client as the row sees it: `close()` is not terminal — a later
+ * `subscribe()` reopens the stream, by design — so once the row has ended,
+ * every call in `STARTS_WORK` throws, as `settle()` and `harness()` do, and
+ * a body that a timeout abandoned cannot open a stream in the next row.
+ * Methods run on the client itself, so its own calls never pass the guard.
+ */
+function ownedBy(row: Row, client: StateClient<FixtureStates>): StateClient<FixtureStates>
+{
+    return new Proxy(client, {
+        get: (target, name, receiver) =>
+        {
+            const value = Reflect.get(target, name, receiver);
+
+            if (typeof value !== 'function')
+            {
+                return value;
+            }
+
+            return (...args: unknown[]) =>
+            {
+                if (row.finished && STARTS_WORK.has(name as string))
+                {
+                    throw new Error(ROW_ENDED);
+                }
+
+                return value.apply(target, args);
+            };
+        },
+    });
+}
+
+/**
+ * Count each route call of `client` from `.call()` until it settles. Not in
+ * the fake `fetch`: `createApi` first awaits `import('next/headers.js')`, and
+ * for the second of two calls started in one tick vitest's module runner
+ * answers that import over an RPC to its main process — a real round trip of
+ * any length, before `fetch` is reached. The client keeps its route calls in
+ * its private `api`; the count wraps them there.
+ */
+function countCalls(client: StateClient<FixtureStates>, tracked: Tracked): void
+{
+    // A renamed field fails here; a second call path that bypasses `this.api` would silently go uncounted.
+    const target = client as unknown as { api: RouteCalls };
+    target.api = new Proxy(target.api, {
+        get: (routes, route: string) => ({
+            call: (input: object) =>
+            {
+                add(tracked.open, route, 1);
+                tracked.activity++;
+
+                return routes[route].call(input).finally(() =>
+                {
+                    add(tracked.open, route, -1);
+                    tracked.activity++;
+                });
+            },
+        }),
+    });
 }
 
 /** `connected` as the server answers `query`: a keyed state whose key fields it lacks denied, the rest served. */
@@ -168,16 +385,22 @@ export function servedBy(query: Record<string, string>): Required<FakeConnected>
     };
 }
 
-/** A promise and the function that resolves it. */
-export function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void }
+/**
+ * A promise and the functions that settle it. A responder that returns it
+ * holds its call open: `settle()` does not wait for it until it is settled.
+ */
+export function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void; reject: (error: unknown) => void }
 {
     let resolve!: (value: T) => void;
-    const promise = new Promise<T>(done =>
+    let reject!: (error: unknown) => void;
+    const promise = new Promise<T>((done, fail) =>
     {
         resolve = done;
+        reject = fail;
     });
+    heldAnswers.add(promise);
 
-    return { promise, resolve };
+    return { promise, resolve, reject };
 }
 
 /** The routes called so far, in order. */
@@ -186,13 +409,83 @@ export function routes(h: Harness): string[]
     return h.calls.map(call => call.route);
 }
 
-/** Let queued microtasks and the fake fetch's promises settle; under fake timers, without moving the clock. */
+/** One macrotask turn: every queued microtask runs first. Under fake timers the clock does not move. */
+function turn(): Promise<unknown>
+{
+    return vi.isFakeTimers() ? vi.advanceTimersByTimeAsync(0) : new Promise(resolve => setTimeout(resolve, 0));
+}
+
+/** The calls of `row`'s clients in flight that no `deferred()` holds, counted by route. */
+function unheldCalls(row: Row): Map<string, number>
+{
+    const unheld = new Map<string, number>();
+    row.tracked.forEach(({ open, held }) => open.forEach((n, route) => add(unheld, route, n - (held.get(route) ?? 0))));
+
+    return new Map([...unheld].filter(([, n]) => n > 0));
+}
+
+function activityOf(row: Row): number
+{
+    return row.tracked.reduce((sum, tracked) => sum + tracked.activity, 0);
+}
+
+/**
+ * Wait until the clients the calling row made are quiescent: every route call
+ * they started has settled — except one whose answer is a `deferred()` the row
+ * has not settled, which the row holds on purpose — and a whole turn has then
+ * passed in which none of their calls started or settled. That is sufficient
+ * because between route calls the client runs only synchronous code and
+ * microtasks (the batched sync, the stream open, applying an answer), and a
+ * turn runs every queued microtask: what the last answer set off has run, and
+ * any call it started was seen. Real timers (`retryDelay`, the SSE
+ * `reconnectDelay`) are not waited for; under fake timers the clock does not
+ * move.
+ *
+ * Only the calling row's clients count, found through the caller's own async
+ * chain: an earlier row's were closed when it finished and were never this
+ * row's to wait for. A row with no harness rejects: there is nothing to wait
+ * for. A row that has ended — a timeout, whether it overtook this wait or an
+ * await before it — rejects, so the abandoned body does not run on into the
+ * next row; when it overtook this wait, the row's failure names what it was
+ * waiting for: the calls in flight, or a client that kept calling.
+ */
 export async function settle(): Promise<void>
 {
-    for (let i = 0; i < 5; i++)
+    const row = harnessedRow();
+    let seen: number;
+    row.waiting = true;
+
+    do
     {
-        await (vi.isFakeTimers() ? vi.advanceTimersByTimeAsync(0) : new Promise(resolve => setTimeout(resolve, 0)));
+        seen = activityOf(row);
+        await turn();
     }
+    while (!row.finished && (activityOf(row) !== seen || unheldCalls(row).size > 0));
+
+    row.waiting = false;
+
+    if (row.finished)
+    {
+        throw new Error(ROW_ENDED);
+    }
+}
+
+/** The calling row, which a `harness()` must have made: with no client, there is nothing to wait for. */
+function harnessedRow(): Row
+{
+    const { row } = callersSlot('settle()');
+
+    if (!row)
+    {
+        throw new Error('settle() found no harness in this row: create the row\'s clients with harness() first; settle() waits only for those.');
+    }
+
+    if (row.finished)
+    {
+        throw new Error(ROW_ENDED);
+    }
+
+    return row;
 }
 
 /**

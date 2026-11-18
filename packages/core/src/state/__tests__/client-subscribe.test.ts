@@ -94,14 +94,23 @@ function holdAfterFirst(): { responder: (input: Record<string, any>) => unknown;
 /** A `getStates` responder answering the first call as the server would, and holding every later read `n` until `release(n, body)`. */
 function heldReads(): { responder: (input: Record<string, any>) => unknown; release: (n: number, body: unknown) => void }
 {
-    const held: Array<(body: unknown) => void> = [];
+    const held: Array<ReturnType<typeof deferred<unknown>>> = [];
     let calls = 0;
 
     return {
-        responder: input => calls++ === 0
-            ? { at: at(0), states: servedStates(input.query) }
-            : new Promise(resolve => held.push(resolve)),
-        release: (n, body) => held[n - 1](body),
+        responder: (input) =>
+        {
+            if (calls++ === 0)
+            {
+                return { at: at(0), states: servedStates(input.query) };
+            }
+
+            const read = deferred<unknown>();
+            held.push(read);
+
+            return read.promise;
+        },
+        release: (n, body) => held[n - 1].resolve(body),
     };
 }
 
@@ -724,20 +733,14 @@ describe('state client — subscription lifecycle', () =>
     it('L27b a second subscribe while the failing first snapshot is in flight: one onError per failure, one retry timer', async () =>
     {
         const timers = vi.spyOn(globalThis, 'setTimeout');
-        const gate = deferred<void>();
-        const h = harness({
-            getStates: async () =>
-            {
-                await gate.promise;
-                throw new TypeError('fetch failed');
-            },
-        }, { retryDelay: 60_000 });
+        const gate = deferred<unknown>();
+        const h = harness({ getStates: () => gate.promise }, { retryDelay: 60_000 });
         h.client.subscribe('consent', () => undefined);
         await settle();                                         // the waiter is set, the read in flight
         h.client.subscribe('runtime', w1, () => undefined);
         await settle();
 
-        gate.resolve();
+        gate.reject(new TypeError('fetch failed'));
         await settle();
 
         expect(h.onError).toHaveBeenCalledTimes(1);
