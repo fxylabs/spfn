@@ -38,10 +38,15 @@
  * | R26 | `with { type: 'javascript' }` and an unknown attribute on JSON;       | the hook's JSON loading dropping Node's attribute   |
  * |     | `with { type: 'json' }` on a TypeScript module                       | checks                                              |
  * | R27 | a JSON file starting with U+FEFF                                     | a byte-order mark Node, tsx and esbuild accept      |
+ * | R28 | watch mode, a missing import in a directory `fs.watch` cannot watch  | the watch failing out of the generation: the        |
+ * |     | (mode 0), then an edit to the route                                  | watcher process ends, nothing regenerates           |
+ * | R29 | a directory watcher reporting an error (EPERM, as Windows does on    | an unhandled 'error' event throwing                 |
+ * |     | deleting it)                                                         |                                                     |
  */
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'fs';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { Logger } from '@spfn/core/logger';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { dirname, join, resolve } from 'path';
 import { createRouteMapGenerator } from '../generators/route-map';
@@ -49,6 +54,7 @@ import { CodegenOrchestrator } from '../core/orchestrator';
 import { createGeneratorsFromConfig, loadCodegenConfig } from '../core/config-loader';
 import { ConditionalRegistrationError } from '../generators/contract-guard';
 import { routerFiles } from '../generators/router-module';
+import { MissingFiles } from '../core/missing-files';
 
 const CORE_PACKAGE = resolve(__dirname, '../../..');
 const OUTPUT_PATH = 'src/generated/route-map.ts';
@@ -494,5 +500,101 @@ describe('codegen loader - .spfnrc.ts', () =>
 
         expect(config).not.toBeInstanceOf(Promise);
         expect(config.generators).toEqual([{ name: '@spfn/core:route-map', routerPath: './src/server/router.ts' }]);
+    });
+});
+
+describe('codegen loader - watch mode', () =>
+{
+    /** Poll for `condition`, calling `again` every half second meanwhile. */
+    async function until(condition: () => boolean, again = (): void => undefined): Promise<void>
+    {
+        const deadline = Date.now() + 10_000;
+
+        for (let poll = 1; !condition(); poll++)
+        {
+            if (Date.now() > deadline)
+            {
+                throw new Error('the watcher did not get there');
+            }
+
+            await new Promise(resolve => setTimeout(resolve, 50));
+
+            if (poll % 10 === 0)
+            {
+                again();
+            }
+        }
+    }
+
+    it('R28 a directory fs.watch cannot watch is warned about and skipped; the watcher still regenerates on an edit', async () =>
+    {
+        const map = join(appDir, OUTPUT_PATH);
+        const warn = vi.spyOn(Logger.prototype, 'warn').mockImplementation(() =>
+        {
+        });
+
+        mkdirSync(join(appDir, 'src/server/locked'), { recursive: true });
+        write('src/server/routes/probe.ts', 'import { route } from \'@spfn/core/route\';\n'
+            + 'import { later } from \'../locked/later\';\n'
+            + 'export const getProbe = route.get(`/probe/${later}`).handler(async () => ({}));\n');
+        write('src/server/router.ts', 'import { defineRouter } from \'@spfn/core/route\';\n'
+            + 'import { getProbe } from \'./routes/probe\';\n'
+            + 'export const appRouter = defineRouter({ getProbe });\n');
+        chmodSync(join(appDir, 'src/server/locked'), 0);
+
+        const generator = createRouteMapGenerator({ name: '@spfn/core:route-map', routerPath: './src/server/router.ts', outputPath: `./${OUTPUT_PATH}` });
+        const orchestrator = new CodegenOrchestrator({ generators: [generator], cwd: appDir });
+        let stopped: unknown;
+
+        try
+        {
+            void orchestrator.watch().catch((error: unknown) => (stopped = error));
+            await until(() => stopped !== undefined || warn.mock.calls.some(([message]) => String(message).includes('locked')));
+
+            expect(stopped).toBeUndefined();
+            expect(warn.mock.calls.map(([message]) => String(message)).join('\n')).toMatch(
+                /Cannot watch src\/server\/locked for .*later.* \(EACCES\): a file created there will not be noticed until another change regenerates/,
+            );
+            expect(existsSync(map)).toBe(false);
+
+            // chokidar reports nothing before its first scan is done, and the
+            // orchestrator does not say when that is: the edit is made again until seen.
+            const edit = (): void => write('src/server/routes/probe.ts', 'import { route } from \'@spfn/core/route\';\n'
+                + 'export const getProbe = route.get(\'/probe/edited\').handler(async () => ({}));\n');
+
+            edit();
+            await until(() => existsSync(map) && pathsOf(readFileSync(map, 'utf-8')).includes('/probe/edited'), edit);
+        }
+        finally
+        {
+            await orchestrator.close();
+            chmodSync(join(appDir, 'src/server/locked'), 0o755);
+            warn.mockRestore();
+        }
+    });
+
+    it('R29 a directory watcher that reports an error is warned about and closed, not thrown', () =>
+    {
+        const warn = vi.spyOn(Logger.prototype, 'warn').mockImplementation(() =>
+        {
+        });
+        const missing = new MissingFiles(appDir, () => undefined);
+
+        try
+        {
+            missing.sync(['src/later.ts']);
+
+            const watchers = (missing as unknown as { watchers: Map<string, NodeJS.EventEmitter> }).watchers;
+            const watcher = watchers.get('.')!;
+
+            expect(() => watcher.emit('error', Object.assign(new Error('operation not permitted'), { code: 'EPERM' }))).not.toThrow();
+            expect(watchers.size).toBe(0);
+            expect(warn.mock.calls.map(([message]) => String(message)).join('\n')).toMatch(/Cannot watch \. for src\/later\.ts \(EPERM\)/);
+        }
+        finally
+        {
+            missing.close();
+            warn.mockRestore();
+        }
     });
 });

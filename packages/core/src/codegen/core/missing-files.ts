@@ -11,10 +11,19 @@
  * `fs.watch`; when anything changes in one, and writes have settled, the paths
  * are checked again: one that now exists is reported, and a directory that
  * appeared on the way to one is watched in its turn.
+ *
+ * Watching is best effort: a directory `fs.watch` refuses (EACCES, ENOSPC at
+ * the inotify limit, ENOENT when it vanished since it was found) or whose
+ * watcher reports an error (EPERM on Windows when it is deleted) is warned
+ * about once and skipped — never thrown into the generation that asked. It is
+ * tried again at the next sync.
  */
 
 import { existsSync, watch, type FSWatcher } from 'fs';
 import { dirname, join } from 'path';
+import { logger } from '@spfn/core/logger';
+
+const missingFilesLogger = logger.child('@spfn/core:codegen');
 
 /** How long a change waits for writes to settle before the paths are checked, as chokidar's `awaitWriteFinish` waits. */
 const SETTLE_MS = 150;
@@ -23,6 +32,7 @@ export class MissingFiles
 {
     private paths = new Set<string>();
     private readonly watchers = new Map<string, FSWatcher>();
+    private readonly warned = new Set<string>();
     private timer?: NodeJS.Timeout;
 
     /** `appeared` is called with a path (relative to `cwd`) once it exists. */
@@ -79,9 +89,45 @@ export class MissingFiles
         {
             if (!this.watchers.has(directory))
             {
-                this.watchers.set(directory, watch(join(this.cwd, directory), () => this.schedule()));
+                this.watchDirectory(directory);
             }
         }
+    }
+
+    private watchDirectory(directory: string): void
+    {
+        try
+        {
+            const watcher = watch(join(this.cwd, directory), () => this.schedule());
+
+            watcher.on('error', error => this.unwatchable(directory, error));
+            this.watchers.set(directory, watcher);
+        }
+        catch (error)
+        {
+            this.unwatchable(directory, error);
+        }
+    }
+
+    /** Stop trying `directory` until the next sync, and say so once. */
+    private unwatchable(directory: string, error: unknown): void
+    {
+        this.watchers.get(directory)?.close();
+        this.watchers.delete(directory);
+
+        if (this.warned.has(directory))
+        {
+            return;
+        }
+
+        const code = (error as NodeJS.ErrnoException | null)?.code ?? String(error);
+        const waiting = [...this.paths].filter(file => this.existingDirectory(file) === directory);
+
+        this.warned.add(directory);
+        missingFilesLogger.warn(
+            `Cannot watch ${directory} for ${waiting.join(', ')} (${code}): a file created there will not be noticed `
+            + 'until another change regenerates.',
+        );
     }
 
     private schedule(): void
