@@ -8,6 +8,12 @@
  * Q1: two observed loads started together, the second settling first, run one
  * after the other and leave the real `process.env` behind (#351 review).
  * Two generations of real apps side by side are loader.test.ts R12.
+ *
+ * Q2: a load started by a timer an earlier, finished load left behind queues
+ * behind the load holding the environment now, rather than running inside it
+ * because it descends from a load that once held it (#351 review round 2). A
+ * load inside the one holding now still runs inside it: the router load of a
+ * varied load, loader.test.ts R6, which deadlocks otherwise.
  */
 
 import { describe, it, expect } from 'vitest';
@@ -100,5 +106,55 @@ describe('environment probe - one environment per process', () =>
 
         expect(events).toEqual(['first starts, proxied: true', 'first released', 'second starts, proxied: true']);
         expect(process.env).toBe(original);
+    });
+
+    it('Q2 a load a finished load left a timer for queues behind the load holding the environment now', async () =>
+    {
+        const events: string[] = [];
+        let fire = (): void => undefined;
+        const fired = new Promise<void>(resolve => (fire = resolve));
+        let armed = (): void => undefined;
+        const timerRan = new Promise<void>(resolve => (armed = resolve));
+        let delayed: Promise<unknown> | undefined;
+
+        await observeEnvironmentReads(ROOT, async () =>
+        {
+            setTimeout(() =>
+            {
+                armed();
+                void fired.then(() =>
+                {
+                    delayed = observeEnvironmentReads(ROOT, async () =>
+                    {
+                        events.push('delayed');
+                    });
+                });
+            }, 0);
+        });
+
+        let release = (): void => undefined;
+        let holding = (): void => undefined;
+        const held = new Promise<void>(resolve => (holding = resolve));
+        const current = observeEnvironmentReads(ROOT, () => new Promise<void>((settle) =>
+        {
+            events.push('current');
+            holding();
+            release = () =>
+            {
+                events.push('release current');
+                settle();
+            };
+        }));
+
+        await Promise.all([held, timerRan]);
+        fire();
+        // Every promise reaction runs first: the delayed load has started, or queued.
+        await new Promise(resolve => setImmediate(resolve));
+        release();
+        await current;
+        await delayed;
+
+        expect(delayed).toBeDefined();
+        expect(events).toEqual(['current', 'release current', 'delayed']);
     });
 });

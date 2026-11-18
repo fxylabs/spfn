@@ -27,9 +27,11 @@
  * one at a time per process. Every router load (`observeEnvironmentReads`) and
  * every varied load (`withVaried`) holds the environment through one
  * process-wide queue (`holdEnvironment`), kept on a `Symbol.for` global so
- * that two copies of this module would share it; a load started inside a held
- * load — the router load inside a varied one — runs inside it rather than
- * behind it. The queue captures the real `process.env` when it hands the
+ * that two copies of this module would share it; a load started inside the
+ * load holding the environment — the router load inside a varied one — runs
+ * inside it rather than behind it. Inside is decided by identity, not by
+ * ancestry: a timer a finished load left behind still descends from it, and a
+ * load it starts queues like any other. The queue captures the real `process.env` when it hands the
  * environment to a load, and that is what the load puts back. So each load of a
  * generation is atomic with respect to the environment: it sees no other
  * load's proxy or varied value, and between loads `process.env` is the real
@@ -145,14 +147,23 @@ export interface EnvironmentProbe<T>
 // Holding the environment
 // ============================================================================
 
+/** One load's hold on the environment: the real `process.env` the queue captured for it. */
+interface Hold
+{
+    readonly real: NodeJS.ProcessEnv;
+}
+
 /** The process's environment, held by one load at a time. */
 interface EnvironmentQueue
 {
     /** Settles once every load queued so far has settled. */
     tail: Promise<void>;
 
-    /** Inside a held load: the real `process.env` the queue captured for it. */
-    holder: AsyncLocalStorage<NodeJS.ProcessEnv>;
+    /** The hold of the load this code descends from, if any — which may have ended. */
+    holder: AsyncLocalStorage<Hold>;
+
+    /** The hold of the load holding the environment now. */
+    current?: Hold;
 }
 
 const QUEUE_KEY = Symbol.for('@spfn/core/codegen:environment-queue');
@@ -169,23 +180,28 @@ function environmentQueue(): EnvironmentQueue
 /**
  * Run `load` holding the process's environment, handing it the real
  * `process.env`: once every load queued before it has settled, or at once
- * inside a load that already holds it.
+ * inside the load that holds it now.
  */
 function holdEnvironment<T>(load: (real: NodeJS.ProcessEnv) => Promise<T>): Promise<T>
 {
     const queue = environmentQueue();
     const held = queue.holder.getStore();
 
-    if (held !== undefined)
+    if (held !== undefined && held === queue.current)
     {
-        return load(held);
+        return load(held.real);
     }
 
     const run = queue.tail.then(() =>
     {
-        const real = process.env;
+        const hold: Hold = { real: process.env };
 
-        return queue.holder.run(real, () => load(real));
+        queue.current = hold;
+
+        return queue.holder.run(hold, () => load(hold.real)).finally(() =>
+        {
+            queue.current = undefined;
+        });
     });
 
     queue.tail = run.then(() => undefined, () => undefined);
