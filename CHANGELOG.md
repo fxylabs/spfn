@@ -17,6 +17,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **@spfn/core: `CodegenOrchestrator.settled()`** resolves once watch mode is idle — no generation
   running, nothing dirty, no input directory event settling (#353).
 
+### Changed
+
+- **@spfn/core: watch mode's generations, the initial one included, log and do not reject under
+  `throwOnError: true` (#353).** `watch()` ran its initial generation as `generateAll('watch')`,
+  so under `throwOnError` a failing generator rejected `watch()` before any watching began; now
+  the initial generation is a cycle of the watch loop, logged like every other. `watch()` still
+  rejects with the first failure when no generator has `watchPatterns` (it then runs one
+  `generateAll('watch')` and returns), and `generateAll()` still rejects, also while watching.
+
 ### Fixed
 
 - **@spfn/core: the `spfn dev` codegen watcher no longer loses changes (#353).** It decided what

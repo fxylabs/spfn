@@ -737,6 +737,10 @@ interface OrchestratorOptions
 run continues, which is what keeps watch mode alive through a half-edited file. `spfn build`
 turns it on: a generator that refuses at build time (a broken route contract, a router that will
 not load) has to reach the exit code, or the refusal scrolls past and the build ships anyway.
+Watch mode's own generations — the initial one included — only log, with it on too. Under it,
+`generateAll()` rejects (also one called while watching), and so does `watch()` when no
+generator has `watchPatterns`: it then runs one `generateAll('watch')` and returns instead of
+watching.
 
 ---
 

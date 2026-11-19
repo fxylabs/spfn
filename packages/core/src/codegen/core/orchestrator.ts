@@ -69,7 +69,11 @@ export interface OrchestratorOptions
      * A build turns it on: a generator that refuses — a broken contract, a
      * router that will not load — has to reach the exit code, or the refusal
      * scrolls past and the build ships anyway. Watch mode's own generations,
-     * the initial one included, only log.
+     * the initial one included, only log under it too. What rejects under it:
+     * `generateAll()`, also one called while watching (its own promise), and
+     * `watch()` when no generator has `watchPatterns`, which then runs one
+     * `generateAll('watch')` instead of watching and rejects with that run's
+     * first failure.
      */
     throwOnError?: boolean;
 }
