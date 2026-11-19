@@ -24,6 +24,7 @@ export type {
 } from './core/types';
 
 export type {
+    ChangedFile,
     Generator,
     GeneratorOptions,
     GeneratorTrigger,

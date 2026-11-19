@@ -96,7 +96,9 @@ const orchestrator = new CodegenOrchestrator({
     debug: true
 });
 
-// Setup graceful shutdown
+// Graceful shutdown: close() starts no new generation and resolves once the one
+// running has finished every generator, so the files of one cycle (route map,
+// contract) are never left from two different generations.
 const cleanup = async () =>
 {
     await orchestrator.close();

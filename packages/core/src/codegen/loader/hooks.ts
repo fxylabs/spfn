@@ -35,9 +35,11 @@
  * - **Generation tag.** Appended to files under the project root and outside
  *   `node_modules` only. A workspace package's source beside the app is
  *   transformed but not tagged: like a package, it is evaluated once.
- * - **What a load reached.** The tagged files, and, for a relative or `paths`
+ * - **What a load read.** Each tagged file, with a stamp of the bytes the
+ *   load hook read (`../core/inputs`), and, for a relative or `paths`
  *   specifier that resolved nowhere, every path under the root it was looked
- *   for at (`closeGeneration`): the watcher retries the load when one appears.
+ *   for at, stamped absent (`closeGeneration`): the watcher regenerates when
+ *   any of them differs from its stamp.
  *
  * A file the rule leaves CommonJS (`.cts`, `.cjs`, a CommonJS-syntax `.js`) is
  * handed back to the chain untagged: the chain loads it as CommonJS, and what
@@ -58,6 +60,7 @@ import { typescript } from '../generators/typescript';
 import { governingCompilerOptions, matchPaths, projectPaths, isWithin, type PathsMatch, type ProjectPaths } from './aliases';
 import { transpileOptions } from './compiler-options';
 import { raisedAt } from './errors';
+import { ABSENT, readStamped, stampOf, type Inputs, type Stamp } from '../core/inputs';
 import { applicationFormat, isDependency, packageType, type ModuleFormat } from './format';
 
 /** The query parameter a load's files carry. */
@@ -117,6 +120,9 @@ interface Generation
     /** Real paths of the project files the load reached. */
     touched: Set<string>;
 
+    /** What the load hook read of each, by real path (`../core/inputs`). */
+    stamps: Map<string, Stamp>;
+
     /** Paths under the root a resolution that failed looked for: a file created at one is to be noticed. */
     tried: Set<string>;
 }
@@ -138,20 +144,24 @@ const sourceMaps = new Map<string, SourceMap>();
 /** Start a load under `token`, reading the project at `root`. */
 export function openGeneration(token: string, root: string): void
 {
-    generations.set(token, { root: realpathSync(root), paths: new Map(), compilerOptions: new Map(), touched: new Set(), tried: new Set() });
+    generations.set(token, { root: realpathSync(root), paths: new Map(), compilerOptions: new Map(), touched: new Set(), stamps: new Map(), tried: new Set() });
 }
 
 /**
- * End a load: forget what only resolution needed, and return the project files
- * it touched with the paths a failed resolution looked for — what a watcher
- * has to watch for the load to be retried. A module stays in Node's cache, so
- * a later load under the same token reuses it without resolving again.
+ * End a load: forget what only resolution needed, and return what it read —
+ * each project file it reached with the stamp of what the load hook read (one
+ * resolved but never read, its load stopped before it, stamped now), and the
+ * paths a failed resolution looked for, stamped absent: what a watcher has to
+ * check for the load to be retried. A module stays in Node's cache, so a later
+ * load under the same token reuses it without resolving again.
  */
-export function closeGeneration(token: string): string[]
+export function closeGeneration(token: string): Inputs
 {
     const generation = generations.get(token);
-    const touched = [...generation?.touched ?? [], ...generation?.tried ?? []];
+    const inputs: Inputs = new Map();
 
+    generation?.touched.forEach(file => inputs.set(file, generation.stamps.get(file) ?? stampOf(file)));
+    generation?.tried.forEach(file => inputs.set(file, inputs.get(file) ?? ABSENT));
     generations.delete(token);
 
     for (const [url, file] of owned)
@@ -163,7 +173,7 @@ export function closeGeneration(token: string): string[]
         }
     }
 
-    return touched;
+    return inputs;
 }
 
 /** A file of a running load, by the URL it was given, and the source map of its transform (`./errors`). */
@@ -634,7 +644,9 @@ function syntaxError(compiler: typeof ts, file: string, diagnostic: ts.Diagnosti
 
 function transform(url: string, { file, token }: OwnedFile): string
 {
-    const source = readFileSync(file, 'utf8');
+    const { source, stamp } = readStamped(file);
+
+    generations.get(token)?.stamps.set(file, stamp);
 
     if (extname(file) === '.json')
     {
