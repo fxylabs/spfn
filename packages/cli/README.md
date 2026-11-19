@@ -149,9 +149,19 @@ which do not let `spfn dev` wait for it.
 
 On SIGINT or SIGTERM, `spfn dev` sends the server and Next.js SIGTERM, forwards the signal to
 the codegen watcher, and exits once the watcher has: the watcher finishes the generation it is
-running first, so the route map and contract never come from two generations. A second
-signal is forwarded too, and the watcher then exits at once. A SIGKILL of `spfn dev` reaches
-no child.
+running first. A second signal is forwarded too, and the watcher then exits at once. A SIGKILL
+of `spfn dev` reaches no child.
+
+So the route map and contract never come from two generations when one SIGTERM or SIGINT is
+sent to the pid of the process that runs `spfn dev`: the tsx child when `bin/spfn.js`
+re-spawned itself under tsx, the bin's own process when it did not. That does not hold for:
+
+- **Ctrl-C in a terminal.** The terminal sends SIGINT to the whole process group, so the
+  watcher gets it twice — from the terminal and from `spfn dev`'s forward — and exits at once,
+  mid-generation if one is running (as before this change).
+- **A signal to the `bin/spfn.js` pid alone**, when the bin re-spawned itself under tsx: that
+  outer process has no signal handler, so it exits and its children run on (read from the
+  source, not run).
 
 | Option | Description | Default |
 |--------|-------------|---------|
