@@ -268,6 +268,10 @@ load (`src/codegen/loader/`).
   read them, and starts no further cycle for them until a file event, or until they change
   again. Only a generator that writes a file it reads, differently on every run, does that —
   see [Don't watch your own output](#pitfalls--anti-patterns).
+- **`generateAll()` while watching** is a run of the loop, not a second generation beside it:
+  queued, run between two cycles, and resolved (or, under `throwOnError`, rejected) when that
+  run has finished. A call still queued when `close()` is called is rejected; one made after
+  `close()` waits for the last cycle and runs as outside watch mode.
 - **`close()`** starts no new generation and resolves once the one running has finished —
   every generator of it, so the outputs of one cycle never disagree. The `spfn dev` watcher
   awaits it on SIGTERM/SIGINT.

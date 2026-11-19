@@ -93,6 +93,14 @@ interface Outcome extends Run
     ms: number;
 }
 
+/** A `generateAll()` call made while watching, waiting for the loop to run it. */
+interface RunRequest
+{
+    trigger: GeneratorTrigger;
+    resolve: () => void;
+    reject: (error: unknown) => void;
+}
+
 const EVENT_ICONS: Record<ChangedFile['event'], string> = { add: '+', change: '~', unlink: '-' };
 
 export class CodegenOrchestrator
@@ -122,6 +130,9 @@ export class CodegenOrchestrator
     private wake?: () => void;
     private stopWaiting?: () => void;
     private idleWaiters: Array<() => void> = [];
+
+    /** `generateAll()` calls made while watching, for the loop to run in turn. */
+    private requests: RunRequest[] = [];
     private watcher?: ReturnType<typeof chokidarWatch>;
     private inputWatcher?: InputWatcher;
 
@@ -158,6 +169,9 @@ export class CodegenOrchestrator
         await this.watcher?.close();
         this.watcher = undefined;
         await this.loop;
+        this.requests.splice(0).forEach(request => request.reject(new Error(
+            `generateAll('${request.trigger}') was not run: the codegen watcher was closed before its turn`,
+        )));
         this.notifyIdle();
     }
 
@@ -190,10 +204,29 @@ export class CodegenOrchestrator
     /**
      * Run all generators once, in one generation
      *
+     * While watching, the run is the loop's to make, so that two generations
+     * never write outputs at once: it is queued, runs between two cycles, and
+     * the promise settles when that run has finished — rejecting with its
+     * failure under `throwOnError`, as outside watch mode. Its log lines follow
+     * watch mode's (`watchGeneration`). Called once `close()` has been, it
+     * waits for the loop's last generation and then runs as outside watch mode;
+     * one still queued when `close()` is called is rejected.
+     *
      * @param trigger - How the generators are being triggered
      */
     async generateAll(trigger: GeneratorTrigger = 'manual'): Promise<void>
     {
+        if (this.loop !== undefined && !this.closed)
+        {
+            return new Promise((resolve, reject) =>
+            {
+                this.requests.push({ trigger, resolve, reject });
+                this.poke();
+            });
+        }
+
+        await this.loop;
+
         const outcomes = await this.generate(this.startRuns(trigger), this.throwOnError);
         const failed = outcomes.find(outcome => outcome.failure !== undefined);
 
@@ -308,7 +341,7 @@ export class CodegenOrchestrator
      * reports. After `close()` there is no check, and each run is reported as it
      * ended.
      */
-    private async watchGeneration(runs: Run[]): Promise<void>
+    private async watchGeneration(runs: Run[]): Promise<Outcome[]>
     {
         const outcomes = await this.generate(runs, false);
         const changed = this.closed ? new Set<string>() : this.armAndCheck('check');
@@ -326,6 +359,8 @@ export class CodegenOrchestrator
                 this.report(outcome);
             }
         }
+
+        return outcomes;
     }
 
     /**
@@ -466,7 +501,7 @@ export class CodegenOrchestrator
     /** Wait until there is something to do; false once closed. */
     private async nextWork(): Promise<boolean>
     {
-        if (!this.closed && this.dirty.size === 0 && !this.checkRequested)
+        if (!this.closed && this.dirty.size === 0 && !this.checkRequested && this.requests.length === 0)
         {
             this.busy = false;
             this.checkOnlyCycles = 0;
@@ -477,12 +512,25 @@ export class CodegenOrchestrator
         return !this.closed;
     }
 
-    /** Take the whole dirty set into one watch generation; or only arm and check, when that was asked. */
+    /**
+     * Run the next `generateAll()` call made while watching; else take the
+     * whole dirty set into one watch generation; else only arm and check, when
+     * that was asked.
+     */
     private async cycle(): Promise<void>
     {
         // A turn for I/O first: file events, and a signal's `close()`, are handled
         // between cycles even when a generation settles without waiting on any.
         await new Promise(resolve => setImmediate(resolve));
+
+        const request = this.closed ? undefined : this.requests.shift();
+
+        if (request !== undefined)
+        {
+            await this.runRequested(request);
+
+            return;
+        }
 
         if (this.dirty.size === 0)
         {
@@ -495,6 +543,21 @@ export class CodegenOrchestrator
 
         this.dirty = new Map();
         await this.regenerate(changes);
+    }
+
+    /** A `generateAll()` made while watching: its run, as a watch generation, settling its promise. */
+    private async runRequested({ trigger, resolve, reject }: RunRequest): Promise<void>
+    {
+        const failed = (await this.watchGeneration(this.startRuns(trigger))).find(outcome => outcome.failure !== undefined);
+
+        if (failed !== undefined && this.throwOnError)
+        {
+            reject(failed.failure);
+
+            return;
+        }
+
+        resolve();
     }
 
     /** Run every generator a change matches or whose inputs hold a changed path, in one generation. */

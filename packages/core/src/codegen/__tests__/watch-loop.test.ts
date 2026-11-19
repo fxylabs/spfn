@@ -1,5 +1,5 @@
 /**
- * The watch loop — rows W1–W3, W5–W8 and the loop guard of the #353 design
+ * The watch loop — rows W1–W3, W5–W9 and the loop guard of the #353 design
  *
  * Each row runs an orchestrator in watch mode, in this process, on an app in a
  * temporary directory with `@spfn/core` linked into its `node_modules`.
@@ -29,6 +29,8 @@
  * | W8 | a route saved between the environment probe's baseline load and   | a false "depends on the environment" failure on an   |
  * |    | its varied one; then saved and restored around the varied load    | ordinary save (CLI R2 flaking), or, after a restore, |
  * |    |                                                                   | that failure because the file reads as unchanged     |
+ * | W9 | `generateAll()` called while a watch cycle is held                | two generations writing the outputs at once, or the  |
+ * |    |                                                                   | call resolving before its own run has finished       |
  * | G1 | a generator writing, on every run, a file it reads                    | the loop guard: such a generator regenerating        |
  * |    |                                                                       | forever                                              |
  */
@@ -163,6 +165,8 @@ function gate(name: string, watchPatterns: string[], inner?: Generator)
     const state = {
         calls: 0,
         finished: 0,
+        running: 0,
+        maxRunning: 0,
         triggers: [] as GeneratorOptions['trigger'][],
         entered: Promise.resolve(),
         hold(): void
@@ -185,9 +189,12 @@ function gate(name: string, watchPatterns: string[], inner?: Generator)
                 const wait = held;
 
                 state.calls += 1;
+                state.running += 1;
+                state.maxRunning = Math.max(state.maxRunning, state.running);
                 state.triggers.push(options.trigger);
                 entered();
                 await wait;
+                state.running -= 1;
                 state.finished += 1;
             },
         } satisfies Generator,
@@ -500,6 +507,33 @@ describe('codegen watch loop', () =>
         expect(mapPaths()).toEqual(['/probe/three']);
         expect(error.mock.calls.map(([message]) => String(message))).toEqual([]);
         expect(info.mock.calls.filter(([message]) => /^\[@spfn\/core:route-map\] Read files that changed while it ran/.test(String(message)))).toHaveLength(2);
+    });
+
+    it('W9 generateAll() while a watch cycle runs is a run of the loop: never concurrent with it, and awaited to its end', async () =>
+    {
+        // Without it, the manual run starts while the cycle is held, and the two
+        // generations write the same outputs at once.
+        const held = gate('gate', ['src/**/*.ts']);
+
+        write('src/x.ts', 'x0');
+
+        const orchestrator = watching([held.generator]);
+
+        await orchestrator.settled();
+        held.hold();
+        write('src/x.ts', 'x1');
+        await held.entered;
+
+        let finishedAtResolve = -1;
+        const manual = orchestrator.generateAll('manual').then(() => (finishedAtResolve = held.finished));
+
+        await new Promise(resolve => setImmediate(resolve));
+        held.release();
+        await manual;
+
+        expect(held.maxRunning).toBe(1);
+        expect(held.triggers.map(trigger => trigger?.type)).toEqual(['watch', 'watch', 'manual']);
+        expect(finishedAtResolve).toBe(3);
     });
 
     it('G1 a generator that rewrites a file it reads on every run is stopped after three check-only cycles, with a warning', async () =>

@@ -42,6 +42,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   called ran the generators again after it resolved; now nothing new starts, and it resolves once
   the generation running has finished every generator, so the `spfn dev` watcher's SIGTERM no
   longer leaves the route map and contract from two different generations.
+- **@spfn/core: `CodegenOrchestrator.generateAll()` called while watching** ran the generators
+  beside the cycle running, two generations writing the same outputs at once; it is now queued as
+  a run of the watch loop and settles when that run has finished.
 - **@spfn/core: watch state is per orchestrator.** The files each router's load reached were kept
   in a module-wide map, so a second orchestrator in the process watched the first app's files.
 
