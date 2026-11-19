@@ -230,8 +230,8 @@ load (`src/codegen/loader/`).
 `spfn dev` runs the generators in watch mode (`orchestrator.watch()`). The model, in order:
 
 - **Every input is stamped.** Each project file a load reads gets a stamp as the loader reads
-  it: a stat taken before the read (inode, size, modification time in nanoseconds) and a hash
-  of the bytes the load used. A path an import that resolved nowhere was looked for at (a
+  it: a hash of the bytes the load used — no stat field, which an in-place write that keeps
+  the size and restores the modification time (`rsync --inplace -t`, `touch -r`) would fool. A path an import that resolved nowhere was looked for at (a
   relative path or a `paths` alias, every candidate extension and `index`) is stamped
   *absent*. The stamps are attributed to the generator whose `generate()` made the load, and
   replaced by each run of it: a file a load no longer reaches leaves its inputs.
@@ -246,14 +246,12 @@ load (`src/codegen/loader/`).
   the dirty set — in debug mode, as `spfn dev` runs, each is logged as `Queued ~ <path>` — and
   are all taken by the next cycle.
 - **Arm, then check.** After every generation the loop watches the directories of the new
-  inputs, *then* compares every input with its stamp: existence; the same inode, size and
-  modification time is unchanged; otherwise the file is read and hashed. A stale input is
+  inputs, *then* compares every input with its stamp: existence, then the hash of the file's
+  content now (every input is read and hashed on every check). A stale input is
   dirty, logged as `Changed during generation: + src/server/lib/later.ts`, and the loop runs
   again. Because the watch is armed before the comparison, a change lands either before it
   (the comparison finds it) or after the watch exists (an event reports it): a file created
-  or edited while a generation ran, or replaced inside one, is not lost. A stamp whose
-  modification time is within two seconds of when it was taken is always hashed, since a
-  further write in the same clock tick may leave the time unchanged.
+  or edited while a generation ran, or replaced inside one, is not lost.
 - **Start.** chokidar's first scan (`ready`), then the initial generation, then arm and
   check. `Watch mode started` is logged once changes are seen from then on.
 - **`No generators matched this file`** (debug) is logged only when no generator matched a

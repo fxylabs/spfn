@@ -1,17 +1,18 @@
 /**
  * What a generation read
  *
- * Every project file a load reads gets a stamp, taken by the codegen loader's
- * load hook as it reads the file: a stat taken before the read (inode, size,
- * modification time in nanoseconds) and a hash of the source the read
- * returned. A path an import that resolved nowhere was looked for at gets a
- * stamp saying it did not exist. The stamp therefore describes the exact bytes
- * the generation used: a write after the stat changes the modification time,
- * so a comparison errs towards "changed", never towards "unchanged".
+ * Every project file a load reads gets a stamp, taken by the codegen loader as
+ * it reads the file: a hash of the source the read returned. A path an import
+ * that resolved nowhere was looked for at gets a stamp saying it did not
+ * exist. The stamp therefore describes the exact bytes the generation
+ * used, and nothing else: no stat field stands in for them, since a file can
+ * be rewritten in place with its size and modification time kept
+ * (`rsync --inplace -t`, `touch -r`), and a clock that file times are compared
+ * with may lag the file system's.
  *
  * The watcher compares the stamps against the file system after each
- * generation (`checkStamp`), so a change is found whichever file event
- * reported it, or none did.
+ * generation (`checkStamp`): existence, then the hash of what is there now. A
+ * change is found whichever file event reported it, or none did.
  *
  * Loads report what they read into the collector the orchestrator opens
  * around each `generate()` call (`collectInputs`), which attributes the files
@@ -22,79 +23,45 @@
 
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash } from 'node:crypto';
-import { readFileSync, statSync, type BigIntStats } from 'node:fs';
+import { readFileSync, statSync } from 'node:fs';
 
-export type Stamp =
-    | { exists: false }
-    | {
-        exists: true;
-        ino: bigint;
-        size: bigint;
-        mtimeNs: bigint;
-        hash: string;
-
-        /** Wall-clock time the stat was taken, in nanoseconds (`isRacy`). */
-        takenNs: bigint;
-    };
+export type Stamp = { exists: false } | { exists: true; hash: string };
 
 /** Stamps by real path. */
 export type Inputs = Map<string, Stamp>;
 
-/**
- * A modification time this close to when its stat was taken may not change on
- * a further write: file systems keep it at the granularity of the kernel's
- * clock tick, or of seconds. Such a stamp's stat is not trusted on its own
- * (git's "racily clean" entries, the same reasoning).
- */
-const RACY_NS = 2_000_000_000n;
-
-/** The stamp of a path an import that resolved nowhere was looked for at. */
+/** The stamp of a path a resolution looked for at and found nothing. */
 export const ABSENT: Stamp = { exists: false };
 
-function hashOf(source: string): string
-{
-    return createHash('sha1').update(source).digest('hex');
-}
-
-function nowNs(): bigint
-{
-    return BigInt(Date.now()) * 1_000_000n;
-}
-
-/** The stat of `file`, or undefined when there is none to take: missing, or a path through a file (ENOTDIR). */
-function statOf(file: string): BigIntStats | undefined
+/** Whether `file` is a file: missing, a directory, or a path through a file (ENOTDIR) is not. */
+function isFile(file: string): boolean
 {
     try
     {
-        return statSync(file, { bigint: true, throwIfNoEntry: false });
+        return statSync(file, { throwIfNoEntry: false })?.isFile() ?? false;
     }
     catch
     {
-        return undefined;
+        return false;
     }
 }
 
-function stampFrom(stats: BigIntStats, takenNs: bigint, source: string): Stamp
-{
-    return { exists: true, ino: stats.ino, size: stats.size, mtimeNs: stats.mtimeNs, hash: hashOf(source), takenNs };
-}
-
-/**
- * Read `file` as the load hook does, with its stamp: the stat is taken before
- * the read, so a write racing the read leaves a stamp that compares stale.
- */
+/** Read `file` as the load hook does, with the stamp of what was read. */
 export function readStamped(file: string): { source: string; stamp: Stamp }
 {
-    const takenNs = nowNs();
-    const stats = statSync(file, { bigint: true });
     const source = readFileSync(file, 'utf8');
 
-    return { source, stamp: stampFrom(stats, takenNs, source) };
+    return { source, stamp: { exists: true, hash: createHash('sha1').update(source).digest('hex') } };
 }
 
 /** The stamp of `file` as it is now: absent when it is not a file, or cannot be read. */
 export function stampOf(file: string): Stamp
 {
+    if (!isFile(file))
+    {
+        return ABSENT;
+    }
+
     try
     {
         return readStamped(file).stamp;
@@ -105,36 +72,20 @@ export function stampOf(file: string): Stamp
     }
 }
 
-function isRacy(stamp: Stamp & { exists: true }): boolean
+function sameStamp(a: Stamp, b: Stamp): boolean
 {
-    return stamp.mtimeNs + RACY_NS > stamp.takenNs;
+    return a.exists ? b.exists && a.hash === b.hash : !b.exists;
 }
 
 /**
- * Compare `stamp` with `file` as it is now. Existence differs: stale. The same
- * inode, size and modification time, on a stamp that is not racy: fresh.
- * Otherwise the file is read and hashed: the same hash is fresh, and the
- * stamp returned for it replaces the old one, so the next check is a stat.
- * `exists` is whether `file` is a file now.
+ * Compare `stamp` with `file` as it is now: fresh when both say it does not
+ * exist, or both hold the same content. `exists` is whether `file` is a file now.
  */
-export function checkStamp(file: string, stamp: Stamp): { fresh: boolean; stamp: Stamp; exists: boolean }
+export function checkStamp(file: string, stamp: Stamp): { fresh: boolean; exists: boolean }
 {
-    const stats = statOf(file);
-    const exists = stats?.isFile() ?? false;
-
-    if (!exists || !stamp.exists)
-    {
-        return { fresh: exists === stamp.exists, stamp, exists };
-    }
-
-    if (stats!.ino === stamp.ino && stats!.size === stamp.size && stats!.mtimeNs === stamp.mtimeNs && !isRacy(stamp))
-    {
-        return { fresh: true, stamp, exists };
-    }
-
     const now = stampOf(file);
 
-    return now.exists && now.hash === stamp.hash ? { fresh: true, stamp: now, exists } : { fresh: false, stamp, exists };
+    return { fresh: sameStamp(now, stamp), exists: now.exists };
 }
 
 const collector = new AsyncLocalStorage<Inputs>();

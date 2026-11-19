@@ -515,10 +515,8 @@ export class CodegenOrchestrator
     }
 
     /**
-     * Every input that differs from its stamp, with how it changed. A stamp the
-     * comparison verified by its hash is refreshed, so the next comparison is a
-     * stat. An input the guard suppressed is left out while it still holds what
-     * it held then.
+     * Every input that differs from its stamp, with how it changed. An input
+     * the guard suppressed is left out while it still holds what it held then.
      */
     private staleInputs(): Map<string, ChangedFile['event']>
     {
@@ -529,8 +527,6 @@ export class CodegenOrchestrator
             for (const [path, stamp] of inputs)
             {
                 const checked = checkStamp(join(this.root, path), stamp);
-
-                inputs.set(path, checked.stamp);
 
                 if (!checked.fresh && !this.isSuppressed(path))
                 {
