@@ -289,7 +289,8 @@ load (`src/codegen/loader/`).
   every generator of it, so the outputs of one cycle never disagree. A generation cannot be
   cancelled, so a generator that never settles keeps `close()` pending. An orchestrator is
   single-use: `watch()` after `close()` rejects. The `spfn dev` watcher calls `close()` on the
-  first SIGTERM/SIGINT and exits when it resolves; a second signal exits at once.
+  first SIGTERM/SIGINT and exits when it resolves; a second signal exits at once. `spfn dev`
+  forwards each signal it gets to the watcher and exits after it.
 - **`settled()`** resolves once the loop is idle: nothing running, nothing dirty, no input
   directory event still settling. A chokidar event not delivered yet (it waits 100 ms for
   writes to settle) is not known to it. Never await it inside a generator: it waits for the

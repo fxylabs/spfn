@@ -1,6 +1,7 @@
 import { Command } from 'commander';
 import { existsSync, readFileSync, writeFileSync, mkdirSync, unlinkSync, rmSync, watch } from 'fs';
-import { join, relative, sep } from 'path';
+import { createRequire } from 'module';
+import { dirname, join, relative, sep } from 'path';
 import { execa, type ExecaChildProcess } from 'execa';
 import chokidar from 'chokidar';
 import { logger } from '../utils/logger.js';
@@ -159,6 +160,89 @@ function tsxCommand(pm: string, cwd: string, entry: string): { command: string; 
     return pm === 'npm'
         ? { command: 'npx', args: tsxArgs }
         : { command: pm, args: ['exec', ...tsxArgs] };
+}
+
+/**
+ * The command that runs the codegen watcher entry: the app's tsx run by this
+ * Node, not through the package manager. `spfn dev` forwards its signals to the
+ * watcher and waits for it to exit (`stopOnSignals`), and neither wrapper lets
+ * it: `pnpm exec` forwards SIGTERM and exits at once, `npx` exits without
+ * forwarding it. tsx relays each signal to the entry and exits when it does.
+ * When the app's tsx cannot be resolved, the package manager runs it as before.
+ */
+function watcherCommand(pm: string, cwd: string, entry: string): { command: string; args: string[] }
+{
+    const tsxCli = resolveTsxCli(cwd);
+
+    return tsxCli === undefined
+        ? tsxCommand(pm, cwd, entry)
+        : { command: process.execPath, args: [tsxCli, '--import', devLoader(cwd), entry] };
+}
+
+/** The bin of the tsx `cwd`'s package resolves, or undefined when it resolves none. */
+function resolveTsxCli(cwd: string): string | undefined
+{
+    let manifest: string;
+
+    try
+    {
+        manifest = createRequire(join(cwd, 'package.json')).resolve('tsx/package.json');
+    }
+    catch
+    {
+        return undefined;
+    }
+
+    const { bin } = JSON.parse(readFileSync(manifest, 'utf-8'));
+
+    return join(dirname(manifest), typeof bin === 'string' ? bin : bin.tsx);
+}
+
+/** What `spfn dev` started, read when a signal arrives. */
+interface DevChildren
+{
+    watcher: ExecaChildProcess | null;
+    others: Array<ExecaChildProcess | null>;
+}
+
+/**
+ * Stop `spfn dev` on SIGINT and SIGTERM. The codegen watcher is sent every
+ * signal this process receives, and this process exits only once the watcher
+ * has: on the first signal the watcher finishes the generation running, on a
+ * second it exits at once (`watcherEntrySource`). Exiting before it would leave
+ * a watcher writing into the project after `spfn dev` was stopped. The server
+ * and Next.js are sent SIGTERM once and not waited for: the server's shutdown
+ * deadline is core's (`SHUTDOWN_TIMEOUT`), and it ignores a second signal.
+ * No child gets execa's default SIGKILL 5 s after a SIGTERM: for the watcher it
+ * would kill tsx mid-generation and orphan the entry tsx runs, which a SIGKILL
+ * is not relayed to. Nothing forwards a SIGKILL this process gets. Returns
+ * whether a stop has begun.
+ */
+function stopOnSignals(children: () => DevChildren): () => boolean
+{
+    let stopping = false;
+
+    const stop = async (signal: NodeJS.Signals): Promise<void> =>
+    {
+        const { watcher, others } = children();
+
+        watcher?.kill(signal, { forceKillAfterTimeout: false });
+
+        if (stopping)
+        {
+            return;
+        }
+
+        stopping = true;
+        others.forEach(child => child?.kill('SIGTERM', { forceKillAfterTimeout: false }));
+        await watcher;
+        process.exit(0);
+    };
+
+    process.on('SIGINT', stop);
+    process.on('SIGTERM', stop);
+
+    return () => stopping;
 }
 
 /**
@@ -360,11 +444,12 @@ writeFileSync(${JSON.stringify(readyFile)}, String(instance.config.port));
             let serverProcess: ExecaChildProcess | null = null;
             let watcherProcess: ExecaChildProcess | null = null;
             let isRestarting = false;
+            const stopping = stopOnSignals(() => ({ watcher: watcherProcess, others: [serverProcess] }));
 
             // Start codegen watcher
             const startWatcher = () =>
             {
-                const watcher = tsxCommand(pm, cwd, watcherEntry);
+                const watcher = watcherCommand(pm, cwd, watcherEntry);
 
                 watcherProcess = execa(watcher.command, watcher.args, {
                     cwd,
@@ -375,7 +460,7 @@ writeFileSync(${JSON.stringify(readyFile)}, String(instance.config.port));
 
                 watcherProcess.then((result) =>
                 {
-                    if (result.exitCode !== 0 && result.exitCode !== 130)
+                    if (!stopping() && result.exitCode !== 0 && result.exitCode !== 130)
                     {
                         logger.error(`Codegen watcher exited with code ${result.exitCode}`);
                         logger.warn('[SPFN] Codegen watch is disabled for this session — the server keeps running. Run codegen manually after route changes.');
@@ -401,7 +486,7 @@ writeFileSync(${JSON.stringify(readyFile)}, String(instance.config.port));
             // Restart server
             const restartServer = async () =>
             {
-                if (isRestarting) return;
+                if (isRestarting || stopping()) return;
                 isRestarting = true;
 
                 logger.info('[SPFN] File changed, restarting server...');
@@ -458,23 +543,6 @@ writeFileSync(${JSON.stringify(readyFile)}, String(instance.config.port));
                 });
             }
 
-            // Cleanup on exit
-            const cleanup = async () =>
-            {
-                if (serverProcess)
-                {
-                    serverProcess.kill('SIGTERM');
-                }
-                if (watcherProcess)
-                {
-                    watcherProcess.kill('SIGTERM');
-                }
-                process.exit(0);
-            };
-
-            process.on('SIGINT', cleanup);
-            process.on('SIGTERM', cleanup);
-
             // Start both processes
             startWatcher();
             startServer();
@@ -504,11 +572,12 @@ writeFileSync(${JSON.stringify(readyFile)}, String(instance.config.port));
         let watcherProcess: ExecaChildProcess | null = null;
         let nextProcess: ExecaChildProcess | null = null;
         let isRestarting = false;
+        const stopping = stopOnSignals(() => ({ watcher: watcherProcess, others: [serverProcess, nextProcess] }));
 
         // Start codegen watcher
         const startWatcher = () =>
         {
-            const watcher = tsxCommand(pm, cwd, watcherEntry);
+            const watcher = watcherCommand(pm, cwd, watcherEntry);
 
             watcherProcess = execa(watcher.command, watcher.args, {
                 cwd,
@@ -519,7 +588,7 @@ writeFileSync(${JSON.stringify(readyFile)}, String(instance.config.port));
 
             watcherProcess.then((result) =>
             {
-                if (result.exitCode !== 0 && result.exitCode !== 130)
+                if (!stopping() && result.exitCode !== 0 && result.exitCode !== 130)
                 {
                     logger.error(`Codegen watcher exited with code ${result.exitCode}`);
                     logger.warn('[SPFN] Codegen watch is disabled for this session — the server keeps running. Run codegen manually after route changes.');
@@ -546,7 +615,7 @@ writeFileSync(${JSON.stringify(readyFile)}, String(instance.config.port));
 
             nextProcess.then((result) =>
             {
-                if (result.exitCode !== 0 && result.exitCode !== 130)
+                if (!stopping() && result.exitCode !== 0 && result.exitCode !== 130)
                 {
                     logger.error(`Next.js exited with code ${result.exitCode}`);
                     process.exit(1);
@@ -572,7 +641,7 @@ writeFileSync(${JSON.stringify(readyFile)}, String(instance.config.port));
         // Restart server
         const restartServer = async () =>
         {
-            if (isRestarting) return;
+            if (isRestarting || stopping()) return;
             isRestarting = true;
 
             logger.info('[SPFN] File changed, restarting server...');
@@ -628,27 +697,6 @@ writeFileSync(${JSON.stringify(readyFile)}, String(instance.config.port));
                 restartServer();
             });
         }
-
-        // Cleanup on exit
-        const cleanup = async () =>
-        {
-            if (serverProcess)
-            {
-                serverProcess.kill('SIGTERM');
-            }
-            if (watcherProcess)
-            {
-                watcherProcess.kill('SIGTERM');
-            }
-            if (nextProcess)
-            {
-                nextProcess.kill('SIGTERM');
-            }
-            process.exit(0);
-        };
-
-        process.on('SIGINT', cleanup);
-        process.on('SIGTERM', cleanup);
 
         // Start all processes — server must be ready before Next.js
         startWatcher();

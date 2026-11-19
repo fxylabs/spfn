@@ -139,6 +139,12 @@ Starts the SPFN server + Next.js (and a codegen watcher, which generates under
 (via a `.spfn/server-ready` signal file) before Next.js launches. Runs through `tsx`,
 no pre-build needed.
 
+On SIGINT or SIGTERM, `spfn dev` sends the server and Next.js SIGTERM, forwards the signal to
+the codegen watcher, and exits once the watcher has: the watcher finishes the generation it is
+running first, so the route map and contract never come from two generations. A second
+signal is forwarded too, and the watcher then exits at once. A SIGKILL of `spfn dev` reaches
+no child.
+
 | Option | Description | Default |
 |--------|-------------|---------|
 | `--server-only` | Run only the SPFN/Hono server (also auto-selected if Next.js isn't a dependency) | off |

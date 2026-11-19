@@ -47,6 +47,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cancelled, so the watcher entry exits at once on a second signal. An orchestrator is
   single-use: `watch()` after `close()` rejects instead of opening watchers nothing closes. A
   chokidar error is warned about once, naming the pattern directories.
+- **spfn: `spfn dev` waits for its codegen watcher on SIGINT/SIGTERM (#353).** It sent the watcher
+  SIGTERM and exited at once, through `pnpm exec`/`npx`, which do not wait (npx did not even
+  forward the signal), and execa SIGKILLed the wrapper 5 s later: a `kill -TERM` of `spfn dev` left
+  the watcher running, writing into the project. The watcher now runs under the app's tsx directly;
+  `spfn dev` forwards every signal to it and exits once it has (a second signal makes it exit at
+  once). The server and Next.js are still sent one SIGTERM and not waited for. A SIGKILL of
+  `spfn dev` reaches none of them.
 - **@spfn/core: `CodegenOrchestrator.generateAll()` called while watching** ran the generators
   beside the cycle running, two generations writing the same outputs at once; it is now queued as
   a run of the watch loop and settles when that run has finished.
