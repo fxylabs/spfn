@@ -416,7 +416,7 @@ loaded `.env` chain.
 | Subcommand | Description |
 |------------|-------------|
 | `db generate` (`g`) | Generate migrations from schema changes (timestamp-prefixed) |
-| `db push` | Diff with Drizzle Kit's current PostgreSQL engine and apply the selected DDL atomically. Destructive changes need confirmation; `--force` applies them, `--dry-run` previews |
+| `db push` | Diff with Drizzle Kit's current PostgreSQL engine and apply the selected DDL atomically. Destructive changes need confirmation; `--force` applies them. `--dry-run` shows the classified statements and each function package's pending migrations by name, then stops: its session is read-only, so it writes nothing |
 | `db migrate` (`m`) | Run pending migrations. `--with-backup` snapshots first |
 | `db status` | Show which migrations are applied and which are pending, for the project and for each installed function package. `--json` prints one machine-readable report instead |
 | `db studio` | Open Drizzle Studio. `-p, --port` (auto-finds a free port) |
@@ -548,7 +548,10 @@ that reads both migration layouts — drizzle-kit ≤0.31 (`NNNN_name.sql` +
 package's layout never has to match the CLI's bundled drizzle version. `db push`
 validates every package's migration folder before applying the project schema, and a
 function-migration failure after a successful schema apply exits 1 with a message
-making clear the project schema was already committed.
+making clear the project schema was already committed. Before applying anything,
+`db push` lists each package's pending migrations by folder or tag name;
+`db push --dry-run` lists them too and applies neither them nor the project
+statements, on a connection opened with `default_transaction_read_only=on`.
 
 Database TLS is controlled by `DATABASE_URL`. Loopback URLs (`localhost`, `127.0.0.1`,
 and `::1`) default to `ssl: false`; add an explicit `sslmode` when the local server uses

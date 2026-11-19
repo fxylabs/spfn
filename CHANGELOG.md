@@ -86,6 +86,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a run of the watch loop and settles when that run has finished.
 - **@spfn/core: watch state is per orchestrator.** The files each router's load reached were kept
   in a module-wide map, so a second orchestrator in the process watched the first app's files.
+- **spfn: `spfn db push --dry-run` writes nothing (spfn/spfn#163).** In 0.4.0-beta.1 a dry run
+  whose project schema had no pending change applied the function package migrations (and created
+  their bookkeeping tables) instead of previewing them; with a pending project change it said
+  nothing about them. `db push` now plans first — the project statements and, per function package,
+  the pending migrations, worked out without writing — prints both, and stops on a dry run before
+  any write, on a read-only session. Applying reads the same pending list, so a preview and the
+  push after it agree.
 
 - **@spfn/core, spfn: codegen loads the app as ESM in the process's own module graph; one copy of
   `@spfn/core` (#335).** Codegen loaded the router (and `.spfnrc.ts`, the generator module, custom

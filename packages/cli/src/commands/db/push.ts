@@ -15,12 +15,18 @@ import {
     type ResolvedSchema,
     type SchemaSource,
 } from './utils/drizzle.js';
-import { classifyStatements } from './utils/sql-classifier.js';
-import { displayClassifiedStatements, displayDryRunSummary, displayApplySummary } from './utils/push-display.js';
+import { classifyStatements, type ClassificationResult } from './utils/sql-classifier.js';
+import {
+    displayClassifiedStatements,
+    displayDryRunSummary,
+    displayApplySummary,
+    displayPendingFunctionMigrations,
+} from './utils/push-display.js';
 import {
     discoverFunctionMigrations,
     loadFunctionMigrationPlans,
     executeFunctionMigrations,
+    resolvePendingFunctionMigrations,
     type FunctionMigrationPlan,
 } from '../../utils/function-migrations.js';
 
@@ -116,7 +122,8 @@ async function resolveSchemaFilesOrExit(config: Parameters<typeof resolveSchemaF
  *
  * - Default: auto-applies safe + warning, prompts for destructive
  * - --force: applies everything without prompting
- * - --dry-run: shows classified SQL without applying
+ * - --dry-run: shows the classified SQL and each function package's pending
+ *   migrations, then stops; its session is read-only, so it writes nothing
  * - --schema: schema entry point; otherwise drizzle.config.ts (schema + schemaFilter),
  *   then core's default: the entities folder scan, or its config.ts registry
  *   (DRIZZLE_SCHEMA_PATH) when the folder holds no entity file or exports a table
@@ -124,7 +131,7 @@ async function resolveSchemaFilesOrExit(config: Parameters<typeof resolveSchemaF
  *   (--schema, drizzle.config.ts) with no files exits 1.
  *
  * Whichever files are read, objects in a schema a function package owns stay out
- * of the diff: the package's own migrations carry them (step 11).
+ * of the diff: the package's own migrations carry them (step 8).
  */
 export async function dbPush(options: { force?: boolean; dryRun?: boolean; schema?: string } = {}): Promise<void>
 {
@@ -163,7 +170,7 @@ export async function dbPush(options: { force?: boolean; dryRun?: boolean; schem
 
     // 3. Load schema imports, less the objects a function package owns: a
     //    registry re-exports one of its tables for a relation, but the package's
-    //    own migrations (step 11) create and alter it.
+    //    own migrations (step 8) create and alter it.
     const imports = withoutFunctionPackageObjects(resolved.imports ?? await loadSchemaImports(resolved.files));
 
     // 3.5 Which PostgreSQL schemas to diff (see resolvePushSchemaFilter)
@@ -173,101 +180,127 @@ export async function dbPush(options: { force?: boolean; dryRun?: boolean; schem
     //     so an incompatible package fails without applying the project schema.
     const functionPlans = loadFunctionPlansOrExit();
 
-    // 4. Create DB connection
-    const { db, close } = await createPushConnection();
+    // 4. Connect. A dry run's session is read-only: PostgreSQL refuses any
+    //    write attempted on it.
+    const connection = await createPushConnection({ readOnly: options.dryRun });
 
     try
     {
-        // 5. Compute diff via pushSchema (does NOT apply yet)
-        const { statements, hints } = await resolvePushPlan(imports, db, schemaFilter);
-
-        for (const hint of hints)
-        {
-            console.log(chalk.yellow(`⚠️  ${hint.hint}`));
-        }
-
-        // 6. Empty diff?
-        if (statements.length === 0)
-        {
-            console.log(chalk.green('✅ No changes detected — database is up to date\n'));
-            await applyFunctionMigrations(functionPlans);
-
-            return;
-        }
-
-        // 7. Classify
+        // 5. Plan, reading only: the project diff via pushSchema, and each
+        //    function package's pending migrations
+        const { statements, hints } = await resolvePushPlan(imports, connection.db, schemaFilter);
+        const pending = await resolvePendingFunctionMigrations(connection, functionPlans);
         const result = classifyStatements(statements);
 
-        // 8. Dry-run mode
+        // 6. Display
+        displayProjectPlan(hints, statements.length === 0 ? undefined : result, options.dryRun);
+        displayPendingFunctionMigrations(pending);
+
+        // 7. The one dry-run gate: every write comes after it
         if (options.dryRun)
         {
-            displayDryRunSummary(result);
+            console.log(chalk.cyan('🔍 Dry run: nothing was applied.\n'));
 
             return;
         }
 
-        // 9. Display what we found
-        displayClassifiedStatements(result);
-
-        // 10. Apply logic
-        if (options.force)
-        {
-            // --force: apply everything
-            console.log(chalk.dim('\n--force: applying all changes...'));
-            await applyStatements(db, statements);
-            displayApplySummary(statements.length, 0);
-        }
-        else if (result.destructive.length === 0)
-        {
-            // No destructive changes — safe to apply all
-            await applyStatements(db, statements);
-            displayApplySummary(statements.length, 0);
-        }
-        else
-        {
-            // Has destructive changes — prompt before applying anything so the
-            // selected plan can run atomically in one transaction.
-            const destructiveSet = new Set(result.destructive.map(s => s.sql));
-            const nonDestructive = statements.filter(s => !destructiveSet.has(s));
-
-            // Prompt for destructive
-            console.log(chalk.red(`\n❌ ${result.destructive.length} destructive change(s) require confirmation:`));
-            for (const stmt of result.destructive)
-            {
-                console.log(chalk.red(`   ${stmt.sql.replace(/\s+/g, ' ').trim()}`));
-                console.log(chalk.dim(`   → ${stmt.reason}`));
-            }
-
-            const { confirm } = await prompts({
-                type: 'confirm',
-                name: 'confirm',
-                message: 'Apply destructive changes?',
-                initial: false,
-            });
-
-            if (confirm)
-            {
-                await applyStatements(db, statements);
-                displayApplySummary(statements.length, 0);
-            }
-            else
-            {
-                if (nonDestructive.length > 0)
-                {
-                    await applyStatements(db, nonDestructive);
-                }
-                displayApplySummary(nonDestructive.length, result.destructive.length);
-                console.log(chalk.dim('Tip: Use --force to apply all changes without prompting.\n'));
-            }
-        }
-
-        // 11. Function package migrations
+        // 8. Apply the project statements, then the function package migrations
+        await applyProjectStatements(connection.db, statements, result, options.force);
         await applyFunctionMigrations(functionPlans);
     }
     finally
     {
-        await close();
+        await connection.close();
     }
+}
+
+/**
+ * Print pushSchema's hints and the classified project statements, or that the
+ * project schema has none.
+ */
+function displayProjectPlan(hints: PushHint[], result: ClassificationResult | undefined, dryRun?: boolean): void
+{
+    for (const hint of hints)
+    {
+        console.log(chalk.yellow(`⚠️  ${hint.hint}`));
+    }
+
+    if (!result)
+    {
+        console.log(chalk.green('✅ No changes detected — project schema is up to date\n'));
+    }
+    else if (dryRun)
+    {
+        displayDryRunSummary(result);
+    }
+    else
+    {
+        displayClassifiedStatements(result);
+        console.log('');
+    }
+}
+
+/**
+ * Apply the project statements: everything with --force or when nothing is
+ * destructive; otherwise destructive ones only after confirmation, in the same
+ * transaction as the rest.
+ */
+async function applyProjectStatements(
+    db: Awaited<ReturnType<typeof createPushConnection>>['db'],
+    statements: string[],
+    result: ClassificationResult,
+    force?: boolean,
+): Promise<void>
+{
+    if (statements.length === 0)
+    {
+        return;
+    }
+
+    if (force)
+    {
+        console.log(chalk.dim('\n--force: applying all changes...'));
+    }
+
+    if (force || result.destructive.length === 0 || await confirmDestructive(result.destructive))
+    {
+        await applyStatements(db, statements);
+        displayApplySummary(statements.length, 0);
+
+        return;
+    }
+
+    const destructiveSet = new Set(result.destructive.map(s => s.sql));
+    const nonDestructive = statements.filter(s => !destructiveSet.has(s));
+
+    if (nonDestructive.length > 0)
+    {
+        await applyStatements(db, nonDestructive);
+    }
+    displayApplySummary(nonDestructive.length, result.destructive.length);
+    console.log(chalk.dim('Tip: Use --force to apply all changes without prompting.\n'));
+}
+
+/**
+ * List the destructive statements and ask before applying any of them.
+ */
+async function confirmDestructive(destructive: ClassificationResult['destructive']): Promise<boolean>
+{
+    console.log(chalk.red(`\n❌ ${destructive.length} destructive change(s) require confirmation:`));
+    for (const stmt of destructive)
+    {
+        console.log(chalk.red(`   ${stmt.sql.replace(/\s+/g, ' ').trim()}`));
+        console.log(chalk.dim(`   → ${stmt.reason}`));
+    }
+
+    const { confirm } = await prompts({
+        type: 'confirm',
+        name: 'confirm',
+        message: 'Apply destructive changes?',
+        initial: false,
+    });
+
+    return confirm;
 }
 
 /**
@@ -300,11 +333,7 @@ async function applyFunctionMigrations(plans: FunctionMigrationPlan[]): Promise<
         return;
     }
 
-    console.log(chalk.blue('\n📦 Applying function package migrations:'));
-    plans.forEach(plan =>
-    {
-        console.log(chalk.dim(`  - ${plan.packageName}`));
-    });
+    console.log(chalk.blue('\n📦 Applying function package migrations...'));
 
     try
     {

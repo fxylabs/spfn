@@ -664,12 +664,37 @@ export async function loadSchemaImports(schemaFiles: string[]): Promise<Record<s
 }
 
 /**
- * Create a drizzle-orm PgDatabase instance for pushSchema().
+ * DATABASE_URL with a startup option that makes every transaction on the
+ * session read-only, so PostgreSQL itself refuses a write. Set in the URL: a
+ * URL's own `options` parameter would override a separate `options` setting.
+ */
+export function withReadOnlySession(databaseUrl: string): string
+{
+    const parsedUrl = parseDatabaseUrl(databaseUrl);
+
+    if (!parsedUrl)
+    {
+        throw new Error('DATABASE_URL is not a URL, so a read-only session cannot be requested');
+    }
+
+    const options = [parsedUrl.searchParams.get('options'), '-c default_transaction_read_only=on'];
+    parsedUrl.searchParams.set('options', options.filter(Boolean).join(' '));
+
+    return parsedUrl.toString();
+}
+
+/**
+ * Create a drizzle-orm PgDatabase instance for pushSchema(), and `query` for raw
+ * SQL on the same session. With `readOnly` the session refuses every write.
  * Uses `pg` (node-postgres) driver because drizzle-kit's internal adapter
  * expects `execute()` to return `{ rows: [...] }`, which `pg` provides
  * but `postgres.js` does not.
  */
-export async function createPushConnection(): Promise<{ db: any; close: () => Promise<void> }>
+export async function createPushConnection(options: { readOnly?: boolean } = {}): Promise<{
+    db: any;
+    query: (text: string, params?: unknown[]) => Promise<Record<string, unknown>[]>;
+    close: () => Promise<void>;
+}>
 {
     loadEnv();
 
@@ -681,15 +706,15 @@ export async function createPushConnection(): Promise<{ db: any; close: () => Pr
     const pg = await import('pg');
     const { drizzle } = await import('drizzle-orm/node-postgres');
 
-    const connectionConfig = resolvePushConnectionConfig(env.DATABASE_URL);
+    const databaseUrl = options.readOnly ? withReadOnlySession(env.DATABASE_URL) : env.DATABASE_URL;
     const pool = new pg.default.Pool({
-        ...connectionConfig,
+        ...resolvePushConnectionConfig(databaseUrl),
         max: 1,
     });
-    const db = drizzle({ client: pool });
 
     return {
-        db,
+        db: drizzle({ client: pool }),
+        query: async (text, params) => (await pool.query(text, params)).rows,
         close: () => pool.end(),
     };
 }
