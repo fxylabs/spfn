@@ -124,10 +124,11 @@ async function resolveSchemaFilesOrExit(config: Parameters<typeof resolveSchemaF
  * - Default: auto-applies safe + warning, prompts for destructive
  * - --force: applies everything without prompting
  * - --dry-run: shows the classified SQL and each function package's pending
- *   migrations, then stops. The plan runs inside one `BEGIN READ ONLY`
- *   transaction on one client, checked to be read-only before it starts and
- *   rolled back after, so PostgreSQL refuses any write; when the check fails
- *   it exits 1 instead
+ *   migrations, then stops. Each plan query runs in its own `BEGIN READ ONLY`
+ *   transaction on one client, rolled back when the query ends, so PostgreSQL
+ *   refuses any write and the dry run holds no lock between statements. The
+ *   transactions are checked to be read-only before the plan starts; when the
+ *   check fails it exits 1 instead
  * - --schema: schema entry point; otherwise drizzle.config.ts (schema + schemaFilter),
  *   then core's default: the entities folder scan, or its config.ts registry
  *   (DRIZZLE_SCHEMA_PATH) when the folder holds no entity file or exports a table
@@ -184,8 +185,8 @@ export async function dbPush(options: { force?: boolean; dryRun?: boolean; schem
     //     so an incompatible package fails without applying the project schema.
     const functionPlans = loadFunctionPlansOrExit();
 
-    // 4. Connect. A dry run plans inside one read-only transaction, so
-    //    PostgreSQL refuses any write attempted on it.
+    // 4. Connect. A dry run runs each plan query in a read-only transaction
+    //    of its own, so PostgreSQL refuses any write attempted on it.
     const connection = await openPushConnectionOrExit(options.dryRun);
 
     try
@@ -223,9 +224,10 @@ export async function dbPush(options: { force?: boolean; dryRun?: boolean; schem
 }
 
 /**
- * Connect for the plan. A dry run's plan runs inside `BEGIN READ ONLY`; when
- * the server does not report that transaction read-only, the command ends
- * before planning rather than preview on a session that could write.
+ * Connect for the plan. Each query of a dry run's plan runs inside
+ * `BEGIN READ ONLY`; when the server does not report such a transaction
+ * read-only, the command ends before planning rather than preview on a
+ * session that could write.
  */
 async function openPushConnectionOrExit(dryRun?: boolean): Promise<PushConnection>
 {
@@ -237,7 +239,7 @@ async function openPushConnectionOrExit(dryRun?: boolean): Promise<PushConnectio
     }
 
     await connection.close();
-    console.error(chalk.red(`❌ --dry-run plans inside a read-only transaction, but after BEGIN READ ONLY the server `
+    console.error(chalk.red(`❌ --dry-run plans in read-only transactions, but after BEGIN READ ONLY the server `
         + `reported transaction_read_only=${connection.transactionReadOnly} — nothing was planned or applied`));
     console.log(chalk.yellow('💡 Something between the CLI and PostgreSQL (a pooler or proxy) changed the transaction; connect to PostgreSQL directly for a dry run'));
     process.exit(1);

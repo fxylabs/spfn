@@ -3,7 +3,8 @@
  *
  * A scratch app with one project table and one installed function package
  * that ships one migration, pushed to TEST_DATABASE_URL. Each dry run is
- * checked against a catalog snapshot taken before it (see snapshot()).
+ * checked against a catalog snapshot taken before it (see snapshot()), and the
+ * L rows check that it holds no lock between its statements.
  * `prompts` answers by failing the row: a dry run that reached the destructive
  * confirmation would otherwise wait on stdin until the row times out.
  */
@@ -26,7 +27,12 @@ vi.mock('prompts', () => ({
     },
 }));
 
-const writeAttempts = vi.hoisted(() => ({ enabled: false, results: [] as string[] }));
+const writeAttempts = vi.hoisted(() => ({
+    enabled: false,
+    results: [] as string[],
+    /** Runs when the push is about to close its connection */
+    beforeClose: undefined as undefined | (() => Promise<void>),
+}));
 
 vi.mock('../utils/drizzle.js', async (importOriginal) =>
 {
@@ -40,14 +46,18 @@ vi.mock('../utils/drizzle.js', async (importOriginal) =>
 
             if (writeAttempts.enabled)
             {
-                // In a savepoint, so the refused write leaves the plan's transaction usable
-                await connection.query('SAVEPOINT write_probe');
                 writeAttempts.results.push(await connection.db.execute(sql.raw('CREATE TABLE i163_app.write_probe (id integer)'))
                     .then(() => 'written', (error: Error & { cause?: Error }) => error.cause?.message ?? error.message));
-                await connection.query('ROLLBACK TO SAVEPOINT write_probe');
             }
 
-            return connection;
+            return {
+                ...connection,
+                close: async () =>
+                {
+                    await writeAttempts.beforeClose?.();
+                    await connection.close();
+                },
+            };
         },
     };
 });
@@ -132,6 +142,7 @@ describe('db push --dry-run', () =>
         printed = [];
         writeAttempts.enabled = false;
         writeAttempts.results = [];
+        writeAttempts.beforeClose = undefined;
         vi.spyOn(console, 'log').mockImplementation((...args: unknown[]) => void printed.push(args.map(String).join(' ')));
         vi.spyOn(process, 'exit').mockImplementation(((code?: number) =>
         {
@@ -182,6 +193,55 @@ describe('db push --dry-run', () =>
     async function createProjectTable(): Promise<void>
     {
         await db.unsafe('CREATE SCHEMA i163_app; CREATE TABLE i163_app.notes (id integer PRIMARY KEY)');
+    }
+
+    /** `text` in its own session, given 1.5 s to get its locks: 'ok', or the error message */
+    async function tryDdl(text: string): Promise<string>
+    {
+        const session = await connectClient();
+
+        try
+        {
+            await session.query(`SET lock_timeout = '1500ms'`);
+            await session.query('BEGIN');
+            await session.query(text);
+            await session.query('ROLLBACK');
+
+            return 'ok';
+        }
+        catch (error)
+        {
+            return (error as Error).message;
+        }
+        finally
+        {
+            await session.end();
+        }
+    }
+
+    /** Two project tables with a row and a column the schema drops, and the legacy shared table. */
+    async function seedTwoTables(): Promise<void>
+    {
+        await createProjectTable();
+        await db.unsafe(`ALTER TABLE i163_app.notes ADD COLUMN extra text;
+            CREATE TABLE i163_app.other (id integer PRIMARY KEY, extra text);
+            INSERT INTO i163_app.notes VALUES (1, 'a'); INSERT INTO i163_app.other VALUES (1, 'a');
+            CREATE SCHEMA drizzle;
+            CREATE TABLE drizzle."__spfn_fn_migrations" (id serial PRIMARY KEY, hash text NOT NULL, created_at bigint)`);
+    }
+
+    /** Whether, within 5 s, a session waits for a lock on i163_app.notes. */
+    async function waitsOnNotes(): Promise<boolean>
+    {
+        for (let i = 0; i < 50; i++)
+        {
+            await new Promise(resolve => setTimeout(resolve, 100));
+            const waiters = await db`SELECT pid FROM pg_stat_activity
+                WHERE datname = current_database() AND wait_event_type = 'Lock' AND query ILIKE '%i163_app%notes%'`;
+            if (waiters.length > 0) return true;
+        }
+
+        return false;
     }
 
     const output = () => printed.join('\n');
@@ -306,7 +366,7 @@ describe('db push --dry-run', () =>
         expect(await db`SELECT to_regclass('i163_app.write_probe') IS NULL AS "absent"`).toEqual([{ absent: true }]);
     });
 
-    it('R2 every query of the dry run goes to one client, between BEGIN READ ONLY and ROLLBACK', async () =>
+    it('R2 every query of the dry run runs on one client inside a read-only transaction of its own', async () =>
     {
         await createProjectTable();
         const sent: { client: unknown; text: string }[] = [];
@@ -321,11 +381,50 @@ describe('db push --dry-run', () =>
         await push(true);
 
         const texts = sent.map(entry => entry.text.trim());
+        const transactions = Array.from({ length: Math.ceil(texts.length / 3) }, (_, i) => texts.slice(i * 3, i * 3 + 3));
         expect(new Set(sent.map(entry => entry.client)).size).toBe(1);
-        expect(texts[0]).toBe('BEGIN READ ONLY');
-        expect(texts.at(-1)).toBe('ROLLBACK');
-        expect(texts.slice(1, -1).filter(text => /^(BEGIN|START|COMMIT|END|ROLLBACK|SET|RESET)\b/i.test(text))).toEqual([]);
-        expect(texts.length).toBeGreaterThan(10);
+        expect(transactions.length).toBeGreaterThan(10);
+        for (const [begin, statement, end] of transactions)
+        {
+            expect([begin, end]).toEqual(['BEGIN READ ONLY', 'ROLLBACK']);
+            expect(statement).not.toMatch(/^(BEGIN|START|COMMIT|END|ROLLBACK|SAVEPOINT|RELEASE|SET|RESET)\b/i);
+        }
+    });
+
+    it('L1 a dry run paused before it closes holds no lock: DDL on a table it read, and DROP of the legacy table, go through', async () =>
+    {
+        await seedTwoTables();
+        const seen: Record<string, string> = {};
+        writeAttempts.beforeClose = async () =>
+        {
+            seen.alterNotes = await tryDdl('ALTER TABLE i163_app.notes ADD COLUMN z integer');
+            seen.dropLegacy = await tryDdl('DROP TABLE drizzle."__spfn_fn_migrations"');
+        };
+
+        await push(true);
+
+        expect(output()).toMatch(/DROP COLUMN "extra"/);
+        expect(output()).toContain('Dry run: nothing was applied');
+        expect(seen).toEqual({ alterNotes: 'ok', dropLegacy: 'ok' });
+    });
+
+    it('L2 a dry run waiting on a table a migration locked holds no other lock: DDL on a table it already read goes through', async () =>
+    {
+        await seedTwoTables();
+        const migration = await connectClient();
+        await migration.query('BEGIN');
+        await migration.query('LOCK TABLE i163_app.notes IN ACCESS EXCLUSIVE MODE');
+        const settled = push(true).then(() => 'done', (error: Error) => error.message);
+
+        const waiting = await waitsOnNotes();
+        const alterOther = await tryDdl('ALTER TABLE i163_app.other ADD COLUMN z integer');
+        await migration.query('ROLLBACK');
+        await migration.end();
+
+        expect(waiting).toBe(true);
+        expect(alterOther).toBe('ok');
+        expect(await settled).toBe('done');
+        expect(output()).toContain('Dry run: nothing was applied');
     });
 
     it('RO1 behind a pooler that drops the `options` startup parameter, the dry run is still read-only', async () =>
@@ -373,6 +472,14 @@ describe('db push --dry-run', () =>
         expect(await snapshot()).toEqual(before);
     });
 });
+
+async function connectClient(): Promise<pg.Client>
+{
+    const client = new pg.Client(OWNER_URL);
+    await client.connect();
+
+    return client;
+}
 
 /**
  * A TCP proxy to OWNER_URL's server that passes each frontend message through
