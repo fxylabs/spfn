@@ -416,7 +416,7 @@ loaded `.env` chain.
 | Subcommand | Description |
 |------------|-------------|
 | `db generate` (`g`) | Generate migrations from schema changes (timestamp-prefixed) |
-| `db push` | Diff with Drizzle Kit's current PostgreSQL engine and apply the selected DDL atomically. Destructive changes need confirmation; `--force` applies them. `--dry-run` shows the classified statements and each function package's pending migrations by name, then stops. Each plan query runs in its own `BEGIN READ ONLY` transaction, checked to be read-only and rolled back when the query ends, so it writes nothing and holds no lock between statements; when PostgreSQL does not report the transaction read-only it exits 1 |
+| `db push` | Diff with Drizzle Kit's current PostgreSQL engine and apply the selected DDL atomically. Destructive changes need confirmation; `--force` applies them. `--dry-run` shows the classified statements and each function package's pending migrations by name, then stops. Each plan query runs in its own `BEGIN READ ONLY` transaction, rolled back when the query ends, so it writes nothing and holds no lock between statements. Before the plan runs, `transaction_read_only` is read once, in one such transaction; when PostgreSQL does not report it `on` it exits 1 |
 | `db migrate` (`m`) | Run pending migrations. `--with-backup` snapshots first |
 | `db status` | Show which migrations are applied and which are pending, for the project and for each installed function package. `--json` prints one machine-readable report instead |
 | `db studio` | Open Drizzle Studio. `-p, --port` (auto-finds a free port) |

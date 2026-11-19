@@ -93,8 +93,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the pending migrations, worked out without writing — prints both, and stops on a dry run before
   any write. Each query of the dry run's plan runs on one connection in its own `BEGIN READ ONLY`
   transaction, rolled back when the query ends, so the dry run holds no lock between statements;
-  the transactions are checked to be read-only (`transaction_read_only = on`) before the plan
-  starts, and when the check fails it exits 1 naming `--dry-run`. Applying reads the same pending list, so a preview and the
+  before the plan runs, `transaction_read_only` is read once, in one such transaction, and every
+  plan query then opens its transaction with the same `BEGIN READ ONLY`; when that read is not
+  `on` it exits 1 naming `--dry-run`. Applying reads the same pending list, so a preview and the
   push after it agree.
 
   Output changes scripts may match: `✅ No changes detected — database is up to date` is now

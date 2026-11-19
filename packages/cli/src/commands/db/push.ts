@@ -126,9 +126,10 @@ async function resolveSchemaFilesOrExit(config: Parameters<typeof resolveSchemaF
  * - --dry-run: shows the classified SQL and each function package's pending
  *   migrations, then stops. Each plan query runs in its own `BEGIN READ ONLY`
  *   transaction on one client, rolled back when the query ends, so PostgreSQL
- *   refuses any write and the dry run holds no lock between statements. The
- *   transactions are checked to be read-only before the plan starts; when the
- *   check fails it exits 1 instead
+ *   refuses any write and the dry run holds no lock between statements. Before
+ *   the plan runs, `transaction_read_only` is read once, in one such
+ *   transaction; every plan query then opens its transaction with the same
+ *   `BEGIN READ ONLY`. When that read is not `on` it exits 1 instead
  * - --schema: schema entry point; otherwise drizzle.config.ts (schema + schemaFilter),
  *   then core's default: the entities folder scan, or its config.ts registry
  *   (DRIZZLE_SCHEMA_PATH) when the folder holds no entity file or exports a table
