@@ -17,8 +17,9 @@
  * |    | directory is first armed (the `fs.watch` seam)                        | arming the watches                                   |
  * | W2 | while a generation is held: an unmatched file, a B file and an A file | the queue reduced to its first path                  |
  * |    | are queued                                                            |                                                      |
- * | W3 | the initial generation held: a pattern file no load reads edited, the | an initial generation before chokidar's `ready`, or  |
- * |    | import the initial load failed on created                             | no check after the first arm                         |
+ * | W3 | the initial generation held: a pattern file no load reads edited      | an initial generation before chokidar's `ready`      |
+ * | W3b| the initial generation held: an input no pattern matches edited,      | no check after the initial generation's arm          |
+ * |    | nothing else queued                                                   |                                                      |
  * | W5 | an input unlinked, recreated inside the unlink's own generation, then | bookkeeping saying "watched" while the watcher has   |
  * |    | edited again; its directory removed and recreated inside a generation,| dropped the file, or a directory watcher that went   |
  * |    | then the input edited again                                           | silent: every later edit lost                        |
@@ -340,12 +341,10 @@ describe('codegen watch loop', () =>
         expect(logged(info, /^No generators matched this file$/)).toBe(false);
     });
 
-    it('W3 edits made during the initial generation are regenerated', async () =>
+    it('W3 a pattern file no load reads, edited during the initial generation, is regenerated', async () =>
     {
         // Without the initial generation starting after chokidar's `ready`, the edit
-        // to `src/r/r.ts`, which no load reads, is never reported; without the check
-        // after the first arm, neither is the creation of the import the initial
-        // load failed on.
+        // to `src/r/r.ts` lands before chokidar's scan and is never reported.
         const reads: string[] = [];
         const reader: Generator = {
             name: 'reader',
@@ -355,23 +354,42 @@ describe('codegen watch loop', () =>
                 reads.push(readFileSync(join(options.cwd, 'src/r/r.ts'), 'utf-8'));
             },
         };
-        const held = gate('gate', ['src/server/routes/**/*.ts']);
+        const held = gate('gate', ['src/g/**/*.ts']);
 
         write('src/r/r.ts', 'r0');
-        writeProbe('/probe/${later}', 'import { later } from \'../lib/later\';\n');
+        write('src/g/g.ts', 'g0');
         held.hold();
 
-        const orchestrator = watching([routeMap(), reader, held.generator]);
+        const orchestrator = watching([reader, held.generator]);
 
         await held.entered;
         write('src/r/r.ts', 'r1');
-        write('src/server/lib/later.ts', 'export const later: string = \'later\';\n');
         await until(() => logged(info, /^Queued ~ src\/r\/r\.ts$/));
         held.release();
         await orchestrator.settled();
 
         expect(reads).toEqual(['r0', 'r1']);
-        expect(mapPaths()).toEqual(['/probe/later']);
+    });
+
+    it('W3b an input outside every pattern, edited during the initial generation with nothing queued, is regenerated', async () =>
+    {
+        // Without the check after the initial generation's arm, nothing reports the
+        // edit: no pattern matches `src/server/lib/seg.ts`, and its directory is
+        // first watched after the write.
+        const held = gate('gate', ['src/g/**/*.ts']);
+
+        write('src/server/lib/seg.ts', 'export const seg: string = \'one\';\n');
+        writeProbe('/probe/${seg}', 'import { seg } from \'../lib/seg\';\n');
+        held.hold();
+
+        const orchestrator = watching([routeMap(), held.generator]);
+
+        await held.entered;
+        write('src/server/lib/seg.ts', 'export const seg: string = \'two\';\n');
+        held.release();
+        await orchestrator.settled();
+
+        expect(mapPaths()).toEqual(['/probe/two']);
     });
 
     it('W5 an input unlinked and recreated inside the unlink\'s generation is still watched: a later edit regenerates', async () =>
@@ -433,13 +451,22 @@ describe('codegen watch loop', () =>
         await until(() => logged(info, /^Queued \+ src\/y\.ts$/));
 
         const calls = held.calls;
-        const closing = orchestrator.close();
+        const watcher = (orchestrator as unknown as { watcher: { close: () => Promise<void> } }).watcher;
+        const closeWatcher = watcher.close.bind(watcher);
 
-        // Released once close() has done the rest of its work, so a close() that
-        // does not wait for the generation resolves first.
-        setTimeout(() => held.release(), 200);
-        await closing;
+        // Released as close() closes chokidar, the last of its work before it
+        // waits for the loop: a close() that does not wait resolves without it.
+        watcher.close = async () =>
+        {
+            await closeWatcher();
+            held.release();
+        };
+        await orchestrator.close();
 
+        // The generation reported its end before close() resolved: a close() that
+        // resolves on its own work alone does so within a few microtasks of the
+        // release, before the loop gets there.
+        expect(info.mock.calls.filter(([message]) => String(message).startsWith('[gate] ✓ Regenerated'))).toHaveLength(1);
         expect(held.finished).toBe(calls);
         expect(held.calls).toBe(calls);
     });

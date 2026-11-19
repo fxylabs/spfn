@@ -144,22 +144,13 @@ interface OwnedFile
 
 const generations = new Map<string, Generation>();
 
-/**
- * The stamps of the latest load that closed. A later load under the same token
- * reaches the modules that load evaluated without reading them again (Node
- * keeps them by URL), so it takes their stamps from here, not from the disk as
- * it is by then: one generation loads a second router after the first.
- */
-let closedStamps: { token: string; stamps: Map<string, Stamp> } | undefined;
 const owned = new Map<string, OwnedFile>();
 const sourceMaps = new Map<string, SourceMap>();
 
 /** Start a load under `token`, reading the project at `root`. */
 export function openGeneration(token: string, root: string): void
 {
-    const stamps = new Map(closedStamps?.token === token ? closedStamps.stamps : []);
-
-    generations.set(token, { root: realpathSync(root), paths: new Map(), compilerOptions: new Map(), touched: new Set(), stamps });
+    generations.set(token, { root: realpathSync(root), paths: new Map(), compilerOptions: new Map(), touched: new Set(), stamps: new Map() });
 }
 
 /**
@@ -175,7 +166,6 @@ export function closeGeneration(token: string): Inputs
     const inputs: Inputs = new Map(generation?.stamps);
 
     generation?.touched.forEach(file => inputs.set(file, inputs.get(file) ?? stampOf(file)));
-    closedStamps = generation === undefined ? closedStamps : { token, stamps: generation.stamps };
     generations.delete(token);
 
     for (const [url, file] of owned)
