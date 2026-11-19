@@ -30,6 +30,7 @@
  * process share nothing.
  */
 
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { realpathSync } from 'fs';
 import { join, relative, sep } from 'path';
 import { watch as chokidarWatch } from 'chokidar';
@@ -157,6 +158,9 @@ export class CodegenOrchestrator
     private warnedUnwatchable = false;
     private inputWatcher?: InputWatcher;
 
+    /** Set inside a generation the watch loop runs: what a generator calls from its `generate()` sees it. */
+    private readonly inLoopGeneration = new AsyncLocalStorage<true>();
+
     /**
      * Pins `NODE_ENV` to `production` (`pinNodeEnv`), for a caller that builds
      * its generators by hand rather than through `loadCodegenConfig`: every
@@ -204,11 +208,17 @@ export class CodegenOrchestrator
      * waiting for one, and no input directory change still settling. A file
      * event chokidar has not delivered yet (it waits for writes to settle) is
      * not known here. Resolves at once outside watch mode, and after `close()`.
-     * Never await it inside a generator: the generation it waits for is the
-     * one awaiting it, and neither settles.
+     * Called from inside a generator of a generation the watch loop runs, it
+     * rejects (`reentered`): it would wait for that generation to end, which
+     * waits for it.
      */
     settled(): Promise<void>
     {
+        if (this.inLoopGeneration.getStore())
+        {
+            return Promise.reject(this.reentered('settled()'));
+        }
+
         if (this.isIdle())
         {
             return Promise.resolve();
@@ -236,12 +246,20 @@ export class CodegenOrchestrator
      * failure under `throwOnError`, as outside watch mode. Its log lines follow
      * watch mode's (`watchGeneration`). Called once `close()` has been, it
      * waits for the loop's last generation and then runs as outside watch mode;
-     * one still queued when `close()` is called is rejected.
+     * one still queued when `close()` is called is rejected. Called from inside
+     * a generator of a generation the watch loop runs, it rejects
+     * (`reentered`): its run would wait for that generation to end, which
+     * waits for it.
      *
      * @param trigger - How the generators are being triggered
      */
     async generateAll(trigger: GeneratorTrigger = 'manual'): Promise<void>
     {
+        if (this.inLoopGeneration.getStore())
+        {
+            throw this.reentered(`generateAll('${trigger}')`);
+        }
+
         if (this.loop !== undefined && !this.closed)
         {
             return new Promise((resolve, reject) =>
@@ -262,6 +280,16 @@ export class CodegenOrchestrator
         {
             throw failed.failure;
         }
+    }
+
+    /** The error for `call` made from inside a generation the watch loop runs. */
+    private reentered(call: string): Error
+    {
+        return new Error(
+            `${call} was called from inside a generator's generate() while this CodegenOrchestrator watches: it would wait `
+            + 'for the generation running that generator, which waits for it, and the watch loop would never run again. '
+            + 'Return from generate() instead; the loop runs a generator again when a file it read changes.',
+        );
     }
 
     /** A run of every generator `trigger` starts, logged; none, and said so, when it starts none. */
@@ -369,7 +397,7 @@ export class CodegenOrchestrator
      */
     private async watchGeneration(runs: Run[]): Promise<Outcome[]>
     {
-        const outcomes = await this.generate(runs, false);
+        const outcomes = await this.inLoopGeneration.run(true, () => this.generate(runs, false));
         const stale = this.closed ? new Map<string, ChangedFile['event']>() : this.armAndCheck();
 
         outcomes.forEach(outcome => this.settleOutcome(outcome, [...stale.keys()].some(path => this.inputs.get(outcome.generator)?.has(path))));

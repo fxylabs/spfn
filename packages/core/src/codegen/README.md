@@ -301,8 +301,10 @@ load (`src/codegen/loader/`).
   forwards each signal it gets to the watcher and exits after it.
 - **`settled()`** resolves once the loop is idle: nothing running, nothing dirty, no input
   directory event still settling. A chokidar event not delivered yet (it waits 100 ms for
-  writes to settle) is not known to it. Never await it inside a generator: it waits for the
-  generation that is awaiting it, and neither settles.
+  writes to settle) is not known to it.
+- **Not from inside a generator.** `generateAll()` and `settled()` called from a generator's
+  `generate()` in a generation the loop runs reject, saying why: each would wait for that
+  generation to end, which waits for it, and the loop would never run again.
 - **A directory that cannot be watched** (EACCES, ENOSPC at the inotify limit) is warned about
   once — `Cannot watch src/server/routes for the generators' watchPatterns (ENOSPC)` for a
   pattern directory, `Cannot watch <dir> for <inputs>` for an input's — and never fails a

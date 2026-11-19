@@ -44,6 +44,8 @@
  * |    | during it, and broken again as its outcome is held back           | the stamp fresh, and the failure is never shown      |
  * | W15| a generator writing a file it reads on every run, and throwing    | a failure held back on every run: a broken app shown |
  * |    |                                                                   | as quietly fine                                      |
+ * | W16| `generateAll()` and `settled()` awaited inside a generator while  | a watcher frozen on its own generation, which        |
+ * |    | watching; then an edit                                            | `close()` can never end                              |
  * | G1 | a generator writing, on every run, a file it reads, differently     | a silent endless loop (no warning), the warning      |
  * |    |                                                                   | repeated, a stop coming back, or a `close()` that    |
  * |    |                                                                   | never ends it                                        |
@@ -753,6 +755,47 @@ describe('codegen watch loop', () =>
         expect(error.mock.calls[0].map(String)).toEqual([
             '[self-writer] ✗ Generation failed (its inputs changed while it ran; running it again once they settle)',
             'Error: the generator failed',
+        ]);
+    });
+
+    it('W16 generateAll() and settled() awaited inside a generator while watching reject, and the loop runs on', async () =>
+    {
+        // Without it, each waits for the generation that is waiting for it: the
+        // loop never runs again, and close() never resolves.
+        let orchestrator!: CodegenOrchestrator;
+        const reads: string[] = [];
+        const outcomes: string[] = [];
+        const reentrant: Generator = {
+            name: 'reentrant',
+            watchPatterns: ['src/n/**/*.ts'],
+            async generate(options: GeneratorOptions): Promise<void>
+            {
+                reads.push(readFileSync(join(options.cwd, 'src/n/a.ts'), 'utf-8'));
+
+                if (reads.at(-1) !== 'a1')
+                {
+                    return;
+                }
+
+                for (const call of [() => orchestrator.generateAll('manual'), () => orchestrator.settled()])
+                {
+                    outcomes.push(await call().then(() => 'resolved', (failure: Error) => failure.message));
+                }
+            },
+        };
+
+        write('src/n/a.ts', 'a0');
+        orchestrator = watching([reentrant]);
+        await orchestrator.settled();
+        write('src/n/a.ts', 'a1');
+        await until(() => outcomes.length === 2);
+        write('src/n/a.ts', 'a2');
+        await until(() => reads.includes('a2'));
+        await orchestrator.close();
+
+        expect(outcomes).toEqual([
+            expect.stringMatching(/^generateAll\('manual'\) was called from inside a generator's generate\(\) while this CodegenOrchestrator watches: it would wait for the generation running that generator, which waits for it/),
+            expect.stringMatching(/^settled\(\) was called from inside a generator's generate\(\) while this CodegenOrchestrator watches/),
         ]);
     });
 
