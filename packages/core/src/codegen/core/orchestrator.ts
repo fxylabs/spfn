@@ -45,8 +45,9 @@ import { newGeneration } from '../loader/register';
 const orchestratorLogger = logger.child('@spfn/core:orchestrator');
 
 /**
- * Consecutive cycles started by the check alone — no file event — after which
- * the loop warns once (`warnCheckOnly`). It keeps regenerating.
+ * Consecutive cycles started by the check after a generation alone — a change
+ * no event reported to the idle loop — after which the loop warns once
+ * (`warnCheckOnly`). It keeps regenerating.
  */
 const CHECK_ONLY_CYCLES = 3;
 
@@ -838,9 +839,9 @@ export class CodegenOrchestrator
 
         this.warnedCheckOnly = true;
         orchestratorLogger.warn(
-            `Inputs changed during each of the last ${CHECK_ONLY_CYCLES} generations, with no file event between: `
-            + `${named.join(', ')}. A generator that writes a file it reads, differently on every run, would do this; `
-            + 'regenerating again each time the change settles.',
+            `Inputs changed during each of the last ${CHECK_ONLY_CYCLES} generations: ${named.join(', ')}. `
+            + 'Either a generator writes a file it reads, differently on every run, or files are being saved during '
+            + 'every generation; regenerating again each time the changes settle.',
         );
     }
 

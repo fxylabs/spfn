@@ -282,11 +282,13 @@ load (`src/codegen/loader/`).
   check. `Watch mode started` is logged once changes are seen from then on.
 - **`No generators matched this file`** (debug) is logged only when no generator matched a
   cycle's changes. A cycle in which every matched generator failed ends with their `✗` lines.
-- **Repeated late changes.** After 3 consecutive cycles that the check alone started (no file
-  event in between) whose inputs changed again, the loop warns once, naming the files and the
-  generators that read them: a generator that writes a file it reads, differently on every
-  run, would do this (see [Don't watch your own output](#pitfalls--anti-patterns)); so would
-  a file saved during each of those generations. It keeps regenerating, one cycle per quiet
+- **Repeated late changes.** After 3 consecutive cycles that only the check after a generation
+  started, whose inputs changed again, the loop warns once — `Inputs changed during each of
+  the last 3 generations:` — naming the files and the generators that read them, and the two
+  things it may mean: a generator that writes a file it reads, differently on every run (see
+  [Don't watch your own output](#pitfalls--anti-patterns)), or files being saved during every
+  generation. A save during a generation is found by that check whether or not it raised a
+  file event, so the warning says nothing about events. It keeps regenerating, one cycle per quiet
   period, and does not warn again until a cycle a file event started has run. Nothing is
   marked handled that no generation read.
 - **`generateAll()` while watching** is a run of the loop, not a second generation beside it:

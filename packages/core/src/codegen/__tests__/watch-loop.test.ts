@@ -838,9 +838,9 @@ describe('codegen watch loop', () =>
         expect(atWarning).toBe(4);
         expect(ends.slice(0, -1).map((end, run) => starts[run + 1] - end).filter(quiet => quiet < 140)).toEqual([]);
         expect(warn.mock.calls.map(([message]) => String(message))).toEqual([
-            'Inputs changed during each of the last 3 generations, with no file event between: src/counter.ts (read by '
-            + 'self-writer). A generator that writes a file it reads, differently on every run, would do this; '
-            + 'regenerating again each time the change settles.',
+            'Inputs changed during each of the last 3 generations: src/counter.ts (read by self-writer). Either a '
+            + 'generator writes a file it reads, differently on every run, or files are being saved during every '
+            + 'generation; regenerating again each time the changes settle.',
         ]);
     });
 });
