@@ -280,11 +280,18 @@ load (`src/codegen/loader/`).
   run has finished. A call still queued when `close()` is called is rejected; one made after
   `close()` waits for the last cycle and runs as outside watch mode.
 - **`close()`** starts no new generation and resolves once the one running has finished —
-  every generator of it, so the outputs of one cycle never disagree. The `spfn dev` watcher
-  awaits it on SIGTERM/SIGINT.
+  every generator of it, so the outputs of one cycle never disagree. A generation cannot be
+  cancelled, so a generator that never settles keeps `close()` pending. An orchestrator is
+  single-use: `watch()` after `close()` rejects. The `spfn dev` watcher calls `close()` on the
+  first SIGTERM/SIGINT and exits when it resolves; a second signal exits at once.
 - **`settled()`** resolves once the loop is idle: nothing running, nothing dirty, no input
   directory event still settling. A chokidar event not delivered yet (it waits 100 ms for
-  writes to settle) is not known to it.
+  writes to settle) is not known to it. Never await it inside a generator: it waits for the
+  generation that is awaiting it, and neither settles.
+- **A directory that cannot be watched** (EACCES, ENOSPC at the inotify limit) is warned about
+  once — `Cannot watch src/server/routes for the generators' watchPatterns (ENOSPC)` for a
+  pattern directory, `Cannot watch <dir> for <inputs>` for an input's — and never fails a
+  generation.
 - **State is per orchestrator.** Two orchestrators in one process share no watch state.
 
 **Not watched** — restart `spfn dev` (or save a watched file) after changing:

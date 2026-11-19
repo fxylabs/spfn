@@ -42,7 +42,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **@spfn/core: `CodegenOrchestrator.close()` stops the watch loop.** A change queued when it was
   called ran the generators again after it resolved; now nothing new starts, and it resolves once
   the generation running has finished every generator, so the `spfn dev` watcher's SIGTERM no
-  longer leaves the route map and contract from two different generations.
+  longer leaves the route map and contract from two different generations. A generation cannot be
+  cancelled, so the watcher entry exits at once on a second signal. An orchestrator is
+  single-use: `watch()` after `close()` rejects instead of opening watchers nothing closes. A
+  chokidar error is warned about once, naming the pattern directories.
 - **@spfn/core: `CodegenOrchestrator.generateAll()` called while watching** ran the generators
   beside the cycle running, two generations writing the same outputs at once; it is now queued as
   a run of the watch loop and settles when that run has finished.

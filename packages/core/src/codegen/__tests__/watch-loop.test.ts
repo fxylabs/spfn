@@ -1,5 +1,5 @@
 /**
- * The watch loop — rows W1–W3, W5–W11 and the loop guard of the #353 design
+ * The watch loop — rows W1–W3, W5–W12 and the loop guard of the #353 design
  *
  * Each row runs an orchestrator in watch mode, in this process, on an app in a
  * temporary directory with `@spfn/core` linked into its `node_modules`.
@@ -35,6 +35,8 @@
  * |    |                                                                   | one Node would make                                  |
  * | W11| a file created at an earlier `paths` target, then one beside a    | the same, for a resolution whose earlier candidates  |
  * |    | directory an import resolved to the index of                      | were not stamped absent                              |
+ * | W12| `watch()` after `close()`                                         | a closed orchestrator opening watchers nothing       |
+ * |    |                                                                   | closes                                               |
  * | G1 | a generator writing, on every run, a file it reads                    | the loop guard: such a generator regenerating        |
  * |    |                                                                       | forever                                              |
  */
@@ -582,6 +584,22 @@ describe('codegen watch loop', () =>
 
         write('src/server/lib/name.ts', 'export const name: string = \'file\';\n');
         await until(() => mapPaths().includes('/probe/first/file'));
+    });
+
+    it('W12 watch() after close() rejects, and opens no watcher', async () =>
+    {
+        // Without it, the closed orchestrator starts chokidar and the input watcher
+        // again, and nothing will close them: the process never exits.
+        write('src/x.ts', 'x0');
+
+        const orchestrator = new CodegenOrchestrator({ generators: [gate('gate', ['src/**/*.ts']).generator], cwd: appDir });
+
+        await orchestrator.close();
+
+        await expect(orchestrator.watch()).rejects.toThrow('This CodegenOrchestrator was closed: an orchestrator is single-use');
+        expect((orchestrator as unknown as { watcher?: unknown }).watcher).toBeUndefined();
+        expect(inputChangePending(orchestrator)).toBe(false);
+        expect((orchestrator as unknown as { inputWatcher?: unknown }).inputWatcher).toBeUndefined();
     });
 
     it('G1 a generator that rewrites a file it reads on every run is stopped after three check-only cycles, with a warning', async () =>

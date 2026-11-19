@@ -134,6 +134,7 @@ export class CodegenOrchestrator
     /** `generateAll()` calls made while watching, for the loop to run in turn. */
     private requests: RunRequest[] = [];
     private watcher?: ReturnType<typeof chokidarWatch>;
+    private warnedUnwatchable = false;
     private inputWatcher?: InputWatcher;
 
     /**
@@ -153,7 +154,10 @@ export class CodegenOrchestrator
     /**
      * Stop watching: no new generation starts, and the promise resolves once
      * the one running, if any, has finished — every generator of it, so the
-     * outputs of one cycle never disagree. `watch()` resolves with it.
+     * outputs of one cycle never disagree. `watch()` resolves with it. A
+     * generation cannot be cancelled: one that never settles keeps this
+     * pending, and only exiting the process stops it. An orchestrator is
+     * single-use: `watch()` after `close()` rejects.
      */
     async close(): Promise<void>
     {
@@ -180,6 +184,8 @@ export class CodegenOrchestrator
      * waiting for one, and no input directory change still settling. A file
      * event chokidar has not delivered yet (it waits for writes to settle) is
      * not known here. Resolves at once outside watch mode, and after `close()`.
+     * Never await it inside a generator: the generation it waits for is the
+     * one awaiting it, and neither settles.
      */
     settled(): Promise<void>
     {
@@ -366,9 +372,16 @@ export class CodegenOrchestrator
     /**
      * Start watch mode: once chokidar has scanned the patterns' directories,
      * the initial generation, then the loop. Resolves when `close()` is called.
+     * Rejects when `close()` was called before: a closed orchestrator watches
+     * nothing again.
      */
     async watch(): Promise<void>
     {
+        if (this.closed)
+        {
+            throw new Error('This CodegenOrchestrator was closed: an orchestrator is single-use, so create a new one to watch again');
+        }
+
         const patterns = this.generators.flatMap(g => g.watchPatterns);
 
         if (patterns.length === 0)
@@ -436,7 +449,8 @@ export class CodegenOrchestrator
         this.watcher
             .on('add', path => this.changed(path, 'add'))
             .on('change', path => this.changed(path, 'change'))
-            .on('unlink', path => this.changed(path, 'unlink'));
+            .on('unlink', path => this.changed(path, 'unlink'))
+            .on('error', error => this.unwatchable(watchDirs, error));
 
         // The initial generation starts after chokidar's first scan: it reports no
         // change to a file it has not scanned (`ignoreInitial`), so an edit made
@@ -446,6 +460,27 @@ export class CodegenOrchestrator
             this.watcher!.on('ready', () => resolve());
             this.stopWaiting = resolve;
         });
+    }
+
+    /**
+     * chokidar reported an error (EACCES, ENOSPC at the inotify limit): say so
+     * once, naming the pattern directories — never thrown into the loop. The
+     * inputs' own directories are watched apart from it (`./input-watcher`).
+     */
+    private unwatchable(watchDirs: string[], error: unknown): void
+    {
+        if (this.warnedUnwatchable)
+        {
+            return;
+        }
+
+        const code = (error as NodeJS.ErrnoException | null)?.code ?? String(error);
+
+        this.warnedUnwatchable = true;
+        orchestratorLogger.warn(
+            `Cannot watch ${watchDirs.map(dir => relative(this.cwd, dir) || '.').join(', ')} for the generators' watchPatterns `
+            + `(${code}): a file created or changed there may not regenerate until spfn dev restarts.`,
+        );
     }
 
     /** A file event from chokidar: the path is dirty. */

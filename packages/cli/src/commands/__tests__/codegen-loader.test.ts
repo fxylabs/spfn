@@ -39,6 +39,8 @@
  * |    | contract check` and the watcher entry `spfn dev` writes      | the refusal silently a warning there                      |
  * | R33| the watcher entry with a `.spfnrc.ts` that fails to load     | a watcher that exits while the server runs on, saying     |
  * |    |                                                              | nothing of regeneration being off until a restart         |
+ * | R34| the watcher entry with a generator held by a file gate: one   | an entry that exits mid-generation, or that ignores every |
+ * |    | signal, then the gate opened; then two signals               | signal while a generation hangs (orphaned by spfn dev)    |
  * | R22| the bin, and the tsx child it re-spawns, recording their     | the codegen mark set where the CLI starts, inherited by   |
  * |    | environment at exit                                          | the dev server, `next` and `spfn db` (every descendant)   |
  */
@@ -202,8 +204,9 @@ beforeEach(() =>
     writeApp();
 });
 
-afterEach(() =>
+afterEach(async () =>
 {
+    await Promise.all(watchers.splice(0).map(watcher => watcher.kill()));
     rmSync(appDir, { recursive: true, force: true });
 });
 
@@ -321,6 +324,60 @@ describe.each(TSX)('codegen in CLI processes, tsx $version', (tsx) =>
         finally
         {
             await watcher.stop();
+        }
+    });
+
+    it('R34 the watcher entry on a signal: finishes the running generation, then exits; on a second, exits at once', async () =>
+    {
+        // A generator held until `open` exists. Without the first half, the entry
+        // exits mid-generation (the outputs of one cycle from two generations);
+        // without the second, a generation that never settles leaves the watcher
+        // ignoring every signal, orphaned once spfn dev exits.
+        write('gate-generator.mjs', 'import { existsSync, writeFileSync } from \'node:fs\';\n'
+            + 'import { join } from \'node:path\';\n'
+            + 'export default function createGate()\n{\n'
+            + '    return { name: \'gate\', watchPatterns: [\'src/gate/**/*.ts\'], async generate({ cwd })\n    {\n'
+            + '        writeFileSync(join(cwd, \'entered\'), \'\');\n'
+            + '        while (!existsSync(join(cwd, \'open\'))) await new Promise(settle => setTimeout(settle, 20));\n'
+            + '        writeFileSync(join(cwd, \'finished\'), \'\');\n'
+            + '    } };\n}\n');
+        write('.spfnrc.ts', 'import { defineConfig } from \'@spfn/core/codegen\';\n\n'
+            + 'export default defineConfig({ generators: [{ path: \'./gate-generator.mjs\' }] });\n');
+        write('.spfn/watcher.mjs', watcherEntrySource());
+
+        const stopping = 'Codegen watcher stopping once the running generation finishes';
+
+        for (const second of [true, false])
+        {
+            rmSync(join(appDir, 'entered'), { force: true });
+
+            const watcher = startWatcher(tsx);
+
+            try
+            {
+                await watcher.until(() => existsSync(join(appDir, 'entered')));
+                watcher.signal('SIGTERM');
+                await watcher.until(() => watcher.output().includes(stopping));
+
+                if (second)
+                {
+                    watcher.signal('SIGTERM');
+
+                    expect(await watcher.exited).toBe(143);
+                    expect(existsSync(join(appDir, 'finished'))).toBe(false);
+                }
+                else
+                {
+                    write('open', '');
+
+                    expect(await watcher.exited).toBe(0);
+                    expect(existsSync(join(appDir, 'finished'))).toBe(true);
+                }
+            }
+            finally
+            {
+                await watcher.kill();
+            }
         }
     });
 
@@ -536,7 +593,30 @@ function installCoreInApp(): void
 }
 
 /** The watcher, started as `spfn dev` starts it (tsx, the dev hook, `NODE_ENV=production`), in a process group of its own. */
-function startWatcher(tsx: Tsx): { output: () => string; until: (condition: () => boolean) => Promise<void>; stop: () => Promise<void> }
+interface Watcher
+{
+    output: () => string;
+    until: (condition: () => boolean) => Promise<void>;
+
+    /**
+     * Send `signal` to the tsx process alone, as `spfn dev` signals its watcher
+     * child; tsx relays it. Not to the group: tsx relays a signal the child also
+     * got unless the child reports it within 30 ms, so one signal can arrive twice.
+     */
+    signal: (signal: NodeJS.Signals) => void;
+
+    /** The exit code, once the watcher has exited. */
+    exited: Promise<number | null>;
+    stop: () => Promise<void>;
+
+    /** SIGKILL the process group, for a watcher a failed row may have left hung. */
+    kill: () => Promise<void>;
+}
+
+/** Every watcher started, killed after each row if still running: a timed-out row never reaches its `finally`. */
+const watchers: Watcher[] = [];
+
+function startWatcher(tsx: Tsx): Watcher
 {
     const loader = pathToFileURL(devLoader);
     const env: NodeJS.ProcessEnv = { ...process.env, NODE_ENV: 'production' };
@@ -556,10 +636,11 @@ function startWatcher(tsx: Tsx): { output: () => string; until: (condition: () =
     child.stdout.on('data', chunk => (output += chunk));
     child.stderr.on('data', chunk => (output += chunk));
 
-    const exited = new Promise<void>(settle => child.on('exit', () => settle()));
-
-    return {
+    const exited = new Promise<number | null>(settle => child.on('exit', code => settle(code)));
+    const watcher: Watcher = {
         output: () => plain(output),
+        signal: signal => process.kill(child.pid!, signal),
+        exited,
         until: async (condition) =>
         {
             const deadline = Date.now() + 20_000;
@@ -582,5 +663,17 @@ function startWatcher(tsx: Tsx): { output: () => string; until: (condition: () =
                 await exited;
             }
         },
+        kill: async () =>
+        {
+            if (child.exitCode === null && child.signalCode === null)
+            {
+                process.kill(-child.pid!, 'SIGKILL');
+                await exited;
+            }
+        },
     };
+
+    watchers.push(watcher);
+
+    return watcher;
 }

@@ -69,6 +69,7 @@ export function watcherEntrySource(): string
 //     pool: { max: 3 }  // Watcher needs fewer connections than server
 // });
 
+import { constants } from 'node:os';
 import { CodegenOrchestrator, loadCodegenConfig, createGeneratorsFromConfig, markCodegenProcess } from '@spfn/core/codegen';
 
 // Started by the spfn CLI to generate code: a second copy of @spfn/core after a
@@ -96,24 +97,28 @@ const orchestrator = new CodegenOrchestrator({
     debug: true
 });
 
-// Graceful shutdown: close() starts no new generation and resolves once the one
+// The first signal: close() starts no new generation and resolves once the one
 // running has finished every generator, so the files of one cycle (route map,
-// contract) are never left from two different generations.
-const cleanup = async () =>
+// contract) are never left from two different generations; then exit. A
+// generation cannot be cancelled, so a second signal exits at once: it is the
+// only way to stop one that never settles.
+let stopping = false;
+
+const stop = async (signal) =>
 {
+    if (stopping)
+    {
+        process.exit(128 + constants.signals[signal]);
+    }
+
+    stopping = true;
+    console.log('[SPFN] Codegen watcher stopping once the running generation finishes (signal again to exit now)');
     await orchestrator.close();
+    process.exit(0);
 };
 
-process.on('SIGTERM', async () =>
-{
-    await cleanup();
-    process.exit(0);
-});
-process.on('SIGINT', async () =>
-{
-    await cleanup();
-    process.exit(0);
-});
+process.on('SIGTERM', stop);
+process.on('SIGINT', stop);
 
 // Start watching - this will run indefinitely until the watcher is closed
 try
