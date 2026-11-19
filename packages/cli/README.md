@@ -149,8 +149,10 @@ which do not let `spfn dev` wait for it.
 
 On SIGINT or SIGTERM, `spfn dev` sends the server and Next.js SIGTERM, forwards the signal to
 the codegen watcher, and exits once the watcher has: the watcher finishes the generation it is
-running first. A second signal is forwarded too, and the watcher then exits at once. A SIGKILL
-of `spfn dev` reaches no child.
+running first. A second signal is forwarded too, and the watcher then exits at once. Once a
+stop has begun, `spfn dev` starts no child: not Next.js when the server becomes ready during it,
+not a server restart (it logs `Next.js not started: spfn dev is stopping`). A SIGKILL of
+`spfn dev` reaches no child.
 
 So the route map and contract never come from two generations when one SIGTERM or SIGINT is
 sent to the pid of the process that runs `spfn dev`: the tsx child when `bin/spfn.js`

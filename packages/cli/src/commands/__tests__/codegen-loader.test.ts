@@ -473,6 +473,42 @@ describe.each(TSX)('codegen in CLI processes, tsx $version', (tsx) =>
         }
     }, 60_000);
 
+    it('R36 spfn dev stopped before its server is ready starts no Next.js once the server becomes ready, and exits leaving no process', async () =>
+    {
+        // Without it, Next.js is started after the stop signalled the children
+        // that existed: nothing ever signals it, and it runs on, orphaned, once
+        // spfn dev exits with its watcher. The row writes the server's ready
+        // file itself after the signal: the server became ready during the stop.
+        writeGateGenerator();
+        installTsx(tsx);
+        write('package.json', JSON.stringify({ name: 'codegen-loader-fixture', private: true, dependencies: { next: '15.0.0' }, scripts: { 'spfn:next': 'node next-stand-in.mjs' } }));
+        write('next-stand-in.mjs', 'import { writeFileSync } from \'node:fs\';\n'
+            + 'writeFileSync(\'next-started\', \'\');\nsetInterval(() => undefined, 1000);\n');
+
+        const dev = startDev(tsx, await freePort());
+
+        try
+        {
+            await dev.until(() => existsSync(join(appDir, 'entered')));
+
+            expect(dev.output(), 'the server became ready before the signal').not.toContain('Server ready on port');
+
+            dev.signal('SIGTERM');
+            await dev.until(() => dev.output().includes('Codegen watcher stopping once the running generation finishes'));
+            write('.spfn/server-ready', '1');
+            await dev.until(() => dev.output().includes('Next.js not started') || existsSync(join(appDir, 'next-started')));
+            write('open', '');
+
+            expect(await dev.exited, dev.output()).toBe(0);
+            expect({ left: await groupLeft(dev.pid), nextStarted: existsSync(join(appDir, 'next-started')) }, dev.output())
+                .toEqual({ left: false, nextStarted: false });
+        }
+        finally
+        {
+            await dev.kill();
+        }
+    }, 60_000);
+
     it('R33 the watcher entry, given a .spfnrc.ts that fails to load, exits 1 saying to fix it and restart spfn dev', () =>
     {
         write('.spfnrc.ts', 'export default __dirname;\n');
@@ -742,6 +778,19 @@ function killGroup(pid: number): void
     }
 }
 
+/** Whether any process is still in the group `pid` leads 10 s on: the server, signalled and not waited for, may take a moment. */
+async function groupLeft(pid: number): Promise<boolean>
+{
+    const deadline = Date.now() + 10_000;
+
+    while (alive(-pid) && Date.now() < deadline)
+    {
+        await new Promise(settle => setTimeout(settle, 50));
+    }
+
+    return alive(-pid);
+}
+
 /** Whether a process with `pid` exists. */
 function alive(pid: number): boolean
 {
@@ -760,6 +809,7 @@ function alive(pid: number): boolean
 /** A process the row started, in a process group of its own. */
 interface Watcher
 {
+    pid: number;
     output: () => string;
     until: (condition: () => boolean) => Promise<void>;
 
@@ -828,6 +878,7 @@ function track(args: string[], env: NodeJS.ProcessEnv): Watcher
 
     const exited = new Promise<number | null>(settle => child.on('exit', code => settle(code)));
     const watcher: Watcher = {
+        pid: child.pid!,
         output: () => plain(output),
         running: () => child.exitCode === null && child.signalCode === null,
         signal: signal => process.kill(child.pid!, signal),

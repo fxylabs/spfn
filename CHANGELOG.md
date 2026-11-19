@@ -66,8 +66,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Node directly — the app's, else the one installed beside `spfn` — and never through the package
   manager: with no tsx found, it is not started, and one error says to install tsx in the app.
   `spfn dev` forwards every signal to it and exits once it has (a second signal makes it exit at
-  once). The server and Next.js are still sent one SIGTERM and not waited for. A SIGKILL of
-  `spfn dev` reaches none of them.
+  once). The server and Next.js are still sent one SIGTERM and not waited for. Every child is
+  started through one place that refuses once a stop has begun: a stop before the server was
+  ready no longer starts Next.js when it becomes ready, leaving it running after `spfn dev`
+  exited. A SIGKILL of `spfn dev` reaches none of them.
 - **@spfn/core: `CodegenOrchestrator.generateAll()` called while watching** ran the generators
   beside the cycle running, two generations writing the same outputs at once; it is now queued as
   a run of the watch loop and settles when that run has finished. Called (or `settled()`) from
