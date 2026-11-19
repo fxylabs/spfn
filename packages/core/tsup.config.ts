@@ -5,19 +5,8 @@ import { defineConfig, type Options } from 'tsup';
 
 type Plugin = NonNullable<Options['esbuildPlugins']>[number];
 
-/**
- * The declaration build gives every *directory* holding an entry source a
- * whole TypeScript program of its own — about 90MB of the DTS worker's heap
- * each, 23 of them, ~3GB together against CI's 3072MB cap. (rollup-plugin-dts,
- * bundled in tsup 9, groups consecutive entries by directory; its config cache
- * hands back the entry's own directory rather than the tsconfig's.) An entry
- * whose source sits beside the previous entry's shares that program: so
- * `codegen/loader` is built from `src/codegen/loader-entry.ts`, next to
- * `src/codegen/index.ts`, not from a `src/codegen/loader/index.ts` of its own.
- * A new entry belongs in an existing entry's directory, listed right after it.
- * That placement avoids the cost for one entry, it does not remove it: issue
- * #352 tracks the one-program-per-directory cost itself.
- */
+// Declarations build as one TypeScript program for all entries, wherever their sources
+// sit, because of the tsup patch in /patches (#352).
 const entry = {
     'nextjs/index': 'src/nextjs/index.ts',
     'nextjs/server': 'src/nextjs/server.ts',
@@ -31,7 +20,7 @@ const entry = {
     'authz/index': 'src/authz/index.ts',
     'cache/index': 'src/cache/index.ts',
     'codegen/index': 'src/codegen/index.ts',
-    'codegen/loader/index': 'src/codegen/loader-entry.ts',
+    'codegen/loader/index': 'src/codegen/loader/index.ts',
     'contract/index': 'src/contract/index.ts',
     'ops/index': 'src/ops/index.ts',
     'surface/index': 'src/surface/index.ts',

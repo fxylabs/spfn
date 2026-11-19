@@ -26,6 +26,11 @@ overrides:
   source-map-js@<1.2.2: ^1.2.2
   sharp@<0.35.5: ^0.35.5
 
+patchedDependencies:
+  tsup@9.0.0:
+    hash: 3xsxyj3qu32icn7lid6e5feqtm
+    path: patches/tsup@9.0.0.patch
+
 importers:
 
   .:
@@ -170,7 +175,7 @@ importers:
         version: 4.1.16
       tsup:
         specifier: ^9.0.0
-        version: 9.0.0(jiti@2.6.1)(postcss@8.5.31)(tsx@4.22.4)(typescript@5.9.3)(yaml@2.9.0)
+        version: 9.0.0(patch_hash=3xsxyj3qu32icn7lid6e5feqtm)(jiti@2.6.1)(postcss@8.5.31)(tsx@4.22.4)(typescript@5.9.3)(yaml@2.9.0)
       tsx:
         specifier: ^4.22.4
         version: 4.22.4
@@ -240,7 +245,7 @@ importers:
         version: 4.1.16
       tsup:
         specifier: ^9.0.0
-        version: 9.0.0(jiti@2.6.1)(postcss@8.5.31)(tsx@4.22.4)(typescript@5.9.3)(yaml@2.9.0)
+        version: 9.0.0(patch_hash=3xsxyj3qu32icn7lid6e5feqtm)(jiti@2.6.1)(postcss@8.5.31)(tsx@4.22.4)(typescript@5.9.3)(yaml@2.9.0)
       tsx:
         specifier: ^4.22.4
         version: 4.22.4
@@ -332,7 +337,7 @@ importers:
         version: link:../cli
       tsup:
         specifier: ^9.0.0
-        version: 9.0.0(jiti@2.6.1)(postcss@8.5.31)(tsx@4.20.6)(typescript@5.9.3)(yaml@2.9.0)
+        version: 9.0.0(patch_hash=3xsxyj3qu32icn7lid6e5feqtm)(jiti@2.6.1)(postcss@8.5.31)(tsx@4.20.6)(typescript@5.9.3)(yaml@2.9.0)
       tsx:
         specifier: ^4.20.6
         version: 4.20.6
@@ -386,7 +391,7 @@ importers:
         version: 2.4.2
       tsup:
         specifier: ^9.0.0
-        version: 9.0.0(jiti@2.6.1)(postcss@8.5.31)(tsx@4.22.4)(typescript@5.9.3)(yaml@2.9.0)
+        version: 9.0.0(patch_hash=3xsxyj3qu32icn7lid6e5feqtm)(jiti@2.6.1)(postcss@8.5.31)(tsx@4.22.4)(typescript@5.9.3)(yaml@2.9.0)
       yaml:
         specifier: ^2.8.3
         version: 2.9.0
@@ -488,7 +493,7 @@ importers:
         version: link:../cli
       tsup:
         specifier: ^9.0.0
-        version: 9.0.0(jiti@2.6.1)(postcss@8.5.31)(tsx@4.20.6)(typescript@5.9.3)(yaml@2.9.0)
+        version: 9.0.0(patch_hash=3xsxyj3qu32icn7lid6e5feqtm)(jiti@2.6.1)(postcss@8.5.31)(tsx@4.20.6)(typescript@5.9.3)(yaml@2.9.0)
       tsx:
         specifier: ^4.20.6
         version: 4.20.6
@@ -595,7 +600,7 @@ importers:
         version: 19.2.3(react@19.2.3)
       tsup:
         specifier: ^9.0.0
-        version: 9.0.0(jiti@2.6.1)(postcss@8.5.31)(tsx@4.22.4)(typescript@5.9.3)(yaml@2.9.0)
+        version: 9.0.0(patch_hash=3xsxyj3qu32icn7lid6e5feqtm)(jiti@2.6.1)(postcss@8.5.31)(tsx@4.22.4)(typescript@5.9.3)(yaml@2.9.0)
       tsx:
         specifier: ^4.20.6
         version: 4.22.4
@@ -628,7 +633,7 @@ importers:
         version: 19.2.3(react@19.2.3)
       tsup:
         specifier: ^9.0.0
-        version: 9.0.0(jiti@2.6.1)(postcss@8.5.31)(tsx@4.22.4)(typescript@5.9.3)(yaml@2.9.0)
+        version: 9.0.0(patch_hash=3xsxyj3qu32icn7lid6e5feqtm)(jiti@2.6.1)(postcss@8.5.31)(tsx@4.22.4)(typescript@5.9.3)(yaml@2.9.0)
       typescript:
         specifier: ^5.9.3
         version: 5.9.3
@@ -656,7 +661,7 @@ importers:
         version: 8.0.0(typescript@5.9.3)
       tsup:
         specifier: ^9.0.0
-        version: 9.0.0(jiti@2.6.1)(postcss@8.5.31)(tsx@4.22.4)(typescript@5.9.3)(yaml@2.9.0)
+        version: 9.0.0(patch_hash=3xsxyj3qu32icn7lid6e5feqtm)(jiti@2.6.1)(postcss@8.5.31)(tsx@4.22.4)(typescript@5.9.3)(yaml@2.9.0)
       typescript:
         specifier: ^5.9.3
         version: 5.9.3
@@ -680,7 +685,7 @@ importers:
         version: 1.0.0-rc.4(@electric-sql/pglite@0.5.4)(@opentelemetry/api@1.10.0)(@sinclair/typebox@0.34.41)(@types/pg@8.15.6)(pg@8.16.3)(postgres@3.4.7)(zod@4.6.7)
       tsup:
         specifier: ^9.0.0
-        version: 9.0.0(jiti@2.6.1)(postcss@8.5.31)(tsx@4.22.4)(typescript@5.9.3)(yaml@2.9.0)
+        version: 9.0.0(patch_hash=3xsxyj3qu32icn7lid6e5feqtm)(jiti@2.6.1)(postcss@8.5.31)(tsx@4.22.4)(typescript@5.9.3)(yaml@2.9.0)
       typescript:
         specifier: ^5.3.3
         version: 5.9.3
@@ -723,7 +728,7 @@ importers:
         version: 8.0.0(typescript@5.9.3)
       tsup:
         specifier: ^9.0.0
-        version: 9.0.0(jiti@2.6.1)(postcss@8.5.31)(tsx@4.22.4)(typescript@5.9.3)(yaml@2.9.0)
+        version: 9.0.0(patch_hash=3xsxyj3qu32icn7lid6e5feqtm)(jiti@2.6.1)(postcss@8.5.31)(tsx@4.22.4)(typescript@5.9.3)(yaml@2.9.0)
       typescript:
         specifier: ^5.3.3
         version: 5.9.3
@@ -762,7 +767,7 @@ importers:
         version: 8.0.0(typescript@5.9.3)
       tsup:
         specifier: ^9.0.0
-        version: 9.0.0(jiti@2.6.1)(postcss@8.5.31)(tsx@4.22.4)(typescript@5.9.3)(yaml@2.9.0)
+        version: 9.0.0(patch_hash=3xsxyj3qu32icn7lid6e5feqtm)(jiti@2.6.1)(postcss@8.5.31)(tsx@4.22.4)(typescript@5.9.3)(yaml@2.9.0)
       typescript:
         specifier: ^5.3.3
         version: 5.9.3
@@ -823,7 +828,7 @@ importers:
         version: 8.0.0(typescript@5.9.3)
       tsup:
         specifier: ^9.0.0
-        version: 9.0.0(jiti@2.6.1)(postcss@8.5.31)(tsx@4.22.4)(typescript@5.9.3)(yaml@2.9.0)
+        version: 9.0.0(patch_hash=3xsxyj3qu32icn7lid6e5feqtm)(jiti@2.6.1)(postcss@8.5.31)(tsx@4.22.4)(typescript@5.9.3)(yaml@2.9.0)
       typescript:
         specifier: ^5.9.3
         version: 5.9.3
@@ -859,7 +864,7 @@ importers:
         version: 19.2.3(react@19.2.3)
       tsup:
         specifier: ^9.0.0
-        version: 9.0.0(jiti@2.6.1)(postcss@8.5.31)(tsx@4.22.4)(typescript@5.9.3)(yaml@2.9.0)
+        version: 9.0.0(patch_hash=3xsxyj3qu32icn7lid6e5feqtm)(jiti@2.6.1)(postcss@8.5.31)(tsx@4.22.4)(typescript@5.9.3)(yaml@2.9.0)
       typescript:
         specifier: ^5.9.3
         version: 5.9.3
@@ -884,7 +889,7 @@ importers:
         version: 8.0.0(typescript@5.9.3)
       tsup:
         specifier: ^9.0.0
-        version: 9.0.0(jiti@2.6.1)(postcss@8.5.31)(tsx@4.22.4)(typescript@5.9.3)(yaml@2.9.0)
+        version: 9.0.0(patch_hash=3xsxyj3qu32icn7lid6e5feqtm)(jiti@2.6.1)(postcss@8.5.31)(tsx@4.22.4)(typescript@5.9.3)(yaml@2.9.0)
       typescript:
         specifier: ^5.9.3
         version: 5.9.3
@@ -913,7 +918,7 @@ importers:
         version: 8.0.0(typescript@5.9.3)
       tsup:
         specifier: ^9.0.0
-        version: 9.0.0(jiti@2.6.1)(postcss@8.5.31)(tsx@4.22.4)(typescript@5.9.3)(yaml@2.9.0)
+        version: 9.0.0(patch_hash=3xsxyj3qu32icn7lid6e5feqtm)(jiti@2.6.1)(postcss@8.5.31)(tsx@4.22.4)(typescript@5.9.3)(yaml@2.9.0)
       typescript:
         specifier: ^5.9.3
         version: 5.9.3
@@ -941,7 +946,7 @@ importers:
         version: 1.0.0-rc.4(@electric-sql/pglite@0.5.4)(@opentelemetry/api@1.10.0)(@sinclair/typebox@0.34.41)(@types/pg@8.15.6)(pg@8.16.3)(postgres@3.4.7)(zod@4.6.7)
       tsup:
         specifier: ^9.0.0
-        version: 9.0.0(jiti@2.6.1)(postcss@8.5.31)(tsx@4.22.4)(typescript@5.9.3)(yaml@2.9.0)
+        version: 9.0.0(patch_hash=3xsxyj3qu32icn7lid6e5feqtm)(jiti@2.6.1)(postcss@8.5.31)(tsx@4.22.4)(typescript@5.9.3)(yaml@2.9.0)
       typescript:
         specifier: ^5.3.3
         version: 5.9.3
@@ -11650,7 +11655,7 @@ snapshots:
 
   tslib@2.9.1: {}
 
-  tsup@9.0.0(jiti@2.6.1)(postcss@8.5.31)(tsx@4.20.6)(typescript@5.9.3)(yaml@2.9.0):
+  tsup@9.0.0(patch_hash=3xsxyj3qu32icn7lid6e5feqtm)(jiti@2.6.1)(postcss@8.5.31)(tsx@4.20.6)(typescript@5.9.3)(yaml@2.9.0):
     dependencies:
       bundle-require: 5.1.0(esbuild@0.28.2)
       cac: 7.1.0
@@ -11677,7 +11682,7 @@ snapshots:
       - tsx
       - yaml
 
-  tsup@9.0.0(jiti@2.6.1)(postcss@8.5.31)(tsx@4.22.4)(typescript@5.9.3)(yaml@2.9.0):
+  tsup@9.0.0(patch_hash=3xsxyj3qu32icn7lid6e5feqtm)(jiti@2.6.1)(postcss@8.5.31)(tsx@4.22.4)(typescript@5.9.3)(yaml@2.9.0):
     dependencies:
       bundle-require: 5.1.0(esbuild@0.28.2)
       cac: 7.1.0

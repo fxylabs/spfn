@@ -136,15 +136,26 @@ steps:
             # Build first: several checks import @spfn/core subpaths whose
             # exports point at dist/, and a fresh checkout has none.
             #
+            # The scope's packages alone, at 1024MB: one needing more fails here, cause named — #352,
+            # one declaration program per tsup config, hungriest package measured 448MB — rather
+            # than as an unexplained DTS worker out-of-memory near 3072MB in the next line.
+            # ERR_WORKER_OUT_OF_MEMORY here most likely means patches/tsup@9.0.0.patch was
+            # dropped or not applied (a tsup bump without it, or a stale install): without it
+            # tsup builds one declaration program per entry directory again.
+            - NODE_OPTIONS=--max-old-space-size=1024 pnpm exec turbo run build --concurrency=2 $FILTERS --filter='!./examples/*' --filter='!./website'
+
+            # Everything in scope; the packages come from turbo's cache.
+            #
             # Not the bare `pnpm build`, and the two flags are not tuning. Once
             # the pod has a memory *limit*, every Node process inside it sizes
             # its heap against that one number — so turbo's default fan-out puts
             # several builds in the ring each believing it may use most of 7Gi.
-            # @spfn/core's declaration build is the one that loses: 25 entry
-            # points through a single tsup DTS worker, which died with
-            # ERR_WORKER_OUT_OF_MEMORY while the website and three example builds
-            # ran beside it. Two at a time on a 4 vCPU node, each capped at 3GB,
-            # keeps the sum under the limit with room for the toolchain itself.
+            # @spfn/core's declaration build was the one that lost: its tsup DTS
+            # worker built a TypeScript program per entry directory (#352) and
+            # died with ERR_WORKER_OUT_OF_MEMORY while the website and three
+            # example builds ran beside it. Two at a time on a 4 vCPU node, each
+            # capped at 3GB, keeps the sum under the limit with room for the
+            # toolchain itself.
             #
             # `pnpm exec turbo run`, not `pnpm build --filter=…`: pnpm reads a
             # `--filter` before the script name as its own option.

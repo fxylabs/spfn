@@ -23,7 +23,9 @@ import type {
 } from '@spfn/core/codegen';
 ```
 
-There is no `@spfn/core/codegen/loader` or other sub-path — everything ships from
+One sub-path, `@spfn/core/codegen/loader`, carries the module-format rule alone —
+`applicationFormat`, `isDependency`, `packageType` and the types `ModuleFormat`, `SyntaxFormat`
+— shared with the CLI's `spfn dev` hook and kept to Node built-ins. Everything else ships from
 `@spfn/core/codegen`.
 
 ---

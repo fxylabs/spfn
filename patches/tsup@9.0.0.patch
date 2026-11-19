@@ -1,0 +1,23 @@
+diff --git a/dist/rollup.js b/dist/rollup.js
+--- a/dist/rollup.js
++++ b/dist/rollup.js
+@@ -7070,6 +7070,9 @@
+         }
+         logCache("tsconfig", config);
+         const configContents = ts2.parseJsonConfigFileContent(config, ts2.sys, dirName);
++        // A cache hit reports the tsconfig's directory, as the miss does, so entries share one
++        // program: https://github.com/Swatinem/rollup-plugin-dts/issues/408
++        configContents.configDirName = dirName;
+         if (overrideConfigPath) {
+           cacheConfig([overrideConfigPath, overrideConfigPath], configContents);
+         } else {
+@@ -7078,7 +7081,8 @@
+       } else {
+         logCache("HIT", cacheKey);
+       }
+-      const { fileNames, options, errors } = configByPath.get(cacheKey);
++      const { fileNames, options, errors, configDirName } = configByPath.get(cacheKey);
++      dirName = configDirName;
+       dtsFiles = fileNames.filter((name) => DTS_EXTENSIONS.test(name));
+       if (errors.length) {
+         console.error(ts2.formatDiagnostics(errors, formatHost));
