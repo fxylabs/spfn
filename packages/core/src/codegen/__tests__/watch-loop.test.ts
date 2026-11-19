@@ -819,6 +819,11 @@ describe('codegen watch loop', () =>
                 runs += 1;
                 reportInputs(load.inputs);
                 write('src/counter.ts', `export const runs = ${runs};\n`);
+
+                // A macrotask, as a real generator's I/O is: a loop that regenerates
+                // with no quiet period then still lets the row's timers fire, and
+                // fails the row instead of starving the worker.
+                await new Promise(resolve => setImmediate(resolve));
                 ends.push(Date.now());
             },
         };
