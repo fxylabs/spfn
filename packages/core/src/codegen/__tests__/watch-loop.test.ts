@@ -1,5 +1,5 @@
 /**
- * The watch loop — rows W1–W3, W5–W9 and the loop guard of the #353 design
+ * The watch loop — rows W1–W3, W5–W11 and the loop guard of the #353 design
  *
  * Each row runs an orchestrator in watch mode, in this process, on an app in a
  * temporary directory with `@spfn/core` linked into its `node_modules`.
@@ -31,6 +31,10 @@
  * |    |                                                                   | that failure because the file reads as unchanged     |
  * | W9 | `generateAll()` called while a watch cycle is held                | two generations writing the outputs at once, or the  |
  * |    |                                                                   | call resolving before its own run has finished       |
+ * | W10| a tsconfig `paths` entry edited to point at another directory     | a map built from a resolution that is no longer the  |
+ * |    |                                                                   | one Node would make                                  |
+ * | W11| a file created at an earlier `paths` target, then one beside a    | the same, for a resolution whose earlier candidates  |
+ * |    | directory an import resolved to the index of                      | were not stamped absent                              |
  * | G1 | a generator writing, on every run, a file it reads                    | the loop guard: such a generator regenerating        |
  * |    |                                                                       | forever                                              |
  */
@@ -534,6 +538,50 @@ describe('codegen watch loop', () =>
         expect(held.maxRunning).toBe(1);
         expect(held.triggers.map(trigger => trigger?.type)).toEqual(['watch', 'watch', 'manual']);
         expect(finishedAtResolve).toBe(3);
+    });
+
+    it('W10 a tsconfig "paths" entry pointed elsewhere regenerates with the new target', async () =>
+    {
+        // Without the tsconfig stamped, the alias keeps resolving where it did
+        // when the watcher started, and the map describes a file Node no longer loads.
+        const config = (target: string): void => write('tsconfig.json', JSON.stringify({ compilerOptions: { paths: { '@lib/*': [target] } } }));
+
+        config('src/one/*');
+        write('src/one/seg.ts', 'export const seg: string = \'one\';\n');
+        write('src/two/seg.ts', 'export const seg: string = \'two\';\n');
+        writeProbe('/probe/${seg}', 'import { seg } from \'@lib/seg\';\n');
+
+        const orchestrator = watching([routeMap()]);
+
+        await orchestrator.settled();
+
+        expect(mapPaths()).toEqual(['/probe/one']);
+
+        config('src/two/*');
+        await until(() => mapPaths().includes('/probe/two'));
+    });
+
+    it('W11 a file created at a candidate tried before the one an import resolved to regenerates with it', async () =>
+    {
+        // Without the earlier candidates stamped absent, only a failed resolution's
+        // are, and an import keeps the file it found first: an alias's later
+        // target, a directory's index beside a new file of the same name.
+        write('tsconfig.json', JSON.stringify({ compilerOptions: { paths: { '@lib/*': ['src/first/*', 'src/second/*'] } } }));
+        write('src/second/seg.ts', 'export const seg: string = \'second\';\n');
+        write('src/server/lib/name/index.ts', 'export const name: string = \'index\';\n');
+        writeProbe('/probe/${seg}/${name}', 'import { seg } from \'@lib/seg\';\nimport { name } from \'../lib/name\';\n');
+
+        const orchestrator = watching([routeMap()]);
+
+        await orchestrator.settled();
+
+        expect(mapPaths()).toEqual(['/probe/second/index']);
+
+        write('src/first/seg.ts', 'export const seg: string = \'first\';\n');
+        await until(() => mapPaths().includes('/probe/first/index'));
+
+        write('src/server/lib/name.ts', 'export const name: string = \'file\';\n');
+        await until(() => mapPaths().includes('/probe/first/file'));
     });
 
     it('G1 a generator that rewrites a file it reads on every run is stopped after three check-only cycles, with a warning', async () =>

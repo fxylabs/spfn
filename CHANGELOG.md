@@ -27,8 +27,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   between a load's read and the watch armed for it — the missing import of CI 725's failing
   generation — was never regenerated; a file unlinked and recreated inside its own generation was
   dropped by chokidar while the watcher believed it watched, so every later edit was lost until a
-  restart. Now every file a load reads is stamped (a hash of the bytes used; paths a failed
-  import looked for, stamped absent) and attributed to the generator that ran; one
+  restart. Now every file a load reads — the tsconfig and package.json files it resolves by
+  included — is stamped (a hash of the bytes used; every path a resolution looked at and found
+  nothing, stamped absent) and attributed to the generator that ran; one
   serialized loop runs, in one generation, every generator a dirty path matches or that read one,
   then watches the directories of the new inputs and then compares every input with its stamp, so
   a change that lands during a generation is found by the comparison. A generator that rewrites

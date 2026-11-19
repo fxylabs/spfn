@@ -63,9 +63,9 @@ export function newGeneration(): string
 /**
  * What a load evaluated, or what it threw — rewritten to name the project's
  * files as written (`./errors`) — and what it read either way: the project
- * files it reached, stamped, with the paths an import that resolved nowhere
- * was looked for at, stamped absent. A load that failed on a file is to be
- * retried when that file changes or appears.
+ * files and config files it read, stamped, with the paths its resolutions
+ * looked at and found nothing, stamped absent (`./hooks`). A load that failed
+ * on a file is to be retried when that file changes or appears.
  */
 export type ProjectLoad =
     | { ok: true; module: Record<string, unknown>; inputs: Inputs }

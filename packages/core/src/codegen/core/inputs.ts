@@ -2,9 +2,11 @@
  * What a generation read
  *
  * Every project file a load reads gets a stamp, taken by the codegen loader as
- * it reads the file: a hash of the source the read returned. A path an import
- * that resolved nowhere was looked for at gets a stamp saying it did not
- * exist. The stamp therefore describes the exact bytes the generation
+ * it reads the file: a hash of the source the read returned. A path the loader
+ * looked for something at and found nothing — every candidate an import's
+ * resolution tried before the file it resolved to (or all of them, when it
+ * resolved nowhere), a tsconfig.json or package.json looked for in a directory
+ * that has none — gets a stamp saying it did not exist. The stamp therefore describes the exact bytes the generation
  * used, and nothing else: no stat field stands in for them, since a file can
  * be rewritten in place with its size and modification time kept
  * (`rsync --inplace -t`, `touch -r`), and a clock that file times are compared
@@ -95,6 +97,24 @@ export function checkStamp(file: string, stamp: Stamp): { fresh: boolean; exists
     return { fresh: sameStamp(now, stamp), exists: now.exists };
 }
 
+/**
+ * Add a read of `file` to `inputs`. A path read again keeps its stamp when
+ * the read found the same; a path found different is `TORN`.
+ */
+export function addStamp(inputs: Inputs, file: string, stamp: Stamp): void
+{
+    const first = inputs.get(file);
+
+    if (first === undefined)
+    {
+        inputs.set(file, stamp);
+    }
+    else if (!sameStamp(first, stamp))
+    {
+        inputs.set(file, TORN);
+    }
+}
+
 const collector = new AsyncLocalStorage<Inputs>();
 
 /**
@@ -123,17 +143,5 @@ export function reportInputs(inputs: Inputs): void
         return;
     }
 
-    for (const [file, stamp] of inputs)
-    {
-        const first = into.get(file);
-
-        if (first === undefined)
-        {
-            into.set(file, stamp);
-        }
-        else if (!sameStamp(first, stamp))
-        {
-            into.set(file, TORN);
-        }
-    }
+    inputs.forEach((stamp, file) => addStamp(into, file, stamp));
 }

@@ -2,8 +2,8 @@
  * Watching what the generations read
  *
  * The orchestrator hands this the paths every generator's latest run read
- * (`./inputs`): files that exist, and paths a failed import was looked for at,
- * which do not. The nearest existing directory of each is watched with Node's
+ * (`./inputs`): files that exist, and paths the loader looked at and found
+ * nothing, which do not. The nearest existing directory of each is watched with Node's
  * own, non-recursive `fs.watch`; when anything changes in one, and writes have
  * settled, `changed` is called. Which file the event named, and which kind of
  * event it was, is not used: platforms report them differently (macOS reports

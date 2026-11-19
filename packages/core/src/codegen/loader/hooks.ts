@@ -36,10 +36,14 @@
  *   `node_modules` only. A workspace package's source beside the app is
  *   transformed but not tagged: like a package, it is evaluated once.
  * - **What a load read.** Each tagged file, with a stamp of the bytes the
- *   load hook read (`../core/inputs`), and, for a relative or `paths`
- *   specifier that resolved nowhere, every path under the root it was looked
- *   for at, stamped absent (`closeGeneration`): the watcher regenerates when
- *   any of them differs from its stamp.
+ *   load hook read (`../core/inputs`); each tsconfig.json (with its `extends`
+ *   chain) and package.json the load read; and every path under the root a
+ *   resolution looked at and found nothing — the candidates a relative or
+ *   `paths` specifier tried before the file it resolved to, all of them when
+ *   it resolved nowhere, a tsconfig.json or package.json looked for in a
+ *   directory with none — stamped absent (`closeGeneration`): the watcher
+ *   regenerates when any of them differs from its stamp, so a resolution is
+ *   made again when the one Node would now make is another.
  *
  * A file the rule leaves CommonJS (`.cts`, `.cjs`, a CommonJS-syntax `.js`) is
  * handed back to the chain untagged: the chain loads it as CommonJS, and what
@@ -57,10 +61,10 @@ import { dirname, extname, isAbsolute, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import type * as ts from 'typescript';
 import { typescript } from '../generators/typescript';
-import { governingCompilerOptions, matchPaths, projectPaths, isWithin, type PathsMatch, type ProjectPaths } from './aliases';
+import { governingCompilerOptions, matchPaths, projectPaths, isWithin, type FileReader, type PathsMatch, type ProjectPaths } from './aliases';
 import { transpileOptions } from './compiler-options';
 import { raisedAt } from './errors';
-import { ABSENT, readStamped, stampOf, type Inputs, type Stamp } from '../core/inputs';
+import { ABSENT, addStamp, readStamped, stampOf, type Inputs, type Stamp } from '../core/inputs';
 import { applicationFormat, isDependency, packageType, type ModuleFormat } from './format';
 
 /** The query parameter a load's files carry. */
@@ -120,11 +124,12 @@ interface Generation
     /** Real paths of the project files the load reached. */
     touched: Set<string>;
 
-    /** What the load hook read of each, by real path (`../core/inputs`). */
+    /**
+     * What the load read under the root, by path (`../core/inputs`): each file
+     * the load hook read, each config file read, and each path looked at and
+     * found empty, stamped absent.
+     */
     stamps: Map<string, Stamp>;
-
-    /** Paths under the root a resolution that failed looked for: a file created at one is to be noticed. */
-    tried: Set<string>;
 }
 
 /** A file the hooks resolved for a load, by the URL it was given. */
@@ -154,24 +159,22 @@ export function openGeneration(token: string, root: string): void
 {
     const stamps = new Map(closedStamps?.token === token ? closedStamps.stamps : []);
 
-    generations.set(token, { root: realpathSync(root), paths: new Map(), compilerOptions: new Map(), touched: new Set(), stamps, tried: new Set() });
+    generations.set(token, { root: realpathSync(root), paths: new Map(), compilerOptions: new Map(), touched: new Set(), stamps });
 }
 
 /**
  * End a load: forget what only resolution needed, and return what it read —
- * each project file it reached with the stamp of what the load hook read (one
- * resolved but never read, its load stopped before it, stamped now), and the
- * paths a failed resolution looked for, stamped absent: what a watcher has to
- * check for the load to be retried. A module stays in Node's cache, so a later
+ * its stamps, and each project file it reached but never read (its load
+ * stopped before it) stamped now: what a watcher has to check for the load to
+ * be retried. A module stays in Node's cache, so a later
  * load under the same token reuses it without resolving again.
  */
 export function closeGeneration(token: string): Inputs
 {
     const generation = generations.get(token);
-    const inputs: Inputs = new Map();
+    const inputs: Inputs = new Map(generation?.stamps);
 
-    generation?.touched.forEach(file => inputs.set(file, generation.stamps.get(file) ?? stampOf(file)));
-    generation?.tried.forEach(file => inputs.set(file, inputs.get(file) ?? ABSENT));
+    generation?.touched.forEach(file => inputs.set(file, inputs.get(file) ?? stampOf(file)));
     closedStamps = generation === undefined ? closedStamps : { token, stamps: generation.stamps };
     generations.delete(token);
 
@@ -250,21 +253,58 @@ function candidatesFor(path: string): string[]
     ];
 }
 
-/** The file `path` names as TypeScript resolves an import. */
-function sourceFile(path: string): string | undefined
+/** Add a stamp to what the load read, when `path` is the project's: under the root, not a dependency. */
+function record(generation: Generation, path: string, stamp: Stamp): void
 {
-    return candidatesFor(path).find(isFile);
+    if (isWithin(generation.root, path) && !isDependency(path, generation.root))
+    {
+        addStamp(generation.stamps, path, stamp);
+    }
 }
 
-/** Note what a resolution that failed looked for under the root (`Generation.tried`). */
-function recordTried(token: string, paths: string[]): void
+/** A `FileReader` for the load's config files: what it reads, or finds missing, is recorded. */
+function readerFor(generation: Generation): FileReader
 {
-    const generation = generations.get(token)!;
+    return (path) =>
+    {
+        const read = readIfFile(path);
 
-    paths
-        .flatMap(candidatesFor)
-        .filter(path => isWithin(generation.root, path) && !isDependency(path, generation.root))
-        .forEach(path => generation.tried.add(path));
+        record(generation, path, read?.stamp ?? ABSENT);
+
+        return read?.source;
+    };
+}
+
+function readIfFile(path: string): ReturnType<typeof readStamped> | undefined
+{
+    try
+    {
+        return readStamped(path);
+    }
+    catch
+    {
+        return undefined;
+    }
+}
+
+/**
+ * The file the first of `paths` that names one names, as TypeScript resolves
+ * an import. Each candidate tried before it is recorded absent: a file created
+ * at one is what the resolution finds next.
+ */
+function sourceFile(generation: Generation, paths: string[]): string | undefined
+{
+    for (const candidate of paths.flatMap(candidatesFor))
+    {
+        if (isFile(candidate))
+        {
+            return candidate;
+        }
+
+        record(generation, candidate, ABSENT);
+    }
+
+    return undefined;
 }
 
 /** A relative, absolute or `file:` specifier as a path, or undefined for a bare one. */
@@ -291,7 +331,7 @@ function pathsFor(generation: Generation, parentURL: string | undefined): Projec
 
     if (!generation.paths.has(directory))
     {
-        generation.paths.set(directory, projectPaths(generation.root, directory));
+        generation.paths.set(directory, projectPaths(generation.root, directory, readerFor(generation)));
     }
 
     return generation.paths.get(directory);
@@ -409,7 +449,7 @@ const STATED_FORMATS: Record<string, ModuleFormat> = { '.mts': 'module', '.mjs':
  * TypeScript source by the rule, else by the format its author stated; any
  * other extension not at all (undefined), which leaves it to the chain.
  */
-function formatOf(file: string): ModuleFormat | undefined
+function formatOf(file: string, generation: Generation): ModuleFormat | undefined
 {
     const extension = extname(file);
 
@@ -423,9 +463,9 @@ function formatOf(file: string): ModuleFormat | undefined
         return undefined;
     }
 
-    return applicationFormat(file, formatBySyntax)
+    return applicationFormat(file, formatBySyntax, readerFor(generation))
         ?? STATED_FORMATS[extension]
-        ?? (packageType(file) === 'module' ? 'module' : 'commonjs');
+        ?? (packageType(file, readerFor(generation)) === 'module' ? 'module' : 'commonjs');
 }
 
 // ============================================================================
@@ -453,7 +493,7 @@ function own(file: string, token: string, context: ResolveContext, nextResolve: 
 {
     const real = realpathSync(file);
 
-    if (formatOf(real) !== 'module')
+    if (formatOf(real, generations.get(token)!) !== 'module')
     {
         return nextResolve(pathToFileURL(real).href, context);
     }
@@ -502,7 +542,7 @@ function resolveBare(specifier: string, context: ResolveContext, nextResolve: Ne
     const generation = generations.get(token)!;
     const paths = pathsFor(generation, context.parentURL);
     const match = paths === undefined ? undefined : matchPaths(specifier, paths);
-    const file = match?.candidates.map(sourceFile).find(candidate => candidate !== undefined);
+    const file = match === undefined ? undefined : sourceFile(generation, match.candidates);
 
     if (file !== undefined)
     {
@@ -513,8 +553,6 @@ function resolveBare(specifier: string, context: ResolveContext, nextResolve: Ne
 
     if ('error' in chained)
     {
-        recordTried(token, match?.candidates ?? []);
-
         throw match === undefined ? unresolvedBare(specifier, context.parentURL, chained.error) : unresolvedAlias(specifier, context.parentURL, match);
     }
 
@@ -545,7 +583,8 @@ function needsTransform(url: string, generation: Generation): boolean
         return false;
     }
 
-    return TYPESCRIPT.test(file) || (!isDependency(realpathSync(file), generation.root) && applicationFormat(file, formatBySyntax) !== undefined);
+    return TYPESCRIPT.test(file)
+        || (!isDependency(realpathSync(file), generation.root) && applicationFormat(file, formatBySyntax, readerFor(generation)) !== undefined);
 }
 
 export function resolveHook(specifier: string, context: ResolveContext, nextResolve: NextResolve): ResolveResult
@@ -564,7 +603,7 @@ export function resolveHook(specifier: string, context: ResolveContext, nextReso
         return resolveBare(specifier, context, nextResolve, token);
     }
 
-    const file = sourceFile(path);
+    const file = sourceFile(generations.get(token)!, [path]);
 
     if (file !== undefined)
     {
@@ -575,8 +614,6 @@ export function resolveHook(specifier: string, context: ResolveContext, nextReso
 
     if ('error' in chained)
     {
-        recordTried(token, [path]);
-
         throw unresolvedPath(specifier, context.parentURL, chained.error);
     }
 
@@ -590,7 +627,7 @@ function projectOptions(generation: Generation, file: string): ts.CompilerOption
 
     if (!generation.compilerOptions.has(directory))
     {
-        generation.compilerOptions.set(directory, governingCompilerOptions(generation.root, directory) ?? {});
+        generation.compilerOptions.set(directory, governingCompilerOptions(generation.root, directory, readerFor(generation)) ?? {});
     }
 
     return generation.compilerOptions.get(directory)!;
@@ -656,8 +693,12 @@ function syntaxError(compiler: typeof ts, file: string, diagnostic: ts.Diagnosti
 function transform(url: string, { file, token }: OwnedFile): string
 {
     const { source, stamp } = readStamped(file);
+    const generation = generations.get(token);
 
-    generations.get(token)?.stamps.set(file, stamp);
+    if (generation !== undefined)
+    {
+        record(generation, file, stamp);
+    }
 
     if (extname(file) === '.json')
     {

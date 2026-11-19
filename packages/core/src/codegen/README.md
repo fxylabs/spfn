@@ -231,10 +231,17 @@ load (`src/codegen/loader/`).
 
 - **Every input is stamped.** Each project file a load reads gets a stamp as the loader reads
   it: a hash of the bytes the load used — no stat field, which an in-place write that keeps
-  the size and restores the modification time (`rsync --inplace -t`, `touch -r`) would fool. A path an import that resolved nowhere was looked for at (a
-  relative path or a `paths` alias, every candidate extension and `index`) is stamped
-  *absent*. The stamps are attributed to the generator whose `generate()` made the load, and
-  replaced by each run of it: a file a load no longer reaches leaves its inputs.
+  the size and restores the modification time (`rsync --inplace -t`, `touch -r`) would fool.
+  The files the loader reads to resolve and transform are inputs too: every `tsconfig.json` it
+  reads (the `paths`, the compiler options, each config of an `extends` chain inside the
+  project) and the `package.json` whose `"type"` decides a `.js`/`.jsx` file's format. A path
+  the loader looked at and found nothing is stamped *absent*: each candidate a relative or
+  `paths` specifier tried before the file it resolved to (an earlier `paths` target, `foo.ts`
+  before `foo/index.ts`), every candidate of one that resolved nowhere, and a `tsconfig.json` or
+  `package.json` looked for in a directory that has none — so a resolution is made again when
+  the one Node would now make is another. The stamps are attributed to the generator whose
+  `generate()` made the load, and replaced by each run of it: a file a load no longer reaches
+  leaves its inputs.
 - **Events are hints.** chokidar watches the base directory of each generator's
   `watchPatterns` (for what no load has reached yet: a new route file, the router), and a
   non-recursive `fs.watch` watches the nearest existing directory of every input. An event
@@ -286,9 +293,10 @@ load (`src/codegen/loader/`).
 - `.env` files and the environment: the environment probe reads them, but they are not
   inputs.
 - Packages: anything under `node_modules`, and a workspace package's source or rebuilt
-  `dist` — packages are evaluated once per process.
-- The codegen config (`.spfnrc.ts`, `.spfnrc.json`, `package.json`) and custom generator
-  files: read once when `spfn dev` starts.
+  `dist` — packages are evaluated once per process. A tsconfig `extends` target in a package
+  is one of them.
+- The codegen config (`.spfnrc.ts`, `.spfnrc.json`, the `spfn.codegen` key of `package.json`)
+  and custom generator files: read once when `spfn dev` starts.
 
 ## Built-in: `@spfn/core:route-map`
 

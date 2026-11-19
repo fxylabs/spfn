@@ -20,8 +20,8 @@
  *
  * What a load read is reported to the inputs collector the orchestrator opens
  * around each generator (`../core/inputs`): the watcher regenerates the
- * generator when a file it read changes, or one a failed import looked for
- * appears. Every load the generator makes reports — the probe's varied ones
+ * generator when a file it read changes, or one appears where a resolution
+ * looked and found nothing. Every load the generator makes reports — the probe's varied ones
  * too — and nothing is kept here between loads.
  *
  * After a load, a second copy of an `@spfn/core` entry in the process is
