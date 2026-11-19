@@ -19,12 +19,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **@spfn/core: watch mode's generations, the initial one included, log and do not reject under
-  `throwOnError: true` (#353).** `watch()` ran its initial generation as `generateAll('watch')`,
+- **BREAKING: @spfn/core: watch mode's generations, the initial one included, log and do not
+  reject under `throwOnError: true` (#353).** `watch()` ran its initial generation as `generateAll('watch')`,
   so under `throwOnError` a failing generator rejected `watch()` before any watching began; now
   the initial generation is a cycle of the watch loop, logged like every other. `watch()` still
   rejects with the first failure when no generator has `watchPatterns` (it then runs one
   `generateAll('watch')` and returns), and `generateAll()` still rejects, also while watching.
+- **BREAKING: spfn: the `spfn dev` codegen watcher needs a tsx resolvable from the app or from the
+  CLI (#353).** It ran through the package manager, so an npm app with no tsx installed got one
+  fetched by `npx tsx`; now the watcher is not started there, and `spfn dev` logs the command that
+  installs tsx in the app (`npm install -D tsx`). The server and Next.js still start.
+- **BREAKING: @spfn/core: `CodegenOrchestrator.generateAll()` and `settled()` reject when called
+  while the calling generator's own `generate()`, run by the watch loop, is still running (#353).**
+  Awaited there, they could never finish, since each waits for that generation; they reject whether
+  or not the call is awaited. Call them after `generate()` has returned (from a timer or a promise
+  callback); the loop runs a generator again when a file it read changes.
 
 ### Fixed
 
@@ -72,9 +81,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   exited. A SIGKILL of `spfn dev` reaches none of them.
 - **@spfn/core: `CodegenOrchestrator.generateAll()` called while watching** ran the generators
   beside the cycle running, two generations writing the same outputs at once; it is now queued as
-  a run of the watch loop and settles when that run has finished. Called (or `settled()`) from
-  inside a generator's `generate()` the loop is running, it rejects instead of deadlocking the
-  loop; a callback that call left behind, run after it returned, is not refused.
+  a run of the watch loop and settles when that run has finished.
 - **@spfn/core: watch state is per orchestrator.** The files each router's load reached were kept
   in a module-wide map, so a second orchestrator in the process watched the first app's files.
 

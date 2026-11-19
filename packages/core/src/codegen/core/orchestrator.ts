@@ -222,10 +222,10 @@ export class CodegenOrchestrator
      * waiting for one, and no input directory change still settling. A file
      * event chokidar has not delivered yet (it waits for writes to settle) is
      * not known here. Resolves at once outside watch mode, and after `close()`.
-     * Called from inside a generator's `generate()` the watch loop is running,
-     * it rejects (`reentered`): it would wait for that generation to end, which
-     * waits for it. A callback that call left behind, run after it returned,
-     * waits as any caller does.
+     * It may not be called while the calling generator's own `generate()`,
+     * run by the watch loop, is still running: awaited there, it could never
+     * resolve, so it rejects (`reentered`), awaited or not. A callback
+     * scheduled to run after `generate()` returned waits as any caller does.
      */
     settled(): Promise<void>
     {
@@ -261,11 +261,11 @@ export class CodegenOrchestrator
      * failure under `throwOnError`, as outside watch mode. Its log lines follow
      * watch mode's (`watchGeneration`). Called once `close()` has been, it
      * waits for the loop's last generation and then runs as outside watch mode;
-     * one still queued when `close()` is called is rejected. Called from inside
-     * a generator's `generate()` the watch loop is running, it rejects
-     * (`reentered`): its run would wait for that generation to end, which
-     * waits for it. A callback that call left behind, run after it returned,
-     * is queued as any call is.
+     * one still queued when `close()` is called is rejected. It may not be
+     * called while the calling generator's own `generate()`, run by the watch
+     * loop, is still running: awaited there, its run could never finish, so it
+     * rejects (`reentered`), awaited or not. A callback scheduled to run after
+     * `generate()` returned is queued as any call is.
      *
      * @param trigger - How the generators are being triggered
      */
@@ -302,9 +302,9 @@ export class CodegenOrchestrator
     private reentered(call: string): Error
     {
         return new Error(
-            `${call} was called from inside a generator's generate() while this CodegenOrchestrator watches: it would wait `
-            + 'for the generation running that generator, which waits for it, and the watch loop would never run again. '
-            + 'Return from generate() instead; the loop runs a generator again when a file it read changes.',
+            `${call} was called while the calling generator's own generate(), run by this CodegenOrchestrator's watch loop, `
+            + 'was still running: awaited there it can never finish, since it waits for that generation. '
+            + 'Call it after generate() has returned; the loop runs a generator again when a file it read changes.',
         );
     }
 

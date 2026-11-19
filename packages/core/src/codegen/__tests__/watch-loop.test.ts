@@ -800,8 +800,8 @@ describe('codegen watch loop', () =>
         await orchestrator.close();
 
         expect(outcomes).toEqual([
-            expect.stringMatching(/^generateAll\('manual'\) was called from inside a generator's generate\(\) while this CodegenOrchestrator watches: it would wait for the generation running that generator, which waits for it/),
-            expect.stringMatching(/^settled\(\) was called from inside a generator's generate\(\) while this CodegenOrchestrator watches/),
+            expect.stringMatching(/^generateAll\('manual'\) was called while the calling generator's own generate\(\), run by this CodegenOrchestrator's watch loop, was still running: awaited there it can never finish/),
+            expect.stringMatching(/^settled\(\) was called while the calling generator's own generate\(\)/),
         ]);
     });
 
