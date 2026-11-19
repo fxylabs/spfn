@@ -1,5 +1,5 @@
 /**
- * The watch loop — rows W1–W3, W5–W7 and the loop guard of the #353 design
+ * The watch loop — rows W1–W3, W5–W8 and the loop guard of the #353 design
  *
  * Each row runs an orchestrator in watch mode, in this process, on an app in a
  * temporary directory with `@spfn/core` linked into its `node_modules`.
@@ -26,6 +26,9 @@
  * |    |                                                                       | resolving with one still running                     |
  * | W7 | two apps in sequence in one process                                   | watch state shared through the process: the second   |
  * |    |                                                                       | app watching the first's files                       |
+ * | W8 | a route saved between the environment probe's baseline load and   | a false "depends on the environment" failure on an   |
+ * |    | its varied one; then saved and restored around the varied load    | ordinary save (CLI R2 flaking), or, after a restore, |
+ * |    |                                                                   | that failure because the file reads as unchanged     |
  * | G1 | a generator writing, on every run, a file it reads                    | the loop guard: such a generator regenerating        |
  * |    |                                                                       | forever                                              |
  */
@@ -53,6 +56,33 @@ const beforeWatch = vi.hoisted(() => new Map<string, () => void>());
 /** Every path `fs.watch` was asked to watch (W7). */
 const watchedPaths = vi.hoisted(() => [] as string[]);
 
+/**
+ * Called before and after each router load (`importProjectModule`) with how
+ * many loads started before it: W8 rewrites a file between the environment
+ * probe's loads.
+ */
+const loads = vi.hoisted(() => ({ count: 0, hook: undefined as ((count: number, when: 'before' | 'after') => void) | undefined }));
+
+vi.mock('../loader/register', async (importOriginal) =>
+{
+    const actual = await importOriginal<typeof import('../loader/register')>();
+    const importProjectModule: typeof actual.importProjectModule = async (...args) =>
+    {
+        const count = loads.count;
+
+        loads.hook?.(count, 'before');
+        loads.count += 1;
+
+        const load = await actual.importProjectModule(...args);
+
+        loads.hook?.(count, 'after');
+
+        return load;
+    };
+
+    return { ...actual, importProjectModule };
+});
+
 vi.mock('fs', async (importOriginal) =>
 {
     const actual = await importOriginal<typeof import('fs')>();
@@ -78,6 +108,7 @@ const apps: string[] = [];
 const orchestrators: CodegenOrchestrator[] = [];
 let info: Spy;
 let warn: Spy;
+let error: Spy;
 
 function write(path: string, content: string, root = appDir): void
 {
@@ -206,7 +237,7 @@ beforeEach(() =>
     appDir = makeApp();
     info = vi.spyOn(Logger.prototype, 'info').mockImplementation(() => undefined);
     warn = vi.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
-    vi.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+    error = vi.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
 });
 
 afterEach(async () =>
@@ -214,6 +245,7 @@ afterEach(async () =>
     await Promise.all(orchestrators.splice(0).map(orchestrator => orchestrator.close()));
     vi.restoreAllMocks();
     beforeWatch.clear();
+    loads.hook = undefined;
     watchedPaths.length = 0;
     apps.splice(0).forEach(root => rmSync(root, { recursive: true, force: true }));
 });
@@ -428,6 +460,46 @@ describe('codegen watch loop', () =>
         expect(mapPaths(second)).toEqual(['/probe/second']);
         expect(watchedPaths).toContain(join(second, 'src/server/lib'));
         expect(watchedPaths.filter(path => path.startsWith(first))).toEqual([]);
+    });
+
+    it('W8 a route rewritten between the environment probe\'s loads is regenerated, with no failure reported', async () =>
+    {
+        // The probe loads the router again with the key varied and compares the
+        // maps. A save between the baseline load and the varied one makes them
+        // differ, and that was reported as "depends on the environment" (CLI R2,
+        // iteration 2): a failure from inputs that changed while it ran is not one.
+        // The second half saves and restores the route around the varied load: the
+        // file holds what the baseline read by the check, yet the maps compared
+        // came from two contents.
+        const probe = (path: string): void => writeProbe(path, 'const mode = process.env.SPFN_WATCH_LOOP_MODE;\nvoid mode;\n');
+
+        probe('/probe/one');
+
+        const orchestrator = watching([routeMap()]);
+
+        await orchestrator.settled();
+
+        expect(mapPaths()).toEqual(['/probe/one']);
+
+        const first = loads.count;
+
+        loads.hook = (count, when) => count === first + 1 && when === 'before' && probe('/probe/final');
+        probe('/probe/two');
+        await until(() => loads.count > first + 1);
+        await orchestrator.settled();
+
+        expect(mapPaths()).toEqual(['/probe/final']);
+
+        const second = loads.count;
+
+        loads.hook = (count, when) => count === second + 1 && probe(when === 'before' ? '/probe/between' : '/probe/three');
+        probe('/probe/three');
+        await until(() => loads.count > second + 1);
+        await orchestrator.settled();
+
+        expect(mapPaths()).toEqual(['/probe/three']);
+        expect(error.mock.calls.map(([message]) => String(message))).toEqual([]);
+        expect(info.mock.calls.filter(([message]) => /^\[@spfn\/core:route-map\] Read files that changed while it ran/.test(String(message)))).toHaveLength(2);
     });
 
     it('G1 a generator that rewrites a file it reads on every run is stopped after three check-only cycles, with a warning', async () =>

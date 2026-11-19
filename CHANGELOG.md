@@ -34,7 +34,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a change that lands during a generation is found by the comparison. A generator that rewrites
   a file it reads differently on every run is stopped after 3 such cycles, with a warning.
   Logged: `Changed during generation: + <path>`, and in debug `Queued ~ <path>`; `No generators
-  matched this file` only when nothing matched.
+  matched this file` only when nothing matched. A generator's `✓`/`✗` is logged after that
+  comparison, and a run whose inputs changed while it ran says so instead: a save between two of
+  the environment probe's loads was reported as `ConditionalRegistrationError: The route map
+  depends on the environment`.
 - **@spfn/core: `CodegenOrchestrator.close()` stops the watch loop.** A change queued when it was
   called ran the generators again after it resolved; now nothing new starts, and it resolves once
   the generation running has finished every generator, so the `spfn dev` watcher's SIGTERM no

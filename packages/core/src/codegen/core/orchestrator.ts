@@ -20,7 +20,9 @@
  * watch for it exists, is found by that comparison rather than lost: an edit
  * to `src/server/lib/segment.ts`, imported through `@/` by a route, a file a
  * failed import was looked for at that appears, a file replaced inside the
- * generation that read it.
+ * generation that read it. How each generator's run ended is logged only
+ * after that comparison: a run whose inputs changed under it is not reported
+ * as a success or a failure of the app (`watchGeneration`).
  *
  * All of this state is the orchestrator's own: two orchestrators in one
  * process share nothing.
@@ -62,7 +64,8 @@ export interface OrchestratorOptions
      * Off by default, which keeps watch mode alive through a half-edited file.
      * A build turns it on: a generator that refuses — a broken contract, a
      * router that will not load — has to reach the exit code, or the refusal
-     * scrolls past and the build ships anyway.
+     * scrolls past and the build ships anyway. Watch mode's own generations,
+     * the initial one included, only log.
      */
     throwOnError?: boolean;
 }
@@ -74,6 +77,20 @@ export interface OrchestratorOptions
 interface Change extends Omit<ChangedFile, 'path'>
 {
     foundBy: 'event' | 'check';
+}
+
+/** A generator to run in a generation, and what it is told triggered it. */
+interface Run
+{
+    generator: Generator;
+    trigger: NonNullable<GeneratorOptions['trigger']>;
+}
+
+/** How a run ended: the error it failed with, if any, and how long it took. */
+interface Outcome extends Run
+{
+    failure?: Error;
+    ms: number;
 }
 
 const EVENT_ICONS: Record<ChangedFile['event'], string> = { add: '+', change: '~', unlink: '-' };
@@ -171,45 +188,42 @@ export class CodegenOrchestrator
     }
 
     /**
-     * Run all generators once
+     * Run all generators once, in one generation
      *
      * @param trigger - How the generators are being triggered
      */
     async generateAll(trigger: GeneratorTrigger = 'manual'): Promise<void>
     {
-        const activeGenerators = this.generators.filter(g => this.shouldRun(g, trigger));
+        const outcomes = await this.generate(this.startRuns(trigger), this.throwOnError);
+        const failed = outcomes.find(outcome => outcome.failure !== undefined);
 
-        if (activeGenerators.length === 0)
+        outcomes.forEach(outcome => this.report(outcome));
+
+        if (failed !== undefined && this.throwOnError)
+        {
+            throw failed.failure;
+        }
+    }
+
+    /** A run of every generator `trigger` starts, logged; none, and said so, when it starts none. */
+    private startRuns(trigger: GeneratorTrigger): Run[]
+    {
+        const active = this.generators.filter(g => this.shouldRun(g, trigger));
+
+        if (active.length === 0)
         {
             orchestratorLogger.info('No generators to run for this trigger', { trigger });
 
-            return;
+            return [];
         }
 
-        orchestratorLogger.info(`Running ${activeGenerators.length} generator(s)`, {
-            generators: activeGenerators.map(g => g.name).join(', '),
+        orchestratorLogger.info(`Running ${active.length} generator(s)`, {
+            generators: active.map(g => g.name).join(', '),
             trigger,
         });
-
         this.logSkipped(trigger);
 
-        const generation = newGeneration();
-
-        for (const generator of activeGenerators)
-        {
-            const startTime = Date.now();
-            const failure = await this.run(generator, { cwd: this.cwd, debug: this.debug, generation, trigger: { type: trigger } });
-
-            if (failure !== undefined && this.throwOnError)
-            {
-                throw failure;
-            }
-
-            if (failure === undefined)
-            {
-                orchestratorLogger.info(`[${generator.name}] ✓ Generated successfully (${Date.now() - startTime}ms)`);
-            }
-        }
+        return active.map(generator => ({ generator, trigger: { type: trigger } }));
     }
 
     private logSkipped(trigger: GeneratorTrigger): void
@@ -225,9 +239,34 @@ export class CodegenOrchestrator
     }
 
     /**
+     * Run each of `runs` in one generation, in order — up to the first failure
+     * when `stopAtFailure` — and return how each ended, unreported.
+     */
+    private async generate(runs: Run[], stopAtFailure: boolean): Promise<Outcome[]>
+    {
+        const generation = newGeneration();
+        const outcomes: Outcome[] = [];
+
+        for (const { generator, trigger } of runs)
+        {
+            const startTime = Date.now();
+            const failure = await this.run(generator, { cwd: this.cwd, debug: this.debug, generation, trigger });
+
+            outcomes.push({ generator, trigger, failure, ms: Date.now() - startTime });
+
+            if (failure !== undefined && stopAtFailure)
+            {
+                break;
+            }
+        }
+
+        return outcomes;
+    }
+
+    /**
      * Run one generator with an inputs collector open around it, and keep what
      * it read — whether it succeeded or not — as its inputs. Returns the error
-     * it failed with, logged, or undefined.
+     * it failed with, or undefined.
      */
     private async run(generator: Generator, options: GeneratorOptions): Promise<Error | undefined>
     {
@@ -241,12 +280,52 @@ export class CodegenOrchestrator
             return undefined;
         }
 
-        const error = failure.error instanceof Error ? failure.error : new Error(String(failure.error));
-        const verb = options.trigger?.changedFiles === undefined ? 'Generation' : 'Regeneration';
+        return failure.error instanceof Error ? failure.error : new Error(String(failure.error));
+    }
 
-        orchestratorLogger.error(`[${generator.name}] ✗ ${verb} failed`, error);
+    /** Log how a run ended: `✓`, or `✗` with the error it failed with. */
+    private report({ generator, trigger, failure, ms }: Outcome): void
+    {
+        const initial = trigger.changedFiles === undefined;
 
-        return error;
+        if (failure !== undefined)
+        {
+            orchestratorLogger.error(`[${generator.name}] ✗ ${initial ? 'Generation' : 'Regeneration'} failed`, failure);
+
+            return;
+        }
+
+        orchestratorLogger.info(initial ? `[${generator.name}] ✓ Generated successfully (${ms}ms)` : `[${generator.name}] ✓ Regenerated (${ms}ms)`);
+    }
+
+    /**
+     * A watch generation: run it, arm and check, and only then report how each
+     * run ended. A run that read a file the check found changed ran on inputs
+     * that changed under it, so its result — success or failure — says nothing
+     * about the app as it is now: a save between two of the environment probe's
+     * loads reads as "depends on the environment". Such a run gets one line
+     * saying so instead of `✓` or `✗`; it is already dirty, and the run after it
+     * reports. After `close()` there is no check, and each run is reported as it
+     * ended.
+     */
+    private async watchGeneration(runs: Run[]): Promise<void>
+    {
+        const outcomes = await this.generate(runs, false);
+        const changed = this.closed ? new Set<string>() : this.armAndCheck('check');
+
+        for (const outcome of outcomes)
+        {
+            const inputs = this.inputs.get(outcome.generator);
+
+            if ([...changed].some(path => inputs?.has(path)))
+            {
+                orchestratorLogger.info(`[${outcome.generator.name}] Read files that changed while it ran; running it again`);
+            }
+            else
+            {
+                this.report(outcome);
+            }
+        }
     }
 
     /**
@@ -280,12 +359,11 @@ export class CodegenOrchestrator
 
         if (!this.closed)
         {
-            await this.generateAll('watch');
+            await this.watchGeneration(this.startRuns('watch'));
         }
 
         if (!this.closed)
         {
-            this.armAndCheck('check');
             this.logWatching(watchDirs, patterns);
         }
 
@@ -399,7 +477,7 @@ export class CodegenOrchestrator
         return !this.closed;
     }
 
-    /** Take the whole dirty set into one generation, then arm and check; or only arm and check, when that was asked. */
+    /** Take the whole dirty set into one watch generation; or only arm and check, when that was asked. */
     private async cycle(): Promise<void>
     {
         // A turn for I/O first: file events, and a signal's `close()`, are handled
@@ -417,11 +495,6 @@ export class CodegenOrchestrator
 
         this.dirty = new Map();
         await this.regenerate(changes);
-
-        if (!this.closed)
-        {
-            this.armAndCheck('check');
-        }
     }
 
     /** Run every generator a change matches or whose inputs hold a changed path, in one generation. */
@@ -437,26 +510,18 @@ export class CodegenOrchestrator
         const runs = this.generators
             .filter(generator => this.shouldRun(generator, 'watch'))
             .map(generator => ({ generator, triggers: this.triggersOf(generator, changes) }))
-            .filter(({ triggers }) => triggers.length > 0);
+            .filter(({ triggers }) => triggers.length > 0)
+            .map(({ generator, triggers }) => ({
+                generator,
+                trigger: { type: 'watch' as const, changedFiles: triggers, ...(triggers.length === 1 ? { changedFile: triggers[0] } : {}) },
+            }));
 
         if (runs.length === 0 && this.debug)
         {
             orchestratorLogger.info('No generators matched this file');
         }
 
-        const generation = newGeneration();
-
-        for (const { generator, triggers } of runs)
-        {
-            const startTime = Date.now();
-            const trigger = { type: 'watch' as const, changedFiles: triggers, ...(triggers.length === 1 ? { changedFile: triggers[0] } : {}) };
-            const failure = await this.run(generator, { cwd: this.cwd, debug: this.debug, generation, trigger });
-
-            if (failure === undefined)
-            {
-                orchestratorLogger.info(`[${generator.name}] ✓ Regenerated (${Date.now() - startTime}ms)`);
-            }
-        }
+        await this.watchGeneration(runs);
     }
 
     /** The changes that trigger `generator`: a path its patterns match, or one its latest run read. */
@@ -473,8 +538,9 @@ export class CodegenOrchestrator
      * Watch the directories of every input, then compare every input with its
      * stamp; a stale one is dirty. `foundBy` says what started the comparison:
      * the end of a generation (`check`), or a directory event (`event`).
+     * Returns the paths it made dirty.
      */
-    private armAndCheck(foundBy: Change['foundBy']): void
+    private armAndCheck(foundBy: Change['foundBy']): Set<string>
     {
         this.checkRequested = false;
 
@@ -490,10 +556,12 @@ export class CodegenOrchestrator
         {
             this.guard(stale);
 
-            return;
+            return new Set();
         }
 
         stale.forEach((event, path) => this.markStale(path, event, foundBy));
+
+        return new Set(stale.keys());
     }
 
     private markStale(path: string, event: ChangedFile['event'], foundBy: Change['foundBy']): void

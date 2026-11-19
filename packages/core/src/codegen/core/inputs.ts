@@ -72,6 +72,13 @@ export function stampOf(file: string): Stamp
     }
 }
 
+/**
+ * The stamp of a path one record holds two different reads of: what was built
+ * from them mixes both, so it matches no content, and the path is stale
+ * whatever is on disk at the check.
+ */
+const TORN: Stamp = { exists: true, hash: '' };
+
 function sameStamp(a: Stamp, b: Stamp): boolean
 {
     return a.exists ? b.exists && a.hash === b.hash : !b.exists;
@@ -94,8 +101,9 @@ const collector = new AsyncLocalStorage<Inputs>();
  * Run `fn` with a collector open: every load inside it reports the files it
  * read into the returned `inputs`, whether `fn` resolves or rejects (a load
  * that failed is to be retried when a file it read or looked for changes). A
- * path read twice keeps its first stamp: if it changed between the two reads,
- * it differs from the first.
+ * path two loads found different — the environment probe loads the router
+ * again for each variation, and a save can land between two loads — is
+ * stamped `TORN`: stale even if it changes back before the check.
  */
 export async function collectInputs(fn: () => Promise<void>): Promise<{ inputs: Inputs; failure?: { error: unknown } }>
 {
@@ -117,9 +125,15 @@ export function reportInputs(inputs: Inputs): void
 
     for (const [file, stamp] of inputs)
     {
-        if (!into.has(file))
+        const first = into.get(file);
+
+        if (first === undefined)
         {
             into.set(file, stamp);
+        }
+        else if (!sameStamp(first, stamp))
+        {
+            into.set(file, TORN);
         }
     }
 }

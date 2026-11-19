@@ -252,6 +252,13 @@ load (`src/codegen/loader/`).
   again. Because the watch is armed before the comparison, a change lands either before it
   (the comparison finds it) or after the watch exists (an event reports it): a file created
   or edited while a generation ran, or replaced inside one, is not lost.
+- **Reported after the check.** A generation's `✓` and `✗` lines are logged once the check has
+  run. A generator that read a file the check found changed ran on inputs that changed under
+  it, so neither its success nor its failure describes the app as it now is (a save between
+  two of the environment probe's loads would read as "depends on the environment"): it gets
+  `[<generator>] Read files that changed while it ran; running it again` instead, and the run
+  after it reports. A file two loads of one generation read with different contents counts as
+  changed even if it is restored before the check.
 - **Start.** chokidar's first scan (`ready`), then the initial generation, then arm and
   check. `Watch mode started` is logged once changes are seen from then on.
 - **`No generators matched this file`** (debug) is logged only when no generator matched a
