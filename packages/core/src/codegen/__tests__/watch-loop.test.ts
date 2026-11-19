@@ -1,5 +1,5 @@
 /**
- * The watch loop — rows W1–W3, W5–W19 and G1 of the #353 design
+ * The watch loop — rows W1–W3, W5–W20 and G1 of the #353 design
  *
  * Each row runs an orchestrator in watch mode, in this process, on an app in a
  * temporary directory with `@spfn/core` linked into its `node_modules`.
@@ -52,6 +52,9 @@
  * |    | period                                                            | report it never comes                                |
  * | W19| a failure held back from a torn run, then the loop ends by an     | the same, when the loop ends any way but `close()`:  |
  * |    | exception                                                         | the exception shown, the generator's failure lost    |
+ * | W20| `generateAll('manual')` while watching tears the run of a         | a torn run of a generator watch mode does not run    |
+ * |    | generator whose `runOn` excludes `'watch'`; then a file it read   | never re-run, or that generator's old inputs found   |
+ * |    | and a pattern file are edited                                     | changed by every check: a loop that never idles      |
  * | G1 | a generator writing, on every run, a file it reads, differently     | a silent endless loop (no warning), the warning      |
  * |    |                                                                   | repeated, a stop coming back, or a `close()` that    |
  * |    |                                                                   | never ends it                                        |
@@ -948,6 +951,61 @@ describe('codegen watch loop', () =>
             '[failing] ✗ Regeneration failed (its inputs changed while it ran; no further run follows: the watch loop is ending)',
             'Error: broken',
         ]]);
+    });
+
+    it('W20 a torn run of a generator whose runOn excludes watch, started by generateAll(), is run again; its inputs then go unwatched', async () =>
+    {
+        // Watch mode never runs it on its own: only the mark its torn run left
+        // brings it into the next generation. After that, no run stamps its
+        // inputs again, so an edit to one must not leave them compared.
+        let runs = 0;
+        const manualOnly: Generator = {
+            name: 'manual-only',
+            watchPatterns: [],
+            runOn: ['manual'],
+            async generate(options: GeneratorOptions): Promise<void>
+            {
+                const load = await importProjectModule(join(options.cwd, 'src/a.ts'), options.cwd, newGeneration());
+
+                runs += 1;
+                reportInputs(load.inputs);
+
+                if (runs === 1)
+                {
+                    write('src/a.ts', 'export const a = 1;\n');
+                }
+
+                throw new Error('broken');
+            },
+        };
+        const anchor: Generator = {
+            name: 'anchor',
+            watchPatterns: ['src/anchor/**/*.ts'],
+            async generate(): Promise<void>
+            {
+                // Its pattern starts a cycle, and so a check.
+            },
+        };
+
+        write('src/anchor/index.ts', 'export {};\n');
+        write('src/a.ts', 'export const a = 0;\n');
+
+        const orchestrator = watching([anchor, manualOnly]);
+
+        await orchestrator.settled();
+        await orchestrator.generateAll('manual');
+        await until(() => runs === 2);
+        await orchestrator.settled();
+
+        expect(error.mock.calls.map(call => call.map(String))).toEqual([['[manual-only] ✗ Generation failed', 'Error: broken']]);
+
+        write('src/a.ts', 'export const a = 2;\n');
+        write('src/anchor/index.ts', 'export const anchor = 1;\n');
+        await until(() => logged(info, /^\[anchor\] ✓ Regenerated/));
+
+        const idle = await Promise.race([orchestrator.settled().then(() => true), new Promise(settle => setTimeout(() => settle(false), 5_000))]);
+
+        expect({ idle, runs }).toEqual({ idle: true, runs: 2 });
     });
 
     it('G1 a generator that rewrites a file it reads on every run: one warning, and it regenerates on until close()', async () =>

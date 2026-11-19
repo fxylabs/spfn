@@ -453,14 +453,7 @@ export class CodegenOrchestrator
         const { generator, failure } = outcome;
         const failedAfterWithheld = this.withheld.delete(generator) && failure !== undefined;
 
-        if (torn)
-        {
-            this.rerun.set(generator, outcome.trigger);
-        }
-        else
-        {
-            this.rerun.delete(generator);
-        }
+        this.markRerun(outcome, torn);
 
         if (!torn || failedAfterWithheld)
         {
@@ -475,6 +468,30 @@ export class CodegenOrchestrator
         }
 
         orchestratorLogger.info(`[${generator.name}] Read files that changed while it ran; running it again once they settle`);
+    }
+
+    /**
+     * Mark a torn run to run again by name (`regenerate` takes it whatever its
+     * `runOn`), else unmark it. A generator watch mode does not run (a
+     * `generateAll()` while watching ran it) keeps its inputs only until then:
+     * no later run would stamp them again, so every check after an edit to
+     * one would find it changed, and the loop would cycle on it forever.
+     */
+    private markRerun({ generator, trigger }: Outcome, torn: boolean): void
+    {
+        if (torn)
+        {
+            this.rerun.set(generator, trigger);
+
+            return;
+        }
+
+        this.rerun.delete(generator);
+
+        if (!this.shouldRun(generator, 'watch'))
+        {
+            this.inputs.delete(generator);
+        }
     }
 
     /**

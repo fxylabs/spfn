@@ -279,7 +279,9 @@ load (`src/codegen/loader/`).
   (`close()`, or an exception that rejects `watch()`), as it ends: `✗` with `(its inputs changed
   while it ran; no further run follows: the watch loop is ending)`. A success held back is not reported then: nothing went wrong. A file two loads of one generation read with
   different contents counts as changed even if it is restored before the check. A re-run is
-  told what the torn run was told (`changedFiles`), and what changed since.
+  told what the torn run was told (`changedFiles`), and what changed since. A generator whose `runOn`
+  excludes `'watch'`, run by a `generateAll()` while watching, is re-run the same way; once a run
+  of it is not torn, its inputs are no longer watched, since watch mode would never run it for them.
 - **Start.** chokidar's first scan (`ready`), then the initial generation, then arm and
   check. `Watch mode started` is logged once changes are seen from then on.
 - **`No generators matched this file`** (debug) is logged only when no generator matched a
