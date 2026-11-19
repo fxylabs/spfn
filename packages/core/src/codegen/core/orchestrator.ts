@@ -110,6 +110,9 @@ interface RunRequest
     reject: (error: unknown) => void;
 }
 
+/** How the watch loop ended: by `close()`, or by an exception, which it was rejected with. */
+type LoopEnd = { reason: 'closed' } | { reason: 'failed'; error: unknown };
+
 const EVENT_ICONS: Record<ChangedFile['event'], string> = { add: '+', change: '~', unlink: '-' };
 
 export class CodegenOrchestrator
@@ -154,10 +157,15 @@ export class CodegenOrchestrator
     private warnedCheckOnly = false;
 
     private busy = false;
+
+    /** `close()` was called: the loop starts nothing more, and ends once its generation has finished. */
     private closed = false;
 
-    /** The watch loop ended by an exception: it runs nothing more, as after `close()`. */
-    private loopFailed = false;
+    /**
+     * How the watch loop ended, once it has (`endLoop`): what waits for the
+     * loop, and every call made after, is settled by it.
+     */
+    private ended?: LoopEnd;
     private root = '';
     private loop?: Promise<void>;
     private wake?: () => void;
@@ -166,6 +174,9 @@ export class CodegenOrchestrator
 
     /** `generateAll()` calls made while watching, for the loop to run in turn. */
     private requests: RunRequest[] = [];
+
+    /** The request whose run the loop has taken from `requests` and not yet settled. */
+    private runningRequest?: RunRequest;
     private watcher?: ReturnType<typeof chokidarWatch>;
     private warnedUnwatchable = false;
     private inputWatcher?: InputWatcher;
@@ -197,8 +208,9 @@ export class CodegenOrchestrator
      * outputs of one cycle never disagree. `watch()` resolves with it. A
      * generation cannot be cancelled: one that never settles keeps this
      * pending, and only exiting the process stops it. A loop that ended by an
-     * exception rejected `watch()` with it; `close()` still resolves. An
-     * orchestrator is single-use: `watch()` after `close()` rejects.
+     * exception rejected `watch()` with it; `close()` still releases the
+     * watchers and resolves. Calling it again resolves as the first call does.
+     * An orchestrator is single-use: `watch()` after `close()` rejects.
      */
     async close(): Promise<void>
     {
@@ -214,25 +226,24 @@ export class CodegenOrchestrator
         await this.watcher?.close();
         this.watcher = undefined;
         await this.loop?.catch(() => undefined);
-        this.rejectRequests('the codegen watcher was closed before its turn');
-        this.notifyIdle();
     }
 
-    /** The loop ended by `error`: what waits for it is settled now, not at `close()`. */
-    private loopDied(error: unknown): void
+    /**
+     * The loop has ended, by `close()` or by an exception. Every `generateAll()` not yet settled — queued, or
+     * the one whose run was in flight — is rejected, since its run will not
+     * come or finish, and `settled()` resolves.
+     */
+    private endLoop(end: LoopEnd): void
     {
-        this.loopFailed = true;
-        this.rejectRequests('the codegen watch loop failed', error);
-        this.notifyIdle();
-    }
+        this.ended = end;
 
-    /** Reject every `generateAll()` still queued: its run will not come. */
-    private rejectRequests(reason: string, cause?: unknown): void
-    {
-        this.requests.splice(0).forEach(request => request.reject(new Error(
-            `generateAll('${request.trigger}') was not run: ${reason}`,
-            cause === undefined ? undefined : { cause },
-        )));
+        const failure = this.ended.reason === 'failed' ? { cause: this.ended.error } : undefined;
+        const reason = failure === undefined ? 'the codegen watcher was closed before its turn' : 'the codegen watch loop failed';
+
+        this.runningRequest?.reject(new Error(`generateAll('${this.runningRequest.trigger}') did not finish: ${reason}`, failure));
+        this.runningRequest = undefined;
+        this.requests.splice(0).forEach(request => request.reject(new Error(`generateAll('${request.trigger}') was not run: ${reason}`, failure)));
+        this.notifyIdle();
     }
 
     /**
@@ -281,8 +292,8 @@ export class CodegenOrchestrator
      * watch mode's (`watchGeneration`). Called once `close()` has been, it
      * waits for the loop's last generation and then runs as outside watch mode;
      * one still queued when `close()` is called is rejected. Once the loop has
-     * ended by an exception, one still queued is rejected naming it, and a
-     * later call rejects with it, as after `close()`. It may not be
+     * ended by an exception, one still queued or running is rejected naming
+     * it, with it as the `cause`, and a later call rejects with it. It may not be
      * called while the calling generator's own `generate()`, run by the watch
      * loop, is still running: awaited there, its run could never finish, so it
      * rejects (`reentered`), awaited or not. A callback scheduled to run after
@@ -297,7 +308,7 @@ export class CodegenOrchestrator
             throw this.reentered(`generateAll('${trigger}')`);
         }
 
-        if (this.loop !== undefined && !this.closed && !this.loopFailed)
+        if (this.loop !== undefined && !this.closed && this.ended === undefined)
         {
             return new Promise((resolve, reject) =>
             {
@@ -306,7 +317,12 @@ export class CodegenOrchestrator
             });
         }
 
-        await this.loop;
+        await this.loop?.catch(() => undefined);
+
+        if (this.ended?.reason === 'failed')
+        {
+            throw this.ended.error;
+        }
 
         const outcomes = await this.generate(this.startRuns(trigger), this.throwOnError);
         const failed = outcomes.find(outcome => outcome.failure !== undefined);
@@ -534,14 +550,15 @@ export class CodegenOrchestrator
     /**
      * Start watch mode: once chokidar has scanned the patterns' directories,
      * the initial generation, then the loop. Resolves when `close()` is called.
-     * Rejects when `close()` was called before: a closed orchestrator watches
-     * nothing again.
+     * Rejects when `close()` was called before, or when it watched already —
+     * its loop running or ended, by `close()` or by an exception: an
+     * orchestrator watches once.
      */
     async watch(): Promise<void>
     {
-        if (this.closed)
+        if (this.closed || this.loop !== undefined)
         {
-            throw new Error('This CodegenOrchestrator was closed: an orchestrator is single-use, so create a new one to watch again');
+            throw this.singleUse();
         }
 
         const patterns = this.generators.flatMap(g => g.watchPatterns);
@@ -557,9 +574,22 @@ export class CodegenOrchestrator
         this.busy = true;
         this.root = realpathSync(this.cwd);
         this.loop = this.watchLoop(patterns);
-        this.loop.catch(error => this.loopDied(error));
+        this.loop.then(() => this.endLoop({ reason: 'closed' }), (error: unknown) => this.endLoop({ reason: 'failed', error }));
 
         return this.loop;
+    }
+
+    /** The error for `watch()` called again: what ended the orchestrator's watching, or that it still watches. */
+    private singleUse(): Error
+    {
+        const advice = 'an orchestrator is single-use, so create a new one to watch again';
+
+        if (this.ended?.reason === 'failed')
+        {
+            return new Error(`This CodegenOrchestrator's watch loop failed: ${advice}`, { cause: this.ended.error });
+        }
+
+        return new Error(this.closed ? `This CodegenOrchestrator was closed: ${advice}` : `This CodegenOrchestrator is already watching: ${advice}`);
     }
 
     /**
@@ -780,18 +810,22 @@ export class CodegenOrchestrator
     }
 
     /** A `generateAll()` made while watching: its run, as a watch generation, settling its promise. */
-    private async runRequested({ trigger, resolve, reject }: RunRequest): Promise<void>
+    private async runRequested(request: RunRequest): Promise<void>
     {
-        const failed = (await this.watchGeneration(this.startRuns(trigger))).find(outcome => outcome.failure !== undefined);
+        this.runningRequest = request;
+
+        const failed = (await this.watchGeneration(this.startRuns(request.trigger))).find(outcome => outcome.failure !== undefined);
+
+        this.runningRequest = undefined;
 
         if (failed !== undefined && this.throwOnError)
         {
-            reject(failed.failure);
+            request.reject(failed.failure);
 
             return;
         }
 
-        resolve();
+        request.resolve();
     }
 
     /**
@@ -957,7 +991,7 @@ export class CodegenOrchestrator
 
     private isIdle(): boolean
     {
-        return this.closed || this.loopFailed || (!this.busy && !(this.inputWatcher?.pending ?? false));
+        return this.closed || this.ended !== undefined || (!this.busy && !(this.inputWatcher?.pending ?? false));
     }
 
     private notifyIdle(): void

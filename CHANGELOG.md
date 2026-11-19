@@ -66,7 +66,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the generation running has finished every generator, so the `spfn dev` watcher's SIGTERM no
   longer leaves the route map and contract from two different generations. A generation cannot be
   cancelled, so the watcher entry exits at once on a second signal. An orchestrator is
-  single-use: `watch()` after `close()` rejects instead of opening watchers nothing closes. A
+  single-use: `watch()` after `close()`, while its loop runs, or after the loop ended by an
+  exception rejects instead of opening watchers nothing closes. When the loop ends by an
+  exception, a `generateAll()` queued or in progress rejects with it as the `cause`. A
   chokidar error is warned about once, naming the pattern directories.
 - **spfn: `spfn dev` waits for its codegen watcher on SIGINT/SIGTERM (#353).** It sent the watcher
   SIGTERM and exited at once, through `pnpm exec`/`npx`, which do not wait (npx did not even

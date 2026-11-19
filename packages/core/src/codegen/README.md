@@ -284,7 +284,9 @@ load (`src/codegen/loader/`).
   watches and compares only the inputs of generators it would run for them: those that run on
   `'watch'`, those owed a re-run, and those of the generation just run, whose check says whether it
   was torn. So the inputs of a `runOn` without `'watch'` stop being watched once its run is not
-  torn, whether a `generateAll()` ran it while watching or before `watch()`.
+  torn, whether a `generateAll()` ran it while watching or before `watch()` — though they stay
+  armed until the check after that run, so one edit there can wake a single check that runs
+  nothing and then drops the watch.
 - **Start.** chokidar's first scan (`ready`), then the initial generation, then arm and
   check. `Watch mode started` is logged once changes are seen from then on.
 - **`No generators matched this file`** (debug) is logged only when no generator matched a
@@ -303,12 +305,15 @@ load (`src/codegen/loader/`).
   run has finished. A call still queued when `close()` is called is rejected; one made after
   `close()` waits for the last cycle and runs as outside watch mode. Once the loop has ended by
   an exception (`watch()` rejected), a call still queued is rejected with
-  `generateAll('<trigger>') was not run: the codegen watch loop failed` (the exception is its
-  `cause`), and a later call rejects with the exception, as after `close()`.
+  `generateAll('<trigger>') was not run: the codegen watch loop failed`, and one whose run was in
+  progress with `generateAll('<trigger>') did not finish: the codegen watch loop failed` (the
+  exception is the `cause` of each); a later call rejects with the exception.
 - **`close()`** starts no new generation and resolves once the one running has finished —
   every generator of it, so the outputs of one cycle never disagree. A generation cannot be
-  cancelled, so a generator that never settles keeps `close()` pending. An orchestrator is
-  single-use: `watch()` after `close()` rejects. The `spfn dev` watcher calls `close()` on the
+  cancelled, so a generator that never settles keeps `close()` pending. After a loop that ended
+  by an exception, `close()` still releases the watchers and resolves, however often it is
+  called. An orchestrator is single-use: `watch()` rejects after `close()`, while its loop runs,
+  and after that loop ended by an exception. The `spfn dev` watcher calls `close()` on the
   first SIGTERM/SIGINT and exits when it resolves; a second signal exits at once. `spfn dev`
   forwards each signal it gets to the watcher and exits after it.
 - **`settled()`** resolves once the loop is idle: nothing running, nothing dirty, no input

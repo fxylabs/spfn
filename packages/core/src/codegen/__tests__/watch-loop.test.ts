@@ -1,5 +1,5 @@
 /**
- * The watch loop — rows W1–W3, W5–W22 and G1 of the #353 design
+ * The watch loop — rows W1–W3, W5–W25 and G1 of the #353 design
  *
  * Each row runs an orchestrator in watch mode, in this process, on an app in a
  * temporary directory with `@spfn/core` linked into its `node_modules`.
@@ -59,6 +59,11 @@
  * |    | a generator whose `runOn` excludes `'watch'`; its input and a     | for, or a watch generator's own input dropped from   |
  * |    | watch generator's non-pattern input are edited after each         | the check                                            |
  * | W22| the loop ends by an exception with a `generateAll()` queued       | the call and `settled()` pending until `close()`     |
+ * | W23| the loop ends by an exception inside a `generateAll()`'s run;     | a caller awaiting `generateAll()` forever after an   |
+ * |    | then `close()`                                                    | internal failure                                     |
+ * | W24| `watch()` again after the loop ended by an exception              | a half-alive second loop: `settled()` idle during a  |
+ * |    |                                                                   | generation, watchers `close()` cannot reach          |
+ * | W25| `close()` while a generation is held with a `generateAll()` queued | the call pending forever: its run never comes        |
  * | G1 | a generator writing, on every run, a file it reads, differently     | a silent endless loop (no warning), the warning      |
  * |    |                                                                   | repeated, a stop coming back, or a `close()` that    |
  * |    |                                                                   | never ends it                                        |
@@ -1091,6 +1096,93 @@ describe('codegen watch loop', () =>
             cause: 'Error: loop failed',
             idle: 'resolved',
             later: 'Error: loop failed',
+            calls: 2,
+        });
+    });
+
+    it('W23 a generateAll() whose run is in flight when the loop ends by an exception rejects with it as the cause, and stays rejected after close()', async () =>
+    {
+        const gated = gate('gate', ['src/**/*.ts']);
+        const orchestrator = new CodegenOrchestrator({ generators: [gated.generator], cwd: appDir, debug: true });
+        const within = (promise: Promise<unknown>): Promise<unknown> => Promise.race([
+            promise.then(() => 'resolved', (reason: unknown) => reason),
+            new Promise(settle => setTimeout(() => settle('pending'), 2_000)),
+        ]);
+
+        orchestrators.push(orchestrator);
+
+        const watched = within(orchestrator.watch());
+
+        await orchestrator.settled();
+        gated.hold();
+
+        const call = orchestrator.generateAll('manual');
+        const inFlight = within(call);
+
+        await gated.entered;
+        vi.spyOn(orchestrator as unknown as { armAndCheck: () => unknown }, 'armAndCheck').mockImplementationOnce(() =>
+        {
+            throw new Error('loop failed');
+        });
+        gated.release();
+
+        const [died, rejected, idle] = await Promise.all([watched, inFlight, within(orchestrator.settled())]);
+
+        await orchestrator.close();
+        await orchestrator.close();
+
+        const afterClose = await within(call);
+
+        expect({ died: String(died), rejected: String(rejected), cause: String((rejected as Error).cause), idle, afterClose }).toEqual({
+            died: 'Error: loop failed',
+            rejected: 'Error: generateAll(\'manual\') did not finish: the codegen watch loop failed',
+            cause: 'Error: loop failed',
+            idle: 'resolved',
+            afterClose: rejected,
+        });
+    });
+
+    it('W24 watch() cannot be restarted after its loop dies', async () =>
+    {
+        const gated = gate('gate', ['src/**/*.ts']);
+        const orchestrator = new CodegenOrchestrator({ generators: [gated.generator], cwd: appDir, debug: true });
+        const loop = orchestrator as unknown as { nextWork: () => Promise<boolean> };
+        const within = (promise: Promise<unknown>): Promise<unknown> =>
+            Promise.race([
+                promise.then(() => 'resolved', reason => reason),
+                new Promise(settle => setTimeout(() => settle('pending'), 2_000)),
+            ]);
+        orchestrators.push(orchestrator);
+        const watched = within(orchestrator.watch());
+        await orchestrator.settled();
+        vi.spyOn(loop, 'nextWork').mockRejectedValueOnce(new Error('loop failed'));
+        void orchestrator.generateAll('manual');
+        expect(String(await watched)).toBe('Error: loop failed');
+        expect(await within(orchestrator.watch())).not.toBe('pending');
+        await expect(orchestrator.watch()).rejects.toThrow('This CodegenOrchestrator\'s watch loop failed: an orchestrator is single-use');
+    });
+
+    it('W25 a generateAll() still queued when close() is called is rejected once the loop has ended', async () =>
+    {
+        const held = gate('gate', ['src/**/*.ts']);
+
+        write('src/x.ts', 'x0');
+
+        const orchestrator = watching([held.generator]);
+
+        await orchestrator.settled();
+        held.hold();
+        write('src/x.ts', 'x1');
+        await held.entered;
+
+        const queued = orchestrator.generateAll('manual').then(() => 'resolved', (reason: unknown) => String(reason));
+        const closed = orchestrator.close();
+
+        held.release();
+        await closed;
+
+        expect({ queued: await Promise.race([queued, new Promise(settle => setTimeout(() => settle('pending'), 2_000))]), calls: held.calls }).toEqual({
+            queued: 'Error: generateAll(\'manual\') was not run: the codegen watcher was closed before its turn',
             calls: 2,
         });
     });
