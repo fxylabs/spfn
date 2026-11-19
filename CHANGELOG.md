@@ -70,7 +70,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **@spfn/core: `CodegenOrchestrator.generateAll()` called while watching** ran the generators
   beside the cycle running, two generations writing the same outputs at once; it is now queued as
   a run of the watch loop and settles when that run has finished. Called (or `settled()`) from
-  inside a generator of a generation the loop runs, it rejects instead of deadlocking the loop.
+  inside a generator's `generate()` the loop is running, it rejects instead of deadlocking the
+  loop; a callback that call left behind, run after it returned, is not refused.
 - **@spfn/core: watch state is per orchestrator.** The files each router's load reached were kept
   in a module-wide map, so a second orchestrator in the process watched the first app's files.
 

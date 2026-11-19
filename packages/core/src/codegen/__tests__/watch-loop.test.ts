@@ -1,5 +1,5 @@
 /**
- * The watch loop — rows W1–W3, W5–W13 and G1 of the #353 design
+ * The watch loop — rows W1–W3, W5–W17 and G1 of the #353 design
  *
  * Each row runs an orchestrator in watch mode, in this process, on an app in a
  * temporary directory with `@spfn/core` linked into its `node_modules`.
@@ -46,6 +46,8 @@
  * |    |                                                                   | as quietly fine                                      |
  * | W16| `generateAll()` and `settled()` awaited inside a generator while  | a watcher frozen on its own generation, which        |
  * |    | watching; then an edit                                            | `close()` can never end                              |
+ * | W17| `settled()` called from a timer a generator's first run scheduled,| a callback outliving its `generate()` taken for that |
+ * |    | after that run and the generation have finished                   | call: `settled()`/`generateAll()` rejected forever   |
  * | G1 | a generator writing, on every run, a file it reads, differently     | a silent endless loop (no warning), the warning      |
  * |    |                                                                   | repeated, a stop coming back, or a `close()` that    |
  * |    |                                                                   | never ends it                                        |
@@ -797,6 +799,42 @@ describe('codegen watch loop', () =>
             expect.stringMatching(/^generateAll\('manual'\) was called from inside a generator's generate\(\) while this CodegenOrchestrator watches: it would wait for the generation running that generator, which waits for it/),
             expect.stringMatching(/^settled\(\) was called from inside a generator's generate\(\) while this CodegenOrchestrator watches/),
         ]);
+    });
+
+    it('W17 settled() from a callback a finished generate() left behind resolves', async () =>
+    {
+        // The callback descends from the generator's call, which has returned:
+        // it waits for the loop as any caller does, and is not refused.
+        let orchestrator!: CodegenOrchestrator;
+        let resolveDelayed!: (value: string) => void;
+        const delayed = new Promise<string>(resolve => (resolveDelayed = resolve));
+        let scheduled = false;
+        const generator: Generator = {
+            name: 'delayed-caller',
+            watchPatterns: ['src/n/**/*.ts'],
+            async generate(): Promise<void>
+            {
+                if (scheduled)
+                {
+                    return;
+                }
+
+                scheduled = true;
+                setTimeout(() =>
+                {
+                    orchestrator.settled().then(
+                        () => resolveDelayed('resolved'),
+                        (failure: Error) => resolveDelayed(failure.message),
+                    );
+                }, 50);
+            },
+        };
+
+        write('src/n/a.ts', 'a0');
+        orchestrator = watching([generator]);
+        await orchestrator.settled();
+
+        expect(await delayed).toBe('resolved');
     });
 
     it('G1 a generator that rewrites a file it reads on every run: one warning, and it regenerates on until close()', async () =>
