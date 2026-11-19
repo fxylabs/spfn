@@ -254,9 +254,13 @@ load (`src/codegen/loader/`).
   are all taken by the next cycle.
 - **Arm, then check.** After every generation the loop watches the directories of the new
   inputs, *then* compares every input with its stamp: existence, then the hash of the file's
-  content now (every input is read and hashed on every check). A stale input is
-  dirty, logged as `Changed during generation: + src/server/lib/later.ts`, and the loop runs
-  again. Because the watch is armed before the comparison, a change lands either before it
+  content now (every input is read and hashed on every check). A stale input is logged as
+  `Changed during generation: + src/server/lib/later.ts` and treated as a late file event: it
+  waits the quiet period every input event waits — 150 ms with no write in an input's
+  directory, each write restarting it — and the loop then compares again and runs for what is
+  stale then. So a change found by the check regenerates 150 ms after the generation that
+  missed it ends, at the earliest, and a file written all through every generation never
+  starts the next one at once. `settled()` does not resolve during that wait. Because the watch is armed before the comparison, a change lands either before it
   (the comparison finds it) or after the watch exists (an event reports it): a file created
   or edited while a generation ran, or replaced inside one, is not lost.
 - **Reported after the check.** A generation's `✓` and `✗` lines are logged once the check has
@@ -270,11 +274,13 @@ load (`src/codegen/loader/`).
   check. `Watch mode started` is logged once changes are seen from then on.
 - **`No generators matched this file`** (debug) is logged only when no generator matched a
   cycle's changes. A cycle in which every matched generator failed ends with their `✗` lines.
-- **Loop guard.** After 3 consecutive cycles that the check alone started (no file event in
-  between, the loop never idle), the loop warns, naming the files and the generators that
-  read them, and starts no further cycle for them until a file event, or until they change
-  again. Only a generator that writes a file it reads, differently on every run, does that —
-  see [Don't watch your own output](#pitfalls--anti-patterns).
+- **Repeated late changes.** After 3 consecutive cycles that the check alone started (no file
+  event in between) whose inputs changed again, the loop warns once, naming the files and the
+  generators that read them: a generator that writes a file it reads, differently on every
+  run, would do this (see [Don't watch your own output](#pitfalls--anti-patterns)); so would
+  a file saved during each of those generations. It keeps regenerating, one cycle per quiet
+  period, and does not warn again until a cycle a file event started has run. Nothing is
+  marked handled that no generation read.
 - **`generateAll()` while watching** is a run of the loop, not a second generation beside it:
   queued, run between two cycles, and resolved (or, under `throwOnError`, rejected) when that
   run has finished. A call still queued when `close()` is called is rejected; one made after
@@ -876,8 +882,9 @@ since (see [Watch mode](#watch-mode)).
 - **Don't watch your own output.** A generator whose `watchPatterns` match its `outputPath`
   re-triggers itself. Write outputs outside the watched globs. A generator that imports a file
   it then writes converges when the content it writes is the same each time (the second check
-  finds the same hash); one that writes something different every run (a timestamp) is stopped
-  by the loop guard after 3 cycles, with a warning (see [Watch mode](#watch-mode)).
+  finds the same hash); one that writes something different every run (a timestamp) is run
+  again once per quiet period for as long as `spfn dev` watches, with one warning after 3
+  such cycles (see [Watch mode](#watch-mode)). `close()` and a signal still stop it.
 - **`generate()` should not throw to signal "skip".** The orchestrator catches errors per
   generator (one failure doesn't stop the others), but a throw is logged as a failure.
   Return early instead (route-map logs a warning and returns when the router file is

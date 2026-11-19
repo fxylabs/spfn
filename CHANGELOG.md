@@ -32,9 +32,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   nothing, stamped absent) and attributed to the generator that ran; one
   serialized loop runs, in one generation, every generator a dirty path matches or that read one,
   then watches the directories of the new inputs and then compares every input with its stamp, so
-  a change that lands during a generation is found by the comparison. A generator that rewrites
-  a file it reads differently on every run is stopped after 3 such cycles, with a warning.
-  Logged: `Changed during generation: + <path>`, and in debug `Queued ~ <path>`; `No generators
+  a change that lands during a generation is found by the comparison. Such a change is a late
+  file event: it waits the quiet period input events wait (150 ms with no write in the input's
+  directory) before the next generation starts. After 3 consecutive cycles started that way, one
+  warning names the files and the generators that read them; regeneration continues. Logged: `Changed during generation: + <path>`, and in debug `Queued ~ <path>`; `No generators
   matched this file` only when nothing matched. A generator's `✓`/`✗` is logged after that
   comparison, and a run whose inputs changed while it ran says so instead: a save between two of
   the environment probe's loads was reported as `ConditionalRegistrationError: The route map

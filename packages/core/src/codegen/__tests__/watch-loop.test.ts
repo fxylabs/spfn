@@ -1,5 +1,5 @@
 /**
- * The watch loop — rows W1–W3, W5–W12 and the loop guard of the #353 design
+ * The watch loop — rows W1–W3, W5–W13 and G1 of the #353 design
  *
  * Each row runs an orchestrator in watch mode, in this process, on an app in a
  * temporary directory with `@spfn/core` linked into its `node_modules`.
@@ -38,8 +38,11 @@
  * |    | directory an import resolved to the index of                      | were not stamped absent                              |
  * | W12| `watch()` after `close()`                                         | a closed orchestrator opening watchers nothing       |
  * |    |                                                                   | closes                                               |
- * | G1 | a generator writing, on every run, a file it reads                    | the loop guard: such a generator regenerating        |
- * |    |                                                                       | forever                                              |
+ * | W13| an input no pattern matches saved once during each of four          | a stop on consecutive check-found cycles: the last   |
+ * |    | generations in a row                                              | save marked handled, the map one edit behind         |
+ * | G1 | a generator writing, on every run, a file it reads, differently     | a silent endless loop (no warning), the warning      |
+ * |    |                                                                   | repeated, a stop coming back, or a `close()` that    |
+ * |    |                                                                   | never ends it                                        |
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -629,21 +632,57 @@ describe('codegen watch loop', () =>
         expect((orchestrator as unknown as { inputWatcher?: unknown }).inputWatcher).toBeUndefined();
     });
 
-    it('G1 a generator that rewrites a file it reads on every run is stopped after three check-only cycles, with a warning', async () =>
+    it('W13 an input saved during each of four generations in a row is regenerated to its last content', async () =>
     {
-        // Without the guard, such a generator regenerates forever: every check
-        // after its run finds the file it just wrote.
+        // seg.ts matches no pattern: each save lands inside a generation and is
+        // found only by the check after it, four cycles in a row. A stop keyed on
+        // that count marks the last save handled, though no generation read it.
+        writeProbe('/probe/${seg}', 'import { seg } from \'../lib/seg\';\n');
+        write('src/server/lib/seg.ts', 'export const seg: string = \'v0\';\n');
+
+        const user = gate('route-map, held', ['src/server/routes/**/*.ts'], routeMap());
+        const orchestrator = watching([user.generator]);
+
+        await orchestrator.settled();
+
+        expect(mapPaths()).toEqual(['/probe/v0']);
+
+        write('src/server/lib/seg.ts', 'export const seg: string = \'v1\';\n');
+
+        for (const version of [2, 3, 4, 5])
+        {
+            user.hold();
+            await user.entered;
+            write('src/server/lib/seg.ts', `export const seg: string = 'v${version}';\n`);
+            user.release();
+        }
+
+        await orchestrator.settled();
+
+        expect(mapPaths()).toEqual(['/probe/v5']);
+    });
+
+    it('G1 a generator that rewrites a file it reads on every run: one warning, and it regenerates on until close()', async () =>
+    {
+        // Each check after its run finds the file it just wrote: the loop runs it
+        // again once the change has settled (the input watcher's 150 ms), for as
+        // long as it watches, and says so once.
         let runs = 0;
+        const starts: number[] = [];
+        const ends: number[] = [];
         const selfWriter: Generator = {
             name: 'self-writer',
             watchPatterns: ['src/self/**/*.ts'],
             async generate(options: GeneratorOptions): Promise<void>
             {
+                starts.push(Date.now());
+
                 const load = await importProjectModule(join(options.cwd, 'src/counter.ts'), options.cwd, newGeneration());
 
                 runs += 1;
                 reportInputs(load.inputs);
                 write('src/counter.ts', `export const runs = ${runs};\n`);
+                ends.push(Date.now());
             },
         };
 
@@ -653,13 +692,18 @@ describe('codegen watch loop', () =>
         const orchestrator = watching([selfWriter]);
 
         await until(() => logged(warn, /src\/counter\.ts \(read by self-writer\)/));
-        await orchestrator.settled();
 
-        expect(runs).toBe(4);
+        const atWarning = runs;
+
+        await until(() => runs >= atWarning + 3);
+        await orchestrator.close();
+
+        expect(atWarning).toBe(4);
+        expect(ends.slice(0, -1).map((end, run) => starts[run + 1] - end).filter(quiet => quiet < 140)).toEqual([]);
         expect(warn.mock.calls.map(([message]) => String(message))).toEqual([
             'Inputs changed during each of the last 3 generations, with no file event between: src/counter.ts (read by '
-            + 'self-writer). A generator may be writing a file it reads; not regenerating for them again until the next '
-            + 'file change.',
+            + 'self-writer). A generator that writes a file it reads, differently on every run, would do this; '
+            + 'regenerating again each time the change settles.',
         ]);
     });
 });

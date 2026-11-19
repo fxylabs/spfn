@@ -15,9 +15,10 @@
  * marks paths dirty. One serialized loop then takes the whole dirty set and
  * runs, in one generation, every generator a dirty path matches or that read
  * one; then it watches the directories of the new inputs, and then compares
- * every input with its stamp. A stale input is dirty in its turn, and the loop
- * runs again. So a change that lands while a generation runs, or before a
- * watch for it exists, is found by that comparison rather than lost: an edit
+ * every input with its stamp. A stale input is a late file event: once writes
+ * have settled (`SETTLE_MS`, the quiet period every input event waits), it is
+ * dirty in its turn, and the loop runs again. So a change that lands while a
+ * generation runs, or before a watch for it exists, is found by that comparison rather than lost: an edit
  * to `src/server/lib/segment.ts`, imported through `@/` by a route, a file a
  * failed import was looked for at that appears, a file replaced inside the
  * generation that read it. How each generator's run ended is logged only
@@ -33,7 +34,7 @@ import { join, relative, sep } from 'path';
 import { watch as chokidarWatch } from 'chokidar';
 import mm from 'micromatch';
 import type { ChangedFile, Generator, GeneratorOptions, GeneratorTrigger } from './generator';
-import { checkStamp, collectInputs, stampOf, type Inputs, type Stamp } from './inputs';
+import { checkStamp, collectInputs, type Inputs } from './inputs';
 import { InputWatcher } from './input-watcher';
 import { pinNodeEnv } from './node-env';
 import { logger } from '@spfn/core/logger';
@@ -43,7 +44,7 @@ const orchestratorLogger = logger.child('@spfn/core:orchestrator');
 
 /**
  * Consecutive cycles started by the check alone — no file event — after which
- * the loop stops starting such cycles until the next event (`guard`).
+ * the loop warns once (`warnCheckOnly`). It keeps regenerating.
  */
 const CHECK_ONLY_CYCLES = 3;
 
@@ -72,7 +73,8 @@ export interface OrchestratorOptions
 
 /**
  * A dirty path: how it changed, and what found it — a file event, or the check
- * after a generation (`check`), which the loop guard counts.
+ * after a generation (`check`), whose consecutive cycles are counted for one
+ * warning.
  */
 interface Change extends Omit<ChangedFile, 'path'>
 {
@@ -119,9 +121,16 @@ export class CodegenOrchestrator
     /** A directory holding an input changed while the loop was idle: compare the inputs. */
     private checkRequested = false;
 
-    /** Stale inputs the loop guard stopped regenerating for, with what they held then. */
-    private readonly suppressed = new Map<string, Stamp>();
+    /**
+     * The check after a generation found a stale input, and the input watcher
+     * is waiting out its quiet period before the loop compares again: what that
+     * comparison finds was found by the check, not by an event.
+     */
+    private lateCheck = false;
+
+    /** Consecutive cycles the check alone started; the warning about them is given once until an event's cycle. */
     private checkOnlyCycles = 0;
+    private warnedCheckOnly = false;
 
     private busy = false;
     private closed = false;
@@ -343,20 +352,20 @@ export class CodegenOrchestrator
      * that changed under it, so its result — success or failure — says nothing
      * about the app as it is now: a save between two of the environment probe's
      * loads reads as "depends on the environment". Such a run gets one line
-     * saying so instead of `✓` or `✗`; it is already dirty, and the run after it
-     * reports. After `close()` there is no check, and each run is reported as it
-     * ended.
+     * saying so instead of `✓` or `✗`; it runs again once the change has
+     * settled (`deferCheck`), and that run reports. After `close()` there is no
+     * check, and each run is reported as it ended.
      */
     private async watchGeneration(runs: Run[]): Promise<Outcome[]>
     {
         const outcomes = await this.generate(runs, false);
-        const changed = this.closed ? new Set<string>() : this.armAndCheck('check');
+        const stale = this.closed ? new Map<string, ChangedFile['event']>() : this.armAndCheck();
 
         for (const outcome of outcomes)
         {
             const inputs = this.inputs.get(outcome.generator);
 
-            if ([...changed].some(path => inputs?.has(path)))
+            if ([...stale.keys()].some(path => inputs?.has(path)))
             {
                 orchestratorLogger.info(`[${outcome.generator.name}] Read files that changed while it ran; running it again`);
             }
@@ -366,7 +375,32 @@ export class CodegenOrchestrator
             }
         }
 
+        this.deferCheck(stale);
+
         return outcomes;
+    }
+
+    /**
+     * The check after a generation found `stale`: a late file event. Like any
+     * event on an input, it waits for writes to settle — the input watcher's
+     * quiet period, restarted by every write meanwhile — and the loop then
+     * compares again and regenerates for what it finds then. Without that wait
+     * a file written all through a generation, by a user or by a generator,
+     * would start the next one at once, every time.
+     */
+    private deferCheck(stale: Map<string, ChangedFile['event']>): void
+    {
+        if (stale.size === 0)
+        {
+            this.checkOnlyCycles = 0;
+
+            return;
+        }
+
+        stale.forEach((event, path) => orchestratorLogger.info(`Changed during generation: ${EVENT_ICONS[event]} ${path}`));
+        this.warnCheckOnly(stale);
+        this.lateCheck = true;
+        this.inputWatcher?.schedule();
     }
 
     /**
@@ -499,7 +533,6 @@ export class CodegenOrchestrator
         }
 
         this.dirty.set(path, { event, foundBy: 'event' });
-        this.suppressed.clear();
         this.poke();
     }
 
@@ -539,7 +572,6 @@ export class CodegenOrchestrator
         if (!this.closed && this.dirty.size === 0 && !this.checkRequested && this.requests.length === 0)
         {
             this.busy = false;
-            this.checkOnlyCycles = 0;
             this.notifyIdle();
             await new Promise<void>(resolve => (this.wake = resolve));
         }
@@ -554,10 +586,6 @@ export class CodegenOrchestrator
      */
     private async cycle(): Promise<void>
     {
-        // A turn for I/O first: file events, and a signal's `close()`, are handled
-        // between cycles even when a generation settles without waiting on any.
-        await new Promise(resolve => setImmediate(resolve));
-
         const request = this.closed ? undefined : this.requests.shift();
 
         if (request !== undefined)
@@ -569,7 +597,9 @@ export class CodegenOrchestrator
 
         if (this.dirty.size === 0)
         {
-            this.armAndCheck('event');
+            const foundBy = this.lateCheck ? 'check' : 'event';
+
+            this.armAndCheck().forEach((event, path) => this.markDirty(path, event, foundBy));
 
             return;
         }
@@ -601,6 +631,7 @@ export class CodegenOrchestrator
         const checkOnly = [...changes.values()].every(change => change.foundBy === 'check');
 
         this.checkOnlyCycles = checkOnly ? this.checkOnlyCycles + 1 : 0;
+        this.warnedCheckOnly &&= checkOnly;
         [...changes]
             .filter(([, change]) => change.foundBy === 'event')
             .forEach(([path, { event }]) => orchestratorLogger.info(`File ${EVENT_ICONS[event]} ${path}`));
@@ -634,13 +665,13 @@ export class CodegenOrchestrator
 
     /**
      * Watch the directories of every input, then compare every input with its
-     * stamp; a stale one is dirty. `foundBy` says what started the comparison:
-     * the end of a generation (`check`), or a directory event (`event`).
-     * Returns the paths it made dirty.
+     * stamp. Returns every stale input, with how it changed; the caller decides
+     * when it is dirty.
      */
-    private armAndCheck(foundBy: Change['foundBy']): Set<string>
+    private armAndCheck(): Map<string, ChangedFile['event']>
     {
         this.checkRequested = false;
+        this.lateCheck = false;
 
         // Arm before the check: this order is what makes the loop correct. A
         // change that lands before the check is found by it; one that lands
@@ -648,27 +679,11 @@ export class CodegenOrchestrator
         // armed after, a change between the two would be neither.
         this.inputWatcher?.sync([...this.inputPaths()].map(path => join(this.root, path)));
 
-        const stale = this.staleInputs();
-
-        if (foundBy === 'check' && stale.size > 0 && this.checkOnlyCycles >= CHECK_ONLY_CYCLES)
-        {
-            this.guard(stale);
-
-            return new Set();
-        }
-
-        stale.forEach((event, path) => this.markStale(path, event, foundBy));
-
-        return new Set(stale.keys());
+        return this.staleInputs();
     }
 
-    private markStale(path: string, event: ChangedFile['event'], foundBy: Change['foundBy']): void
+    private markDirty(path: string, event: ChangedFile['event'], foundBy: Change['foundBy']): void
     {
-        if (foundBy === 'check')
-        {
-            orchestratorLogger.info(`Changed during generation: ${EVENT_ICONS[event]} ${path}`);
-        }
-
         if (!this.dirty.has(path))
         {
             this.dirty.set(path, { event, foundBy });
@@ -680,10 +695,7 @@ export class CodegenOrchestrator
         return new Set([...this.inputs.values()].flatMap(inputs => [...inputs.keys()]));
     }
 
-    /**
-     * Every input that differs from its stamp, with how it changed. An input
-     * the guard suppressed is left out while it still holds what it held then.
-     */
+    /** Every input that differs from its stamp, with how it changed. */
     private staleInputs(): Map<string, ChangedFile['event']>
     {
         const stale = new Map<string, ChangedFile['event']>();
@@ -694,7 +706,7 @@ export class CodegenOrchestrator
             {
                 const checked = checkStamp(join(this.root, path), stamp);
 
-                if (!checked.fresh && !this.isSuppressed(path))
+                if (!checked.fresh)
                 {
                     stale.set(path, eventOf(stamp.exists, checked.exists));
                 }
@@ -704,41 +716,27 @@ export class CodegenOrchestrator
         return stale;
     }
 
-    private isSuppressed(path: string): boolean
-    {
-        const held = this.suppressed.get(path);
-
-        if (held === undefined)
-        {
-            return false;
-        }
-
-        if (checkStamp(join(this.root, path), held).fresh)
-        {
-            return true;
-        }
-
-        this.suppressed.delete(path);
-
-        return false;
-    }
-
     /**
-     * The loop guard: inputs changed after each of the last cycles, which the
-     * check alone started. A generator that writes a file it reads, differently
-     * on every run, does that; nothing else keeps every generation stale. Say
-     * which files and generators, and start no cycle for those files until a
-     * file event, or until they change again.
+     * Inputs changed during each of the last cycles, which the check alone
+     * started: say which files and which generators read them, once until a
+     * cycle an event started. A generator writing a file it reads, differently
+     * on every run, would do this; so would a file saved during every one of
+     * them. The loop regenerates either way.
      */
-    private guard(stale: Map<string, ChangedFile['event']>): void
+    private warnCheckOnly(stale: Map<string, ChangedFile['event']>): void
     {
+        if (this.checkOnlyCycles < CHECK_ONLY_CYCLES || this.warnedCheckOnly)
+        {
+            return;
+        }
+
         const named = [...stale.keys()].map(path => `${path} (read by ${this.readersOf(path).join(', ')})`);
 
-        stale.forEach((_event, path) => this.suppressed.set(path, stampOf(join(this.root, path))));
+        this.warnedCheckOnly = true;
         orchestratorLogger.warn(
             `Inputs changed during each of the last ${CHECK_ONLY_CYCLES} generations, with no file event between: `
-            + `${named.join(', ')}. A generator may be writing a file it reads; not regenerating for them again until `
-            + 'the next file change.',
+            + `${named.join(', ')}. A generator that writes a file it reads, differently on every run, would do this; `
+            + 'regenerating again each time the change settles.',
         );
     }
 

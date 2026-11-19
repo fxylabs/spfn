@@ -39,7 +39,15 @@ import { logger } from '@spfn/core/logger';
 
 const inputWatcherLogger = logger.child('@spfn/core:codegen');
 
-/** How long a change waits for writes to settle before `changed` is called, as chokidar's `awaitWriteFinish` waits. */
+/**
+ * The quiet period: how long a change waits for writes to settle before
+ * `changed` is called, every later change restarting the wait. chokidar's
+ * `awaitWriteFinish` reports a file once its size held for 100 ms, polled
+ * every 50 ms, so up to 150 ms after the last write; a directory event says
+ * nothing about sizes, so this waits those 150 ms outright. The orchestrator's
+ * late events — inputs the check after a generation found changed — wait the
+ * same period (`schedule`).
+ */
 const SETTLE_MS = 150;
 
 export class InputWatcher
@@ -81,6 +89,20 @@ export class InputWatcher
 
         this.reported.clear();
         directories.forEach(directory => this.watchers.has(directory) || this.watchDirectory(directory));
+    }
+
+    /**
+     * Call `changed` once a quiet period has passed with no change in a watched
+     * directory, as for a change in one: a change meanwhile restarts the wait.
+     */
+    schedule(): void
+    {
+        clearTimeout(this.timer);
+        this.timer = setTimeout(() =>
+        {
+            this.timer = undefined;
+            this.changed();
+        }, SETTLE_MS);
     }
 
     close(): void
@@ -134,16 +156,6 @@ export class InputWatcher
     private named(path: string): string
     {
         return relative(this.root, path) || '.';
-    }
-
-    private schedule(): void
-    {
-        clearTimeout(this.timer);
-        this.timer = setTimeout(() =>
-        {
-            this.timer = undefined;
-            this.changed();
-        }, SETTLE_MS);
     }
 }
 
