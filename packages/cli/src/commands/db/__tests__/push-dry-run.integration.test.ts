@@ -188,11 +188,34 @@ describe('db push --dry-run', () =>
             .toEqual([{ hash: sha256(MIGRATION_SQL), millis: String(MIGRATION_MILLIS) }]);
         expect(await db`SELECT to_regclass('i163_fix.things') IS NOT NULL AS "exists"`).toEqual([{ exists: true }]);
 
+        expect(output()).toContain('📦 Applying function package migrations:\n  - @spfn/i163fix');
+
         printed = [];
         await push(true);
 
         expect(output()).toContain('No function package migrations pending');
         expect(output()).not.toContain(MIGRATION_NAME);
+    });
+
+    it('N1 an app with no function package prints no function package line, dry run or push', async () =>
+    {
+        const bare = mkdtempSync(join(__dirname, 'tmp-push-dry-run-bare-'));
+        writeFixtureApp(bare, { withPackage: false });
+        process.chdir(bare);
+
+        try
+        {
+            await push(true);
+            await push(false);
+        }
+        finally
+        {
+            process.chdir(root);
+            rmSync(bare, { recursive: true, force: true });
+        }
+
+        expect(output()).toContain('CREATE TABLE "i163_app"."notes"');
+        expect(output()).not.toMatch(/function package/i);
     });
 
     it('D4 legacy shared table holding the hash: dry run lists none and writes nothing; push copies the row', async () =>
@@ -398,18 +421,24 @@ function sha256(content: string): string
     return createHash('sha256').update(content).digest('hex');
 }
 
-/** A project table in schema i163_app, and @spfn/i163fix shipping one migration. */
-function writeFixtureApp(root: string): void
+/** A project table in schema i163_app, and unless told otherwise @spfn/i163fix shipping one migration. */
+function writeFixtureApp(root: string, { withPackage = true } = {}): void
 {
     const entities = join(root, 'src', 'server', 'entities');
     const migration = join(root, 'node_modules', '@spfn', 'i163fix', 'migrations', MIGRATION_NAME);
 
     mkdirSync(entities, { recursive: true });
-    mkdirSync(migration, { recursive: true });
     writeFileSync(join(entities, 'notes.entity.ts'),
         "import { pgSchema, integer } from 'drizzle-orm/pg-core';\n"
         + "export const app = pgSchema('i163_app');\n"
         + "export const notes = app.table('notes', { id: integer('id').primaryKey() });\n");
+
+    if (!withPackage)
+    {
+        return;
+    }
+
+    mkdirSync(migration, { recursive: true });
     writeFileSync(join(migration, 'migration.sql'), MIGRATION_SQL);
     writeFileSync(join(root, 'node_modules', '@spfn', 'i163fix', 'package.json'),
         JSON.stringify({ name: '@spfn/i163fix', version: '1.0.0', spfn: { migrations: { dir: './migrations' } } }));

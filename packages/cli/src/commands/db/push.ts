@@ -196,9 +196,13 @@ export async function dbPush(options: { force?: boolean; dryRun?: boolean; schem
         const pending = await resolvePendingFunctionMigrations(connection, functionPlans);
         const result = classifyStatements(statements);
 
-        // 6. Display
+        // 6. Display. Function package lines only when a package is installed,
+        //    as `db migrate` prints its header only then.
         displayProjectPlan(hints, statements.length === 0 ? undefined : result, options.dryRun);
-        displayPendingFunctionMigrations(pending);
+        if (functionPlans.length > 0)
+        {
+            displayPendingFunctionMigrations(pending);
+        }
 
         // 7. The one dry-run gate: every write comes after it
         if (options.dryRun)
@@ -358,7 +362,8 @@ async function applyFunctionMigrations(plans: FunctionMigrationPlan[]): Promise<
         return;
     }
 
-    console.log(chalk.blue('\n📦 Applying function package migrations...'));
+    console.log(chalk.blue('\n📦 Applying function package migrations:'));
+    plans.forEach(plan => console.log(chalk.dim(`  - ${plan.packageName}`)));
 
     try
     {

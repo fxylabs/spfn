@@ -96,6 +96,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fails it exits 1 naming `--dry-run`. Applying reads the same pending list, so a preview and the
   push after it agree.
 
+  Output changes scripts may match: `✅ No changes detected — database is up to date` is now
+  `✅ No changes detected — project schema is up to date` (the old sentence was false while
+  package migrations were pending); when at least one function package is installed, every push
+  and dry run prints `📦 Function package migrations pending:` with one `<package> (<n>):` line
+  and its `- <migration>` lines per package, or `📦 No function package migrations pending`; a
+  dry run ends with `🔍 Dry run: nothing was applied.` The `📦 Applying function package
+  migrations:` header and its `- <package>` lines are unchanged, as in `spfn db migrate`.
+
 - **@spfn/core, spfn: codegen loads the app as ESM in the process's own module graph; one copy of
   `@spfn/core` (#335).** Codegen loaded the router (and `.spfnrc.ts`, the generator module, custom
   generators) with jiti, and every jiti load evaluated the app **and the `node_modules` packages it
