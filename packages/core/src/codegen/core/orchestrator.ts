@@ -15,7 +15,7 @@
  * marks paths dirty. One serialized loop then takes the whole dirty set and
  * runs, in one generation, every generator a dirty path matches or that read
  * one; then it watches the directories of the new inputs, and then compares
- * every input with its stamp. A stale input is a late file event: once writes
+ * each input the loop acts on (`actedOn`) with its stamp. A stale input is a late file event: once writes
  * have settled (`SETTLE_MS`, the quiet period every input event waits), it is
  * dirty in its turn, and the loop runs again. So a change that lands while a
  * generation runs, or before a watch for it exists, is found by that comparison rather than lost: an edit
@@ -155,6 +155,9 @@ export class CodegenOrchestrator
 
     private busy = false;
     private closed = false;
+
+    /** The watch loop ended by an exception: it runs nothing more, as after `close()`. */
+    private loopFailed = false;
     private root = '';
     private loop?: Promise<void>;
     private wake?: () => void;
@@ -211,17 +214,33 @@ export class CodegenOrchestrator
         await this.watcher?.close();
         this.watcher = undefined;
         await this.loop?.catch(() => undefined);
-        this.requests.splice(0).forEach(request => request.reject(new Error(
-            `generateAll('${request.trigger}') was not run: the codegen watcher was closed before its turn`,
-        )));
+        this.rejectRequests('the codegen watcher was closed before its turn');
         this.notifyIdle();
+    }
+
+    /** The loop ended by `error`: what waits for it is settled now, not at `close()`. */
+    private loopDied(error: unknown): void
+    {
+        this.loopFailed = true;
+        this.rejectRequests('the codegen watch loop failed', error);
+        this.notifyIdle();
+    }
+
+    /** Reject every `generateAll()` still queued: its run will not come. */
+    private rejectRequests(reason: string, cause?: unknown): void
+    {
+        this.requests.splice(0).forEach(request => request.reject(new Error(
+            `generateAll('${request.trigger}') was not run: ${reason}`,
+            cause === undefined ? undefined : { cause },
+        )));
     }
 
     /**
      * Resolves once watch mode is idle: no generation running, no change
      * waiting for one, and no input directory change still settling. A file
      * event chokidar has not delivered yet (it waits for writes to settle) is
-     * not known here. Resolves at once outside watch mode, and after `close()`.
+     * not known here. Resolves at once outside watch mode, after `close()`,
+     * and once the loop has ended by an exception.
      * It may not be called while the calling generator's own `generate()`,
      * run by the watch loop, is still running: awaited there, it could never
      * resolve, so it rejects (`reentered`), awaited or not. A callback
@@ -261,7 +280,9 @@ export class CodegenOrchestrator
      * failure under `throwOnError`, as outside watch mode. Its log lines follow
      * watch mode's (`watchGeneration`). Called once `close()` has been, it
      * waits for the loop's last generation and then runs as outside watch mode;
-     * one still queued when `close()` is called is rejected. It may not be
+     * one still queued when `close()` is called is rejected. Once the loop has
+     * ended by an exception, one still queued is rejected naming it, and a
+     * later call rejects with it, as after `close()`. It may not be
      * called while the calling generator's own `generate()`, run by the watch
      * loop, is still running: awaited there, its run could never finish, so it
      * rejects (`reentered`), awaited or not. A callback scheduled to run after
@@ -276,7 +297,7 @@ export class CodegenOrchestrator
             throw this.reentered(`generateAll('${trigger}')`);
         }
 
-        if (this.loop !== undefined && !this.closed)
+        if (this.loop !== undefined && !this.closed && !this.loopFailed)
         {
             return new Promise((resolve, reject) =>
             {
@@ -428,7 +449,7 @@ export class CodegenOrchestrator
     private async watchGeneration(runs: Run[]): Promise<Outcome[]>
     {
         const outcomes = await this.generate(runs, false, true);
-        const stale = this.closed ? new Map<string, ChangedFile['event']>() : this.armAndCheck();
+        const stale = this.closed ? new Map<string, ChangedFile['event']>() : this.armAndCheck(runs.map(run => run.generator));
 
         outcomes.forEach(outcome => this.settleOutcome(outcome, [...stale.keys()].some(path => this.inputs.get(outcome.generator)?.has(path))));
         this.deferCheck(stale);
@@ -472,10 +493,7 @@ export class CodegenOrchestrator
 
     /**
      * Mark a torn run to run again by name (`regenerate` takes it whatever its
-     * `runOn`), else unmark it. A generator watch mode does not run (a
-     * `generateAll()` while watching ran it) keeps its inputs only until then:
-     * no later run would stamp them again, so every check after an edit to
-     * one would find it changed, and the loop would cycle on it forever.
+     * `runOn`), else unmark it.
      */
     private markRerun({ generator, trigger }: Outcome, torn: boolean): void
     {
@@ -487,11 +505,6 @@ export class CodegenOrchestrator
         }
 
         this.rerun.delete(generator);
-
-        if (!this.shouldRun(generator, 'watch'))
-        {
-            this.inputs.delete(generator);
-        }
     }
 
     /**
@@ -544,6 +557,7 @@ export class CodegenOrchestrator
         this.busy = true;
         this.root = realpathSync(this.cwd);
         this.loop = this.watchLoop(patterns);
+        this.loop.catch(error => this.loopDied(error));
 
         return this.loop;
     }
@@ -683,7 +697,7 @@ export class CodegenOrchestrator
 
     /**
      * A directory holding an input changed. While the loop is busy nothing is
-     * needed: every cycle ends with the check, which compares every input. Idle,
+     * needed: every cycle ends with the check, which compares the inputs. Idle,
      * the loop is woken to check.
      */
     private requestCheck(): void
@@ -845,12 +859,15 @@ export class CodegenOrchestrator
     }
 
     /**
-     * Watch the directories of every input, then compare every input with its
-     * stamp. Returns every stale input, with how it changed; the caller decides
-     * when it is dirty.
+     * Watch the directories of the inputs the loop acts on (`actedOn`), then
+     * compare each with its stamp. `ran` are the generators of the generation
+     * just run, if any. Returns every stale input, with how it changed; the
+     * caller decides when it is dirty.
      */
-    private armAndCheck(): Map<string, ChangedFile['event']>
+    private armAndCheck(ran: Generator[] = []): Map<string, ChangedFile['event']>
     {
+        const compared = this.actedOn(ran);
+
         this.checkRequested = false;
         this.lateCheck = false;
 
@@ -858,9 +875,26 @@ export class CodegenOrchestrator
         // change that lands before the check is found by it; one that lands
         // after the watch is armed is reported by the watch. Checked first and
         // armed after, a change between the two would be neither.
-        this.inputWatcher?.sync([...this.inputPaths()].map(path => join(this.root, path)));
+        this.inputWatcher?.sync([...new Set(compared.flatMap(inputs => [...inputs.keys()]))].map(path => join(this.root, path)));
 
-        return this.staleInputs();
+        return this.staleInputs(compared);
+    }
+
+    /**
+     * The inputs a change to which the loop acts on: those of every generator
+     * it runs on watch, of every one owed a re-run, and of every one in `ran`,
+     * whose check says whether its run was torn. A generator whose `runOn`
+     * excludes `'watch'`, run by a `generateAll()`, keeps its inputs recorded,
+     * but they are neither watched nor compared once its run is not torn: no
+     * run would follow an edit to one, so every check would find it changed
+     * again, and the loop would cycle on it forever.
+     */
+    private actedOn(ran: Generator[]): Inputs[]
+    {
+        return this.generators
+            .filter(generator => ran.includes(generator) || this.rerun.has(generator) || this.shouldRun(generator, 'watch'))
+            .map(generator => this.inputs.get(generator))
+            .filter(inputs => inputs !== undefined);
     }
 
     private markDirty(path: string, event: ChangedFile['event'], foundBy: Change['foundBy']): void
@@ -871,17 +905,12 @@ export class CodegenOrchestrator
         }
     }
 
-    private inputPaths(): Set<string>
-    {
-        return new Set([...this.inputs.values()].flatMap(inputs => [...inputs.keys()]));
-    }
-
-    /** Every input that differs from its stamp, with how it changed. */
-    private staleInputs(): Map<string, ChangedFile['event']>
+    /** Every input of `compared` that differs from its stamp, with how it changed. */
+    private staleInputs(compared: Inputs[]): Map<string, ChangedFile['event']>
     {
         const stale = new Map<string, ChangedFile['event']>();
 
-        for (const inputs of this.inputs.values())
+        for (const inputs of compared)
         {
             for (const [path, stamp] of inputs)
             {
@@ -928,7 +957,7 @@ export class CodegenOrchestrator
 
     private isIdle(): boolean
     {
-        return this.closed || (!this.busy && !(this.inputWatcher?.pending ?? false));
+        return this.closed || this.loopFailed || (!this.busy && !(this.inputWatcher?.pending ?? false));
     }
 
     private notifyIdle(): void

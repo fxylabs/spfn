@@ -1,5 +1,5 @@
 /**
- * The watch loop — rows W1–W3, W5–W20 and G1 of the #353 design
+ * The watch loop — rows W1–W3, W5–W22 and G1 of the #353 design
  *
  * Each row runs an orchestrator in watch mode, in this process, on an app in a
  * temporary directory with `@spfn/core` linked into its `node_modules`.
@@ -55,6 +55,10 @@
  * | W20| `generateAll('manual')` while watching tears the run of a         | a torn run of a generator watch mode does not run    |
  * |    | generator whose `runOn` excludes `'watch'`; then a file it read   | never re-run, or that generator's old inputs found   |
  * |    | and a pattern file are edited                                     | changed by every check: a loop that never idles      |
+ * | W21| `generateAll('manual')` before `watch()` and while watching runs  | a loop that never idles on inputs it runs nothing    |
+ * |    | a generator whose `runOn` excludes `'watch'`; its input and a     | for, or a watch generator's own input dropped from   |
+ * |    | watch generator's non-pattern input are edited after each         | the check                                            |
+ * | W22| the loop ends by an exception with a `generateAll()` queued       | the call and `settled()` pending until `close()`     |
  * | G1 | a generator writing, on every run, a file it reads, differently     | a silent endless loop (no warning), the warning      |
  * |    |                                                                   | repeated, a stop coming back, or a `close()` that    |
  * |    |                                                                   | never ends it                                        |
@@ -1006,6 +1010,89 @@ describe('codegen watch loop', () =>
         const idle = await Promise.race([orchestrator.settled().then(() => true), new Promise(settle => setTimeout(() => settle(false), 5_000))]);
 
         expect({ idle, runs }).toEqual({ idle: true, runs: 2 });
+    });
+
+    it('W21 inputs of a generator whose runOn excludes watch are not compared, whoever ran it; a watch generator\'s are', async () =>
+    {
+        const runs = { manual: 0, reader: 0 };
+        const reading = (name: keyof typeof runs, path: string, rest: Partial<Generator>): Generator => ({
+            name,
+            watchPatterns: [],
+            ...rest,
+            async generate(options: GeneratorOptions): Promise<void>
+            {
+                const load = await importProjectModule(join(options.cwd, path), options.cwd, newGeneration());
+
+                runs[name] += 1;
+                reportInputs(load.inputs);
+            },
+        });
+
+        write('src/anchor/index.ts', 'export {};\n');
+        write('src/a.ts', 'export const a = 0;\n');
+        write('src/b.ts', 'export const b = 0;\n');
+
+        const orchestrator = new CodegenOrchestrator({
+            generators: [reading('reader', 'src/b.ts', { watchPatterns: ['src/anchor/**/*.ts'] }), reading('manual', 'src/a.ts', { runOn: ['manual'] })],
+            cwd: appDir,
+            debug: true,
+        });
+        const idleAfterEdits = async (edit: number): Promise<{ idle: unknown; runs: typeof runs }> =>
+        {
+            const readerRuns = runs.reader;
+
+            write('src/a.ts', `export const a = ${edit};\n`);
+            write('src/b.ts', `export const b = ${edit};\n`);
+            await until(() => runs.reader === readerRuns + 1);
+
+            const idle = await Promise.race([orchestrator.settled().then(() => true), new Promise(settle => setTimeout(() => settle(false), 5_000))]);
+
+            return { idle, runs: { ...runs } };
+        };
+
+        orchestrators.push(orchestrator);
+        await orchestrator.generateAll('manual');
+        void orchestrator.watch();
+        await orchestrator.settled();
+        expect(await idleAfterEdits(1)).toEqual({ idle: true, runs: { manual: 1, reader: 3 } });
+
+        await orchestrator.generateAll('manual');
+        expect(await idleAfterEdits(2)).toEqual({ idle: true, runs: { manual: 2, reader: 5 } });
+        expect({ noMatch: logged(info, /No generators matched/), warned: warn.mock.calls }).toEqual({ noMatch: false, warned: [] });
+    });
+
+    it('W22 once the loop has ended by an exception, a queued generateAll() rejects naming it, and settled() resolves', async () =>
+    {
+        const gated = gate('gate', ['src/**/*.ts']);
+        const orchestrator = new CodegenOrchestrator({ generators: [gated.generator], cwd: appDir, debug: true });
+        const loop = orchestrator as unknown as { nextWork: () => Promise<boolean> };
+        const within = (promise: Promise<unknown>): Promise<unknown> => Promise.race([
+            promise.then(() => 'resolved', (reason: unknown) => reason),
+            new Promise(settle => setTimeout(() => settle('pending'), 2_000)),
+        ]);
+
+        orchestrators.push(orchestrator);
+
+        const watched = within(orchestrator.watch());
+
+        await orchestrator.settled();
+        vi.spyOn(loop, 'nextWork').mockRejectedValueOnce(new Error('loop failed'));
+
+        const first = within(orchestrator.generateAll('manual'));
+        const queued = within(orchestrator.generateAll('manual'));
+
+        expect(String(await watched)).toBe('Error: loop failed');
+
+        const [ran, rejected, idle, later] = await Promise.all([first, queued, within(orchestrator.settled()), within(orchestrator.generateAll('build'))]);
+
+        expect({ ran, rejected: String(rejected), cause: String((rejected as Error).cause), idle, later: String(later), calls: gated.calls }).toEqual({
+            ran: 'resolved',
+            rejected: 'Error: generateAll(\'manual\') was not run: the codegen watch loop failed',
+            cause: 'Error: loop failed',
+            idle: 'resolved',
+            later: 'Error: loop failed',
+            calls: 2,
+        });
     });
 
     it('G1 a generator that rewrites a file it reads on every run: one warning, and it regenerates on until close()', async () =>

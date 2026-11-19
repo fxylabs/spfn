@@ -280,8 +280,11 @@ load (`src/codegen/loader/`).
   while it ran; no further run follows: the watch loop is ending)`. A success held back is not reported then: nothing went wrong. A file two loads of one generation read with
   different contents counts as changed even if it is restored before the check. A re-run is
   told what the torn run was told (`changedFiles`), and what changed since. A generator whose `runOn`
-  excludes `'watch'`, run by a `generateAll()` while watching, is re-run the same way; once a run
-  of it is not torn, its inputs are no longer watched, since watch mode would never run it for them.
+  excludes `'watch'`, run by a `generateAll()` while watching, is re-run the same way. The loop
+  watches and compares only the inputs of generators it would run for them: those that run on
+  `'watch'`, those owed a re-run, and those of the generation just run, whose check says whether it
+  was torn. So the inputs of a `runOn` without `'watch'` stop being watched once its run is not
+  torn, whether a `generateAll()` ran it while watching or before `watch()`.
 - **Start.** chokidar's first scan (`ready`), then the initial generation, then arm and
   check. `Watch mode started` is logged once changes are seen from then on.
 - **`No generators matched this file`** (debug) is logged only when no generator matched a
@@ -298,7 +301,10 @@ load (`src/codegen/loader/`).
 - **`generateAll()` while watching** is a run of the loop, not a second generation beside it:
   queued, run between two cycles, and resolved (or, under `throwOnError`, rejected) when that
   run has finished. A call still queued when `close()` is called is rejected; one made after
-  `close()` waits for the last cycle and runs as outside watch mode.
+  `close()` waits for the last cycle and runs as outside watch mode. Once the loop has ended by
+  an exception (`watch()` rejected), a call still queued is rejected with
+  `generateAll('<trigger>') was not run: the codegen watch loop failed` (the exception is its
+  `cause`), and a later call rejects with the exception, as after `close()`.
 - **`close()`** starts no new generation and resolves once the one running has finished —
   every generator of it, so the outputs of one cycle never disagree. A generation cannot be
   cancelled, so a generator that never settles keeps `close()` pending. An orchestrator is
@@ -307,7 +313,8 @@ load (`src/codegen/loader/`).
   forwards each signal it gets to the watcher and exits after it.
 - **`settled()`** resolves once the loop is idle: nothing running, nothing dirty, no input
   directory event still settling. A chokidar event not delivered yet (it waits 100 ms for
-  writes to settle) is not known to it.
+  writes to settle) is not known to it. Once the loop has ended — by `close()` or by an
+  exception — it resolves at once.
 - **Not while the caller's own `generate()` runs.** `generateAll()` and `settled()` may not be
   called while the calling generator's `generate()`, run by the loop, is still running: awaited
   there they could never finish, since each waits for that generation. They reject, saying so,
