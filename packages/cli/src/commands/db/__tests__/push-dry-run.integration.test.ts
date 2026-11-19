@@ -3,9 +3,9 @@
  *
  * A scratch app with one project table and one installed function package
  * that ships one migration, pushed to TEST_DATABASE_URL. Each dry run is
- * checked against a catalog snapshot taken before it: every relation in every
- * non-system schema, `drizzle` included, and the row count of each migration
- * bookkeeping table.
+ * checked against a catalog snapshot taken before it (see snapshot()).
+ * `prompts` answers by failing the row: a dry run that reached the destructive
+ * confirmation would otherwise wait on stdin until the row times out.
  */
 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -18,6 +18,13 @@ import postgres from 'postgres';
 import { sql } from 'drizzle-orm';
 
 import { OWNER_URL, requireDatabase } from './helpers/test-database.js';
+
+vi.mock('prompts', () => ({
+    default: async () =>
+    {
+        throw new Error('prompts was called: the push reached the destructive confirmation');
+    },
+}));
 
 const writeAttempts = vi.hoisted(() => ({ enabled: false, results: [] as string[] }));
 
@@ -51,6 +58,40 @@ const MIGRATION_NAME = '20260101000000_things';
 const MIGRATION_SQL = 'CREATE SCHEMA i163_fix;\n--> statement-breakpoint\nCREATE TABLE i163_fix.things (id integer PRIMARY KEY);\n';
 const MIGRATION_MILLIS = Date.UTC(2026, 0, 1);
 const PACKAGE_TABLE = '__spfn_fn_i163fix_migrations';
+
+/** One `line` per catalog object; each query is filtered to USER_SCHEMAS. */
+const USER_SCHEMAS = `n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
+    AND n.nspname NOT LIKE 'pg_temp_%' AND n.nspname NOT LIKE 'pg_toast_temp_%'`;
+
+const CATALOG_QUERIES = [
+    `SELECT 'schema ' || n.nspname AS line FROM pg_catalog.pg_namespace n WHERE ${USER_SCHEMAS} ORDER BY 1`,
+    `SELECT format('relation %s.%s (%s)', n.nspname, c.relname, c.relkind) AS line
+        FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+        WHERE ${USER_SCHEMAS} ORDER BY 1`,
+    `SELECT format('column %s.%s.%s %s notnull=%s default=%s', n.nspname, c.relname, a.attname,
+            format_type(a.atttypid, a.atttypmod), a.attnotnull, pg_get_expr(d.adbin, d.adrelid)) AS line
+        FROM pg_catalog.pg_attribute a
+        JOIN pg_catalog.pg_class c ON c.oid = a.attrelid
+        JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+        LEFT JOIN pg_catalog.pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
+        WHERE ${USER_SCHEMAS} AND a.attnum > 0 AND NOT a.attisdropped ORDER BY 1`,
+    `SELECT format('constraint %s.%s %s', n.nspname, con.conname, pg_get_constraintdef(con.oid)) AS line
+        FROM pg_catalog.pg_constraint con JOIN pg_catalog.pg_namespace n ON n.oid = con.connamespace
+        WHERE ${USER_SCHEMAS} ORDER BY 1`,
+    `SELECT 'index ' || indexdef AS line FROM pg_catalog.pg_indexes n
+        WHERE ${USER_SCHEMAS.replaceAll('n.nspname', 'n.schemaname')} ORDER BY 1`,
+    `SELECT format('sequence %s.%s %s start=%s step=%s last=%s', n.schemaname, n.sequencename, n.data_type,
+            n.start_value, n.increment_by, n.last_value) AS line
+        FROM pg_catalog.pg_sequences n WHERE ${USER_SCHEMAS.replaceAll('n.nspname', 'n.schemaname')} ORDER BY 1`,
+    `SELECT format('type %s.%s (%s) %s', n.nspname, t.typname, t.typtype,
+            (SELECT string_agg(e.enumlabel, ',' ORDER BY e.enumsortorder) FROM pg_catalog.pg_enum e WHERE e.enumtypid = t.oid)) AS line
+        FROM pg_catalog.pg_type t JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace
+        WHERE ${USER_SCHEMAS} ORDER BY 1`,
+    `SELECT format('function %s.%s(%s) %s', n.nspname, p.proname, pg_get_function_identity_arguments(p.oid), md5(p.prosrc)) AS line
+        FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace
+        WHERE ${USER_SCHEMAS} ORDER BY 1`,
+    `SELECT format('extension %s %s', extname, extversion) AS line FROM pg_catalog.pg_extension ORDER BY 1`,
+];
 
 describe('db push --dry-run', () =>
 {
@@ -112,35 +153,30 @@ describe('db push --dry-run', () =>
         await db.unsafe('DROP SCHEMA IF EXISTS drizzle CASCADE');
     }
 
-    /** Every schema and relation outside the system ones, and each bookkeeping table's row count. */
+    /**
+     * What a migration can write and the catalog shows cheaply, in every schema
+     * but the system ones (`drizzle` included): schemas; relations with their
+     * kind (tables, views, indexes, sequences…); columns with type, NOT NULL and
+     * default; constraints with their definition; index definitions; sequence
+     * parameters and last value; types with enum labels; functions and
+     * procedures with their arguments and body hash; installed extensions
+     * (database-wide) with version; and each `drizzle` table's row count.
+     * Not covered: grants, policies, triggers, comments, row data elsewhere.
+     */
     async function snapshot(): Promise<string[]>
     {
-        const schemas = await db<{ name: string }[]>`
-            SELECT nspname AS name FROM pg_catalog.pg_namespace
-            WHERE nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
-                AND nspname NOT LIKE 'pg_temp_%' AND nspname NOT LIKE 'pg_toast_temp_%'
-            ORDER BY 1`;
-        const relations = await db<{ name: string; kind: string }[]>`
-            SELECT n.nspname || '.' || c.relname AS name, c.relkind AS kind
-            FROM pg_catalog.pg_class c
-            JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
-            WHERE n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
-                AND n.nspname NOT LIKE 'pg_temp_%' AND n.nspname NOT LIKE 'pg_toast_temp_%'
-            ORDER BY 1`;
-        const counts = await Promise.all(relations
-            .filter(relation => relation.kind === 'r' && relation.name.startsWith('drizzle.'))
-            .map(async ({ name }) =>
-            {
-                const [{ count }] = await db.unsafe(`SELECT count(*)::int AS count FROM ${name.replace('drizzle.', 'drizzle."')}"`);
+        const lines = await Promise.all(CATALOG_QUERIES.map(async query =>
+            (await db.unsafe<{ line: string }[]>(query)).map(row => row.line)));
+        const tables = await db<{ name: string }[]>`
+            SELECT tablename AS name FROM pg_catalog.pg_tables WHERE schemaname = 'drizzle' ORDER BY 1`;
+        const counts = await Promise.all(tables.map(async ({ name }) =>
+        {
+            const [{ count }] = await db.unsafe(`SELECT count(*)::int AS count FROM drizzle."${name}"`);
 
-                return `${name} rows=${count}`;
-            }));
+            return `drizzle.${name} rows=${count}`;
+        }));
 
-        return [
-            ...schemas.map(schema => `schema ${schema.name}`),
-            ...relations.map(relation => `${relation.name} (${relation.kind})`),
-            ...counts,
-        ];
+        return [...lines.flat(), ...counts];
     }
 
     async function createProjectTable(): Promise<void>
@@ -237,6 +273,25 @@ describe('db push --dry-run', () =>
             .toEqual([{ hash: sha256(MIGRATION_SQL), millis: String(MIGRATION_MILLIS) }]);
         expect(await db`SELECT to_regclass('drizzle."__spfn_fn_migrations"') IS NULL AS "gone"`).toEqual([{ gone: true }]);
         expect(await db`SELECT to_regclass('i163_fix.things') IS NULL AS "skipped"`).toEqual([{ skipped: true }]);
+    });
+
+    it('S1 a pending destructive change: the dry run lists it and alters nothing', async () =>
+    {
+        await createProjectTable();
+        await db.unsafe(`
+            CREATE TYPE i163_app.mood AS ENUM ('ok', 'not');
+            CREATE SEQUENCE i163_app.counter START 7;
+            ALTER TABLE i163_app.notes ADD COLUMN extra text NOT NULL DEFAULT 'x' CHECK (extra <> ''),
+                ADD COLUMN mood i163_app.mood;
+            CREATE INDEX notes_extra ON i163_app.notes (extra);
+            CREATE FUNCTION i163_app.answer() RETURNS integer LANGUAGE sql AS 'SELECT 42';`);
+        const before = await snapshot();
+
+        await push(true);
+
+        expect(output()).toMatch(/DROP COLUMN "extra"/);
+        expect(output()).toContain('Dry run: nothing was applied');
+        expect(await snapshot()).toEqual(before);
     });
 
     it('R1 a write attempted on the dry run\'s connection is refused by PostgreSQL', async () =>
