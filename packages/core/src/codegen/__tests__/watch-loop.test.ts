@@ -841,6 +841,10 @@ describe('codegen watch loop', () =>
 
     it('W18 a failure held back from a torn run is reported when close() comes before its re-run', async () =>
     {
+        // close() is called as the failure is held back: a re-run started before
+        // it (chokidar's event for the same save, arriving late) would report
+        // the failure itself, and the row would not reach the close path.
+        let closing: Promise<void> | undefined;
         let fail = false;
         let tear = false;
         const generator: Generator = {
@@ -870,11 +874,18 @@ describe('codegen watch loop', () =>
         const orchestrator = watching([generator]);
 
         await orchestrator.settled();
+        info.mockImplementation((message: unknown) =>
+        {
+            if (/^\[failing\] Read files that changed/.test(String(message)))
+            {
+                closing ??= orchestrator.close();
+            }
+        });
         fail = true;
         tear = true;
         write('src/a.ts', 'export const a = 1;\n');
-        await until(() => logged(info, /^\[failing\] Read files that changed/));
-        await orchestrator.close();
+        await until(() => closing !== undefined);
+        await closing;
 
         expect(error.mock.calls.map(call => call.map(String))).toEqual([[
             '[failing] ✗ Regeneration failed (its inputs changed while it ran; no further run follows: the watcher is closing)',
