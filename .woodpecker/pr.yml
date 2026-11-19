@@ -139,6 +139,9 @@ steps:
             # The scope's packages alone, at 1024MB: one needing more fails here, cause named — #352,
             # one declaration program per tsup config, hungriest package measured 448MB — rather
             # than as an unexplained DTS worker out-of-memory near 3072MB in the next line.
+            # ERR_WORKER_OUT_OF_MEMORY here most likely means patches/tsup@9.0.0.patch was
+            # dropped or not applied (a tsup bump without it, or a stale install): without it
+            # tsup builds one declaration program per entry directory again.
             - NODE_OPTIONS=--max-old-space-size=1024 pnpm exec turbo run build --concurrency=2 $FILTERS --filter='!./examples/*' --filter='!./website'
 
             # Everything in scope; the packages come from turbo's cache.
