@@ -9,7 +9,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **@spfn/core: `GeneratorOptions.trigger.changedFiles`** (and the `ChangedFile` type): every change
+  that triggered a watch run. `changedFile` is now set only when exactly one change did; the
+  watcher takes every change that arrived during a generation into the next one (#353).
+- **@spfn/core: `CodegenOrchestrator.settled()`** resolves once watch mode is idle — no generation
+  running, nothing dirty, no input directory event settling (#353).
+
 ### Fixed
+
+- **@spfn/core: the `spfn dev` codegen watcher no longer loses changes (#353).** It decided what
+  changed from file events and its own bookkeeping, so a change arriving while that bookkeeping was
+  not valid was lost: only the first of the changes queued during a generation was regenerated (a
+  queued `notes.md` that matched nothing dropped the route edit behind it); an edit during the
+  initial generation, or before chokidar's first scan, was never seen; a file created or edited
+  between a load's read and the watch armed for it — the missing import of CI 725's failing
+  generation — was never regenerated; a file unlinked and recreated inside its own generation was
+  dropped by chokidar while the watcher believed it watched, so every later edit was lost until a
+  restart. Now every file a load reads is stamped (stat before the read, hash of the bytes used;
+  paths a failed import looked for, stamped absent) and attributed to the generator that ran; one
+  serialized loop runs, in one generation, every generator a dirty path matches or that read one,
+  then watches the directories of the new inputs and then compares every input with its stamp, so
+  a change that lands during a generation is found by the comparison. A generator that rewrites
+  a file it reads differently on every run is stopped after 3 such cycles, with a warning.
+  Logged: `Changed during generation: + <path>`, and in debug `Queued ~ <path>`; `No generators
+  matched this file` only when nothing matched.
+- **@spfn/core: `CodegenOrchestrator.close()` stops the watch loop.** A change queued when it was
+  called ran the generators again after it resolved; now nothing new starts, and it resolves once
+  the generation running has finished every generator, so the `spfn dev` watcher's SIGTERM no
+  longer leaves the route map and contract from two different generations.
+- **@spfn/core: watch state is per orchestrator.** The files each router's load reached were kept
+  in a module-wide map, so a second orchestrator in the process watched the first app's files.
 
 - **@spfn/core, spfn: codegen loads the app as ESM in the process's own module graph; one copy of
   `@spfn/core` (#335).** Codegen loaded the router (and `.spfnrc.ts`, the generator module, custom
