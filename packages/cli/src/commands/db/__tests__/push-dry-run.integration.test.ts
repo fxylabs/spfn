@@ -11,7 +11,9 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createHash } from 'crypto';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs';
+import { connect, createServer, type AddressInfo } from 'net';
 import { join } from 'path';
+import pg from 'pg';
 import postgres from 'postgres';
 import { sql } from 'drizzle-orm';
 
@@ -31,8 +33,11 @@ vi.mock('../utils/drizzle.js', async (importOriginal) =>
 
             if (writeAttempts.enabled)
             {
+                // In a savepoint, so the refused write leaves the plan's transaction usable
+                await connection.query('SAVEPOINT write_probe');
                 writeAttempts.results.push(await connection.db.execute(sql.raw('CREATE TABLE i163_app.write_probe (id integer)'))
                     .then(() => 'written', (error: Error & { cause?: Error }) => error.cause?.message ?? error.message));
+                await connection.query('ROLLBACK TO SAVEPOINT write_probe');
             }
 
             return connection;
@@ -219,9 +224,174 @@ describe('db push --dry-run', () =>
         await push(true);
 
         expect(writeAttempts.results).toEqual([expect.stringMatching(/read-only transaction/)]);
+        expect(output()).toContain('Dry run: nothing was applied');
         expect(await db`SELECT to_regclass('i163_app.write_probe') IS NULL AS "absent"`).toEqual([{ absent: true }]);
     });
+
+    it('R2 every query of the dry run goes to one client, between BEGIN READ ONLY and ROLLBACK', async () =>
+    {
+        await createProjectTable();
+        const sent: { client: unknown; text: string }[] = [];
+        const query = pg.Client.prototype.query;
+        vi.spyOn(pg.Client.prototype, 'query').mockImplementation(function (this: unknown, ...args: any[])
+        {
+            sent.push({ client: this, text: typeof args[0] === 'string' ? args[0] : args[0].text });
+
+            return (query as (...a: unknown[]) => unknown).apply(this, args);
+        } as never);
+
+        await push(true);
+
+        const texts = sent.map(entry => entry.text.trim());
+        expect(new Set(sent.map(entry => entry.client)).size).toBe(1);
+        expect(texts[0]).toBe('BEGIN READ ONLY');
+        expect(texts.at(-1)).toBe('ROLLBACK');
+        expect(texts.slice(1, -1).filter(text => /^(BEGIN|START|COMMIT|END|ROLLBACK|SET|RESET)\b/i.test(text))).toEqual([]);
+        expect(texts.length).toBeGreaterThan(10);
+    });
+
+    it('RO1 behind a pooler that drops the `options` startup parameter, the dry run is still read-only', async () =>
+    {
+        await createProjectTable();
+        const proxy = await startProxy((message, startup) => startup ? withoutStartupOption(message, 'options') : message);
+        process.env.DATABASE_URL = proxy.url;
+        writeAttempts.enabled = true;
+
+        try
+        {
+            await push(true);
+        }
+        finally
+        {
+            await proxy.close();
+        }
+
+        expect(proxy.forwarded()).toBeGreaterThan(0);
+        expect(writeAttempts.results).toEqual([expect.stringMatching(/read-only transaction/)]);
+        expect(output()).toContain('Dry run: nothing was applied');
+    });
+
+    it('RO2 a dry run whose transaction is not read-only stops with exit 1 before planning', async () =>
+    {
+        await createProjectTable();
+        const before = await snapshot();
+        const errors: string[] = [];
+        vi.spyOn(console, 'error').mockImplementation((...args: unknown[]) => void errors.push(args.map(String).join(' ')));
+        const proxy = await startProxy((message, startup) => startup ? message : withQueryText(message, 'BEGIN READ ONLY', 'BEGIN'));
+        process.env.DATABASE_URL = proxy.url;
+
+        try
+        {
+            await expect(push(true)).rejects.toThrow('exit 1');
+        }
+        finally
+        {
+            await proxy.close();
+        }
+
+        expect(errors.join('\n')).toMatch(/--dry-run.*transaction_read_only=off/);
+        expect(output()).not.toContain('Dry run: nothing was applied');
+        expect(output()).not.toContain(MIGRATION_NAME);
+        expect(await snapshot()).toEqual(before);
+    });
 });
+
+/**
+ * A TCP proxy to OWNER_URL's server that passes each frontend message through
+ * `rewrite`: the startup message (no type byte) and then every typed message.
+ * `url` is OWNER_URL pointed at the proxy; it is never printed.
+ */
+async function startProxy(rewrite: (message: Buffer, startup: boolean) => Buffer): Promise<{
+    url: string;
+    forwarded: () => number;
+    close: () => Promise<void>;
+}>
+{
+    const target = new URL(OWNER_URL);
+    let forwarded = 0;
+    const server = createServer(client =>
+    {
+        const upstream = connect(Number(target.port || 5432), target.hostname);
+        const frames = frontendFrames(message =>
+        {
+            forwarded++;
+            upstream.write(rewrite(message, frames.startup));
+        });
+        client.on('data', frames.push);
+        upstream.on('data', data => client.write(data));
+        client.on('close', () => upstream.end());
+        upstream.on('close', () => client.end());
+        client.on('error', () => undefined);
+        upstream.on('error', () => undefined);
+    });
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+    const url = new URL(OWNER_URL);
+    url.hostname = 'localhost';
+    url.port = String((server.address() as AddressInfo).port);
+
+    return {
+        url: url.toString(),
+        forwarded: () => forwarded,
+        close: () => new Promise(resolve => server.close(() => resolve())),
+    };
+}
+
+/** Split a frontend byte stream into whole messages; `startup` holds until the startup message has passed. */
+function frontendFrames(onMessage: (message: Buffer) => void): { push: (chunk: Buffer) => void; startup: boolean }
+{
+    let pending = Buffer.alloc(0);
+    const frames = {
+        startup: true,
+        push: (chunk: Buffer) =>
+        {
+            pending = Buffer.concat([pending, chunk]);
+            while (pending.length >= 5)
+            {
+                const length = frames.startup ? pending.readInt32BE(0) : 1 + pending.readInt32BE(1);
+                if (pending.length < length) return;
+                const message = pending.subarray(0, length);
+                pending = pending.subarray(length);
+                onMessage(message);
+                // An SSLRequest (code 80877103) is followed by the real startup message
+                frames.startup = frames.startup && message.length === 8 && message.readInt32BE(4) === 80877103;
+            }
+        },
+    };
+
+    return frames;
+}
+
+/** The startup message without one parameter. */
+function withoutStartupOption(message: Buffer, name: string): Buffer
+{
+    const parts = message.subarray(8).toString('utf8').split('\0');
+    const kept: string[] = [];
+    for (let i = 0; i + 1 < parts.length; i += 2)
+    {
+        if (parts[i] && parts[i] !== name) kept.push(parts[i], parts[i + 1]);
+    }
+    const body = Buffer.from(kept.join('\0') + '\0\0', 'utf8');
+    const header = Buffer.alloc(8);
+    header.writeInt32BE(body.length + 8, 0);
+    header.writeInt32BE(message.readInt32BE(4), 4);
+
+    return Buffer.concat([header, body]);
+}
+
+/** A simple-query message whose text is `from`, sent as `to`; any other message unchanged. */
+function withQueryText(message: Buffer, from: string, to: string): Buffer
+{
+    if (message[0] !== 0x51 || message.subarray(5, -1).toString('utf8') !== from)
+    {
+        return message;
+    }
+    const text = Buffer.from(to + '\0', 'utf8');
+    const header = Buffer.alloc(5);
+    header[0] = 0x51;
+    header.writeInt32BE(text.length + 4, 1);
+
+    return Buffer.concat([header, text]);
+}
 
 function sha256(content: string): string
 {

@@ -416,7 +416,7 @@ loaded `.env` chain.
 | Subcommand | Description |
 |------------|-------------|
 | `db generate` (`g`) | Generate migrations from schema changes (timestamp-prefixed) |
-| `db push` | Diff with Drizzle Kit's current PostgreSQL engine and apply the selected DDL atomically. Destructive changes need confirmation; `--force` applies them. `--dry-run` shows the classified statements and each function package's pending migrations by name, then stops: its session is read-only, so it writes nothing |
+| `db push` | Diff with Drizzle Kit's current PostgreSQL engine and apply the selected DDL atomically. Destructive changes need confirmation; `--force` applies them. `--dry-run` shows the classified statements and each function package's pending migrations by name, then stops. It plans inside one `BEGIN READ ONLY` transaction, checked to be read-only and rolled back, so it writes nothing; when PostgreSQL does not report the transaction read-only it exits 1 |
 | `db migrate` (`m`) | Run pending migrations. `--with-backup` snapshots first |
 | `db status` | Show which migrations are applied and which are pending, for the project and for each installed function package. `--json` prints one machine-readable report instead |
 | `db studio` | Open Drizzle Studio. `-p, --port` (auto-finds a free port) |
@@ -551,7 +551,13 @@ function-migration failure after a successful schema apply exits 1 with a messag
 making clear the project schema was already committed. Before applying anything,
 `db push` lists each package's pending migrations by folder or tag name;
 `db push --dry-run` lists them too and applies neither them nor the project
-statements, on a connection opened with `default_transaction_read_only=on`.
+statements. What it guarantees, and how: every query of its plan — Drizzle Kit's
+diff and the pending lookup — runs on one connection inside one `BEGIN READ ONLY`
+transaction, which it rolls back. Before planning it reads
+`current_setting('transaction_read_only')` inside that transaction; anything but
+`on` (a pooler or proxy that rewrote the `BEGIN`) ends the command with exit 1
+naming `--dry-run`, before any plan query runs. The mode is a statement, not a
+startup parameter, so a pooler that drops startup `options` does not remove it.
 
 Database TLS is controlled by `DATABASE_URL`. Loopback URLs (`localhost`, `127.0.0.1`,
 and `::1`) default to `ssl: false`; add an explicit `sslmode` when the local server uses

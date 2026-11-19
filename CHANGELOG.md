@@ -91,7 +91,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   their bookkeeping tables) instead of previewing them; with a pending project change it said
   nothing about them. `db push` now plans first — the project statements and, per function package,
   the pending migrations, worked out without writing — prints both, and stops on a dry run before
-  any write, on a read-only session. Applying reads the same pending list, so a preview and the
+  any write. The dry run's plan runs on one connection inside `BEGIN READ ONLY`, checked to be
+  read-only (`transaction_read_only = on`) before it starts and rolled back after; when the check
+  fails it exits 1 naming `--dry-run`. Applying reads the same pending list, so a preview and the
   push after it agree.
 
 - **@spfn/core, spfn: codegen loads the app as ESM in the process's own module graph; one copy of

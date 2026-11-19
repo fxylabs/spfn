@@ -664,37 +664,33 @@ export async function loadSchemaImports(schemaFiles: string[]): Promise<Record<s
 }
 
 /**
- * DATABASE_URL with a startup option that makes every transaction on the
- * session read-only, so PostgreSQL itself refuses a write. Set in the URL: a
- * URL's own `options` parameter would override a separate `options` setting.
+ * One client for `db push`: a drizzle-orm PgDatabase for pushSchema(), and
+ * `query` for raw SQL on the same client.
  */
-export function withReadOnlySession(databaseUrl: string): string
+export interface PushConnection
 {
-    const parsedUrl = parseDatabaseUrl(databaseUrl);
-
-    if (!parsedUrl)
-    {
-        throw new Error('DATABASE_URL is not a URL, so a read-only session cannot be requested');
-    }
-
-    const options = [parsedUrl.searchParams.get('options'), '-c default_transaction_read_only=on'];
-    parsedUrl.searchParams.set('options', options.filter(Boolean).join(' '));
-
-    return parsedUrl.toString();
-}
-
-/**
- * Create a drizzle-orm PgDatabase instance for pushSchema(), and `query` for raw
- * SQL on the same session. With `readOnly` the session refuses every write.
- * Uses `pg` (node-postgres) driver because drizzle-kit's internal adapter
- * expects `execute()` to return `{ rows: [...] }`, which `pg` provides
- * but `postgres.js` does not.
- */
-export async function createPushConnection(options: { readOnly?: boolean } = {}): Promise<{
     db: any;
     query: (text: string, params?: unknown[]) => Promise<Record<string, unknown>[]>;
     close: () => Promise<void>;
-}>
+    /** With `readOnly`: `transaction_read_only` as the server reports it inside the transaction */
+    transactionReadOnly?: string;
+}
+
+/**
+ * Open the push connection on one pg client, not a pool: every query of the
+ * plan goes to that client, so one transaction covers them all. pushSchema
+ * sends each of its queries through `db.execute` and opens no transaction or
+ * client of its own.
+ *
+ * With `readOnly` the client runs `BEGIN READ ONLY` first and close() rolls it
+ * back. The mode is set by a statement, not a startup parameter, so a pooler
+ * cannot drop it; the caller checks `transactionReadOnly` before the plan runs.
+ *
+ * Uses `pg` (node-postgres) because drizzle-kit's internal adapter expects
+ * `execute()` to return `{ rows: [...] }`, which `pg` provides but
+ * `postgres.js` does not.
+ */
+export async function createPushConnection(options: { readOnly?: boolean } = {}): Promise<PushConnection>
 {
     loadEnv();
 
@@ -706,15 +702,31 @@ export async function createPushConnection(options: { readOnly?: boolean } = {})
     const pg = await import('pg');
     const { drizzle } = await import('drizzle-orm/node-postgres');
 
-    const databaseUrl = options.readOnly ? withReadOnlySession(env.DATABASE_URL) : env.DATABASE_URL;
-    const pool = new pg.default.Pool({
-        ...resolvePushConnectionConfig(databaseUrl),
-        max: 1,
-    });
+    const client = new pg.default.Client(resolvePushConnectionConfig(env.DATABASE_URL));
+    await client.connect();
+
+    const connection: PushConnection = {
+        db: drizzle({ client }),
+        query: async (text, params) => (await client.query(text, params)).rows,
+        close: () => client.end(),
+    };
+
+    return options.readOnly ? beginReadOnly(connection) : connection;
+}
+
+/**
+ * Start the read-only transaction and read back whether the server holds it.
+ * Ending the session discards the transaction too, so close() ends it even
+ * when the rollback fails.
+ */
+async function beginReadOnly(connection: PushConnection): Promise<PushConnection>
+{
+    await connection.query('BEGIN READ ONLY');
+    const [{ setting }] = await connection.query(`SELECT current_setting('transaction_read_only') AS setting`);
 
     return {
-        db: drizzle({ client: pool }),
-        query: async (text, params) => (await pool.query(text, params)).rows,
-        close: () => pool.end(),
+        ...connection,
+        transactionReadOnly: String(setting),
+        close: () => connection.query('ROLLBACK').then(connection.close, connection.close),
     };
 }
