@@ -1,5 +1,5 @@
 /**
- * The watch loop — rows W1–W3, W5–W18 and G1 of the #353 design
+ * The watch loop — rows W1–W3, W5–W19 and G1 of the #353 design
  *
  * Each row runs an orchestrator in watch mode, in this process, on an app in a
  * temporary directory with `@spfn/core` linked into its `node_modules`.
@@ -50,6 +50,8 @@
  * |    | after that run and the generation have finished                   | call: `settled()`/`generateAll()` rejected forever   |
  * | W18| a failure held back from a torn run, then `close()` in the quiet  | the failure never shown: the re-run that was to      |
  * |    | period                                                            | report it never comes                                |
+ * | W19| a failure held back from a torn run, then the loop ends by an     | the same, when the loop ends any way but `close()`:  |
+ * |    | exception                                                         | the exception shown, the generator's failure lost    |
  * | G1 | a generator writing, on every run, a file it reads, differently     | a silent endless loop (no warning), the warning      |
  * |    |                                                                   | repeated, a stop coming back, or a `close()` that    |
  * |    |                                                                   | never ends it                                        |
@@ -888,7 +890,62 @@ describe('codegen watch loop', () =>
         await closing;
 
         expect(error.mock.calls.map(call => call.map(String))).toEqual([[
-            '[failing] ✗ Regeneration failed (its inputs changed while it ran; no further run follows: the watcher is closing)',
+            '[failing] ✗ Regeneration failed (its inputs changed while it ran; no further run follows: the watch loop is ending)',
+            'Error: broken',
+        ]]);
+    });
+
+    it('W19 a failure held back from a torn run is reported when the loop ends by an exception, which still rejects watch()', async () =>
+    {
+        let fail = false;
+        let tear = false;
+        const generator: Generator = {
+            name: 'failing',
+            watchPatterns: ['src/**/*.ts'],
+            async generate(options: GeneratorOptions): Promise<void>
+            {
+                const load = await importProjectModule(join(options.cwd, 'src/a.ts'), options.cwd, newGeneration());
+
+                reportInputs(load.inputs);
+
+                if (tear)
+                {
+                    tear = false;
+                    write('src/a.ts', 'export const a = 2;\n');
+                }
+
+                if (fail)
+                {
+                    throw new Error('broken');
+                }
+            },
+        };
+
+        write('src/a.ts', 'export const a = 0;\n');
+
+        const orchestrator = new CodegenOrchestrator({ generators: [generator], cwd: appDir, debug: true });
+        const loop = orchestrator as unknown as { nextWork: () => Promise<boolean> };
+
+        orchestrators.push(orchestrator);
+
+        const watched = orchestrator.watch().then(() => undefined, (reason: unknown) => reason);
+
+        await orchestrator.settled();
+        info.mockImplementation((message: unknown) =>
+        {
+            if (/^\[failing\] Read files that changed/.test(String(message)))
+            {
+                vi.spyOn(loop, 'nextWork').mockRejectedValueOnce(new Error('loop failed'));
+            }
+        });
+        fail = true;
+        tear = true;
+        write('src/a.ts', 'export const a = 1;\n');
+
+        expect(String(await watched)).toBe('Error: loop failed');
+        await orchestrator.close();
+        expect(error.mock.calls.map(call => call.map(String))).toEqual([[
+            '[failing] ✗ Regeneration failed (its inputs changed while it ran; no further run follows: the watch loop is ending)',
             'Error: broken',
         ]]);
     });

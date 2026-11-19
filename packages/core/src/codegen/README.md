@@ -275,9 +275,9 @@ load (`src/codegen/loader/`).
   reported as `✗`, with `(its inputs changed while it ran; running it again once they settle)`
   added when this run's inputs changed too. A success or a reported failure starts the count
   again. So a failure caused only by a save in the middle of a run is never shown, and a real
-  one is shown by the second run at the latest — or, when the watcher closes before that run,
-  as it closes: `✗` with `(its inputs changed while it ran; no further run follows: the watcher
-  is closing)`. A success held back is not reported then: nothing went wrong. A file two loads of one generation read with
+  one is shown by the second run at the latest — or, when the watch loop ends before that run
+  (`close()`, or an exception that rejects `watch()`), as it ends: `✗` with `(its inputs changed
+  while it ran; no further run follows: the watch loop is ending)`. A success held back is not reported then: nothing went wrong. A file two loads of one generation read with
   different contents counts as changed even if it is restored before the check. A re-run is
   told what the torn run was told (`changedFiles`), and what changed since.
 - **Start.** chokidar's first scan (`ready`), then the initial generation, then arm and

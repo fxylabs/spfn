@@ -193,8 +193,9 @@ export class CodegenOrchestrator
      * the one running, if any, has finished — every generator of it, so the
      * outputs of one cycle never disagree. `watch()` resolves with it. A
      * generation cannot be cancelled: one that never settles keeps this
-     * pending, and only exiting the process stops it. An orchestrator is
-     * single-use: `watch()` after `close()` rejects.
+     * pending, and only exiting the process stops it. A loop that ended by an
+     * exception rejected `watch()` with it; `close()` still resolves. An
+     * orchestrator is single-use: `watch()` after `close()` rejects.
      */
     async close(): Promise<void>
     {
@@ -209,7 +210,7 @@ export class CodegenOrchestrator
         this.inputWatcher?.close();
         await this.watcher?.close();
         this.watcher = undefined;
-        await this.loop;
+        await this.loop?.catch(() => undefined);
         this.requests.splice(0).forEach(request => request.reject(new Error(
             `generateAll('${request.trigger}') was not run: the codegen watcher was closed before its turn`,
         )));
@@ -530,12 +531,30 @@ export class CodegenOrchestrator
         return this.loop;
     }
 
+    /**
+     * The watch loop's lifecycle. A failure held back is reported once
+     * however the loop ends: by `close()`, or by an exception, which still
+     * rejects `watch()`.
+     */
     private async watchLoop(patterns: string[]): Promise<void>
     {
         const watchDirs = this.watchDirectories(patterns);
 
         await this.startWatching(watchDirs);
 
+        try
+        {
+            await this.runLoop(watchDirs, patterns);
+        }
+        finally
+        {
+            this.reportWithheld();
+        }
+    }
+
+    /** The initial generation, then a cycle per piece of work until the loop is closed. */
+    private async runLoop(watchDirs: string[], patterns: string[]): Promise<void>
+    {
         if (!this.closed)
         {
             await this.watchGeneration(this.startRuns('watch'));
@@ -550,19 +569,17 @@ export class CodegenOrchestrator
         {
             await this.cycle();
         }
-
-        this.reportWithheld();
     }
 
     /**
-     * The loop stopped: a failure still held back would otherwise never be
+     * The loop ended: a failure still held back would otherwise never be
      * shown, since the re-run that was to report it does not come. A success
      * held back needs no line: its `Read files that changed` line said all
      * there is, and nothing went wrong.
      */
     private reportWithheld(): void
     {
-        this.withheld.forEach(outcome => this.report(outcome, ' (its inputs changed while it ran; no further run follows: the watcher is closing)'));
+        this.withheld.forEach(outcome => this.report(outcome, ' (its inputs changed while it ran; no further run follows: the watch loop is ending)'));
         this.withheld.clear();
     }
 
