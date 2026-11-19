@@ -190,6 +190,11 @@ Scope an override to the major it repairs (`picomatch@2`, not `picomatch`). A bl
 drags packages that ask for the next major back onto the old one, and the workspace then tests a
 graph no adopter gets.
 
+`patches/tsup@9.0.0.patch` makes tsup build one declaration program per config (#352). A tsup bump
+carries it to the new version, or drops it once tsup bundles a fixed rollup-plugin-dts
+([upstream issue](https://github.com/Swatinem/rollup-plugin-dts/issues/408)); otherwise `pnpm install`
+fails with `ERR_PNPM_PATCH_NOT_APPLIED`.
+
 ## Running the tests
 
 Integration tests need PostgreSQL and Redis. They run against the machine's own
