@@ -50,7 +50,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   they settle, whatever a later comparison finds: a save between two of the environment probe's
   loads was reported as `ConditionalRegistrationError: The route map depends on the
   environment`. A failure is held back that way at most once in a row per generator; the next
-  failure is reported, so a real one shows by the second run at the latest.
+  failure is reported, so a real one shows by the second run at the latest, or as the watcher
+  closes when it closes before that run.
 - **@spfn/core: `CodegenOrchestrator.close()` stops the watch loop.** A change queued when it was
   called ran the generators again after it resolved; now nothing new starts, and it resolves once
   the generation running has finished every generator, so the `spfn dev` watcher's SIGTERM no

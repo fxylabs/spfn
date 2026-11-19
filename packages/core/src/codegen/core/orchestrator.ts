@@ -142,8 +142,12 @@ export class CodegenOrchestrator
      */
     private readonly rerun = new Map<Generator, Run['trigger']>();
 
-    /** Generators whose latest run failed and whose failure was not reported: the next failure is. */
-    private readonly withheld = new Set<Generator>();
+    /**
+     * Generators whose latest run failed and whose failure was not reported,
+     * with that run: the next failure is reported, and so is this one if the
+     * loop stops first (`reportWithheld`).
+     */
+    private readonly withheld = new Map<Generator, Outcome>();
 
     /** Consecutive cycles the check alone started; the warning about them is given once until an event's cycle. */
     private checkOnlyCycles = 0;
@@ -398,18 +402,16 @@ export class CodegenOrchestrator
     }
 
     /**
-     * Log how a run ended: `✓`, or `✗` with the error it failed with — saying
-     * so when the run was `torn`: its inputs changed while it ran.
+     * Log how a run ended: `✓`, or `✗` with the error it failed with and
+     * `note`, if any — why a torn run's failure is reported anyway.
      */
-    private report({ generator, trigger, failure, ms }: Outcome, torn = false): void
+    private report({ generator, trigger, failure, ms }: Outcome, note = ''): void
     {
         const initial = trigger.changedFiles === undefined;
 
         if (failure !== undefined)
         {
-            const tornClause = torn ? ' (its inputs changed while it ran; running it again once they settle)' : '';
-
-            orchestratorLogger.error(`[${generator.name}] ✗ ${initial ? 'Generation' : 'Regeneration'} failed${tornClause}`, failure);
+            orchestratorLogger.error(`[${generator.name}] ✗ ${initial ? 'Generation' : 'Regeneration'} failed${note}`, failure);
 
             return;
         }
@@ -443,7 +445,7 @@ export class CodegenOrchestrator
      * failure is held back at most once in a row: a failure after a withheld
      * one is reported, torn or not. A transient failure from a save is
      * therefore never shown, and a real one is shown by the second run at the
-     * latest.
+     * latest, or as the watcher closes if it closes first (`reportWithheld`).
      */
     private settleOutcome(outcome: Outcome, torn: boolean): void
     {
@@ -461,14 +463,14 @@ export class CodegenOrchestrator
 
         if (!torn || failedAfterWithheld)
         {
-            this.report(outcome, torn);
+            this.report(outcome, torn ? ' (its inputs changed while it ran; running it again once they settle)' : '');
 
             return;
         }
 
         if (failure !== undefined)
         {
-            this.withheld.add(generator);
+            this.withheld.set(generator, outcome);
         }
 
         orchestratorLogger.info(`[${generator.name}] Read files that changed while it ran; running it again once they settle`);
@@ -548,6 +550,20 @@ export class CodegenOrchestrator
         {
             await this.cycle();
         }
+
+        this.reportWithheld();
+    }
+
+    /**
+     * The loop stopped: a failure still held back would otherwise never be
+     * shown, since the re-run that was to report it does not come. A success
+     * held back needs no line: its `Read files that changed` line said all
+     * there is, and nothing went wrong.
+     */
+    private reportWithheld(): void
+    {
+        this.withheld.forEach(outcome => this.report(outcome, ' (its inputs changed while it ran; no further run follows: the watcher is closing)'));
+        this.withheld.clear();
     }
 
     /** One directory per pattern, its part before `**`: "src/**\/*.ts" → "src". */

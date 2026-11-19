@@ -1,5 +1,5 @@
 /**
- * The watch loop — rows W1–W3, W5–W17 and G1 of the #353 design
+ * The watch loop — rows W1–W3, W5–W18 and G1 of the #353 design
  *
  * Each row runs an orchestrator in watch mode, in this process, on an app in a
  * temporary directory with `@spfn/core` linked into its `node_modules`.
@@ -48,6 +48,8 @@
  * |    | watching; then an edit                                            | `close()` can never end                              |
  * | W17| `settled()` called from a timer a generator's first run scheduled,| a callback outliving its `generate()` taken for that |
  * |    | after that run and the generation have finished                   | call: `settled()`/`generateAll()` rejected forever   |
+ * | W18| a failure held back from a torn run, then `close()` in the quiet  | the failure never shown: the re-run that was to      |
+ * |    | period                                                            | report it never comes                                |
  * | G1 | a generator writing, on every run, a file it reads, differently     | a silent endless loop (no warning), the warning      |
  * |    |                                                                   | repeated, a stop coming back, or a `close()` that    |
  * |    |                                                                   | never ends it                                        |
@@ -835,6 +837,49 @@ describe('codegen watch loop', () =>
         await orchestrator.settled();
 
         expect(await delayed).toBe('resolved');
+    });
+
+    it('W18 a failure held back from a torn run is reported when close() comes before its re-run', async () =>
+    {
+        let fail = false;
+        let tear = false;
+        const generator: Generator = {
+            name: 'failing',
+            watchPatterns: ['src/**/*.ts'],
+            async generate(options: GeneratorOptions): Promise<void>
+            {
+                const load = await importProjectModule(join(options.cwd, 'src/a.ts'), options.cwd, newGeneration());
+
+                reportInputs(load.inputs);
+
+                if (tear)
+                {
+                    tear = false;
+                    write('src/a.ts', 'export const a = 2;\n');
+                }
+
+                if (fail)
+                {
+                    throw new Error('broken');
+                }
+            },
+        };
+
+        write('src/a.ts', 'export const a = 0;\n');
+
+        const orchestrator = watching([generator]);
+
+        await orchestrator.settled();
+        fail = true;
+        tear = true;
+        write('src/a.ts', 'export const a = 1;\n');
+        await until(() => logged(info, /^\[failing\] Read files that changed/));
+        await orchestrator.close();
+
+        expect(error.mock.calls.map(call => call.map(String))).toEqual([[
+            '[failing] ✗ Regeneration failed (its inputs changed while it ran; no further run follows: the watcher is closing)',
+            'Error: broken',
+        ]]);
     });
 
     it('G1 a generator that rewrites a file it reads on every run: one warning, and it regenerates on until close()', async () =>
