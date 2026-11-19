@@ -37,9 +37,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   directory) before the next generation starts. After 3 consecutive cycles started that way, one
   warning names the files and the generators that read them; regeneration continues. Logged: `Changed during generation: + <path>`, and in debug `Queued ~ <path>`; `No generators
   matched this file` only when nothing matched. A generator's `✓`/`✗` is logged after that
-  comparison, and a run whose inputs changed while it ran says so instead: a save between two of
-  the environment probe's loads was reported as `ConditionalRegistrationError: The route map
-  depends on the environment`.
+  comparison, and a run whose inputs changed while it ran says so instead and is run again once
+  they settle, whatever a later comparison finds: a save between two of the environment probe's
+  loads was reported as `ConditionalRegistrationError: The route map depends on the
+  environment`. A failure is held back that way at most once in a row per generator; the next
+  failure is reported, so a real one shows by the second run at the latest.
 - **@spfn/core: `CodegenOrchestrator.close()` stops the watch loop.** A change queued when it was
   called ran the generators again after it resolved; now nothing new starts, and it resolves once
   the generation running has finished every generator, so the `spfn dev` watcher's SIGTERM no

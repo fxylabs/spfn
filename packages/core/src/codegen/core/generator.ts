@@ -48,7 +48,9 @@ export interface GeneratorOptions
          * never on its initial pass): the files matching the generator's
          * `watchPatterns`, and the files its previous run read, that changed
          * since. The watcher takes every change queued while a generation ran
-         * into the next one, so a run may be for several.
+         * into the next one, so a run may be for several. A run again of one
+         * whose inputs changed while it ran also gets that run's changes (the
+         * same trigger, with none, when that run had none).
          */
         changedFiles?: ChangedFile[];
     };

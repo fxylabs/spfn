@@ -265,11 +265,19 @@ load (`src/codegen/loader/`).
   or edited while a generation ran, or replaced inside one, is not lost.
 - **Reported after the check.** A generation's `✓` and `✗` lines are logged once the check has
   run. A generator that read a file the check found changed ran on inputs that changed under
-  it, so neither its success nor its failure describes the app as it now is (a save between
-  two of the environment probe's loads would read as "depends on the environment"): it gets
-  `[<generator>] Read files that changed while it ran; running it again` instead, and the run
-  after it reports. A file two loads of one generation read with different contents counts as
-  changed even if it is restored before the check.
+  it, so neither its success nor its failure surely describes the app as it now is (a save
+  between two of the environment probe's loads would read as "depends on the environment").
+  Such a run is marked to run again by name: once the change has settled it runs, whether or
+  not a later check still finds a difference (a file saved and then restored still gets its
+  re-run). Its outcome is held back for `[<generator>] Read files that changed while it ran;
+  running it again once they settle` — but a failure is held back at most once in a row per
+  generator: when a run fails and that generator's previous failure was held back, this one is
+  reported as `✗`, with `(its inputs changed while it ran; running it again once they settle)`
+  added when this run's inputs changed too. A success or a reported failure starts the count
+  again. So a failure caused only by a save in the middle of a run is never shown, and a real
+  one is shown by the second run at the latest. A file two loads of one generation read with
+  different contents counts as changed even if it is restored before the check. A re-run is
+  told what the torn run was told (`changedFiles`), and what changed since.
 - **Start.** chokidar's first scan (`ready`), then the initial generation, then arm and
   check. `Watch mode started` is logged once changes are seen from then on.
 - **`No generators matched this file`** (debug) is logged only when no generator matched a

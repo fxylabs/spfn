@@ -22,8 +22,9 @@
  * to `src/server/lib/segment.ts`, imported through `@/` by a route, a file a
  * failed import was looked for at that appears, a file replaced inside the
  * generation that read it. How each generator's run ended is logged only
- * after that comparison: a run whose inputs changed under it is not reported
- * as a success or a failure of the app (`watchGeneration`).
+ * after that comparison: a run whose inputs changed under it is run again
+ * once they settle, and its outcome is held back at most once in a row
+ * (`settleOutcome`).
  *
  * All of this state is the orchestrator's own: two orchestrators in one
  * process share nothing.
@@ -127,6 +128,16 @@ export class CodegenOrchestrator
      * comparison finds was found by the check, not by an event.
      */
     private lateCheck = false;
+
+    /**
+     * Generators whose latest run read a file the check after it found changed,
+     * with the trigger that run had: each runs again once the change has
+     * settled, whether or not a later check still finds a difference.
+     */
+    private readonly rerun = new Map<Generator, Run['trigger']>();
+
+    /** Generators whose latest run failed and whose failure was not reported: the next failure is. */
+    private readonly withheld = new Set<Generator>();
 
     /** Consecutive cycles the check alone started; the warning about them is given once until an event's cycle. */
     private checkOnlyCycles = 0;
@@ -331,14 +342,19 @@ export class CodegenOrchestrator
         return failure.error instanceof Error ? failure.error : new Error(String(failure.error));
     }
 
-    /** Log how a run ended: `✓`, or `✗` with the error it failed with. */
-    private report({ generator, trigger, failure, ms }: Outcome): void
+    /**
+     * Log how a run ended: `✓`, or `✗` with the error it failed with — saying
+     * so when the run was `torn`: its inputs changed while it ran.
+     */
+    private report({ generator, trigger, failure, ms }: Outcome, torn = false): void
     {
         const initial = trigger.changedFiles === undefined;
 
         if (failure !== undefined)
         {
-            orchestratorLogger.error(`[${generator.name}] ✗ ${initial ? 'Generation' : 'Regeneration'} failed`, failure);
+            const tornClause = torn ? ' (its inputs changed while it ran; running it again once they settle)' : '';
+
+            orchestratorLogger.error(`[${generator.name}] ✗ ${initial ? 'Generation' : 'Regeneration'} failed${tornClause}`, failure);
 
             return;
         }
@@ -348,43 +364,67 @@ export class CodegenOrchestrator
 
     /**
      * A watch generation: run it, arm and check, and only then report how each
-     * run ended. A run that read a file the check found changed ran on inputs
-     * that changed under it, so its result — success or failure — says nothing
-     * about the app as it is now: a save between two of the environment probe's
-     * loads reads as "depends on the environment". Such a run gets one line
-     * saying so instead of `✓` or `✗`; it runs again once the change has
-     * settled (`deferCheck`), and that run reports. After `close()` there is no
-     * check, and each run is reported as it ended.
+     * run ended (`settleOutcome`). After `close()` there is no check, and each
+     * run is reported as it ended.
      */
     private async watchGeneration(runs: Run[]): Promise<Outcome[]>
     {
         const outcomes = await this.generate(runs, false);
         const stale = this.closed ? new Map<string, ChangedFile['event']>() : this.armAndCheck();
 
-        for (const outcome of outcomes)
-        {
-            const inputs = this.inputs.get(outcome.generator);
-
-            if ([...stale.keys()].some(path => inputs?.has(path)))
-            {
-                orchestratorLogger.info(`[${outcome.generator.name}] Read files that changed while it ran; running it again`);
-            }
-            else
-            {
-                this.report(outcome);
-            }
-        }
-
+        outcomes.forEach(outcome => this.settleOutcome(outcome, [...stale.keys()].some(path => this.inputs.get(outcome.generator)?.has(path))));
         this.deferCheck(stale);
 
         return outcomes;
     }
 
     /**
+     * Report how a watch run ended. A `torn` run read a file the check found
+     * changed: it ran on inputs that changed under it, so its result says
+     * nothing sure about the app as it is now (a save between two of the
+     * environment probe's loads reads as "depends on the environment"). It is
+     * marked to run again once the change has settled, whatever a later check
+     * finds, and its outcome is held back for one line saying so — but a
+     * failure is held back at most once in a row: a failure after a withheld
+     * one is reported, torn or not. A transient failure from a save is
+     * therefore never shown, and a real one is shown by the second run at the
+     * latest.
+     */
+    private settleOutcome(outcome: Outcome, torn: boolean): void
+    {
+        const { generator, failure } = outcome;
+        const failedAfterWithheld = this.withheld.delete(generator) && failure !== undefined;
+
+        if (torn)
+        {
+            this.rerun.set(generator, outcome.trigger);
+        }
+        else
+        {
+            this.rerun.delete(generator);
+        }
+
+        if (!torn || failedAfterWithheld)
+        {
+            this.report(outcome, torn);
+
+            return;
+        }
+
+        if (failure !== undefined)
+        {
+            this.withheld.add(generator);
+        }
+
+        orchestratorLogger.info(`[${generator.name}] Read files that changed while it ran; running it again once they settle`);
+    }
+
+    /**
      * The check after a generation found `stale`: a late file event. Like any
      * event on an input, it waits for writes to settle — the input watcher's
      * quiet period, restarted by every write meanwhile — and the loop then
-     * compares again and regenerates for what it finds then. Without that wait
+     * compares again and regenerates for what it finds then, and every
+     * generator marked to run again (`settleOutcome`). Without that wait
      * a file written all through a generation, by a user or by a generator,
      * would start the next one at once, every time.
      */
@@ -566,10 +606,17 @@ export class CodegenOrchestrator
         }
     }
 
-    /** Wait until there is something to do; false once closed. */
+    /**
+     * Wait until there is something to do; false once closed. A re-run is due
+     * once no quiet period is pending: the input watcher's call at its end is
+     * dropped while the loop is busy, so this is where a re-run marked then is
+     * picked up.
+     */
     private async nextWork(): Promise<boolean>
     {
-        if (!this.closed && this.dirty.size === 0 && !this.checkRequested && this.requests.length === 0)
+        const rerunDue = this.rerun.size > 0 && !(this.inputWatcher?.pending ?? false);
+
+        if (!this.closed && this.dirty.size === 0 && !this.checkRequested && this.requests.length === 0 && !rerunDue)
         {
             this.busy = false;
             this.notifyIdle();
@@ -580,9 +627,9 @@ export class CodegenOrchestrator
     }
 
     /**
-     * Run the next `generateAll()` call made while watching; else take the
-     * whole dirty set into one watch generation; else only arm and check, when
-     * that was asked.
+     * Run the next `generateAll()` call made while watching; else, with nothing
+     * dirty, arm and check first; then take the whole dirty set, and every
+     * generator marked to run again, into one watch generation.
      */
     private async cycle(): Promise<void>
     {
@@ -600,7 +647,10 @@ export class CodegenOrchestrator
             const foundBy = this.lateCheck ? 'check' : 'event';
 
             this.armAndCheck().forEach((event, path) => this.markDirty(path, event, foundBy));
+        }
 
+        if (this.dirty.size === 0 && this.rerun.size === 0)
+        {
             return;
         }
 
@@ -625,7 +675,10 @@ export class CodegenOrchestrator
         resolve();
     }
 
-    /** Run every generator a change matches or whose inputs hold a changed path, in one generation. */
+    /**
+     * Run, in one generation, every generator a change matches or whose inputs
+     * hold a changed path, and every one marked to run again.
+     */
     private async regenerate(changes: Map<string, Change>): Promise<void>
     {
         const checkOnly = [...changes.values()].every(change => change.foundBy === 'check');
@@ -637,13 +690,11 @@ export class CodegenOrchestrator
             .forEach(([path, { event }]) => orchestratorLogger.info(`File ${EVENT_ICONS[event]} ${path}`));
 
         const runs = this.generators
-            .filter(generator => this.shouldRun(generator, 'watch'))
-            .map(generator => ({ generator, triggers: this.triggersOf(generator, changes) }))
-            .filter(({ triggers }) => triggers.length > 0)
-            .map(({ generator, triggers }) => ({
-                generator,
-                trigger: { type: 'watch' as const, changedFiles: triggers, ...(triggers.length === 1 ? { changedFile: triggers[0] } : {}) },
-            }));
+            .filter(generator => this.rerun.has(generator) || this.shouldRun(generator, 'watch'))
+            .map(generator => this.runOf(generator, changes))
+            .filter(run => run !== undefined);
+
+        this.rerun.clear();
 
         if (runs.length === 0 && this.debug)
         {
@@ -651,6 +702,31 @@ export class CodegenOrchestrator
         }
 
         await this.watchGeneration(runs);
+    }
+
+    /**
+     * The run `changes` call for of `generator`, if any. One marked to run
+     * again is told what its torn run was told, and what changed since; a torn
+     * run that had no changed files (the initial generation, a `generateAll()`)
+     * runs again with the same trigger, in full.
+     */
+    private runOf(generator: Generator, changes: Map<string, Change>): Run | undefined
+    {
+        const torn = this.rerun.get(generator);
+
+        if (torn !== undefined && torn.changedFiles === undefined)
+        {
+            return { generator, trigger: torn };
+        }
+
+        const changedFiles = [...new Map([...torn?.changedFiles ?? [], ...this.triggersOf(generator, changes)].map(file => [file.path, file])).values()];
+
+        if (changedFiles.length === 0)
+        {
+            return undefined;
+        }
+
+        return { generator, trigger: { type: 'watch', changedFiles, ...(changedFiles.length === 1 ? { changedFile: changedFiles[0] } : {}) } };
     }
 
     /** The changes that trigger `generator`: a path its patterns match, or one its latest run read. */

@@ -40,6 +40,10 @@
  * |    |                                                                   | closes                                               |
  * | W13| an input no pattern matches saved once during each of four          | a stop on consecutive check-found cycles: the last   |
  * |    | generations in a row                                              | save marked handled, the map one edit behind         |
+ * | W14| a run reads broken content and fails; the file is saved fixed     | a re-run decided again from the file system: it finds|
+ * |    | during it, and broken again as its outcome is held back           | the stamp fresh, and the failure is never shown      |
+ * | W15| a generator writing a file it reads on every run, and throwing    | a failure held back on every run: a broken app shown |
+ * |    |                                                                   | as quietly fine                                      |
  * | G1 | a generator writing, on every run, a file it reads, differently     | a silent endless loop (no warning), the warning      |
  * |    |                                                                   | repeated, a stop coming back, or a `close()` that    |
  * |    |                                                                   | never ends it                                        |
@@ -113,7 +117,7 @@ vi.mock('fs', async (importOriginal) =>
 });
 
 /** A spy on a `Logger.prototype` method: its calls' first argument is the message. */
-type Spy = { mock: { calls: unknown[][] } };
+type Spy = { mock: { calls: unknown[][] }; mockImplementation(implementation: (message: unknown) => void): unknown };
 
 let appDir: string;
 const apps: string[] = [];
@@ -660,6 +664,96 @@ describe('codegen watch loop', () =>
         await orchestrator.settled();
 
         expect(mapPaths()).toEqual(['/probe/v5']);
+    });
+
+    it('W14 a failure held back because a save tore its run is reported when the file is restored before the re-run', async () =>
+    {
+        // The run reads the broken file and fails; the fixed save lands while it
+        // runs, so its failure is held back. The broken content is restored as
+        // that is logged, inside the quiet period: a re-run decided by a later
+        // check finds the stamp fresh, runs nothing, and settles with the
+        // failure for what is on disk never shown.
+        const failures: unknown[] = [];
+        let duringRun: (() => void) | undefined;
+        const failing: Generator = {
+            name: 'failing',
+            watchPatterns: ['src/self/**/*.ts'],
+            async generate(options: GeneratorOptions): Promise<void>
+            {
+                const load = await importProjectModule(join(options.cwd, 'src/seg.ts'), options.cwd, newGeneration());
+
+                reportInputs(load.inputs);
+                duringRun?.();
+
+                if (!load.ok)
+                {
+                    failures.push(load.error);
+                    throw load.error;
+                }
+            },
+        };
+        const broken = 'export const seg: string = ;\n';
+
+        write('src/self/index.ts', 'export {};\n');
+        write('src/seg.ts', 'export const seg: string = \'v0\';\n');
+
+        const orchestrator = watching([failing]);
+
+        await orchestrator.settled();
+        duringRun = () =>
+        {
+            duringRun = undefined;
+            write('src/seg.ts', 'export const seg: string = \'fixed\';\n');
+        };
+        info.mockImplementation((message: unknown) =>
+        {
+            if (/^\[failing\] Read files that changed while it ran/.test(String(message)))
+            {
+                write('src/seg.ts', broken);
+            }
+        });
+        write('src/seg.ts', broken);
+        await until(() => logged(info, /^\[failing\] Read files that changed while it ran/));
+        await orchestrator.settled();
+
+        expect(error.mock.calls.map(([message]) => String(message))).toEqual(['[failing] ✗ Regeneration failed']);
+        expect(failures).toHaveLength(2);
+        expect(error.mock.calls[0][1]).toBe(failures[1]);
+    });
+
+    it('W15 a generator that rewrites a file it reads and throws on every run has its error reported', async () =>
+    {
+        // Every run of it is torn by its own write. Held back every time, its
+        // failure would never be shown: only the warning about repeated changes.
+        let runs = 0;
+        const selfWriter: Generator = {
+            name: 'self-writer',
+            watchPatterns: ['src/self/**/*.ts'],
+            async generate(options: GeneratorOptions): Promise<void>
+            {
+                const load = await importProjectModule(join(options.cwd, 'src/counter.ts'), options.cwd, newGeneration());
+
+                runs += 1;
+                reportInputs(load.inputs);
+                write('src/counter.ts', `export const runs = ${runs};\n`);
+                await new Promise(resolve => setImmediate(resolve));
+                throw new Error('the generator failed');
+            },
+        };
+
+        write('src/self/index.ts', 'export {};\n');
+        write('src/counter.ts', 'export const runs = 0;\n');
+
+        const orchestrator = watching([selfWriter]);
+
+        await until(() => error.mock.calls.length > 0);
+        await orchestrator.close();
+
+        expect(runs).toBeGreaterThanOrEqual(2);
+        expect(error.mock.calls[0].map(String)).toEqual([
+            '[self-writer] ✗ Generation failed (its inputs changed while it ran; running it again once they settle)',
+            'Error: the generator failed',
+        ]);
     });
 
     it('G1 a generator that rewrites a file it reads on every run: one warning, and it regenerates on until close()', async () =>
