@@ -552,7 +552,8 @@ export class CodegenOrchestrator
      * the initial generation, then the loop. Resolves when `close()` is called.
      * Rejects when `close()` was called before, or when it watched already —
      * its loop running or ended, by `close()` or by an exception: an
-     * orchestrator watches once.
+     * orchestrator watches once. A loop that could not start (a `cwd` that
+     * does not exist) has ended by that exception.
      */
     async watch(): Promise<void>
     {
@@ -572,7 +573,6 @@ export class CodegenOrchestrator
         }
 
         this.busy = true;
-        this.root = realpathSync(this.cwd);
         this.loop = this.watchLoop(patterns);
         this.loop.then(() => this.endLoop({ reason: 'closed' }), (error: unknown) => this.endLoop({ reason: 'failed', error }));
 
@@ -595,10 +595,13 @@ export class CodegenOrchestrator
     /**
      * The watch loop's lifecycle. A failure held back is reported once
      * however the loop ends: by `close()`, or by an exception, which still
-     * rejects `watch()`.
+     * rejects `watch()`. Everything that can fail runs in here — resolving
+     * `cwd` too — so a loop that failed to start has ended as any other has.
      */
     private async watchLoop(patterns: string[]): Promise<void>
     {
+        this.root = realpathSync(this.cwd);
+
         const watchDirs = this.watchDirectories(patterns);
 
         await this.startWatching(watchDirs);

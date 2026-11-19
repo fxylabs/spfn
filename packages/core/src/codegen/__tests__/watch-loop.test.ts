@@ -258,6 +258,15 @@ function logged(spy: Spy, pattern: RegExp): boolean
     return spy.mock.calls.some(([message]) => pattern.test(String(message)));
 }
 
+/** How `promise` settled within `ms`: `resolved`, the reason it was rejected with, or `pending`. */
+function within(promise: Promise<unknown>, ms = 2_000): Promise<string>
+{
+    return Promise.race([
+        promise.then(() => 'resolved', (reason: unknown) => String(reason)),
+        new Promise<string>(settle => setTimeout(() => settle('pending'), ms)),
+    ]);
+}
+
 async function until(condition: () => boolean): Promise<void>
 {
     const deadline = Date.now() + 10_000;
@@ -1147,17 +1156,13 @@ describe('codegen watch loop', () =>
         const gated = gate('gate', ['src/**/*.ts']);
         const orchestrator = new CodegenOrchestrator({ generators: [gated.generator], cwd: appDir, debug: true });
         const loop = orchestrator as unknown as { nextWork: () => Promise<boolean> };
-        const within = (promise: Promise<unknown>): Promise<unknown> =>
-            Promise.race([
-                promise.then(() => 'resolved', reason => reason),
-                new Promise(settle => setTimeout(() => settle('pending'), 2_000)),
-            ]);
         orchestrators.push(orchestrator);
         const watched = within(orchestrator.watch());
         await orchestrator.settled();
+        expect(await within(orchestrator.watch())).toBe('Error: This CodegenOrchestrator is already watching: an orchestrator is single-use, so create a new one to watch again');
         vi.spyOn(loop, 'nextWork').mockRejectedValueOnce(new Error('loop failed'));
         void orchestrator.generateAll('manual');
-        expect(String(await watched)).toBe('Error: loop failed');
+        expect(await watched).toBe('Error: loop failed');
         expect(await within(orchestrator.watch())).not.toBe('pending');
         await expect(orchestrator.watch()).rejects.toThrow('This CodegenOrchestrator\'s watch loop failed: an orchestrator is single-use');
     });
@@ -1184,6 +1189,28 @@ describe('codegen watch loop', () =>
         expect({ queued: await Promise.race([queued, new Promise(settle => setTimeout(() => settle('pending'), 2_000))]), calls: held.calls }).toEqual({
             queued: 'Error: generateAll(\'manual\') was not run: the codegen watcher was closed before its turn',
             calls: 2,
+        });
+    });
+
+    it('W26 a cwd that does not exist: watch() rejects with it as the loop\'s end, settled() resolves, the orchestrator is spent', async () =>
+    {
+        // Without it, watch() marks the loop busy and then fails before a loop
+        // exists: settled() never resolves for a caller awaiting it.
+        const g = gate('gate', ['src/**/*.ts']);
+        const o = new CodegenOrchestrator({ generators: [g.generator], cwd: join(appDir, 'missing'), debug: true });
+        orchestrators.push(o);
+        expect({ watched: await within(o.watch()), idle: await within(o.settled(), 1_000) })
+            .toEqual({ watched: expect.stringContaining('ENOENT'), idle: 'resolved' });
+        expect({
+            again: await within(o.watch()),
+            generated: await within(o.generateAll('manual')),
+            closed: await within(o.close()),
+            calls: g.calls,
+        }).toEqual({
+            again: 'Error: This CodegenOrchestrator\'s watch loop failed: an orchestrator is single-use, so create a new one to watch again',
+            generated: expect.stringContaining('ENOENT'),
+            closed: 'resolved',
+            calls: 0,
         });
     });
 
