@@ -44,6 +44,8 @@
  * | R35| `spfn dev` with the watcher's generator held by a file gate: | a parent that exits before its watcher (orphaned, writing |
  * |    | one SIGTERM to it, then the gate opened; then two SIGTERMs   | into the project after spfn dev stopped), or that does    |
  * |    |                                                              | not forward the second signal                             |
+ * | R35b| R35's single SIGTERM with no tsx in the app's node_modules   | a watcher started through `pnpm exec tsx` / `npx tsx`,    |
+ * |    | (the CLI's own tsx runs it)                                  | which exit at once: the watcher orphaned again            |
  * | R22| the bin, and the tsx child it re-spawns, recording their     | the codegen mark set where the CLI starts, inherited by   |
  * |    | environment at exit                                          | the dev server, `next` and `spfn db` (every descendant)   |
  */
@@ -436,6 +438,41 @@ describe.each(TSX)('codegen in CLI processes, tsx $version', (tsx) =>
         }
     }, 90_000);
 
+    it('R35b with no tsx installed in the app, spfn dev runs its watcher under the CLI\'s own tsx and still waits for it', async () =>
+    {
+        // Without it, the watcher of an app with no tsx of its own runs through
+        // `pnpm exec tsx`, which exits at once on SIGTERM: spfn dev exits with
+        // it, and the watcher runs on, orphaned. The server keeps the app's
+        // `.bin/tsx`, as `pnpm exec tsx` runs it.
+        writeGateGenerator();
+        installTsx(tsx);
+        rmSync(join(appDir, 'node_modules/tsx'));
+
+        const dev = startDev(tsx, await freePort());
+
+        try
+        {
+            await dev.until(() => existsSync(join(appDir, 'entered')));
+
+            const watcherPid = Number(readFileSync(join(appDir, 'entered'), 'utf8'));
+
+            dev.signal('SIGTERM');
+            await dev.until(() => dev.output().includes('Codegen watcher stopping once the running generation finishes') || !dev.running());
+
+            expect({ dev: dev.running(), watcher: alive(watcherPid) }, dev.output()).toEqual({ dev: true, watcher: true });
+
+            write('open', '');
+
+            expect(await dev.exited, dev.output()).toBe(0);
+            expect(alive(watcherPid), dev.output()).toBe(false);
+            expect(existsSync(join(appDir, 'finished'))).toBe(true);
+        }
+        finally
+        {
+            await dev.kill();
+        }
+    }, 60_000);
+
     it('R33 the watcher entry, given a .spfnrc.ts that fails to load, exits 1 saying to fix it and restart spfn dev', () =>
     {
         write('.spfnrc.ts', 'export default __dirname;\n');
@@ -768,6 +805,7 @@ function startDev(tsx: Tsx, port: number): Watcher
     delete env.SPFN_APP_URL;
     delete env.SPFN_CODEGEN_PROCESS;
     delete env.NODE_OPTIONS;
+    delete env.NODE_PATH;
     delete env.NODE_ENV;
     delete env.DATABASE_URL;
 

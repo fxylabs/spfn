@@ -1,12 +1,12 @@
 import { Command } from 'commander';
 import { existsSync, readFileSync, writeFileSync, mkdirSync, unlinkSync, rmSync, watch } from 'fs';
-import { createRequire } from 'module';
 import { dirname, join, relative, sep } from 'path';
+import { fileURLToPath } from 'url';
 import { execa, type ExecaChildProcess } from 'execa';
 import chokidar from 'chokidar';
 import { logger } from '../utils/logger.js';
 import { syncAgentInstructions } from '../lib/agent-instructions.js';
-import { detectPackageManager, getRunScriptArgs } from '../utils/package-manager.js';
+import { detectPackageManager, getAddCommand, getRunScriptArgs, type PackageManager } from '../utils/package-manager.js';
 import { resolveKeychainEnv } from '../utils/secret-store/index.js';
 import { loadAppConfig, resolvePorts, resolveHost } from '@spfn/core/app-config';
 
@@ -150,8 +150,8 @@ function devLoader(cwd: string): string
 }
 
 /**
- * The command that runs a generated entry under the app's tsx, with the dev
- * module hook registered first.
+ * The command that runs the server entry under the app's tsx, through the
+ * package manager, with the dev module hook registered first.
  */
 function tsxCommand(pm: string, cwd: string, entry: string): { command: string; args: string[] }
 {
@@ -163,39 +163,79 @@ function tsxCommand(pm: string, cwd: string, entry: string): { command: string; 
 }
 
 /**
- * The command that runs the codegen watcher entry: the app's tsx run by this
- * Node, not through the package manager. `spfn dev` forwards its signals to the
- * watcher and waits for it to exit (`stopOnSignals`), and neither wrapper lets
- * it: `pnpm exec` forwards SIGTERM and exits at once, `npx` exits without
- * forwarding it. tsx relays each signal to the entry and exits when it does.
- * When the app's tsx cannot be resolved, the package manager runs it as before.
+ * Start the codegen watcher entry: a tsx CLI run by this Node, never through
+ * the package manager. `spfn dev` forwards its signals to the watcher and waits
+ * for it to exit (`stopOnSignals`), and neither wrapper lets it: `pnpm exec`
+ * forwards SIGTERM and exits at once, `npx` exits without forwarding it, and
+ * the watcher is orphaned. tsx relays each signal to the entry and exits when
+ * it does. With no tsx to run (`resolveTsxCli`), the watcher is not started:
+ * the session goes on without it, as when the watcher exits with an error.
+ * Returns the watcher process, or null when none was started.
  */
-function watcherCommand(pm: string, cwd: string, entry: string): { command: string; args: string[] }
+function startCodegenWatcher(pm: PackageManager, cwd: string, entry: string, env: NodeJS.ProcessEnv, stopping: () => boolean): ExecaChildProcess | null
 {
     const tsxCli = resolveTsxCli(cwd);
 
-    return tsxCli === undefined
-        ? tsxCommand(pm, cwd, entry)
-        : { command: process.execPath, args: [tsxCli, '--import', devLoader(cwd), entry] };
+    if (tsxCli === undefined)
+    {
+        logger.error(`[SPFN] Codegen watcher not started: no tsx is installed for the app or for the spfn CLI. Install it in the app: ${getAddCommand(pm, ['-D', 'tsx'])}`);
+        warnCodegenWatchDisabled();
+
+        return null;
+    }
+
+    const watcher = execa(process.execPath, [tsxCli, '--import', devLoader(cwd), entry], { cwd, stdio: 'inherit', reject: false, env });
+
+    watcher.then((result) =>
+    {
+        if (!stopping() && result.exitCode !== 0 && result.exitCode !== 130)
+        {
+            logger.error(`Codegen watcher exited with code ${result.exitCode}`);
+            warnCodegenWatchDisabled();
+        }
+    });
+
+    return watcher;
 }
 
-/** The bin of the tsx `cwd`'s package resolves, or undefined when it resolves none. */
+function warnCodegenWatchDisabled(): void
+{
+    logger.warn('[SPFN] Codegen watch is disabled for this session — the server keeps running. Run codegen manually after route changes.');
+}
+
+/**
+ * The tsx CLI the watcher runs under: the app's, else the one installed for
+ * the spfn CLI itself (the tsx `bin/spfn.js` re-spawns under), else undefined.
+ */
 function resolveTsxCli(cwd: string): string | undefined
 {
-    let manifest: string;
+    return tsxCliFrom(cwd) ?? tsxCliFrom(dirname(fileURLToPath(import.meta.url)));
+}
 
-    try
+/**
+ * The bin of the tsx in the nearest `node_modules` on the way up from `from`:
+ * Node's lookup of a package without `NODE_PATH`. Package-manager shims (a
+ * pnpm bin script, npx) point `NODE_PATH` at their store, which would hand the
+ * watcher a tsx nothing on that path declares.
+ */
+function tsxCliFrom(from: string): string | undefined
+{
+    let directory = from;
+
+    while (!existsSync(join(directory, 'node_modules/tsx/package.json')))
     {
-        manifest = createRequire(join(cwd, 'package.json')).resolve('tsx/package.json');
-    }
-    catch
-    {
-        return undefined;
+        if (dirname(directory) === directory)
+        {
+            return undefined;
+        }
+
+        directory = dirname(directory);
     }
 
-    const { bin } = JSON.parse(readFileSync(manifest, 'utf-8'));
+    const tsxDir = join(directory, 'node_modules/tsx');
+    const { bin } = JSON.parse(readFileSync(join(tsxDir, 'package.json'), 'utf-8'));
 
-    return join(dirname(manifest), typeof bin === 'string' ? bin : bin.tsx);
+    return join(tsxDir, typeof bin === 'string' ? bin : bin.tsx);
 }
 
 /** What `spfn dev` started, read when a signal arrives. */
@@ -449,23 +489,7 @@ writeFileSync(${JSON.stringify(readyFile)}, String(instance.config.port));
             // Start codegen watcher
             const startWatcher = () =>
             {
-                const watcher = watcherCommand(pm, cwd, watcherEntry);
-
-                watcherProcess = execa(watcher.command, watcher.args, {
-                    cwd,
-                    stdio: 'inherit',
-                    reject: false,
-                    env: watcherEnv,
-                });
-
-                watcherProcess.then((result) =>
-                {
-                    if (!stopping() && result.exitCode !== 0 && result.exitCode !== 130)
-                    {
-                        logger.error(`Codegen watcher exited with code ${result.exitCode}`);
-                        logger.warn('[SPFN] Codegen watch is disabled for this session — the server keeps running. Run codegen manually after route changes.');
-                    }
-                });
+                watcherProcess = startCodegenWatcher(pm, cwd, watcherEntry, watcherEnv, stopping);
             };
 
             // Start server process
@@ -577,23 +601,7 @@ writeFileSync(${JSON.stringify(readyFile)}, String(instance.config.port));
         // Start codegen watcher
         const startWatcher = () =>
         {
-            const watcher = watcherCommand(pm, cwd, watcherEntry);
-
-            watcherProcess = execa(watcher.command, watcher.args, {
-                cwd,
-                stdio: 'inherit',
-                reject: false,
-                env: watcherEnv,
-            });
-
-            watcherProcess.then((result) =>
-            {
-                if (!stopping() && result.exitCode !== 0 && result.exitCode !== 130)
-                {
-                    logger.error(`Codegen watcher exited with code ${result.exitCode}`);
-                    logger.warn('[SPFN] Codegen watch is disabled for this session — the server keeps running. Run codegen manually after route changes.');
-                }
-            });
+            watcherProcess = startCodegenWatcher(pm, cwd, watcherEntry, watcherEnv, stopping);
         };
 
         // Start Next.js

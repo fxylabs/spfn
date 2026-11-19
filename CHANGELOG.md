@@ -52,7 +52,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **spfn: `spfn dev` waits for its codegen watcher on SIGINT/SIGTERM (#353).** It sent the watcher
   SIGTERM and exited at once, through `pnpm exec`/`npx`, which do not wait (npx did not even
   forward the signal), and execa SIGKILLed the wrapper 5 s later: a `kill -TERM` of `spfn dev` left
-  the watcher running, writing into the project. The watcher now runs under the app's tsx directly;
+  the watcher running, writing into the project. The watcher now runs under a tsx CLI started by
+  Node directly — the app's, else the one installed beside `spfn` — and never through the package
+  manager: with no tsx found, it is not started, and one error says to install tsx in the app.
   `spfn dev` forwards every signal to it and exits once it has (a second signal makes it exit at
   once). The server and Next.js are still sent one SIGTERM and not waited for. A SIGKILL of
   `spfn dev` reaches none of them.

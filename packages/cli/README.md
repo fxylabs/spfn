@@ -139,6 +139,14 @@ Starts the SPFN server + Next.js (and a codegen watcher, which generates under
 (via a `.spfn/server-ready` signal file) before Next.js launches. Runs through `tsx`,
 no pre-build needed.
 
+The codegen watcher is run by Node under a `tsx` CLI found in a `node_modules` directory on
+the way up from the app (the app's own, which wins), else on the way up from where `spfn`
+itself is installed — the one `spfn`'s bin re-spawns under. `NODE_PATH` is not consulted. With
+neither, the watcher is not started: `spfn dev` logs `Codegen watcher not started: no tsx is
+installed for the app or for the spfn CLI. Install it in the app: pnpm add -D tsx` and goes on
+without it, as when the watcher fails to start. It is never run through `pnpm exec`/`npx`,
+which do not let `spfn dev` wait for it.
+
 On SIGINT or SIGTERM, `spfn dev` sends the server and Next.js SIGTERM, forwards the signal to
 the codegen watcher, and exits once the watcher has: the watcher finishes the generation it is
 running first, so the route map and contract never come from two generations. A second
