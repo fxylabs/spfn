@@ -531,7 +531,12 @@ writeFileSync(${JSON.stringify(readyFile)}, String(instance.config.port));
                     }
                 }
 
-                startServer();
+                // A stop that began during the awaits above starts no server.
+                if (!stopping())
+                {
+                    startServer();
+                }
+
                 isRestarting = false;
             };
 
@@ -670,7 +675,12 @@ writeFileSync(${JSON.stringify(readyFile)}, String(instance.config.port));
                 }
             }
 
-            startServer();
+            // A stop that began during the awaits above starts no server.
+            if (!stopping())
+            {
+                startServer();
+            }
+
             isRestarting = false;
         };
 
