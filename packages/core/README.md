@@ -528,7 +528,10 @@ The message says what tells the two copies apart, and the remedy follows from it
 - **Two installs** — the message names both files. Make `@spfn/core` resolve to one install for the
   app and every `@spfn` package (`pnpm why @spfn/core`). One version installed twice is this case
   too: pnpm installs a package once per resolution of its peers (`drizzle-orm`, `next`, `react`), and
-  a non-deduped `node_modules/@spfn/auth/node_modules/@spfn/core` is a second install.
+  a non-deduped `node_modules/@spfn/auth/node_modules/@spfn/core` is a second install. When one of
+  the two is the `spfn` CLI's own — a global or `npx`/`dlx` CLI in an app with its own
+  `@spfn/core`, which the CLI tells `markAppSourceProcess({ foreignRunner })` — the message says
+  so instead and names the app's own command (`pnpm exec spfn …`).
 - **One file, natively and as CommonJS** — the message names the file the chain of `require()`
   calls starts at, the one loaded as CommonJS — the app's own, or a dependency's when the chain
   starts there. A TypeScript file means the `spfn` CLI is older than

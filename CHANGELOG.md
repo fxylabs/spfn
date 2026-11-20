@@ -214,7 +214,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   generate` failed on it). `spfn env` loads `env.schemas` files the same way.
 - **BREAKING: spfn, @spfn/core: every `spfn db` command and the `spfn provision` runner refuse a
   second copy of `@spfn/core` (#349)**, with the message a server refuses with: a `.cjs` file that
-  requires `@spfn/*` from an entity or `server.config` stops the command, naming the file.
+  requires `@spfn/*` from an entity or `server.config` stops the command, naming the file. A `spfn`
+  that is not the app's own (global, `npx`/`dlx`) in an app with its own `@spfn/core` is refused
+  naming the CLI's install as the second one and the app's own command to run (`pnpm exec spfn …`);
+  `markAppSourceProcess({ foreignRunner })` carries that.
 - **BREAKING: @spfn/core: `markCodegenProcess()` is `markAppSourceProcess()` (#349)**, exported from
   `@spfn/core/codegen` and now also `@spfn/core/server`. It marks any process the spfn CLI started
   to load app source, and from the mark on a second copy is refused where it is recorded, as in a

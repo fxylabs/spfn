@@ -24,6 +24,11 @@ pnpm dlx spfn@beta <command>
 Or add it as a project dependency (`spfn init`/`spfn create` do this for you), then
 call it via `pnpm spfn <command>` / `npm run spfn:<script>`.
 
+Once the app has its own `@spfn/core`, run the app's own `spfn` for the commands that load its
+source (`db`, `codegen`, `build`, `contract`): a `spfn` from `npx`/`dlx` or a global install brings
+a second `@spfn/core`, and is refused, saying so and naming the command to run instead (`pnpm exec
+spfn db generate`).
+
 Requirements: Node.js 22.23.4+ (or 24.22.1+, 26.12.1+) in both modes, Next.js 16.4.5+ (App Router, `src/` dir),
 PostgreSQL 14+ (Redis optional). Next.js 15
 is not supported — see [the root README](../../README.md#what-do-i-need-installed).

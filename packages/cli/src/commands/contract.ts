@@ -2,6 +2,7 @@ import { Command } from 'commander';
 import { join } from 'path';
 import chalk from 'chalk';
 import { logger } from '../utils/logger.js';
+import { foreignRunner } from '../utils/foreign-runner.js';
 
 /**
  * Where the contract lives.
@@ -39,7 +40,7 @@ async function regenerate(cwd: string): Promise<void>
 
     // Loads the app's source: a second copy of @spfn/core is refused, where it is
     // recorded and after each router load.
-    markAppSourceProcess();
+    markAppSourceProcess({ foreignRunner: foreignRunner(cwd, process.argv.slice(2)) });
 
     const config = loadCodegenConfig(cwd);
     const generators = (await createGeneratorsFromConfig(config, cwd))

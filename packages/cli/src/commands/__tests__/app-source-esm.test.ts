@@ -32,12 +32,14 @@
  * | R6 | `spfn db push`, a drizzle.config.ts using            | the CLI's ESM read of a config drizzle-kit reads fine   |
  * |    | `__dirname`, with and without `--schema`             | failing silently: `--schema` dropped its schemaFilter   |
  * |    |                                                      | unsaid                                                  |
+ * | R7 | `spfn db generate` by a CLI whose @spfn/core is not  | the refusal advising to dedupe the app, when the cause  |
+ * |    | the app's (the app has its own install)              | is the CLI's install                                    |
  *
  * R3 and the provision runner's refusal are in `provision-runner.test.ts`.
  */
 
 import { spawnSync } from 'node:child_process';
-import { copyFileSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { copyFileSync, cpSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -165,6 +167,7 @@ it('R4 spfn db generate refuses a second install of @spfn/core', () =>
 
     expect(status, output).not.toBe(0);
     expect(output).toContain('Refusing a second copy of @spfn/core in this process: @spfn/core/logger was loaded from two installs');
+    expect(output).toContain('Two installs of @spfn/core: dedupe');
 });
 
 it('R5 spfn env list started under node --import tsx loads an env schema with top-level await', () =>
@@ -196,4 +199,24 @@ it('R6 spfn db push names a drizzle.config.ts it cannot read as ESM, with and wi
         + `spfn reads ${config} as ESM`);
     expect(withSchema.output).toContain(`drizzle.config.ts could not be loaded, so a schemaFilter it declares is not applied: ${config}: `
         + '__dirname is not defined in ES module scope');
+});
+
+it('R7 spfn db generate run by a CLI that is not the app\'s own names the CLI as the second install', () =>
+{
+    const appCore = join(appDir, 'node_modules/@spfn/core');
+
+    rmSync(appCore);
+    mkdirSync(appCore);
+    cpSync(join(coreRoot, 'dist'), join(appCore, 'dist'), { recursive: true });
+    copyFileSync(join(coreRoot, 'package.json'), join(appCore, 'package.json'));
+    symlinkSync(join(coreRoot, 'node_modules'), join(appCore, 'node_modules'), 'dir');
+    write('pnpm-lock.yaml', '');
+    writeEntity();
+
+    const { status, output } = dbGenerate();
+
+    expect(status, output).not.toBe(0);
+    expect(output).toContain(`Two installs of @spfn/core: this spfn CLI is not the app's own — it brings its @spfn/core (\`${realpathSync(coreRoot)}\`) `
+        + `beside the app's (\`${realpathSync(appCore)}\`). Run the app's own spfn: \`pnpm exec spfn db generate\``);
+    expect(output).not.toContain('dedupe');
 });

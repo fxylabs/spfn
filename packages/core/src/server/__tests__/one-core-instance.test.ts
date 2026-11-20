@@ -15,7 +15,7 @@
  * |    | installed before                                                     |                                                   |
  * | D1 | after boot: a copy of `dist/logger` built as another version, as ESM | the import throws the refusal, naming both        |
  * | D1 | after boot: a byte-identical `dist/logger` from another directory    | the import throws the refusal, naming both        |
- * |    | (a second install of the same version), as ESM                       | locations                                         |
+ * |    | (a second install of the same version), as ESM                       | locations, with the two-installs remedy alone     |
  * | D1 | after boot: `dist/logger` evaluated again as ESM, from its own path  | the import succeeds: the same copy again          |
  * | D1 | in vitest: a server booted from `dist/`, `vi.resetModules()`, and    | the re-import succeeds: the same copy again       |
  * |    | `dist/server` and `dist/logger` imported again                       |                                                   |
@@ -268,6 +268,8 @@ describe('one @spfn/core per process', () =>
             + `loaded from two installs: \`${loggerFile}\` (${version}) and `
             + `\`${join(cwd, 'same-version/dist/logger/index.js')}\` (${version}).`);
         expect(lines[1]).toContain('Two installs of @spfn/core: dedupe');
+        // Each install evaluated natively once: no file was evaluated twice
+        expect(lines[1]).not.toContain('evaluated natively more than once');
         expect(lines[2]).toBe(lines[1]);
         expect(lines[3]).toBe('SERVING 200');
     });

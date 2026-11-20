@@ -14,7 +14,7 @@ export {
 } from './core/config-loader';
 
 // Marks a process the spfn CLI started to load the app's source (see module-evaluation)
-export { markAppSourceProcess } from '../module-evaluation';
+export { markAppSourceProcess, type ForeignRunner } from '../module-evaluation';
 
 export type {
     RouteContractMapping,

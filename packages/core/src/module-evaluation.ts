@@ -85,7 +85,7 @@ interface Registry
     /** Set by `startServer`; from then on a second copy is refused where it is recorded. */
     server?: { logError: (message: string) => void; logged: Set<string> };
     /** Set by `markAppSourceProcess`: from then on a second copy is refused where it is recorded, and one found after a router load too. */
-    appSource?: { refuse: true };
+    appSource?: { refuse: true; foreignRunner?: ForeignRunner };
 }
 
 /** The wrapper argument vitest's module runner evaluates a module with; undeclared anywhere else. */
@@ -315,6 +315,19 @@ export function markServerProcess(logError: (message: string) => void): void
 }
 
 /**
+ * A runner — the spfn CLI — whose own `@spfn/core` is not the app's: a CLI
+ * installed globally or run by `npx`/`dlx` in an app with its own core. Two
+ * installs, one of them under `location`, are then the runner's doing, and
+ * `remedy` says what to do instead of deduping the app.
+ */
+export interface ForeignRunner
+{
+    /** The root of the runner's own `@spfn/core` install, a real path. */
+    location: string;
+    remedy: string;
+}
+
+/**
  * Marks this process as one the spfn CLI started to load the app's source: a
  * second copy of an entry is then refused where it is recorded, as in a server,
  * and one `codegenSecondCopy` finds after a router load is refused rather than
@@ -324,11 +337,12 @@ export function markServerProcess(logError: (message: string) => void): void
  * `spfn dev` watcher entry; the mark is not an environment variable, so no
  * process they spawn (the dev server, `next`, `drizzle-kit`) inherits it.
  *
+ * @param options.foreignRunner set when the caller's own `@spfn/core` is not the app's
  * @throws Error when a second copy was recorded before the mark
  */
-export function markAppSourceProcess(): void
+export function markAppSourceProcess(options: { foreignRunner?: ForeignRunner } = {}): void
 {
-    registry().appSource ??= { refuse: true };
+    registry().appSource ??= { refuse: true, foreignRunner: options.foreignRunner };
 
     refuseCopiesRecordedBefore();
 }
@@ -427,13 +441,31 @@ function describeEvaluator(evaluation: Evaluation): string
     return `${EVALUATOR_NAMES[evaluation.evaluator]}${namespace}${requiredBy}`;
 }
 
+/** Whether the file at `location` is inside the directory `root`, on either separator. */
+function isInside(location: string, root: string): boolean
+{
+    return location.startsWith(`${root}/`) || location.startsWith(`${root}\\`);
+}
+
+/** What to do about two installs: the runner's, when one of them is a foreign runner's own; else dedupe. */
+function twoInstallsRemedy(splits: Evaluation[][]): string
+{
+    const runner = registry().appSource?.foreignRunner;
+    const runnersOwn = runner !== undefined && splits.some(evaluations =>
+        evaluations.some(evaluation => isInside(evaluation.location, runner.location)));
+
+    return runnersOwn
+        ? `Two installs of @spfn/core: ${runner.remedy}`
+        : 'Two installs of @spfn/core: dedupe — make @spfn/core resolve to one install for the app and every '
+            + '@spfn package (`pnpm why @spfn/core`; a peer such as drizzle-orm, next or react resolved differently '
+            + 'for two dependents installs it twice).';
+}
+
 /** What to do, by what tells the copies apart: their installs, or the evaluators beside each other. */
 function remedies(splits: Evaluation[][]): string[]
 {
     const twoInstalls = splits.some(evaluations => new Set(evaluations.map(evaluation => evaluation.location)).size > 1)
-        ? ['Two installs of @spfn/core: dedupe — make @spfn/core resolve to one install for the app and every '
-            + '@spfn package (`pnpm why @spfn/core`; a peer such as drizzle-orm, next or react resolved differently '
-            + 'for two dependents installs it twice).']
+        ? [twoInstallsRemedy(splits)]
         : [];
     const byEvaluator = splits.flatMap(evaluations => evaluatorRemedies(evaluations));
 
@@ -453,7 +485,8 @@ function evaluatorRemedies(evaluations: Evaluation[]): string[]
     const bundle = evaluators.has('bundle') && evaluators.size > 1
         ? ['A bundled copy of @spfn/core runs beside a loaded one: bundle every importer of @spfn/core, or none.']
         : [];
-    const repeated = evaluations.filter(evaluation => evaluation.evaluator === 'esm').length > 1
+    const native = evaluations.filter(evaluation => evaluation.evaluator === 'esm').map(evaluation => evaluation.location);
+    const repeated = native.length > new Set(native).size
         ? ['One file was evaluated natively more than once, which Node does only for an import URL that differs by '
             + 'its query: import @spfn/* without a query. If no code of yours does, the codegen loader tagged a '
             + 'package as project source — report it.']
