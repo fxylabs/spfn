@@ -314,7 +314,7 @@ function applyRateLimit(config?: ServerConfig): void
         failClosed: rl?.default?.failClosed ?? env.RATE_LIMIT_FAIL_CLOSED,
     };
 
-    const globalRateLimit = defineMiddleware('rateLimit', rateLimit(defaultPolicy));
+    const globalRateLimit = defineMiddleware('rateLimit', rateLimit(defaultPolicy).handler);
 
     config.middlewares = [globalRateLimit, ...(config.middlewares ?? [])];
 

@@ -30,9 +30,10 @@ describe('monitorRouter under a router-level skipper', () =>
         expect(routes).toHaveLength(Object.keys(monitorRouter.routes).length);
         for (const route of routes)
         {
-            expect(route.middlewares.filter(mw => mw.name).map(mw => `${mw.source}:${mw.name}`)).toEqual([
+            expect(route.middlewares.map(mw => `${mw.source}:${mw.name}`)).toEqual([
                 'router:skipper',
                 'route:auth',
+                'route:role',
             ]);
         }
     });

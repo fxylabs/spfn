@@ -132,6 +132,18 @@ the inherited `auth`. Mount it with `.packages()`; as a plain entry it is served
 but its routes become the app's own to `AppRouter` and the route map. See core's route README,
 "Skipping & auto-skip".
 
+The guards that take arguments — `requirePermissions(...)`, `requireAnyPermission(...)`,
+`requireRole(...)`, `roleGuard(...)`, `requireOpsScope(...)`, `requireMachineScope(...)`,
+`opsOrUser(...)`, `signedTokenAuth(...)` — are middleware factories: each call returns a named
+middleware, named after the factory (`'permission'`, `'anyPermission'`, `'role'`, `'roleGuard'`,
+`'opsScope'`, `'machineScope'`, `'opsOrUser'`, `'signedTokenAuth'`). A call can sit on a router's
+`.use([...])`, and calls are **never merged by name**: a router's `requirePermissions('a')` and a
+route's `requirePermissions('b')` both run, as do a router's `opsOrUser({ opsScopes: ['read'], … })`
+and a route's `opsOrUser({ opsScopes: ['write'], … })`. **A route can `.skip([...])` such a guard by
+its factory name** — `.skip(['permission'])` removes every `requirePermissions(...)` it inherits,
+the same power `.skip(['auth'])` has over `authenticate`. A call's result is not a Hono handler;
+outside the route DSL pass `.handler` (`app.get(path, authenticate.handler, requireRole('admin').handler, …)`).
+
 ### 3. Next.js interceptor — RPC proxy route
 
 The interceptor handles session cookies, JWT signing, and key management automatically.
@@ -6469,7 +6481,9 @@ message — no error class and no wire message is introduced here.
 
 `opsOrUser` carries `skips: ['auth']`, so a route using it auto-skips the server-level
 `auth` middleware exactly as `optionalAuth` and `opsTokenAuth` do. No `.skip(['auth'])` by
-hand.
+hand. Each call is its own check: under a router's `opsOrUser({ opsScopes: ['read'], … })`, a
+route's `opsOrUser({ opsScopes: ['write'], … })` still runs, so a read-only ops token is refused
+there. `.skip(['opsOrUser'])` removes every call a route inherits.
 
 **Cookies.** The backend never reads them. A browser session reaches a route as a Bearer
 token because `@spfn/auth/nextjs/api` forwards it as one, so through the app a console

@@ -169,7 +169,7 @@ describe('the limiter when the cache fails mid-request', () =>
     it('counts locally instead of letting the error escape as a 500', async () =>
     {
         evalMock.mockRejectedValue(new Error('READONLY You can\'t write against a read only replica.'));
-        const limiter = rateLimit({ limit: 2, windowMs: 60_000 });
+        const limiter = rateLimit({ limit: 2, windowMs: 60_000 }).handler;
         const ctx = () => makeCtx({ 'x-forwarded-for': '1.2.3.4' });
 
         await limiter(ctx(), vi.fn().mockResolvedValue(undefined));
@@ -184,14 +184,14 @@ describe('the limiter when the cache fails mid-request', () =>
         evalMock.mockRejectedValue(new Error('connection lost'));
         const next = vi.fn();
 
-        await expect(rateLimit({ limit: 5, windowMs: 60_000, failClosed: true })(makeCtx(), next))
+        await expect(rateLimit({ limit: 5, windowMs: 60_000, failClosed: true }).handler(makeCtx(), next))
             .rejects.toBeInstanceOf(TooManyRequestsError);
         expect(next).not.toHaveBeenCalled();
     });
 
     it('goes back to the cache once it recovers', async () =>
     {
-        const limiter = rateLimit({ limit: 5, windowMs: 60_000 });
+        const limiter = rateLimit({ limit: 5, windowMs: 60_000 }).handler;
         const ctx = () => makeCtx({ 'x-forwarded-for': '1.2.3.4' });
 
         evalMock.mockRejectedValueOnce(new Error('down'));

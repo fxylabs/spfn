@@ -37,7 +37,7 @@ function limitedApp(): Hono
     const app = new Hono();
 
     app.onError(ErrorHandler({ enableLogging: false }));
-    app.post('/_auth/mfa/verify', rateLimit({ limit: LIMIT, windowMs: 60_000 }), c => c.json({ ip: getClientIp(c) }));
+    app.post('/_auth/mfa/verify', rateLimit({ limit: LIMIT, windowMs: 60_000 }).handler, c => c.json({ ip: getClientIp(c) }));
 
     return app;
 }

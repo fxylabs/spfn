@@ -245,6 +245,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   No other registration records one: none without user verification, and adding a passkey to an
   enrolled account does not refresh the window. `currentPassword` stays required on that password
   change. Not breaking.
+- **BREAKING: @spfn/core, @spfn/auth: a middleware factory call returns a named middleware; calls
+  are never merged by name (spfn/spfn#168).** A call of a factory made by
+  `defineMiddlewareFactory(name, factory, options?)` returns `{ name, _name, handler, skips?, instance: true }`
+  instead of the inner Hono handler. `defineMiddlewareFactory` takes the same `options` as
+  `defineMiddleware`, and `skips` declared on the factory apply to every call (they were dropped
+  before). `defineMiddleware(name, fn, options?)` no longer guesses from `fn`'s parameter count
+  whether `fn` is a factory: `fn` is always the handler, so a one-parameter
+  `async (c) => c.json(…)` answers its response. **Rename** every `defineMiddleware(name, (...args) =>
+  handler)` to `defineMiddlewareFactory(name, (...args) => handler)` — the old call is now a type
+  error (the factory returns a handler, not a response). Every call carries the factory's name: `.skip(['permission'])` and another middleware's
+  `skips: ['permission']` remove every `requirePermissions(...)` a route inherits — which also means
+  **a route can now `.skip([...])` an authorization guard by its factory name** (`'permission'`,
+  `'anyPermission'`, `'role'`, `'roleGuard'`, `'opsScope'`, `'machineScope'`, `'opsOrUser'`,
+  `'tenancyGuard'`, `'rateLimit'`, …), the same power `.skip(['auth'])` has. A call's result is never
+  merged with anything by name: a router's `requirePermissions('a')` and a route's
+  `requirePermissions('b')` both run, and so do two calls of a factory that returns one cached handler;
+  the same result object at two levels runs once. A call can sit
+  in a router's `.use([...])`. `opsOrUser(...)` and `signedTokenAuth(...)` are now such factories
+  (with `skips: ['auth']`), so a router's `opsOrUser({ opsScopes: ['read'], … })` no longer drops a
+  route's `opsOrUser({ opsScopes: ['write'], … })` — before, only the router's check ran and a
+  read-only ops token passed the write route. `tenancy.guard(...)` is typed as returning
+  `NamedMiddleware<'tenancyGuard'>`. `rateLimitPolicy(...)` is unchanged (one counter per policy name
+  stays intended). A `rateLimit(...)` call can now sit on a router; limiters that share a
+  scope count against one key, so an equal `rateLimit(...)` on a route below counts each request
+  twice — as the global default and a route-level `rateLimit(...)` already did. Replace the
+  inherited one with `.skip(['rateLimit'])`, or give one its own `scope`, or use `rateLimitPolicy`.
+  **To migrate:** pass `.handler` where a call result goes to Hono (`app.use`,
+  `app.get(path, …)`, `combine`, a hand-written chain), or put it in `.use([...])` directly; a
+  `defineMiddleware(name, factory(args))` wrapper becomes `factory(args)`.
+  @spfn/auth at this release needs the core of the same release: it reads `.handler` from factory
+  calls and passes `{ skips }` to `defineMiddlewareFactory`. Core 0.4.0-beta.1 satisfies auth's
+  current peer range and would give it `undefined` handlers (`opsOrUser` answers 500 to every
+  caller its first check admits) and drop the `skips` of `opsOrUser`/`signedTokenAuth`, so the
+  release raises the `@spfn/core` peer floor of @spfn/auth — the only package that calls a core
+  middleware factory — to that core.
+
 - **BREAKING (security-relevant): @spfn/core: a middleware declaring `skips` now removes what it
   names when it is attached to a router (spfn/spfn#165).** It was ignored on `defineRouter(...).use([...])`
   and honoured only in a route's own `.use()`; now it removes the listed names from what that

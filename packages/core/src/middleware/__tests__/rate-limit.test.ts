@@ -6,6 +6,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { Hono } from 'hono';
 
 const evalMock = vi.fn();
 let cacheClient: { eval: typeof evalMock } | undefined = { eval: evalMock };
@@ -22,6 +23,7 @@ import {
 } from '../rate-limit';
 import { getClientIp } from '../client-ip';
 import { TooManyRequestsError } from '../../errors';
+import { defineRouter, registerRoutes, route } from '../../route';
 
 function makeCtx(headers: Record<string, string> = {})
 {
@@ -58,7 +60,7 @@ describe('rateLimit middleware', () =>
         evalMock.mockResolvedValue([1, 60_000]);
         const next = vi.fn().mockResolvedValue(undefined);
 
-        await rateLimit({ limit: 5, windowMs: 60_000 })(makeCtx({ 'x-forwarded-for': '1.2.3.4' }), next);
+        await rateLimit({ limit: 5, windowMs: 60_000 }).handler(makeCtx({ 'x-forwarded-for': '1.2.3.4' }), next);
 
         expect(next).toHaveBeenCalledTimes(1);
     });
@@ -69,7 +71,7 @@ describe('rateLimit middleware', () =>
         const ctx = makeCtx({ 'x-forwarded-for': '1.2.3.4' }) as never as { _setHeaders: Record<string, string> };
         const next = vi.fn();
 
-        await expect(rateLimit({ limit: 5, windowMs: 60_000 })(ctx as never, next))
+        await expect(rateLimit({ limit: 5, windowMs: 60_000 }).handler(ctx as never, next))
             .rejects.toBeInstanceOf(TooManyRequestsError);
         expect(next).not.toHaveBeenCalled();
         expect(ctx._setHeaders['Retry-After']).toBe('30');
@@ -78,7 +80,7 @@ describe('rateLimit middleware', () =>
     it('counts in the process when the cache is unavailable, rather than not counting', async () =>
     {
         cacheClient = undefined;
-        const limiter = rateLimit({ limit: 2, windowMs: 60_000 });
+        const limiter = rateLimit({ limit: 2, windowMs: 60_000 }).handler;
         const ctx = () => makeCtx({ 'x-forwarded-for': '1.2.3.4' });
 
         await limiter(ctx(), vi.fn().mockResolvedValue(undefined));
@@ -94,7 +96,7 @@ describe('rateLimit middleware', () =>
         cacheClient = undefined;
         const next = vi.fn();
 
-        await expect(rateLimit({ limit: 5, windowMs: 60_000, failClosed: true })(makeCtx(), next))
+        await expect(rateLimit({ limit: 5, windowMs: 60_000, failClosed: true }).handler(makeCtx(), next))
             .rejects.toBeInstanceOf(TooManyRequestsError);
         expect(next).not.toHaveBeenCalled();
     });
@@ -106,7 +108,7 @@ describe('rateLimit middleware', () =>
         const next = vi.fn();
 
         await expect(
-            rateLimit({ limit: 5, windowMs: 60_000, by: () => ['1.2.3.4', 'user@example.com'] })(makeCtx(), next),
+            rateLimit({ limit: 5, windowMs: 60_000, by: () => ['1.2.3.4', 'user@example.com'] }).handler(makeCtx(), next),
         ).rejects.toBeInstanceOf(TooManyRequestsError);
         expect(next).not.toHaveBeenCalled();
         expect(evalMock).toHaveBeenCalledTimes(2);
@@ -122,7 +124,7 @@ describe('rateLimit middleware', () =>
                 limit: 5,
                 windowMs: 60_000,
                 by: () => [{ key: 'ip:1.2.3.4', limit: 100 }, 'acct:a@b.com'],
-            })(makeCtx(), next),
+            }).handler(makeCtx(), next),
         ).rejects.toBeInstanceOf(TooManyRequestsError);
 
         // IP dim (limit 100) allowed at count 6; account dim (top-level limit 5) tripped.
@@ -139,7 +141,7 @@ describe('rateLimit middleware', () =>
             limit: 5,
             windowMs: 60_000,
             by: () => [{ key: 'ip:1.2.3.4', limit: 100 }],
-        })(makeCtx(), next);
+        }).handler(makeCtx(), next);
 
         expect(next).toHaveBeenCalledTimes(1); // 6 <= 100
     });
@@ -235,6 +237,50 @@ describe('rateLimitPolicy named policies', () =>
 
         setRateLimitPolicies(undefined);
         expect(getRateLimitPolicy('p')).toBeUndefined();
+    });
+});
+
+describe('rateLimit stacked on one route', () =>
+{
+    beforeEach(() =>
+    {
+        cacheClient = undefined;
+        resetMemoryRateLimitStore();
+    });
+
+    /** The statuses of four requests to `/x` of `router`, which stacks limiters on it. */
+    async function statuses(router: ReturnType<typeof defineRouter>): Promise<number[]>
+    {
+        const app = new Hono();
+        app.onError((error, c) => c.json({}, error instanceof TooManyRequestsError ? 429 : 500));
+        registerRoutes(app, router, []);
+        const result: number[] = [];
+        for (let i = 0; i < 4; i++)
+        {
+            result.push((await app.request('/x')).status);
+        }
+
+        return result;
+    }
+
+    const limit = () => rateLimit({ limit: 3, windowMs: 60_000 });
+    const ok = async () => ({ ok: true });
+
+    it('counts a request once per limiter sharing a scope, as the README states', async () =>
+    {
+        expect(await statuses(defineRouter({ x: route.get('/x').use([limit()]).handler(ok) }).use([limit()])))
+            .toEqual([200, 429, 429, 429]);
+    });
+
+    it('counts it once when the route skips the inherited limiter for its own, or scopes its own apart', async () =>
+    {
+        expect(await statuses(defineRouter({ x: route.get('/x').skip(['rateLimit']).use([limit()]).handler(ok) }).use([limit()])))
+            .toEqual([200, 200, 200, 429]);
+
+        resetMemoryRateLimitStore();
+        const own = rateLimit({ limit: 3, windowMs: 60_000, scope: 'x-own' });
+        expect(await statuses(defineRouter({ x: route.get('/x').use([own]).handler(ok) }).use([limit()])))
+            .toEqual([200, 200, 200, 429]);
     });
 });
 

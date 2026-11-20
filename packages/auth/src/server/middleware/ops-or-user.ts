@@ -30,12 +30,13 @@
  * - **A refusal is the selected branch's own refusal.** No error class and no
  *   wire message is introduced here; whichever guard refused answers exactly
  *   what it answers on a single-credential route.
- * - **It is a `NamedMiddleware`, not a `defineMiddleware` factory.** A factory
- *   produces a bare handler, and `register-routes` reads `skips` only off a
- *   `NamedMiddleware` object — so a factory form would put `.skip(['auth'])`
- *   back on every route, which is the hand-written workaround this exists to
- *   remove. Carrying `skips: ['auth']` makes the global `auth` middleware
- *   auto-skip, exactly as `optionalAuth` and `opsTokenAuth` do.
+ * - **Every call is its own check.** It is a `defineMiddlewareFactory`
+ *   factory: each call returns a named middleware carrying
+ *   `skips: ['auth']`, so the global `auth` middleware auto-skips exactly as
+ *   it does for `optionalAuth` and `opsTokenAuth`. A call's result is never
+ *   merged with another by name, so a router's `opsOrUser(read)` and a
+ *   route's `opsOrUser(write)` both run — the route's stricter check is not
+ *   dropped. `.skip(['opsOrUser'])` removes every call.
  *
  * The backend never reads cookies. A browser session reaches here as a Bearer
  * token because `@spfn/auth/nextjs/api` forwards it as one; a request carrying
@@ -57,7 +58,7 @@
  */
 
 import type { MiddlewareHandler } from 'hono';
-import type { NamedMiddleware } from '@spfn/core/route';
+import { defineMiddlewareFactory } from '@spfn/core/route';
 
 import { isOpsToken } from '../services/ops-token.service';
 import { authenticate } from './authenticate';
@@ -87,7 +88,7 @@ export interface OpsOrUserConfig
  * @throws Error when `opsScopes` is empty, or when neither `roles` nor
  *   `permissions` names anything.
  */
-export function opsOrUser(config: OpsOrUserConfig): NamedMiddleware<'opsOrUser'>
+export const opsOrUser = defineMiddlewareFactory('opsOrUser', (config: OpsOrUserConfig): MiddlewareHandler =>
 {
     const roles = config.roles ?? [];
     const permissions = config.permissions ?? [];
@@ -102,20 +103,17 @@ export function opsOrUser(config: OpsOrUserConfig): NamedMiddleware<'opsOrUser'>
         throw new Error('opsOrUser: give roles, permissions, or both — a user session would otherwise be admitted unchecked.');
     }
 
-    // The guards are factories returning bare handlers: built once here, not
-    // per request.
-    const ops = chain([opsTokenAuth.handler, requireOpsScope(...config.opsScopes)]);
+    // The guards are built once here, not per request.
+    const ops = chain([opsTokenAuth.handler, requireOpsScope(...config.opsScopes).handler]);
     const user = chain([
         authenticate.handler,
-        ...(roles.length > 0 ? [requireRole(...roles)] : []),
-        ...(permissions.length > 0 ? [requirePermissions(...permissions)] : []),
+        ...(roles.length > 0 ? [requireRole(...roles).handler] : []),
+        ...(permissions.length > 0 ? [requirePermissions(...permissions).handler] : []),
     ]);
 
-    const handler: MiddlewareHandler = (c, next) =>
+    return (c, next) =>
         isOpsToken(bearerOf(c.req.header('Authorization'))) ? ops(c, next) : user(c, next);
-
-    return { name: 'opsOrUser', _name: 'opsOrUser', handler, skips: ['auth'] };
-}
+}, { skips: ['auth'] });
 
 /**
  * The bearer as presented, or '' — never null, so the shape test in the

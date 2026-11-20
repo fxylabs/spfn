@@ -8,9 +8,10 @@
 
 import { describe, it, expect, expectTypeOf, beforeAll, afterAll, beforeEach, vi } from 'vitest';
 import { Hono } from 'hono';
-import type { Context, MiddlewareHandler } from 'hono';
+import type { Context } from 'hono';
 import { UnauthorizedError } from '../../../errors';
 import { runInTransaction, Transactional } from '../../transaction';
+import type { NamedMiddleware } from '../../../route/define-middleware';
 import type { TenancyGuardOptions } from '../tenancy';
 import { createTenancyDb } from './tenancy-db';
 import { setAuthorize, tenancy, TENANCY_SCHEMA } from './tenancy-fixtures';
@@ -74,8 +75,8 @@ describe('tenancy.guard and tenancy.of', () =>
     {
         const app = createApp();
 
-        app.get('/w/:workspaceId/notes', tenancy.guard({ param: 'workspaceId' }), handler);
-        app.get('/optional/:workspaceId?', tenancy.guard({ param: 'workspaceId' }), handler);
+        app.get('/w/:workspaceId/notes', tenancy.guard({ param: 'workspaceId' }).handler, handler);
+        app.get('/optional/:workspaceId?', tenancy.guard({ param: 'workspaceId' }).handler, handler);
 
         return app;
     }
@@ -84,7 +85,7 @@ describe('tenancy.guard and tenancy.of', () =>
     {
         const app = createApp();
 
-        app.get('/me', tenancy.guard({ resolve }), handler);
+        app.get('/me', tenancy.guard({ resolve }).handler, handler);
 
         return app;
     }
@@ -144,7 +145,7 @@ describe('tenancy.guard and tenancy.of', () =>
     {
         const app = createApp();
 
-        app.get('/w/:workspaceId/notes', tenancy.guard({ param: 'workspaceId' }), async (c) =>
+        app.get('/w/:workspaceId/notes', tenancy.guard({ param: 'workspaceId' }).handler, async (c) =>
             c.json(await noteRepository.list(9)));
 
         const response = await app.request('/w/7/notes');
@@ -182,8 +183,8 @@ describe('tenancy.guard and tenancy.of', () =>
             return c.json({ rows: ids(rows), tenant: (await noteRepository.session()).tenant });
         };
 
-        app.get('/guard-first/:workspaceId', tenancy.guard({ param: 'workspaceId' }), Transactional(), respond);
-        app.get('/transaction-first/:workspaceId', Transactional(), tenancy.guard({ param: 'workspaceId' }), respond);
+        app.get('/guard-first/:workspaceId', tenancy.guard({ param: 'workspaceId' }).handler, Transactional(), respond);
+        app.get('/transaction-first/:workspaceId', Transactional(), tenancy.guard({ param: 'workspaceId' }).handler, respond);
 
         for (const path of ['/guard-first/7', '/transaction-first/7'])
         {
@@ -206,7 +207,7 @@ describe('tenancy.guard and tenancy.of', () =>
 
         const app = createApp();
 
-        app.get('/w/:workspaceId/notes', tenancy.guard({ param: 'workspaceId' }), async (c) =>
+        app.get('/w/:workspaceId/notes', tenancy.guard({ param: 'workspaceId' }).handler, async (c) =>
         {
             await delay(tenancy.of(c) === 7 ? 5 : 30);
 
@@ -270,7 +271,7 @@ describe('tenancy.guard and tenancy.of', () =>
 
         const app = createApp();
 
-        app.patch('/w/:workspaceId', tenancy.guard({ param: 'workspaceId' }), Transactional(), rename);
+        app.patch('/w/:workspaceId', tenancy.guard({ param: 'workspaceId' }).handler, Transactional(), rename);
 
         const response = await app.request('/w/7', { method: 'PATCH' });
 
@@ -289,7 +290,7 @@ describe('tenancy.guard and tenancy.of', () =>
 
         const app = createApp();
 
-        app.patch('/w/:workspaceId', Transactional(), tenancy.guard({ param: 'workspaceId' }), rename);
+        app.patch('/w/:workspaceId', Transactional(), tenancy.guard({ param: 'workspaceId' }).handler, rename);
 
         const response = await app.request('/w/7', { method: 'PATCH' });
 
@@ -304,7 +305,7 @@ describe('tenancy.guard and tenancy.of', () =>
 
         const app = createApp();
 
-        app.get('/w/:workspaceId', tenancy.guard({ param: 'workspaceId' }), async (c) =>
+        app.get('/w/:workspaceId', tenancy.guard({ param: 'workspaceId' }).handler, async (c) =>
             c.json(await runInTransaction(async () =>
             {
                 const session = await noteRepository.session();
@@ -327,7 +328,7 @@ describe('tenancy.guard and tenancy.of', () =>
 
         const app = createApp();
 
-        app.get('/w/:workspaceId', tenancy.guard({ param: 'workspaceId' }), async (c) =>
+        app.get('/w/:workspaceId', tenancy.guard({ param: 'workspaceId' }).handler, async (c) =>
             c.json(ids(await runInTransaction(() => noteRepository.list(tenancy.of(c))))));
 
         const response = await app.request('/w/7');
@@ -367,6 +368,6 @@ describe('tenancy.guard and tenancy.of', () =>
         expectTypeOf<{ param: string; resolve: () => number }>().not.toMatchTypeOf<TenancyGuardOptions>();
         expectTypeOf<{}>().not.toMatchTypeOf<TenancyGuardOptions>();
         expectTypeOf<{ param: string }>().toMatchTypeOf<TenancyGuardOptions>();
-        expectTypeOf(tenancy.guard).returns.toEqualTypeOf<MiddlewareHandler>();
+        expectTypeOf(tenancy.guard).returns.toEqualTypeOf<NamedMiddleware<'tenancyGuard'>>();
     });
 });

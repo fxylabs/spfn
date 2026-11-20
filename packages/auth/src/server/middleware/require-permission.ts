@@ -10,7 +10,7 @@
  */
 
 import type { Context, Next } from 'hono';
-import { defineMiddleware } from '@spfn/core/route';
+import { defineMiddlewareFactory } from '@spfn/core/route';
 import { ForbiddenError } from '@spfn/core/errors';
 import { InsufficientPermissionsError } from '@spfn/auth/errors';
 import { getAuth, hasAllPermissions, hasAnyPermission, authLogger } from '@spfn/auth/server';
@@ -47,7 +47,7 @@ import { getAuth, hasAllPermissions, hasAnyPermission, authLogger } from '@spfn/
  *   .handler(async (c) => { ... });
  * ```
  */
-export const requirePermissions = defineMiddleware('permission',
+export const requirePermissions = defineMiddlewareFactory('permission',
     (...permissionNames: string[]) => async (c: Context, next: Next) =>
     {
         const auth = getAuth(c);
@@ -111,7 +111,7 @@ export const requirePermissions = defineMiddleware('permission',
  *   .handler(async (c) => { ... });
  * ```
  */
-export const requireAnyPermission = defineMiddleware('anyPermission',
+export const requireAnyPermission = defineMiddlewareFactory('anyPermission',
     (...permissionNames: string[]) => async (c: Context, next: Next) =>
     {
         const auth = getAuth(c);

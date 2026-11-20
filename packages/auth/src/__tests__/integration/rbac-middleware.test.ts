@@ -105,7 +105,7 @@ describe.skipIf(!dbAvailable)('RBAC Middleware', () =>
                     c.set('auth', { user: superadmin, userId: String(superadmin.id), keyId: 'test-key', role: null, locale: 'en', scheme: 'bearer' } as never);
                     await next();
                 },
-                requirePermissions('user:read'),
+                requirePermissions('user:read').handler,
                 (c) => c.json({ success: true }),
             );
 
@@ -128,7 +128,7 @@ describe.skipIf(!dbAvailable)('RBAC Middleware', () =>
                     c.set('auth', { user: user, userId: String(user.id), keyId: 'test-key', role: null, locale: 'en', scheme: 'bearer' } as never);
                     await next();
                 },
-                requirePermissions('user:delete'), // user role doesn't have this
+                requirePermissions('user:delete').handler, // user role doesn't have this
                 (c) => c.json({ success: true }),
             );
 
@@ -148,7 +148,7 @@ describe.skipIf(!dbAvailable)('RBAC Middleware', () =>
                     c.set('auth', { user: admin, userId: String(admin.id), keyId: 'test-key', role: null, locale: 'en', scheme: 'bearer' } as never);
                     await next();
                 },
-                requirePermissions('user:read', 'user:write'), // admin has both
+                requirePermissions('user:read', 'user:write').handler, // admin has both
                 (c) => c.json({ success: true }),
             );
 
@@ -167,7 +167,7 @@ describe.skipIf(!dbAvailable)('RBAC Middleware', () =>
                     c.set('auth', { user: admin, userId: String(admin.id), keyId: 'test-key', role: null, locale: 'en', scheme: 'bearer' } as never);
                     await next();
                 },
-                requirePermissions('user:read', 'rbac:permission:manage'), // admin doesn't have rbac:permission:manage
+                requirePermissions('user:read', 'rbac:permission:manage').handler, // admin doesn't have rbac:permission:manage
                 (c) => c.json({ success: true }),
             );
 
@@ -178,7 +178,7 @@ describe.skipIf(!dbAvailable)('RBAC Middleware', () =>
         it('should return 403 when not authenticated', async () =>
         {
             app.get('/protected',
-                requirePermissions('user:read'),
+                requirePermissions('user:read').handler,
                 (c) => c.json({ success: true }),
             );
 
@@ -200,7 +200,7 @@ describe.skipIf(!dbAvailable)('RBAC Middleware', () =>
                     c.set('auth', { user: user, userId: String(user.id), keyId: 'test-key', role: null, locale: 'en', scheme: 'bearer' } as never);
                     await next();
                 },
-                requireAnyPermission('auth:self:manage', 'admin:access'), // user has auth:self:manage
+                requireAnyPermission('auth:self:manage', 'admin:access').handler, // user has auth:self:manage
                 (c) => c.json({ success: true }),
             );
 
@@ -219,7 +219,7 @@ describe.skipIf(!dbAvailable)('RBAC Middleware', () =>
                     c.set('auth', { user: user, userId: String(user.id), keyId: 'test-key', role: null, locale: 'en', scheme: 'bearer' } as never);
                     await next();
                 },
-                requireAnyPermission('user:delete', 'rbac:role:manage'), // user has neither
+                requireAnyPermission('user:delete', 'rbac:role:manage').handler, // user has neither
                 (c) => c.json({ success: true }),
             );
 
@@ -241,7 +241,7 @@ describe.skipIf(!dbAvailable)('RBAC Middleware', () =>
                     c.set('auth', { user: admin, userId: String(admin.id), keyId: 'test-key', role: 'admin', locale: 'en', scheme: 'bearer' } as never);
                     await next();
                 },
-                requireRole('admin', 'superadmin'),
+                requireRole('admin', 'superadmin').handler,
                 (c) => c.json({ success: true }),
             );
 
@@ -260,7 +260,7 @@ describe.skipIf(!dbAvailable)('RBAC Middleware', () =>
                     c.set('auth', { user: user, userId: String(user.id), keyId: 'test-key', role: null, locale: 'en', scheme: 'bearer' } as never);
                     await next();
                 },
-                requireRole('admin', 'superadmin'),
+                requireRole('admin', 'superadmin').handler,
                 (c) => c.json({ success: true }),
             );
 
@@ -279,7 +279,7 @@ describe.skipIf(!dbAvailable)('RBAC Middleware', () =>
                     c.set('auth', { user: superadmin, userId: String(superadmin.id), keyId: 'test-key', role: 'superadmin', locale: 'en', scheme: 'bearer' } as never);
                     await next();
                 },
-                requireRole('admin', 'superadmin'),
+                requireRole('admin', 'superadmin').handler,
                 (c) => c.json({ success: true }),
             );
 
@@ -290,7 +290,7 @@ describe.skipIf(!dbAvailable)('RBAC Middleware', () =>
         it('should deny access when not authenticated', async () =>
         {
             app.get('/admin-dashboard',
-                requireRole('admin'),
+                requireRole('admin').handler,
                 (c) => c.json({ success: true }),
             );
 
@@ -312,8 +312,8 @@ describe.skipIf(!dbAvailable)('RBAC Middleware', () =>
                     c.set('auth', { user: superadmin, userId: String(superadmin.id), keyId: 'test-key', role: 'superadmin', locale: 'en', scheme: 'bearer' } as never);
                     await next();
                 },
-                requireRole('admin', 'superadmin'),
-                requirePermissions('user:delete'),
+                requireRole('admin', 'superadmin').handler,
+                requirePermissions('user:delete').handler,
                 (c) => c.json({ success: true }),
             );
 
@@ -332,8 +332,8 @@ describe.skipIf(!dbAvailable)('RBAC Middleware', () =>
                     c.set('auth', { user: user, userId: String(user.id), keyId: 'test-key', role: null, locale: 'en', scheme: 'bearer' } as never);
                     await next();
                 },
-                requireRole('admin', 'superadmin'), // user is not admin
-                requirePermissions('user:delete'),
+                requireRole('admin', 'superadmin').handler, // user is not admin
+                requirePermissions('user:delete').handler,
                 (c) => c.json({ success: true }),
             );
 
@@ -352,8 +352,8 @@ describe.skipIf(!dbAvailable)('RBAC Middleware', () =>
                     c.set('auth', { user: admin, userId: String(admin.id), keyId: 'test-key', role: null, locale: 'en', scheme: 'bearer' } as never);
                     await next();
                 },
-                requireRole('admin', 'superadmin'), // admin passes
-                requirePermissions('rbac:permission:manage'), // but doesn't have this permission
+                requireRole('admin', 'superadmin').handler, // admin passes
+                requirePermissions('rbac:permission:manage').handler, // but doesn't have this permission
                 (c) => c.json({ success: true }),
             );
 

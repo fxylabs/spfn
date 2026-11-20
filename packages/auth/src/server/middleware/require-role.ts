@@ -9,7 +9,7 @@
  */
 
 import type { Context, Next } from 'hono';
-import { defineMiddleware } from '@spfn/core/route';
+import { defineMiddlewareFactory } from '@spfn/core/route';
 import { getAuth, authLogger } from '@spfn/auth/server';
 import { ForbiddenError } from '@spfn/core/errors';
 import { InsufficientRoleError } from '@spfn/auth/errors';
@@ -46,7 +46,7 @@ import { InsufficientRoleError } from '@spfn/auth/errors';
  *   .handler(async (c) => { ... });
  * ```
  */
-export const requireRole = defineMiddleware('role',
+export const requireRole = defineMiddlewareFactory('role',
     (...roleNames: string[]) => async (c: Context, next: Next) =>
     {
         const auth = getAuth(c);

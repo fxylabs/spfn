@@ -11,6 +11,7 @@ import { CORE_HEALTH_PATH } from './namespace';
 import { getShutdownManager } from './shutdown-manager';
 import { serverLogger } from './logger';
 import type { NamedMiddleware, Router } from '@spfn/core/route';
+import { mergeKey } from '../route/route-chain';
 import type { ServerConfig } from './types';
 
 // ============================================================================
@@ -287,7 +288,9 @@ export function resolveStreamTokenManager(auth: StreamTokenConfig, transport: 'S
  * or `defineRouter(...).use([...])`. Only the first lands in `config.middlewares` —
  * router-level middleware travels with the router — so both are collected here, or an
  * app that authenticates through its router would publish an unauthenticated token
- * endpoint. Names are deduplicated: a middleware present at both levels runs once.
+ * endpoint. Entries are deduplicated by `mergeKey`, as route registration does: a
+ * middleware present at both levels runs once, and a factory call's result merges only
+ * with the same object.
  */
 export function resolveEndpointMiddlewares(config: {
     middlewares?: ReadonlyArray<NamedMiddleware>;
@@ -304,22 +307,22 @@ export function resolveEndpointMiddlewares(config: {
         candidates.push(...(pkgRouter._globalMiddlewares ?? []));
     }
 
-    const seen = new Set<string>();
+    const seen = new Set<unknown>();
 
     return candidates.filter((mw) =>
     {
-        // An unnamed entry is never collapsed — unrelated handlers share the empty name.
-        if (!mw.name)
+        const key = mergeKey(mw);
+        if (key === undefined)
         {
             return true;
         }
 
-        if (seen.has(mw.name))
+        if (seen.has(key))
         {
             return false;
         }
 
-        seen.add(mw.name);
+        seen.add(key);
 
         return true;
     });

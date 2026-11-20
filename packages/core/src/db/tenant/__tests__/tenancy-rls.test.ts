@@ -906,7 +906,7 @@ describe('tenancy execution rules (app role, integration)', () =>
 
         const app = new Hono();
 
-        app.get('/w/:workspaceId/me', tenancy.guard({ param: 'workspaceId' }), async (c) => c.json(ids(await memberRepository.membershipsOf(3))));
+        app.get('/w/:workspaceId/me', tenancy.guard({ param: 'workspaceId' }).handler, async (c) => c.json(ids(await memberRepository.membershipsOf(3))));
 
         const response = await app.request('/w/7/me');
 

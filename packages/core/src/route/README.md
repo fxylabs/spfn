@@ -34,8 +34,9 @@ Values:
 - `route` — builder entry. Methods: `route.get/post/put/patch/delete(path)`. **No `head`/`options`.**
 - `defineRouter(routes)` — build a `Router`. Returned router is chainable: `.packages([...])`, `.use([...])`.
 - `registerRoutes(app, router, namedMiddlewares?, collectedRoutes?)` — mount onto Hono, returns `RegisteredRoute[]`.
-- `defineMiddleware(name, handler | factory, options?)` — named middleware (param-count auto-detects handler vs factory).
-- `defineMiddlewareFactory(name, factory)` — explicit factory form (use when the factory itself takes exactly 2 args).
+- `defineMiddleware(name, handler, options?)` — named middleware; `handler` is the Hono handler, whatever its parameter count.
+- `defineMiddlewareFactory(name, factory, options?)` — named middleware factory: `factory(...args)` returns the handler.
+  A call returns a named middleware `{ name, _name, handler, skips?, instance: true }` — not a Hono handler.
 - `Nullable(schema)` → `T | null`; `OptionalNullable(schema)` → `T | null | undefined`.
 - `isHttpMethod(value)` — type guard for `'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE'`.
 - `.contract({ since, response, auth?, requiresSession?, deprecatedIn?, removedIn? })` — builder method; publishes
@@ -541,13 +542,14 @@ route.post('/posts')
 ### Named middleware (`defineMiddleware`)
 
 A named middleware can be **skipped by name** at the route level and is **deduplicated** if
-present both globally and route-level. `defineMiddleware` auto-detects form by parameter count:
-a 2-arg function is a `(c, next)` handler; anything else is a factory.
+present both globally and route-level. `defineMiddleware` takes the handler itself — a
+one-parameter `async (c) => c.json(...)` is a handler too. A middleware that takes arguments is
+defined with `defineMiddlewareFactory`.
 
 ```typescript
 import { defineMiddleware } from '@spfn/core/route';
 
-// Regular handler — exactly (c, next)
+// Handler
 export const authMiddleware = defineMiddleware('auth', async (c, next) =>
 {
     if (!c.req.header('authorization')) return c.json({ error: 'Unauthorized' }, 401);
@@ -555,8 +557,8 @@ export const authMiddleware = defineMiddleware('auth', async (c, next) =>
     await next();
 });
 
-// Factory — any arg count other than 2
-export const requirePermissions = defineMiddleware('permission',
+// Factory
+export const requirePermissions = defineMiddlewareFactory('permission',
     (...perms: string[]) => async (c, next) =>
     {
         if (!hasPermissions(c.get('user'), perms)) return c.json({ error: 'Forbidden' }, 403);
@@ -566,11 +568,44 @@ export const requirePermissions = defineMiddleware('permission',
 route.get('/admin').use([requirePermissions('admin:write')]).handler(...);
 ```
 
-### `defineMiddlewareFactory` — for 2-arg factories
+### Factory calls
 
-A factory whose own signature is exactly two args (e.g. `(limit, window) => handler`) would be
-misread as a `(c, next)` handler by `defineMiddleware`. Use `defineMiddlewareFactory` to force
-the factory interpretation:
+A call returns a named middleware, named after the factory. Every call shares that name:
+`.skip(['permission'])` removes all of them, `skips` declared on the factory apply to each call,
+and two calls with different arguments both run.
+
+A call's result is marked `instance: true` and is **never merged with another middleware by
+name**: a router's `.use([requirePermissions('a')])` and a route's
+`.use([requirePermissions('b')])` are two checks, and the route's runs too. Nor is it merged by
+handler: two calls of a factory that returns one cached handler both run. The same result
+object referenced at two levels runs once — route registration and the server's SSE/WS token
+endpoints apply the same rule. Plain named middleware keep the first-wins rule below. A factory call can sit in a router's `.use([...])`, and declare `skips`:
+
+```typescript
+export const requireDoor = defineMiddlewareFactory('requireDoor',
+    (door: Door) => async (c, next) => { /* authenticate for the door */ await next(); },
+    { skips: ['auth'] });
+
+route.get('/door').use([requireDoor('north')]).handler(...);   // 'auth' auto-skipped
+```
+
+**A route can skip an authorization guard by its factory name.** With the guard on a router,
+`route.get('/x').skip(['permission'])` (or `['role']`, `['opsOrUser']`, …) removes it from that
+route — the same power `.skip(['auth'])` has. Review a `.skip([...])` naming a guard as you
+would one naming `auth`.
+
+The result is not a Hono `MiddlewareHandler`. Where Hono expects one (`app.use`,
+`app.get(path, …)`, a hand-written chain), pass `.handler`:
+
+```typescript
+app.use('/raw/*', requirePermissions('admin:write').handler);
+```
+
+### `defineMiddlewareFactory` — for factories of any arity
+
+`defineMiddleware` never takes a factory: whatever it is given is the handler. A factory — one
+that takes no arguments, one, two like `(limit, window) => handler`, or a rest list — is defined
+with `defineMiddlewareFactory`:
 
 ```typescript
 import { defineMiddlewareFactory } from '@spfn/core/route';
@@ -651,7 +686,9 @@ inherited named middleware: server → outer router → … → inner router
       → handler
 ```
 
-Dedup rules: named middleware by `name`; plain middleware by handler reference. A name is
+Dedup rules: named middleware by `name`; plain middleware and factory calls' results by handler
+reference — a factory call's result is never merged by name, with another call or with a plain
+named middleware. A name is
 one middleware however many times it is registered — server-config and router-level `.use()`
 naming the same middleware attach it **once**, at the outermost place, which is what lets
 middleware hold one-shot state (a nonce ledger) without rejecting its own request. An entry
