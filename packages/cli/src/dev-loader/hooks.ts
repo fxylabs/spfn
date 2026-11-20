@@ -128,11 +128,25 @@ function withoutCommonJsQuery(url: string): string
     return plain.href;
 }
 
-/** The resolve hook for the application rooted at `root`. Formats are decided once per file. */
+/** What the hook states for one URL tsx resolved: the URL to load it by, and its format. */
+interface Statement
+{
+    url: string;
+    format: string;
+}
+
+/**
+ * The resolve hook for the application rooted at `root`. Formats are decided
+ * once per file, and what the hook states is kept by the URL tsx resolved: the
+ * same module resolves again from every file that imports it, and most of
+ * those are dependencies the hook leaves alone, so a repeat costs neither a
+ * file-system call nor a URL parse.
+ */
 export function createResolveHook(root: string): ResolveHook
 {
     const realRoot = realpathSync(root);
     const formats = new Map<string, string | undefined>();
+    const statements = new Map<string, Statement | undefined>();
 
     function formatOf(file: string): string | undefined
     {
@@ -144,6 +158,21 @@ export function createResolveHook(root: string): ResolveHook
         return formats.get(file);
     }
 
+    function statementFor(resolvedUrl: string): Statement | undefined
+    {
+        const url = withoutCommonJsQuery(resolvedUrl);
+        const file = fileURLToPath(url);
+        // A URL that names no file is another loader's virtual module, not application source.
+        const format = existsSync(file) ? formatOf(realpathSync(file)) : undefined;
+
+        if (format === undefined)
+        {
+            return undefined;
+        }
+
+        return { url: format === 'module' ? url : resolvedUrl, format };
+    }
+
     return (specifier, context, nextResolve) =>
     {
         const result = nextResolve(specifier, context);
@@ -153,16 +182,13 @@ export function createResolveHook(root: string): ResolveHook
             return result;
         }
 
-        const url = withoutCommonJsQuery(result.url);
-        const file = fileURLToPath(url);
-        // A URL that names no file is another loader's virtual module, not application source.
-        const format = existsSync(file) ? formatOf(realpathSync(file)) : undefined;
-
-        if (format === undefined)
+        if (!statements.has(result.url))
         {
-            return result;
+            statements.set(result.url, statementFor(result.url));
         }
 
-        return format === 'module' ? { ...result, url, format } : { ...result, format };
+        const statement = statements.get(result.url);
+
+        return statement === undefined ? result : { ...result, ...statement };
     };
 }
