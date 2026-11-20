@@ -103,7 +103,10 @@ logger.info('Fetching url: %s', requestUrl);
 
 How the arguments are read (see `logWithLevel` in `logger.ts`):
 - If `message` contains a printf token (`%s %d %i %f %j %o %O %c %%`), the 2nd arg is
-  formatted into the message string — it will **not** appear as context.
+  formatted into the message string — it will **not** appear as context. It is made printable
+  first: an Error becomes its formatted description, an object goes through the masking walk
+  (so an Error inside it is described too). This holds when the token is there by accident —
+  a templated path with `%c3` in it — though a `%c` then swallows the argument.
 - **Three arguments** `(message, caught, context)`: the 2nd is the caught value whatever its
   shape — an `Error`, `undefined`, a string, a plain object — and is described; the context
   is always kept.

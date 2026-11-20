@@ -7,7 +7,7 @@
 import { format } from 'node:util';
 import type { LogLevel, LogMetadata, LoggerConfig, Transport } from './types';
 import { LOG_LEVEL_PRIORITY } from './types';
-import { maskContext } from './formatters';
+import { formatError, maskContext, maskSensitiveData } from './formatters';
 import { describeError, isError } from './error-description';
 
 const FORMAT_PATTERN = /%[sdifjoOc%]/;
@@ -19,6 +19,21 @@ const FORMAT_PATTERN = /%[sdifjoOc%]/;
 function isCaught(value: unknown): boolean
 {
     return value !== undefined && (isError(value) || typeof value !== 'object' || value === null);
+}
+
+/**
+ * A printf argument made printable before `util.format` sees it: an Error as
+ * its formatted description, an object by the masking walk. `%s`, `%o` and
+ * `%j` would otherwise print an error's stack header, `params` and `detail`.
+ */
+function printable(value: unknown): unknown
+{
+    if (isError(value))
+    {
+        return formatError(describeError(value));
+    }
+
+    return typeof value === 'object' && value !== null ? maskSensitiveData(value) : value;
 }
 
 /**
@@ -72,7 +87,9 @@ export class Logger
      * - `(message, value)`: an Error, or anything that is not an object, is the
      *   caught value; any other object is the context. A catch site whose value
      *   may not be an Error passes `{ error }` or the three-argument form.
-     * - A printf token in the message formats the second argument into it.
+     * - A printf token in the message formats the second argument into it,
+     *   made printable first (`printable`) — also when the token got there by
+     *   accident, a `%c3` in a templated path.
      */
     private logWithLevel(level: LogLevel, message: string, args: unknown[]): void
     {
@@ -87,7 +104,7 @@ export class Logger
 
         if (value !== undefined && FORMAT_PATTERN.test(message))
         {
-            this.log(level, format(message, value), undefined, asContext(context));
+            this.log(level, format(message, printable(value)), undefined, asContext(context));
         }
         else if (args.length >= 2)
         {

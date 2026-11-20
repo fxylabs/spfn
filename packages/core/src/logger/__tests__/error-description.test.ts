@@ -12,6 +12,7 @@
  * | R5  | inside the context object                   | the key-masking walk printing `params` and the cause's `detail` |
  * | R7  | a 22P02 driver error                        | a class-22 message quoting the rejected input               |
  * | R7b | a 23505 an app trigger RAISEd with its text | a kept class carrying the app's own text                    |
+ * | F1  | formatted into a printf-style message (`%s`, `%o`, `%j`, a stray `%c`) | the documented printf form handing the error to `util.format` undescribed |
  *
  * What is the caught value is decided by position, never by the value's shape (G2):
  *
@@ -66,6 +67,23 @@ describe('a logged database error carries no bound value', () =>
         expectNoValues(output());
         expect(output()).toContain('"code":"23505"');
         expect(output()).toContain('"paramCount":2');
+    });
+
+    it('F1: an error formatted into a printf-style message is its description, also inside an object', async () =>
+    {
+        const { logger, output } = capturingLogger(Logger);
+
+        logger.error('Saving user failed: %s', failedInsert());
+        logger.error('Saving user failed: %o', failedInsert());
+        logger.error('Saving user failed: %O', failedInsert());
+        logger.error('Saving user failed: %j', { e: failedInsert() });
+        logger.error('Saving user failed: %o', { e: failedInsert() });
+        logger.error(`Upload of /files/caf%c3%a9.txt failed`, failedInsert());
+        await settle();
+
+        expectNoValues(output());
+        expect(output()).toContain('[code=23505]');
+        expect(output()).toContain('\\"code\\":\\"23505\\"');
     });
 
     it('R7: a class-22 driver message, which quotes the rejected input, is left out', () =>
