@@ -469,7 +469,7 @@ describe.skipIf(!dbAvailable)('signed revoke-all link (case table 7b)', () =>
             consumeRevokeAllLink(token),
             revokeAllKeysService({
                 userId: user.id,
-                currentKeyId: first.key.keyId,
+                credential: { kind: 'deviceKey', keyId: first.key.keyId },
                 includeCurrent: true,
                 reason: 'the other path',
             }),

@@ -20,10 +20,11 @@
  * have an account here".
  *
  * Second, completing it is a credential change on a live account, so it carries
- * the same blast radius as `changePasswordService`: pending device
+ * the blast radius of `revoke-all` with `includeCurrent`: pending device
  * authorizations are denied and every active key is revoked. Whoever was signed
  * in on the old password is signed out, including the attacker the reset was
- * needed for.
+ * needed for. (A password change spares the session making it; a reset has no
+ * session to spare, and signs this browser in on a fresh key instead.)
  */
 
 import { env } from '@spfn/auth/config';
@@ -274,7 +275,7 @@ export interface CompletePasswordResetParams
  *
  * The order is the whole point. Pending device authorizations are denied first,
  * because a poll on an approved one would hand out a fresh active key moments
- * after the revocation — the same reasoning `changePasswordService` records.
+ * after the revocation — the same reasoning `revokeAllKeysService` records.
  * The revoke-all then runs BEFORE the new device key is registered, never after,
  * or the reset would sign out the browser that performed it.
  *

@@ -20,6 +20,7 @@
  * | T9 | a guard over a 503 / a refused connection: no redirect, cookies kept; over a refused key: signed out |
  * | T10 | every establishing path (and social → 202 → `mfa/verify`) over a previous session: the same account's key is no longer active, another account's is left |
  * | T11 | `TokenExpiredError`: one re-signed retry, session kept; refused again: passed through, session kept |
+ * | T12 | a password change (#372): the browser's cookies are kept and its next proxied request is admitted; the other device is signed out |
  *
  * No secret printed by these tests is a real one.
  */
@@ -354,13 +355,14 @@ describe.skipIf(!dbAvailable)('the Next.js proxy decides the session once per re
         jar: Map<string, string>,
         path: string,
         input: Record<string, unknown> = {},
-        options: { method?: 'GET' | 'POST'; via?: MountedProxy } = {},
+        options: { method?: 'GET' | 'POST' | 'PUT'; via?: MountedProxy } = {},
     ): Promise<Browsed>
     {
         const method = options.method ?? 'POST';
         const csrf = jar.get(COOKIE_NAMES.CSRF);
+        // The browser reaches the proxy with GET or POST; the route map carries the backend's method.
         const response = await (options.via ?? proxy).call(routeNameOf(path, method), input, {
-            method,
+            method: method === 'GET' ? 'GET' : 'POST',
             cookie: [...jar].map(([name, value]) => `${name}=${value}`).join('; ') || undefined,
             headers: { 'user-agent': CHROME, ...(csrf ? { [CSRF_HEADER]: csrf } : {}) },
         });
@@ -1627,5 +1629,24 @@ describe.skipIf(!dbAvailable)('the Next.js proxy decides the session once per re
         expect(proxy.backendCalls.slice(calls)).toHaveLength(2);
         expect(sessionCleared(answer.setCookies)).toBe(false);
         expect(jar.get(COOKIE_NAMES.SESSION)).toBe(before.get(COOKIE_NAMES.SESSION));
+    });
+
+    // ========================================================================
+    // T12 — a password change keeps the session that made it (#372)
+    // ========================================================================
+
+    it('T12: a password change through the proxy keeps the browser\'s cookies, and its next proxied request is admitted', async () =>
+    {
+        const { jar } = await validJar(OWNER);
+        const other = await signedInDevice(OWNER);
+        const before = new Map(jar);
+
+        const changed = await browse(jar, '/_auth/password', { body: { currentPassword: PASSWORD, newPassword: NEW_PASSWORD } }, { method: 'PUT' });
+        const next = await browse(jar, '/_auth/session', {}, { method: 'GET' });
+
+        expect({ changed: changed.status, next: next.status, cleared: sessionCleared([...changed.setCookies, ...next.setCookies]) })
+            .toEqual({ changed: 204, next: 200, cleared: false });
+        expect(jar).toEqual(before);
+        expect((await keyRow(other.key.keyId)).isActive).toBe(false);
     });
 });
