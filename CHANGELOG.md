@@ -57,15 +57,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   for a config load running as for a generation: neither can be cancelled (a load is a module
   evaluation), so one that never settles keeps `close()` pending, and the watcher's first signal
   says it waits for "the running generation or codegen config load"; a second exits at once.
-  `new CodegenOrchestrator()` takes `OrchestratorOptions` (`generators`; it gains only `loadGenerators?: never`) or the new
-  `LoadingOrchestratorOptions`; given both options, or neither, it now throws a `TypeError`
-  naming them (both: `loadGenerators` was used and `generators` silently ignored; neither: no generator
-  ran, silently).
+  `new CodegenOrchestrator()` takes `OrchestratorOptions` (`generators`) or the new
+  `LoadingOrchestratorOptions`. Given neither, it now throws a `TypeError` naming them from the
+  constructor: `new CodegenOrchestrator({})` used to be constructed and then throw a `TypeError`
+  at its first `generateAll()` or `watch()`. Given both, which no option type allowed before, it
+  throws the same way.
 - **@spfn/core: `CodegenOrchestrator.loadsGenerators`** (static, `true`): the orchestrator takes
-  `loadGenerators`. The `spfn dev` watcher checks it, and with an older `@spfn/core` stops with
-  `[SPFN] Codegen watcher not started: @spfn/core <installed> is installed, and the spfn dev watcher
-  needs @spfn/core 0.4.0-beta.2 or later.` (exit 1) instead of dying on `TypeError: Cannot read
-  properties of undefined (reading 'flatMap')` (#353).
+  `loadGenerators`. The `spfn dev` watcher checks it, and with a core that cannot load its
+  generators — no `./codegen` subpath, no `CodegenOrchestrator` export, or one without this flag —
+  stops with `[SPFN] Codegen watcher not started: @spfn/core <installed> is installed; spfn
+  <version> requires @spfn/core <its peer range> and a core that reloads generators. Update
+  @spfn/core.` (exit 1) instead of dying on Node's own error (`SyntaxError … does not provide an
+  export`, `ERR_PACKAGE_PATH_NOT_EXPORTED`, or `TypeError: Cannot read properties of undefined
+  (reading 'flatMap')`). A core that fails to load for any other reason shows its own error (#353).
 - **@spfn/core: `CodegenOrchestrator.settled()`** resolves once watch mode is idle — no generation
   running, nothing dirty, no input directory event settling (#353).
 
@@ -141,6 +145,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (#353).** A reload calls each factory again (a package generator's with the new options; a
   custom generator's file evaluated again); state a generator keeps in its factory's closure
   starts over, and the old instance is never called again.
+- **BREAKING: @spfn/core: `OrchestratorOptions` declares `loadGenerators?: never` (#353).** A type
+  that extends or widens `OrchestratorOptions` and declares its own `loadGenerators` property no
+  longer compiles (`interface X extends OrchestratorOptions { loadGenerators?: … }` is TS2430).
+  Extend `LoadingOrchestratorOptions` if the property means the orchestrator's loader, or rename it.
 - **BREAKING: @spfn/core: watch mode's generations, the initial one included, log and do not
   reject under `throwOnError: true` (#353).** `watch()` ran its initial generation as `generateAll('watch')`,
   so under `throwOnError` a failing generator rejected `watch()` before any watching began; now
