@@ -389,11 +389,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   package.json file"), so `--pm yarn` failed with a yarn 1 that is not corepack's and under an
   ancestor pinned to `yarn@1`. With corepack, `yarn dlx` is Yarn 4 and worked, producing a Yarn 4
   app; it still does. create now asks the yarn that answers in the directory (`yarn dlx --help`)
-  and keeps `yarn dlx` where it exists, using `npx --yes … --use-yarn` only where it does not. For
+  and keeps `yarn dlx` where it exists, using `npx --yes … --use-yarn` only where it does not: yarn
+  1's `yarn run v1.` banner means no `dlx`, exit 0 with the `yarn dlx <command>` usage means `dlx`.
+  With no yarn on PATH, `--pm yarn` stops before anything is downloaded or written, with "yarn was
+  not found; install it or choose another --pm" (exit 1); any other answer (a corepack refusal, a
+  failed download) stops create with yarn's output. The question shares the terminal, so corepack's
+  `COREPACK_ENABLE_DOWNLOAD_PROMPT=1` prompt shows as it does for `yarn dlx` itself. For
   npm, pnpm and bun, create-next-app and shadcn now run through `npx --yes` (they ran through
   `npx` without `--yes`, `pnpm dlx`, and `bunx dlx`, which was broken); `--pm` still picks the
   installer (`--use-<pm>`, and shadcn reads the lockfile). A missing npx now says "npx was not
-  found; install npm" instead of `spawn npx ENOENT`. Not breaking.
+  found; install npm" instead of `spawn npx ENOENT`. create-next-app and shadcn are the only sites
+  of this one definition: the Kit's older-CLI hint (`KIT_CLI_INCOMPATIBLE`) is not one of them, since
+  a Kit installs only with pnpm, and it stays `pnpm dlx spfn@…` as on main. Not breaking.
 - **spfn: `spfn dev` waits for its codegen watcher on SIGINT/SIGTERM (#353).** It sent the watcher
   SIGTERM and exited at once, through `pnpm exec`/`npx`, which do not wait (npx did not even
   forward the signal), and execa SIGKILLed the wrapper 5 s later: a `kill -TERM` of `spfn dev` left
