@@ -78,7 +78,7 @@ const schema = defineEnvSchema({
         description: 'Enable debug mode',
         default: false,
     }),
-    LOG_LEVEL: envEnum(['debug', 'info', 'warn', 'error'] as const, {
+    APP_LOG_LEVEL: envEnum(['debug', 'info', 'warn', 'error'] as const, {
         description: 'Logging level',
         default: 'info',
     }),
@@ -89,10 +89,10 @@ export const env = registry.validate();
 export type Env = typeof env;
 
 // Full type safety:
-env.DATABASE_URL; // string  (required)
-env.PORT;         // number  (default: 3000)
-env.DEBUG;        // boolean (default: false)
-env.LOG_LEVEL;    // 'debug' | 'info' | 'warn' | 'error'
+env.DATABASE_URL;  // string  (required)
+env.PORT;          // number  (default: 3000)
+env.DEBUG;         // boolean (default: false)
+env.APP_LOG_LEVEL; // 'debug' | 'info' | 'warn' | 'error'
 ```
 
 `defineEnvSchema` auto-fills the `key` field from each object key. You can write the
@@ -135,7 +135,7 @@ API_URL: envUrl({
     validator: createUrlParser('https'),
 }),
 
-LOG_LEVEL: envEnum(['debug', 'info', 'warn', 'error'] as const, {
+APP_LOG_LEVEL: envEnum(['debug', 'info', 'warn', 'error'] as const, {
     description: 'Logging level',
     default: 'info',
 }),
@@ -738,7 +738,7 @@ const schema = defineEnvSchema({
         description: 'Node environment',
         default: 'local',
     }),
-    LOG_LEVEL: envEnum(['debug', 'info', 'warn', 'error', 'fatal'] as const, {
+    APP_LOG_LEVEL: envEnum(['debug', 'info', 'warn', 'error', 'fatal'] as const, {
         description: 'Log level',
         default: 'info',
     }),

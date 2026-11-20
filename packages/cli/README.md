@@ -277,6 +277,7 @@ second copy splits, and does not refuse (#349).
 Runs codegen, builds Next.js (via the project's `build` script), and compiles
 `src/server/**/*.ts` → `.spfn/server` with tsup. Also writes `.spfn/prod-server.mjs`
 (the production entry consumed by `spfn start`).
+For quieter output, set the logger's level for the run: `SPFN_LOG_LEVEL=warn spfn build`.
 
 | Option | Description |
 |--------|-------------|

@@ -105,6 +105,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and its `- <migration>` lines per package, or `📦 No function package migrations pending`; a
   dry run ends with `🔍 Dry run: nothing was applied.` The `📦 Applying function package
   migrations:` header and its `- <package>` lines are unchanged, as in `spfn db migrate`.
+- **spfn: `spfn build` no longer sets `LOG_LEVEL` (#350).** It set `LOG_LEVEL=warn` to quieten
+  codegen, but no logger has read that variable since core's logger moved to `SPFN_LOG_LEVEL`, and
+  that level is fixed when the CLI starts, so no variable set there could work. Build now runs
+  codegen with its `debug` switch off (no `Loading router` / `Found N routes` lines); for quieter
+  output run `SPFN_LOG_LEVEL=warn spfn build`. The one visible effect: an app that defines its own
+  `LOG_LEVEL` no longer has it forced to `warn` during `next build`. Core's env docs now name the
+  app-defined example variable `APP_LOG_LEVEL`.
 
 - **@spfn/core, spfn: codegen loads the app as ESM in the process's own module graph; one copy of
   `@spfn/core` (#335).** Codegen loaded the router (and `.spfnrc.ts`, the generator module, custom

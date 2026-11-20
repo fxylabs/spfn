@@ -495,7 +495,7 @@ export function parseEnum(
  *
  * @example
  * ```typescript
- * const logLevel = getEnvVar('LOG_LEVEL', {
+ * const logLevel = getEnvVar('APP_LOG_LEVEL', {
  *   default: 'info',
  *   validator: createEnumParser(['debug', 'info', 'warn', 'error']),
  * });
