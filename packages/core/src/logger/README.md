@@ -103,14 +103,14 @@ How the second argument is classified (see `logWithLevel` in `logger.ts`):
   formatted into the message string — it will **not** appear as context.
 - An `Error` instance → logged as the error: its description, stack frames and `cause`
   chain printed (see [Errors are described, not dumped](#errors-are-described-not-dumped)).
-- A non-Error object **with** a string `stack` property → treated as an error and described.
-- A plain object **without** a `stack` property → treated as **context**.
+- Any other object → treated as **context**, whatever fields it has. "An Error" is
+  `instanceof Error`, or an Error from another realm (`Object.prototype.toString` gives
+  `[object Error]`) — never "an object with a `stack`": an error response body or a domain
+  object with a `stack` field is data.
 - A `string` / `number` / `boolean` → wrapped into an `Error` (so `{ key: value }`
   context must be an object, not a bare primitive).
 
-This `stack`-based heuristic means an object you intend as context will be misread as an
-error if it happens to carry a string `stack` field. Prefer the explicit 3-arg form
-`logger.error(msg, error, context)` when you have both.
+Prefer the explicit 3-arg form `logger.error(msg, error, context)` when you have both.
 
 ---
 
@@ -197,8 +197,8 @@ Masked key tokens (a key matches if it contains any of these):
 `session`, `sessionid`, `session_id`, `privatekey`, `private_key`, `creditcard`,
 `credit_card`, `cardnumber`, `card_number`, `cvv`, `ssn`, `pin`.
 
-An `Error` — or an object with a string `stack` — found anywhere in the context is replaced by
-its description, not walked key by key: `logger.error('x', { error })` prints what
+An `Error` found anywhere in the context is replaced by its description, not walked key by
+key: `logger.error('x', { error })` prints what
 `logger.error('x', error)` prints.
 
 > Masking only applies to the **context** object. It does **not** scan the `message`
@@ -253,6 +253,10 @@ interface ErrorDescription
   rejected input (`invalid input syntax for type integer: "…"`), 42601 quotes a token, P0001 is
   the app's own text: those, and unknown codes, keep no message. Neither does a message raised by
   PL/pgSQL `RAISE` (routine `exec_stmt_raise`), whatever ERRCODE it carries.
+- Describing never throws: a field whose getter throws is left out, a cause chain longer than
+  10 links ends in a `CauseChainTruncated` link, and one that loops back ends in a
+  `CircularCause` link. Masking the context never throws either: a value whose getter throws
+  is logged as `[Unreadable]`.
 - The SQL text is kept: query-builder SQL holds `$n` placeholders only. A literal reaches it only
   through `sql.raw(…)` — an app that `sql.raw`s user input logs it, and has an injection bug.
 - There is no option to log parameter values. To see them while debugging locally, use drizzle's
@@ -303,9 +307,8 @@ stdout/stderr, which the platform collects automatically.
 - **Masked value is `***MASKED***`, not `***`.** Don't assert on `***` in tests/parsers.
 - **Secrets in the message are NOT masked.** Only the context object is scanned. Keep
   sensitive values out of the message string; put them in context.
-- **Context vs error ambiguity.** A plain object with a string `stack` property is treated
-  as an error, not context. Use the 3-arg form `logger.error(msg, error, context)` when
-  you have both, and don't put a `stack` key on a context object.
+- **Context vs error ambiguity.** Only an Error is read as the error; any other object
+  is context. Use the 3-arg form `logger.error(msg, error, context)` when you have both.
 - **Bare primitives as 2nd arg become errors.** `logger.info('x', 42)` logs `42` as an
   Error (or printf-substitutes it if the message has a `%` token) — it is not context.
   Context must be an object: `logger.info('x', { n: 42 })`.

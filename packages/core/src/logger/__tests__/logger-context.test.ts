@@ -158,7 +158,7 @@ describe('Logger Context Detection', () =>
         });
     });
 
-    it('should treat error-like object with stack as error', () => 
+    it('treats an object with a stack, but not an Error, as context', () => 
     {
         const mockTransport: Transport = {
             name: 'mock',
@@ -186,8 +186,8 @@ describe('Logger Context Detection', () =>
             setTimeout(() => 
             {
                 const call = (mockTransport.log as any).mock.calls[0][0];
-                expect(call.error).toBeDefined();
-                expect(call.error.message).toContain('Custom error');
+                expect(call.error).toBeUndefined();
+                expect(call.context).toEqual(errorLike);
                 resolve();
             }, 50);
         });

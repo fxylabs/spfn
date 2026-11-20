@@ -474,6 +474,29 @@ describe('ErrorHandler Middleware', () =>
             expect(output()).toContain('"code":"23505"');
             expectNoValues(output());
         });
+
+        it('F3: the request logger keeps an error body it copies, stack and all — it is data, not an error', async () =>
+        {
+            const { lines } = captureLoggerClass(Logger);
+            const app = new Hono();
+            app.use(RequestLogger());
+            app.onError(ErrorHandler({ includeStack: true }));
+            app.get('/x', () =>
+            {
+                throw new ValidationError({ message: 'bad', fields: [{ path: 'email', message: 'required' }] } as any);
+            });
+
+            await app.request('/x');
+            await new Promise(resolve => setTimeout(resolve, 0));
+
+            const copy = lines.find(line => line.message === 'Request completed')!.context!.response;
+            expect(copy).toMatchObject({
+                __type: 'ValidationError',
+                fields: [{ path: 'email', message: 'required' }],
+                stack: expect.any(String),
+                error: { code: 'ValidationError', requestId: expect.any(String) },
+            });
+        });
     });
 
     describe('Error envelope', () =>

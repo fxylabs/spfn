@@ -5,7 +5,7 @@
  */
 
 import type { LogLevel, LogMetadata } from './types';
-import { describeError } from './error-description';
+import { describeError, isArray, isError } from './error-description';
 import type { DatabaseErrorDescription, ErrorDescription } from './error-description';
 
 /**
@@ -47,6 +47,11 @@ const SENSITIVE_KEYS = [
 const MASKED_VALUE = '***MASKED***';
 
 /**
+ * A context value whose read threw
+ */
+const UNREADABLE_VALUE = '[Unreadable]';
+
+/**
  * 키가 민감 정보를 포함하는지 확인
  */
 function isSensitiveKey(key: string): boolean
@@ -57,11 +62,36 @@ function isSensitiveKey(key: string): boolean
 }
 
 /**
- * An Error, or an object carrying a string `stack` the way one does
+ * An object's own enumerable entries, each read on its own: a getter that
+ * throws stands in as `[Unreadable]`, and an object whose keys cannot be
+ * listed (a revoked Proxy) has none. Masking never throws into a log call.
  */
-function isErrorLike(data: object): boolean
+function entriesOf(data: object): [string, unknown][]
 {
-    return data instanceof Error || typeof (data as { stack?: unknown }).stack === 'string';
+    let keys: string[];
+
+    try
+    {
+        keys = Object.keys(data);
+    }
+    catch
+    {
+        return [];
+    }
+
+    return keys.map(key => [key, readEntry(data, key)]);
+}
+
+function readEntry(data: object, key: string): unknown
+{
+    try
+    {
+        return (data as Record<string, unknown>)[key];
+    }
+    catch
+    {
+        return UNREADABLE_VALUE;
+    }
 }
 
 /**
@@ -96,21 +126,21 @@ export function maskSensitiveData(data: unknown, seen = new WeakSet<object>()): 
 
     // An error is described, not walked: its enumerable fields (drizzle's
     // `params`, the driver's `detail`) hold the values a log must not carry
-    if (isErrorLike(data))
+    if (isError(data))
     {
         return describeError(data);
     }
 
     // 배열 처리
-    if (Array.isArray(data))
+    if (isArray(data))
     {
-        return data.map(item => maskSensitiveData(item, seen));
+        return entriesOf(data).map(([, item]) => maskSensitiveData(item, seen));
     }
 
     // 객체 처리
     const masked: Record<string, unknown> = {};
 
-    for (const [key, value] of Object.entries(data))
+    for (const [key, value] of entriesOf(data))
     {
         if (isSensitiveKey(key))
         {

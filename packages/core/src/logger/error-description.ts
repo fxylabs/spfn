@@ -94,6 +94,9 @@ const RAISE_ROUTINE = 'exec_stmt_raise';
 
 const SQL_LIMIT = 1000;
 
+/** How many links of a cause chain are described; a longer chain ends in a `CauseChainTruncated` link */
+export const CAUSE_DEPTH_LIMIT = 10;
+
 /** Marks an object `describeError` built, so describing it again returns it */
 const DESCRIBED = Symbol.for('spfn.core.errorDescription');
 
@@ -154,24 +157,64 @@ export function isDriverError(error: unknown): boolean
         return false;
     }
 
-    const candidate = error as Fields;
+    const code = read(error, 'code');
 
-    if (typeof candidate.code !== 'string')
+    if (typeof code !== 'string')
     {
         return false;
     }
 
-    if (POSTGRES_JS_CONNECTION_CODES.has(candidate.code))
+    if (POSTGRES_JS_CONNECTION_CODES.has(code))
     {
         return true;
     }
 
-    if (!SQLSTATE_PATTERN.test(candidate.code))
+    if (!SQLSTATE_PATTERN.test(code))
     {
         return false;
     }
 
-    return typeof candidate.severity === 'string' || typeof candidate.severity_local === 'string';
+    return typeof read(error, 'severity') === 'string' || typeof read(error, 'severity_local') === 'string';
+}
+
+/**
+ * Whether a value is an Error: an instance of this realm's `Error`, or one
+ * from another realm (a vm context, a worker), which carries the `Error` tag.
+ * The logger, the context masking and `describeError` share this one test.
+ *
+ * Deliberately NOT "any object with a string `stack`": an error response body
+ * copied into a log context, or a domain object with a `stack` field, is data,
+ * and reading it as an error replaced it with a description that kept none of
+ * its fields.
+ */
+export function isError(value: unknown): value is Error
+{
+    try
+    {
+        return value instanceof Error || Object.prototype.toString.call(value) === '[object Error]';
+    }
+    catch
+    {
+        // A revoked Proxy, or one whose prototype trap throws
+        return false;
+    }
+}
+
+/**
+ * A property of a caught value, or `undefined` when reading it throws — a
+ * getter, a Proxy trap. Describing an error must never throw into the log
+ * call, or the catch block, that asked for it.
+ */
+function read(value: object, key: PropertyKey): unknown
+{
+    try
+    {
+        return (value as Record<PropertyKey, unknown>)[key];
+    }
+    catch
+    {
+        return undefined;
+    }
 }
 
 /**
@@ -179,12 +222,27 @@ export function isDriverError(error: unknown): boolean
  */
 function isQueryError(error: unknown): error is Fields
 {
-    const candidate = error as Fields;
-
     return typeof error === 'object' && error !== null
-        && typeof candidate.query === 'string' && Array.isArray(candidate.params);
+        && typeof read(error, 'query') === 'string' && isArray(read(error, 'params'));
 }
 
+/**
+ * `Array.isArray`, false for a revoked Proxy instead of throwing
+ */
+export function isArray(value: unknown): value is unknown[]
+{
+    try
+    {
+        return Array.isArray(value);
+    }
+    catch
+    {
+        // A revoked Proxy
+        return false;
+    }
+}
+
+/**
 /**
  * Describe a caught error without any value it carries
  *
@@ -193,6 +251,10 @@ function isQueryError(error: unknown): error is Fields
  * error under a query error is folded into it. It never copies `params`,
  * `parameters`, `args`, `detail`, `hint`, `where`, `internal_query`, drizzle's
  * message, or a stack's header lines.
+ *
+ * It never throws: a property whose read throws is left out, a chain longer
+ * than `CAUSE_DEPTH_LIMIT` ends in a `CauseChainTruncated` link and a chain
+ * that refers back to an earlier link ends in a `CircularCause` link.
  *
  * @example
  * ```typescript
@@ -203,10 +265,13 @@ function isQueryError(error: unknown): error is Fields
  */
 export function describeError(error: unknown): ErrorDescription | DatabaseErrorDescription
 {
-    return describeLink(error, new WeakSet<object>());
+    return describeLink(error, new Set<object>());
 }
 
-function describeLink(error: unknown, seen: WeakSet<object>): ErrorDescription | DatabaseErrorDescription
+/**
+ * `seen` holds the links described so far, outermost first
+ */
+function describeLink(error: unknown, seen: Set<object>): ErrorDescription | DatabaseErrorDescription
 {
     if (isDescription(error))
     {
@@ -228,35 +293,32 @@ function describeLink(error: unknown, seen: WeakSet<object>): ErrorDescription |
 
 function isDescription(error: unknown): error is ErrorDescription | DatabaseErrorDescription
 {
-    return typeof error === 'object' && error !== null && (error as { [DESCRIBED]?: true })[DESCRIBED] === true;
+    return typeof error === 'object' && error !== null && read(error, DESCRIBED) === true;
 }
 
 function describeQueryError(error: Fields): DatabaseErrorDescription
 {
-    const cause = error.cause as Fields | undefined;
-    const driver = isDriverError(cause) ? driverFields(cause!) : { code: stringField(cause, 'code') };
+    const cause = read(error, 'cause');
+    const driver = isDriverError(cause) ? driverFields(cause as Fields) : { code: stringField(cause, 'code') };
 
     return mark({
         kind: 'database',
         name: nameOf(error, 'DrizzleQueryError'),
         ...driver,
-        sql: truncate(error.query as string),
-        paramCount: (error.params as unknown[]).length,
+        sql: sqlOf(read(error, 'query')),
+        paramCount: countOf(read(error, 'params')),
         stack: framesOf(error),
     });
 }
 
 function describeDriverError(error: Fields): DatabaseErrorDescription
 {
-    const query = error.query;
-    const parameters = error.parameters;
-
     return mark({
         kind: 'database',
         name: nameOf(error, 'PostgresError'),
         ...driverFields(error),
-        sql: typeof query === 'string' ? truncate(query) : undefined,
-        paramCount: Array.isArray(parameters) ? parameters.length : undefined,
+        sql: sqlOf(read(error, 'query')),
+        paramCount: countOf(read(error, 'parameters')),
         stack: framesOf(error),
     });
 }
@@ -268,7 +330,7 @@ function describeDriverError(error: Fields): DatabaseErrorDescription
 function driverFields(error: Fields): Partial<DatabaseErrorDescription>
 {
     return {
-        code: error.code as string,
+        code: stringField(error, 'code'),
         severity: stringField(error, 'severity'),
         constraint: stringField(error, 'constraint_name') ?? stringField(error, 'constraint'),
         schema: stringField(error, 'schema_name') ?? stringField(error, 'schema'),
@@ -282,17 +344,17 @@ function driverFields(error: Fields): Partial<DatabaseErrorDescription>
 
 function keptMessage(error: Fields): string | undefined
 {
-    const code = error.code as string;
+    const code = stringField(error, 'code');
 
-    if (!SQLSTATE_PATTERN.test(code) || !MESSAGE_SAFE_CLASSES.has(code.slice(0, 2)))
+    if (code === undefined || !SQLSTATE_PATTERN.test(code) || !MESSAGE_SAFE_CLASSES.has(code.slice(0, 2)))
     {
         return undefined;
     }
 
-    return error.routine === RAISE_ROUTINE ? undefined : stringField(error, 'message');
+    return read(error, 'routine') === RAISE_ROUTINE ? undefined : stringField(error, 'message');
 }
 
-function describeOther(error: unknown, seen: WeakSet<object>): ErrorDescription
+function describeOther(error: unknown, seen: Set<object>): ErrorDescription
 {
     if (typeof error !== 'object' || error === null)
     {
@@ -301,18 +363,41 @@ function describeOther(error: unknown, seen: WeakSet<object>): ErrorDescription
 
     seen.add(error);
 
-    const cause = (error as Fields).cause;
-    const message = (error as Fields).message;
+    const message = read(error, 'message');
 
     return mark({
         kind: 'error',
         name: nameOf(error as Fields, 'Error'),
-        message: typeof message === 'string' ? message : Object.prototype.toString.call(error),
+        message: typeof message === 'string' ? message : 'Error',
         stack: framesOf(error as Fields),
-        cause: cause === undefined || (typeof cause === 'object' && cause !== null && seen.has(cause))
-            ? undefined
-            : describeLink(cause, seen),
+        cause: describeCause(error, seen),
     });
+}
+
+/**
+ * The next link of the chain, unless it is one already described or the
+ * chain has run past its limit: either ends the chain in a link that says so
+ */
+function describeCause(error: object, seen: Set<object>): ErrorDescription | DatabaseErrorDescription | undefined
+{
+    const cause = read(error, 'cause');
+
+    if (cause === undefined)
+    {
+        return undefined;
+    }
+
+    if (typeof cause === 'object' && cause !== null && seen.has(cause))
+    {
+        return mark({ kind: 'error', name: 'CircularCause', message: 'the cause refers back to an earlier link of the chain' });
+    }
+
+    if (seen.size >= CAUSE_DEPTH_LIMIT)
+    {
+        return mark({ kind: 'error', name: 'CauseChainTruncated', message: `the cause chain is longer than ${CAUSE_DEPTH_LIMIT} links` });
+    }
+
+    return describeLink(cause, seen);
 }
 
 /**
@@ -323,14 +408,14 @@ function describeOther(error: unknown, seen: WeakSet<object>): ErrorDescription
  */
 function framesOf(error: Fields): string | undefined
 {
-    const stack = error.stack;
+    const stack = read(error, 'stack');
 
     if (typeof stack !== 'string')
     {
         return undefined;
     }
 
-    const message = typeof error.message === 'string' ? error.message : '';
+    const message = stringField(error, 'message') ?? '';
     const end = message === '' ? -1 : stack.indexOf(message);
     const frames = (end === -1 ? stack : stack.slice(end + message.length))
         .split('\n')
@@ -341,19 +426,39 @@ function framesOf(error: Fields): string | undefined
 
 function nameOf(error: Fields, fallback: string): string
 {
-    return typeof error.name === 'string' && error.name !== '' ? error.name : fallback;
+    const name = read(error, 'name');
+
+    return typeof name === 'string' && name !== '' ? name : fallback;
 }
 
-function stringField(error: Fields | undefined, key: string): string | undefined
+function stringField(error: unknown, key: string): string | undefined
 {
-    const value = error?.[key];
+    const value = typeof error === 'object' && error !== null ? read(error, key) : undefined;
 
     return typeof value === 'string' ? value : undefined;
 }
 
-function truncate(sql: string): string
+/**
+ * The SQL text, truncated
+ */
+function sqlOf(query: unknown): string | undefined
 {
-    return sql.length > SQL_LIMIT ? `${sql.slice(0, SQL_LIMIT)}…` : sql;
+    if (typeof query !== 'string')
+    {
+        return undefined;
+    }
+
+    return query.length > SQL_LIMIT ? `${query.slice(0, SQL_LIMIT)}…` : query;
+}
+
+/**
+ * How many values were bound
+ */
+function countOf(values: unknown): number | undefined
+{
+    const length = isArray(values) ? read(values, 'length') : undefined;
+
+    return typeof length === 'number' ? length : undefined;
 }
 
 /**
