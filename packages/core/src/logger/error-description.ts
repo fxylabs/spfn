@@ -119,9 +119,13 @@ const MESSAGE_SAFE_ROUTINES: ReadonlySet<string> = new Set([
     'ExecEvalConstraintCheck',                  // 23514: domain check
     'ExecEvalConstraintNotNull',                // 23502: domain not-null
     'domain_check_input',                       // 23502/23514: domain input (COPY, a bound parameter)
+    'ExecPartitionCheckEmitError',              // 23514: partition constraint, insert into a partition
     'DeadLockReport',                           // 40P01
     'ExecUpdate',                               // 40001: concurrent update
-    'PreCommit_CheckForSerializationFailure',   // 40001: serializable read/write dependencies
+    'ExecDelete',                               // 40001: concurrent update, under a delete
+    'ExecLockRows',                             // 40001: concurrent update, under FOR UPDATE / a foreign key check
+    'PreCommit_CheckForSerializationFailure',   // 40001: serializable read/write dependencies, at commit
+    'OnConflict_CheckForSerializationFailure',  // 40001: serializable read/write dependencies, at a read or write
     'ProcessInterrupts',                        // 57014 statement timeout / cancel, 57P01 terminated
 ]);
 

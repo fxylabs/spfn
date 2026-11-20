@@ -12,6 +12,7 @@
  * | R5  | inside the context object                   | the key-masking walk printing `params` and the cause's `detail` |
  * | R7  | a 22P02 driver error                        | a class-22 message quoting the rejected input               |
  * | R7b | a kept class from an unknown routine (`RAISE`, PL/Python) | a kept class carrying the app's own text; a pooler's routine-less 08 losing its message |
+ * | R7c | a 40001 or a partition 23514, as PostgreSQL 16.15 raised it | a serialization failure logged without its message      |
  * | F1  | formatted into a printf-style message (`%s`, `%o`, `%j`, a stray `%c`) | the documented printf form handing the error to `util.format` undescribed |
  *
  * What is the caught value is decided by position, never by the value's shape (G2):
@@ -125,6 +126,22 @@ describe('a logged database error carries no bound value', () =>
         }
 
         expect(describeError(pooler)).toMatchObject({ kind: 'database', code: '08P01', message: 'no more connections allowed (max_client_conn)' });
+    });
+
+    it('R7c: a serialization failure and a partition check keep their identifier-only messages', () =>
+    {
+        // Each read off PostgreSQL 16.15 (two sessions, repeatable read or serializable)
+        const raised: [string, string, string][] = [
+            ['40001', 'ExecLockRows', 'could not serialize access due to concurrent update'],
+            ['40001', 'ExecDelete', 'could not serialize access due to concurrent update'],
+            ['40001', 'OnConflict_CheckForSerializationFailure', 'could not serialize access due to read/write dependencies among transactions'],
+            ['23514', 'ExecPartitionCheckEmitError', 'new row for relation "orders_2026" violates partition constraint'],
+        ];
+
+        for (const [code, routine, message] of raised)
+        {
+            expect(describeError(Object.assign(new Error(message), { severity: 'ERROR', code, routine }))).toMatchObject({ code, routine, message });
+        }
     });
 });
 

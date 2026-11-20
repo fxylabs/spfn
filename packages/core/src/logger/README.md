@@ -293,10 +293,11 @@ interface ErrorDescription
   an extension; from an unknown routine the message is dropped and the code, constraint and
   table stay. The known routines, each read off the error PostgreSQL 16.15 raised:
   `_bt_check_unique`, `comparetup_index_btree` (23505), `check_exclusion_or_unique_constraint`
-  (23P01), `ExecConstraints` (23502, 23514), `ri_ReportViolation` (23503),
-  `ExecEvalConstraintCheck`, `ExecEvalConstraintNotNull`, `domain_check_input` (domain 23502,
-  23514), `DeadLockReport` (40P01), `ExecUpdate`, `PreCommit_CheckForSerializationFailure`
-  (40001), `ProcessInterrupts` (57014, 57P01).
+  (23P01), `ExecConstraints` (23502, 23514), `ExecPartitionCheckEmitError` (partition 23514),
+  `ri_ReportViolation` (23503), `ExecEvalConstraintCheck`, `ExecEvalConstraintNotNull`,
+  `domain_check_input` (domain 23502, 23514), `DeadLockReport` (40P01), `ExecUpdate`,
+  `ExecDelete`, `ExecLockRows`, `PreCommit_CheckForSerializationFailure`,
+  `OnConflict_CheckForSerializationFailure` (40001), `ProcessInterrupts` (57014, 57P01).
 - Describing never throws: a field whose getter throws is left out, a cause chain longer than
   10 links ends in a `CauseChainTruncated` link, and one that loops back ends in a
   `CircularCause` link. Masking the context never throws either: a value whose getter throws
