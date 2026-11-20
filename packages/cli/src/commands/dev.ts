@@ -52,6 +52,13 @@ function writeAgentInstructions(cwd: string, agentFiles: boolean): void
 }
 
 /**
+ * The first @spfn/core whose `CodegenOrchestrator` loads its generators
+ * (`loadGenerators`), which the watcher entry needs. The release that ships it
+ * raises this package's `@spfn/core` peer floor to it.
+ */
+const CORE_LOADING_GENERATORS = '0.4.0-beta.2';
+
+/**
  * The codegen watcher's entry, `.spfn/watcher.mjs`: the generators of the
  * app's codegen config, run by an orchestrator in watch mode, which loads them
  * again when the config changes (`loadGenerators`). Started under
@@ -71,8 +78,42 @@ export function watcherEntrySource(): string
 //     pool: { max: 3 }  // Watcher needs fewer connections than server
 // });
 
+import { existsSync, readFileSync } from 'node:fs';
 import { constants } from 'node:os';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { CodegenOrchestrator, loadCodegenConfig, createGeneratorsFromConfig, markCodegenProcess } from '@spfn/core/codegen';
+
+// The version of the @spfn/core installed for the app, from the package.json
+// above its codegen entry.
+const installedCoreVersion = () =>
+{
+    let directory = dirname(fileURLToPath(import.meta.resolve('@spfn/core/codegen')));
+
+    while (dirname(directory) !== directory)
+    {
+        const file = join(directory, 'package.json');
+        const manifest = existsSync(file) ? JSON.parse(readFileSync(file, 'utf8')) : undefined;
+
+        if (manifest?.name === '@spfn/core')
+        {
+            return manifest.version;
+        }
+
+        directory = dirname(directory);
+    }
+
+    return 'of unknown version';
+};
+
+// A core older than ${CORE_LOADING_GENERATORS} ignores loadGenerators and fails with a
+// TypeError on the generator list it never got: stop, saying which core is
+// installed, instead.
+if (CodegenOrchestrator.loadsGenerators !== true)
+{
+    console.error(\`[SPFN] Codegen watcher not started: @spfn/core \${installedCoreVersion()} is installed, and the spfn dev watcher needs @spfn/core ${CORE_LOADING_GENERATORS} or later. Update @spfn/core.\`);
+    process.exit(1);
+}
 
 // Started by the spfn CLI to generate code: a second copy of @spfn/core after a
 // router load is refused, not only warned about. In-process, so nothing

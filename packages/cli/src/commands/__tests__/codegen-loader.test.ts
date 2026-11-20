@@ -40,6 +40,8 @@
  * | R33| the watcher entry with a `.spfnrc.ts` that fails to load,    | a watcher that exits on a broken config while the server  |
  * |    | then fixed                                                   | runs on (regeneration off until a restart), or one that   |
  * |    |                                                              | stays up silent, or never loads the fix                   |
+ * | R33b| the watcher entry with an installed core whose orchestrator  | a watcher dead on `TypeError … 'flatMap'` while spfn dev  |
+ * |    | lacks `loadsGenerators` (a core before the config reload)    | runs on without codegen                                   |
  * | R34| the watcher entry with a generator held by a file gate: one   | an entry that exits mid-generation, or that ignores every |
  * |    | signal, then the gate opened; then two signals               | signal while a generation hangs (orphaned by spfn dev)    |
  * | R34b| the watcher entry reloading a `.spfnrc.ts` whose custom      | a load that never settles taken for a hung watcher: no    |
@@ -571,6 +573,26 @@ describe.each(TSX)('codegen in CLI processes, tsx $version', (tsx) =>
             await watcher.stop();
         }
     }, 60_000);
+
+    it('R33b the watcher entry with a core that cannot load its generators stops, naming the installed core and the minimum', async () =>
+    {
+        // Without it, a core older than the config reload ignores loadGenerators:
+        // the watcher dies on a TypeError about flatMap, and spfn dev runs on
+        // without codegen.
+        installCoreInApp();
+
+        const codegen = join(appDir, 'node_modules/@spfn/core/dist/codegen/index.js');
+
+        writeFileSync(codegen, readFileSync(codegen, 'utf8').replace('static loadsGenerators = true;', ''));
+        write('.spfn/watcher.mjs', watcherEntrySource());
+
+        const watcher = startWatcher(tsx);
+        const version = JSON.parse(readFileSync(join(coreRoot, 'package.json'), 'utf8')).version;
+
+        expect(await watcher.exited, watcher.output()).toBe(1);
+        expect(watcher.output()).toContain(`[SPFN] Codegen watcher not started: @spfn/core ${version} is installed, and the spfn dev watcher needs @spfn/core 0.4.0-beta.2 or later. Update @spfn/core.`);
+        expect(watcher.output()).not.toContain('flatMap');
+    });
 
     it('R15 .spfnrc.ts sees its own file in import.meta.url, filename and dirname', () =>
     {

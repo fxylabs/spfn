@@ -61,6 +61,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `LoadingOrchestratorOptions`; given both options, or neither, it now throws a `TypeError`
   naming them (both: `loadGenerators` was used and `generators` silently ignored; neither: no generator
   ran, silently).
+- **@spfn/core: `CodegenOrchestrator.loadsGenerators`** (static, `true`): the orchestrator takes
+  `loadGenerators`. The `spfn dev` watcher checks it, and with an older `@spfn/core` stops with
+  `[SPFN] Codegen watcher not started: @spfn/core <installed> is installed, and the spfn dev watcher
+  needs @spfn/core 0.4.0-beta.2 or later.` (exit 1) instead of dying on `TypeError: Cannot read
+  properties of undefined (reading 'flatMap')` (#353).
 - **@spfn/core: `CodegenOrchestrator.settled()`** resolves once watch mode is idle — no generation
   running, nothing dirty, no input directory event settling (#353).
 

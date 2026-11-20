@@ -48,7 +48,9 @@ Functions:
 Class:
 
 - `CodegenOrchestrator` — `new CodegenOrchestrator(options)`, then `generateAll(trigger?)`,
-  `watch()`, `settled()`, `close()`.
+  `watch()`, `settled()`, `close()`. `CodegenOrchestrator.loadsGenerators` is `true` in a core whose
+  orchestrator takes `loadGenerators`; an older core has no such property and ignores the option,
+  so a caller that needs it checks this first (the `spfn dev` watcher does).
 
 Types:
 

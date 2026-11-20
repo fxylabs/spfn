@@ -161,6 +161,13 @@ const EVENT_ICONS: Record<ChangedFile['event'], string> = { add: '+', change: '~
 
 export class CodegenOrchestrator
 {
+    /**
+     * This orchestrator takes `loadGenerators` (`LoadingOrchestratorOptions`).
+     * A core without it has no such property, and ignores the option: a caller
+     * that depends on it — the `spfn dev` watcher — checks this first.
+     */
+    static readonly loadsGenerators = true;
+
     private generators: Generator[];
     private readonly loadGenerators?: () => Promise<Generator[]>;
     private readonly cwd: string;
