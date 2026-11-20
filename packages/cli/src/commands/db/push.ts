@@ -85,7 +85,7 @@ export async function applyStatements(
 
 /**
  * Resolve the schema source, ending the command when drizzle.config.ts cannot be
- * loaded: falling back silently would push a different schema than generate reads.
+ * loaded, --schema or not: the config declares what push may touch.
  */
 async function loadSchemaSourceOrExit(explicit?: string): Promise<SchemaSource | undefined>
 {
@@ -95,8 +95,7 @@ async function loadSchemaSourceOrExit(explicit?: string): Promise<SchemaSource |
     }
     catch (error)
     {
-        console.error(chalk.red(`❌ Could not load drizzle.config.ts: ${error instanceof Error ? error.message : String(error)}`));
-        console.log(chalk.yellow('💡 Fix the config, or name the schema directly: spfn db push --schema <path>'));
+        console.error(chalk.red(`❌ ${error instanceof Error ? error.message : String(error)}`));
         process.exit(1);
     }
 }
@@ -134,7 +133,9 @@ async function resolveSchemaFilesOrExit(config: Parameters<typeof resolveSchemaF
  *   then core's default: the entities folder scan, or its config.ts registry
  *   (DRIZZLE_SCHEMA_PATH) when the folder holds no entity file or exports a table
  *   the folder does not define — as `db generate` reads it. A named source
- *   (--schema, drizzle.config.ts) with no files exits 1.
+ *   (--schema, drizzle.config.ts) with no files exits 1, and so does a
+ *   drizzle.config.ts that cannot be loaded, with --schema too: its
+ *   schemaFilter is what push may touch.
  *
  * Whichever files are read, objects in a schema a function package owns stay out
  * of the diff: the package's own migrations carry them (step 8).

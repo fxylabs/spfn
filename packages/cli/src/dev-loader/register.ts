@@ -9,9 +9,14 @@
  * the asynchronous chain tsx registers with `module.register`: the hook's
  * `nextResolve` is tsx's resolve, and the format it states is what tsx's load
  * receives.
+ *
+ * The root it is registered for is left on `globalThis` (`DEV_LOADER_ROOT`):
+ * `bin/spfn.js` reads it (`hasDevLoader`) to tell whether this process already
+ * has the hook for the app it runs in, whatever else the launcher registered.
  */
 
 import nodeModule from 'node:module';
+import { DEV_LOADER_ROOT } from '../utils/dev-loader';
 import { createResolveHook, type ResolveHook } from './hooks';
 
 /** `module.registerHooks`; the `@types/node` this package builds with predates it. */
@@ -25,3 +30,5 @@ if (root === null)
 }
 
 registerHooks({ resolve: createResolveHook(root) });
+
+(globalThis as Record<symbol, unknown>)[DEV_LOADER_ROOT] = root;

@@ -19,6 +19,9 @@ import { mkdirSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { execa } from 'execa';
 import { logger } from '../utils/logger.js';
+import { tsxCommand } from '../utils/dev-loader.js';
+import { missingTsx } from '../utils/tsx-required.js';
+import { redactUrls } from '../utils/redact-urls.js';
 import { detectPackageManager } from '../utils/package-manager.js';
 import { resolveKeychainEnv } from '../utils/secret-store/index.js';
 
@@ -30,6 +33,10 @@ import { resolveKeychainEnv } from '../utils/secret-store/index.js';
  * no plain object stops provisioning naming the file; it used to hand
  * `provisionInfrastructure` an `undefined` config and provision on defaults.
  * Only an absent file is "not found", which exits 1 with the paths it tried.
+ * It marks its process before (`markAppSourceProcess`), so a second copy of
+ * `@spfn/core` the config brings in is refused, not provisioned with. What
+ * stops it is printed through `redactUrls`, embedded as source: the runner is
+ * another process, in the app.
  *
  * Exported so its content is under test rather than only under review: this is
  * generated text, so nothing type-checks it.
@@ -46,23 +53,40 @@ if (!process.env.NODE_ENV)
 // which is what SPFN reads. Map it so build-step provisioning connects too.
 process.env.DATABASE_URL ??= process.env.POSTGRES_URL;
 
-// Load environment variables FIRST (before any imports that depend on them)
-await import('@spfn/core/config');
+// Whatever stops the run is printed with the credentials of any URL in it
+// blanked: a server.config or a provisioning step can throw with DATABASE_URL
+// in its text, and this output reaches deploy logs.
+const redactUrls = ${redactUrls.toString()};
 
-const { provisionInfrastructure, loadServerConfigFile, SERVER_CONFIG_FILE_PATHS } = await import('@spfn/core/server');
-
-const loaded = await loadServerConfigFile(process.cwd());
-
-if (!loaded)
+async function provision()
 {
-    console.error('server.config not found. Looked for: ' + SERVER_CONFIG_FILE_PATHS.join(', '));
-    console.error('Run "spfn init" first, or run this command from the app root.');
-    process.exit(1);
+    // Load environment variables FIRST (before any imports that depend on them)
+    await import('@spfn/core/config');
+
+    const { provisionInfrastructure, loadServerConfigFile, SERVER_CONFIG_FILE_PATHS, markAppSourceProcess } = await import('@spfn/core/server');
+
+    // Loads the app's source: a second copy of @spfn/core is refused where it is recorded.
+    markAppSourceProcess();
+
+    const loaded = await loadServerConfigFile(process.cwd());
+
+    if (!loaded)
+    {
+        console.error('server.config not found. Looked for: ' + SERVER_CONFIG_FILE_PATHS.join(', '));
+        console.error('Run "spfn init" first, or run this command from the app root.');
+        process.exit(1);
+    }
+
+    console.info('[SPFN] Provisioning with config: ' + loaded.path);
+
+    await provisionInfrastructure(loaded.config);
 }
 
-console.info('[SPFN] Provisioning with config: ' + loaded.path);
-
-await provisionInfrastructure(loaded.config);
+await provision().catch((error) =>
+{
+    console.error(redactUrls(error instanceof Error ? error.stack ?? error.message : String(error)));
+    process.exit(1);
+});
 
 // provisionInfrastructure leaves the DB pool open — exit explicitly.
 process.exit(0);
@@ -94,8 +118,18 @@ export const provisionCommand = new Command('provision')
             logger.warn(`[SPFN] Could not resolve keychain secret(s): ${keychainMissing.join(', ')} — run \`spfn secret set <KEY>\``);
         }
 
-        // Temp runner spawned via tsx so a TS server.config and its path aliases
-        // (@/server/...) resolve the same way `spfn dev` resolves them.
+        // The runner runs under the app's tsx: without one, say what to install
+        const tsxMissing = missingTsx(cwd);
+
+        if (tsxMissing !== undefined)
+        {
+            logger.error(tsxMissing);
+            process.exit(1);
+        }
+
+        // Temp runner spawned via tsx, with the hook `spfn dev` runs the server
+        // under, so a TS server.config, its path aliases (@/server/...) and its
+        // module format resolve the same way they do there.
         const tempDir = join(cwd, '.spfn');
         const runnerEntry = join(tempDir, 'provision.mjs');
 
@@ -103,13 +137,9 @@ export const provisionCommand = new Command('provision')
 
         writeFileSync(runnerEntry, renderProvisionRunner());
 
-        const pm = detectPackageManager(cwd);
-        const runnerCmd = pm === 'npm' ? 'npx' : pm;
-        const runnerArgs = pm === 'npm'
-            ? ['tsx', runnerEntry]
-            : ['exec', 'tsx', runnerEntry];
+        const runner = tsxCommand(detectPackageManager(cwd), cwd, runnerEntry);
 
-        const result = await execa(runnerCmd, runnerArgs, {
+        const result = await execa(runner.command, runner.args, {
             cwd,
             stdio: 'inherit',
             reject: false,

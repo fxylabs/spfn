@@ -5,7 +5,7 @@
  * drizzle.config.ts (schema and schemaFilter), then the core default.
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
@@ -92,11 +92,28 @@ describe('resolvePushSchemaSource', () =>
         expect(await resolvePushSchemaSource('./b.ts', cwd)).toEqual({ schema: './b.ts', schemaFilter: ['app'], label: '--schema' });
     });
 
-    it('lets --schema bypass a drizzle.config.ts that cannot be loaded', async () =>
+    it('does not let --schema bypass a drizzle.config.ts that cannot be loaded: its schemaFilter is the scope', async () =>
     {
-        writeFileSync(join(cwd, 'drizzle.config.ts'), "throw new Error('DIRECT_URL required');");
+        // rv375b: the config declares ['app']; read without it, the filter fell back to public
+        writeFileSync(join(cwd, 'drizzle.config.ts'), "if (!process.env.NEVER) throw new Error('DIRECT_URL required');\n"
+            + "export default { schema: './a.ts', schemaFilter: ['app'] };\n");
 
-        expect(await resolvePushSchemaSource('./b.ts', cwd)).toEqual({ schema: './b.ts', schemaFilter: undefined, label: '--schema' });
+        await expect(resolvePushSchemaSource('./b.ts', cwd)).rejects
+            .toThrow(`Could not load ${join(cwd, 'drizzle.config.ts')}: DIRECT_URL required. Make it load`);
+    });
+
+    it('K1 blanks the credentials of a URL in the config\'s own load error', async () =>
+    {
+        // Codex's probe: printed verbatim, the error put a database password into CI logs
+        vi.stubEnv('DATABASE_URL', 'postgres://u:FAKE@h/d');
+        writeFileSync(join(cwd, 'drizzle.config.ts'), "throw new Error('connection failed for ' + process.env.DATABASE_URL);");
+
+        const error = await resolvePushSchemaSource(undefined, cwd).catch((thrown: Error) => thrown);
+
+        vi.unstubAllEnvs();
+        expect(error).toBeInstanceOf(Error);
+        expect((error as Error).message).toContain('connection failed for postgres://<redacted>@h/d.');
+        expect((error as Error).message).not.toContain('FAKE');
     });
 });
 

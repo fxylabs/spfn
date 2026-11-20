@@ -18,6 +18,9 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { loadAppConfig } from '@spfn/core/app-config';
+import { hasDevLoader } from './dev-loader.js';
+import { assertTypeScriptLoadable, tsxApiPath } from './tsx-required.js';
+import { redactUrls } from './redact-urls.js';
 import { loadEnvSchema, resolveFrom, type EnvSchema, type EnvSchemaEntry } from './env-schema.js';
 
 /** One schema and the name it is reported under. */
@@ -49,8 +52,6 @@ export interface EnvSourceGroup
 
 /** `@spfn/core` leads the package part of the list; the rest follow by name. */
 const CORE_PACKAGE = '@spfn/core';
-
-const TYPESCRIPT_FILE = /\.[cm]?tsx?$/;
 
 /**
  * Build the list: one package with `-p`, the whole app without it.
@@ -200,7 +201,7 @@ async function loadSchemaModule(cwd: string, path: string): Promise<EnvSchema>
 
     const module = await importAppModule(cwd, fullPath).catch((error: unknown) =>
     {
-        const message = error instanceof Error ? error.message : String(error);
+        const message = redactUrls(error instanceof Error ? error.message : String(error));
 
         return Promise.reject(new Error(`spfn.config.js env.schemas: ${path} could not be loaded: ${message}`));
     });
@@ -216,12 +217,25 @@ async function loadSchemaModule(cwd: string, path: string): Promise<EnvSchema>
 /**
  * Import a file of the app the way `spfn dev` and `spfn provision` run it:
  * through tsx, with the app's tsconfig, so TypeScript and path aliases such as
- * `@/server/...` resolve. A plain JavaScript module still loads when the app
+ * `@/server/...` resolve. `bin/spfn.js` runs every command on tsx with the
+ * CLI's module hook (`hasDevLoader`), so there a plain `import()` loads `.ts`
+ * as ESM, sharing this process's `@spfn/*` modules: tsx's `tsImport` would
+ * evaluate every module the file reaches again, in a namespace of its own — a
+ * second `@spfn/core/env`. Otherwise (a caller in-process, the bin without
+ * tsx) through that API; a plain JavaScript module still loads when the app
  * has no tsx.
  */
 async function importAppModule(cwd: string, fullPath: string): Promise<Record<string, unknown>>
 {
     const url = pathToFileURL(fullPath).href;
+
+    if (hasDevLoader(cwd))
+    {
+        return await import(url);
+    }
+
+    assertTypeScriptLoadable(cwd, fullPath);
+
     const tsx = await loadTsx(cwd);
 
     if (tsx)
@@ -232,11 +246,6 @@ async function importAppModule(cwd: string, fullPath: string): Promise<Record<st
             parentURL: pathToFileURL(join(cwd, 'noop.js')).href,
             tsconfig: existsSync(tsconfig) ? tsconfig : false,
         });
-    }
-
-    if (TYPESCRIPT_FILE.test(fullPath))
-    {
-        throw new Error('tsx is not installed in this project, and it is what loads TypeScript. Add it: pnpm add -D tsx');
     }
 
     return await import(url);
@@ -252,8 +261,7 @@ interface TsxApi
  */
 async function loadTsx(cwd: string): Promise<TsxApi | undefined>
 {
-    const path = resolveFrom(join(cwd, 'noop.js'), 'tsx/esm/api')
-        ?? resolveFrom(import.meta.url, 'tsx/esm/api');
+    const path = tsxApiPath(cwd);
 
     return path ? await import(pathToFileURL(path).href) as TsxApi : undefined;
 }

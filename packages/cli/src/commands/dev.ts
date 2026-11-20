@@ -6,6 +6,7 @@ import { execa, type ExecaChildProcess } from 'execa';
 import chokidar from 'chokidar';
 import { logger } from '../utils/logger.js';
 import { getCliVersion, getCorePeerRange } from '../utils/version.js';
+import { devLoaderImport, tsxCommand } from '../utils/dev-loader.js';
 import { syncAgentInstructions } from '../lib/agent-instructions.js';
 import { detectPackageManager, getAddCommand, getRunScriptArgs, type PackageManager } from '../utils/package-manager.js';
 import { resolveKeychainEnv } from '../utils/secret-store/index.js';
@@ -56,7 +57,7 @@ function writeAgentInstructions(cwd: string, agentFiles: boolean): void
  * The codegen watcher's entry, `.spfn/watcher.mjs`: the generators of the
  * app's codegen config, run by an orchestrator in watch mode, which loads them
  * again when the config changes (`loadGenerators`). Started under
- * tsx with the `spfn dev` hook (`devLoader`), as the server is.
+ * tsx with the `spfn dev` hook (`devLoaderImport`), as the server is.
  */
 export function watcherEntrySource(): string
 {
@@ -135,12 +136,12 @@ if (codegen.CodegenOrchestrator?.loadsGenerators !== true)
     process.exit(1);
 }
 
-const { CodegenOrchestrator, loadCodegenConfig, createGeneratorsFromConfig, markCodegenProcess } = codegen;
+const { CodegenOrchestrator, loadCodegenConfig, createGeneratorsFromConfig, markAppSourceProcess } = codegen;
 
-// Started by the spfn CLI to generate code: a second copy of @spfn/core after a
-// router load is refused, not only warned about. In-process, so nothing
-// inherits it.
-markCodegenProcess();
+// Started by the spfn CLI to load the app's source: a second copy of @spfn/core
+// is refused, where it is recorded and after each router load, not only warned
+// about. In-process, so nothing inherits it.
+markAppSourceProcess();
 
 const cwd = process.cwd();
 
@@ -192,34 +193,6 @@ catch (error)
 }
 
 /**
- * Registers the module hook that runs the app's own source in the format
- * `spfn build` gives it (see `dev-loader/hooks.ts`), for the application rooted
- * at `cwd`. Built next to this file, so it is resolved from the CLI's location,
- * never from the app's cwd.
- */
-function devLoader(cwd: string): string
-{
-    const loader = new URL('./dev-loader/register.js', import.meta.url);
-
-    loader.searchParams.set('root', cwd);
-
-    return loader.href;
-}
-
-/**
- * The command that runs the server entry under the app's tsx, through the
- * package manager, with the dev module hook registered first.
- */
-function tsxCommand(pm: string, cwd: string, entry: string): { command: string; args: string[] }
-{
-    const tsxArgs = ['tsx', '--import', devLoader(cwd), entry];
-
-    return pm === 'npm'
-        ? { command: 'npx', args: tsxArgs }
-        : { command: pm, args: ['exec', ...tsxArgs] };
-}
-
-/**
  * Start the codegen watcher entry: a tsx CLI run by this Node, never through
  * the package manager. `spfn dev` forwards its signals to the watcher and waits
  * for it to exit (`DevChildren`), and neither wrapper lets it: `pnpm exec`
@@ -241,7 +214,7 @@ function startCodegenWatcher(pm: PackageManager, cwd: string, entry: string, env
         return null;
     }
 
-    const watcher = execa(process.execPath, [tsxCli, '--import', devLoader(cwd), entry], { cwd, stdio: 'inherit', reject: false, env });
+    const watcher = execa(process.execPath, [tsxCli, '--import', devLoaderImport(cwd), entry], { cwd, stdio: 'inherit', reject: false, env });
 
     watcher.then((result) =>
     {

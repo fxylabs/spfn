@@ -24,6 +24,11 @@ pnpm dlx spfn@beta <command>
 Or add it as a project dependency (`spfn init`/`spfn create` do this for you), then
 call it via `pnpm spfn <command>` / `npm run spfn:<script>`.
 
+Once the app has its own `@spfn/core`, run the app's own `spfn` for the commands that load its
+source (`db`, `codegen`, `build`, `contract`): a `spfn` from `npx`/`dlx` or a global install brings
+a second `@spfn/core`, and is refused, saying so and naming the command to run instead (`pnpm exec
+spfn db generate`).
+
 Requirements: Node.js 22.23.4+ (or 24.22.1+, 26.12.1+) in both modes, Next.js 16.4.5+ (App Router, `src/` dir),
 PostgreSQL 14+ (Redis optional). Next.js 15
 is not supported — see [the root README](../../README.md#what-do-i-need-installed).
@@ -230,10 +235,25 @@ like and how to override it.
 #### Your server source runs as ESM, as it does in production
 
 `spfn build` bundles `src/server` as ESM with esbuild whatever your `package.json` says, and
-esbuild decides each `.js` file by its own syntax. `spfn dev` gives your source the same formats:
-it registers a Node module hook (`module.registerHooks`) in the server process and in the codegen
-watcher that states the format of every file of yours that `tsx` would otherwise guess from
-`package.json`:
+esbuild decides each `.js` file by its own syntax. Every other `spfn` command gives your source the
+same formats: the `spfn` bin runs every command in a process with `tsx` and a Node module hook
+(`module.registerHooks`) registered for the directory it was started in — re-running itself to get
+them unless the process already has that hook, whatever else started it (`node --import tsx`,
+`npx tsx`, `NODE_OPTIONS`) — and so does every `tsx` process a command starts: the `spfn dev`
+server and codegen watcher, the `spfn provision` runner. So the files of yours a command loads
+itself — entities under `spfn db generate`, `db push` and `db tenant`, `drizzle.config.ts` under
+`db push` and `db tenant`, `server.config` under `spfn provision`, `env.schemas` files under `spfn
+env`, your router under codegen — load as they do under `spfn dev`. (`drizzle-kit`, which `db
+generate`, `check`, `drop` and `studio` hand a `drizzle.config.ts` to, reads that file and the
+schema it names in a process of its own, by its own rule.) Without `tsx` in the app, the bin runs
+the command without the hook, and a command that loads your TypeScript — `spfn env`, `spfn db`
+(`push`, `tenant`, and `generate` with the entity registry), `spfn provision` — stops before its
+first import with `tsx is not installed in this project, and it is what loads TypeScript. Add it:
+<your package manager's add command>` and exit code 1. The cost: every `spfn` command in a project
+re-spawns itself once to get the hook, and the hook's resolve takes its own time — ~73 ms of
+self-time over 2,815 resolves on `spfn --version` in example 01 (measured on the dev VM, Node 22,
+hook time minus Node's own resolve). The hook states the format of every file of yours that `tsx`
+would otherwise guess from `package.json`:
 
 - `.ts` and `.tsx` run as ESM, with or without `"type": "module"`, also when imported with a query
   of your own (`./route.ts?v=2`), which reaches the module as you wrote it — one evaluation per
@@ -245,7 +265,7 @@ watcher that states the format of every file of yours that `tsx` would otherwise
   alone.
 
 A file is yours unless it is a dependency: a `node_modules` directory appears in its real path
-below the longest common ancestor of that path and the directory `spfn dev` was started in. So a
+below the longest common ancestor of that path and the directory the command was started in. So a
 workspace package beside the app, consumed as source, is yours; what is installed under it is
 not; and a `node_modules` directory above the app (a project checked out under one) does not
 count. A workspace package that pnpm materialises under `node_modules/.pnpm` (`injected: true`)
@@ -284,6 +304,32 @@ server ran the other: rate-limit `policies` and `.trustedProxyHops()` were ignor
 > the production build rejects it. Use `import.meta.url` / `import.meta.dirname` and `import` for
 > the rest.
 >
+> **BREAKING (`spfn db`, `spfn provision`).** In an app without `"type": "module"`, these
+> commands loaded your files — and what they import — as CommonJS, beside a second copy of
+> `@spfn/core` (issue #349). They now load them as `spfn dev` does, so the CommonJS-only shapes in
+> the table above fail where the CLI loads the file itself, and these commands refuse a second copy
+> of `@spfn/core` as a server does: a `.cjs` file that requires `@spfn/*` from those files stops
+> the command, naming the file. File by file:
+>
+> - **Entity files** — loaded by `db push` and `db tenant`, and by `db generate` when the app has
+>   the entity registry `src/server/entities/config.ts` (every scaffold) or a function package
+>   installed and no `drizzle.config.ts` of its own. A CommonJS-only shape fails there; top-level
+>   `await` now loads. `drizzle-kit` then reads the entities again under `db generate`, by its own
+>   rule.
+> - **`server.config`** — loaded by the `spfn provision` runner. A CommonJS-only shape fails there.
+> - **`drizzle.config.ts`** — read by the CLI itself only under `db push` and `db tenant`, for its
+>   `schema` and `schemaFilter`. A config that cannot be loaded stops `db push` — with `--schema`
+>   too, since its `schemaFilter` is what push may touch — and `db tenant`, with exit code 1.
+>   `__dirname`, `__filename` or `require` there now does: `Could not load <path>: __dirname is not
+>   defined in ES module scope. spfn reads <path> as ESM, as the app's other source (drizzle-kit
+>   reads it by its own rule): use import.meta.dirname, import.meta.filename and import instead of
+>   __dirname`. The load error in that message is the config's own text, with the credentials of
+>   any URL in it (`scheme://user:pass@host`) blanked to `<redacted>` — as in `spfn env`'s and the
+>   `provision` runner's load errors; a secret the config prints in another form (a bare password,
+>   its own `console.log`) is the config's own output. `module.exports = { … }` still loads.
+>   `db generate`, `check`, `drop` and `studio` hand the file to `drizzle-kit`, which reads it as
+>   before — a CommonJS config works there.
+>
 > Not a break — dev now matches production: a named import from a CommonJS npm package whose
 > exports Node cannot analyse (`import { red } from 'chalk'` v4, `{ sign } from 'jsonwebtoken'`,
 > `{ enable } from 'debug'`) fails under `spfn dev` (`does not provide an export named …`) as it
@@ -304,14 +350,11 @@ watcher `spfn dev` starts — imports your router the same way, in its own proce
 by the same rule, resolves tsconfig `paths` as tsc does, and re-runs only your project's files on
 each reload; every package is evaluated once. A second copy of `@spfn/core` found after a router
 load — a `.cts` route requiring `@spfn/*` — is refused in these processes (each marks itself with
-`markCodegenProcess()` from `@spfn/core/codegen`; nothing it spawns inherits the mark). The watcher regenerates for any project file the router
+`markAppSourceProcess()` from `@spfn/core/codegen`, as `spfn db` and `spfn provision` do; nothing
+it spawns inherits the mark). The watcher regenerates for any project file the router
 reached, not only `src/server/routes/**`: an edit to `src/server/lib/segment.ts` imported through
 `@/` regenerates too. Each reload keeps about 100 KB per small app in memory, by design
 ([@spfn/core codegen](../core/src/codegen/README.md#how-the-router-is-loaded)).
-
-`spfn db generate` still loads your schema files the old way (tsx, as CommonJS in an app without
-`"type": "module"`, beside an ESM `@spfn/core`); it reads schema definitions, never the state a
-second copy splits, and does not refuse (#349).
 
 ### `spfn build`
 
@@ -525,7 +568,8 @@ the schema. A registry loaded as-is (2 or 4) contributes only what it exports:
 re-export with `export *` so a `pgEnum` or `pgSchema` defined next to a table comes
 along. `db push` diffs the PostgreSQL schemas the declared `schemaFilter` names (else
 `public`) plus every schema the loaded modules name — tables, `pgSchema()` objects,
-enums, views, sequences; `--schema` replaces the files but keeps that declared filter.
+enums, views, sequences; `--schema` replaces the files but keeps that declared filter,
+and a `drizzle.config.ts` that cannot be loaded stops push, `--schema` or not.
 
 **A function package's own schema is never the project's.** An installed package that
 ships migrations (`@spfn/auth` → `spfn_auth`) creates and alters its own tables when

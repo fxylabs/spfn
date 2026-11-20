@@ -233,9 +233,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to the workspace's globs, or commit the app's own lockfile (`pnpm-lock.yaml`, `yarn.lock`, …);
   `create` and `init` also take `--pm`, but `dev`, `build`, `start`, `add`, `setup` and
   `provision` have no `--pm` and follow the lockfile only.
+- **BREAKING: spfn: `spfn db` and `spfn provision` load a type-less app's source as ESM, as
+  `spfn dev` does (#349).** In an app without `"type": "module"`, `spfn db generate`, `db push`,
+  `db tenant` and the `spfn provision` runner loaded entity files, `drizzle.config.ts` and
+  `server.config` as CommonJS, beside a second copy of every `@spfn/core` entry they reached (5
+  under `db generate` in example 03, 15 under `provision`). The `spfn` bin now runs every command in
+  a process with the CLI's module hook registered for the app — re-running itself unless the process
+  already has it, also when `tsx` was already there (`node --import tsx`, `npx tsx`,
+  `NODE_OPTIONS`) — and every `tsx` child a command starts (the `provision` runner, the dev server
+  and watcher) gets the same hook. A CommonJS-only shape — `require`, `__dirname`, a named import of
+  a `module.exports` file — now fails where the CLI loads the file itself, as it fails under `spfn
+  dev` (table in the CLI README, "Your server source runs as ESM"): in entity files under `db push`,
+  `db tenant`, and `db generate` with the entity registry or a function package and no
+  `drizzle.config.ts`; in `server.config` under `provision`; in `drizzle.config.ts` under `db push`
+  and `db tenant`, which read its `schema` and `schemaFilter`. **A `drizzle.config.ts` that does
+  not load as ESM now stops `db push`, with and without `--schema`, and `db tenant`** (exit 1, naming
+  the file, the CommonJS name and `import.meta.dirname`/`import.meta.filename`/`import` as the
+  remedy; the credentials of a URL in the config's load error are blanked): its `schemaFilter` is
+  what they may touch, and `--schema`, which replaces only its files, no longer goes on without it.
+  `drizzle-kit`, which `db generate`, `check`, `drop` and `studio` hand `drizzle.config.ts` to,
+  reads it and the schema by its own rule as before. Top-level `await` in an entity now loads (`db
+  generate` failed on it). `spfn env` loads `env.schemas` files the same way. The cost: every `spfn`
+  command in a project re-spawns itself once to get the hook, and the hook's resolve adds ~73 ms of
+  self-time over 2,815 resolves on `spfn --version` in example 01 (dev VM, Node 22).
+- **BREAKING: spfn, @spfn/core: every `spfn db` command and the `spfn provision` runner refuse a
+  second copy of `@spfn/core` (#349)**, with the message a server refuses with: a `.cjs` file that
+  requires `@spfn/*` from an entity or `server.config` stops the command, naming the file. A `spfn`
+  that is not the app's own (global, `npx`/`dlx`) in an app with its own `@spfn/core` is refused
+  naming the CLI's install as the second one and the app's own command to run (`pnpm exec spfn …`);
+  `markAppSourceProcess({ foreignRunner })` carries that.
+- **BREAKING: @spfn/core: `markCodegenProcess()` is `markAppSourceProcess()` (#349)**, exported from
+  `@spfn/core/codegen` and now also `@spfn/core/server`. It marks any process the spfn CLI started
+  to load app source, and from the mark on a second copy is refused where it is recorded, as in a
+  server — in a codegen process too, inside the router load, besides the check after it.
 
 ### Fixed
 
+- **spfn: without tsx, `spfn db` and `spfn provision` say what to install (#349)**, as `spfn env`
+  did: `tsx is not installed in this project, and it is what loads TypeScript. Add it: <the app's
+  own add command>`, exit 1. `db generate`, `push` and `tenant` stopped on Node's `Cannot find
+  module '…/example.entity'`; `provision` on the package manager's `Command "tsx" not found`. The
+  message now names the app's package manager (`npm install --legacy-peer-deps --save-dev tsx` in an
+  npm app) instead of always `pnpm add -D tsx`.
 - **@spfn/auth: `mfaLockedEvent`, `passkeyEnrolledEvent` and `passkeyRevokedEvent` are exported from
   `@spfn/auth/server` (#361)**, with `MfaLockedPayload`, `PasskeyEnrolledPayload` and
   `PasskeyRevokedPayload`. The README documented all three and the package emitted them, but an app

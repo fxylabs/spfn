@@ -8,6 +8,7 @@ import { build } from 'tsup';
 
 import { logger } from '../utils/logger.js';
 import { detectPackageManager, getRunCommand } from '../utils/package-manager.js';
+import { foreignRunner } from '../utils/foreign-runner.js';
 
 interface BuildOptions
 {
@@ -82,10 +83,11 @@ async function buildProject(options: BuildOptions): Promise<void>
 
         try
         {
-            const { CodegenOrchestrator, loadCodegenConfig, createGeneratorsFromConfig, markCodegenProcess } = await import('@spfn/core/codegen');
+            const { CodegenOrchestrator, loadCodegenConfig, createGeneratorsFromConfig, markAppSourceProcess } = await import('@spfn/core/codegen');
 
-            // A codegen process: a second copy of @spfn/core after a router load is refused.
-            markCodegenProcess();
+            // Loads the app's source: a second copy of @spfn/core is refused, where it is
+            // recorded and after each router load.
+            markAppSourceProcess({ foreignRunner: foreignRunner(cwd, process.argv.slice(2)) });
 
             const config = loadCodegenConfig(cwd);
             const generators = await createGeneratorsFromConfig(config, cwd);

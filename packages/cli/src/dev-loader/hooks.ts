@@ -24,7 +24,7 @@
  * the root is handed to it as data by `register.ts`.
  */
 
-import { existsSync, realpathSync } from 'node:fs';
+import { existsSync, realpathSync, statSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { applicationFormat, isDependency } from '@spfn/core/codegen/loader';
 import { buildSync } from 'esbuild';
@@ -65,10 +65,28 @@ const TSX_VIRTUAL_QUERY = 'tsx-commonjs-virtual-query=';
 /** The query parameters tsx marks a file it took for CommonJS with. */
 const TSX_COMMONJS_PARAMETERS = ['tsx-commonjs-export-preparse=', TSX_VIRTUAL_QUERY];
 
-/** Whether `part` (`name=value` of a query) is one of tsx's own parameters. */
+/** The query parameter a file loaded through tsx's `tsImport`/`require` API carries: its loader's namespace. */
+const TSX_NAMESPACE = 'tsx-namespace=';
+
+/** Whether `part` (`name=value` of a query) is one of tsx's CommonJS parameters. */
 function isTsxParameter(part: string): boolean
 {
     return TSX_COMMONJS_PARAMETERS.some(parameter => part.startsWith(parameter));
+}
+
+/**
+ * The query of a virtual path's copy as the app wrote it, followed by the
+ * namespace parameter `searchParts` carries. tsx appends the namespace to the
+ * copy as `namespace=<n>` and keeps `tsx-namespace=<n>` in the search; the
+ * scoped loader of `tsImport` claims a file by the latter, so it is kept, and
+ * its copy dropped.
+ */
+function virtualPathQuery(copy: string, searchParts: string[]): string[]
+{
+    const namespaces = searchParts.filter(part => part.startsWith(TSX_NAMESPACE));
+    const copies = new Set(namespaces.map(part => part.slice('tsx-'.length)));
+
+    return [...copy.split('&').filter(part => !copies.has(part)), ...namespaces];
 }
 
 /**
@@ -79,8 +97,9 @@ function isTsxParameter(part: string): boolean
  * `tsx-commonjs-virtual-query`, and re-serialises the search (`?raw` becomes
  * `?raw=`). As tsx's own inverse (`getFilePathFromVirtualQuery`) reads it, the
  * file is the path up to its last `%3F`; the app's query is taken from the
- * path's copy, which is as the app wrote it, without tsx's parameters. A URL
- * with none of tsx's parameters is returned untouched.
+ * path's copy, which is as the app wrote it, without tsx's parameters, and a
+ * `tsImport` namespace stays — the URL tsx gives the same import as ESM. A URL
+ * with none of tsx's CommonJS parameters is returned untouched.
  */
 function withoutCommonJsQuery(url: string): string
 {
@@ -95,7 +114,9 @@ function withoutCommonJsQuery(url: string): string
     const virtualPathEnd = searchParts.some(part => part.startsWith(TSX_VIRTUAL_QUERY))
         ? plain.pathname.toLowerCase().lastIndexOf('%3f')
         : -1;
-    const queryParts = virtualPathEnd === -1 ? searchParts : plain.pathname.slice(virtualPathEnd + '%3F'.length).split('&');
+    const queryParts = virtualPathEnd === -1
+        ? searchParts
+        : virtualPathQuery(plain.pathname.slice(virtualPathEnd + '%3F'.length), searchParts);
 
     if (virtualPathEnd !== -1)
     {
@@ -107,41 +128,92 @@ function withoutCommonJsQuery(url: string): string
     return plain.href;
 }
 
-/** The resolve hook for the application rooted at `root`. Formats are decided once per file. */
+/** What the hook states for one URL tsx resolved: the URL to load it by, and its format. */
+interface Statement
+{
+    url: string;
+    format: string;
+}
+
+/** A resolved URL as the hook reads it: the URL naming its file, and the file's path. */
+interface ParsedUrl
+{
+    url: string;
+    file: string;
+}
+
+/**
+ * A file's identity on disk: inode, size and status-change time, which any
+ * write, rename onto it or chmod moves.
+ * Known limit: with coarse ctime (Linux before 6.13), two same-length rewrites in one tick share a key.
+ */
+function revisionOf(file: string): string
+{
+    const stats = statSync(file, { bigint: true, throwIfNoEntry: false });
+
+    return stats === undefined ? 'gone' : `${stats.ino}:${stats.size}:${stats.ctimeNs}`;
+}
+
+/**
+ * The resolve hook for the application rooted at `root`.
+ *
+ * Kept by the URL tsx resolved is only what the URL's text decides: the URL
+ * naming the file and its path. What the file system says is asked on every
+ * resolve — whether the file exists, its real path (a symlink can be
+ * retargeted), whether that is a dependency, the `package.json` `type` over a
+ * `.js` — since a file the app's codegen or an editor writes can appear or
+ * change under a URL already resolved. The one answer kept is a type-less
+ * `.js` file's syntax, by its real path and revision (`revisionOf`), as it is
+ * the one that costs a parse. Real paths are the system's (`realpathSync.native`):
+ * one call, where Node's own walks the path a `lstat` at a time.
+ */
 export function createResolveHook(root: string): ResolveHook
 {
-    const realRoot = realpathSync(root);
-    const formats = new Map<string, string | undefined>();
+    const realRoot = realpathSync.native(root);
+    const parsedUrls = new Map<string, ParsedUrl>();
+    const syntaxFormats = new Map<string, { revision: string; format: 'module' | 'commonjs' }>();
 
-    function formatOf(file: string): string | undefined
+    function parse(resolvedUrl: string): ParsedUrl
     {
-        if (!formats.has(file))
+        if (!parsedUrls.has(resolvedUrl))
         {
-            formats.set(file, isDependency(file, realRoot) ? undefined : applicationFormat(file, formatBySyntax));
+            const url = withoutCommonJsQuery(resolvedUrl);
+
+            parsedUrls.set(resolvedUrl, { url, file: fileURLToPath(url) });
         }
 
-        return formats.get(file);
+        return parsedUrls.get(resolvedUrl)!;
+    }
+
+    function bySyntax(file: string): 'module' | 'commonjs'
+    {
+        const revision = revisionOf(file);
+
+        if (syntaxFormats.get(file)?.revision !== revision)
+        {
+            syntaxFormats.set(file, { revision, format: formatBySyntax(file) });
+        }
+
+        return syntaxFormats.get(file)!.format;
+    }
+
+    function statementFor(resolvedUrl: string): Statement | undefined
+    {
+        const { url, file } = parse(resolvedUrl);
+        // A URL that names no file is another loader's virtual module, or a file not written yet.
+        const realFile = existsSync(file) ? realpathSync.native(file) : undefined;
+        const format = realFile === undefined || isDependency(realFile, realRoot)
+            ? undefined
+            : applicationFormat(realFile, bySyntax);
+
+        return format === undefined ? undefined : { url: format === 'module' ? url : resolvedUrl, format };
     }
 
     return (specifier, context, nextResolve) =>
     {
         const result = nextResolve(specifier, context);
+        const statement = result.url.startsWith('file:') ? statementFor(result.url) : undefined;
 
-        if (!result.url.startsWith('file:'))
-        {
-            return result;
-        }
-
-        const url = withoutCommonJsQuery(result.url);
-        const file = fileURLToPath(url);
-        // A URL that names no file is another loader's virtual module, not application source.
-        const format = existsSync(file) ? formatOf(realpathSync(file)) : undefined;
-
-        if (format === undefined)
-        {
-            return result;
-        }
-
-        return format === 'module' ? { ...result, url, format } : { ...result, format };
+        return statement === undefined ? result : { ...result, ...statement };
     };
 }

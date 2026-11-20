@@ -20,6 +20,8 @@ import {
 import { env } from '@spfn/core/config';
 import { getDrizzleConfig, renderDrizzleConfig, discoverFunctionMigrations, packageNameToSchema } from '@spfn/core/db';
 import { loadEnv } from '@spfn/core/server';
+import { assertTypeScriptLoadable } from '../../../utils/tsx-required.js';
+import { redactUrls } from '../../../utils/redact-urls.js';
 
 const TLS_SSL_MODES = new Set(['no-verify', 'prefer', 'require', 'verify-ca', 'verify-full']);
 
@@ -242,22 +244,6 @@ export async function runWithSpinner(
         console.error(chalk.red(error instanceof Error ? error.message : 'Unknown error'));
         process.exit(1);
     }
-}
-
-/**
- * Check if tsx ESM loader is available.
- *
- * On Node.js 22+, tsx must be loaded via --import tsx at process start
- * (handled by bin/spfn.js). Calling tsx.register() at runtime causes
- * ERR_REQUIRE_CYCLE_MODULE due to CJS/ESM interop issues.
- *
- * This function is kept for backwards compatibility but is now a no-op.
- * The bin entry point handles tsx loader registration via process re-spawn.
- */
-async function ensureTsxLoader(): Promise<void>
-{
-    // No-op: tsx loader is registered at process start via --import tsx
-    // See bin/spfn.js for the re-spawn mechanism
 }
 
 type DrizzleConfig = ReturnType<typeof getDrizzleConfig>;
@@ -578,11 +564,37 @@ export interface DrizzleConfigSchema
     schemaFilter?: string[];
 }
 
+/** Node's message for a CommonJS-only name read in an ES module. */
+const COMMONJS_GLOBAL = /\b(__dirname|__filename|require|module|exports) is not defined in ES module scope/;
+
+/**
+ * The error a drizzle.config.ts that cannot be imported stops `db push` and
+ * `db tenant` with, `--schema` or not: the file declares what they may touch
+ * (its schemaFilter), so without it they have no scope. Names the file, the
+ * load error and the remedy; for a CommonJS-only name, that this process reads
+ * the file as ESM — drizzle-kit, which `db generate` hands it to, reads it by
+ * its own rule. The load error is the config's own text: a URL's credentials
+ * in it are blanked (`redactUrls`) before it can reach a terminal or a CI log.
+ */
+function drizzleConfigError(configPath: string, error: unknown): Error
+{
+    const message = redactUrls(error instanceof Error ? error.message : String(error));
+    const name = COMMONJS_GLOBAL.exec(message)?.[1];
+    const remedy = name === undefined
+        ? 'Make it load: it declares what db push and db tenant may touch, so they do not run without it'
+        : `spfn reads ${configPath} as ESM, as the app's other source (drizzle-kit reads it by its own rule): `
+            + `use import.meta.dirname, import.meta.filename and import instead of ${name}`;
+
+    return new Error(`Could not load ${configPath}: ${message}. ${remedy}`, { cause: error });
+}
+
 /**
  * Read the `schema` and `schemaFilter` entries of the project's drizzle.config.ts,
- * the file `db generate` runs against when the project has one.
+ * the file `db generate` runs against when the project has one. Imported in
+ * this process, under the CLI's module hook: as ESM in any app.
  *
  * @returns undefined when there is no drizzle.config.ts or it names no schema
+ * @throws the file, the load error and the remedy, when it exists and cannot be loaded
  */
 export async function readDrizzleConfigSchema(cwd: string = process.cwd()): Promise<DrizzleConfigSchema | undefined>
 {
@@ -590,7 +602,10 @@ export async function readDrizzleConfigSchema(cwd: string = process.cwd()): Prom
 
     if (!existsSync(configPath)) return undefined;
 
-    const mod = await import(pathToFileURL(configPath).href);
+    assertTypeScriptLoadable(cwd, configPath);
+
+    const mod = await import(pathToFileURL(configPath).href)
+        .catch((error: unknown) => Promise.reject(drizzleConfigError(configPath, error)));
     // A CommonJS-compiled config arrives as { default: { default: config } }
     const config = mod.default?.default ?? mod.default;
     const schema = config?.schema;
@@ -603,30 +618,24 @@ export async function readDrizzleConfigSchema(cwd: string = process.cwd()): Prom
     return { schema, schemaFilter: Array.isArray(schemaFilter) ? schemaFilter : undefined };
 }
 
-/**
- * Schema named by the user, with where it came from; undefined leaves the
- * resolution to core (the folder scan, or the registry)
- */
+/** Schema named by the user, with where it came from; undefined leaves the resolution to core (the folder scan, or the registry). */
 export type SchemaSource = DrizzleConfigSchema & { label: string };
 
 /**
  * Pick the schema entry point the way `db generate` does: an explicit --schema,
  * then drizzle.config.ts, then the core default (folder scan, else the registry).
- * A drizzle.config.ts that fails to load throws unless --schema bypasses it; the
- * caller reports it.
+ * --schema replaces the config's files, not the schemaFilter it declares.
+ *
+ * @throws when drizzle.config.ts exists and cannot be loaded, --schema or not
  */
 export async function resolvePushSchemaSource(explicit?: string, cwd: string = process.cwd()): Promise<SchemaSource | undefined>
 {
+    const fromConfig = await readDrizzleConfigSchema(cwd);
+
     if (explicit)
     {
-        // --schema replaces the files, not a schemaFilter the config declares on
-        // purpose; a config that cannot be loaded is what --schema exists to bypass
-        const schemaFilter = await readDrizzleConfigSchema(cwd).then(config => config?.schemaFilter, () => undefined);
-
-        return { schema: explicit, schemaFilter, label: '--schema' };
+        return { schema: explicit, schemaFilter: fromConfig?.schemaFilter, label: '--schema' };
     }
-
-    const fromConfig = await readDrizzleConfigSchema(cwd);
 
     return fromConfig && { ...fromConfig, label: 'drizzle.config.ts' };
 }
@@ -634,20 +643,20 @@ export async function resolvePushSchemaSource(explicit?: string, cwd: string = p
 /**
  * Dynamically import schema files and merge all exports into a single object.
  * Used to build the `imports` parameter for drizzle-kit's `pushSchema()`.
+ *
+ * A plain `import()`: `bin/spfn.js` starts this process under tsx with the
+ * CLI's module hook, so a `.ts` entity loads as ESM whatever the app's
+ * `package.json` says, as `spfn dev` and `spfn build` load it. Without tsx a
+ * `.ts` file stops the command naming it (`assertTypeScriptLoadable`).
  */
 export async function loadSchemaImports(schemaFiles: string[]): Promise<Record<string, unknown>>
 {
-    // Ensure tsx loader is registered so .ts files can be imported
-    const hasTsFiles = schemaFiles.some(f => f.endsWith('.ts'));
-    if (hasTsFiles)
-    {
-        await ensureTsxLoader();
-    }
-
     const imports: Record<string, unknown> = {};
 
     for (const file of schemaFiles)
     {
+        assertTypeScriptLoadable(process.cwd(), file);
+
         const moduleUrl = pathToFileURL(file).href;
         const mod = await import(moduleUrl);
 

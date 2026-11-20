@@ -190,7 +190,21 @@ function codegenRun(tsx: Tsx): { status: number | null; output: string }
     return binRun(tsx, ['codegen', 'run']);
 }
 
-/** The bin under tsx, as a package script runs it, with `args`. */
+/**
+ * The `--import` of the CLI's module hook for the fixture app: with it beside
+ * `tsx`, the bin runs the command in its own process, under the row's tsx,
+ * rather than re-spawning itself under the CLI's.
+ */
+function devLoaderImport(): string
+{
+    const loader = pathToFileURL(devLoader);
+
+    loader.searchParams.set('root', appDir);
+
+    return loader.href;
+}
+
+/** The bin under tsx and the hook, as its re-spawned process runs, with `args`. */
 function binRun(tsx: Tsx, args: string[]): { status: number | null; output: string }
 {
     const env: NodeJS.ProcessEnv = { ...process.env, DUMP_FILE: join(appDir, 'dump.json') };
@@ -201,7 +215,7 @@ function binRun(tsx: Tsx, args: string[]): { status: number | null; output: stri
 
     const result = spawnSync(
         process.execPath,
-        ['--import', tsx.loader, '--import', pathToFileURL(join(appDir, 'dump.mjs')).href, bin, ...args],
+        ['--import', tsx.loader, '--import', devLoaderImport(), '--import', pathToFileURL(join(appDir, 'dump.mjs')).href, bin, ...args],
         { cwd: appDir, env, encoding: 'utf8', timeout: 60_000 },
     );
 
@@ -953,7 +967,7 @@ function startWatcher(tsx: Tsx): Watcher
     return track([tsx.cli, '--import', loader.href, join(appDir, '.spfn/watcher.mjs')], env);
 }
 
-/** `spfn dev` as the bin runs it under tsx, its server on `port`: the process a process manager signals. */
+/** `spfn dev` as the bin runs it under tsx and the hook, its server on `port`: the process a process manager signals. */
 function startDev(tsx: Tsx, port: number): Watcher
 {
     const env: NodeJS.ProcessEnv = { ...process.env, SPFN_PORT: String(port) };
@@ -965,7 +979,7 @@ function startDev(tsx: Tsx, port: number): Watcher
     delete env.NODE_ENV;
     delete env.DATABASE_URL;
 
-    return track(['--import', tsx.loader, bin, 'dev', '--no-agent-files'], env);
+    return track(['--import', tsx.loader, '--import', devLoaderImport(), bin, 'dev', '--no-agent-files'], env);
 }
 
 /** Run Node with `args` in the app, in a process group of its own, killed after the row if still running. */

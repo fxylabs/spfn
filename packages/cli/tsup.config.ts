@@ -8,6 +8,9 @@ export default defineConfig({
         index: 'src/index.ts',
         surface: 'src/surface/index.ts',
         'dev-loader/register': 'src/dev-loader/register.ts',
+        // bin/spfn.js builds the hook's --import with it; at the root of dist/,
+        // beside index.js, which bundles the same helper (src/utils/dev-loader.ts)
+        'dev-loader-import': 'src/utils/dev-loader.ts',
     },
     format: ['esm'],
     dts: true,

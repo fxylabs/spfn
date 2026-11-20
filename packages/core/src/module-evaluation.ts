@@ -28,16 +28,19 @@
  * import that would bring it in — at boot or lazily in a request, a job, an
  * event handler — throws, and the copy never reaches its importer.
  *
- * Codegen checks after each router load (`codegenSecondCopy`), and there a
- * repeated evaluation of one path counts too: the codegen loader evaluates the
- * project again on every load and a package never, so a package evaluated
+ * The spfn CLI marks the same way every process of its own that loads the
+ * app's source — `db`, `provision`, codegen (`markAppSourceProcess`): from the
+ * mark on, a second copy is refused where it is recorded, as in a server.
+ *
+ * Codegen also checks after each router load (`codegenSecondCopy`), and there
+ * a repeated evaluation of one path counts too: the codegen loader evaluates
+ * the project again on every load and a package never, so a package evaluated
  * twice natively — given a generation query by mistake — is as much a second
- * copy as one evaluated as CommonJS. A process the spfn CLI started to
- * generate code (marked by `markCodegenProcess`) refuses it; any
- * other caller of codegen — a script, a test — is warned. vitest's own
+ * copy as one evaluated as CommonJS. A marked process refuses it; any other
+ * caller of codegen — a script, a test — is warned. vitest's own
  * re-evaluations, which a module reset makes, are not counted. Processes that
- * neither serve nor generate (scripts, a Next.js server bundling the package)
- * record and never refuse.
+ * neither serve nor are marked (scripts, `spfn env`, a Next.js server
+ * bundling the package) record and never refuse.
  *
  * The registry lives on `globalThis` under a `Symbol.for` key, so every copy
  * and every version reads and writes the same one: its shape is a contract
@@ -81,8 +84,8 @@ interface Registry
     evaluations: Map<string, Evaluation[]>;
     /** Set by `startServer`; from then on a second copy is refused where it is recorded. */
     server?: { logError: (message: string) => void; logged: Set<string> };
-    /** Set by `markCodegenProcess`: a second copy found after a router load is refused, not warned about. */
-    codegen?: { refuse: true };
+    /** Set by `markAppSourceProcess`: from then on a second copy is refused where it is recorded, and one found after a router load too. */
+    appSource?: { refuse: true; foreignRunner?: ForeignRunner };
 }
 
 /** The wrapper argument vitest's module runner evaluates a module with; undeclared anywhere else. */
@@ -288,7 +291,7 @@ export function recordEvaluation(entry: string, url: unknown, version: string): 
         return;
     }
 
-    if (registry().server !== undefined && seen.length > 0)
+    if ((registry().server !== undefined || registry().appSource !== undefined) && seen.length > 0)
     {
         refuseSecondCopy(new Map([[entry, [...seen, evaluation]]]));
     }
@@ -308,25 +311,50 @@ export function markServerProcess(logError: (message: string) => void): void
 {
     registry().server ??= { logError, logged: new Set() };
 
+    refuseCopiesRecordedBefore();
+}
+
+/**
+ * A runner — the spfn CLI — whose own `@spfn/core` is not the app's: a CLI
+ * installed globally or run by `npx`/`dlx` in an app with its own core. Two
+ * installs, one of them under `location`, are then the runner's doing, and
+ * `remedy` says what to do instead of deduping the app.
+ */
+export interface ForeignRunner
+{
+    /** The root of the runner's own `@spfn/core` install, a real path. */
+    location: string;
+    remedy: string;
+}
+
+/**
+ * Marks this process as one the spfn CLI started to load the app's source: a
+ * second copy of an entry is then refused where it is recorded, as in a server,
+ * and one `codegenSecondCopy` finds after a router load is refused rather than
+ * warned about. Called in-process by the spfn CLI before it loads anything of
+ * the app — every `spfn db` command, the `spfn provision` runner, the codegen
+ * commands (`codegen run`, `build`'s generation step, `contract`) and the
+ * `spfn dev` watcher entry; the mark is not an environment variable, so no
+ * process they spawn (the dev server, `next`, `drizzle-kit`) inherits it.
+ *
+ * @param options.foreignRunner set when the caller's own `@spfn/core` is not the app's
+ * @throws Error when a second copy was recorded before the mark
+ */
+export function markAppSourceProcess(options: { foreignRunner?: ForeignRunner } = {}): void
+{
+    registry().appSource ??= { refuse: true, foreignRunner: options.foreignRunner };
+
+    refuseCopiesRecordedBefore();
+}
+
+function refuseCopiesRecordedBefore(): void
+{
     const split = [...registry().evaluations].filter(([, evaluations]) => evaluations.length > 1);
 
     if (split.length > 0)
     {
         throw new Error(secondCopyMessage(new Map(split)));
     }
-}
-
-/**
- * Marks this process as one the spfn CLI started to generate code: a second
- * copy `codegenSecondCopy` finds is then to be refused rather than warned
- * about. Called in-process by the spfn CLI's codegen commands — `codegen
- * run`, `build`'s generation step, `contract` — and the `spfn dev` watcher
- * entry; the mark is not an environment variable, so no process they spawn
- * (the dev server, `next`) inherits it.
- */
-export function markCodegenProcess(): void
-{
-    registry().codegen ??= { refuse: true };
 }
 
 /** An evaluation, once per time it was evaluated — vitest's re-evaluations, from a module reset, once in all. */
@@ -340,7 +368,7 @@ function codegenEvaluations(evaluation: Evaluation): Evaluation[]
 /**
  * Every entry evaluated more than once in this process — by two evaluators, from
  * two installs, or one path natively twice — as the refusal describes it, and
- * whether this process refuses it (`markCodegenProcess`); undefined when each
+ * whether this process refuses it (`markAppSourceProcess`); undefined when each
  * entry was evaluated once.
  */
 export function codegenSecondCopy(): { message: string; refuse: boolean } | undefined
@@ -351,15 +379,15 @@ export function codegenSecondCopy(): { message: string; refuse: boolean } | unde
 
     return split.length === 0
         ? undefined
-        : { message: secondCopyMessage(new Map(split)), refuse: registry().codegen !== undefined };
+        : { message: secondCopyMessage(new Map(split)), refuse: registry().appSource !== undefined };
 }
 
 function refuseSecondCopy(split: Map<string, Evaluation[]>): never
 {
     const message = secondCopyMessage(split);
-    const server = registry().server!;
+    const server = registry().server;
 
-    if (!server.logged.has(message))
+    if (server !== undefined && !server.logged.has(message))
     {
         server.logged.add(message);
         server.logError(message);
@@ -413,13 +441,31 @@ function describeEvaluator(evaluation: Evaluation): string
     return `${EVALUATOR_NAMES[evaluation.evaluator]}${namespace}${requiredBy}`;
 }
 
+/** Whether the file at `location` is inside the directory `root`, on either separator. */
+function isInside(location: string, root: string): boolean
+{
+    return location.startsWith(`${root}/`) || location.startsWith(`${root}\\`);
+}
+
+/** What to do about two installs: the runner's, when one of them is a foreign runner's own; else dedupe. */
+function twoInstallsRemedy(splits: Evaluation[][]): string
+{
+    const runner = registry().appSource?.foreignRunner;
+    const runnersOwn = runner !== undefined && splits.some(evaluations =>
+        evaluations.some(evaluation => isInside(evaluation.location, runner.location)));
+
+    return runnersOwn
+        ? `Two installs of @spfn/core: ${runner.remedy}`
+        : 'Two installs of @spfn/core: dedupe — make @spfn/core resolve to one install for the app and every '
+            + '@spfn package (`pnpm why @spfn/core`; a peer such as drizzle-orm, next or react resolved differently '
+            + 'for two dependents installs it twice).';
+}
+
 /** What to do, by what tells the copies apart: their installs, or the evaluators beside each other. */
 function remedies(splits: Evaluation[][]): string[]
 {
     const twoInstalls = splits.some(evaluations => new Set(evaluations.map(evaluation => evaluation.location)).size > 1)
-        ? ['Two installs of @spfn/core: dedupe — make @spfn/core resolve to one install for the app and every '
-            + '@spfn package (`pnpm why @spfn/core`; a peer such as drizzle-orm, next or react resolved differently '
-            + 'for two dependents installs it twice).']
+        ? [twoInstallsRemedy(splits)]
         : [];
     const byEvaluator = splits.flatMap(evaluations => evaluatorRemedies(evaluations));
 
@@ -439,7 +485,8 @@ function evaluatorRemedies(evaluations: Evaluation[]): string[]
     const bundle = evaluators.has('bundle') && evaluators.size > 1
         ? ['A bundled copy of @spfn/core runs beside a loaded one: bundle every importer of @spfn/core, or none.']
         : [];
-    const repeated = evaluations.filter(evaluation => evaluation.evaluator === 'esm').length > 1
+    const native = evaluations.filter(evaluation => evaluation.evaluator === 'esm').map(evaluation => evaluation.location);
+    const repeated = native.length > new Set(native).size
         ? ['One file was evaluated natively more than once, which Node does only for an import URL that differs by '
             + 'its query: import @spfn/* without a query. If no code of yours does, the codegen loader tagged a '
             + 'package as project source — report it.']
@@ -454,13 +501,13 @@ function commonJsRemedy(requiredBy: string | undefined): string
     if (requiredBy !== undefined && /\.tsx?$/.test(requiredBy))
     {
         return `${requiredBy} is TypeScript run as CommonJS: the spfn CLI is older than this @spfn/core, or the `
-            + 'process was not started through `spfn dev` — upgrade spfn together with @spfn/core and start it '
-            + 'with `spfn dev`.';
+            + 'process was not started by the spfn CLI — upgrade spfn together with @spfn/core and run the app '
+            + 'through it (`spfn dev`, `spfn db`, `spfn provision`).';
     }
 
     if (requiredBy !== undefined && /\.(c?js|jsx|cts)$/.test(requiredBy))
     {
-        return `${requiredBy} is CommonJS, and under \`spfn dev\` a CommonJS file that requires @spfn/* gets a `
+        return `${requiredBy} is CommonJS, and under the spfn CLI a CommonJS file that requires @spfn/* gets a `
             + 'copy of its own: import @spfn/* from an ES module (.ts, .mts, or .js written with import/export).';
     }
 
