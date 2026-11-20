@@ -2,6 +2,7 @@ import { spawnSync } from 'child_process';
 import { execa, type Options } from 'execa';
 import { existsSync, readFileSync } from 'fs';
 import { dirname, join, posix, relative, sep } from 'path';
+import { stripVTControlCharacters } from 'util';
 import { parse } from 'yaml';
 
 export type PackageManager = 'npm' | 'pnpm' | 'yarn' | 'bun';
@@ -246,9 +247,9 @@ function isWorkspaceMember(path: string, patterns: string[]): boolean
 
 /**
  * Why npm refused the install and how to fix it, printed under npm's own lines
- * when they report `ERESOLVE` and name drizzle-typebox: its peer range on
- * drizzle-orm admits no prerelease, so npm refuses it beside the
- * `1.0.0-rc.4` SPFN pins, as it does in every npm app an earlier `spfn init`
+ * when npm's error is `ERESOLVE` over drizzle-typebox's peer on drizzle-orm
+ * (`refusesDrizzleTypebox`): that peer range admits no prerelease, so npm
+ * refuses drizzle-typebox beside the `1.0.0-rc.4` SPFN pins, as it does in every npm app an earlier `spfn init`
  * scaffolded. The CLI does not predict this; npm alone knows what it resolves.
  */
 export const DRIZZLE_TYPEBOX_REFUSAL = 'npm refused the install (ERESOLVE above) over drizzle-typebox:'
@@ -278,13 +279,67 @@ export async function runInstall(pm: PackageManager, args: string[], options?: O
     }
 }
 
-/** Whether a failed npm run's output reports `ERESOLVE` and names drizzle-typebox. */
+/**
+ * The stanzas in which npm names drizzle-typebox's peer on drizzle-orm as the
+ * conflict: the dependency it could not resolve, or the conflicting peer that
+ * dependency brought. The same edge listed under "Found:" is only how the
+ * installed drizzle-orm got there, so it does not count.
+ */
+const DRIZZLE_TYPEBOX_CONFLICT = [
+    /^Could not resolve dependency:\npeer drizzle-orm@"[^"\n]*" from drizzle-typebox@/m,
+    /^Conflicting peer dependency: drizzle-orm@.*\n.*\n {2}peer drizzle-orm@"[^"\n]*" from drizzle-typebox@/m,
+];
+
+/**
+ * Whether a failed npm run's error is `ERESOLVE` over drizzle-typebox's peer
+ * on drizzle-orm. npm reports the error as `npm error` lines on stderr and,
+ * under `json`, as `{ "error": { "code", "detail" } }` on stdout (alone under
+ * `loglevel=silent`); `detail` holds the same stanzas without the prefix. An
+ * `ERESOLVE` npm only warned about (under `force`) is not its error.
+ */
 function refusesDrizzleTypebox(error: unknown): boolean
 {
     const { stdout, stderr } = isObject(error) ? error : {};
-    const output = [stdout, stderr].filter(stream => typeof stream === 'string').join('\n');
+    const reports = [npmErrorText(stderr), npmJsonErrorDetail(stdout)];
 
-    return output.includes('ERESOLVE') && output.includes('drizzle-typebox');
+    return reports.some(report => report !== null
+        && DRIZZLE_TYPEBOX_CONFLICT.some(conflict => conflict.test(report)));
+}
+
+/** The `npm error` lines of `stderr`, unprefixed, when their code is `ERESOLVE`. */
+function npmErrorText(stderr: unknown): string | null
+{
+    const text = (typeof stderr === 'string' ? stripVTControlCharacters(stderr).split('\n') : [])
+        .filter(line => /^npm error( |$)/.test(line))
+        .map(line => line.replace(/^npm error ?/, ''))
+        .join('\n');
+
+    return /^code ERESOLVE$/m.test(text) ? text : null;
+}
+
+/** The `detail` of npm's JSON error on `stdout`, when its code is `ERESOLVE`. */
+function npmJsonErrorDetail(stdout: unknown): string | null
+{
+    const { error } = parseObject(stdout);
+
+    return isObject(error) && error.code === 'ERESOLVE' && typeof error.detail === 'string'
+        ? error.detail
+        : null;
+}
+
+/** `text` parsed as JSON when it is an object; an empty object otherwise. */
+function parseObject(text: unknown): Record<string, unknown>
+{
+    try
+    {
+        const value: unknown = typeof text === 'string' ? JSON.parse(text) : null;
+
+        return isObject(value) ? value : {};
+    }
+    catch
+    {
+        return {};
+    }
 }
 
 /**
