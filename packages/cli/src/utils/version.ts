@@ -4,8 +4,15 @@ import { fileURLToPath } from 'url';
 
 // Injected at build time by tsup
 declare const __CLI_VERSION__: string;
+declare const __CLI_CORE_PEER_RANGE__: string;
 
-let fromPackageJson: string | null = null;
+interface CliManifest
+{
+    version: string;
+    peerDependencies?: Record<string, string>;
+}
+
+let fromPackageJson: CliManifest | null = null;
 
 /**
  * Get the CLI package version (injected at build time).
@@ -23,10 +30,30 @@ export function getCliVersion(): string
         return __CLI_VERSION__;
     }
 
-    return fromPackageJson ?? (fromPackageJson = readPackageVersion());
+    return cliManifest().version;
 }
 
-function readPackageVersion(): string
+/**
+ * The `@spfn/core` range this CLI declares in its `peerDependencies`, which the
+ * release raises: injected at build time beside the version, read from the
+ * same `package.json` when the define is absent.
+ */
+export function getCorePeerRange(): string
+{
+    if (typeof __CLI_CORE_PEER_RANGE__ === 'string')
+    {
+        return __CLI_CORE_PEER_RANGE__;
+    }
+
+    return cliManifest().peerDependencies?.['@spfn/core'] ?? 'of an unknown range';
+}
+
+function cliManifest(): CliManifest
+{
+    return fromPackageJson ?? (fromPackageJson = readPackageManifest());
+}
+
+function readPackageManifest(): CliManifest
 {
     let directory = dirname(fileURLToPath(import.meta.url));
 
@@ -38,11 +65,11 @@ function readPackageVersion(): string
         {
             try
             {
-                const parsed = JSON.parse(readFileSync(candidate, 'utf8')) as { name?: string; version?: string };
+                const parsed = JSON.parse(readFileSync(candidate, 'utf8')) as Partial<CliManifest> & { name?: string };
 
                 if (parsed.name === 'spfn' && typeof parsed.version === 'string')
                 {
-                    return parsed.version;
+                    return parsed as CliManifest;
                 }
             }
             catch
@@ -61,7 +88,7 @@ function readPackageVersion(): string
         directory = parent;
     }
 
-    return '0.0.0';
+    return { version: '0.0.0' };
 }
 
 /**

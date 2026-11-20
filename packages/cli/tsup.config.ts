@@ -26,5 +26,6 @@ export default defineConfig({
     noExternal: [],
     define: {
         '__CLI_VERSION__': JSON.stringify(packageJson.version),
+        '__CLI_CORE_PEER_RANGE__': JSON.stringify(packageJson.peerDependencies['@spfn/core']),
     },
 });

@@ -22,7 +22,7 @@ import nodeModule, { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
 import { constants, runInThisContext } from 'node:vm';
 import { locateLoadError } from './errors';
-import { closeGeneration, GENERATION_PARAMETER, loadHook, openGeneration, projectFileAt, resolveHook } from './hooks';
+import { closeGeneration, GENERATION_PARAMETER, loadHook, openGeneration, projectFileAt, REQUIRE_SUFFIX, resolveHook } from './hooks';
 import { reportInputs, type Inputs } from '../core/inputs';
 
 /** `module.registerHooks` (Node 22.15+); the `@types/node` this package builds with predates it. */
@@ -129,6 +129,7 @@ export function requireProjectModule(file: string, root: string): Record<string,
     const settled = settleRequire(file, generationURL(file, token));
     const error = settled.ok ? undefined : locateLoadError(settled.error, projectFileAt);
 
+    forgetStandIn(token);
     reportInputs(closeGeneration(token));
 
     if (!settled.ok)
@@ -137,6 +138,20 @@ export function requireProjectModule(file: string, root: string): Record<string,
     }
 
     return settled.module;
+}
+
+/**
+ * Drop the `require()` cache entry of the stand-in for the load under `token`
+ * (`./hooks` `requiredEntry`), loaded or not: its name is that load's own, so
+ * nothing asks for it again, and kept it would add an entry per load. What the
+ * load evaluated stays in the ES module loader, which cannot drop a module.
+ */
+function forgetStandIn(token: string): void
+{
+    const cache = createRequire(import.meta.url).cache;
+    const suffix = `.${token}${REQUIRE_SUFFIX}`;
+
+    Object.keys(cache).filter(key => key.endsWith(suffix)).forEach(key => delete cache[key]);
 }
 
 /** Import a package's module natively, by its file (`resolvePackageModule`). */

@@ -1,5 +1,5 @@
 /**
- * The watch loop — rows W1–W3, W5–W25 and G1 of the #353 design
+ * The watch loop — rows W1–W26 and G1 of the #353 design
  *
  * Each row runs an orchestrator in watch mode, in this process, on an app in a
  * temporary directory with `@spfn/core` linked into its `node_modules`.
@@ -20,6 +20,22 @@
  * | W3 | the initial generation held: a pattern file no load reads edited      | an initial generation before chokidar's `ready`      |
  * | W3b| the initial generation held: an input no pattern matches edited,      | no check after the initial generation's arm          |
  * |    | nothing else queued                                                   |                                                      |
+ * | W4 | the generators loaded from `.spfnrc.ts` (`loadGenerators`): a helper | stale generators until a restart: the config, custom |
+ * |    | a custom generator imports edited, an option the config imports      | generators and what they import read once; or a      |
+ * |    | from a helper changed, a generator added, one removed                 | removed generator still run and its inputs watched   |
+ * | W4b| a `.spfnrc.ts` that fails to load at start, fixed by creating the     | a watcher up and silently dead (nothing watched for  |
+ * |    | file it tried to import; broken again after loading, a pattern file   | the fix, or no retry), one writing outputs the       |
+ * |    | edited while paused, then fixed                                       | config no longer describes, or one repeating "paused"|
+ * | W4c| a reload adding a generator whose patterns name a new directory,      | the reload's generation run before chokidar watches  |
+ * |    | held: a file there edited during the reload's generation              | the new directory: the edit is never reported        |
+ * | W4d| the generators loaded from `.spfnrc.json`: it edited, then a        | a JSON config read once, or a `.spfnrc.ts` created   |
+ * |    | `.spfnrc.ts` created, which takes precedence                         | over it ignored until a restart                       |
+ * | W4e| `generateAll()` with `loadGenerators`, before any `watch()`: with a  | a run of no generator, logged as nothing to run: a   |
+ * |    | config that loads, then with one that does not                        | config never loaded, or its failure swallowed        |
+ * | W4f| `close()` while a reload whose load fails is held                    | the failing load's inputs armed after `close()`:     |
+ * |    |                                                                       | watches nothing closes, a process that never exits   |
+ * | W4g| `new CodegenOrchestrator()` given both `generators` and           | one option silently ignored, or an orchestrator that |
+ * |    | `loadGenerators`, then neither                                        | runs nothing                                         |
  * | W5 | an input unlinked, recreated inside the unlink's own generation, then | bookkeeping saying "watched" while the watcher has   |
  * |    | edited again; its directory removed and recreated inside a generation,| dropped the file, or a directory watcher that went   |
  * |    | then the input edited again                                           | silent: every later edit lost                        |
@@ -78,6 +94,7 @@ import { createRouteMapGenerator } from '../generators/route-map';
 import { CodegenOrchestrator } from '../core/orchestrator';
 import type { Generator, GeneratorOptions } from '../core/generator';
 import { reportInputs } from '../core/inputs';
+import { createGeneratorsFromConfig, loadCodegenConfig } from '../core/config-loader';
 import { importProjectModule, newGeneration } from '../loader/register';
 
 const CORE_PACKAGE = resolve(__dirname, '../../..');
@@ -282,6 +299,100 @@ async function until(condition: () => boolean): Promise<void>
     }
 }
 
+/**
+ * What `.spfnrc.ts` and the custom generator files of W4 read from the test:
+ * route-map built here, from source, so its loads report into the
+ * orchestrator under test; a gate; and every custom generator call, by name
+ * and instance (`<name>#<n>`).
+ */
+interface ConfigFixtures
+{
+    routeMap: (outputPath: string) => Generator;
+    gate?: Generator;
+    instances: number;
+    calls: string[];
+}
+
+function configFixtures(gateGenerator?: Generator): ConfigFixtures
+{
+    const fixtures: ConfigFixtures = {
+        routeMap: outputPath => createRouteMapGenerator({ name: '@spfn/core:route-map', routerPath: './src/server/router.ts', outputPath }),
+        gate: gateGenerator,
+        instances: 0,
+        calls: [],
+    };
+
+    (globalThis as { __watchLoop?: ConfigFixtures }).__watchLoop = fixtures;
+
+    return fixtures;
+}
+
+/** `.spfnrc.ts`: `imports`, then a config listing `entries` (`fixtures` is `ConfigFixtures`). */
+function writeConfig(entries: string[], imports = ''): void
+{
+    write('.spfnrc.ts', `${imports}const fixtures = (globalThis as any).__watchLoop;\n`
+        + `export default { generators: [${entries.join(', ')}] };\n`);
+}
+
+/**
+ * `gen/<name>.ts`: a custom generator, run on a route change, writing
+ * `out-<name>.txt` with what `gen/value.ts` exports, and recording each call.
+ */
+function writeCustomGenerator(name: string): void
+{
+    write(`gen/${name}.ts`, 'import { writeFileSync } from \'node:fs\';\n'
+        + 'import { join } from \'node:path\';\n'
+        + 'import { value } from \'./value\';\n'
+        + 'export default function create()\n{\n'
+        + '    const fixtures = (globalThis as any).__watchLoop;\n'
+        + '    const instance = ++fixtures.instances;\n'
+        + `    return { name: '${name}', watchPatterns: ['src/server/routes/**/*.ts'], async generate({ cwd }: { cwd: string })\n    {\n`
+        + `        fixtures.calls.push('${name}#' + instance);\n`
+        + `        writeFileSync(join(cwd, 'out-${name}.txt'), value);\n`
+        + '    } };\n}\n');
+}
+
+function output(name: string): string | undefined
+{
+    const file = join(appDir, `out-${name}.txt`);
+
+    return existsSync(file) ? readFileSync(file, 'utf-8') : undefined;
+}
+
+/** The paths a route map at `file` names. */
+function routesIn(file: string): string[]
+{
+    return existsSync(join(appDir, file)) ? [...readFileSync(join(appDir, file), 'utf-8').matchAll(/path: '([^']+)'/g)].map(match => match[1]) : [];
+}
+
+/** An orchestrator watching the generators `.spfnrc.ts` names, loaded as the `spfn dev` watcher loads them. */
+function watchingConfig(): CodegenOrchestrator
+{
+    const root = appDir;
+    const orchestrator = new CodegenOrchestrator({
+        loadGenerators: async () => createGeneratorsFromConfig(loadCodegenConfig(root), root),
+        cwd: root,
+        debug: true,
+    });
+
+    orchestrators.push(orchestrator);
+    void orchestrator.watch();
+
+    return orchestrator;
+}
+
+/** The orchestrator's chokidar instance, to see an event it delivered. */
+function chokidarOf(orchestrator: CodegenOrchestrator): { on: (event: string, listener: (path: string) => void) => void }
+{
+    return (orchestrator as unknown as { watcher: { on: (event: string, listener: (path: string) => void) => void } }).watcher;
+}
+
+/** How many times the paused line was logged. */
+function pauses(): number
+{
+    return error.mock.calls.filter(([message]) => /^✗ Codegen config failed to load: .*Regeneration is paused; save a fix to retry\.$/s.test(String(message))).length;
+}
+
 beforeEach(() =>
 {
     appDir = makeApp();
@@ -298,6 +409,7 @@ afterEach(async () =>
     loads.hook = undefined;
     watchedPaths.length = 0;
     apps.splice(0).forEach(root => rmSync(root, { recursive: true, force: true }));
+    delete (globalThis as { __watchLoop?: ConfigFixtures }).__watchLoop;
 });
 
 describe('codegen watch loop', () =>
@@ -426,6 +538,223 @@ describe('codegen watch loop', () =>
         await orchestrator.settled();
 
         expect(mapPaths()).toEqual(['/probe/two']);
+    });
+
+    it('W4 an edited codegen config, custom generator or helper they import reloads the generators and runs them under it', async () =>
+    {
+        // Without the config's inputs stamped, compared and acted on, every step
+        // below leaves the outputs of the generators loaded at start.
+        configFixtures();
+        writeProbe('/probe/plain');
+        write('gen/value.ts', 'export const value: string = \'one\';\n');
+        write('gen/options.ts', 'export const outputPath = \'./src/generated/one.ts\';\n');
+        writeCustomGenerator('a');
+        writeCustomGenerator('b');
+
+        const imports = 'import { outputPath } from \'./gen/options\';\n';
+
+        writeConfig(['fixtures.routeMap(outputPath)', '{ path: \'./gen/a.ts\' }'], imports);
+
+        const orchestrator = watchingConfig();
+
+        await orchestrator.settled();
+        expect([routesIn('src/generated/one.ts'), output('a')]).toEqual([['/probe/plain'], 'one']);
+
+        // A helper a custom generator imports.
+        write('gen/value.ts', 'export const value: string = \'two\';\n');
+        await until(() => output('a') === 'two');
+        expect(logged(info, /^Codegen config changed \(gen\/value\.ts\): reloading$/)).toBe(true);
+
+        // An option, from a helper the config imports.
+        write('gen/options.ts', 'export const outputPath = \'./src/generated/two.ts\';\n');
+        await until(() => routesIn('src/generated/two.ts').length > 0);
+
+        // A generator added.
+        writeConfig(['fixtures.routeMap(outputPath)', '{ path: \'./gen/a.ts\' }', '{ path: \'./gen/b.ts\' }'], imports);
+        await until(() => output('b') === 'two');
+
+        // A generator removed: it no longer runs, and what it read is no longer watched.
+        writeConfig(['{ path: \'./gen/a.ts\' }', '{ path: \'./gen/b.ts\' }'], imports);
+        await until(() => info.mock.calls.filter(([message]) => String(message).startsWith('Reloaded codegen config:')).length === 4);
+        await orchestrator.settled();
+        writeProbe('/probe/edited');
+        write('gen/value.ts', 'export const value: string = \'three\';\n');
+        await until(() => output('a') === 'three' && output('b') === 'three');
+        await orchestrator.settled();
+
+        const watched = (orchestrator as unknown as { inputWatcher: { paths: string[] } }).inputWatcher.paths;
+
+        expect(routesIn('src/generated/two.ts')).toEqual(['/probe/plain']);
+        expect(watched.filter(path => path.includes('src/server'))).toEqual([]);
+        expect(error).not.toHaveBeenCalled();
+    });
+
+    it('W4b a codegen config that fails to load pauses regeneration, at start and after a good one, and a fix resumes it', async () =>
+    {
+        // Without the failing load's inputs watched, creating the file it tried
+        // goes unnoticed; without the pause, the old generator runs on for the
+        // route edit, writing outputs the broken config no longer describes.
+        const fixtures = configFixtures();
+        const imports = 'import { list } from \'./gen/list\';\n';
+
+        writeProbe('/probe/plain');
+        write('gen/value.ts', 'export const value: string = \'one\';\n');
+        writeCustomGenerator('a');
+        writeConfig(['...list'], imports);
+
+        const orchestrator = watchingConfig();
+
+        await orchestrator.settled();
+        expect([pauses(), fixtures.calls]).toEqual([1, []]);
+        expect(String(error.mock.calls[0][0])).toContain('Failed to load .spfnrc.ts');
+
+        // The fix is the file the failing load looked for.
+        write('gen/list.ts', 'export const list = [{ path: \'./gen/a.ts\' }];\n');
+        await until(() => output('a') === 'one');
+        expect(logged(info, /^Codegen config loads again: 1 generator\(s\); regenerating$/)).toBe(true);
+
+        // Broken after a good load, then a file the old generator watches edited.
+        await orchestrator.settled();
+        writeConfig(['...list'], `${imports}throw new Error('half-edited');\n`);
+        await until(() => pauses() === 2);
+        await orchestrator.settled();
+
+        const delivered = new Promise<void>(resolve => chokidarOf(orchestrator).on('change', path => path.endsWith('probe.ts') && resolve()));
+
+        writeProbe('/probe/paused');
+        await delivered;
+        await orchestrator.settled();
+        expect([pauses(), fixtures.calls]).toEqual([2, ['a#1']]);
+
+        writeConfig(['...list'], imports);
+        await until(() => fixtures.calls.length === 2);
+        expect([pauses(), fixtures.calls]).toEqual([2, ['a#1', 'a#2']]);
+    });
+
+    it('W4c a file in a directory a reloaded generator newly watches, edited during the reload\'s generation, is regenerated', async () =>
+    {
+        // Without chokidar watching the new patterns before the reload's generation
+        // runs, the edit falls before the watch exists and is never reported.
+        const held = gate('gate', ['gate/**/*.ts']);
+
+        configFixtures(held.generator);
+        writeProbe('/probe/plain');
+        write('gate/x.ts', 'x0');
+        writeConfig(['fixtures.routeMap(\'./src/generated/map.ts\')']);
+
+        const orchestrator = watchingConfig();
+
+        await orchestrator.settled();
+        held.hold();
+        writeConfig(['fixtures.routeMap(\'./src/generated/map.ts\')', 'fixtures.gate']);
+        await held.entered;
+        write('gate/x.ts', 'x1');
+        await until(() => logged(info, /^Queued ~ gate\/x\.ts$/));
+        held.release();
+        await until(() => held.triggers.some(trigger => trigger?.changedFiles?.some(file => file.path === 'gate/x.ts')));
+    });
+
+    it('W4d an edited .spfnrc.json, and a .spfnrc.ts created beside it, reload the generators', async () =>
+    {
+        // Without the JSON file stamped, and the absent .spfnrc.ts stamped absent,
+        // neither change is compared: the config loaded at start runs on.
+        configFixtures();
+        write('gen/value.ts', 'export const value: string = \'one\';\n');
+        writeCustomGenerator('a');
+        writeCustomGenerator('b');
+        writeCustomGenerator('c');
+
+        const json = (names: string[]): string => JSON.stringify({ codegen: { generators: names.map(name => ({ path: `./gen/${name}.ts` })) } });
+
+        write('.spfnrc.json', json(['a']));
+
+        const orchestrator = watchingConfig();
+
+        await orchestrator.settled();
+        expect(output('a')).toBe('one');
+
+        write('.spfnrc.json', json(['a', 'b']));
+        await until(() => output('b') === 'one');
+
+        writeConfig(['{ path: \'./gen/c.ts\' }']);
+        await until(() => output('c') === 'one');
+    });
+
+    it('W4e generateAll() before watch() loads the generators it is given a loader for, and rejects when the load fails', async () =>
+    {
+        const fixtures = configFixtures();
+
+        write('gen/value.ts', 'export const value: string = \'one\';\n');
+        writeCustomGenerator('a');
+        writeConfig(['{ path: \'./gen/a.ts\' }']);
+
+        const root = appDir;
+        const orchestrator = new CodegenOrchestrator({ loadGenerators: async () => createGeneratorsFromConfig(loadCodegenConfig(root), root), cwd: root });
+
+        await orchestrator.generateAll();
+        expect(fixtures.calls).toEqual(['a#1']);
+
+        writeConfig(['{ path: \'./gen/missing.ts\' }']);
+        await expect(orchestrator.generateAll()).rejects.toThrow('gen/missing.ts');
+        expect(fixtures.calls).toEqual(['a#1']);
+    });
+
+    it('W4f close() during a reload whose load fails: no input watch is opened after it, and none is left open', async () =>
+    {
+        // Without it, the failing reload arms the config's inputs after close()
+        // released the watches: nothing closes them, and the process never exits.
+        configFixtures();
+        write('gen/value.ts', 'export const value: string = \'one\';\n');
+        writeCustomGenerator('a');
+        writeConfig(['{ path: \'./gen/a.ts\' }']);
+
+        const root = appDir;
+        const held = { hold: undefined as Promise<void> | undefined, release: (): void => undefined, entered: (): void => undefined };
+        const entered = new Promise<void>(resolve => (held.entered = resolve));
+        const orchestrator = new CodegenOrchestrator({
+            loadGenerators: async () =>
+            {
+                held.entered();
+                await held.hold;
+
+                return createGeneratorsFromConfig(loadCodegenConfig(root), root);
+            },
+            cwd: root,
+            debug: true,
+        });
+
+        orchestrators.push(orchestrator);
+        void orchestrator.watch();
+        await orchestrator.settled();
+        expect(output('a')).toBe('one');
+
+        held.hold = new Promise(resolve => (held.release = resolve));
+        writeConfig(['{ path: \'./gen/missing.ts\' }']);
+        await until(() => logged(info, /^Codegen config changed \(\.spfnrc\.ts\): reloading$/));
+        await entered;
+
+        const closing = orchestrator.close();
+        const watchedBeforeClose = watchedPaths.length;
+
+        held.release();
+        await closing;
+        expect(pauses()).toBe(1);
+        expect(watchedPaths.slice(watchedBeforeClose)).toEqual([]);
+        expect([...(orchestrator as unknown as { inputWatcher: { watchers: Map<string, unknown> } }).inputWatcher.watchers.keys()]).toEqual([]);
+    });
+
+    it('W4g given both generators and loadGenerators, or neither, the constructor throws naming the two', () =>
+    {
+        // Without it, a JavaScript caller passing both has generators silently
+        // ignored, and one passing neither gets an orchestrator that runs nothing.
+        const message = (given: string): string => `CodegenOrchestrator takes \`generators\` or \`loadGenerators\`, exactly one; it was given ${given}.`;
+        const loadGenerators = async (): Promise<Generator[]> => [];
+        const construct = (options: object) => () => new CodegenOrchestrator(options as ConstructorParameters<typeof CodegenOrchestrator>[0]);
+
+        expect(construct({ generators: [], loadGenerators, cwd: appDir })).toThrow(new TypeError(message('both')));
+        expect(construct({ cwd: appDir })).toThrow(new TypeError(message('neither')));
+        expect(construct({ generators: [], cwd: appDir })).not.toThrow();
+        expect(construct({ loadGenerators, cwd: appDir })).not.toThrow();
     });
 
     it('W5 an input unlinked and recreated inside the unlink\'s generation is still watched: a later edit regenerates', async () =>

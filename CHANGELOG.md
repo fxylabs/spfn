@@ -50,6 +50,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **@spfn/core: `GeneratorOptions.trigger.changedFiles`** (and the `ChangedFile` type): every change
   that triggered a watch run. `changedFile` is now set only when exactly one change did; the
   watcher takes every change that arrived during a generation into the next one (#353).
+- **@spfn/core: `LoadingOrchestratorOptions.loadGenerators`** — an orchestrator given how to load its
+  generators (instead of `generators`) loads them itself, and in watch mode loads them again when
+  the codegen config, a custom generator file or a project file they import changes: the `spfn
+  dev` watcher no longer needs a restart after an edit to `.spfnrc.ts` (#353). `close()` waits
+  for a config load running as for a generation: neither can be cancelled (a load is a module
+  evaluation), so one that never settles keeps `close()` pending, and the watcher's first signal
+  says it waits for "the running generation or codegen config load"; a second exits at once.
+  `new CodegenOrchestrator()` takes `OrchestratorOptions` (`generators`) or the new
+  `LoadingOrchestratorOptions`. Given neither, it now throws a `TypeError` naming them from the
+  constructor: `new CodegenOrchestrator({})` used to be constructed and then throw a `TypeError`
+  at its first `generateAll()` or `watch()`. Given both, which no option type allowed before, it
+  throws the same way.
+- **@spfn/core: `CodegenOrchestrator.loadsGenerators`** (static, `true`): the orchestrator takes
+  `loadGenerators`. The `spfn dev` watcher checks it, and with a core that cannot load its
+  generators — no `./codegen` subpath, no `CodegenOrchestrator` export, or one without this flag —
+  stops with `[SPFN] Codegen watcher not started: @spfn/core <installed> is installed; spfn
+  <version> requires @spfn/core <its peer range> and a core that reloads generators. Update
+  @spfn/core.` (exit 1) instead of dying on Node's own error (`SyntaxError … does not provide an
+  export`, `ERR_PACKAGE_PATH_NOT_EXPORTED`, or `TypeError: Cannot read properties of undefined
+  (reading 'flatMap')`). A core that fails to load for any other reason shows its own error (#353).
 - **@spfn/core: `CodegenOrchestrator.settled()`** resolves once watch mode is idle — no generation
   running, nothing dirty, no input directory event settling (#353).
 - **@spfn/auth: `GET /_auth/channels` (`authApi.getAuthChannels`) — a sign-in page can read which
@@ -129,6 +149,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   — not on a replica. A successful sign-in sends the same statements as before.
   `POST /_auth/mfa/verify` now reads its own request's address and user agent (`deviceProvenance`)
   for the guard.
+- **BREAKING: spfn: the `spfn dev` codegen watcher no longer exits on a codegen config that fails
+  to load (#353).** It exited 1 at start ("fix the config and restart spfn dev"), and never read
+  the config again; now it logs `✗ Codegen config failed to load: … Regeneration is paused; save a
+  fix to retry.`, stays up generating nothing — not even with the generators of the last good
+  config — and loads the config again on the next change to what the failing load read or looked
+  for. `spfn codegen run` and `spfn build` still fail on such a config.
+- **BREAKING: @spfn/core: generator instances are re-created when the watcher reloads the config
+  (#353).** A reload calls each factory again (a package generator's with the new options; a
+  custom generator's file evaluated again); state a generator keeps in its factory's closure
+  starts over, and the old instance is never called again.
+- **BREAKING: @spfn/core: `OrchestratorOptions` declares `loadGenerators?: never` (#353).** A type
+  that extends or widens `OrchestratorOptions` and declares its own `loadGenerators` property no
+  longer compiles (`interface X extends OrchestratorOptions { loadGenerators?: … }` is TS2430).
+  Extend `LoadingOrchestratorOptions` if the property means the orchestrator's loader, or rename it.
 - **BREAKING: @spfn/core: watch mode's generations, the initial one included, log and do not
   reject under `throwOnError: true` (#353).** `watch()` ran its initial generation as `generateAll('watch')`,
   so under `throwOnError` a failing generator rejected `watch()` before any watching began; now
@@ -181,6 +215,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   takes starts on this instance. Phase 5 waits for core's running handlers itself and fails the
   jobs of those still running (`"pg-boss shut down while active"`, as before: `retry` or `failed`)
   before the pool closes, since pg-boss's stop fails only jobs its own workers hold.
+- **@spfn/core: `loadCodegenConfig` evaluates `.spfnrc.ts` on every call (#353).** A second call
+  in one process returned the module the first had evaluated — `require()` caches by file name
+  and dropped the generation query — so the config and what it imports were never read again.
 - **@spfn/core: the `spfn dev` codegen watcher no longer loses changes (#353).** It decided what
   changed from file events and its own bookkeeping, so a change arriving while that bookkeeping was
   not valid was lost: only the first of the changes queued during a generation was regenerated (a

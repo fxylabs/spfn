@@ -37,10 +37,16 @@
  * |    | one whose `/codegen` throws on import                        | and exit 0: a configured generator silently skipped       |
  * | R32| R23's second copy under `spfn build --server-only`, `spfn     | a codegen entry point that no longer marks its process:   |
  * |    | contract check` and the watcher entry `spfn dev` writes      | the refusal silently a warning there                      |
- * | R33| the watcher entry with a `.spfnrc.ts` that fails to load     | a watcher that exits while the server runs on, saying     |
- * |    |                                                              | nothing of regeneration being off until a restart         |
+ * | R33| the watcher entry with a `.spfnrc.ts` that fails to load,    | a watcher that exits on a broken config while the server  |
+ * |    | then fixed                                                   | runs on (regeneration off until a restart), or one that   |
+ * |    |                                                              | stays up silent, or never loads the fix                   |
+ * | R33b| the watcher entry with an installed core without the          | a watcher dead on Node's own error while spfn dev runs on |
+ * |    | CodegenOrchestrator export, exporting it as undefined, or    | without codegen; or a core broken in its own code         |
+ * |    | without ./codegen; then one missing a dependency of its own  | reported as an old one                                    |
  * | R34| the watcher entry with a generator held by a file gate: one   | an entry that exits mid-generation, or that ignores every |
  * |    | signal, then the gate opened; then two signals               | signal while a generation hangs (orphaned by spfn dev)    |
+ * | R34b| the watcher entry reloading a `.spfnrc.ts` whose custom      | a load that never settles taken for a hung watcher: no    |
+ * |    | generator's top-level `await` never settles: two signals     | line naming it, or no way out but SIGKILL                 |
  * | R35| `spfn dev` with the watcher's generator held by a file gate: | a parent that exits before its watcher (orphaned, writing |
  * |    | one SIGTERM to it, then the gate opened; then two SIGTERMs   | into the project after spfn dev stopped), or that does    |
  * |    |                                                              | not forward the second signal                             |
@@ -342,7 +348,7 @@ describe.each(TSX)('codegen in CLI processes, tsx $version', (tsx) =>
         writeGateGenerator();
         write('.spfn/watcher.mjs', watcherEntrySource());
 
-        const stopping = 'Codegen watcher stopping once the running generation finishes';
+        const stopping = 'Codegen watcher stopping once the running generation or codegen config load finishes';
 
         for (const second of [true, false])
         {
@@ -378,6 +384,42 @@ describe.each(TSX)('codegen in CLI processes, tsx $version', (tsx) =>
         }
     });
 
+    it('R34b the watcher entry on a signal during a config load that never settles: says it waits for the load; a second signal exits', async () =>
+    {
+        // Without it, the first signal's line names only a generation while the
+        // watcher sits in a module evaluation nothing can cancel. The load holds
+        // a timer, as a stuck connection would: one holding nothing ends the
+        // process once close() has released the watches (Node's exit 13).
+        writeGateGenerator();
+        write('src/gate/x.ts', '');
+        write('open', '');
+        write('hang-generator.mjs', 'await new Promise(() => setInterval(() => undefined, 1_000));\nexport default function createHang() { return { name: \'hang\', watchPatterns: [], async generate() {} }; }\n');
+        write('.spfn/watcher.mjs', watcherEntrySource());
+
+        const watcher = startWatcher(tsx);
+
+        try
+        {
+            await watcher.until(() => existsSync(join(appDir, 'finished')));
+            await watcher.until(() => watcher.output().includes('Watch mode started'));
+            write('.spfnrc.ts', 'import { defineConfig } from \'@spfn/core/codegen\';\n\n'
+                + 'export default defineConfig({ generators: [{ path: \'./gate-generator.mjs\' }, { path: \'./hang-generator.mjs\' }] });\n');
+            await watcher.until(() => watcher.output().includes('Codegen config changed (.spfnrc.ts): reloading'));
+            watcher.signal('SIGTERM');
+            await watcher.until(() => watcher.output().includes('Codegen watcher stopping once the running generation or codegen config load finishes (signal again to exit now)'));
+            await watcher.until(() => watcher.output().includes('Closing watcher'));
+            expect(watcher.running()).toBe(true);
+            watcher.signal('SIGTERM');
+
+            expect(await watcher.exited, watcher.output()).toBe(143);
+            expect(watcher.output()).not.toMatch(/Reloaded codegen config|Codegen config failed to load/);
+        }
+        finally
+        {
+            await watcher.kill();
+        }
+    }, 60_000);
+
     it('R35 spfn dev on a signal waits for its watcher: forwards the first and the second, and exits after the watcher', async () =>
     {
         // Without it, the parent exits at once and the watcher it started runs on,
@@ -388,7 +430,7 @@ describe.each(TSX)('codegen in CLI processes, tsx $version', (tsx) =>
         writeGateGenerator();
         installTsx(tsx);
 
-        const stopping = 'Codegen watcher stopping once the running generation finishes';
+        const stopping = 'Codegen watcher stopping once the running generation or codegen config load finishes';
 
         for (const second of [false, true])
         {
@@ -457,7 +499,7 @@ describe.each(TSX)('codegen in CLI processes, tsx $version', (tsx) =>
             const watcherPid = Number(readFileSync(join(appDir, 'entered'), 'utf8'));
 
             dev.signal('SIGTERM');
-            await dev.until(() => dev.output().includes('Codegen watcher stopping once the running generation finishes') || !dev.running());
+            await dev.until(() => dev.output().includes('Codegen watcher stopping once the running generation or codegen config load finishes') || !dev.running());
 
             expect({ dev: dev.running(), watcher: alive(watcherPid) }, dev.output()).toEqual({ dev: true, watcher: true });
 
@@ -494,7 +536,7 @@ describe.each(TSX)('codegen in CLI processes, tsx $version', (tsx) =>
             expect(dev.output(), 'the server became ready before the signal').not.toContain('Server ready on port');
 
             dev.signal('SIGTERM');
-            await dev.until(() => dev.output().includes('Codegen watcher stopping once the running generation finishes'));
+            await dev.until(() => dev.output().includes('Codegen watcher stopping once the running generation or codegen config load finishes'));
             write('.spfn/server-ready', '1');
             await dev.until(() => dev.output().includes('Next.js not started') || existsSync(join(appDir, 'next-started')));
             write('open', '');
@@ -509,25 +551,71 @@ describe.each(TSX)('codegen in CLI processes, tsx $version', (tsx) =>
         }
     }, 60_000);
 
-    it('R33 the watcher entry, given a .spfnrc.ts that fails to load, exits 1 saying to fix it and restart spfn dev', () =>
+    it('R33 the watcher entry, given a .spfnrc.ts that fails to load, stays up saying regeneration is paused, and loads the fix', async () =>
     {
+        const good = readFileSync(join(appDir, '.spfnrc.ts'), 'utf8');
+
         write('.spfnrc.ts', 'export default __dirname;\n');
         write('.spfn/watcher.mjs', watcherEntrySource());
 
-        const loader = pathToFileURL(devLoader);
-        const env: NodeJS.ProcessEnv = { ...process.env, NODE_ENV: 'production' };
+        const watcher = startWatcher(tsx);
 
-        loader.searchParams.set('root', appDir);
-        delete env.SPFN_APP_URL;
-        delete env.NODE_OPTIONS;
+        try
+        {
+            await watcher.until(() => watcher.output().includes('Regeneration is paused; save a fix to retry.'));
+            expect(watcher.output()).toContain('✗ Codegen config failed to load: Failed to load .spfnrc.ts');
 
-        const result = spawnSync(process.execPath, [tsx.cli, '--import', loader.href, join(appDir, '.spfn/watcher.mjs')],
-            { cwd: appDir, env, encoding: 'utf8', timeout: 60_000 });
-        const output = plain(`${result.stdout}${result.stderr}`);
+            write('.spfnrc.ts', good);
+            await watcher.until(() => routeMapPaths().includes('/probe/one'));
+            expect(watcher.output()).toContain('Codegen config loads again: 2 generator(s); regenerating');
+        }
+        finally
+        {
+            await watcher.stop();
+        }
+    }, 60_000);
 
-        expect(result.status, output).toBe(1);
-        expect(output).toContain('Codegen watcher could not load the codegen config: Failed to load .spfnrc.ts');
-        expect(output).toContain('Route maps are not regenerated meanwhile: fix the config and restart spfn dev.');
+    it('R33b the watcher entry with a core that cannot load its generators stops, naming the installed core and the required range', async () =>
+    {
+        // Without it, a core older than the config reload makes the watcher die
+        // on Node's own error (no export, undefined, no './codegen'), and spfn
+        // dev runs on without codegen; a core broken for another reason must
+        // still show its own error, not "update @spfn/core".
+        const cli = JSON.parse(readFileSync(join(cliRoot, 'package.json'), 'utf8'));
+        const core = JSON.parse(readFileSync(join(coreRoot, 'package.json'), 'utf8'));
+        const notStarted = `[SPFN] Codegen watcher not started: @spfn/core ${core.version} is installed; `
+            + `spfn ${cli.version} requires @spfn/core ${cli.peerDependencies['@spfn/core']} and a core that reloads generators. Update @spfn/core.`;
+        const shapes: { core: string; patch: () => void; says: string }[] = [
+            { core: 'without the CodegenOrchestrator export', patch: () => patchCodegen(source => source.replace('export { CodegenOrchestrator, ', 'export { ')), says: notStarted },
+            { core: 'exporting CodegenOrchestrator as undefined', patch: () => patchCodegen(source => 'const absentOrchestrator = undefined;\n'
+                + source.replace('export { CodegenOrchestrator, ', 'export { absentOrchestrator as CodegenOrchestrator, ')), says: notStarted },
+            { core: 'without the ./codegen subpath', patch: removeCodegenSubpath, says: notStarted },
+            { core: 'missing a dependency of its own', patch: () => patchCodegen(source => 'import \'spfn-missing-dependency\';\n' + source),
+                says: 'Cannot find package \'spfn-missing-dependency\'' },
+        ];
+
+        write('.spfn/watcher.mjs', watcherEntrySource());
+
+        for (const shape of shapes)
+        {
+            installCoreInApp();
+            shape.patch();
+
+            const watcher = startWatcher(tsx);
+
+            try
+            {
+                const output = { code: await watcher.exited, text: watcher.output() };
+
+                expect({ core: shape.core, code: output.code, says: output.text.includes(shape.says) }, output.text)
+                    .toEqual({ core: shape.core, code: 1, says: true });
+                expect(output.text.includes('Codegen watcher not started'), output.text).toBe(shape.says === notStarted);
+            }
+            finally
+            {
+                await watcher.kill();
+            }
+        }
     });
 
     it('R15 .spfnrc.ts sees its own file in import.meta.url, filename and dirname', () =>
@@ -713,11 +801,29 @@ function installCoreInApp(): void
 {
     const installed = join(appDir, 'node_modules/@spfn/core');
 
-    unlinkSync(installed);
+    rmSync(installed, { recursive: true, force: true });
     mkdirSync(installed);
     cpSync(join(coreRoot, 'package.json'), join(installed, 'package.json'));
     cpSync(join(coreRoot, 'dist'), join(installed, 'dist'), { recursive: true, filter: source => !source.endsWith('.map') });
     symlinkSync(join(coreRoot, 'node_modules'), join(installed, 'node_modules'), 'dir');
+}
+
+/** Rewrite the app-installed core's `@spfn/core/codegen` entry (`installCoreInApp`). */
+function patchCodegen(rewrite: (source: string) => string): void
+{
+    const codegen = join(appDir, 'node_modules/@spfn/core/dist/codegen/index.js');
+
+    writeFileSync(codegen, rewrite(readFileSync(codegen, 'utf8')));
+}
+
+/** Drop `./codegen` from the app-installed core's exports (`installCoreInApp`). */
+function removeCodegenSubpath(): void
+{
+    const manifest = join(appDir, 'node_modules/@spfn/core/package.json');
+    const { exports, ...rest } = JSON.parse(readFileSync(manifest, 'utf8'));
+
+    delete exports['./codegen'];
+    writeFileSync(manifest, JSON.stringify({ ...rest, exports }));
 }
 
 /**

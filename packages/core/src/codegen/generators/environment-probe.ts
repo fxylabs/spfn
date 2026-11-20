@@ -209,6 +209,17 @@ function holdEnvironment<T>(load: (real: NodeJS.ProcessEnv) => Promise<T>): Prom
     return run;
 }
 
+/**
+ * Run `fn` holding the process's environment, as a load does: once every load
+ * queued before it has settled, so `process.env` is the real object
+ * throughout — never another load's recording proxy, nor its varied values.
+ * For loads that observe nothing: the orchestrator loading the codegen config.
+ */
+export function withEnvironment<T>(fn: () => Promise<T>): Promise<T>
+{
+    return holdEnvironment(() => fn());
+}
+
 // ============================================================================
 // Observing reads
 // ============================================================================

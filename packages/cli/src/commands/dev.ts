@@ -5,6 +5,7 @@ import { fileURLToPath } from 'url';
 import { execa, type ExecaChildProcess } from 'execa';
 import chokidar from 'chokidar';
 import { logger } from '../utils/logger.js';
+import { getCliVersion, getCorePeerRange } from '../utils/version.js';
 import { syncAgentInstructions } from '../lib/agent-instructions.js';
 import { detectPackageManager, getAddCommand, getRunScriptArgs, type PackageManager } from '../utils/package-manager.js';
 import { resolveKeychainEnv } from '../utils/secret-store/index.js';
@@ -53,7 +54,8 @@ function writeAgentInstructions(cwd: string, agentFiles: boolean): void
 
 /**
  * The codegen watcher's entry, `.spfn/watcher.mjs`: the generators of the
- * app's codegen config, run by an orchestrator in watch mode. Started under
+ * app's codegen config, run by an orchestrator in watch mode, which loads them
+ * again when the config changes (`loadGenerators`). Started under
  * tsx with the `spfn dev` hook (`devLoader`), as the server is.
  */
 export function watcherEntrySource(): string
@@ -70,8 +72,70 @@ export function watcherEntrySource(): string
 //     pool: { max: 3 }  // Watcher needs fewer connections than server
 // });
 
+import { existsSync, readFileSync } from 'node:fs';
 import { constants } from 'node:os';
-import { CodegenOrchestrator, loadCodegenConfig, createGeneratorsFromConfig, markCodegenProcess } from '@spfn/core/codegen';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+// The @spfn/core installed for the app: the package.json of the
+// node_modules/@spfn/core nearest this entry, where its import resolves.
+const installedCoreVersion = () =>
+{
+    let directory = dirname(fileURLToPath(import.meta.url));
+
+    while (dirname(directory) !== directory)
+    {
+        const file = join(directory, 'node_modules/@spfn/core/package.json');
+
+        if (existsSync(file))
+        {
+            return JSON.parse(readFileSync(file, 'utf8')).version;
+        }
+
+        directory = dirname(directory);
+    }
+
+    return undefined;
+};
+
+// The error resolving '@spfn/core/codegen' itself, if any.
+const codegenResolutionError = () =>
+{
+    try
+    {
+        import.meta.resolve('@spfn/core/codegen');
+        return undefined;
+    }
+    catch (error)
+    {
+        return error;
+    }
+};
+
+// A core that cannot load the generators itself — no './codegen' to resolve,
+// no CodegenOrchestrator, or one without loadsGenerators, which ignores
+// loadGenerators and fails on the generator list it never got — stops the
+// watcher with one message, naming the core installed and the range this spfn
+// requires. Any other failure (no core at all, a core broken in its own code
+// or dependencies) is not an old core and surfaces as its own error.
+const resolutionError = codegenResolutionError();
+const unresolvableCore = ['ERR_PACKAGE_PATH_NOT_EXPORTED', 'ERR_MODULE_NOT_FOUND'].includes(resolutionError?.code)
+    && installedCoreVersion() !== undefined;
+
+if (resolutionError !== undefined && !unresolvableCore)
+{
+    throw resolutionError;
+}
+
+const codegen = unresolvableCore ? {} : await import('@spfn/core/codegen');
+
+if (codegen.CodegenOrchestrator?.loadsGenerators !== true)
+{
+    console.error(\`[SPFN] Codegen watcher not started: @spfn/core \${installedCoreVersion() ?? 'of unknown version'} is installed; spfn ${getCliVersion()} requires @spfn/core ${getCorePeerRange()} and a core that reloads generators. Update @spfn/core.\`);
+    process.exit(1);
+}
+
+const { CodegenOrchestrator, loadCodegenConfig, createGeneratorsFromConfig, markCodegenProcess } = codegen;
 
 // Started by the spfn CLI to generate code: a second copy of @spfn/core after a
 // router load is refused, not only warned about. In-process, so nothing
@@ -80,29 +144,22 @@ markCodegenProcess();
 
 const cwd = process.cwd();
 
-// A config or generator that fails to load is reported, not read as "no
-// generators"; the dev server keeps running without the watcher, and the
-// watcher does not read the config again, so the message says to restart.
-const generators = await Promise.resolve()
-    .then(() => createGeneratorsFromConfig(loadCodegenConfig(cwd), cwd))
-    .catch((error) =>
-    {
-        console.error('[SPFN] Codegen watcher could not load the codegen config:', error instanceof Error ? error.message : error);
-        console.error('[SPFN] Route maps are not regenerated meanwhile: fix the config and restart spfn dev.');
-        process.exit(1);
-    });
-
+// The orchestrator loads the generators itself, and again whenever the config,
+// a custom generator or a project file they import changes. A config that
+// fails to load, at start or later, pauses regeneration and says so; the
+// watcher stays up and loads it again on the next save.
 const orchestrator = new CodegenOrchestrator({
-    generators,
+    loadGenerators: async () => createGeneratorsFromConfig(loadCodegenConfig(cwd), cwd),
     cwd,
     debug: true
 });
 
 // The first signal: close() starts no new generation and resolves once the one
 // running has finished every generator, so the files of one cycle (route map,
-// contract) are never left from two different generations; then exit. A
-// generation cannot be cancelled, so a second signal exits at once: it is the
-// only way to stop one that never settles.
+// contract) are never left from two different generations, or once the config
+// load running has finished; then exit. Neither a generation nor a config load
+// (a module evaluation) can be cancelled, so a second signal exits at once: it
+// is the only way to stop one that never settles.
 let stopping = false;
 
 const stop = async (signal) =>
@@ -113,7 +170,7 @@ const stop = async (signal) =>
     }
 
     stopping = true;
-    console.log('[SPFN] Codegen watcher stopping once the running generation finishes (signal again to exit now)');
+    console.log('[SPFN] Codegen watcher stopping once the running generation or codegen config load finishes (signal again to exit now)');
     await orchestrator.close();
     process.exit(0);
 };
