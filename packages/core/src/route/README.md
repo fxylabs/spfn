@@ -503,10 +503,12 @@ router's, under `.packages()`, as a plain entry, or nested deeper. An app's `.us
 package router (`authRouter.use([optionalAuth])`) is refused like one above it: core cannot tell
 it from the package's own. A package that wants a replacement authenticator for some of its own
 routes puts it on those routes, or on a nested router inside its package router that states no
-`packageName`. Every router
-the SPFN packages export carries it (`@spfn/auth`, `@spfn/cms`, `@spfn/monitor`,
-`@spfn/notification`, `@spfn/mcp`). Mounting with `.packages()` says the same of a router that
-does not; mount a package's router there, not as a plain entry — a plain entry registers and
+`packageName`. A package whose every route authenticates itself — its own `auth` on each
+route, or `.skip(['auth'])` / `.skip('*')` and a credential it checks itself — states no
+`packageName`: a skipper above removes nothing those routes rely on. Of the SPFN packages only
+`@spfn/auth` states it; `@spfn/cms` and `@spfn/monitor` put `authenticate` on each route,
+`@spfn/mcp` validates its own token, and `@spfn/notification`'s tracking routes are public.
+Mounting with `.packages()` says the same of a router that does not; mount a package's router there, not as a plain entry — a plain entry registers and
 serves the same paths, but its routes are then the app's own to `AppRouter` and the route map.
 
 ### `.use([...])` — router-level global middleware

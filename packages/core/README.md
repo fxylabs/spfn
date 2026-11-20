@@ -1014,9 +1014,13 @@ router-level middleware declaring `skips` (`optionalAuth`, `machineAuth`, …) a
 serve that route to callers `auth` would have refused. Registration refuses such a skipper at or
 above a router that states `packageName` — in that router's own `.use()` or in any enclosing
 router's — wherever the app mounted it: under `.packages()`, as a plain entry, nested at any
-depth. It is required of any router whose routes rely on the app's authenticator; every router
-the SPFN packages export carries it. A router mounted with `.packages()` is treated as a
-package's whether it says so or not.
+depth. It is required of any router whose routes rely on the app's authenticator (`@spfn/auth`'s
+`authRouter` states it). A package whose every route authenticates itself — its own `.use([auth,
+…])`, or `.skip(['auth'])` / `.skip('*')` and a credential it checks itself — does not state
+`packageName`: a skipper above removes nothing such a route relies on, and stating it would only
+refuse an app that mounts the router under one (`@spfn/cms`, `@spfn/monitor`, `@spfn/mcp`, and
+`@spfn/notification`'s tracking routes state none). A router mounted with `.packages()` is
+treated as a package's whether it says so or not.
 
 So a package never `.use()`s a skipper on the router it ships: core cannot tell the package's
 `.use()` there from an app's (`authRouter.use([optionalAuth])`), and refuses both. To give some

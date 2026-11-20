@@ -37,6 +37,6 @@ export const monitorRouter = defineRouter({
     listErrorEvents,
     listLogs,
     getStats,
-}, { packageName: '@spfn/monitor' });
+});
 
 export default monitorRouter;

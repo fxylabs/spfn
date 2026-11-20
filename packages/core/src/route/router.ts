@@ -167,7 +167,9 @@ export interface RouterOptions
     /**
      * The defining package's name (`'@spfn/auth'`). Required of a package whose
      * routes rely on the app's authenticator: it is what makes registration
-     * refuse a skipper above them however the app mounts the router.
+     * refuse a skipper above them however the app mounts the router. A package
+     * whose every route authenticates itself (its own `auth`, or a skip of the
+     * inherited one and a credential it checks) leaves it out.
      */
     packageName?: string;
 }

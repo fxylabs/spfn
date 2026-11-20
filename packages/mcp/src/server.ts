@@ -89,7 +89,7 @@ export function createMcpHttpRoute<Auth extends McpAuth, Ctx>(
         mcpGet: route.get('/mcp').skip('*').handler(handle),
         mcpDelete: route.delete('/mcp').skip('*').handler(handle),
         ...metadataRoutes(path ?? resolve().path, resolve),
-    }, { packageName: '@spfn/mcp' });
+    });
 }
 
 /**

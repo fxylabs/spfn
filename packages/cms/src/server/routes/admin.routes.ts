@@ -131,6 +131,6 @@ export const cmsAdminRouter = defineRouter({
     saveSectionDraft: saveSectionDraftRoute,
     publishSection: publishSectionRoute,
     resetSectionDraft: resetSectionDraftRoute,
-}, { packageName: '@spfn/cms' });
+});
 
 export type CmsAdminRouter = typeof cmsAdminRouter;

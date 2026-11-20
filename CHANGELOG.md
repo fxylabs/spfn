@@ -73,12 +73,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with the new `defineRouter(routes, { packageName })`. So
   `defineRouter({ auth: authRouter }).use([optionalAuth])` is refused too, as is
   `authRouter.use([optionalAuth])` however it is mounted, and any depth of nesting. Package
-  routes have no authenticator of their own; every router the SPFN packages export now states
+  routes have no authenticator of their own; `@spfn/auth`'s `authRouter` now states
   `packageName`, and a third-party package whose routes rely on the app's authenticator should
-  too — and puts a replacement authenticator for some of its routes on those routes or on a
+  too (a package whose every route authenticates itself states none: `@spfn/cms`,
+  `@spfn/monitor`, `@spfn/mcp` and `@spfn/notification` do not, and stay mountable under a
+  skipper as a plain entry) — and puts a replacement authenticator for some of its routes on those routes or on a
   nested router inside its package router, never in the package router's own `.use()`. **To boot again**, move the skipper onto a nested router that holds
   no package router (`defineRouter({ machine: defineRouter({ ... }).use([machineAuth]) })
   .packages([authRouter])`), or onto the routes themselves (`route.get(...).use([optionalAuth])`).
+  The refusal for a package router mounted as a plain entry needs the package and core from the
+  same release — an older package's router carries no `packageName` (mounting through
+  `.packages()` is refused with any version) — so the release raises each package's `@spfn/core`
+  peer floor to the core that reads it.
   New: `resolveRouteMiddlewares(router, serverMiddlewares?)` (the
   chain `registerRoutes` registers, per route) and `RegisteredRoute.middlewares`. The SSE/WS token
   endpoints (`resolveEndpointMiddlewares`) are unchanged.
