@@ -2,7 +2,7 @@
  * @spfn/auth - An app chooses which sign-in channels exist (#308)
  *
  * One test per row C2–C12 of the #308 case table, and R1 for passkey sign-in
- * (#330), I1–I7 for invitations and self-deletion (#381). C1 is every other suite staying green; C13 and the option's own
+ * (#330), I1, I2, I4 and I6–I8 for invitations and self-deletion (#381). C1 is every other suite staying green; C13 and the option's own
  * validation are in unit/auth-channels.test.ts.
  *
  * Driven against the mounted auth router with `authenticate` as the
@@ -577,7 +577,7 @@ describe.skipIf(!dbAvailable)('An app chooses which sign-in channels exist (#308
     });
 
     // ========================================================================
-    // I1–I7: invitations and self-deletion (#381)
+    // I1, I2, I6, I7: invitations and self-deletion (#381); I4/I8 under C12
     // ========================================================================
 
     describe('invitations: false', () =>
