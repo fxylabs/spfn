@@ -7,7 +7,7 @@ import { execa } from 'execa';
 import chalk from 'chalk';
 
 import { logger } from '../utils/logger.js';
-import { detectPackageManager, findWorkspace, getRunCommand } from '../utils/package-manager.js';
+import { detectPackageManager, findWorkspace, getAddArgs, getInstallArgs, getRunCommand } from '../utils/package-manager.js';
 import { confirmInstalled } from './init/steps/package.js';
 import { ENV_FILES_HINT } from '../utils/messages.js';
 import { selectScaffoldMode, type ScaffoldMode } from './init/mode.js';
@@ -32,7 +32,7 @@ async function installFromWorkspaceRoot(workspaceRoot: string, projectPath: stri
 
     try
     {
-        await execa('pnpm', ['install'], {
+        await execa('pnpm', getInstallArgs('pnpm'), {
             cwd: workspaceRoot,
             stdio: 'pipe',
             timeout: 300_000,
@@ -191,15 +191,7 @@ async function createProject(projectName: string, options: CreateOptions): Promi
     try
     {
         // Install @svgr/webpack
-        const installArgs = pm === 'npm'
-            ? ['install', '--save-dev', '@svgr/webpack']
-            : pm === 'yarn'
-                ? ['add', '-D', '@svgr/webpack']
-                : pm === 'pnpm'
-                    ? ['add', '-D', '@svgr/webpack']
-                    : ['add', '-d', '@svgr/webpack'];
-
-        await execa(pm, installArgs, { cwd: projectPath, timeout: 120_000 });
+        await execa(pm, getAddArgs(pm, ['@svgr/webpack'], { dev: true }), { cwd: projectPath, timeout: 120_000 });
 
         // Run spfn setup icons programmatically
         const { setupIcons } = await import('./setup.js');

@@ -28,7 +28,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **BREAKING: spfn: the `spfn dev` codegen watcher needs a tsx resolvable from the app or from the
   CLI (#353).** It ran through the package manager, so an npm app with no tsx installed got one
   fetched by `npx tsx`; now the watcher is not started there, and `spfn dev` logs the command that
-  installs tsx in the app (`npm install -D tsx`). The server and Next.js still start.
+  installs tsx in the app (`npm install --legacy-peer-deps --save-dev tsx` in an npm app). The
+  server and Next.js still start.
 - **BREAKING: @spfn/core: `CodegenOrchestrator.generateAll()` and `settled()` reject when called
   while the calling generator's own `generate()`, run by the watch loop, is still running (#353).**
   Awaited there, they could never finish, since each waits for that generation; they reject whether
@@ -107,6 +108,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   package in the app's `dependencies` and `devDependencies` resolves from the app directory, as
   Node resolves it there (Plug'n'Play included, the CLI's own `NODE_PATH` not); otherwise they exit
   1 naming the missing packages.
+- **spfn: `spfn add` in an npm app installs with `--legacy-peer-deps`, as `init` does (#345).** It
+  ran `npm add <package>`, which npm refuses with `ERESOLVE` for every SPFN app (drizzle-typebox's
+  peer range `drizzle-orm >=0.36.0` admits no `1.0.0-rc.4`). `init`, `add`, `create` and
+  `setup icons` now share one set of install arguments per manager, and the generated Dockerfile's
+  `npm ci` and `npm prune`, which failed the same way, carry the flag too; it copies bun's text
+  `bun.lock` as well as `bun.lockb`.
 - **spfn: `spfn db push --dry-run` writes nothing (spfn/spfn#163).** In 0.4.0-beta.1 a dry run
   whose project schema had no pending change applied the function package migrations (and created
   their bookkeeping tables) instead of previewing them; with a pending project change it said

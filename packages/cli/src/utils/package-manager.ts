@@ -21,6 +21,14 @@ const LOCKFILES: ReadonlyArray<[string, PackageManager]> = [
 ];
 
 /**
+ * npm refuses the SPFN dependency set without it (`ERESOLVE`), in `install`,
+ * `ci` and `prune` alike: drizzle-typebox's peer range on drizzle-orm
+ * (`>=0.36.0`) admits no prerelease, so not the `1.0.0-rc.4` every SPFN app
+ * pins. Every npm invocation the CLI runs or writes carries it.
+ */
+export const NPM_PEER_FLAGS = ['--legacy-peer-deps'];
+
+/**
  * The package manager the app in `appDir` uses.
  *
  * The app's own lockfile decides, before any ancestor is read. Otherwise the
@@ -208,43 +216,41 @@ function isWorkspaceMember(path: string, patterns: string[]): boolean
         && !excluded.some(pattern => posix.matchesGlob(path, pattern));
 }
 
-export function getInstallCommand(pm: PackageManager): string
+/**
+ * Arguments for `<pm> install`: every command that installs the app's
+ * dependencies uses these, so npm accepts the SPFN set the same way everywhere.
+ */
+export function getInstallArgs(pm: PackageManager): string[]
+{
+    return pm === 'npm' ? ['install', ...NPM_PEER_FLAGS] : ['install'];
+}
+
+/**
+ * Arguments for adding `packages` to the app (`dev`: as devDependencies), the
+ * one definition `init`, `create`, `add` and `setup` share.
+ */
+export function getAddArgs(pm: PackageManager, packages: string[], { dev = false } = {}): string[]
 {
     switch (pm)
     {
-        case 'bun':
-            return 'bun install';
-        case 'pnpm':
-            return 'pnpm install';
-        case 'yarn':
-            return 'yarn';
         case 'npm':
+            return ['install', ...NPM_PEER_FLAGS, ...(dev ? ['--save-dev'] : []), ...packages];
+        case 'bun':
+            return ['add', ...(dev ? ['--dev'] : []), ...packages];
         default:
-            return 'npm install';
+            return ['add', ...(dev ? ['-D'] : []), ...packages];
     }
+}
+
+/** The command line `getAddArgs` stands for, for a hint to the user. */
+export function getAddCommand(pm: PackageManager, packages: string[], options: { dev?: boolean } = {}): string
+{
+    return [pm, ...getAddArgs(pm, packages, options)].join(' ');
 }
 
 export function getRunCommand(pm: PackageManager): string
 {
     return pm === 'npm' ? 'npm run' : `${pm} run`;
-}
-
-export function getAddCommand(pm: PackageManager, packages: string[]): string
-{
-    const pkgs = packages.join(' ');
-
-    switch (pm)
-    {
-        case 'bun':
-            return `bun add ${pkgs}`;
-        case 'pnpm':
-            return `pnpm add ${pkgs}`;
-        case 'yarn':
-            return `yarn add ${pkgs}`;
-        case 'npm':
-        default:
-            return `npm install ${pkgs}`;
-    }
 }
 
 /**

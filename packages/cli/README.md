@@ -72,6 +72,10 @@ Node answers, in a child process started in the app directory without the CLI's
 `NODE_PATH` or `NODE_OPTIONS`, through the app's `.pnp.cjs` under Plug'n'Play; a package
 resolves when Node finds its `package.json`, since an entry point is optional.
 
+npm installs (`init`, `add`, `create`, `setup icons`, and the generated Dockerfile's
+`npm ci` / `npm prune`) pass `--legacy-peer-deps`: drizzle-typebox's peer range on
+drizzle-orm (`>=0.36.0`) admits no prerelease, so npm refuses the `1.0.0-rc.4` SPFN pins.
+
 ---
 
 ## Commands

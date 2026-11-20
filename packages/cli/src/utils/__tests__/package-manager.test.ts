@@ -17,6 +17,8 @@ import {
     detectPackageManager,
     findUnresolvedPackages,
     findWorkspace,
+    getAddArgs,
+    getInstallArgs,
     getRunScriptArgs,
 } from '../package-manager.js';
 
@@ -79,6 +81,25 @@ function makeRepository(files: Record<string, string>): string
 
     return repository;
 }
+
+describe('getInstallArgs and getAddArgs', () =>
+{
+    it('give `add` the npm arguments `init` installs with, so npm accepts the SPFN set in both', () =>
+    {
+        const shared = getInstallArgs('npm');
+
+        expect(shared).toEqual(['install', '--legacy-peer-deps']);
+        expect(getAddArgs('npm', ['@spfn/i18n'])).toEqual([...shared, '@spfn/i18n']);
+        expect(getAddArgs('npm', ['@svgr/webpack'], { dev: true })).toEqual([...shared, '--save-dev', '@svgr/webpack']);
+    });
+
+    it('add with each manager\'s own verb and dev flag', () =>
+    {
+        expect(getAddArgs('pnpm', ['tsx'], { dev: true })).toEqual(['add', '-D', 'tsx']);
+        expect(getAddArgs('yarn', ['tsx'])).toEqual(['add', 'tsx']);
+        expect(getAddArgs('bun', ['tsx'], { dev: true })).toEqual(['add', '--dev', 'tsx']);
+    });
+});
 
 describe('detectPackageManager', () =>
 {
