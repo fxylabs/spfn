@@ -316,4 +316,23 @@ describe('spfn create launches its one-off packages with yarn dlx where yarn has
         expect(mocks.execa.mock.calls.some(([, args]) => args.includes('shadcn@latest'))).toBe(false);
         expect(mocks.execa).toHaveBeenCalledWith('yarn', ['install'], { cwd: app });
     });
+
+    it('says "npx was not found; install npm" when npx cannot start', async () =>
+    {
+        mocks.execa.mockImplementation((command: string, args: string[], options: { cwd: string }) =>
+            (command === 'npx'
+                ? Promise.reject(Object.assign(new Error('Command failed with ENOENT: npx --yes create-next-app@latest\nspawn npx ENOENT'), { code: 'ENOENT', path: 'npx' }))
+                : fakeProcess(command, args, options)));
+        const exit = vi.spyOn(process, 'exit').mockImplementation(((code?: number) =>
+        {
+            throw new Error(`process.exit(${code})`);
+        }) as never);
+        const error = vi.spyOn(logger, 'error').mockImplementation(() => undefined);
+
+        await expect(createFrom(join(repository, 'scratch'), ['--pm', 'npm'])).rejects.toThrow('process.exit(1)');
+
+        expect(error).toHaveBeenCalledWith('npx was not found; install npm');
+        exit.mockRestore();
+        error.mockRestore();
+    });
 });
