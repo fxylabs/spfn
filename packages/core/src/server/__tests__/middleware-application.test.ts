@@ -454,6 +454,12 @@ describe('router-level skips (#165)', () =>
         expect(await ran(app, '/leaf')).toEqual(['serverLevel', 'topLevel', 'machineAuth', 'midLevel', 'own']);
     });
 
+    /**
+     * The tree holds the two shapes main registers oddly and the resolver must
+     * keep as they were: a package mounting a package (`.packages()` copies the
+     * inner one up, so its route registers twice and the first chain answers),
+     * and a route with no path (skipped with a warning, registered nowhere).
+     */
     it('R13: every route runs exactly the chain the resolver reports for it', async () =>
     {
         const { middleware, ran } = chainRecorder();
@@ -467,23 +473,32 @@ describe('router-level skips (#165)', () =>
             nested: defineRouter({ nestedRoute: get('/m/nested') }).use([auth, middleware('nestedLevel')]),
         }).use([machineAuth, middleware('machineLevel')]);
         const optional = route.get('/optional').use([middleware('optionalAuth', ['auth'])]).handler(async () => ({ ok: true }));
-        const pkg = defineRouter({ pkgRoute: get('/pkg') }).use([middleware('pkgLevel')]);
-        const tree = defineRouter({ machine, optional, person: get('/person') }).packages([pkg]).use([auth]);
+        const innerPkg = defineRouter({ innerPkgRoute: get('/pkg/inner') }).use([middleware('innerPkgLevel')]);
+        const pkg = defineRouter({ pkgRoute: get('/pkg') }).packages([innerPkg]).use([middleware('pkgLevel')]);
+        const pathless = route.get('').handler(async () => ({ ok: true }));
+        const tree = defineRouter({ machine, optional, pathless, person: get('/person') }).packages([pkg]).use([auth]);
         const serverList = [middleware('serverLevel')];
 
         const app = new Hono();
         const registered = registerRoutes(app, tree, serverList);
         const resolved = resolveRouteMiddlewares(tree, serverList);
 
-        expect(registered.map(r => r.path)).toEqual(['/m/plain', '/m/re-added', '/m/person', '/m/open', '/m/nested', '/optional', '/person', '/pkg']);
+        expect(registered.map(r => r.path)).toEqual(
+            ['/m/plain', '/m/re-added', '/m/person', '/m/open', '/m/nested', '/optional', '/person', '/pkg', '/pkg/inner', '/pkg/inner'],
+        );
         expect(resolved.map(r => r.path)).toEqual(registered.map(r => r.path));
 
+        const answering = new Map<string, string[]>();
         for (const [index, entry] of resolved.entries())
         {
             const names = entry.middlewares.map(mw => mw.name);
             expect(registered[index]!.middlewares, entry.path).toEqual(names);
-            expect(await ran(app, entry.path), entry.path).toEqual(names);
+            answering.set(entry.path, answering.get(entry.path) ?? names);
+            expect(await ran(app, entry.path), entry.path).toEqual(answering.get(entry.path));
         }
+
+        expect(answering.get('/pkg/inner')).toEqual(['serverLevel', 'auth', 'pkgLevel', 'innerPkgLevel']);
+        expect(resolved.filter(r => r.path === '/pkg/inner')[1]!.middlewares.map(mw => mw.name)).toEqual(['serverLevel', 'auth', 'innerPkgLevel']);
     });
 
     it('R14: refuses a skipper on a router that mounts .packages(), or on any router enclosing the mount', async () =>
