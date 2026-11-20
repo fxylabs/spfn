@@ -51,7 +51,8 @@ From `@spfn/core/job`:
   `expireInSeconds` (at least 1s); a single job completed with the handler's result, a batch
   without one; a throw (or a failed completion) fails the batch with the error's description —
   `describeError` from `@spfn/core/logger`, which keeps a database error's SQLSTATE, constraint,
-  table, SQL text and `paramCount` and never its bound values — which pg-boss stores as the job's
+  table, SQL text and `paramCount` and never its bound values, and an ordinary error's name,
+  message, `code` and numeric `statusCode` and none of its other fields — which pg-boss stores as the job's
   `output` and retries per the job's retry options; a failed poll emitted as the
   instance's `error` event with `queue` and `worker`. `stop(options)` and `start()` on that instance
   are core's too, so pg-boss's lifecycle covers those workers: `stop()` is the path `stopBoss()`

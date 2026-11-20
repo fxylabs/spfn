@@ -44,16 +44,29 @@ export interface DatabaseErrorDescription
 }
 
 /**
- * Any other error, with its cause chain described the same way
+ * Any other error, with its cause chain described the same way — or a thrown
+ * value that is not an Error: a string as its text, an object by its
+ * constructor's name (`NonError` for a plain one), its string `message` and
+ * its `code`, and none of its other fields
  */
 export interface ErrorDescription
 {
     kind: 'error';
     name: string;
-    message: string;
+    message?: string;
+    /** The error's `code`, when it is a string or a number */
+    code?: string | number;
+    /** The error's `statusCode`, when it is a number; never for a value that is not an Error */
+    statusCode?: number;
     /** Stack frames only: the header lines, which repeat the message, are dropped */
     stack?: string;
     cause?: ErrorDescription | DatabaseErrorDescription;
+}
+
+export interface DescribeErrorOptions
+{
+    /** Keep the stack frames, down the cause chain. Default `true` */
+    stack?: boolean;
 }
 
 /**
@@ -101,6 +114,16 @@ export const CAUSE_DEPTH_LIMIT = 10;
 const DESCRIBED = Symbol.for('spfn.core.errorDescription');
 
 type Fields = Record<string, unknown>;
+
+/**
+ * One description in progress: the links described so far, outermost first,
+ * and whether stack frames are kept
+ */
+interface Walk
+{
+    seen: Set<object>;
+    stack: boolean;
+}
 
 /**
  * Whether an error came from the database driver — either relayed from the
@@ -256,6 +279,10 @@ export function isArray(value: unknown): value is unknown[]
  * than `CAUSE_DEPTH_LIMIT` ends in a `CauseChainTruncated` link and a chain
  * that refers back to an earlier link ends in a `CircularCause` link.
  *
+ * A value that is not an Error is described by what it is, never by its
+ * fields: a string by its text, an object by its constructor's name, its
+ * string `message` and its `code`. A thrown `{ code, params }` logs no params.
+ *
  * @example
  * ```typescript
  * import { describeError } from '@spfn/core/logger';
@@ -263,32 +290,44 @@ export function isArray(value: unknown): value is unknown[]
  * await boss.fail(queue, id, describeError(error));
  * ```
  */
-export function describeError(error: unknown): ErrorDescription | DatabaseErrorDescription
+export function describeError(error: unknown, options: DescribeErrorOptions = {}): ErrorDescription | DatabaseErrorDescription
 {
-    return describeLink(error, new Set<object>());
+    return describeLink(error, { seen: new Set<object>(), stack: options.stack !== false });
 }
 
-/**
- * `seen` holds the links described so far, outermost first
- */
-function describeLink(error: unknown, seen: Set<object>): ErrorDescription | DatabaseErrorDescription
+function describeLink(error: unknown, walk: Walk): ErrorDescription | DatabaseErrorDescription
 {
     if (isDescription(error))
     {
-        return error;
+        return walk.stack ? error : withoutStack(error);
     }
 
     if (isQueryError(error))
     {
-        return describeQueryError(error);
+        return describeQueryError(error, walk);
     }
 
     if (isDriverError(error))
     {
-        return describeDriverError(error as Fields);
+        return describeDriverError(error as Fields, walk);
     }
 
-    return describeOther(error, seen);
+    return isError(error) ? describeOther(error, walk) : describeNonError(error);
+}
+
+/**
+ * A description with its stack frames dropped, down the cause chain
+ */
+function withoutStack(description: ErrorDescription | DatabaseErrorDescription): ErrorDescription | DatabaseErrorDescription
+{
+    const { stack: _stack, ...rest } = description;
+
+    if (rest.kind === 'error' && rest.cause)
+    {
+        return mark({ ...rest, cause: withoutStack(rest.cause) });
+    }
+
+    return mark(rest);
 }
 
 function isDescription(error: unknown): error is ErrorDescription | DatabaseErrorDescription
@@ -296,7 +335,7 @@ function isDescription(error: unknown): error is ErrorDescription | DatabaseErro
     return typeof error === 'object' && error !== null && read(error, DESCRIBED) === true;
 }
 
-function describeQueryError(error: Fields): DatabaseErrorDescription
+function describeQueryError(error: Fields, walk: Walk): DatabaseErrorDescription
 {
     const cause = read(error, 'cause');
     const driver = isDriverError(cause) ? driverFields(cause as Fields) : { code: stringField(cause, 'code') };
@@ -307,11 +346,11 @@ function describeQueryError(error: Fields): DatabaseErrorDescription
         ...driver,
         sql: sqlOf(read(error, 'query')),
         paramCount: countOf(read(error, 'params')),
-        stack: framesOf(error),
+        stack: walk.stack ? framesOf(error) : undefined,
     });
 }
 
-function describeDriverError(error: Fields): DatabaseErrorDescription
+function describeDriverError(error: Fields, walk: Walk): DatabaseErrorDescription
 {
     return mark({
         kind: 'database',
@@ -319,7 +358,7 @@ function describeDriverError(error: Fields): DatabaseErrorDescription
         ...driverFields(error),
         sql: sqlOf(read(error, 'query')),
         paramCount: countOf(read(error, 'parameters')),
-        stack: framesOf(error),
+        stack: walk.stack ? framesOf(error) : undefined,
     });
 }
 
@@ -354,31 +393,65 @@ function keptMessage(error: Fields): string | undefined
     return read(error, 'routine') === RAISE_ROUTINE ? undefined : stringField(error, 'message');
 }
 
-function describeOther(error: unknown, seen: Set<object>): ErrorDescription
+function describeOther(error: Error, walk: Walk): ErrorDescription
 {
-    if (typeof error !== 'object' || error === null)
-    {
-        return mark({ kind: 'error', name: 'Error', message: String(error) });
-    }
+    walk.seen.add(error);
 
-    seen.add(error);
-
-    const message = read(error, 'message');
+    const statusCode = read(error, 'statusCode');
 
     return mark({
         kind: 'error',
-        name: nameOf(error as Fields, 'Error'),
-        message: typeof message === 'string' ? message : 'Error',
-        stack: framesOf(error as Fields),
-        cause: describeCause(error, seen),
+        name: nameOf(error as unknown as Fields, 'Error'),
+        message: stringField(error, 'message'),
+        code: codeOf(error),
+        statusCode: typeof statusCode === 'number' ? statusCode : undefined,
+        stack: walk.stack ? framesOf(error as unknown as Fields) : undefined,
+        cause: describeCause(error, walk),
     });
+}
+
+/**
+ * A thrown value that is not an Error. Its fields are arbitrary — a thrown
+ * `{ code, params }` — so none is copied but a string `message` and the `code`.
+ */
+function describeNonError(value: unknown): ErrorDescription
+{
+    if (value === null || (typeof value !== 'object' && typeof value !== 'function'))
+    {
+        return mark({ kind: 'error', name: 'NonError', message: String(value) });
+    }
+
+    return mark({
+        kind: 'error',
+        name: constructorName(value),
+        message: stringField(value, 'message'),
+        code: codeOf(value),
+    });
+}
+
+/**
+ * The name of a non-Error object's class, or `NonError` for a plain object
+ */
+function constructorName(value: object): string
+{
+    const constructor = read(value, 'constructor');
+    const name = typeof constructor === 'function' ? read(constructor, 'name') : undefined;
+
+    return typeof name === 'string' && name !== '' && name !== 'Object' ? name : 'NonError';
+}
+
+function codeOf(error: object): string | number | undefined
+{
+    const code = read(error, 'code');
+
+    return typeof code === 'string' || typeof code === 'number' ? code : undefined;
 }
 
 /**
  * The next link of the chain, unless it is one already described or the
  * chain has run past its limit: either ends the chain in a link that says so
  */
-function describeCause(error: object, seen: Set<object>): ErrorDescription | DatabaseErrorDescription | undefined
+function describeCause(error: object, walk: Walk): ErrorDescription | DatabaseErrorDescription | undefined
 {
     const cause = read(error, 'cause');
 
@@ -387,17 +460,17 @@ function describeCause(error: object, seen: Set<object>): ErrorDescription | Dat
         return undefined;
     }
 
-    if (typeof cause === 'object' && cause !== null && seen.has(cause))
+    if (typeof cause === 'object' && cause !== null && walk.seen.has(cause))
     {
         return mark({ kind: 'error', name: 'CircularCause', message: 'the cause refers back to an earlier link of the chain' });
     }
 
-    if (seen.size >= CAUSE_DEPTH_LIMIT)
+    if (walk.seen.size >= CAUSE_DEPTH_LIMIT)
     {
         return mark({ kind: 'error', name: 'CauseChainTruncated', message: `the cause chain is longer than ${CAUSE_DEPTH_LIMIT} links` });
     }
 
-    return describeLink(cause, seen);
+    return describeLink(cause, walk);
 }
 
 /**

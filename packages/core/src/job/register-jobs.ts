@@ -216,13 +216,13 @@ async function sweepOrphanSchedules(boss: PgBoss): Promise<void>
             }
             catch (error)
             {
-                jobLogger.error(`Failed to remove orphan schedule: ${orphan.name}`, error);
+                jobLogger.error(`Failed to remove orphan schedule: ${orphan.name}`, { error });
             }
         }));
     }
     catch (error)
     {
-        jobLogger.error('Orphan schedule sweep failed', error);
+        jobLogger.error('Orphan schedule sweep failed', { error });
     }
 }
 

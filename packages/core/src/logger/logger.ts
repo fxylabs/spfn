@@ -7,10 +7,27 @@
 import { format } from 'node:util';
 import type { LogLevel, LogMetadata, LoggerConfig, Transport } from './types';
 import { LOG_LEVEL_PRIORITY } from './types';
-import { maskSensitiveData } from './formatters';
+import { maskContext } from './formatters';
 import { describeError, isError } from './error-description';
 
 const FORMAT_PATTERN = /%[sdifjoOc%]/;
+
+/**
+ * Whether the only argument after the message is the caught value rather
+ * than the context: an Error, or anything that is not an object
+ */
+function isCaught(value: unknown): boolean
+{
+    return value !== undefined && (isError(value) || typeof value !== 'object' || value === null);
+}
+
+/**
+ * The context argument, if it is an object
+ */
+function asContext(value: unknown): Record<string, unknown> | undefined
+{
+    return typeof value === 'object' && value !== null ? value as Record<string, unknown> : undefined;
+}
 
 /**
  * Logger class
@@ -24,15 +41,6 @@ export class Logger
     {
         this.config = config;
         this.module = config.module;
-    }
-
-    /**
-     * Whether the only argument after the message is the caught value rather
-     * than the context: an Error, or anything that is not an object
-     */
-    private isCaught(value: unknown): boolean
-    {
-        return value !== undefined && (isError(value) || typeof value !== 'object' || value === null);
     }
 
     /**
@@ -55,30 +63,43 @@ export class Logger
     }
 
     /**
-     * Common log method with error/context detection
+     * Log at a level: the arguments after the message decide what is the
+     * caught value and what is the context, by position.
+     *
+     * - `(message, caught, context)`: the second argument **is** the caught
+     *   value, whatever its shape — `undefined`, a string, a plain object —
+     *   and the context is always kept.
+     * - `(message, value)`: an Error, or anything that is not an object, is the
+     *   caught value; any other object is the context. A catch site whose value
+     *   may not be an Error passes `{ error }` or the three-argument form.
+     * - A printf token in the message formats the second argument into it.
      */
-    private logWithLevel(
-        level: LogLevel,
-        message: string,
-        errorOrContext?: Error | unknown | Record<string, unknown>,
-        context?: Record<string, unknown>,
-    ): void
+    private logWithLevel(level: LogLevel, message: string, args: unknown[]): void
     {
-        // printf-style format string: logger.info('url: %s', value)
-        if (errorOrContext !== undefined && FORMAT_PATTERN.test(message))
+        // Early return if log level is below configured level
+        // This prevents unnecessary description and masking
+        if (LOG_LEVEL_PRIORITY[level] < LOG_LEVEL_PRIORITY[this.config.level])
         {
-            this.log(level, format(message, errorOrContext), undefined, context);
-
             return;
         }
 
-        if (this.isCaught(errorOrContext))
+        const [value, context] = args;
+
+        if (value !== undefined && FORMAT_PATTERN.test(message))
         {
-            this.log(level, message, errorOrContext, context);
+            this.log(level, format(message, value), undefined, asContext(context));
+        }
+        else if (args.length >= 2)
+        {
+            this.log(level, message, describeError(value), asContext(context));
+        }
+        else if (isCaught(value))
+        {
+            this.log(level, message, describeError(value));
         }
         else
         {
-            this.log(level, message, undefined, errorOrContext as Record<string, unknown>);
+            this.log(level, message, undefined, asContext(value));
         }
     }
 
@@ -87,10 +108,11 @@ export class Logger
      */
     debug(message: string, context?: Record<string, unknown>): void;
     debug(message: string, formatArg: string | number | boolean): void;
-    debug(message: string, error: Error | unknown, context?: Record<string, unknown>): void;
-    debug(message: string, errorOrContext?: unknown, context?: Record<string, unknown>): void
+    debug(message: string, error: Error | unknown): void;
+    debug(message: string, error: unknown, context: Record<string, unknown>): void;
+    debug(message: string, ...args: unknown[]): void
     {
-        this.logWithLevel('debug', message, errorOrContext, context);
+        this.logWithLevel('debug', message, args);
     }
 
     /**
@@ -98,10 +120,11 @@ export class Logger
      */
     info(message: string, context?: Record<string, unknown>): void;
     info(message: string, formatArg: string | number | boolean): void;
-    info(message: string, error: Error | unknown, context?: Record<string, unknown>): void;
-    info(message: string, errorOrContext?: unknown, context?: Record<string, unknown>): void
+    info(message: string, error: Error | unknown): void;
+    info(message: string, error: unknown, context: Record<string, unknown>): void;
+    info(message: string, ...args: unknown[]): void
     {
-        this.logWithLevel('info', message, errorOrContext, context);
+        this.logWithLevel('info', message, args);
     }
 
     /**
@@ -109,10 +132,11 @@ export class Logger
      */
     warn(message: string, context?: Record<string, unknown>): void;
     warn(message: string, formatArg: string | number | boolean): void;
-    warn(message: string, error: Error | unknown, context?: Record<string, unknown>): void;
-    warn(message: string, errorOrContext?: unknown, context?: Record<string, unknown>): void
+    warn(message: string, error: Error | unknown): void;
+    warn(message: string, error: unknown, context: Record<string, unknown>): void;
+    warn(message: string, ...args: unknown[]): void
     {
-        this.logWithLevel('warn', message, errorOrContext, context);
+        this.logWithLevel('warn', message, args);
     }
 
     /**
@@ -120,10 +144,11 @@ export class Logger
      */
     error(message: string, context?: Record<string, unknown>): void;
     error(message: string, formatArg: string | number | boolean): void;
-    error(message: string, error: Error | unknown, context?: Record<string, unknown>): void;
-    error(message: string, errorOrContext?: unknown, context?: Record<string, unknown>): void
+    error(message: string, error: Error | unknown): void;
+    error(message: string, error: unknown, context: Record<string, unknown>): void;
+    error(message: string, ...args: unknown[]): void
     {
-        this.logWithLevel('error', message, errorOrContext, context);
+        this.logWithLevel('error', message, args);
     }
 
     /**
@@ -131,10 +156,11 @@ export class Logger
      */
     fatal(message: string, context?: Record<string, unknown>): void;
     fatal(message: string, formatArg: string | number | boolean): void;
-    fatal(message: string, error: Error | unknown, context?: Record<string, unknown>): void;
-    fatal(message: string, errorOrContext?: unknown, context?: Record<string, unknown>): void
+    fatal(message: string, error: Error | unknown): void;
+    fatal(message: string, error: unknown, context: Record<string, unknown>): void;
+    fatal(message: string, ...args: unknown[]): void
     {
-        this.logWithLevel('fatal', message, errorOrContext, context);
+        this.logWithLevel('fatal', message, args);
     }
 
     /**
@@ -143,23 +169,16 @@ export class Logger
      * The error reaches a transport only as its description: a database
      * error's bound values, which sit in its message, stack and fields, never do.
      */
-    private log(level: LogLevel, message: string, error?: unknown, context?: Record<string, unknown>): void
+    private log(level: LogLevel, message: string, error?: LogMetadata['error'], context?: Record<string, unknown>): void
     {
-        // Early return if log level is below configured level
-        // This prevents unnecessary metadata creation and processing
-        if (LOG_LEVEL_PRIORITY[level] < LOG_LEVEL_PRIORITY[this.config.level])
-        {
-            return;
-        }
-
         const metadata: LogMetadata = {
             timestamp: new Date(),
             level,
             message,
             module: this.module,
-            error: error === undefined ? undefined : describeError(error),
+            error,
             // Mask sensitive information in context to prevent credential leaks
-            context: context ? maskSensitiveData(context) as Record<string, unknown> : undefined,
+            context: context ? maskContext(context) : undefined,
         };
 
         // Pass to all enabled Transports

@@ -340,7 +340,7 @@ export function onAfterCommit(callback: AfterCommitCallback): void
         // No active transaction → execute immediately (tracked for the shutdown drain)
         startAfterCommitCallback(callback, (err) =>
         {
-            txLogger.error('afterCommit callback failed (no transaction)', err);
+            txLogger.error('afterCommit callback failed (no transaction)', { error: err });
         });
 
         return;
@@ -409,7 +409,7 @@ export function onBeforeCommit(callback: BeforeCommitCallback): void
 
         Promise.resolve().then(callback).catch((err) =>
         {
-            txLogger.error('beforeCommit callback failed (no transaction)', err);
+            txLogger.error('beforeCommit callback failed (no transaction)', { error: err });
         });
 
         return;

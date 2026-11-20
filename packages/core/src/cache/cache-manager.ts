@@ -247,7 +247,7 @@ export async function closeCache(): Promise<void>
         closePromises.push(
             state.write.quit().catch((err: Error) =>
             {
-                cacheLogger.error('Error closing cache write instance', err);
+                cacheLogger.error('Error closing cache write instance', { error: err });
             }),
         );
     }
@@ -257,7 +257,7 @@ export async function closeCache(): Promise<void>
         closePromises.push(
             state.read.quit().catch((err: Error) =>
             {
-                cacheLogger.error('Error closing cache read instance', err);
+                cacheLogger.error('Error closing cache read instance', { error: err });
             }),
         );
     }

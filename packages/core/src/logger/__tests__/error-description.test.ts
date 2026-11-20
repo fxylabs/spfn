@@ -13,6 +13,14 @@
  * | R7  | a 22P02 driver error                        | a class-22 message quoting the rejected input               |
  * | R7b | a 23505 an app trigger RAISEd with its text | a kept class carrying the app's own text                    |
  *
+ * What is the caught value is decided by position, never by the value's shape (G2):
+ *
+ * | #   | the caught value reaches the logger         | goes unnoticed without the row                              |
+ * | --- | ------------------------------------------- | ----------------------------------------------------------- |
+ * | A1  | a thrown plain object with `params`, as `{ error }` and as the 2nd of 3 | the object walked as context, its params printed |
+ * | A2  | `undefined`, a string or a plain object, with a context | the context dropped (a transaction id missing from the line) |
+ * | A3  | an app error with `code`, `statusCode`, `details` | a failed job's `output` losing the error's `code`      |
+ *
  * And describing never throws into the log call that asked for it (G4):
  *
  * | #   | the error                                   | goes unnoticed without the row                              |
@@ -26,7 +34,7 @@
 import { describe, it, expect } from 'vitest';
 import { Logger } from '../logger';
 import { CAUSE_DEPTH_LIMIT, describeError } from '../error-description';
-import { capturingLogger, expectNoValues, failedInsert, FAILED_INSERT } from './helpers/leak-probe';
+import { BOUND_VALUES, capturingLogger, expectNoValues, failedInsert, FAILED_INSERT } from './helpers/leak-probe';
 
 /** Let the logger's transports, which run on a microtask, finish */
 const settle = (): Promise<void> => new Promise(resolve => setTimeout(resolve, 0));
@@ -89,6 +97,61 @@ describe('a logged database error carries no bound value', () =>
     });
 });
 
+describe('the caught value is described whatever its shape', () =>
+{
+    /** What a dependency might throw: not an Error, values in an arbitrary field */
+    const thrownObject = (): Record<string, unknown> => ({ code: 'BROKEN', message: 'broken', params: [...BOUND_VALUES], detail: 'Key (email)=(leak-probe@example.test)' });
+
+    it('A1: a thrown plain object logged as { error } or as the second of three arguments keeps no field but name, message and code', async () =>
+    {
+        const { logger, lines, output } = capturingLogger(Logger);
+
+        logger.error('operation failed', { error: thrownObject(), op: 'register' });
+        logger.error('operation failed', thrownObject(), { op: 'register' });
+        logger.error('operation failed', { err: thrownObject(), cause: 'a string', reason: thrownObject() });
+        await settle();
+
+        expectNoValues(output());
+        expect(lines[0].context).toEqual({ error: { kind: 'error', name: 'NonError', message: 'broken', code: 'BROKEN' }, op: 'register' });
+        expect(lines[1].error).toEqual({ kind: 'error', name: 'NonError', message: 'broken', code: 'BROKEN' });
+        expect(lines[1].context).toEqual({ op: 'register' });
+        expect(lines[2].context!.cause).toEqual({ kind: 'error', name: 'NonError', message: 'a string' });
+    });
+
+    it('A2: with three arguments the context is kept whatever the caught value is', async () =>
+    {
+        const { logger, lines } = capturingLogger(Logger);
+
+        for (const caught of [undefined, 'it broke', { reason: 'plain' }, null])
+        {
+            logger.error('afterCommit callback failed', caught, { txId: 'tx-1' });
+        }
+
+        await settle();
+
+        expect(lines.map(line => line.context)).toEqual(Array(4).fill({ txId: 'tx-1' }));
+        expect(lines.map(line => line.error)).toEqual([
+            { kind: 'error', name: 'NonError', message: 'undefined' },
+            { kind: 'error', name: 'NonError', message: 'it broke' },
+            { kind: 'error', name: 'NonError' },
+            { kind: 'error', name: 'NonError', message: 'null' },
+        ]);
+    });
+
+    it('A3: an error\'s code and numeric statusCode are kept; its other fields are not', () =>
+    {
+        class AppError extends Error
+        {
+            code = 'E_APP';
+            statusCode = 409;
+            details = { email: BOUND_VALUES[0] };
+        }
+
+        expect(describeError(new AppError('taken'))).toMatchObject({ kind: 'error', name: 'Error', message: 'taken', code: 'E_APP', statusCode: 409 });
+        expect(JSON.stringify(describeError(new AppError('taken')))).not.toContain(BOUND_VALUES[0]);
+    });
+});
+
 describe('describing an error never throws', () =>
 {
     /** An Error each of whose fields throws when read, and a Proxy every trap of which throws */
@@ -125,6 +188,7 @@ describe('describing an error never throws', () =>
 
         await settle();
         expect(output()).toContain('Job failed');
+        expect(output()).toContain('jobId');
     });
 
     it('D2: a cause chain past the limit ends in a CauseChainTruncated link', () =>

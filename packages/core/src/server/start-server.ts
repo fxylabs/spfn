@@ -207,7 +207,7 @@ export async function startServer(config?: ServerConfig): Promise<ServerInstance
             }
             catch (error)
             {
-                serverLogger.error('afterStart hook failed', error as Error);
+                serverLogger.error('afterStart hook failed', { error });
                 // Don't throw - server is already running
                 // Just log the error and continue
             }
@@ -702,7 +702,7 @@ async function runWithin(step: () => Promise<void>, name: string, timeout: numbe
     }
     catch (error)
     {
-        serverLogger.error(`${name} failed or timed out`, error as Error);
+        serverLogger.error(`${name} failed or timed out`, { error });
     }
     finally
     {
@@ -726,7 +726,7 @@ async function closeHttpServer(server: Server, timeout: number): Promise<void>
 
                 if (err)
                 {
-                    serverLogger.error('HTTP server close error', err);
+                    serverLogger.error('HTTP server close error', { error: err });
                     reject(err);
                 }
                 else
@@ -746,7 +746,7 @@ async function closeHttpServer(server: Server, timeout: number): Promise<void>
     ]).catch((error) =>
     {
         if (timeoutId) clearTimeout(timeoutId);
-        serverLogger.warn('HTTP server close timeout, forcing shutdown', error as Error);
+        serverLogger.warn('HTTP server close timeout, forcing shutdown', { error });
     });
 }
 
@@ -781,7 +781,7 @@ async function closeInfrastructure(
     catch (error)
     {
         if (timeoutId) clearTimeout(timeoutId);
-        serverLogger.error(`${name} close failed or timed out`, error as Error);
+        serverLogger.error(`${name} close failed or timed out`, { error });
         // Continue with shutdown even if close fails
     }
 }
@@ -885,7 +885,7 @@ function registerProcessHandlers(
     {
         shutdown('SIGTERM').catch((error) =>
         {
-            serverLogger.error('SIGTERM handler failed', error as Error);
+            serverLogger.error('SIGTERM handler failed', { error });
             process.exit(1);
         });
     });
@@ -894,7 +894,7 @@ function registerProcessHandlers(
     {
         shutdown('SIGINT').catch((error) =>
         {
-            serverLogger.error('SIGINT handler failed', error as Error);
+            serverLogger.error('SIGINT handler failed', { error });
             process.exit(1);
         });
     });
@@ -913,7 +913,7 @@ function registerProcessHandlers(
         }
         else
         {
-            serverLogger.error('Uncaught exception', error);
+            serverLogger.error('Uncaught exception', { error });
         }
 
         handleProcessError('UNCAUGHT_EXCEPTION');
@@ -981,6 +981,6 @@ async function cleanupOnFailure(config: ServerConfig): Promise<void>
     }
     catch (cleanupError)
     {
-        serverLogger.error('Cleanup failed', cleanupError as Error);
+        serverLogger.error('Cleanup failed', { error: cleanupError });
     }
 }

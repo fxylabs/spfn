@@ -212,7 +212,7 @@ export async function initBoss(options: BossOptions): Promise<PgBoss>
     // Event handlers
     boss.on('error', (error) =>
     {
-        jobLogger.error('pg-boss error:', error);
+        jobLogger.error('pg-boss error:', { error });
     });
 
     await boss.start();
@@ -330,7 +330,7 @@ export async function stopBoss(handlerWait = 30000): Promise<void>
     }
     catch (error)
     {
-        jobLogger.error('Error stopping pg-boss:', error);
+        jobLogger.error('Error stopping pg-boss:', { error });
         throw error;
     }
     finally

@@ -78,7 +78,7 @@ constructed on first import in `factory.ts`.
 ## Logging: message + (error | context) + context
 
 Each level method (`debug`/`info`/`warn`/`error`/`fatal`) shares the same overloads.
-The second argument is detected at runtime, so argument **order and type matter**:
+What the arguments after the message are is decided by their **position**:
 
 ```typescript
 // 1. message only
@@ -90,27 +90,34 @@ logger.info('Request received', { method: 'POST', path: '/users' });
 // 3. message + Error            → stack trace (and cause chain) printed
 logger.error('Query failed', error);
 
-// 4. message + Error + context  → both
+// 4. message + caught value + context  → both; the 2nd IS the caught value, whatever it is
 logger.error('Query failed', error, { userId: 123, op: 'createUser' });
 
-// 5. printf-style — if message contains a %s/%d/%i/%f/%j/%o/%O/%c token,
+// 5. a caught value of unknown shape, without other context → under the `error` key
+logger.error('Query failed', { error });
+
+// 6. printf-style — if message contains a %s/%d/%i/%f/%j/%o/%O/%c token,
 //    the second arg is substituted via node:util.format (NOT treated as context)
 logger.info('Fetching url: %s', requestUrl);
 ```
 
-How the second argument is classified (see `logWithLevel` in `logger.ts`):
+How the arguments are read (see `logWithLevel` in `logger.ts`):
 - If `message` contains a printf token (`%s %d %i %f %j %o %O %c %%`), the 2nd arg is
   formatted into the message string — it will **not** appear as context.
-- An `Error` instance → logged as the error: its description, stack frames and `cause`
-  chain printed (see [Errors are described, not dumped](#errors-are-described-not-dumped)).
-- Any other object → treated as **context**, whatever fields it has. "An Error" is
+- **Three arguments** `(message, caught, context)`: the 2nd is the caught value whatever its
+  shape — an `Error`, `undefined`, a string, a plain object — and is described; the context
+  is always kept.
+- **Two arguments** `(message, value)`: an `Error` is the caught value; any other object is
+  the **context**, whatever fields it has; a string, number, boolean or `null` is the caught
+  value (so `{ key: value }` context must be an object, not a bare primitive). "An Error" is
   `instanceof Error`, or an Error from another realm (`Object.prototype.toString` gives
   `[object Error]`) — never "an object with a `stack`": an error response body or a domain
   object with a `stack` field is data.
-- A `string` / `number` / `boolean` → wrapped into an `Error` (so `{ key: value }`
-  context must be an object, not a bare primitive).
 
-Prefer the explicit 3-arg form `logger.error(msg, error, context)` when you have both.
+A `catch` binding is `unknown`: whatever a dependency threw. Log it as `{ error }` or with the
+three-argument form, never as the lone second argument — a thrown plain object there is read as
+the context and walked, field by field. Core's own catch sites follow this (a scan row keeps them
+to it).
 
 ---
 
@@ -198,8 +205,10 @@ Masked key tokens (a key matches if it contains any of these):
 `credit_card`, `cardnumber`, `card_number`, `cvv`, `ssn`, `pin`.
 
 An `Error` found anywhere in the context is replaced by its description, not walked key by
-key: `logger.error('x', { error })` prints what
-`logger.error('x', error)` prints.
+key. A value under the keys `error`, `err`, `cause` or `reason` at the **top level** of the
+context is described whatever its shape, Error or not: `logger.error('x', { error })` prints
+what `logger.error('x', error, {})` prints. Deeper down those keys are data (the `error`
+envelope of a response body the request logger copies).
 
 > Masking only applies to the **context** object. It does **not** scan the `message`
 > string. Never interpolate a secret into the message — `logger.info(\`token: ${t}\`)`
@@ -239,12 +248,22 @@ interface ErrorDescription
 {
     kind: 'error';
     name: string;
-    message: string;
+    message?: string;
+    code?: string | number;     // the error's `code`, if a string or a number
+    statusCode?: number;        // the error's `statusCode`, if a number (Errors only)
     stack?: string;             // frames only
     cause?: ErrorDescription | DatabaseErrorDescription;
 }
 ```
 
+`describeError(error, { stack: false })` leaves the stack frames out, down the cause chain.
+
+- A thrown value that is not an Error is described by what it is, never by its fields: a
+  string → `{ kind: 'error', name: 'NonError', message: <the string> }`; an object → `name`
+  (its constructor's name, `NonError` for a plain object), `message` only if it has a string
+  `message`, `code` only if a string or number. **A thrown plain object's other fields are
+  not logged** — a dependency that throws `{ code, params }` logs no params. An Error keeps
+  its `code` and numeric `statusCode` too, never its other fields (`details`, …).
 - The cause chain is walked; the first link that is a drizzle query error or a driver error
   becomes a database description, with the driver error under drizzle's folded into it.
 - The driver's message is kept only for SQLSTATE classes whose messages name identifiers only:
@@ -309,8 +328,9 @@ stdout/stderr, which the platform collects automatically.
   sensitive values out of the message string; put them in context.
 - **Context vs error ambiguity.** Only an Error is read as the error; any other object
   is context. Use the 3-arg form `logger.error(msg, error, context)` when you have both.
-- **Bare primitives as 2nd arg become errors.** `logger.info('x', 42)` logs `42` as an
-  Error (or printf-substitutes it if the message has a `%` token) — it is not context.
+- **Bare primitives as 2nd arg are the caught value.** `logger.info('x', 42)` logs `42` as
+  the caught value, `NonError: 42` (or printf-substitutes it if the message has a `%` token)
+  — it is not context.
   Context must be an object: `logger.info('x', { n: 42 })`.
 - **Don't import internals.** `maskSensitiveData`, `formatConsole`, `formatJSON`,
   `extractQueryInfo`, `formatUnhandledRejection`, `Logger` construction, etc. are not the

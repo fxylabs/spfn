@@ -451,7 +451,7 @@ describe('ErrorHandler Middleware', () =>
 
         it('R9: outside production the body is the description; in production it is unchanged; no log or body carries a value', async () =>
         {
-            const { output } = captureLoggerClass(Logger);
+            const { lines, output } = captureLoggerClass(Logger);
 
             const staging: any = await (await failingApp(true).request('/register', { method: 'POST' })).json();
             const production: any = await (await failingApp(false).request('/register', { method: 'POST' })).json();
@@ -473,6 +473,27 @@ describe('ErrorHandler Middleware', () =>
             expect(output()).toContain('[code=23505]');
             expect(output()).toContain('"code":"23505"');
             expectNoValues(output());
+
+            const productionLine = lines.filter(line => line.message === 'Error occurred')[1];
+            expect(productionLine.error).toBeUndefined();
+            expect(productionLine.context!.error).toMatchObject({ kind: 'database', name: 'DrizzleQueryError', constraint: 'users_email_key' });
+            expect(productionLine.context!.error).not.toHaveProperty('stack');
+        });
+
+        it('R9b: in production the log line carries an ordinary error\'s description, without its stack, under context.error', async () =>
+        {
+            const { lines } = captureLoggerClass(Logger);
+            const app = new Hono();
+            app.onError(ErrorHandler({ includeStack: false }));
+            app.get('/x', () =>
+            {
+                throw Object.assign(new Error('boom'), { code: 'E_BOOM' });
+            });
+
+            await app.request('/x');
+            await new Promise(resolve => setTimeout(resolve, 0));
+
+            expect(lines.find(line => line.message === 'Error occurred')!.context!.error).toEqual({ kind: 'error', name: 'Error', message: 'boom', code: 'E_BOOM' });
         });
 
         it('F3: the request logger keeps an error body it copies, stack and all — it is data, not an error', async () =>

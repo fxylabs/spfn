@@ -133,14 +133,14 @@ export async function attachWSHandler<
         })
             .catch((err: Error) =>
             {
-                wsLogger.error('WebSocket connection handler error', err);
+                wsLogger.error('WebSocket connection handler error', { error: err });
                 if (ws.readyState === 1) ws.close(1011, 'Internal server error');
             });
     });
 
     wss.on('error', (err: Error) =>
     {
-        wsLogger.error('WebSocket server error', err);
+        wsLogger.error('WebSocket server error', { error: err });
     });
 
     wsLogger.info(`✓ WebSocket endpoint registered at ${path}`, {
@@ -309,7 +309,7 @@ async function handleConnection(
         if (ws.readyState !== 1) return;
 
         onClientMessage(data, router, connection, subject)
-            .catch((err: Error) => wsLogger.error('Unhandled message error', err));
+            .catch((err: Error) => wsLogger.error('Unhandled message error', { error: err }));
     });
 
     // ── 7. Keep-alive ping with liveness (pong) tracking ──
@@ -554,7 +554,7 @@ async function onClientMessage(
     }
     catch (err)
     {
-        wsLogger.error(`WebSocket message handler error: ${type}`, err as Error);
+        wsLogger.error(`WebSocket message handler error: ${type}`, { error: err });
     }
 }
 

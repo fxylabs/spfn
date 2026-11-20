@@ -52,6 +52,13 @@ const MASKED_VALUE = '***MASKED***';
 const UNREADABLE_VALUE = '[Unreadable]';
 
 /**
+ * The context keys a caught value conventionally sits under. A value there is
+ * described whatever its shape: a thrown `{ code, params }` is not an Error,
+ * and walking it would print its params.
+ */
+const ERROR_KEYS: ReadonlySet<string> = new Set(['error', 'err', 'cause', 'reason']);
+
+/**
  * 키가 민감 정보를 포함하는지 확인
  */
 function isSensitiveKey(key: string): boolean
@@ -92,6 +99,32 @@ function readEntry(data: object, key: string): unknown
     {
         return UNREADABLE_VALUE;
     }
+}
+
+/**
+ * A log line's context, masked: a value under one of `ERROR_KEYS` at its top
+ * level is described, any other is masked by `maskSensitiveData`. Only the
+ * top level: deeper down, an `error` key is data — the error envelope of a
+ * response body the request logger copies.
+ */
+export function maskContext(context: Record<string, unknown>): Record<string, unknown>
+{
+    if (isError(context))
+    {
+        return { error: describeError(context) };
+    }
+
+    const seen = new WeakSet<object>([context]);
+    const masked: Record<string, unknown> = {};
+
+    for (const [key, value] of entriesOf(context))
+    {
+        masked[key] = ERROR_KEYS.has(key) && value !== undefined
+            ? describeError(value)
+            : maskEntry(key, value, seen);
+    }
+
+    return masked;
 }
 
 /**
@@ -142,24 +175,19 @@ export function maskSensitiveData(data: unknown, seen = new WeakSet<object>()): 
 
     for (const [key, value] of entriesOf(data))
     {
-        if (isSensitiveKey(key))
-        {
-            // 민감 정보 키는 마스킹
-            masked[key] = MASKED_VALUE;
-        }
-        else if (typeof value === 'object' && value !== null)
-        {
-            // 중첩된 객체는 재귀 처리 (seen 전달)
-            masked[key] = maskSensitiveData(value, seen);
-        }
-        else
-        {
-            // 일반 값은 그대로 유지
-            masked[key] = value;
-        }
+        masked[key] = maskEntry(key, value, seen);
     }
 
     return masked;
+}
+
+/**
+ * One entry of an object: masked if its key is sensitive, otherwise walked
+ * (`maskSensitiveData` returns a primitive as it is)
+ */
+function maskEntry(key: string, value: unknown, seen: WeakSet<object>): unknown
+{
+    return isSensitiveKey(key) ? MASKED_VALUE : maskSensitiveData(value, seen);
 }
 
 /**
@@ -224,7 +252,7 @@ export function formatError(error: ErrorDescription | DatabaseErrorDescription):
 {
     const lines = error.kind === 'database'
         ? formatDatabaseError(error)
-        : [`${error.name}: ${error.message}`];
+        : [error.message === undefined ? error.name : `${error.name}: ${error.message}`];
 
     if (error.stack)
     {

@@ -196,7 +196,7 @@ function isThenable(value: unknown): value is PromiseLike<unknown>
 
 function logObserverFailure(error: unknown): void
 {
-    apiLogger.error('onOutcome observer failed; the call result is unchanged', error);
+    apiLogger.error('onOutcome observer failed; the call result is unchanged', { error });
 }
 
 // ============================================================================

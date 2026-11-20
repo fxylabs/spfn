@@ -351,7 +351,7 @@ export class ShutdownManager
         {
             serverLogger.error(
                 `Shutdown hook [${hook.name}] failed`,
-                error as Error,
+                { error },
             );
         }
     }

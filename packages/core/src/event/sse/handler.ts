@@ -141,7 +141,7 @@ export function createSSEHandler<TRouter extends EventRouterDef<any>>(
 
         return streamSSE(c, stream => runStream(c, stream, admission, streamConfig), async (err: Error) =>
         {
-            sseLogger.error('SSE stream error', err);
+            sseLogger.error('SSE stream error', { error: err });
         });
     };
 

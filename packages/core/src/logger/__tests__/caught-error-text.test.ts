@@ -23,9 +23,16 @@
  * received under another name, and a raw error object handed to a sink that
  * serialises it (pg-boss `fail(…, error)` — boss-workers row R8 pins that one).
  *
- * | #   | goes unnoticed without the row                                |
- * | --- | ------------------------------------------------------------- |
- * | R13 | a new log or persist site reintroducing the cause of #382     |
+ * R13b: in core, a caught value never reaches a logger as the lone second
+ * argument. `logger.error(message, value)` reads an object that is not an
+ * Error as the context and walks it — a thrown `{ code, params }` printed its
+ * params — so a catch site passes `{ error }` or `(message, error, context)`,
+ * which describe the value whatever its shape.
+ *
+ * | #    | goes unnoticed without the row                                       |
+ * | ---- | -------------------------------------------------------------------- |
+ * | R13  | a new log or persist site reintroducing the cause of #382            |
+ * | R13b | a core catch site whose non-Error value is walked as the context     |
  */
 
 import { describe, it, expect } from 'vitest';
@@ -207,6 +214,12 @@ function enclosingSink(node: ts.Node): string | undefined
     return undefined;
 }
 
+function isLogCall(callee: ts.Expression): boolean
+{
+    return ts.isPropertyAccessExpression(callee) && LOG_METHODS.has(callee.name.text)
+        && /logger/i.test(callee.expression.getText());
+}
+
 function isSink(callee: ts.Expression): boolean
 {
     if (!ts.isPropertyAccessExpression(callee))
@@ -256,6 +269,37 @@ function offencesIn(file: string): Offence[]
     return offences;
 }
 
+/**
+ * Logger calls in the file whose only argument after the message is a caught value
+ */
+function loneCaughtArguments(file: string): Offence[]
+{
+    const source = ts.createSourceFile(file, readFileSync(file, 'utf-8'), ts.ScriptTarget.Latest, true);
+    const offences: Offence[] = [];
+
+    const visit = (node: ts.Node, names: ReadonlySet<string>): void =>
+    {
+        const bound = new Set([...names, ...caughtNames(node)]);
+
+        if (ts.isCallExpression(node) && node.arguments.length === 2 && isLogCall(node.expression))
+        {
+            const argument = unwrap(node.arguments[1]);
+
+            if (ts.isIdentifier(argument) && bound.has(argument.text))
+            {
+                const line = source.getLineAndCharacterOfPosition(node.getStart()).line + 1;
+                offences.push({ file: relative(packagesRoot, file), line, text: argument.text, sink: node.expression.getText() });
+            }
+        }
+
+        ts.forEachChild(node, child => visit(child, bound));
+    };
+
+    visit(source, new Set());
+
+    return offences;
+}
+
 describe('caught error text', () =>
 {
     it('R13: no production source logs or persists a caught error\'s message, stack or string form (#382)', () =>
@@ -266,5 +310,15 @@ describe('caught error text', () =>
             .map(offence => `${offence.file}:${offence.line} ${offence.text} in ${offence.sink}(…)`);
 
         expect(offences, 'pass the error object itself: the logger describes it (describeError)').toEqual([]);
+    });
+
+    it('R13b: no core catch site hands its caught value to a logger as the lone second argument', () =>
+    {
+        const offences = productionSources()
+            .filter(file => relative(packagesRoot, file).startsWith('core/src/'))
+            .flatMap(loneCaughtArguments)
+            .map(offence => `${offence.file}:${offence.line} ${offence.sink}(…, ${offence.text})`);
+
+        expect(offences, 'pass { error } or (message, error, context): either describes the value whatever its shape').toEqual([]);
     });
 });

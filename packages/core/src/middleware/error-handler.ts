@@ -268,24 +268,9 @@ function logError(
     }
     else
     {
-        errorLogger[logLevel]('Error occurred', { ...logData, error: withoutStack(describeError(err)) });
+        // Without `includeStack` the line names the error but carries no trace
+        errorLogger[logLevel]('Error occurred', { ...logData, error: describeError(err, { stack: false }) });
     }
-}
-
-/**
- * A description with its stack frames dropped, down the cause chain: without
- * `includeStack` the log line names the error but carries no trace
- */
-function withoutStack(description: Description): Description
-{
-    const { stack: _stack, ...rest } = description;
-
-    if (rest.kind === 'error' && rest.cause)
-    {
-        return { ...rest, cause: withoutStack(rest.cause) };
-    }
-
-    return rest;
 }
 
 /**
@@ -447,7 +432,7 @@ export function ErrorHandler(options: ErrorHandlerOptions = {}): (err: Error, c:
             {
                 const ctx = buildOnErrorContext(c, statusCode);
                 Promise.resolve(onError(err, ctx))
-                    .catch(e => errorLogger.warn('onError callback failed', e as Error));
+                    .catch(error => errorLogger.warn('onError callback failed', { error }));
             }
 
             // Internal (DB-driver-derived) errors must not leak SQL text, schema
@@ -495,7 +480,7 @@ export function ErrorHandler(options: ErrorHandlerOptions = {}): (err: Error, c:
         {
             const ctx = buildOnErrorContext(c, statusCode);
             Promise.resolve(onError(err, ctx))
-                .catch(e => errorLogger.warn('onError callback failed', e as Error));
+                .catch(error => errorLogger.warn('onError callback failed', { error }));
         }
 
         return respond(c, standardErrorResponse(err, includeStack), statusCode);
