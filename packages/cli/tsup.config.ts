@@ -8,15 +8,16 @@ export default defineConfig({
         index: 'src/index.ts',
         surface: 'src/surface/index.ts',
         'dev-loader/register': 'src/dev-loader/register.ts',
-        // bin/spfn.js builds the hook's --import with it; at the root of dist/,
-        // beside index.js, which bundles the same helper (src/utils/dev-loader.ts)
+        // bin/spfn.js builds the hook's --import with it; the helper is one chunk
+        // at the root of dist/, shared with index.js and dev-loader/register.js
         'dev-loader-import': 'src/utils/dev-loader.ts',
     },
     format: ['esm'],
     dts: true,
     clean: true,
     sourcemap: false,
-    splitting: false,
+    // Entries share chunks, so each module is emitted once (scripts/check-bundle-identity.mjs, #398)
+    splitting: true,
     target: 'es2022',
     outDir: 'dist',
     // `@spfn/auth` is an optional peer, loaded at run time by `spfn ops token`.

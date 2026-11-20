@@ -12,12 +12,15 @@ export default defineConfig({
         errors: 'src/errors/index.ts',
         'nextjs/api': 'src/nextjs/api.ts',
         'nextjs/server': 'src/nextjs/server.ts',
+        // Not exported: the private `#nextjs/client-shared` of the separate `nextjs/client` build
+        'nextjs/client-shared': 'src/nextjs/client-shared.ts',
         server: 'src/server.ts',
     },
     format: ['esm'],
     dts: true,
     sourcemap: true,
     clean: true,
-    splitting: false,
+    // Entries share chunks, so each module is emitted once (scripts/check-bundle-identity.mjs, #398)
+    splitting: true,
     external: sharedExternal,
 });

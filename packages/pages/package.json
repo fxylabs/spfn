@@ -24,7 +24,7 @@
     "tag": "beta"
   },
   "scripts": {
-    "build": "pnpm check:circular && tsup",
+    "build": "pnpm check:circular && tsup && node ../../scripts/check-bundle-identity.mjs",
     "dev": "tsup --watch",
     "clean": "rm -rf dist",
     "test": "vitest run",

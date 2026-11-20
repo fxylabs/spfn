@@ -11,6 +11,7 @@ export default defineConfig({
     dts: { entry: { index: 'src/index.ts', dev: 'src/dev.ts', hosted: 'src/hosted.tsx' } },
     sourcemap: true,
     clean: true,
-    splitting: false,
+    // Entries share chunks, so each module is emitted once (scripts/check-bundle-identity.mjs, #398)
+    splitting: true,
     external: ['react', 'react-dom', 'next', '@spfn/pages'],
 });

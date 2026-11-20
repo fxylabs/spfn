@@ -1,6 +1,5 @@
-import { readFile } from 'fs/promises';
 import { readFileSync } from 'fs';
-import { dirname, relative, resolve } from 'path';
+import { basename, dirname, relative, resolve } from 'path';
 import { defineConfig, type Options } from 'tsup';
 
 type Plugin = NonNullable<Options['esbuildPlugins']>[number];
@@ -56,15 +55,16 @@ function subpathName(entryKey: string): string
 /**
  * Every entry records where it was loaded from — its own `import.meta.url` —
  * what evaluated it, and the version it was built as, inlined from
- * `package.json` (see `src/module-evaluation.ts`). The call is appended to each
- * entry point's source here, from the entry map itself, so no entry can be
- * built without it.
+ * `package.json` (see `src/module-evaluation.ts`). Each entry point is built
+ * from a module this plugin writes from the entry map itself — the entry's
+ * source re-exported, then the call — so no entry can be built without it.
  *
- * Only the entry point of each output: an entry whose source another entry
- * inlines (`server` inlines `route`) does not record from inside that other
- * file. The suffix makes the entry point a module of its own, which the
- * inlined copy is not. Appended, not prepended, so the source map's lines stay
- * where they were; an import is hoisted wherever it is written.
+ * Only the entry point of each output records: an entry whose source another
+ * entry imports (`server` imports `route`) does not record from inside that
+ * other file. The source stays one module, which the code splitting puts in a
+ * shared chunk when two entries reach it; only the module written here is the
+ * entry's own. It lives in a namespace of its own, so the build's `// src/…`
+ * markers name the source once (`scripts/check-bundle-identity.mjs`).
  */
 function recordEvaluationPlugin(): Plugin
 {
@@ -80,26 +80,21 @@ function recordEvaluationPlugin(): Plugin
                 const path = resolve(args.resolveDir, args.path);
 
                 return args.kind === 'entry-point' && names.has(path)
-                    ? { path, suffix: '?spfn-entry-point' }
+                    ? { path: relative(process.cwd(), path), namespace: 'spfn-entry-point' }
                     : undefined;
             });
 
-            build.onLoad({ filter: /\.tsx?$/ }, async (args) =>
+            build.onLoad({ filter: /.*/, namespace: 'spfn-entry-point' }, (args) =>
             {
-                if (args.suffix !== '?spfn-entry-point')
-                {
-                    return undefined;
-                }
-
-                const source = await readFile(args.path, 'utf-8');
-                const recorderPath = `./${relative(dirname(args.path), recorder).replace(/\.ts$/, '')}`;
+                const source = resolve(args.path);
 
                 return {
-                    contents: `${source}\nimport { recordEvaluation as __recordEvaluation } from '${recorderPath}';\n`
-                        + `__recordEvaluation(${JSON.stringify(names.get(args.path))}, import.meta.url, `
+                    contents: `export * from './${basename(source)}';\n`
+                        + `import { recordEvaluation as __recordEvaluation } from './${relative(dirname(source), recorder)}';\n`
+                        + `__recordEvaluation(${JSON.stringify(names.get(source))}, import.meta.url, `
                         + `${JSON.stringify(packageJson.version)});\n`,
-                    loader: args.path.endsWith('.tsx') ? 'tsx' : 'ts',
-                    resolveDir: dirname(args.path),
+                    loader: 'ts',
+                    resolveDir: dirname(source),
                 };
             });
         },
@@ -113,11 +108,8 @@ export default defineConfig({
     dts: true,
     sourcemap: true,
     clean: true,
-    splitting: false,
-    treeshake: {
-        preset: 'smallest',
-        propertyReadSideEffects: false,
-    },
+    // Entries share chunks, so each module is emitted once (scripts/check-bundle-identity.mjs, #398)
+    splitting: true,
     external: [
         // Internal entrypoints (prevent bundling into each other)
         /^@spfn\//,

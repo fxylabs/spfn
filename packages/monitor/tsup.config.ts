@@ -12,6 +12,7 @@ export default defineConfig({
     dts: true,
     sourcemap: true,
     clean: true,
-    splitting: false,
+    // Entries share chunks, so each module is emitted once (scripts/check-bundle-identity.mjs, #398)
+    splitting: true,
     external: sharedExternal,
 });

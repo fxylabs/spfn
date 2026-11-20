@@ -600,9 +600,9 @@ describe.each(TSX)('codegen in CLI processes, tsx $version', (tsx) =>
         const notStarted = `[SPFN] Codegen watcher not started: @spfn/core ${core.version} is installed; `
             + `spfn ${cli.version} requires @spfn/core ${cli.peerDependencies['@spfn/core']} and a core that reloads generators. Update @spfn/core.`;
         const shapes: { core: string; patch: () => void; says: string }[] = [
-            { core: 'without the CodegenOrchestrator export', patch: () => patchCodegen(source => source.replace('export { CodegenOrchestrator, ', 'export { ')), says: notStarted },
+            { core: 'without the CodegenOrchestrator export', patch: () => patchCodegen(source => source.replace(/export \{\s*CodegenOrchestrator,/, 'export {')), says: notStarted },
             { core: 'exporting CodegenOrchestrator as undefined', patch: () => patchCodegen(source => 'const absentOrchestrator = undefined;\n'
-                + source.replace('export { CodegenOrchestrator, ', 'export { absentOrchestrator as CodegenOrchestrator, ')), says: notStarted },
+                + source.replace(/export \{\s*CodegenOrchestrator,/, 'export { absentOrchestrator as CodegenOrchestrator,')), says: notStarted },
             { core: 'without the ./codegen subpath', patch: removeCodegenSubpath, says: notStarted },
             { core: 'missing a dependency of its own', patch: () => patchCodegen(source => 'import \'spfn-missing-dependency\';\n' + source),
                 says: 'Cannot find package \'spfn-missing-dependency\'' },

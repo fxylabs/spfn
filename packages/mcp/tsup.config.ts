@@ -11,11 +11,8 @@ export default defineConfig({
     dts: true,
     sourcemap: true,
     clean: true,
-    splitting: false,
-    treeshake: {
-        preset: 'smallest',
-        propertyReadSideEffects: false,
-    },
+    // Entries share chunks, so each module is emitted once (scripts/check-bundle-identity.mjs, #398)
+    splitting: true,
     external: [
         /^@modelcontextprotocol\//,
         /^@spfn\//,

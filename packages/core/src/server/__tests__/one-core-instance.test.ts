@@ -29,7 +29,7 @@
  */
 
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -49,12 +49,18 @@ const OTHER_VERSION = '0.0.0-other';
 
 let cwd: string;
 
-/** A second install of `dist/logger`, as `contents` makes it: its own file in another package directory. */
+/**
+ * A second install of `dist/logger`, as `contents` makes it: its own file in another package
+ * directory, beside a copy of the chunks the entries share.
+ */
 function secondInstall(directory: string, contents: string): string
 {
     const file = join(cwd, directory, 'dist/logger/index.js');
 
-    mkdirSync(join(cwd, directory, 'dist/logger'), { recursive: true });
+    cpSync(join(packageRoot, 'dist'), join(cwd, directory, 'dist'), {
+        recursive: true,
+        filter: source => !/\.(d\.ts|map)$/.test(source),
+    });
     writeFileSync(join(cwd, directory, 'package.json'), JSON.stringify({ type: 'module' }));
     writeFileSync(file, contents);
 

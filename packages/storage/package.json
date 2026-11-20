@@ -32,7 +32,7 @@
     "node": "^22.23.4 || ^24.22.1 || >=26.12.1"
   },
   "scripts": {
-    "build": "pnpm check:circular && tsup && pnpm check:bundle",
+    "build": "pnpm check:circular && tsup && node ../../scripts/check-bundle-identity.mjs",
     "dev": "tsup --watch",
     "clean": "rm -rf dist",
     "test": "vitest run",

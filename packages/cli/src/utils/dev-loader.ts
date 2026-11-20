@@ -6,8 +6,8 @@
  * and for each tsx child a command starts (the `spfn dev` server and watcher,
  * the `spfn provision` runner).
  *
- * Built by tsup both into the CLI's bundle and as the bin's own entry, each at
- * the root of `dist/`, so `register.js` is found beside either.
+ * The CLI's bundle and the bin's own entry share it as one chunk, which tsup
+ * puts at the root of `dist/`, so `register.js` is found beside it.
  */
 
 /**

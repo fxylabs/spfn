@@ -2,11 +2,12 @@
  * Logger single-instance guard (issue #136)
  *
  * `logger` is a module-level singleton, so "one logger" only holds if every
- * entrypoint resolves to the SAME module. tsup builds each entrypoint in
- * `tsup.config.ts` separately with `splitting: false` and marks `@spfn/*`
- * external — so a module reached through the package specifier stays shared,
- * while a module reached through a relative path is inlined into whichever
- * bundle imported it.
+ * entrypoint resolves to the SAME module. Until #398 tsup built each
+ * entrypoint in `tsup.config.ts` separately with `splitting: false` and marked
+ * `@spfn/*` external — so a module reached through the package specifier
+ * stayed shared, while a module reached through a relative path was inlined
+ * into whichever bundle imported it. Code splitting now shares such a module
+ * as a chunk, which `scripts/check-bundle-identity.mjs` checks for every module.
  *
  * That is how issue #136 happened: `middleware/rate-limit.ts` and
  * `errors/serializable-error.ts` imported `'../logger'`, so the logger, errors,

@@ -11,5 +11,7 @@ export default defineConfig({
     sourcemap: true,
     splitting: false,
     banner: { js: `'use client';` },
-    external: sharedExternal,
+    // Shares no chunk with the main build: whatever it takes from it comes through the
+    // package's private import, so each module is emitted once (scripts/check-bundle-identity.mjs)
+    external: [...sharedExternal, '#nextjs/client-shared'],
 });

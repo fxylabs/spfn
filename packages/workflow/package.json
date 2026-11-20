@@ -11,7 +11,7 @@
     }
   },
   "scripts": {
-    "build": "tsup",
+    "build": "tsup && node ../../scripts/check-bundle-identity.mjs",
     "prepack": "node -e \"require('fs').copyFileSync('../../LICENSE','LICENSE')\"",
     "dev": "tsup --watch",
     "test": "vitest run",

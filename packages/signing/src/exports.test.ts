@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import {
-    copyFileSync,
+    cpSync,
     mkdirSync,
     mkdtempSync,
     readFileSync,
@@ -102,9 +102,10 @@ function rootWithStaleDist(): string
  * Import a built entry point from outside the repository, in a fresh Node
  * process given no help finding modules.
  *
- * Copying the file to a temporary directory is the point: nothing above it
- * has a `node_modules`, so any bare specifier that is not a Node builtin
- * fails to resolve. That is stricter than uninstalling the optional peers —
+ * Copying the build — the entry and the chunks it shares with the other
+ * entry — to a temporary directory is the point: nothing above it has a
+ * `node_modules`, so any bare specifier that is not a Node builtin fails to
+ * resolve. That is stricter than uninstalling the optional peers —
  * this workspace's pnpm installs them for the developer's convenience
  * whatever the manifest says they are.
  */
@@ -112,7 +113,7 @@ function importInCleanProcess(entry: string, root: string = PACKAGE_ROOT): strin
 {
     const copy = join(mkdtempSync(join(scratch, 'import-')), basename(entry));
 
-    copyFileSync(built(entry, root), copy);
+    cpSync(dirname(built(entry, root)), dirname(copy), { recursive: true });
 
     const script = `import(${JSON.stringify(pathToFileURL(copy).href)})`
         + '.then((m) => console.log(Object.keys(m).sort().join(",")))';

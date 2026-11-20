@@ -58,13 +58,19 @@
       "require": "./dist/nextjs/server.js"
     }
   },
+  "imports": {
+    "#nextjs/client-shared": {
+      "types": "./dist/nextjs/client-shared.d.ts",
+      "default": "./dist/nextjs/client-shared.js"
+    }
+  },
   "files": [
     "dist",
     "migrations",
     "README.md"
   ],
   "scripts": {
-    "build": "pnpm check:circular && tsup && tsup --config tsup.client.config.ts",
+    "build": "pnpm check:circular && tsup && tsup --config tsup.client.config.ts && node ../../scripts/check-bundle-identity.mjs",
     "prepack": "node -e \"require('fs').copyFileSync('../../LICENSE','LICENSE')\"",
     "watch": "tsup --watch",
     "dev": "tsup --watch",

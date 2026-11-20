@@ -38,7 +38,7 @@
     "README.md"
   ],
   "scripts": {
-    "build": "pnpm check:circular && tsup",
+    "build": "pnpm check:circular && tsup && node ../../scripts/check-bundle-identity.mjs",
     "prepack": "node -e \"require('fs').copyFileSync('../../LICENSE','LICENSE')\"",
     "watch": "tsup --watch",
     "clean": "rm -rf dist",
