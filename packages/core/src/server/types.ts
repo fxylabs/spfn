@@ -185,7 +185,9 @@ export interface ServerConfig
      * writes `<prefix>/[redacted]` instead, at every level. For capability routes
      * whose path segment is the secret (`/api/import/:token`, share links,
      * one-time downloads). A prefix matches itself and what lies below it on a
-     * segment boundary, against the decoded path the router matches. An entry
+     * segment boundary, in a canonical spelling of the path — percent-decoded,
+     * dot segments resolved, repeated slashes collapsed, case ignored — so a 404
+     * for `//api/import/<token>` is redacted like the route it missed. An entry
      * that does not start with `/`, ends with `/`, or contains `?`, `#`, `:` or
      * `*` refuses the boot.
      *

@@ -8,11 +8,12 @@
  * declared once with `defineServerConfig().logging({ redactPaths })` keeps the
  * secret out of all of them, at every level.
  *
- * Matching is against the decoded path the router matches (`c.req.path`), so a
- * percent-encoded spelling (`/api/%69mport/…`) reaches the same rule as the
- * route it is served by. An entry covers itself and everything below it on a
- * segment boundary: `/api/import` covers `/api/import` and `/api/import/abc`,
- * not `/api/importer`.
+ * Matching is against a canonical spelling of the path (`matchedSpelling`),
+ * not only the one the router serves: a request the router does not serve is
+ * logged too, and `//api/import/<token>` or `/API/import/<token>` carries the
+ * same token as the route it missed. An entry covers itself and everything
+ * below it on a segment boundary: `/api/import` covers `/api/import` and
+ * `/api/import/abc`, not `/api/importer`.
  */
 
 import type { Context } from 'hono';
@@ -25,8 +26,18 @@ const REDACTED_SEGMENT = '[redacted]';
 /** Characters that make an entry something other than a literal path prefix. */
 const PATTERN_CHARACTERS = /[?#:*]/;
 
+/** Rounds of percent-decoding before matching: a doubly encoded spelling, and one more */
+const DECODE_ROUNDS = 3;
+
+/** A declared prefix as it was written, which a line prints, and as it is matched */
+interface RedactedPrefix
+{
+    declared: string;
+    matched: string;
+}
+
 /** Set from server config; empty until something declares a prefix. */
-let redactedPrefixes: readonly string[] = [];
+let redactedPrefixes: readonly RedactedPrefix[] = [];
 
 /**
  * The one rule for a `redactPaths` declaration: a list of literal path
@@ -65,13 +76,73 @@ export function parseRedactPaths(value: unknown): string[]
  */
 export function setRedactPaths(paths: string[] | undefined): void
 {
-    redactedPrefixes = paths === undefined ? [] : parseRedactPaths(paths);
+    redactedPrefixes = paths === undefined
+        ? []
+        : parseRedactPaths(paths).map(declared => ({ declared, matched: matchedSpelling(declared) }));
 }
 
 /** The declared prefix a path falls under, if any */
 function redactedPrefixOf(path: string): string | undefined
 {
-    return redactedPrefixes.find(entry => path === entry || path.startsWith(`${entry}/`));
+    const spelling = matchedSpelling(path);
+
+    return redactedPrefixes.find(({ matched }) => spelling === matched || spelling.startsWith(`${matched}/`))?.declared;
+}
+
+/**
+ * The spelling of a path the prefixes are matched against: percent-decoded
+ * `DECODE_ROUNDS` times over (`%2F` included; a decoded path stays put), dot
+ * segments resolved, repeated slashes collapsed, lower case. A client joining
+ * a base URL that ends in `/` sends `//api/import/<token>`, a proxy encoding
+ * twice `/api/%2569mport/<token>`; the router serves neither, and the 404 is
+ * logged with the token unless it matches here.
+ */
+function matchedSpelling(path: string): string
+{
+    let decoded = path;
+
+    for (let round = 0; round < DECODE_ROUNDS; round++)
+    {
+        decoded = decodeOnce(decoded);
+    }
+
+    return withoutDotSegments(decoded.replace(/\/{2,}/g, '/')).toLowerCase();
+}
+
+/** One round of percent-decoding; a run of escapes that is not valid UTF-8 stays as written */
+function decodeOnce(path: string): string
+{
+    return path.replace(/(?:%[0-9a-f]{2})+/gi, (escapes) =>
+    {
+        try
+        {
+            return decodeURIComponent(escapes);
+        }
+        catch
+        {
+            return escapes;
+        }
+    });
+}
+
+/** `.` and `..` segments resolved, as a URL parser resolves them; `..` never climbs above the root */
+function withoutDotSegments(path: string): string
+{
+    const segments: string[] = [];
+
+    for (const segment of path.split('/'))
+    {
+        if (segment === '..')
+        {
+            segments.splice(Math.max(segments.length - 1, 1));
+        }
+        else if (segment !== '.')
+        {
+            segments.push(segment);
+        }
+    }
+
+    return segments.join('/');
 }
 
 /**
@@ -144,20 +215,7 @@ export function loggedUrl(url: string): string
     }
 
     const { origin, pathname } = new URL(url);
-    const prefix = redactedPrefixOf(decodedPath(pathname));
+    const prefix = redactedPrefixOf(pathname);
 
     return prefix === undefined ? url : `${origin}${prefix}/${REDACTED_SEGMENT}`;
-}
-
-/** A URL's path decoded as the router decodes a request's; as written when it does not decode */
-function decodedPath(pathname: string): string
-{
-    try
-    {
-        return decodeURI(pathname);
-    }
-    catch
-    {
-        return pathname;
-    }
 }

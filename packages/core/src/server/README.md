@@ -368,8 +368,14 @@ Nothing derived from the path is written under the prefix either:
   the error object itself.
 
 - **Matching.** A prefix covers itself and what lies below it on a segment boundary:
-  `/api/import` covers `/api/import` and `/api/import/abc`, not `/api/importer`. It is matched
-  against the decoded path the router serves, so `/api/%69mport/abc` is covered too.
+  `/api/import` covers `/api/import` and `/api/import/abc`, not `/api/importer`.
+- **Every spelling of it.** A request the router does not serve is logged too, as received — a
+  404 for `//api/import/<token>` (a client joining a base URL that ends in `/`),
+  `/API/import/<token>` or `/api/%2569mport/<token>` (a proxy encoding twice) carries the token the
+  client meant for the route. So the path and the entries are matched in one canonical spelling:
+  percent-decoded three times over (`%2F` included), dot segments resolved, repeated slashes
+  collapsed, case ignored. Each of those 404s writes `/api/import/[redacted]`; a path outside every
+  prefix is still written exactly as the router received it.
 - **Refused entries.** An entry that does not start with `/`, ends with `/`, or contains `?`,
   `#`, `:` or `*` refuses the boot: the builder fails the config load, a plain config fails
   `validateServerConfig`, and `createServer` throws. A route pattern such as

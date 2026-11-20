@@ -234,8 +234,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `<prefix>/[redacted]`, at every level: the request logger, proxy-guard (whose tag-mode debug and
   strict-mode warn carried the token), the error handler and its `onError` context, rate limiting
   and the transaction context. A prefix covers itself and what lies below it on a segment
-  boundary (`/api/import` covers `/api/import/abc`, not `/api/importer`), matched against the
-  decoded path the router serves, so `/api/%69mport/…` is covered too. An entry that does not start
+  boundary (`/api/import` covers `/api/import/abc`, not `/api/importer`), matched in a canonical
+  spelling of the path: percent-decoded three times over (`%2F` included), dot segments
+  resolved, repeated slashes collapsed, case ignored. A request the router does not serve is
+  logged as received, so a 404 for `//api/import/<token>`, `/API/import/<token>` or
+  `/api/%2569mport/<token>` is redacted like the route it missed. An entry that does not start
   with `/`, ends with `/`, or contains `?`, `#`, `:` or `*` refuses the boot (builder, plain config
   and `createServer`). `createServer` publishes the declaration before anything else, so a
   hand-written `app.ts` wiring its own `RequestLogger` and `ErrorHandler` gets it too; a bare Hono

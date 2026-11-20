@@ -395,8 +395,10 @@ at every level: `RequestLogger`, proxy-guard (its tag-mode debug and strict-mode
 context `Transactional()` hands the runner. Nothing derived from the path is written either:
 `RequestLogger` leaves out an error response's body (and the request body), and the error lines
 of `ErrorHandler` and `RequestLogger` describe the error without its message, down the cause
-chain — name, code, status and stack frames stay. Matching is on a segment boundary, against the decoded
-path; undeclared paths are written as before. The full rules, and what is not covered, are in the
+chain — name, code, status and stack frames stay. Matching is on a segment boundary, in a
+canonical spelling of the path (percent-decoded, dot segments resolved, repeated slashes
+collapsed, case ignored), so a 404 for `//api/import/<token>` is redacted too; undeclared paths
+are written as before. The full rules, and what is not covered, are in the
 server README's [Paths that must not be logged](../server/README.md#paths-that-must-not-be-logged).
 
 Name the path in your own lines the same way:

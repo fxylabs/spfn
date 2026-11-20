@@ -24,6 +24,8 @@
  * | T15a | a path-parameter validation failure under the prefix                 | the logged 400 body (`fields[].value`) quoting the segment      |
  * | T15b | an error whose message and cause quote the segment, with and without `includeStack` | the error handler's line carrying either message     |
  * | T15c | the request logger's `Request failed` line, downstream throwing a message quoting the segment | that line carrying the message |
+ * | T16a | spellings the router does not serve (`//`, case, `%2F`, double encoding, `..` after decoding) | a 404 logging the token the client meant for the route |
+ * | T16b | a mixed-case entry; the same rules beside the boundary, and an undeclared 404 | an entry that matches nothing, over-redaction, or a 404's path no longer written as received |
  * | T15d | a `Referer` under the prefix in the `onError` context                 | the referring page's token in the context's headers             |
  */
 
@@ -347,14 +349,56 @@ describe('a declared path prefix is redacted in every core log line (#164)', () 
             .logging({ redactPaths: ['/api/import'] })));
         captureLoggerClass(Logger);
 
-        for (const referer of [`https://app.test/api/import/${SECRET}?x=1`, 'https://app.test/users/7?tab=a'])
+        const referers = [`https://app.test/api/import/${SECRET}?x=1`, `https://app.test//API/import/${SECRET}`, 'https://app.test/users/7?tab=a'];
+
+        for (const referer of referers)
         {
             await Promise.resolve(app.fetch(new Request('http://localhost/users/1/fail', { headers: { referer } })));
         }
-        await vi.waitFor(() => expect(onError).toHaveBeenCalledTimes(2));
+        await vi.waitFor(() => expect(onError).toHaveBeenCalledTimes(3));
 
         expect(onError.mock.calls.map(([, context]) => context.request.headers.referer))
-            .toEqual([`https://app.test${REDACTED}`, 'https://app.test/users/7?tab=a']);
+            .toEqual([`https://app.test${REDACTED}`, `https://app.test${REDACTED}`, 'https://app.test/users/7?tab=a']);
+    });
+
+    it('T16a: a spelling of a declared prefix the router does not serve is redacted in its 404 lines', async () =>
+    {
+        const app = await createServer(serverConfig(builder => builder.logging({ redactPaths: ['/api/import'] })));
+        const spellings = [
+            `//api/import/${SECRET}`,
+            `/api//import/${SECRET}`,
+            `/API/Import/${SECRET}`,
+            `/api%2Fimport/${SECRET}`,
+            `/api/%2569mport/${SECRET}`,
+            `/x/..%2Fapi/import/${SECRET}`,
+            `/..%2Fapi/import/${SECRET}`,
+        ];
+
+        for (const spelling of spellings)
+        {
+            const { lines, output } = captureLoggerClass(Logger);
+
+            expect((await get(app, spelling)).status, spelling).toBe(404);
+            expect(pathsOf(lines, 'Request completed'), spelling).toEqual([REDACTED]);
+            expect(output(), spelling).not.toContain(SECRET);
+            vi.restoreAllMocks();
+        }
+    });
+
+    it('T16b: an entry is matched in the same spelling; beside the boundary and outside every prefix a path is written as received', async () =>
+    {
+        setRedactPaths(['/api/import', '/Share']);
+        const app = new Hono();
+        app.get('*', c => c.text(loggedPath(c)));
+
+        const logged = async (path: string): Promise<string> => (await get(app, path)).text();
+
+        expect(await logged('/API/Importer/x')).toBe('/API/Importer/x');
+        expect(await logged('//api/importer/x')).toBe('//api/importer/x');
+        expect(await logged('/v1/api/import/x')).toBe('/v1/api/import/x');
+        expect(await logged(`/Share/${SECRET}`)).toBe('/Share/[redacted]');
+        expect(await logged(`/share/${SECRET}`)).toBe('/Share/[redacted]');
+        expect(await logged('//Users/%2569d')).toBe('//Users/%2569d');
     });
 });
 
