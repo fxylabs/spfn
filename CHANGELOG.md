@@ -38,7 +38,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     before the answer — a refusal decided inside the session's transaction once that transaction has
     rolled back. A `settled` that throws on a success rolls the session back (500, no `auth.login`);
     on a wrong credential answers 500, the second-factor budget's count and lock committed whatever
-    it does; on a refusal is logged, the refusal answered.
+    it does; on a refusal is logged, the refusal answered. That report, and one whose account lock
+    stays busy past its five-second wait, is lost: the package logs a line naming the attempt
+    (channel, stage, reason, user and key ids — no identifier, no address).
   - `loginService` and `cancelAccountDeletionService` throw when called inside a caller's transaction
     — a recorded failure would roll back with the refusal — as `checkSecondFactorProof` does.
   - A second `createAuthLifecycle()` stating other `signIn` functions refuses boot.

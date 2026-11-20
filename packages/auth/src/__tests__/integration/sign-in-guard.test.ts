@@ -9,7 +9,8 @@
  * 3. the refusal as a password oracle, or by its cost an account oracle
  * 4. a limit that is not a limit under concurrent attempts
  * 5. failures lost to a rollback (a route-wide `Transactional()` returning)
- * 6. sign-ins that escape a recorder that failed
+ * 6. sign-ins that escape a recorder that failed, and refusals whose report
+ *    could not be written leaving nothing to find them by
  * 7. the second factor: a refusal between the 202 and `mfa/verify`, `succeeded`
  *    reported once, a step-up's typo counted as a sign-in failure
  * 8. the address the app is told: a spoofed `X-Forwarded-For`, or the 202's
@@ -99,7 +100,8 @@ const { createOAuthState, generateOAuthNonce } = await import('@/server/lib/oaut
 const { oauthCallbackService } = await import('@/server/services/oauth.service');
 const { oauthNativeService } = await import('@/server/services/oauth-native.service');
 const { requestAccountDeletionService } = await import('@/server/services/account-deletion.service');
-const { SignInRefusedError } = await import('@spfn/auth/errors');
+const { AccountBusyError, SignInRefusedError } = await import('@spfn/auth/errors');
+const { authLogger } = await import('@/server/logger');
 
 const dbAvailable = await isDatabaseAvailable();
 
@@ -972,6 +974,49 @@ describe.skipIf(!dbAvailable)('the sign-in guard (#361)', () =>
         expect((await keyRow(keyId))!.isActive).toBe(false);
         expect(locks.seen).toHaveLength(1);
     });
+
+    it('row 6c — a refusal report that cannot be written after the rollback: the 403 stands, and the package logs the attempt', async () =>
+    {
+        const owner = await seedUser('lost@test.com');
+        const authenticator = await registerPasskey('lost@test.com');
+        const busy = deviceKeyBody();
+        const throwing = deviceKeyBody();
+        const logged = vi.spyOn(authLogger.service, 'error');
+        let holder: Promise<unknown> | null = null;
+
+        // Another writer takes the account's lock while the session's
+        // transaction decides, and holds it past the report's five seconds.
+        policy.admit = async () =>
+        {
+            if (getTransactionContext() && !holder)
+            {
+                holder = observer.begin(async (tx) =>
+                {
+                    await tx`select id from spfn_auth.users where id = ${owner.id} for update`;
+                    await new Promise(resolve => setTimeout(resolve, 6_500));
+                });
+            }
+
+            return LOCKED;
+        };
+        await expectRefused(await passkeyLogin(authenticator, ORIGIN, busy));
+        await holder;
+
+        policy.settled = async () =>
+        {
+            throw new Error('the history store is down');
+        };
+        await expectRefused(await passkeyLogin(authenticator, ORIGIN, throwing));
+
+        const lines = logged.mock.calls.filter(([message]) => message.startsWith('A refused sign-in was not told'));
+        logged.mockRestore();
+        const attempt = { channel: 'passkey', stage: 'credential', reason: 'refused', userId: String(owner.id) };
+        expect(lines).toEqual([
+            [expect.any(String), expect.any(AccountBusyError), { ...attempt, keyId: busy.keyId }],
+            [expect.any(String), expect.objectContaining({ message: 'the history store is down' }), { ...attempt, keyId: throwing.keyId }],
+        ]);
+        expect(await committedHistory()).toEqual([]);
+    }, 30_000);
 
     // ========================================================================
     // Row 7 — the second factor

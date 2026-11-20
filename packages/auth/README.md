@@ -697,7 +697,7 @@ decides what becomes of a write it makes:
 | `admit`, asked again after a wrong credential | in the transaction that records the failure, under the account lock | commits with that record |
 | `settled`, `challenged` or `succeeded` | in the session's transaction, under the account lock | commits with the session; a throw rolls the session back |
 | `settled`, `failed` for a wrong credential checked before any transaction | in a transaction of its own, under the account lock, before the answer | commits before the 401 or 403; a throw answers 500 |
-| `settled`, `failed` for a refusal decided in the session's transaction | in a transaction of its own, under the account lock, after the session's rolled back | commits before the 403; a throw is logged |
+| `settled`, `failed` for a refusal decided in the session's transaction | in a transaction of its own, under the account lock, after the session's rolled back | commits before the 403; a throw, or the lock busy past its wait, loses the report and is logged |
 
 - **Under the account's lock** (`usersRepository.lockAccount`; none when `user` is null) every other
   writer of the account waits on you, at most five seconds before it answers `AccountBusyError`:
@@ -708,7 +708,8 @@ decides what becomes of a write it makes:
   your rows and then calls a package writer that locks the account (`setAccountStatus`,
   `revokeAllKeysService`, …) can deadlock against a sign-in. Call the package writer first, or do
   not hold your row locks across it.
-- **Every failure is told, committed.** Whatever said no — a wrong password or proof, your `admit`,
+- **Every failure is told, committed** — but for the two cases under the second path below, which
+  are logged instead. Whatever said no — a wrong password or proof, your `admit`,
   the package's refusal of an account that is not active — `settled` is told `failed` in a
   transaction of its own, under the account lock, committed before the answer: the 401 or 403 does
   not roll it back. It gets there one of two ways:
@@ -726,8 +727,16 @@ decides what becomes of a write it makes:
     transaction, and every one around it, has rolled back: nothing of the refused session is in the
     report, and the report is committed before the refusal is answered. `admit` is not asked again. On a channel that creates
     the account (`register`, `signup-link`, `invitation`) the refused account never existed, and
-    `user` is null. A throw from `settled` here is logged and the refusal stands — the session is
-    already gone.
+    `user` is null.
+  - **When the second path's report cannot be written** — the account lock held by another writer
+    past its five-second wait (`AccountBusyError`), or your `settled` throwing — the history row is
+    lost, and the answer is unchanged: the refusal, as it would have been. The session is already
+    gone; there is nothing left for the answer to undo. The package logs one error line, `A refused
+    sign-in was not told to signIn.settled; the refusal was answered`, with the error and `channel`,
+    `stage`, `reason`, `userId` (null when the attempt had no account) and `keyId` when it had a
+    key — never the identifier typed, never an address. Search for that line to find the attempts
+    your history is missing. On the first path the same two failures change the answer instead: a
+    busy lock answers 503 (`AccountBusyError`), a throw 500, and nothing is lost unseen.
 - **A refusal is not a failure the package counts.** `reason: 'refused'` is your own `admit`'s
   refusal told back to you; whether it counts toward anything is your policy's choice. The worked
   example below counts `credential` only, so a locked account's further attempts do not extend its

@@ -33,6 +33,7 @@
 import { getTransactionContext, onAfterRollback, runInTransaction } from '@spfn/core/db';
 import { SignInRefusedError } from '@spfn/auth/errors';
 
+import { authLogger } from '../logger';
 import { usersRepository } from '../repositories';
 import type { AdmissionRefusal } from '../lib/admission-refusal';
 import type { User } from '../entities/users';
@@ -164,9 +165,10 @@ export async function recordSignInFailure(
  * the report commits before the refusal is answered, on a connection of its
  * own, and nothing of the refused session is in it. The account is read again
  * under its lock there: an account the rolled-back transaction created (a
- * refused registration) is `user: null`. A `settled` that throws there is
- * logged by core, and the refusal stands. Outside any transaction it is told
- * at once, and a throw answers 500.
+ * refused registration) is `user: null`. A report that cannot be written
+ * there — the account lock busy past its wait, or `settled` throwing — is
+ * logged (`logLostReport`), and the refusal stands. Outside any transaction it
+ * is told at once, and a throw answers 500.
  *
  * `admit` is not asked again: the attempt is already refused.
  *
@@ -183,7 +185,7 @@ export async function reportRefusal(attempt: SignInAttempt | null, reason: SignI
 
     if (getTransactionContext())
     {
-        afterOutermostRollback(report);
+        afterOutermostRollback(() => report().catch(error => logLostReport(attempt, reason, keyId, error)));
 
         return;
     }
@@ -234,6 +236,22 @@ function afterOutermostRollback(work: () => Promise<unknown>): void
         }
 
         await work();
+    });
+}
+
+/**
+ * The trace of a refusal `settled` was not told: the attempt by channel,
+ * stage, reason, account and key, and the error. Nothing the person typed and
+ * no address — the line is for finding the attempt, not for replaying it.
+ */
+function logLostReport(attempt: SignInAttempt, reason: SignInFailureReason, keyId: string | undefined, error: unknown): void
+{
+    authLogger.service.error('A refused sign-in was not told to signIn.settled; the refusal was answered', error, {
+        channel: attempt.channel,
+        stage: attempt.stage,
+        reason,
+        userId: attempt.user ? String(attempt.user.id) : null,
+        ...(keyId && { keyId }),
     });
 }
 
