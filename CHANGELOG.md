@@ -73,7 +73,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `defineRouter({ auth: authRouter }).use([optionalAuth])` is refused too, as is any depth of
   nesting. Package routes have no authenticator of their own; every router the SPFN packages
   export now states `packageName`, and a third-party package whose routes rely on the app's
-  authenticator should too. New: `resolveRouteMiddlewares(router, serverMiddlewares?)` (the
+  authenticator should too. **To boot again**, move the skipper onto a nested router that holds
+  no package router (`defineRouter({ machine: defineRouter({ ... }).use([machineAuth]) })
+  .packages([authRouter])`), or onto the routes themselves (`route.get(...).use([optionalAuth])`).
+  New: `resolveRouteMiddlewares(router, serverMiddlewares?)` (the
   chain `registerRoutes` registers, per route) and `RegisteredRoute.middlewares`. The SSE/WS token
   endpoints (`resolveEndpointMiddlewares`) are unchanged.
   **To find affected routers**, look for a router-level `.use([` naming a middleware that declares
