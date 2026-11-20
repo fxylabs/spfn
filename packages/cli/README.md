@@ -47,9 +47,11 @@ npx spfn@beta init --mode full
 ```
 
 The package manager is the app's own: its lockfile (`bun.lockb`, `pnpm-lock.yaml`,
-`yarn.lock`, `package-lock.json`) decides; otherwise the lockfile of the workspace root whose
-declared globs (`pnpm-workspace.yaml` `packages`, `package.json` `workspaces`, `!` negations
-honoured) list the app's directory; otherwise npm. A directory inside a pnpm or yarn
+`yarn.lock`, `package-lock.json`) decides, before anything above the app is read; otherwise
+the lockfile of the workspace root whose declared globs (`pnpm-workspace.yaml` `packages`,
+`package.json` `workspaces`, `!` negations honoured) list the app's directory; otherwise npm.
+An ancestor declaration that cannot be parsed (after stripping a BOM) or is not the
+documented shape is someone else's file and declares no workspace. A directory inside a pnpm or yarn
 repository that its workspace does not list is its own npm project. Override with `--pm`
 (`create`, `init`). When `create` makes a member of a pnpm workspace, it installs from the
 workspace root. "Dependencies installed" is printed only once every package the step
