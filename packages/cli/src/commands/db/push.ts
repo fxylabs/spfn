@@ -1,6 +1,6 @@
 import chalk from 'chalk';
 import prompts from 'prompts';
-import '@spfn/core/config';
+import { env } from '@spfn/core/config';
 import { loadEnv } from '@spfn/core/server';
 import { sql } from 'drizzle-orm';
 import { pendingFunctionMigrations } from '@spfn/core/db';
@@ -32,6 +32,7 @@ import {
     executeFunctionMigrations,
     type FunctionMigrationPlan,
 } from '../../utils/function-migrations.js';
+import { describeError } from './tenant/connection.js';
 
 export interface PushHint
 {
@@ -125,6 +126,12 @@ async function resolveSchemaFilesOrExit(config: Parameters<typeof resolveSchemaF
 /**
  * Push schema changes to database with safe-mode protection.
  *
+ * Both halves are planned read-only, once, before any write; destructive project
+ * statements are settled next. Then each function package's pending migrations
+ * apply (one committed transaction per package, as `db migrate`), then the
+ * project statements (one transaction), so a project table may reference a
+ * package table on an empty database.
+ *
  * - Default: auto-applies safe + warning, prompts for destructive
  * - --force: applies everything without prompting
  * - --dry-run: shows the classified SQL and each function package's pending
@@ -143,7 +150,7 @@ async function resolveSchemaFilesOrExit(config: Parameters<typeof resolveSchemaF
  *   schemaFilter is what push may touch.
  *
  * Whichever files are read, objects in a schema a function package owns stay out
- * of the diff: the package's own migrations carry them (step 8).
+ * of the diff: the package's own migrations carry them (step 9).
  *
  * drizzle-kit's push never alters an existing check whose expression changed
  * (an `enumCheck` given another value): push warns about each existing check
@@ -188,14 +195,14 @@ export async function dbPush(options: { force?: boolean; dryRun?: boolean; schem
 
     // 3. Load schema imports, less the objects a function package owns: a
     //    registry re-exports one of its tables for a relation, but the package's
-    //    own migrations (step 8) create and alter it.
+    //    own migrations (step 9) create and alter it.
     const imports = withoutFunctionPackageObjects(resolved.imports ?? await loadSchemaImports(resolved.files));
 
     // 3.5 Which PostgreSQL schemas to diff (see resolvePushSchemaFilter)
     const schemaFilter = resolvePushSchemaFilter(source?.schemaFilter, imports);
 
     // 3.7 Preflight: parse function package migrations before touching the DB,
-    //     so an incompatible package fails without applying the project schema.
+    //     so an incompatible package fails before anything is applied.
     const functionPlans = loadFunctionPlansOrExit();
 
     // 4. Connect. A dry run runs each plan query in a read-only transaction
@@ -211,13 +218,17 @@ export async function dbPush(options: { force?: boolean; dryRun?: boolean; schem
         const pending = await pendingFunctionMigrations(connection.db, functionPlans);
         const result = classifyStatements(statements);
 
-        // 6. Display. Function package lines only when a package is installed,
-        //    as `db migrate` prints its header only then.
-        displayProjectPlan(plan, statements.length === 0 ? undefined : result, options.dryRun);
+        // 6. Display in apply order. Function package lines only when a package
+        //    is installed, as `db migrate` prints its header only then.
         if (functionPlans.length > 0)
         {
             displayPendingFunctionMigrations(pending);
         }
+        if (pending.some(pkg => pkg.entries.length > 0))
+        {
+            console.log(chalk.dim('Function package migrations are applied first, then the project statements.\n'));
+        }
+        displayProjectPlan(plan, statements.length === 0 ? undefined : result, options.dryRun);
 
         // 7. The one dry-run gate: every write comes after it
         if (options.dryRun)
@@ -227,9 +238,13 @@ export async function dbPush(options: { force?: boolean; dryRun?: boolean; schem
             return;
         }
 
-        // 8. Apply the project statements, then the function package migrations
-        await applyProjectStatements(connection.db, statements, result, options.force);
+        // 8. Settle the destructive project statements before any write
+        const selection = await selectProjectStatements(statements, result, options.force);
+
+        // 9. Apply the function package migrations, then the project statements:
+        //    a project table may reference a package table
         await applyFunctionMigrations(functionPlans);
+        await applyProjectStatements(connection.db, selection, functionPlans.length > 0);
     }
     finally
     {
@@ -290,45 +305,73 @@ function displayProjectPlan(plan: PushPlan, result: ClassificationResult | undef
     }
 }
 
+interface ProjectSelection
+{
+    statements: string[];
+    skipped: number;
+}
+
 /**
- * Apply the project statements: everything with --force or when nothing is
- * destructive; otherwise destructive ones only after confirmation, in the same
- * transaction as the rest.
+ * The project statements to apply: all of them with --force or when nothing is
+ * destructive; otherwise destructive ones only after confirmation. Declining
+ * keeps the rest, which still apply after the function package migrations.
  */
-async function applyProjectStatements(
-    db: PushConnection['db'],
+async function selectProjectStatements(
     statements: string[],
     result: ClassificationResult,
     force?: boolean,
-): Promise<void>
+): Promise<ProjectSelection>
 {
-    if (statements.length === 0)
-    {
-        return;
-    }
-
-    if (force)
+    if (force && statements.length > 0)
     {
         console.log(chalk.dim('\n--force: applying all changes...'));
     }
 
     if (force || result.destructive.length === 0 || await confirmDestructive(result.destructive))
     {
-        await applyStatements(db, statements);
-        displayApplySummary(statements.length, 0);
-
-        return;
+        return { statements, skipped: 0 };
     }
 
     const destructiveSet = new Set(result.destructive.map(s => s.sql));
-    const nonDestructive = statements.filter(s => !destructiveSet.has(s));
-
-    if (nonDestructive.length > 0)
-    {
-        await applyStatements(db, nonDestructive);
-    }
-    displayApplySummary(nonDestructive.length, result.destructive.length);
     console.log(chalk.dim('Tip: Use --force to apply all changes without prompting.\n'));
+
+    return {
+        statements: statements.filter(s => !destructiveSet.has(s)),
+        skipped: result.destructive.length,
+    };
+}
+
+/**
+ * Apply the selected project statements in one transaction. On failure it
+ * rolls back and exits 1; function package migrations already committed stay.
+ */
+async function applyProjectStatements(
+    db: PushConnection['db'],
+    { statements, skipped }: ProjectSelection,
+    afterFunctionMigrations: boolean,
+): Promise<void>
+{
+    try
+    {
+        if (statements.length > 0)
+        {
+            await applyStatements(db, statements);
+        }
+    }
+    catch (error)
+    {
+        console.error(chalk.red(`\n❌ The project statements were rolled back: ${describeError(error, env.DATABASE_URL)}`));
+        if (afterFunctionMigrations)
+        {
+            console.error(chalk.yellow('Function package migrations applied above stay applied; fix the schema and run spfn db push again.'));
+        }
+        process.exit(1);
+    }
+
+    if (statements.length > 0 || skipped > 0)
+    {
+        displayApplySummary(statements.length, skipped);
+    }
 }
 
 /**
@@ -393,9 +436,8 @@ async function applyFunctionMigrations(plans: FunctionMigrationPlan[]): Promise<
     }
     catch (error)
     {
-        console.error(chalk.red('\n❌ Failed to apply function package migrations'));
+        console.error(chalk.red('\n❌ Failed to apply function package migrations — nothing of the project schema was applied'));
         console.error(chalk.red(error instanceof Error ? error.message : 'Unknown error'));
-        console.error(chalk.yellow('Project schema changes (if any) were already applied — only function package migrations failed.'));
         process.exit(1);
     }
 }

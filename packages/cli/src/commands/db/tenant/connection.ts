@@ -7,8 +7,12 @@
  * is the server's message for a statement that failed, a local file error's
  * own message, else only an error code — with the URL and its password cut out
  * whatever the source, and any other URL's credentials blanked (`redactUrls`).
+ * `db push` prints its failed project statement the same
+ * way: through drizzle and `pg`, whose errors are read here too.
  */
 
+import { DrizzleQueryError } from 'drizzle-orm';
+import pg from 'pg';
 import postgres from 'postgres';
 import { redactUrls } from '../../../utils/redact-urls.js';
 
@@ -28,9 +32,20 @@ export function describeError(error: unknown, url: string | undefined): string
 
 function rawDescription(error: unknown): string
 {
+    // drizzle's message quotes the query and its bound values; the driver's does not
+    if (error instanceof DrizzleQueryError && error.cause)
+    {
+        return rawDescription(error.cause);
+    }
+
     if (error instanceof postgres.PostgresError)
     {
-        return describePostgresError(error);
+        return describePostgresError(error.code, error.message, error.constraint_name);
+    }
+
+    if (error instanceof pg.DatabaseError)
+    {
+        return describePostgresError(error.code ?? '', error.message, error.constraint);
     }
 
     const code = (error as { code?: unknown } | null)?.code;
@@ -47,14 +62,14 @@ function rawDescription(error: unknown): string
 const AUTHENTICATION_FAILURES = new Set(['28P01', '28000']);
 
 /** The server's message for a failed statement; an authentication failure's names the user, so only its SQLSTATE. */
-function describePostgresError(error: postgres.PostgresError): string
+function describePostgresError(code: string, message: string, constraint: string | undefined): string
 {
-    if (AUTHENTICATION_FAILURES.has(error.code))
+    if (AUTHENTICATION_FAILURES.has(code))
     {
-        return `authentication failed (${error.code})`;
+        return `authentication failed (${code})`;
     }
 
-    return error.constraint_name ? `${error.message} (constraint ${error.constraint_name})` : error.message;
+    return constraint ? `${message} (constraint ${constraint})` : message;
 }
 
 /**
