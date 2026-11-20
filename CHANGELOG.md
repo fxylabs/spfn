@@ -40,8 +40,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **@spfn/auth: `mfaLockedEvent`, `passkeyEnrolledEvent` and `passkeyRevokedEvent` are exported from
   `@spfn/auth/server` (#361)**, with `MfaLockedPayload`, `PasskeyEnrolledPayload` and
   `PasskeyRevokedPayload`. The README documented all three and the package emitted them, but an app
-  could not import them to subscribe. A unit test now fails when an event defined in
-  `server/events` is not exported and not named as deliberately private.
+  could not import them to subscribe. A unit test now fails when an event defined anywhere in the
+  package's source is not exported and not named as deliberately private.
 - **@spfn/auth: the README no longer says seeded accounts are required to change their password
   (#361).** `passwordChangeRequired` is set for seeded accounts, returned by sign-in and cleared when
   the password changes; nothing in the package gates on it. An app that wants the change enforced
