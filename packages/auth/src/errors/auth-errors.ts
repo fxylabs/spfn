@@ -240,6 +240,26 @@ export class RegistrationRejectedError extends ForbiddenError
 }
 
 /**
+ * Sign-In Refused Error (403)
+ *
+ * The application refused this sign-in in its own `signIn.admit`
+ * (`createAuthLifecycle({ signIn })`) — a lock after repeated failures, an
+ * expired temporary password, anything the app keeps. `details.code` is the
+ * app's string, for the client to branch on; the status is always 403.
+ *
+ * An account the app refuses is answered this, whatever the password was: the
+ * refusal says nothing about the credential.
+ */
+export class SignInRefusedError extends ForbiddenError
+{
+    constructor(data: { code: string; message?: string; details?: Record<string, any> })
+    {
+        super({ message: data.message || 'Sign-in refused', details: { ...data.details, code: data.code } });
+        this.name = 'SignInRefusedError';
+    }
+}
+
+/**
  * Invalid Verification Code Error (400)
  *
  * Thrown when verification code is invalid, expired, or already used

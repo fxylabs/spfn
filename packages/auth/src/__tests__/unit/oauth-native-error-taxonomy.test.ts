@@ -397,6 +397,12 @@ describe('native sign-in answers each failure path with its own code', () =>
         // contract-export.test.ts.
         const passkeyProofCodes = ['PasskeyProofRequiredError'];
 
+        // The app's sign-in guard is the ninth (contract 0.14.7, #361): its
+        // refusal, which every operation that starts a session can answer —
+        // native sign-in among them — and only for an app that states
+        // signIn.admit. Held to its error class in contract-export.test.ts.
+        const signInGuardCodes = ['SignInRefusedError'];
+
         expect(declared.filter(e => e.surface === 'rest').map(e => e.code).sort())
             .toEqual([
                 ...table.map(cell => cell.code),
@@ -407,6 +413,7 @@ describe('native sign-in answers each failure path with its own code', () =>
                 ...secondFactorCodes,
                 ...sessionEndingCodes,
                 ...passkeyProofCodes,
+                ...signInGuardCodes,
             ].sort());
     });
 

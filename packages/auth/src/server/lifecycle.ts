@@ -25,6 +25,7 @@ import {
     isSecondFactorRequired,
     type SecondFactorOptions,
 } from './lib/second-factor-policy';
+import { assertSignInGuardConsistent, configureSignIn, type SignInGuardOptions } from './lib/sign-in-guard';
 import { assertOAuthRedirectUris } from './lib/oauth/redirect-uri-check';
 import { assertAppleWebConfig } from './lib/oauth/apple-config-check';
 import { assertAndroidAssetLinks, assertAppleRelayUrls } from './lib/oauth/android-config-check';
@@ -403,6 +404,52 @@ export interface AuthLifecycleOptions extends AuthInitOptions
      * ```
      */
     secondFactor?: SecondFactorOptions;
+
+    /**
+     * The application's sign-in guard
+     *
+     * Omitted, nothing changes: no extra query, lock or transaction on any
+     * sign-in. Stated, the app is asked whether each sign-in may go on and is
+     * told how each one ended.
+     *
+     * - `admit(attempt)` — answer `{ refuse: { code } }` to refuse: the client
+     *   gets 403 `SignInRefusedError` with `details.code`. Asked under the
+     *   account lock where a key is minted (every sign-in channel), and at the
+     *   second-factor completion; a password sign-in, `deletion/cancel` and
+     *   `mfa/verify` ask it once more before the credential is compared, and a
+     *   refused account is compared against a dummy hash and refused whatever
+     *   the password was. Never asked on renewal or key rotation.
+     * - `settled(outcome)` — `succeeded` once a session exists, `challenged` on
+     *   a 202, `failed` with a `reason` for every attempt that names an account
+     *   or a credential, refusals included. A failure is recorded in a
+     *   transaction of its own, committed before the answer; a wrong credential
+     *   checked before any transaction has `admit` asked again there, and a
+     *   refusal decided inside the session's transaction is told once that
+     *   transaction has rolled back.
+     *
+     * Each runs in a transaction of the package's, holding the account's lock
+     * — except `admit`'s first call on `password`, `deletion-cancel` and
+     * `mfa/verify`, which runs before any — and an app repository extending
+     * `BaseRepository` joins it. Database work only, and fast. Never lock a
+     * second account. On OAuth a contended sign-in runs them twice, the first
+     * run rolled back. See the README, "Sign-in guard".
+     *
+     * A later `createAuthLifecycle()` that omits it leaves it as it is; one
+     * that states other functions refuses boot in `afterInfrastructure`.
+     *
+     * @example
+     * ```typescript
+     * createAuthLifecycle({
+     *     signIn: {
+     *         admit: async ({ user }) => user && await lockouts.isLocked(user.id)
+     *             ? { refuse: { code: 'LOCKED' } }
+     *             : undefined,
+     *         settled: async (outcome) => { await signInHistory.record(outcome); },
+     *     },
+     * })
+     * ```
+     */
+    signIn?: SignInGuardOptions;
 }
 
 export function createAuthLifecycle(options: AuthLifecycleOptions = {}): AuthLifecycleConfig
@@ -437,6 +484,10 @@ export function createAuthLifecycle(options: AuthLifecycleOptions = {}): AuthLif
     // the proof checks read it at request time. Omitted leaves it as it is; a
     // contradicting statement is refused below, in afterInfrastructure.
     configureSecondFactor(options.secondFactor);
+
+    // Same again: every sign-in reads it at request time. Omitted leaves it as
+    // it is; a contradicting statement is refused below, in afterInfrastructure.
+    configureSignIn(options.signIn);
 
     return {
         /**
@@ -485,6 +536,9 @@ export function createAuthLifecycle(options: AuthLifecycleOptions = {}): AuthLif
             // user verification, TOTP-only with no keyring. Silent when no
             // policy was stated.
             assertSecondFactorPolicy();
+            // Same reasoning: two createAuthLifecycle() calls that stated
+            // different sign-in guards. Silent when at most one stated one.
+            assertSignInGuardConsistent();
 
             await initializeAuth(options);
             // Before any account is looked up: the repository folds addresses to

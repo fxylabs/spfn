@@ -81,6 +81,16 @@ export { OAUTH_LINK_OUTCOMES, isOAuthLinkOutcome, type OAuthLinkOutcome } from '
 export { createAuthLifecycle } from './server/lifecycle';
 export type { AuthLifecycleOptions, AuthLifecycleConfig } from './server/lifecycle';
 export type { AuthChannel, AuthChannelsOptions } from './server/lib/channels-config';
+export type {
+    SignInAdmission,
+    SignInAttempt,
+    SignInChannel,
+    SignInFailureReason,
+    SignInGuardOptions,
+    SignInIdentifier,
+    SignInOutcome,
+    SignInStage,
+} from './server/lib/sign-in-guard';
 
 // ============================================================================
 // Jobs

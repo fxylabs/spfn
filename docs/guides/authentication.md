@@ -175,6 +175,22 @@ verification needs no second factor while `'passkey'` is listed, so an app that 
 passkey on every sign-in also closes `channels.passkeyLogin`. See
 [Requiring a second factor](../../packages/auth/README.md#requiring-a-second-factor-secondfactor).
 
+`createAuthLifecycle({ signIn: { admit, settled } })` is the app's sign-in guard. `admit(attempt)`
+answers `{ refuse: { code } }` to refuse a sign-in — the client gets 403 `SignInRefusedError` with
+`details.code`, the web OAuth flow `reason=sign_in_refused` — and is asked under the account lock
+where every sign-in channel writes its key, and at `mfa/verify`; a password sign-in,
+`deletion/cancel` and `mfa/verify` also ask it before the credential is checked, and a refused account
+is compared against a dummy hash and refused whatever the password was. `settled(outcome)` is told
+`challenged` at a 202, `succeeded` once a session exists, and `failed` with a closed `reason` for
+every attempt that names an account or a credential, refusals included; a failure is committed in a
+transaction of its own before the 401 or 403. Each runs in a transaction of the package's, holding
+the account lock — except `admit`'s first call on `password`, `deletion-cancel` and `mfa/verify`,
+before the credential is compared, which runs in none — and app repositories extending
+`BaseRepository` join it; keep them to fast database work, lock no second account, and expect a
+second run on an OAuth sign-in that lost a race. Renewal and key rotation are never asked. Omitted,
+nothing changes; two lifecycles stating different functions refuse boot. See
+[The sign-in guard](../../packages/auth/README.md#the-sign-in-guard-signin).
+
 ### 5. Register Router and Middleware in `router.ts`
 
 This is the **critical step** that most setups miss. You need three things:
@@ -858,6 +874,7 @@ codes are the closed union `OAuthErrorReason`:
 | `signup_disabled` | a first sign-in would have created an account and the app set `channels: { signup: false }` (#308) |
 | `provider_already_linked` | a first sign-in matched an account by email that already holds another identity of the same provider — an account holds one per provider |
 | `sign_in_contended` | a concurrent sign-in or sign-up committed the same identity or address first, and running this one again did not settle it — signing in again does |
+| `sign_in_refused` | the app refused the sign-in in its `signIn.admit` (#361) |
 | `failed` | anything else |
 
 A refused sign-in writes nothing — no account, social row, key, stored token or event: the callback
@@ -1695,6 +1712,7 @@ catch (error)
 | `InvalidVerificationCodeError` | 400 | Wrong verification code |
 | `InvalidVerificationTokenError` | 400 | Invalid verification token |
 | `RegistrationRejectedError` | 403 | A `beforeRegister` hook rejected the signup |
+| `SignInRefusedError` | 403 | The app's `signIn.admit` refused the sign-in; `details.code` is the app's reason (mobile contract 0.14.7) |
 | `OAuthProviderLinkOnlyError` | 403 | A sign-in used a provider the app made link-only |
 | `OAuthEmailInUseError` | 409 | A first social sign-in's email belongs to an existing account and `oauthEmailMatch` is `'reject'` |
 | `OAuthProviderAlreadyLinkedError` | 409 | `OAUTH_PROVIDER_ALREADY_LINKED`: the account already holds an identity of this provider — a link start, or a first social sign-in matching it by email |

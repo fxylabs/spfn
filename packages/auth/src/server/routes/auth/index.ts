@@ -266,6 +266,11 @@ export const completeSignup = route.post('/_auth/signup/password')
  * and the body carries the challenge that activates it. The status is what lets
  * a proxy or a generated client tell "signed in" from "half signed in" without
  * reading the body; `mfaRequired` says the same thing inside it.
+ *
+ * No `Transactional()`: with the app's `signIn` guard configured a wrong
+ * password is recorded, and the record has to survive the 401 that follows it.
+ * The service opens its own transactions — one for a recorded failure, one
+ * for the session.
  */
 export const login = route.post('/_auth/login')
     .input({
@@ -293,7 +298,7 @@ export const login = route.post('/_auth/login')
             platform: Type.Optional(PlatformSchema),
         }),
     })
-    .use([rateLimitPolicy('auth-login', { limit: 10, windowMs: 60_000, by: byIpAndAccount({ ipLimit: 100 }) }), Transactional()])
+    .use([rateLimitPolicy('auth-login', { limit: 10, windowMs: 60_000, by: byIpAndAccount({ ipLimit: 100 }) })])
     .skip(['auth'])
     .handler(async (c) =>
     {

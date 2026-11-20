@@ -33,6 +33,9 @@ import { assertStepUp, mfaEnrolledForUser } from './mfa.service';
 import { secondFactorEnrolmentFields } from './second-factor-policy.service';
 import { updateLastLoginService } from './user.service';
 import { accountRefusal, admissionRefusalError, type PrincipalCredential } from './admission.service';
+import { admitSignIn, assertOwnsTransactions, failedCredentialAnswer, reportAccountRefusal } from './sign-in-guard.service';
+import { signInGuard, type SignInAttempt } from '../lib/sign-in-guard';
+import type { User } from '../entities/users';
 import { authLoginEvent, authRegisterEvent } from '../events';
 
 export interface RegisterParams
@@ -317,7 +320,7 @@ export async function createVerifiedAccount(
 /**
  * Whether an account already holds the email or phone a signup names.
  *
- * The email is looked up in any stored case, unlike `findByEmailOrPhone`, which
+ * The email is looked up in any stored case, unlike `findByEmailOrPhoneOnPrimary`, which
  * login and account deletion share and which must keep finding exactly one
  * account to act as.
  */
@@ -333,54 +336,108 @@ async function accountExists(email?: string, phone?: string): Promise<boolean>
 
 /**
  * Authenticate user and create session
+ *
+ * The password is checked outside any transaction and outside the account
+ * lock, and the session is written in a transaction of this function's own.
+ * With the app's `signIn` guard configured:
+ *
+ * 1. `admit` is asked before the password is compared, without the lock. An
+ *    account it refuses is compared against the dummy hash — never its own —
+ *    and answered `SignInRefusedError` whatever the password was, so the
+ *    refusal is neither a password oracle nor, by timing, an account oracle;
+ * 2. a failure is told to `settled` in a transaction of its own, under the
+ *    account lock, committed before the answer — a wrong password with
+ *    `admit` asked again there, a refusal from step 1 without
+ *    (`failedCredentialAnswer`);
+ * 3. a right password meets the deciding `admit` under the lock in the
+ *    session's transaction (`registerPublicKeyService`), whose refusal is told
+ *    once that transaction has rolled back.
+ *
+ * The account refusals the package makes (`AccountDisabledError`,
+ * `AccountPendingDeletionError`) keep their order: after the password. They
+ * are told to `settled` too (`reportAccountRefusal`).
+ *
+ * @throws Error when the guard is configured and the caller holds a transaction
  */
 export async function loginService(
     params: LoginParams,
 ): Promise<LoginResult>
 {
-    const { email, phone, password, publicKey, keyId, fingerprint, algorithm } = params;
+    const { email, phone, password } = params;
 
-    // Find user
-    const user = await usersRepository.findByEmailOrPhone(email, phone);
+    assertOwnsTransactions('loginService');
+
+    // Find user — on the primary: a password changed a moment ago is the one
+    // that has to match.
+    const user = await usersRepository.findByEmailOrPhoneOnPrimary(email, phone);
 
     if (!email && !phone)
     {
         throw new ValidationError({ message: 'Either email or phone must be provided' });
     }
 
-    if (!user || !user.passwordHash)
-    {
-        // Spend the same time as the real verify path so a non-existent account
-        // can't be told apart from a wrong password by response timing (user
-        // enumeration). The dummy hash is computed once and reused.
-        await verifyPassword(password, await getDummyPasswordHash());
-        throw new InvalidCredentialsError();
-    }
+    const attempt = signInGuard() && passwordAttempt(user, params);
+    const refusal = attempt && await admitSignIn(attempt);
 
-    // Verify password
-    const isValid = await verifyPassword(password, user.passwordHash);
-    if (!isValid)
+    // An unknown account, one without a password and one the app refused spend
+    // the time of the real verify path against the dummy hash, so none of the
+    // three can be told apart from a wrong password by response timing. The
+    // dummy hash is computed once and reused.
+    const comparedHash = refusal || !user?.passwordHash ? await getDummyPasswordHash() : user.passwordHash;
+    const isValid = await verifyPassword(password, comparedHash);
+
+    if (refusal || !user?.passwordHash || !isValid)
     {
-        throw new InvalidCredentialsError();
+        throw await failedCredentialAnswer(attempt, refusal, () => new InvalidCredentialsError(), params.keyId);
     }
 
     // The account half of the admission: a deletion asked for, then the status
-    const refusal = await accountRefusal(user);
-    if (refusal)
+    const accountRefused = await accountRefusal(user);
+    if (accountRefused)
     {
-        throw admissionRefusalError(refusal);
+        await reportAccountRefusal(attempt, accountRefused, params.keyId);
+        throw admissionRefusalError(accountRefused);
     }
 
     // Hashed before the account lock is taken: the hash is the slow step.
     const upgradedHash = await upgradedPasswordHash(password, user.passwordHash);
 
+    return await runInTransaction(
+        () => startPasswordSession(user, params, upgradedHash),
+        { context: 'auth:login' },
+    );
+}
+
+/** The attempt a password sign-in is, as the app's `signIn` guard sees it. */
+function passwordAttempt(user: User | null, params: LoginParams): SignInAttempt
+{
+    return {
+        user,
+        channel: 'password',
+        stage: 'credential',
+        identifier: params.email ? { email: params.email } : { phone: params.phone },
+        ip: params.ip,
+        userAgent: params.userAgent,
+        webProxy: params.webProxy === true,
+    };
+}
+
+/**
+ * The session of a password sign-in whose password was right: the key, the
+ * re-encoded hash, `lastLoginAt` and the login event — one transaction, under
+ * the account lock the key write takes.
+ */
+async function startPasswordSession(user: User, params: LoginParams, upgradedHash: string | null): Promise<LoginResult>
+{
+    const { email } = params;
+
     // Register new public key
     const registered = await registerPublicKeyService({
         userId: user.id,
-        keyId,
-        publicKey,
-        fingerprint,
-        algorithm,
+        keyId: params.keyId,
+        publicKey: params.publicKey,
+        fingerprint: params.fingerprint,
+        algorithm: params.algorithm,
         deviceName: params.deviceName,
         platform: params.platform,
         channel: 'password',
@@ -388,6 +445,7 @@ export async function loginService(
         ip: params.ip,
         userAgent: params.userAgent,
         webProxy: params.webProxy,
+        identifier: email ? { email } : { phone: params.phone },
         replaces: params.replacementProof ? { proof: params.replacementProof } : undefined,
         loginEvent: {
             provider: email ? 'email' : 'phone',
@@ -400,7 +458,7 @@ export async function loginService(
     // until it commits.
     if (upgradedHash)
     {
-        await usersRepository.replaceVerifiedPasswordHash(user.id, user.passwordHash, upgradedHash);
+        await usersRepository.replaceVerifiedPasswordHash(user.id, user.passwordHash!, upgradedHash);
     }
 
     // An enrolled account on a device it has never seen gets a challenge instead

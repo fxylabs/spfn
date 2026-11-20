@@ -22,6 +22,7 @@ export const OAUTH_ERROR_REASONS = [
     'signup_disabled',
     'provider_already_linked',
     'sign_in_contended',
+    'sign_in_refused',
     'failed',
 ] as const;
 
@@ -50,6 +51,8 @@ export const OAUTH_ERROR_REASONS = [
  * - `sign_in_contended` — another first sign-in with the same identity attached
  *   it at the same moment, and running this one again did not settle it; signing
  *   in again does
+ * - `sign_in_refused` — the app refused this sign-in in its `signIn.admit`
+ *   (`createAuthLifecycle({ signIn })`); nothing was written
  * - `failed` — anything else
  */
 export type OAuthErrorReason = typeof OAUTH_ERROR_REASONS[number];

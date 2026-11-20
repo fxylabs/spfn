@@ -72,6 +72,7 @@ import type { PasskeyProofProcedure, WebAuthnChallenge, WebAuthnChallengeKind } 
 import type { User } from '../entities/users';
 import { getDummyPasswordHash, verifyPassword } from '../helpers';
 import type { KeyAlgorithmType, KeyPlatformType } from '../types';
+import { reportAccountRefusal, reportedFailure, signInAttempt } from './sign-in-guard.service';
 import { registerPublicKeyService } from './key.service';
 import { assertEnrolmentProven, assertStepUp, mfaEnrolledForUser, mfaStatusService, type MfaStatus } from './mfa.service';
 import { assertNotLastListedFactor, isEnrolmentOnly, secondFactorEnrolmentFields } from './second-factor-policy.service';
@@ -941,8 +942,12 @@ export async function finishPasskeyLoginService(params: FinishPasskeyLoginParams
             throw new PasskeyVerificationError();
         }
 
-        await assertActiveForPasskeyLogin(await usersRepository.findById(passkey.userId));
-        const { newCounter, assertion } = await verifiedAssertion(passkey, presented);
+        // From here the credential is known, and so is its account: a refusal
+        // and an assertion that does not verify are told to the app's
+        // `settled` once this transaction has rolled back (`reportRefusal`).
+        const owner = await assertActiveForPasskeyLogin(await usersRepository.findById(passkey.userId), params);
+        const { newCounter, assertion } = await verifiedAssertion(passkey, presented)
+            .catch(error => reportedFailure(error, signInAttempt(owner, 'passkey', params), 'credential', params.keyId));
 
         // The verification done, the account is locked (`lockAccount`) before
         // the challenge is spent and the passkey row written, and its status
@@ -950,7 +955,7 @@ export async function finishPasskeyLoginService(params: FinishPasskeyLoginParams
         // use is recorded only on a row still live under it, at the counter
         // verified against, and a revocation that landed meanwhile refuses the
         // sign-in as a revoked credential is refused (L4/L5).
-        const user = await assertActiveForPasskeyLogin(await usersRepository.lockAccount(passkey.userId));
+        const user = await assertActiveForPasskeyLogin(await usersRepository.lockAccount(passkey.userId), params);
         assertChallenge(await spendChallenge(presented.challenge, 'authentication', user.id), 'authentication');
 
         if (!await passkeysRepository.recordUse(passkey, newCounter))
@@ -1066,11 +1071,12 @@ function assertDeviceKeyPresent(params: FinishPasskeyLoginParams): void
  * The account behind a verified credential, if it may hold a session.
  *
  * Same two errors as `loginService`, so a disabled or pending-deletion account
- * answers a passkey sign-in exactly as it answers a password one.
+ * answers a passkey sign-in exactly as it answers a password one — and is
+ * told to the app's `settled` as one (`reportAccountRefusal`).
  *
  * @throws AccountDisabledError | AccountPendingDeletionError
  */
-async function assertActiveForPasskeyLogin(user: User | null): Promise<User>
+async function assertActiveForPasskeyLogin(user: User | null, params: FinishPasskeyLoginParams): Promise<User>
 {
     if (!user)
     {
@@ -1080,6 +1086,7 @@ async function assertActiveForPasskeyLogin(user: User | null): Promise<User>
     const refusal = await accountRefusal(user);
     if (refusal)
     {
+        await reportAccountRefusal(signInAttempt(user, 'passkey', params), refusal, params.keyId);
         throw admissionRefusalError(refusal);
     }
 

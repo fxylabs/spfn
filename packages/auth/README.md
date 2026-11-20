@@ -630,6 +630,296 @@ In `afterInfrastructure`, beside the channel check:
 The mobile contract lists the three since 0.14.0 and marks each operation that can answer the
 first with `secondFactor.enrolmentRequired` — every signed-in operation except `auth.mfa.status`.
 
+### The sign-in guard (`signIn`)
+
+`createAuthLifecycle({ signIn: { admit, settled } })` gives the application a say over who signs in
+and tells it how every attempt ended — a lock after repeated failures, an expiring temporary
+password, a sign-in history. Leave it out and nothing changes: no extra query, lock or transaction
+runs on any sign-in. Both callbacks are optional.
+
+```typescript
+import type { SignInAttempt, SignInOutcome } from '@spfn/auth/server';
+
+createAuthLifecycle({
+    signIn: {
+        admit: async (attempt: SignInAttempt) =>
+            attempt.user && await lockouts.isLocked(attempt.user.id) ? { refuse: { code: 'LOCKED' } } : undefined,
+        settled: (outcome: SignInOutcome) => signInHistory.record(outcome),
+    },
+})
+```
+
+```typescript
+type SignInChannel = Exclude<DeviceRegistrationChannel, 'renewal'> | 'deletion-cancel';
+type SignInStage = 'credential' | 'second-factor';
+type SignInFailureReason =
+    'credential' | 'secondFactor' | 'refused' | 'accountDisabled' | 'pendingDeletion' | 'secondFactorLocked';
+
+interface SignInAttempt
+{
+    user: User | null;              // null when the identifier names no account
+    channel: SignInChannel;
+    stage: SignInStage;
+    identifier?: { email?: string; phone?: string };   // password and deletion-cancel
+    ip?: string;                    // display material (deviceProvenance), never decide by it
+    userAgent?: string;
+    webProxy: boolean;              // proxy-guard recognised the Next.js proxy: the one attested fact
+}
+
+type SignInOutcome = SignInAttempt & (
+    | { result: 'succeeded' | 'challenged'; keyId: string }
+    | { result: 'failed'; reason: SignInFailureReason; keyId?: string }
+);
+
+type SignInAdmission = void | undefined | { refuse: { code: string } };   // code: /^[A-Za-z0-9_.-]{1,64}$/
+```
+
+**`admit(attempt)`** answers nothing to let the attempt go on, or `{ refuse: { code } }`. The client
+gets **403 `SignInRefusedError`** with the app's string in `details.code`; the status is always 403.
+The code is a constant for the client to branch on — 1 to 64 characters, each a letter, a digit,
+`_`, `-` or `.` (`ACCOUNT_LOCKED`, `temporary-password-expired`) — never a message or data
+interpolated into one. Any other answer, a code outside that shape included, is refused as `admit`
+throwing is: 500, no session.
+On the web OAuth flow the refusal is the error redirect with `reason=sign_in_refused`. A refused
+registration (`register`, `signup-link`, `invitation`) rolls the new account back.
+
+**`settled(outcome)`** is told `challenged` at a 202 (the key is written inactive), `succeeded`
+once, when the session exists — at `mfa/verify` for a 202 — and `failed` with a `reason`.
+
+**Where each call runs.** An app repository extending `BaseRepository` joins whatever transaction is
+open through the transaction context — no transaction argument to thread — so where a call runs
+decides what becomes of a write it makes:
+
+| Call | Runs | A write of yours there |
+|---|---|---|
+| `admit`, first call on `password`, `deletion-cancel` and `mfa/verify` (before the credential is compared) | outside any transaction, without the lock | commits at once, statement by statement, whatever the attempt's outcome |
+| `admit`, deciding call — where the key is written; at `mfa/verify`, where it is activated | in the session's transaction, under the account lock | commits with the session; rolls back with a refused or failed one |
+| `admit`, asked again after a wrong credential | in the transaction that records the failure, under the account lock | commits with that record |
+| `settled`, `challenged` or `succeeded` | in the session's transaction, under the account lock | commits with the session; a throw rolls the session back |
+| `settled`, `failed` for a wrong credential checked before any transaction | in a transaction of its own, under the account lock, before the answer | commits before the 401 or 403; a throw answers 500 |
+| `settled`, `failed` for a refusal decided in the session's transaction | in a transaction of its own, under the account lock, after the session's rolled back | commits before the 403; a throw, or the lock busy past its wait, loses the report and is logged |
+
+- **Under the account's lock** (`usersRepository.lockAccount`; none when `user` is null) every other
+  writer of the account waits on you, at most five seconds before it answers `AccountBusyError`:
+  database work only, and fast. No network call.
+- **Never lock a second account** in them — the transaction refuses it with
+  `SecondAccountLockError`.
+- **Lock order.** The package locks the account row first, then your rows. Code of yours that locks
+  your rows and then calls a package writer that locks the account (`setAccountStatus`,
+  `revokeAllKeysService`, …) can deadlock against a sign-in. Call the package writer first, or do
+  not hold your row locks across it.
+- **Every failure is told, committed** — but for the two cases under the second path below, which
+  are logged instead. Whatever said no — a wrong password or proof, your `admit`,
+  the package's refusal of an account that is not active — `settled` is told `failed` in a
+  transaction of its own, under the account lock, committed before the answer: the 401 or 403 does
+  not roll it back. It gets there one of two ways:
+  - **A wrong credential checked before any transaction** — the password on `password` and
+    `deletion-cancel`, the proof at `mfa/verify`, a spent second-factor budget — is told, and `admit`
+    is then asked again in that transaction: a failure that crossed your limit is answered with the
+    refusal. An unknown identifier has no account row to lock; count it with one statement (an
+    upsert).
+  - **A refusal decided inside the session's transaction** — the deciding `admit` (`refused`), an
+    account the package refuses (`accountDisabled`, `pendingDeletion`), a passkey assertion that
+    fails for a known credential (`credential`), and at `mfa/verify`'s completion a right proof it
+    can no longer spend: a budget spent since the proof was judged (`secondFactorLocked`, answered
+    429 — `admit` is not asked again), the proof or the challenge spent by another request first,
+    the challenge expired or its key generation ended (`secondFactor`) — is told once that
+    transaction, and every one around it, has rolled back: nothing of the refused session is in the
+    report, and the report is committed before the refusal is answered. `admit` is not asked again. On a channel that creates
+    the account (`register`, `signup-link`, `invitation`) the refused account never existed, and
+    `user` is null.
+  - **When the second path's report cannot be written** — the account lock held by another writer
+    past its five-second wait (`AccountBusyError`), or your `settled` throwing — the history row is
+    lost, and the answer is unchanged: the refusal, as it would have been. The session is already
+    gone; there is nothing left for the answer to undo. The package logs one error line, `A refused
+    sign-in was not told to signIn.settled; the refusal was answered`, with the error and `channel`,
+    `stage`, `reason`, `userId` (null when the attempt had no account) and `keyId` when it had a
+    key — never the identifier typed, never an address. Search for that line to find the attempts
+    your history is missing. On the first path the same two failures change the answer instead: a
+    busy lock answers 503 (`AccountBusyError`), a throw 500, and nothing is lost unseen.
+- **A refusal is not a failure the package counts.** `reason: 'refused'` is your own `admit`'s
+  refusal told back to you; whether it counts toward anything is your policy's choice. The worked
+  example below counts `credential` only, so a locked account's further attempts do not extend its
+  lock.
+- **A throw** from `admit` answers 500, with no session. From `settled` on a failure, 500 — never a
+  quiet 401 with nothing recorded. From `settled` on a success, the session rolls back: no key, no
+  `auth.login`.
+- **The package's own count is not yours to roll back.** A wrong second-factor proof is charged to
+  the account's budget in a transaction that commits before `settled` is told, so a `settled` that
+  throws still leaves the count, the lock it reaches and the one `auth.mfa.locked` in force: after
+  the budget is spent the right code is refused, as without a guard.
+- **It may run twice.** On OAuth a sign-in that lost a race is rolled back and run once more
+  (`beforeRegister` has the same note): the rolled-back run's writes go with it. Side effects — mail,
+  webhooks — belong after commit (`onAfterCommit`, or an event subscriber), not in the callback.
+- **Not asked on renewal or key rotation.** Those continue a session; a lock must not sign the owner
+  out of every device as keys expire. Status is the tool for ending sessions (`setAccountStatus`).
+
+| Channel | Credential the package checks | `admit` asked | `settled` told |
+|---|---|---|---|
+| `password` (`POST /_auth/login`) | password for an identifier | before the comparison (no lock), and under the lock in the session's transaction, which decides | `failed` (`credential`, `refused`, `accountDisabled`, `pendingDeletion`); `challenged` or `succeeded` |
+| `passkey` | the passkey assertion | under the lock where the key is written | `failed` (`credential` for a known credential, `refused`, `accountDisabled`, `pendingDeletion`); `challenged` or `succeeded` |
+| `oauth`, `oauth-native`, `password-reset`, `device-code`, `device-link` | the provider, the reset link, the approving device | under the lock where the key is written | `failed` (`refused`, `accountDisabled`, `pendingDeletion`); `challenged` or `succeeded` |
+| `register`, `signup-link`, `invitation` | the code, the link, the invitation | under the lock, after `beforeRegister`; a refusal rolls the account back | `failed` (`refused`, `user: null`); `succeeded` |
+| second factor (`POST /_auth/mfa/verify`), the 202's channel | the TOTP code, recovery code or passkey | before the proof is judged, and under the lock where the key is activated | `failed` (`secondFactor`, `secondFactorLocked`, `refused`, `accountDisabled`, `pendingDeletion`), `stage: 'second-factor'`; `succeeded` once |
+| `deletion-cancel` (`POST /_auth/deletion/cancel`) | the password for an identifier — no session results | before the comparison; a verification-code cancel is not guarded | `failed` (`credential`, `refused`) |
+| renewal, `keys/rotate` | — | never | never |
+
+A wrong **step-up** or **enrolment** proof is not reported: a signed-in person's typo is not a
+sign-in. **Not reported either**: an attempt that never identifies an account or a credential — a
+malformed request, an unknown passkey credential id, a challenge, link or code already expired or
+spent when it is presented, an
+identity the OAuth provider would not vouch for — and the verification-code path of
+`deletion/cancel` (no password is checked; no session results). A reset link refused at its
+confirmation, before the sign-in step, is not a sign-in yet; an account refused at the completion is
+reported. Do not record from inside `admit`: a write there rolls back with a refused session — the
+report of the refusal is `settled`'s.
+
+**Why a refused account still costs a comparison.** On `password` and `deletion-cancel`, `admit` is
+asked before the password is compared. An account it refuses is compared against the **dummy hash**,
+never its own, and answered the refusal whatever the password was. Skipping the comparison would
+make a refused account answer faster than an unknown one; comparing its real hash would make the
+refusal answer the password. An unknown identifier reaches `admit` with `user: null` — refuse those
+too if your policy counts identifiers. The package's own refusals (`AccountDisabledError`,
+`AccountPendingDeletionError`) keep their order: after the password.
+
+**Under concurrency** an attempt already past `admit` when your limit is reached is still judged, but
+a right password then meets the deciding `admit` under the account lock, after the failure that
+crossed the limit has committed — so no session starts past the limit. The guesses themselves stay
+bounded by the route's rate limit (10 a minute per account).
+
+`loginService` and `cancelAccountDeletionService` own their transactions: with a guard configured,
+calling them inside one of yours throws, as `checkSecondFactorProof` does — a recorded failure would
+roll back with the refusal.
+
+#### Worked example — lock after five, lifted by an administrator
+
+```typescript
+// src/server/entities/sign-in-history.ts
+import { bigint, boolean, pgTable, serial, text, timestamp } from 'drizzle-orm/pg-core';
+
+export const signInHistory = pgTable('sign_in_history', {
+    id: serial('id').primaryKey(),
+    userId: bigint('user_id', { mode: 'number' }),
+    channel: text('channel').notNull(),
+    result: text('result').notNull(),
+    reason: text('reason'),
+    ip: text('ip'),
+    webProxy: boolean('web_proxy').notNull(),
+    at: timestamp('at', { withTimezone: true }).notNull().defaultNow(),
+});
+
+export const signInLockLifts = pgTable('sign_in_lock_lifts', {
+    userId: bigint('user_id', { mode: 'number' }).primaryKey(),
+    liftedAt: timestamp('lifted_at', { withTimezone: true }).notNull(),
+});
+```
+
+```typescript
+// src/server/repositories/sign-in-history.repository.ts
+import { BaseRepository } from '@spfn/core/db';
+import { and, count, eq, gt } from 'drizzle-orm';
+import type { SignInOutcome } from '@spfn/auth/server';
+import { signInHistory, signInLockLifts } from '../entities/sign-in-history';
+
+export class SignInHistoryRepository extends BaseRepository
+{
+    async record(outcome: SignInOutcome): Promise<void>
+    {
+        await this.db.insert(signInHistory).values({
+            userId: outcome.user?.id ?? null,
+            channel: outcome.channel,
+            result: outcome.result,
+            reason: outcome.result === 'failed' ? outcome.reason : null,
+            ip: outcome.ip ?? null,
+            webProxy: outcome.webProxy,
+        });
+    }
+
+    /** Wrong passwords since the last lift — read in the package's transaction, under the account lock. */
+    async failuresSinceLift(userId: number): Promise<number>
+    {
+        const [lift] = await this.db.select().from(signInLockLifts).where(eq(signInLockLifts.userId, userId));
+        const [row] = await this.db.select({ n: count() }).from(signInHistory).where(and(
+            eq(signInHistory.userId, userId),
+            eq(signInHistory.reason, 'credential'),
+            gt(signInHistory.at, lift?.liftedAt ?? new Date(0)),
+        ));
+
+        return row!.n;
+    }
+
+    /** An administrator's lift: one upsert of the app's own row, no account lock taken. */
+    async lift(userId: number): Promise<void>
+    {
+        const liftedAt = new Date();
+
+        await this.db.insert(signInLockLifts).values({ userId, liftedAt })
+            .onConflictDoUpdate({ target: signInLockLifts.userId, set: { liftedAt } });
+    }
+}
+
+export const signInHistoryRepository = new SignInHistoryRepository();
+```
+
+```typescript
+// server.config.ts
+import { createAuthLifecycle } from '@spfn/auth/server';
+import { signInHistoryRepository } from './src/server/repositories/sign-in-history.repository';
+// The app's own record of the temporary passwords it issued.
+import { temporaryPasswordsRepository } from './src/server/repositories/temporary-passwords.repository';
+
+export const authLifecycle = createAuthLifecycle({
+    signIn: {
+        admit: async ({ user, channel }) =>
+        {
+            if (!user)
+            {
+                return undefined;
+            }
+
+            if (await signInHistoryRepository.failuresSinceLift(user.id) >= 5)
+            {
+                return { refuse: { code: 'LOCKED' } };
+            }
+
+            // An expiring temporary password: the app recorded its expiry when it issued it
+            // (with passwordChangeRequired), in a table of its own.
+            if (channel === 'password' && user.passwordChangeRequired
+                && await temporaryPasswordsRepository.hasExpired(user.id))
+            {
+                return { refuse: { code: 'TEMPORARY_PASSWORD_EXPIRED' } };
+            }
+
+            return undefined;
+        },
+        settled: outcome => signInHistoryRepository.record(outcome),
+    },
+});
+```
+
+The lift is an ops or admin route calling `signInHistoryRepository.lift(userId)` behind
+`requireOpsScope` (or a role check). Whether a password reset lifts the lock is yours to decide: a
+`password-reset` sign-in reaches `admit` like any other, so the policy above refuses it while locked
+— lift on `channel === 'password-reset'` in `admit` if a reset should. The history is the sign-in
+list a settings page shows; `ip` is what the request said, `webProxy` whether the proxy vouched for
+it.
+
+#### Out of scope
+
+- **A built-in lock policy.** The package stores no attempts; the example above is the policy.
+- **Enforcing `passwordChangeRequired`.** A person refused at sign-in could never reach the route
+  that clears the flag; enforcement is a restricted session, not a refusal (tracked separately).
+- **The address of a sign-in made from a Next.js server action**, which today is the Next server's
+  own (tracked separately in `@spfn/core`).
+- **`AccountDisabledError` after a right password only** — the package's own refusal of a disabled
+  account still answers after the password is checked (tracked separately). The app's refusal does
+  not.
+- **Moving `beforeRegister`** onto the lifecycle.
+
+A second `createAuthLifecycle()` that omits `signIn` leaves it as it is; one that states other
+functions refuses boot in `afterInfrastructure`, the first statement staying in force meanwhile.
+`configureAuth` has no `signIn`: a late call there would replace the guard silently.
+
 ### Migration — a sign-in replaces a key only with proof of the old key
 
 **BREAKING.** A sign-in used to count as "the same device swapping its key" when its body named
@@ -4323,6 +4613,7 @@ type. Branch on `reason`; show `error` if you like. The codes are the closed uni
 | `signup_disabled` | a first sign-in with this provider would have created an account, and the app turned sign-up off with [`channels: { signup: false }`](#which-sign-in-channels-exist-channels) (#308) | a fixed sentence |
 | `provider_already_linked` | a first sign-in with this provider matched an account by email, and that account already holds another identity of the same provider — one per provider per account (au5) | a fixed sentence |
 | `sign_in_contended` | a concurrent sign-in or sign-up committed the same identity or address first, and running this one again did not settle it — signing in again does; nothing was written | a fixed sentence |
+| `sign_in_refused` | the app refused the sign-in in its [`signIn.admit`](#the-sign-in-guard-signin) (#361); nothing was written | unchanged |
 | `failed` | anything else — missing `code`/`state`, an unverified email that would link an account (`oauthEmailMatch` unset or `'attach'`), a missing role | unchanged |
 
 A refused sign-in writes nothing: no account, no social row, no key, no stored token, no event.
@@ -5429,6 +5720,9 @@ is the recommended error. The hook receives the same `metadata` the app supplied
 To turn sign-up off altogether rather than filter it, use
 [`channels: { signup: false }`](#which-sign-in-channels-exist-channels): the sign-up routes answer
 404 `CHANNEL_DISABLED` and a first social sign-in is refused with `SIGNUP_DISABLED` before this hook would run.
+
+To refuse a **sign-in** — every channel, the account existing or not — and to be told of each
+attempt's outcome, use the [sign-in guard](#the-sign-in-guard-signin) instead.
 
 ```typescript
 import { configureAuth } from '@spfn/auth/server';

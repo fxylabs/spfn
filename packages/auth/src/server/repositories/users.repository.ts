@@ -428,16 +428,36 @@ export class UsersRepository extends AccountStateRepository
      */
     async findByEmailOrPhone(email?: string, phone?: string)
     {
-        if (email)
+        return this.selectByEmailOrPhone(this.readDb, email, phone);
+    }
+
+    /**
+     * 이메일 또는 전화번호로 사용자 조회 — Write primary에서 직접 읽는다.
+     *
+     * For the callers that compare a password against what this returns outside
+     * any transaction — sign-in and deletion cancel, which own their
+     * transactions so a recorded failure survives the refusal. A replica a
+     * moment behind a password change would still accept the old password.
+     */
+    async findByEmailOrPhoneOnPrimary(email?: string, phone?: string)
+    {
+        return this.selectByEmailOrPhone(this.db, email, phone);
+    }
+
+    private async selectByEmailOrPhone(db: Database, email?: string, phone?: string)
+    {
+        if (!email && !phone)
         {
-            return this.findByEmail(email);
-        }
-        else if (phone)
-        {
-            return this.findByPhone(phone);
+            return null;
         }
 
-        return null;
+        const result = await db
+            .select()
+            .from(users)
+            .where(email ? eq(users.email, normalizeEmail(email)) : eq(users.phone, phone!))
+            .limit(1);
+
+        return result[0] ?? null;
     }
 
     /**

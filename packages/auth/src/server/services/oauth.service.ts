@@ -23,6 +23,7 @@ import {
     OAuthStateExpiredError,
     OAuthStateInvalidError,
     SignupDisabledError,
+    SignInRefusedError,
     UnverifiedEmailLinkError,
 } from '@spfn/auth/errors';
 
@@ -56,6 +57,7 @@ import {
     type UnlinkNotification,
 } from '../lib/oauth';
 import { providerAccountFields } from '../lib/oauth/provider-account';
+import { reportAccountRefusal, signInAttempt, type SignInRequest } from './sign-in-guard.service';
 import { registerPublicKeyService } from './key.service';
 import { updateLastLoginService } from './user.service';
 import { accountRefusal, admissionRefusalError } from './admission.service';
@@ -377,7 +379,11 @@ async function persistWebSignIn(signIn: WebSignIn): Promise<OAuthCallbackResult>
     const { userId, isNewUser } = await signInAccount(params.provider, identity, tokens, stateData.metadata);
 
     // 세션(공개키) 발급 전 계정 상태 검사 — both branches of `signInAccount` meet here.
-    await assertActiveForOAuthSession(userId, () => new OAuthAccountNotFoundError());
+    await assertActiveForOAuthSession(
+        userId,
+        () => new OAuthAccountNotFoundError(),
+        { channel: 'oauth', request: params, keyId: stateData.keyId },
+    );
 
     // The event payload's row. Whether the key is bound is decided where it is
     // written, under the account lock (`registerPublicKeyService`).
@@ -769,10 +775,15 @@ export async function lockLinkedAccount(provider: SocialProvider, providerUserId
  * status는 replica가 아닌 primary에서 읽는다: 삭제 요청 직후(세션 revoke + status
  * 전이가 막 커밋된 시점) 복제 지연 창에서 OAuth 로그인이 stale 'active' 상태를 보고
  * 새 세션 키를 발급받는 것을 막기 위함.
+ *
+ * An account refused here is told to the app's `settled` as the sign-in
+ * `signIn` names, once the transaction has rolled back (`reportAccountRefusal`);
+ * both OAuth flows name theirs.
  */
 export async function assertActiveForOAuthSession(
     userId: number,
     missing: () => Error = () => new ValidationError({ message: 'User not found' }),
+    signIn: OAuthSignInAttempt | null = null,
 ): Promise<void>
 {
     const user = await usersRepository.findByIdOnPrimary(userId);
@@ -785,8 +796,17 @@ export async function assertActiveForOAuthSession(
     const refusal = await accountRefusal(user);
     if (refusal)
     {
+        await reportAccountRefusal(signIn && signInAttempt(user, signIn.channel, signIn.request), refusal, signIn?.keyId);
         throw admissionRefusalError(refusal);
     }
+}
+
+/** An OAuth sign-in as the app's `signIn` guard is told of it: the channel, the request, the key it presented. */
+export interface OAuthSignInAttempt
+{
+    channel: 'oauth' | 'oauth-native';
+    request: SignInRequest;
+    keyId: string;
 }
 
 /**
@@ -1085,6 +1105,7 @@ const REASON_BY_ERROR: [abstract new (...args: never[]) => Error, OAuthErrorReas
     [OAuthProviderAlreadyLinkedError, 'provider_already_linked'],
     [OAuthSignInContendedError, 'sign_in_contended'],
     [SignupDisabledError, 'signup_disabled'],
+    [SignInRefusedError, 'sign_in_refused'],
     [AccountDisabledError, 'account_unavailable'],
     [AccountPendingDeletionError, 'account_unavailable'],
     [OAuthAccountNotFoundError, 'account_unavailable'],

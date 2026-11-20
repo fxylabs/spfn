@@ -195,7 +195,12 @@ async function persistNativeLogin(
         }
 
         // 세션(공개키) 발급 전 계정 상태 검사 — oauth.service.ts의 web 흐름과 동일한 지점
-        await assertActiveForOAuthSession(userId);
+        // No `webProxy`, as for the key below.
+        await assertActiveForOAuthSession(userId, undefined, {
+            channel: 'oauth-native',
+            request: { ip: params.ip, userAgent: params.userAgent },
+            keyId: params.keyId,
+        });
 
         // 공개키 등록 (같은 사용자의 활성 키 재등록만 무시 — 그 밖의 keyId 충돌은 409)
         //
