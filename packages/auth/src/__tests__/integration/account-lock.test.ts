@@ -396,8 +396,9 @@ describe.skipIf(!dbAvailable)('The account row is the one lock for its credentia
 
         const [response] = await Promise.all([signIn, suspension]);
 
-        expect(response.status).toBe(403);
-        expect((await response.json()).name ?? '').not.toBe('InternalServerError');
+        // Refused under the lock as a wrong password is (#364).
+        expect(response.status).toBe(401);
+        expect((await response.json()).error.code).toBe('InvalidCredentialsError');
         expect(await getTestDb().select().from(userPublicKeys).where(eq(userPublicKeys.keyId, key.keyId))).toEqual([]);
     }, 20_000);
 

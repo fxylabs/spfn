@@ -153,6 +153,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   template imports them; `spfn build` bundles with the CLI's own tsup, and core and the CLI declare
   their own dotenv. An existing app keeps them harmlessly, apart from `drizzle-typebox` under npm
   (above). The unused `buildServerForCommand` helper, which ran an app-level tsup, is gone.
+- **BREAKING: @spfn/auth: a disabled or pending-deletion account answers password sign-in as a wrong
+  password does (#364).** `POST /_auth/login` used to answer a wrong password `InvalidCredentialsError`
+  (401) and the right one `AccountDisabledError` / `AccountPendingDeletionError` (403), telling any
+  caller the password of an account that cannot sign in was right. Now a disabled, suspended,
+  pending-deletion or purged account is answered `InvalidCredentialsError` — same status, code and
+  body — whatever the password, after the same comparison against its own hash, with the refusal
+  read from columns already on the row (no extra query; the purge date is no longer looked up there).
+  The same holds under the account lock when the account changes between the check and the session
+  write. `POST /_auth/deletion/cancel` answers `DeletionNotRequestedError` only to an active account;
+  a password for an account that is not active and has nothing pending is `InvalidCredentialsError`.
+  With a sign-in guard, `settled` is told `failed` with `accountDisabled` / `pendingDeletion` for the
+  right password (`credential` for a wrong one), and `admit` is asked again after either, as after a
+  wrong password; the README has a recipe for e-mailing the owner from there. No separate event.
+  Those two reasons are told only for the right password, so a counter, a delay or any answer
+  derived from `settled` must treat them exactly as `credential`: the README's lockout example now
+  counts every failure at `stage: 'credential'` (and records `stage`) instead of
+  `reason = 'credential'`, which fired after five wrong passwords and never after the right one.
+  **Migrate:** a client that showed the account status or offered restore on a 403 from password
+  sign-in gets a 401 instead; tell the owner out of band (`signIn.settled`). OAuth, passkey, device
+  code, device link and one-time-token sign-in keep their answers. The mobile contract does not
+  change: its error list is one list for the whole surface, and both codes stay in it for those
+  operations.
 - **BREAKING: @spfn/core: workers started on `getBoss()` run core's fetch loop, not pg-boss's
   worker, so they no longer appear in pg-boss's `wip` events (#359).** Core needs to know when a
   worker's last fetch has settled, which pg-boss 11 does not expose; the loop runs on pg-boss's

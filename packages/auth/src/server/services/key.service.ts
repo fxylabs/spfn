@@ -137,9 +137,10 @@ export interface RegisterPublicKeyParams
     loginEvent?: DeferredLoginEvent;
     /**
      * The channel's own answer for an account that may not open a session,
-     * where it is not `loginService`'s two (`AccountDisabledError`,
-     * `AccountPendingDeletionError`). A signed-request replacement answers its
-     * claim's `refusal` instead, and needs none.
+     * where it is not the package's two (`AccountDisabledError`,
+     * `AccountPendingDeletionError`): `InvalidCredentialsError` on `password`,
+     * which answers a refused account as a wrong password. A signed-request
+     * replacement answers its claim's `refusal` instead, and needs none.
      */
     inactiveAccount?: () => Error;
     /**

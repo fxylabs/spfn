@@ -314,6 +314,19 @@ describe.skipIf(!dbAvailable)('account status and deletion are separate facts (T
         }
     }
 
+    /** What password sign-in answers in a cell: a refused account as a wrong password (#364). */
+    async function expectPasswordAnswer(response: Response, status: UserStatus, pending: boolean): Promise<void>
+    {
+        if (pending || status !== 'active')
+        {
+            await expectError(response, 401, 'InvalidCredentialsError');
+        }
+        else
+        {
+            expect(response.status).toBe(200);
+        }
+    }
+
     const CELLS = (['active', 'inactive', 'suspended'] as const)
         .flatMap((status) => (['none', 'pending', 'after cancel'] as const).map((deletion) => ({ status, deletion })));
 
@@ -335,7 +348,7 @@ describe.skipIf(!dbAvailable)('account status and deletion are separate facts (T
         const pending = deletion === 'pending';
 
         await expectCellAnswer(await send('GET', '/_auth/session', account, undefined, session.authorization), status, pending, 200);
-        await expectCellAnswer((await login(account)).response, status, pending, 200);
+        await expectPasswordAnswer((await login(account)).response, status, pending);
         await expectCellAnswer(await requestDeletion(account, session), status, pending, 200);
         const scheduled = !pending && status === 'active';
 
@@ -347,7 +360,8 @@ describe.skipIf(!dbAvailable)('account status and deletion are separate facts (T
         }
         else
         {
-            await expectError(cancelled, 404, 'DeletionNotRequestedError');
+            // Not active, nothing pending: answered as a wrong password (#364).
+            await expectError(cancelled, 401, 'InvalidCredentialsError');
         }
         expect(await stateOf(account)).toEqual({ status, deletion: null });
     });
@@ -361,7 +375,7 @@ describe.skipIf(!dbAvailable)('account status and deletion are separate facts (T
         expect(await stateOf(account)).toEqual({ status: 'suspended', deletion: 'pending' });
         expect((await cancel(account, { password: TEST_PASSWORD })).status).toBe(204);
 
-        await expectError((await login(account)).response, 403, 'AccountDisabledError');
+        await expectError((await login(account)).response, 401, 'InvalidCredentialsError');
         expect(await stateOf(account)).toEqual({ status: 'suspended', deletion: null });
         expect(await requestRows(account)).toEqual([{ status: 'cancelled', requestedBy: 'admin' }]);
     });
@@ -686,13 +700,9 @@ describe.skipIf(!dbAvailable)('account status and deletion are separate facts (T
             { userId: deleted.id, status: 'completed', purgeScheduledAt: PURGE_AT },
         ]);
 
-        const pendingLogin = (await login(pending)).response;
-        expect(pendingLogin.status).toBe(403);
-        const refusal = await pendingLogin.json();
-        expect(refusal.error.code).toBe('AccountPendingDeletionError');
-        expect(refusal.details.purgeScheduledAt).toBe(PURGE_AT.toISOString());
-        await expectError((await login(deleted)).response, 403, 'AccountDisabledError');
-        await expectError((await login(suspended)).response, 403, 'AccountDisabledError');
+        await expectError((await login(pending)).response, 401, 'InvalidCredentialsError');
+        await expectError((await login(deleted)).response, 401, 'InvalidCredentialsError');
+        await expectError((await login(suspended)).response, 401, 'InvalidCredentialsError');
         expect((await login(active)).response.status).toBe(200);
     });
 });

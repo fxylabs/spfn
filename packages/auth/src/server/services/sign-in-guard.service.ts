@@ -17,7 +17,9 @@
  * - a wrong credential checked before any transaction (`password`,
  *   `deletion-cancel`, the proof at `mfa/verify`) is told, under the account
  *   lock, and `admit` asked again there (`recordSignInFailure`), so an attempt
- *   that crossed the app's limit is answered with the refusal;
+ *   that crossed the app's limit is answered with the refusal; a right
+ *   password for an account the package refuses is told and answered the same
+ *   way, with the refusal's reason;
  * - a refusal — by `admit`, or by the package of an account that is not
  *   active — and a passkey assertion that fails for a known credential are
  *   told once the transaction they were decided in, and every one around it,
@@ -268,11 +270,14 @@ async function underAccountLock<T>(attempt: SignInAttempt, work: (locked: SignIn
 
 /**
  * The answer to a credential check that did not pass — a wrong password, an
- * unknown identifier, or an account `admit` refused before the comparison —
- * once the failure is recorded. A refused account is answered the refusal
- * whatever the password was, reported as `refused`; any other failure is
- * recorded as `credential` and answered the refusal only when `admit`, asked
- * again after recording it, now refuses.
+ * unknown identifier, an account `admit` refused before the comparison, or a
+ * right password for an account the package refuses — once the failure is
+ * recorded. A refused account is answered the refusal whatever the password
+ * was, reported as `refused`; any other failure is recorded as `reason` and
+ * answered the refusal only when `admit`, asked again after recording it, now
+ * refuses. A right password for a disabled or pending account (`reason`
+ * `accountDisabled`, `pendingDeletion`) is recorded and answered exactly as a
+ * wrong one: only `settled` learns why.
  *
  * @param attempt null without a guard: the answer is `wrong()`, and nothing is recorded
  */
@@ -280,7 +285,7 @@ export async function failedCredentialAnswer(
     attempt: SignInAttempt | null,
     refusal: SignInRefusal | null,
     wrong: () => Error,
-    keyId?: string,
+    { keyId, reason = 'credential' }: { keyId?: string; reason?: SignInFailureReason } = {},
 ): Promise<Error>
 {
     if (!attempt)
@@ -295,7 +300,7 @@ export async function failedCredentialAnswer(
         return new SignInRefusedError({ code: refusal.code });
     }
 
-    const latest = await recordSignInFailure(attempt, 'credential', keyId);
+    const latest = await recordSignInFailure(attempt, reason, keyId);
 
     return latest ? new SignInRefusedError({ code: latest.code }) : wrong();
 }

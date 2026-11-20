@@ -49,7 +49,7 @@ import { revokeAllOAuth2GrantsForUser } from './oauth2-grant.service';
 import { setAccountDeletion } from './user.service';
 import { assertStepUp } from './mfa.service';
 import { proveRecentAuthentication, recentAuthenticationHolds, type RecentAuthenticationProof } from './passkey.service';
-import { admissionRefusalError, admitCompletion, type PrincipalCredential } from './admission.service';
+import { accountRefusalReason, admissionRefusalError, admitCompletion, admitsAccount, type PrincipalCredential } from './admission.service';
 import { ROUTE_ENROLMENT } from '../routes/channels';
 import { getDeletionConfig } from '../lib/deletion-config';
 import { getRecentAuthMs } from '../lib/config';
@@ -191,6 +191,12 @@ interface ProvenHolder
  * whatever the password — and a wrong password recorded before the 401. A
  * verification token proves the mailbox, not a guess, and is not guarded.
  *
+ * A password for an account that is not active and has no deletion pending
+ * is answered as a wrong one, right or not, after the same comparison: this
+ * door is for a pending deletion, and must not tell a caller that a disabled
+ * account's password was right (`loginService` answers it the same way).
+ * `settled` is told `accountDisabled` for a right password.
+ *
  * @throws ValidationError, InvalidCredentialsError, InvalidVerificationTokenError,
  *   VerificationTokenPurposeMismatchError, VerificationTokenTargetMismatchError, SignInRefusedError
  */
@@ -216,10 +222,13 @@ async function proveAccountHolder(user: User | null, params: CancelAccountDeleti
     const refusal = attempt && await admitSignIn(attempt);
     const comparedHash = refusal || !user?.passwordHash ? await getDummyPasswordHash() : user.passwordHash;
     const matched = await verifyPassword(params.password, comparedHash);
+    const accountRefused = user !== null && accountRefusalReason(user) === 'accountDisabled';
 
-    if (refusal || !user?.passwordHash || !matched)
+    if (refusal || !user?.passwordHash || !matched || accountRefused)
     {
-        throw await failedCredentialAnswer(attempt, refusal, () => new InvalidCredentialsError());
+        throw await failedCredentialAnswer(attempt, refusal, () => new InvalidCredentialsError(), {
+            reason: matched && accountRefused ? 'accountDisabled' : 'credential',
+        });
     }
 
     return { user, proof: { kind: 'password', verifiedHash: user.passwordHash } };
@@ -657,6 +666,7 @@ export async function cancelAccountDeletionService(
  * account's keys stay revoked: the person signs in anew.
  *
  * @throws DeletionNotRequestedError when the account's deletion is not pending
+ *   (InvalidCredentialsError to a password, for an account that is not active)
  *   or there is no pending request to claim; InvalidVerificationTokenError
  *   when the token was spent already
  * @returns false, with nothing written, when the password hash moved since it was verified
@@ -666,7 +676,7 @@ async function claimCancellation({ user, proof }: ProvenHolder): Promise<boolean
     const locked = await usersRepository.lockAccount(user.id);
     if (locked?.deletion !== 'pending')
     {
-        throw new DeletionNotRequestedError();
+        throw notPendingError(locked, proof);
     }
 
     if (proof.kind === 'password' && locked.passwordHash !== proof.verifiedHash)
@@ -695,6 +705,19 @@ async function claimCancellation({ user, proof }: ProvenHolder): Promise<boolean
     }
 
     return true;
+}
+
+/**
+ * A cancel of an account with no deletion pending: `DeletionNotRequestedError`,
+ * except to a password for an account that is not active (or is gone), which is
+ * answered as a wrong password — as `proveAccountHolder` answers it before the
+ * lock.
+ */
+function notPendingError(locked: User | null, proof: CancelProof): Error
+{
+    const refused = proof.kind === 'password' && !(locked && admitsAccount(locked));
+
+    return refused ? new InvalidCredentialsError() : new DeletionNotRequestedError();
 }
 
 // ============================================================================

@@ -36,8 +36,16 @@ export type SignInStage = 'credential' | 'second-factor';
  *   one the attempt could no longer spend: the proof or the challenge spent by
  *   another request first, the challenge expired, or its key generation ended
  * - `refused` — `admit` refused it
- * - `accountDisabled` / `pendingDeletion` — the package refused the account
+ * - `accountDisabled` / `pendingDeletion` — the package refused the account;
+ *   on `password` and `deletion-cancel`, told only for the right password
+ *   (a wrong one is `credential`), though both are answered alike
  * - `secondFactorLocked` — the account's second-factor budget is spent
+ *
+ * A counter, a delay or any answer the app derives from `settled` must treat
+ * `accountDisabled` and `pendingDeletion` exactly as `credential`: they exist
+ * so the app can tell the owner, out of band. Count failures by `stage`, not
+ * by reason — a counter of `credential` alone fires after wrong passwords and
+ * never after the right one, and tells a caller which was which.
  */
 export type SignInFailureReason =
     | 'credential'

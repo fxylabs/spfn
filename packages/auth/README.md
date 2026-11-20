@@ -838,9 +838,11 @@ decides what becomes of a write it makes:
     your history is missing. On the first path the same two failures change the answer instead: a
     busy lock answers 503 (`AccountBusyError`), a throw 500, and nothing is lost unseen.
 - **A refusal is not a failure the package counts.** `reason: 'refused'` is your own `admit`'s
-  refusal told back to you; whether it counts toward anything is your policy's choice. The worked
-  example below counts `credential` only, so a locked account's further attempts do not extend its
-  lock.
+  refusal told back to you. The worked example below counts it all the same, with every failure at
+  `stage: 'credential'`: the deciding `admit` is reached only by a right password, so a right
+  password it refuses is told `refused` where a wrong one is told `credential`, and a counter that
+  skipped either would count them apart. A locked account's further attempts add to a count that is
+  already past the limit, and the lift starts it again.
 - **A throw** from `admit` answers 500, with no session. From `settled` on a failure, 500 — never a
   quiet 401 with nothing recorded. From `settled` on a success, the session rolls back: no key, no
   `auth.login`.
@@ -861,15 +863,28 @@ decides what becomes of a write it makes:
 | `oauth`, `oauth-native`, `password-reset`, `device-code`, `device-link` | the provider, the reset link, the approving device | under the lock where the key is written | `failed` (`refused`, `accountDisabled`, `pendingDeletion`); `challenged` or `succeeded` |
 | `register`, `signup-link`, `invitation` | the code, the link, the invitation | under the lock, after `beforeRegister`; a refusal rolls the account back | `failed` (`refused`, `user: null`); `succeeded` |
 | second factor (`POST /_auth/mfa/verify`), the 202's channel | the TOTP code, recovery code or passkey | before the proof is judged, and under the lock where the key is activated | `failed` (`secondFactor`, `secondFactorLocked`, `refused`, `accountDisabled`, `pendingDeletion`), `stage: 'second-factor'`; `succeeded` once |
-| `deletion-cancel` (`POST /_auth/deletion/cancel`) | the password for an identifier — no session results | before the comparison; a verification-code cancel is not guarded | `failed` (`credential`, `refused`) |
+| `deletion-cancel` (`POST /_auth/deletion/cancel`) | the password for an identifier — no session results | before the comparison; a verification-code cancel is not guarded | `failed` (`credential`, `refused`, `accountDisabled` for an account not active with nothing pending) |
 | renewal, `keys/rotate` | — | never | never |
+
+**Count by stage, never by reason.** A counter, a delay or any answer the app derives from
+`settled` must treat `accountDisabled` and `pendingDeletion` exactly as `credential`: they exist so
+the app can tell the **owner**, out of band. On `password` and `deletion-cancel` they are told only
+for the right password, and a wrong one is told `credential`, so a lockout that counts `credential`
+alone fires after five wrong guesses and never after the right one — the oracle the package's own
+answer no longer is. Count every `failed` outcome with `stage: 'credential'`, whatever its reason,
+as the worked example below does; a reason added later is then counted without a change of yours.
 
 A wrong **step-up** or **enrolment** proof is not reported: a signed-in person's typo is not a
 sign-in. **Not reported either**: an attempt that never identifies an account or a credential — a
 malformed request, an unknown passkey credential id, a challenge, link or code already expired or
 spent when it is presented, an
 identity the OAuth provider would not vouch for — and the verification-code path of
-`deletion/cancel` (no password is checked; no session results). A reset link refused at its
+`deletion/cancel` (no password is checked; no session results). Nor is a password
+`deletion/cancel` that lost a race after its password matched: the account, read again under its
+lock, is no longer pending and not active, or its password hash changed again after it was checked
+a second time — answered 401 `InvalidCredentialsError`, told nothing. The race is the owner's
+(a status change or a password change landing within the same request), not a guesser's to arrange,
+and a counter misses one right password by it. A reset link refused at its
 confirmation, before the sign-in step, is not a sign-in yet; an account refused at the completion is
 reported. Do not record from inside `admit`: a write there rolls back with a refused session — the
 report of the refusal is `settled`'s.
@@ -879,8 +894,57 @@ asked before the password is compared. An account it refuses is compared against
 never its own, and answered the refusal whatever the password was. Skipping the comparison would
 make a refused account answer faster than an unknown one; comparing its real hash would make the
 refusal answer the password. An unknown identifier reaches `admit` with `user: null` — refuse those
-too if your policy counts identifiers. The package's own refusals (`AccountDisabledError`,
-`AccountPendingDeletionError`) keep their order: after the password.
+too if your policy counts identifiers.
+
+**An account the package refuses answers as a wrong password.** On `password` and
+`deletion-cancel`, an account that is disabled, suspended, pending deletion or purged is answered
+exactly what a wrong password is — `InvalidCredentialsError` (401), the same body — whatever the
+password. Its own hash is still compared, and the refusal is read from columns already on the row,
+so the refused path issues no statement the wrong-password path does not. Otherwise the answer would
+tell a caller the password was right on an account that cannot sign in. On `deletion-cancel` a
+pending deletion is the door itself, so only an account that is not active and has nothing pending
+is refused there; an active account with nothing pending is answered `DeletionNotRequestedError`.
+`settled` is the one place the reason reaches: a right password is told `failed` with
+`accountDisabled` or `pendingDeletion`, a wrong one `credential`, and `admit` is asked again after
+either. The other channels (OAuth, passkey, device code, device link, one-time token) prove
+possession of something a guesser does not hold, and still answer `AccountDisabledError` /
+`AccountPendingDeletionError`.
+
+#### Recipe — tell the owner of a refused account by e-mail
+
+The person who typed the right password for a disabled or pending-deletion account is shown "wrong
+password". Tell the account's owner why, out of band, from `settled`:
+
+```typescript
+// server.config.ts
+import { onAfterCommit } from '@spfn/core/db';
+import { createAuthLifecycle } from '@spfn/auth/server';
+import { accountNoticeMailer } from './src/server/mail/account-notice';
+
+export const authLifecycle = createAuthLifecycle({
+    signIn: {
+        settled: (outcome) =>
+        {
+            const told = outcome.result === 'failed'
+                && (outcome.reason === 'accountDisabled' || outcome.reason === 'pendingDeletion');
+
+            if (told && outcome.user?.email)
+            {
+                // After the report's own transaction commits: mail is not database work.
+                const { user, reason } = outcome;
+                onAfterCommit(() => accountNoticeMailer.send(user, reason));
+            }
+        },
+    },
+});
+```
+
+The mail goes to the account's own address, never to the caller: for `pendingDeletion` it carries
+the purge date and the restore path (`POST /_auth/deletion/cancel`), for `accountDisabled` the
+status and how to reach support. The reason arrives only with the right password, so the mail is
+sent only when the owner's password was used — which is why nothing but this mail may read it
+(see "Count by stage, never by reason" above). Rate-limit it (one per account per hour, say) so a
+leaked password cannot flood the inbox. Without a guard the package tells nobody.
 
 **Under concurrency** an attempt already past `admit` when your limit is reached is still judged, but
 a right password then meets the deciding `admit` under the account lock, after the failure that
@@ -901,6 +965,7 @@ export const signInHistory = pgTable('sign_in_history', {
     id: serial('id').primaryKey(),
     userId: bigint('user_id', { mode: 'number' }),
     channel: text('channel').notNull(),
+    stage: text('stage').notNull(),
     result: text('result').notNull(),
     reason: text('reason'),
     ip: text('ip'),
@@ -928,6 +993,7 @@ export class SignInHistoryRepository extends BaseRepository
         await this.db.insert(signInHistory).values({
             userId: outcome.user?.id ?? null,
             channel: outcome.channel,
+            stage: outcome.stage,
             result: outcome.result,
             reason: outcome.result === 'failed' ? outcome.reason : null,
             ip: outcome.ip ?? null,
@@ -935,13 +1001,18 @@ export class SignInHistoryRepository extends BaseRepository
         });
     }
 
-    /** Wrong passwords since the last lift — read in the package's transaction, under the account lock. */
+    /**
+     * Failures at the credential stage since the last lift, whatever their reason — read in the
+     * package's transaction, under the account lock. Never a list of reasons: `accountDisabled` and
+     * `pendingDeletion` are told only for the right password.
+     */
     async failuresSinceLift(userId: number): Promise<number>
     {
         const [lift] = await this.db.select().from(signInLockLifts).where(eq(signInLockLifts.userId, userId));
         const [row] = await this.db.select({ n: count() }).from(signInHistory).where(and(
             eq(signInHistory.userId, userId),
-            eq(signInHistory.reason, 'credential'),
+            eq(signInHistory.result, 'failed'),
+            eq(signInHistory.stage, 'credential'),
             gt(signInHistory.at, lift?.liftedAt ?? new Date(0)),
         ));
 
@@ -1011,9 +1082,6 @@ it.
   that clears the flag; enforcement is a restricted session, not a refusal (tracked separately).
 - **The address of a sign-in made from a Next.js server action**, which today is the Next server's
   own (tracked separately in `@spfn/core`).
-- **`AccountDisabledError` after a right password only** — the package's own refusal of a disabled
-  account still answers after the password is checked (tracked separately). The app's refusal does
-  not.
 - **Moving `beforeRegister`** onto the lifecycle.
 
 A second `createAuthLifecycle()` that omits `signIn` leaves it as it is; one that states other
@@ -2640,7 +2708,8 @@ two ways in are indistinguishable.
   longer stand behind is not one the waiting device may collect.
 - **The poll re-checks the account.** It is a login, so it admits the account through
   `admitPrincipal` (on the approving key) and refuses a suspended or pending-deletion account
-  with the same errors `/_auth/login` does. Approval and collection are separate moments, and
+  with `AccountDisabledError` / `AccountPendingDeletionError`, as passkey and OAuth sign-in do
+  (password sign-in answers a refused account as a wrong password; a device code is not a guess). Approval and collection are separate moments, and
   what the account is when the key is registered is what counts.
 - **`start` bounds what it stores.** It is the one route that takes key material from a caller
   who cannot authenticate, so `publicKey`, `keyId` and `fingerprint` carry length limits —
@@ -7184,10 +7253,13 @@ users.status (active | inactive | suspended) is not written by any of them.
   `sendNotifications` is on) a notice with the scheduled purge date and how to cancel goes to the
   channel the account has: by e-mail when it has an address, otherwise by SMS (`sendSMS` from
   `@spfn/notification`, the sender verification codes use).
-- **Login is blocked while pending** — password, passkey and OAuth sign-in and every door of the
-  admission (`authenticate` and the rest) reject an account whose deletion is pending with
+- **Login is blocked while pending** — passkey and OAuth sign-in and every door of the admission
+  (`authenticate` and the rest) reject an account whose deletion is pending with
   `AccountPendingDeletionError` (403, `details.purgeScheduledAt`) — before its status, so the
-  client can show a recovery prompt even for a suspended account.
+  client can show a recovery prompt even for a suspended account. Password sign-in answers it
+  `InvalidCredentialsError`, as a wrong password, whatever the password: the owner learns of it
+  from the app (`signIn.settled`, [recipe](#recipe--tell-the-owner-of-a-refused-account-by-e-mail)),
+  never from the response.
 - **Cancel (recovery)** — `POST /_auth/deletion/cancel` (public — sessions were revoked at
   request time, so there's no Bearer token to authenticate with), the one door that admits an
   account whose deletion is pending. Email or phone, plus **either** the `password` **or** a

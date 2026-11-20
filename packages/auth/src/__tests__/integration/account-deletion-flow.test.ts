@@ -4,7 +4,7 @@
  * Real HTTP requests against the mounted auth router, plus direct service calls
  * for the purge sweep (so the test controls `purgeScheduledAt` precisely instead
  * of waiting on a cron tick). Covers:
- * - request -> login blocked (403, AccountPendingDeletionError) -> cancel -> login succeeds
+ * - request -> login blocked (401, as a wrong password: #364) -> cancel -> login succeeds
  * - purge sweep, anonymize strategy: PII scrubbed, same email/social account reusable
  * - purge sweep, hard-delete strategy: row physically removed, audit row survives (userId -> null)
  * - B1 regression: cancel-during-sweep — a request already read into a sweep's batch,
@@ -157,7 +157,7 @@ describe.skipIf(!dbAvailable)('Account Deletion Lifecycle Integration', () =>
         });
     }
 
-    it('request -> login blocked (403, purgeScheduledAt) -> cancel -> login succeeds again', async () =>
+    it('request -> login blocked (401, as a wrong password) -> cancel -> login succeeds again', async () =>
     {
         const email = 'roundtrip@example.com';
         const password = 'SecurePassword123!';
@@ -173,12 +173,11 @@ describe.skipIf(!dbAvailable)('Account Deletion Lifecycle Integration', () =>
         const { purgeScheduledAt } = await requestRes.json();
         expect(new Date(purgeScheduledAt).getTime()).toBeGreaterThan(Date.now());
 
-        // Login is now blocked with the dedicated pending-deletion error
+        // Login is now blocked, answered as a wrong password (#364)
         const blockedLogin = await loginAttempt(email, password);
-        expect(blockedLogin.status).toBe(403);
+        expect(blockedLogin.status).toBe(401);
         const blockedBody = await blockedLogin.json();
-        expect(blockedBody.__type).toBe('AccountPendingDeletionError');
-        expect(blockedBody.details?.purgeScheduledAt).toBeDefined();
+        expect(blockedBody.__type).toBe('InvalidCredentialsError');
 
         // Cancel (recovery) — credential-based, no Bearer token needed
         const cancelRes = await app.request('/_auth/deletion/cancel', {

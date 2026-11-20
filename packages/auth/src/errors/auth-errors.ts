@@ -124,7 +124,9 @@ export class AccountNotFoundError extends UnauthorizedError
 /**
  * Account Disabled Error (403)
  *
- * Thrown when user account is disabled or inactive
+ * Thrown when user account is disabled or inactive — except on the password
+ * channels (`/login`, `deletion/cancel`), which answer it as a wrong password
+ * (`InvalidCredentialsError`) so the answer never says the password was right.
  */
 export class AccountDisabledError extends ForbiddenError
 {
@@ -142,9 +144,10 @@ export class AccountDisabledError extends ForbiddenError
 /**
  * Account Pending Deletion Error (403)
  *
- * Thrown on login (password/OAuth/authenticate) when the account is within its
- * deletion grace period. Carries `purgeScheduledAt` so the client can offer a
- * recovery flow instead of a generic "disabled" message.
+ * Thrown on sign-in (passkey/OAuth/device code) and by `authenticate` when the
+ * account is within its deletion grace period. Carries `purgeScheduledAt` so the
+ * client can offer a recovery flow instead of a generic "disabled" message.
+ * Password sign-in answers it as a wrong password (`InvalidCredentialsError`).
  */
 export class AccountPendingDeletionError extends ForbiddenError
 {
