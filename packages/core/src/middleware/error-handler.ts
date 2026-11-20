@@ -11,7 +11,7 @@ import { SerializableError, type SerializedError } from '@spfn/core/errors';
 import { describeError, logger } from '@spfn/core/logger';
 import type { DatabaseErrorDescription, ErrorDescription } from '@spfn/core/logger';
 import { env } from '@spfn/core/config';
-import { loggedPath } from './logged-path';
+import { loggedError, loggedPath, loggedUrl } from './logged-path';
 
 const errorLogger = logger.child('@spfn/core:error-handler');
 
@@ -193,7 +193,9 @@ function extractCauseMessage(err: Error): string | undefined
 const SENSITIVE_HEADERS = new Set(['authorization', 'cookie', 'x-api-key', 'x-auth-token']);
 
 /**
- * Extract headers from request, masking sensitive values
+ * Extract headers from request, masking sensitive values. `Referer` names the
+ * page that made the request, so it is redacted like a request path
+ * (`loggedUrl`).
  */
 function extractHeaders(c: Context): Record<string, string>
 {
@@ -201,7 +203,9 @@ function extractHeaders(c: Context): Record<string, string>
 
     c.req.raw.headers.forEach((value, key) =>
     {
-        headers[key] = SENSITIVE_HEADERS.has(key.toLowerCase()) ? '***' : value;
+        const name = key.toLowerCase();
+
+        headers[key] = SENSITIVE_HEADERS.has(name) ? '***' : name === 'referer' ? loggedUrl(value) : value;
     });
 
     return headers;
@@ -253,9 +257,12 @@ function buildOnErrorContext(c: Context, statusCode: number): OnErrorContext
 }
 
 /**
- * Log error with appropriate level based on status code
+ * Log error with appropriate level based on status code. The error is
+ * `loggedError`'s description: under a redacted path prefix it carries no
+ * message, which may quote the path.
  */
 function logError(
+    c: Context,
     err: Error,
     logData: ErrorLogData,
     includeStack: boolean,
@@ -265,12 +272,12 @@ function logError(
 
     if (includeStack)
     {
-        errorLogger[logLevel]('Error occurred', err, logData);
+        errorLogger[logLevel]('Error occurred', loggedError(c, err), logData);
     }
     else
     {
         // Without `includeStack` the line names the error but carries no trace
-        errorLogger[logLevel]('Error occurred', { ...logData, error: describeError(err, { stack: false }) });
+        errorLogger[logLevel]('Error occurred', { ...logData, error: loggedError(c, err, { stack: false }) });
     }
 }
 
@@ -420,7 +427,7 @@ export function ErrorHandler(options: ErrorHandlerOptions = {}): (err: Error, c:
 
             if (enableLogging)
             {
-                logError(err, {
+                logError(c, err, {
                     type: err.constructor.name,
                     statusCode,
                     path,
@@ -468,7 +475,7 @@ export function ErrorHandler(options: ErrorHandlerOptions = {}): (err: Error, c:
 
         if (enableLogging)
         {
-            logError(err, {
+            logError(c, err, {
                 type: err.name || 'Error',
                 statusCode,
                 path,

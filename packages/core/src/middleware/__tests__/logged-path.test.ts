@@ -21,6 +21,10 @@
  * | T8  | a path nothing declared                                                | a silent change to every app's path fields                      |
  * | T9  | entries that are not literal prefixes                                  | a typo that redacts nothing                                     |
  * | T10 | a hand-written `app.ts` with its own RequestLogger and ErrorHandler   | the declaration published only on the auto-configured path      |
+ * | T15a | a path-parameter validation failure under the prefix                 | the logged 400 body (`fields[].value`) quoting the segment      |
+ * | T15b | an error whose message and cause quote the segment, with and without `includeStack` | the error handler's line carrying either message     |
+ * | T15c | the request logger's `Request failed` line, downstream throwing a message quoting the segment | that line carrying the message |
+ * | T15d | a `Referer` under the prefix in the `onError` context                 | the referring page's token in the context's headers             |
  */
 
 import { describe, it, expect, afterEach, vi } from 'vitest';
@@ -29,11 +33,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Hono } from 'hono';
+import { Type } from '@sinclair/typebox';
 
 import { Logger } from '@spfn/core/logger';
 import { NotFoundError } from '@spfn/core/errors';
 import { route, defineRouter } from '@spfn/core/route';
-import { loggedPath, setRedactPaths, type OnErrorContext } from '@spfn/core/middleware';
+import { ErrorHandler, RequestLogger, loggedPath, setRedactPaths, type OnErrorContext } from '@spfn/core/middleware';
 import { defineServerConfig } from '../../server/config-builder';
 import { createServer } from '../../server/create-server';
 import { validateServerConfig } from '../../server/validation';
@@ -53,6 +58,12 @@ const appRouter = defineRouter({
     }),
     getImporter: route.get('/api/importer/:id').handler(async () => ({ ok: true })),
     getImportRoot: route.get('/api/import').handler(async () => ({ ok: true })),
+    checkImport: route.get('/api/import/:token/check')
+        .input({ params: Type.Object({ token: Type.String({ pattern: '^[a-z-]+$' }) }) })
+        .handler(async () => ({ ok: true })),
+    checkUser: route.get('/users/:id/check')
+        .input({ params: Type.Object({ id: Type.String({ pattern: '^[a-z-]+$' }) }) })
+        .handler(async () => ({ ok: true })),
     failUser: route.get('/users/:id/fail').handler(async () =>
     {
         throw new NotFoundError({ message: 'No such user' });
@@ -242,6 +253,108 @@ describe('a declared path prefix is redacted in every core log line (#164)', () 
             process.chdir(cwd);
             rmSync(appDir, { recursive: true, force: true });
         }
+    });
+
+    it('T15a: a path-parameter validation failure under the prefix logs status and duration, not the 400 body', async () =>
+    {
+        const app = await createServer(serverConfig(builder => builder.logging({ redactPaths: ['/api/import'] })));
+        const segment = SECRET.toUpperCase();
+        const completed = async (path: string): Promise<{ context: Record<string, unknown>; output: string }> =>
+        {
+            const { lines, output } = captureLoggerClass(Logger);
+            expect((await get(app, path)).status).toBe(400);
+            vi.restoreAllMocks();
+
+            return { context: lines.find(line => line.message === 'Request completed')!.context!, output: output() };
+        };
+
+        const declared = await completed(`/api/import/${segment}/check`);
+        expect([declared.context.path, declared.context.status, typeof declared.context.duration, 'response' in declared.context])
+            .toEqual([REDACTED, 400, 'number', false]);
+        expect(declared.output).not.toContain(segment);
+
+        // The same failure outside the prefix still logs the body, value and all
+        const undeclared = await completed(`/users/${segment}/check`);
+        expect(JSON.stringify(undeclared.context.response)).toContain(`"value":"${segment}"`);
+    });
+
+    it('T15b: an error quoting the segment is logged by name, status and stack under the prefix, with no message', async () =>
+    {
+        setRedactPaths(['/api/import']);
+
+        for (const includeStack of [true, false])
+        {
+            const app = new Hono();
+            app.get('*', () =>
+            {
+                const error = new NotFoundError({ message: `Import ${SECRET} not found` });
+                error.cause = new Error(`No row for ${SECRET}`);
+                throw error;
+            });
+            app.onError(ErrorHandler({ includeStack }));
+            const logged = async (path: string): Promise<{ error: Record<string, unknown>; output: string }> =>
+            {
+                const { lines, output } = captureLoggerClass(Logger);
+                await get(app, path);
+                vi.restoreAllMocks();
+                const line = lines.find(entry => entry.message === 'Error occurred')!;
+
+                return { error: (line.error ?? line.context?.error) as Record<string, unknown>, output: output() };
+            };
+
+            const declared = await logged(`/api/import/${SECRET}`);
+            expect([declared.error.name, declared.error.statusCode, 'message' in declared.error, 'stack' in declared.error])
+                .toEqual(['NotFoundError', 404, false, includeStack]);
+            expect(declared.error.cause).toMatchObject({ name: 'Error' });
+            expect(declared.error.cause).not.toHaveProperty('message');
+            expect(declared.output, `includeStack: ${includeStack}`).not.toContain(SECRET);
+
+            expect((await logged('/users/1')).error).toMatchObject({
+                message: `Import ${SECRET} not found`,
+                cause: { message: `No row for ${SECRET}` },
+            });
+        }
+    });
+
+    it('T15c: the request logger\'s Request failed line under the prefix carries the error without its message', async () =>
+    {
+        setRedactPaths(['/api/import']);
+        const app = new Hono();
+        app.get('*', async (c) =>
+        {
+            await RequestLogger()(c, async () =>
+            {
+                throw new Error(`Import ${SECRET} not found`);
+            }).catch(() => undefined);
+
+            return c.text('done');
+        });
+        const { lines, output } = captureLoggerClass(Logger);
+
+        await get(app, `/api/import/${SECRET}`);
+
+        const failed = lines.find(line => line.message === 'Request failed')!;
+        expect([failed.context?.path, failed.error?.name, failed.error && 'message' in failed.error])
+            .toEqual([REDACTED, 'Error', false]);
+        expect(output()).not.toContain(SECRET);
+    });
+
+    it('T15d: a Referer under the prefix reaches the onError context redacted; any other is unchanged', async () =>
+    {
+        const onError = vi.fn<(err: Error, context: OnErrorContext) => void>();
+        const app = await createServer(serverConfig(builder => builder
+            .middleware({ onError })
+            .logging({ redactPaths: ['/api/import'] })));
+        captureLoggerClass(Logger);
+
+        for (const referer of [`https://app.test/api/import/${SECRET}?x=1`, 'https://app.test/users/7?tab=a'])
+        {
+            await Promise.resolve(app.fetch(new Request('http://localhost/users/1/fail', { headers: { referer } })));
+        }
+        await vi.waitFor(() => expect(onError).toHaveBeenCalledTimes(2));
+
+        expect(onError.mock.calls.map(([, context]) => context.request.headers.referer))
+            .toEqual([`https://app.test${REDACTED}`, 'https://app.test/users/7?tab=a']);
     });
 });
 

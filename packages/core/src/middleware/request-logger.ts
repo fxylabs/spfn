@@ -7,7 +7,7 @@ import { randomBytes } from 'crypto';
 import type { Context, Next } from 'hono';
 import { alreadySentToClient, logger } from '@spfn/core/logger';
 import { getClientIp } from './client-ip';
-import { loggedPath } from './logged-path';
+import { isRedactedPath, loggedError, loggedPath } from './logged-path';
 
 /**
  * Options for RequestLogger middleware
@@ -208,8 +208,10 @@ export function RequestLogger(options?: RequestLoggerOptions)
                 logData.slow = true;
             }
 
-            // Add detailed error information for 4xx/5xx responses
-            if (status >= 400)
+            // Add detailed error information for 4xx/5xx responses. Under a
+            // redacted path prefix the response body is left out: it is built
+            // from the path (a validation failure quotes the segment)
+            if (status >= 400 && !isRedactedPath(c))
             {
                 try
                 {
@@ -246,7 +248,7 @@ export function RequestLogger(options?: RequestLoggerOptions)
         {
             const duration = Date.now() - startTime;
 
-            apiLogger.error('Request failed', error as Error, {
+            apiLogger.error('Request failed', loggedError(c, error), {
                 requestId,
                 method,
                 path,

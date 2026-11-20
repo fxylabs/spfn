@@ -16,6 +16,8 @@
  */
 
 import type { Context } from 'hono';
+import { describeError } from '@spfn/core/logger';
+import type { DatabaseErrorDescription, DescribeErrorOptions, ErrorDescription } from '@spfn/core/logger';
 
 /** What replaces everything below a declared prefix. */
 const REDACTED_SEGMENT = '[redacted]';
@@ -66,6 +68,22 @@ export function setRedactPaths(paths: string[] | undefined): void
     redactedPrefixes = paths === undefined ? [] : parseRedactPaths(paths);
 }
 
+/** The declared prefix a path falls under, if any */
+function redactedPrefixOf(path: string): string | undefined
+{
+    return redactedPrefixes.find(entry => path === entry || path.startsWith(`${entry}/`));
+}
+
+/**
+ * Whether the request path falls under a declared prefix. Under one, no line
+ * may carry anything derived from the path: its parameters, an error raised
+ * while serving it, the response built from it.
+ */
+export function isRedactedPath(c: Context): boolean
+{
+    return redactedPrefixOf(c.req.path) !== undefined;
+}
+
 /**
  * The request path for a log line: `c.req.path`, or `<prefix>/[redacted]` when
  * it falls under a declared prefix.
@@ -75,8 +93,70 @@ export function setRedactPaths(paths: string[] | undefined): void
  */
 export function loggedPath(c: Context): string
 {
-    const path = c.req.path;
-    const prefix = redactedPrefixes.find(entry => path === entry || path.startsWith(`${entry}/`));
+    const prefix = redactedPrefixOf(c.req.path);
 
-    return prefix === undefined ? path : `${prefix}/${REDACTED_SEGMENT}`;
+    return prefix === undefined ? c.req.path : `${prefix}/${REDACTED_SEGMENT}`;
+}
+
+/**
+ * A caught error as a log line may carry it: its `describeError` description,
+ * and under a declared prefix the same description without a message anywhere
+ * in its cause chain. An error raised while serving a capability route may
+ * quote the path — a validation failure naming the segment, `Import <token>
+ * not found` — so its name, code, status and stack frames stay, its text goes.
+ */
+export function loggedError(
+    c: Context,
+    error: unknown,
+    options?: DescribeErrorOptions,
+): ErrorDescription | DatabaseErrorDescription
+{
+    const description = describeError(error, options);
+
+    return isRedactedPath(c) ? withoutMessages(description) : description;
+}
+
+/** Drop every message down the cause chain, in place: the description stays marked as one */
+function withoutMessages<T extends ErrorDescription | DatabaseErrorDescription>(description: T): T
+{
+    delete description.message;
+
+    if (description.kind === 'error' && description.cause !== undefined)
+    {
+        withoutMessages(description.cause);
+    }
+
+    return description;
+}
+
+/**
+ * A URL a request carries in a header (`Referer`) as a log line may name it:
+ * its origin and `<prefix>/[redacted]` when its path falls under a declared
+ * prefix, otherwise unchanged. A page served under a capability path sends
+ * its own URL, secret and all, with every request it makes.
+ */
+export function loggedUrl(url: string): string
+{
+    if (!URL.canParse(url))
+    {
+        return url;
+    }
+
+    const { origin, pathname } = new URL(url);
+    const prefix = redactedPrefixOf(decodedPath(pathname));
+
+    return prefix === undefined ? url : `${origin}${prefix}/${REDACTED_SEGMENT}`;
+}
+
+/** A URL's path decoded as the router decodes a request's; as written when it does not decode */
+function decodedPath(pathname: string): string
+{
+    try
+    {
+        return decodeURI(pathname);
+    }
+    catch
+    {
+        return pathname;
+    }
 }

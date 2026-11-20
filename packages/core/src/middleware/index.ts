@@ -14,6 +14,6 @@ export {
 } from './rate-limit';
 export type { RateLimitOptions, RateLimitDimension } from './rate-limit';
 export { getClientIp, setTrustedProxyHops, parseTrustedProxyHops } from './client-ip';
-export { loggedPath, setRedactPaths, parseRedactPaths } from './logged-path';
+export { isRedactedPath, loggedError, loggedPath, setRedactPaths, parseRedactPaths } from './logged-path';
 export { CacheRateLimitStore, MemoryRateLimitStore } from './rate-limit-store';
 export type { RateLimitStore, RateLimitHit } from './rate-limit-store';

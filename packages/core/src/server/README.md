@@ -354,6 +354,19 @@ Every core log line that names the request path then writes `/api/import/[redact
 every level: the request logger, proxy-guard, the error handler and its `onError` context,
 rate limiting, and the transaction context of `Transactional()`.
 
+Nothing derived from the path is written under the prefix either:
+
+- **No response body.** The request logger logs a 4xx/5xx response's body (and a write's request
+  body) everywhere else. Under a declared prefix it logs neither — a path-parameter validation
+  failure answers `fields: [{ path: '/token', value: '<the segment>' }]`, and a `NotFoundError`
+  may name the token. Status, duration and the redacted path remain.
+- **No error message.** The error handler's `Error occurred` and the request logger's
+  `Request failed` describe the error by name, code, status and stack frames, without the
+  message of any link in its cause chain (`loggedError(c, error)`).
+- **No `Referer` naming it.** `OnErrorContext.request.headers.referer` under a declared prefix is
+  `<origin><prefix>/[redacted]`, whatever path the erroring request had. `onError` still receives
+  the error object itself.
+
 - **Matching.** A prefix covers itself and what lies below it on a segment boundary:
   `/api/import` covers `/api/import` and `/api/import/abc`, not `/api/importer`. It is matched
   against the decoded path the router serves, so `/api/%69mport/abc` is covered too.

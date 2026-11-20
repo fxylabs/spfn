@@ -239,9 +239,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with `/`, ends with `/`, or contains `?`, `#`, `:` or `*` refuses the boot (builder, plain config
   and `createServer`). `createServer` publishes the declaration before anything else, so a
   hand-written `app.ts` wiring its own `RequestLogger` and `ErrorHandler` gets it too; a bare Hono
-  app calls `setRedactPaths()` itself. `loggedPath(c)` is how your own lines name the path. Paths
-  nothing declares are written as before. `ServerConfig.logging`, `setRedactPaths` and
-  `parseRedactPaths` are new.
+  app calls `setRedactPaths()` itself. `loggedPath(c)` is how your own lines name the path. Under a
+  declared prefix nothing derived from the path is logged either: the request logger leaves out an
+  error response's body (a path-parameter validation failure quotes the segment in
+  `fields[].value`) and the request body, the error handler's and request logger's error lines
+  describe the error without the message of any link in its cause chain, and the `onError`
+  context's `Referer` is redacted when its path falls under a prefix. Paths nothing declares are
+  written as before. `ServerConfig.logging`, `setRedactPaths`, `parseRedactPaths`,
+  `isRedactedPath` and `loggedError` are new.
 - **@spfn/core: `.middleware({ logger: { excludePaths, … } })`** — the auto-applied request logger
   takes `RequestLoggerOptions` as well as a boolean, in place. Excluding a path used to mean
   `logger: false` and a `RequestLogger` of your own in `.use()`, which runs after proxy-guard.
