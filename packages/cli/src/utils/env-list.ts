@@ -18,6 +18,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { loadAppConfig } from '@spfn/core/app-config';
+import { runsUnderDevLoader } from './dev-loader.js';
 import { loadEnvSchema, resolveFrom, type EnvSchema, type EnvSchemaEntry } from './env-schema.js';
 
 /** One schema and the name it is reported under. */
@@ -216,12 +217,23 @@ async function loadSchemaModule(cwd: string, path: string): Promise<EnvSchema>
 /**
  * Import a file of the app the way `spfn dev` and `spfn provision` run it:
  * through tsx, with the app's tsconfig, so TypeScript and path aliases such as
- * `@/server/...` resolve. A plain JavaScript module still loads when the app
- * has no tsx.
+ * `@/server/...` resolve. Under `bin/spfn.js` this process already runs tsx
+ * with the CLI's module hook (`runsUnderDevLoader`), so a plain `import()`
+ * loads `.ts` as ESM, as those do; tsx's own import API would take the format
+ * from the app's `package.json` — CommonJS without `"type"`, a second copy of
+ * every `@spfn/*` the file imports. Otherwise (a caller in-process, the bin
+ * without tsx) through that API; a plain JavaScript module still loads when
+ * the app has no tsx.
  */
 async function importAppModule(cwd: string, fullPath: string): Promise<Record<string, unknown>>
 {
     const url = pathToFileURL(fullPath).href;
+
+    if (runsUnderDevLoader(cwd))
+    {
+        return await import(url);
+    }
+
     const tsx = await loadTsx(cwd);
 
     if (tsx)

@@ -6,6 +6,11 @@
  * Re-spawns with --import tsx when .ts schema loading is needed.
  * This avoids ERR_REQUIRE_CYCLE_MODULE on Node.js 22+ where
  * tsx.register() causes CJS/ESM interop cycles.
+ *
+ * The child also gets the CLI's module hook (dist/dev-loader-import.js), so
+ * every command that loads the app's source — db, provision, env, codegen —
+ * runs its .ts as ESM, as `spfn dev` and `spfn build` do. Without tsx the
+ * command runs in this process, without the hook, as before.
  */
 
 const TSX_FLAG = '--import';
@@ -38,10 +43,12 @@ async function tryRelaunchWithTsx()
     const { pathToFileURL } = await import('url');
     const tsxUrl = pathToFileURL(createRequire(import.meta.url).resolve(TSX_MODULE)).href;
 
+    const { devLoaderImport } = await import('../dist/dev-loader-import.js');
+
     const { spawn } = await import('child_process');
     const child = spawn(
         process.execPath,
-        [TSX_FLAG, tsxUrl, ...process.execArgv, process.argv[1], ...process.argv.slice(2)],
+        [TSX_FLAG, tsxUrl, TSX_FLAG, devLoaderImport(process.cwd()), ...process.execArgv, process.argv[1], ...process.argv.slice(2)],
         { stdio: 'inherit' },
     );
 

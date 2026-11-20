@@ -5,6 +5,7 @@
  */
 
 import { Command } from 'commander';
+import { markAppSourceProcess } from '@spfn/core/server';
 import { dbGenerate } from './generate.js';
 import { dbPush } from './push.js';
 import { dbMigrate } from './migrate.js';
@@ -24,7 +25,11 @@ import { dbTenantImport } from './tenant/import.js';
  * Database command group
  */
 export const dbCommand = new Command('db')
-    .description('Database management commands (wraps Drizzle Kit)');
+    .description('Database management commands (wraps Drizzle Kit)')
+    // Before any subcommand: `generate`, `push` and `tenant` load the app's
+    // entities and drizzle.config.ts, so a second copy of @spfn/core is refused
+    // where it is recorded. The rest load none, and the mark costs them nothing.
+    .hook('preAction', () => markAppSourceProcess());
 
 dbCommand
     .command('generate')

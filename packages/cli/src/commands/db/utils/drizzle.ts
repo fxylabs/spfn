@@ -244,22 +244,6 @@ export async function runWithSpinner(
     }
 }
 
-/**
- * Check if tsx ESM loader is available.
- *
- * On Node.js 22+, tsx must be loaded via --import tsx at process start
- * (handled by bin/spfn.js). Calling tsx.register() at runtime causes
- * ERR_REQUIRE_CYCLE_MODULE due to CJS/ESM interop issues.
- *
- * This function is kept for backwards compatibility but is now a no-op.
- * The bin entry point handles tsx loader registration via process re-spawn.
- */
-async function ensureTsxLoader(): Promise<void>
-{
-    // No-op: tsx loader is registered at process start via --import tsx
-    // See bin/spfn.js for the re-spawn mechanism
-}
-
 type DrizzleConfig = ReturnType<typeof getDrizzleConfig>;
 
 /**
@@ -634,16 +618,13 @@ export async function resolvePushSchemaSource(explicit?: string, cwd: string = p
 /**
  * Dynamically import schema files and merge all exports into a single object.
  * Used to build the `imports` parameter for drizzle-kit's `pushSchema()`.
+ *
+ * A plain `import()`: `bin/spfn.js` starts this process under tsx with the
+ * CLI's module hook, so a `.ts` entity loads as ESM whatever the app's
+ * `package.json` says, as `spfn dev` and `spfn build` load it.
  */
 export async function loadSchemaImports(schemaFiles: string[]): Promise<Record<string, unknown>>
 {
-    // Ensure tsx loader is registered so .ts files can be imported
-    const hasTsFiles = schemaFiles.some(f => f.endsWith('.ts'));
-    if (hasTsFiles)
-    {
-        await ensureTsxLoader();
-    }
-
     const imports: Record<string, unknown> = {};
 
     for (const file of schemaFiles)

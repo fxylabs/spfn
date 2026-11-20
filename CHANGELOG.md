@@ -194,6 +194,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to the workspace's globs, or commit the app's own lockfile (`pnpm-lock.yaml`, `yarn.lock`, …);
   `create` and `init` also take `--pm`, but `dev`, `build`, `start`, `add`, `setup` and
   `provision` have no `--pm` and follow the lockfile only.
+- **BREAKING: spfn: `spfn db` and `spfn provision` load a type-less app's source as ESM, as
+  `spfn dev` does (#349).** In an app without `"type": "module"`, `spfn db generate`, `db push`,
+  `db tenant` and the `spfn provision` runner loaded entity files, `drizzle.config.ts` and
+  `server.config` as CommonJS, beside a second copy of every `@spfn/core` entry they reached (5
+  under `db generate` in example 03, 15 under `provision`). The `spfn` bin now registers the CLI's
+  module hook in the process it re-runs every command in, and every `tsx` child a command starts
+  (the `provision` runner, the dev server and watcher) gets the same hook. A CommonJS-only shape in
+  those files — `require`, `__dirname`, a named import of a `module.exports` file — now fails there
+  as it fails under `spfn dev` (table in the CLI README, "Your server source runs as ESM").
+  Top-level `await` in an entity now loads (`db generate` failed on it). `spfn env` loads
+  `env.schemas` files the same way.
+- **BREAKING: spfn, @spfn/core: every `spfn db` command and the `spfn provision` runner refuse a
+  second copy of `@spfn/core` (#349)**, with the message a server refuses with: a `.cjs` file that
+  requires `@spfn/*` from an entity or `server.config` stops the command, naming the file.
+- **BREAKING: @spfn/core: `markCodegenProcess()` is `markAppSourceProcess()` (#349)**, exported from
+  `@spfn/core/codegen` and now also `@spfn/core/server`. It marks any process the spfn CLI started
+  to load app source, and from the mark on a second copy is refused where it is recorded, as in a
+  server — in a codegen process too, inside the router load, besides the check after it.
 
 ### Fixed
 

@@ -40,6 +40,8 @@ export {
 export type { ServerClock, ServerTimeResponse } from './server';
 export { createServerlessApp, resetServerlessApp, provisionInfrastructure } from './serverless';
 export { loadServerConfigFile, SERVER_CONFIG_FILE_PATHS } from './config-file';
+// Marks a process the spfn CLI started to load the app's source (see module-evaluation)
+export { markAppSourceProcess } from '../module-evaluation';
 export { getShutdownManager, endShutdownRun } from './shutdown-manager';
 
 // Migration boot gate

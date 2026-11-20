@@ -243,7 +243,7 @@ describe('one @spfn/core per process', () =>
         expect(lines[0]).toBe('BOOTED');
         expect(lines[1]).toContain(`THREW Refusing a second copy of @spfn/core in this process: @spfn/core/logger `
             + `(\`${loggerFile}\`, ${version}) was evaluated twice: natively as ESM and as CommonJS, required by ${app}.`);
-        expect(lines[1]).toContain(`${app} is CommonJS, and under \`spfn dev\``);
+        expect(lines[1]).toContain(`${app} is CommonJS, and under the spfn CLI`);
         expect(lines[2]).toBe(lines[1]);
         expect(lines[3]).toBe('SERVING 200');
         expect(output.split('Refusing a second copy').length - 1, output).toBe(3);

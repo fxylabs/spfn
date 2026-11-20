@@ -230,10 +230,14 @@ like and how to override it.
 #### Your server source runs as ESM, as it does in production
 
 `spfn build` bundles `src/server` as ESM with esbuild whatever your `package.json` says, and
-esbuild decides each `.js` file by its own syntax. `spfn dev` gives your source the same formats:
-it registers a Node module hook (`module.registerHooks`) in the server process and in the codegen
-watcher that states the format of every file of yours that `tsx` would otherwise guess from
-`package.json`:
+esbuild decides each `.js` file by its own syntax. Every other `spfn` command gives your source the
+same formats: the `spfn` bin, which re-runs each command under `tsx`, registers a Node module hook
+(`module.registerHooks`) there, and so does every `tsx` process a command starts — the `spfn dev`
+server and codegen watcher, the `spfn provision` runner. So your entities and `drizzle.config.ts`
+under `spfn db generate`, `db push` and `db tenant`, your `server.config` under `spfn provision`,
+your `env.schemas` files under `spfn env`, and your router under codegen all load as they do under
+`spfn dev`. The hook states the format of every file of yours that `tsx` would otherwise guess
+from `package.json`:
 
 - `.ts` and `.tsx` run as ESM, with or without `"type": "module"`, also when imported with a query
   of your own (`./route.ts?v=2`), which reaches the module as you wrote it — one evaluation per
@@ -245,7 +249,7 @@ watcher that states the format of every file of yours that `tsx` would otherwise
   alone.
 
 A file is yours unless it is a dependency: a `node_modules` directory appears in its real path
-below the longest common ancestor of that path and the directory `spfn dev` was started in. So a
+below the longest common ancestor of that path and the directory the command was started in. So a
 workspace package beside the app, consumed as source, is yours; what is installed under it is
 not; and a `node_modules` directory above the app (a project checked out under one) does not
 count. A workspace package that pnpm materialises under `node_modules/.pnpm` (`injected: true`)
@@ -284,6 +288,14 @@ server ran the other: rate-limit `policies` and `.trustedProxyHops()` were ignor
 > the production build rejects it. Use `import.meta.url` / `import.meta.dirname` and `import` for
 > the rest.
 >
+> **BREAKING (`spfn db`, `spfn provision`).** In an app without `"type": "module"`, `spfn db
+> generate`, `db push`, `db tenant` and `spfn provision` loaded entity files, `drizzle.config.ts`
+> and `server.config` — and what they import — as CommonJS, beside a second copy of `@spfn/core`
+> (issue #349). They now load them as `spfn dev` does, so the CommonJS-only shapes in the table
+> above fail there as they fail under `spfn dev`, and these commands refuse a second copy of
+> `@spfn/core` as a server does: a `.cjs` file that requires `@spfn/*` from those files stops the
+> command, naming the file. Top-level `await` in an entity file now loads.
+>
 > Not a break — dev now matches production: a named import from a CommonJS npm package whose
 > exports Node cannot analyse (`import { red } from 'chalk'` v4, `{ sign } from 'jsonwebtoken'`,
 > `{ enable } from 'debug'`) fails under `spfn dev` (`does not provide an export named …`) as it
@@ -304,7 +316,8 @@ watcher `spfn dev` starts — imports your router the same way, in its own proce
 by the same rule, resolves tsconfig `paths` as tsc does, and re-runs only your project's files on
 each reload; every package is evaluated once. A second copy of `@spfn/core` found after a router
 load — a `.cts` route requiring `@spfn/*` — is refused in these processes (each marks itself with
-`markCodegenProcess()` from `@spfn/core/codegen`; nothing it spawns inherits the mark). The watcher regenerates for any project file the router
+`markAppSourceProcess()` from `@spfn/core/codegen`, as `spfn db` and `spfn provision` do; nothing
+it spawns inherits the mark). The watcher regenerates for any project file the router
 reached, not only `src/server/routes/**`: an edit to `src/server/lib/segment.ts` imported through
 `@/` regenerates too. Each reload keeps about 100 KB per small app in memory, by design
 ([@spfn/core codegen](../core/src/codegen/README.md#how-the-router-is-loaded)).

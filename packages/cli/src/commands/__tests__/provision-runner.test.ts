@@ -6,14 +6,24 @@
  * It now loads the file with `loadServerConfigFile`, the loader `startServer`
  * uses. These rows run the generated text with node against fixture apps; each
  * one stops before `provisionInfrastructure`, so no database is touched.
+ *
+ * Issue #349: the runner refuses a second copy of @spfn/core the config brings
+ * in (without its mark it provisions beside the copy, unnoticed), and
+ * `spfn provision` starts it with the CLI's module hook (R3: without it, the
+ * runner silently loads a type-less app's server.config as CommonJS again).
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { execFileSync } from 'child_process';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'fs';
+import { copyFileSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'fs';
 import { join } from 'path';
+import { execa } from 'execa';
 
-import { renderProvisionRunner } from '../provision';
+import { provisionCommand, renderProvisionRunner } from '../provision';
+import { devLoaderImport } from '../../utils/dev-loader';
+
+// `spfn provision` itself, for the arguments it starts the runner with (R3).
+vi.mock('execa', () => ({ execa: vi.fn(async () => ({ exitCode: 0 })) }));
 
 // Inside the package, so the runner's bare `@spfn/core/*` imports resolve
 // through this package's node_modules, as they do from an app.
@@ -79,5 +89,44 @@ describe('spfn provision runner', () =>
         expect(status).toBe(1);
         expect(stderr).toContain('server.config not found');
         expect(stderr).toContain('.spfn/server/server.config.mjs');
+    });
+
+    it('refuses a second copy of @spfn/core that server.config brings in', () =>
+    {
+        const secondInstall = join(app, 'node_modules', 'second-core', 'dist', 'logger');
+
+        mkdirSync(secondInstall, { recursive: true });
+        writeFileSync(join(app, 'node_modules', 'second-core', 'package.json'), JSON.stringify({ type: 'module' }));
+        copyFileSync(join(PACKAGE_DIR, 'node_modules', '@spfn', 'core', 'dist', 'logger', 'index.js'), join(secondInstall, 'index.js'));
+        writeCompiledConfig('import \'../../node_modules/second-core/dist/logger/index.js\';\nexport default {};');
+
+        const { status, stderr } = runProvision();
+
+        expect(status).not.toBe(0);
+        expect(stderr).toContain('Refusing a second copy of @spfn/core in this process: @spfn/core/logger was loaded from two installs');
+    });
+});
+
+describe('spfn provision', () =>
+{
+    it('R3 starts its runner under tsx with the CLI\'s module hook', async () =>
+    {
+        const cwd = process.cwd();
+
+        process.chdir(app);
+
+        try
+        {
+            await provisionCommand.parseAsync([], { from: 'user' });
+        }
+        finally
+        {
+            process.chdir(cwd);
+        }
+
+        const args = vi.mocked(execa).mock.calls[0][1] as string[];
+
+        expect(args).toContain('tsx');
+        expect(args[args.indexOf('--import') + 1]).toBe(devLoaderImport(app));
     });
 });

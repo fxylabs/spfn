@@ -107,10 +107,11 @@ async function listGenerators(): Promise<void>
  */
 async function generateOnce(cwd: string): Promise<boolean>
 {
-    const { loadCodegenConfig, createGeneratorsFromConfig, CodegenOrchestrator, markCodegenProcess } = await import('@spfn/core/codegen');
+    const { loadCodegenConfig, createGeneratorsFromConfig, CodegenOrchestrator, markAppSourceProcess } = await import('@spfn/core/codegen');
 
-    // A codegen process: a second copy of @spfn/core after a router load is refused.
-    markCodegenProcess();
+    // Loads the app's source: a second copy of @spfn/core is refused, where it is
+    // recorded and after each router load.
+    markAppSourceProcess();
 
     const generators = await createGeneratorsFromConfig(loadCodegenConfig(cwd), cwd);
 

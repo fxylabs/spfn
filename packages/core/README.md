@@ -519,7 +519,7 @@ the server keeps serving with its one copy:
 Refusing a second copy of @spfn/core in this process: @spfn/core/logger
 (`/app/node_modules/@spfn/core/dist/logger/index.js`, 0.3.0-beta.38) was evaluated twice: natively
 as ESM and as CommonJS, required by /app/src/server/legacy.cjs. … /app/src/server/legacy.cjs is
-CommonJS, and under `spfn dev` a CommonJS file that requires @spfn/* gets a copy of its own: import
+CommonJS, and under the spfn CLI a CommonJS file that requires @spfn/* gets a copy of its own: import
 @spfn/* from an ES module (.ts, .mts, or .js written with import/export).
 ```
 
@@ -532,7 +532,7 @@ The message says what tells the two copies apart, and the remedy follows from it
 - **One file, natively and as CommonJS** — the message names the file the chain of `require()`
   calls starts at, the one loaded as CommonJS — the app's own, or a dependency's when the chain
   starts there. A TypeScript file means the `spfn` CLI is older than
-  this `@spfn/core` or the process was not started through `spfn dev`; a `.cjs`, `.cts` or CommonJS
+  this `@spfn/core` or the process was not started by the `spfn` CLI; a `.cjs`, `.cts` or CommonJS
   `.js` file must import `@spfn/*` from ESM.
 - **One file, by vitest's module runner and natively** — the test loads `@spfn/core` both inlined
   (`server.deps.inline`) and externally, through a package vitest leaves to Node: inline every
@@ -542,14 +542,17 @@ The message says what tells the two copies apart, and the remedy follows from it
 The shapes `spfn dev` refuses, beside what `spfn build` + `spfn start` does with them, are tabled in
 the [spfn CLI README](../cli/README.md#your-server-source-runs-as-esm-as-it-does-in-production).
 
-`spfn dev` loads app source as ESM from this release on, and `spfn build` always bundled it as
-ESM, so neither trips it. The same entry evaluated again from the same file by the same
-evaluator (a test runner resetting its module registry, HMR) is the same copy, not refused.
-Codegen processes the CLI starts — `spfn codegen`, `spfn build`'s generation, `spfn contract`, the
-codegen watcher — refuse a second copy after each router load (a programmatic caller or a test is
-warned), counting evaluations: an entry evaluated natively twice is a second copy there too.
-Processes that neither serve nor generate — `spfn db generate`, scripts, a Next.js server
-bundling the package — record and never refuse.
+Every `spfn` command loads app source as ESM from this release on (`spfn dev` first, `spfn db`
+and `spfn provision` since #349), and `spfn build` always bundled it as ESM, so none trips it.
+The same entry evaluated again from the same file by the same evaluator (a test runner resetting
+its module registry, HMR) is the same copy, not refused. The CLI marks every process of its own
+that loads app source with `markAppSourceProcess()` — every `spfn db` command, the `spfn provision`
+runner, and the codegen processes (`spfn codegen`, `spfn build`'s generation, `spfn contract`, the
+codegen watcher): from the mark on, a second copy is refused where it is recorded, as in a server.
+Codegen also checks after each router load (a programmatic caller or a test is warned there),
+counting evaluations: an entry evaluated natively twice is a second copy there too. Processes
+that neither serve nor are marked — `spfn env`, scripts, a Next.js server bundling the package —
+record and never refuse.
 
 > **BREAKING.** An app run by an older `spfn` CLI — which ran app source as CommonJS — is refused
 > by this `@spfn/core`; so is a `.cjs`/`.cts`/CommonJS `.js` server file that requires `@spfn/*`

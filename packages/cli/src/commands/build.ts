@@ -82,10 +82,11 @@ async function buildProject(options: BuildOptions): Promise<void>
 
         try
         {
-            const { CodegenOrchestrator, loadCodegenConfig, createGeneratorsFromConfig, markCodegenProcess } = await import('@spfn/core/codegen');
+            const { CodegenOrchestrator, loadCodegenConfig, createGeneratorsFromConfig, markAppSourceProcess } = await import('@spfn/core/codegen');
 
-            // A codegen process: a second copy of @spfn/core after a router load is refused.
-            markCodegenProcess();
+            // Loads the app's source: a second copy of @spfn/core is refused, where it is
+            // recorded and after each router load.
+            markAppSourceProcess();
 
             const config = loadCodegenConfig(cwd);
             const generators = await createGeneratorsFromConfig(config, cwd);
