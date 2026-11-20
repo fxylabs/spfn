@@ -20,6 +20,7 @@ import {
 import { env } from '@spfn/core/config';
 import { getDrizzleConfig, renderDrizzleConfig, discoverFunctionMigrations, packageNameToSchema } from '@spfn/core/db';
 import { loadEnv } from '@spfn/core/server';
+import { assertTypeScriptLoadable } from '../../../utils/tsx-required.js';
 
 const TLS_SSL_MODES = new Set(['no-verify', 'prefer', 'require', 'verify-ca', 'verify-full']);
 
@@ -599,6 +600,8 @@ export async function readDrizzleConfigSchema(cwd: string = process.cwd()): Prom
 
     if (!existsSync(configPath)) return undefined;
 
+    assertTypeScriptLoadable(cwd, configPath);
+
     const mod = await import(pathToFileURL(configPath).href)
         .catch((error: unknown) => Promise.reject(drizzleConfigError(configPath, error)));
     // A CommonJS-compiled config arrives as { default: { default: config } }
@@ -641,7 +644,8 @@ export async function resolvePushSchemaSource(explicit?: string, cwd: string = p
  *
  * A plain `import()`: `bin/spfn.js` starts this process under tsx with the
  * CLI's module hook, so a `.ts` entity loads as ESM whatever the app's
- * `package.json` says, as `spfn dev` and `spfn build` load it.
+ * `package.json` says, as `spfn dev` and `spfn build` load it. Without tsx a
+ * `.ts` file stops the command naming it (`assertTypeScriptLoadable`).
  */
 export async function loadSchemaImports(schemaFiles: string[]): Promise<Record<string, unknown>>
 {
@@ -649,6 +653,8 @@ export async function loadSchemaImports(schemaFiles: string[]): Promise<Record<s
 
     for (const file of schemaFiles)
     {
+        assertTypeScriptLoadable(process.cwd(), file);
+
         const moduleUrl = pathToFileURL(file).href;
         const mod = await import(moduleUrl);
 

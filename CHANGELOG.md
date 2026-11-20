@@ -228,6 +228,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **spfn: without tsx, `spfn db` and `spfn provision` say what to install (#349)**, as `spfn env`
+  did: `tsx is not installed in this project, and it is what loads TypeScript. Add it: <the app's
+  own add command>`, exit 1. `db generate`, `push` and `tenant` stopped on Node's `Cannot find
+  module '…/example.entity'`; `provision` on the package manager's `Command "tsx" not found`. The
+  message now names the app's package manager (`npm install --legacy-peer-deps --save-dev tsx` in an
+  npm app) instead of always `pnpm add -D tsx`.
 - **@spfn/auth: `mfaLockedEvent`, `passkeyEnrolledEvent` and `passkeyRevokedEvent` are exported from
   `@spfn/auth/server` (#361)**, with `MfaLockedPayload`, `PasskeyEnrolledPayload` and
   `PasskeyRevokedPayload`. The README documented all three and the package emitted them, but an app

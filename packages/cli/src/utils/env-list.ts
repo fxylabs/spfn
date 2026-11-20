@@ -19,6 +19,7 @@ import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { loadAppConfig } from '@spfn/core/app-config';
 import { hasDevLoader } from './dev-loader.js';
+import { assertTypeScriptLoadable, tsxApiPath } from './tsx-required.js';
 import { loadEnvSchema, resolveFrom, type EnvSchema, type EnvSchemaEntry } from './env-schema.js';
 
 /** One schema and the name it is reported under. */
@@ -50,8 +51,6 @@ export interface EnvSourceGroup
 
 /** `@spfn/core` leads the package part of the list; the rest follow by name. */
 const CORE_PACKAGE = '@spfn/core';
-
-const TYPESCRIPT_FILE = /\.[cm]?tsx?$/;
 
 /**
  * Build the list: one package with `-p`, the whole app without it.
@@ -234,6 +233,8 @@ async function importAppModule(cwd: string, fullPath: string): Promise<Record<st
         return await import(url);
     }
 
+    assertTypeScriptLoadable(cwd, fullPath);
+
     const tsx = await loadTsx(cwd);
 
     if (tsx)
@@ -244,11 +245,6 @@ async function importAppModule(cwd: string, fullPath: string): Promise<Record<st
             parentURL: pathToFileURL(join(cwd, 'noop.js')).href,
             tsconfig: existsSync(tsconfig) ? tsconfig : false,
         });
-    }
-
-    if (TYPESCRIPT_FILE.test(fullPath))
-    {
-        throw new Error('tsx is not installed in this project, and it is what loads TypeScript. Add it: pnpm add -D tsx');
     }
 
     return await import(url);
@@ -264,8 +260,7 @@ interface TsxApi
  */
 async function loadTsx(cwd: string): Promise<TsxApi | undefined>
 {
-    const path = resolveFrom(join(cwd, 'noop.js'), 'tsx/esm/api')
-        ?? resolveFrom(import.meta.url, 'tsx/esm/api');
+    const path = tsxApiPath(cwd);
 
     return path ? await import(pathToFileURL(path).href) as TsxApi : undefined;
 }

@@ -20,9 +20,9 @@
  *
  * Without tsx (it is the app's dependency, not the CLI's) the command runs in
  * this process, without the hook, and nothing loads the app's source as
- * CommonJS behind its back: `spfn env` stops naming tsx, and `spfn db` hands
- * the .ts files to Node alone, which fails on the first one it cannot load (an
- * extensionless import, a path alias, or a Node without type stripping).
+ * CommonJS behind its back: `spfn env`, `spfn db` and `spfn provision` stop
+ * before their first TypeScript import with one message naming tsx and the
+ * app's command to add it (src/utils/tsx-required.ts).
  */
 
 const TSX_FLAG = '--import';

@@ -20,6 +20,7 @@ import { join } from 'path';
 import { execa } from 'execa';
 import { logger } from '../utils/logger.js';
 import { tsxCommand } from '../utils/dev-loader.js';
+import { missingTsx } from '../utils/tsx-required.js';
 import { detectPackageManager } from '../utils/package-manager.js';
 import { resolveKeychainEnv } from '../utils/secret-store/index.js';
 
@@ -98,6 +99,15 @@ export const provisionCommand = new Command('provision')
         if (keychainMissing.length > 0)
         {
             logger.warn(`[SPFN] Could not resolve keychain secret(s): ${keychainMissing.join(', ')} — run \`spfn secret set <KEY>\``);
+        }
+
+        // The runner runs under the app's tsx: without one, say what to install
+        const tsxMissing = missingTsx(cwd);
+
+        if (tsxMissing !== undefined)
+        {
+            logger.error(tsxMissing);
+            process.exit(1);
         }
 
         // Temp runner spawned via tsx, with the hook `spfn dev` runs the server
