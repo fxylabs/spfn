@@ -88,7 +88,7 @@ export class UserPermissionsRepository extends BaseRepository
             .values(data)
             .onConflictDoUpdate({
                 target: [userPermissions.userId, userPermissions.permissionId],
-                set: { granted: data.granted, expiresAt: data.expiresAt, reason: data.reason, updatedAt: new Date() },
+                set: { granted: data.granted, expiresAt: data.expiresAt, reason: data.reason },
             })
             .returning();
 

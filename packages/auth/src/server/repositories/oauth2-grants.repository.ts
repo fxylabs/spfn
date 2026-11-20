@@ -78,7 +78,7 @@ export class OAuth2GrantsRepository extends AccountStateRepository
             .onConflictDoUpdate({
                 target: [oauth2Grants.client, oauth2Grants.user, oauth2Grants.resource],
                 targetWhere: sql`${oauth2Grants.revokedAt} is null`,
-                set: { scopes: data.scopes, updatedAt: new Date() },
+                set: { scopes: data.scopes },
             })
             .returning();
 

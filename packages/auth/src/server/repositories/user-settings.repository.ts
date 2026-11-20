@@ -84,7 +84,7 @@ export class UserSettingsRepository extends BaseRepository
             .values({ userId, key, value: jsonbValue(value), updatedBy })
             .onConflictDoUpdate({
                 target: [userSettings.userId, userSettings.key],
-                set: { value: jsonbValue(value), updatedBy, updatedAt: sql`now()` },
+                set: { value: jsonbValue(value), updatedBy },
             });
     }
 

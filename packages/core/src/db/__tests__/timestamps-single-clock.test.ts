@@ -7,7 +7,7 @@
  * record an update earlier than its own creation, and ordering rows by
  * `updated_at` would order by whichever host's clock ran ahead.
  *
- * The first test reads the generated SQL, which is what actually proves the clock
+ * The first two tests read the generated SQL, which is what actually proves the clock
  * source. The rest run against PostgreSQL and check the behaviour that follows.
  */
 
@@ -36,7 +36,7 @@ const CREATE_TABLE = `
 
 /**
  * postgres-js opens no socket until a query runs, and `.toSQL()` never runs one,
- * so the SQL-shape test needs no database.
+ * so the SQL-shape tests need no database.
  */
 const offline = drizzle({ client: postgres('postgresql://unused:unused@127.0.0.1:1/unused') });
 
@@ -80,6 +80,18 @@ describe('timestamps() — one clock writes both columns', () =>
         expect(params.some(p => p instanceof Date)).toBe(false);
     });
 
+    it('generates updated_at = now() in an upsert\'s conflict update too', () =>
+    {
+        const { sql: text, params } = offline
+            .insert(clockRows)
+            .values({ id: 1, label: 'first' })
+            .onConflictDoUpdate({ target: clockRows.id, set: { label: 'second' } })
+            .toSQL();
+
+        expect(text).toMatch(/do update set .*"updated_at" = now\(\)/);
+        expect(params.some(p => p instanceof Date)).toBe(false);
+    });
+
     it('gives a new row two equal timestamps', async () =>
     {
         if (!dbFixture.isAvailable) return;
@@ -109,24 +121,5 @@ describe('timestamps() — one clock writes both columns', () =>
 
         expect(updated.createdAt.getTime()).toBe(inserted.createdAt.getTime());
         expect(updated.updatedAt.getTime()).toBeGreaterThanOrEqual(updated.createdAt.getTime());
-    });
-
-    it('stamps updated_at on an upsert conflict too', async () =>
-    {
-        if (!dbFixture.isAvailable) return;
-
-        const [inserted] = await dbFixture.db
-            .insert(clockRows)
-            .values({ label: 'first' })
-            .returning();
-
-        const [upserted] = await dbFixture.db
-            .insert(clockRows)
-            .values({ id: inserted.id, label: 'first' })
-            .onConflictDoUpdate({ target: clockRows.id, set: { label: 'second' } })
-            .returning();
-
-        expect(upserted.label).toBe('second');
-        expect(upserted.updatedAt.getTime()).toBeGreaterThanOrEqual(upserted.createdAt.getTime());
     });
 });
