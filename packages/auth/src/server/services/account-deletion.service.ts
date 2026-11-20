@@ -696,8 +696,8 @@ async function anonymizeUser(user: User): Promise<void>
  * The purge's transaction: the account lock (`usersRepository.lockAccount`)
  * and the status read under it — the authoritative check, closing the window
  * between findDueForPurge (replica)/the pre-check and this transaction, so a
- * cancel that committed in between is honored — then the claim, the
- * destructive DML, and `onPurge` with the contact read under the lock.
+ * cancel that committed in between is honored — then the claim, `onPurge`
+ * with the contact read under the lock, and the destructive DML.
  *
  * @returns the account's publicId once destroyed; null, with nothing written,
  *   when the account or its request is no longer pending
@@ -720,6 +720,13 @@ async function destroyPendingAccount(userId: number, requestId: number, config: 
         return null;
     }
 
+    // Past the claim, so it runs only for a purge that goes ahead; before the
+    // destructive writes, so the account's rows — and the app's own, which a
+    // hard delete cascades away — are still there to read. Its writes commit
+    // with the purge or not at all; a throw rolls everything back and the next
+    // sweep retries.
+    await config.onPurge?.({ publicId: user.publicId, email: user.email, phone: user.phone, purgeStrategy });
+
     if (purgeStrategy === 'hard-delete')
     {
         await usersRepository.deleteById(user.id);
@@ -737,10 +744,6 @@ async function destroyPendingAccount(userId: number, requestId: number, config: 
         await verificationCodesRepository.deleteByTarget(target);
         await accountExistsNoticesRepository.deleteByTarget(target);
     }
-
-    // Last, so the app's write commits with the purge or not at all; a throw
-    // rolls everything back and the next sweep retries.
-    await config.onPurge?.({ publicId: user.publicId, email: user.email, phone: user.phone, purgeStrategy });
 
     return user.publicId;
 }
@@ -761,10 +764,11 @@ async function destroyPendingAccount(userId: number, requestId: number, config: 
  *    a primary re-read of the user (closes the replica-lag/TOCTOU window against
  *    `findDueForPurge`'s replica read and the pre-check above), the conditional
  *    `markCompleted` claim (fails closed — 0 rows — if the request was cancelled
- *    or already completed concurrently), the destructive DML itself, and last
- *    `onPurge` with the contact read under the lock — the app's database hand-off,
- *    committed with the purge or rolled back with it. Nothing proceeds to
- *    destructive DML unless both re-checks pass.
+ *    or already completed concurrently), `onPurge` with the contact read under
+ *    the lock — the app's database hand-off, run while the account's rows and
+ *    the app's own are still readable, committed with the purge or rolled back
+ *    with it — and the destructive DML itself. Nothing proceeds to the hook or
+ *    the destructive DML unless both re-checks pass.
  * 4. The `auth.deletion.completed` event is deferred to `onAfterCommit` — it
  *    must never fire for a purge that ultimately aborted or rolled back.
  */

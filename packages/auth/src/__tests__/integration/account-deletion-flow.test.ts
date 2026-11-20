@@ -21,12 +21,15 @@
  * |     | false otherwise                                                     | at once                                           |
  * | N3  | `onPurge` called once with the contact read under the lock, both    | a hook given the anonymized address, or none      |
  * |     | strategies                                                          |                                                   |
- * | N4  | inside the hook the purge's writes are in its transaction and not   | a hook run outside the purge transaction: an      |
- * |     | yet committed; its outbox row is there after the commit             | outbox row for a purge that never committed       |
+ * | N4  | inside the hook the claim is made in the purge's transaction, the   | a hook run outside the purge transaction (an      |
+ * |     | account not yet touched; its outbox row is there after the commit   | outbox row for a purge that never committed), or  |
+ * |     |                                                                     | after the writes it should precede                |
  * | N5  | a throwing hook: account and request stay pending, its write is     | a purge committed without the app's hand-off      |
  * |     | rolled back, no `completed`                                         |                                                   |
  * | N6  | a second purge of the same batch row calls the hook no more         | the notice sent twice                             |
  * | N7  | `completed` carries exactly `{ userPublicId, purgeStrategy }`       | the address added to the event "for convenience"  |
+ * | P6  | inside the hook, both strategies, the account and its stored        | a hook moved after the writes: no locale to word  |
+ * |     | locale read back through the app's repositories                     | the notice in, the README's advice dead           |
  * | B1  | (extended) a cancel that won the race: the hook is not called       | a notice for an account that was kept             |
  *
  * OAuth-login status gate coverage lives in the unit test
@@ -68,7 +71,7 @@ const { initializeAuth } = await import('@/server/services/rbac.service');
 const { __resetDeletionForTests, configureDeletion } = await import('@/server/lib/deletion-config');
 const { sweepDuePurges, purgePendingRequest, requestAccountDeletionService } = await import('@/server/services/account-deletion.service');
 const { authDeletionRequestedEvent, authDeletionCancelledEvent, authDeletionCompletedEvent } = await import('@/server/events');
-const { accountDeletionRequestsRepository } = await import('@/server/repositories');
+const { accountDeletionRequestsRepository, usersRepository, userSettingsRepository } = await import('@/server/repositories');
 const { authenticate } = await import('@/server/middleware/authenticate');
 
 const dbAvailable = await isDatabaseAvailable();
@@ -94,12 +97,15 @@ class NoticeOutboxRepository extends BaseRepository
         await this.db.insert(noticeOutbox).values({ publicId: account.publicId, email: account.email, phone: account.phone });
     }
 
-    /** The account's deletion as this repository's connection sees it — the purge's transaction, inside `onPurge`. */
-    async deletionOf(userId: number): Promise<string | null | undefined>
+    /** The account and its request as this repository's connection sees them — the purge's transaction, inside `onPurge`. */
+    async deletionOf(userId: number): Promise<{ deletion: string | null; email: string | null; request: string } | undefined>
     {
-        const [row] = await this.db.select({ deletion: users.deletion }).from(users).where(eq(users.id, userId));
+        const [row] = await this.db.select({ deletion: users.deletion, email: users.email, request: accountDeletionRequests.status })
+            .from(users)
+            .innerJoin(accountDeletionRequests, eq(accountDeletionRequests.userId, users.id))
+            .where(eq(users.id, userId));
 
-        return row?.deletion;
+        return row;
     }
 }
 
@@ -539,14 +545,15 @@ describe.skipIf(!dbAvailable)('Account Deletion Lifecycle Integration', () =>
         expect(onPurge).toHaveBeenCalledWith({ publicId, email, phone, purgeStrategy });
     });
 
-    it('N4: onPurge runs in the purge transaction after its writes, and its outbox row is there after the commit', async () =>
+    it('N4: onPurge runs in the purge transaction past the claim and before the account is touched, and its outbox row is there after the commit', async () =>
     {
         const seen: Array<{ inTransaction: unknown; outside: unknown }> = [];
         configureDeletion({
             onPurge: async (account) =>
             {
-                const [outside] = await getTestDb().select({ deletion: users.deletion }).from(users).where(eq(users.publicId, account.publicId));
-                seen.push({ inTransaction: await noticeOutboxRepository.deletionOf(userId), outside: outside?.deletion });
+                const [outside] = await getTestDb().select({ request: accountDeletionRequests.status }).from(accountDeletionRequests)
+                    .where(eq(accountDeletionRequests.userPublicId, account.publicId));
+                seen.push({ inTransaction: await noticeOutboxRepository.deletionOf(userId), outside: outside?.request });
                 await noticeOutboxRepository.add(account);
                 expect(await outboxRows()).toEqual([]);
             },
@@ -556,7 +563,7 @@ describe.skipIf(!dbAvailable)('Account Deletion Lifecycle Integration', () =>
 
         expect(await sweepDuePurges()).toMatchObject({ purged: 1 });
 
-        expect(seen).toEqual([{ inTransaction: 'deleted', outside: 'pending' }]);
+        expect(seen).toEqual([{ inTransaction: { deletion: 'pending', email, request: 'completed' }, outside: 'pending' }]);
         expect(await outboxRows()).toEqual([{ publicId, email, phone: null }]);
     });
 
@@ -594,6 +601,26 @@ describe.skipIf(!dbAvailable)('Account Deletion Lifecycle Integration', () =>
 
         expect(onPurge).toHaveBeenCalledTimes(1);
         expect((await deletionState(userId)).request).toBe('completed');
+    });
+
+    it.each(['anonymize', 'hard-delete'] as const)('P6 (%s): inside onPurge the account and its stored locale are still readable', async (purgeStrategy) =>
+    {
+        const seen: Array<{ email: string | null | undefined; locale: string | null }> = [];
+        configureDeletion({
+            purgeStrategy,
+            onPurge: async (account) =>
+            {
+                const user = await usersRepository.findByPublicId(account.publicId);
+                seen.push({ email: user?.email, locale: user ? await userSettingsRepository.findLocaleByUserId(user.id) : null });
+            },
+        });
+        const email = `p6-${purgeStrategy}@example.com`;
+        const { userId } = await dueAccount(email);
+        await userSettingsRepository.upsert(userId, 'locale', 'ko', userId);
+
+        expect(await sweepDuePurges()).toMatchObject({ purged: 1 });
+
+        expect(seen).toEqual([{ email, locale: 'ko' }]);
     });
 
     it.each(['anonymize', 'hard-delete'] as const)('N7 (%s): completed carries exactly { userPublicId, purgeStrategy }', async (purgeStrategy) =>

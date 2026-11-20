@@ -364,11 +364,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     commit, so there is no date to announce and nothing to cancel. `auth.deletion.cancelled` and
     `auth.deletion.completed` (`{ userPublicId, purgeStrategy }`, no contact details) are unchanged.
   - New `deletion.onPurge(account)` hook, with type `PurgedAccount` (`{ publicId, email, phone,
-    purgeStrategy }`, read under the account lock before the destructive step). It is called inside
-    the purge transaction, after the purge's writes and before the commit, once per committed purge,
-    and is never published or queued. Database work only: write an outbox row through the app's own
-    repository and send from a job after the commit. A throw rolls the purge back — account and
-    request stay `pending`, no `completed` — and the next sweep retries.
+    purgeStrategy }`, read under the account lock). It is called inside the purge transaction, under
+    the account lock, once the request is claimed and before the destructive writes, so the account's
+    rows (its language setting among them) and the app's own rows a `hard-delete` cascades away are
+    still readable through the transaction. It is never published or queued. Database work only:
+    write an outbox row through the app's own repository and send from a job after the commit. A
+    throw rolls the purge back — account and request stay `pending`, no `completed` — and the next
+    sweep retries. `onBeforePurge` is unchanged: it runs before the transaction opens, without the
+    lock.
 
   **Migrate from `sendNotifications: true`:** remove the option, then follow the README recipe
   ("Account Deletion & Recovery" → "Telling the person"): `registerTemplate` three templates with

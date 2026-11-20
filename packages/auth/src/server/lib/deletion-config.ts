@@ -45,23 +45,30 @@ export interface AuthDeletionConfig
     purgeCron: string;
 
     /**
-     * Synchronous hook invoked immediately before a user is purged. Throw to skip
-     * that user for this sweep (they stay `pending`, retried on the next tick).
+     * The app's own I/O before a purge, outside any transaction: called once the
+     * primary read finds the account still `pending`, before the purge
+     * transaction opens and without the account lock. Throw to skip that user
+     * for this sweep (they stay `pending`, retried on the next tick). A cancel
+     * may still win after it returns, so it can run for a purge that never
+     * happens, and it runs again on every retry.
      */
     onBeforePurge?: (user: AccountDeletionPurgeUser) => Promise<void>;
 
     /**
-     * Called inside the purge transaction, after the purge's own writes and
-     * before its commit, with the contact read under the account lock. Never
-     * published or queued. Database work only — it runs under the account lock:
-     * write an outbox row through the app's own repository (it joins this
-     * transaction) and send from a job after the commit. A throw rolls the purge
-     * back; the request stays `pending` and the next sweep retries it.
+     * Called inside the purge transaction, under the account lock, once the
+     * purge has claimed the request and before its destructive writes, with the
+     * contact read under the lock. The account's rows, and the app's own rows a
+     * hard delete would cascade away, are still readable through the
+     * transaction. Never published or queued. Database work only: write an
+     * outbox row through the app's own repository (it joins this transaction,
+     * so the row commits with the purge or not at all) and send from a job
+     * after the commit. A throw rolls the purge back; the request stays
+     * `pending` and the next sweep retries it.
      */
     onPurge?: (account: PurgedAccount) => Promise<void>;
 }
 
-/** The account a purge destroys, as read under its lock before the destructive step. */
+/** The account a purge destroys, as read under its lock, handed to `onPurge` before the destructive step. */
 export interface PurgedAccount
 {
     publicId: string;

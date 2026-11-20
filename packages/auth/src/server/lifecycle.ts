@@ -225,19 +225,25 @@ export interface AuthLifecycleOptions extends AuthInitOptions
         purgeCron?: string;
 
         /**
-         * Invoked immediately before a user is purged (both the immediate inline
-         * path and the cron sweep). Throw to skip that user for this run — they
-         * stay `pending` and are retried on the next sweep.
+         * The app's own I/O before a purge (the immediate inline path, the
+         * admin entry point and the cron sweep), outside any transaction: called
+         * once the primary read finds the account still `pending`, before the
+         * purge transaction opens and without the account lock. Throw to skip
+         * that user for this run — they stay `pending` and are retried on the
+         * next sweep. A cancel may still win after it returns, so it can run for
+         * a purge that never happens, and it runs again on every retry.
          */
         onBeforePurge?: (user: AccountDeletionPurgeUser) => Promise<void>;
 
         /**
          * The package sends no deletion notice; this hook is how an app learns
          * the address of an account it may no longer read. Called inside the
-         * purge transaction, after the purge's own writes and before the commit,
-         * once per committed purge (both strategies), with
-         * `{ publicId, email, phone, purgeStrategy }` read under the account
-         * lock. Never published or queued.
+         * purge transaction, under the account lock, once the purge has claimed
+         * the request and before its destructive writes (both strategies), with
+         * `{ publicId, email, phone, purgeStrategy }` read under the lock. The
+         * account's rows — its settings, the language among them — and the
+         * app's own rows that a hard delete cascades away are still readable
+         * through the transaction. Never published or queued.
          *
          * Database work only: it runs under the account lock. Write an outbox
          * row through the app's own repository — it joins this transaction, so

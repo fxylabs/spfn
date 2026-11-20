@@ -7479,7 +7479,7 @@ export default defineServerConfig()
 
 By the time a purge commits, the account's address is scrubbed (`anonymize`) or gone
 (`hard-delete`). An app that tells the person their account is deleted takes the address from
-`onPurge`, which is handed it under the lock before the destructive step — see
+`onPurge`, which runs under the lock before the destructive step — see
 [telling the person](#telling-the-person).
 
 **Concurrency.** The purge job re-verifies the account's deletion is still `pending` on the write
@@ -7537,15 +7537,26 @@ purge. With the default configuration nothing is sent.
   address must not travel with it. It says that a purge committed, nothing more.
 - **`onPurge`** is how the app learns the address of an account it can no longer read. It is
   never published or queued. Its contract:
-  - It is called **inside the purge transaction**, after the purge's own writes and before the
-    commit, once per purge that commits, for both strategies, with the contact read under the
-    account lock before the destructive step.
+  - It is called **inside the purge transaction, under the account lock, before the destructive
+    writes**: once the account is read `pending` under the lock and the request is claimed, and
+    before the account is anonymized or deleted, for both strategies. The contact it is handed is
+    read under that lock. Everything the purge is about to destroy is still readable through the
+    transaction — the account (`usersRepository.findByPublicId`), its settings, the language among
+    them (`userSettingsRepository.findLocaleByUserId`), and the app's own rows that a
+    `hard-delete` cascades away.
+  - A purge that does not go ahead does not call it: one a cancel won, or one another sweep already
+    completed.
   - **Database work only.** It runs under the account lock: no mail, no HTTP. Write an outbox row
     through the app's own repository — a `BaseRepository` joins this transaction, so the row
     commits with the purge or not at all — and send from a job after the commit.
   - **A throw rolls the purge back.** The account and its request stay `pending`, no
     `auth.deletion.completed` fires, and the next sweep purges it again and calls the hook again.
-    A purge a cancel won (the request no longer `pending` under the lock) calls it not at all.
+- **`onBeforePurge`** is not part of telling anyone, and runs at another moment: before the purge
+  transaction opens, without the account lock, once the primary read finds the account still
+  `pending`. It is for the app's own I/O outside the database (files in object storage, an
+  external system). A throw skips that account for this sweep; nothing is rolled back, because
+  nothing has been written. A cancel can still win after it returns, so it can run for a purge that
+  never happens, and it runs again on every retry. Never send the notice from it.
 
 **Recipe.** Three templates with locales, two subscribers, and an outbox the hook fills and a job
 empties. Every part is `@spfn/notification`'s or the app's own:
@@ -7660,8 +7671,9 @@ export const deletionNoticeOutboxRepository = new DeletionNoticeOutboxRepository
 Register `deletionNoticeJob` in the app's job router beside `authJobRouter`, and pass
 `onPurge: (account) => deletionNoticeOutboxRepository.add(account)` in
 `createAuthLifecycle({ deletion })`. For the completed notice in the person's language, add a
-`locale` column and fill it in the hook from the app's own data — a read through its repository,
-inside the same transaction — before the account's rows are gone.
+`locale` column and fill it in the hook: the account's settings and the app's own rows are still
+there, read through their repositories inside the same transaction — for example
+`userSettingsRepository.findLocaleByUserId((await usersRepository.findByPublicId(account.publicId))!.id)`.
 
 > **BREAKING — the package sends no deletion notice (#170).** `deletion.sendNotifications` is
 > removed and `createAuthLifecycle({ deletion: { sendNotifications } })` refuses to boot, naming
