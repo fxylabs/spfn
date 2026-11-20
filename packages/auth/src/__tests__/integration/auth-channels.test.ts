@@ -2,7 +2,7 @@
  * @spfn/auth - An app chooses which sign-in channels exist (#308)
  *
  * One test per row C2–C12 of the #308 case table, and R1 for passkey sign-in
- * (#330), I1, I2, I4 and I6–I8 for invitations and self-deletion (#381). C1 is every other suite staying green; C13 and the option's own
+ * (#330), I1–I4, I6–I8, I11 and I12 for invitations and self-deletion (#381). C1 is every other suite staying green; C13 and the option's own
  * validation are in unit/auth-channels.test.ts.
  *
  * Driven against the mounted auth router with `authenticate` as the
@@ -16,7 +16,7 @@
  * setting left behind would close a channel under the next file.
  */
 
-import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, onTestFinished, vi } from 'vitest';
 import type { Hono } from 'hono';
 import { eq } from 'drizzle-orm';
 
@@ -72,7 +72,8 @@ const { requestSignupLinkService } = await import('@/server/services/signup-link
 const { requestPasswordResetService } = await import('@/server/services/password-reset.service');
 const { sendVerificationCodeService } = await import('@/server/services/verification.service');
 const { createInvitation, acceptInvitation } = await import('@/server/services/invitation.service');
-const { requestAccountDeletionService } = await import('@/server/services/account-deletion.service');
+const { requestAccountDeletionService, sweepDuePurges } = await import('@/server/services/account-deletion.service');
+const { invitationCreatedEvent } = await import('@/server/events');
 
 const dbAvailable = await isDatabaseAvailable();
 
@@ -577,7 +578,7 @@ describe.skipIf(!dbAvailable)('An app chooses which sign-in channels exist (#308
     });
 
     // ========================================================================
-    // I1, I2, I6, I7: invitations and self-deletion (#381); I4/I8 under C12
+    // I1–I3, I6, I7, I11, I12: invitations and self-deletion (#381); I4/I8 under C12
     // ========================================================================
 
     describe('invitations: false', () =>
@@ -629,6 +630,26 @@ describe.skipIf(!dbAvailable)('An app chooses which sign-in channels exist (#308
             expect(await getTestDb().select().from(users).where(eq(users.email, 'i2@ch381.test'))).toHaveLength(1);
             expect(await invitationStatus(id)).toBe('accepted');
         });
+
+        it('I3: a superadmin, who holds user:invite, is answered 404 on every signed-in route; nothing is issued, changed or announced', async () =>
+        {
+            const { id } = await issuedInvitation('i3-pending@ch381.test');
+            const before = await getTestDb().select().from(userInvitations);
+            await createTestUser('i3@ch381.test', (await getRoleByName('superadmin'))!.id);
+            const authorization = await signIn(app, 'i3@ch381.test', nextIp());
+            const announced: unknown[] = [];
+            onTestFinished(invitationCreatedEvent.subscribe(payload => void announced.push(payload)));
+            configureChannels({ invitations: false });
+
+            await expectChannelClosed(await post('/_auth/invitations', { email: 'i3-new@ch381.test', roleId: await userRoleId() }, authorization), 'invitations', 'createInvitation');
+            await expectChannelClosed(await post('/_auth/invitations/resend', { id }, authorization), 'invitations', 'resendInvitation');
+            await expectChannelClosed(await post('/_auth/invitations/cancel', { id }, authorization), 'invitations', 'cancelInvitation');
+            await expectChannelClosed(await post('/_auth/invitations/delete', { id }, authorization), 'invitations', 'deleteInvitation');
+            await expectChannelClosed(await app.request('/_auth/invitations', { headers: { Authorization: authorization } }), 'invitations', 'listInvitations');
+
+            expect(await getTestDb().select().from(userInvitations)).toEqual(before);
+            expect(announced).toEqual([]);
+        });
     });
 
     describe('selfDeletion: false', () =>
@@ -654,6 +675,27 @@ describe.skipIf(!dbAvailable)('An app chooses which sign-in channels exist (#308
             expect((await post('/_auth/keys/list', {}, authorization)).status).toBe(200);
         });
 
+        it('I11: a refused deletion request spends no rate-limit token — the first request after reopening is served', async () =>
+        {
+            const email = 'i9@ch381.test';
+            const userId = await createTestUser(email, await userRoleId());
+            const ip = nextIp();
+            const authorization = await signIn(app, email, ip);
+            const request = () => post('/_auth/deletion/request', { password: TEST_PASSWORD }, authorization, ip);
+            configureChannels({ selfDeletion: false });
+
+            for (let attempt = 0; attempt < 6; attempt += 1)
+            {
+                await expectChannelClosed(await request(), 'selfDeletion', `attempt ${attempt}`);
+            }
+
+            __resetChannelsForTests();
+
+            const response = await request();
+            expect(response.status, await response.clone().text()).toBe(200);
+            expect((await deletionState(userId)).requests).toBe(1);
+        });
+
         it('I7: a pending deletion an operator requested is still cancelled, by the password and by an account_deletion code', async () =>
         {
             const email = 'i7@ch381.test';
@@ -675,6 +717,20 @@ describe.skipIf(!dbAvailable)('An app chooses which sign-in channels exist (#308
             const byCode = await post('/_auth/deletion/cancel', { email, verificationToken: (await verified.json()).verificationToken });
             expect(byCode.status, await byCode.clone().text()).toBe(204);
             expect((await deletionState(userId)).deletion).toBeNull();
+        });
+
+        it('I12: the purge sweep still purges an operator-requested deletion once it is due', async () =>
+        {
+            const userId = await createTestUser('i10@ch381.test', await userRoleId());
+            configureChannels({ selfDeletion: false });
+            await requestAccountDeletionService(userId, { requestedBy: 'admin' });
+            await getTestDb().update(accountDeletionRequests)
+                .set({ purgeScheduledAt: new Date(Date.now() - 1000) })
+                .where(eq(accountDeletionRequests.userId, userId));
+
+            expect(await sweepDuePurges()).toMatchObject({ processed: 1, purged: 1 });
+            const [user] = await getTestDb().select().from(users).where(eq(users.id, userId));
+            expect(user!.email).not.toBe('i10@ch381.test');
         });
     });
 
