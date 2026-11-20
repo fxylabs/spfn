@@ -248,9 +248,12 @@ export interface AuthLifecycleOptions extends AuthInitOptions
          * Database work only: it runs under the account lock. Write an outbox
          * row through the app's own repository — it joins this transaction, so
          * the row commits with the purge or not at all — and send from a job
-         * after the commit. A throw rolls the purge back (no
-         * `auth.deletion.completed`); the request stays `pending` and the next
-         * sweep calls it again.
+         * after the commit. A hook that opens its own transaction
+         * (`requiresNew`) and touches the account's rows never returns: it
+         * waits on the lock the purge holds, and PostgreSQL does not see a
+         * deadlock. A plain nested `runInTransaction` joins and is fine. A throw
+         * rolls the purge back (no `auth.deletion.completed`); the request stays
+         * `pending` and the next sweep calls it again.
          */
         onPurge?: (account: PurgedAccount) => Promise<void>;
     };

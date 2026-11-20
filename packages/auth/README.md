@@ -7549,6 +7549,11 @@ purge. With the default configuration nothing is sent.
   - **Database work only.** It runs under the account lock: no mail, no HTTP. Write an outbox row
     through the app's own repository — a `BaseRepository` joins this transaction, so the row
     commits with the purge or not at all — and send from a job after the commit.
+  - **Never its own transaction.** A hook that opens its own transaction
+    (`runInTransaction(fn, { requiresNew: true })`) and touches the account's rows never returns:
+    it waits on the lock the purge holds, and the purge waits on the hook. PostgreSQL does not see
+    a deadlock, because the second wait is in the application, not in the database, so nothing
+    breaks it. A plain nested `runInTransaction(fn)` joins the purge's transaction and is fine.
   - **A throw rolls the purge back.** The account and its request stay `pending`, no
     `auth.deletion.completed` fires, and the next sweep purges it again and calls the hook again.
 - **`onBeforePurge`** is not part of telling anyone, and runs at another moment: before the purge

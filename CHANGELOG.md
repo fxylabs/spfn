@@ -369,6 +369,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     rows (its language setting among them) and the app's own rows a `hard-delete` cascades away are
     still readable through the transaction. It is never published or queued. Database work only:
     write an outbox row through the app's own repository and send from a job after the commit. A
+    hook that opens its own transaction (`requiresNew`) and touches the account's rows never
+    returns: it waits on the lock the purge holds, and PostgreSQL does not see a deadlock. A
     throw rolls the purge back — account and request stay `pending`, no `completed` — and the next
     sweep retries. `onBeforePurge` is unchanged: it runs before the transaction opens, without the
     lock.

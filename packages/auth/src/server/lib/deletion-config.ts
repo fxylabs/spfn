@@ -62,8 +62,11 @@ export interface AuthDeletionConfig
      * transaction. Never published or queued. Database work only: write an
      * outbox row through the app's own repository (it joins this transaction,
      * so the row commits with the purge or not at all) and send from a job
-     * after the commit. A throw rolls the purge back; the request stays
-     * `pending` and the next sweep retries it.
+     * after the commit. A hook that opens its own transaction (`requiresNew`)
+     * and touches the account's rows never returns: it waits on the lock the
+     * purge holds, and PostgreSQL does not see a deadlock. A plain nested
+     * `runInTransaction` joins and is fine. A throw rolls the purge back; the
+     * request stays `pending` and the next sweep retries it.
      */
     onPurge?: (account: PurgedAccount) => Promise<void>;
 }
