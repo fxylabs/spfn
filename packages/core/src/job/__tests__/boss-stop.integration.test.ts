@@ -120,6 +120,22 @@ describe('pg-boss\'s stop() on the getBoss() instance', () =>
         await expect(boss.work(QUEUE, async () => undefined)).resolves.toEqual(expect.any(String));
     }, 15000);
 
+    it('B6: a stop() while one runs, or after it, does nothing — neither it nor the first rejects with a handler still running', async () =>
+    {
+        const boss = getBoss()!;
+        const started = startedHandler(new Promise(() => undefined));
+        await boss.work(QUEUE, { pollingIntervalSeconds: 0.5 }, started.handler);
+        const id = await boss.send(QUEUE, {});
+        await started.running;
+
+        const first = boss.stop({ graceful: true, timeout: 1000 });
+        await expect(boss.stop({ graceful: false })).resolves.toBeUndefined();
+        await expect(first).resolves.toBeUndefined();
+        await expect(boss.stop({ graceful: false })).resolves.toBeUndefined();
+
+        expect(await jobState(id)).toBe('retry');
+    }, 15000);
+
     async function jobState(id: string | null): Promise<string>
     {
         const rows = await sql.unsafe(`SELECT state FROM ${TEST_SCHEMA}.job WHERE id = $1`, [id as string]);
