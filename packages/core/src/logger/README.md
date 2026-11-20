@@ -241,7 +241,7 @@ interface DatabaseErrorDescription
     severity?: string;
     constraint?: string; schema?: string; table?: string; column?: string; dataType?: string;
     routine?: string;
-    message?: string;           // the driver's message, for SQLSTATE classes 08, 23, 40, 53, 57 only
+    message?: string;           // the driver's message: classes 08, 23, 40, 53, 57 from a known routine only
     sql?: string;               // the SQL text with $n placeholders, truncated to 1000 characters
     paramCount?: number;        // how many values were bound — never the values
     stack?: string;             // frames only: the header lines are dropped
@@ -273,8 +273,18 @@ interface ErrorDescription
   08 (connection), 23 (integrity constraint — the values are in `detail`), 40 (transaction
   rollback), 53 (insufficient resources), 57 (operator intervention). Class 22 messages quote the
   rejected input (`invalid input syntax for type integer: "…"`), 42601 quotes a token, P0001 is
-  the app's own text: those, and unknown codes, keep no message. Neither does a message raised by
-  PL/pgSQL `RAISE` (routine `exec_stmt_raise`), whatever ERRCODE it carries.
+  the app's own text: those, and unknown codes, keep no message.
+- A kept class is not enough: the error must also come from a server routine known to write
+  identifiers only, or name no routine at all (a pooler's own 08/53 errors). A procedural
+  language raises any SQLSTATE with the app's own text — PL/pgSQL `RAISE … USING ERRCODE`
+  reports `exec_stmt_raise`, PL/Python `plpy.error(…, sqlstate=…)` its own routine — and so may
+  an extension; from an unknown routine the message is dropped and the code, constraint and
+  table stay. The known routines, each read off the error PostgreSQL 16.15 raised:
+  `_bt_check_unique`, `comparetup_index_btree` (23505), `check_exclusion_or_unique_constraint`
+  (23P01), `ExecConstraints` (23502, 23514), `ri_ReportViolation` (23503),
+  `ExecEvalConstraintCheck`, `ExecEvalConstraintNotNull`, `domain_check_input` (domain 23502,
+  23514), `DeadLockReport` (40P01), `ExecUpdate`, `PreCommit_CheckForSerializationFailure`
+  (40001), `ProcessInterrupts` (57014, 57P01).
 - Describing never throws: a field whose getter throws is left out, a cause chain longer than
   10 links ends in a `CauseChainTruncated` link, and one that loops back ends in a
   `CircularCause` link. Masking the context never throws either: a value whose getter throws

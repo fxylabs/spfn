@@ -33,7 +33,7 @@ export interface DatabaseErrorDescription
     column?: string;
     dataType?: string;
     routine?: string;
-    /** The driver's message, only for SQLSTATE classes whose messages name identifiers only */
+    /** The driver's message, only for SQLSTATE classes whose messages name identifiers only, from a known server routine */
     message?: string;
     /** The SQL text with its `$n` placeholders, truncated */
     sql?: string;
@@ -100,10 +100,30 @@ const SQLSTATE_PATTERN = /^[0-9A-Z]{5}$/;
 const MESSAGE_SAFE_CLASSES: ReadonlySet<string> = new Set(['08', '23', '40', '53', '57']);
 
 /**
- * The routine a PL/pgSQL `RAISE` reports: its message is the app's own text,
- * whatever ERRCODE it was raised with
+ * The server routines whose messages, in the classes above, name identifiers
+ * only. A kept class is not enough on its own: a procedural language raises
+ * any SQLSTATE with the app's own text (PL/pgSQL `RAISE … USING ERRCODE =
+ * 'unique_violation'` reports `exec_stmt_raise`, PL/Python `plpy.error(…,
+ * sqlstate='23505')` its own routine), and so may an extension. So the
+ * message is kept only from a routine on this list — each one read off the
+ * error PostgreSQL 16.15 actually raised — or from an error that names no
+ * routine at all, which is what a pooler such as PgBouncer synthesizes for its
+ * own 08 and 53 errors.
  */
-const RAISE_ROUTINE = 'exec_stmt_raise';
+const MESSAGE_SAFE_ROUTINES: ReadonlySet<string> = new Set([
+    '_bt_check_unique',                         // 23505: insert, update, deferred unique check
+    'comparetup_index_btree',                   // 23505: CREATE UNIQUE INDEX over duplicates
+    'check_exclusion_or_unique_constraint',     // 23P01: exclusion constraint
+    'ExecConstraints',                          // 23502 not-null column, 23514 check
+    'ri_ReportViolation',                       // 23503: foreign key, on insert and on delete
+    'ExecEvalConstraintCheck',                  // 23514: domain check
+    'ExecEvalConstraintNotNull',                // 23502: domain not-null
+    'domain_check_input',                       // 23502/23514: domain input (COPY, a bound parameter)
+    'DeadLockReport',                           // 40P01
+    'ExecUpdate',                               // 40001: concurrent update
+    'PreCommit_CheckForSerializationFailure',   // 40001: serializable read/write dependencies
+    'ProcessInterrupts',                        // 57014 statement timeout / cancel, 57P01 terminated
+]);
 
 const SQL_LIMIT = 1000;
 
@@ -390,7 +410,10 @@ function keptMessage(error: Fields): string | undefined
         return undefined;
     }
 
-    return read(error, 'routine') === RAISE_ROUTINE ? undefined : stringField(error, 'message');
+    const routine = read(error, 'routine');
+    const safe = routine === undefined || (typeof routine === 'string' && MESSAGE_SAFE_ROUTINES.has(routine));
+
+    return safe ? stringField(error, 'message') : undefined;
 }
 
 function describeOther(error: Error, walk: Walk): ErrorDescription

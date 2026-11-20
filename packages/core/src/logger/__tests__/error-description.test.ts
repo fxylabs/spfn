@@ -11,7 +11,7 @@
  * | R4  | as the error argument                       | a fix that drops only the stack's first line: line 2 is `params:` |
  * | R5  | inside the context object                   | the key-masking walk printing `params` and the cause's `detail` |
  * | R7  | a 22P02 driver error                        | a class-22 message quoting the rejected input               |
- * | R7b | a 23505 an app trigger RAISEd with its text | a kept class carrying the app's own text                    |
+ * | R7b | a kept class from an unknown routine (`RAISE`, PL/Python) | a kept class carrying the app's own text; a pooler's routine-less 08 losing its message |
  * | F1  | formatted into a printf-style message (`%s`, `%o`, `%j`, a stray `%c`) | the documented printf form handing the error to `util.format` undescribed |
  *
  * What is the caught value is decided by position, never by the value's shape (G2):
@@ -100,18 +100,26 @@ describe('a logged database error carries no bound value', () =>
         expect(JSON.stringify(description)).not.toContain('leak-probe-value');
     });
 
-    it('R7b: a message RAISEd by PL/pgSQL is left out, whatever ERRCODE it carries', () =>
+    it('R7b: a kept class from an unknown routine keeps no message; one that names no routine keeps it', () =>
     {
-        const raised = Object.assign(new Error('leak-probe@example.test taken'), {
+        const raised = (routine: string): Error => Object.assign(new Error('leak-probe@example.test taken'), {
             severity: 'ERROR',
             code: '23505',
-            routine: 'exec_stmt_raise',
+            constraint_name: 'users_email_key',
+            table_name: 'users',
+            routine,
         });
+        const pooler = Object.assign(new Error('no more connections allowed (max_client_conn)'), { severity: 'FATAL', code: '08P01' });
 
-        const description = describeError(raised);
+        for (const routine of ['exec_stmt_raise', 'PLy_elog_impl'])
+        {
+            const description = describeError(raised(routine));
 
-        expect(description).toMatchObject({ kind: 'database', code: '23505', routine: 'exec_stmt_raise' });
-        expect(JSON.stringify(description)).not.toContain('leak-probe@example.test');
+            expect(description).toMatchObject({ kind: 'database', code: '23505', constraint: 'users_email_key', table: 'users', routine });
+            expect(description).not.toHaveProperty('message');
+        }
+
+        expect(describeError(pooler)).toMatchObject({ kind: 'database', code: '08P01', message: 'no more connections allowed (max_client_conn)' });
     });
 });
 

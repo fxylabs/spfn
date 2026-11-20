@@ -196,7 +196,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `DatabaseErrorDescription` types): the one loggable form of a caught error. A database error is
   described by its SQLSTATE, constraint, schema, table, column, routine, the SQL with its `$n`
   placeholders (truncated to 1000 characters) and `paramCount`; the driver's message only for
-  SQLSTATE classes 08, 23, 40, 53 and 57, and never for a PL/pgSQL `RAISE`. It never copies
+  SQLSTATE classes 08, 23, 40, 53 and 57 raised by a known server routine (or by a pooler, which
+  names none) — a PL/pgSQL `RAISE`, a PL/Python `plpy.error` or an extension reporting a kept
+  class keeps no message. It never copies
   `params`, `parameters`, `detail`, `hint`, `where`, `internal_query`, drizzle's message or a stack
   header (#382).
 
