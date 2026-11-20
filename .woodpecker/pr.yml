@@ -90,19 +90,64 @@ steps:
         # laptop. Nothing about the code was slow; the pod was simply not asking
         # for anything.
         #
-        # `role: build` is the dedicated build pool (c7g.xlarge, 4 vCPU / 8GB,
-        # one on-demand node always up and spot nodes above it). It is tainted,
-        # so the toleration is required alongside the selector — a selector on
-        # its own leaves the pod unschedulable.
+        # `role: build` is the dedicated build pool. As read from the cluster on
+        # 2026-11-20: GKE Autopilot, its nodes `gk3-…` of machine type
+        # `ek-standard-8`, amd64. It is tainted, so the toleration is required
+        # alongside the selector — a selector on its own leaves the pod
+        # unschedulable.
+        #
+        # `ephemeral-storage` is everything the container writes outside the
+        # workspace volume: its own filesystem layer, /tmp, its log. Undeclared,
+        # GKE Autopilot gives a pod 1Gi and evicts it past that — the namespace
+        # `woodpecker` has no LimitRange (read 2026-11-20), so the 1Gi is
+        # Autopilot's — and pipelines
+        # 729, 735, 740, 741 and 743 ended so — exit 137, the log cut inside
+        # @spfn/auth's tests, `Evicted: Pod ephemeral local storage usage exceeds
+        # the total limit of containers 1Gi.` Measured in 743's `test` pod just
+        # before the eviction:
+        #
+        #     /usr                 276 MB  growth from the step's apt-get install,
+        #                                  /usr/local/bin/sops included
+        #     /root                322 MB  21 until the cli suite ran
+        #     /var/lib/postgresql  282 MB  pg_wal 209 of it, and growing
+        #     /tmp                  79 MB  the 46 MB sops download included
+        #
+        # The rule since: a large or growing write goes on the workspace volume
+        # (a PersistentVolumeClaim, not counted here), not in the container.
+        # `test` below follows it for the cluster and its home directory.
+        # Measured in 746, this branch's `test` (head f834ed48, every task
+        # passed), with `du` in the pod every 120 s through the step; the peak
+        # of each:
+        #
+        #     container  /usr                 276 MB  above the image's 1085, as in 743
+        #                /tmp                  33 MB
+        #                /root                  1 MB
+        #                /var/lib/postgresql    1 MB  after the drop
+        #                /var/log               1 MB
+        #     volume     postgresql           107 MB  the whole cluster, pg_wal in it
+        #                home                 151 MB  all of it corepack's pnpm
+        #                redis                  1 MB
+        #
+        # The container's writes peaked at about 310 MB, so 2Gi leaves about
+        # 1.8 GB for what the rows do not show — the step log, a new suite's
+        # temporary files, a larger apt dependency.
+        # `verify` writes less: no apt, no cluster; pnpm keeps its store at the
+        # volume's root because /root is another filesystem, so the one-off
+        # corepack pnpm (21 MB) and the build's /tmp are its share. 744's
+        # `verify` pod carried the 2Gi as request and limit (read 2026-11-20).
+        # 2Gi is a fifth of Autopilot's 10Gi maximum, and Autopilot requires the
+        # limit to equal the request.
         backend_options: &build_pod
             kubernetes:
                 resources:
                     requests:
                         cpu: "2"
                         memory: "4Gi"
+                        ephemeral-storage: "2Gi"
                     limits:
                         cpu: "4"
                         memory: "7Gi"
+                        ephemeral-storage: "2Gi"
                 nodeSelector:
                     role: build
                 tolerations:
@@ -153,9 +198,9 @@ steps:
             # @spfn/core's declaration build was the one that lost: its tsup DTS
             # worker built a TypeScript program per entry directory (#352) and
             # died with ERR_WORKER_OUT_OF_MEMORY while the website and three
-            # example builds ran beside it. Two at a time on a 4 vCPU node, each
-            # capped at 3GB, keeps the sum under the limit with room for the
-            # toolchain itself.
+            # example builds ran beside it. Two at a time in a pod limited to 4
+            # CPUs, each capped at 3GB, keeps the sum under the limit with room
+            # for the toolchain itself.
             #
             # `pnpm exec turbo run`, not `pnpm build --filter=…`: pnpm reads a
             # `--filter` before the script name as its own option.
@@ -216,8 +261,14 @@ steps:
             # password-protected. The script waits for the replication link
             # rather than for both ports to listen — a per-port health check
             # passes while the replica is still catching up.
+            #
+            # Nothing reads the package lists or the downloaded archives after
+            # the install, and both sit in the container's own storage (see
+            # `ephemeral-storage` above), so they go at once.
             - apt-get update
             - apt-get install -y --no-install-recommends postgresql postgresql-contrib redis-server age
+            - apt-get clean
+            - rm -rf /var/lib/apt/lists/*
 
             # `age` and `sops` are for the CLI's secret tests
             # (packages/cli/src/commands/secret/__tests__/export.test.ts and
@@ -236,9 +287,14 @@ steps:
             # rather than as a confusing test failure later.
             #
             # The architecture is read from the container, not written down: the
-            # build pool is ARM today (c7g) and an amd64 binary there fails only
-            # as `Exec format error`. dpkg's names and sops' asset names agree for
+            # build pool is amd64 (read from the cluster on 2026-11-20), but the
+            # pod asks for a `role: build` node, not an architecture, so a pool
+            # moved to arm64 would otherwise get a binary that fails only as
+            # `Exec format error`. dpkg's names and sops' asset names agree for
             # the two architectures pinned; anything else stops the step.
+            #
+            # The download is deleted once installed: left in /tmp it is a
+            # second 46 MB copy in the container's storage.
             - SOPS_VERSION=v3.13.3
             - |
                 case "$(dpkg --print-architecture)" in
@@ -249,8 +305,51 @@ steps:
             - curl --fail --silent --show-error --location --output /tmp/sops "https://github.com/getsops/sops/releases/download/$SOPS_VERSION/sops-$SOPS_VERSION.linux.$SOPS_ARCH"
             - echo "$SOPS_SHA256  /tmp/sops" | sha256sum --check --strict
             - install -m 0755 /tmp/sops /usr/local/bin/sops
+            - rm /tmp/sops
             - sops --disable-version-check --version
             - age --version
+
+            # The step's large and growing writes go on the workspace volume —
+            # the rule and the measurement are with `ephemeral-storage` above —
+            # in a directory beside the checkout rather than inside it. Woodpecker
+            # mounts the volume at the workspace base (/woodpecker) and checks
+            # out at src/<forge host>/<owner>/<repo> beneath it, so the
+            # checkout's parent is on the volume while git, eslint, turbo and
+            # ci-scope, which all walk the checkout, never see the directory and
+            # nothing has to ignore it.
+            #
+            # `$CI_WORKSPACE` unbraced, as this file writes every variable the
+            # shell is to expand. Woodpecker pre-processes a dollar sign followed
+            # by a brace in the YAML itself, before any shell runs, with the
+            # variables of its `compile` scope only; CI_WORKSPACE is `runtime`
+            # scope, so the braced form became empty — 744 ran `dirname ""` and put the state in a
+            # relative ./ci-test-state inside the checkout, where Redis, which
+            # changes directory, could not open its log. The checks stop the
+            # step unless the path is absolute (an empty or relative
+            # CI_WORKSPACE yields one that is not), lies outside the checkout,
+            # and has its parent on the checkout's device. That parent is no
+            # longer the checkout itself, so the device check now proves the
+            # directory is on the volume, not on the container's own filesystem
+            # as it would be should a `workspace:` put the checkout at the
+            # volume's root. The directory is emptied first, so a volume that
+            # outlived an earlier run cannot hand pg_createcluster a directory
+            # with a cluster in it.
+            - STEP_STATE="$(dirname "$CI_WORKSPACE")/ci-test-state"
+            - |
+                case "$STEP_STATE" in
+                    /*) ;;
+                    *) echo "$STEP_STATE is not an absolute path" >&2; exit 1 ;;
+                esac
+                case "$STEP_STATE/" in
+                    "$CI_WORKSPACE"/*) echo "$STEP_STATE is inside the checkout $CI_WORKSPACE" >&2; exit 1 ;;
+                esac
+                if [ "$(stat -c %d "$(dirname "$STEP_STATE")")" != "$(stat -c %d "$CI_WORKSPACE")" ]
+                then
+                    echo "$(dirname "$STEP_STATE") is not on the checkout's device, the workspace volume" >&2
+                    exit 1
+                fi
+            - rm -rf "$STEP_STATE"
+            - mkdir -p "$STEP_STATE"
 
             # `pg_ctlcluster` rather than `service postgresql start`: it comes
             # from postgresql-common itself, so it does not depend on the image
@@ -272,12 +371,75 @@ steps:
             # and cms suites share the cluster and get the same settings, which
             # changes nothing they assert. Appended rather than edited in place:
             # the last setting in the file wins.
+            #
+            # The data directory is on the volume. The package's install makes a
+            # cluster under /var/lib/postgresql, in the container's storage,
+            # where 743's grew to 282 MB; it is dropped and made again with
+            # postgresql-common's own pg_createcluster, which creates the
+            # directory owned by `postgres` — the step runs as root — and writes
+            # its `data_directory` into the configuration pg_ctlcluster reads.
+            # `-p 5432` because that is the port the suites and the roles script
+            # use, and pg_createcluster would otherwise take the first free one.
+            #
+            # The WAL is kept small as well. With Debian's defaults pg_wal grows
+            # toward max_wal_size = 1GB before a checkpoint recycles it, and the
+            # auth suite rewrites its schema for every test. `wal_level =
+            # minimal` logs only what crash recovery needs, and PostgreSQL
+            # refuses to start with it unless `max_wal_senders = 0`. It is not
+            # silence: a table created or truncated in the transaction that
+            # fills it is still logged whole at commit when smaller than
+            # `wal_skip_threshold` (2MB), as the suites' tables are; only
+            # larger ones skip the WAL. Nothing in the repository replicates,
+            # decodes logically or publishes; pg_trgm, LISTEN/NOTIFY and pg_dump
+            # all work at that level. `max_wal_size = 32MB` is PostgreSQL's
+            # floor, two 16 MB segments, and a soft limit: it triggers a
+            # checkpoint, and pg_wal outgrows it until that checkpoint ends.
+            # `min_wal_size`, the same, is how much finished WAL is kept for
+            # reuse rather than removed. `checkpoint_timeout = 30s` is its floor
+            # too, for stretches too quiet to reach the size. Measured against a
+            # throwaway cluster with a truncate, reseed and update loop: pg_wal
+            # 689 MB with the Debian defaults; a 49 MB peak, 33 MB afterwards,
+            # with these lines. In 746 the whole cluster peaked at 107 MB, pg_wal
+            # included. What the more frequent checkpoints cost the suites in
+            # time was not measured.
             - PGVER=$(ls /etc/postgresql | head -n1)
+            - pg_dropcluster --stop "$PGVER" main
+            - pg_createcluster -p 5432 -d "$STEP_STATE/postgresql" "$PGVER" main
             - printf '%s\n' 'local all all trust' 'host all all 127.0.0.1/32 trust' > "/etc/postgresql/$PGVER/main/pg_hba.conf"
-            - printf '%s\n' 'fsync = off' 'synchronous_commit = off' 'full_page_writes = off' >> "/etc/postgresql/$PGVER/main/postgresql.conf"
+            - printf '%s\n' 'fsync = off' 'synchronous_commit = off' 'full_page_writes = off' 'wal_level = minimal' 'max_wal_senders = 0' 'max_wal_size = 32MB' 'min_wal_size = 32MB' 'checkpoint_timeout = 30s' >> "/etc/postgresql/$PGVER/main/postgresql.conf"
             - pg_ctlcluster "$PGVER" main start
-            - PGUSER=postgres ./scripts/test-services.sh start
 
+            # The Redis instances' state and logs follow, through the script's
+            # own variable for them.
+            - PGUSER=postgres SPFN_TEST_STATE_DIR="$STEP_STATE/redis" ./scripts/test-services.sh start
+
+            # The home directory moves to the volume for the rest of the step,
+            # before corepack first writes to it. What is known of the 322 MB
+            # 743's /root held: run with a fresh HOME on a developer machine,
+            # the cli suite left 152 MB there, 151 of them corepack's downloads —
+            # pnpm 9.1.2 for the repository (21 MB, the 21 MB measured before the
+            # suite), 10.34.5 (23) and 11.23.0 (40) that
+            # test/kit/local-install-integration.test.ts runs, and the newest pnpm
+            # (68 MB as 12.21.0), fetched when the kit runs pnpm in a scratch
+            # project that names no `packageManager`. What is not known: the
+            # other 170 MB, which that run did not write, nor did 745 or 746;
+            # wherever it comes from, it would now land on the volume. A tool's
+            # own variable would not cover even the known part — the kit hands its pnpm
+            # children HOME but not COREPACK_HOME (packages/cli/src/kit/
+            # child-env.ts), so they would download their pnpm again under /root —
+            # while moving HOME puts both parts on the volume whatever the rest
+            # is: turbo passes HOME to its tasks and the kit to its children.
+            # Nothing else here reads it to a different effect. pnpm 9.1.2's
+            # `exec` and `run` do not open the store, so the store a new HOME
+            # would point pnpm at is never compared with the one `verify`
+            # installed `node_modules` from, and the kit's tests name their own
+            # `--store-dir`. The secret tests set SOPS_AGE_KEY_FILE, so sops does
+            # not look in the home directory for a key. node:22 ships no global
+            # git configuration, so the new home lacks nothing /root had.
+            # PostgreSQL and Redis are already up, as `postgres` and with their
+            # own directories.
+            - export HOME="$STEP_STATE/home"
+            - mkdir -p "$HOME"
             - corepack enable
 
             # `--concurrency=1` is not a throttle to relax when a run feels slow.

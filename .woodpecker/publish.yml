@@ -54,15 +54,21 @@ steps:
         # written down: a memory request so the pod is not BestEffort, and the
         # tainted `role: build` pool, which needs the toleration beside the
         # selector. YAML anchors do not cross files, so the block is copied.
+        # The `ephemeral-storage` declaration is copied with it, though this
+        # step starts no PostgreSQL, installs no packages with apt and runs no
+        # suite — what filled pr.yml's `test` pod. Its writes outside the
+        # volume are those of `verify`: the corepack pnpm and the build's /tmp.
         backend_options:
             kubernetes:
                 resources:
                     requests:
                         cpu: "2"
                         memory: "4Gi"
+                        ephemeral-storage: "2Gi"
                     limits:
                         cpu: "4"
                         memory: "7Gi"
+                        ephemeral-storage: "2Gi"
                 nodeSelector:
                     role: build
                 tolerations:
