@@ -14,6 +14,7 @@ import { PasskeyProofRequiredError } from '@spfn/auth/errors';
 
 import {
     enrollPasskey,
+    enrollPasskeyRetryOf,
     isConditionalMediationAvailable,
     isPasskeySupported,
     renewSession,
@@ -353,6 +354,7 @@ describe('browser passkey helpers', () =>
             const api = apiStub({ getSessionBinding: { call: vi.fn().mockRejectedValue(offline) } });
 
             await expect(enrollPasskey(api)).rejects.toBe(offline);
+            expect(enrollPasskeyRetryOf(offline)).toBeUndefined();
             expect(api.passkeyRegisterOptions.call).not.toHaveBeenCalled();
             expect(create).not.toHaveBeenCalled();
         });
@@ -387,6 +389,24 @@ describe('browser passkey helpers', () =>
             expect(resent.response).toBe(first.response);
             expect(resent).toMatchObject({ label: 'Laptop', passkeyResponse: { id: 'Y3JlZA' } });
             expect(create).toHaveBeenCalledTimes(1);
+        });
+
+        it('E13: a network error at the verify — rejects as itself, carrying retry, which posts the same attestation', async () =>
+        {
+            const offline = new TypeError('fetch failed');
+            const verify = logged('register/verify', async () => ENROLLED);
+            verify.mockRejectedValueOnce(offline);
+            const api = boundApi(verify);
+
+            await expect(enrollPasskey(api, { label: 'Laptop' })).rejects.toBe(offline);
+            const retry = enrollPasskeyRetryOf(offline);
+            expect(retry).toEqual({ body: verifyBodies(api)[0], mayProve: true });
+            order = [];
+
+            expect(await enrollPasskey(api, { retry })).toEqual({ ok: true, ...ENROLLED });
+            expect(order).toEqual(['register/verify']);
+            expect(create).toHaveBeenCalledTimes(1);
+            expect(get).toHaveBeenCalledTimes(1);
         });
 
         it('E10 (R10): an app-supplied proof the verify refuses is thrown — no proof prompt of the helper\'s', async () =>

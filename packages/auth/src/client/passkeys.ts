@@ -254,7 +254,7 @@ async function verifyEnrolment(api: AuthApi, retry: EnrollPasskeyRetry): Promise
 
             return retry.mayProve && isPasskeyProofRequired(error)
                 ? proveAndResend(api, retry)
-                : Promise.reject(error);
+                : rejectCarrying(retry)(error);
         },
     );
 }
@@ -277,6 +277,28 @@ async function proveAndResend(api: AuthApi, retry: EnrollPasskeyRetry): Promise<
         body: { ...retry.body, passkeyResponse: proof.passkeyResponse },
         mayProve: false,
     });
+}
+
+/**
+ * Rejects with the error as it came — the server's class, the transport's
+ * `TypeError` — carrying `retry`, so a rejection after `create()` still hands
+ * back the attestation the authenticator made.
+ */
+function rejectCarrying(retry: EnrollPasskeyRetry): (error: unknown) => Promise<never>
+{
+    return error => Promise.reject(Object.assign(
+        error !== null && typeof error === 'object' ? error : new Error(String(error), { cause: error }),
+        { retry },
+    ));
+}
+
+/**
+ * The `retry` an `enrollPasskey` rejection carries: present on every rejection
+ * after the registration prompt made a credential, absent before it.
+ */
+export function enrollPasskeyRetryOf(error: unknown): EnrollPasskeyRetry | undefined
+{
+    return (error as { retry?: EnrollPasskeyRetry } | null)?.retry;
 }
 
 /**

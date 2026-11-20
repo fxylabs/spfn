@@ -38,11 +38,11 @@ vi.mock('@simplewebauthn/browser', () => ({
 
 import { clearTables, getTestDb, isDatabaseAvailable, setupTestDb, teardownTestDb } from '../helpers/db';
 import { enableBinding, FixtureAuthenticator } from '../helpers/webauthn-fixture';
-import { passkeys, users } from '@/server/entities';
+import { passkeys, users, webauthnChallenges } from '@/server/entities';
 import { hashPassword } from '@/server/helpers/password';
 import { generateClientToken, generateKeyPair } from '@/server/lib/crypto';
 import { authenticate } from '@/server/middleware/authenticate';
-import { enrollPasskey } from '@/client/passkeys';
+import { enrollPasskey, enrollPasskeyRetryOf } from '@/client/passkeys';
 import type { AuthApi } from '@/client/passkeys';
 import { __resetChannelsForTests, configureChannels } from '@/server/lib/channels-config';
 import { __resetSecondFactorPolicyForTests, configureSecondFactor } from '@/server/lib/second-factor-policy';
@@ -288,5 +288,40 @@ describe.skipIf(!dbAvailable)('enrollPasskey against the router (#400)', () =>
         expect(await enrollPasskey(apiOver(session), { retry: dismissed.ok ? undefined : dismissed.retry })).toMatchObject({ ok: true });
         expect(log).toEqual(['registerVerify', 'registerVerify:403:PASSKEY_PROOF_REQUIRED', 'proofOptions', 'registerVerify']);
         expect({ registrations: browser.registrations, stored: await storedPasskeys() }).toEqual({ registrations: 1, stored: 2 });
+    });
+
+    it('PH: a network error at the verify after create() — rejects as the TypeError with retry, which stores', async () =>
+    {
+        const { session, authenticator } = await boundOwner();
+        holding(authenticator, await FixtureAuthenticator.create());
+        const api = apiOver(session);
+        (api as { passkeyRegisterVerify: unknown }).passkeyRegisterVerify = {
+            call: () => Promise.reject(new TypeError('fetch failed')),
+        };
+
+        const offline = await enrollPasskey(api, { label: 'Laptop' }).then(() => undefined, (error: unknown) => error);
+
+        expect(offline).toBeInstanceOf(TypeError);
+        expect(await storedPasskeys()).toBe(1);
+
+        expect(await enrollPasskey(apiOver(session), { retry: enrollPasskeyRetryOf(offline) })).toMatchObject({ ok: true, label: 'Laptop' });
+        expect({ registrations: browser.registrations, assertions: browser.assertions, stored: await storedPasskeys() })
+            .toEqual({ registrations: 1, assertions: 1, stored: 2 });
+    });
+
+    it('PB: a stale retry — the registration challenge expired — answers 401 PasskeyChallengeError', async () =>
+    {
+        const { session, authenticator } = await boundOwner();
+        holding(authenticator, await FixtureAuthenticator.create());
+        const api = apiOver(session);
+        (api as { passkeyRegisterVerify: unknown }).passkeyRegisterVerify = {
+            call: () => Promise.reject(new TypeError('fetch failed')),
+        };
+        const offline = await enrollPasskey(api).then(() => undefined, (error: unknown) => error);
+        await getTestDb().update(webauthnChallenges).set({ expiresAt: new Date(Date.now() - 60_000) });
+
+        await expect(enrollPasskey(apiOver(session), { retry: enrollPasskeyRetryOf(offline) }))
+            .rejects.toMatchObject({ statusCode: 401, name: 'PasskeyChallengeError' });
+        expect(await storedPasskeys()).toBe(1);
     });
 });
