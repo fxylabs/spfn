@@ -749,6 +749,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   so. A function package migration that fails now means the project schema was not applied
   (`❌ Failed to apply function package migrations — nothing of the project schema was applied`);
   it used to mean the project statements were already committed.
+- **spfn: `spfn db push`'s destructive confirmation has three outcomes (#378).** No skips the listed
+  statements and still applies the other project statements and the package migrations, as the
+  question now says. An aborted question (Ctrl-C, EOF) used to count as No and apply the rest; it
+  now exits 1 with nothing applied (`❌ The confirmation was aborted — nothing was applied`). A run
+  whose stdin is not a terminal used to hang at the question; with a destructive statement pending
+  and no `--force` it now exits 1 before any write, naming `--force`.
 
 ### Fixed
 

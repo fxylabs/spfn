@@ -313,8 +313,9 @@ interface ProjectSelection
 
 /**
  * The project statements to apply: all of them with --force or when nothing is
- * destructive; otherwise destructive ones only after confirmation. Declining
- * keeps the rest, which still apply after the function package migrations.
+ * destructive; otherwise destructive ones only after confirmation. Answering No
+ * keeps the rest, which still apply after the function package migrations; an
+ * aborted or impossible confirmation ends the command before any write.
  */
 async function selectProjectStatements(
     statements: string[],
@@ -375,7 +376,9 @@ async function applyProjectStatements(
 }
 
 /**
- * List the destructive statements and ask before applying any of them.
+ * List the destructive statements and ask before applying any of them. Only an
+ * explicit answer comes back: a confirmation that is aborted (Ctrl-C, EOF) or
+ * cannot be asked (stdin is not a terminal) exits 1 with nothing applied.
  */
 async function confirmDestructive(destructive: ClassificationResult['destructive']): Promise<boolean>
 {
@@ -386,12 +389,25 @@ async function confirmDestructive(destructive: ClassificationResult['destructive
         console.log(chalk.dim(`   → ${stmt.reason}`));
     }
 
+    if (!process.stdin.isTTY)
+    {
+        console.error(chalk.red('\n❌ Destructive changes need a confirmation and stdin is not a terminal — nothing was applied'));
+        console.log(chalk.yellow('💡 Pass --force to apply them, or run spfn db push in a terminal to choose.'));
+        process.exit(1);
+    }
+
     const { confirm } = await prompts({
         type: 'confirm',
         name: 'confirm',
-        message: 'Apply destructive changes?',
+        message: 'Apply these destructive changes? No skips them; the other project statements and the function package migrations are still applied.',
         initial: false,
     });
+
+    if (typeof confirm !== 'boolean')
+    {
+        console.error(chalk.red('\n❌ The confirmation was aborted — nothing was applied'));
+        process.exit(1);
+    }
 
     return confirm;
 }

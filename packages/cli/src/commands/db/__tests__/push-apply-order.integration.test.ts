@@ -4,7 +4,8 @@
  *
  * A scratch app whose project table references a table of the fake function
  * package @spfn/i163fix, pushed to TEST_DATABASE_URL. Without its own answer a
- * row fails at the destructive confirmation instead of waiting on stdin.
+ * row fails at the destructive confirmation instead of waiting on stdin; stdin
+ * counts as a terminal unless a row says otherwise.
  */
 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -16,19 +17,24 @@ import { OWNER_URL, requireDatabase } from './helpers/test-database.js';
 import { writeFunctionPackage } from './helpers/function-package.js';
 
 const prompter = vi.hoisted(() => ({
-    /** Answers the destructive confirmation; unset, reaching it fails the row */
-    answer: undefined as undefined | (() => Promise<boolean>),
+    /** Answers the destructive confirmation, undefined as an aborted prompt; unset, reaching it fails the row */
+    answer: undefined as undefined | (() => Promise<boolean | undefined>),
+    /** The question the confirmation asked */
+    message: undefined as string | undefined,
 }));
 
 vi.mock('prompts', () => ({
-    default: async () =>
+    default: async (question: { message: string }) =>
     {
         if (!prompter.answer)
         {
             throw new Error('prompts was called: the push reached the destructive confirmation');
         }
 
-        return { confirm: await prompter.answer() };
+        prompter.message = question.message;
+        const confirm = await prompter.answer();
+
+        return confirm === undefined ? {} : { confirm };
     },
 }));
 
@@ -61,6 +67,7 @@ describe('db push applies function package migrations first', () =>
     let previousCwd: string;
     let printed: string[];
     let errors: string[];
+    let stdinIsTTY: PropertyDescriptor | undefined;
 
     beforeAll(async () =>
     {
@@ -91,6 +98,9 @@ describe('db push applies function package migrations first', () =>
         printed = [];
         errors = [];
         prompter.answer = undefined;
+        prompter.message = undefined;
+        stdinIsTTY = Object.getOwnPropertyDescriptor(process.stdin, 'isTTY');
+        setStdinTTY(true);
         vi.spyOn(console, 'log').mockImplementation((...args: unknown[]) => void printed.push(args.map(String).join(' ')));
         vi.spyOn(console, 'error').mockImplementation((...args: unknown[]) => void errors.push(args.map(String).join(' ')));
         vi.spyOn(process, 'exit').mockImplementation(((code?: number) =>
@@ -103,9 +113,22 @@ describe('db push applies function package migrations first', () =>
     {
         process.chdir(previousCwd);
         delete process.env.DATABASE_URL;
+        if (stdinIsTTY)
+        {
+            Object.defineProperty(process.stdin, 'isTTY', stdinIsTTY);
+        }
+        else
+        {
+            delete (process.stdin as { isTTY?: boolean }).isTTY;
+        }
         vi.restoreAllMocks();
         rmSync(root, { recursive: true, force: true });
     });
+
+    function setStdinTTY(value: boolean): void
+    {
+        Object.defineProperty(process.stdin, 'isTTY', { value, configurable: true, writable: true });
+    }
 
     async function resetDatabase(): Promise<void>
     {
@@ -220,6 +243,8 @@ describe('db push applies function package migrations first', () =>
         await push();
 
         expect(packageAtPrompt).toBe(false);
+        expect(prompter.message).toBe(
+            'Apply these destructive changes? No skips them; the other project statements and the function package migrations are still applied.');
         expect(await exists('spfn_i163fix.things')).toBe(true);
         expect(await exists('i378_app.accounts')).toBe(true);
         expect(await columnExists('notes', 'extra')).toBe(true);
@@ -240,5 +265,35 @@ describe('db push applies function package migrations first', () =>
         await push({ dryRun: true });
 
         expect(output()).toMatch(/Destructive changes \(2\):\n\s+DROP TABLE "spfn_i163fix"."things"/);
+    });
+    it('T9 the confirmation is aborted (Ctrl-C, EOF): exit 1, nothing written — no package migration, no project statement', async () =>
+    {
+        await db.unsafe('CREATE SCHEMA i378_app; CREATE TABLE i378_app.notes (id integer PRIMARY KEY, extra text)');
+        writeFixture({ accounts: ACCOUNTS.byId });
+        prompter.answer = async () => undefined;
+
+        await expect(push()).rejects.toThrow('exit 1');
+
+        expect(errors.join('\n')).toContain('❌ The confirmation was aborted — nothing was applied');
+        expect(await exists(PACKAGE_TABLE)).toBe(false);
+        expect(await exists('spfn_i163fix.things')).toBe(false);
+        expect(await exists('i378_app.accounts')).toBe(false);
+        expect(await columnExists('notes', 'extra')).toBe(true);
+    });
+
+    it('T10 stdin is not a terminal and a destructive statement is pending: exit 1 before any prompt or write, naming --force', async () =>
+    {
+        await db.unsafe('CREATE SCHEMA i378_app; CREATE TABLE i378_app.notes (id integer PRIMARY KEY, extra text)');
+        writeFixture({ accounts: ACCOUNTS.byId });
+        setStdinTTY(false);
+
+        await expect(push()).rejects.toThrow('exit 1');
+
+        expect(errors.join('\n')).toContain(
+            '❌ Destructive changes need a confirmation and stdin is not a terminal — nothing was applied');
+        expect(output()).toContain('Pass --force to apply them');
+        expect(await exists(PACKAGE_TABLE)).toBe(false);
+        expect(await exists('i378_app.accounts')).toBe(false);
+        expect(await columnExists('notes', 'extra')).toBe(true);
     });
 });
