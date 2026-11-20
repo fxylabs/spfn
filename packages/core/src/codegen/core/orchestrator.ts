@@ -515,12 +515,13 @@ export class CodegenOrchestrator
     /**
      * A watch generation: run it, arm and check, and only then report how each
      * run ended (`settleOutcome`). After `close()` there is no check, and each
-     * run is reported as it ended.
+     * run is reported as it ended. With no runs — the config failed to load —
+     * it arms and checks the config's inputs alone.
      */
     private async watchGeneration(runs: Run[]): Promise<Outcome[]>
     {
         const outcomes = await this.generate(runs, false, true);
-        const stale = this.closed ? new Map<string, ChangedFile['event']>() : this.armAndCheck(runs.map(run => run.generator));
+        const stale = this.armAndCheck(runs.map(run => run.generator));
 
         outcomes.forEach(outcome => this.settleOutcome(outcome, [...stale.keys()].some(path => this.inputs.get(outcome.generator)?.has(path))));
         this.deferCheck(stale);
@@ -928,8 +929,8 @@ export class CodegenOrchestrator
     /**
      * An input of the codegen config changed: load the generators again, and
      * on success watch their patterns and run them all, in one watch
-     * generation. On failure (`loadConfig` says so) no generator runs; the
-     * inputs of the failing load are armed and checked as after a generation.
+     * generation. On failure (`loadConfig` says so) no generator runs: an
+     * empty watch generation arms and checks the inputs of the failing load.
      */
     private async reload(changes: Map<string, Change>): Promise<void>
     {
@@ -940,7 +941,7 @@ export class CodegenOrchestrator
 
         if (!(await this.loadConfig()))
         {
-            this.deferCheck(this.armAndCheck());
+            await this.watchGeneration([]);
 
             return;
         }
@@ -1073,10 +1074,17 @@ export class CodegenOrchestrator
      * Watch the directories of the inputs the loop acts on (`actedOn`) and of
      * the codegen config's, then compare each with its stamp. `ran` are the generators of the generation
      * just run, if any. Returns every stale input, with how it changed; the
-     * caller decides when it is dirty.
+     * caller decides when it is dirty. Every input watch is opened here, and
+     * none once `close()` has released them: a path still running when it is
+     * called (a generation, a config load) finds nothing stale and arms nothing.
      */
     private armAndCheck(ran: Generator[] = []): Map<string, ChangedFile['event']>
     {
+        if (this.closed)
+        {
+            return new Map();
+        }
+
         const compared = [...this.actedOn(ran), this.configInputs];
 
         this.checkRequested = false;

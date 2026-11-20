@@ -32,6 +32,8 @@
  * |    | `.spfnrc.ts` created, which takes precedence                         | over it ignored until a restart                       |
  * | W4e| `generateAll()` with `loadGenerators`, before any `watch()`: with a  | a run of no generator, logged as nothing to run: a   |
  * |    | config that loads, then with one that does not                        | config never loaded, or its failure swallowed        |
+ * | W4f| `close()` while a reload whose load fails is held                    | the failing load's inputs armed after `close()`:     |
+ * |    |                                                                       | watches nothing closes, a process that never exits   |
  * | W5 | an input unlinked, recreated inside the unlink's own generation, then | bookkeeping saying "watched" while the watcher has   |
  * |    | edited again; its directory removed and recreated inside a generation,| dropped the file, or a directory watcher that went   |
  * |    | then the input edited again                                           | silent: every later edit lost                        |
@@ -693,6 +695,50 @@ describe('codegen watch loop', () =>
         writeConfig(['{ path: \'./gen/missing.ts\' }']);
         await expect(orchestrator.generateAll()).rejects.toThrow('gen/missing.ts');
         expect(fixtures.calls).toEqual(['a#1']);
+    });
+
+    it('W4f close() during a reload whose load fails: no input watch is opened after it, and none is left open', async () =>
+    {
+        // Without it, the failing reload arms the config's inputs after close()
+        // released the watches: nothing closes them, and the process never exits.
+        configFixtures();
+        write('gen/value.ts', 'export const value: string = \'one\';\n');
+        writeCustomGenerator('a');
+        writeConfig(['{ path: \'./gen/a.ts\' }']);
+
+        const root = appDir;
+        const held = { hold: undefined as Promise<void> | undefined, release: (): void => undefined, entered: (): void => undefined };
+        const entered = new Promise<void>(resolve => (held.entered = resolve));
+        const orchestrator = new CodegenOrchestrator({
+            loadGenerators: async () =>
+            {
+                held.entered();
+                await held.hold;
+
+                return createGeneratorsFromConfig(loadCodegenConfig(root), root);
+            },
+            cwd: root,
+            debug: true,
+        });
+
+        orchestrators.push(orchestrator);
+        void orchestrator.watch();
+        await orchestrator.settled();
+        expect(output('a')).toBe('one');
+
+        held.hold = new Promise(resolve => (held.release = resolve));
+        writeConfig(['{ path: \'./gen/missing.ts\' }']);
+        await until(() => logged(info, /^Codegen config changed \(\.spfnrc\.ts\): reloading$/));
+        await entered;
+
+        const closing = orchestrator.close();
+        const watchedBeforeClose = watchedPaths.length;
+
+        held.release();
+        await closing;
+        expect(pauses()).toBe(1);
+        expect(watchedPaths.slice(watchedBeforeClose)).toEqual([]);
+        expect([...(orchestrator as unknown as { inputWatcher: { watchers: Map<string, unknown> } }).inputWatcher.watchers.keys()]).toEqual([]);
     });
 
     it('W5 an input unlinked and recreated inside the unlink\'s generation is still watched: a later edit regenerates', async () =>
