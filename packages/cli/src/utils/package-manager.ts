@@ -1,60 +1,112 @@
-import { existsSync } from 'fs';
-import { join } from 'path';
+import { existsSync, readFileSync } from 'fs';
+import { dirname, join, posix, relative, sep } from 'path';
+import { parse } from 'yaml';
 
 export type PackageManager = 'npm' | 'pnpm' | 'yarn' | 'bun';
 
-export function detectPackageManager(cwd: string): PackageManager
+const LOCKFILES: ReadonlyArray<[string, PackageManager]> = [
+    ['bun.lockb', 'bun'],
+    ['pnpm-lock.yaml', 'pnpm'],
+    ['yarn.lock', 'yarn'],
+    ['package-lock.json', 'npm'],
+];
+
+/**
+ * The package manager the app in `appDir` uses.
+ *
+ * The app's own lockfile decides first. An ancestor's lockfile counts only when
+ * `appDir` is a member of that ancestor's workspace — a directory merely
+ * sitting inside a pnpm or yarn repository is its own project, and running the
+ * repository's manager there installs the repository, not the app. Otherwise npm.
+ */
+export function detectPackageManager(appDir: string): PackageManager
 {
-    // Check current directory first
-    if (existsSync(join(cwd, 'bun.lockb')))
+    const workspaceRoot = findWorkspaceRoot(appDir);
+
+    return lockfileManager(appDir)
+        ?? (workspaceRoot ? lockfileManager(workspaceRoot) : null)
+        ?? 'npm';
+}
+
+/**
+ * The root of the workspace `dir` is a member of, or null.
+ *
+ * The nearest ancestor that declares a workspace — `pnpm-workspace.yaml`
+ * `packages` or `package.json` `workspaces` — answers; `dir` belongs to it when
+ * its path matches one of the declared globs and none of the negated (`!…`)
+ * ones. `dir` need not exist yet.
+ */
+export function findWorkspaceRoot(dir: string): string | null
+{
+    for (const candidate of ancestorsOf(dirname(dir)))
     {
-        return 'bun';
+        const patterns = readWorkspacePatterns(candidate);
+
+        if (patterns)
+        {
+            return isWorkspaceMember(relative(candidate, dir).split(sep).join('/'), patterns)
+                ? candidate
+                : null;
+        }
     }
 
-    if (existsSync(join(cwd, 'pnpm-lock.yaml')))
+    return null;
+}
+
+/**
+ * The packages of `names` that cannot be found from `appDir` — the lookup an
+ * `import` in the app does: `node_modules` in `appDir` and each ancestor.
+ * `NODE_PATH` and the global folders are left out on purpose: ESM ignores them,
+ * and a package manager running the CLI sets `NODE_PATH` to its own store.
+ */
+export function findUnresolvedPackages(appDir: string, names: string[]): string[]
+{
+    const lookupDirs = ancestorsOf(appDir).map(dir => join(dir, 'node_modules'));
+
+    return names.filter(name => !lookupDirs.some(dir => existsSync(join(dir, name, 'package.json'))));
+}
+
+function ancestorsOf(dir: string): string[]
+{
+    return dirname(dir) === dir ? [dir] : [dir, ...ancestorsOf(dirname(dir))];
+}
+
+function lockfileManager(dir: string): PackageManager | null
+{
+    return LOCKFILES.find(([lockfile]) => existsSync(join(dir, lockfile)))?.[1] ?? null;
+}
+
+/**
+ * The workspace globs `dir` declares, or null when it declares no workspace.
+ */
+function readWorkspacePatterns(dir: string): string[] | null
+{
+    const pnpmWorkspacePath = join(dir, 'pnpm-workspace.yaml');
+    const packageJsonPath = join(dir, 'package.json');
+
+    if (existsSync(pnpmWorkspacePath))
     {
-        return 'pnpm';
+        return parse(readFileSync(pnpmWorkspacePath, 'utf-8'))?.packages ?? [];
     }
 
-    if (existsSync(join(cwd, 'yarn.lock')))
+    if (!existsSync(packageJsonPath))
     {
-        return 'yarn';
+        return null;
     }
 
-    // Check parent directories for monorepo setup
-    let currentDir = cwd;
-    let depth = 0;
-    const maxDepth = 5;
+    const { workspaces } = JSON.parse(readFileSync(packageJsonPath, 'utf-8'));
 
-    while (depth < maxDepth)
-    {
-        const parentDir = join(currentDir, '..');
+    return Array.isArray(workspaces) ? workspaces : workspaces?.packages ?? null;
+}
 
-        if (parentDir === currentDir)
-        {
-            break; // Reached root
-        }
+function isWorkspaceMember(memberPath: string, patterns: string[]): boolean
+{
+    const normalised = patterns.map(pattern => pattern.replace(/^(!?)\.\//, '$1').replace(/\/+$/, ''));
+    const included = normalised.filter(pattern => !pattern.startsWith('!'));
+    const excluded = normalised.filter(pattern => pattern.startsWith('!')).map(pattern => pattern.slice(1));
 
-        if (existsSync(join(parentDir, 'pnpm-lock.yaml')))
-        {
-            return 'pnpm';
-        }
-
-        if (existsSync(join(parentDir, 'yarn.lock')))
-        {
-            return 'yarn';
-        }
-
-        if (existsSync(join(parentDir, 'bun.lockb')))
-        {
-            return 'bun';
-        }
-
-        currentDir = parentDir;
-        depth++;
-    }
-
-    return 'npm';
+    return included.some(pattern => posix.matchesGlob(memberPath, pattern))
+        && !excluded.some(pattern => posix.matchesGlob(memberPath, pattern));
 }
 
 export function getInstallCommand(pm: PackageManager): string

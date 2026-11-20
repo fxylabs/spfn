@@ -46,8 +46,15 @@ npx spfn@beta create my-api --mode bare
 npx spfn@beta init --mode full
 ```
 
-The package manager is auto-detected (pnpm > yarn > bun > npm) from lockfiles; override
-with `--pm`. In a pnpm workspace, `create` installs from the workspace root.
+The package manager is the app's own: its lockfile (`bun.lockb`, `pnpm-lock.yaml`,
+`yarn.lock`, `package-lock.json`) decides; otherwise the lockfile of the workspace root whose
+declared globs (`pnpm-workspace.yaml` `packages`, `package.json` `workspaces`, `!` negations
+honoured) list the app's directory; otherwise npm. A directory inside a pnpm or yarn
+repository that its workspace does not list is its own npm project. Override with `--pm`
+(`create`, `init`). When `create` makes a member of a pnpm workspace, it installs from the
+workspace root. "Dependencies installed" is printed only once every package the step
+declared resolves from the app directory; otherwise the command exits 1 naming the
+missing ones.
 
 ---
 
@@ -88,6 +95,7 @@ already exists). See [Scaffold structure](#scaffold-structure) for what lands on
 | Option | Description |
 |--------|-------------|
 | `--mode <mode>` | `bare` (core only) \| `full` (core, auth, i18n, ops) |
+| `--pm <manager>` | Package manager: `npm` \| `pnpm` \| `yarn` \| `bun` (default: detected from the app) |
 | `-y, --yes` | Skip prompts, use defaults |
 
 Generated projects pin `drizzle-orm` and `drizzle-kit` to `1.0.0-rc.4`, matching
@@ -1291,9 +1299,11 @@ committed.
 - **`spfn add` requires a scoped package name** (must contain `/`) and only applies
   migrations when `DATABASE_URL` is set — otherwise it skips with a hint. The single
   exception is `spfn add vercel`, a built-in target rather than a package.
-- **Package manager is auto-detected from lockfiles.** If detection is wrong (e.g. mixed
-  lockfiles), pass `--pm` to `create`. In a pnpm workspace, `create` installs from the
-  workspace root, not the new project dir.
+- **The package manager is the app's own.** Its lockfile decides, then the lockfile of a
+  workspace that lists the app, then npm — an app under a pnpm or yarn repository that the
+  workspace does not list uses npm (see [Usage](#usage)). If detection is wrong (e.g. mixed
+  lockfiles), pass `--pm` to `create` or `init`. `create` installs a pnpm-workspace member
+  from the workspace root, any other app in its own directory.
 - **Make scaffold mode explicit in automation.** Interactive runs recommend `full`, while
   historical `--yes` calls without `--mode` remain `bare`. Pass `--mode full` or
   `--mode bare` so scripts state their intended architecture.

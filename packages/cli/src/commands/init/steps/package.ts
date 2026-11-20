@@ -1,7 +1,8 @@
-import ora from 'ora';
+import ora, { type Ora } from 'ora';
 import { execa } from 'execa';
 import fse from 'fs-extra';
 import { logger } from '../../../utils/logger.js';
+import { findUnresolvedPackages } from '../../../utils/package-manager.js';
 import { getSpfnTag } from '../../../utils/version.js';
 import type { PackageJson } from './validate.js';
 import type { ScaffoldMode } from '../mode.js';
@@ -39,14 +40,16 @@ export async function setupPackageJson(
     // - spfn: CLI needed for both build and runtime (spfn build, spfn start)
     // - concurrently: Process manager for running Next.js + SPFN API concurrently
     const spfnTag = getSpfnTag();
-    packageJson.dependencies['@spfn/core'] = spfnTag;
-    packageJson.dependencies['@sinclair/typebox'] = '^0.34.0';
-    packageJson.dependencies['drizzle-orm'] = '1.0.0-rc.4';
-    packageJson.dependencies['drizzle-typebox'] = '^0.3.3';
-    packageJson.dependencies['postgres'] = '^3.4.0';
-    packageJson.dependencies['pg'] = '^8.16.3';
-    packageJson.dependencies['spfn'] = spfnTag;
-    packageJson.dependencies['concurrently'] = '^9.2.5';
+    const dependencies: Record<string, string> = {
+        '@spfn/core': spfnTag,
+        '@sinclair/typebox': '^0.34.0',
+        'drizzle-orm': '1.0.0-rc.4',
+        'drizzle-typebox': '^0.3.3',
+        'postgres': '^3.4.0',
+        'pg': '^8.16.3',
+        'spfn': spfnTag,
+        'concurrently': '^9.2.5',
+    };
 
     // Both modes declare the Node releases that carry the CVE-2026-111497 fix
     // (see node-engine.ts). A range the app already declares is kept only when
@@ -68,9 +71,9 @@ export async function setupPackageJson(
     // of its own: `@spfn/core/ops` carries the router and `@spfn/auth` the tokens.
     if (mode === 'full')
     {
-        packageJson.dependencies['@spfn/auth'] = spfnTag;
-        packageJson.dependencies['@spfn/i18n'] = spfnTag;
-        packageJson.dependencies['@spfn/notification'] = spfnTag;
+        dependencies['@spfn/auth'] = spfnTag;
+        dependencies['@spfn/i18n'] = spfnTag;
+        dependencies['@spfn/notification'] = spfnTag;
     }
 
     // Add SPFN dev dependencies (fixes Issue #2)
@@ -78,11 +81,16 @@ export async function setupPackageJson(
     //   that registers with module.registerHooks on Node 26; an older one prints
     //   DEP0205 (module.register() deprecated) at every spfn dev start there.
     // - tsup: TypeScript bundler for server build with @/ alias support
-    packageJson.devDependencies['@types/node'] = '^20.11.0';
-    packageJson.devDependencies['tsx'] = '^4.22.4';
-    packageJson.devDependencies['tsup'] = '^9.0.0';
-    packageJson.devDependencies['drizzle-kit'] = '1.0.0-rc.4';
-    packageJson.devDependencies['dotenv'] = '^17.2.3';
+    const devDependencies: Record<string, string> = {
+        '@types/node': '^20.11.0',
+        'tsx': '^4.22.4',
+        'tsup': '^9.0.0',
+        'drizzle-kit': '1.0.0-rc.4',
+        'dotenv': '^17.2.3',
+    };
+
+    Object.assign(packageJson.dependencies, dependencies);
+    Object.assign(packageJson.devDependencies, devDependencies);
 
     // Add SPFN-specific scripts
     // Preserve existing build script if it exists, otherwise use default Next.js build
@@ -109,7 +117,22 @@ export async function setupPackageJson(
 
     spinner.succeed('package.json updated');
 
-    // Install all dependencies at once
+    await installDependencies(spinner, cwd, packageManager, [
+        ...Object.keys(dependencies),
+        ...Object.keys(devDependencies),
+    ]);
+}
+
+/**
+ * Install all dependencies at once, then confirm the declared ones are there.
+ */
+async function installDependencies(
+    spinner: Ora,
+    cwd: string,
+    packageManager: string,
+    declared: string[],
+): Promise<void>
+{
     spinner.start('Installing dependencies...');
 
     try
@@ -119,8 +142,6 @@ export async function setupPackageJson(
             : ['install'];
 
         await execa(packageManager, installArgs, { cwd });
-
-        spinner.succeed('Dependencies installed');
     }
     catch (error)
     {
@@ -128,4 +149,27 @@ export async function setupPackageJson(
         logger.error(String(error));
         process.exit(1);
     }
+
+    confirmInstalled(spinner, cwd, packageManager, declared);
+}
+
+/**
+ * Report "Dependencies installed" only when every declared package resolves from
+ * `appDir`; otherwise fail the command naming the missing ones.
+ *
+ * An exit code proves nothing here: pnpm run in a directory that is not a member
+ * of the workspace above it installs that workspace and exits 0, leaving the app
+ * without a single one of its packages.
+ */
+export function confirmInstalled(spinner: Ora, appDir: string, packageManager: string, declared: string[]): void
+{
+    const missing = findUnresolvedPackages(appDir, declared);
+
+    if (missing.length > 0)
+    {
+        spinner.fail(`${packageManager} install finished, but these do not resolve from ${appDir}: ${missing.join(', ')}`);
+        process.exit(1);
+    }
+
+    spinner.succeed('Dependencies installed');
 }

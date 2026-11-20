@@ -34,6 +34,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Awaited there, they could never finish, since each waits for that generation; they reject whether
   or not the call is awaited. Call them after `generate()` has returned (from a timer or a promise
   callback); the loop runs a generator again when a file it read changes.
+- **BREAKING: spfn: inside a pnpm/yarn/bun repository, a directory that is not a workspace member
+  is no longer treated as using the repository's manager (#345).** The manager was taken from any
+  `pnpm-lock.yaml`, `yarn.lock` or `bun.lockb` up to five directories above, and `package-lock.json`
+  was never looked at. Now the app's own lockfile decides (`package-lock.json` included), then the
+  lockfile of the workspace root whose `pnpm-workspace.yaml` `packages` or `package.json`
+  `workspaces` globs list the app (negations honoured), otherwise npm. So `init`, `add`, `build`,
+  `start`, `dev`, `setup`, `provision` and `create` (without `--pm`), run in such a directory, use
+  the app's own lockfile or npm, and install, add and run scripts there; `create --pm pnpm` there
+  installs in the app directory instead of from the repository root. `spfn init` gains `--pm`.
 
 ### Fixed
 
@@ -86,6 +95,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a run of the watch loop and settles when that run has finished.
 - **@spfn/core: watch state is per orchestrator.** The files each router's load reached were kept
   in a module-wide map, so a second orchestrator in the process watched the first app's files.
+- **spfn: `spfn create --pm <manager>` installs with that manager, and an install is reported
+  only when it installed (#345).** `create` chose the manager, then `init` detected one again, so
+  `create --pm npm` in a pnpm repository ran `pnpm install` in a directory the workspace did not
+  list — a no-op for the app that exited 0 — and printed `✔ Dependencies installed` with
+  `@spfn/core`, `spfn` and `drizzle-orm` missing. `create` now hands its manager to `init`, and
+  `init` and `create`'s workspace-root install print `Dependencies installed` only once every
+  package they declared resolves from the app directory; otherwise they exit 1 naming the missing
+  packages.
 - **spfn: `spfn db push --dry-run` writes nothing (spfn/spfn#163).** In 0.4.0-beta.1 a dry run
   whose project schema had no pending change applied the function package migrations (and created
   their bookkeeping tables) instead of previewing them; with a pending project change it said
