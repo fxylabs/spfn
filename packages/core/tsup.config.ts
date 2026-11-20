@@ -10,6 +10,8 @@ type Plugin = NonNullable<Options['esbuildPlugins']>[number];
 const entry = {
     'nextjs/index': 'src/nextjs/index.ts',
     'nextjs/server': 'src/nextjs/server.ts',
+    'nextjs/server-call': 'src/nextjs/server-call.ts',
+    'nextjs/server-call.browser': 'src/nextjs/server-call.browser.ts',
     'route/index': 'src/route/index.ts',
     'route/types': 'src/route/types.ts',
     'db/index': 'src/db/index.ts',

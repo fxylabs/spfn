@@ -67,6 +67,26 @@ function inboundAppUrl(inbound: InboundRequest | null): string
 }
 
 /**
+ * Server-side, the header asserting the browser's address to the app's own proxy
+ *
+ * The call reaches the proxy as a new request from the Next.js server, so nothing on
+ * it names the browser unless the call asserts it. The signing code is server-only and
+ * loaded by dynamic import, the way `next/headers` is; a browser build resolves the
+ * subpath to an empty stub, and in the browser there is no inbound request anyway.
+ */
+async function forwardedClient(inbound: InboundRequest | null, method: string, url: string): Promise<Record<string, string>>
+{
+    if (!inbound)
+    {
+        return {};
+    }
+
+    const { forwardedClientHeaders } = await import('@spfn/core/nextjs/server-call');
+
+    return forwardedClientHeaders(inbound.headers, method, url);
+}
+
+/**
  * Set a header the client derives, unless the caller already set it under any casing
  */
 function setUnlessCallerDid(headers: Record<string, string>, name: string, value: string | null | undefined): void
@@ -318,6 +338,9 @@ export function createApi<TRouter extends Router<any>>(
         // Server-side, the call speaks for the browser: its `user-agent` goes with it,
         // the way its cookies do, so the backend sees the browser and not Node's fetch.
         setUnlessCallerDid(headers, 'User-Agent', inbound?.headers.get('user-agent'));
+
+        // And its address, which only the holder of the proxy key can assert.
+        Object.assign(headers, await forwardedClient(inbound, method, fullUrl));
 
         // Log cookie auto-detection if debug enabled
         if (debug && inbound && Object.keys(inbound.cookies).length > 0)

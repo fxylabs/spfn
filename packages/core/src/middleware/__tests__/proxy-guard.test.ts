@@ -2,11 +2,22 @@
  * Proxy-guard middleware 테스트
  */
 
+import { createHmac } from 'node:crypto';
 import { describe, it, expect } from 'vitest';
 import { Hono } from 'hono';
 
 import { createProxyGuard, createInMemoryNonceStore, type NonceStore } from '../proxy-guard';
-import { signProxyRequest, parseProxyKey } from '../../security/proxy-signature';
+import { getClientIp } from '../client-ip';
+import {
+    signProxyRequest,
+    parseProxyKey,
+    buildLegacyCanonicalString,
+    PROXY_CLIENT_IP_HEADER,
+    PROXY_SIGNATURE_HEADER,
+    PROXY_TIMESTAMP_HEADER,
+    PROXY_NONCE_HEADER,
+    PROXY_KEY_ID_HEADER,
+} from '../../security/proxy-signature';
 
 const SECRET = 'test-shared-secret';
 
@@ -554,6 +565,54 @@ describe('createProxyGuard', () =>
             });
 
             expect(res.status).toBe(403);
+        });
+    });
+
+    describe('the client address (#363)', () =>
+    {
+        /** A backend that answers the address `getClientIp` read. */
+        function addressApp(mode: 'strict' | 'tag')
+        {
+            const app = new Hono();
+
+            app.use('*', createProxyGuard({ mode, secret: SECRET }));
+            app.get('/whoami', c => c.json({ clientType: c.get('clientType'), ip: getClientIp(c) }));
+
+            return app;
+        }
+
+        it('C4: an address changed after signing fails verification', async () =>
+        {
+            const signed = signProxyRequest({ key: parseProxyKey(SECRET), method: 'GET', path: '/whoami', clientIp: '203.0.113.7' });
+
+            // The control: as signed, it is believed
+            const asSigned = await addressApp('strict').request('/whoami', { headers: { ...signed, [PROXY_CLIENT_IP_HEADER]: '203.0.113.7' } });
+            expect(await asSigned.json()).toEqual({ clientType: 'web', ip: '203.0.113.7' });
+
+            const res = await addressApp('strict').request('/whoami', {
+                headers: { ...signed, [PROXY_CLIENT_IP_HEADER]: '192.0.2.66' },
+            });
+
+            expect(res.status).toBe(403);
+        });
+
+        it('a version-1 signature (no version header) is still verified until 0.5.0, and its address is ignored', async () =>
+        {
+            const timestamp = String(Date.now());
+            const legacy = buildLegacyCanonicalString({ method: 'GET', path: '/whoami', query: '', timestamp, nonce: 'n1', bodyHash: '' });
+
+            const res = await addressApp('strict').request('/whoami', {
+                headers: {
+                    [PROXY_SIGNATURE_HEADER]: createHmac('sha256', SECRET).update(legacy).digest('hex'),
+                    [PROXY_TIMESTAMP_HEADER]: timestamp,
+                    [PROXY_NONCE_HEADER]: 'n1',
+                    [PROXY_KEY_ID_HEADER]: 'default',
+                    [PROXY_CLIENT_IP_HEADER]: '192.0.2.66',
+                },
+            });
+
+            expect(res.status).toBe(200);
+            expect(await res.json()).toEqual({ clientType: 'web', ip: 'unknown' });
         });
     });
 });

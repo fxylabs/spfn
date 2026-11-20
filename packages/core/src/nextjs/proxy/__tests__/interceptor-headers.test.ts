@@ -25,7 +25,7 @@ describe('proxy header forwarding', () =>
 
     it('does not forward the CSRF header to the backend', () =>
     {
-        const forwarded = buildProxyHeaders(browserHeaders, {});
+        const forwarded = buildProxyHeaders(browserHeaders, {}, undefined);
 
         // Proxy-terminated by design: the backend authenticates a bearer token and
         // has no use for it.
@@ -38,7 +38,7 @@ describe('proxy header forwarding', () =>
         const ctx = buildRequestContext(
             'orders',
             'POST',
-            buildProxyHeaders(browserHeaders, {}),
+            buildProxyHeaders(browserHeaders, {}, undefined),
             undefined,
             new URLSearchParams(),
             new Map(),

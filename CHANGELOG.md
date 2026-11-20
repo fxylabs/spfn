@@ -180,6 +180,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **BREAKING (deployment, security-relevant): @spfn/core: the proxy signature covers the client
+  address, and a server-side call asserts the browser's (#363).** A sign-in made by a server
+  component, server action or route handler recorded the Next.js server's address — in
+  `registeredIp`, in the sign-in guard's `attempt.ip`, and as the key of every per-IP limit —
+  because its call reaches the app's own proxy as a new request from the server. And the backend
+  believed `x-spfn-proxy-client-ip` on any verified request although the signature did not cover
+  it.
+  - The proxy signs **version 2** (`x-spfn-proxy-signature-version: 2`): the canonical string
+    gains a seventh field, the `x-spfn-proxy-client-ip` value or `''`. Proxy-guard hands the
+    address on as `c.get('proxyClientIp')` only under a verified version-2 signature, and
+    `getClientIp` reads that, never the header: a `clientType` set by anything but proxy-guard
+    (`'mobile'` from client proof) no longer makes the header believed. `callBackend` signs the
+    address it sends too.
+  - Server-side, `createApi` reads the browser's address off the inbound request with the
+    proxy's own rule (`TRUSTED_PROXY_HOPS` from the right of `X-Forwarded-For`, one shared
+    helper) and sends `x-spfn-forwarded-client: <ip>;<ts>;<nonce>;<hmac>`, keyed with
+    `SPFN_PROXY_SECRET` over a fixed label, method, path, address, timestamp and nonce. The proxy
+    uses an assertion it verifies (30-second window); an absent or invalid one changes nothing.
+    Without `SPFN_PROXY_SECRET` nothing is asserted and the backend sees what it saw before.
+    The client loads the signer by dynamic import from a new subpath,
+    `@spfn/core/nextjs/server-call`, whose `browser` export condition resolves to an empty stub,
+    so no signing code reaches a browser bundle.
+  - **Version 1 is accepted through 0.4.x only, and its address is ignored**: a request with no
+    version header (or `1`) is still verified and tagged `web`, the address dropped, and the
+    backend logs one warning per process. The path is `signatureVersion`,
+    `computeLegacySignature` and `buildLegacyCanonicalString` in
+    `packages/core/src/security/proxy-signature.ts` and `believeSignedAddress` in
+    `packages/core/src/middleware/proxy-guard.ts`; 0.5.0 removes it and refuses version 1. Any
+    other version is refused (`unknown-version`).
+  - **Upgrade order:** the backend first, then the Next.js app. A new backend verifies an old
+    proxy's version-1 signature (addresses ignored until the app is upgraded); an old backend
+    refuses every request a new proxy signs (403 in `strict`, `untrusted` in `tag`).
+  - `buildCanonicalString` and `SignatureParts` gain `clientIp`; `signProxyRequest` takes
+    `clientIp` and returns the version header; `verifyProxyRequest` takes `version` and
+    `clientIp` and answers `version`.
+
 - **BREAKING: @spfn/core: a failed job's `output` is the error's description (#382).** Core's
   fetch loop fails a batch with `describeError(error)` instead of the error, so pg-boss no longer
   serialises drizzle's `params` or the driver's `detail` into the job row. The `output` of a failed

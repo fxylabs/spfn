@@ -7,21 +7,22 @@ import type { Context } from 'hono';
 import { getClientIp } from '../client-ip';
 import { PROXY_CLIENT_IP_HEADER } from '../../security/proxy-signature';
 
-function ctx(headers: Record<string, string>, clientType?: string): Context
+function ctx(headers: Record<string, string>, clientType?: string, proxyClientIp?: string): Context
 {
     const lower = Object.fromEntries(Object.entries(headers).map(([k, v]) => [k.toLowerCase(), v]));
+    const vars: Record<string, string | undefined> = { clientType, proxyClientIp };
 
     return {
-        get: (k: string) => (k === 'clientType' ? clientType : undefined),
+        get: (k: string) => vars[k],
         req: { header: (n: string) => lower[n.toLowerCase()] },
     } as unknown as Context;
 }
 
 describe('getClientIp', () =>
 {
-    it('uses the forwarded client IP when proxy-guard verified the request', () =>
+    it('uses the address proxy-guard handed on from a signature that covered it', () =>
     {
-        const c = ctx({ [PROXY_CLIENT_IP_HEADER]: '203.0.113.9', 'x-forwarded-for': '10.0.0.1' }, 'web');
+        const c = ctx({ [PROXY_CLIENT_IP_HEADER]: '203.0.113.9', 'x-forwarded-for': '10.0.0.1' }, 'web', '203.0.113.9');
 
         expect(getClientIp(c)).toBe('203.0.113.9');
     });

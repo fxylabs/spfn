@@ -238,16 +238,22 @@ describe.skipIf(!dbAvailable)('the sign-in guard (#361)', () =>
         process.env.SPFN_AUTH_PASSKEY_ORIGINS = ORIGIN;
         process.env.SPFN_AUTH_TOKEN_ENCRYPTION_KEYS = `v1:${Buffer.alloc(32, 7).toString('base64')}`;
 
-        // `clientType` is what proxy-guard sets on a request it verified as the
-        // Next.js proxy's; the header stands in for that verdict.
+        // `clientType` and `proxyClientIp` are what proxy-guard sets on a request
+        // it verified as the Next.js proxy's; the headers stand in for that verdict.
         app = new Hono();
         app.use('*', async (c, next) =>
         {
             const declared = c.req.header(CLIENT_TYPE_HEADER);
+            const attested = c.req.header(ATTESTED_IP_HEADER);
 
             if (declared)
             {
                 c.set('clientType', declared);
+            }
+
+            if (declared && attested)
+            {
+                c.set('proxyClientIp', attested);
             }
 
             await next();

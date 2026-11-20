@@ -19,6 +19,12 @@
             "import": "./dist/nextjs/server.js",
             "require": "./dist/nextjs/server.js"
         },
+        "./nextjs/server-call": {
+            "types": "./dist/nextjs/server-call.d.ts",
+            "browser": "./dist/nextjs/server-call.browser.js",
+            "import": "./dist/nextjs/server-call.js",
+            "require": "./dist/nextjs/server-call.js"
+        },
         "./route": {
             "types": "./dist/route/index.d.ts",
             "import": "./dist/route/index.js",

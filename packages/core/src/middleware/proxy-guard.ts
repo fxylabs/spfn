@@ -27,6 +27,8 @@ import {
     PROXY_TIMESTAMP_HEADER,
     PROXY_NONCE_HEADER,
     PROXY_KEY_ID_HEADER,
+    PROXY_SIGNATURE_VERSION_HEADER,
+    PROXY_CLIENT_IP_HEADER,
     type VerifyFailureReason,
 } from '../security/proxy-signature';
 
@@ -125,6 +127,11 @@ declare module 'hono'
     interface ContextVariableMap
     {
         clientType?: ClientType;
+        /**
+         * The client address the proxy signed (`x-spfn-proxy-client-ip` under a
+         * version-2 signature). Set by proxy-guard only; `getClientIp` reads it first.
+         */
+        proxyClientIp?: string;
     }
 }
 
@@ -357,9 +364,11 @@ export function createProxyGuard(config: ProxyGuardConfig = {}): MiddlewareHandl
             return reject(c, mode, next, 'body-read-error');
         }
 
-        // 5. HMAC over the wire request-target (raw path + query) and body. Use the raw
-        //    URL, NOT the decoded c.req.path, so it matches the bytes the proxy signed.
+        // 5. HMAC over the wire request-target (raw path + query), body and client
+        //    address. Use the raw URL, NOT the decoded c.req.path, so it matches the
+        //    bytes the proxy signed.
         const url = new URL(c.req.url);
+        const clientIp = c.req.header(PROXY_CLIENT_IP_HEADER);
         const result = verifyProxyRequest({
             keys,
             method: c.req.method,
@@ -370,6 +379,8 @@ export function createProxyGuard(config: ProxyGuardConfig = {}): MiddlewareHandl
             timestamp,
             nonce,
             keyId,
+            version: c.req.header(PROXY_SIGNATURE_VERSION_HEADER),
+            clientIp,
             windowMs,
         });
 
@@ -405,9 +416,41 @@ export function createProxyGuard(config: ProxyGuardConfig = {}): MiddlewareHandl
         }
 
         c.set('clientType', 'web');
+        believeSignedAddress(c, result.version, clientIp);
 
         return next();
     };
+}
+
+let legacySignatureWarned = false;
+
+/**
+ * Hand on the address a version-2 signature covered. A version-1 signature covers
+ * none, so its address header is the caller's own and is ignored.
+ *
+ * Version 1 is accepted through @spfn/core 0.4.x only, so a backend upgraded first
+ * keeps serving a proxy not yet upgraded; the branch goes in 0.5.0.
+ */
+function believeSignedAddress(c: Context, version: 1 | 2 | undefined, clientIp: string | undefined): void
+{
+    if (version === 2)
+    {
+        if (clientIp)
+        {
+            c.set('proxyClientIp', clientIp);
+        }
+
+        return;
+    }
+
+    if (!legacySignatureWarned)
+    {
+        legacySignatureWarned = true;
+        guardLogger.warn(
+            'A request carried a version-1 proxy signature: it is verified, but its client address is ignored. '
+            + 'Upgrade @spfn/core in the Next.js app; version 1 is refused from 0.5.0.',
+        );
+    }
 }
 
 // ============================================================================
