@@ -55,9 +55,44 @@ const ACCOUNTS = {
     byMissingColumn: "export const accounts = app.table('accounts', { id: integer('id').primaryKey(), thingCode: text('thing_code').references(() => things.code) });\n",
 };
 
+/** A project statement that fails on a row already in i378_app.notes: the rows, the declared notes, what the line names. */
+const ROW_FAILURES = [
+    {
+        name: 'class 22: a text column changed to integer over a row holding text',
+        rows: "CREATE TABLE i378_app.notes (id integer PRIMARY KEY, secret text); INSERT INTO i378_app.notes VALUES (1, 'customer-secret-SECRETVALUE')",
+        notes: "{ id: integer('id').primaryKey(), secret: integer('secret') }",
+        line: 'Invalid input value (22P02)',
+    },
+    {
+        name: 'unique: two rows hold the same value',
+        rows: "CREATE TABLE i378_app.notes (id integer PRIMARY KEY, email text); INSERT INTO i378_app.notes VALUES (1, 'SECRETVALUE'), (2, 'SECRETVALUE')",
+        notes: "{ id: integer('id').primaryKey(), email: text('email').unique() }",
+        line: 'could not create unique index "notes_email_key" (23505, constraint notes_email_key, table i378_app.notes)',
+    },
+    {
+        name: 'not-null: a row holds null',
+        rows: 'CREATE TABLE i378_app.notes (id integer PRIMARY KEY, email text); INSERT INTO i378_app.notes VALUES (1, NULL)',
+        notes: "{ id: integer('id').primaryKey(), email: text('email').notNull() }",
+        line: '(23502, table i378_app.notes, column email)',
+    },
+    {
+        name: 'check: a row breaks the new check',
+        rows: "CREATE TABLE i378_app.notes (id integer PRIMARY KEY, email text); INSERT INTO i378_app.notes VALUES (1, 'SECRETVALUE')",
+        notes: "{ id: integer('id').primaryKey(), email: text('email') }, (t) => [check('notes_email_short', sql`length(${t.email}) < 3`)]",
+        line: '(23514, constraint notes_email_short, table i378_app.notes)',
+    },
+    {
+        name: 'foreign key: a row references a missing package row',
+        rows: 'CREATE TABLE i378_app.notes (id integer PRIMARY KEY, thing_id integer); INSERT INTO i378_app.notes VALUES (1, 424242)',
+        notes: "{ id: integer('id').primaryKey(), thingId: integer('thing_id').references(() => things.id) }",
+        line: 'violates foreign key constraint "notes_thing_id_things_id_fkey" (23503, constraint notes_thing_id_things_id_fkey, table i378_app.notes)',
+    },
+];
+
 interface FixtureOptions
 {
     accounts?: string;
+    notes?: string;
     packageSql?: string;
     schemaFilter?: string[];
 }
@@ -156,15 +191,16 @@ describe('db push applies function package migrations first', () =>
     }
 
     /** The app: i378_app.notes, optionally i378_app.accounts, and @spfn/i163fix. */
-    function writeFixture({ accounts, packageSql = PACKAGE_SQL, schemaFilter }: FixtureOptions = {}): void
+    function writeFixture({ accounts, notes = "{ id: integer('id').primaryKey() }", packageSql = PACKAGE_SQL, schemaFilter }: FixtureOptions = {}): void
     {
         const entities = join(root, 'src', 'server', 'entities');
         mkdirSync(entities, { recursive: true });
         writeFileSync(join(entities, 'app.entity.ts'),
-            "import { pgSchema, integer, text } from 'drizzle-orm/pg-core';\n"
+            "import { sql } from 'drizzle-orm';\n"
+            + "import { check, pgSchema, integer, text } from 'drizzle-orm/pg-core';\n"
             + "const things = pgSchema('spfn_i163fix').table('things', { id: integer('id').primaryKey(), code: text('code').unique() });\n"
             + "export const app = pgSchema('i378_app');\n"
-            + "export const notes = app.table('notes', { id: integer('id').primaryKey() });\n"
+            + `export const notes = app.table('notes', ${notes});\n`
             + (accounts ?? ''));
         writeFunctionPackage(root, MIGRATION_NAME, packageSql);
 
@@ -220,8 +256,8 @@ describe('db push applies function package migrations first', () =>
 
         await expect(push({ force: true })).rejects.toThrow('exit 1');
 
-        expect(errors.join('\n')).toContain(
-            '❌ The project statements were rolled back: column "code" referenced in foreign key constraint does not exist');
+        expect(errors.join('\n')).toContain('❌ The project statements were rolled back: Invalid query (42703)');
+        expect(errors.join('\n')).toMatch(/ {3}Failed statement: ALTER TABLE "i378_app"."accounts" ADD CONSTRAINT .*REFERENCES "spfn_i163fix"."things"\("code"\)/);
         expect(errors.join('\n')).toContain(STAY_APPLIED_LINE);
         expect(errors.join('\n')).not.toMatch(/Failed query|params:/);
         expect(await db.unsafe(`SELECT count(*)::int AS count FROM ${PACKAGE_TABLE}`)).toEqual([{ count: 1 }]);
@@ -275,7 +311,8 @@ describe('db push applies function package migrations first', () =>
         await expect(push({ force: true })).rejects.toThrow('exit 1');
 
         expect(errors.join('\n')).toContain(
-            'duplicate key value violates unique constraint "things_pkey" (constraint things_pkey)');
+            'duplicate key value violates unique constraint "things_pkey" (23505, constraint things_pkey, table spfn_i163fix.things)');
+        expect(errors.join('\n')).not.toMatch(/Failed statement|Key \(/);
         expect(await exists('spfn_i163fix.things')).toBe(false);
     });
 
@@ -292,9 +329,23 @@ describe('db push applies function package migrations first', () =>
 
         await expect(push({ force: true })).rejects.toThrow('exit 1');
 
-        expect(errors.join('\n')).toContain('❌ The project statements were rolled back: column "code" referenced');
+        expect(errors.join('\n')).toContain('❌ The project statements were rolled back: Invalid query (42703)');
         expect(errors.join('\n')).not.toContain('stay applied');
         expect(await exists('i378_app.accounts')).toBe(false);
+    });
+
+    it.each(ROW_FAILURES)('T11 a project statement fails on a row ($name): the line names code, constraint, table, column and the statement, never the row\'s value', async ({ rows, notes, line }) =>
+    {
+        await db.unsafe(`CREATE SCHEMA i378_app; ${rows}`);
+        writeFixture({ notes });
+
+        await expect(push({ force: true })).rejects.toThrow('exit 1');
+
+        const printedErrors = errors.join('\n');
+        expect(printedErrors).toContain('❌ The project statements were rolled back: ');
+        expect(printedErrors).toContain(line);
+        expect(printedErrors).toMatch(/ {3}Failed statement: ALTER TABLE "i378_app"."notes" /);
+        expect(printedErrors).not.toMatch(/SECRETVALUE|customer-secret|424242|Key \(|Failed query|params:/);
     });
 
     it('T9 the confirmation is aborted (Ctrl-C, EOF): exit 1, nothing written — no package migration, no project statement', async () =>

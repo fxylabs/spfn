@@ -333,7 +333,7 @@ describe('spfn db tenant export (integration)', () =>
         const cases: [string, RegExp][] = [
             [closedPort, /Tenant export failed: could not reach the database \(/],
             [unresolvable, /Tenant export failed: could not reach the database \(/],
-            [missingRole.toString(), /Tenant export failed: authentication failed \((28000|28P01)\)/],
+            [missingRole.toString(), /Tenant export failed: Database authentication failed \((28000|28P01)\)/],
         ];
 
         for (const [url, failure] of cases)

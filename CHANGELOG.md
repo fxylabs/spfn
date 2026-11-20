@@ -650,10 +650,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   question now says. An aborted question (Ctrl-C, EOF) used to count as No and apply the rest; it
   now exits 1 with nothing applied (`❌ The confirmation was aborted — nothing was applied`). A run
   whose stdin is not a terminal used to hang at the question; with a destructive statement pending
-  and no `--force` it now exits 1 before any write, naming `--force`. A failed package migration is
-  printed as a failed project statement is (the server's message, its constraint, never the
-  connection URL), and a project failure says package migrations stay applied only when this run
-  applied one.
+  and no `--force` it now exits 1 before any write, naming `--force`. A project failure says
+  package migrations stay applied only when this run applied one.
+- **spfn: a failed `db push` statement and a failed `db tenant export`/`import` print a database
+  error by core's rule (#378, #382).** One line: `databaseErrorMessage` (the server's message only
+  where `@spfn/core`'s `describeError` keeps it, else the SQLSTATE class's fixed text), then the
+  code, constraint, table and column, with the connection URL and any URL's credentials cut out.
+  A class-22 failure used to print the row's value (`invalid input syntax for type integer:
+  "…"`); it now reads `Invalid input value (22P02)`. A failed project statement adds its SQL
+  (`   Failed statement: ALTER TABLE …`), so a class-22 or class-42 failure still says which
+  statement failed. Unique, foreign-key and exclusion failures keep the server's message; a
+  not-null or check failure raised while altering a table reads `Integrity constraint violated
+  (23502, table …, column …)` / `(23514, constraint …, table …)`. An authentication failure reads
+  `Database authentication failed (28P01)` (was `authentication failed (28P01)`). spfn now reads
+  `databaseErrorMessage` from `@spfn/core/db`, so the release raises spfn's `@spfn/core` peer
+  floor to the core that has it.
 
 ### Fixed
 
@@ -679,8 +690,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   write, and destructive project statements are confirmed (or declined) before any write. Then
   each package's pending migrations apply, one committed transaction per package as `db migrate`
   does, and then the project statements in one transaction. A failing project statement now exits
-  1 with the server's message (`❌ The project statements were rolled back: …`; it used to be
-  uncaught), and the package migrations it followed stay applied.
+  1 with a printable description of the error and the statement (`❌ The project statements were
+  rolled back: …`; it used to be uncaught), and the package migrations it followed stay applied.
 - **spfn: a new app is told to run `spfn db push` (#378).** Both scaffold modes ship the starter
   `examples` entity and no project migration, but `spfn init --mode full` said `db migrate` (which
   creates the auth tables and never the app's), `spfn create --mode full` printed init's list and

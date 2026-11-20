@@ -32,7 +32,7 @@ describe('describeError for an authentication failure', () =>
     {
         const text = describeError(serverError(code, message), URL_WITH_SECRET);
 
-        expect(text).toBe(`authentication failed (${code})`);
+        expect(text).toBe(`Database authentication failed (${code})`);
         expect(text).not.toContain('x10c-user');
     });
 });
@@ -43,13 +43,26 @@ describe('describeError for a failed db push project statement (pg through drizz
     {
         const cause = Object.assign(
             new pg.DatabaseError('duplicate key value violates unique constraint "accounts_email_key"', 0, 'error'),
-            { code: '23505', constraint: 'accounts_email_key' },
+            { severity: 'ERROR', code: '23505', constraint: 'accounts_email_key', schema: 'public', table: 'accounts', routine: '_bt_check_unique' },
         );
         const error = new DrizzleQueryError('ALTER TABLE "accounts" ADD CONSTRAINT "accounts_email_key" UNIQUE("email")', ['x11-param'], cause);
 
         const text = describeError(error, URL_WITH_SECRET);
 
-        expect(text).toBe('duplicate key value violates unique constraint "accounts_email_key" (constraint accounts_email_key)');
+        expect(text).toBe('duplicate key value violates unique constraint "accounts_email_key" (23505, constraint accounts_email_key, table public.accounts)');
         expect(text).not.toMatch(/ALTER TABLE|x11-param/);
+    });
+});
+
+describe('describeError for a URL the error names that is not the connection\'s', () =>
+{
+    it('X12 another URL\'s credentials are blanked (redactUrls), as is the connection URL', () =>
+    {
+        const error = new Error(`could not load the schema: postgres://x12-user:x12-secret@other.example.test/app via ${URL_WITH_SECRET}`);
+
+        const text = describeError(error, URL_WITH_SECRET);
+
+        expect(text).toBe('could not load the schema: postgres://<redacted>@other.example.test/app via ***');
+        expect(text).not.toMatch(/x12-secret|x10c-secret/);
     });
 });
