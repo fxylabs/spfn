@@ -36,10 +36,20 @@ export type { AuthApi };
  *
  * - `unsupported`: this browser has no WebAuthn at all
  * - `cancelled`: the person dismissed the prompt
- * - `no-credential`: the authenticator had nothing for this relying party
+ * - `no-credential`: the authenticator had nothing for this relying party.
+ *   From `enrollPasskey`: the account has session binding on, and the proof
+ *   prompt (an assertion with a passkey it already holds) was dismissed or this
+ *   device offered none of its passkeys. When the proof was asked only after
+ *   the registration prompt, the result carries `retry`
  * - `busy`: the server answered 503 — another change to the account held it
  *   (`AccountBusyError`). Retryable: the session is not over, and nothing was
- *   spent; run the same call again shortly (`renewSession` alone answers it)
+ *   spent. One rule for every helper: a retry never needs the authenticator to
+ *   make something new. An assertion leaves nothing behind, so `renewSession`
+ *   and `stepUpWithPasskey` are simply called again; a registration made a
+ *   credential on the authenticator, so `enrollPasskey`'s `busy` carries
+ *   `retry`, which posts that same attestation again — as does every other
+ *   way `enrollPasskey` ends after the registration prompt without the
+ *   passkey stored, a rejection included (`enrollPasskeyRetryOf`)
  * - `error`: anything else, with the original error attached
  */
 export type PasskeyFailureReason = 'unsupported' | 'cancelled' | 'no-credential' | 'busy' | 'error';
@@ -87,7 +97,56 @@ export interface EnrollPasskeyOptions
     label?: string;
     /** Sent when the session proved itself longer ago than the recent-auth window. */
     currentPassword?: string;
+    /**
+     * The `passkeyAdd` proof the app already ran (`provePasskey(api, 'passkeyAdd')`),
+     * sent as given: the session binding is not read and no proof prompt is shown.
+     */
+    passkeyResponse?: AuthenticationResponseJSON;
+    /**
+     * A `retry` handed back after the registration prompt — a `busy` or
+     * `no-credential` result's, or a rejection's (`enrollPasskeyRetryOf`):
+     * `register/verify` is posted again with the attestation and proof it
+     * carried. No binding read and no registration prompt; the proof prompt
+     * only if the verify asks the proof and the app did not supply it. The
+     * other options are not read; the label travels in it.
+     *
+     * The registration's challenge lives `SPFN_AUTH_PASSKEY_CHALLENGE_TTL_SECONDS`
+     * (five minutes by default) and is spent by the post that stores the
+     * passkey. After either, the re-post answers 401 `PasskeyChallengeError` —
+     * so does one whose first post was stored but its answer lost to the
+     * network (the passkey list says which) — and a new ceremony is the only
+     * way.
+     */
+    retry?: EnrollPasskeyRetry;
 }
+
+/** What `register/verify` is posted. */
+export interface EnrolmentBody
+{
+    response: RegistrationResponseJSON;
+    label?: string;
+    passkeyResponse?: AuthenticationResponseJSON;
+}
+
+/**
+ * A `register/verify` that did not store the passkey, kept to be posted again:
+ * hand it back as `enrollPasskey(api, { retry })`. Built by the helper, not by
+ * the app.
+ */
+export interface EnrollPasskeyRetry
+{
+    readonly body: EnrolmentBody;
+    /** Whether a `PASSKEY_PROOF_REQUIRED` may still be answered with the helper's own proof. */
+    readonly mayProve: boolean;
+}
+
+/**
+ * `PasskeyResult`, with `retry` set on a failure after the registration
+ * prompt: `busy`, and `no-credential` when the proof was asked after it.
+ */
+export type EnrollPasskeyResult =
+    | ({ ok: true } & EnrollPasskeyValue)
+    | { ok: false; reason: PasskeyFailureReason; error?: unknown; retry?: EnrollPasskeyRetry };
 
 export interface EnrollPasskeyValue
 {
@@ -113,15 +172,53 @@ export interface EnrollPasskeyValue
  * options call means the caller should prompt for the password and try again
  * with `currentPassword`; that is a rejected promise, not a result here, because
  * it is the server declining rather than the ceremony failing.
+ *
+ * An account with session binding on must prove a passkey it already holds to
+ * add one (`passkeyAdd`, 403 `PASSKEY_PROOF_REQUIRED` without it). So the
+ * binding is read first, and a bound account sees two prompts: the proof
+ * (`navigator.credentials.get()`), then the registration (`create()`). The proof
+ * comes first because the registration's credential is made on the
+ * authenticator before the server is asked: a proof dismissed after it would
+ * leave a passkey in the person's password manager that the account never
+ * stored. A binding read that fails is not an answer: its refusal (say 403
+ * `SECOND_FACTOR_ENROLMENT_REQUIRED`) or network error is thrown before any
+ * prompt. If the verify still asks the proof — binding turned on since the
+ * read — the proof runs once and the same attestation is sent again; its
+ * challenge was not spent. A second refusal is thrown, and so is the first
+ * when the app supplied the proof.
+ *
+ * A dismissed proof prompt is `no-credential`, a dismissed registration prompt
+ * `cancelled`, and a 503 at the verify `busy` (`AccountBusyError`: nothing was
+ * written or spent). Once the registration prompt has made the credential,
+ * every way this ends without it stored hands back `retry`: on the result
+ * (`busy`; `no-credential` from a proof asked after it), or on the rejected
+ * error, which is otherwise the server's refusal or the network's `TypeError`
+ * as it came (`enrollPasskeyRetryOf(error)`) — a rejection, as every helper
+ * here rejects a failed call. `enrollPasskey(api, { retry })` posts the same
+ * attestation again, with no registration prompt.
  */
 export async function enrollPasskey(
     api: AuthApi,
     options: EnrollPasskeyOptions = {},
-): Promise<PasskeyResult<EnrollPasskeyValue>>
+): Promise<EnrollPasskeyResult>
 {
+    if (options.retry !== undefined)
+    {
+        return await verifyEnrolment(api, options.retry);
+    }
+
     if (!isPasskeySupported())
     {
         return { ok: false, reason: 'unsupported' };
+    }
+
+    const proof = options.passkeyResponse === undefined
+        ? await provePasskeyIfBound(api)
+        : { ok: true as const, passkeyResponse: options.passkeyResponse };
+
+    if (!proof.ok)
+    {
+        return proof;
     }
 
     const optionsJSON = await api.passkeyRegisterOptions.call({
@@ -139,11 +236,104 @@ export async function enrollPasskey(
         return { ok: false, reason: failureReason(error, 'cancelled'), error };
     }
 
-    const enrolled = await api.passkeyRegisterVerify.call({
-        body: { response, label: options.label },
-    }) as EnrollPasskeyValue;
+    return await verifyEnrolment(api, {
+        body: { response, label: options.label, passkeyResponse: proof.passkeyResponse },
+        mayProve: options.passkeyResponse === undefined,
+    });
+}
 
-    return { ok: true, ...enrolled };
+/**
+ * The `passkeyAdd` proof when the account has session binding on; no proof,
+ * and no prompt, when the read answers that it has not.
+ *
+ * A read that fails rejects as itself — a refusal, a network error — before
+ * any ceremony: not knowing the binding is not "unbound", and registering
+ * blind on a bound account leaves a credential the server never stores.
+ */
+async function provePasskeyIfBound(api: AuthApi): Promise<PasskeyResult<Partial<PasskeyProofValue>>>
+{
+    const binding = await api.getSessionBinding.call();
+
+    return binding.mode === 'passkey' ? await provePasskey(api, 'passkeyAdd') : { ok: true };
+}
+
+/**
+ * `register/verify`, with the proof asked and the same attestation sent once
+ * more when it answers `PASSKEY_PROOF_REQUIRED` and `mayProve`. A 503 is
+ * `busy`, carrying the post to make again.
+ */
+async function verifyEnrolment(api: AuthApi, retry: EnrollPasskeyRetry): Promise<EnrollPasskeyResult>
+{
+    return await api.passkeyRegisterVerify.call({ body: retry.body }).then(
+        (enrolled): EnrollPasskeyResult => ({ ok: true, ...enrolled as EnrollPasskeyValue }),
+        (error: unknown): EnrollPasskeyResult | Promise<EnrollPasskeyResult> =>
+        {
+            if (isServiceUnavailable(error))
+            {
+                return { ok: false, reason: 'busy', error, retry };
+            }
+
+            return retry.mayProve && isPasskeyProofRequired(error)
+                ? proveAndResend(api, retry)
+                : rejectCarrying(retry)(error);
+        },
+    );
+}
+
+/**
+ * The proof `register/verify` asked for, and the attestation sent again with
+ * it. A proof that did not happen, or a rejection of either call, hands back
+ * the first post: re-posted, it is asked the proof again, which a refused
+ * proof needs.
+ */
+async function proveAndResend(api: AuthApi, retry: EnrollPasskeyRetry): Promise<EnrollPasskeyResult>
+{
+    const proof = await provePasskey(api, 'passkeyAdd').catch(rejectCarrying(retry));
+
+    if (!proof.ok)
+    {
+        return { ...proof, retry };
+    }
+
+    return await verifyEnrolment(api, {
+        body: { ...retry.body, passkeyResponse: proof.passkeyResponse },
+        mayProve: false,
+    }).catch(rejectCarrying(retry));
+}
+
+/**
+ * Rejects with the error as it came — the server's class, the transport's
+ * `TypeError` — carrying `retry`, so a rejection after `create()` still hands
+ * back the attestation the authenticator made.
+ */
+function rejectCarrying(retry: EnrollPasskeyRetry): (error: unknown) => Promise<never>
+{
+    return error => Promise.reject(Object.assign(
+        error !== null && typeof error === 'object' ? error : new Error(String(error), { cause: error }),
+        { retry },
+    ));
+}
+
+/**
+ * The `retry` an `enrollPasskey` rejection carries: present on every rejection
+ * after the registration prompt made a credential, absent before it.
+ */
+export function enrollPasskeyRetryOf(error: unknown): EnrollPasskeyRetry | undefined
+{
+    return (error as { retry?: EnrollPasskeyRetry } | null)?.retry;
+}
+
+/**
+ * A 403 `PASSKEY_PROOF_REQUIRED`, read by name as `mfa-confirm-flow` reads its
+ * errors: `authApi` restores the class, a client built without the registry
+ * throws an `ApiError` whose `response` is the envelope.
+ */
+function isPasskeyProofRequired(error: unknown): boolean
+{
+    const answered = error as { name?: unknown; code?: unknown; response?: { __type?: unknown } } | null;
+
+    return [answered?.name, answered?.code, answered?.response?.__type]
+        .some(name => name === 'PasskeyProofRequiredError' || name === 'PASSKEY_PROOF_REQUIRED');
 }
 
 export interface SignInWithPasskeyOptions
@@ -365,16 +555,11 @@ export async function disableSessionBinding(
 /**
  * The procedures by which a session lets another credential into an account —
  * each asks a passkey proof when the account has session binding on — and
- * turning binding on, which asks one of every account.
+ * turning binding on, which asks one of every account. Read off the route's
+ * input, so it is the list the server accepts; a refusal names one as
+ * `details.procedure`.
  */
-export type PasskeyProofProcedure =
-    | 'deviceApprove'
-    | 'linkIssue'
-    | 'passkeyAdd'
-    | 'passwordSet'
-    | 'socialLink'
-    | 'oauth2Consent'
-    | 'bindingEnable';
+export type PasskeyProofProcedure = Parameters<AuthApi['passkeyProofOptions']['call']>[0]['body']['procedure'];
 
 /** The assertion to send as that procedure's `passkeyResponse`. */
 export interface PasskeyProofValue

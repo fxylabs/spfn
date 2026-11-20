@@ -579,7 +579,7 @@ async function keepPasskey(
     // spent and the row written: an operator's `resetSecondFactorService`
     // either lands first and this enrols after it, or waits and revokes what
     // this enrolled.
-    await assertPasskeyProven(await usersRepository.lockAccount(params.userId), proof);
+    await assertPasskeyProven(await usersRepository.lockAccount(params.userId), proof, 'passkeyAdd');
     await assertMayRegister(challenge, params);
     assertChallenge(await spendChallenge(challenge, 'registration', params.userId), 'registration');
 

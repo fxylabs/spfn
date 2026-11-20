@@ -271,10 +271,12 @@ describe.skipIf(!dbAvailable)('an expired bound key is a dead key (T1-T6)', () =
         expect(Math.abs(row!.expiresAt!.getTime() - (Date.now() + KEY_TTL_DAYS * DAY_MS))).toBeLessThan(60_000);
     }
 
-    async function expectPasskeyProofRequired(response: Response): Promise<void>
+    /** The refusal names the procedure it asks the proof for (#400): a client learns which to prove. */
+    async function expectPasskeyProofRequired(response: Response, procedure: string): Promise<void>
     {
         expect(response.status).toBe(403);
-        expect((await response.json()).error.code).toBe('PasskeyProofRequiredError');
+        const body = await response.json();
+        expect({ code: body.error.code, details: body.details }).toEqual({ code: 'PasskeyProofRequiredError', details: { procedure } });
     }
 
     function changePassword(session: Session, body: Record<string, unknown>)
@@ -600,7 +602,7 @@ describe.skipIf(!dbAvailable)('an expired bound key is a dead key (T1-T6)', () =
         const owner = await boundSession();
         const device = await startDevice();
 
-        await expectPasskeyProofRequired(await post('/_auth/device/approve', { userCode: device.userCode }, owner));
+        await expectPasskeyProofRequired(await post('/_auth/device/approve', { userCode: device.userCode }, owner), 'deviceApprove');
         await post('/_auth/device/poll', { deviceCode: device.deviceCode }, undefined, false);
 
         expect(await keyRow(device.keyId)).toBeUndefined();
@@ -627,7 +629,7 @@ describe.skipIf(!dbAvailable)('an expired bound key is a dead key (T1-T6)', () =
             challenge: (await options.json()).challenge, origin: ORIGIN, rpId: RP_ID, counter: 1, userVerified: false,
         });
 
-        await expectPasskeyProofRequired(await post('/_auth/device/approve', { userCode: device.userCode, passkeyResponse: presenceOnly }, session));
+        await expectPasskeyProofRequired(await post('/_auth/device/approve', { userCode: device.userCode, passkeyResponse: presenceOnly }, session), 'deviceApprove');
         await post('/_auth/device/poll', { deviceCode: device.deviceCode }, undefined, false);
         expect(await keyRow(device.keyId)).toBeUndefined();
 
@@ -652,7 +654,7 @@ describe.skipIf(!dbAvailable)('an expired bound key is a dead key (T1-T6)', () =
     {
         const { session, authenticator } = await boundOwner();
 
-        await expectPasskeyProofRequired(await post('/_auth/device/link/issue', {}, session));
+        await expectPasskeyProofRequired(await post('/_auth/device/link/issue', {}, session), 'linkIssue');
         expect(await getTestDb().select().from(deviceLinks)).toEqual([]);
 
         const passkeyResponse = await passkeyProof(session, authenticator, 'linkIssue');
@@ -669,7 +671,7 @@ describe.skipIf(!dbAvailable)('an expired bound key is a dead key (T1-T6)', () =
         const { session, authenticator } = await boundOwner();
         const another = await FixtureAuthenticator.create();
 
-        await expectPasskeyProofRequired(await registerPasskey(session, another));
+        await expectPasskeyProofRequired(await registerPasskey(session, another), 'passkeyAdd');
         expect(await getTestDb().select().from(passkeys)).toHaveLength(1);
 
         const passkeyResponse = await passkeyProof(session, authenticator, 'passkeyAdd');
@@ -683,7 +685,7 @@ describe.skipIf(!dbAvailable)('an expired bound key is a dead key (T1-T6)', () =
         await getTestDb().update(users).set({ passwordHash: null }).where(eq(users.email, 'owner@test.com'));
         const passwordOf = async () => (await getTestDb().select().from(users).where(eq(users.email, 'owner@test.com')))[0].passwordHash;
 
-        await expectPasskeyProofRequired(await changePassword(session, { newPassword: 'Another123!' }));
+        await expectPasskeyProofRequired(await changePassword(session, { newPassword: 'Another123!' }), 'passwordSet');
         expect(await passwordOf()).toBeNull();
 
         const passkeyResponse = await passkeyProof(session, authenticator, 'passwordSet');
@@ -705,7 +707,7 @@ describe.skipIf(!dbAvailable)('an expired bound key is a dead key (T1-T6)', () =
         expect((await issue(unbound)).status).toBe(200);
 
         const { session, authenticator } = await boundOwner();
-        await expectPasskeyProofRequired(await issue(session));
+        await expectPasskeyProofRequired(await issue(session), 'opsTokenIssue');
         expect(await tokenCount()).toBe(1);
 
         const minted = await issue(session, await passkeyProof(session, authenticator, 'opsTokenIssue'));

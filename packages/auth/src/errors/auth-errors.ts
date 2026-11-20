@@ -2026,9 +2026,9 @@ export class StepUpRequiredError extends ForbiddenError
  * Turning binding on asks the same proof of every account (`bindingEnable`).
  *
  * 403 and not 401, for `StepUpRequiredError`'s reason. Clients branch on
- * `code`: ask `POST /_auth/session/passkey-proof/options` with the procedure,
- * run `navigator.credentials.get()`, and send the request again with the
- * assertion as `passkeyResponse`.
+ * `code`: ask `POST /_auth/session/passkey-proof/options` with the procedure
+ * the refusal names (`details.procedure`), run `navigator.credentials.get()`,
+ * and send the request again with the assertion as `passkeyResponse`.
  */
 export class PasskeyProofRequiredError extends ForbiddenError
 {

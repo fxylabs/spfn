@@ -119,7 +119,7 @@ export async function issueOpsTokenService(
     {
         const account = await usersRepository.lockAccount(issuer.userId);
         await assertMayIssue(issuer);
-        await assertPasskeyProven(account, issuer.passkeyProof ?? null);
+        await assertPasskeyProven(account, issuer.passkeyProof ?? null, 'opsTokenIssue');
 
         const token = OPS_TOKEN_PREFIX + randomBytes(32).toString('hex');
         const record = await opsTokensRepository.create({

@@ -346,8 +346,10 @@ describe.skipIf(!dbAvailable)('OAuth2 authorize, API side (8b)', () =>
             approve: true,
         }, pkcePair('bound').challenge);
 
+        const body = await response.json() as Envelope;
         expect(response.status).toBe(403);
-        expect((await response.json() as Envelope).error?.code).toBe('PasskeyProofRequiredError');
+        expect(body.error?.code).toBe('PasskeyProofRequiredError');
+        expect(refusalOf(body)).toEqual({ procedure: 'oauth2Consent' });
         expect(await oauth2GrantsRepository.listLiveByUserId(userId)).toEqual([]);
     });
 

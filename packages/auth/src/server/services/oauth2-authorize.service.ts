@@ -312,7 +312,7 @@ export async function approveOAuth2AuthorizeService(
     {
         const account = await usersRepository.lockAccount(approver.userId);
         await assertApproverAdmitted(approver);
-        await assertPasskeyProven(account, proof);
+        await assertPasskeyProven(account, proof, 'oauth2Consent');
 
         const grant = await recordConsent(validated, approver.userId, config);
 

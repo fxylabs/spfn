@@ -353,7 +353,7 @@ export async function issueDeviceLinkService(
     // revoke-all that expires links and revokes keys queues on the same row.
     return await runInTransaction(async () =>
     {
-        await assertPasskeyProven(await usersRepository.lockAccount(issuer.userId), passkeyProof);
+        await assertPasskeyProven(await usersRepository.lockAccount(issuer.userId), passkeyProof, 'linkIssue');
 
         return await insertLink(issuer);
     }, { context: 'auth:device-link-issue' });

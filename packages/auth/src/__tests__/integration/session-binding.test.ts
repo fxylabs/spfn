@@ -276,7 +276,9 @@ describe.skipIf(!dbAvailable)('session binding (case tables 6a, 6b, 6g)', () =>
             const response = await post('/_auth/session/binding', { mode: 'passkey' }, session);
 
             expect(response.status).toBe(403);
-            expect((await response.json()).__type).toBe('PasskeyProofRequiredError');
+            expect(await response.json()).toMatchObject({
+                __type: 'PasskeyProofRequiredError', details: { procedure: 'bindingEnable' },
+            });
             expect((await userRow()).sessionBinding).toBe('none');
         });
 
