@@ -13,7 +13,10 @@
  * database; it is handed a URL nothing listens on.
  *
  * Copies are counted from `@spfn/core`'s own registry, which a preload writes
- * out when the spfn process exits.
+ * out when the spfn process exits, beside the format each evaluation of the
+ * entity recorded on `globalThis` (`typeof require`: a function only in
+ * CommonJS) — the CLI imports `@spfn/core/db` itself, so only the entity's own
+ * record shows that it was loaded, and how.
  *
  * | #  | process                                              | catches                                                 |
  * |----|------------------------------------------------------|---------------------------------------------------------|
@@ -42,7 +45,13 @@ const coreRoot = join(cliRoot, '../core');
 const bin = join(cliRoot, 'bin/spfn.js');
 const drizzleOrm = realpathSync(join(coreRoot, 'node_modules/drizzle-orm'));
 
-/** The spfn process's `@spfn/core` evaluations, `<evaluator>×<count>` per entry, when it exits. */
+/** The `globalThis` key each evaluation of the entity records its format under. */
+const ENTITY_FORMATS = 'app-source-esm:entity-formats';
+
+/**
+ * The spfn process's `@spfn/core` evaluations, `<evaluator>×<count>` per entry,
+ * and the entity's formats, when it exits.
+ */
 const DUMP = `const { writeFileSync } = require('node:fs');
 process.on('exit', () =>
 {
@@ -50,8 +59,11 @@ process.on('exit', () =>
 
     if (registry !== undefined && process.argv[1].endsWith('spfn.js'))
     {
-        writeFileSync(process.env.DUMP_FILE, JSON.stringify(Object.fromEntries([...registry.evaluations].map(([entry, evaluations]) =>
-            [entry, evaluations.map(evaluation => \`\${evaluation.evaluator}×\${evaluation.count ?? 1}\`)]))));
+        writeFileSync(process.env.DUMP_FILE, JSON.stringify({
+            core: Object.fromEntries([...registry.evaluations].map(([entry, evaluations]) =>
+                [entry, evaluations.map(evaluation => \`\${evaluation.evaluator}×\${evaluation.count ?? 1}\`)])),
+            entity: globalThis[Symbol.for('${ENTITY_FORMATS}')] ?? [],
+        }));
     }
 });
 `;
@@ -68,6 +80,7 @@ function writeEntity(prelude = ''): void
 {
     write('src/server/entities/example.entity.ts', `${prelude}import { pgTable, text } from 'drizzle-orm/pg-core';\n`
         + 'import { id } from \'@spfn/core/db\';\n'
+        + `((globalThis as any)[Symbol.for('${ENTITY_FORMATS}')] ??= []).push(typeof require === 'function' ? 'commonjs' : 'module');\n`
         + 'export const examples = pgTable(\'examples\', { id: id(), name: text(\'name\').notNull() });\n');
     // The scaffold's registry: with it, db generate loads the entities in its own process.
     write('src/server/entities/config.ts', 'export * from \'./example.entity\';\n');
@@ -96,7 +109,7 @@ function dbGenerate(): { status: number | null; output: string }
     return spfn(['db', 'generate']);
 }
 
-function evaluations(): Record<string, string[]>
+function dump(): { core: Record<string, string[]>; entity: string[] }
 {
     return JSON.parse(readFileSync(join(appDir, 'dump.json'), 'utf8'));
 }
@@ -123,8 +136,8 @@ it('R1 spfn db generate evaluates every @spfn/core entry once, as ESM, in a type
     const { status, output } = dbGenerate();
 
     expect(status, output).toBe(0);
-    expect(Object.keys(evaluations())).toContain('@spfn/core/db');
-    expect(Object.entries(evaluations()).filter(([, copies]) => copies.join() !== 'esm×1')).toEqual([]);
+    expect(dump().entity).toEqual(['module']);
+    expect(Object.entries(dump().core).filter(([, copies]) => copies.join() !== 'esm×1')).toEqual([]);
 });
 
 it('R2 spfn db generate loads an entity with top-level await', () =>
