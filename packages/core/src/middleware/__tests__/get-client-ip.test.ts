@@ -41,6 +41,13 @@ describe('getClientIp', () =>
         expect(getClientIp(c)).toBe('unknown');
     });
 
+    it('ignores the forwarded header on a mobile request: client proof sets clientType, proxy-guard did not run', () =>
+    {
+        const c = ctx({ [PROXY_CLIENT_IP_HEADER]: '1.2.3.4', 'x-forwarded-for': '10.0.0.1' }, 'mobile');
+
+        expect(getClientIp(c)).toBe('unknown');
+    });
+
     it('reads no forwarding header when no proxy is declared', () =>
     {
         expect(getClientIp(ctx({ 'x-real-ip': '198.51.100.7' }))).toBe('unknown');

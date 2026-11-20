@@ -278,4 +278,17 @@ describe('the browser\'s address across a server-side call', () =>
         expect(late).toEqual({ ip: BROWSER });
         expect(sent[1].get(FORWARDED_CLIENT_HEADER)).not.toBe(sent[0].get(FORWARDED_CLIENT_HEADER));
     });
+
+    it('C13: the method is signed: a GET assertion replayed as a POST on the same path is ignored', async () =>
+    {
+        configure();
+        const { browser } = network();
+        const made = assertion('/api/rpc/whoami', '192.0.2.66');
+
+        // The control: as the GET it was made for, it is believed
+        expect(await browser('whoami', { 'x-forwarded-for': NEXT_SERVER, [FORWARDED_CLIENT_HEADER]: made }))
+            .toEqual({ ip: '192.0.2.66' });
+        expect(await browser('whoami', { 'x-forwarded-for': NEXT_SERVER, [FORWARDED_CLIENT_HEADER]: made }, 'POST'))
+            .toEqual({ ip: NEXT_SERVER });
+    });
 });
