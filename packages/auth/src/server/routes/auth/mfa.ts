@@ -40,6 +40,7 @@ import { route } from '@spfn/core/route';
 
 import { getAuth } from '../../helpers';
 import { byIpAndCaller } from '../../lib/rate-limit-keys';
+import { deviceProvenance } from '../../lib/device-provenance';
 import {
     assertNotLastListedFactor,
     assertStepUp,
@@ -295,6 +296,7 @@ export const mfaVerify = route.post('/_auth/mfa/verify')
             code: body.code,
             recoveryCode: body.recoveryCode,
             response: body.response,
+            ...deviceProvenance(c.raw),
         });
     });
 

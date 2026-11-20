@@ -32,6 +32,7 @@ import { buildStartCookieName } from '@/server/lib/oauth/start-cookies';
 import { createOAuthState, generateOAuthNonce } from '@/server/lib/oauth/state';
 import { configureAuth } from '@/server/lib/config';
 import { configureChannels, __resetChannelsForTests } from '@/server/lib/channels-config';
+import { configureSignIn, resetSignInGuardForTests } from '@/server/lib/sign-in-guard';
 import { socialAccountsRepository } from '@/server/repositories';
 import { OAUTH_ERROR_REASONS, type OAuthErrorReason } from '@/lib/oauth-error-reason';
 import {
@@ -155,6 +156,7 @@ describe.skipIf(!dbAvailable)('OAuth web callback refusals and one identity per 
     {
         configureAuth({ oauthEmailMatch: undefined, oauthProviders: undefined });
         __resetChannelsForTests();
+        resetSignInGuardForTests();
     }
 
     // ========================================================================
@@ -368,6 +370,18 @@ describe.skipIf(!dbAvailable)('OAuth web callback refusals and one identity per 
             },
             callback: () => kakaoCallback({ code: 'code-newcomer' }),
         }],
+        sign_in_refused: [
+            {
+                name: "the app's signIn.admit refuses the linked identity's account",
+                arrange: async () => configureSignIn({ admit: () => ({ refuse: { code: 'LOCKED' } }) }),
+                callback: () => kakaoCallback({ code: 'code-linked' }),
+            },
+            {
+                name: "the app's signIn.admit refuses the account a first sign-in would create",
+                arrange: async () => configureSignIn({ admit: () => ({ refuse: { code: 'LOCKED' } }) }),
+                callback: () => kakaoCallback({ code: 'code-newcomer' }),
+            },
+        ],
         failed: [
             {
                 name: 'a first sign-in whose key registration fails (the account was created first)',

@@ -43,6 +43,7 @@ import {
     PasskeyNotFoundError,
     PasskeyUserVerificationRequiredError,
     SecondFactorLockedError,
+    SignInRefusedError,
     StepUpRequiredError,
 } from '@spfn/auth/errors';
 
@@ -72,6 +73,7 @@ import { authLoginEvent, mfaLockedEvent, passkeyRevokedEvent } from '../events';
 import type { DeferredLoginEvent, MfaChallenge, MfaChallengeChannel } from '../entities/mfa-challenges';
 import type { MfaTotp } from '../entities/mfa-totp';
 import type { UserPublicKey } from '../entities/user-public-keys';
+import type { User } from '../entities/users';
 import type { MfaVerificationMethod } from '../entities/mfa-verifications';
 import { stampFor, stampOf } from '../lib/deferred-stamp';
 import { provesSecondFactor } from '../lib/passkey-assertion';
@@ -86,6 +88,15 @@ import {
 import { isMethodListed } from '../lib/second-factor-policy';
 import { accountRefusal, admitPrincipal, sessionCredentialOf, type PrincipalCredential } from './admission.service';
 import { SWEEP_BATCH, sweepEachAccount } from './account-sweep.service';
+import {
+    admitSignIn,
+    assertSignInAdmits,
+    failedCredentialAnswer,
+    recordSignInFailure,
+    reportSignIn,
+    settleFailure,
+} from './sign-in-guard.service';
+import { signInGuard, type SignInAttempt } from '../lib/sign-in-guard';
 import {
     assertNotLastListedFactor,
     enrolmentNeedsProof,
@@ -302,6 +313,29 @@ export interface VerifyMfaChallengeParams
     recoveryCode?: string;
     /** A passkey assertion as it arrived; `verifyPasskeyProof` reads its shape. */
     response?: unknown;
+    /** Client address of this request, from `deviceProvenance` at the route — not the 202's. */
+    ip?: string;
+    /** `user-agent` of this request, already truncated at the route. */
+    userAgent?: string;
+    /** Whether proxy-guard recognised the trusted Next.js proxy, from the same helper. */
+    webProxy?: boolean;
+}
+
+/** A challenge that can still be spent, and its account as read on the primary. */
+interface SpendableChallenge
+{
+    row: MfaChallenge;
+    account: User;
+}
+
+/**
+ * A `mfa/verify` that completes a sign-in, for the app's `signIn` guard: the
+ * attempt, at the second-factor stage, and the pending key it would activate.
+ */
+interface SecondStep
+{
+    attempt: SignInAttempt;
+    keyId: string;
 }
 
 /**
@@ -336,7 +370,7 @@ export interface VerifyMfaChallengeResult extends LoginResult
  *
  * @throws MfaVerificationFailedError
  */
-async function spendableChallenge(challengeHash: string): Promise<MfaChallenge>
+async function spendableChallenge(challengeHash: string): Promise<SpendableChallenge>
 {
     const row = await mfaChallengesRepository.findByHash(challengeHash);
 
@@ -352,7 +386,7 @@ async function spendableChallenge(challengeHash: string): Promise<MfaChallenge>
         throw new MfaVerificationFailedError();
     }
 
-    return row;
+    return { row, account };
 }
 
 /**
@@ -363,9 +397,10 @@ async function spendableChallenge(challengeHash: string): Promise<MfaChallenge>
  * refuses the activation here; one that arrives later waits for it, and then
  * revokes the key it activated.
  *
+ * @returns the account as of the lock
  * @throws MfaVerificationFailedError
  */
-async function assertAccountStillAdmits(row: MfaChallenge): Promise<void>
+async function assertAccountStillAdmits(row: MfaChallenge): Promise<User>
 {
     const account = await usersRepository.lockAccount(row.userId);
 
@@ -373,6 +408,8 @@ async function assertAccountStillAdmits(row: MfaChallenge): Promise<void>
     {
         throw new MfaVerificationFailedError();
     }
+
+    return account;
 }
 
 /**
@@ -430,8 +467,17 @@ async function releaseDeferredAnnouncements(row: MfaChallenge, key: UserPublicKe
  * therefore gets exactly the binding and the expiry its sign-in registered, and
  * the ten minutes a challenge may sit for come out of that key's short life.
  *
+ * With the app's `signIn` guard configured, `admit` is asked before the proof
+ * is judged — a refused account is answered `SignInRefusedError`, its
+ * challenge unspent and its proof not looked at — and again under the lock
+ * in the completion transaction, which decides. A wrong proof and a spent
+ * budget are told to `settled` (`stage: 'second-factor'`) in the transaction
+ * that counts them; the sign-in is told `succeeded` once, here, in the
+ * transaction that activates the key.
+ *
  * @throws ValidationError when the body names none or more than one proof
  * @throws SecondFactorLockedError while the account's budget is spent
+ * @throws SignInRefusedError when the app's `signIn.admit` refuses the sign-in
  * @throws MfaVerificationFailedError for every other refusal, in one body
  */
 export async function verifyMfaChallengeService(
@@ -439,8 +485,15 @@ export async function verifyMfaChallengeService(
 ): Promise<VerifyMfaChallengeResult>
 {
     const challengeHash = hashCredential(params.challenge);
-    const row = await spendableChallenge(challengeHash);
-    const proof = await checkSecondFactorProof(row.userId, params, { kind: 'verify' });
+    const { row, account } = await spendableChallenge(challengeHash);
+    const step = signInGuard() && secondStepOf(row, account, params);
+
+    if (step)
+    {
+        await refuseUnadmittedStep(step);
+    }
+
+    const proof = await judgeSecondFactor(row.userId, params, { kind: 'verify' }, step);
 
     // The transaction starts here and not at the route: a wrong proof's count
     // has to commit before the refusal that raised it (`checkSecondFactorProof`
@@ -450,7 +503,12 @@ export async function verifyMfaChallengeService(
     // the account is read again under it.
     return await runInTransaction(async () =>
     {
-        await assertAccountStillAdmits(row);
+        const locked = await assertAccountStillAdmits(row);
+
+        if (step)
+        {
+            await assertSignInAdmits({ ...step.attempt, user: locked });
+        }
 
         if (!await proof.spend() || !await mfaChallengesRepository.markVerified(row))
         {
@@ -461,8 +519,47 @@ export async function verifyMfaChallengeService(
         await assertSignInAdmitted(row);
         await mfaVerificationsRepository.record(row.userId, { kind: 'deviceKey', keyId: row.keyId }, proof.method);
 
-        return { ...await settleStepUpLogin(row), keyId: row.keyId, challengeHash };
+        const result = await settleStepUpLogin(row);
+
+        if (step)
+        {
+            await reportSignIn({ ...step.attempt, user: locked, result: 'succeeded', keyId: row.keyId });
+        }
+
+        return { ...result, keyId: row.keyId, challengeHash };
     }, { context: 'auth:mfa-verify' });
+}
+
+/** The sign-in a `mfa/verify` completes, on the channel the 202 came through, from this request. */
+function secondStepOf(row: MfaChallenge, account: User, params: VerifyMfaChallengeParams): SecondStep
+{
+    return {
+        attempt: {
+            user: account,
+            channel: row.channel,
+            stage: 'second-factor',
+            ip: params.ip,
+            userAgent: params.userAgent,
+            webProxy: params.webProxy === true,
+        },
+        keyId: row.keyId,
+    };
+}
+
+/**
+ * `admit`, asked before the proof is judged. A refusal is recorded in a
+ * transaction of its own and answered, with the challenge left unspent.
+ *
+ * @throws SignInRefusedError
+ */
+async function refuseUnadmittedStep(step: SecondStep): Promise<void>
+{
+    const refusal = await admitSignIn(step.attempt);
+
+    if (refusal)
+    {
+        throw await failedCredentialAnswer(step.attempt, refusal, () => new MfaVerificationFailedError(), step.keyId);
+    }
 }
 
 /**
@@ -544,7 +641,7 @@ export async function startMfaChallengeAssertionService(
     challenge: string,
 ): Promise<PublicKeyCredentialRequestOptionsJSON>
 {
-    const row = await spendableChallenge(hashCredential(challenge));
+    const { row } = await spendableChallenge(hashCredential(challenge));
 
     return await buildAuthenticationOptions({
         config: getPasskeyConfig(),
@@ -1166,15 +1263,31 @@ export async function checkSecondFactorProof(
     purpose: SecondFactorPurpose,
 ): Promise<SecondFactorProof>
 {
+    return await judgeSecondFactor(userId, proof, purpose, null);
+}
+
+/**
+ * `checkSecondFactorProof`, and for `mfa/verify` the sign-in it completes:
+ * with one, a spent budget and a wrong proof are told to the app's `settled`
+ * — a step-up's or an enrolment's never are, a signed-in person's typo is not
+ * a sign-in.
+ */
+async function judgeSecondFactor(
+    userId: number,
+    proof: PresentedSecondFactor,
+    purpose: SecondFactorPurpose,
+    step: SecondStep | null,
+): Promise<SecondFactorProof>
+{
     assertOutsideTransaction();
     assertExactlyOneProof(proof, purpose);
-    await assertBudgetOpen(userId);
+    await assertBudgetOpen(userId, step);
 
     const checked = await judgeProof(userId, proof, purpose);
 
     if (!checked)
     {
-        return await refuseProof(userId);
+        return await refuseProof(userId, step);
     }
 
     return {
@@ -1219,15 +1332,27 @@ function assertExactlyOneProof(proof: PresentedSecondFactor, purpose: SecondFact
     }
 }
 
-/** @throws SecondFactorLockedError while the account's budget is spent */
-async function assertBudgetOpen(userId: number): Promise<void>
+/**
+ * A spent budget at a sign-in's second step is told to `settled` first, in a
+ * transaction of its own, and answered the app's refusal when `admit` now
+ * refuses.
+ *
+ * @throws SecondFactorLockedError | SignInRefusedError while the account's budget is spent
+ */
+async function assertBudgetOpen(userId: number, step: SecondStep | null = null): Promise<void>
 {
     const lockedUntil = await mfaAttemptBudgetsRepository.lockedUntil(userId);
 
-    if (lockedUntil)
+    if (!lockedUntil)
     {
-        throw new SecondFactorLockedError({ retryAfter: Math.ceil((lockedUntil.getTime() - Date.now()) / 1000) });
+        return;
     }
+
+    const refusal = step && await recordSignInFailure(step.attempt, 'secondFactorLocked', step.keyId);
+
+    throw refusal
+        ? new SignInRefusedError({ code: refusal.code })
+        : new SecondFactorLockedError({ retryAfter: Math.ceil((lockedUntil.getTime() - Date.now()) / 1000) });
 }
 
 /**
@@ -1237,13 +1362,17 @@ async function assertBudgetOpen(userId: number): Promise<void>
  * (`auth.mfa.locked`), for the app to tell the owner. A count refused because
  * the account locked meanwhile answers the lock.
  *
- * @throws SecondFactorLockedError | MfaVerificationFailedError, always
+ * At a sign-in's second step the same transaction tells the app's `settled`
+ * and asks `admit` again (`settleFailure`), and a refusal it answers now is
+ * the answer.
+ *
+ * @throws SecondFactorLockedError | SignInRefusedError | MfaVerificationFailedError, always
  */
-async function refuseProof(userId: number): Promise<never>
+async function refuseProof(userId: number, step: SecondStep | null): Promise<never>
 {
-    const counted = await runInTransaction(async () =>
+    const { counted, refusal } = await runInTransaction(async () =>
     {
-        await usersRepository.lockAccount(userId);
+        const account = await usersRepository.lockAccount(userId);
 
         const failure = await mfaAttemptBudgetsRepository.spendFailure(userId);
         const lockedUntil = failure?.lockedUntil;
@@ -1254,8 +1383,16 @@ async function refuseProof(userId: number): Promise<never>
             onAfterCommit(() => mfaLockedEvent.emit({ userId: String(userId), lockedUntil: lockedUntil.toISOString() }));
         }
 
-        return failure !== null;
+        return {
+            counted: failure !== null,
+            refusal: step && await settleFailure({ ...step.attempt, user: account }, 'secondFactor', step.keyId),
+        };
     }, { context: 'auth:mfa-failure' });
+
+    if (refusal)
+    {
+        throw new SignInRefusedError({ code: refusal.code });
+    }
 
     if (!counted)
     {

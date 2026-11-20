@@ -23,6 +23,7 @@ import {
     OAuthStateExpiredError,
     OAuthStateInvalidError,
     SignupDisabledError,
+    SignInRefusedError,
     UnverifiedEmailLinkError,
 } from '@spfn/auth/errors';
 
@@ -1085,6 +1086,7 @@ const REASON_BY_ERROR: [abstract new (...args: never[]) => Error, OAuthErrorReas
     [OAuthProviderAlreadyLinkedError, 'provider_already_linked'],
     [OAuthSignInContendedError, 'sign_in_contended'],
     [SignupDisabledError, 'signup_disabled'],
+    [SignInRefusedError, 'sign_in_refused'],
     [AccountDisabledError, 'account_unavailable'],
     [AccountPendingDeletionError, 'account_unavailable'],
     [OAuthAccountNotFoundError, 'account_unavailable'],

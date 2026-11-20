@@ -480,8 +480,19 @@ import { CLIENT_IDENTITY_HEADERS, CLIENT_KINDS, SERVER_CONTRACT_HEADERS } from '
  * code and nothing is approved. Accounts without binding are answered as
  * before. A patch, by 0.10.1's rule: a code joins the open list, and no
  * operation, type or enum changes shape.
+ *
+ * 0.14.7 lists `SignInRefusedError` (403, not retryable) (#361). An app can
+ * refuse a sign-in in its own `createAuthLifecycle({ signIn: { admit } })` —
+ * a lock after repeated failures, an expired temporary password — and every
+ * operation that starts a session can then answer this code, with the app's
+ * own string in `details.code`: `auth.enroll.register`, `auth.enroll.login`,
+ * `auth.enroll.oauthNative`, `auth.device.poll`, `auth.deviceLink.poll` and
+ * `auth.mfa.verify`. A refused account is answered it whatever the password
+ * was. Apps that do not state the option never answer it. A patch, by
+ * 0.10.1's rule: a code joins the open list, and no operation, type or enum
+ * changes shape.
  */
-export const CONTRACT_VERSION = '0.14.6';
+export const CONTRACT_VERSION = '0.14.7';
 export const CONTRACT_MAJOR = 0;
 export const CONTRACT_NAME = 'spfn-mobile-contract';
 
@@ -1378,6 +1389,15 @@ const REST_SURFACE_ERRORS: readonly RestSurfaceError[] = [
         summary:
             'the app refused this sign-up in its own beforeRegister check — reached only when the identity would '
             + 'create a new account, never when it links to an existing one',
+    },
+    {
+        code: 'SignInRefusedError',
+        httpStatus: 403,
+        retryable: false,
+        summary:
+            'the app refused this sign-in in its own signIn.admit check — details.code is the app\'s reason, for '
+            + 'the client to branch on. Any operation that starts a session can answer it, auth.mfa.verify '
+            + 'included, and it is the answer whatever the password was; an app that never refuses never sends it',
     },
     {
         code: 'OAuthProviderLinkOnlyError',

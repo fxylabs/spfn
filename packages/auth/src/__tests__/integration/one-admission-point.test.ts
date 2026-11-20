@@ -994,16 +994,16 @@ describe.skipIf(!dbAvailable)('one admission point for a person principal (T1-T1
     // ========================================================================
 
     /**
-     * Let `findByEmailOrPhone` read, then commit `between` before handing the
-     * read back — a lagging replica, or a writer in the gap. `between` runs in a
-     * transaction of its own (`requiresNew`): the route's would otherwise roll
-     * it back with the request.
+     * Let `findByEmailOrPhoneOnPrimary` read, then commit `between` before
+     * handing the read back — a writer in the gap. `between` runs in a
+     * transaction of its own (`requiresNew`), so it commits whatever the
+     * request does.
      */
     function staleReadThen(between: () => Promise<unknown>): void
     {
-        const read = usersRepository.findByEmailOrPhone.bind(usersRepository);
+        const read = usersRepository.findByEmailOrPhoneOnPrimary.bind(usersRepository);
 
-        vi.spyOn(usersRepository, 'findByEmailOrPhone').mockImplementationOnce(async (email, phone) =>
+        vi.spyOn(usersRepository, 'findByEmailOrPhoneOnPrimary').mockImplementationOnce(async (email, phone) =>
         {
             const found = await read(email, phone);
             await runInTransaction(between, { requiresNew: true, context: 'test:writer-in-the-gap' });

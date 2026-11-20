@@ -45,7 +45,7 @@ const {
         lockAccount: vi.fn(),
         // The purge's pre-check reads the primary: the same answer as `findById`.
         findByIdOnPrimary: vi.fn(),
-        findByEmailOrPhone: vi.fn(),
+        findByEmailOrPhoneOnPrimary: vi.fn(),
         updateById: vi.fn(async (_id: number, _data: Record<string, unknown>): Promise<unknown> => undefined),
         deleteById: vi.fn(async () => undefined),
     },
@@ -427,7 +427,7 @@ describe('account-deletion.service', () =>
         it('clears a pending deletion, claiming the request row before touching users', async () =>
         {
             const user = makeUser({ deletion: 'pending' });
-            usersRepository.findByEmailOrPhone.mockResolvedValue(user);
+            usersRepository.findByEmailOrPhoneOnPrimary.mockResolvedValue(user);
             usersRepository.findById.mockResolvedValue(user);
             accountDeletionRequestsRepository.findPendingByUserId.mockResolvedValue({ id: 5 });
 
@@ -451,7 +451,7 @@ describe('account-deletion.service', () =>
         {
             const user = makeUser({ deletion: 'pending' });
             const rehashed = { ...user, passwordHash: '$2b$12$rehashed' };
-            usersRepository.findByEmailOrPhone.mockResolvedValue(user);
+            usersRepository.findByEmailOrPhoneOnPrimary.mockResolvedValue(user);
             usersRepository.findByIdOnPrimary.mockResolvedValue(rehashed);
             usersRepository.lockAccount.mockResolvedValue(rehashed);
             accountDeletionRequestsRepository.findPendingByUserId.mockResolvedValue({ id: 5 });
@@ -466,7 +466,7 @@ describe('account-deletion.service', () =>
         it('a password whose hash moves again is refused, with nothing claimed', async () =>
         {
             const user = makeUser({ deletion: 'pending' });
-            usersRepository.findByEmailOrPhone.mockResolvedValue(user);
+            usersRepository.findByEmailOrPhoneOnPrimary.mockResolvedValue(user);
             usersRepository.findByIdOnPrimary.mockResolvedValue({ ...user, passwordHash: '$2b$12$changed' });
             usersRepository.lockAccount.mockResolvedValue({ ...user, passwordHash: '$2b$12$changed-again' });
 
@@ -483,7 +483,7 @@ describe('account-deletion.service', () =>
             // Cancel read `pending`; the purge committed before the cancel took
             // the account lock, which reads it.
             const user = makeUser({ deletion: 'pending' });
-            usersRepository.findByEmailOrPhone.mockResolvedValue(user);
+            usersRepository.findByEmailOrPhoneOnPrimary.mockResolvedValue(user);
             usersRepository.lockAccount.mockResolvedValue({ ...user, deletion: 'deleted' });
             accountDeletionRequestsRepository.findPendingByUserId.mockResolvedValue({ id: 5 });
 
@@ -498,7 +498,7 @@ describe('account-deletion.service', () =>
         it('a refused reactivation throws inside the claim\'s transaction, so the claim is rolled back with it', async () =>
         {
             const user = makeUser({ deletion: 'pending' });
-            usersRepository.findByEmailOrPhone.mockResolvedValue(user);
+            usersRepository.findByEmailOrPhoneOnPrimary.mockResolvedValue(user);
             usersRepository.findById.mockResolvedValue(user);
             accountDeletionRequestsRepository.findPendingByUserId.mockResolvedValue({ id: 5 });
             setAccountDeletion.mockResolvedValueOnce('refused');
@@ -514,7 +514,7 @@ describe('account-deletion.service', () =>
         it('rejects when the account has no pending deletion request (after verifying the credential)', async () =>
         {
             const user = makeUser();
-            usersRepository.findByEmailOrPhone.mockResolvedValue(user);
+            usersRepository.findByEmailOrPhoneOnPrimary.mockResolvedValue(user);
             usersRepository.findById.mockResolvedValue(user);
 
             await expect(
@@ -530,7 +530,7 @@ describe('account-deletion.service', () =>
             // request row's claim below is what proves the clearing is never
             // even called; the real defense is the request-row claim below.
             const user = makeUser({ deletion: 'pending' });
-            usersRepository.findByEmailOrPhone.mockResolvedValue(user);
+            usersRepository.findByEmailOrPhoneOnPrimary.mockResolvedValue(user);
             accountDeletionRequestsRepository.findPendingByUserId.mockResolvedValue({ id: 5 });
             // The conditional UPDATE (WHERE status='pending') matches 0 rows because
             // the purge's own claim already flipped this row to 'completed'.
@@ -547,7 +547,7 @@ describe('account-deletion.service', () =>
         it('m1: a wrong credential on a non-pending account fails with InvalidCredentialsError, not DeletionNotRequestedError', async () =>
         {
             const user = makeUser();
-            usersRepository.findByEmailOrPhone.mockResolvedValue(user);
+            usersRepository.findByEmailOrPhoneOnPrimary.mockResolvedValue(user);
             verifyPassword.mockResolvedValueOnce(false);
 
             // Credential is checked before the "not pending" branch is allowed to
@@ -560,7 +560,7 @@ describe('account-deletion.service', () =>
 
         it('does not distinguish a missing account from a bad credential, and equalizes timing via the dummy hash', async () =>
         {
-            usersRepository.findByEmailOrPhone.mockResolvedValue(null);
+            usersRepository.findByEmailOrPhoneOnPrimary.mockResolvedValue(null);
 
             await expect(
                 cancelAccountDeletionService({ email: 'nope@example.com', password: 'x' }),

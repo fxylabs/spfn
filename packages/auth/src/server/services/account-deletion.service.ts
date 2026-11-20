@@ -55,6 +55,8 @@ import { getDeletionConfig } from '../lib/deletion-config';
 import { getRecentAuthMs } from '../lib/config';
 import { isUniqueViolation } from '../lib/unique-violation';
 import { authLogger } from '../logger';
+import { admitSignIn, assertOwnsTransactions, failedCredentialAnswer } from './sign-in-guard.service';
+import { signInGuard, type SignInAttempt } from '../lib/sign-in-guard';
 import {
     authDeletionRequestedEvent,
     authDeletionCancelledEvent,
@@ -183,8 +185,14 @@ interface ProvenHolder
  *
  * Answers a missing account as it answers a wrong credential, at the same cost.
  *
+ * A password is a guarded credential check (`deletion-cancel`) under the app's
+ * `signIn` guard, as a password sign-in is: `admit` before the comparison — a
+ * refused account is compared against the dummy hash and answered the refusal
+ * whatever the password — and a wrong password recorded before the 401. A
+ * verification token proves the mailbox, not a guess, and is not guarded.
+ *
  * @throws ValidationError, InvalidCredentialsError, InvalidVerificationTokenError,
- *   VerificationTokenPurposeMismatchError, VerificationTokenTargetMismatchError
+ *   VerificationTokenPurposeMismatchError, VerificationTokenTargetMismatchError, SignInRefusedError
  */
 async function proveAccountHolder(user: User | null, params: CancelAccountDeletionParams): Promise<ProvenHolder>
 {
@@ -204,13 +212,31 @@ async function proveAccountHolder(user: User | null, params: CancelAccountDeleti
         throw new ValidationError({ message: 'A password or a verification code is required to confirm this action' });
     }
 
-    const matched = await verifyPassword(params.password, user?.passwordHash ?? await getDummyPasswordHash());
-    if (!user?.passwordHash || !matched)
+    const attempt = signInGuard() && cancelAttempt(user, params);
+    const refusal = attempt && await admitSignIn(attempt);
+    const comparedHash = refusal || !user?.passwordHash ? await getDummyPasswordHash() : user.passwordHash;
+    const matched = await verifyPassword(params.password, comparedHash);
+
+    if (refusal || !user?.passwordHash || !matched)
     {
-        throw new InvalidCredentialsError();
+        throw await failedCredentialAnswer(attempt, refusal, () => new InvalidCredentialsError());
     }
 
     return { user, proof: { kind: 'password', verifiedHash: user.passwordHash } };
+}
+
+/** A password cancel, as the app's `signIn` guard sees it. */
+function cancelAttempt(user: User | null, params: CancelAccountDeletionParams): SignInAttempt
+{
+    return {
+        user,
+        channel: 'deletion-cancel',
+        stage: 'credential',
+        identifier: params.email ? { email: params.email } : { phone: params.phone },
+        ip: params.ip,
+        userAgent: params.userAgent,
+        webProxy: params.webProxy === true,
+    };
 }
 
 /** A verification token minted for an account deletion. */
@@ -555,6 +581,12 @@ export interface CancelAccountDeletionParams
     phone?: string;
     password?: string;
     verificationToken?: string;
+    /** Client address of the request, from `deviceProvenance` at the route. */
+    ip?: string;
+    /** `user-agent` of the request, already truncated at the route. */
+    userAgent?: string;
+    /** Whether proxy-guard recognised the trusted Next.js proxy, from the same helper. */
+    webProxy?: boolean;
 }
 
 export interface CancelAccountDeletionResult
@@ -586,8 +618,10 @@ export async function cancelAccountDeletionService(
         throw new ValidationError({ message: 'Either email or phone must be provided' });
     }
 
+    assertOwnsTransactions('cancelAccountDeletionService');
+
     const claim = (holder: ProvenHolder) => runInTransaction(() => claimCancellation(holder), { context: 'auth:deletion-cancel' });
-    const { user, proof } = await proveAccountHolder(await usersRepository.findByEmailOrPhone(email, phone), params);
+    const { user, proof } = await proveAccountHolder(await usersRepository.findByEmailOrPhoneOnPrimary(email, phone), params);
 
     // A password hash that moved since it was verified (read on a replica, or
     // re-encoded by a sign-in) is verified again against the primary's, outside

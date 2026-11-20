@@ -16,6 +16,7 @@ import { EmailSchema, PhoneSchema } from '../schema';
 import { getAuth } from '../../helpers';
 import { requestAccountDeletionService, cancelAccountDeletionService } from '../../services';
 import { byIpAndAccount } from '../../lib/rate-limit-keys';
+import { deviceProvenance } from '../../lib/device-provenance';
 
 /**
  * POST /_auth/deletion/request - Request account deletion (authenticated)
@@ -67,6 +68,10 @@ export const requestAccountDeletion = route.post('/_auth/deletion/request')
  * account's e-mail or phone — either one, whether or not the account has a
  * password. A token cancels once. On success the deletion is cleared and the
  * status left as it is; the user still needs to log in separately afterward.
+ *
+ * No `Transactional()`, for `login`'s reason: with the app's `signIn` guard
+ * configured a wrong password is recorded, and the record has to survive the
+ * 401. The service claims the cancellation in a transaction of its own.
  */
 export const cancelAccountDeletion = route.post('/_auth/deletion/cancel')
     .input({
@@ -80,13 +85,13 @@ export const cancelAccountDeletion = route.post('/_auth/deletion/cancel')
             description: 'Email or phone must be provided with password or verificationToken',
         }),
     })
-    .use([rateLimitPolicy('auth-deletion-cancel', { limit: 10, windowMs: 60_000, by: byIpAndAccount({ ipLimit: 50 }) }), Transactional()])
+    .use([rateLimitPolicy('auth-deletion-cancel', { limit: 10, windowMs: 60_000, by: byIpAndAccount({ ipLimit: 50 }) })])
     .skip(['auth'])
     .handler(async (c) =>
     {
         const { body } = await c.data();
 
-        await cancelAccountDeletionService(body);
+        await cancelAccountDeletionService({ ...body, ...deviceProvenance(c.raw) });
 
         return c.noContent();
     });

@@ -4,7 +4,7 @@
   "originStatement": "Generated from the route and contract definitions in SPFN primitives (packages/auth/src/server/client-proof) and published from that repository. This file is generated output: edit the source modules and re-export, never this file.",
   "contractName": "spfn-mobile-contract",
   "contractMajor": 0,
-  "contractVersion": "0.14.6",
+  "contractVersion": "0.14.7",
   "supportedRange": ">=0.14.0 <0.15.0",
   "exporterVersion": "@spfn/auth/contract-bundle@6.3.0",
   "authProfiles": { "allowed": ["clientProofV1"], "unknownProfilePolicy": "reject", "mixingWithinSession": "prohibited" },
@@ -899,6 +899,13 @@
       "httpStatus": 403,
       "retryable": false,
       "summary": "the app refused this sign-up in its own beforeRegister check — reached only when the identity would create a new account, never when it links to an existing one",
+      "surface": "rest"
+    },
+    {
+      "code": "SignInRefusedError",
+      "httpStatus": 403,
+      "retryable": false,
+      "summary": "the app refused this sign-in in its own signIn.admit check — details.code is the app's reason, for the client to branch on. Any operation that starts a session can answer it, auth.mfa.verify included, and it is the answer whatever the password was; an app that never refuses never sends it",
       "surface": "rest"
     },
     {

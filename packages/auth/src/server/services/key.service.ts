@@ -43,6 +43,8 @@ import { MFA_CHALLENGE_CHANNELS, type DeferredLoginEvent, type MfaChallengeChann
 import type { DeviceRegistrationChannel } from '../events';
 import type { NewUserPublicKey, UserPublicKey } from '../entities/user-public-keys';
 import type { User } from '../entities/users';
+import { signInGuard, type SignInAttempt, type SignInIdentifier } from '../lib/sign-in-guard';
+import { assertSignInAdmits, reportSignIn } from './sign-in-guard.service';
 
 /**
  * Every door a key row is written through: the eleven sign-in channels, and
@@ -149,6 +151,8 @@ export interface RegisterPublicKeyParams
      * `refusal`.
      */
     missingAccount?: () => Error;
+    /** The email or phone the sign-in named, for the app's `signIn` guard. On `password` only. */
+    identifier?: SignInIdentifier;
 }
 
 /**
@@ -526,19 +530,66 @@ export async function registerPublicKeyService(
     return await runInTransaction(async () =>
     {
         const account = await lockAdmittedAccount(params);
-        const existing = await keysRepository.findWithAccountEpochOnPrimary(params.keyId);
-        if (existing)
-        {
-            return await answerForExistingKey(existing, params, account);
-        }
+        const result = await writeKey(params, account);
 
-        // The defaulted algorithm is what gets stored, so it is the one the key has
-        // to be: a key parked under an algorithm it cannot sign for would only fail
-        // at proof verification, after the caller believes it is enrolled.
-        assertKeyMatchesAlgorithm(params.publicKey, params.algorithm ?? DEFAULT_KEY_ALGORITHM);
+        await reportRegistration(params, account, result);
 
-        return await registerNewKey(params, account);
+        return result;
     }, { context: 'auth:register-key' });
+}
+
+/** The key write itself, for an account locked and admitted. */
+async function writeKey(params: RegisterPublicKeyParams, account: User): Promise<RegisterPublicKeyResult>
+{
+    const existing = await keysRepository.findWithAccountEpochOnPrimary(params.keyId);
+    if (existing)
+    {
+        return await answerForExistingKey(existing, params, account);
+    }
+
+    // The defaulted algorithm is what gets stored, so it is the one the key has
+    // to be: a key parked under an algorithm it cannot sign for would only fail
+    // at proof verification, after the caller believes it is enrolled.
+    assertKeyMatchesAlgorithm(params.publicKey, params.algorithm ?? DEFAULT_KEY_ALGORITHM);
+
+    return await registerNewKey(params, account);
+}
+
+/** Whether a registration channel is a sign-in — every one but the two that continue a session. */
+function isSignInChannel(channel: KeyRegistrationChannel): channel is Exclude<KeyRegistrationChannel, 'renewal' | 'rotation'>
+{
+    return channel !== 'renewal' && channel !== 'rotation';
+}
+
+/** The sign-in a registration is, as the app's `signIn` guard sees it; null on renewal and rotation. */
+function signInAttemptOf(params: RegisterPublicKeyParams, account: User): SignInAttempt | null
+{
+    return isSignInChannel(params.channel)
+        ? {
+            user: account,
+            channel: params.channel,
+            stage: 'credential',
+            identifier: params.identifier,
+            ip: params.ip,
+            userAgent: params.userAgent,
+            webProxy: params.webProxy === true,
+        }
+        : null;
+}
+
+/**
+ * Tell the app's `settled` that a sign-in started a session or was
+ * challenged, in the transaction that wrote the key: a `settled` that throws
+ * rolls the session back with it. Nothing without a guard.
+ */
+async function reportRegistration(params: RegisterPublicKeyParams, account: User, result: RegisterPublicKeyResult): Promise<void>
+{
+    const attempt = signInGuard() && signInAttemptOf(params, account);
+
+    if (attempt)
+    {
+        await reportSignIn({ ...attempt, result: result.pending ? 'challenged' : 'succeeded', keyId: params.keyId });
+    }
 }
 
 /**
@@ -546,6 +597,7 @@ export async function registerPublicKeyService(
  * transaction ends, and its key generation as of that lock.
  *
  * @throws the channel's answer for an account that may not open a session
+ * @throws SignInRefusedError when the app's `signIn.admit` refuses a sign-in
  */
 async function lockAdmittedAccount(params: RegisterPublicKeyParams): Promise<User>
 {
@@ -559,6 +611,14 @@ async function lockAdmittedAccount(params: RegisterPublicKeyParams): Promise<Use
     if (refusal)
     {
         throw inactiveAccountError(refusal, params);
+    }
+
+    // The app's say, after the package's and under the same lock: the one
+    // `admit` that decides a sign-in, whatever the channel asked before.
+    const attempt = signInGuard() && signInAttemptOf(params, account);
+    if (attempt)
+    {
+        await assertSignInAdmits(attempt);
     }
 
     return account;

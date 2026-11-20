@@ -10,7 +10,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 vi.mock('../../server/repositories', () => ({
     usersRepository: {
-        findByEmailOrPhone: vi.fn(),
+        findByEmailOrPhoneOnPrimary: vi.fn(),
     },
 }));
 
@@ -49,7 +49,7 @@ describe('loginService — timing equalization for missing accounts', () =>
 
     it('still runs verifyPassword when the account does not exist', async () =>
     {
-        vi.mocked(usersRepository.findByEmailOrPhone).mockResolvedValue(null);
+        vi.mocked(usersRepository.findByEmailOrPhoneOnPrimary).mockResolvedValue(null);
 
         await expect(loginService(loginParams)).rejects.toBeInstanceOf(InvalidCredentialsError);
 
