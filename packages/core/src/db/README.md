@@ -199,7 +199,7 @@ const created = await create(users, { email: 'a@b.com', name: 'A' });
 // Upsert (INSERT … ON CONFLICT DO UPDATE) — target is required, set defaults to data
 const cache = await upsert(cmsCache, data, {
     target: [cmsCache.section, cmsCache.locale],
-    set: { content: data.content, updatedAt: new Date() },
+    set: { content: data.content },   // updated_at = now() is stamped by the database
 });
 
 // Update — where then data; returns null if nothing matched
@@ -1010,8 +1010,10 @@ These have their own READMEs — do not duplicate their APIs here, link to them:
 - **Don't start your own transaction inside repository write methods.** Let route
   `Transactional()` middleware (or an explicit `runInTransaction`) own the boundary.
 - **`upsert` requires `target`.** `set` is optional and defaults to the inserted `data`;
-  pass `set` explicitly (e.g. `updatedAt: new Date()`, or a `sql\`…\`` expression) when the
-  conflict update should differ from the insert.
+  pass `set` explicitly (e.g. a `sql\`…\`` expression; never `updatedAt`) when the conflict
+  update should differ from the insert. On a `timestamps()` table every Drizzle `update()`
+  and every upsert sets `updated_at = now()` from the database clock; only raw SQL you write
+  yourself says `updated_at = now()`.
 
 ---
 

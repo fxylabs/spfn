@@ -51,23 +51,19 @@ a `drizzle.config.ts` (read before the folder scan) or pass `spfn db push --sche
 
 ## Defining Entities
 
-The examples below are plain Drizzle, spelling out what `id()` and `timestamps()`
-generate for you.
-
-Create entity files using Drizzle ORM's `pgTable` for the public schema:
+Create entity files with Drizzle's `pgTable` and SPFN's column helpers from
+`@spfn/core/db`, as `example.entity.ts` does:
 
 ```typescript
 // src/server/entities/users.ts
-import { sql } from 'drizzle-orm';
-import { pgTable, serial, text, timestamp } from 'drizzle-orm/pg-core';
+import { pgTable, text } from 'drizzle-orm/pg-core';
+import { id, timestamps } from '@spfn/core/db';
 
 export const users = pgTable('users', {
-    id: serial('id').primaryKey(),
+    id: id(),                 // bigserial primary key
     email: text('email').notNull().unique(),
     name: text('name').notNull(),
-    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
-    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow()
-        .$onUpdate(() => sql`now()`),
+    ...timestamps(),          // createdAt + updatedAt, timezone-aware
 });
 
 // Type inference for TypeScript
@@ -75,22 +71,24 @@ export type User = typeof users.$inferSelect;
 export type NewUser = typeof users.$inferInsert;
 ```
 
+`timestamps()` stamps both columns from the database clock. Never write `updatedAt`:
+every Drizzle `update()` and every `onConflictDoUpdate` sets `updated_at = now()` for you;
+only raw SQL you write yourself says `updated_at = now()`.
+
 ## Entity with Relationships
 
 ```typescript
 // src/server/entities/posts.ts
-import { sql } from 'drizzle-orm';
-import { pgTable, serial, text, timestamp, integer } from 'drizzle-orm/pg-core';
+import { pgTable, text } from 'drizzle-orm/pg-core';
+import { foreignKey, id, timestamps } from '@spfn/core/db';
 import { users } from './users';
 
 export const posts = pgTable('posts', {
-    id: serial('id').primaryKey(),
+    id: id(),
     title: text('title').notNull(),
     content: text('content').notNull(),
-    authorId: integer('author_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
-    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
-    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow()
-        .$onUpdate(() => sql`now()`),
+    authorId: foreignKey('author', () => users.id),   // author_id bigint, on delete cascade
+    ...timestamps(),
 });
 
 export type Post = typeof posts.$inferSelect;
@@ -103,16 +101,17 @@ Use the array callback pattern to define indexes and constraints:
 
 ```typescript
 // src/server/entities/products.ts
-import { pgTable, serial, text, numeric, integer, timestamp, index, uniqueIndex } from 'drizzle-orm/pg-core';
+import { pgTable, text, numeric, bigint, index, uniqueIndex } from 'drizzle-orm/pg-core';
 import { sql } from 'drizzle-orm';
+import { id, timestamps } from '@spfn/core/db';
 
 export const products = pgTable('products', {
-    id: serial('id').primaryKey(),
+    id: id(),
     name: text('name').notNull(),
     sku: text('sku').notNull(),
     price: numeric('price', { precision: 10, scale: 2 }).notNull(),
-    categoryId: integer('category_id'),
-    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    categoryId: bigint('category_id', { mode: 'number' }),
+    ...timestamps(),
 }, (table) => [
     // Simple index on single column
     index('products_name_idx').on(table.name),
