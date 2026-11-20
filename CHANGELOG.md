@@ -68,8 +68,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   itself runs on the route, so a route that `.skip()`s it gets the skipped middleware back;
   `.skip('*')` still drops everything inherited; an inner router or route may `.use()` the removed
   middleware again. Registration now **throws** when a router whose `.use()` holds a middleware
-  declaring `skips` mounts `.packages([...])`, or encloses a router that does: package routes have
-  no authenticator of their own. New: `resolveRouteMiddlewares(router, serverMiddlewares?)` (the
+  declaring `skips` sits anywhere above a package router: one mounted with `.packages([...])`, or
+  one its package defined with the new `defineRouter(routes, { packageName })` — so
+  `defineRouter({ auth: authRouter }).use([optionalAuth])` is refused too, as is any depth of
+  nesting. Package routes have no authenticator of their own; every router the SPFN packages
+  export now states `packageName`, and a third-party package whose routes rely on the app's
+  authenticator should too. New: `resolveRouteMiddlewares(router, serverMiddlewares?)` (the
   chain `registerRoutes` registers, per route) and `RegisteredRoute.middlewares`. The SSE/WS token
   endpoints (`resolveEndpointMiddlewares`) are unchanged.
   **To find affected routers**, look for a router-level `.use([` naming a middleware that declares

@@ -219,7 +219,7 @@ export const appRouter = defineRouter({
 export type AppRouter = typeof appRouter;
 ```
 
-> **Common mistake:** Using `auth: authRouter` in defineRouter. Auth routes use a fixed `/_auth` namespace and must be registered via `.packages()`.
+> **Mount `authRouter` with `.packages()`.** As a plain entry (`defineRouter({ auth: authRouter })`) it registers and serves the same `/_auth/*` paths, but its routes become the app's own to `AppRouter` and the generated route map. Either way, registration refuses a middleware declaring `skips` on any router above it — see "One Router per Kind of Caller" below.
 
 #### Skipping Auth for Public Routes
 
@@ -279,7 +279,7 @@ export const appRouter = defineRouter({
 
 - A route under `machineRouter` that `.skip(['machineAuth'])`s gets the inherited `auth` back.
 - **`optionalAuth` on a router makes every route in that subtree accept anonymous callers.**
-- Registration refuses a middleware declaring `skips` on a router that mounts `.packages([...])`, or on a router enclosing such a mount: the `/_auth/*` routes rely on the inherited `auth`. Keep `.packages([authRouter])` on a router with no skipper, as above.
+- Registration refuses a middleware declaring `skips` on any router above `authRouter` — the one that mounts it with `.packages([...])`, one enclosing that, or one holding it as a plain entry (`defineRouter({ auth: authRouter }).use([optionalAuth])`): the `/_auth/*` routes rely on the inherited `auth`. Keep `.packages([authRouter])` on a router with no skipper, as above.
 
 ### 6. Configure Next.js Interceptor
 
@@ -1912,16 +1912,16 @@ export const getStatus = route.get('/status')
 
 ### Auth routes not found (404 on `/_auth/*`)
 
-`authRouter` is not registered. Make sure you use `.packages()`:
+`authRouter` is not registered. Mount it with `.packages()`:
 
 ```typescript
 // ✅ Correct
 export const appRouter = defineRouter({ ... })
     .packages([authRouter]);
 
-// ❌ Wrong — auth routes won't be accessible
+// ❌ Not the supported mount — the routes are served, but typed and mapped as the app's own
 export const appRouter = defineRouter({
-    auth: authRouter,  // This doesn't work for package routers
+    auth: authRouter,
 });
 ```
 

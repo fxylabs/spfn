@@ -160,4 +160,4 @@ export const trackClick = route.get('/_noti/t/c/:token')
 export const trackingRouter = defineUnmappedRouter({
     trackOpen,
     trackClick,
-});
+}, { packageName: '@spfn/notification' });

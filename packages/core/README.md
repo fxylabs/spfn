@@ -1006,6 +1006,20 @@ way so the endpoint never reveals that someone else's record exists.
 
 ---
 
+## What must a package state on the router it ships?
+
+Its name: `defineRouter(routes, { packageName: '@acme/pkg' })`. A package's signed-in route
+reads `getAuth(c)` from the app's `auth` and carries no authenticator of its own, so a
+router-level middleware declaring `skips` (`optionalAuth`, `machineAuth`, …) above it would
+serve that route to callers `auth` would have refused. Registration refuses such a skipper above
+a router that states `packageName`, wherever the app mounted it — under `.packages()`, as a plain
+entry, nested at any depth. It is required of any router whose routes rely on the app's
+authenticator; every router the SPFN packages export carries it. A router mounted with
+`.packages()` is treated as a package's whether it says so or not. See the route README,
+"`.packages([...])`".
+
+---
+
 ## Related packages
 
 Other SPFN packages build on `@spfn/core`:

@@ -95,10 +95,11 @@ interface Walk
  * Routes come back in registration order: a router's own routes (nested
  * routers in place) before its package routers.
  *
- * Throws when a router-level middleware declaring `skips` sits above a
- * `.packages()` mount — on the mounting router or on any router enclosing it.
- * A package route has no authenticator of its own; it relies on what it
- * inherits, and the skip would remove that from every one of them.
+ * Throws when a router-level middleware declaring `skips` sits on any router
+ * above a package router: one its package defined with `packageName`, wherever
+ * it is mounted, or one mounted with `.packages()`. A package route has no
+ * authenticator of its own; it relies on what it inherits, and the skip would
+ * remove that from every one of them.
  *
  * @param router - The top router
  * @param serverMiddlewares - The server-level named middlewares, outermost
@@ -116,7 +117,7 @@ export function resolveRouteMiddlewares(
         resolved: [],
     };
 
-    walkRouter(router, walk);
+    walkRouter(router, walk, false);
 
     return walk.resolved;
 }
@@ -132,8 +133,17 @@ function inheritedFrom(mw: ServerMiddleware | NamedMiddleware<string>, source: M
     };
 }
 
-function walkRouter(router: Router<any>, walk: Walk): void
+/**
+ * @param mountedAsPackage - Whether the router was mounted with `.packages()`,
+ *   which states it is a package's as much as its own `packageName` does
+ */
+function walkRouter(router: Router<any>, walk: Walk, mountedAsPackage: boolean): void
 {
+    if (router._packageName || mountedAsPackage)
+    {
+        assertNoSkipperAbovePackage(walk.skippers, routerLabel(walk.path), router._packageName);
+    }
+
     const own = router._globalMiddlewares ?? [];
     const inner: Walk = {
         ...walk,
@@ -147,15 +157,9 @@ function walkRouter(router: Router<any>, walk: Walk): void
         walkEntry(name, entry, inner);
     }
 
-    const packageRouters = router._packageRouters ?? [];
-    if (packageRouters.length > 0)
+    (router._packageRouters ?? []).forEach((pkgRouter, index) =>
     {
-        assertNoSkipperAbovePackages(inner.skippers, routerLabel(walk.path));
-    }
-
-    packageRouters.forEach((pkgRouter, index) =>
-    {
-        walkRouter(pkgRouter, { ...inner, path: [...walk.path, `packages[${index}]`] });
+        walkRouter(pkgRouter, { ...inner, path: [...walk.path, `packages[${index}]`] }, true);
     });
 }
 
@@ -169,7 +173,7 @@ function walkEntry(name: string, entry: unknown, walk: Walk): void
 {
     if (isRouter(entry))
     {
-        walkRouter(entry, { ...walk, path: [...walk.path, name] });
+        walkRouter(entry, { ...walk, path: [...walk.path, name] }, false);
     }
     else if (isRouteDef(entry))
     {
@@ -189,11 +193,11 @@ function walkEntry(name: string, entry: unknown, walk: Walk): void
 
 /**
  * Package routes have no authenticator of their own: `getAuth(c)` in a
- * package's signed-in route reads what the inherited `auth` left. A skipper
- * above the mount would remove that `auth` from each of them, enclosing
- * routers included, since a package router inherits their `.use()` too.
+ * package's signed-in route reads what the inherited `auth` left. A skipper on
+ * any router above a package router would remove that `auth` from each of its
+ * routes, since a router inherits the `.use()` of every router enclosing it.
  */
-function assertNoSkipperAbovePackages(skippers: readonly RouterSkipper[], mount: string): void
+function assertNoSkipperAbovePackage(skippers: readonly RouterSkipper[], label: string, packageName: string | null): void
 {
     const skipper = skippers[0];
     if (!skipper)
@@ -202,15 +206,13 @@ function assertNoSkipperAbovePackages(skippers: readonly RouterSkipper[], mount:
     }
 
     const { name, skips } = skipper.middleware;
-    const where = skipper.router === mount
-        ? `Router "${mount}" .use()s "${name}"`
-        : `Router "${mount}" sits under "${skipper.router}", which .use()s "${name}"`;
+    const statement = packageName ? `defined by ${packageName}` : 'mounted with .packages()';
 
     throw new Error(
-        `${where}, a middleware declaring skips: [${skips!.map(skip => `'${skip}'`).join(', ')}], `
-        + `and "${mount}" mounts package routers with .packages(). Package routes have no authenticator of their own, `
+        `Router "${skipper.router}" .use()s "${name}", a middleware declaring skips: [${skips!.map(skip => `'${skip}'`).join(', ')}], `
+        + `and the package router "${label}" (${statement}) sits below it. Package routes have no authenticator of their own, `
         + `so "${name}" would remove the ${skips!.join(', ')} they inherit from every one of them. `
-        + `Put "${name}" on a nested router that mounts no packages, or on the routes themselves.`,
+        + `Put "${name}" on a nested router that holds no package router, or on the routes themselves.`,
     );
 }
 

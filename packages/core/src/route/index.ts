@@ -17,7 +17,7 @@ export type { RouteContract, RouteAuthProfile } from './contract';
 
 // Router
 export { defineRouter, defineUnmappedRouter } from './router';
-export type { Router } from './router';
+export type { Router, RouterOptions } from './router';
 
 // Route registration
 export { registerRoutes } from './register-routes';

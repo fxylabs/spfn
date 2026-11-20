@@ -54,7 +54,7 @@ export const cmsAppRouter = defineRouter({
     saveSectionDraft: saveSectionDraftRoute,
     publishSection: publishSectionRoute,
     resetSectionDraft: resetSectionDraftRoute,
-});
+}, { packageName: '@spfn/cms' });
 
 export type AppRouter = typeof cmsAppRouter;
 

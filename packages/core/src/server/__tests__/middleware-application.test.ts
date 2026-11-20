@@ -307,6 +307,22 @@ function chainRecorder()
 
 const get = (path: string) => route.get(path).handler(async () => ({ ok: true }));
 
+/** A route that counts how often its handler is reached. */
+function counting(path: string)
+{
+    let count = 0;
+
+    return {
+        route: route.get(path).handler(async () =>
+        {
+            count += 1;
+
+            return { ok: true };
+        }),
+        count: () => count,
+    };
+}
+
 describe('router-level skips (#165)', () =>
 {
     it('R1: the issue\'s tree — machine routes run their authenticator in place of auth, every other route keeps auth', async () =>
@@ -480,15 +496,66 @@ describe('router-level skips (#165)', () =>
 
         await expect(boot(defineRouter({ ping }).packages([pkg]).use([machineAuth]))).rejects.toThrow(
             'Router "(top-level)" .use()s "machineAuth", a middleware declaring skips: [\'auth\'], '
-            + 'and "(top-level)" mounts package routers with .packages(). Package routes have no authenticator of their own, '
+            + 'and the package router "packages[0]" (mounted with .packages()) sits below it. Package routes have no authenticator of their own, '
             + 'so "machineAuth" would remove the auth they inherit from every one of them. '
-            + 'Put "machineAuth" on a nested router that mounts no packages, or on the routes themselves.',
+            + 'Put "machineAuth" on a nested router that holds no package router, or on the routes themselves.',
         );
 
         const enclosing = defineRouter({ machine: defineRouter({ inner: defineRouter({ ping }).packages([pkg]) }).use([machineAuth]) });
         await expect(boot(enclosing)).rejects.toThrow(
-            'Router "machine.inner" sits under "machine", which .use()s "machineAuth"',
+            'Router "machine" .use()s "machineAuth", a middleware declaring skips: [\'auth\'], '
+            + 'and the package router "machine.inner.packages[0]" (mounted with .packages()) sits below it.',
         );
+    });
+
+    /**
+     * rv389 P1/P2: what makes a router a package's is the package saying so,
+     * not how the app mounted it. A marked router entered as a plain key
+     * (`defineRouter({ auth: authRouter })`) is the shape auth's own JSDoc showed.
+     */
+    it('R16: refuses a skipper above a router its package marked, wherever it is mounted', async () =>
+    {
+        const { middleware } = chainRecorder();
+        const optionalAuth = middleware('optionalAuth', ['auth']);
+        const pkg = defineRouter({ pkgSession: get('/pkg/session') }, { packageName: '@acme/pkg' });
+        const server = [middleware('auth')];
+        const refusal = (label: string, skipperRouter: string) =>
+            `Router "${skipperRouter}" .use()s "optionalAuth", a middleware declaring skips: ['auth'], `
+            + `and the package router "${label}" (defined by @acme/pkg) sits below it.`;
+
+        expect(() => resolveRouteMiddlewares(defineRouter({ pkg }).use([optionalAuth]), server))
+            .toThrow(refusal('pkg', '(top-level)'));
+        expect(() => resolveRouteMiddlewares(defineRouter({ outer: defineRouter({ deep: defineRouter({ pkg }) }) }).use([optionalAuth]), server))
+            .toThrow(refusal('outer.deep.pkg', '(top-level)'));
+        expect(() => resolveRouteMiddlewares(defineRouter({ ok: defineRouter({ pkg }), opt: defineRouter({ pkg }).use([optionalAuth]) }), server))
+            .toThrow(refusal('opt.pkg', 'opt'));
+        expect(() => resolveRouteMiddlewares(defineRouter({ pkg: pkg.use([middleware('pkgLevel')]) }).use([optionalAuth]), server))
+            .toThrow(refusal('pkg', '(top-level)'));
+    });
+
+    it('R17: a marked router mounted as a plain entry under a skipper never boots, so no anonymous request reaches its route', async () =>
+    {
+        const { middleware } = chainRecorder();
+        const pkgRoute = counting('/pkg/session');
+        const pkg = defineRouter({ pkgSession: pkgRoute.route }, { packageName: '@acme/pkg' });
+        const app = new Hono();
+
+        expect(() => registerRoutes(app, defineRouter({ pkg }).use([middleware('optionalAuth', ['auth'])]), [middleware('auth')]))
+            .toThrow('(defined by @acme/pkg)');
+        expect((await app.request('/pkg/session')).status).toBe(404);
+        expect(pkgRoute.count()).toBe(0);
+    });
+
+    it('R18: a marked router under no skipper keeps the inherited auth on every route', () =>
+    {
+        const { middleware } = chainRecorder();
+        const pkg = defineRouter({ pkgSession: get('/pkg/session') }, { packageName: '@acme/pkg' });
+        const chain = resolveRouteMiddlewares(defineRouter({ pkg, feed: route.get('/feed').use([middleware('optionalAuth', ['auth'])]).handler(async () => ({ ok: true })) }), [middleware('auth')]);
+
+        expect(chain.map(r => [r.path, r.middlewares.map(mw => mw.name)])).toEqual([
+            ['/pkg/session', ['auth']],
+            ['/feed', ['optionalAuth']],
+        ]);
     });
 
     it('R15: a route-level skipper still removes the inherited middleware it names', async () =>
