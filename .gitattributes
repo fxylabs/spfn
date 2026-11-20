@@ -1,0 +1,7 @@
+# Every pull request adds an entry to the same place in CHANGELOG.md, so two of
+# them always conflicted there and each merge forced a rebase and a full CI run
+# of every other open pull request. `union` keeps both sides' added lines.
+# It also keeps both sides when two branches EDIT the same line: after merging,
+# an edited entry can appear twice. Entries are added, not edited, so that is
+# the accepted cost.
+CHANGELOG.md merge=union
