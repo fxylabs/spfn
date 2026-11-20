@@ -73,6 +73,25 @@ export function findWorkspace(dir: string): Workspace | null
 }
 
 /**
+ * Why pnpm, run in `appDir`, would install something other than the app, or
+ * null: pnpm installs the nearest `pnpm-workspace.yaml`'s workspace whether or
+ * not it lists the directory it runs in.
+ */
+export function pnpmNonMemberReason(appDir: string): string | null
+{
+    const root = ancestorsOf(appDir).find(dir => existsSync(join(dir, 'pnpm-workspace.yaml')));
+    const patterns = root && root !== appDir ? readWorkspacePatterns(root, 'pnpm') : null;
+
+    if (!root || !patterns || isWorkspaceMember(memberPath(root, appDir), patterns))
+    {
+        return null;
+    }
+
+    return `${appDir} is not in the packages of ${join(root, 'pnpm-workspace.yaml')}, so pnpm installed that workspace instead.`
+        + ' Add the directory to its packages, or install with the app\'s own manager (--pm npm).';
+}
+
+/**
  * The packages the app in `appDir` declares — every name in its `package.json`
  * `dependencies` and `devDependencies` — that do not resolve from it.
  *

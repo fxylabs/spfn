@@ -2,7 +2,7 @@ import ora, { type Ora } from 'ora';
 import { execa } from 'execa';
 import fse from 'fs-extra';
 import { logger } from '../../../utils/logger.js';
-import { findUnresolvedPackages, getInstallArgs, type PackageManager } from '../../../utils/package-manager.js';
+import { findUnresolvedPackages, getInstallArgs, pnpmNonMemberReason, type PackageManager } from '../../../utils/package-manager.js';
 import { getSpfnTag } from '../../../utils/version.js';
 import type { PackageJson } from './validate.js';
 import type { ScaffoldMode } from '../mode.js';
@@ -144,7 +144,7 @@ async function installDependencies(spinner: Ora, cwd: string, packageManager: Pa
 /**
  * Report "Dependencies installed" only when every package the app declares
  * (`findUnresolvedPackages`) resolves from `appDir`; otherwise fail the command
- * naming the missing ones.
+ * naming the missing ones, and why when that can be known.
  *
  * An exit code proves nothing here: pnpm run in a directory that is not a member
  * of the workspace above it installs that workspace and exits 0, leaving the app
@@ -156,7 +156,13 @@ export function confirmInstalled(spinner: Ora, appDir: string, packageManager: P
 
     if (missing.length > 0)
     {
+        const reason = packageManager === 'pnpm' ? pnpmNonMemberReason(appDir) : null;
+
         spinner.fail(`${packageManager} install finished, but these do not resolve from ${appDir}: ${missing.join(', ')}`);
+        if (reason)
+        {
+            logger.error(reason);
+        }
         process.exit(1);
     }
 

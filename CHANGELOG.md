@@ -46,7 +46,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `build`, `start`, `dev`, `setup`, `provision` and `create` (without `--pm`), run in such a
   directory, use the app's own lockfile or npm, and install, add and run scripts there;
   `create --pm pnpm` there installs in the app directory instead of from the repository root.
-  `spfn init` gains `--pm`.
+  `spfn init` gains `--pm`. **To keep the repository's manager** for such an app: add its directory
+  to the workspace's globs, or commit the app's own lockfile (`pnpm-lock.yaml`, `yarn.lock`, …);
+  `create` and `init` also take `--pm`, but `dev`, `build`, `start`, `add`, `setup` and
+  `provision` have no `--pm` and follow the lockfile only.
 
 ### Fixed
 
@@ -107,7 +110,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `init` and `create`'s workspace-root install print `Dependencies installed` only once every
   package in the app's `dependencies` and `devDependencies` resolves from the app directory, as
   Node resolves it there (Plug'n'Play included, the CLI's own `NODE_PATH` not); otherwise they exit
-  1 naming the missing packages.
+  1 naming the missing packages, and, when pnpm installed the workspace above a directory it does
+  not list, say so and how to fix it.
 - **spfn: `spfn add` in an npm app installs with `--legacy-peer-deps`, as `init` does (#345).** It
   ran `npm add <package>`, which npm refuses with `ERESOLVE` for every SPFN app (drizzle-typebox's
   peer range `drizzle-orm >=0.36.0` admits no `1.0.0-rc.4`). `init`, `add`, `create` and

@@ -62,12 +62,13 @@ The package manager is the app's own, decided in this order:
 
 yarn classic ignores `!` negations in `workspaces`, so a directory such a negation excludes
 is answered npm here while yarn 1 still treats it as a member. Override with `--pm`
-(`create`, `init`). When `create` makes a member of a pnpm workspace, it installs from the
-workspace root.
+(`create`, `init`); `dev`, `build`, `start`, `add`, `setup` and `provision` have none. When
+`create` makes a member of a pnpm workspace, it installs from the workspace root.
 
 "Dependencies installed" is printed only once every package in the app's `dependencies` and
 `devDependencies` resolves from the app directory (optional and peer dependencies are not
-checked); otherwise the command exits 1 naming the missing ones.
+checked); otherwise the command exits 1 naming the missing ones, and says why when it can
+(pnpm run in a directory its workspace does not list installs that workspace instead).
 Node answers, in a child process started in the app directory without the CLI's
 `NODE_PATH` or `NODE_OPTIONS`, through the app's `.pnp.cjs` under Plug'n'Play; a package
 resolves when Node finds its `package.json`, since an entry point is optional.
@@ -1320,10 +1321,12 @@ committed.
   migrations when `DATABASE_URL` is set — otherwise it skips with a hint. The single
   exception is `spfn add vercel`, a built-in target rather than a package.
 - **The package manager is the app's own.** Its lockfile decides, then the lockfile and
-  declaration of a workspace that lists the app, then npm (see [Usage](#usage)). If
-  detection is wrong (e.g. mixed lockfiles), pass `--pm` to `create` or `init`. `create`
-  installs a pnpm-workspace member from the workspace root, any other app in its own
-  directory.
+  declaration of a workspace that lists the app, then npm (see [Usage](#usage)). An app that
+  relied on the repository's manager while its workspace does not list it now gets npm.
+  To keep the repository's manager, add the app to the workspace's globs, or commit the
+  app's own lockfile; `create` and `init` also take `--pm`, while `dev`, `build`, `start`,
+  `add`, `setup` and `provision` follow the lockfile only. `create` installs a
+  pnpm-workspace member from the workspace root, any other app in its own directory.
 - **Make scaffold mode explicit in automation.** Interactive runs recommend `full`, while
   historical `--yes` calls without `--mode` remain `bare`. Pass `--mode full` or
   `--mode bare` so scripts state their intended architecture.

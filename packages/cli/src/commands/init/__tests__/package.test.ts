@@ -2,6 +2,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { logger } from '../../../utils/logger.js';
 import { setupPackageJson } from '../steps/package.js';
 import { NODE_ENGINE_RANGE } from '../steps/node-engine.js';
 import type { PackageJson } from '../steps/validate.js';
@@ -245,5 +246,35 @@ describe('setupPackageJson', () =>
 
         exit.mockRestore();
         expect(mocks.spinner.fail).toHaveBeenCalledWith(expect.stringMatching(/do not resolve from .*: left-pad$/));
+    });
+
+    it('says why when pnpm installed the workspace above a directory it does not list', async () =>
+    {
+        testDirectory = await mkdtemp(join(tmpdir(), 'spfn-init-package-nonmember-'));
+        await writeFile(join(testDirectory, 'pnpm-workspace.yaml'), 'packages:\n  - packages/*\n');
+        await writeFile(join(testDirectory, 'pnpm-lock.yaml'), '');
+        const appDirectory = join(testDirectory, 'scratch/app');
+        await mkdir(appDirectory, { recursive: true });
+        const exit = vi.spyOn(process, 'exit').mockImplementation(((code?: number) =>
+        {
+            throw new Error(`process.exit(${code})`);
+        }) as never);
+        const error = vi.spyOn(logger, 'error').mockImplementation(() => undefined);
+        mocks.execa.mockResolvedValue(undefined);
+
+        await expect(setupPackageJson(
+            appDirectory,
+            join(appDirectory, 'package.json'),
+            { name: 'app', dependencies: {}, devDependencies: {}, scripts: {} },
+            'pnpm',
+            'bare',
+        )).rejects.toThrow('process.exit(1)');
+
+        exit.mockRestore();
+        expect(error).toHaveBeenCalledWith(
+            `${appDirectory} is not in the packages of ${join(testDirectory, 'pnpm-workspace.yaml')}, so pnpm installed that workspace instead.`
+            + ' Add the directory to its packages, or install with the app\'s own manager (--pm npm).',
+        );
+        error.mockRestore();
     });
 });
