@@ -356,17 +356,30 @@ function nameVersionZeroRows(rows: Record<string, unknown>[], localMigrations: M
 {
     const match = versionZeroMatcher(localMigrations);
     const named = rows.map(row => ({ ...row, name: match(row)?.name ?? null }) as ProjectBookkeepingRow);
-    const unmatchedIds = named.filter(row => row.name === null).map(row => row.id);
+    const unmatched = named.filter(row => row.name === null);
 
-    if (unmatchedIds.length > 0)
+    if (unmatched.length > 0)
     {
         throw new MigrationBookkeepingMismatchError(
-            `drizzle.${PROJECT_MIGRATIONS_TABLE} was written before drizzle-orm 1.0 and its rows `
-            + `(ids: ${unmatchedIds.join(', ')}) match no folder in src/server/drizzle.`,
+            `drizzle.${PROJECT_MIGRATIONS_TABLE} was written before drizzle-orm 1.0 and these rows match no `
+            + `folder in src/server/drizzle: ${unmatched.map(describeVersionZeroRow).join('; ')}. `
+            + 'Restore the folder the row was written for, or — after confirming its SQL is applied to this '
+            + 'database — delete the row; then check `spfn db status`.',
         );
     }
 
     return named;
+}
+
+/**
+ * What would match a version-0 row: a folder stamped in the row's second
+ * (drizzle reads folder stamps as UTC), or one whose SQL has the row's hash.
+ */
+function describeVersionZeroRow(row: ProjectBookkeepingRow): string
+{
+    const stamp = new Date(Number(row.created_at)).toISOString().replace(/\D/g, '').slice(0, 14);
+
+    return `id ${row.id} matches a folder named ${stamp}_* or a migration.sql with hash ${String(row.hash).slice(0, 12)}…`;
 }
 
 /**
