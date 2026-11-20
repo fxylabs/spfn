@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **@spfn/core: `stopFetching(fetchWait = 5000)`** waits up to `fetchWait` ms for the job fetches
+  in flight; the server's Phase 2 passes its own budget (a `jobFetch` phase, see below) (#359).
 - **@spfn/core: `GeneratorOptions.trigger.changedFiles`** (and the `ChangedFile` type): every change
   that triggered a watch run. `changedFile` is now set only when exactly one change did; the
   watcher takes every change that arrived during a generation into the next one (#353).
@@ -19,6 +21,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **BREAKING: @spfn/core: workers started on `getBoss()` run core's fetch loop, not pg-boss's
+  worker, so they no longer appear in pg-boss's `getWipData()` or its `wip` events (#359).** Core
+  needs to know when a worker's last fetch has settled, which pg-boss 11 does not expose; the loop
+  runs on pg-boss's public `fetch` / `complete` / `fail` and keeps the worker's options and
+  behaviour (polling interval, `batchSize`, `includeMetadata`, `priority`, the handler bound,
+  completion with the handler's result, failure with its error, `error` events, `offWork`,
+  `notifyWorker`; see the job README). `work()` returns core's worker id, which `offWork({ id })`
+  and `notifyWorker(id)` on that instance take. A `PgBoss` the app constructs itself is unchanged.
+- **@spfn/core: the shutdown budget has a `jobFetch` phase (#359):** Phase 2's wait for fetches in
+  flight, capped at 5s and reserving nothing, inside the half of the work share the HTTP and
+  WebSocket closes use, so it cannot shorten the drain.
 - **BREAKING: @spfn/core: watch mode's generations, the initial one included, log and do not
   reject under `throwOnError: true` (#353).** `watch()` ran its initial generation as `generateAll('watch')`,
   so under `throwOnError` a failing generator rejected `watch()` before any watching began; now
@@ -47,6 +60,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the password changes; nothing in the package gates on it. An app that wants the change enforced
   does it itself.
 
+- **@spfn/core: a graceful shutdown waits for in-flight job fetches before it calls fetching
+  stopped (#359).** `stopFetching()` only asked pg-boss's workers to stop, so a fetch already in
+  flight could run its SQL after the drain began and take a job enqueued during it, which then
+  started on the stopping instance. Phase 2 now logs `Stopped job fetch` once every fetch has
+  settled; if its budget ends first it warns that a fetch is still in flight and that a job it
+  takes starts on this instance. Phase 5 waits for core's running handlers itself and fails the
+  jobs of those still running (`"pg-boss shut down while active"`, as before: `retry` or `failed`)
+  before the pool closes, since pg-boss's stop fails only jobs its own workers hold.
 - **@spfn/core: the `spfn dev` codegen watcher no longer loses changes (#353).** It decided what
   changed from file events and its own bookkeeping, so a change arriving while that bookkeeping was
   not valid was lost: only the first of the changes queued during a generation was regenerated (a

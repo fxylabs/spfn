@@ -568,7 +568,9 @@ function getShutdownInfrastructure(config: ServerConfig): ShutdownInfrastructure
 /**
  * Phases 1–2: close HTTP and WebSocket, then stop fetching jobs
  *
- * Handlers already running continue; `send` keeps working.
+ * Phase 2 waits for the fetches in flight, so a job enqueued from Phase 3 on
+ * is not taken by this instance. Handlers already running continue; `send`
+ * keeps working.
  */
 async function stopAcceptingWork(
     server: Server,
@@ -588,8 +590,9 @@ async function stopAcceptingWork(
 
     if (config.jobs)
     {
-        serverLogger.info('Phase 2: Stopping job fetch (sending stays open)...');
-        await stopFetching();
+        const fetchBudget = budget.phase('jobFetch');
+        serverLogger.info(`Phase 2: Stopping job fetch, waiting for fetches in flight (budget: ${fetchBudget}ms; sending stays open)...`);
+        await stopFetching(fetchBudget);
     }
 }
 
@@ -637,9 +640,9 @@ async function runBeforeShutdown(config: ServerConfig, hookBudget: number): Prom
 /**
  * Phase 5: wait for running job handlers, then stop pg-boss
  *
- * A handler still running when its wait ends has its job failed by pg-boss
+ * A handler still running when its wait ends has its job failed by core
  * before the database closes: retried on a live instance if attempts remain,
- * left failed on the last one. With less budget than pg-boss's shortest wait
+ * left failed on the last one. With less budget than the stop's shortest wait
  * plus the fail, it fails them without waiting.
  */
 async function stopJobQueue(config: ServerConfig, budget: ShutdownBudget): Promise<void>

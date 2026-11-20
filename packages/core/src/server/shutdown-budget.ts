@@ -15,9 +15,12 @@
  *   Disabled infrastructure reserves nothing. What the reserves do not need
  *   goes to the work: once 0.3 · T ≥ Σ caps the drain gets T − hooks − Σ caps.
  *
- * Inside the work share, the HTTP and WebSocket closes keep their own 5 s caps
- * and together may take at most half of the share: the other half is the
- * drain's, so a slow HTTP close cannot starve it.
+ * Inside the work share, the HTTP and WebSocket closes and the wait for the
+ * job fetches in flight (Phase 2) keep their own 5 s caps and together may
+ * take at most half of the share: the other half is the drain's, so a slow
+ * HTTP close or a hung fetch cannot starve it. The fetch wait reserves
+ * nothing: a fetch is one statement, and one still unsettled after what the
+ * HTTP close left is reported as such, not waited for at the drain's cost.
  *
  * A reserve is time an earlier phase cannot spend. A phase starting now gets
  *
@@ -31,6 +34,7 @@
 export type ShutdownPhase =
     | 'http'
     | 'websocket'
+    | 'jobFetch'
     | 'drain'
     | 'hooks'
     | 'jobs'
@@ -58,14 +62,14 @@ export interface ShutdownBudget
 }
 
 /**
- * pg-boss needs this long to fail the jobs still running and close its pool —
- * the part of stopping it that needs no handler wait.
+ * Stopping the job queue needs this long to fail the jobs still running and
+ * close pg-boss's pool — the part of stopping it that needs no handler wait.
  */
 export const JOB_FAIL_TIME = 1000;
 
 const JOB_HANDLER_WAIT_CAP = 30_000;
 
-/** pg-boss's own floor: a graceful stop waits at least this long for handlers */
+/** The stop's floor, kept from pg-boss's: a handler wait is at least this long or none */
 const JOB_HANDLER_WAIT_FLOOR = 1000;
 
 const HOOKS_SHARE = 0.2;
@@ -94,7 +98,7 @@ interface InfrastructureRule
 /**
  * The infrastructure closes in shutdown order
  *
- * The job queue's reserve cap is pg-boss's shortest handler wait plus failing
+ * The job queue's reserve cap is the stop's shortest handler wait plus failing
  * what is left; with less than that, it fails the running jobs without waiting.
  */
 const INFRASTRUCTURE_RULES: InfrastructureRule[] = [
@@ -121,6 +125,7 @@ function phaseRules(timeout: number, infrastructure: ShutdownInfrastructure): Ph
     return [
         { name: 'http', cap: 5000, reserve: 0 },
         { name: 'websocket', cap: 5000, reserve: 0 },
+        { name: 'jobFetch', cap: 5000, reserve: 0 },
         { name: 'drain', cap: Infinity, reserve: Math.ceil(work / 2) },
         { name: 'hooks', cap: Infinity, reserve: hooks },
         ...closes,

@@ -165,6 +165,58 @@ describe.skipIf(!available)('the job queue during shutdown', () =>
         expect(logLines.map((entry) => entry.message)).toContain('Shutdown manager: drain timeout — abandoning operations');
     }
 
+    /** Records core's job-queue log lines (`@spfn/core:job`), which the server spies do not see */
+    function recordJobLog(): { message: string; at: number }[]
+    {
+        const lines: { message: string; at: number }[] = [];
+        const loggerClass = Object.getPrototypeOf(logger);
+
+        for (const level of ['info', 'warn'] as const)
+        {
+            const original = loggerClass[level];
+
+            vi.spyOn(loggerClass, level).mockImplementation(function (this: unknown, ...args: unknown[])
+            {
+                lines.push({ message: String(args[0]), at: Date.now() });
+
+                return original.apply(this, args);
+            });
+        }
+
+        return lines;
+    }
+
+    /**
+     * Holds the instance's next fetch for `queue` until `release` resolves,
+     * then lets it run its SQL — the fetch a slow pool or a cold queue cache
+     * keeps in flight
+     */
+    function gateFetch(queue: string, release: Promise<unknown>): { held: Promise<void>; settledAt: () => number | null }
+    {
+        const boss = getBoss()!;
+        const fetch = boss.fetch.bind(boss) as (name: string, options?: object) => Promise<unknown>;
+        const held = latch();
+        let settledAt: number | null = null;
+
+        (boss as any).fetch = async (name: string, options?: object) =>
+        {
+            if (name !== queue || held.released())
+            {
+                return fetch(name, options);
+            }
+
+            held.release();
+            await release;
+
+            return fetch(name, options).finally(() =>
+            {
+                settledAt = Date.now();
+            });
+        };
+
+        return { held: held.promise, settledAt: () => settledAt };
+    }
+
     async function jobState(id: string | null): Promise<string>
     {
         const rows = await sql.unsafe(`SELECT state FROM ${TEST_SCHEMA}.job WHERE id = $1`, [id as string]);
@@ -174,7 +226,8 @@ describe.skipIf(!available)('the job queue during shutdown', () =>
 
     it('T1: a tracked operation that enqueues after the drain started leaves its job in the queue', async () =>
     {
-        // Polls once when it starts, then idles: the job is counted before any worker could take it.
+        // Polls once when it starts, then idles. Phase 2 waits for that poll if it is still in
+        // flight, so no fetch is left that could take the job sent from Phase 3 on.
         const sendMail = job('shutdown-t1-mail')
             .options({ pollingIntervalSeconds: 3600 })
             .handler(async () =>
@@ -453,7 +506,7 @@ describe.skipIf(!available)('the job queue during shutdown', () =>
         await started.promise;
         const errors = vi.spyOn(Object.getPrototypeOf(logger), 'error');
 
-        // pg-boss stops waiting for the handler at the job's expiration and fails the job
+        // Core's loop stops waiting for the handler at the job's expiration, pg-boss's bound, and fails the job
         await vi.waitFor(async () => expect(await jobState(jobId)).toBe('failed'), { timeout: 10000, interval: 200 });
         expect(runningJobs(boss)).toEqual([]);
 
@@ -461,6 +514,47 @@ describe.skipIf(!available)('the job queue during shutdown', () =>
 
         const reported = errors.mock.calls.filter(([message]) => String(message).includes('still running when pg-boss stopped'));
         expect(reported).toEqual([]);
+    });
+
+    it('T11: a fetch in flight when Phase 2 starts settles before fetching is called stopped, and takes no job sent from Phase 3 on', async () =>
+    {
+        const sendMail = job('shutdown-t11-mail').options({ pollingIntervalSeconds: 1 }).handler(async () =>
+        {});
+        const instance = await startWith({ sendMail }, { shutdown: { timeout: 14000 } });
+        // Released only once close() is in Phase 2, so that the fetch is in flight there
+        const gate = gateFetch('shutdown-t11-mail', logged('Phase 2:').then(() => sleep(100)));
+        await gate.held;
+        const jobLog = recordJobLog();
+
+        const enqueued = getShutdownManager().trackOperation(
+            'mail-after-commit',
+            logged('Phase 3:').then(() => sendMail.send()),
+        );
+        enqueued.catch(() => undefined);
+
+        await instance.close();
+
+        const stoppedAt = jobLog.find((line) => line.message.includes('Stopped job fetch'))?.at;
+        expect(gate.settledAt()).not.toBeNull();
+        expect(stoppedAt).toBeGreaterThanOrEqual(gate.settledAt()!);
+        expect(await jobState(await enqueued)).toBe('created');
+    });
+
+    it('T12: a fetch still in flight when Phase 2\'s budget ends is reported as in flight, not stopped, and the shutdown completes', async () =>
+    {
+        const sendMail = job('shutdown-t12-mail').options({ pollingIntervalSeconds: 1 }).handler(async () =>
+        {});
+        const instance = await startWith({ sendMail }, { shutdown: { timeout: 10000 } });
+        const gate = gateFetch('shutdown-t12-mail', latch().promise);
+        await gate.held;
+        const jobLog = recordJobLog();
+
+        await instance.close();
+
+        const messages = jobLog.map((line) => line.message);
+        expect(messages.some((message) => message.includes('Job fetch not stopped: 1 fetch(es) still in flight'))).toBe(true);
+        expect(messages.some((message) => message.includes('Stopped job fetch'))).toBe(false);
+        expect(logLines.map((line) => line.message)).toContain('Server shutdown completed');
     });
 });
 
