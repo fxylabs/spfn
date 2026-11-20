@@ -139,14 +139,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   peer warning. The flag also hid every other peer conflict. `init`, `add`, `create`,
   `setup icons` and the generated Dockerfile's `npm ci` / `npm prune` drop it. An npm app
   scaffolded before still lists `drizzle-typebox`, which npm now refuses. The CLI does not predict
-  that: when an install it runs fails, it prints npm's own lines, and when they report `ERESOLVE`
-  and name `drizzle-typebox`, one more line: why, and to remove it from the `package.json` npm
+  that: when an install it runs fails, it prints npm's own lines, and when npm's error is
+  `ERESOLVE` over drizzle-typebox's peer on drizzle-orm (text or `json` output), one more line: why, and to remove it from the `package.json` npm
   names (the app's, or the workspace root's), move to a drizzle-typebox version that accepts the
   prerelease, or import `drizzle-orm/typebox-legacy`. The command exits non-zero as for any failed
   install (`create`'s `@svgr/webpack` install only warns, as before). When `spfn init` fails there,
   what it wrote before the install stays, as for any install failure: the server and lib
-  templates, the RPC proxy route, the `next.config` rewrite, the Docker files, `spfn.config.js` and
-  the patched `package.json`; no `.env` file, `.spfnrc.ts`, `.gitignore`, `tsconfig.json` change or
+  templates, the RPC proxy route, in full mode the `next.config` rewrites (bare mode does not touch
+  `next.config`), the Docker files, `spfn.config.js` and the patched `package.json`; no `.env` file, `.spfnrc.ts`, `.gitignore`, `tsconfig.json` change or
   README. Delete the flag from your own Dockerfile and scripts too. pnpm, yarn and bun installs are
   unchanged.
 - **spfn: the scaffold no longer adds `drizzle-typebox`, `tsup` or `dotenv` (#376, #368).** No

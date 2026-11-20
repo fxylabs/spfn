@@ -80,8 +80,11 @@ resolves when Node finds its `package.json`, since an entry point is optional.
 
 npm installs (`init`, `add`, `create`, `setup icons`, and the generated Dockerfile's
 `npm ci` / `npm prune`) pass no peer flag. The CLI does not predict what npm resolves: when
-an install fails, it prints the manager's own output, and when npm's reports `ERESOLVE` and names
-`drizzle-typebox` it adds one line saying why and how to fix it. drizzle-typebox `0.x`'s peer
+an install fails, it prints the manager's own output, and when npm's error is `ERESOLVE` over
+drizzle-typebox's peer on drizzle-orm (npm's `Could not resolve dependency:` or
+`Conflicting peer dependency:` stanza names `peer drizzle-orm@"…" from drizzle-typebox@…`) it adds
+one line saying why and how to fix it; an `ERESOLVE` npm only warns about, or one over another
+package, gets npm's output alone. drizzle-typebox `0.x`'s peer
 range on drizzle-orm (`>=0.36.0`) admits no prerelease, so npm refuses it beside the
 `1.0.0-rc.4` SPFN pins, as in every npm app an earlier `spfn init` scaffolded. Remove it from the
 `package.json` that declares it (the app's, or its npm workspace root's), or move to a drizzle-typebox
@@ -89,8 +92,9 @@ version that accepts the prerelease, or import `drizzle-orm/typebox-legacy` inst
 install exits non-zero in `init`, `add` and `setup icons`; in `create` the `@svgr/webpack`
 install only warns, as before. When `spfn init` fails at its install step, what it wrote before
 it stays, as for any install failure: `src/server` and `src/lib` (full mode: also its app
-pages and `src/i18n`), the RPC proxy route, the `next.config` rewrite, the Docker files,
-`spfn.config.js` and the patched `package.json`. The `.env` files, `.spfnrc.ts`, `.gitignore`,
+pages and `src/i18n`), the RPC proxy route, in full mode the `next.config` rewrites (bare mode
+leaves `next.config` as it was), the Docker files, `spfn.config.js` and the patched
+`package.json`. The `.env` files, `.spfnrc.ts`, `.gitignore`,
 `tsconfig.json` changes and `README.md` come after the install and are not written.
 
 ---
