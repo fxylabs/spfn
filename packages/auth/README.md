@@ -879,7 +879,12 @@ sign-in. **Not reported either**: an attempt that never identifies an account or
 malformed request, an unknown passkey credential id, a challenge, link or code already expired or
 spent when it is presented, an
 identity the OAuth provider would not vouch for — and the verification-code path of
-`deletion/cancel` (no password is checked; no session results). A reset link refused at its
+`deletion/cancel` (no password is checked; no session results). Nor is a password
+`deletion/cancel` that lost a race after its password matched: the account, read again under its
+lock, is no longer pending and not active, or its password hash changed again after it was checked
+a second time — answered 401 `InvalidCredentialsError`, told nothing. The race is the owner's
+(a status change or a password change landing within the same request), not a guesser's to arrange,
+and a counter misses one right password by it. A reset link refused at its
 confirmation, before the sign-in step, is not a sign-in yet; an account refused at the completion is
 reported. Do not record from inside `admit`: a write there rolls back with a refused session — the
 report of the refusal is `settled`'s.
