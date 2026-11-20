@@ -151,16 +151,21 @@ describe.skipIf(!dbAvailable)('no row leaves a connection inside a transaction',
 
     it('a transactional route that rolls back', async () =>
     {
-        await getTestDb().update(users).set({ status: 'inactive' });
+        // A keyId already taken under another public key is refused inside the
+        // session's transaction. An inactive account no longer is: it is
+        // answered before any (#364).
+        const taken = keyBody();
+        expect((await post('/_auth/login', { email: 'owner@test.com', password: PASSWORD, ...taken })).status).toBe(200);
 
         const response = await post('/_auth/login', {
             email: 'owner@test.com',
             password: PASSWORD,
             ...keyBody(),
+            keyId: taken.keyId,
         });
 
-        expect(response.status).toBe(403);
-        expect((await response.json()).__type).toBe('AccountDisabledError');
+        expect(response.status).toBe(409);
+        expect((await response.json()).__type).toBe('KeyIdAlreadyRegisteredError');
 
         expect(await openTransactions()).toEqual([]);
     });

@@ -487,6 +487,22 @@ export function admitsAccount(user: Pick<User, 'status' | 'deletion'>): boolean
 }
 
 /**
+ * Why `accountRefusal` refuses an account, read from the row's own columns —
+ * no purge date, so no query. For the password channels, which answer the
+ * refusal as a wrong password and must not spend a query a wrong password does
+ * not (`loginService`).
+ */
+export function accountRefusalReason(user: Pick<User, 'status' | 'deletion'>): 'accountDisabled' | 'pendingDeletion' | null
+{
+    if (user.deletion === 'pending')
+    {
+        return 'pendingDeletion';
+    }
+
+    return admitsAccount(user) ? null : 'accountDisabled';
+}
+
+/**
  * Step 1: an account that is not active, or whose deletion was asked for, is
  * refused, whatever it presented.
  *

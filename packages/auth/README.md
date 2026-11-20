@@ -861,7 +861,7 @@ decides what becomes of a write it makes:
 | `oauth`, `oauth-native`, `password-reset`, `device-code`, `device-link` | the provider, the reset link, the approving device | under the lock where the key is written | `failed` (`refused`, `accountDisabled`, `pendingDeletion`); `challenged` or `succeeded` |
 | `register`, `signup-link`, `invitation` | the code, the link, the invitation | under the lock, after `beforeRegister`; a refusal rolls the account back | `failed` (`refused`, `user: null`); `succeeded` |
 | second factor (`POST /_auth/mfa/verify`), the 202's channel | the TOTP code, recovery code or passkey | before the proof is judged, and under the lock where the key is activated | `failed` (`secondFactor`, `secondFactorLocked`, `refused`, `accountDisabled`, `pendingDeletion`), `stage: 'second-factor'`; `succeeded` once |
-| `deletion-cancel` (`POST /_auth/deletion/cancel`) | the password for an identifier — no session results | before the comparison; a verification-code cancel is not guarded | `failed` (`credential`, `refused`) |
+| `deletion-cancel` (`POST /_auth/deletion/cancel`) | the password for an identifier — no session results | before the comparison; a verification-code cancel is not guarded | `failed` (`credential`, `refused`, `accountDisabled` for an account not active with nothing pending) |
 | renewal, `keys/rotate` | — | never | never |
 
 A wrong **step-up** or **enrolment** proof is not reported: a signed-in person's typo is not a
@@ -879,8 +879,56 @@ asked before the password is compared. An account it refuses is compared against
 never its own, and answered the refusal whatever the password was. Skipping the comparison would
 make a refused account answer faster than an unknown one; comparing its real hash would make the
 refusal answer the password. An unknown identifier reaches `admit` with `user: null` — refuse those
-too if your policy counts identifiers. The package's own refusals (`AccountDisabledError`,
-`AccountPendingDeletionError`) keep their order: after the password.
+too if your policy counts identifiers.
+
+**An account the package refuses answers as a wrong password.** On `password` and
+`deletion-cancel`, an account that is disabled, suspended, pending deletion or purged is answered
+exactly what a wrong password is — `InvalidCredentialsError` (401), the same body — whatever the
+password. Its own hash is still compared, and the refusal is read from columns already on the row,
+so the refused path issues no statement the wrong-password path does not. Otherwise the answer would
+tell a caller the password was right on an account that cannot sign in. On `deletion-cancel` a
+pending deletion is the door itself, so only an account that is not active and has nothing pending
+is refused there; an active account with nothing pending is answered `DeletionNotRequestedError`.
+`settled` is the one place the reason reaches: a right password is told `failed` with
+`accountDisabled` or `pendingDeletion`, a wrong one `credential`, and `admit` is asked again after
+either. The other channels (OAuth, passkey, device code, device link, one-time token) prove
+possession of something a guesser does not hold, and still answer `AccountDisabledError` /
+`AccountPendingDeletionError`.
+
+#### Recipe — tell the owner of a refused account by e-mail
+
+The person who typed the right password for a disabled or pending-deletion account is shown "wrong
+password". Tell the account's owner why, out of band, from `settled`:
+
+```typescript
+// server.config.ts
+import { onAfterCommit } from '@spfn/core/db';
+import { createAuthLifecycle } from '@spfn/auth/server';
+import { accountNoticeMailer } from './src/server/mail/account-notice';
+
+export const authLifecycle = createAuthLifecycle({
+    signIn: {
+        settled: (outcome) =>
+        {
+            const told = outcome.result === 'failed'
+                && (outcome.reason === 'accountDisabled' || outcome.reason === 'pendingDeletion');
+
+            if (told && outcome.user?.email)
+            {
+                // After the report's own transaction commits: mail is not database work.
+                const { user, reason } = outcome;
+                onAfterCommit(() => accountNoticeMailer.send(user, reason));
+            }
+        },
+    },
+});
+```
+
+The mail goes to the account's own address, never to the caller: for `pendingDeletion` it carries
+the purge date and the restore path (`POST /_auth/deletion/cancel`), for `accountDisabled` the
+status and how to reach support. The reason arrives only with the right password, so the mail is
+sent only when the owner's password was used — rate-limit it (one per account per hour, say) so a
+leaked password cannot flood the inbox. Without a guard the package tells nobody.
 
 **Under concurrency** an attempt already past `admit` when your limit is reached is still judged, but
 a right password then meets the deciding `admit` under the account lock, after the failure that
@@ -1011,9 +1059,6 @@ it.
   that clears the flag; enforcement is a restricted session, not a refusal (tracked separately).
 - **The address of a sign-in made from a Next.js server action**, which today is the Next server's
   own (tracked separately in `@spfn/core`).
-- **`AccountDisabledError` after a right password only** — the package's own refusal of a disabled
-  account still answers after the password is checked (tracked separately). The app's refusal does
-  not.
 - **Moving `beforeRegister`** onto the lifecycle.
 
 A second `createAuthLifecycle()` that omits `signIn` leaves it as it is; one that states other
@@ -2640,7 +2685,8 @@ two ways in are indistinguishable.
   longer stand behind is not one the waiting device may collect.
 - **The poll re-checks the account.** It is a login, so it admits the account through
   `admitPrincipal` (on the approving key) and refuses a suspended or pending-deletion account
-  with the same errors `/_auth/login` does. Approval and collection are separate moments, and
+  with `AccountDisabledError` / `AccountPendingDeletionError`, as passkey and OAuth sign-in do
+  (password sign-in answers a refused account as a wrong password; a device code is not a guess). Approval and collection are separate moments, and
   what the account is when the key is registered is what counts.
 - **`start` bounds what it stores.** It is the one route that takes key material from a caller
   who cannot authenticate, so `publicKey`, `keyId` and `fingerprint` carry length limits —
@@ -7184,10 +7230,13 @@ users.status (active | inactive | suspended) is not written by any of them.
   `sendNotifications` is on) a notice with the scheduled purge date and how to cancel goes to the
   channel the account has: by e-mail when it has an address, otherwise by SMS (`sendSMS` from
   `@spfn/notification`, the sender verification codes use).
-- **Login is blocked while pending** — password, passkey and OAuth sign-in and every door of the
-  admission (`authenticate` and the rest) reject an account whose deletion is pending with
+- **Login is blocked while pending** — passkey and OAuth sign-in and every door of the admission
+  (`authenticate` and the rest) reject an account whose deletion is pending with
   `AccountPendingDeletionError` (403, `details.purgeScheduledAt`) — before its status, so the
-  client can show a recovery prompt even for a suspended account.
+  client can show a recovery prompt even for a suspended account. Password sign-in answers it
+  `InvalidCredentialsError`, as a wrong password, whatever the password: the owner learns of it
+  from the app (`signIn.settled`, [recipe](#recipe--tell-the-owner-of-a-refused-account-by-e-mail)),
+  never from the response.
 - **Cancel (recovery)** — `POST /_auth/deletion/cancel` (public — sessions were revoked at
   request time, so there's no Bearer token to authenticate with), the one door that admits an
   account whose deletion is pending. Email or phone, plus **either** the `password` **or** a

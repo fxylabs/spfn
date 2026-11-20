@@ -32,8 +32,8 @@ import { registerPublicKeyService, revokeKeyService } from './key.service';
 import { assertStepUp, mfaEnrolledForUser } from './mfa.service';
 import { secondFactorEnrolmentFields } from './second-factor-policy.service';
 import { updateLastLoginService } from './user.service';
-import { accountRefusal, admissionRefusalError, type PrincipalCredential } from './admission.service';
-import { admitSignIn, assertOwnsTransactions, failedCredentialAnswer, reportAccountRefusal } from './sign-in-guard.service';
+import { accountRefusalReason, type PrincipalCredential } from './admission.service';
+import { admitSignIn, assertOwnsTransactions, failedCredentialAnswer } from './sign-in-guard.service';
 import { signInGuard, type SignInAttempt } from '../lib/sign-in-guard';
 import type { User } from '../entities/users';
 import { authLoginEvent, authRegisterEvent } from '../events';
@@ -353,9 +353,14 @@ async function accountExists(email?: string, phone?: string): Promise<boolean>
  *    session's transaction (`registerPublicKeyService`), whose refusal is told
  *    once that transaction has rolled back.
  *
- * The account refusals the package makes (`AccountDisabledError`,
- * `AccountPendingDeletionError`) keep their order: after the password. They
- * are told to `settled` too (`reportAccountRefusal`).
+ * An account the package refuses — disabled, pending deletion, purged — is
+ * answered exactly as a wrong password, whatever the password: its own hash is
+ * still compared, and the refusal is read from the row's columns
+ * (`accountRefusalReason`), so neither the answer nor the time it takes tells
+ * a caller the password was right. Only `settled` learns why: a right
+ * password is told with the refusal's reason (`accountDisabled`,
+ * `pendingDeletion`), a wrong one as `credential`. The session's write asks
+ * again under the account lock and answers the same way.
  *
  * @throws Error when the guard is configured and the caller holds a transaction
  */
@@ -385,18 +390,14 @@ export async function loginService(
     // dummy hash is computed once and reused.
     const comparedHash = refusal || !user?.passwordHash ? await getDummyPasswordHash() : user.passwordHash;
     const isValid = await verifyPassword(password, comparedHash);
+    const accountRefused = user && accountRefusalReason(user);
 
-    if (refusal || !user?.passwordHash || !isValid)
+    if (refusal || !user?.passwordHash || !isValid || accountRefused)
     {
-        throw await failedCredentialAnswer(attempt, refusal, () => new InvalidCredentialsError(), params.keyId);
-    }
-
-    // The account half of the admission: a deletion asked for, then the status
-    const accountRefused = await accountRefusal(user);
-    if (accountRefused)
-    {
-        await reportAccountRefusal(attempt, accountRefused, params.keyId);
-        throw admissionRefusalError(accountRefused);
+        throw await failedCredentialAnswer(attempt, refusal, () => new InvalidCredentialsError(), {
+            keyId: params.keyId,
+            reason: isValid && accountRefused ? accountRefused : 'credential',
+        });
     }
 
     // Hashed before the account lock is taken: the hash is the slow step.
@@ -441,6 +442,7 @@ async function startPasswordSession(user: User, params: LoginParams, upgradedHas
         deviceName: params.deviceName,
         platform: params.platform,
         channel: 'password',
+        inactiveAccount: () => new InvalidCredentialsError(),
         missingAccount: () => new InvalidCredentialsError(),
         ip: params.ip,
         userAgent: params.userAgent,

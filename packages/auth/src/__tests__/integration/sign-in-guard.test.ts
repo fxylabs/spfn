@@ -25,6 +25,12 @@
  * 12. a refusal told for a sign-in that was not refused: one a caller's
  *     transaction caught and committed past (OAuth's contended retry, whose
  *     second run succeeds)
+ * 13. the package's own refusal of an account (disabled, pending deletion,
+ *     purged) as a password oracle on `/login` and `deletion/cancel` (#364):
+ *     by its answer, by a comparison against another hash, or by a statement
+ *     the wrong password does not send
+ * 14. the owner's one channel for that refusal lost: `settled` told
+ *     `credential` for the right password, so the app cannot tell the owner why
  *
  * The app's side is what the README tells an app to write: a repository
  * extending `BaseRepository` whose writes join the package's transaction.
@@ -1411,5 +1417,99 @@ describe.skipIf(!dbAvailable)('the sign-in guard (#361)', () =>
         expect(await statementsOf(() => login('plain@test.com', PASSWORD)))
             .toEqual({ status: 200, data: 10, locks: 1, begins: 1, savepoints: 1 });
         expect(await committedHistory()).toEqual([]);
+    });
+
+    // ========================================================================
+    // Row 13 — the package's refusal of an account is no password oracle (#364)
+    // ========================================================================
+
+    /**
+     * One request's answer and what it sent to the database. The answer drops the
+     * envelope's per-request id and the stack a non-production server adds: the
+     * stack names the line that threw, which no production client sees.
+     */
+    async function answerAndCost(request: () => Promise<Response>): Promise<{ answer: unknown; cost: unknown }>
+    {
+        let response!: Response;
+        const cost = await statementsOf(async () => response = await request());
+        const { error: { requestId: _requestId, ...envelope }, stack: _stack, ...body } = await response.json();
+
+        return { answer: { status: response.status, ...body, error: envelope }, cost };
+    }
+
+    /** The hashes `verifyPassword` was given since the last call. */
+    function comparedHashes(): string[]
+    {
+        const hashes = verifyPassword.mock.calls.map(([, hash]) => hash as string);
+        verifyPassword.mockClear();
+
+        return hashes;
+    }
+
+    const REFUSED_ACCOUNTS = [
+        { name: 'suspended', state: { status: 'suspended', deletion: null } },
+        { name: 'pending deletion', state: { status: 'active', deletion: 'pending' } },
+        { name: 'purged, its hash left by an upgrade', state: { status: 'active', deletion: 'deleted' } },
+    ] as const;
+
+    it.each(REFUSED_ACCOUNTS)('row 13a — /login, $name, no guard: the right password answers as a wrong one, compared against the same hash, at the same statements', async ({ state }) =>
+    {
+        resetSignInGuardForTests();
+        const owner = await seedUser('refused@test.com');
+        await getTestDb().update(users).set(state).where(eq(users.id, owner.id));
+
+        const right = await answerAndCost(() => login('refused@test.com', PASSWORD));
+        const rightHashes = comparedHashes();
+        const wrong = await answerAndCost(() => login('refused@test.com', WRONG_PASSWORD));
+
+        expect(wrong.answer).toMatchObject({ status: 401, error: { code: 'InvalidCredentialsError' } });
+        expect(right).toEqual(wrong);
+        expect(rightHashes).toEqual([owner.passwordHash]);
+        expect(comparedHashes()).toEqual([owner.passwordHash]);
+        expect(await getTestDb().select().from(userPublicKeys)).toEqual([]);
+    });
+
+    it('row 13b — deletion/cancel, a suspended account with nothing pending, no guard: the right password answers as a wrong one, at the same statements', async () =>
+    {
+        resetSignInGuardForTests();
+        const owner = await seedUser('suspended-cancel@test.com');
+        await getTestDb().update(users).set({ status: 'suspended' }).where(eq(users.id, owner.id));
+        const cancel = (password: string) => () => post('/_auth/deletion/cancel', { email: 'suspended-cancel@test.com', password });
+
+        const right = await answerAndCost(cancel(PASSWORD));
+        const rightHashes = comparedHashes();
+        const wrong = await answerAndCost(cancel(WRONG_PASSWORD));
+
+        expect(wrong.answer).toMatchObject({ status: 401, error: { code: 'InvalidCredentialsError' } });
+        expect(right).toEqual(wrong);
+        expect(rightHashes).toEqual([owner.passwordHash]);
+        expect(comparedHashes()).toEqual([owner.passwordHash]);
+    });
+
+    // ========================================================================
+    // Row 14 — settled is where the owner's reason goes
+    // ========================================================================
+
+    it('row 14 — with a guard, a refused account answers right and wrong passwords alike, and settled is told why only for the right one', async () =>
+    {
+        const suspended = await seedUser('told-suspended@test.com');
+        const pending = await seedUser('told-pending@test.com');
+        await getTestDb().update(users).set({ status: 'suspended' }).where(eq(users.id, suspended.id));
+        await getTestDb().update(users).set({ deletion: 'pending' }).where(eq(users.id, pending.id));
+
+        const right = await answerAndCost(() => login('told-suspended@test.com', PASSWORD));
+        const wrong = await answerAndCost(() => login('told-suspended@test.com', WRONG_PASSWORD));
+        expect(right).toEqual(wrong);
+        expect((await login('told-pending@test.com', PASSWORD)).status).toBe(401);
+        const cancelled = await post('/_auth/deletion/cancel', { email: 'told-suspended@test.com', password: PASSWORD });
+        expect(cancelled.status).toBe(401);
+
+        expect(await committedHistory()).toMatchObject([
+            { user_id: suspended.id, channel: 'password', result: 'failed', reason: 'accountDisabled' },
+            { user_id: suspended.id, channel: 'password', result: 'failed', reason: 'credential' },
+            { user_id: pending.id, channel: 'password', result: 'failed', reason: 'pendingDeletion' },
+            { user_id: suspended.id, channel: 'deletion-cancel', result: 'failed', reason: 'accountDisabled' },
+        ]);
+        expect(await committedHistory()).toHaveLength(4);
     });
 });

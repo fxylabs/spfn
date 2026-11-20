@@ -605,7 +605,7 @@ async function refuseUnadmittedStep(step: SecondStep): Promise<void>
 
     if (refusal)
     {
-        throw await failedCredentialAnswer(step.attempt, refusal, () => new MfaVerificationFailedError(), step.keyId);
+        throw await failedCredentialAnswer(step.attempt, refusal, () => new MfaVerificationFailedError(), { keyId: step.keyId });
     }
 }
 

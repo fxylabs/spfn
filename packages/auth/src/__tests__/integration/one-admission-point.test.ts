@@ -22,8 +22,12 @@
  * | T8  | a deletion cancel that read the account before a suspension committed does not lift it: the        |
  * |     | deletion is cleared and the account stays suspended. Without it, a cancel overwrites an operator's |
  * |     | suspension with `active`                                                                          |
- * | T9  | a password sign-in that read the account before a suspension committed writes no key: refused, and |
- * |     | nothing it registered is admitted after reactivation. Without it, the key outlives the suspension |
+ * | T8b | a password cancel that read an active account with nothing pending before a suspension committed   |
+ * |     | is answered as a wrong password (#364). Without it, the refusal under the lock answers            |
+ * |     | `DeletionNotRequestedError`, telling the caller the suspended account's password was right        |
+ * | T9  | a password sign-in that read the account before a suspension committed writes no key: refused as a |
+ * |     | wrong password, and nothing it registered is admitted after reactivation. Without it, the key      |
+ * |     | outlives the suspension, or the refusal under the lock tells the caller the password was right    |
  * | T10 | a token minted through core's endpoint with a custom `getSubject` and the shared manager is honoured |
  * |     | for the key holder recorded beside the tag, and refused once that key is revoked. Without it, the  |
  * |     | subject is parsed as the user id and a custom subject is refused or checked against another account |
@@ -1035,14 +1039,27 @@ describe.skipIf(!dbAvailable)('one admission point for a person principal (T1-T1
         expect(requests).toEqual([{ status: 'cancelled' }]);
     });
 
-    it('T9 a password sign-in that read the account before a suspension committed is refused, and leaves no key that reactivation admits', async () =>
+    it('T8b a password cancel that read an active account with nothing pending before a suspension committed is answered as a wrong password', async () =>
+    {
+        const account = await newAccount();
+        staleReadThen(() => setAccountStatus(account.id, 'suspended', { from: 'any', reason: 'T8b suspension' }));
+
+        const cancelled = await post('/_auth/deletion/cancel', account, { email: account.email, password: TEST_PASSWORD });
+
+        await expectError(cancelled, 401, 'InvalidCredentialsError');
+        expect(await stateOf(account)).toEqual({ status: 'suspended', deletion: null });
+    });
+
+    it('T9 a password sign-in that read the account before a suspension committed is refused as a wrong password, and leaves no key that reactivation admits', async () =>
     {
         const account = await newAccount();
         staleReadThen(() => setAccountStatus(account.id, 'suspended', { from: 'any', reason: 'T9 suspension' }));
 
         const { response, session } = await login(account);
 
-        await expectAccountRefusal(response, { status: 'suspended', deletion: null });
+        // Refused under the lock, and answered there as the password channel
+        // answers a refused account: as a wrong password (#364).
+        await expectError(response, 401, 'InvalidCredentialsError');
         await setAccountStatus(account.id, 'active', { from: 'suspended', reason: 'T9 reactivation' });
 
         expect(await getTestDb().select().from(userPublicKeys).where(eq(userPublicKeys.keyId, session.keyId))).toHaveLength(0);

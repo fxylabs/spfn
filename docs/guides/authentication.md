@@ -757,18 +757,11 @@ notifications) and the purge job registration caveat live in the package README 
 await authApi.requestAccountDeletion.call({ body: { password } });
 // -> { purgeScheduledAt: '2026-08-08T00:00:00.000Z' }
 
-// A blocked login surfaces the scheduled purge date so you can offer recovery:
-try
-{
-    await authApi.login.call({ body: { email, password, publicKey, keyId, fingerprint, algorithm } });
-}
-catch (error)
-{
-    if (error instanceof AuthError.AccountPendingDeletionError)
-    {
-        // error.details.purgeScheduledAt
-    }
-}
+// A password login to an account pending deletion answers InvalidCredentialsError, exactly as a
+// wrong password does (#364): the response must not tell a caller the password was right. Tell the
+// owner the purge date and how to cancel out of band, from the sign-in guard's `settled` (the
+// package README has the recipe). Passkey and OAuth sign-in still answer
+// AccountPendingDeletionError with details.purgeScheduledAt.
 
 // Cancel (no Bearer token — the account's sessions were revoked on request):
 // the password, or a single-use code token for the account's e-mail or phone
@@ -1717,11 +1710,8 @@ catch (error)
 {
     if (error instanceof AuthError.InvalidCredentialsError)
     {
-        // Wrong email or password (401)
-    }
-    if (error instanceof AuthError.AccountDisabledError)
-    {
-        // Account suspended (403)
+        // Wrong email or password (401) — and also a disabled or pending-deletion
+        // account, whatever the password: password login never tells them apart
     }
 }
 ```
@@ -1734,8 +1724,8 @@ catch (error)
 | `InvalidTokenError` | 401 | Malformed or invalid JWT |
 | `TokenExpiredError` | 401 | JWT has expired |
 | `KeyExpiredError` | 401 | Public key has expired |
-| `AccountDisabledError` | 403 | Account is suspended/inactive |
-| `AccountPendingDeletionError` | 403 | Account is within its deletion grace period (`details.purgeScheduledAt`) |
+| `AccountDisabledError` | 403 | Account is suspended/inactive — passkey, OAuth, device code and every authenticated route; password login answers `InvalidCredentialsError` |
+| `AccountPendingDeletionError` | 403 | Account is within its deletion grace period (`details.purgeScheduledAt`) — the same doors; password login answers `InvalidCredentialsError` |
 | `DeletionAlreadyRequestedError` | 409 | Deletion already requested (or account already purged) |
 | `DeletionNotRequestedError` | 404 | No pending deletion request to cancel/purge |
 | `ImmediateDeletionNotAllowedError` | 403 | Self-service `immediate: true` without `deletion.allowSelfImmediate` |

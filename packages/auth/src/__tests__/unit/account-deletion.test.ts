@@ -127,7 +127,8 @@ vi.mock('../../server/services/oauth2-grant.service', () => ({ revokeAllOAuth2Gr
 vi.mock('../../server/services/user.service', () => ({ setAccountDeletion }));
 vi.mock('../../server/services/mfa.service', () => ({ assertStepUp }));
 vi.mock('../../server/services/passkey.service', () => ({ proveRecentAuthentication, recentAuthenticationHolds }));
-vi.mock('../../server/services/admission.service', () => ({
+vi.mock('../../server/services/admission.service', async importOriginal => ({
+    ...await importOriginal<typeof import('../../server/services/admission.service')>(),
     admitCompletion,
     admissionRefusalError: (refusal: { reason: string }) => new Error(refusal.reason),
 }));
@@ -487,9 +488,10 @@ describe('account-deletion.service', () =>
             usersRepository.lockAccount.mockResolvedValue({ ...user, deletion: 'deleted' });
             accountDeletionRequestsRepository.findPendingByUserId.mockResolvedValue({ id: 5 });
 
+            // A purged account is not active: a password is answered as a wrong one (#364).
             await expect(
                 cancelAccountDeletionService({ email: user.email, password: 'correct-password' }),
-            ).rejects.toBeInstanceOf(DeletionNotRequestedError);
+            ).rejects.toBeInstanceOf(InvalidCredentialsError);
 
             expect(accountDeletionRequestsRepository.markCancelled).not.toHaveBeenCalled();
             expect(setAccountDeletion).not.toHaveBeenCalled();
