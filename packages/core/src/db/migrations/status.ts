@@ -4,7 +4,9 @@
  * Compares what each migration folder ships (function packages, plus the
  * project's own `src/server/drizzle`) against what the database records as
  * applied. `spfn db status`, the server's boot gate and the detailed health
- * endpoint all read this one implementation.
+ * endpoint all read this one implementation, and the CLI's `spfn db push`
+ * preview and every function-package apply take their pending list from
+ * `pendingFunctionMigrations` here — one rule for "pending", never two.
  */
 
 import { existsSync } from 'fs';
@@ -26,6 +28,13 @@ import {
 export const PROJECT_MIGRATIONS_TABLE = '__drizzle_migrations';
 
 /**
+ * The table every function package shared before each got its own. Read as a
+ * package's record while its own table is missing or empty; never written or
+ * dropped, so a package uninstalled today still finds its rows tomorrow.
+ */
+const LEGACY_FUNCTION_MIGRATIONS_TABLE = '__spfn_fn_migrations';
+
+/**
  * The name `spfn db status` and health use for the project's own migrations.
  */
 export const PROJECT_TARGET_NAME = 'project (src/server/drizzle)';
@@ -36,6 +45,22 @@ export type MigrationTargetStatus = {
     applied: number;
     pending: number;
     pendingTags: string[];
+};
+
+/**
+ * A function package's migrations, as read from its folder.
+ */
+export type FunctionMigrationSource = {
+    packageName: string;
+    entries: FunctionMigrationEntry[];
+};
+
+/**
+ * The entries of one function package that the database has not applied yet.
+ */
+export type PendingFunctionMigrations = {
+    packageName: string;
+    entries: FunctionMigrationEntry[];
 };
 
 export type MigrationStatus = {
@@ -51,20 +76,6 @@ export type MigrationStatus = {
 export interface MigrationStatusDb
 {
     execute(query: SQL): Promise<unknown>;
-}
-
-/**
- * An entry counts as applied when its name is recorded (drizzle-orm 1.0
- * projects) or its timestamp is not newer than the last applied record —
- * the rule the CLI's function-migration runner and drizzle-orm ≤0.45 share.
- */
-export function filterPendingEntries(
-    entries: FunctionMigrationEntry[],
-    lastAppliedMillis: number,
-    appliedNames: Set<string>,
-): FunctionMigrationEntry[]
-{
-    return entries.filter(entry => entry.millis > lastAppliedMillis && !appliedNames.has(entry.name));
 }
 
 /**
@@ -129,7 +140,7 @@ async function tableExists(db: MigrationStatusDb, tableName: string): Promise<bo
 
 /**
  * drizzle-orm 1.0 records a `name` column and treats a migration as applied
- * when its name is present; CLI-owned per-package tables have no such column.
+ * when its name is present. Only the project's table is read this way.
  * The column is looked up in `pg_catalog` for the same reason as the table.
  */
 async function readAppliedNames(db: MigrationStatusDb, tableName: string): Promise<Set<string>>
@@ -154,32 +165,78 @@ async function readAppliedNames(db: MigrationStatusDb, tableName: string): Promi
     return new Set(rows.map(row => String(row.name)));
 }
 
-async function collectTargetStatus(
-    db: MigrationStatusDb,
-    name: string,
-    migrationsDir: string,
-    tableName: string,
-): Promise<MigrationTargetStatus>
+/**
+ * The newest `created_at` in a package's own table, or undefined while the
+ * table is missing or empty.
+ */
+async function readLastRecordedMillis(db: MigrationStatusDb, tableName: string): Promise<number | undefined>
 {
-    const entries = readMigrationEntries(migrationsDir, name);
-
-    let lastApplied = 0;
-    let appliedNames = new Set<string>();
-
-    // A fresh database has no bookkeeping table yet — every entry is pending,
-    // which is exactly what a first boot should be told.
-    if (await tableExists(db, tableName))
+    if (!await tableExists(db, tableName))
     {
-        const rows = toRows(await db.execute(sql`
-            SELECT created_at FROM drizzle.${sql.identifier(tableName)}
-            ORDER BY created_at DESC LIMIT 1`));
-
-        lastApplied = rows[0]?.created_at ? Number(rows[0].created_at) : 0;
-        appliedNames = await readAppliedNames(db, tableName);
+        return undefined;
     }
 
-    const pendingEntries = filterPendingEntries(entries, lastApplied, appliedNames);
+    const rows = toRows(await db.execute(sql`
+        SELECT max(created_at) AS "last" FROM drizzle.${sql.identifier(tableName)}`));
 
+    return rows[0]?.last == null ? undefined : Number(rows[0].last);
+}
+
+/**
+ * The hashes of migration SQL the legacy shared table records, empty when
+ * there is no such table.
+ */
+async function readLegacyHashes(db: MigrationStatusDb): Promise<Set<string>>
+{
+    if (!await tableExists(db, LEGACY_FUNCTION_MIGRATIONS_TABLE))
+    {
+        return new Set();
+    }
+
+    const rows = toRows(await db.execute(sql`
+        SELECT hash FROM drizzle.${sql.identifier(LEGACY_FUNCTION_MIGRATIONS_TABLE)}`));
+
+    return new Set(rows.map(row => String(row.hash)));
+}
+
+/**
+ * Each function package's pending migrations — the one rule for packages.
+ *
+ * An entry is pending when it is newer than the package's last record: the
+ * newest `created_at` in its own table or, while that table is missing or
+ * empty, the newest of its entries whose hash the legacy shared table holds.
+ * There is no name rule: the CLI creates package tables without a `name`
+ * column. An apply records each entry in the package's own table, so after it
+ * that table's newest row is newer than every legacy row it supersedes.
+ *
+ * Reads only, so a read-only connection (`spfn db push --dry-run`) can run it.
+ */
+export async function pendingFunctionMigrations(
+    db: MigrationStatusDb,
+    packages: FunctionMigrationSource[],
+): Promise<PendingFunctionMigrations[]>
+{
+    const legacyHashes = await readLegacyHashes(db);
+    const pending: PendingFunctionMigrations[] = [];
+
+    for (const { packageName, entries } of packages)
+    {
+        const legacyMillis = entries.filter(entry => legacyHashes.has(entry.hash)).map(entry => entry.millis);
+        const lastMillis = await readLastRecordedMillis(db, functionMigrationsTable(packageName))
+            ?? Math.max(Number.NEGATIVE_INFINITY, ...legacyMillis);
+
+        pending.push({ packageName, entries: entries.filter(entry => entry.millis > lastMillis) });
+    }
+
+    return pending;
+}
+
+function toTargetStatus(
+    name: string,
+    entries: FunctionMigrationEntry[],
+    pendingEntries: FunctionMigrationEntry[],
+): MigrationTargetStatus
+{
     return {
         name,
         total: entries.length,
@@ -187,6 +244,37 @@ async function collectTargetStatus(
         pending: pendingEntries.length,
         pendingTags: pendingEntries.map(entry => entry.name),
     };
+}
+
+/**
+ * The project's own migrations: an entry counts as applied when its name is
+ * recorded (drizzle-orm 1.0) or its timestamp is not newer than the last
+ * applied record (drizzle-orm ≤0.45).
+ */
+async function collectProjectStatus(db: MigrationStatusDb, migrationsDir: string): Promise<MigrationTargetStatus>
+{
+    const entries = readMigrationEntries(migrationsDir, PROJECT_TARGET_NAME);
+
+    let lastApplied = 0;
+    let appliedNames = new Set<string>();
+
+    // A fresh database has no bookkeeping table yet — every entry is pending,
+    // which is exactly what a first boot should be told.
+    if (await tableExists(db, PROJECT_MIGRATIONS_TABLE))
+    {
+        const rows = toRows(await db.execute(sql`
+            SELECT created_at FROM drizzle.${sql.identifier(PROJECT_MIGRATIONS_TABLE)}
+            ORDER BY created_at DESC LIMIT 1`));
+
+        lastApplied = rows[0]?.created_at ? Number(rows[0].created_at) : 0;
+        appliedNames = await readAppliedNames(db, PROJECT_MIGRATIONS_TABLE);
+    }
+
+    return toTargetStatus(
+        PROJECT_TARGET_NAME,
+        entries,
+        entries.filter(entry => entry.millis > lastApplied && !appliedNames.has(entry.name)),
+    );
 }
 
 /**
@@ -216,22 +304,15 @@ export async function collectMigrationStatus(
     cwd: string = process.cwd(),
 ): Promise<MigrationStatus>
 {
-    const packages: MigrationTargetStatus[] = [];
-
-    for (const func of discoverFunctionMigrations(cwd))
-    {
-        packages.push(await collectTargetStatus(
-            db,
-            func.packageName,
-            func.migrationsDir,
-            functionMigrationsTable(func.packageName),
-        ));
-    }
+    const sources = discoverFunctionMigrations(cwd).map(func => ({
+        packageName: func.packageName,
+        entries: readMigrationEntries(func.migrationsDir, func.packageName),
+    }));
+    const pending = await pendingFunctionMigrations(db, sources);
+    const packages = sources.map((source, i) => toTargetStatus(source.packageName, source.entries, pending[i]!.entries));
 
     const projectDir = projectMigrationsDir(cwd);
-    const project = existsSync(projectDir)
-        ? await collectTargetStatus(db, PROJECT_TARGET_NAME, projectDir, PROJECT_MIGRATIONS_TABLE)
-        : null;
+    const project = existsSync(projectDir) ? await collectProjectStatus(db, projectDir) : null;
 
     return { packages, project: project && project.total > 0 ? project : null };
 }

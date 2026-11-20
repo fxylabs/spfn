@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { PGlite } from '@electric-sql/pglite';
+import { drizzle } from 'drizzle-orm/pglite';
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
@@ -13,13 +14,15 @@ import {
 
 function pgliteDb(client: PGlite): MigrationDb
 {
+    const statusDb = drizzle({ client });
+
     return {
         query: async (text, params) =>
             (await client.query(text, params as unknown[])).rows as Record<string, unknown>[],
+        execute: query => statusDb.execute(query),
         transaction: fn => client.transaction(tx => fn({
             query: async (text, params) =>
                 (await tx.query(text, params as unknown[])).rows as Record<string, unknown>[],
-            transaction: () => Promise.reject(new Error('nested transactions are not supported')),
         })) as Promise<never>,
     };
 }

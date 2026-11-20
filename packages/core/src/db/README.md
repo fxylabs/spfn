@@ -930,10 +930,12 @@ These have their own READMEs — do not duplicate their APIs here, link to them:
   (linked to the source on GitHub: this sub-module has no README, and the package ships
   only READMEs) — which migrations each installed function
   package ships and which the database has applied: `discoverFunctionMigrations`,
-  `collectMigrationStatus`, `pendingMigrationTargets`, `countPendingMigrations`. Read-only
-  — applying migrations is `spfn db migrate`. One implementation behind `spfn db status`,
-  the server's migration boot gate and the detailed health payload, so they cannot
-  disagree about what "pending" means.
+  `collectMigrationStatus`, `pendingFunctionMigrations`, `pendingMigrationTargets`,
+  `countPendingMigrations`. Read-only — applying migrations is `spfn db migrate`. One
+  implementation behind `spfn db status`, the server's migration boot gate, the detailed
+  health payload, the `spfn db push` preview and every function-package apply, so they
+  cannot disagree about what "pending" means. A function package's legacy records in the
+  shared `drizzle.__spfn_fn_migrations` table are read, never written or dropped.
 
 ---
 

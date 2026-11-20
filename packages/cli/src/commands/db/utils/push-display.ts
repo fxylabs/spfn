@@ -6,7 +6,7 @@
 
 import chalk from 'chalk';
 import type { ClassificationResult, ClassifiedStatement } from './sql-classifier.js';
-import type { PendingFunctionMigrations } from '../../../utils/function-migrations.js';
+import type { PendingFunctionMigrations } from '@spfn/core/db';
 
 // ============================================================================
 // Helpers

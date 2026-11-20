@@ -49,11 +49,11 @@ export {
     collectMigrationStatus,
     countPendingMigrations,
     discoverFunctionMigrations,
-    filterPendingEntries,
     formatPendingMigrations,
     functionMigrationsTable,
     hasMigrationTargets,
     migrationTargets,
+    pendingFunctionMigrations,
     pendingMigrationTargets,
     pendingMigrationsSummary,
     projectMigrationsDir,
@@ -65,9 +65,11 @@ export {
 export type {
     FunctionMigrationEntry,
     FunctionMigrationInfo,
+    FunctionMigrationSource,
     MigrationStatus,
     MigrationStatusDb,
     MigrationTargetStatus,
+    PendingFunctionMigrations,
 } from './migrations';
 
 // Transaction

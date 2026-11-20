@@ -8,13 +8,11 @@ import { join } from 'path';
 import {
     collectMigrationStatus,
     countPendingMigrations,
-    filterPendingEntries,
     functionMigrationsTable,
     hasMigrationTargets,
     pendingMigrationTargets,
     type MigrationStatusDb,
 } from '../index';
-import type { FunctionMigrationEntry } from '../discovery';
 
 /**
  * A project fixture: a temp cwd carrying an installed function package that
@@ -104,7 +102,7 @@ describe('collectMigrationStatus', () =>
         expect(pendingMigrationTargets(status)).toEqual([]);
     });
 
-    it('treats a migration recorded by name as applied (drizzle-orm 1.0 projects)', async () =>
+    it('R3 ignores a `name` column on a package table: only the timestamp counts', async () =>
     {
         cwd = makeProject();
         const table = functionMigrationsTable('@spfn/testfn');
@@ -119,7 +117,24 @@ describe('collectMigrationStatus', () =>
 
         const status = await collectMigrationStatus(db, cwd);
 
-        expect(status.packages[0]).toMatchObject({ applied: 1, pending: 0 });
+        expect(status.packages[0]).toMatchObject({ applied: 0, pending: 1 });
+    });
+
+    it('treats a project migration recorded by name as applied (drizzle-orm 1.0 projects)', async () =>
+    {
+        cwd = makeProject({ withProjectMigrations: true });
+
+        await client.exec(`CREATE SCHEMA IF NOT EXISTS drizzle`);
+        await client.exec(`CREATE TABLE drizzle."__drizzle_migrations" (
+            id serial PRIMARY KEY, hash text NOT NULL, created_at bigint, name text)`);
+        await client.query(
+            `INSERT INTO drizzle."__drizzle_migrations" (hash, created_at, name) VALUES ($1, $2, $3)`,
+            ['hash', 0, '20260102000000_app'],
+        );
+
+        const status = await collectMigrationStatus(db, cwd);
+
+        expect(status.project).toMatchObject({ applied: 1, pending: 0 });
     });
 
     it('includes the project migrations folder when it exists', async () =>
@@ -170,26 +185,6 @@ describe('hasMigrationTargets', () =>
         {
             rmSync(cwd, { recursive: true, force: true });
         }
-    });
-});
-
-describe('filterPendingEntries', () =>
-{
-    function entry(name: string, millis: number): FunctionMigrationEntry
-    {
-        return { name, millis, hash: `hash-${name}`, statements: [] };
-    }
-
-    it('treats entries newer than the last applied timestamp as pending', () =>
-    {
-        const pending = filterPendingEntries([entry('a', 1000), entry('b', 2000)], 1000, new Set());
-
-        expect(pending.map(e => e.name)).toEqual(['b']);
-    });
-
-    it('reports everything pending against an empty database', () =>
-    {
-        expect(filterPendingEntries([entry('a', 1000), entry('b', 2000)], 0, new Set())).toHaveLength(2);
     });
 });
 

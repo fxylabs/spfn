@@ -2,10 +2,12 @@
  * Function Package Migration Execution
  *
  * Applies the migrations shipped by SPFN function packages (e.g., @spfn/cms).
- * Discovery and folder reading live in `@spfn/core/db` — the server's boot gate
- * and its health endpoint read migration state from the same implementation, so
- * `spfn db migrate` and a running server can never disagree about what "pending"
- * means. This module owns only the half that writes.
+ * Discovery, folder reading and the rule for what is pending live in
+ * `@spfn/core/db` (`pendingFunctionMigrations`): `spfn db status`, the server's
+ * boot gate, its health endpoint, the `spfn db push` preview and every apply
+ * here read that one rule. This module owns only the half that writes, and it
+ * writes only each package's own table — the legacy shared table is read by
+ * the rule and never touched.
  */
 
 import chalk from 'chalk';
@@ -13,9 +15,11 @@ import chalk from 'chalk';
 import {
     discoverFunctionMigrations,
     functionMigrationsTable,
+    pendingFunctionMigrations,
     readMigrationEntries,
     type FunctionMigrationEntry,
     type FunctionMigrationInfo,
+    type MigrationStatusDb,
 } from '@spfn/core/db';
 import { env } from '@spfn/core/config';
 import { loadEnv } from '@spfn/core/server';
@@ -28,27 +32,22 @@ export type FunctionMigrationPlan = FunctionMigrationInfo & {
 };
 
 /**
- * What working out the pending migrations needs: queries only. `spfn db push`
- * passes its own connection, read-only on a dry run.
+ * Raw SQL on one connection or transaction.
  */
-export interface MigrationReader
+export interface MigrationQueries
 {
     query(text: string, params?: unknown[]): Promise<Record<string, unknown>[]>;
 }
 
 /**
- * Minimal DB surface the runner needs. Adapters exist for postgres.js (runtime)
- * and PGlite (tests).
+ * Minimal DB surface the runner needs: `execute` for core's pending rule, raw
+ * queries and a transaction for the writes. Adapters exist for postgres.js
+ * (runtime) and PGlite (tests).
  */
-export interface MigrationDb extends MigrationReader
+export interface MigrationDb extends MigrationStatusDb, MigrationQueries
 {
-    transaction<T>(fn: (tx: MigrationDb) => Promise<T>): Promise<T>;
+    transaction<T>(fn: (tx: MigrationQueries) => Promise<T>): Promise<T>;
 }
-
-export type PendingFunctionMigrations = {
-    packageName: string;
-    entries: FunctionMigrationEntry[];
-};
 
 /**
  * Parse migration folders for all packages up front, so a broken package fails
@@ -62,146 +61,7 @@ export function loadFunctionMigrationPlans(functionMigrations: FunctionMigration
     }));
 }
 
-/**
- * Migrate legacy shared __spfn_fn_migrations table to per-package tables.
- *
- * Previous versions used a single shared table for all packages, causing
- * index-based hash conflicts. This copies each package's migration hashes
- * from the legacy table (matched by hash) into per-package tables,
- * then drops the legacy table.
- */
-async function migrateLegacyTable(
-    db: MigrationDb,
-    plans: FunctionMigrationPlan[],
-): Promise<void>
-{
-    const legacyHashes = await readLegacyHashes(db);
-
-    if (!legacyHashes)
-    {
-        return;
-    }
-
-    console.log(chalk.dim('\n  Migrating legacy shared migration table to per-package tables...'));
-
-    if (legacyHashes.size === 0)
-    {
-        await db.query(`DROP TABLE drizzle."__spfn_fn_migrations"`);
-
-        return;
-    }
-
-    for (const plan of plans)
-    {
-        const tableName = functionMigrationsTable(plan.packageName);
-
-        await ensureMigrationsTable(db, tableName);
-
-        // Skip packages that already have per-package records
-        const existing = await db.query(
-            `SELECT COUNT(*) AS "count" FROM drizzle."${tableName}"`,
-        );
-
-        if (Number(existing[0]?.count) > 0)
-        {
-            continue;
-        }
-
-        // The legacy table stores sha256 hashes of migration SQL content, so a
-        // hash match identifies which legacy rows belong to this package.
-        const legacyEntries = plan.entries.filter(entry => legacyHashes.has(entry.hash));
-
-        for (const entry of legacyEntries)
-        {
-            await db.query(
-                `INSERT INTO drizzle."${tableName}" (hash, created_at) VALUES ($1, $2)`,
-                [entry.hash, entry.millis],
-            );
-        }
-
-        if (legacyEntries.length > 0)
-        {
-            console.log(chalk.dim(`    ✓ ${plan.packageName}: copied ${legacyEntries.length} migration record(s)`));
-        }
-    }
-
-    await db.query(`DROP TABLE drizzle."__spfn_fn_migrations"`);
-    console.log(chalk.dim('    ✓ Legacy migration table removed\n'));
-}
-
-/**
- * The hashes in the legacy shared table, or undefined when there is none.
- */
-async function readLegacyHashes(db: MigrationReader): Promise<Set<string> | undefined>
-{
-    const legacyCheck = await db.query(
-        `SELECT EXISTS (
-            SELECT 1 FROM information_schema.tables
-            WHERE table_schema = 'drizzle' AND table_name = '__spfn_fn_migrations'
-        ) AS "exists"`,
-    );
-
-    if (!legacyCheck[0]?.exists)
-    {
-        return undefined;
-    }
-
-    const legacyRows = await db.query(`SELECT hash FROM drizzle."__spfn_fn_migrations" ORDER BY id`);
-
-    return new Set(legacyRows.map(row => String(row.hash)));
-}
-
-/**
- * The newest `created_at` in a package's table, or undefined when the table is
- * missing or empty. Looked up in `pg_catalog`, which needs no `drizzle` schema.
- */
-async function readLastRecordedMillis(db: MigrationReader, tableName: string): Promise<number | undefined>
-{
-    const exists = await db.query(`SELECT to_regclass($1) IS NOT NULL AS "exists"`, [`drizzle."${tableName}"`]);
-
-    if (!exists[0]?.exists)
-    {
-        return undefined;
-    }
-
-    const rows = await db.query(
-        `SELECT created_at FROM drizzle."${tableName}" ORDER BY created_at DESC LIMIT 1`,
-    );
-
-    return rows.length > 0 ? Number(rows[0]?.created_at) : undefined;
-}
-
-/**
- * Each package's pending migrations, without writing anything.
- *
- * Pending = entries newer than the last applied record — the same
- * timestamp-based rule drizzle-orm ≤0.45 used for these tables, so databases
- * migrated by earlier CLI versions continue seamlessly. A package with no
- * record yet counts what the legacy shared table holds, as migrateLegacyTable
- * would copy it. Applying reads its pending list here too, so a preview and
- * the run after it cannot disagree.
- */
-export async function resolvePendingFunctionMigrations(
-    db: MigrationReader,
-    plans: FunctionMigrationPlan[],
-): Promise<PendingFunctionMigrations[]>
-{
-    const legacyHashes = await readLegacyHashes(db) ?? new Set<string>();
-    const pending: PendingFunctionMigrations[] = [];
-
-    for (const plan of plans)
-    {
-        const legacyMillis = plan.entries.filter(entry => legacyHashes.has(entry.hash)).map(entry => entry.millis);
-        const lastMillis = await readLastRecordedMillis(db, functionMigrationsTable(plan.packageName))
-            ?? Math.max(Number.NEGATIVE_INFINITY, ...legacyMillis);
-
-        pending.push({ packageName: plan.packageName, entries: plan.entries.filter(entry => entry.millis > lastMillis) });
-    }
-
-    return pending;
-}
-
-async function ensureMigrationsTable(db: MigrationDb, tableName: string): Promise<void>
+async function ensureMigrationsTable(db: MigrationQueries, tableName: string): Promise<void>
 {
     await db.query(`CREATE SCHEMA IF NOT EXISTS drizzle`);
     await db.query(
@@ -214,8 +74,8 @@ async function ensureMigrationsTable(db: MigrationDb, tableName: string): Promis
 }
 
 /**
- * Apply one package's pending migrations (resolvePendingFunctionMigrations)
- * inside a transaction.
+ * Apply one package's pending migrations (`pendingFunctionMigrations`) inside
+ * a transaction. Writes nothing when none is pending.
  */
 export async function applyFunctionMigrationPlan(
     db: MigrationDb,
@@ -223,15 +83,14 @@ export async function applyFunctionMigrationPlan(
 ): Promise<number>
 {
     const tableName = functionMigrationsTable(plan.packageName);
-
-    await ensureMigrationsTable(db, tableName);
-
-    const [{ entries: pending }] = await resolvePendingFunctionMigrations(db, [plan]);
+    const [{ entries: pending }] = await pendingFunctionMigrations(db, [plan]);
 
     if (pending.length === 0)
     {
         return 0;
     }
+
+    await ensureMigrationsTable(db, tableName);
 
     await db.transaction(async tx =>
     {
@@ -252,11 +111,20 @@ export async function applyFunctionMigrationPlan(
     return pending.length;
 }
 
-function createPostgresJsMigrationDb(client: any): MigrationDb
+function postgresJsQueries(client: any): MigrationQueries
 {
+    return { query: (text, params) => client.unsafe(text, params ?? []) };
+}
+
+async function createPostgresJsMigrationDb(client: any): Promise<MigrationDb>
+{
+    const { drizzle } = await import('drizzle-orm/postgres-js');
+    const statusDb = drizzle({ client });
+
     return {
-        query: (text, params) => client.unsafe(text, params ?? []),
-        transaction: fn => client.begin((tx: any) => fn(createPostgresJsMigrationDb(tx))),
+        ...postgresJsQueries(client),
+        execute: query => statusDb.execute(query),
+        transaction: fn => client.begin((tx: any) => fn(postgresJsQueries(tx))),
     };
 }
 
@@ -280,14 +148,11 @@ export async function executeFunctionMigrations(
     }
 
     const connection = postgres.default(url, { max: 1 });
-    const db = createPostgresJsMigrationDb(connection);
+    const db = await createPostgresJsMigrationDb(connection);
     let appliedCount = 0;
 
     try
     {
-        // Migrate legacy shared table to per-package tables (one-time)
-        await migrateLegacyTable(db, plans);
-
         for (const plan of plans)
         {
             console.log(chalk.blue(`\n  📦 Running ${plan.packageName} migrations...`));
