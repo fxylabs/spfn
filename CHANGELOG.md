@@ -243,7 +243,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `'anyPermission'`, `'role'`, `'roleGuard'`, `'opsScope'`, `'machineScope'`, `'opsOrUser'`,
   `'tenancyGuard'`, `'rateLimit'`, …), the same power `.skip(['auth'])` has. A call's result is never
   merged with anything by name: a router's `requirePermissions('a')` and a route's
-  `requirePermissions('b')` both run; the same result object at two levels runs once. A call can sit
+  `requirePermissions('b')` both run, and so do two calls of a factory that returns one cached handler;
+  the same result object at two levels runs once. A call can sit
   in a router's `.use([...])`. `opsOrUser(...)` and `signedTokenAuth(...)` are now such factories
   (with `skips: ['auth']`), so a router's `opsOrUser({ opsScopes: ['read'], … })` no longer drops a
   route's `opsOrUser({ opsScopes: ['write'], … })` — before, only the router's check ran and a

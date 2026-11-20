@@ -752,4 +752,23 @@ describe('factory calls (#168)', () =>
 
         expect(await request('/pot')).toEqual({ status: 418, ran: ['auth'] });
     });
+
+    it('F7: two calls of a factory that return one shared handler both run; one call at two levels runs once', async () =>
+    {
+        const { log, serve } = guards();
+        const shared: MiddlewareHandler = async (_c, next) =>
+        {
+            log.push('shared');
+            await next();
+        };
+        const cached = defineMiddlewareFactory('cached', () => shared);
+        const once = cached();
+        const request = serve(defineRouter({
+            twice: route.get('/twice').use([cached()]).handler(async () => ({ ok: true })),
+            once: route.get('/once').use([once]).handler(async () => ({ ok: true })),
+        }).use([cached(), once]));
+
+        expect(await request('/twice')).toEqual({ status: 200, ran: ['auth', 'shared', 'shared', 'shared'] });
+        expect(await request('/once')).toEqual({ status: 200, ran: ['auth', 'shared', 'shared'] });
+    });
 });

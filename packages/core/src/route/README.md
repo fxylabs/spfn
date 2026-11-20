@@ -576,9 +576,10 @@ and two calls with different arguments both run.
 
 A call's result is marked `instance: true` and is **never merged with another middleware by
 name**: a router's `.use([requirePermissions('a')])` and a route's
-`.use([requirePermissions('b')])` are two checks, and the route's runs too. The same result
-object referenced at two levels runs once (by reference). Plain named middleware keep the
-first-wins rule below. A factory call can sit in a router's `.use([...])`, and declare `skips`:
+`.use([requirePermissions('b')])` are two checks, and the route's runs too. Nor is it merged by
+handler: two calls of a factory that returns one cached handler both run. The same result
+object referenced at two levels runs once — route registration and the server's SSE/WS token
+endpoints apply the same rule. Plain named middleware keep the first-wins rule below. A factory call can sit in a router's `.use([...])`, and declare `skips`:
 
 ```typescript
 export const requireDoor = defineMiddlewareFactory('requireDoor',

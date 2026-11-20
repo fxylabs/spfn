@@ -28,7 +28,7 @@ export type NamedMiddleware<TName extends string = string> = {
     handler: MiddlewareHandler;
     _name: TName;  // Type inference helper
     skips?: string[];  // Inherited middlewares to auto-skip where this middleware is used (route or router .use)
-    instance?: true;  // A factory call's result: never merged with another middleware by name, only by reference
+    instance?: true;  // A factory call's result: never merged with another middleware, only with this same object
 };
 
 /**
