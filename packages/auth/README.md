@@ -703,6 +703,10 @@ attempt — no transaction argument to thread.
 - **A throw** from `admit` answers 500, with no session. From `settled` on a failure, 500 — never a
   quiet 401 with nothing recorded. From `settled` on a success, the session rolls back: no key, no
   `auth.login`.
+- **The package's own count is not yours to roll back.** A wrong second-factor proof is charged to
+  the account's budget in a transaction that commits before `settled` is told, so a `settled` that
+  throws still leaves the count, the lock it reaches and the one `auth.mfa.locked` in force: after
+  the budget is spent the right code is refused, as without a guard.
 - **It may run twice.** On OAuth a sign-in that lost a race is rolled back and run once more
   (`beforeRegister` has the same note): the rolled-back run's writes go with it. Side effects — mail,
   webhooks — belong after commit (`onAfterCommit`, or an event subscriber), not in the callback.

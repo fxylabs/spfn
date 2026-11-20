@@ -94,7 +94,6 @@ import {
     failedCredentialAnswer,
     recordSignInFailure,
     reportSignIn,
-    settleFailure,
 } from './sign-in-guard.service';
 import { signInGuard, type SignInAttempt } from '../lib/sign-in-guard';
 import {
@@ -471,9 +470,9 @@ async function releaseDeferredAnnouncements(row: MfaChallenge, key: UserPublicKe
  * is judged — a refused account is answered `SignInRefusedError`, its
  * challenge unspent and its proof not looked at — and again under the lock
  * in the completion transaction, which decides. A wrong proof and a spent
- * budget are told to `settled` (`stage: 'second-factor'`) in the transaction
- * that counts them; the sign-in is told `succeeded` once, here, in the
- * transaction that activates the key.
+ * budget are told to `settled` (`stage: 'second-factor'`) in a transaction
+ * of their own, after the count committed; the sign-in is told `succeeded`
+ * once, here, in the transaction that activates the key.
  *
  * @throws ValidationError when the body names none or more than one proof
  * @throws SecondFactorLockedError while the account's budget is spent
@@ -1356,38 +1355,18 @@ async function assertBudgetOpen(userId: number, step: SecondStep | null = null):
 }
 
 /**
- * Count a wrong proof against the account, in a transaction of its own under
- * the account lock, committed before the refusal. The count that reaches the
- * limit — one statement, so exactly one — announces the lock after commit
- * (`auth.mfa.locked`), for the app to tell the owner. A count refused because
- * the account locked meanwhile answers the lock.
- *
- * At a sign-in's second step the same transaction tells the app's `settled`
- * and asks `admit` again (`settleFailure`), and a refusal it answers now is
- * the answer.
+ * Refuse a wrong proof: count it (`countFailure`), and at a sign-in's second
+ * step tell the app's `settled` and ask `admit` again (`recordSignInFailure`)
+ * — in a transaction of its own, after the count committed. The count is the
+ * package's: an app callback that throws answers 500 and leaves it, and the
+ * lock it reached, in force.
  *
  * @throws SecondFactorLockedError | SignInRefusedError | MfaVerificationFailedError, always
  */
 async function refuseProof(userId: number, step: SecondStep | null): Promise<never>
 {
-    const { counted, refusal } = await runInTransaction(async () =>
-    {
-        const account = await usersRepository.lockAccount(userId);
-
-        const failure = await mfaAttemptBudgetsRepository.spendFailure(userId);
-        const lockedUntil = failure?.lockedUntil;
-
-        if (lockedUntil)
-        {
-            authLogger.service.warn('Second factor locked after repeated wrong proofs', { userId });
-            onAfterCommit(() => mfaLockedEvent.emit({ userId: String(userId), lockedUntil: lockedUntil.toISOString() }));
-        }
-
-        return {
-            counted: failure !== null,
-            refusal: step && await settleFailure({ ...step.attempt, user: account }, 'secondFactor', step.keyId),
-        };
-    }, { context: 'auth:mfa-failure' });
+    const counted = await countFailure(userId);
+    const refusal = step && await recordSignInFailure(step.attempt, 'secondFactor', step.keyId);
 
     if (refusal)
     {
@@ -1400,6 +1379,33 @@ async function refuseProof(userId: number, step: SecondStep | null): Promise<nev
     }
 
     throw new MfaVerificationFailedError();
+}
+
+/**
+ * Count a wrong proof against the account, in a transaction of its own under
+ * the account lock, committed before the refusal. The count that reaches the
+ * limit — one statement, so exactly one — announces the lock after commit
+ * (`auth.mfa.locked`), for the app to tell the owner.
+ *
+ * @returns false when the account locked meanwhile and the count was refused
+ */
+async function countFailure(userId: number): Promise<boolean>
+{
+    return await runInTransaction(async () =>
+    {
+        await usersRepository.lockAccount(userId);
+
+        const failure = await mfaAttemptBudgetsRepository.spendFailure(userId);
+        const lockedUntil = failure?.lockedUntil;
+
+        if (lockedUntil)
+        {
+            authLogger.service.warn('Second factor locked after repeated wrong proofs', { userId });
+            onAfterCommit(() => mfaLockedEvent.emit({ userId: String(userId), lockedUntil: lockedUntil.toISOString() }));
+        }
+
+        return failure !== null;
+    }, { context: 'auth:mfa-failure' });
 }
 
 /**

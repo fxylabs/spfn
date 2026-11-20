@@ -32,6 +32,7 @@ import { setupTestDb, teardownTestDb, clearTables, getTestDb, isDatabaseAvailabl
 import { enableBinding, FixtureAuthenticator } from '../helpers/webauthn-fixture';
 import {
     accountDeletionRequests,
+    mfaAttemptBudgets,
     mfaChallenges,
     mfaTotp,
     userInvitations,
@@ -43,7 +44,7 @@ import { generateClientToken, generateKeyPair } from '@/server/lib/crypto';
 import { hashCredential } from '@/server/lib/link-credentials';
 import { decodeBase32, hotp, totpStep } from '@/server/lib/totp';
 import { authenticate } from '@/server/middleware/authenticate';
-import { authDeviceRegisteredEvent, authLoginEvent, DeviceRegistrationChannelSchema } from '@/server/events';
+import { authDeviceRegisteredEvent, authLoginEvent, DeviceRegistrationChannelSchema, mfaLockedEvent } from '@/server/events';
 import type { SignInAdmission, SignInAttempt, SignInOutcome } from '@/server/lib/sign-in-guard';
 
 // The remote JWKS fetch is the only part of native sign-in that leaves the
@@ -878,6 +879,39 @@ describe.skipIf(!dbAvailable)('the sign-in guard (#361)', () =>
         expect(answer.status).toBe(500);
         expect(await keyRow(key.keyId)).toBeUndefined();
         expect(logins.seen).toEqual([]);
+    });
+
+    it('row 6b — settled throws on every failure at mfa/verify: the budget is still spent and locked, announced once, and the right code is refused', async () =>
+    {
+        const owner = await seedUser('budget@test.com');
+        const { secret } = await enrolTotp('budget@test.com');
+        const { challenge, keyId } = await openChallenge('budget@test.com');
+        const locks = capture(mfaLockedEvent);
+        policy.settled = async (outcome) =>
+        {
+            if (outcome.result === 'failed')
+            {
+                throw new Error('the history store is down');
+            }
+
+            await history.record(outcome);
+        };
+
+        for (let guess = 0; guess < 20; guess++)
+        {
+            resetMemoryRateLimitStore();
+            expect((await post('/_auth/mfa/verify', { challenge, code: String(100000 + guess) })).status).toBe(500);
+        }
+        resetMemoryRateLimitStore();
+        const right = await post('/_auth/mfa/verify', { challenge, code: codeFor(secret) });
+        await afterCommitCallbacks();
+        locks.stop();
+
+        const [budget] = await getTestDb().select().from(mfaAttemptBudgets).where(eq(mfaAttemptBudgets.userId, owner.id));
+        expect(budget?.lockedUntil).toBeTruthy();
+        expect(right.status).toBe(500);
+        expect((await keyRow(keyId))!.isActive).toBe(false);
+        expect(locks.seen).toHaveLength(1);
     });
 
     // ========================================================================
