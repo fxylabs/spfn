@@ -445,7 +445,7 @@ describe.skipIf(!dbAvailable)('opsOrUser — one route, two credentials', () =>
     {
         // Compile-only: the return type is NamedMiddleware<'opsOrUser'>, which
         // is what makes `.use([...])` type-check and `.skip` typing see the
-        // name. A `defineMiddleware` factory would return a bare handler here.
+        // name; every call carries the factory's `skips`.
         const middleware: NamedMiddleware<'opsOrUser'> = opsOrUser({ opsScopes: [SCOPE], roles: ['admin'] });
         expect(middleware._name).toBe('opsOrUser');
         expect(middleware.skips).toEqual(['auth']);
