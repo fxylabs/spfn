@@ -202,9 +202,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a process with the CLI's module hook registered for the app — re-running itself unless the process
   already has it, also when `tsx` was already there (`node --import tsx`, `npx tsx`,
   `NODE_OPTIONS`) — and every `tsx` child a command starts (the `provision` runner, the dev server
-  and watcher) gets the same hook. A CommonJS-only shape in those files — `require`, `__dirname`, a
-  named import of a `module.exports` file — now fails there as it fails under `spfn dev` (table in
-  the CLI README, "Your server source runs as ESM"). Top-level `await` in an entity now loads (`db
+  and watcher) gets the same hook. A CommonJS-only shape — `require`, `__dirname`, a named import of
+  a `module.exports` file — now fails where the CLI loads the file itself, as it fails under `spfn
+  dev` (table in the CLI README, "Your server source runs as ESM"): in entity files under `db push`,
+  `db tenant`, and `db generate` with the entity registry or a function package and no
+  `drizzle.config.ts`; in `server.config` under `provision`; in `drizzle.config.ts` under `db push`
+  and `db tenant`, which read its `schema` and `schemaFilter` — `db push` stops naming the file and
+  the CommonJS name, and under `--schema` warns that the config's `schemaFilter` is not applied.
+  `drizzle-kit`, which `db generate`, `check`, `drop` and `studio` hand `drizzle.config.ts` to,
+  reads it and the schema by its own rule as before. Top-level `await` in an entity now loads (`db
   generate` failed on it). `spfn env` loads `env.schemas` files the same way.
 - **BREAKING: spfn, @spfn/core: every `spfn db` command and the `spfn provision` runner refuse a
   second copy of `@spfn/core` (#349)**, with the message a server refuses with: a `.cjs` file that

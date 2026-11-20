@@ -86,12 +86,21 @@ export async function applyStatements(
 /**
  * Resolve the schema source, ending the command when drizzle.config.ts cannot be
  * loaded: falling back silently would push a different schema than generate reads.
+ * Under --schema, which bypasses such a config, say that its schemaFilter is not
+ * applied.
  */
 async function loadSchemaSourceOrExit(explicit?: string): Promise<SchemaSource | undefined>
 {
     try
     {
-        return await resolvePushSchemaSource(explicit);
+        const source = await resolvePushSchemaSource(explicit);
+
+        if (source?.unreadConfig)
+        {
+            console.warn(chalk.yellow(`⚠️  drizzle.config.ts could not be loaded, so a schemaFilter it declares is not applied: ${source.unreadConfig}`));
+        }
+
+        return source;
     }
     catch (error)
     {

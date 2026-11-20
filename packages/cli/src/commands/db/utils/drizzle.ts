@@ -562,9 +562,28 @@ export interface DrizzleConfigSchema
     schemaFilter?: string[];
 }
 
+/** Node's message for a CommonJS-only name read in an ES module. */
+const COMMONJS_GLOBAL = /\b(__dirname|__filename|require|module|exports) is not defined in ES module scope/;
+
+/**
+ * The error a drizzle.config.ts that cannot be imported stops `db push` with:
+ * the file, and for a CommonJS-only name, that this process reads the file as
+ * ESM — drizzle-kit, which `db generate` hands it to, reads it by its own rule.
+ */
+function drizzleConfigError(configPath: string, error: unknown): Error
+{
+    const message = error instanceof Error ? error.message : String(error);
+    const name = COMMONJS_GLOBAL.exec(message)?.[1];
+    const remedy = name === undefined ? '' : `. spfn reads ${configPath} as ESM, as the app's other source `
+        + `(drizzle-kit reads it by its own rule): use import.meta.dirname, import.meta.filename and import instead of ${name}`;
+
+    return new Error(`${configPath}: ${message}${remedy}`, { cause: error });
+}
+
 /**
  * Read the `schema` and `schemaFilter` entries of the project's drizzle.config.ts,
- * the file `db generate` runs against when the project has one.
+ * the file `db generate` runs against when the project has one. Imported in
+ * this process, under the CLI's module hook: as ESM in any app.
  *
  * @returns undefined when there is no drizzle.config.ts or it names no schema
  */
@@ -574,7 +593,8 @@ export async function readDrizzleConfigSchema(cwd: string = process.cwd()): Prom
 
     if (!existsSync(configPath)) return undefined;
 
-    const mod = await import(pathToFileURL(configPath).href);
+    const mod = await import(pathToFileURL(configPath).href)
+        .catch((error: unknown) => Promise.reject(drizzleConfigError(configPath, error)));
     // A CommonJS-compiled config arrives as { default: { default: config } }
     const config = mod.default?.default ?? mod.default;
     const schema = config?.schema;
@@ -589,9 +609,11 @@ export async function readDrizzleConfigSchema(cwd: string = process.cwd()): Prom
 
 /**
  * Schema named by the user, with where it came from; undefined leaves the
- * resolution to core (the folder scan, or the registry)
+ * resolution to core (the folder scan, or the registry). `unreadConfig` is why
+ * a drizzle.config.ts that --schema bypassed could not be read: its
+ * schemaFilter, if it declares one, is not applied.
  */
-export type SchemaSource = DrizzleConfigSchema & { label: string };
+export type SchemaSource = DrizzleConfigSchema & { label: string; unreadConfig?: string };
 
 /**
  * Pick the schema entry point the way `db generate` does: an explicit --schema,
@@ -604,10 +626,12 @@ export async function resolvePushSchemaSource(explicit?: string, cwd: string = p
     if (explicit)
     {
         // --schema replaces the files, not a schemaFilter the config declares on
-        // purpose; a config that cannot be loaded is what --schema exists to bypass
-        const schemaFilter = await readDrizzleConfigSchema(cwd).then(config => config?.schemaFilter, () => undefined);
-
-        return { schema: explicit, schemaFilter, label: '--schema' };
+        // purpose; a config that cannot be loaded is what --schema exists to
+        // bypass, and the caller says so
+        return await readDrizzleConfigSchema(cwd).then(
+            config => ({ schema: explicit, schemaFilter: config?.schemaFilter, label: '--schema' }),
+            (error: Error) => ({ schema: explicit, schemaFilter: undefined, label: '--schema', unreadConfig: error.message }),
+        );
     }
 
     const fromConfig = await readDrizzleConfigSchema(cwd);

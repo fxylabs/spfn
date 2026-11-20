@@ -235,13 +235,15 @@ same formats: the `spfn` bin runs every command in a process with `tsx` and a No
 (`module.registerHooks`) registered for the directory it was started in — re-running itself to get
 them unless the process already has that hook, whatever else started it (`node --import tsx`,
 `npx tsx`, `NODE_OPTIONS`) — and so does every `tsx` process a command starts: the `spfn dev`
-server and codegen watcher, the `spfn provision` runner. So your entities and `drizzle.config.ts`
-under `spfn db generate`, `db push` and `db tenant`, your `server.config` under `spfn provision`,
-your `env.schemas` files under `spfn env`, and your router under codegen all load as they do under
-`spfn dev`. Without `tsx` in the app, the bin runs the command without the hook: `spfn env` stops,
-saying to add `tsx`, and `spfn db` leaves your TypeScript to Node, which stops at the first file it
-cannot load. The hook states the format of every file of yours that `tsx` would otherwise guess
-from `package.json`:
+server and codegen watcher, the `spfn provision` runner. So the files of yours a command loads
+itself — entities under `spfn db generate`, `db push` and `db tenant`, `drizzle.config.ts` under
+`db push` and `db tenant`, `server.config` under `spfn provision`, `env.schemas` files under `spfn
+env`, your router under codegen — load as they do under `spfn dev`. (`drizzle-kit`, which `db
+generate`, `check`, `drop` and `studio` hand a `drizzle.config.ts` to, reads that file and the
+schema it names in a process of its own, by its own rule.) Without `tsx` in the app, the bin runs the command
+without the hook: `spfn env` stops, saying to add `tsx`, and `spfn db` leaves your TypeScript to
+Node, which stops at the first file it cannot load. The hook states the format of every file of
+yours that `tsx` would otherwise guess from `package.json`:
 
 - `.ts` and `.tsx` run as ESM, with or without `"type": "module"`, also when imported with a query
   of your own (`./route.ts?v=2`), which reaches the module as you wrote it — one evaluation per
@@ -292,13 +294,28 @@ server ran the other: rate-limit `policies` and `.trustedProxyHops()` were ignor
 > the production build rejects it. Use `import.meta.url` / `import.meta.dirname` and `import` for
 > the rest.
 >
-> **BREAKING (`spfn db`, `spfn provision`).** In an app without `"type": "module"`, `spfn db
-> generate`, `db push`, `db tenant` and `spfn provision` loaded entity files, `drizzle.config.ts`
-> and `server.config` — and what they import — as CommonJS, beside a second copy of `@spfn/core`
-> (issue #349). They now load them as `spfn dev` does, so the CommonJS-only shapes in the table
-> above fail there as they fail under `spfn dev`, and these commands refuse a second copy of
-> `@spfn/core` as a server does: a `.cjs` file that requires `@spfn/*` from those files stops the
-> command, naming the file. Top-level `await` in an entity file now loads.
+> **BREAKING (`spfn db`, `spfn provision`).** In an app without `"type": "module"`, these
+> commands loaded your files — and what they import — as CommonJS, beside a second copy of
+> `@spfn/core` (issue #349). They now load them as `spfn dev` does, so the CommonJS-only shapes in
+> the table above fail where the CLI loads the file itself, and these commands refuse a second copy
+> of `@spfn/core` as a server does: a `.cjs` file that requires `@spfn/*` from those files stops
+> the command, naming the file. File by file:
+>
+> - **Entity files** — loaded by `db push` and `db tenant`, and by `db generate` when the app has
+>   the entity registry `src/server/entities/config.ts` (every scaffold) or a function package
+>   installed and no `drizzle.config.ts` of its own. A CommonJS-only shape fails there; top-level
+>   `await` now loads. `drizzle-kit` then reads the entities again under `db generate`, by its own
+>   rule.
+> - **`server.config`** — loaded by the `spfn provision` runner. A CommonJS-only shape fails there.
+> - **`drizzle.config.ts`** — read by the CLI itself only under `db push` and `db tenant`, for its
+>   `schema` and `schemaFilter`. `__dirname`, `__filename` or `require` there now stops `db push`:
+>   `Could not load drizzle.config.ts: <path>: __dirname is not defined in ES module scope. spfn
+>   reads <path> as ESM, as the app's other source (drizzle-kit reads it by its own rule): use
+>   import.meta.dirname, import.meta.filename and import instead of __dirname`. Under `db push
+>   --schema`, which bypasses a config that cannot be loaded, push warns that the config's
+>   `schemaFilter` is not applied. `module.exports = { … }` still loads. `db generate`, `check`,
+>   `drop` and `studio` hand the file to `drizzle-kit`, which reads it as before — a CommonJS config
+>   works there.
 >
 > Not a break — dev now matches production: a named import from a CommonJS npm package whose
 > exports Node cannot analyse (`import { red } from 'chalk'` v4, `{ sign } from 'jsonwebtoken'`,
@@ -325,10 +342,6 @@ it spawns inherits the mark). The watcher regenerates for any project file the r
 reached, not only `src/server/routes/**`: an edit to `src/server/lib/segment.ts` imported through
 `@/` regenerates too. Each reload keeps about 100 KB per small app in memory, by design
 ([@spfn/core codegen](../core/src/codegen/README.md#how-the-router-is-loaded)).
-
-`spfn db generate` still loads your schema files the old way (tsx, as CommonJS in an app without
-`"type": "module"`, beside an ESM `@spfn/core`); it reads schema definitions, never the state a
-second copy splits, and does not refuse (#349).
 
 ### `spfn build`
 

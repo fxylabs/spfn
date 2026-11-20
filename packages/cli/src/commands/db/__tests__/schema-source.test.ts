@@ -96,7 +96,12 @@ describe('resolvePushSchemaSource', () =>
     {
         writeFileSync(join(cwd, 'drizzle.config.ts'), "throw new Error('DIRECT_URL required');");
 
-        expect(await resolvePushSchemaSource('./b.ts', cwd)).toEqual({ schema: './b.ts', schemaFilter: undefined, label: '--schema' });
+        expect(await resolvePushSchemaSource('./b.ts', cwd)).toEqual({
+            schema: './b.ts',
+            schemaFilter: undefined,
+            label: '--schema',
+            unreadConfig: `${join(cwd, 'drizzle.config.ts')}: DIRECT_URL required`,
+        });
     });
 });
 

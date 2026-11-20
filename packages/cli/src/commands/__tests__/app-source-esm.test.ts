@@ -29,6 +29,9 @@
  * | R5 | `spfn env list` started as `node --import tsx`, an   | the bin taking a tsx it did not start for the hook: the |
  * |    | env schema with top-level `await` importing          | schema loads as CommonJS and fails; the schema loaded   |
  * |    | @spfn/core/env                                       | by tsx's `tsImport`: a second @spfn/core/env            |
+ * | R6 | `spfn db push`, a drizzle.config.ts using            | the CLI's ESM read of a config drizzle-kit reads fine   |
+ * |    | `__dirname`, with and without `--schema`             | failing silently: `--schema` dropped its schemaFilter   |
+ * |    |                                                      | unsaid                                                  |
  *
  * R3 and the provision runner's refusal are in `provision-runner.test.ts`.
  */
@@ -176,4 +179,21 @@ it('R5 spfn env list started under node --import tsx loads an env schema with to
     expect(output).toContain('R5_KEY');
     // tsx's tsImport would evaluate what the schema imports again, in a namespace of its own
     expect(Object.entries(dump().core).filter(([, copies]) => copies.join() !== 'esm×1')).toEqual([]);
+});
+
+it('R6 spfn db push names a drizzle.config.ts it cannot read as ESM, with and without --schema', () =>
+{
+    writeEntity();
+    write('drizzle.config.ts', 'import { join } from \'node:path\';\n'
+        + 'export default { schema: join(__dirname, \'src/server/entities\'), schemaFilter: [\'app\'] };\n');
+
+    const config = join(realpathSync(appDir), 'drizzle.config.ts');
+    const withConfig = spfn(['db', 'push', '--dry-run']);
+    const withSchema = spfn(['db', 'push', '--dry-run', '--schema', 'src/server/entities/example.entity.ts']);
+
+    expect(withConfig.status, withConfig.output).toBe(1);
+    expect(withConfig.output).toContain(`Could not load drizzle.config.ts: ${config}: __dirname is not defined in ES module scope. `
+        + `spfn reads ${config} as ESM`);
+    expect(withSchema.output).toContain(`drizzle.config.ts could not be loaded, so a schemaFilter it declares is not applied: ${config}: `
+        + '__dirname is not defined in ES module scope');
 });
