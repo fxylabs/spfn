@@ -80,10 +80,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   chain `registerRoutes` registers, per route) and `RegisteredRoute.middlewares`. The SSE/WS token
   endpoints (`resolveEndpointMiddlewares`) are unchanged.
   **To find affected routers**, look for a router-level `.use([` naming a middleware that declares
-  `skips` — in `@spfn/auth`: `optionalAuth`, `machineAuth`, `signedTokenAuth`, `opsTokenAuth`,
-  `opsOrUser`, `oneTimeTokenAuth`, `oauthFinalizeAuth`, `authenticateForSignOut`,
-  `authenticateForRenewal` — plus any of your own `defineMiddleware(..., { skips })`:
-  `grep -rnE -A4 "\.use\(\[" src/ | grep -E "optionalAuth|machineAuth|signedTokenAuth|opsTokenAuth|opsOrUser|oneTimeTokenAuth|oauthFinalizeAuth|authenticateForSignOut|authenticateForRenewal"`
+  `skips` — those `@spfn/auth/server` exports: `optionalAuth`, `machineAuth`, `signedTokenAuth`,
+  `opsTokenAuth`, `opsOrUser`, `oneTimeTokenAuth`, `authenticateForRenewal` — plus any of your own
+  `defineMiddleware(..., { skips })`:
+  `grep -rnE -A4 "\.use\(\[" src/ | grep -E "optionalAuth|machineAuth|signedTokenAuth|opsTokenAuth|opsOrUser|oneTimeTokenAuth|authenticateForRenewal"`
   and check which hits follow a `defineRouter(...)` rather than a `route.*(...)`.
 - **BREAKING: @spfn/core: workers started on `getBoss()` run core's fetch loop, not pg-boss's
   worker, so they no longer appear in pg-boss's `wip` events (#359).** Core needs to know when a
