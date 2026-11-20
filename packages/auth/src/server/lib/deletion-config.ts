@@ -66,10 +66,11 @@ export interface AuthDeletionConfig
      * and touches the account's rows never returns: it waits on the lock the
      * purge holds, and PostgreSQL does not see a deadlock. A plain nested
      * `runInTransaction` joins and is fine. A throw rolls the purge back; the
-     * request stays `pending` and the next sweep retries it. The purge rethrows
-     * the error as `PurgeHookFailedError`, its `cause`, with a message that names
-     * only the hook and the request. Core's runner logs a rollback with the cause
-     * chain's messages, so keep the address out of the message the hook throws.
+     * request stays `pending` and the next sweep retries it. The purge rejects
+     * with `PurgeHookFailedError`, which names the hook, the request, and what
+     * the hook threw by class name and SQLSTATE only: it keeps no reference to
+     * the hook's error. An app that needs the error itself handles it inside
+     * the hook.
      */
     onPurge?: (account: PurgedAccount) => Promise<void>;
 }

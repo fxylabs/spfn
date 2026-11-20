@@ -211,21 +211,28 @@ export class ImmediateDeletionNotAllowedError extends ForbiddenError
  *
  * The app's `deletion.onPurge` hook threw, so the purge rolled back and the
  * next sweep retries it. The hook was handed the account's email and phone, and
- * what it throws may quote them, so this error's message names only the hook and
- * the deletion request. The hook's own error is its `cause`, for an app that
- * catches this one upstream; like a native `cause`, it is not enumerable, so it
- * is never serialized into a response.
+ * what it throws may quote them, so this error keeps none of it: not as its
+ * `cause`, not in any field. It says which hook failed, for which deletion
+ * request, and what the hook threw by identifiers only — its class name and,
+ * when a database statement failed, the SQLSTATE — so any logger, serializer
+ * or response body may carry it whole.
  */
 export class PurgeHookFailedError extends InternalServerError
 {
     readonly requestId: number;
+    readonly hookErrorClass: string;
+    readonly hookErrorCode?: string;
 
-    constructor(data: { requestId: number; cause: unknown })
+    constructor(data: { requestId: number; hookErrorClass: string; hookErrorCode?: string })
     {
-        super({ message: `deletion.onPurge failed for deletion request ${data.requestId}` });
+        super({
+            message: `deletion.onPurge failed for deletion request ${data.requestId}: ${data.hookErrorClass}`
+                + (data.hookErrorCode === undefined ? '' : ` (SQLSTATE ${data.hookErrorCode})`),
+        });
         this.name = 'PurgeHookFailedError';
         this.requestId = data.requestId;
-        Object.defineProperty(this, 'cause', { value: data.cause, writable: true, configurable: true });
+        this.hookErrorClass = data.hookErrorClass;
+        this.hookErrorCode = data.hookErrorCode;
     }
 }
 

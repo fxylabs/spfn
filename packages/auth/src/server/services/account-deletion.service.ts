@@ -54,6 +54,7 @@ import { ROUTE_ENROLMENT } from '../routes/channels';
 import { getDeletionConfig, type AuthDeletionConfig, type PurgedAccount } from '../lib/deletion-config';
 import { getRecentAuthMs } from '../lib/config';
 import { isUniqueViolation } from '../lib/unique-violation';
+import { identifyHookError } from '../lib/hook-error';
 import { authLogger } from '../logger';
 import { admitSignIn, assertOwnsTransactions, failedCredentialAnswer } from './sign-in-guard.service';
 import { signInGuard, type SignInAttempt } from '../lib/sign-in-guard';
@@ -696,9 +697,9 @@ async function anonymizeUser(user: User): Promise<void>
 /**
  * Calls `onPurge`. The hook holds the account's email and phone, and what it
  * throws may quote them — an app's "handoff failed for <address>", a constraint
- * error from its outbox write — so its error leaves here only as the `cause` of
- * a `PurgeHookFailedError`, whose message the transaction runner and the sweep
- * can log.
+ * error from its outbox write — so its error goes no further than here: it
+ * leaves as a `PurgeHookFailedError` that names it by class and SQLSTATE only,
+ * which the transaction runner and the sweep can log whole.
  *
  * @throws PurgeHookFailedError when the hook throws or rejects
  */
@@ -706,7 +707,7 @@ function handOffToApp(onPurge: (account: PurgedAccount) => Promise<void>, accoun
 {
     return Promise.resolve(account)
         .then(onPurge)
-        .catch((cause: unknown) => Promise.reject(new PurgeHookFailedError({ requestId, cause })));
+        .catch((error: unknown) => Promise.reject(new PurgeHookFailedError({ requestId, ...identifyHookError(error) })));
 }
 
 /**
@@ -879,23 +880,13 @@ export interface SweepDuePurgesResult
 }
 
 /**
- * A purge the next sweep retries — one of its own, or an immediate one. A failed `onPurge` is logged by its name and
- * request id alone: its cause is the app's error, which may quote the contact
- * the hook was handed. Anything else is the package's own failure, and goes to
- * the logger, which describes it without bound values.
+ * A purge the next sweep retries — one of its own, or an immediate one. A failed
+ * `onPurge` arrives as `PurgeHookFailedError`, which carries nothing the hook
+ * threw, and any other failure is the package's own; the logger describes
+ * either without bound values.
  */
 function logFailedPurge(requestId: number, error: unknown): void
 {
-    if (error instanceof PurgeHookFailedError)
-    {
-        authLogger.service.error('[account-deletion] purge failed, will retry next sweep', {
-            requestId,
-            error: error.name,
-        });
-
-        return;
-    }
-
     authLogger.service.error('[account-deletion] purge failed, will retry next sweep', error, { requestId });
 }
 

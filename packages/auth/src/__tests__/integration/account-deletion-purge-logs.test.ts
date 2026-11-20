@@ -1,40 +1,40 @@
 /**
- * @spfn/auth - a failing `onPurge` does not put the account's contact in the log
+ * @spfn/auth - a failing deletion hook does not put the account's contact anywhere
  *
- * The purge hands `onPurge` the account's email and phone. What the hook throws
- * may quote them — an app's "handoff failed for <address>", a constraint error
- * from its outbox write — and the purge rolls back, so the transaction runner
- * logs the rollback and the sweep logs the failure. Neither may print the hook's
- * error: the purge rethrows it as `PurgeHookFailedError`, whose message names
- * the hook and the request only.
+ * `onPurge` and `onBeforePurge` are handed the account's email and phone. What
+ * they throw may quote them — an app's "handoff failed for <address>", a
+ * constraint error whose `detail` quotes the value from its outbox write — and
+ * the package logs the failure, the transaction runner logs the purge's
+ * rollback, a caller's job runner stores the rejection. None of them may carry
+ * the address: the purge rejects with `PurgeHookFailedError`, which keeps no
+ * reference to the hook's error, only its class name and SQLSTATE.
  *
  * | Row | Checks                                                              | Unnoticed without it                              |
  * |-----|---------------------------------------------------------------------|---------------------------------------------------|
- * | L1a | a hook whose outbox write fails on a constraint quoting the         | a deleted account's address in the log of its own |
- * |     | address: no log line of the sweep, at any level, has the address or | deletion                                          |
- * |     | phone; the rollback line is the wrapper's, the sweep's names it     |                                                   |
- * | L1b | a hook throwing "handoff failed for <address>" over that write: no  | the same, from the app's own error                |
- * |     | line but core's rollback line has them; that line is the wrapper's, |                                                   |
- * |     | and still prints the hook's message as its cause (core, see below)  |                                                   |
- * | L1c | L1b for an immediate request, whose purge runs after its commit:    | the address at `error`, in core's "afterCommit    |
- * |     | the failure is the package's line, not core's after-commit one      | callback failed" line                             |
- * | L2  | the purge rejects with `PurgeHookFailedError`, its `cause` the      | an app that catches upstream left without the     |
- * |     | hook's own error, which a response body does not carry              | hook's error, or the error in a response body     |
+ * | L1a | a hook whose outbox write fails on a constraint whose detail quotes | a deleted account's address in the log of its own |
+ * |     | the address: no line at any level has the address or phone; the    | deletion                                          |
+ * |     | rollback line names the class and SQLSTATE                          |                                                   |
+ * | L1b | a hook throwing a plain Error naming the address: no line at any    | the same, from the app's own error, through the   |
+ * |     | level has it — core's rollback line included                        | wrapper's cause chain                             |
+ * | L1c | an immediate request, whose purge runs after its commit, its hook   | the address at `error`, in core's "afterCommit    |
+ * |     | naming the address over a failed write: no line has it, and the     | callback failed" line, or on the rollback line    |
+ * |     | failure is the package's line with the SQLSTATE found down the chain|                                                   |
+ * | L2  | the rejection holds no reference to the hook's error: no `cause`,   | the address in a response body, or in whatever an |
+ * |     | and no serializer (`JSON.stringify`, `util.inspect` with hidden     | app's logger or serializer walks                  |
+ * |     | fields, `describeError`, `toJSON`) reaches the address              |                                                   |
+ * | L3  | the purge job: its run resolves, so pg-boss stores no failure, and  | the address in a job's stored `output`            |
+ * |     | pg-boss's serializer on a rejection an app's own job would store    |                                                   |
+ * |     | has no address                                                      |                                                   |
  *
  * The logger's level is fixed when it is imported, so this file sets it to
- * `debug` before anything loads: the runner logs a rollback at `debug`.
- *
- * Core's transaction runner logs the rollback with the error
- * (`db/transaction/runner.ts`, "Transaction rolled back" at `debug`, "Slow
- * transaction rolled back" at `warn`), and `describeError` keeps the message of
- * every link of a cause chain that is not a database error, which the console
- * prints as `Caused by:`. A database error's description keeps no bound values,
- * so L1a holds whole; the app's own message in L1b reaches that one line. L1b
- * pins it, so the row fails once core stops printing cause messages and can
- * then hold whole too.
+ * `debug` before anything loads: core's transaction runner logs a rollback,
+ * with the error and its cause chain, at `debug`.
  */
 
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
+import { createRequire } from 'node:module';
+import { inspect } from 'node:util';
+import { resolve } from 'node:path';
 import { eq, sql } from 'drizzle-orm';
 import { pgSchema, serial, text } from 'drizzle-orm/pg-core';
 
@@ -44,6 +44,7 @@ vi.hoisted(() =>
 });
 
 const { BaseRepository } = await import('@spfn/core/db');
+const { describeError } = await import('@spfn/core/logger');
 const { setupTestDb, teardownTestDb, clearTables, getTestDb, isDatabaseAvailable } = await import('../helpers/db');
 const { createTestUser } = await import('../helpers/oauth2');
 const { users, accountDeletionRequests } = await import('@/server/entities');
@@ -51,7 +52,17 @@ const { initializeAuth } = await import('@/server/services/rbac.service');
 const { getRoleByName } = await import('@/server/services/role.service');
 const { __resetDeletionForTests, configureDeletion } = await import('@/server/lib/deletion-config');
 const { sweepDuePurges, purgeUserService, requestAccountDeletionService } = await import('@/server/services/account-deletion.service');
+const { createAuthDeletionPurgeJob } = await import('@/server/jobs/deletion-purge');
 const { PurgeHookFailedError } = await import('@spfn/auth/errors');
+
+/** The serializer pg-boss stores a failed job's `output` with, resolved the way core's pg-boss resolves it. */
+function pgBossSerializeError(): (error: unknown) => unknown
+{
+    const fromCore = createRequire(resolve(__dirname, '../../../../core/package.json'));
+    const fromPgBoss = createRequire(fromCore.resolve('pg-boss'));
+
+    return fromPgBoss('serialize-error').serializeError;
+}
 
 const dbAvailable = await isDatabaseAvailable();
 
@@ -80,14 +91,23 @@ type HandedAccount = { email: string | null; phone: string | null };
 /** A hook whose outbox write fails on the unique key, whose detail quotes the address; the write's error leaves the hook as it comes. */
 const writeFails = (account: HandedAccount) => noticeOutboxRepository.add(account);
 
-/** The same write, failed, under the app's own error naming the address. */
+/** The app's own error naming the address, over that failed write. */
 async function handoffFails(account: HandedAccount): Promise<void>
 {
     const failure = await noticeOutboxRepository.add(account).catch((error: unknown) => error);
     throw new Error(`handoff failed for ${account.email} / ${account.phone}`, { cause: failure });
 }
 
-describe.skipIf(!dbAvailable)('account deletion - a failing onPurge and the log', () =>
+/** A plain Error naming the address, and nothing else. */
+async function namesAddress(account: HandedAccount): Promise<void>
+{
+    throw new Error(`could not hand off ${account.email} / ${account.phone}`);
+}
+
+/** Whether a text has the account's address or phone. */
+const quotesContact = (text: string) => text.includes(EMAIL) || text.includes(PHONE);
+
+describe.skipIf(!dbAvailable)('account deletion - a failing hook and the log', () =>
 {
     const written: string[] = [];
 
@@ -122,12 +142,15 @@ describe.skipIf(!dbAvailable)('account deletion - a failing onPurge and the log'
         {
             vi.spyOn(console, channel).mockImplementation(capture);
         }
-        vi.spyOn(process.stderr, 'write').mockImplementation((chunk: string | Uint8Array) =>
+        for (const stream of [process.stdout, process.stderr])
         {
-            capture(String(chunk));
+            vi.spyOn(stream, 'write').mockImplementation((chunk: string | Uint8Array) =>
+            {
+                capture(String(chunk));
 
-            return true;
-        });
+                return true;
+            });
+        }
     });
 
     afterEach(() =>
@@ -136,17 +159,24 @@ describe.skipIf(!dbAvailable)('account deletion - a failing onPurge and the log'
         __resetDeletionForTests();
     });
 
-    /** An account with a deletion request past its grace period. */
+    /** An account with its phone set, and a deletion request past its grace period. */
     async function dueAccount(): Promise<{ userId: number; requestId: number }>
     {
-        const userId = await createTestUser(EMAIL, (await getRoleByName('user'))!.id);
-        await getTestDb().update(users).set({ phone: PHONE }).where(eq(users.id, userId));
+        const userId = await accountWithPhone();
         const { requestId } = await requestAccountDeletionService(userId, { requestedBy: 'admin' });
         await getTestDb().update(accountDeletionRequests)
             .set({ purgeScheduledAt: new Date(Date.now() - 1000) })
             .where(eq(accountDeletionRequests.id, requestId));
 
         return { userId, requestId };
+    }
+
+    async function accountWithPhone(): Promise<number>
+    {
+        const userId = await createTestUser(EMAIL, (await getRoleByName('user'))!.id);
+        await getTestDb().update(users).set({ phone: PHONE }).where(eq(users.id, userId));
+
+        return userId;
     }
 
     /** Every line written so far, once the logger's transports have run. */
@@ -157,7 +187,7 @@ describe.skipIf(!dbAvailable)('account deletion - a failing onPurge and the log'
         return [...written];
     }
 
-    /** The log of one sweep whose hook throws, once its rollback and its failure are written. */
+    /** The rollback line and every line quoting the contact, from one sweep whose hook throws. */
     async function sweepLog(onPurge: (account: HandedAccount) => Promise<void>)
     {
         configureDeletion({ onPurge });
@@ -167,61 +197,86 @@ describe.skipIf(!dbAvailable)('account deletion - a failing onPurge and the log'
         expect(await sweepDuePurges()).toEqual({ processed: 1, purged: 0, skipped: 1 });
 
         const lines = await logLines();
-        const rollback = lines.find(line => line.includes('Transaction rolled back'));
-        expect(rollback?.split('\n')[1]).toBe(`PurgeHookFailedError: deletion.onPurge failed for deletion request ${requestId}`);
         expect(lines.find(line => line.includes('purge failed, will retry next sweep'))).toContain(`[requestId=${requestId}]`);
-        expect(lines.find(line => line.includes('purge failed, will retry next sweep'))).toContain('[error=PurgeHookFailedError]');
 
-        return { rollback: rollback!, leaking: lines.filter(line => line.includes(EMAIL) || line.includes(PHONE)) };
+        return {
+            requestId,
+            rollback: lines.find(line => line.includes('Transaction rolled back'))!,
+            leaking: lines.filter(quotesContact),
+        };
     }
 
-    it('L1a: a hook whose outbox write fails on a constraint quoting the address leaves it in no log line', async () =>
+    it('L1a: a hook whose outbox write fails on a constraint quoting the address leaves it in no line; the rollback names class and SQLSTATE', async () =>
     {
-        const { leaking } = await sweepLog(writeFails);
+        const { requestId, rollback, leaking } = await sweepLog(writeFails);
 
         expect(leaking).toEqual([]);
+        expect(rollback.split('\n')[1]).toBe(`PurgeHookFailedError: deletion.onPurge failed for deletion request ${requestId}: DrizzleQueryError (SQLSTATE 23505)`);
     });
 
-    it('L1b: a hook naming the address in its own error leaves it in no line but core\'s rollback line, which prints it as the cause', async () =>
+    it('L1b: a hook throwing a plain Error naming the address leaves it in no line, core\'s rollback line included', async () =>
     {
-        const { rollback, leaking } = await sweepLog(handoffFails);
+        const { requestId, rollback, leaking } = await sweepLog(namesAddress);
 
-        expect(leaking).toEqual([rollback]);
-        expect(rollback).toContain(`Caused by: Error: handoff failed for ${EMAIL}`);
+        expect(leaking).toEqual([]);
+        expect(rollback.split('\n')[1]).toBe(`PurgeHookFailedError: deletion.onPurge failed for deletion request ${requestId}: Error`);
+        expect(rollback).not.toContain('Caused by');
     });
 
-    it('L1c: an immediate request whose hook names the address logs the failure as the package\'s line, not core\'s after-commit one', async () =>
+    it('L1c: an immediate request whose hook names the address over a failed write leaves it in no line, and the failure is the package\'s line', async () =>
     {
         configureDeletion({ onPurge: handoffFails });
-        const userId = await createTestUser(EMAIL, (await getRoleByName('user'))!.id);
-        await getTestDb().update(users).set({ phone: PHONE }).where(eq(users.id, userId));
+        const userId = await accountWithPhone();
         written.length = 0;
 
         const { requestId } = await requestAccountDeletionService(userId, { requestedBy: 'admin', immediate: true });
 
         await vi.waitFor(() => expect(written.find(line => line.includes('purge failed, will retry next sweep'))).toContain(`[requestId=${requestId}]`));
         const lines = await logLines();
-        const rollback = lines.find(line => line.includes('Transaction rolled back'));
-        expect(rollback?.split('\n')[1]).toBe(`PurgeHookFailedError: deletion.onPurge failed for deletion request ${requestId}`);
+        expect(lines.filter(quotesContact)).toEqual([]);
         expect(lines.filter(line => line.includes('afterCommit callback failed'))).toEqual([]);
-        expect(lines.filter(line => line.includes(EMAIL) || line.includes(PHONE))).toEqual([rollback]);
+        expect(lines.find(line => line.includes('purge failed, will retry next sweep')))
+            .toContain(`deletion.onPurge failed for deletion request ${requestId}: Error (SQLSTATE 23505)`);
     });
 
-    it('L2: the purge rejects with PurgeHookFailedError, the hook\'s error as its cause and not in its body', async () =>
+    it('L2: the rejection holds no reference to the hook\'s error that any serializer reaches', async () =>
     {
-        const hookError = new Error(`handoff failed for ${EMAIL}`);
-        configureDeletion({ onPurge: () => Promise.reject(hookError) });
+        configureDeletion({ onPurge: handoffFails });
         const { userId, requestId } = await dueAccount();
 
-        const failure = await purgeUserService(userId).catch((error: unknown) => error);
+        const failure = await purgeUserService(userId).catch((error: unknown) => error) as InstanceType<typeof PurgeHookFailedError>;
 
         expect(failure).toBeInstanceOf(PurgeHookFailedError);
-        expect(failure).toMatchObject({ message: `deletion.onPurge failed for deletion request ${requestId}`, requestId, statusCode: 500 });
-        expect((failure as Error).cause).toBe(hookError);
-        expect((failure as InstanceType<typeof PurgeHookFailedError>).toJSON()).toEqual({
-            __type: 'PurgeHookFailedError',
-            message: `deletion.onPurge failed for deletion request ${requestId}`,
+        expect(failure).toMatchObject({
+            message: `deletion.onPurge failed for deletion request ${requestId}: Error (SQLSTATE 23505)`,
             requestId,
+            hookErrorClass: 'Error',
+            hookErrorCode: '23505',
+            statusCode: 500,
         });
+        expect('cause' in failure).toBe(false);
+        const serialized = [
+            JSON.stringify(failure),
+            JSON.stringify(failure.toJSON()),
+            JSON.stringify(describeError(failure)),
+            inspect(failure, { showHidden: true, depth: Infinity }),
+            String(failure.stack),
+        ];
+        expect(serialized.filter(quotesContact)).toEqual([]);
+    });
+
+    it('L3: the purge job stores no failure, and pg-boss\'s serializer on a rejection an app\'s job would store has no address', async () =>
+    {
+        configureDeletion({ onPurge: handoffFails });
+        const { userId, requestId } = await dueAccount();
+        written.length = 0;
+
+        await expect(createAuthDeletionPurgeJob().run()).resolves.toBeUndefined();
+        const failure = await purgeUserService(userId).catch((error: unknown) => error);
+
+        const stored = JSON.stringify(pgBossSerializeError()(failure));
+        expect(stored).toContain(`deletion request ${requestId}: Error (SQLSTATE 23505)`);
+        expect(quotesContact(stored)).toBe(false);
+        expect((await logLines()).filter(quotesContact)).toEqual([]);
     });
 });
