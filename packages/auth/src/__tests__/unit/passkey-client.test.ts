@@ -406,8 +406,12 @@ describe('browser passkey helpers', () =>
             assertionCredential();
             const api = stepUpApi();
 
+            const assertion = await stepUpAssertion(stepUpApi());
+
+            expect(assertion.ok).toBe(true);
             expect(await stepUpWithPasskey(api)).toEqual({ ok: true });
-            expect(api.mfaStepUp.call).toHaveBeenCalledTimes(1);
+            expect((api.mfaStepUp.call as ReturnType<typeof vi.fn>).mock.calls)
+                .toStrictEqual([[{ body: { response: assertion.ok && assertion.response } }]]);
         });
 
         it('S4: a 503 (AccountBusyError) from mfa/step-up is busy, not a refusal', async () =>
