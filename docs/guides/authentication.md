@@ -176,10 +176,13 @@ operator's re-issue path). Boot is refused for `methods: []`, for `required` bes
 `deviceLink`, and for two lifecycles stating different policies. A passkey sign-in with user
 verification needs no second factor while `'passkey'` is listed. `required` means a factor on a new
 device, not the password on every sign-in: social sign-in, a password reset and a recovery code each
-get in without the password. An app that wants a password and a passkey on every sign-in closes
-`channels.passkeyLogin` and `channels.passwordReset`, sets `recoveryCodes: false` and enables no social
-provider for sign-in — see
-[the recipe](../../packages/auth/README.md#what-required-means--and-password-plus-passkey-on-every-sign-in).
+get in without the password. An app that wants the password and the passkey whenever a person signs
+in on a device that is not already signed in closes `channels.passkeyLogin` and
+`channels.passwordReset`, sets `recoveryCodes: false` and enables no social provider for sign-in. It
+does not cover a still-signed-in browser signing in again (the password alone), a bound session's
+renewal (the passkey alone), or an account that has not enrolled yet (the password, then enrolment)
+— see
+[the recipe](../../packages/auth/README.md#what-required-means--and-password-plus-passkey-on-a-device-not-signed-in).
 
 ### 5. Register Router and Middleware in `router.ts`
 

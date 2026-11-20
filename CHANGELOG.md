@@ -26,9 +26,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   mobile contract operation. A channel added later appears in the answer with it.
 - **@spfn/auth: the README says what `secondFactor.required` takes (#373).** It means a factor on a
   new device, not the password on every sign-in: social sign-in, a password reset and a recovery code
-  each get in without the password. A new recipe, "password and passkey on every sign-in", closes all
-  of them — `passkeyLogin: false`, `passwordReset: false`, `recoveryCodes: false`, no social provider
-  enabled for sign-in.
+  each get in without the password. A new recipe, "password and passkey on a device not signed in",
+  closes all of them — `passkeyLogin: false`, `passwordReset: false`, `recoveryCodes: false`, no
+  social provider enabled for sign-in — and asks the password and the passkey whenever a person signs
+  in on a device that is not already signed in. It does not cover a still-signed-in browser signing
+  in again (the password alone), a bound session's renewal (the passkey alone), or an account that
+  has not enrolled yet (the password, then enrolment).
 
 ### Changed
 

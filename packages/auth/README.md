@@ -617,9 +617,9 @@ verification itself, whatever that variable says ([what a passkey proves](#what-
 When `'passkey'` is not listed, a passkey sign-in is no longer a second proof: an enrolled account
 signing in with one on a new device gets the same 202 challenge a password sign-in gets, and the
 proxy handles it the same way. While it is listed, a passkey sign-in with user verification needs no
-second factor at all, so an app that wants a password plus a passkey on every sign-in also closes
-passkey sign-in with `channels: { passkeyLogin: false }` ([channels](#which-sign-in-channels-exist-channels))
-— and three more doors ([the recipe](#what-required-means--and-password-plus-passkey-on-every-sign-in)).
+second factor at all, so an app that wants a password plus a passkey whenever a person signs in on a
+device that is not already signed in also closes passkey sign-in with `channels: { passkeyLogin: false }` ([channels](#which-sign-in-channels-exist-channels))
+— and three more doors ([the recipe](#what-required-means--and-password-plus-passkey-on-a-device-not-signed-in)).
 
 #### `recoveryCodes: false`
 
@@ -629,7 +629,7 @@ the code is **not** spent). `recovery/regenerate` answers 404 `SECOND_FACTOR_MET
 with `details.method: 'recoveryCodes'`, and `mfa/status` reports `recoveryCodesRemaining: 0`.
 Rows from before are ignored, not deleted.
 
-#### What `required` means — and password plus passkey on every sign-in
+#### What `required` means — and password plus passkey on a device not signed in
 
 `required: true` means **a factor on a new device**: every account holds a listed second factor,
 and a device the account has not seen proves one before its key works
@@ -645,7 +645,8 @@ some ways in ask for no password at all:
 | recovery code | stands in for the factor on every 202 | `secondFactor: { recoveryCodes: false }` |
 | device-code login, device link | — | refused at boot under `required` |
 
-So an app that wants **a password and a passkey on every sign-in** closes all four:
+So an app that wants **the password and the passkey whenever a person signs in on a device that is
+not already signed in** closes all four:
 
 ```typescript
 createAuthLifecycle({
@@ -666,13 +667,23 @@ createAuthLifecycle({
 // GET /_auth/oauth/providers answers `providers: []`.
 ```
 
-Then every way in starts with the password, and every sign-in on a device the account has not
-seen — a signed-out browser included — answers 202 until the passkey is proven at `mfa/verify`. A
-sign-in that replaces the key of a session still signed in on the same device (the proxy's
-`replacementProof`) is that device again and is not asked twice. Services the app calls itself
-ignore channels, as they always do. The cost: with no recovery codes and no reset, a person who
-loses the passkey or the password is let back in only by the operator
-(`resetSecondFactorService(userId)`, and a password set by the app). `GET /_auth/channels`
+Then, for an account that has enrolled its passkey, every sign-in route asks for the password, and a
+sign-in on a device that is not already signed in — a signed-out browser included — answers 202
+until the passkey is proven at `mfa/verify`. The recipe does **not** cover:
+
+- **A browser that is still signed in, signing in again.** The proxy sends the live session's key as
+  `replacementProof`; that sign-in is the same device, so the password alone answers 200.
+- **Session renewal with [binding](#session-binding) on.** An expired bound key inside its grace is
+  renewed at `session/renew/verify` with the passkey alone; no password is asked.
+- **An account with no listed factor yet** — created before the policy, or holding only a method
+  not in `methods`. The password answers 200 with an enrolment-only session
+  (`secondFactorEnrolmentRequired: true`), and an account holding no credential it could prove
+  itself with enrols its passkey on that session with the password alone. The rule above holds from
+  the moment the account has enrolled.
+- **Services the app calls itself**, which ignore channels, as they always do.
+
+The cost: with no recovery codes and no reset, a person who loses the passkey or the password is let
+back in only by the operator (`resetSecondFactorService(userId)`, and a password set by the app). `GET /_auth/channels`
 then answers `passkeyLogin: false` and `passwordReset: false`, so the sign-in page draws neither.
 
 #### Removing the last factor
