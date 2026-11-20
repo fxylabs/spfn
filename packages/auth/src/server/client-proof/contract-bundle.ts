@@ -485,7 +485,8 @@ import { CLIENT_IDENTITY_HEADERS, CLIENT_KINDS, SERVER_CONTRACT_HEADERS } from '
  * refuse a sign-in in its own `createAuthLifecycle({ signIn: { admit } })` —
  * a lock after repeated failures, an expired temporary password — and every
  * operation that starts a session can then answer this code, with the app's
- * own string in `details.code`: `auth.enroll.register`, `auth.enroll.login`,
+ * own string in `details.code` (1 to 64 letters, digits, `_`, `-` or `.`):
+ * `auth.enroll.register`, `auth.enroll.login`,
  * `auth.enroll.oauthNative`, `auth.device.poll`, `auth.deviceLink.poll` and
  * `auth.mfa.verify`. A refused account is answered it whatever the password
  * was. Apps that do not state the option never answer it. A patch, by
@@ -1396,8 +1397,10 @@ const REST_SURFACE_ERRORS: readonly RestSurfaceError[] = [
         retryable: false,
         summary:
             'the app refused this sign-in in its own signIn.admit check — details.code is the app\'s reason, for '
-            + 'the client to branch on. Any operation that starts a session can answer it, auth.mfa.verify '
-            + 'included, and it is the answer whatever the password was; an app that never refuses never sends it',
+            + 'the client to branch on: 1 to 64 characters, each a letter, a digit, _, - or . (an app answering '
+            + 'any other code is answered 500 instead). Any operation that starts a session can answer it, '
+            + 'auth.mfa.verify included, and it is the answer whatever the password was; an app that never '
+            + 'refuses never sends it',
     },
     {
         code: 'OAuthProviderLinkOnlyError',

@@ -84,7 +84,19 @@ export type SignInOutcome = SignInAttempt & (
     }
 );
 
-/** `admit`'s answer: nothing to let the attempt through, or the refusal and its code for the client. */
+/**
+ * The shape a refusal's `code` must have: 1 to 64 characters, each a letter,
+ * a digit, `_`, `-` or `.` — `ACCOUNT_LOCKED`, `temporary-password-expired`,
+ * `policy.locked`. It reaches the client as `details.code`, a constant to
+ * branch on: never a message, and never data interpolated into one.
+ */
+export const SIGN_IN_REFUSAL_CODE = /^[A-Za-z0-9_.-]{1,64}$/;
+
+/**
+ * `admit`'s answer: nothing to let the attempt through, or the refusal and its
+ * code for the client. A `code` outside `SIGN_IN_REFUSAL_CODE` is refused like
+ * any other malformed answer: 500, no session.
+ */
 export type SignInAdmission = void | undefined | { refuse: { code: string } };
 
 /**

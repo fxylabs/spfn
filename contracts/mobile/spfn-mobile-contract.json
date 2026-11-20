@@ -905,7 +905,7 @@
       "code": "SignInRefusedError",
       "httpStatus": 403,
       "retryable": false,
-      "summary": "the app refused this sign-in in its own signIn.admit check — details.code is the app's reason, for the client to branch on. Any operation that starts a session can answer it, auth.mfa.verify included, and it is the answer whatever the password was; an app that never refuses never sends it",
+      "summary": "the app refused this sign-in in its own signIn.admit check — details.code is the app's reason, for the client to branch on: 1 to 64 characters, each a letter, a digit, _, - or . (an app answering any other code is answered 500 instead). Any operation that starts a session can answer it, auth.mfa.verify included, and it is the answer whatever the password was; an app that never refuses never sends it",
       "surface": "rest"
     },
     {

@@ -15,7 +15,7 @@
     "version": "0.14.7",
     "major": 0,
     "supportedRange": ">=0.14.0 <0.15.0",
-    "bundleSha256": "47ae296148e0485fc40ebd753f5e16fd10bf1ea2f1fe5741c7a34d19928ef92b"
+    "bundleSha256": "8d6c708c542844d80f6d9c7f704930e7b9293c699823e636c322eaceb08427e4"
   },
   "verification": {
     "digest": "shasum -a 256 contracts/mobile/spfn-mobile-contract.json",

@@ -671,11 +671,15 @@ type SignInOutcome = SignInAttempt & (
     | { result: 'failed'; reason: SignInFailureReason; keyId?: string }
 );
 
-type SignInAdmission = void | undefined | { refuse: { code: string } };
+type SignInAdmission = void | undefined | { refuse: { code: string } };   // code: /^[A-Za-z0-9_.-]{1,64}$/
 ```
 
 **`admit(attempt)`** answers nothing to let the attempt go on, or `{ refuse: { code } }`. The client
 gets **403 `SignInRefusedError`** with the app's string in `details.code`; the status is always 403.
+The code is a constant for the client to branch on — 1 to 64 characters, each a letter, a digit,
+`_`, `-` or `.` (`ACCOUNT_LOCKED`, `temporary-password-expired`) — never a message or data
+interpolated into one. Any other answer, a code outside that shape included, is refused as `admit`
+throwing is: 500, no session.
 On the web OAuth flow the refusal is the error redirect with `reason=sign_in_refused`. A refused
 registration (`register`, `signup-link`, `invitation`) rolls the new account back.
 

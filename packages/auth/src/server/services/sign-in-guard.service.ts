@@ -26,6 +26,7 @@ import { SignInRefusedError } from '@spfn/auth/errors';
 
 import { usersRepository } from '../repositories';
 import {
+    SIGN_IN_REFUSAL_CODE,
     signInGuard,
     type SignInAttempt,
     type SignInFailureReason,
@@ -43,6 +44,7 @@ export interface SignInRefusal
  *
  * @returns the refusal, or null without a guard or when the attempt may go on
  * @throws Error when `admit` throws, or answers something that is neither nothing nor a refusal
+ *   whose code has the shape `SIGN_IN_REFUSAL_CODE` states
  */
 export async function admitSignIn(attempt: SignInAttempt): Promise<SignInRefusal | null>
 {
@@ -55,9 +57,10 @@ export async function admitSignIn(attempt: SignInAttempt): Promise<SignInRefusal
 
     const code = (answer as { refuse?: { code?: unknown } }).refuse?.code;
 
-    if (typeof code !== 'string' || code.length === 0)
+    if (typeof code !== 'string' || !SIGN_IN_REFUSAL_CODE.test(code))
     {
-        throw new Error('signIn.admit must answer nothing, or { refuse: { code } } with a non-empty string code.');
+        throw new Error('signIn.admit must answer nothing, or { refuse: { code } } with a code of 1 to 64 letters, '
+            + 'digits, `_`, `-` or `.`.');
     }
 
     return { code };

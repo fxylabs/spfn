@@ -681,6 +681,25 @@ describe.skipIf(!dbAvailable)('the sign-in guard (#361)', () =>
         await drive!();
     });
 
+    it.each([
+        ['{}', {}],
+        ['{ refuse: {} }', { refuse: {} }],
+        ['an empty code', { refuse: { code: '' } }],
+        ['a code of 65 characters', { refuse: { code: 'L'.repeat(65) } }],
+        ['a message as the code', { refuse: { code: 'Locked until 2026-11-21 for user@example.com' } }],
+    ])('row 1b — admit answers %s: 500, no session, nothing of the answer in the body', async (_name, answer) =>
+    {
+        await seedUser('malformed@test.com');
+        policy.admit = async () => answer as SignInAdmission;
+        const key = deviceKeyBody();
+
+        const response = await login('malformed@test.com', PASSWORD, {}, key);
+
+        expect(response.status).toBe(500);
+        expect(await response.text()).not.toMatch(/LLLL|user@example\.com/);
+        expect(await keyRow(key.keyId)).toBeUndefined();
+    });
+
     // ========================================================================
     // Row 2 — rotation and renewal are not sign-ins
     // ========================================================================
