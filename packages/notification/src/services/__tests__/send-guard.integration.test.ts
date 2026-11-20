@@ -2,9 +2,14 @@
  * GitHub #115: a scheduled send can name a guard that decides at send time
  * whether it still goes out. One test per row of the approved case table
  * (G1-G8); each row that must not send asserts the provider was not called.
+ *
+ * #382 adds G9: a guard that fails on a statement. The row's `error_message`
+ * holds the error's description — without it, the statement's message and
+ * with it every bound value would be stored in the row.
  */
 
 import { describe, it, expect, vi, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
+import { sql } from 'drizzle-orm';
 import { getDatabase, findOne } from '@spfn/core/db';
 
 const { getBoss } = vi.hoisted(() => ({ getBoss: vi.fn((): unknown => undefined) }));
@@ -186,6 +191,29 @@ describe('#115 send guard', () =>
         expect(await statusOf(first)).toBe('skipped');
         expect(await statusOf(second)).toBe('sent');
         expect(emailSend).toHaveBeenCalledTimes(1);
+    });
+
+    it('G9 guard fails on a statement: row failed, its error_message the description, none of the values (#382)', async () =>
+    {
+        const values = ['leak-probe@example.test', '$2b$FAKEHASH'];
+        registerSendGuard('g9', async () =>
+        {
+            await getDatabase('write').execute(sql`select ${values[0]}::text, ${values[1]}::int`);
+
+            return true;
+        });
+        const id = await schedule('g9');
+
+        await expect(runJob()).rejects.toThrow(values[1]);
+
+        const row = await findOne(notifications, { id });
+        expect(row?.status).toBe('failed');
+        expect(row?.errorMessage).toContain('"code":"22P02"');
+
+        for (const leak of [...values, 'Key (', 'Failing row', 'params:'])
+        {
+            expect(row?.errorMessage).not.toContain(leak);
+        }
     });
 
     it('a skipped row cannot be cancelled and is left unchanged', async () =>
