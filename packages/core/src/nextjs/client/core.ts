@@ -67,16 +67,41 @@ function inboundAppUrl(inbound: InboundRequest | null): string
 }
 
 /**
+ * Whether a call's response may be kept by Next's data cache and served to other
+ * requests: `cache: 'force-cache'`, or a `next.revalidate` / `next.tags` not overruled
+ * by `cache: 'no-store'`.
+ */
+function sharedAcrossRequests(fetchOptions: CallOptions['fetchOptions']): boolean
+{
+    const { revalidate, tags } = fetchOptions?.next ?? {};
+
+    if (fetchOptions?.cache === 'force-cache')
+    {
+        return true;
+    }
+
+    return fetchOptions?.cache !== 'no-store'
+        && (revalidate === false || (revalidate ?? 0) > 0 || (tags?.length ?? 0) > 0);
+}
+
+/**
  * Server-side, the header asserting the browser's address to the app's own proxy
  *
  * The call reaches the proxy as a new request from the Next.js server, so nothing on
- * it names the browser unless the call asserts it. The signing code is server-only and
- * loaded by dynamic import, the way `next/headers` is; a browser build resolves the
- * subpath to an empty stub, and in the browser there is no inbound request anyway.
+ * it names the browser unless the call asserts it. A call whose response is cached
+ * across requests asserts nothing: that response is no one client's, and the backend
+ * sees the Next.js server's address for it. The signing code is server-only and loaded
+ * by dynamic import, the way `next/headers` is; a browser build resolves the subpath
+ * to an empty stub, and in the browser there is no inbound request anyway.
  */
-async function forwardedClient(inbound: InboundRequest | null, method: string, url: string): Promise<Record<string, string>>
+async function forwardedClient(
+    inbound: InboundRequest | null,
+    method: string,
+    url: string,
+    fetchOptions: CallOptions['fetchOptions'],
+): Promise<Record<string, string>>
 {
-    if (!inbound)
+    if (!inbound || sharedAcrossRequests(fetchOptions))
     {
         return {};
     }
@@ -340,7 +365,7 @@ export function createApi<TRouter extends Router<any>>(
         setUnlessCallerDid(headers, 'User-Agent', inbound?.headers.get('user-agent'));
 
         // And its address, which only the holder of the proxy key can assert.
-        Object.assign(headers, await forwardedClient(inbound, method, fullUrl));
+        Object.assign(headers, await forwardedClient(inbound, method, fullUrl, options.fetchOptions));
 
         // Log cookie auto-detection if debug enabled
         if (debug && inbound && Object.keys(inbound.cookies).length > 0)

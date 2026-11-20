@@ -383,14 +383,28 @@ is a new request from the Next.js server to the app's own proxy: its `X-Forwarde
 the server, not the browser. So, server-side, `createApi` reads the browser's address off the
 request it runs for (`next/headers`) — with the very rule the proxy uses, `TRUSTED_PROXY_HOPS`
 entries from the right of `X-Forwarded-For` — and **asserts** it to the proxy in
-`x-spfn-forwarded-client: <ip>;<timestamp>;<nonce>;<hmac>`. The HMAC is keyed with
-`SPFN_PROXY_SECRET` and covers a fixed label, the call's method and path, the address, the
-timestamp and the nonce.
+`x-spfn-forwarded-client: <ip>;<timestamp>;<hmac>`. The HMAC is keyed with
+`SPFN_PROXY_SECRET` and covers a fixed label, the call's method and path, the address and the
+timestamp.
 
 The proxy believes an assertion it can verify with its own key, for that method and path,
-within 30 seconds; it then forwards (and signs) the asserted address. Anything else — absent, a
-browser's forgery, one replayed on another route or too late — is ignored, and the address is
-read off `X-Forwarded-For` as for any request. The signing code is server-only: the client
+within 30 seconds either side of its timestamp; it then forwards (and signs) the asserted
+address. Anything else — absent, a browser's forgery, one replayed with another method, on
+another path or too late — is ignored, and the address is read off `X-Forwarded-For` as for
+any request. **Within those 30 seconds an assertion is believed as often as it is presented**,
+on its method and path: the proxy keeps no record of the assertions it saw, so the format
+carries no nonce (one that nothing checks would only look like replay protection). Replaying
+one needs the header itself, which travels only from the Next.js server to its own proxy.
+
+What it asserts is a fact about the **inbound request**, not about one call: the assertion is
+made once per inbound request and target (method and path) and every call of that request to
+that target sends the same header, so Next's request dedupe still folds two identical calls
+of one render into one. (It is signed again once 15 seconds have passed, so a long server
+action's late call does not carry an expired one.) A call whose response may be **cached
+across requests** — `.fetchOptions({ next: { revalidate } })` with a `revalidate` above 0 or
+`false`, `next.tags`, or `cache: 'force-cache'`, unless `cache: 'no-store'` overrules it —
+asserts nothing: its response is shared between clients, and the backend sees the Next.js
+server's address for it, as before. The signing code is server-only: the client
 loads it from `@spfn/core/nextjs/server-call` by dynamic import, only where `next/headers`
 answers, and a browser build resolves that subpath to an empty stub (its `browser` export
 condition).

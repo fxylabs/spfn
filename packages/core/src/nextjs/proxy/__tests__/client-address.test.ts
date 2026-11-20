@@ -30,13 +30,28 @@ const BACKEND = 'http://backend.test';
 const BROWSER = '203.0.113.7';
 const NEXT_SERVER = '198.51.100.9';
 
-/** The browser request a server-side call is made for, as `next/headers` answers it. */
-const inbound = vi.hoisted(() => ({ forwardedFor: '' }));
+/**
+ * The browser request a server-side call is made for, as `next/headers` answers it:
+ * one headers object for the whole of that request, as Next's request store holds it.
+ */
+const inbound = vi.hoisted(() => ({ request: new Headers() }));
 
 vi.mock('next/headers', () => ({
     cookies: async () => ({ getAll: () => [] }),
-    headers: async () => new Headers({ host: 'app.test', 'x-forwarded-for': inbound.forwardedFor }),
+    headers: async () => inbound.request,
 }));
+
+/** A new browser request reaching the app, from the address `forwardedFor` names. */
+function browserRequest(forwardedFor: string): void
+{
+    inbound.request = new Headers({ host: 'app.test', 'x-forwarded-for': forwardedFor });
+}
+
+/** Lets the clock move on, so a fresh signature would differ from the last one. */
+async function tick(): Promise<void>
+{
+    await new Promise(resolve => setTimeout(resolve, 5));
+}
 
 function backend(): Hono
 {
@@ -92,30 +107,28 @@ function network(interceptors: InterceptorRule[] = [])
         /** A server component's client. */
         api: createApi<any>({ fetch: routed as typeof fetch }) as any,
         /** The browser calling the proxy itself. */
-        async browser(routeName: string, headers: Record<string, string>): Promise<{ ip?: string }>
+        async browser(routeName: string, headers: Record<string, string>, method: 'GET' | 'POST' = 'GET'): Promise<{ ip?: string }>
         {
-            const url = `${APP}/api/rpc/${routeName}?input=${encodeURIComponent('{}')}`;
+            const url = method === 'GET'
+                ? `${APP}/api/rpc/${routeName}?input=${encodeURIComponent('{}')}`
+                : `${APP}/api/rpc/${routeName}`;
+            const body = method === 'POST' ? '{}' : undefined;
 
-            return await (await routed(url, { headers })).json();
+            return await (await routed(url, { method, body, headers: { 'content-type': 'application/json', ...headers } })).json();
         },
     };
 }
 
 function assertion(path: string, clientIp: string, options: { secret?: string; timestamp?: number } = {}): string
 {
-    return signForwardedClient(
-        parseProxyKey(options.secret ?? SECRET),
-        { method: 'GET', path },
-        clientIp,
-        { timestamp: String(options.timestamp ?? Date.now()), nonce: 'n0nce' },
-    )!;
+    return signForwardedClient(parseProxyKey(options.secret ?? SECRET), { method: 'GET', path }, clientIp, options.timestamp)!;
 }
 
 describe('the browser\'s address across a server-side call', () =>
 {
     afterEach(() =>
     {
-        inbound.forwardedFor = '';
+        browserRequest('');
         vi.unstubAllGlobals();
         vi.unstubAllEnvs();
     });
@@ -130,7 +143,7 @@ describe('the browser\'s address across a server-side call', () =>
     it('C1: a server-side call made for a browser request reaches the backend with the browser\'s address', async () =>
     {
         configure();
-        inbound.forwardedFor = BROWSER;
+        browserRequest(BROWSER);
 
         expect(await network().api.whoami.call({})).toEqual({ ip: BROWSER });
     });
@@ -165,7 +178,7 @@ describe('the browser\'s address across a server-side call', () =>
     it('C5: without a proxy key a server-side call asserts nothing', async () =>
     {
         configure({ secret: '' });
-        inbound.forwardedFor = BROWSER;
+        browserRequest(BROWSER);
         const { api, sent } = network();
 
         await api.whoami.call({});
@@ -177,10 +190,11 @@ describe('the browser\'s address across a server-side call', () =>
     it('C6: behind two trusted hops, a server-side call asserts the entry the proxy reads off the browser\'s own request', async () =>
     {
         configure({ hops: '2' });
-        inbound.forwardedFor = `192.0.2.66, ${BROWSER}, 10.0.0.2`;
+        const forwardedFor = `192.0.2.66, ${BROWSER}, 10.0.0.2`;
+        browserRequest(forwardedFor);
         const { api, browser } = network();
 
-        expect(await browser('whoami', { 'x-forwarded-for': inbound.forwardedFor })).toEqual({ ip: BROWSER });
+        expect(await browser('whoami', { 'x-forwarded-for': forwardedFor })).toEqual({ ip: BROWSER });
         expect(await api.whoami.call({})).toEqual({ ip: BROWSER });
     });
 
@@ -198,5 +212,70 @@ describe('the browser\'s address across a server-side call', () =>
 
         expect(await network([again]).browser('whoami', { 'x-forwarded-for': BROWSER }))
             .toEqual({ ip: BROWSER, again: true });
+    });
+
+    it('C9: two identical calls in one inbound request send the same assertion, byte for byte, so Next can dedupe them', async () =>
+    {
+        configure();
+        browserRequest(BROWSER);
+        const { api, sent } = network();
+
+        await api.whoami.call({});
+        await tick();
+        await api.whoami.call({});
+
+        expect(sent[0].get(FORWARDED_CLIENT_HEADER)).toMatch(new RegExp(`^${BROWSER};\\d+;[0-9a-f]{64}$`));
+        expect(sent[1].get(FORWARDED_CLIENT_HEADER)).toBe(sent[0].get(FORWARDED_CLIENT_HEADER));
+    });
+
+    it('C10: two inbound requests get their own assertions, never one another\'s', async () =>
+    {
+        configure();
+        const { api, sent } = network();
+
+        browserRequest(BROWSER);
+        await api.whoami.call({});
+        await tick();
+        browserRequest(BROWSER);
+        await api.whoami.call({});
+        browserRequest('192.0.2.66');
+
+        expect(await api.whoami.call({})).toEqual({ ip: '192.0.2.66' });
+        expect(sent[1].get(FORWARDED_CLIENT_HEADER)).not.toBe(sent[0].get(FORWARDED_CLIENT_HEADER));
+    });
+
+    it('C11: a call cached across requests asserts no address; one that is not cached does', async () =>
+    {
+        configure();
+        browserRequest(BROWSER);
+        const { api, sent } = network();
+
+        expect(await api.whoami.fetchOptions({ next: { revalidate: 60 } }).call({})).not.toEqual({ ip: BROWSER });
+        await api.whoami.fetchOptions({ next: { tags: ['who'] } }).call({});
+        await api.whoami.fetchOptions({ next: { revalidate: false } }).call({});
+        await api.whoami.fetchOptions({ cache: 'force-cache' }).call({});
+        expect(sent.map(headers => headers.get(FORWARDED_CLIENT_HEADER))).toEqual([null, null, null, null]);
+
+        // The controls: not cached, so the call is this browser's
+        expect(await api.whoami.fetchOptions({ next: { revalidate: 0 } }).call({})).toEqual({ ip: BROWSER });
+        expect(await api.whoami.fetchOptions({ cache: 'no-store', next: { tags: ['who'] } }).call({})).toEqual({ ip: BROWSER });
+    });
+
+    it('C12: an assertion made after half its window is signed again, so a long request\'s late call still verifies', async () =>
+    {
+        configure();
+        browserRequest(BROWSER);
+        const { api, sent } = network();
+        const start = Date.now();
+        const clock = vi.spyOn(Date, 'now');
+
+        clock.mockReturnValue(start);
+        await api.whoami.call({});
+        clock.mockReturnValue(start + 31_000);
+        const late = await api.whoami.call({});
+        clock.mockRestore();
+
+        expect(late).toEqual({ ip: BROWSER });
+        expect(sent[1].get(FORWARDED_CLIENT_HEADER)).not.toBe(sent[0].get(FORWARDED_CLIENT_HEADER));
     });
 });

@@ -195,10 +195,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     address it sends too.
   - Server-side, `createApi` reads the browser's address off the inbound request with the
     proxy's own rule (`TRUSTED_PROXY_HOPS` from the right of `X-Forwarded-For`, one shared
-    helper) and sends `x-spfn-forwarded-client: <ip>;<ts>;<nonce>;<hmac>`, keyed with
-    `SPFN_PROXY_SECRET` over a fixed label, method, path, address, timestamp and nonce. The proxy
-    uses an assertion it verifies (30-second window); an absent or invalid one changes nothing.
-    Without `SPFN_PROXY_SECRET` nothing is asserted and the backend sees what it saw before.
+    helper) and sends `x-spfn-forwarded-client: <ip>;<timestamp>;<hmac>`, keyed with
+    `SPFN_PROXY_SECRET` over a fixed label, method, path, address and timestamp. The proxy uses
+    an assertion it verifies (30 seconds either side of the timestamp); an absent or invalid one
+    changes nothing. Within the window an assertion is believed on its method and path as often
+    as it is replayed: the proxy keeps no nonce store, so the format has no nonce. One assertion
+    is made per inbound request and target and reused by every call of that request, so Next's
+    request dedupe still works; a call cached across requests (`next.revalidate`, `next.tags`,
+    `cache: 'force-cache'`) asserts nothing and reaches the backend from the Next.js server's
+    address, as before. Without `SPFN_PROXY_SECRET` nothing is asserted and the backend sees
+    what it saw before.
     The client loads the signer by dynamic import from a new subpath,
     `@spfn/core/nextjs/server-call`, whose `browser` export condition resolves to an empty stub,
     so no signing code reaches a browser bundle.
