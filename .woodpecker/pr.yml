@@ -114,14 +114,23 @@ steps:
         #
         # The rule since: a large or growing write goes on the workspace volume
         # (a PersistentVolumeClaim, not counted here), not in the container.
-        # `test` below follows it for the cluster and its home directory. Of the
-        # measured rows, what stays in the container is /usr's 276 MB and /tmp's
-        # 33 without the deleted download: 309 MB. /root and the cluster move
-        # whole, the 170 MB of /root nobody has accounted for with them (see
-        # `test`). Not in the rows and so not in the sum: PostgreSQL's log, the
-        # step log, whatever else the layer gains. 2Gi leaves about 1.8 GB above
-        # the 309 for those, a new suite's temporary files or a larger apt
-        # dependency — an estimate until a pipeline of this branch is measured.
+        # `test` below follows it for the cluster and its home directory.
+        # Measured in 746, this branch's `test` (head f834ed48, every task
+        # passed), with `du` in the pod every 120 s through the step; the peak
+        # of each:
+        #
+        #     container  /usr                 276 MB  above the image's 1085, as in 743
+        #                /tmp                  33 MB
+        #                /root                  1 MB
+        #                /var/lib/postgresql    1 MB  after the drop
+        #                /var/log               1 MB
+        #     volume     postgresql           107 MB  the whole cluster, pg_wal in it
+        #                home                 151 MB  all of it corepack's pnpm
+        #                redis                  1 MB
+        #
+        # The container's writes peaked at about 310 MB, so 2Gi leaves about
+        # 1.8 GB for what the rows do not show — the step log, a new suite's
+        # temporary files, a larger apt dependency.
         # `verify` writes less: no apt, no cluster; pnpm keeps its store at the
         # volume's root because /root is another filesystem, so the one-off
         # corepack pnpm (21 MB) and the build's /tmp are its share. 744's
@@ -390,8 +399,9 @@ steps:
             # too, for stretches too quiet to reach the size. Measured against a
             # throwaway cluster with a truncate, reseed and update loop: pg_wal
             # 689 MB with the Debian defaults; a 49 MB peak, 33 MB afterwards,
-            # with these lines. What the more frequent checkpoints cost the
-            # suites in time was not measured.
+            # with these lines. In 746 the whole cluster peaked at 107 MB, pg_wal
+            # included. What the more frequent checkpoints cost the suites in
+            # time was not measured.
             - PGVER=$(ls /etc/postgresql | head -n1)
             - pg_dropcluster --stop "$PGVER" main
             - pg_createcluster -p 5432 -d "$STEP_STATE/postgresql" "$PGVER" main
@@ -412,8 +422,9 @@ steps:
             # test/kit/local-install-integration.test.ts runs, and the newest pnpm
             # (68 MB as 12.21.0), fetched when the kit runs pnpm in a scratch
             # project that names no `packageManager`. What is not known: the
-            # other 170 MB, which that run did not write. A tool's own variable
-            # would not cover even the known part — the kit hands its pnpm
+            # other 170 MB, which that run did not write, nor did 745 or 746;
+            # wherever it comes from, it would now land on the volume. A tool's
+            # own variable would not cover even the known part — the kit hands its pnpm
             # children HOME but not COREPACK_HOME (packages/cli/src/kit/
             # child-env.ts), so they would download their pnpm again under /root —
             # while moving HOME puts both parts on the volume whatever the rest
