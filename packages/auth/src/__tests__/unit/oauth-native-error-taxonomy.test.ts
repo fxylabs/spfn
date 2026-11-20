@@ -403,6 +403,13 @@ describe('native sign-in answers each failure path with its own code', () =>
         // signIn.admit. Held to its error class in contract-export.test.ts.
         const signInGuardCodes = ['SignInRefusedError'];
 
+        // The required password change is the tenth (contract 0.15.0, #362):
+        // the refusal every signed-in operation that does not lead to the
+        // change can answer a session whose account must change its password.
+        // Never native sign-in's: such a sign-in answers its session, with
+        // passwordChangeRequired. Held to its error class in contract-export.test.ts.
+        const passwordChangeCodes = ['PasswordChangeRequiredError'];
+
         expect(declared.filter(e => e.surface === 'rest').map(e => e.code).sort())
             .toEqual([
                 ...table.map(cell => cell.code),
@@ -414,6 +421,7 @@ describe('native sign-in answers each failure path with its own code', () =>
                 ...sessionEndingCodes,
                 ...passkeyProofCodes,
                 ...signInGuardCodes,
+                ...passwordChangeCodes,
             ].sort());
     });
 

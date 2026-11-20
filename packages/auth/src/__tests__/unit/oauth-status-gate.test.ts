@@ -29,11 +29,12 @@ describe('assertActiveForOAuthSession', () =>
 {
     beforeEach(() => vi.clearAllMocks());
 
-    it('allows an active user through', async () =>
+    it('allows an active user through, answering the account it read', async () =>
     {
-        usersRepository.findByIdOnPrimary.mockResolvedValue({ id: 1, status: 'active', deletion: null });
+        const account = { id: 1, status: 'active', deletion: null };
+        usersRepository.findByIdOnPrimary.mockResolvedValue(account);
 
-        await expect(assertActiveForOAuthSession(1)).resolves.toBeUndefined();
+        await expect(assertActiveForOAuthSession(1)).resolves.toBe(account);
     });
 
     it('blocks a suspended user with AccountDisabledError', async () =>

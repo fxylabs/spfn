@@ -22,7 +22,6 @@ import { assertChannelsConsistent, configureChannels, type AuthChannelsOptions }
 import {
     assertSecondFactorPolicy,
     configureSecondFactor,
-    isSecondFactorRequired,
     type SecondFactorOptions,
 } from './lib/second-factor-policy';
 import { assertSignInGuardConsistent, configureSignIn, type SignInGuardOptions } from './lib/sign-in-guard';
@@ -628,20 +627,17 @@ export function createAuthLifecycle(options: AuthLifecycleOptions = {}): AuthLif
 
         /**
          * Refuses the boot when the server's app was built by another copy of
-         * Hono than this package's and the enrolment gate would read its
-         * routes: the gate could not read a single request's route. It reads
-         * one only for an enrolment-only account, and `secondFactor.required`
-         * is the only thing that makes one (`isEnrolmentOnly`) — without it,
-         * nothing here reads a route and the app boots. Core runs this hook for
-         * the app it configures, not for a custom `app.ts`; there the first
-         * such request is refused instead.
+         * Hono than this package's: the gate could not read a single request's
+         * route. It reads one for every restricted session — an account that
+         * must change its password (#362), which seeding makes in any app, or
+         * one the second-factor policy holds to enrolling — so it is asked of
+         * every app, policy or not. Core runs this hook for the app it
+         * configures, not for a custom `app.ts`; there the first such request
+         * is refused instead.
          */
         afterRoutes: async (app) =>
         {
-            if (isSecondFactorRequired())
-            {
-                assertAppFromThisHono(app);
-            }
+            assertAppFromThisHono(app);
         },
 
         /**

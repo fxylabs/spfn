@@ -29,7 +29,7 @@ import { UnauthorizedError } from '@spfn/core/errors';
 import { SecondFactorEnrolmentRequiredError } from '@spfn/auth/errors';
 
 import { redeemOneTimeTokenService } from '../services/one-time-token.service';
-import { admitPrincipal, authContextFor, type AdmissionRefusal } from '../services/admission.service';
+import { admissionRefusalError, admitPrincipal, authContextFor, type AdmissionRefusal } from '../services/admission.service';
 
 export const oneTimeTokenAuth = defineMiddleware('oneTimeTokenAuth', async (c, next) =>
 {
@@ -72,7 +72,8 @@ export const oneTimeTokenAuth = defineMiddleware('oneTimeTokenAuth', async (c, n
 /**
  * The answers this middleware has always given: a dead token — here, one whose
  * issuing key has since died — is an invalid one; an account that is not
- * active is a 401 of its own; enrolment-only is the policy's 403.
+ * active is a 401 of its own; enrolment-only is the policy's 403, and a
+ * password to change its own 403.
  */
 function oneTimeTokenRefusal(refusal: AdmissionRefusal): Error
 {
@@ -89,6 +90,8 @@ function oneTimeTokenRefusal(refusal: AdmissionRefusal): Error
             return new UnauthorizedError({ message: 'Invalid or expired one-time token' });
         case 'enrolmentRequired':
             return new SecondFactorEnrolmentRequiredError();
+        case 'passwordChangeRequired':
+            return admissionRefusalError(refusal);
     }
 }
 

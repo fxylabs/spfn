@@ -37,7 +37,8 @@ const {
     deviceLinksRepository: {
         expireAllLiveByUserId: vi.fn(async () => []),
     },
-    verifyPassword: vi.fn(async () => true),
+    // Only the current password verifies: a new password is never the current one (#362).
+    verifyPassword: vi.fn(async (password: string) => password === 'old-password'),
     hashPassword: vi.fn(async () => 'new-hash'),
     revokeAllOAuth2GrantsForUser: vi.fn(async () => undefined),
     assertStepUp: vi.fn(async () => undefined),
@@ -123,7 +124,8 @@ describe('changePasswordService — session revocation', () =>
             .mockResolvedValueOnce({ id: 7, passwordHash: 'changed-meanwhile' })
             .mockResolvedValueOnce({ id: 7, passwordHash: 'changed-meanwhile' });
         usersRepository.findByIdOnPrimary.mockResolvedValueOnce({ id: 7, passwordHash: 'changed-meanwhile' });
-        verifyPassword.mockResolvedValueOnce(true).mockResolvedValueOnce(false);
+        // The current password, the new one compared against it (#362), then the re-check.
+        verifyPassword.mockResolvedValueOnce(true).mockResolvedValueOnce(false).mockResolvedValueOnce(false);
 
         await expect(changePasswordService({
             userId: 7,

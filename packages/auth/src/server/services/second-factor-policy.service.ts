@@ -18,7 +18,7 @@ import { SecondFactorEnrolmentRequiredError, SecondFactorRequiredError } from '@
 import { keysRepository, mfaEnrolmentRepository, passkeysRepository, usersRepository } from '../repositories';
 import type { EnrolmentMethods } from '../repositories/mfa-enrolment.repository';
 import { isMethodListed, isSecondFactorRequired } from '../lib/second-factor-policy';
-import { isEnrolmentRoute } from '../lib/enrolment-routes';
+import { restrictedRouteAdmits } from '../lib/enrolment-routes';
 
 function listedMethods(): EnrolmentMethods
 {
@@ -86,10 +86,12 @@ export async function keySecondFactorEnrolmentFields(keyId: string): Promise<Sec
  * only enrol is admitted on an enrolment route reached through the global
  * `authenticate`, and nowhere else.
  *
- * Asked by `admitPrincipal`, the one point every person principal is produced
- * — so no principal carrying a user reaches a handler without it. Not
- * evaluated at all while the policy does not require a second factor: no
- * query, no answer that differs from before.
+ * The policy's half alone, for an application that asks it outside the
+ * admission. `admitPrincipal` — the one point every person principal is
+ * produced — asks it as one of the account's outstanding requirements
+ * (`isEnrolmentOnly`), beside a password to change. Not evaluated at all while
+ * the policy does not require a second factor: no query, no answer that
+ * differs from before.
  *
  * Read on the primary: an account that enrolled on the previous request is
  * admitted on this one, on the same session.
@@ -105,7 +107,7 @@ export async function keySecondFactorEnrolmentFields(keyId: string): Promise<Sec
  */
 export async function secondFactorAdmits(userId: number, route: Context | null): Promise<boolean>
 {
-    return !await isEnrolmentOnly(userId) || (route !== null && isEnrolmentRoute(route));
+    return !await isEnrolmentOnly(userId) || (route !== null && restrictedRouteAdmits(route, 'secondFactorEnrolment'));
 }
 
 /**

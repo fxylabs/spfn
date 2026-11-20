@@ -9,7 +9,7 @@
  * credential and calls `admitPrincipal`; the completion of a two-step procedure
  * (`admitDeferred`) and a write that asks again under the account lock whether
  * its session is still let in (the deletion request) call `admitCompletion`,
- * the same decision with a named route's enrolment class in place of a
+ * the same decision with a named route's classes in place of a
  * request. None of them carries a rule of its own, so a rule added here holds
  * at every door and a door cannot keep a copy that has drifted.
  *
@@ -24,7 +24,10 @@
  *    (`familyRefusal`); then the key has not expired. The family comes before
  *    the expiry so that a copy presented from another browser is told it is
  *    one, never asked to renew the owner's session;
- * 3. the second-factor policy (#309) — except for renewal, below.
+ * 3. the account's outstanding requirements — a password to change (#362),
+ *    then a second factor to enrol under the policy (#309) — except for
+ *    renewal, below. With one outstanding, only a route that admits it is let
+ *    in (`ROUTE_ENROLMENT`); with several, a route that admits any one of them.
  *
  * The principal it answers with is a `Principal`, and the two shapes the doors
  * hand on — `AuthContext` on the request, `VerifiedOAuth2AccessToken` to
@@ -54,9 +57,10 @@ import { profileLocale } from '../lib/profile-locale';
 import { uaFamily } from '../lib/ua-family';
 import type { StartingCredential } from '../lib/deferred-stamp';
 import { resolveRoleInForce } from './role-email-domain.service';
-import { secondFactorAdmits } from './second-factor-policy.service';
+import { isEnrolmentOnly } from './second-factor-policy.service';
 import { isMethodListed } from '../lib/second-factor-policy';
-import type { RouteEnrolment } from '../routes/channels';
+import { restrictedRouteAdmits, SESSION_REQUIREMENTS, type SessionRequirement } from '../lib/enrolment-routes';
+import type { RouteEnrolment, RouteRequirementClasses } from '../routes/channels';
 
 /**
  * What a door presents. Closed: a kind added here does not compile until
@@ -70,7 +74,7 @@ import type { RouteEnrolment } from '../routes/channels';
  * A procedure's completion is no kind of its own: it presents the credential
  * the procedure was started with, to `admitCompletion`, which the package
  * entry does not export — so no caller of `admitPrincipal` can claim a
- * completing route's enrolment class.
+ * completing route's classes.
  */
 export type PrincipalCredential =
     | { kind: 'deviceKey'; keyId: string }
@@ -87,7 +91,7 @@ export interface AdmitPrincipalParams
 {
     userId: number;
     credential: PrincipalCredential;
-    /** The matched request, for the #309 enrolment-route exception; null where there is none. */
+    /** The matched request, for the routes a restricted session reaches (`ROUTE_ENROLMENT`); null where there is none. */
     route: Context | null;
     /**
      * The request the credential is presented on, which a bound key's browser
@@ -323,14 +327,15 @@ export function isRenewable(key: KeyWithAccountEpoch): boolean
  * The queries are the ones `authenticate` always made: one read of the
  * account, its role (with whether that role is active) and the credential's
  * row together, the locale beside it, and the second-factor read only while
- * the policy requires a factor.
+ * the policy requires a factor. `passwordChangeRequired` is a column of the
+ * account row already read.
  *
- * **Renewal and the second factor (au9-N8).** A `renewal` credential is not
- * held to the second-factor policy, deliberately. Renewal does not admit a
+ * **Renewal and the requirements (au9-N8).** A `renewal` credential is not
+ * held to the account's requirements, deliberately. Renewal does not admit a
  * request to anything: it continues a key the person already holds into its
- * replacement, and the replacement is held to the policy on its first request
- * like any key. Refusing it here would turn an enrolment-only person's expired
- * key into a sign-in instead of a renewal, and enrol nothing.
+ * replacement, and the replacement is held to them on its first request like
+ * any key. Refusing it here would turn a restricted person's expired key into
+ * a sign-in instead of a renewal, and change or enrol nothing.
  */
 export async function admitPrincipal(params: AdmitPrincipalParams): Promise<Admission>
 {
@@ -342,8 +347,8 @@ export interface AdmitCompletionParams
     userId: number;
     /** The credential the procedure was started with — or, for a renewal, the renewal it completes. */
     credential: PrincipalCredential;
-    /** The class in `ROUTE_ENROLMENT` (#309) of the route the credential is admitted for. */
-    enrolment: RouteEnrolment;
+    /** The row in `ROUTE_ENROLMENT` of the route the credential is admitted for: its class under each requirement. */
+    enrolment: RouteRequirementClasses;
 }
 
 /**
@@ -355,20 +360,21 @@ export interface AdmitCompletionParams
  * An application profile's credential is live here as it was on the request
  * its verifier admitted.
  *
- * The second-factor policy's enrolment-only state admits the credential
- * exactly as it admitted the route it came in on (`ROUTE_ENROLMENT`): under
- * `'always'` and `'unchecked'`, under a method while that method is listed,
- * and under `'none'` not at all. Not exported from the package entry: an
- * application that could name an enrolment class here could let any request
- * past the enrolment-only refusal.
+ * An outstanding requirement admits the credential exactly as it admitted the
+ * route it came in on (`ROUTE_ENROLMENT`): enrolment under `'always'` and
+ * `'unchecked'`, under a method while that method is listed, and under
+ * `'none'` not at all; a password change under `'admit'` and `'unchecked'`.
+ * Not exported from the package entry: an application that could name a
+ * route's classes here could let any request past a restricted session's
+ * refusal.
  */
 export async function admitCompletion(params: AdmitCompletionParams): Promise<Admission>
 {
     return await admit({ userId: params.userId, credential: params.credential, route: null, presentedOn: null }, params.enrolment);
 }
 
-/** The decision both entries make; `enrolment` is a completing route's class, null for a door. */
-async function admit(params: AdmitPrincipalParams, enrolment: RouteEnrolment | null): Promise<Admission>
+/** The decision both entries make; `completing` is a completing route's row, null for a door. */
+async function admit(params: AdmitPrincipalParams, completing: RouteRequirementClasses | null): Promise<Admission>
 {
     const [read, chosenLocale] = await Promise.all([
         readAdmission(params.userId, params.credential),
@@ -385,7 +391,7 @@ async function admit(params: AdmitPrincipalParams, enrolment: RouteEnrolment | n
         ?? revokedRefusal(read)
         ?? familyRefusal(read.key, params.presentedOn)
         ?? expiredRefusal(read)
-        ?? await secondFactorRefusal(params, enrolment);
+        ?? await requirementRefusal(read.account.user, params, completing);
 
     if (refusal !== null)
     {
@@ -572,18 +578,66 @@ function familyRefusal(key: UserPublicKey | null | undefined, presentedOn: Prese
     return uaFamily(presentedOn.userAgent) === key.registeredUaFamily ? null : { reason: 'contextChanged' };
 }
 
-/** Step 3, for every credential but renewal (see `admitPrincipal`). */
-async function secondFactorRefusal(
+/**
+ * Step 3, for every credential but renewal (see `admitPrincipal`): the
+ * account's outstanding requirements, and whether the route admits any one of
+ * them. Refused, the answer names the first outstanding in
+ * `SESSION_REQUIREMENTS`' order, and a password change lists them all.
+ */
+async function requirementRefusal(
+    user: User,
     params: AdmitPrincipalParams,
-    enrolment: RouteEnrolment | null,
+    completing: RouteRequirementClasses | null,
 ): Promise<AdmissionRefusal | null>
 {
-    if (params.credential.kind === 'renewal' || (enrolment !== null && admitsEnrolmentOnly(enrolment)))
+    if (params.credential.kind === 'renewal')
     {
         return null;
     }
 
-    return await secondFactorAdmits(params.userId, params.route) ? null : { reason: 'enrolmentRequired' };
+    const outstanding = await outstandingRequirements(user);
+
+    if (outstanding.length === 0 || outstanding.some(requirement => routeAdmits(requirement, params.route, completing)))
+    {
+        return null;
+    }
+
+    return outstanding[0] === 'passwordChange'
+        ? { reason: 'passwordChangeRequired', requirements: outstanding }
+        : { reason: 'enrolmentRequired' };
+}
+
+/**
+ * What the account must do before its session may do anything else, in
+ * `SESSION_REQUIREMENTS`' order. The enrolment read runs only while the policy
+ * requires a second factor (`isEnrolmentOnly`).
+ */
+async function outstandingRequirements(user: User): Promise<SessionRequirement[]>
+{
+    const held: Record<SessionRequirement, boolean> = {
+        passwordChange: user.passwordChangeRequired,
+        secondFactorEnrolment: await isEnrolmentOnly(user.id),
+    };
+
+    return SESSION_REQUIREMENTS.filter(requirement => held[requirement]);
+}
+
+/**
+ * Whether the request admits a session held to `requirement`: a completing
+ * route by its row, a door's request by the marker on the route it matched —
+ * read only from inside the global `authenticate` — and no request at all
+ * (`route: null`: a one-time token, a grant, every other door) never.
+ */
+function routeAdmits(requirement: SessionRequirement, route: Context | null, completing: RouteRequirementClasses | null): boolean
+{
+    if (completing !== null)
+    {
+        return requirement === 'passwordChange'
+            ? completing.passwordChange !== 'refuse'
+            : admitsEnrolmentOnly(completing.secondFactorEnrolment);
+    }
+
+    return route !== null && restrictedRouteAdmits(route, requirement);
 }
 
 /** Whether a completing route admits an enrolment-only session, as `authenticate` reads its class. */

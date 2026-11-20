@@ -872,6 +872,7 @@ export class UsersRepository extends AccountStateRepository
                 emailVerifiedAt: users.emailVerifiedAt,
                 phoneVerifiedAt: users.phoneVerifiedAt,
                 passwordHash: users.passwordHash,
+                passwordChangeRequired: users.passwordChangeRequired,
             })
             .from(users)
             .where(eq(users.id, userId))
@@ -891,6 +892,7 @@ export class UsersRepository extends AccountStateRepository
             isEmailVerified: !!user.emailVerifiedAt,
             isPhoneVerified: !!user.phoneVerifiedAt,
             hasPassword: !!user.passwordHash,
+            passwordChangeRequired: user.passwordChangeRequired,
         };
     }
 

@@ -86,7 +86,8 @@ import {
     spendChallenge,
 } from './webauthn-challenge.service';
 import { isMethodListed } from '../lib/second-factor-policy';
-import { accountRefusal, admitPrincipal, sessionCredentialOf, type PrincipalCredential } from './admission.service';
+import { accountRefusal, admitCompletion, sessionCredentialOf, type PrincipalCredential } from './admission.service';
+import { ROUTE_ENROLMENT } from '../routes/channels';
 import { SWEEP_BATCH, sweepEachAccount } from './account-sweep.service';
 import {
     admitSignIn,
@@ -611,10 +612,13 @@ async function refuseUnadmittedStep(step: SecondStep): Promise<void>
 
 /**
  * Whether the person whose sign-in this completes may be let in now —
- * `admitPrincipal`, as every door asks it, on the key just activated: the
- * account active on the primary, the key live, the second-factor policy (which
- * a step-up never meets refused: a challenge is opened only for an account
- * enrolled under it).
+ * `admitCompletion` on the key just activated, under `mfaVerify`'s classes:
+ * the account active on the primary, the key live, the second-factor policy
+ * (which a step-up never meets refused: a challenge is opened only for an
+ * account enrolled under it). A password still to change does not refuse it:
+ * like a password sign-in, the completion hands such an account the session
+ * it changes the password with, and that session is restricted from its first
+ * request.
  *
  * Asked inside the transaction that activated the key, after the activation
  * and before anything is announced, so a refusal rolls the activation back
@@ -630,11 +634,10 @@ async function refuseUnadmittedStep(step: SecondStep): Promise<void>
  */
 async function assertSignInAdmitted(row: MfaChallenge, step: SecondStep | null): Promise<void>
 {
-    const admission = await admitPrincipal({
+    const admission = await admitCompletion({
         userId: row.userId,
         credential: { kind: 'deviceKey', keyId: row.keyId },
-        route: null,
-        presentedOn: null,
+        enrolment: ROUTE_ENROLMENT.mfaVerify,
     });
 
     if ('refused' in admission)

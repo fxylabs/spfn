@@ -17,9 +17,11 @@ import { secondFactorEnrolmentFields } from './second-factor-policy.service';
  * deactivated one), and the permissions with the person's own grants and
  * revocations applied.
  *
+ * `passwordChangeRequired` says whether the account must change its password
+ * before this session may use anything but the change (#362), and
  * `secondFactorEnrolmentRequired: true` is present exactly when the
  * second-factor policy holds this session to enrolling one, as on the
- * `LoginResult` — this route is one such a session reaches.
+ * `LoginResult` — this route is one either session reaches.
  *
  * @param userId - User ID (string, number, or bigint)
  * @returns Auth session data (minimal user info + role + permissions)
@@ -48,6 +50,7 @@ export async function getAuthSessionService(userId: string | number | bigint)
         emailVerified: user.isEmailVerified,
         phoneVerified: user.isPhoneVerified,
         hasPassword: user.hasPassword,
+        passwordChangeRequired: user.passwordChangeRequired,
         role: authority.role,
         permissions: authority.permissions,
         ...await secondFactorEnrolmentFields(userIdNum),

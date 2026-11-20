@@ -11,7 +11,8 @@
  *
  * "Ends the session" is the key-refused family: this key or this account can no
  * longer act, so the cookie that holds the key is dead weight. A refusal that asks
- * the same session to do something first — enrol a second factor — leaves it.
+ * the same session to do something first — change its password, enrol a second
+ * factor — leaves it.
  *
  * An expired key is the family's one member a session may survive: a bound key
  * inside its renewal grace is renewed with the passkey, not signed in again. The
@@ -38,11 +39,13 @@ import {
     AccountPendingDeletionError,
     KeyExpiredError,
     KeyRevokedError,
+    PasswordChangeRequiredError,
     SecondFactorEnrolmentRequiredError,
     SessionContextChangedError,
 } from '@spfn/auth/errors';
 
 import type { UserStatus } from '../types';
+import type { SessionRequirement } from './enrolment-routes';
 
 /**
  * Why a person was not let in. Each door answers each reason in its own vocabulary.
@@ -57,7 +60,8 @@ export type AdmissionRefusal =
     | { reason: 'credentialRevoked' }
     | { reason: 'credentialExpired'; renewable: boolean }
     | { reason: 'contextChanged' }
-    | { reason: 'enrolmentRequired' };
+    | { reason: 'enrolmentRequired' }
+    | { reason: 'passwordChangeRequired'; requirements: readonly SessionRequirement[] };
 
 type RefusalReason = AdmissionRefusal['reason'];
 
@@ -104,6 +108,11 @@ const REFUSAL_ANSWERS: { [R in RefusalReason]: RefusalAnswer<R> } = {
         errorType: SecondFactorEnrolmentRequiredError,
         endsSession: false,
         error: () => new SecondFactorEnrolmentRequiredError(),
+    },
+    passwordChangeRequired: {
+        errorType: PasswordChangeRequiredError,
+        endsSession: false,
+        error: refusal => new PasswordChangeRequiredError({ details: { requirements: [...refusal.requirements] } }),
     },
 };
 

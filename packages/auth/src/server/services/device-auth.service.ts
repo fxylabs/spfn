@@ -67,7 +67,7 @@ import {
     KEY_FINGERPRINT_PREFIX_LENGTH,
 } from './key.service';
 import { updateLastLoginService } from './user.service';
-import { admitPrincipal, type AdmissionRefusal, type PrincipalCredential } from './admission.service';
+import { admissionRefusalError, admitPrincipal, type AdmissionRefusal, type PrincipalCredential } from './admission.service';
 import { reportAccountRefusal, signInAttempt } from './sign-in-guard.service';
 import { signInGuard } from '../lib/sign-in-guard';
 import { assertPasskeyProven } from '../lib/passkey-proof';
@@ -704,6 +704,8 @@ async function admittedApprover(params: CompleteDeviceLoginParams): Promise<User
             throw new AccountPendingDeletionError({ purgeScheduledAt: admission.refused.purgeScheduledAt });
         case 'enrolmentRequired':
             throw new SecondFactorEnrolmentRequiredError();
+        case 'passwordChangeRequired':
+            throw admissionRefusalError(admission.refused);
         default:
             throw params.expiredRecord();
     }

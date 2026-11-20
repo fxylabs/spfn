@@ -39,17 +39,19 @@ per-call `.timeout()`, and the OAuth callback page uses its CSRF helpers.
 and only the copy of Hono that built the request can say. A process with two copies — the install
 resolves a different `hono` for this package than for `@spfn/core`, or one `hono` is loaded in two
 module formats (an app run as CommonJS beside an ESM server; `@spfn/core` refuses that boot) — is
-refused, not served, where the policy would read a route: with `secondFactor.required: true` —
-the only setting that makes an enrolment-only account — `createAuthLifecycle()`'s `afterRoutes`
-refuses to boot an app built by another copy. Wherever an enrolment-only session's request reaches
-the gate on another copy (a custom `app.ts`, where that hook does not run), it answers **500** with a
-logged error naming the two copies. Without a required second factor nothing reads a route, and the
-app boots as before. `pnpm why hono` should show one version.
+refused, not served, where a restricted session's request would read its route — an account that
+must [change its password](#a-required-password-change-passwordchangerequired) (which admin seeding
+makes in any app) or one the second-factor policy holds to enrolling: `createAuthLifecycle()`'s
+`afterRoutes` refuses to boot an app built by another copy, whatever the policy. Wherever such a
+session's request reaches the gate on another copy (a custom `app.ts`, where that hook does not
+run), it answers **500** with a logged error naming the two copies. `pnpm why hono` should show one
+version.
 
 > **BREAKING.** This used to answer an enrolment-only session 403 `SECOND_FACTOR_ENROLMENT_REQUIRED`
 > on every route, enrolment routes included — a broken process that read as policy. An app that
 > boots today has one copy and sees no change; one that had two and requires a second factor now
-> fails at boot (or with a 500) and names the cause.
+> fails at boot (or with a 500) and names the cause. Since the required password change (#362) the
+> boot check runs without a second-factor policy too.
 
 `@simplewebauthn/server` and `@simplewebauthn/browser` come along as dependencies —
 [passkeys](#passkeys-webauthn) need them, and standards conformance is the whole risk there.
@@ -292,8 +294,9 @@ startup). `envSchema` carries descriptions/defaults. The three URLs `@spfn/core`
 
 `createAuthLifecycle()` creates admin accounts on startup from env, in priority order. Seeded
 accounts are auto email-verified, `status: 'active'`, `passwordChangeRequired: true`. The flag is
-returned by sign-in and cleared when the password is changed; the package gates nothing on it, so an
-app that wants a seeded admin to change the password first must enforce that itself.
+enforced: the account's session can do nothing but change its password until it does — see
+[A required password change](#a-required-password-change-passwordchangerequired). Seeding sets it
+only on accounts it creates; `passwordChangeRequired: false` seeds an account without it.
 
 - **JSON (recommended):** `SPFN_AUTH_ADMIN_ACCOUNTS` — array of `{email, password, role?, phone?, passwordChangeRequired?}`. `role` defaults to `user` (`user` | `admin` | `superadmin`).
 - **CSV:** `SPFN_AUTH_ADMIN_EMAILS` + `SPFN_AUTH_ADMIN_PASSWORDS` + `SPFN_AUTH_ADMIN_ROLES`.
@@ -477,7 +480,8 @@ app's configuration, the same for every caller, needs no session and says nothin
 account. Like that route it has no rate limit and sets no cache headers; the answer is fixed while
 the server runs and changes only when it restarts with different `channels`. Through the Next.js proxy it gets
 no rule of its own — a session cookie the browser holds is read and forwarded as on any request, and
-none is needed. Its `ROUTE_CHANNELS` entry is `'always'` and its `ROUTE_ENROLMENT` entry `'none'`.
+none is needed. Its `ROUTE_CHANNELS` entry is `'always'` and its `ROUTE_ENROLMENT` row
+`{ secondFactorEnrolment: 'none', passwordChange: 'refuse' }`.
 
 **A channel turned off answers 404** (`ChannelDisabledError`, code `CHANNEL_DISABLED`,
 `details.channel` naming the channel) on each of its routes, before anything the route itself runs:
@@ -581,7 +585,8 @@ The enrolment routes — the only ones such a session reaches:
 
 They still run behind the global `auth` middleware, so every app middleware after it sees the
 principal on them. Only routes of `mainAuthRouter` can be enrolment routes; the classification is
-`ROUTE_ENROLMENT` beside `ROUTE_CHANNELS`, and a route left out of it fails at import.
+the `secondFactorEnrolment` column of `ROUTE_ENROLMENT` beside `ROUTE_CHANNELS`, and a route left
+out of it fails at import.
 
 An enrolment route is recognised by **the route that matched**, not by the request's path: the
 classification puts a marker on each one, and `authenticate` looks for it inside the route chain it
@@ -653,14 +658,19 @@ account's sensitive change.
 An account an operator created with a temporary password (`passwordChangeRequired: true`), under
 `methods: ['passkey']`, holding nothing yet:
 
-1. **Sign in** with the temporary password → a session with `secondFactorEnrolmentRequired: true`.
-2. **Register a passkey** with user verification (`enrollPasskey`) → it is marked, the session is
-   ordinary, and this device's step-up window is open.
+1. **Sign in** with the temporary password → a session with `secondFactorEnrolmentRequired: true`
+   and `passwordChangeRequired: true`. Both requirements are outstanding; the session reaches a
+   route that admits either one (an app route answers 403 `PASSWORD_CHANGE_REQUIRED`, naming both).
+2. **Register a passkey** with user verification (`enrollPasskey`) → it is marked, the enrolment
+   requirement is met, and this device's step-up window is open.
 3. **`PUT /_auth/password`** with `currentPassword` and `newPassword` → 204, no step-up ceremony in
    between. `currentPassword` (the temporary one) stays required here: with the window just opened,
    a session taken in those minutes could otherwise set a password it never knew.
-4. The change signs every other session out and **keeps this one**: the person carries on, signed
-   in, with no further ceremony.
+4. The change clears `passwordChangeRequired` and signs every other session out and **keeps this
+   one**: the person carries on, signed in and unrestricted, with no further ceremony.
+
+The order may be the other way round: the change first (admitted under the password requirement,
+and with nothing enrolled it asks no step-up), then the registration.
 
 Before this release step 3 answered 403 `STEP_UP_REQUIRED` and needed an `mfa/step-up` ceremony with
 the passkey registered seconds earlier, and the change then signed this session out too, so the
@@ -796,6 +806,69 @@ In `afterInfrastructure`, beside the channel check:
 
 The mobile contract lists the three since 0.14.0 and marks each operation that can answer the
 first with `secondFactor.enrolmentRequired` — every signed-in operation except `auth.mfa.status`.
+
+### A required password change (`passwordChangeRequired`)
+
+An account carrying `passwordChangeRequired` — admin seeding sets it on every account it creates,
+with the known password from the environment — must change its password before its session may do
+anything else. It is a restricted session, the same mechanism as the
+[enrolment-only state](#the-enrolment-only-state), and on by default: there is no option.
+
+- Its sign-in succeeds as usual and answers **`passwordChangeRequired: true`** — the `LoginResult`,
+  `mfa/verify`, the native OAuth answer and `oauth/finalize`. So does `GET /_auth/session`.
+- Every other request is **403 `PASSWORD_CHANGE_REQUIRED`** (`PasswordChangeRequiredError`), on the
+  package's routes and the app's, with `details.requirements` listing what the account still has to
+  do. 403 rather than 401: the session is not gone, and the Next.js proxy keeps it.
+- `optionalAuth` reads the caller as anonymous. A one-time token, an OAuth 2.1 access token
+  (`verifyAccessToken` throws the error) and the token endpoint (`invalid_grant`) refuse such an
+  account whatever the route: those doors never stand in front of a route that clears anything.
+  Renewal is unchecked, as for enrolment; the renewed key is held to it on its next request.
+
+The routes such a session reaches:
+
+| routes | why |
+|---|---|
+| `changePassword` (`PUT /_auth/password`) | the change itself |
+| `mfaStepUpOptions`, `mfaStepUp`, `mfaStatus` | an enrolled account steps up before the change |
+| `getAuthSession`, `logout` | to know why, and to leave |
+| `oauthFinalize`, `mfaVerify` | the sign-in completions that hand such an account its session |
+
+`GET /_auth/channels` is public, so it answers anyone; `GET /_auth/session/binding` is refused — the
+package's client helpers call neither on the way to a change.
+
+**What clears it:** the change, which writes the new hash and clears the flag in one transaction
+under the account lock, or a completed password reset. The next request reads the account on the
+primary and is admitted — the same session, nothing re-issued. **The new password must differ from
+the current one:** sending the current password as `newPassword` is 400 `ValidationError`, and the
+flag stays.
+
+**With a second factor to enrol as well**, both requirements are outstanding. A request is admitted
+when the route admits **either** one — requiring both would leave no route at all, since the change
+is not an enrolment route and no enrolment route changes the password — so the person can enrol and
+change the password in either order. A refusal names the password first: `PasswordChangeRequiredError`
+with `details.requirements: ['passwordChange', 'secondFactorEnrolment']`. Once the password is
+changed, the enrolment refusal is what is left.
+
+The classification is a second column of `ROUTE_ENROLMENT`, `passwordChange` (`'admit'`,
+`'refuse'`, `'unchecked'`), beside the enrolment one; a route without it fails at import, and the
+marker each admitted route carries is read only by the global `authenticate`, as for enrolment.
+
+| Error | HTTP | `code` | When |
+|---|---|---|---|
+| `PasswordChangeRequiredError` | 403 | `PASSWORD_CHANGE_REQUIRED` | a request of a session whose account must change its password, on a route that does not lead to the change; `details.requirements` |
+
+The mobile contract lists it since 0.15.0 and marks each operation that can answer it with
+`passwordChange`. `PUT /_auth/password` is not a contract operation: a native client clears the
+requirement off-contract, as it enrols a second factor.
+
+Nothing here sets the flag on an existing account: only seeding does, and only when it creates one.
+To find the accounts flagged before the upgrade, and clear the ones whose password was already
+replaced out of band:
+
+```sql
+SELECT id, email, created_at FROM spfn_auth.users WHERE password_change_required;
+UPDATE spfn_auth.users SET password_change_required = false WHERE id IN (/* … */);
+```
 
 ### The sign-in guard (`signIn`)
 
@@ -1145,8 +1218,9 @@ it.
 #### Out of scope
 
 - **A built-in lock policy.** The package stores no attempts; the example above is the policy.
-- **Enforcing `passwordChangeRequired`.** A person refused at sign-in could never reach the route
-  that clears the flag; enforcement is a restricted session, not a refusal (tracked separately).
+- **Enforcing `passwordChangeRequired`** in `admit`. A person refused at sign-in could never reach
+  the route that clears the flag; the package enforces it as a restricted session instead — see
+  [A required password change](#a-required-password-change-passwordchangerequired).
 - **The address of a sign-in made from a Next.js server action**, which today is the Next server's
   own (tracked separately in `@spfn/core`).
 - **Moving `beforeRegister`** onto the lifecycle.
@@ -1770,8 +1844,8 @@ do on its grant and nowhere else:
   of one code revoke the grant whether they arrive one after the other or together — the loser of
   a race used to be answered `invalid_grant` and leave the winner's tokens live.
 - **`verifyAccessToken` throws what is not a refusal.** `null` is an invalid token; a 4xx
-  `HttpError` (today `SECOND_FACTOR_ENROLMENT_REQUIRED`, 403) is a valid token whose person may not
-  act now; anything else — a database error — is thrown as it is. `@spfn/mcp` now answers the
+  `HttpError` (today `SECOND_FACTOR_ENROLMENT_REQUIRED` or `PASSWORD_CHANGE_REQUIRED`, 403) is a
+  valid token whose person may not act now; anything else — a database error — is thrown as it is. `@spfn/mcp` now answers the
   last two with their own status (403 / 5xx) instead of 401, so a passing outage no longer sends
   every client to re-authorize. A custom validator that threw to refuse must return `null`.
 - **Required app change: your consent page must append `iss` to the redirect (RFC 9207).** The
@@ -4193,6 +4267,7 @@ the session itself, and `authLoginEvent` says so in `secondFactorEnrolmentRequir
 | `StepUpRequiredError` | 403 | `STEP_UP_REQUIRED` | an enrolled account's device is outside the window |
 | `PasskeyProofRequiredError` | 403 | `PASSKEY_PROOF_REQUIRED` | session binding is on and a procedure that lets another credential in carried no passkey proof for it — a step-up does not satisfy it; see [Letting another credential in](#letting-another-credential-in) |
 | `SecondFactorEnrolmentRequiredError` | 403 | `SECOND_FACTOR_ENROLMENT_REQUIRED` | the app requires a factor and this account has no listed one; every route but the enrolment routes — see [Requiring a second factor](#requiring-a-second-factor-secondfactor) |
+| `PasswordChangeRequiredError` | 403 | `PASSWORD_CHANGE_REQUIRED` | the account must change its password first; every route but the change and what leads to it (the step-up pair, `mfa/status`) — see [A required password change](#a-required-password-change-passwordchangerequired) |
 | `SecondFactorMethodDisabledError` | 404 | `SECOND_FACTOR_METHOD_DISABLED` | a route of a method the policy does not list, or `recovery/regenerate` with `recoveryCodes: false` |
 | `SecondFactorRequiredError` | 409 | `SECOND_FACTOR_REQUIRED` | removing the last listed factor through a route while one is required |
 | `MfaAlreadyEnrolledError` | 409 | — | `totp/enroll` on a confirmed enrolment |
@@ -5492,10 +5567,12 @@ restores — match on `name` (and `status` / `errorType` for `ApiError`):
 | a rate limit | `TooManyRequestsError` | `error.name`, `error.statusCode === 429` |
 | a bound session presented from another browser | — (`null`: signed out, cookies cleared) | |
 | an account held to enrolment (`secondFactor.required`) | — not thrown: the session route is an enrolment route, so the session comes back with `secondFactorEnrolmentRequired: true` | `session.secondFactorEnrolmentRequired` |
+| an account that must change its password | — not thrown: the session route admits it, so the session comes back with `passwordChangeRequired: true` | `session.passwordChangeRequired` |
 
 `SecondFactorEnrolmentRequiredError` (403, code `SECOND_FACTOR_ENROLMENT_REQUIRED`) is what an
 enrolment-only session meets on every *other* route — your own data reads included — and it is
-thrown there like any refusal that is not a sign-out.
+thrown there like any refusal that is not a sign-out. `PasswordChangeRequiredError` (403, code
+`PASSWORD_CHANGE_REQUIRED`) is the same for a session whose account must change its password.
 
 A **public** layout that only wants to know whether to show the admin link decides for display,
 and must not turn an outage into a page that fails to render. Catch, and render as signed out —
@@ -6942,7 +7019,8 @@ x-acme-device-proof: <the app's own credential>
   [the second-factor policy](#requiring-a-second-factor-secondfactor) like any other: while
   `secondFactor.required` holds, an account with no listed factor is refused 403
   `SECOND_FACTOR_ENROLMENT_REQUIRED` before the handler runs (anonymous under `optionalAuth`),
-  whichever verifier produced it. A credential that is not a person — a service, a job, a runtime —
+  whichever verifier produced it — and an account that must change its password, 403
+  `PASSWORD_CHANGE_REQUIRED`, the same way. A credential that is not a person — a service, a job, a runtime —
   belongs in a [machine principal](#machine-principals-registermachineverifier), which the policy
   does not touch.
 
@@ -7016,6 +7094,7 @@ token authorizes **now**: the scopes it was issued with that its grant still hol
 | the principal | a live token whose grant still holds at least one of its scopes | the request runs |
 | `null` | unknown, revoked, expired, refresh-kind, wrong resource, grant revoked or past its `expires_at`, no scope left | 401 `invalid_token` |
 | throws `SecondFactorEnrolmentRequiredError` | a valid token whose person may only enrol a second factor | 403 `SECOND_FACTOR_ENROLMENT_REQUIRED` |
+| throws `PasswordChangeRequiredError` | a valid token whose person must change the password first | 403 `PASSWORD_CHANGE_REQUIRED` |
 | throws anything else | verification failed — a database error is not a verdict on the token | 5xx |
 
 - **A suspended person's client is refused, and comes back with the account.** Every access
@@ -7959,11 +8038,11 @@ authorization.
 
 **Where do my admin accounts come from?**
 The environment, seeded on startup by `createAuthLifecycle()`. Seeded accounts are email
-verified, active, and carry `passwordChangeRequired: true`. Sign-in returns the flag and changing
-the password clears it, but the package gates nothing on it: a seeded account can use the app with
-its seeded password. An app that wants the change enforced must do it itself — read the flag from
-the sign-in result and hold the user on a change-password page — until the package has a
-restricted session for it.
+verified, active, and carry `passwordChangeRequired: true`. Their session can do nothing but change
+the password until it is changed (or reset): every other route answers 403
+`PASSWORD_CHANGE_REQUIRED` — see [A required password change](#a-required-password-change-passwordchangerequired).
+Send the person to your change page on that code, or on `passwordChangeRequired: true` in the
+sign-in answer or `GET /_auth/session`.
 
 **Is `Foo@Example.com` the same account as `foo@example.com`?**
 Yes. Addresses are trimmed and lower-cased on the way in and on the way out, so one person

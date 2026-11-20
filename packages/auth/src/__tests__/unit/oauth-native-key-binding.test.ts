@@ -36,7 +36,7 @@ vi.mock('../../server/repositories', () => ({ socialAccountsRepository }));
 
 vi.mock('../../server/services/oauth.service', () => ({
     createOrLinkUser,
-    assertActiveForOAuthSession: vi.fn(async () => undefined),
+    assertActiveForOAuthSession: vi.fn(async () => ({ passwordChangeRequired: false })),
     backfillVerifiedEmail: vi.fn(async () => undefined),
     retryContendedSignIn: (_provider: unknown, attempt: () => Promise<unknown>) => attempt(),
     lockLinkedAccount: () => socialAccountsRepository.findByProviderAndProviderId(),
@@ -107,7 +107,7 @@ describe('native sign-in binds the id_token to the key being enrolled', () =>
 
         const result = await oauthNativeService(paramsFor(key));
 
-        expect(result).toEqual({ mfaRequired: false, userId: '1', keyId: 'key-id-1', isNewUser: true });
+        expect(result).toEqual({ mfaRequired: false, userId: '1', keyId: 'key-id-1', isNewUser: true, passwordChangeRequired: false });
         expect(verifyNativeIdToken).toHaveBeenCalledOnce();
         expect(registerPublicKeyService).toHaveBeenCalledOnce();
     });

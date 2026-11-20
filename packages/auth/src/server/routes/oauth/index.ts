@@ -453,6 +453,12 @@ export interface OAuthFinalizeResponse
     returnUrl: string;
     sessionBinding?: SessionBindingType;
     keyExpiresAtMillis?: number;
+    /**
+     * As on `LoginResult`: the account must change its password before this
+     * session may do anything else. Read off the principal's account row, as
+     * admission read it.
+     */
+    passwordChangeRequired?: boolean;
     /** As on `LoginResult`: the session may only enrol a second factor. Read off the key's owner. */
     secondFactorEnrolmentRequired?: boolean;
 }
@@ -529,7 +535,7 @@ export const oauthFinalize = route.post('/_auth/oauth/finalize')
         // this is the seam the Next.js interceptor seals a session from, and a
         // caller allowed to state its own binding could ask for a cookie that
         // believes a bound key is an ordinary one.
-        const { userId, keyId } = getAuth(c);
+        const { userId, keyId, user } = getAuth(c);
 
         return {
             success: true,
@@ -537,6 +543,7 @@ export const oauthFinalize = route.post('/_auth/oauth/finalize')
             userId: String(userId),
             keyId,
             returnUrl: body.returnUrl || '/',
+            passwordChangeRequired: user.passwordChangeRequired,
             ...await keySessionBindingService(keyId),
             ...await keySecondFactorEnrolmentFields(keyId),
         };

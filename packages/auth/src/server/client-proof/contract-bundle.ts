@@ -492,8 +492,26 @@ import { CLIENT_IDENTITY_HEADERS, CLIENT_KINDS, SERVER_CONTRACT_HEADERS } from '
  * was. Apps that do not state the option never answer it. A patch, by
  * 0.10.1's rule: a code joins the open list, and no operation, type or enum
  * changes shape.
+ *
+ * 0.15.0 carries the required password change (#362). An account an operator
+ * seeded with a known password (`passwordChangeRequired`) signs in to a session
+ * that can do nothing but change it, as an enrolment-only session can do
+ * nothing but enrol: every signed-in operation that does not lead to the change
+ * answers `PasswordChangeRequiredError` (403, not retryable), with
+ * `details.requirements` listing what the account still has to do —
+ * `passwordChange` first, then `secondFactorEnrolment` when the second-factor
+ * policy holds it too. It is not a signed-out session and must not be cleared.
+ * Each operation that can answer it says so with `passwordChange`, read from
+ * `ROUTE_ENROLMENT`, the table the server gates with. `OauthNativeResponse`
+ * gains the optional `passwordChangeRequired`, which `LoginResponse` already
+ * declares. The change itself, `PUT /_auth/password`, is not an operation
+ * here — a native client clears the requirement off-contract, as it enrols a
+ * second factor off-contract (0.14.0).
+ *
+ * A minor, by 0.11.0's rule: an optional field the server sends is a new
+ * declared field every generated decoder meets, so the range moves with it.
  */
-export const CONTRACT_VERSION = '0.14.7';
+export const CONTRACT_VERSION = '0.15.0';
 export const CONTRACT_MAJOR = 0;
 export const CONTRACT_NAME = 'spfn-mobile-contract';
 
@@ -504,7 +522,7 @@ export const CONTRACT_NAME = 'spfn-mobile-contract';
  * consumer decodes as required became optional, so that consumer would reject a
  * 202 sign-in outright. A patch leaves the floor where it is; 0.10.1 did.
  */
-export const CONTRACT_SUPPORTED_RANGE = '>=0.14.0 <0.15.0';
+export const CONTRACT_SUPPORTED_RANGE = '>=0.15.0 <0.16.0';
 
 /** What spfn-mobile's validator expects an upstream-exported bundle to name. */
 export const EXPORT_ORIGIN = 'spfn-primitives-ci-export';
@@ -540,8 +558,11 @@ export const EXPORT_ORIGIN = 'spfn-primitives-ci-export';
  *
  * 6.3.0 is a minor again: the `secondFactor` section and an optional
  * `secondFactor` on an operation.
+ *
+ * 6.4.0 is a minor on the same terms: the `passwordChange` section and an
+ * optional `passwordChange` on an operation.
  */
-export const EXPORTER_VERSION = '@spfn/auth/contract-bundle@6.3.0';
+export const EXPORTER_VERSION = '@spfn/auth/contract-bundle@6.4.0';
 
 /**
  * The scalars the grammar admits.
@@ -945,6 +966,7 @@ export const CONTRACT_TYPES: readonly TypeDeclaration[] = [
             optional('userId', 'string'),
             optional('keyId', 'string'),
             optional('isNewUser', 'boolean'),
+            optional('passwordChangeRequired', 'boolean'),
             optional('secondFactorEnrolmentRequired', 'boolean'),
         ],
     },
@@ -1221,6 +1243,9 @@ const CHANNEL_DISABLED_CODE = 'ChannelDisabledError';
 /** What a signed-in operation answers a session that may only enrol a second factor. */
 const SECOND_FACTOR_ENROLMENT_REQUIRED_CODE = 'SecondFactorEnrolmentRequiredError';
 
+/** What a signed-in operation answers a session whose account must change its password first. */
+const PASSWORD_CHANGE_REQUIRED_CODE = 'PasswordChangeRequiredError';
+
 /** What a second-factor operation of a method the app does not list answers. */
 const SECOND_FACTOR_METHOD_DISABLED_CODE = 'SecondFactorMethodDisabledError';
 
@@ -1313,6 +1338,9 @@ interface RestSurfaceError
  * `SecondFactorRequiredError` is an account screen's — removing the last listed
  * factor — and no operation on this surface can meet it; it is listed so the
  * vocabulary is whole.
+ *
+ * `PasswordChangeRequiredError` (contract 0.15.0) is every operation's whose
+ * `passwordChange` names it (#362).
  */
 const REST_SURFACE_ERRORS: readonly RestSurfaceError[] = [
     {
@@ -1465,6 +1493,15 @@ const REST_SURFACE_ERRORS: readonly RestSurfaceError[] = [
             + 'not gone — it is the one to enrol with; send the person to enrolment, then retry',
     },
     {
+        code: PASSWORD_CHANGE_REQUIRED_CODE,
+        httpStatus: 403,
+        retryable: false,
+        summary:
+            'this account must change its password before this session may do anything else — '
+            + 'details.requirements lists what it still has to do, passwordChange first. The session is not '
+            + 'gone — it is the one to change the password with; send the person to the change, then retry',
+    },
+    {
         code: SECOND_FACTOR_METHOD_DISABLED_CODE,
         httpStatus: 404,
         retryable: false,
@@ -1592,8 +1629,8 @@ const REST_SURFACE_ERRORS: readonly RestSurfaceError[] = [
 /**
  * An operation as the bundle states it: without the route key it is matched to
  * the router by, with `closedChannel` when that route belongs to a channel an
- * app can turn off, and with `secondFactor` when the second-factor policy can
- * refuse it.
+ * app can turn off, with `secondFactor` when the second-factor policy can
+ * refuse it, and with `passwordChange` when a required password change can.
  */
 function exportedOperation({ route, ...operation }: ContractOperation): Record<string, unknown>
 {
@@ -1604,7 +1641,19 @@ function exportedOperation({ route, ...operation }: ContractOperation): Record<s
         ...operation,
         ...channels.length === 0 ? {} : { closedChannel: { channels, error: CHANNEL_DISABLED_CODE } },
         ...secondFactor === null ? {} : { secondFactor },
+        ...refusedUnderPasswordChange(operation, route) ? { passwordChange: { error: PASSWORD_CHANGE_REQUIRED_CODE } } : {},
     };
+}
+
+/**
+ * Whether a session whose account must change its password is refused the
+ * operation: every signed-in one whose route does not lead to the change — an
+ * app's own (no route key) included, since an app route never does.
+ */
+function refusedUnderPasswordChange(operation: Omit<ContractOperation, 'route'>, route: ContractOperation['route']): boolean
+{
+    return operation.authProfile === 'clientProofV1'
+        && (route === undefined || ROUTE_ENROLMENT[route].passwordChange === 'refuse');
 }
 
 /**
@@ -1621,7 +1670,7 @@ function secondFactorOf(
     route: ContractOperation['route'],
 ): Record<string, unknown> | null
 {
-    const enrolment: RouteEnrolment = route === undefined ? 'none' : ROUTE_ENROLMENT[route];
+    const enrolment: RouteEnrolment = route === undefined ? 'none' : ROUTE_ENROLMENT[route].secondFactorEnrolment;
     const method = route === undefined ? undefined : (ROUTE_SECOND_FACTOR_METHODS as Record<string, string>)[route];
     const refusals: Record<string, unknown> = {};
 
@@ -2053,6 +2102,19 @@ export function buildMobileContractBundle(): MobileContractBundle
                 'error is the code; unlessListed names the method whose being listed makes the operation an '
                 + 'enrolment route the session may use',
             methodDisabled: 'method is what the app must list for the operation to exist; error is the code otherwise',
+        },
+        passwordChange: {
+            appliesTo: 'every operation that carries passwordChange',
+            rule:
+                'an account an operator seeded with a known password must change it first. A sign-in then answers '
+                + 'passwordChangeRequired: true, and that session is refused with '
+                + `${PASSWORD_CHANGE_REQUIRED_CODE} (403) on every operation that carries passwordChange, until the `
+                + 'password is changed or reset — on the same session, no new sign-in. details.requirements lists '
+                + 'every requirement still outstanding, passwordChange first; while secondFactorEnrolment is listed '
+                + 'too, an operation the secondFactor rule lets an enrolment-only session use stays open. It is not '
+                + 'a signed-out session and must not be cleared. The change itself is not an operation of this '
+                + 'contract',
+            error: 'the code the operation answers such a session',
         },
         errorEnvelope: {
             shape: '{"error":{"code":<string>,"message":<string>,"requestId":<string>}}',

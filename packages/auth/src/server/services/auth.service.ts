@@ -567,7 +567,12 @@ export async function logoutService(
  * outside the proxy is an unbound 90-day key. Changing an existing password
  * proves that password, and is not asked.
  *
+ * The new password must differ from the current one, so re-typing a seeded
+ * password does not clear `passwordChangeRequired` (#362). The change clears
+ * it in the same transaction, under the account lock, as it writes the hash.
+ *
  * @throws PasskeyProofRequiredError when a bound account sets its first password without the proof
+ * @throws ValidationError when the new password is the current one
  */
 export async function changePasswordService(
     params: ChangePasswordParams,
@@ -578,6 +583,7 @@ export async function changePasswordService(
     await assertStepUp({ userId, credential: params.credential });
 
     const verifiedHash = await verifyCurrentPassword(params);
+    await assertNewPasswordDiffers(params.newPassword, verifiedHash);
     // Hashed before the account lock is taken: the hash is the slow step.
     const change = {
         userId,
@@ -685,6 +691,21 @@ async function verifyCurrentPassword(params: ChangePasswordParams): Promise<stri
     }
 
     return passwordHash;
+}
+
+/**
+ * Refuse a new password that is the current one — one more hash compare,
+ * against the hash the current password was just verified with. An account
+ * setting its first password has nothing to compare.
+ *
+ * @throws ValidationError
+ */
+async function assertNewPasswordDiffers(newPassword: string, currentHash: string | null): Promise<void>
+{
+    if (currentHash !== null && await verifyPassword(newPassword, currentHash))
+    {
+        throw new ValidationError({ message: 'The new password must differ from the current one' });
+    }
 }
 
 /** On the primary: it is compared, under the lock, with what the primary holds. */
