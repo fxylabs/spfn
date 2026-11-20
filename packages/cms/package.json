@@ -106,7 +106,6 @@
     "@vitest/coverage-v8": "^4.0.6",
     "drizzle-kit": "1.0.0-rc.4",
     "drizzle-orm": "1.0.0-rc.4",
-    "drizzle-typebox": "^0.3.3",
     "madge": "^8.0.0",
     "postgres": "^3.4.0",
     "spfn": "workspace:*",

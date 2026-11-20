@@ -2,7 +2,6 @@ import { existsSync, readFileSync } from 'fs';
 import { join } from 'path';
 import fse from 'fs-extra';
 import { logger } from '../../../utils/logger.js';
-import { NPM_PEER_FLAGS } from '../../../utils/package-manager.js';
 import { findTemplatesPath } from '../utils/templates.js';
 
 const { copySync, writeFileSync } = fse;
@@ -15,9 +14,9 @@ const PM_DOCKERFILE_ADAPTATIONS: Record<string, [string, string][]> = {
     npm: [
         ['# Install pnpm\nRUN corepack enable pnpm\n\n', ''],
         ['pnpm-lock.yaml*', 'package-lock.json*'],
-        ['RUN pnpm install --frozen-lockfile --prod=false', `RUN npm ci --include=dev ${NPM_PEER_FLAGS.join(' ')}`],
+        ['RUN pnpm install --frozen-lockfile --prod=false', 'RUN npm ci --include=dev'],
         ['RUN pnpm run spfn:build', 'RUN npm run spfn:build'],
-        ['RUN pnpm prune --prod', `RUN npm prune --omit=dev ${NPM_PEER_FLAGS.join(' ')}`],
+        ['RUN pnpm prune --prod', 'RUN npm prune --omit=dev'],
         ['CMD ["pnpm", "run", "spfn:start"]', 'CMD ["npm", "run", "spfn:start"]'],
     ],
     yarn: [

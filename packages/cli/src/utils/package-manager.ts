@@ -1,6 +1,8 @@
 import { spawnSync } from 'child_process';
+import { execa, type Options } from 'execa';
 import { existsSync, readFileSync } from 'fs';
 import { dirname, join, posix, relative, sep } from 'path';
+import { stripVTControlCharacters } from 'util';
 import { parse } from 'yaml';
 
 export type PackageManager = 'npm' | 'pnpm' | 'yarn' | 'bun';
@@ -19,14 +21,6 @@ const LOCKFILES: ReadonlyArray<[string, PackageManager]> = [
     ['yarn.lock', 'yarn'],
     ['package-lock.json', 'npm'],
 ];
-
-/**
- * npm refuses the SPFN dependency set without it (`ERESOLVE`), in `install`,
- * `ci` and `prune` alike: drizzle-typebox's peer range on drizzle-orm
- * (`>=0.36.0`) admits no prerelease, so not the `1.0.0-rc.4` every SPFN app
- * pins. Every npm invocation the CLI runs or writes carries it.
- */
-export const NPM_PEER_FLAGS = ['--legacy-peer-deps'];
 
 /**
  * The package manager the app in `appDir` uses.
@@ -252,12 +246,100 @@ function isWorkspaceMember(path: string, patterns: string[]): boolean
 }
 
 /**
- * Arguments for `<pm> install`: every command that installs the app's
- * dependencies uses these, so npm accepts the SPFN set the same way everywhere.
+ * Why npm refused the install and how to fix it, printed under npm's own lines
+ * when npm's error is `ERESOLVE` over drizzle-typebox's peer on drizzle-orm
+ * (`refusesDrizzleTypebox`): that peer range admits no prerelease, so npm
+ * refuses drizzle-typebox beside the `1.0.0-rc.4` SPFN pins, as it does in every npm app an earlier `spfn init`
+ * scaffolded. The CLI does not predict this; npm alone knows what it resolves.
  */
-export function getInstallArgs(pm: PackageManager): string[]
+export const DRIZZLE_TYPEBOX_REFUSAL = 'npm refused the install (ERESOLVE above) over drizzle-typebox:'
+    + ' its peer range on drizzle-orm excludes the drizzle-orm prerelease SPFN pins.'
+    + ' Remove drizzle-typebox from the package.json that declares it (the app\'s, or its npm workspace root\'s),'
+    + ' move to a drizzle-typebox version that accepts the prerelease, or import drizzle-orm/typebox-legacy instead.';
+
+/**
+ * Runs `pm` with `args` — every install and add the CLI makes goes through
+ * here — and resolves to null when it succeeds. When it fails, resolves to the
+ * report to print: the failure, the manager's own output in it, and below it
+ * `DRIZZLE_TYPEBOX_REFUSAL` when that is what npm refused.
+ */
+export async function runInstall(pm: PackageManager, args: string[], options?: Options): Promise<string | null>
 {
-    return pm === 'npm' ? ['install', ...NPM_PEER_FLAGS] : ['install'];
+    try
+    {
+        await execa(pm, args, options);
+
+        return null;
+    }
+    catch (error)
+    {
+        return pm === 'npm' && refusesDrizzleTypebox(error)
+            ? `${String(error)}\n\n${DRIZZLE_TYPEBOX_REFUSAL}`
+            : String(error);
+    }
+}
+
+/**
+ * The stanzas in which npm names drizzle-typebox's peer on drizzle-orm as the
+ * conflict: the dependency it could not resolve, or the conflicting peer that
+ * dependency brought. The same edge listed under "Found:" is only how the
+ * installed drizzle-orm got there, so it does not count.
+ */
+const DRIZZLE_TYPEBOX_CONFLICT = [
+    /^Could not resolve dependency:\npeer drizzle-orm@"[^"\n]*" from drizzle-typebox@/m,
+    /^Conflicting peer dependency: drizzle-orm@.*\n.*\n {2}peer drizzle-orm@"[^"\n]*" from drizzle-typebox@/m,
+];
+
+/**
+ * Whether a failed npm run's error is `ERESOLVE` over drizzle-typebox's peer
+ * on drizzle-orm. npm reports the error as `npm error` lines on stderr and,
+ * under `json`, as `{ "error": { "code", "detail" } }` on stdout (alone under
+ * `loglevel=silent`); `detail` holds the same stanzas without the prefix. An
+ * `ERESOLVE` npm only warned about (under `force`) is not its error.
+ */
+function refusesDrizzleTypebox(error: unknown): boolean
+{
+    const { stdout, stderr } = isObject(error) ? error : {};
+    const reports = [npmErrorText(stderr), npmJsonErrorDetail(stdout)];
+
+    return reports.some(report => report !== null
+        && DRIZZLE_TYPEBOX_CONFLICT.some(conflict => conflict.test(report)));
+}
+
+/** The `npm error` lines of `stderr`, unprefixed, when their code is `ERESOLVE`. */
+function npmErrorText(stderr: unknown): string | null
+{
+    const text = (typeof stderr === 'string' ? stripVTControlCharacters(stderr).split('\n') : [])
+        .filter(line => /^npm error( |$)/.test(line))
+        .map(line => line.replace(/^npm error ?/, ''))
+        .join('\n');
+
+    return /^code ERESOLVE$/m.test(text) ? text : null;
+}
+
+/** The `detail` of npm's JSON error on `stdout`, when its code is `ERESOLVE`. */
+function npmJsonErrorDetail(stdout: unknown): string | null
+{
+    const { error } = parseObject(stdout);
+
+    return isObject(error) && error.code === 'ERESOLVE' && typeof error.detail === 'string'
+        ? error.detail
+        : null;
+}
+
+/** `text` parsed as JSON when it is an object; an empty object otherwise. */
+function parseObject(text: unknown): Record<string, unknown>
+{
+    try
+    {
+        const value: unknown = typeof text === 'string' ? JSON.parse(text) : null;
+
+        return isObject(value) ? value : {};
+    }
+    catch
+    {
+        return {};
+    }
 }
 
 /**
@@ -269,7 +351,7 @@ export function getAddArgs(pm: PackageManager, packages: string[], { dev = false
     switch (pm)
     {
         case 'npm':
-            return ['install', ...NPM_PEER_FLAGS, ...(dev ? ['--save-dev'] : []), ...packages];
+            return ['install', ...(dev ? ['--save-dev'] : []), ...packages];
         case 'bun':
             return ['add', ...(dev ? ['--dev'] : []), ...packages];
         default:

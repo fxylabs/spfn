@@ -32,7 +32,7 @@ export async function setupServerStructure(cwd: string, mode: ScaffoldMode): Pro
 
         ensureDirSync(targetDir);
 
-        // Copy all template files (includes tsconfig.json and tsup.config.ts)
+        // Copy all template files (includes tsconfig.json)
         copySync(serverTemplateDir, targetDir);
 
         // Copy lib directory (contracts, types, etc.)

@@ -29,6 +29,10 @@ vi.mock('../init/steps/config-files.js', () => ({ setupConfigFiles: vi.fn() }));
 vi.mock('../init/steps/readme.js', () => ({ setupReadme: vi.fn() }));
 
 import { createCommand } from '../create.js';
+import { initializeSpfn } from '../init/index.js';
+import { logger } from '../../utils/logger.js';
+import { DRIZZLE_TYPEBOX_REFUSAL } from '../../utils/package-manager.js';
+import { NPM_ERESOLVE_DRIZZLE_TYPEBOX } from '../../utils/__tests__/fixtures/npm-eresolve.js';
 
 const originalCwd = process.cwd();
 let repository: string;
@@ -109,7 +113,7 @@ describe('spfn create --pm npm under a pnpm workspace', () =>
     {
         const app = await createFrom(join(repository, 'scratch'));
 
-        expect(mocks.execa).toHaveBeenCalledWith('npm', ['install', '--legacy-peer-deps'], { cwd: app });
+        expect(mocks.execa).toHaveBeenCalledWith('npm', ['install'], { cwd: app });
         expect(mocks.execa.mock.calls.filter(([command]) => command === 'pnpm')).toEqual([]);
     });
 
@@ -117,7 +121,7 @@ describe('spfn create --pm npm under a pnpm workspace', () =>
     {
         const app = await createFrom(join(repository, 'packages'));
 
-        expect(mocks.execa).toHaveBeenCalledWith('npm', ['install', '--legacy-peer-deps'], { cwd: app });
+        expect(mocks.execa).toHaveBeenCalledWith('npm', ['install'], { cwd: app });
         expect(mocks.execa.mock.calls.filter(([command]) => command === 'pnpm')).toEqual([]);
     });
 });
@@ -160,5 +164,49 @@ describe('spfn create under a pnpm workspace, the manager detected or pnpm', () 
         expect(createNextAppArgs()).not.toContain('--skip-install');
         expect(mocks.execa.mock.calls.filter(([, , options]) => options?.cwd === repository)).toEqual([]);
         expect(mocks.execa).toHaveBeenCalledWith('pnpm', ['install'], { cwd: app });
+    });
+});
+
+/** What execa rejects with when npm exits 1 having written `stderr`. */
+function npmFailure(stderr: string): Error
+{
+    return Object.assign(new Error(`Command failed with exit code 1: npm install\n${stderr}`), { exitCode: 1, stdout: '', stderr });
+}
+
+describe('an npm install that npm refuses over drizzle-typebox (npm 10.9.9 output, fixtures/npm-eresolve.ts)', () =>
+{
+    it('spfn init prints npm\'s lines and the explanation, then exits non-zero', async () =>
+    {
+        const app = join(repository, 'scratch/app');
+        mkdirSync(app, { recursive: true });
+        writeFileSync(join(app, 'package.json'), JSON.stringify({ name: 'app', dependencies: { 'next': '16', 'drizzle-typebox': '^0.3.3' } }));
+        process.chdir(app);
+        mocks.execa.mockRejectedValueOnce(npmFailure(NPM_ERESOLVE_DRIZZLE_TYPEBOX));
+        const exit = vi.spyOn(process, 'exit').mockImplementation(((code?: number) =>
+        {
+            throw new Error(`process.exit(${code})`);
+        }) as never);
+        const error = vi.spyOn(logger, 'error').mockImplementation(() => undefined);
+
+        await expect(initializeSpfn({ pm: 'npm', mode: 'bare', yes: true })).rejects.toThrow('process.exit(1)');
+
+        expect(mocks.spinner.fail).toHaveBeenCalledWith('Failed to install dependencies');
+        expect(error).toHaveBeenCalledWith(expect.stringContaining('npm error peer drizzle-orm@">=0.36.0" from drizzle-typebox@0.3.3'));
+        expect(error).toHaveBeenCalledWith(expect.stringContaining(DRIZZLE_TYPEBOX_REFUSAL));
+        exit.mockRestore();
+        error.mockRestore();
+    });
+
+    it('spfn create\'s @svgr/webpack install warns as before and prints npm\'s lines and the explanation', async () =>
+    {
+        mocks.execa.mockImplementation((command: string, args: string[], options: { cwd: string }) =>
+            (args.includes('@svgr/webpack') ? Promise.reject(npmFailure(NPM_ERESOLVE_DRIZZLE_TYPEBOX)) : fakeProcess(command, args, options)));
+        const error = vi.spyOn(logger, 'error').mockImplementation(() => undefined);
+
+        await createFrom(join(repository, 'scratch'));
+
+        expect(mocks.spinner.warn).toHaveBeenCalledWith('Failed to setup SVGR (you can run `spfn setup icons` later)');
+        expect(error).toHaveBeenCalledWith(expect.stringContaining(DRIZZLE_TYPEBOX_REFUSAL));
+        error.mockRestore();
     });
 });

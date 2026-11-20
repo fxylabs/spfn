@@ -4,7 +4,6 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { logger } from '../../../utils/logger.js';
-import { getInstallArgs } from '../../../utils/package-manager.js';
 import { setupDockerFiles } from '../steps/docker.js';
 
 let testDirectory: string | undefined;
@@ -27,13 +26,12 @@ async function dockerfileFor(pm: string): Promise<string>
 
 describe('setupDockerFiles', () =>
 {
-    it('gives npm in the image the peer flag the CLI installs with, which npm ci and prune refuse the SPFN set without', async () =>
+    it('runs npm ci and prune in the image with no flag that would hide a peer conflict', async () =>
     {
         const dockerfile = await dockerfileFor('npm');
-        const flags = getInstallArgs('npm').slice(1).join(' ');
 
-        expect(dockerfile).toContain(`RUN npm ci --include=dev ${flags}\n`);
-        expect(dockerfile).toContain(`RUN npm prune --omit=dev ${flags}\n`);
+        expect(dockerfile).toContain('RUN npm ci --include=dev\n');
+        expect(dockerfile).toContain('RUN npm prune --omit=dev\n');
     });
 
     it('copies bun\'s lockfile, text (bun.lock) or binary (bun.lockb)', async () =>

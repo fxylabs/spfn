@@ -7,7 +7,7 @@ import { execa } from 'execa';
 import chalk from 'chalk';
 
 import { logger } from '../utils/logger.js';
-import { detectPackageManager, findWorkspace, getAddArgs, getInstallArgs, getRunCommand } from '../utils/package-manager.js';
+import { detectPackageManager, findWorkspace, getAddArgs, getRunCommand, runInstall, type PackageManager } from '../utils/package-manager.js';
 import { confirmInstalled } from './init/steps/package.js';
 import { ENV_FILES_HINT } from '../utils/messages.js';
 import { selectScaffoldMode, type ScaffoldMode } from './init/mode.js';
@@ -29,29 +29,53 @@ interface CreateOptions
 async function installFromWorkspaceRoot(workspaceRoot: string, projectPath: string): Promise<void>
 {
     const installSpinner = ora('Installing dependencies from workspace root...').start();
+    const failure = await runInstall('pnpm', ['install'], {
+        cwd: workspaceRoot,
+        stdio: 'pipe',
+        timeout: 300_000,
+    });
 
-    try
-    {
-        await execa('pnpm', getInstallArgs('pnpm'), {
-            cwd: workspaceRoot,
-            stdio: 'pipe',
-            timeout: 300_000,
-        });
-    }
-    catch (error: any)
+    if (failure)
     {
         installSpinner.fail('Failed to install dependencies');
         logger.error('Run `pnpm install` from workspace root manually.');
-
-        if (error.stderr)
-        {
-            logger.error(error.stderr);
-        }
+        logger.error(failure);
 
         return;
     }
 
     confirmInstalled(installSpinner, projectPath, 'pnpm');
+}
+
+/**
+ * Install @svgr/webpack and run `spfn setup icons`. A failure only warns: the
+ * project is usable without it. A failed install also prints its report
+ * (`runInstall`).
+ */
+async function setupSvgr(pm: PackageManager, projectPath: string): Promise<void>
+{
+    const iconsSpinner = ora('Setting up SVGR for icon management...').start();
+    const failure = await runInstall(pm, getAddArgs(pm, ['@svgr/webpack'], { dev: true }), { cwd: projectPath, timeout: 120_000 });
+
+    if (failure)
+    {
+        iconsSpinner.warn('Failed to setup SVGR (you can run `spfn setup icons` later)');
+        logger.error(failure);
+
+        return;
+    }
+
+    try
+    {
+        const { setupIcons } = await import('./setup.js');
+
+        await setupIcons();
+        iconsSpinner.succeed('SVGR setup completed');
+    }
+    catch
+    {
+        iconsSpinner.warn('Failed to setup SVGR (you can run `spfn setup icons` later)');
+    }
 }
 
 /**
@@ -186,23 +210,7 @@ async function createProject(projectName: string, options: CreateOptions): Promi
     logger.info(`\n📂 Changed directory to ${projectName}\n`);
 
     // 7. Setup SVGR for icons
-    const iconsSpinner = ora('Setting up SVGR for icon management...').start();
-
-    try
-    {
-        // Install @svgr/webpack
-        await execa(pm, getAddArgs(pm, ['@svgr/webpack'], { dev: true }), { cwd: projectPath, timeout: 120_000 });
-
-        // Run spfn setup icons programmatically
-        const { setupIcons } = await import('./setup.js');
-        await setupIcons();
-
-        iconsSpinner.succeed('SVGR setup completed');
-    }
-    catch (error)
-    {
-        iconsSpinner.warn('Failed to setup SVGR (you can run `spfn setup icons` later)');
-    }
+    await setupSvgr(pm, projectPath);
 
     // 8. Setup shadcn/ui (optional)
     if (options.shadcn)

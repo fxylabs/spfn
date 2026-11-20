@@ -9,10 +9,9 @@
 import { Command } from 'commander';
 import { existsSync, readFileSync } from 'fs';
 import { join } from 'path';
-import { execa } from 'execa';
 import chalk from 'chalk';
 import ora from 'ora';
-import { detectPackageManager, getAddArgs } from '../utils/package-manager.js';
+import { detectPackageManager, getAddArgs, runInstall } from '../utils/package-manager.js';
 import { addVercel } from './add-vercel.js';
 
 /**
@@ -50,18 +49,16 @@ async function addPackage(packageName: string): Promise<void>
     {
         const pm = detectPackageManager(process.cwd());
         const installSpinner = ora('Installing package...').start();
+        const failure = await runInstall(pm, getAddArgs(pm, [packageName]), { cwd: process.cwd() });
 
-        try
-        {
-            await execa(pm, getAddArgs(pm, [packageName]));
-            installSpinner.succeed('Package installed');
-        }
-        catch (error)
+        if (failure)
         {
             installSpinner.fail('Failed to install package');
-            console.error(chalk.red(error instanceof Error ? error.message : 'Unknown error'));
+            console.error(chalk.red(failure));
             process.exit(1);
         }
+
+        installSpinner.succeed('Package installed');
     }
     else
     {

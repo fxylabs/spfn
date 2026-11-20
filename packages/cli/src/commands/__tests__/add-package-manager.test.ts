@@ -16,7 +16,8 @@ vi.mock('execa', () => ({ execa: mocks.execa }));
 vi.mock('ora', () => ({ default: () => mocks.spinner }));
 
 import { addCommand } from '../add.js';
-import { getInstallArgs } from '../../utils/package-manager.js';
+import { DRIZZLE_TYPEBOX_REFUSAL, getAddArgs } from '../../utils/package-manager.js';
+import { NPM_ERESOLVE_DRIZZLE_TYPEBOX, NPM_ERESOLVE_OTHER } from '../../utils/__tests__/fixtures/npm-eresolve.js';
 
 const originalCwd = process.cwd();
 let repository: string;
@@ -43,6 +44,31 @@ beforeEach(() =>
     });
 });
 
+/**
+ * Runs `spfn add @spfn/i18n` in the npm app with npm failing as execa reports
+ * it (`stderr` npm's own output), and returns what the command printed; fails
+ * the row unless it exited 1.
+ */
+async function addFailingWith(stderr: string): Promise<string>
+{
+    process.chdir(join(repository, 'scratch/app'));
+    mocks.execa.mockRejectedValueOnce(Object.assign(
+        new Error(`Command failed with exit code 1: npm install @spfn/i18n\n${stderr}`),
+        { exitCode: 1, stdout: '', stderr },
+    ));
+    vi.spyOn(process, 'exit').mockImplementation(((code?: number) =>
+    {
+        throw new Error(`process.exit(${code})`);
+    }) as never);
+    const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    await expect(addCommand.parseAsync(['@spfn/i18n'], { from: 'user' })).rejects.toThrow('process.exit(1)');
+
+    expect(mocks.spinner.fail).toHaveBeenCalledWith('Failed to install package');
+
+    return error.mock.calls.flat().join('\n');
+}
+
 afterEach(() =>
 {
     process.chdir(originalCwd);
@@ -53,13 +79,42 @@ afterEach(() =>
 
 describe('spfn add in an npm app', () =>
 {
-    it('installs with the npm arguments init installs with, which npm needs to accept the SPFN set', async () =>
+    it('adds the package with npm\'s install verb', async () =>
     {
         process.chdir(join(repository, 'scratch/app'));
 
         await addCommand.parseAsync(['@spfn/i18n'], { from: 'user' });
 
-        expect(mocks.execa).toHaveBeenCalledWith('npm', [...getInstallArgs('npm'), '@spfn/i18n']);
+        expect(mocks.execa).toHaveBeenCalledWith('npm', getAddArgs('npm', ['@spfn/i18n']), { cwd: process.cwd() });
+        expect(mocks.spinner.succeed).toHaveBeenCalledWith('Package installed');
+    });
+
+    it('prints npm\'s own ERESOLVE lines and the drizzle-typebox explanation, then exits non-zero', async () =>
+    {
+        // The fixture is npm 10.9.9's real output; see fixtures/npm-eresolve.ts.
+        const error = await addFailingWith(NPM_ERESOLVE_DRIZZLE_TYPEBOX);
+
+        expect(error).toContain('peer drizzle-orm@">=0.36.0" from drizzle-typebox@0.3.3');
+        expect(error).toContain(DRIZZLE_TYPEBOX_REFUSAL);
+    });
+
+    it('reports an ERESOLVE that names another package as npm wrote it, without the drizzle-typebox line', async () =>
+    {
+        const error = await addFailingWith(NPM_ERESOLVE_OTHER);
+
+        expect(error).toContain('peer react@"^19.2.1" from react-dom@19.2.1');
+        expect(error).not.toContain('drizzle-typebox');
+    });
+
+    it('prints nothing about drizzle-typebox when npm succeeds in an app that lists it', async () =>
+    {
+        process.chdir(join(repository, 'scratch/app'));
+        writeFileSync('package.json', '{"name":"app","dependencies":{"drizzle-typebox":"1.0.0-beta.14"}}');
+        const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+        await addCommand.parseAsync(['@spfn/i18n'], { from: 'user' });
+
+        expect(error).not.toHaveBeenCalled();
         expect(mocks.spinner.succeed).toHaveBeenCalledWith('Package installed');
     });
 });

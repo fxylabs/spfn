@@ -18,7 +18,6 @@ import {
     findUnresolvedPackages,
     findWorkspace,
     getAddArgs,
-    getInstallArgs,
     getRunScriptArgs,
     pnpmNonMemberReason,
 } from '../package-manager.js';
@@ -83,15 +82,12 @@ function makeRepository(files: Record<string, string>): string
     return repository;
 }
 
-describe('getInstallArgs and getAddArgs', () =>
+describe('getAddArgs', () =>
 {
-    it('give `add` the npm arguments `init` installs with, so npm accepts the SPFN set in both', () =>
+    it('adds with npm\'s install verb and no flag that would hide a peer conflict', () =>
     {
-        const shared = getInstallArgs('npm');
-
-        expect(shared).toEqual(['install', '--legacy-peer-deps']);
-        expect(getAddArgs('npm', ['@spfn/i18n'])).toEqual([...shared, '@spfn/i18n']);
-        expect(getAddArgs('npm', ['@svgr/webpack'], { dev: true })).toEqual([...shared, '--save-dev', '@svgr/webpack']);
+        expect(getAddArgs('npm', ['@spfn/i18n'])).toEqual(['install', '@spfn/i18n']);
+        expect(getAddArgs('npm', ['@svgr/webpack'], { dev: true })).toEqual(['install', '--save-dev', '@svgr/webpack']);
     });
 
     it('add with each manager\'s own verb and dev flag', () =>

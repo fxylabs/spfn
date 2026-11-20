@@ -128,6 +128,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `defineMiddleware(..., { skips })`:
   `grep -rnE -A4 "\.use\(\[" src/ | grep -E "optionalAuth|machineAuth|signedTokenAuth|opsTokenAuth|opsOrUser|oneTimeTokenAuth|authenticateForRenewal"`
   and check which hits follow a `defineRouter(...)` rather than a `route.*(...)`.
+- **BREAKING: @spfn/core no longer depends on `drizzle-typebox` (#376).** Nothing in core imported
+  it. An app that imports `drizzle-typebox` without declaring it, reaching core's copy through
+  npm's hoisting, must declare it in its own `package.json`, or import `drizzle-orm/typebox-legacy`,
+  which drizzle-orm `1.0.0-rc.4` ships.
+- **BREAKING: spfn: npm installs pass no `--legacy-peer-deps`, so an existing npm app that lists
+  `drizzle-typebox@0.x` gets npm's `ERESOLVE`, with the CLI's explanation and fix (#376).** The
+  flag was there only for drizzle-typebox, whose peer range `drizzle-orm >=0.36.0` admits no
+  `1.0.0-rc.4`; the scaffold no longer adds it, and without it npm installs the SPFN set with no
+  peer warning. The flag also hid every other peer conflict. `init`, `add`, `create`,
+  `setup icons` and the generated Dockerfile's `npm ci` / `npm prune` drop it. An npm app
+  scaffolded before still lists `drizzle-typebox`, which npm now refuses. The CLI does not predict
+  that: when an install it runs fails, it prints npm's own lines, and when npm's error is
+  `ERESOLVE` over drizzle-typebox's peer on drizzle-orm (text or `json` output), one more line: why, and to remove it from the `package.json` npm
+  names (the app's, or the workspace root's), move to a drizzle-typebox version that accepts the
+  prerelease, or import `drizzle-orm/typebox-legacy`. The command exits non-zero as for any failed
+  install (`create`'s `@svgr/webpack` install only warns, as before). When `spfn init` fails there,
+  what it wrote before the install stays, as for any install failure: the server and lib
+  templates, the RPC proxy route, in full mode the `next.config` rewrites (bare mode does not touch
+  `next.config`), the Docker files, `spfn.config.js` and the patched `package.json`; no `.env` file, `.spfnrc.ts`, `.gitignore`, `tsconfig.json` change or
+  README. Delete the flag from your own Dockerfile and scripts too. pnpm, yarn and bun installs are
+  unchanged.
+- **spfn: the scaffold no longer adds `drizzle-typebox`, `tsup` or `dotenv` (#376, #368).** No
+  template imports them; `spfn build` bundles with the CLI's own tsup, and core and the CLI declare
+  their own dotenv. An existing app keeps them harmlessly, apart from `drizzle-typebox` under npm
+  (above). The unused `buildServerForCommand` helper, which ran an app-level tsup, is gone.
 - **BREAKING: @spfn/core: workers started on `getBoss()` run core's fetch loop, not pg-boss's
   worker, so they no longer appear in pg-boss's `wip` events (#359).** Core needs to know when a
   worker's last fetch has settled, which pg-boss 11 does not expose; the loop runs on pg-boss's
@@ -240,7 +265,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **BREAKING: spfn: the `spfn dev` codegen watcher needs a tsx resolvable from the app or from the
   CLI (#353).** It ran through the package manager, so an npm app with no tsx installed got one
   fetched by `npx tsx`; now the watcher is not started there, and `spfn dev` logs the command that
-  installs tsx in the app (`npm install --legacy-peer-deps --save-dev tsx` in an npm app). The
+  installs tsx in the app (`npm install --save-dev tsx` in an npm app). The
   server and Next.js still start.
 - **BREAKING: @spfn/core: `CodegenOrchestrator.generateAll()` and `settled()` reject when called
   while the calling generator's own `generate()`, run by the watch loop, is still running (#353).**
@@ -389,7 +414,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   peer range `drizzle-orm >=0.36.0` admits no `1.0.0-rc.4`). `init`, `add`, `create` and
   `setup icons` now share one set of install arguments per manager, and the generated Dockerfile's
   `npm ci` and `npm prune`, which failed the same way, carry the flag too; it copies bun's text
-  `bun.lock` as well as `bun.lockb`.
+  `bun.lock` as well as `bun.lockb`. (The flag is gone again: no SPFN app needs it, see #376
+  under Changed.)
 - **spfn: `spfn db push --dry-run` writes nothing (spfn/spfn#163).** In 0.4.0-beta.1 a dry run
   whose project schema had no pending change applied the function package migrations (and created
   their bookkeeping tables) instead of previewing them; with a pending project change it said
