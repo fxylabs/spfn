@@ -212,6 +212,9 @@ describe('second-factor policy (#309)', () =>
             passkeyRegisterVerify: 'passkey',
             listPasskeys: 'passkey',
             mfaMarkPasskey: 'passkey',
+            // enrollPasskey's binding read: refused, it would stop the
+            // registration before its ceremony (#400).
+            getSessionBinding: 'passkey',
             mfaTotpEnroll: 'totp',
             mfaTotpConfirm: 'totp',
             mfaStatus: 'always',

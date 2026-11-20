@@ -303,22 +303,67 @@ describe('browser passkey helpers', () =>
             expect(verifyBodies(api)[0].passkeyResponse).toBe(passkeyResponse);
         });
 
-        it('E6: a 503 (AccountBusyError) at the verify is busy, not a thrown refusal', async () =>
+        it('E6: a 503 (AccountBusyError) at the verify is busy, carrying the post to make again', async () =>
         {
             const busy = Object.assign(new Error('Another change to this account is in progress. Try again.'), { statusCode: 503 });
+            const api = boundApi(vi.fn().mockRejectedValue(busy));
 
-            expect(await enrollPasskey(boundApi(vi.fn().mockRejectedValue(busy)))).toEqual({ ok: false, reason: 'busy', error: busy });
+            const result = await enrollPasskey(api, { label: 'Laptop' });
+
+            expect(result).toMatchObject({ ok: false, reason: 'busy', error: busy });
+            expect(result.ok === false && result.retry?.body).toBe(verifyBodies(api)[0]);
         });
 
-        it('E7: a session that may not read its binding (enrolment-only, #309) still enrols, with no proof prompt', async () =>
+        it('E7: retry posts the same attestation and proof again — no binding read, no prompt', async () =>
         {
-            const refused = Object.assign(new Error('enrol a second factor first'), { statusCode: 403 });
+            const busy = Object.assign(new Error('busy'), { statusCode: 503 });
+            const verify = logged('register/verify', async () => ENROLLED);
+            verify.mockRejectedValueOnce(busy);
+            const api = boundApi(verify);
+            const first = await enrollPasskey(api, { label: 'Laptop' });
+            order = [];
+
+            expect(first.ok === false && first.retry).toBeTruthy();
+            expect(await enrollPasskey(api, { retry: first.ok ? undefined : first.retry })).toEqual({ ok: true, ...ENROLLED });
+            expect(order).toEqual(['register/verify']);
+            const [sent, again] = verifyBodies(api);
+            expect(again).toEqual(sent);
+            expect(again).toMatchObject({ label: 'Laptop', passkeyResponse: { id: 'Y3JlZA' } });
+            expect(create).toHaveBeenCalledTimes(1);
+            expect(get).toHaveBeenCalledTimes(1);
+        });
+
+        it('E8 (R9): a refused binding read rejects as that refusal, before any ceremony', async () =>
+        {
+            const refused = Object.assign(new Error('enrol a second factor first'), { statusCode: 403, code: 'SECOND_FACTOR_ENROLMENT_REQUIRED' });
             const api = apiStub({
                 getSessionBinding: { call: vi.fn().mockRejectedValue(refused) },
                 passkeyProofOptions: { call: vi.fn() },
             });
 
-            expect(await enrollPasskey(api)).toMatchObject({ ok: true });
+            await expect(enrollPasskey(api)).rejects.toBe(refused);
+            expect(api.passkeyRegisterOptions.call).not.toHaveBeenCalled();
+            expect(create).not.toHaveBeenCalled();
+            expect(get).not.toHaveBeenCalled();
+        });
+
+        it('E9: a network error on the binding read rejects as itself, before any ceremony', async () =>
+        {
+            const offline = new TypeError('Failed to fetch');
+            const api = apiStub({ getSessionBinding: { call: vi.fn().mockRejectedValue(offline) } });
+
+            await expect(enrollPasskey(api)).rejects.toBe(offline);
+            expect(api.passkeyRegisterOptions.call).not.toHaveBeenCalled();
+            expect(create).not.toHaveBeenCalled();
+        });
+
+        it('E10 (R10): an app-supplied proof the verify refuses is thrown — no proof prompt of the helper\'s', async () =>
+        {
+            const refused = new PasskeyProofRequiredError({ details: { procedure: 'passkeyAdd' } });
+            const api = boundApi(vi.fn().mockRejectedValue(refused));
+
+            await expect(enrollPasskey(api, { passkeyResponse: { id: 'spent' } as never })).rejects.toBe(refused);
+            expect(get).not.toHaveBeenCalled();
             expect(api.passkeyProofOptions.call).not.toHaveBeenCalled();
         });
     });

@@ -603,10 +603,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the authenticator that the account never stored. A bound account sees two prompts, an unbound
   one still sees one. If the verify still asks for the proof, the proof runs once and the same
   attestation is sent again; a second refusal rejects. `enrollPasskey(api, { passkeyResponse })`
-  sends an app's own proof as given. New results: a dismissed proof prompt is `no-credential`, and a
-  503 at the verify is `busy`. A dismissed registration prompt is still `cancelled`. Not breaking.
-  A session that may only enrol a second factor cannot ask the proof, so on a bound account it
-  marks an existing passkey instead (README, "Enrolling, from a Next.js client component").
+  sends an app's own proof as given; its refusal rejects, with no proof prompt of the helper's. A
+  binding read that fails rejects as itself before any prompt. New results: a dismissed proof
+  prompt is `no-credential`, and a 503 at the verify is `busy` with `retry`, which
+  `enrollPasskey(api, { retry })` posts again — the same attestation and proof, no prompt. A
+  dismissed registration prompt is still `cancelled`. Not breaking. `GET /_auth/session/binding` is
+  an enrolment route while `'passkey'` is listed (`ROUTE_ENROLMENT`), so an enrolment-only session
+  reads it; on a bound account its proof is refused before the registration prompt, and it marks an
+  existing passkey instead (README, "Enrolling, from a Next.js client component").
 - **@spfn/auth: `PasskeyProofProcedure` (`@spfn/auth/client`) is read off the route's input
   (#400).** The hand-written union had left out `opsTokenIssue`, which the server accepts.
 - **spfn: without tsx, `spfn db` and `spfn provision` say what to install (#349)**, as `spfn env`

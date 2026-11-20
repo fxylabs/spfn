@@ -301,7 +301,9 @@ export const ROUTE_ENROLMENT = {
     getAuthSession: 'always',
     getAuthChannels: 'none',
     setSessionBinding: 'none',
-    getSessionBinding: 'none',
+    // enrollPasskey reads it to learn whether the registration needs a
+    // passkeyAdd proof; a read about the caller's own session (#400).
+    getSessionBinding: 'passkey',
     sessionBindingDisableOptions: 'none',
     passkeyProofOptions: 'none',
     sessionRenewOptions: 'unchecked',

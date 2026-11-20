@@ -540,7 +540,7 @@ The enrolment routes — the only ones such a session reaches:
 
 | routes | while |
 |---|---|
-| `passkeyRegisterOptions`, `passkeyRegisterVerify`, `listPasskeys`, `mfaMarkPasskey` | `'passkey'` is listed |
+| `passkeyRegisterOptions`, `passkeyRegisterVerify`, `listPasskeys`, `mfaMarkPasskey`, `getSessionBinding` | `'passkey'` is listed |
 | `mfaTotpEnroll`, `mfaTotpConfirm` | `'totp'` is listed |
 | `mfaStatus`, `mfaStepUpOptions`, `mfaStepUp`, `getAuthSession`, `logout` | always |
 
@@ -3394,21 +3394,34 @@ the account already holds (`passkeyAdd`, see
 `passkeyResponse`. The proof comes first because the authenticator makes the new credential before
 the server is asked about it: a proof dismissed after the registration would leave a passkey in the
 person's password manager that the account never stored. An unbound account sees one prompt, the
-registration's.
+registration's. A binding read that fails is not taken for "unbound": its refusal or network error
+is the rejected promise, before any prompt.
 
-If the verify still answers 403 `PASSKEY_PROOF_REQUIRED` — binding was turned on since the read,
-or the session may not read it — `enrollPasskey` runs the proof once and sends the **same**
-attestation again; the refusal did not spend its challenge. A second refusal is a rejected promise.
-An app that ran `provePasskey(api, 'passkeyAdd')` itself passes the assertion as
+If the verify still answers 403 `PASSKEY_PROOF_REQUIRED` — binding was turned on since the read —
+`enrollPasskey` runs the proof once and sends the **same** attestation again; the refusal did not
+spend its challenge. A second refusal is a rejected promise. An app that ran
+`provePasskey(api, 'passkeyAdd')` itself passes the assertion as
 `enrollPasskey(api, { passkeyResponse })`: it is sent as given, the binding is not read, and no
-proof prompt is shown.
+proof prompt is shown — a refusal of that proof (spent, say) is the rejected promise.
+
+A 503 at the verify (`AccountBusyError`) spends neither the registration's challenge nor the proof,
+and the authenticator already holds the new credential. So the `busy` result carries `retry`, and
+`enrollPasskey(api, { retry })` posts the same attestation and proof again with no prompt; calling
+`enrollPasskey` afresh would make a second credential and leave the first unstored.
+
+```ts
+const result = await enrollPasskey(authApi, { label: 'MacBook Touch ID' });
+const settled = !result.ok && result.retry ? await enrollPasskey(authApi, { retry: result.retry }) : result;
+```
 
 A session that may only enrol a second factor ([`secondFactorEnrolmentRequired`](#requiring-a-second-factor-secondfactor))
-is refused both `session/binding` and `passkey-proof/options` (403
+reads `session/binding` — it is an enrolment route while `'passkey'` is listed, because this helper
+needs it to register — but is refused `passkey-proof/options` (403
 `SECOND_FACTOR_ENROLMENT_REQUIRED`). On an unbound account that changes nothing: it enrols with one
-prompt. On a bound account its registration cannot be proved, and the verify's refusal is the
-rejected promise; mark the passkey the account already holds instead (`mfa/step-up`, then
-`mfa/passkey/mark`), or turn binding off first.
+prompt. On a bound account the proof comes first and is refused, so the helper rejects with that
+refusal before the registration prompt, and nothing is left on the authenticator; mark the passkey
+the account already holds instead (`mfa/step-up`, then `mfa/passkey/mark`), or turn binding off
+first.
 
 The passkey helpers take a client and call through it, so they wait as long as that client
 does — `SPFN_AUTH_GUARD_TIMEOUT` bounds only the guards. To bound them, pass a client created
@@ -3465,7 +3478,7 @@ someone who simply changed their mind.
 | `{ ok: false, reason: 'unsupported' }` | this browser has no WebAuthn; nothing was sent to the server |
 | `{ ok: false, reason: 'cancelled' }` | the person dismissed the enrollment prompt (the registration's `create()`) |
 | `{ ok: false, reason: 'no-credential' }` | sign-in: the authenticator offered nothing, or the person dismissed it. Enrolling: the account has session binding on, and the proof prompt was dismissed or this device offered none of the account's passkeys — nothing was registered. A bound account with no passkey left turns binding off first ([An owner who lost every passkey](#session-binding)) |
-| `{ ok: false, reason: 'busy', error }` | enrolling: `register/verify` answered 503 (`AccountBusyError`) — another change held the account, nothing was written; call `enrollPasskey` again |
+| `{ ok: false, reason: 'busy', error }` | the server answered 503 (`AccountBusyError`) — another change held the account, nothing was written or spent. `renewSession`, `stepUpWithPasskey`: call again (an assertion leaves nothing behind). Enrolling: the result also carries `retry`; `enrollPasskey(api, { retry })` posts the same attestation again — a fresh call would leave the first credential on the authenticator unstored |
 | `{ ok: false, reason: 'error', error }` | anything else, with the original error attached |
 
 #### The recent-authentication gate
