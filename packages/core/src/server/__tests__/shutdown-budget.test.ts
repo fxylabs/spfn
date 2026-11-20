@@ -1,10 +1,10 @@
 /**
  * T4 — the shutdown budget rule, on a simulated clock
  *
- * Of `shutdown.timeout` T: the work phases (HTTP close, WebSocket close,
- * drain) get at least half, the hooks a fifth, and the enabled
- * infrastructure closes share three tenths in proportion to their caps, each
- * never above its cap. Every phase here takes its whole budget, so each later
+ * Of `shutdown.timeout` T: the work phases (HTTP close, WebSocket close, the
+ * wait for job fetches in flight, drain) get at least half, the hooks a
+ * fifth, and the enabled infrastructure closes share three tenths in
+ * proportion to their caps, each never above its cap. Every phase here takes its whole budget, so each later
  * phase finds exactly what was held back for it.
  */
 
@@ -21,7 +21,7 @@ const ALL_ON: ShutdownInfrastructure = { jobs: true, database: true, redis: true
 
 const DATABASE_ONLY: ShutdownInfrastructure = { jobs: false, database: true, redis: false };
 
-const WORK_PHASES: ShutdownPhase[] = ['http', 'websocket', 'drain'];
+const WORK_PHASES: ShutdownPhase[] = ['http', 'websocket', 'jobFetch', 'drain'];
 
 type Close = keyof typeof CAPS;
 
@@ -73,7 +73,7 @@ describe('T4: the shutdown budget rule', () =>
             expect(taken.get(close)).toBe(Math.floor(Math.min(CAPS[close], 0.3 * timeout * CAPS[close] / capSum))));
         expect([...taken.values()].reduce((sum, ms) => sum + ms, 0)).toBeLessThanOrEqual(timeout);
         [...taken.values()].forEach((ms) => expect(ms).toBeGreaterThanOrEqual(0));
-        // The HTTP and WebSocket closes cannot take the drain's half of the work share
+        // The HTTP and WebSocket closes and the fetch wait cannot take the drain's half of the work share
         expect(taken.get('drain')).toBeGreaterThanOrEqual(work / 2);
     }
 
@@ -92,7 +92,8 @@ describe('T4: the shutdown budget rule', () =>
         const taken = walkAtBound(280_000, ALL_ON);
 
         expect(taken.get('database')).toBe(CAPS.database);
-        expect(taken.get('drain')).toBe(280_000 - 56_000 - 14_000 - taken.get('http')! - taken.get('websocket')!);
+        expect(taken.get('drain')).toBe(280_000 - 56_000 - 14_000 - taken.get('http')! - taken.get('websocket')!
+            - taken.get('jobFetch')!);
     });
 
     it('T4: a jobs share below pg-boss\'s graceful minimum plus the fail means a stop without a wait', () =>

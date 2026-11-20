@@ -408,30 +408,47 @@ signal the forced exit (`process.exit(1)`) fires at that same deadline.
 beginShutdown()                    health → 503, trackOperation() now rejects
 Phase 1  HTTP server.close()       stop new connections (≤5s), finish in-flight requests
 Phase 1.5 WS cleanup               (if websockets; ≤5s)
-Phase 2  stopFetching()            (if jobs) every worker on getBoss() stops fetching; running
-                                   handlers continue, send() keeps working
+Phase 2  stopFetching(wait)        (if jobs) every worker on getBoss() stops fetching, and the
+                                   fetches in flight are waited for (≤5s, within the half of
+                                   the work share HTTP leaves); running handlers continue,
+                                   send() keeps working. The wait may take up to 5s the drain
+                                   would otherwise get, never the drain's guaranteed half; when
+                                   the closes used their whole half it is 0ms, Phase 2 reports
+                                   the fetch in flight, and a job it takes starts on the
+                                   stopping instance — the warning is the record
 Phase 3  ShutdownManager.drain()   wait for tracked operations and after-commit callbacks
 Phase 3.5 ShutdownManager.runHooks() onShutdown hooks, in order   ┐ one hooks' budget
 Phase 4  lifecycle.beforeShutdown()                               ┘
-Phase 5  stopBoss(wait)            (if jobs) wait for running job handlers, then stop pg-boss,
-                                   failing what still runs; sending stops here (≤31s)
+Phase 5  stopBoss(wait)            (if jobs) wait for running job handlers — and, within the
+                                   same wait, for a fetch Phase 2 left in flight and the
+                                   handlers its jobs start — fail the jobs of those still
+                                   running, then stop pg-boss; sending stops here (≤31s)
 Phase 6  closeDatabase, closeEventTransport, closeCache  (≤5s, ≤2s, ≤5s)
          process.exit(0)
 ```
 
-**The job queue is two things.** Fetching stops in Phase 2: from then on the stopping instance
-starts no job, so a job that is due during the drain stays `created` for another instance (or
-for this app's next start). That covers every worker started on the instance `getBoss()`
-returns — by `registerJobs()` or by the app's own `getBoss().work(queue, handler)` (per-tenant or
-dynamic queues): the instance records its workers itself. From Phase 2 until the instance is
+**The job queue is two things.** Fetching stops in Phase 2: every worker stops polling, and
+Phase 2 waits for the fetches already in flight to settle — a fetch that started before the
+shutdown takes its jobs then, and they run here. Once Phase 2 has logged `Stopped job fetch`
+the stopping instance takes no job, so a job that is due during the drain, or enqueued from
+Phase 3 on, stays `created` for another instance (or for this app's next start). That covers
+every worker started on the instance `getBoss()` returns — by `registerJobs()` or by the app's
+own `getBoss().work(queue, handler)` (per-tenant or dynamic queues): core runs those workers
+itself, on pg-boss's `fetch`/`complete`/`fail`, so it knows each fetch in flight. A `PgBoss`
+the app constructs itself runs pg-boss's own workers, which a shutdown does not stop. From Phase 2 until the instance is
 stopped, `getBoss().work(...)` **rejects** with an error saying the instance stopped fetching for
 a shutdown — it starts no worker. Sending stays open until Phase 5: a tracked operation, an
 after-commit callback, an `onShutdown` hook or `beforeShutdown` that enqueues as it finishes
 puts its job in the queue. pg-boss's own timekeeping also runs until Phase 5 — a cron tick only
 inserts the job row, which a running instance fetches; the stopping instance never runs it.
-`stopFetching()` cannot recall a fetch already in flight when Phase 2 starts: that fetch still
-hands its jobs to the handler, so the log line `Stopped job fetch` may precede one last job
-starting on the stopping instance; that handler counts as running. Job handlers that were running may still be running
+The wait for fetches in flight shares the first half of the work share with the HTTP and
+WebSocket closes and is capped at 5s; it reserves nothing, so it cannot cut into the drain's
+guaranteed half — but what the closes leave of their half, which the drain would otherwise get,
+it may take, up to 5s (at the default timeout the drain is at least 195000ms, not 200000ms). A
+fetch is one statement, so it normally settles at once; if one is still in flight when the wait
+ends — a hung pool — Phase 2 logs `Job fetch not stopped: N fetch(es) still in flight …` (a
+warning) instead of `Stopped job fetch`, because a job such a fetch takes still starts on this
+instance; Phase 5 waits for it again with the handlers. Job handlers that were running may still be running
 while `onShutdown` hooks and `beforeShutdown` run — do not close something a handler uses there.
 
 **What the drain waits for.** Every operation passed to `trackOperation()` before the shutdown
@@ -447,18 +464,21 @@ not in `onAfterCommit` — so the handler's wait covers it.
 
 **One budget rule** (`shutdown-budget.ts`). `shutdown.timeout` T is shared by proportion:
 
-- **waiting for accepted work** — the HTTP close, then the drain — is entitled to **at least half**;
+- **waiting for accepted work** — the HTTP close, the wait for job fetches in flight, then the
+  drain — is entitled to **at least half**;
 - the **hooks** — `onShutdown` hooks and `beforeShutdown`, one budget — to **a fifth**;
 - the enabled **infrastructure closes** share the remaining **three tenths in proportion to their
   caps**, each never above its cap: `reserve_i = min(cap_i, 0.3 · T · cap_i / Σ caps of enabled)`.
-  The caps: the job queue 2000ms (pg-boss's 1000ms minimum handler wait + 1000ms to fail what is
-  left and close its pool), the database 5000ms, the event transport 2000ms, Redis 5000ms — each
+  The caps: the job queue 2000ms (the stop's 1000ms minimum handler wait, kept from pg-boss +
+  1000ms to fail what is left and close its pool), the database 5000ms, the event transport 2000ms, Redis 5000ms — each
   only when the server runs it; disabled infrastructure reserves nothing.
 
 What the reserves do not need goes to the work: once `0.3 · T ≥ Σ caps` each close holds exactly
-its cap and the drain gets `T − hooks − Σ caps`. Inside the work share, the HTTP close and the
-WebSocket close keep their own 5s caps and together take at most half of it; the other half is
-the drain's, so a slow HTTP close cannot starve the drain. A reserve is time an earlier phase
+its cap and the drain gets `T − hooks − Σ caps`. Inside the work share, the HTTP close, the
+WebSocket close and Phase 2's wait for job fetches in flight keep their own 5s caps and together
+take at most half of it; the other half is the drain's, so a slow HTTP close or a hung fetch
+cannot starve the drain. The fetch wait reserves nothing: it gets what the closes before it left
+of that half. A reserve is time an earlier phase
 cannot spend; time a phase does not use flows forward to the phases after it. So a phase starting
 now gets
 
@@ -476,31 +496,39 @@ stays inside its budget the database closes before the forced exit with its rese
 The budgets when every phase takes its whole budget, all infrastructure on (printed from
 `createShutdownBudget`; ms):
 
-| `shutdown.timeout` | HTTP + WS close (at most) | drain (at least) | hooks | jobs | database | event transport | Redis |
+| `shutdown.timeout` | HTTP + WS close + fetch wait (at most) | drain (at least) | hooks | jobs | database | event transport | Redis |
 |---|---|---|---|---|---|---|---|
 | 10000 | 2501 | 2501 | 2000 | 428 | 1071 | 428 | 1071 |
 | 30000 | 7501 | 7501 | 6000 | 1285 | 3214 | 1285 | 3214 |
-| 280000 (default) | 10000 | 200000 | 56000 | 2000 | 5000 | 2000 | 5000 |
+| 280000 (default) | 15000 | 195000 | 56000 | 2000 | 5000 | 2000 | 5000 |
 
-An HTTP close that ends at once leaves its part to the drain (at 10000: a drain of about 5000ms).
+An HTTP close that ends at once leaves its part to the fetch wait (up to 5s) and what that does
+not use to the drain (at 10000: a drain of about 5000ms). So a hung fetch takes up to 5s from the
+drain — the "drain (at least)" column already counts it (at the default, 195000 rather than
+200000) — but never the drain's guaranteed half of the work share. When the HTTP and WebSocket
+closes take their whole half, the fetch wait gets 0ms: Phase 2 reports a fetch still in flight as
+such, and a job that fetch takes starts on the stopping instance — the warning is the record.
 
 **Do not set `shutdown.timeout` below about 47s with every piece of infrastructure on** (below
 about 17s with only the database): under `Σ caps / 0.3` the closes get less than their caps — the
-database pool is given less than 5s to end, and the job queue gets less than pg-boss's 2000ms
-graceful minimum, so when the drain and hooks use their shares, pg-boss fails running handlers'
-jobs without waiting for them. And set it to at least twice the longest request or after-commit
+database pool is given less than 5s to end, and the job queue gets less than its 2000ms
+minimum, so when the drain and hooks use their shares, core fails running handlers' jobs without
+waiting for them. And set it to at least twice the longest request or after-commit
 callback that must finish: the work share is only guaranteed half.
 
 **A job handler still running in Phase 5.** The outcome depends on the jobs' budget:
 
-- **2000ms or more** (the normal case): pg-boss waits up to the budget minus 1000ms (at most 30s)
-  for running handlers. A handler that finishes in that time completes its job as usual.
+- **2000ms or more** (the normal case): core waits up to the budget minus 1000ms (at most 30s)
+  for running handlers — and for a fetch Phase 2 reported still in flight. A handler that
+  finishes in that time completes its job as usual.
 - **Less than 2000ms** — a short `shutdown.timeout` (below about 47s with all infrastructure on)
-  whose earlier phases took their whole budgets: pg-boss cannot wait less than 1000ms, so it does
-  not wait; it stops at once.
+  whose earlier phases took their whole budgets: the stop keeps pg-boss's 1000ms minimum wait,
+  so it does not wait; it fails at once.
 
-Either way, a handler still running when the wait ends has its job failed by pg-boss before its
-pool closes and before the database closes (output `"pg-boss shut down while active"`):
+Either way, a handler still running when the wait ends has its job failed by core — pg-boss's own
+stop fails only jobs its own workers hold, and core runs the workers — before pg-boss's pool
+closes and before the database closes (output `"pg-boss shut down while active"`, as pg-boss
+writes it):
 
 - with attempts left (`retry_count < retryLimit`) the job goes to `retry` and runs again on a
   live instance after its retry delay — it is not lost, but the handler may have done part (or
@@ -508,8 +536,8 @@ pool closes and before the database closes (output `"pg-boss shut down while act
 - on its last attempt it ends `failed` and is not run again.
 
 The server logs it from what it observed: `N job handler(s) were still running when pg-boss
-stopped; pg-boss failed their jobs …`, with each job's id and queue. The stop is abandoned only
-when the jobs' budget is 0 (the deadline has passed) or pg-boss's fail and pool close outlast the
+stopped; their jobs were failed …`, with each job's id and queue. The stop is abandoned only
+when the jobs' budget is 0 (the deadline has passed) or the fail and pg-boss's pool close outlast the
 1000ms held for them; on a signal `process.exit` follows, and the job stays `active` until its
 expiry (`expireInSeconds`) before it is retried.
 

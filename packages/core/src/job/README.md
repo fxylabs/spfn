@@ -34,13 +34,34 @@ From `@spfn/core/job`:
 - Router: `defineJobRouter(jobs)`, `mergeJobRouters(base, extra)`, `collectJobs(router, prefix?)`,
   `isJobDef(v)`, `isJobRouter(v)`
 - Queue policy: `resolveQueuePolicy(job)`
-- pg-boss lifecycle: `initBoss(options)`, `getBoss()`, `stopFetching()`, `stopBoss(handlerWait?)`,
-  `isBossRunning()`, `shouldClearOnStart()` — `stopFetching()` stops every worker started on the
-  instance `getBoss()` returns (by `registerJobs()` or by the app's own `getBoss().work()`) while
-  `send()` keeps working, and from then on `getBoss().work()` rejects; `stopBoss(handlerWait =
-  30000)` waits that long for running handlers (with less than 1000ms, pg-boss's minimum, it does
-  not wait), then stops pg-boss — a job still running is failed: retried if attempts remain.
-  The server's graceful shutdown calls both — see the server README
+- pg-boss lifecycle: `initBoss(options)`, `getBoss()`, `stopFetching(fetchWait?)`,
+  `stopBoss(handlerWait?)`, `isBossRunning()`, `shouldClearOnStart()` — `stopFetching(fetchWait =
+  5000)` stops every worker started on the instance `getBoss()` returns (by `registerJobs()` or by
+  the app's own `getBoss().work()`) and waits up to `fetchWait` for the fetches they have in
+  flight, while `send()` keeps working; from then on `getBoss().work()` rejects. It logs `Stopped
+  job fetch` only once no fetch is in flight — otherwise a warning that one still is, since a job
+  it takes starts on this instance. `stopBoss(handlerWait = 30000)` waits that long for running
+  handlers (with less than 1000ms, the minimum kept from pg-boss, it does not wait), fails the jobs
+  of those still running — retried if attempts remain — then stops pg-boss. The server's graceful
+  shutdown calls both — see the server README
+- Workers on `getBoss()`: `work()`, `offWork()` and `notifyWorker()` on that instance run core's
+  fetch loop, built on pg-boss's public `fetch` / `complete` / `fail` and keeping its worker's
+  behaviour — `pollingIntervalSeconds` (default 2, at least 0.5), `batchSize`, `includeMetadata`,
+  `priority`; one batch at a time per worker; the handler bounded by the batch's largest
+  `expireInSeconds` (at least 1s); a single job completed with the handler's result, a batch
+  without one; a throw (or a failed completion) fails the batch with the error, which pg-boss
+  serialises into the output and retries per the job's retry options; a failed poll emitted as the
+  instance's `error` event with `queue` and `worker`. `stop(options)` and `start()` on that instance
+  are core's too, so pg-boss's lifecycle covers those workers: `stop()` is the path `stopBoss()`
+  takes — with `graceful` (default) it waits up to `timeout` (default 30000, at least 1000) for a
+  fetch in flight and the running handlers, then fails the jobs of handlers still running (`"pg-boss
+  shut down while active"`), then runs pg-boss's stop with `close`; with `graceful: false` it fails
+  them at once; `wait: false` resolves at once. No worker fetches once `stop()` began, `work()`
+  after it rejects with pg-boss's `Workers are disabled. pg-boss is stopped`, and `start()` lets it
+  start workers again; the `stopped` event is pg-boss's own. Unlike pg-boss's stop, cron and queue
+  supervision end after the wait, not before it. What it drops: those workers do not appear in
+  pg-boss's `wip` events (`getWipData()` is not on the 11.1.2 instance). A `PgBoss` the app
+  constructs itself keeps pg-boss's own workers, which a shutdown neither stops nor fails
 - Registration: `registerJobs(router)` — **takes a `JobRouter`, not an array**
 - Types: `JobDef`, `JobRouter`, `JobRouterEntry`, `JobOptions`, `JobQueuePolicy`,
   `JobSendOptions`, `JobHandler`, `CompensateHandler`, `InferJobInput`, `InferJobOutput`,

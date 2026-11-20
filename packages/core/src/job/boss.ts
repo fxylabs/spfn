@@ -6,7 +6,8 @@
 
 import PgBoss from 'pg-boss';
 import { logger } from '@spfn/core/logger';
-import { recordWorkers, runningJobs, stopWorkers } from './boss-workers';
+import { MIN_GRACEFUL_WAIT, recordWorkers, stopInstance, stopWorkers } from './boss-workers';
+import type { RunningJob } from './boss-workers';
 
 const jobLogger = logger.child('@spfn/core:job');
 
@@ -226,9 +227,12 @@ export async function initBoss(options: BossOptions): Promise<PgBoss>
 /**
  * Get the current pg-boss instance
  *
- * Workers started on it with `work()` — here or by registerJobs() — are
- * recorded by the instance itself, so `stopFetching()` stops them all. Once
- * `stopFetching()` ran, `work()` on it rejects: the instance is shutting down.
+ * Workers started on it with `work()` — here or by registerJobs() — run on
+ * core's fetch loop, so `stopFetching()` stops them all and knows when their
+ * last fetch settled. Once `stopFetching()` ran, `work()` on it rejects: the
+ * instance is shutting down. Its own `stop(options)` is the path `stopBoss()`
+ * takes, so it waits for, fails and stops those workers as pg-boss's stop does
+ * its own.
  */
 export function getBoss(): PgBoss | null
 {
@@ -236,21 +240,30 @@ export function getBoss(): PgBoss | null
 }
 
 /**
- * Stop fetching: every worker started on the current instance stops polling
+ * How long `stopFetching()` waits for in-flight fetches when not given a wait
+ */
+const DEFAULT_FETCH_WAIT = 5000;
+
+/**
+ * Stop fetching: every worker started on the current instance stops polling,
+ * and the fetches they have in flight settle
  *
  * The first step of a graceful shutdown. Every worker started on the instance
  * `getBoss()` returns counts — by registerJobs() or by the app's own
  * `getBoss().work(...)` — and from here until the instance is stopped a
  * `work()` call on it rejects instead of starting a worker.
  *
- * A handler already running continues and its job completes or fails as
- * usual; a job not yet fetched stays `created` for another instance. A fetch
- * already in flight when this is called still hands its jobs to the handler —
- * pg-boss cannot recall it. Sending stays open — `send()` and event publishes
- * keep working until `stopBoss()`; so does pg-boss's own timekeeping, whose
- * cron ticks only insert job rows for a running instance to fetch.
+ * A fetch already in flight is waited for, up to `fetchWait` ms: the jobs it
+ * takes start here, and once it settled the instance takes no other job — a
+ * job not yet fetched stays `created` for another instance. If the wait ends
+ * with a fetch unsettled, the log says so: a job it takes still starts on
+ * this instance. Handlers are not waited for: one already running continues
+ * and its job completes or fails as usual. Sending stays open — `send()` and
+ * event publishes keep working until `stopBoss()`; so does pg-boss's own
+ * timekeeping, whose cron ticks only insert job rows for a running instance
+ * to fetch.
  */
-export async function stopFetching(): Promise<void>
+export async function stopFetching(fetchWait = DEFAULT_FETCH_WAIT): Promise<void>
 {
     const boss = getBossInstance();
     if (!boss)
@@ -258,26 +271,40 @@ export async function stopFetching(): Promise<void>
         return;
     }
 
-    const stopped = await stopWorkers(boss);
+    const { stopped, inFlight } = await stopWorkers(boss, fetchWait);
 
-    jobLogger.info(`Stopped job fetch: ${stopped} worker(s); sending stays open`);
+    if (inFlight > 0)
+    {
+        jobLogger.warn(
+            `Job fetch not stopped: ${inFlight} fetch(es) still in flight after ${fetchWait}ms — ` +
+            'a job such a fetch takes starts on this instance; sending stays open',
+        );
+
+        return;
+    }
+
+    jobLogger.info(`Stopped job fetch: ${stopped} worker(s), no fetch in flight; sending stays open`);
 }
 
 /**
- * The shortest handler wait pg-boss can do: `stop({ graceful: true })` waits
- * at least this long, whatever timeout it is given.
+ * The shortest handler wait a stop does — a wait below it is no wait. Kept
+ * from pg-boss's graceful stop, which the shutdown budget was built on.
  */
-export const BOSS_MIN_HANDLER_WAIT = 1000;
+export const BOSS_MIN_HANDLER_WAIT = MIN_GRACEFUL_WAIT;
 
 /**
- * Stop pg-boss: wait for running job handlers, then stop
+ * Stop pg-boss: wait for running job handlers, fail what still runs, then stop
  *
- * With `handlerWait` of at least 1000 (pg-boss's minimum wait), pg-boss waits
- * that long for running handlers; with less, it does not wait at all. Either
- * way, a handler still running then has its job failed by pg-boss ("pg-boss
- * shut down while active") before its pool closes: a job with attempts left
- * goes to `retry` and runs again on a live instance after its retry delay; a
- * job on its last attempt ends `failed`. Sending stops here.
+ * With `handlerWait` of at least 1000, core waits up to that long for the
+ * handlers its workers run, and for a fetch still in flight; with less, it
+ * does not wait at all. Either way, a handler still running then has its job
+ * failed ("pg-boss shut down while active") before the pool closes: a job
+ * with attempts left goes to `retry` and runs again on a live instance after
+ * its retry delay; a job on its last attempt ends `failed`. Sending stops here.
+ *
+ * This is the instance's own `stop({ graceful, timeout })` with `graceful`
+ * set by whether `handlerWait` reaches 1000 — the same code path, so an app
+ * that calls `getBoss().stop()` itself gets the same wait and failures.
  *
  * Only this instance's state is cleared: if a newer instance was initialised
  * while this one was stopping, `getBoss()` keeps returning the newer one.
@@ -290,16 +317,15 @@ export async function stopBoss(handlerWait = 30000): Promise<void>
         return;
     }
 
-    const graceful = handlerWait >= BOSS_MIN_HANDLER_WAIT;
+    const wait = handlerWait >= BOSS_MIN_HANDLER_WAIT ? handlerWait : 0;
 
-    jobLogger.info(graceful
-        ? `Stopping pg-boss (running handlers get ${handlerWait}ms)...`
+    jobLogger.info(wait > 0
+        ? `Stopping pg-boss (running handlers get ${wait}ms)...`
         : 'Stopping pg-boss without waiting for running handlers...');
 
     try
     {
-        await boss.stop(graceful ? { graceful, timeout: handlerWait } : { graceful });
-        logJobsFailedAtStop(runningJobs(boss));
+        logJobsFailedAtStop(await stopInstance(boss, { graceful: wait > 0, timeout: wait }));
         jobLogger.info('pg-boss stopped');
     }
     catch (error)
@@ -318,10 +344,9 @@ export async function stopBoss(handlerWait = 30000): Promise<void>
 }
 
 /**
- * A handler still running once `stop()` resolved was running when pg-boss
- * failed the jobs in progress — its job is one of them.
+ * A handler still running once the wait ended has had its job failed
  */
-function logJobsFailedAtStop(cut: { id: string; queue: string }[]): void
+function logJobsFailedAtStop(cut: RunningJob[]): void
 {
     if (cut.length === 0)
     {
@@ -329,7 +354,7 @@ function logJobsFailedAtStop(cut: { id: string; queue: string }[]): void
     }
 
     jobLogger.error(
-        `${cut.length} job handler(s) were still running when pg-boss stopped; pg-boss failed their jobs ` +
+        `${cut.length} job handler(s) were still running when pg-boss stopped; their jobs were failed ` +
         '("pg-boss shut down while active") — retried on a live instance if attempts remain, left failed ' +
         'on the last attempt',
         { jobs: cut },
