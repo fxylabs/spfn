@@ -9,9 +9,11 @@
  * Requires the local test services (./scripts/test-services.sh start).
  */
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import postgres from 'postgres';
 import type { Sql } from 'postgres';
+
+import type PgBoss from 'pg-boss';
 
 import { getBoss, initBoss, stopBoss } from '../boss';
 import { TEST_DATABASE_URL } from '../../db/__tests__/helpers/db-fixture';
@@ -23,8 +25,11 @@ describe('pg-boss\'s stop() on the getBoss() instance', () =>
 {
     let sql: Sql;
 
+    let timersBefore = 0;
+
     beforeEach(async () =>
     {
+        timersBefore = timers();
         await initBoss({ connectionString: TEST_DATABASE_URL, schema: TEST_SCHEMA });
         await getBoss()!.createQueue(QUEUE, { retryLimit: 2 });
         sql = postgres(TEST_DATABASE_URL, { max: 1, onnotice: () => undefined });
@@ -95,6 +100,26 @@ describe('pg-boss\'s stop() on the getBoss() instance', () =>
         expect(await jobState(id)).toBe('retry');
     }, 15000);
 
+    it('B5: a stop whose fail statement errors rejects with that error after pg-boss stopped; stop() then does nothing and start() starts again', async () =>
+    {
+        const boss = getBoss()!;
+        let release = () => undefined as void;
+        const started = startedHandler(new Promise<void>((resolve) => release = resolve));
+        await boss.work(QUEUE, { pollingIntervalSeconds: 0.5 }, started.handler);
+        await boss.send(QUEUE, {});
+        await started.running;
+        const restore = breakFailStatement(boss);
+
+        await expect(boss.stop({ graceful: false })).rejects.toThrow('connection terminated (injected)');
+        restore();
+        release();
+
+        await vi.waitFor(() => expect(timers()).toBeLessThanOrEqual(timersBefore), { timeout: 2000, interval: 50 });
+        await expect(boss.stop({ graceful: false })).resolves.toBeUndefined();
+        await boss.start();
+        await expect(boss.work(QUEUE, async () => undefined)).resolves.toEqual(expect.any(String));
+    }, 15000);
+
     async function jobState(id: string | null): Promise<string>
     {
         const rows = await sql.unsafe(`SELECT state FROM ${TEST_SCHEMA}.job WHERE id = $1`, [id as string]);
@@ -117,6 +142,33 @@ function startedHandler(done: Promise<unknown>): { handler: () => Promise<void>;
         },
         running,
     };
+}
+
+/** Make pg-boss's statement that fails jobs by id throw, as a dropped connection does; returns the undo */
+function breakFailStatement(boss: PgBoss): () => void
+{
+    const db = boss.getDb() as any;
+    const executeSql = db.executeSql;
+    db.executeSql = async (text: string, values: unknown) =>
+    {
+        if (text.includes('deleted_jobs') && text.includes('UNNEST($2'))
+        {
+            throw new Error('connection terminated (injected)');
+        }
+
+        return executeSql.call(db, text, values);
+    };
+
+    return () =>
+    {
+        db.executeSql = executeSql;
+    };
+}
+
+/** Timers alive in this process — pg-boss's intervals and the pool's among them */
+function timers(): number
+{
+    return process.getActiveResourcesInfo().filter((kind) => kind === 'Timeout').length;
 }
 
 function sleep(ms: number): Promise<void>

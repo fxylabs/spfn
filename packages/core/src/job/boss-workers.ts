@@ -81,9 +81,13 @@ interface Loop
 
 /**
  * `fetching` until stopWorkers() runs, `fetchStopped` from then until a stop
- * begins; `work` is refused in every state but `fetching`
+ * begins, `stopping` while it runs; then `stopped` once pg-boss's own stop
+ * resolved, `stopFailed` if it rejected. `work` is refused in every state but
+ * `fetching`; a stop does nothing once one has begun.
  */
-type InstanceState = 'fetching' | 'fetchStopped' | 'stopping' | 'stopped';
+type InstanceState = 'fetching' | 'fetchStopped' | 'stopping' | 'stopped' | 'stopFailed';
+
+const STOP_BEGUN: InstanceState[] = ['stopping', 'stopped', 'stopFailed'];
 
 interface BossWorkers
 {
@@ -162,14 +166,21 @@ export function recordWorkers(boss: PgBoss): void
  * failure is emitted as an `error` event, as pg-boss's does.
  *
  * pg-boss's own stop ends its cron and supervision before its wait; here they
- * end after it, when pg-boss's stop runs.
+ * end after it, when pg-boss's stop runs — and it runs whatever core's steps
+ * did. If one failed (the fail statement errors when the connection dropped),
+ * the stop rejects with that error once pg-boss has stopped; the jobs it did
+ * not fail stay `active` until pg-boss's expiration retries them. After such
+ * a stop the instance is `stopped` as after any other: `stop()` does nothing
+ * and `start()` starts it again. If pg-boss's own stop rejects, the instance
+ * is where pg-boss leaves itself after a failed stop: `stop()` and `start()`
+ * do nothing, and `work()` stays refused.
  *
  * @returns the jobs failed because their handler still ran
  */
 export async function stopInstance(boss: PgBoss, options: PgBoss.StopOptions = {}): Promise<RunningJob[]>
 {
     const record = recordOf(boss);
-    if (record.state === 'stopping' || record.state === 'stopped')
+    if (STOP_BEGUN.includes(record.state))
     {
         return [];
     }
@@ -189,24 +200,51 @@ export async function stopInstance(boss: PgBoss, options: PgBoss.StopOptions = {
 }
 
 /**
- * Within `wait` ms, let a fetch still in flight settle and the running
- * handlers finish; fail the jobs of those still running, since pg-boss's
- * stop fails only the jobs its own workers hold; then stop pg-boss
+ * Settle core's workers, then stop pg-boss — after them whether or not they
+ * settled. The first error, core's before pg-boss's, is what the caller gets
+ * once both have run.
  */
 async function settleAndStop(boss: PgBoss, record: BossWorkers, wait: number, close: boolean): Promise<RunningJob[]>
+{
+    const settling = settleWorkers(boss, wait);
+    const stopping = settling.then(ignore, ignore).then(() => record.stopPgBoss({ graceful: false, close }));
+    const [settled, stopped] = await Promise.allSettled([settling, stopping]);
+
+    record.state = stopped.status === 'fulfilled' ? 'stopped' : 'stopFailed';
+
+    if (settled.status === 'rejected')
+    {
+        throw settled.reason;
+    }
+
+    if (stopped.status === 'rejected')
+    {
+        throw stopped.reason;
+    }
+
+    return settled.value;
+}
+
+/**
+ * Within `wait` ms, let a fetch still in flight settle and the running
+ * handlers finish; then fail the jobs of those still running, since pg-boss's
+ * stop fails only the jobs its own workers hold
+ */
+async function settleWorkers(boss: PgBoss, wait: number): Promise<RunningJob[]>
 {
     const deadline = Date.now() + wait;
 
     await stopWorkers(boss, wait);
     await waitForHandlers(boss, deadline - Date.now());
-    const failed = await failRunningJobs(boss);
-    await record.stopPgBoss({ graceful: false, close });
-    record.state = 'stopped';
 
-    return failed;
+    return failRunningJobs(boss);
 }
 
-/** pg-boss's `start()`; after a completed stop, `work()` starts workers again */
+function ignore(): void
+{
+}
+
+/** pg-boss's `start()`; after a stop that ended `stopped`, `work()` starts workers again */
 async function restart(record: BossWorkers): Promise<PgBoss>
 {
     const boss = await record.startPgBoss();
@@ -300,7 +338,7 @@ function recordOf(boss: PgBoss): BossWorkers
  */
 function startLoop(boss: PgBoss, record: BossWorkers, name: string, args: unknown[]): string
 {
-    if (record.state === 'stopping' || record.state === 'stopped')
+    if (STOP_BEGUN.includes(record.state))
     {
         throw new Error('Workers are disabled. pg-boss is stopped');
     }
