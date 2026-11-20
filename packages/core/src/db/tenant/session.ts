@@ -11,6 +11,7 @@
  * | R3/R4 inside a transaction, tenancy table   | in it, after binding it to the tenant if unbound |
  * | inside a transaction, `tenantKey()` only    | in it, unbound (part 1)                          |
  * | R1 no transaction, read, tenancy table      | in a short `READ ONLY` transaction on the read DB |
+ * |    … with `{ primary: true }`               | the same, on the write DB                        |
  * | R2 no transaction, write, tenancy table     | in a short transaction on the write DB           |
  * | no transaction, `tenantKey()` only          | on the read or write DB directly (part 1)        |
  *
@@ -36,7 +37,7 @@ import type { TenantBindingKey } from './errors';
 import { findTenancyMarker } from './registry';
 import { assertRequestTenant } from './request-scope';
 
-/** Whether the query reads only, which sends it to the read database. */
+/** Whether the query reads only, which makes its short transaction `READ ONLY`. */
 export type TenantAccess = 'read' | 'write';
 
 /** What a query is scoped to: a tenant (`app.tenant_id`) or a user (`app.user_id`). */
@@ -56,7 +57,8 @@ interface TransactionOpener
  * Run `query` for a tenant under rules R1–R6, or for a user under U1–U5.
  *
  * @param outside - the database to use when no transaction is open: the
- *   repository's `readDb` for a read, its `db` for a write
+ *   repository's `readDb` for a read — its `db` when the read asked for the
+ *   primary — and its `db` for a write
  */
 export async function runTenantQuery<TDb, TResult>(
     access: TenantAccess,

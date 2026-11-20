@@ -78,9 +78,9 @@ import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js';
 import type { AnyRelations, EmptyRelations, InferInsertModel, InferSelectModel, SQL } from 'drizzle-orm';
 import { and, gt, lt, asc, desc } from 'drizzle-orm';
 import type { PgColumn, PgTable } from 'drizzle-orm/pg-core';
-import { isSQLWrapper, buildWhereFromObject, buildWhereClause, clampRowLimit, countRows, type CountOptions } from './query-utils';
+import { isSQLWrapper, buildWhereFromObject, buildWhereClause, clampRowLimit, countRows, type CountOptions, type ReadOptions } from './query-utils';
 import type { DrizzleDatabase } from './manager/types';
-import { RepositoryCore } from './repository-core';
+import { RepositoryCore, type RepositoryDatabase } from './repository-core';
 
 export { RepositoryError } from './repository-core';
 export type { RepositoryDatabase } from './repository-core';
@@ -113,6 +113,7 @@ export abstract class BaseRepository<
      *
      * @param table - Drizzle table schema
      * @param where - Object or SQL condition
+     * @param options - `primary` reads from the primary instead of the replica
      * @returns Single record or null
      *
      * @example
@@ -122,11 +123,15 @@ export abstract class BaseRepository<
      *
      * // SQL-based
      * const user = await this._findOne(users, eq(users.id, 1));
+     *
+     * // Must see a write made a moment ago: the replica can lag
+     * const user = await this._findOne(users, { id: 1 }, { primary: true });
      * ```
      */
     protected async _findOne<T extends PgTable>(
         table: T,
         where: Record<string, any> | SQL | undefined,
+        options?: ReadOptions,
     ): Promise<InferSelectModel<T> | null>
     {
         const whereClause = isSQLWrapper(where)
@@ -138,7 +143,7 @@ export abstract class BaseRepository<
             throw new Error('findOne requires at least one where condition');
         }
 
-        const results = await this.readDb.select().from(table as any).where(whereClause).limit(1);
+        const results = await this.readDatabase(options).select().from(table as any).where(whereClause).limit(1);
 
         return (results[0] as InferSelectModel<T>) ?? null;
     }
@@ -147,7 +152,7 @@ export abstract class BaseRepository<
      * Find multiple records
      *
      * @param table - Drizzle table schema
-     * @param options - Query options
+     * @param options - Query options; `primary` reads from the primary instead of the replica
      * @returns Array of records
      *
      * @example
@@ -161,7 +166,7 @@ export abstract class BaseRepository<
      */
     protected async _findMany<T extends PgTable>(
         table: T,
-        options?: {
+        options?: ReadOptions & {
             where?: Record<string, any> | SQL | undefined;
             orderBy?: SQL | SQL[];
             limit?: number;
@@ -169,7 +174,7 @@ export abstract class BaseRepository<
         },
     ): Promise<InferSelectModel<T>[]>
     {
-        let query = this.readDb.select().from(table as any);
+        let query = this.readDatabase(options).select().from(table as any);
 
         // Apply where
         if (options?.where)
@@ -225,11 +230,14 @@ export abstract class BaseRepository<
      *     after: page1.at(-1)?.id,
      *     limit: 20,
      * });
+     *
+     * // Must see a write made a moment ago: the replica can lag
+     * const fresh = await this._findManyKeyset(users, { cursorColumn: users.id, limit: 20, primary: true });
      * ```
      */
     protected async _findManyKeyset<T extends PgTable>(
         table: T,
-        options: {
+        options: ReadOptions & {
             cursorColumn: PgColumn;
             limit: number;
             after?: string | number | bigint | Date;
@@ -256,7 +264,7 @@ export abstract class BaseRepository<
             ? and(baseWhere, cursorPredicate)
             : (cursorPredicate ?? baseWhere);
 
-        let query = this.readDb.select().from(table as any);
+        let query = this.readDatabase(options).select().from(table as any);
 
         if (whereClause)
         {
@@ -502,7 +510,7 @@ export abstract class BaseRepository<
      *
      * @param table - Drizzle table schema
      * @param where - Optional object or SQL condition
-     * @param options - `cap` stops counting past that many rows
+     * @param options - `cap` stops counting past that many rows; `primary` reads from the primary
      * @returns Number of records; with `cap`, at most `cap + 1`, which means "more than cap"
      *
      * @example
@@ -517,9 +525,15 @@ export abstract class BaseRepository<
     protected async _count<T extends PgTable>(
         table: T,
         where?: Record<string, any> | SQL | undefined,
-        options?: CountOptions,
+        options?: CountOptions & ReadOptions,
     ): Promise<number>
     {
-        return countRows(this.readDb, table, buildWhereClause(table, where), options);
+        return countRows(this.readDatabase(options), table, buildWhereClause(table, where), options);
+    }
+
+    /** Where a read runs outside a transaction: the replica, or the primary when asked. */
+    private readDatabase(options: ReadOptions | undefined): RepositoryDatabase<TDatabase>
+    {
+        return options?.primary ? this.db : this.readDb;
     }
 }

@@ -46,7 +46,7 @@ Everything re-exported from `@spfn/core/db` (`src/db/index.ts`):
 
 **Repository** (`repository.ts`, `tenant/`):
 `BaseRepository` (abstract class), `TenantRepository` (abstract class, tables shared by many
-tenants), `RepositoryError` (class), `RepositoryDatabase` (type), `CountOptions` (type)
+tenants), `RepositoryError` (class), `RepositoryDatabase` (type), `CountOptions` (type), `ReadOptions` (type: `{ primary? }`)
 
 **Tenancy** (`tenant/tenancy.ts` — see [Tenancy](#tenancy-definetenancy--tenant-tables-enforced-by-the-database)):
 `defineTenancy`, `tenantList`, `TenantMismatchError` (class), `listTenancyTables` (internal: the boot check)
@@ -256,9 +256,9 @@ inside repository methods.
 
 | Method | Returns |
 |--------|---------|
-| `_findOne(table, where)` | `T \| null` |
-| `_findMany(table, options?)` | `T[]` |
-| `_findManyKeyset(table, { cursorColumn, limit, after?, order?, where? })` | `T[]` |
+| `_findOne(table, where, { primary? })` | `T \| null` |
+| `_findMany(table, { …, primary? })` | `T[]` |
+| `_findManyKeyset(table, { cursorColumn, limit, after?, order?, where?, primary? })` | `T[]` |
 | `_create(table, data)` | `T` |
 | `_createMany(table, data[])` | `T[]` |
 | `_upsert(table, data, { target, set? })` | `T` |
@@ -266,7 +266,12 @@ inside repository methods.
 | `_updateMany(table, where, data)` | `T[]` |
 | `_deleteOne(table, where)` | `T \| null` |
 | `_deleteMany(table, where)` | `T[]` |
-| `_count(table, where?, { cap? })` | `number` — with `cap`, at most `cap + 1` |
+| `_count(table, where?, { cap?, primary? })` | `number` — with `cap`, at most `cap + 1` |
+
+`{ primary: true }` goes after `where` (`_findOne(table, { id }, { primary: true })`, `_count(table,
+undefined, { primary: true })`) or into the `_findMany` / `_findManyKeyset` options object: in the
+`where` position (`_findOne(table, { primary: true })`) it type-checks, since `where` is
+`Record<string, any>`, and fails at run time as malformed SQL (`syntax error at or near "="`).
 
 `_count` with `cap` stops counting past `cap` rows: it reads at most `cap + 1` rows through a
 limited subquery, and a result of `cap + 1` means "more than `cap`". A list label such as
@@ -282,7 +287,17 @@ Both getters first check for an active transaction (`getTransaction()`); if one 
 both return that transaction's DB so all work runs in the same transaction. Outside a
 transaction, `this.db` returns the write/primary instance and `this.readDb` the read/replica
 instance. Use `readDb` for SELECT, `db` for INSERT/UPDATE/DELETE. The `_`-helpers already do
-this (`_findOne`/`_findMany`/`_count` use `readDb`; writes use `db`).
+this (`_findOne`/`_findMany`/`_findManyKeyset`/`_count` use `readDb`; writes use `db`).
+
+A replica can lag behind the primary. A read that must see a write made a moment ago — by this
+request or another — passes `{ primary: true }` to `_findOne`, `_findMany`, `_findManyKeyset` or
+`_count`, or runs inside a transaction; a transaction runs on the primary, and inside one the
+option changes nothing.
+
+```typescript
+// Just written by another request: the replica may not have it yet
+const user = await this._findOne(users, { id }, { primary: true });
+```
 
 Their type is the injected database **or its matching transaction type**. Common Drizzle
 query methods remain available in both contexts, while driver-only members such as a raw
@@ -398,16 +413,20 @@ where "notes"."tenant_id" = $2
 
 | Method | Tenant handling |
 |--------|-----------------|
-| `_findOne(tenantId, table, where)` | added to WHERE |
-| `_findMany(tenantId, table, options?)` | added to WHERE |
-| `_findManyKeyset(tenantId, table, options)` | added to WHERE |
-| `_count(tenantId, table, where?, { cap? })` | added to WHERE |
+| `_findOne(tenantId, table, where, { primary? })` | added to WHERE |
+| `_findMany(tenantId, table, { …, primary? })` | added to WHERE |
+| `_findManyKeyset(tenantId, table, { …, primary? })` | added to WHERE |
+| `_count(tenantId, table, where?, { cap?, primary? })` | added to WHERE |
 | `_create` / `_createMany(tenantId, table, data)` | written to the tenant column; a different tenant value in `data` throws, and `_createMany` checks every row before writing any |
 | `_upsert(tenantId, table, data, { target, set? })` | written to the tenant column; `target` must include the tenant column, `set` must not change it |
 | `_updateOne` / `_updateMany(tenantId, table, where, data)` | added to WHERE; `data` naming the tenant column throws |
 | `_deleteOne` / `_deleteMany(tenantId, table, where)` | added to WHERE |
-| `_select(tenantId, fields?)` | the `from` table in WHERE, each joined tenant-aware table in its ON clause |
-| `_selectOfUser(userId, fields?)` | by person, not by tenant: the `from` table must be a `visibleTo` tenancy table and gets `user = userId` in WHERE, each joined `visibleTo` table in its ON clause; see [A second key](#a-second-key-visibleto) |
+| `_select(tenantId, fields?, { primary? })` | the `from` table in WHERE, each joined tenant-aware table in its ON clause |
+| `_selectOfUser(userId, fields?, { primary? })` | by person, not by tenant: the `from` table must be a `visibleTo` tenancy table and gets `user = userId` in WHERE, each joined `visibleTo` table in its ON clause; see [A second key](#a-second-key-visibleto) |
+
+`{ primary: true }` goes after `where` here too (`_findOne(tenantId, table, { id }, { primary:
+true })`), never in its place: `_findOne(tenantId, table, { primary: true })` type-checks, since
+`where` is `Record<string, any>`, and fails at run time as malformed SQL (`syntax error at or near "="`).
 
 - **The tenant id must be a positive safe integer.** Anything else — `0`, `NaN`,
   `undefined`, a string — throws before a query is built.
@@ -438,6 +457,14 @@ where "notes"."tenant_id" = $2
 - **Tenancy tables add rules R1–R6.** For a table made with `tenancy.table` (next section)
   every method also decides where the query runs and refuses a mismatched tenant; a
   `tenantKey()`-only table keeps the behaviour above, plus the two mismatch checks.
+- **A read outside a transaction goes to the replica,** which can lag behind the primary. A
+  read that must see a write made a moment ago — by this request or another — passes
+  `{ primary: true }`, or runs inside a transaction. `_select` and `_selectOfUser` take it as
+  the third argument (`_select(tenantId, undefined, { primary: true })` selects every column).
+  The read keeps every rule above: still scoped to its tenant, still a short read-only
+  transaction with the tenant set on a tenancy table — only on the write connection. A raw
+  primary handle is not offered: on a tenancy table, `this.db` outside a transaction fails
+  for want of the tenant setting.
 
 ---
 
@@ -618,7 +645,7 @@ CREATE POLICY "members_tenant_delete" ON "acme_notes"."members" AS PERMISSIVE FO
 
 | # | Situation | What happens |
 |---|-----------|--------------|
-| U1 | no open transaction | `BEGIN` + `SET TRANSACTION READ ONLY` on the read connection → `set_config('app.user_id', u, true)` → query → `COMMIT` |
+| U1 | no open transaction | `BEGIN` + `SET TRANSACTION READ ONLY` on the read connection (the write connection with `{ primary: true }`) → `set_config('app.user_id', u, true)` → query → `COMMIT` |
 | U3 | in a transaction with no user yet | `set_config('app.user_id', u)` in it first, and the transaction is bound to `u` — beside its tenant, if it has one |
 | U4 | in a transaction bound to `u` | the query |
 | U5 | in a transaction bound to another user | `TenantMismatchError` (`key: 'user'`), no SQL |
@@ -635,7 +662,8 @@ class MemberRepository extends TenantRepository
 {
     async isMember(workspaceId: number, userId: number)       // the guard's authorize
     {
-        return await this._findOne(workspaceId, members, { userId, status: 'active' }) !== null;
+        // On the primary: a member removed a moment ago must not be admitted
+        return await this._findOne(workspaceId, members, { userId, status: 'active' }, { primary: true }) !== null;
     }
 
     async listWorkspacesOf(userId: number)
@@ -712,7 +740,7 @@ CREATE POLICY "workspaces_tenant_delete" ON "acme_notes"."workspaces" AS PERMISS
 
 | # | Situation | What happens |
 |---|-----------|--------------|
-| R1 | no open transaction, read method | `BEGIN` + `SET TRANSACTION READ ONLY` on the **read** connection → `set_config('app.tenant_id', t, true)` → query → `COMMIT` |
+| R1 | no open transaction, read method | `BEGIN` + `SET TRANSACTION READ ONLY` on the **read** connection — a replica when `DATABASE_READ_URL` is set → `set_config('app.tenant_id', t, true)` → query → `COMMIT`; `{ primary: true }` runs the same short read-only transaction on the write connection |
 | R2 | no open transaction, write method | `BEGIN` on the write connection → `set_config` → query → `COMMIT` |
 | R3 | in a transaction with no tenant yet | `set_config(t)` in it first, and the transaction is bound to `t` |
 | R4 | in a transaction bound to `t` | the query |
@@ -758,9 +786,11 @@ calls your function — exactly one of the two, checked when `guard()` is called
    requests never see each other's); `tenancy.of(c)` returns it, and throws on a route
    without the guard.
 
-The guard opens no transaction, so reads keep using the read replica. Add `Transactional()`
-to a write route — in either order: the transaction is bound to the guard's tenant before the
-handler runs (see R1–R6 above).
+The guard opens no transaction, so reads keep using the read replica — `authorize` too, unless
+it asks for the primary. A replica can lag: an `isMember` read there admits a member removed a
+moment ago until the replica catches up, so `authorize` reads with `{ primary: true }` (see the
+`isMember` example above). Add `Transactional()` to a write route — in either order: the
+transaction is bound to the guard's tenant before the handler runs (see R1–R6 above).
 
 ### Database roles
 

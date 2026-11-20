@@ -29,6 +29,11 @@
  * table declared with `visibleTo` — every tenant's rows of that user. It binds
  * `app.user_id` the way the tenant methods bind `app.tenant_id` (rules U1–U5).
  *
+ * Every read method takes `{ primary: true }` for a read that must see a write
+ * made a moment ago: outside a transaction it runs on the write connection
+ * instead of the replica, under the same rules — still a short `READ ONLY`
+ * transaction with the tenant set. Inside a transaction it changes nothing.
+ *
  * @example
  * ```typescript
  * export class NoteRepository extends TenantRepository
@@ -53,7 +58,7 @@ import type { AnyRelations, EmptyRelations, InferInsertModel, InferSelectModel, 
 import { and, asc, desc, gt, lt } from 'drizzle-orm';
 import type { PgAsyncSelectBuilder, PgColumn, PgTable, SelectedFields } from 'drizzle-orm/pg-core';
 import { RepositoryCore, type RepositoryDatabase } from '../repository-core';
-import { buildWhereClause, clampRowLimit, countRows, type CountOptions } from '../query-utils';
+import { buildWhereClause, clampRowLimit, countRows, type CountOptions, type ReadOptions } from '../query-utils';
 import type { DrizzleDatabase } from '../manager/types';
 import { assertTenantId, assertUserId, requireTenantColumn, tenantCondition } from './condition';
 import { scopeSelectBuilder, tenantScope, userScope } from './select';
@@ -79,10 +84,11 @@ export abstract class TenantRepository<
         tenantId: number,
         table: T,
         where: WhereInput,
+        options?: ReadOptions,
     ): Promise<InferSelectModel<T> | null>
     {
         const condition = this.requiredWhere(tenantId, table, where, 'findOne');
-        const rows = await this.runQuery('read', tenantId, table, (db) => db.select().from(table as any).where(condition).limit(1));
+        const rows = await this.runQuery('read', tenantId, table, (db) => db.select().from(table as any).where(condition).limit(1), options);
 
         return (rows[0] as InferSelectModel<T>) ?? null;
     }
@@ -91,7 +97,7 @@ export abstract class TenantRepository<
     protected async _findMany<T extends PgTable>(
         tenantId: number,
         table: T,
-        options?: {
+        options?: ReadOptions & {
             where?: WhereInput;
             orderBy?: SQL | SQL[];
             limit?: number;
@@ -122,7 +128,7 @@ export abstract class TenantRepository<
             }
 
             return query as unknown as Promise<InferSelectModel<T>[]>;
-        });
+        }, options);
     }
 
     /**
@@ -132,7 +138,7 @@ export abstract class TenantRepository<
     protected async _findManyKeyset<T extends PgTable>(
         tenantId: number,
         table: T,
-        options: {
+        options: ReadOptions & {
             cursorColumn: PgColumn;
             limit: number;
             after?: string | number | bigint | Date;
@@ -150,7 +156,7 @@ export abstract class TenantRepository<
         return this.runQuery('read', tenantId, table, (db) => db.select().from(table as any)
             .where(condition)
             .orderBy(order === 'desc' ? desc(cursorColumn) : asc(cursorColumn))
-            .limit(clampRowLimit(options.limit) as number) as unknown as Promise<InferSelectModel<T>[]>);
+            .limit(clampRowLimit(options.limit) as number) as unknown as Promise<InferSelectModel<T>[]>, options);
     }
 
     /** Number of the tenant's rows; with `cap`, at most `cap + 1` ("more than cap"). */
@@ -158,30 +164,31 @@ export abstract class TenantRepository<
         tenantId: number,
         table: T,
         where?: WhereInput,
-        options?: CountOptions,
+        options?: CountOptions & ReadOptions,
     ): Promise<number>
     {
         const condition = this.tenantWhere(tenantId, table, where);
 
-        return this.runQuery('read', tenantId, table, (db) => countRows(db, table, condition, options));
+        return this.runQuery('read', tenantId, table, (db) => countRows(db, table, condition, options), options);
     }
 
     /**
      * A select whose `from` table and every joined tenant-aware table carry the
      * tenant condition: the `from` table in WHERE, a joined one in its ON clause.
      * `innerJoin` and `leftJoin` are scoped; right, full, cross and lateral joins,
-     * set operators and a joined view throw.
+     * set operators and a joined view throw. `{ primary: true }` is the third
+     * argument — pass `undefined` as `fields` to select every column.
      */
-    protected _select(tenantId: number): PgAsyncSelectBuilder<undefined>;
-    protected _select<TSelection extends SelectedFields>(tenantId: number, fields: TSelection): PgAsyncSelectBuilder<TSelection>;
-    protected _select(tenantId: number, fields?: SelectedFields): unknown
+    protected _select(tenantId: number, fields?: undefined, options?: ReadOptions): PgAsyncSelectBuilder<undefined>;
+    protected _select<TSelection extends SelectedFields>(tenantId: number, fields: TSelection, options?: ReadOptions): PgAsyncSelectBuilder<TSelection>;
+    protected _select(tenantId: number, fields?: SelectedFields, options?: ReadOptions): unknown
     {
         assertTenantId(tenantId);
 
         return scopeSelectBuilder(
-            fields ? this.readDb.select(fields) : this.readDb.select(),
+            fields ? this.readDatabase(options).select(fields) : this.readDatabase(options).select(),
             tenantScope(tenantId),
-            (tables, execute) => runTenantQuery('read', { key: 'tenant', id: tenantId }, tables, this.readDb, execute),
+            (tables, execute) => runTenantQuery('read', { key: 'tenant', id: tenantId }, tables, this.readDatabase(options), execute),
         );
     }
 
@@ -193,18 +200,18 @@ export abstract class TenantRepository<
      * `from` or `join`; read it with `_select(tenantId)`. The query runs with
      * `app.user_id` set (rules U1–U5), so the row-level security policy admits
      * that user's rows in every tenant. The same joins and members are refused
-     * as on `_select`.
+     * as on `_select`, and `{ primary: true }` is the third argument there too.
      */
-    protected _selectOfUser(userId: number): PgAsyncSelectBuilder<undefined>;
-    protected _selectOfUser<TSelection extends SelectedFields>(userId: number, fields: TSelection): PgAsyncSelectBuilder<TSelection>;
-    protected _selectOfUser(userId: number, fields?: SelectedFields): unknown
+    protected _selectOfUser(userId: number, fields?: undefined, options?: ReadOptions): PgAsyncSelectBuilder<undefined>;
+    protected _selectOfUser<TSelection extends SelectedFields>(userId: number, fields: TSelection, options?: ReadOptions): PgAsyncSelectBuilder<TSelection>;
+    protected _selectOfUser(userId: number, fields?: SelectedFields, options?: ReadOptions): unknown
     {
         assertUserId(userId);
 
         return scopeSelectBuilder(
-            fields ? this.readDb.select(fields) : this.readDb.select(),
+            fields ? this.readDatabase(options).select(fields) : this.readDatabase(options).select(),
             userScope(userId),
-            (tables, execute) => runTenantQuery('read', { key: 'user', id: userId }, tables, this.readDb, execute),
+            (tables, execute) => runTenantQuery('read', { key: 'user', id: userId }, tables, this.readDatabase(options), execute),
         );
     }
 
@@ -353,9 +360,16 @@ export abstract class TenantRepository<
         tenantId: number,
         table: PgTable,
         query: (db: RepositoryDatabase<TDatabase>) => PromiseLike<TResult>,
+        options?: ReadOptions,
     ): Promise<TResult>
     {
-        return runTenantQuery(access, { key: 'tenant', id: tenantId }, [table], access === 'read' ? this.readDb : this.db, query);
+        return runTenantQuery(access, { key: 'tenant', id: tenantId }, [table], access === 'read' ? this.readDatabase(options) : this.db, query);
+    }
+
+    /** Where a read runs outside a transaction: the replica, or the primary when asked. */
+    private readDatabase(options: ReadOptions | undefined): RepositoryDatabase<TDatabase>
+    {
+        return options?.primary ? this.db : this.readDb;
     }
 
     /** `tenant condition AND where`, after checking the tenant id and the table. */
