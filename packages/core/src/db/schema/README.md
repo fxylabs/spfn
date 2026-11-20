@@ -263,6 +263,13 @@ ALTER TABLE "spfn_blog"."posts" DROP CONSTRAINT "posts_status_check", ADD CONSTR
 > does not emit `NOT VALID`. Removing a value fails the `ADD` while a row still holds it:
 > update those rows first.
 
+> **`db push` does not change an existing check.** drizzle-kit's push creates a check the
+> database lacks, but never alters one whose values changed: after a push, the database
+> still refuses the added value and admits the removed one. `spfn db push` (and `--dry-run`)
+> names each such check — `Check "posts_status_check" on "spfn_blog"."posts" differs from
+> the one in the database` — and leaves it. To change it, run `db generate` + `db migrate`,
+> or drop the constraint (the printed `ALTER TABLE … DROP CONSTRAINT`) and push again.
+
 ### `typedJsonb<T>(fieldName)`
 
 jsonb column typed as `T` — avoids `unknown` / `as any` on reads. Chainable.

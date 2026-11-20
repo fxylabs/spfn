@@ -7,6 +7,8 @@
 import chalk from 'chalk';
 import type { ClassificationResult, ClassifiedStatement } from './sql-classifier.js';
 import type { PendingFunctionMigrations } from '@spfn/core/db';
+import { qualifiedName, quoteIdent } from '../tenant/plan.js';
+import type { UnchangedCheck } from './unchanged-checks.js';
 
 // ============================================================================
 // Helpers
@@ -108,4 +110,28 @@ export function displayApplySummary(applied: number, skipped: number): void
     }
 
     console.log('');
+}
+
+/**
+ * Warn about each check push leaves as it is (see unchangedChecks), with the
+ * two ways to change it
+ */
+export function displayUnchangedChecks(checks: UnchangedCheck[]): void
+{
+    for (const check of checks)
+    {
+        const table = qualifiedName({ schema: check.schema, name: check.table });
+        const state = check.error === undefined
+            ? 'differs from the one in the database'
+            : `could not be compared with the one in the database (${check.error})`;
+
+        console.log(chalk.yellow(`⚠️  Check "${check.name}" on ${table} ${state}; db push does not change an existing check.`));
+        console.log(chalk.dim('   Run spfn db generate and spfn db migrate, or drop it and push again:'));
+        console.log(chalk.dim(`   ALTER TABLE ${table} DROP CONSTRAINT ${quoteIdent(check.name)};`));
+    }
+
+    if (checks.length > 0)
+    {
+        console.log('');
+    }
 }

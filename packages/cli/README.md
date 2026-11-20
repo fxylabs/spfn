@@ -533,6 +533,14 @@ loaded `.env` chain.
 > `db push` is for development. For production, use `db generate` + `db migrate` to keep
 > migration history.
 
+> **`db push` does not change an existing check.** Drizzle Kit's push creates a check the
+> database lacks but never alters one whose expression changed (an `enumCheck` given another
+> value). `db push` and `--dry-run` name each such check, `differs from the one in the
+> database`, with the remedy — `db generate` + `db migrate`, or drop it and push again — and
+> leave it. PostgreSQL parses and prints both expressions for the comparison
+> (`EXPLAIN (VERBOSE)`, which runs nothing); one it cannot parse against the table as it
+> stands is named as `could not be compared`.
+
 **One tenant out and back in.** `db tenant export` and `db tenant import` move the rows of
 one tenant across every tenant table — a `tenancy.table` and a `tenantKey()`-only table
 alike — and nothing else: not the tenant list row, not auth data.

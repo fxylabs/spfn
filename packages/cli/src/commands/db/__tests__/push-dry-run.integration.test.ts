@@ -293,6 +293,30 @@ describe('db push --dry-run', () =>
         expect(output()).not.toContain(MIGRATION_NAME);
     });
 
+    it('C1 a check whose values changed: dry run and push name it with the remedy and leave it as it is (spfn/spfn#167)', async () =>
+    {
+        await db.unsafe(`CREATE SCHEMA i163_app; CREATE TABLE i163_app.checked (state text NOT NULL,
+            CONSTRAINT checked_state_check CHECK (state in ('a', 'b')))`);
+        const before = await snapshot();
+        const notice = 'Check "checked_state_check" on "i163_app"."checked" differs from the one in the database; '
+            + 'db push does not change an existing check.\n'
+            + '   Run spfn db generate and spfn db migrate, or drop it and push again:\n'
+            + '   ALTER TABLE "i163_app"."checked" DROP CONSTRAINT "checked_state_check";';
+
+        await dbPush({ dryRun: true, schema: './src/server/entities/checked.entity.ts' });
+
+        expect(output()).toContain(notice);
+        expect(output()).toContain('No statements to apply; the checks above stay as they are');
+        expect(await snapshot()).toEqual(before);
+
+        printed = [];
+        await dbPush({ schema: './src/server/entities/checked.entity.ts' });
+
+        expect(output()).toContain(notice);
+        expect(await db`SELECT pg_get_constraintdef(oid) AS def FROM pg_constraint WHERE conname = 'checked_state_check'`)
+            .toEqual([{ def: 'CHECK ((state = ANY (ARRAY[\'a\'::text, \'b\'::text])))' }]);
+    });
+
     it('N1 an app with no function package prints no function package line, dry run or push', async () =>
     {
         const bare = mkdtempSync(join(__dirname, 'tmp-push-dry-run-bare-'));
@@ -593,6 +617,12 @@ function writeFixtureApp(root: string, { withPackage = true } = {}): void
         "import { pgSchema, integer } from 'drizzle-orm/pg-core';\n"
         + "export const app = pgSchema('i163_app');\n"
         + "export const notes = app.table('notes', { id: integer('id').primaryKey() });\n");
+    writeFileSync(join(entities, 'checked.entity.ts'),
+        "import { pgSchema } from 'drizzle-orm/pg-core';\n"
+        + "import { enumCheck, enumText } from '@spfn/core/db';\n"
+        + "export const app = pgSchema('i163_app');\n"
+        + "const STATES = ['a', 'b', 'c'] as const;\n"
+        + "export const checked = app.table('checked', { state: enumText('state', STATES).notNull() }, (t) => [enumCheck(t.state, STATES)]);\n");
 
     if (!withPackage)
     {

@@ -102,9 +102,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   nothing), as literals with `'` doubled; a value holding a backslash is refused (under
   `standard_conforming_strings = off` it would read as an escape). NULL passes (chain
   `.notNull()`); an empty list throws when the table's extras are evaluated (`db generate`, `db
-  push`). A `.default()` outside `values` is accepted by the DDL and fails at insert. Adding a value makes `db generate` drop and
-  re-add the constraint, and the `ADD` re-checks every row under an ACCESS EXCLUSIVE lock. No package
-  column adopts it.
+  push`). A `.default()` outside `values` is accepted by the DDL and fails at insert. Adding a value
+  makes `db generate` drop and re-add the constraint, and the `ADD` re-checks every row under an
+  ACCESS EXCLUSIVE lock. **`db push` does not change the constraint once it exists**: drizzle-kit's
+  push never alters a check, so the database keeps refusing an added value and admitting a removed
+  one; `spfn db push` names the check (below). No package column adopts it.
+- **spfn: `db push` names each check it leaves as it is** (spfn/spfn#167). drizzle-kit's push never
+  alters an existing check whose expression changed. `db push` and `--dry-run` now print, per such
+  check, `Check "<name>" on "<schema>"."<table>" differs from the one in the database; db push does
+  not change an existing check.`, the remedy (`db generate` + `db migrate`, or drop it and push
+  again) and the `ALTER TABLE … DROP CONSTRAINT` statement, and change nothing about it. PostgreSQL
+  parses and prints both expressions for the comparison (`EXPLAIN (VERBOSE)`, which runs nothing),
+  so a normalised stored check and the declared text compare exactly; a declared expression it
+  cannot parse against the table is named as `could not be compared`, with the error.
 
 ### Changed
 

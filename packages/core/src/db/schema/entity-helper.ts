@@ -452,7 +452,10 @@ export function enumText<T extends readonly [string, ...string[]]>(
  * PostgreSQL never truncates it. The name does not depend on the values, so
  * adding a value regenerates the same constraint: drizzle-kit writes
  * `DROP CONSTRAINT` + `ADD CONSTRAINT`, and the ADD re-checks every row under
- * an ACCESS EXCLUSIVE lock on the table.
+ * an ACCESS EXCLUSIVE lock on the table. `db push` does not: drizzle-kit's push
+ * never alters an existing check, so the database keeps the old values.
+ * `spfn db push` names such a check; `db generate` + `db migrate`, or dropping
+ * the constraint and pushing again, changes it.
  *
  * The values are a set: written sorted and once each, so reordering them in
  * source changes nothing in the database. They are written as quoted literals
