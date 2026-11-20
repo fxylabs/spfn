@@ -411,10 +411,10 @@ function secureRoutes(
  * routers' first, its own last.
  *
  * A guard sharing its name with the surface's auth middleware or a declared
- * middleware is refused rather than chained. Registration keeps one
- * middleware per name, so the other one would be dropped without a word —
- * and a guard factory that returns a named middleware per call makes that
- * collision easy to hit by accident.
+ * middleware is refused rather than chained. Registration keeps one plain
+ * named middleware per name, so the other one would be dropped without a
+ * word. A factory call's result is never merged by name, so it collides with
+ * nothing.
  */
 function commandChain(
     plan: Plan,
@@ -466,10 +466,10 @@ function refuseGuardCollision(
     }
 }
 
-/** The name registration deduplicates by — a plain handler has none. */
+/** The name registration deduplicates by — a plain handler and a factory call's result have none. */
 function middlewareNameOf(middleware: SurfaceMiddleware): string | undefined
 {
-    return typeof middleware === 'function' ? undefined : middleware.name;
+    return typeof middleware === 'function' || middleware.instance ? undefined : middleware.name;
 }
 
 /**

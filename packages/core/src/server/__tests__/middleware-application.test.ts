@@ -7,6 +7,7 @@
  * - 두 레벨 공존, 같은 미들웨어의 양쪽 등록, 익명 미들웨어
  * - .skip() 과 패키지 라우터 스코프
  * - 라우터 레벨 미들웨어의 skips (#165): 상속 체인에서의 제거, 존재 규칙, .packages() 거부
+ * - 팩토리 호출 결과 (#168): 이름으로 제거되고, 이름으로 합쳐지지 않는다
  *
  * 🔗 관련 파일:
  * - src/server/config-builder.ts
@@ -17,11 +18,14 @@
  *
  * spfn/spfn#165: a middleware declaring `skips` in a router's `.use()` was ignored,
  * so the inherited `auth` still ran in front of the router's own authenticator.
+ *
+ * spfn/spfn#168: a factory call returned a bare handler — no name to skip, no
+ * `skips` — and a named call must never be merged with another by name.
  */
 
 import { describe, it, expect } from 'vitest';
-import { Hono, type MiddlewareHandler } from 'hono';
-import { route, defineRouter, defineMiddleware, registerRoutes, resolveRouteMiddlewares } from '@spfn/core/route';
+import { Hono, type Context, type MiddlewareHandler, type Next } from 'hono';
+import { route, defineRouter, defineMiddleware, defineMiddlewareFactory, registerRoutes, resolveRouteMiddlewares } from '@spfn/core/route';
 import type { NamedMiddleware } from '@spfn/core/route';
 import { defineServerConfig } from '../config-builder';
 import { createServer } from '../create-server';
@@ -635,5 +639,121 @@ describe('router-level skips (#165)', () =>
             .build();
 
         expect(resolveEndpointMiddlewares(config).map(mw => mw.name)).toEqual(['auth', 'optionalAuth']);
+    });
+});
+
+// ============================================================================
+// Factory calls (#168)
+// ============================================================================
+
+/**
+ * A server-level `auth` refusing a request without `Authorization`, and a
+ * `scope` factory refusing one whose `X-Scopes` lacks its argument. Every run
+ * is logged, so a request shows the chain it ran.
+ */
+function guards(scopeSkips?: string[])
+{
+    const log: string[] = [];
+
+    const auth = defineMiddleware('auth', async (c, next) =>
+    {
+        log.push('auth');
+
+        return c.req.header('Authorization') ? await next() : c.json({ refused: 'auth' }, 401);
+    });
+
+    const scope = defineMiddlewareFactory('scope', (needed: string) => async (c, next) =>
+    {
+        log.push(`scope:${needed}`);
+        const granted = (c.req.header('X-Scopes') ?? '').split(',');
+
+        return granted.includes(needed) ? await next() : c.json({ refused: needed }, 403);
+    }, scopeSkips ? { skips: scopeSkips } : undefined);
+
+    /** Register `router` under the server-level `auth`; answer status and chain per request. */
+    const serve = (router: ReturnType<typeof defineRouter>) =>
+    {
+        const app = new Hono();
+        registerRoutes(app, router, [auth]);
+
+        return async (path: string, headers: Record<string, string> = {}) =>
+        {
+            log.length = 0;
+            const { status } = await app.request(path, { headers: { Authorization: 'Bearer t', ...headers } });
+
+            return { status, ran: [...log] };
+        };
+    };
+
+    return { log, auth, scope, serve };
+}
+
+describe('factory calls (#168)', () =>
+{
+    it('F1: a route\'s .skip([name]) removes a router-level call of the factory', async () =>
+    {
+        const { scope, serve } = guards();
+        const request = serve(defineRouter({
+            open: route.get('/open').skip(['scope']).handler(async () => ({ ok: true })),
+            closed: get('/closed'),
+        }).use([scope('admin')]));
+
+        expect(await request('/open')).toEqual({ status: 200, ran: ['auth'] });
+        expect(await request('/closed')).toEqual({ status: 403, ran: ['auth', 'scope:admin'] });
+    });
+
+    it('F2: a router-level call and a stricter route-level call of the same factory both run', async () =>
+    {
+        const { scope, serve } = guards();
+        const request = serve(defineRouter({
+            read: get('/read'),
+            write: route.get('/write').use([scope('write')]).handler(async () => ({ ok: true })),
+        }).use([scope('read')]));
+
+        expect(await request('/write', { 'X-Scopes': 'read' })).toEqual({ status: 403, ran: ['auth', 'scope:read', 'scope:write'] });
+        expect(await request('/write', { 'X-Scopes': 'read,write' })).toEqual({ status: 200, ran: ['auth', 'scope:read', 'scope:write'] });
+        expect(await request('/read', { 'X-Scopes': 'read' })).toEqual({ status: 200, ran: ['auth', 'scope:read'] });
+    });
+
+    it('F3: one call\'s result referenced at router and route level runs once', async () =>
+    {
+        const { scope, serve } = guards();
+        const admin = scope('admin');
+        const request = serve(defineRouter({
+            both: route.get('/both').use([admin]).handler(async () => ({ ok: true })),
+        }).use([admin]));
+
+        expect(await request('/both', { 'X-Scopes': 'admin' })).toEqual({ status: 200, ran: ['auth', 'scope:admin'] });
+    });
+
+    it('F4: a factory\'s skips apply to each call — the route skips the inherited auth, and a router call above a package router is refused', async () =>
+    {
+        const { scope, serve } = guards(['auth']);
+        const request = serve(defineRouter({
+            door: route.get('/door').use([scope('north')]).handler(async () => ({ ok: true })),
+            ping,
+        }));
+
+        expect(await request('/door', { Authorization: '', 'X-Scopes': 'north' })).toEqual({ status: 200, ran: ['scope:north'] });
+        expect(await request('/ping', { Authorization: '' })).toEqual({ status: 401, ran: ['auth'] });
+
+        const pkg = defineRouter({ pkgSession: get('/pkg/session') });
+        expect(() => serve(defineRouter({ ping }).packages([pkg]).use([scope('north')]))).toThrow(
+            'Router "(top-level)" .use()s "scope", a middleware declaring skips: [\'auth\'], '
+            + 'and the package router "packages[0]" (mounted with .packages()) sits below it.',
+        );
+    });
+
+    it('F5: a factory made by defineMiddleware(name, factory, { skips }) gives each call its skips', async () =>
+    {
+        const { serve } = guards();
+        const door = defineMiddleware('door', (name: string) => async (c: Context, next: Next) =>
+        {
+            c.header('X-Door', name);
+            await next();
+        }, { skips: ['auth'] });
+        const request = serve(defineRouter({ door: route.get('/door').use([door('north')]).handler(async () => ({ ok: true })) }));
+
+        expect(await request('/door', { Authorization: '' })).toEqual({ status: 200, ran: [] });
     });
 });

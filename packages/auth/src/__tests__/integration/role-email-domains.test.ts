@@ -114,10 +114,10 @@ describe.skipIf(!dbAvailable)('Per-role email-domain policy', () =>
         process.env.SPFN_AUTH_SESSION_SECRET = 'test-secret-key-for-testing-only-min-32-chars';
 
         app = new Hono();
-        app.get('/probe/admin', authenticate.handler, requireRole('admin'), c => c.json({ role: getAuth(c).role }));
-        app.get('/probe/user-permission', authenticate.handler, requirePermissions(USER_PERMISSION),
+        app.get('/probe/admin', authenticate.handler, requireRole('admin').handler, c => c.json({ role: getAuth(c).role }));
+        app.get('/probe/user-permission', authenticate.handler, requirePermissions(USER_PERMISSION).handler,
             c => c.json({ role: getAuth(c).role }));
-        app.get('/probe/admin-permission', authenticate.handler, requirePermissions(ADMIN_ONLY_PERMISSION),
+        app.get('/probe/admin-permission', authenticate.handler, requirePermissions(ADMIN_ONLY_PERMISSION).handler,
             c => c.json({ role: getAuth(c).role }));
         registerRoutes(app, mainAuthRouter, [{ name: authenticate.name, handler: authenticate.handler }]);
         app.onError(ErrorHandler());

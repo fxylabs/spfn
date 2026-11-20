@@ -312,7 +312,7 @@ export function rateLimitPolicy(name: string, fallback: RateLimitOptions): Named
                 merged.failClosed = policyFailClosedDefault;
             }
 
-            resolved = rateLimit(merged);
+            resolved = rateLimit(merged).handler;
         }
 
         return resolved(c, next);

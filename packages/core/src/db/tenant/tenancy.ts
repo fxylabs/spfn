@@ -72,7 +72,7 @@ import {
     type PgTableWithColumns,
 } from 'drizzle-orm/pg-core';
 import { ForbiddenError, ValidationError } from '@spfn/core/errors';
-import { defineMiddlewareFactory } from '../../route/define-middleware';
+import { defineMiddlewareFactory, type NamedMiddleware } from '../../route/define-middleware';
 import { tenantKey } from '../schema/entity-helper';
 import { constraintName, sqlLiteral } from '../schema/migration-text';
 import { claimTransactionForGuard, TENANT_SETTING, USER_SETTING } from '../transaction/tenant';
@@ -236,8 +236,12 @@ export interface Tenancy<TProperty extends string = 'tenantId'>
     reference(name: string, target: () => PgTable, options?: { optional?: false; onDelete?: TenancyOnDelete }): RequiredReference;
     reference(name: string, target: () => PgTable, options: { optional: true; onDelete?: TenancyOnDelete }): OptionalReference;
 
-    /** Route middleware: read the tenant id, authorize it, bind the request to it. */
-    guard(options: TenancyGuardOptions): MiddlewareHandler;
+    /**
+     * Route middleware: read the tenant id, authorize it, bind the request to it.
+     * Each call returns a named middleware, `'tenancyGuard'`; pass `.handler` where
+     * Hono expects a handler.
+     */
+    guard(options: TenancyGuardOptions): NamedMiddleware<'tenancyGuard'>;
 
     /** The tenant `guard()` bound this request to; throws on a route without the guard. */
     of(c: Context | { raw: Context }): number;

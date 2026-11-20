@@ -734,15 +734,17 @@ manifest, exactly as it shadows every other package route.
 Routes may be grouped in nested `defineRouter`s, and a group's own `.use()` middlewares
 apply to its routes — always after the injected auth, so a group-wide guard reads a
 request that has already been authenticated. A group-level middleware must be a named one;
-wrap a factory to give it a name:
+a factory call is one, named after its factory, so it goes in `.use([...])` directly:
 
 ```typescript
-const requireAdmin = defineMiddleware('opsAdminScope', requireOpsScope('admin:read'));
-
 export const opsRouter = createOpsRouter({
-    admin: defineRouter({ getStats, reindex }).use([requireAdmin]),
+    admin: defineRouter({ getStats, reindex }).use([requireOpsScope('admin:read')]),
 }, { auth: opsTokenAuth });
 ```
+
+A factory call is never merged with another middleware by name: a group's
+`requireOpsScope('admin:read')` and a command's own `requireOpsScope('admin:write')` both run.
+A call's result is not a Hono handler; where Hono expects one, pass `.handler`.
 
 A group's `.use()` middleware carries its `skips` into every route in the group, suppressing
 the named middleware they inherit there — server-level or from an enclosing router. The surface

@@ -314,7 +314,7 @@ async function refusalOf(answer: unknown): Promise<{ status: number; message: st
 async function runScoped(driven: DrivenContext, required: string[]): Promise<{ answer: unknown; reached: boolean }>
 {
     const handler = vi.fn(async () => undefined);
-    const guard = requireMachineScope(...required);
+    const guard = requireMachineScope(...required).handler;
     const answer = await machineAuth.handler(driven.c, async () =>
     {
         await guard(driven.c, handler);
@@ -612,7 +612,7 @@ describe('the machine-principal case table', () =>
         {
             const driven = contextFor(bearer(VALID_MACHINE_TOKEN));
             const handler = vi.fn(async () => undefined);
-            const guard = requireMachineScope('events:write');
+            const guard = requireMachineScope('events:write').handler;
 
             const answer = await guard(driven.c, handler).then(res => res ?? null, (error: unknown) => error);
 

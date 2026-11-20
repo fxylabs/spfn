@@ -381,7 +381,7 @@ describe('5 — the same refusal on /_ops', () =>
         expect(build).toThrow(/shares the name "opsTokenAuth".*auth middleware/);
     });
 
-    it('does not refuse requireOpsScope\'s real shape — a factory returning an unnamed handler — and runs both checks', async () =>
+    it('does not refuse requireOpsScope\'s real shape — a factory call, never merged by name — and runs both checks', async () =>
     {
         const scopeFactory = defineMiddleware('opsScope', (...scopes: string[]) => async (c: Context, next: Next) =>
         {

@@ -65,9 +65,15 @@ export interface ResolvedRoute
 }
 
 /** A server-level middleware: anything named with a handler. Its `skips`, if any, have nothing outside them to remove. */
-type ServerMiddleware = { name: string; handler: MiddlewareHandler };
+type ServerMiddleware = { name: string; handler: MiddlewareHandler; instance?: true };
 
-interface InheritedMiddleware extends ChainMiddleware
+/** A chain entry before deduplication: a factory call's result is never merged by name. */
+interface CandidateMiddleware extends ChainMiddleware
+{
+    instance: boolean;
+}
+
+interface InheritedMiddleware extends CandidateMiddleware
 {
     skips: readonly string[];
 }
@@ -130,6 +136,7 @@ function inheritedFrom(mw: ServerMiddleware | NamedMiddleware<string>, source: M
         source,
         depth,
         handler: mw.handler,
+        instance: mw.instance === true,
         skips: ('skips' in mw && mw.skips) || [],
     };
 }
@@ -331,36 +338,54 @@ function levelsInnerToOuter(inherited: InheritedMiddleware[]): InheritedMiddlewa
 
 /**
  * The chain in run order: what survived of the inherited list, then the
- * route's own. A name runs once, at its outermost place; a plain handler
- * once per reference; an entry with no name is never collapsed by name.
+ * route's own. A name runs once, at its outermost place; a factory call's
+ * result and a plain handler once per reference; neither is collapsed by name.
  */
 function attach(name: string, route: RouteDef<any>, kept: InheritedMiddleware[], depth: number): ChainMiddleware[]
 {
     const chain: ChainMiddleware[] = [];
     const names = new Set<string>();
     const handlers = new Set<MiddlewareHandler>();
-    const own = (route.middlewares ?? []).map(mw => isNamedMiddleware(mw)
-        ? { name: mw.name, source: 'route' as const, depth, handler: mw.handler }
-        : { name: '', source: 'route' as const, depth, handler: mw });
+    const own: CandidateMiddleware[] = (route.middlewares ?? []).map(mw => isNamedMiddleware(mw)
+        ? { name: mw.name, source: 'route', depth, handler: mw.handler, instance: mw.instance === true }
+        : { name: '', source: 'route', depth, handler: mw, instance: false });
 
-    for (const mw of [...kept.map(chainEntry), ...own])
+    for (const mw of [...kept, ...own])
     {
-        const duplicate = mw.name ? names.has(mw.name) : mw.source === 'route' && handlers.has(mw.handler);
-        if (duplicate)
+        if (isDuplicate(mw, names, handlers))
         {
             logger.debug(`🔄 Skipping duplicate middleware '${mw.name}' for route: ${route.method} ${route.path}`, { name });
             continue;
         }
 
-        names.add(mw.name);
+        if (!mw.instance)
+        {
+            names.add(mw.name);
+        }
         handlers.add(mw.handler);
-        chain.push(mw);
+        chain.push(chainEntry(mw));
     }
 
     return chain;
 }
 
-function chainEntry({ name, source, depth, handler }: InheritedMiddleware): ChainMiddleware
+/**
+ * A plain named middleware merges into an earlier one of its name. A factory
+ * call's result never does — `scope('read')` on a router and `scope('write')`
+ * on a route are two checks — so it, like a route's plain handler, merges only
+ * into the same handler.
+ */
+function isDuplicate(mw: CandidateMiddleware, names: ReadonlySet<string>, handlers: ReadonlySet<MiddlewareHandler>): boolean
+{
+    if (mw.instance)
+    {
+        return handlers.has(mw.handler);
+    }
+
+    return mw.name ? names.has(mw.name) : mw.source === 'route' && handlers.has(mw.handler);
+}
+
+function chainEntry({ name, source, depth, handler }: CandidateMiddleware): ChainMiddleware
 {
     return { name, source, depth, handler };
 }

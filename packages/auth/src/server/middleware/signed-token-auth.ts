@@ -49,9 +49,9 @@
  * Auto-skips the global 'auth' middleware, like `opsTokenAuth`.
  */
 
-import type { Context } from 'hono';
+import type { Context, MiddlewareHandler } from 'hono';
 import { createRemoteJWKSet, decodeProtectedHeader, jwtVerify, type JWTPayload } from 'jose';
-import { defineMiddleware, type NamedMiddleware } from '@spfn/core/route';
+import { defineMiddlewareFactory } from '@spfn/core/route';
 import { UnauthorizedError } from '@spfn/core/errors';
 import { authLogger } from '../logger';
 
@@ -127,11 +127,11 @@ export function getSignedToken(c: Context): VerifiedSignedToken | null
  * });
  * ```
  */
-export function signedTokenAuth(options: SignedTokenAuthOptions): NamedMiddleware<'signedTokenAuth'>
+export const signedTokenAuth = defineMiddlewareFactory('signedTokenAuth', (options: SignedTokenAuthOptions): MiddlewareHandler =>
 {
     const verifier = verifierOf(options);
 
-    return defineMiddleware('signedTokenAuth', async (c, next) =>
+    return async (c, next) =>
     {
         const token = extractBearer(c.req.header('Authorization'));
 
@@ -150,8 +150,8 @@ export function signedTokenAuth(options: SignedTokenAuthOptions): NamedMiddlewar
         c.set('signedToken', verified);
 
         await next();
-    }, { skips: ['auth'] });
-}
+    };
+}, { skips: ['auth'] });
 
 function verifierOf(options: SignedTokenAuthOptions): Verifier
 {

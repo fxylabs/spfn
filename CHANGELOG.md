@@ -228,6 +228,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   No other registration records one: none without user verification, and adding a passkey to an
   enrolled account does not refresh the window. `currentPassword` stays required on that password
   change. Not breaking.
+- **BREAKING: @spfn/core, @spfn/auth: a middleware factory call returns a named middleware; calls
+  are never merged by name (spfn/spfn#168).** A call of a factory made by
+  `defineMiddlewareFactory(name, factory, options?)` — or by `defineMiddleware(name, factory, options?)`,
+  which still detects a factory and now delegates — returns `{ name, _name, handler, skips?, instance: true }`
+  instead of the inner Hono handler. `defineMiddlewareFactory` takes the same `options` as
+  `defineMiddleware`, and `skips` declared on either factory apply to every call (they were dropped
+  before). Every call carries the factory's name: `.skip(['permission'])` and another middleware's
+  `skips: ['permission']` remove every `requirePermissions(...)` a route inherits — which also means
+  **a route can now `.skip([...])` an authorization guard by its factory name** (`'permission'`,
+  `'anyPermission'`, `'role'`, `'roleGuard'`, `'opsScope'`, `'machineScope'`, `'opsOrUser'`,
+  `'tenancyGuard'`, `'rateLimit'`, …), the same power `.skip(['auth'])` has. A call's result is never
+  merged with anything by name: a router's `requirePermissions('a')` and a route's
+  `requirePermissions('b')` both run; the same result object at two levels runs once. A call can sit
+  in a router's `.use([...])`. `opsOrUser(...)` and `signedTokenAuth(...)` are now such factories
+  (with `skips: ['auth']`), so a router's `opsOrUser({ opsScopes: ['read'], … })` no longer drops a
+  route's `opsOrUser({ opsScopes: ['write'], … })` — before, only the router's check ran and a
+  read-only ops token passed the write route. `tenancy.guard(...)` is typed as returning
+  `NamedMiddleware<'tenancyGuard'>`. `rateLimitPolicy(...)` is unchanged (one counter per policy name
+  stays intended). **To migrate:** pass `.handler` where a call result goes to Hono (`app.use`,
+  `app.get(path, …)`, `combine`, a hand-written chain), or put it in `.use([...])` directly; a
+  `defineMiddleware(name, factory(args))` wrapper becomes `factory(args)`.
+
 - **BREAKING (security-relevant): @spfn/core: a middleware declaring `skips` now removes what it
   names when it is attached to a router (spfn/spfn#165).** It was ignored on `defineRouter(...).use([...])`
   and honoured only in a route's own `.use()`; now it removes the listed names from what that

@@ -287,7 +287,8 @@ export function resolveStreamTokenManager(auth: StreamTokenConfig, transport: 'S
  * or `defineRouter(...).use([...])`. Only the first lands in `config.middlewares` —
  * router-level middleware travels with the router — so both are collected here, or an
  * app that authenticates through its router would publish an unauthenticated token
- * endpoint. Names are deduplicated: a middleware present at both levels runs once.
+ * endpoint. Names are deduplicated: a middleware present at both levels runs once. A
+ * factory call's result is deduplicated only by reference, as route registration does.
  */
 export function resolveEndpointMiddlewares(config: {
     middlewares?: ReadonlyArray<NamedMiddleware>;
@@ -306,8 +307,14 @@ export function resolveEndpointMiddlewares(config: {
 
     const seen = new Set<string>();
 
-    return candidates.filter((mw) =>
+    return candidates.filter((mw, index) =>
     {
+        // A factory call's result merges only with itself.
+        if (mw.instance)
+        {
+            return candidates.indexOf(mw) === index;
+        }
+
         // An unnamed entry is never collapsed — unrelated handlers share the empty name.
         if (!mw.name)
         {
