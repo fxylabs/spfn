@@ -324,7 +324,6 @@ export class RolesRepository extends BaseRepository
                     isSystem: sql`excluded.is_system`,
                     isBuiltin: sql`excluded.is_builtin`,
                     source: CONFIG_OWNED,
-                    updatedAt: new Date(),
                 },
                 setWhere: sql`(${roles.displayName}, ${roles.description}, ${roles.priority}, ${roles.isSystem}, ${roles.isBuiltin}, ${roles.source})
                     is distinct from (excluded.display_name, excluded.description, excluded.priority, excluded.is_system, excluded.is_builtin, excluded.source)`,

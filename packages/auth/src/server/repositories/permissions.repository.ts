@@ -160,7 +160,6 @@ export class PermissionsRepository extends BaseRepository
                     category: sql`excluded.category`,
                     isSystem: sql`excluded.is_system`,
                     isBuiltin: sql`excluded.is_builtin`,
-                    updatedAt: new Date(),
                 },
                 setWhere: sql`(${permissions.displayName}, ${permissions.description}, ${permissions.category}, ${permissions.isSystem}, ${permissions.isBuiltin})
                     is distinct from (excluded.display_name, excluded.description, excluded.category, excluded.is_system, excluded.is_builtin)`,

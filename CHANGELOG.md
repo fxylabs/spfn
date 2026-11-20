@@ -351,6 +351,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   module '…/example.entity'`; `provision` on the package manager's `Command "tsx" not found`. The
   message now names the app's package manager (`npm install --legacy-peer-deps --save-dev tsx` in an
   npm app) instead of always `pnpm add -D tsx`.
+- **@spfn/core, @spfn/auth, spfn: `updatedAt` is never written by hand, and the docs, templates and
+  auth's upserts now agree (spfn/spfn#166).** One rule everywhere: on a `timestamps()` table never
+  write `updatedAt`; every Drizzle `update()` and every `onConflictDoUpdate` sets
+  `updated_at = now()` from the database clock; only raw SQL you write yourself says
+  `updated_at = now()`.
+  - Docs: `db/schema/README.md` no longer tells you to set `updatedAt: new Date()` (the "do not
+    exist" note and the Pitfalls item); the `db/README.md` upsert example and its `upsert` pitfall
+    drop `updatedAt: new Date()`.
+  - Templates: the entity README that `spfn init` copies, and those of examples 02 and 03, use
+    `id()`, `...timestamps()` and `foreignKey()` like their `example.entity.ts`; the template's
+    hand-written `updatedAt` column never moved on update.
+  - @spfn/auth: the upserts of roles, permissions, role mappings, user permissions and OAuth2
+    grants no longer stamp `updated_at` from the application clock, and the user-settings upsert
+    drops its redundant `updatedAt`. The `setWhere` guards still move the stamp only on a real
+    change.
 - **@spfn/auth: `mfaLockedEvent`, `passkeyEnrolledEvent` and `passkeyRevokedEvent` are exported from
   `@spfn/auth/server` (#361)**, with `MfaLockedPayload`, `PasskeyEnrolledPayload` and
   `PasskeyRevokedPayload`. The README documented all three and the package emitted them, but an app

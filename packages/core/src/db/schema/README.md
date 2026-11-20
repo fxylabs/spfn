@@ -53,9 +53,7 @@ Schema namespacing (`schema-helper.ts`):
 
 > The following **do not exist** in the current code — do not use them:
 > `autoUpdateTimestamp()`, `statusEnum()`, the `timestamps({ autoUpdate })` option, and
-> the `__autoUpdate` marker. Earlier docs referenced these; they were removed. For
-> auto-updating `updatedAt`, set it manually (`.set({ updatedAt: new Date() })`) — the
-> helpers do not auto-update it.
+> the `__autoUpdate` marker. Earlier docs referenced these; they were removed.
 
 ---
 
@@ -111,12 +109,22 @@ column named `id`.
 
 DB column names are `created_at` / `updated_at`. Both come from the database clock —
 `now()` on insert through the column default, and `now()` again on update, which Drizzle
-adds to the SET clause for you. **Do not pass `updatedAt` yourself:**
+adds to the SET clause for you. **The one rule: on a `timestamps()` table never write
+`updatedAt`.** Every Drizzle `update()` and every `onConflictDoUpdate` sets
+`updated_at = now()` from the database clock; only raw SQL you write yourself says
+`updated_at = now()`.
 
 ```typescript
 await db.update(users)
     .set({ name: 'new' })   // updated_at = now() is added automatically
     .where(eq(users.id, userId));
+
+await db.insert(users)
+    .values({ email, name })
+    .onConflictDoUpdate({
+        target: users.email,
+        set: { name },      // the upsert's SET gets updated_at = now() too
+    });
 ```
 
 An explicit value wins over the automatic one, so stamping `new Date()` reads a second
@@ -263,9 +271,9 @@ column helpers above work identically inside `schema.table`.
 - **`id` is bigint, not uuid.** `id()` and `foreignKey()`/`optionalForeignKey()` are all
   bigint-based. Don't point a `foreignKey()` (bigint) at a `uuid()` PK — types won't match.
   For a uuid FK, use drizzle's table-level `foreignKey({ columns, foreignColumns })`.
-- **`timestamps()` takes no arguments and does not auto-update `updatedAt`.** Calls like
-  `timestamps({ autoUpdate: true })` are from an old API and will fail/no-op. Set
-  `updatedAt: new Date()` yourself on updates.
+- **`timestamps()` takes no arguments; the database stamps `updatedAt` on every update and
+  upsert — do not pass it.** Calls like `timestamps({ autoUpdate: true })` are from an old
+  API and will fail/no-op. Only raw SQL you write yourself says `updated_at = now()`.
 - **`autoUpdateTimestamp()`, `statusEnum()`, and the `__autoUpdate` marker do not exist.**
   Replace `statusEnum([...])` with `enumText('status', [...] as const).notNull().default(...)`.
 - **`verificationTimestamp(name)` takes a camelCase logical name; `utcTimestamp(col)` takes

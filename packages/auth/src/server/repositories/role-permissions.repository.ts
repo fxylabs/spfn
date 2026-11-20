@@ -138,7 +138,7 @@ export class RolePermissionsRepository extends BaseRepository
             .values(ordered.map(mapping => ({ ...mapping, source: CONFIG_OWNED })))
             .onConflictDoUpdate({
                 target: [rolePermissions.roleId, rolePermissions.permissionId],
-                set: { source: CONFIG_OWNED, updatedAt: new Date() },
+                set: { source: CONFIG_OWNED },
                 setWhere: ne(rolePermissions.source, CONFIG_OWNED),
             });
     }
