@@ -288,15 +288,6 @@ function refusesDrizzleTypebox(error: unknown): boolean
 }
 
 /**
- * Arguments for `<pm> install`: every command that installs the app's
- * dependencies uses these.
- */
-export function getInstallArgs(_pm: PackageManager): string[]
-{
-    return ['install'];
-}
-
-/**
  * Arguments for adding `packages` to the app (`dev`: as devDependencies), the
  * one definition `init`, `create`, `add` and `setup` share.
  */

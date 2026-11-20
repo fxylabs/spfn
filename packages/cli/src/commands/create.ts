@@ -7,7 +7,7 @@ import { execa } from 'execa';
 import chalk from 'chalk';
 
 import { logger } from '../utils/logger.js';
-import { detectPackageManager, findWorkspace, getAddArgs, getInstallArgs, getRunCommand, runInstall, type PackageManager } from '../utils/package-manager.js';
+import { detectPackageManager, findWorkspace, getAddArgs, getRunCommand, runInstall, type PackageManager } from '../utils/package-manager.js';
 import { confirmInstalled } from './init/steps/package.js';
 import { ENV_FILES_HINT } from '../utils/messages.js';
 import { selectScaffoldMode, type ScaffoldMode } from './init/mode.js';
@@ -29,7 +29,7 @@ interface CreateOptions
 async function installFromWorkspaceRoot(workspaceRoot: string, projectPath: string): Promise<void>
 {
     const installSpinner = ora('Installing dependencies from workspace root...').start();
-    const failure = await runInstall('pnpm', getInstallArgs('pnpm'), {
+    const failure = await runInstall('pnpm', ['install'], {
         cwd: workspaceRoot,
         stdio: 'pipe',
         timeout: 300_000,

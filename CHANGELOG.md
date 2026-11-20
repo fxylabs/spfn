@@ -132,15 +132,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it. An app that imports `drizzle-typebox` without declaring it, reaching core's copy through
   npm's hoisting, must declare it in its own `package.json`, or import `drizzle-orm/typebox-legacy`,
   which drizzle-orm `1.0.0-rc.4` ships.
-- **BREAKING: spfn: npm installs pass no `--legacy-peer-deps`, and `spfn add` / `spfn init` refuse an
-  npm app that lists `drizzle-typebox` (#376).** The flag was there only for drizzle-typebox, whose
-  peer range `drizzle-orm >=0.36.0` admits no `1.0.0-rc.4`; the scaffold no longer adds it, and
-  without it npm installs the SPFN set with no peer warning. The flag also hid every other peer
-  conflict. `init`, `add`, `create`, `setup icons` and the generated Dockerfile's `npm ci` /
-  `npm prune` drop it. An npm app scaffolded before still lists `drizzle-typebox`, which npm now
-  refuses with `ERESOLVE`; `spfn add` and `spfn init` say so before running npm. Remove
-  `drizzle-typebox` from `package.json`, or import `drizzle-orm/typebox-legacy` instead, and
-  delete the flag from your own Dockerfile and scripts. pnpm, yarn and bun apps are not refused.
+- **BREAKING: spfn: npm installs pass no `--legacy-peer-deps`, so an existing npm app that lists
+  `drizzle-typebox@0.x` gets npm's `ERESOLVE`, with the CLI's explanation and fix (#376).** The
+  flag was there only for drizzle-typebox, whose peer range `drizzle-orm >=0.36.0` admits no
+  `1.0.0-rc.4`; the scaffold no longer adds it, and without it npm installs the SPFN set with no
+  peer warning. The flag also hid every other peer conflict. `init`, `add`, `create`,
+  `setup icons` and the generated Dockerfile's `npm ci` / `npm prune` drop it. An npm app
+  scaffolded before still lists `drizzle-typebox`, which npm now refuses. The CLI does not predict
+  that: when an install it runs fails, it prints npm's own lines, and when they report `ERESOLVE`
+  and name `drizzle-typebox`, one more line: why, and to remove it from the `package.json` npm
+  names (the app's, or the workspace root's), move to a drizzle-typebox version that accepts the
+  prerelease, or import `drizzle-orm/typebox-legacy`. The command exits non-zero as for any failed
+  install (`create`'s `@svgr/webpack` install only warns, as before). When `spfn init` fails there,
+  what it wrote before the install stays, as for any install failure: the server and lib
+  templates, the RPC proxy route, the `next.config` rewrite, the Docker files, `spfn.config.js` and
+  the patched `package.json`; no `.env` file, `.spfnrc.ts`, `.gitignore`, `tsconfig.json` change or
+  README. Delete the flag from your own Dockerfile and scripts too. pnpm, yarn and bun installs are
+  unchanged.
 - **spfn: the scaffold no longer adds `drizzle-typebox`, `tsup` or `dotenv` (#376, #368).** No
   template imports them; `spfn build` bundles with the CLI's own tsup, and core and the CLI declare
   their own dotenv. An existing app keeps them harmlessly, apart from `drizzle-typebox` under npm

@@ -16,7 +16,7 @@ vi.mock('execa', () => ({ execa: mocks.execa }));
 vi.mock('ora', () => ({ default: () => mocks.spinner }));
 
 import { addCommand } from '../add.js';
-import { DRIZZLE_TYPEBOX_REFUSAL, getInstallArgs } from '../../utils/package-manager.js';
+import { DRIZZLE_TYPEBOX_REFUSAL, getAddArgs } from '../../utils/package-manager.js';
 import { NPM_ERESOLVE_DRIZZLE_TYPEBOX, NPM_ERESOLVE_OTHER } from '../../utils/__tests__/fixtures/npm-eresolve.js';
 
 const originalCwd = process.cwd();
@@ -79,13 +79,13 @@ afterEach(() =>
 
 describe('spfn add in an npm app', () =>
 {
-    it('installs with the npm arguments init installs with', async () =>
+    it('adds the package with npm\'s install verb', async () =>
     {
         process.chdir(join(repository, 'scratch/app'));
 
         await addCommand.parseAsync(['@spfn/i18n'], { from: 'user' });
 
-        expect(mocks.execa).toHaveBeenCalledWith('npm', [...getInstallArgs('npm'), '@spfn/i18n'], { cwd: process.cwd() });
+        expect(mocks.execa).toHaveBeenCalledWith('npm', getAddArgs('npm', ['@spfn/i18n']), { cwd: process.cwd() });
         expect(mocks.spinner.succeed).toHaveBeenCalledWith('Package installed');
     });
 
