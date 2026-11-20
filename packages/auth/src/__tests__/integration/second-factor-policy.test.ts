@@ -4,7 +4,7 @@
  * One test per row of the #309 case table — S1–S19, R1–R7, K1–K5 — of the
  * first review round — F1, F2 and P1–P12 — of the second — G1, G2, RV-A,
  * RV-D and the recovery-code generation — D2 of #329, SU1–SU3 of #372
- * (a marking registration records a step-up) and SU4 of #393 (one spend of a
+ * (a marking registration records a step-up) and SU4–SU5 of #393 (one spend of a
  * step-up assertion across its two consumers), named for its row. The boot
  * rows B1–B7 and the classification's own guarantees (F4 among them) are in
  * unit/second-factor-policy.test.ts.
@@ -1599,5 +1599,55 @@ describe.skipIf(!dbAvailable)('second-factor policy (#309 case table)', () =>
         const routeFirst = await stepUpAssertionFor(session, authenticator, 0);
         expect((await post('/_auth/mfa/step-up', { response: routeFirst }, session.authorization)).status).toBe(204);
         await expect(spendInApp(session, routeFirst)).rejects.toMatchObject({ name: 'MfaVerificationFailedError' });
+    });
+
+    /**
+     * Run the racers, each held at the account lock until all of them reached
+     * it: every one is past the check before the lock, so only the spend under
+     * the lock can tell them apart.
+     */
+    async function raceAtTheLock<T>(racers: Array<() => Promise<T>>): Promise<T[]>
+    {
+        let allArrived!: () => void;
+        const arrived = new Promise<void>(resolve => allArrived = resolve);
+        let arrivals = 0;
+        const lockAccount = usersRepository.lockAccount.bind(usersRepository);
+        const spy = vi.spyOn(usersRepository, 'lockAccount').mockImplementation(async (id) =>
+        {
+            if (++arrivals === racers.length)
+            {
+                allArrived();
+            }
+
+            await arrived;
+
+            return await lockAccount(id);
+        });
+
+        try
+        {
+            return await Promise.all(racers.map(racer => racer()));
+        }
+        finally
+        {
+            spy.mockRestore();
+        }
+    }
+
+    it('SU5: one step-up assertion raced by the app\'s spend and mfa/step-up — one of each, three of each — is spent once', async () =>
+    {
+        const { session, authenticator } = await passkeyEnrolledAccount();
+
+        for (const each of [1, 3])
+        {
+            const assertion = await stepUpAssertionFor(session, authenticator, 0);
+            const inApp = async () => await spendInApp(session, assertion) ? 'spent' : 'refused';
+            const atRoute = async () => (await post('/_auth/mfa/step-up', { response: assertion }, session.authorization)).status;
+
+            const outcomes = await raceAtTheLock([...Array(each).fill(inApp), ...Array(each).fill(atRoute)]);
+
+            expect(outcomes.filter(outcome => outcome === 'spent' || outcome === 204)).toHaveLength(1);
+            expect(outcomes.filter(outcome => outcome === 'refused' || outcome === 401)).toHaveLength(2 * each - 1);
+        }
     });
 });
