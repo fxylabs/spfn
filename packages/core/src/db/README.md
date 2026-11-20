@@ -809,6 +809,22 @@ ALTER DEFAULT PRIVILEGES FOR ROLE app_owner IN SCHEMA drizzle
 Without it the check cannot read them: it logs one warning (`permission denied for schema
 drizzle`) and the server starts unchecked.
 
+A database migrated by an earlier CLI may also hold `drizzle.__spfn_fn_migrations`: one
+shared table where those versions recorded every function package's applied migrations by
+content hash and timestamp, with no package column. It is read only for a package that has
+no rows in its own `__spfn_fn_<pkg>_migrations` table, and then that package counts as
+applied up to its newest migration whose hash the legacy table holds. Because the table
+does not say which package a row belongs to, a package installed later whose newest
+migration has the same SQL as a migration of another package recorded there (a
+drizzle-kit custom-migration template left unedited, say) counts as applied up to that
+migration, and its older ones never run. Nothing writes or drops the table. Once every
+package the table holds records for has rows of its own — check that
+`drizzle."__spfn_fn_<pkg>_migrations"` is non-empty for every function package installed
+now, and for any package removed earlier that may be installed again — the table is never
+read, and the operator may drop it (`DROP TABLE drizzle."__spfn_fn_migrations"`), which
+also removes the limit above. Drop it no earlier: a package without rows of its own
+would then count every migration as pending and replay them over existing objects.
+
 An app already deployed with the app role as owner moves the tables once (nothing does it
 automatically), as a superuser or the current owner:
 
@@ -930,10 +946,12 @@ These have their own READMEs — do not duplicate their APIs here, link to them:
   (linked to the source on GitHub: this sub-module has no README, and the package ships
   only READMEs) — which migrations each installed function
   package ships and which the database has applied: `discoverFunctionMigrations`,
-  `collectMigrationStatus`, `pendingMigrationTargets`, `countPendingMigrations`. Read-only
-  — applying migrations is `spfn db migrate`. One implementation behind `spfn db status`,
-  the server's migration boot gate and the detailed health payload, so they cannot
-  disagree about what "pending" means.
+  `collectMigrationStatus`, `pendingFunctionMigrations`, `pendingMigrationTargets`,
+  `countPendingMigrations`. Read-only — applying migrations is `spfn db migrate`. One
+  implementation behind `spfn db status`, the server's migration boot gate, the detailed
+  health payload, the `spfn db push` preview and every function-package apply, so they
+  cannot disagree about what "pending" means. A function package's legacy records in the
+  shared `drizzle.__spfn_fn_migrations` table are read, never written or dropped.
 
 ---
 

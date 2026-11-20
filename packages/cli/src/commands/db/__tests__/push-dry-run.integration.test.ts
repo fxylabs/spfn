@@ -314,7 +314,7 @@ describe('db push --dry-run', () =>
         expect(output()).not.toMatch(/function package/i);
     });
 
-    it('D4 legacy shared table holding the hash: dry run lists none and writes nothing; push copies the row', async () =>
+    it('D4 legacy shared table holding the hash: dry run lists none and writes nothing; push leaves the legacy row and applies nothing', async () =>
     {
         await createProjectTable();
         await db.unsafe(`CREATE SCHEMA drizzle;
@@ -329,9 +329,8 @@ describe('db push --dry-run', () =>
 
         await push(false);
 
-        expect(await db.unsafe(`SELECT hash, created_at::bigint AS millis FROM drizzle."${PACKAGE_TABLE}"`))
-            .toEqual([{ hash: sha256(MIGRATION_SQL), millis: String(MIGRATION_MILLIS) }]);
-        expect(await db`SELECT to_regclass('drizzle."__spfn_fn_migrations"') IS NULL AS "gone"`).toEqual([{ gone: true }]);
+        expect(await db`SELECT hash FROM drizzle."__spfn_fn_migrations"`).toEqual([{ hash: sha256(MIGRATION_SQL) }]);
+        expect(await db`SELECT to_regclass(${`drizzle."${PACKAGE_TABLE}"`}) IS NULL AS "absent"`).toEqual([{ absent: true }]);
         expect(await db`SELECT to_regclass('i163_fix.things') IS NULL AS "skipped"`).toEqual([{ skipped: true }]);
     });
 

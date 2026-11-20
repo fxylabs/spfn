@@ -575,7 +575,14 @@ packages (`@spfn/auth`, `@spfn/cms`, …) into per-package tracking tables
 (`drizzle.__spfn_fn_<pkg>_migrations`). The CLI applies these with a built-in runner
 that reads both migration layouts — drizzle-kit ≤0.31 (`NNNN_name.sql` +
 `meta/_journal.json`) and drizzle-kit 1.0 (`<timestamp>_name/migration.sql`) — so a
-package's layout never has to match the CLI's bundled drizzle version. `db push`
+package's layout never has to match the CLI's bundled drizzle version. A migration is
+pending when it is newer than the package's last record — the newest `created_at` in its
+own table or, while that table is missing or empty, the newest of its migrations recorded
+in the shared `drizzle.__spfn_fn_migrations` table that earlier CLI versions wrote. That
+legacy table is read, never written or dropped, so the records of a package installed or
+updated later stay where they were. The rule lives in `@spfn/core/db`
+(`pendingFunctionMigrations`); `db status`, the boot gate, health, the `db push` preview
+and every apply (`db push`, `db migrate`, `spfn add`) all use it. `db push`
 validates every package's migration folder before applying the project schema, and a
 function-migration failure after a successful schema apply exits 1 with a message
 making clear the project schema was already committed. Before applying anything,
@@ -1253,8 +1260,9 @@ logged as a warning instead.
 
 A readiness probe can catch the same drift on a cluster the local gate never sees. When
 detailed health is on, `GET /_core/health` carries a `migrations` object with per-package
-applied/pending counts — assert `migrations.pending === 0` in the probe to hold a
-drifted pod out of rotation. Reporting drift does not, by itself, change the overall
+applied/pending counts — the same pending rule `spfn db status` and `spfn db migrate`
+use, legacy `__spfn_fn_migrations` records included — assert `migrations.pending === 0`
+in the probe to hold a drifted pod out of rotation. Reporting drift does not, by itself, change the overall
 health `status`.
 
 `spfn.config.js` (committed) configures the managed `*.spfn.app` deployment: `subdomain`,

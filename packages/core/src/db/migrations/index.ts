@@ -1,8 +1,9 @@
 /**
  * Migration discovery and status — the read-only half of the migration story.
  *
- * `spfn db status`, the server boot gate and the detailed health endpoint all
- * answer "what is applied, what is still waiting?" from here.
+ * `spfn db status`, the server boot gate, the detailed health endpoint and the
+ * CLI's push preview and function-package applies all answer "what is applied,
+ * what is still waiting?" from here.
  */
 
 export {
@@ -19,9 +20,9 @@ export type {
 export {
     collectMigrationStatus,
     countPendingMigrations,
-    filterPendingEntries,
     hasMigrationTargets,
     migrationTargets,
+    pendingFunctionMigrations,
     pendingMigrationTargets,
     projectMigrationsDir,
     PROJECT_MIGRATIONS_TABLE,
@@ -29,9 +30,11 @@ export {
 } from './status';
 
 export type {
+    FunctionMigrationSource,
     MigrationStatus,
     MigrationStatusDb,
     MigrationTargetStatus,
+    PendingFunctionMigrations,
 } from './status';
 
 export {

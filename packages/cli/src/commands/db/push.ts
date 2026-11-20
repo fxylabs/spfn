@@ -3,6 +3,7 @@ import prompts from 'prompts';
 import '@spfn/core/config';
 import { loadEnv } from '@spfn/core/server';
 import { sql } from 'drizzle-orm';
+import { pendingFunctionMigrations } from '@spfn/core/db';
 
 import {
     validateDatabasePrerequisites,
@@ -27,7 +28,6 @@ import {
     discoverFunctionMigrations,
     loadFunctionMigrationPlans,
     executeFunctionMigrations,
-    resolvePendingFunctionMigrations,
     type FunctionMigrationPlan,
 } from '../../utils/function-migrations.js';
 
@@ -195,7 +195,7 @@ export async function dbPush(options: { force?: boolean; dryRun?: boolean; schem
         // 5. Plan, reading only: the project diff via pushSchema, and each
         //    function package's pending migrations
         const { statements, hints } = await resolvePushPlan(imports, connection.db, schemaFilter);
-        const pending = await resolvePendingFunctionMigrations(connection, functionPlans);
+        const pending = await pendingFunctionMigrations(connection.db, functionPlans);
         const result = classifyStatements(statements);
 
         // 6. Display. Function package lines only when a package is installed,

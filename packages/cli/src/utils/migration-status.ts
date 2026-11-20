@@ -22,7 +22,6 @@ import { env } from '@spfn/core/config';
 import { loadEnv } from '@spfn/core/server';
 
 export {
-    filterPendingEntries,
     functionMigrationsTable,
     migrationTargets,
     pendingMigrationTargets,

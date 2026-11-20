@@ -43,6 +43,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the drain would otherwise get (at the default 280000ms, a drain of at least 195000ms rather than
   200000ms). When the closes use their whole half, the fetch wait is 0ms: Phase 2 warns that a
   fetch is still in flight, and a job it takes starts on the stopping instance.
+- **BREAKING: @spfn/core, spfn: one rule for pending function package migrations (#357).**
+  Core's status (`spfn db status`, the `spfn dev`/`spfn start` pre-flight, the boot gate, detailed
+  health, the Kit `db-status` gate) ignored the legacy shared `drizzle.__spfn_fn_migrations` table,
+  while the CLI's `db push` preview and every apply counted it: on a database recorded only there,
+  `db status` reported all 45 `@spfn/auth` migrations pending and `db push --dry-run` 1. The rule now
+  lives in `@spfn/core/db` as `pendingFunctionMigrations(db, packages)` (with the
+  `FunctionMigrationSource` and `PendingFunctionMigrations` types): a package's migration is pending
+  when it is newer than the newest `created_at` in its own table or, while that table is missing or
+  empty, newer than the newest of its migrations the legacy table holds. Package tables have no
+  `name` rule. The CLI's preview and applies import it. The legacy table is read only for a package
+  with no rows of its own, so a role without SELECT on it still reads status on a database where
+  every package has its own rows; when the legacy read is needed and denied, the boot gate starts
+  with "Could not verify migration status" and `db status` exits 1. The legacy table has no package
+  column, and when the operator may drop it is in the `@spfn/core/db` README.
+- **BREAKING: @spfn/core: `filterPendingEntries` is no longer exported from `@spfn/core/db`
+  (#357).** It was the shared "name OR timestamp" filter; function packages now go through
+  `pendingFunctionMigrations`, and the project target's rule (unchanged here, #370) is private to
+  `collectMigrationStatus`. Read status with `collectMigrationStatus`, or a package's pending list
+  with `pendingFunctionMigrations`.
+- **BREAKING: spfn: the legacy `drizzle.__spfn_fn_migrations` table is no longer converted or
+  dropped (#357).** Every apply (`db push`, `db migrate`, `spfn add`) copied the hashes of the
+  packages it was given into their own tables and dropped the shared table, so `spfn add <pkg>` lost
+  every other package's records and the next `db migrate` re-ran them (`schema "…" already exists`,
+  or an idempotent migration applied twice). The table is now only read; it stays in the database.
+  An apply with nothing pending writes nothing, not even an empty bookkeeping table.
+- **BREAKING: @spfn/core: pending counts on databases recorded in the legacy table drop (#357)** —
+  to what `db push` and `db migrate` apply. A deploy gated on `migrations.pending === 0` or on
+  `spfn db status --json` sees fewer pending migrations there than in earlier versions.
 - **BREAKING: @spfn/core: watch mode's generations, the initial one included, log and do not
   reject under `throwOnError: true` (#353).** `watch()` ran its initial generation as `generateAll('watch')`,
   so under `throwOnError` a failing generator rejected `watch()` before any watching began; now
