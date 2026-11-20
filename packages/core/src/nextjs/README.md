@@ -409,6 +409,11 @@ loads it from `@spfn/core/nextjs/server-call` by dynamic import, only where `nex
 answers, and a browser build resolves that subpath to an empty stub (its `browser` export
 condition).
 
+**Not on the edge runtime:** a server-side `createApi` call in a route or page with
+`export const runtime = 'edge'` resolves `@spfn/core/nextjs/server-call` to the same empty stub
+a browser build does (the edge build honours the `browser` condition), so it asserts nothing and
+the backend sees the Next.js server's address for it, as before.
+
 **Only with `SPFN_PROXY_SECRET` set** does a server-side call carry the browser's address.
 Without it nothing is asserted, and the backend sees the call as it always did: from the
 Next.js server. The client signs with `SPFN_PROXY_SECRET` itself, so a proxy given a different
