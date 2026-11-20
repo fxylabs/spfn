@@ -719,9 +719,12 @@ decides what becomes of a write it makes:
     upsert).
   - **A refusal decided inside the session's transaction** — the deciding `admit` (`refused`), an
     account the package refuses (`accountDisabled`, `pendingDeletion`), a passkey assertion that
-    fails for a known credential (`credential`) — is told once that transaction, and every one
-    around it, has rolled back: nothing of the refused session is in the report, and the report is
-    committed before the refusal is answered. `admit` is not asked again. On a channel that creates
+    fails for a known credential (`credential`), and at `mfa/verify`'s completion a right proof it
+    can no longer spend: a budget spent since the proof was judged (`secondFactorLocked`, answered
+    429 — `admit` is not asked again), the proof or the challenge spent by another request first,
+    the challenge expired or its key generation ended (`secondFactor`) — is told once that
+    transaction, and every one around it, has rolled back: nothing of the refused session is in the
+    report, and the report is committed before the refusal is answered. `admit` is not asked again. On a channel that creates
     the account (`register`, `signup-link`, `invitation`) the refused account never existed, and
     `user` is null. A throw from `settled` here is logged and the refusal stands — the session is
     already gone.
@@ -754,7 +757,8 @@ decides what becomes of a write it makes:
 
 A wrong **step-up** or **enrolment** proof is not reported: a signed-in person's typo is not a
 sign-in. **Not reported either**: an attempt that never identifies an account or a credential — a
-malformed request, an unknown passkey credential id, an expired or spent challenge, link or code, an
+malformed request, an unknown passkey credential id, a challenge, link or code already expired or
+spent when it is presented, an
 identity the OAuth provider would not vouch for — and the verification-code path of
 `deletion/cancel` (no password is checked; no session results). A reset link refused at its
 confirmation, before the sign-in step, is not a sign-in yet; an account refused at the completion is

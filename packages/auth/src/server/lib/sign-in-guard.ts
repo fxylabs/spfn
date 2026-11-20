@@ -32,7 +32,9 @@ export type SignInStage = 'credential' | 'second-factor';
  *
  * - `credential` — the password was wrong, or no account holds the identifier;
  *   or a passkey assertion failed for a known credential
- * - `secondFactor` — a wrong second-factor proof at `mfa/verify`
+ * - `secondFactor` — a wrong second-factor proof at `mfa/verify`; or a right
+ *   one the attempt could no longer spend: the proof or the challenge spent by
+ *   another request first, the challenge expired, or its key generation ended
  * - `refused` — `admit` refused it
  * - `accountDisabled` / `pendingDeletion` — the package refused the account
  * - `secondFactorLocked` — the account's second-factor budget is spent

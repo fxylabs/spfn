@@ -18,7 +18,9 @@
  * 10. an app that did not turn the guard on paying for it
  * 11. a history that omits exactly the attempts that were refused: the
  *     deciding `admit`, the package's refusal of an account on every channel,
- *     a passkey assertion that fails for a known credential
+ *     a passkey assertion that fails for a known credential, and at
+ *     `mfa/verify`'s completion a budget locked mid-attempt — the moment an
+ *     attack is under way — or a challenge another request spent first
  *
  * The app's side is what the README tells an app to write: a repository
  * extending `BaseRepository` whose writes join the package's transaction.
@@ -432,15 +434,16 @@ describe.skipIf(!dbAvailable)('the sign-in guard (#361)', () =>
     }
 
     /** Enrol TOTP on `email`; the confirmation's step is forgotten so the next code is spendable. */
-    async function enrolTotp(email: string): Promise<{ secret: string; authorization: string }>
+    async function enrolTotp(email: string): Promise<{ secret: string; authorization: string; recoveryCodes: string[] }>
     {
         const { authorization } = await signIn(email);
         const secret = (await (await post('/_auth/mfa/totp/enroll', {}, { authorization })).json()).secret as string;
+        const confirmed = await post('/_auth/mfa/totp/confirm', { code: codeFor(secret) }, { authorization });
 
-        expect((await post('/_auth/mfa/totp/confirm', { code: codeFor(secret) }, { authorization })).status).toBe(200);
+        expect(confirmed.status).toBe(200);
         await forgetUsedStep();
 
-        return { secret, authorization };
+        return { secret, authorization, recoveryCodes: (await confirmed.json()).recoveryCodes };
     }
 
     async function forgetUsedStep(): Promise<void>
@@ -1202,6 +1205,77 @@ describe.skipIf(!dbAvailable)('the sign-in guard (#361)', () =>
             { user_id: resetter.id, channel: 'password-reset', result: 'failed', reason: 'accountDisabled', key_id: resetKey.keyId },
         ]);
         expect(await committedHistory()).toHaveLength(3);
+    });
+
+    it('row 11f — the budget locks between a judged right code and the completion: 429, the key inactive, one secondFactorLocked row', async () =>
+    {
+        const { usersRepository } = await import('@/server/repositories');
+        const owner = await seedUser('late-lock@test.com');
+        const { secret } = await enrolTotp('late-lock@test.com');
+        const { challenge, keyId } = await openChallenge('late-lock@test.com');
+        await getTestDb().execute(sql`truncate sign_in_guard_test.history`);
+        const lockAccount = usersRepository.lockAccount.bind(usersRepository);
+        let first = true;
+
+        // The completion's lock is the first one taken: concurrent wrong
+        // proofs reach the package's limit just before it.
+        const spy = vi.spyOn(usersRepository, 'lockAccount').mockImplementation(async (userId: number) =>
+        {
+            if (first)
+            {
+                first = false;
+                const lockedUntil = new Date(Date.now() + 15 * 60_000);
+                await getTestDb().insert(mfaAttemptBudgets).values({ userId, failedAt: [new Date()], lockedUntil })
+                    .onConflictDoUpdate({ target: mfaAttemptBudgets.userId, set: { lockedUntil } });
+            }
+
+            return await lockAccount(userId);
+        });
+
+        const response = await post('/_auth/mfa/verify', { challenge, code: codeFor(secret) });
+        spy.mockRestore();
+
+        expect(response.status).toBe(429);
+        expect((await keyRow(keyId))!.isActive).toBe(false);
+        expect(await committedHistory()).toMatchObject([
+            { user_id: owner.id, channel: 'password', stage: 'second-factor', result: 'failed', reason: 'secondFactorLocked', key_id: keyId },
+        ]);
+        expect(await committedHistory()).toHaveLength(1);
+    });
+
+    it('row 11g — one challenge completed at once by a TOTP code and a recovery code: one session, one secondFactor row for the other', async () =>
+    {
+        const owner = await seedUser('twice@test.com');
+        const { secret, recoveryCodes } = await enrolTotp('twice@test.com');
+        const { challenge, keyId } = await openChallenge('twice@test.com');
+        await getTestDb().execute(sql`truncate sign_in_guard_test.history`);
+        const both = barrier(2);
+
+        // Both requests are past the challenge's entry check before either
+        // completes: each proof is right, and the challenge is spent once.
+        policy.admit = async () =>
+        {
+            if (!getTransactionContext())
+            {
+                both.arrive();
+                await both.passed;
+            }
+
+            return undefined;
+        };
+
+        const answers = await Promise.all([
+            post('/_auth/mfa/verify', { challenge, code: codeFor(secret) }),
+            post('/_auth/mfa/verify', { challenge, recoveryCode: recoveryCodes[0] }),
+        ]);
+
+        expect(answers.map(answer => answer.status).sort()).toEqual([200, 401]);
+        expect((await keyRow(keyId))!.isActive).toBe(true);
+        expect(await committedHistory()).toMatchObject([
+            { user_id: owner.id, stage: 'second-factor', result: 'succeeded', key_id: keyId },
+            { user_id: owner.id, channel: 'password', stage: 'second-factor', result: 'failed', reason: 'secondFactor', key_id: keyId },
+        ]);
+        expect(await committedHistory()).toHaveLength(2);
     });
 
     // ========================================================================

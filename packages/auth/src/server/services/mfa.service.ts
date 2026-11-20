@@ -94,6 +94,7 @@ import {
     failedCredentialAnswer,
     recordSignInFailure,
     reportAccountRefusal,
+    reportRefusal,
     reportSignIn,
     signInAttempt,
 } from './sign-in-guard.service';
@@ -408,7 +409,9 @@ async function spendableChallenge(challengeHash: string, verifying?: VerifyMfaCh
  * suspension or a revoke-all that committed while the proof was being checked
  * refuses the activation here; one that arrives later waits for it, and then
  * revokes the key it activated. An account refused here is told to the app's
- * `settled` once the transaction has rolled back (`reportAccountRefusal`).
+ * `settled` once the transaction has rolled back (`reportAccountRefusal`); a
+ * challenge whose key generation ended meanwhile is told as `secondFactor`.
+ * An account gone since names no one, and is not told.
  *
  * @returns the account as of the lock
  * @throws MfaVerificationFailedError
@@ -417,8 +420,15 @@ async function assertAccountStillAdmits(row: MfaChallenge, step: SecondStep | nu
 {
     const account = await usersRepository.lockAccount(row.userId);
 
-    if (!account || row.keyEpoch !== account.keyEpoch)
+    if (!account)
     {
+        throw new MfaVerificationFailedError();
+    }
+
+    if (row.keyEpoch !== account.keyEpoch)
+    {
+        await reportRefusal(step?.attempt ?? null, 'secondFactor', row.keyId);
+
         throw new MfaVerificationFailedError();
     }
 
@@ -495,7 +505,10 @@ async function releaseDeferredAnnouncements(row: MfaChallenge, key: UserPublicKe
  * in the completion transaction, which decides. A wrong proof and a spent
  * budget are told to `settled` (`stage: 'second-factor'`) in a transaction
  * of their own, after the count committed; the sign-in is told `succeeded`
- * once, here, in the transaction that activates the key.
+ * once, here, in the transaction that activates the key. Every refusal that
+ * transaction decides — the account, the key generation, `admit`, the budget
+ * spent since the judgement, a proof or challenge another request spent — is
+ * told once it has rolled back (`reportRefusal`).
  *
  * @throws ValidationError when the body names none or more than one proof
  * @throws SecondFactorLockedError while the account's budget is spent
@@ -532,13 +545,9 @@ export async function verifyMfaChallengeService(
             await assertSignInAdmits({ ...step.attempt, user: locked }, step.keyId);
         }
 
-        if (!await proof.spend() || !await mfaChallengesRepository.markVerified(row))
-        {
-            throw new MfaVerificationFailedError();
-        }
-
+        await spendStep(row, proof, step);
         await mfaChallengesRepository.activateKey(row);
-        await assertSignInAdmitted(row);
+        await assertSignInAdmitted(row, step);
         await mfaVerificationsRepository.record(row.userId, { kind: 'deviceKey', keyId: row.keyId }, proof.method);
 
         const result = await settleStepUpLogin(row);
@@ -561,6 +570,27 @@ function secondStepOf(row: MfaChallenge, account: User, params: VerifyMfaChallen
     const attempt = signInAttempt(account, row.channel, params, { stage: 'second-factor' });
 
     return attempt && { attempt, keyId: row.keyId };
+}
+
+/**
+ * Spend the judged proof, then the challenge, under the account lock. Either
+ * one can have gone since it was judged: the proof spent by another request
+ * (the TOTP step used, the recovery code used, the WebAuthn challenge spent),
+ * the challenge verified by another request or expired. The attempt failed at
+ * its second step, and is told as `secondFactor` once the transaction has
+ * rolled back (`reportRefusal`). A budget spent since the judgement is told by
+ * `proof.spend` itself.
+ *
+ * @throws SecondFactorLockedError | MfaVerificationFailedError
+ */
+async function spendStep(row: MfaChallenge, proof: SecondFactorProof, step: SecondStep | null): Promise<void>
+{
+    if (!await proof.spend() || !await mfaChallengesRepository.markVerified(row))
+    {
+        await reportRefusal(step?.attempt ?? null, 'secondFactor', row.keyId);
+
+        throw new MfaVerificationFailedError();
+    }
 }
 
 /**
@@ -592,11 +622,13 @@ async function refuseUnadmittedStep(step: SecondStep): Promise<void>
  * inactive, emits no login event and moves no `lastLoginAt`. The challenge
  * stays unspent, and every attempt on it is refused alike. The refusal is this
  * route's one `MfaVerificationFailedError` — the contract enumerates nothing
- * else for `auth.mfa.verify`.
+ * else for `auth.mfa.verify`. An account refused is told to the app's
+ * `settled` as at every door (`reportAccountRefusal`); a refusal of the key
+ * alone is not the account's, and is not told.
  *
  * @throws MfaVerificationFailedError
  */
-async function assertSignInAdmitted(row: MfaChallenge): Promise<void>
+async function assertSignInAdmitted(row: MfaChallenge, step: SecondStep | null): Promise<void>
 {
     const admission = await admitPrincipal({
         userId: row.userId,
@@ -607,6 +639,8 @@ async function assertSignInAdmitted(row: MfaChallenge): Promise<void>
 
     if ('refused' in admission)
     {
+        await reportAccountRefusal(step?.attempt ?? null, admission.refused, row.keyId);
+
         throw new MfaVerificationFailedError();
     }
 }
@@ -1311,7 +1345,7 @@ async function judgeSecondFactor(
         method: checked.method,
         spend: async () =>
         {
-            await assertBudgetOpen(userId);
+            await assertBudgetStillOpen(userId, step);
 
             return await checked.spend();
         },
@@ -1367,9 +1401,33 @@ async function assertBudgetOpen(userId: number, step: SecondStep | null = null):
 
     const refusal = step && await recordSignInFailure(step.attempt, 'secondFactorLocked', step.keyId);
 
-    throw refusal
-        ? new SignInRefusedError({ code: refusal.code })
-        : new SecondFactorLockedError({ retryAfter: Math.ceil((lockedUntil.getTime() - Date.now()) / 1000) });
+    throw refusal ? new SignInRefusedError({ code: refusal.code }) : budgetLockedError(lockedUntil);
+}
+
+/**
+ * `assertBudgetOpen` asked again under the account lock, in the transaction
+ * that spends the proof: a budget other attempts spent since the judgement.
+ * At a sign-in's second step the lock is told as `secondFactorLocked` once
+ * that transaction has rolled back (`reportRefusal`); `admit` is not asked
+ * again, so the answer is the 429 whatever the app's policy now says.
+ *
+ * @throws SecondFactorLockedError while the account's budget is spent
+ */
+async function assertBudgetStillOpen(userId: number, step: SecondStep | null): Promise<void>
+{
+    const lockedUntil = await mfaAttemptBudgetsRepository.lockedUntil(userId);
+
+    if (lockedUntil)
+    {
+        await reportRefusal(step?.attempt ?? null, 'secondFactorLocked', step?.keyId);
+
+        throw budgetLockedError(lockedUntil);
+    }
+}
+
+function budgetLockedError(lockedUntil: Date): SecondFactorLockedError
+{
+    return new SecondFactorLockedError({ retryAfter: Math.ceil((lockedUntil.getTime() - Date.now()) / 1000) });
 }
 
 /**
