@@ -74,6 +74,7 @@ const { sendVerificationCodeService } = await import('@/server/services/verifica
 const { createInvitation, acceptInvitation } = await import('@/server/services/invitation.service');
 const { requestAccountDeletionService, sweepDuePurges } = await import('@/server/services/account-deletion.service');
 const { invitationCreatedEvent } = await import('@/server/events');
+const { settleLinkMail } = await import('@/server/lib/link-mail-delivery');
 
 const dbAvailable = await isDatabaseAvailable();
 
@@ -194,8 +195,11 @@ describe.skipIf(!dbAvailable)('An app chooses which sign-in channels exist (#308
         sendEmail.mockClear();
     });
 
-    afterEach(() =>
+    afterEach(async () =>
     {
+        // A send a row started by calling a service directly, so none lands
+        // in the next row's sendEmail count
+        await settleLinkMail();
         __resetChannelsForTests();
         vi.unstubAllEnvs();
     });
@@ -211,7 +215,12 @@ describe.skipIf(!dbAvailable)('An app chooses which sign-in channels exist (#308
         return `198.51.100.${ipCounter % 250 + 1}`;
     }
 
-    function post(path: string, body: unknown, authorization?: string, ip = nextIp()): Promise<Response>
+    /**
+     * One POST, answered and its mail settled: a verification code or a link
+     * mail leaves after the response, not before it, so a row that counts
+     * `sendEmail` right after the answer would race the send.
+     */
+    async function post(path: string, body: unknown, authorization?: string, ip = nextIp()): Promise<Response>
     {
         const headers: Record<string, string> = { ...JSON_HEADERS, 'x-forwarded-for': ip };
 
@@ -220,7 +229,10 @@ describe.skipIf(!dbAvailable)('An app chooses which sign-in channels exist (#308
             headers.Authorization = authorization;
         }
 
-        return Promise.resolve(app.request(path, { method: 'POST', headers, body: JSON.stringify(body) }));
+        const response = await app.request(path, { method: 'POST', headers, body: JSON.stringify(body) });
+        await settleLinkMail();
+
+        return response;
     }
 
     /** One request of a group route, anonymous unless `authorization` is given. */
