@@ -46,8 +46,10 @@ export const users = authSchema.table('users',
         // Nullable to support OAuth-only accounts
         passwordHash: text('password_hash'),
 
-        // Force password change on next login
-        // Use cases: initial setup, security breach, policy violation
+        // Whether the account should choose a new password: set for accounts
+        // seeded from the admin-account env, returned by sign-in, cleared when
+        // the password changes or is reset. The package does not enforce it;
+        // an app that wants a forced change gates on it itself.
         passwordChangeRequired: boolean('password_change_required').notNull().default(false),
 
         // Authorization (Role-Based Access Control)
