@@ -209,6 +209,11 @@ async function readLegacyHashes(db: MigrationStatusDb): Promise<Set<string>>
  * column. An apply records each entry in the package's own table, so after it
  * that table's newest row is newer than every legacy row it supersedes.
  *
+ * The legacy table is read only for a package with entries and no rows of its
+ * own, at most once per call; a database where every package has its own rows
+ * never touches it, so a role without SELECT on it can still read status. A
+ * needed legacy read that fails throws, like any other status read.
+ *
  * Reads only, so a read-only connection (`spfn db push --dry-run`) can run it.
  */
 export async function pendingFunctionMigrations(
@@ -216,19 +221,33 @@ export async function pendingFunctionMigrations(
     packages: FunctionMigrationSource[],
 ): Promise<PendingFunctionMigrations[]>
 {
-    const legacyHashes = await readLegacyHashes(db);
+    let legacyHashes: Promise<Set<string>> | undefined;
     const pending: PendingFunctionMigrations[] = [];
 
     for (const { packageName, entries } of packages)
     {
-        const legacyMillis = entries.filter(entry => legacyHashes.has(entry.hash)).map(entry => entry.millis);
+        if (entries.length === 0)
+        {
+            pending.push({ packageName, entries });
+            continue;
+        }
+
         const lastMillis = await readLastRecordedMillis(db, functionMigrationsTable(packageName))
-            ?? Math.max(Number.NEGATIVE_INFINITY, ...legacyMillis);
+            ?? newestLegacyMillis(entries, await (legacyHashes ??= readLegacyHashes(db)));
 
         pending.push({ packageName, entries: entries.filter(entry => entry.millis > lastMillis) });
     }
 
     return pending;
+}
+
+/** The newest entry the legacy table records, or -Infinity when it records none. */
+function newestLegacyMillis(entries: FunctionMigrationEntry[], legacyHashes: Set<string>): number
+{
+    return Math.max(
+        Number.NEGATIVE_INFINITY,
+        ...entries.filter(entry => legacyHashes.has(entry.hash)).map(entry => entry.millis),
+    );
 }
 
 function toTargetStatus(

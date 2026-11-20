@@ -19,6 +19,7 @@ import {
     functionMigrationsTable,
     pendingFunctionMigrations,
     readMigrationEntries,
+    type FunctionMigrationEntry,
     type MigrationStatusDb,
 } from '../index';
 import { TEST_DATABASE_URL } from '../../__tests__/helpers/db-fixture';
@@ -107,4 +108,37 @@ describe('pending function package migrations on a legacy-recorded database', ()
             .toEqual([[PACKAGE_NAME, [TAGS[2]]]]);
         expect(applyPending?.entries.map(entry => entry.name)).toEqual([TAGS[2]]);
     });
+
+    it('R5 a package with rows of its own reads status without SELECT on the legacy table', async () =>
+    {
+        const entries = readMigrationEntries(join(cwd, 'node_modules', '@spfn', 'r357pkg', 'drizzle'), PACKAGE_NAME);
+        await createPackageTable(entries);
+        await owner.unsafe(`REVOKE ALL ON drizzle."__spfn_fn_migrations" FROM CURRENT_USER`);
+
+        const status = await collectMigrationStatus(db, cwd);
+
+        expect(status.packages.map(target => [target.name, target.pending])).toEqual([[PACKAGE_NAME, 0]]);
+    });
+
+    it('R6 a legacy read the rule needs and may not make fails the status read', async () =>
+    {
+        await owner.unsafe(`REVOKE ALL ON drizzle."__spfn_fn_migrations" FROM CURRENT_USER`);
+
+        const failure = await collectMigrationStatus(db, cwd).then(() => undefined, (error: Error) => error);
+
+        expect((failure?.cause as Error | undefined)?.message).toMatch(/permission denied/);
+    });
+
+    /** The package's own table, recording `recorded` the way an apply does. */
+    async function createPackageTable(recorded: FunctionMigrationEntry[]): Promise<void>
+    {
+        const table = functionMigrationsTable(PACKAGE_NAME);
+
+        await owner.unsafe(`CREATE TABLE drizzle."${table}" (
+            id serial PRIMARY KEY, hash text NOT NULL, created_at bigint)`);
+        for (const entry of recorded)
+        {
+            await owner`INSERT INTO drizzle.${owner(table)} (hash, created_at) VALUES (${entry.hash}, ${entry.millis})`;
+        }
+    }
 });

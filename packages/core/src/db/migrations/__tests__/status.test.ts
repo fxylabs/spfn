@@ -1,6 +1,7 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { PGlite } from '@electric-sql/pglite';
 import { drizzle } from 'drizzle-orm/pglite';
+import { PgDialect } from 'drizzle-orm/pg-core';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
@@ -10,6 +11,7 @@ import {
     countPendingMigrations,
     functionMigrationsTable,
     hasMigrationTargets,
+    pendingFunctionMigrations,
     pendingMigrationTargets,
     type MigrationStatusDb,
 } from '../index';
@@ -154,6 +156,45 @@ describe('collectMigrationStatus', () =>
         const status = await collectMigrationStatus(db, cwd);
 
         expect(status.project).toBeNull();
+    });
+});
+
+describe('pendingFunctionMigrations', () =>
+{
+    it('R7 sends no query when no function package is installed', async () =>
+    {
+        const execute = vi.fn(() => Promise.reject(new Error('unexpected query')));
+
+        expect(await pendingFunctionMigrations({ execute }, [])).toEqual([]);
+        expect(execute).not.toHaveBeenCalled();
+    });
+
+    it('R8 reads the legacy table once however many packages need it', async () =>
+    {
+        const client = new PGlite();
+        const dialect = new PgDialect();
+        const statements: string[] = [];
+        const db = drizzle({ client }) as unknown as MigrationStatusDb;
+        const recording: MigrationStatusDb = {
+            execute: (query) =>
+            {
+                statements.push(dialect.sqlToQuery(query).sql);
+
+                return db.execute(query);
+            },
+        };
+        const entries = [{ name: '20260101000000_init', millis: 1, hash: 'h', statements: [] }];
+
+        await client.exec(`CREATE SCHEMA drizzle;
+            CREATE TABLE drizzle."__spfn_fn_migrations" (id serial PRIMARY KEY, hash text NOT NULL, created_at bigint)`);
+        await pendingFunctionMigrations(recording, [
+            { packageName: '@spfn/a', entries },
+            { packageName: '@spfn/b', entries },
+        ]);
+        await client.close();
+
+        expect(statements.filter(text => text.includes('SELECT hash FROM drizzle."__spfn_fn_migrations"')))
+            .toHaveLength(1);
     });
 });
 
