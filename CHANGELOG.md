@@ -52,7 +52,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `FunctionMigrationSource` and `PendingFunctionMigrations` types): a package's migration is pending
   when it is newer than the newest `created_at` in its own table or, while that table is missing or
   empty, newer than the newest of its migrations the legacy table holds. Package tables have no
-  `name` rule. The CLI's preview and applies import it.
+  `name` rule. The CLI's preview and applies import it. The legacy table is read only for a package
+  with no rows of its own, so a role without SELECT on it still reads status on a database where
+  every package has its own rows; when the legacy read is needed and denied, the boot gate starts
+  with "Could not verify migration status" and `db status` exits 1. The legacy table has no package
+  column, and when the operator may drop it is in the `@spfn/core/db` README.
 - **BREAKING: @spfn/core: `filterPendingEntries` is no longer exported from `@spfn/core/db`
   (#357).** It was the shared "name OR timestamp" filter; function packages now go through
   `pendingFunctionMigrations`, and the project target's rule (unchanged here, #370) is private to
