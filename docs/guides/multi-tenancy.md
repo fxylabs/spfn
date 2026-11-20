@@ -207,7 +207,8 @@ would be cleared too; any other value throws when the schema module loads.
 `foreignKey` as usual.
 
 The `memberRepository` used by `authorize` is a `TenantRepository` (step 4): `isMember` reads by
-workspace, in a short transaction bound to it.
+workspace, in a short transaction bound to it, on the primary — a removed member must not be
+admitted from a lagging replica.
 
 **Code that already names the tenant.** If your repositories, services and tests read
 `row.workspaceId`, keep that name: `property` sets the key the tenant column has on every
@@ -336,7 +337,12 @@ export const noteRepository = new NoteRepository();
 Where each call runs depends on whether a transaction is open:
 
 - **Outside a transaction**, each call opens a short transaction of its own, sets the tenant and
-  commits: a read on the read connection (read-only), a write on the write connection.
+  commits: a read on the read connection (read-only), a write on the write connection. The read
+  connection is a replica when `DATABASE_READ_URL` is set, and a replica can lag: a read that must
+  see a write made a moment ago — by this request or another — passes `{ primary: true }`
+  (`_findOne(tenantId, table, where, { primary: true })`, a `primary` field in `_findMany`'s and
+  `_findManyKeyset`'s options, the third argument of `_select` / `_selectOfUser`). It runs the
+  same short read-only transaction, tenant set, on the write connection.
 - **Inside a transaction** (`Transactional()` on the route, or `runInTransaction`), the first call
   sets the tenant on that transaction, and every later call must name the same tenant. Naming
   another throws `TenantMismatchError` before any SQL runs.
@@ -354,10 +360,10 @@ import { members, workspaces } from '../entities/tenancy';
 
 class MemberRepository extends TenantRepository
 {
-    /** The guard's authorize: by workspace, in a short transaction bound to it. */
+    /** The guard's authorize: by workspace, in a short transaction bound to it, on the primary. */
     async isMember(workspaceId: number, userId: number): Promise<boolean>
     {
-        return await this._findOne(workspaceId, members, { userId, status: 'active' }) !== null;
+        return await this._findOne(workspaceId, members, { userId, status: 'active' }, { primary: true }) !== null;
     }
 
     /** After sign-in, the workspace picker, account deletion: by person, before any workspace is known. */
@@ -469,7 +475,9 @@ Register the routes in your router as usual. The guard answers:
 | `authorize` returns anything but `true` | **403** |
 | a handler calls a repository with a tenant other than the guarded one | `TenantMismatchError`, a **500**: a bug in the handler, not in the request |
 
-The guard opens no transaction, so reads keep going to the read replica. Add `Transactional()`
+The guard opens no transaction, so reads keep going to the read replica — except those that ask
+for the primary, as `isMember` does: on a lagging replica, a member removed a moment ago would
+still be admitted. Add `Transactional()`
 to routes that write; the order of the two does not matter: either way the transaction is bound
 to the guarded workspace before the handler runs. That is what lets a plain repository rename the
 workspace itself, whose update policy needs the binding:
@@ -562,7 +570,7 @@ For a `tenancy.table`, each call follows one of six rules
 
 | Rule | When | What happens |
 | --- | --- | --- |
-| R1 | a read, no transaction open | a short read-only transaction on the read connection sets the tenant, runs the query, commits |
+| R1 | a read, no transaction open | a short read-only transaction on the read connection (the write connection with `{ primary: true }`) sets the tenant, runs the query, commits |
 | R2 | a write, no transaction open | the same, on the write connection |
 | R3 | a transaction is open and has no tenant yet | the tenant is set on it; the transaction now belongs to that tenant |
 | R4 | the open transaction belongs to this tenant | the query runs |
@@ -581,7 +589,7 @@ The same shape, with the user in `app.user_id`
 
 | Rule | When | What happens |
 | --- | --- | --- |
-| U1 | no transaction open | a short read-only transaction on the read connection sets the user, runs the query, commits |
+| U1 | no transaction open | a short read-only transaction on the read connection (the write connection with `{ primary: true }`) sets the user, runs the query, commits |
 | U3 | a transaction is open and has no user yet | the user is set on it, beside its tenant if it has one |
 | U4 | the open transaction belongs to this user | the query runs |
 | U5 | the open transaction belongs to another user | `TenantMismatchError` with `key: 'user'`, no SQL |

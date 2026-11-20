@@ -91,6 +91,19 @@ export interface CountOptions
     cap?: number;
 }
 
+/** Where a repository read helper runs when no transaction is open. */
+export interface ReadOptions
+{
+    /**
+     * Read from the primary — the write connection — instead of the replica
+     * (`DATABASE_READ_URL`). A replica can lag behind the primary, so a read
+     * that must see a write made a moment ago, by this request or another,
+     * passes `true`. Inside a transaction it changes nothing: the read runs in
+     * the transaction, which is on the primary already.
+     */
+    primary?: boolean;
+}
+
 /**
  * Count rows, optionally stopping past `cap`
  *
