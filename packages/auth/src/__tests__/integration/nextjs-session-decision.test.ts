@@ -742,7 +742,7 @@ describe.skipIf(!dbAvailable)('the Next.js proxy decides the session once per re
     const KEEPS = [
         'UnauthorizedError',
         'InvalidCredentialsError', 'InvalidTokenError', 'InvalidSocialTokenError', 'TokenExpiredError',
-        'DeletionAlreadyRequestedError', 'DeletionNotRequestedError', 'ImmediateDeletionNotAllowedError',
+        'DeletionAlreadyRequestedError', 'DeletionNotRequestedError', 'ImmediateDeletionNotAllowedError', 'PurgeHookFailedError',
         'AccountAlreadyExistsError', 'RegistrationRejectedError', 'SignInRefusedError', 'ReservedUsernameError', 'UsernameAlreadyTakenError',
         'InvalidVerificationCodeError', 'InvalidVerificationTokenError', 'InvalidKeyFingerprintError',
         'KeyAlgorithmMismatchError', 'NonceKeyBindingError', 'NativeSignInUnsupportedError', 'UnverifiedEmailLinkError',

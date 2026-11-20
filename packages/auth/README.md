@@ -2598,7 +2598,8 @@ for it, a reset would be a way in built on an address nobody proved.
 `/_auth/deletion/cancel` with a one-time code sent to its own e-mail or phone — no password
 needed — and reset once it is back. The reset request answers it as it answers every input (no
 mail, the same body), because a different answer would tell a stranger the address has an
-account; the pointer to the code path is in the deletion notice the account was sent instead.
+account; the pointer to the code path belongs in the app's own deletion notice
+([telling the person](#telling-the-person)).
 
 **1 — request the link.** The response is identical for every input — same status, same two
 fields, same `expiresAt` arithmetic — and mail goes only to an account that can be reset, so
@@ -7406,10 +7407,9 @@ users.status (active | inactive | suspended) is not written by any of them.
   factor or changed the password is refused with the answer its next request would get and
   schedules nothing (a hash re-encoded meanwhile is verified once more). On success: `deletion` → `pending` (the
   status is left as it is), every active session key is revoked, an `account_deletion_requests`
-  audit row is created (with `requestedBy: 'self'`), `auth.deletion.requested` fires, and (when
-  `sendNotifications` is on) a notice with the scheduled purge date and how to cancel goes to the
-  channel the account has: by e-mail when it has an address, otherwise by SMS (`sendSMS` from
-  `@spfn/notification`, the sender verification codes use).
+  audit row is created (with `requestedBy: 'self'`), and `auth.deletion.requested` fires after the
+  commit. The package sends the person nothing: [telling the person](#telling-the-person) is the
+  app's.
 - **Login is blocked while pending** — passkey and OAuth sign-in and every door of the admission
   (`authenticate` and the rest) reject an account whose deletion is pending with
   `AccountPendingDeletionError` (403, `details.purgeScheduledAt`) — before its status, so the
@@ -7463,12 +7463,13 @@ export default defineServerConfig()
             gracePeriodDays: 30,               // default; 0 = immediate
             purgeStrategy: 'anonymize',        // default; or 'hard-delete'
             allowSelfImmediate: false,         // default; self-service immediate: true
-            sendNotifications: true,           // default
             onBeforePurge: async (user) =>
             {
                 // throw to skip this user for the current sweep (retried next run)
                 await appDataCleanup(user.id);
             },
+            // inside the purge transaction: database work only (see "Telling the person")
+            onPurge: (account) => deletionNoticeOutboxRepository.add(account),
         },
     }))
     .jobs(authJobRouter)   // the daily (04:00 UTC) purge sweep, and auth.link-mail
@@ -7490,10 +7491,10 @@ export default defineServerConfig()
   The `account_deletion_requests` audit row survives either strategy — its `userId` FK is
   `set null` (not cascade), by design, so "who requested/purged what, when" outlives the user row.
 
-The final "your account has been deleted" notice is sent **after** the purge transaction commits
-(never before, and never on a purge that aborted or rolled back — see below), using the address
-captured before the destructive step ran. This holds for `hard-delete` too: the row is already
-gone by send time, but the address was captured beforehand, so the notice still goes out.
+By the time a purge commits, the account's address is scrubbed (`anonymize`) or gone
+(`hard-delete`). An app that tells the person their account is deleted takes the address from
+`onPurge`, which runs under the lock before the destructive step — see
+[telling the person](#telling-the-person).
 
 **Concurrency.** The purge job re-verifies the account's deletion is still `pending` on the write
 primary immediately before any destructive DML, inside the same transaction as the DML itself —
@@ -7522,6 +7523,189 @@ each name against pg-boss instead of overriding it.
 `createAuthDeletionJobRouter` is the former name of `createAuthJobRouter` and still works, with
 the same argument and the same result. It is deprecated because the router has carried more than
 the deletion purge since `auth.link-mail` joined it.
+
+### Telling the person
+
+**The rule.** `@spfn/auth` sends a message itself only when it carries, or stands in for, a
+credential the package minted: a verification code, a signup or password-reset link, the
+"you already have an account" notice that stands in for a signup link. Every other moment is an
+event or a hook, and the words, language, channel and timing are the app's. Deletion has no
+credential, so the package sends no deletion notice — not on request, not on cancel, not after the
+purge. With the default configuration nothing is sent.
+
+| Moment | What the app gets | Payload |
+|---|---|---|
+| request committed | `authDeletionRequestedEvent` (`auth.deletion.requested`) | `userId`, `userPublicId`, `purgeScheduledAt`, `requestedBy`, `immediate` |
+| cancel committed | `authDeletionCancelledEvent` (`auth.deletion.cancelled`) | `userId`, `userPublicId` |
+| purge, inside its transaction | `deletion.onPurge` hook | `{ publicId, email, phone, purgeStrategy }` |
+| purge committed | `authDeletionCompletedEvent` (`auth.deletion.completed`) | `userPublicId`, `purgeStrategy` |
+
+- **`immediate`** is true whenever the grace period is 0 — `gracePeriodDays: 0`, or a request with
+  `immediate: true`. The purge runs right after that commit, so there is nothing "scheduled" to
+  tell and nothing to cancel, and a subscriber reading the account by `userId` may already find it
+  anonymized or gone. Send no "requested" notice for it; the completed notice covers it.
+- **`requested` and `cancelled`**: the account still exists, so a subscriber reads the contact by
+  `userId` (`usersRepository.findById`).
+- **`completed` carries no contact details**, by design: an event's payload is published through
+  the cache's pub/sub and stored by any job bound with `.on(event)`, and a deleted account's
+  address must not travel with it. It says that a purge committed, nothing more.
+- **`onPurge`** is how the app learns the address of an account it can no longer read. It is
+  never published or queued. Its contract:
+  - It is called **inside the purge transaction, under the account lock, before the destructive
+    writes**: once the account is read `pending` under the lock and the request is claimed, and
+    before the account is anonymized or deleted, for both strategies. The contact it is handed is
+    read under that lock. Everything the purge is about to destroy is still readable through the
+    transaction — the account (`usersRepository.findByPublicId`), its settings, the language among
+    them (`userSettingsRepository.findLocaleByUserId`), and the app's own rows that a
+    `hard-delete` cascades away.
+  - A purge that does not go ahead does not call it: one a cancel won, or one another sweep already
+    completed.
+  - **Database work only.** It runs under the account lock: no mail, no HTTP. Write an outbox row
+    through the app's own repository — a `BaseRepository` joins this transaction, so the row
+    commits with the purge or not at all — and send from a job after the commit.
+  - **Never its own transaction.** A hook that opens its own transaction
+    (`runInTransaction(fn, { requiresNew: true })`) and touches the account's rows never returns:
+    it waits on the lock the purge holds, and the purge waits on the hook. PostgreSQL does not see
+    a deadlock, because the second wait is in the application, not in the database, so nothing
+    breaks it. A plain nested `runInTransaction(fn)` joins the purge's transaction and is fine.
+  - **A throw rolls the purge back.** The account and its request stay `pending`, no
+    `auth.deletion.completed` fires, and the next sweep purges it again and calls the hook again.
+    The purge rejects with `PurgeHookFailedError` (500, from `@spfn/auth/errors`), which names the
+    hook, the deletion request (`requestId`), and what the hook threw by identifiers only: its
+    class name (`hookErrorClass`) and, when a database statement failed, the SQLSTATE
+    (`hookErrorCode`). It keeps no reference to the hook's error — no `cause`, no field — because
+    that error may quote the address anywhere, so the rollback line, the sweep's line and a
+    response body carry none of it. An app that needs its own error handles it inside the hook.
+- **`onBeforePurge`** is not part of telling anyone, and runs at another moment: before the purge
+  transaction opens, without the account lock, once the primary read finds the account still
+  `pending`. It is for the app's own I/O outside the database (files in object storage, an
+  external system). A throw skips that account for this sweep; nothing is rolled back, because
+  nothing has been written. A cancel can still win after it returns, so it can run for a purge that
+  never happens, and it runs again on every retry. Never send the notice from it. It is handed the
+  email and phone too, so the sweep's warning names what it threw by class name and SQLSTATE only;
+  an app that needs the error itself handles it inside the hook.
+
+**Recipe.** Three templates with locales, two subscribers, and an outbox the hook fills and a job
+empties. Every part is `@spfn/notification`'s or the app's own:
+
+```typescript
+// src/server/deletion-notices.ts
+import { registerTemplate, sendEmail, sendSMS } from '@spfn/notification/server';
+import { authDeletionRequestedEvent, authDeletionCancelledEvent, usersRepository } from '@spfn/auth/server';
+import { job } from '@spfn/core/job';
+import { deletionNoticeOutboxRepository } from './repositories/deletion-notice-outbox.repository';
+import { localeOf } from './locale';   // the app's own: the person's language, if it knows it
+
+registerTemplate({
+    name: 'app-deletion-requested',
+    channels: ['email', 'sms'],
+    defaultLocale: 'en',
+    locales: {
+        en: {
+            email: { subject: 'Your account will be deleted', text: 'It will be deleted on {{date}}. To keep it, …' },
+            sms: { message: 'Your account will be deleted on {{date}}. To keep it, …' },
+        },
+        ko: {
+            email: { subject: '계정 삭제가 예약되었습니다', text: '{{date}}에 삭제됩니다. 계정을 유지하려면 …' },
+            sms: { message: '{{date}}에 계정이 삭제됩니다. 유지하려면 …' },
+        },
+    },
+});
+// 'app-deletion-cancelled' and 'app-account-deleted' alike
+
+interface Contact { email: string | null; phone: string | null }
+
+/** The app's channel choice: here e-mail, else SMS. */
+async function tell(contact: Contact, template: string, data: Record<string, unknown> = {}, locale?: string)
+{
+    if (contact.email)
+    {
+        return sendEmail({ to: contact.email, template, data, locale });
+    }
+
+    return contact.phone ? sendSMS({ to: contact.phone, template, data, locale }) : { success: true };
+}
+
+// `localOnly`: run by the instance that emitted, not once per instance through the cache.
+authDeletionRequestedEvent.subscribe(async ({ userId, purgeScheduledAt, immediate }) =>
+{
+    if (immediate)
+    {
+        return;   // the purge runs now; the completed notice is the one to send
+    }
+
+    const user = await usersRepository.findById(Number(userId));
+    if (user)
+    {
+        await tell(user, 'app-deletion-requested', { date: new Date(purgeScheduledAt).toLocaleDateString() }, await localeOf(user.id));
+    }
+}, { localOnly: true });
+
+authDeletionCancelledEvent.subscribe(async ({ userId }) =>
+{
+    const user = await usersRepository.findById(Number(userId));
+    if (user)
+    {
+        await tell(user, 'app-deletion-cancelled', {}, await localeOf(user.id));
+    }
+}, { localOnly: true });
+
+// Sends what onPurge left in the outbox, after the purge committed; a row is deleted once sent,
+// so the address is kept no longer than it takes to deliver it.
+export const deletionNoticeJob = job('app.deletion-notice')
+    .cron('*/5 * * * *')
+    .handler(async () =>
+    {
+        for (const row of await deletionNoticeOutboxRepository.listPending())
+        {
+            if ((await tell(row, 'app-account-deleted')).success)
+            {
+                await deletionNoticeOutboxRepository.remove(row.id);
+            }
+        }
+    });
+```
+
+```typescript
+// src/server/repositories/deletion-notice-outbox.repository.ts — the app's own table and repository
+import { BaseRepository } from '@spfn/core/db';
+import { eq } from 'drizzle-orm';
+import type { PurgedAccount } from '@spfn/auth/server';
+import { deletionNoticeOutbox } from '../entities/deletion-notice-outbox';
+
+export class DeletionNoticeOutboxRepository extends BaseRepository
+{
+    /** Called from onPurge: `this.db` is the purge's transaction. */
+    async add(account: PurgedAccount): Promise<void>
+    {
+        await this.db.insert(deletionNoticeOutbox).values({ email: account.email, phone: account.phone });
+    }
+
+    async listPending()
+    {
+        return this.db.select().from(deletionNoticeOutbox);
+    }
+
+    async remove(id: number): Promise<void>
+    {
+        await this.db.delete(deletionNoticeOutbox).where(eq(deletionNoticeOutbox.id, id));
+    }
+}
+
+export const deletionNoticeOutboxRepository = new DeletionNoticeOutboxRepository();
+```
+
+Register `deletionNoticeJob` in the app's job router beside `authJobRouter`, and pass
+`onPurge: (account) => deletionNoticeOutboxRepository.add(account)` in
+`createAuthLifecycle({ deletion })`. For the completed notice in the person's language, add a
+`locale` column and fill it in the hook: the account's settings and the app's own rows are still
+there, read through their repositories inside the same transaction — for example
+`userSettingsRepository.findLocaleByUserId((await usersRepository.findByPublicId(account.publicId))!.id)`.
+
+> **BREAKING — the package sends no deletion notice (#170).** `deletion.sendNotifications` is
+> removed and `createAuthLifecycle({ deletion: { sendNotifications } })` refuses to boot, naming
+> the removal, so an app that relied on the notices learns it before it stops sending them. The
+> recipe above replaces `sendNotifications: true`. `auth.deletion.requested` gained `immediate`.
 
 ### Link mail delivery
 

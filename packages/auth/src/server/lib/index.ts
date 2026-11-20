@@ -31,7 +31,19 @@ export { CSRF_HEADER, deriveCsrfToken, matchesCsrfToken } from './csrf';
 export * from './oauth';
 export * from './oauth2';
 export * from './one-time-token';
-export * from './deletion-config';
+// Named rather than `export *`: the boot check and the test reset are the
+// lifecycle's and the tests', not the application's.
+export {
+    DEFAULT_DELETION_ALLOW_SELF_IMMEDIATE,
+    DEFAULT_DELETION_GRACE_PERIOD_DAYS,
+    DEFAULT_DELETION_PURGE_CRON,
+    DEFAULT_DELETION_PURGE_STRATEGY,
+    configureDeletion,
+    getDeletionConfig,
+    type AccountDeletionPurgeUser,
+    type AuthDeletionConfig,
+    type PurgedAccount,
+} from './deletion-config';
 export * from './device-auth-config';
 export * from './device-link-config';
 export * from './device-code';

@@ -33,7 +33,7 @@ const { initializeAuth } = await import('@/server/services/rbac.service');
 const { getRoleByName } = await import('@/server/services/role.service');
 const { admitPrincipal } = await import('@/server/services/admission.service');
 const { authLogger } = await import('@/server/logger');
-const { configureDeletion } = await import('@/server/lib/deletion-config');
+const { __resetDeletionForTests, configureDeletion } = await import('@/server/lib/deletion-config');
 const { purgeUserService } = await import('@/server/services/account-deletion.service');
 const { updateLocaleService, updateUserProfileService } = await import('@/server/services/user-profile.service');
 const {
@@ -97,7 +97,7 @@ describe.skipIf(!dbAvailable)('per-person settings (case table #161)', () =>
         await clearTables(getTestDb());
         resetMemoryRateLimitStore();
         await initializeAuth();
-        configureDeletion();
+        __resetDeletionForTests();
         userId = await seedUser('settings@test.com');
     });
 

@@ -7,7 +7,7 @@
 import type { AuthInitOptions } from './rbac';
 import type { SSETokenStore } from '@spfn/core/event/sse';
 import type { PurgeStrategy } from './types';
-import type { AccountDeletionPurgeUser } from './lib/deletion-config';
+import type { AccountDeletionPurgeUser, PurgedAccount } from './lib/deletion-config';
 import type { Hono } from 'hono';
 import { ensureAdminExists } from './setup';
 import { assertAppFromThisHono } from './lib/hono-copy';
@@ -15,7 +15,7 @@ import { authLogger } from './logger';
 import { assertRoleEmailDomainPolicy, initializeAuth, normalizeStoredEmails } from './services';
 import { initOneTimeTokenManager } from './lib/one-time-token';
 import { settleLinkMail } from './lib/link-mail-delivery';
-import { configureDeletion } from './lib/deletion-config';
+import { assertDeletionConsistent, configureDeletion } from './lib/deletion-config';
 import { configureDeviceAuth } from './lib/device-auth-config';
 import { configureDeviceLink } from './lib/device-link-config';
 import { assertChannelsConsistent, configureChannels, type AuthChannelsOptions } from './lib/channels-config';
@@ -169,6 +169,11 @@ export interface AuthLifecycleOptions extends AuthInitOptions
      * (`@spfn/auth/server`) and the README, since job registration happens after
      * this lifecycle hook runs and can't be triggered from here.
      *
+     * A later `createAuthLifecycle()` that omits it, or omits an option, leaves
+     * what an earlier one stated as it is; one that states an option with
+     * another value, or another `onBeforePurge`/`onPurge` function, refuses
+     * boot in `afterInfrastructure`, naming both.
+     *
      * @example
      * ```typescript
      * createAuthLifecycle({
@@ -176,9 +181,11 @@ export interface AuthLifecycleOptions extends AuthInitOptions
      *         gracePeriodDays: 14,
      *         purgeStrategy: 'anonymize',
      *         allowSelfImmediate: false,
-     *         sendNotifications: true,
      *         onBeforePurge: async (user) => {
      *             await appDataCleanup(user.id); // throw to skip this user this sweep
+     *         },
+     *         onPurge: async (account) => {
+     *             await deletionNoticeOutbox.add(account); // database only: a job sends it
      *         },
      *     },
      * })
@@ -218,18 +225,37 @@ export interface AuthLifecycleOptions extends AuthInitOptions
         purgeCron?: string;
 
         /**
-         * Whether to email users (when they have one on file) at request,
-         * recovery, and final-purge time.
-         * @default true
-         */
-        sendNotifications?: boolean;
-
-        /**
-         * Invoked immediately before a user is purged (both the immediate inline
-         * path and the cron sweep). Throw to skip that user for this run — they
-         * stay `pending` and are retried on the next sweep.
+         * The app's own I/O before a purge (the immediate inline path, the
+         * admin entry point and the cron sweep), outside any transaction: called
+         * once the primary read finds the account still `pending`, before the
+         * purge transaction opens and without the account lock. Throw to skip
+         * that user for this run — they stay `pending` and are retried on the
+         * next sweep. A cancel may still win after it returns, so it can run for
+         * a purge that never happens, and it runs again on every retry.
          */
         onBeforePurge?: (user: AccountDeletionPurgeUser) => Promise<void>;
+
+        /**
+         * The package sends no deletion notice; this hook is how an app learns
+         * the address of an account it may no longer read. Called inside the
+         * purge transaction, under the account lock, once the purge has claimed
+         * the request and before its destructive writes (both strategies), with
+         * `{ publicId, email, phone, purgeStrategy }` read under the lock. The
+         * account's rows — its settings, the language among them — and the
+         * app's own rows that a hard delete cascades away are still readable
+         * through the transaction. Never published or queued.
+         *
+         * Database work only: it runs under the account lock. Write an outbox
+         * row through the app's own repository — it joins this transaction, so
+         * the row commits with the purge or not at all — and send from a job
+         * after the commit. A hook that opens its own transaction
+         * (`requiresNew`) and touches the account's rows never returns: it
+         * waits on the lock the purge holds, and PostgreSQL does not see a
+         * deadlock. A plain nested `runInTransaction` joins and is fine. A throw
+         * rolls the purge back (no `auth.deletion.completed`); the request stays
+         * `pending` and the next sweep calls it again.
+         */
+        onPurge?: (account: PurgedAccount) => Promise<void>;
     };
 
     /**
@@ -459,6 +485,8 @@ export function createAuthLifecycle(options: AuthLifecycleOptions = {}): AuthLif
     // createAuthDeletionJobRouter() may be called by the app right after this
     // constructor returns (same builder chain), and it needs the resolved config
     // immediately. See lib/deletion-config.ts for the full ordering rationale.
+    // An omitted option leaves an earlier call's as it is; a contradicting one
+    // is refused below, in afterInfrastructure.
     configureDeletion(options.deletion);
 
     // Same reason, one step simpler: nothing but request handlers read this, and
@@ -498,7 +526,7 @@ export function createAuthLifecycle(options: AuthLifecycleOptions = {}): AuthLif
          *    on a partial Sign in with Apple web setup, on an Android relay or
          *    assetlinks.json setup that cannot work, on an authorization
          *    server issuer no client could use, or on two lifecycles that
-         *    stated different channels
+         *    stated different channels or deletion options
          * 1. Ensures admin account exists (creates if missing)
          * 2. Initializes RBAC system with built-in + custom roles/permissions
          * 3. Refuses boot on an SPFN_AUTH_ROLE_EMAIL_DOMAINS policy that cannot work
@@ -530,6 +558,10 @@ export function createAuthLifecycle(options: AuthLifecycleOptions = {}): AuthLif
             // Same reasoning: two createAuthLifecycle() calls that stated
             // different channels. Silent when at most one stated them.
             assertChannelsConsistent();
+            // Same reasoning: two createAuthLifecycle() calls that stated one
+            // deletion option differently, or two owners of one purge hook.
+            // Silent when at most one stated each.
+            assertDeletionConsistent();
             // Same reasoning, after the channels it reads: a contradicting
             // second statement, no method listed, a required factor beside a
             // device channel that proves none, passkey-only beside a weaker

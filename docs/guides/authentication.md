@@ -1743,6 +1743,7 @@ catch (error)
 | `DeletionAlreadyRequestedError` | 409 | Deletion already requested (or account already purged) |
 | `DeletionNotRequestedError` | 404 | No pending deletion request to cancel/purge |
 | `ImmediateDeletionNotAllowedError` | 403 | Self-service `immediate: true` without `deletion.allowSelfImmediate` |
+| `PurgeHookFailedError` | 500 | `deletion.onPurge` threw; the purge rolled back. The message names the hook and `requestId` only; the hook's error is its `cause` |
 | `AccountAlreadyExistsError` | 409 | Email/phone already registered |
 | `InsufficientRoleError` | 403 | Missing required role |
 | `InsufficientPermissionsError` | 403 | Missing required permission |

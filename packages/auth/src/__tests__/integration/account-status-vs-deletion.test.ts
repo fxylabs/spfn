@@ -20,8 +20,7 @@
  * |     | while it waits → 403 STEP_UP_REQUIRED, nothing scheduled, the key live                           | password that no longer holds (PR #320 F1)   |
  * | T7  | a recently authenticated session presents the wrong password → 403 RECENT_AUTH_REQUIRED, nothing | a failed proof read as an absent one (F2)    |
  * |     | scheduled                                                                                        |                                              |
- * | T8  | a phone-only account requests deletion → one SMS to its phone with the date and the cancel       | a phone-only person never learning the purge |
- * |     | pointer, no mail; an e-mail account → the mail as before, no SMS                                 | date or how to cancel (F3)                   |
+ * | T8  | removed (#170): the package sends no deletion notice; account-deletion-flow pins zero sends       |                                              |
  * | T9  | a code verified, `deleteExpired` past the code's expiry inside the token's lifetime → the token  | a scheduled sweep breaking a valid cancel    |
  * |     | cancels (204); a verified row past its token's lifetime is swept                                 | token (F4)                                   |
  * | T10 | a session of an application-registered profile asks with the correct password → 200, deletion    | the check under the lock refusing a          |
@@ -72,7 +71,7 @@ const { sendEmail, sendSMS } = await import('@spfn/notification/server');
 const { runInTransaction } = await import('@spfn/core/db');
 const { initializeAuth } = await import('@/server/services/rbac.service');
 const { getRoleByName } = await import('@/server/services/role.service');
-const { configureDeletion } = await import('@/server/lib/deletion-config');
+const { __resetDeletionForTests } = await import('@/server/lib/deletion-config');
 
 const dbAvailable = await isDatabaseAvailable();
 
@@ -156,7 +155,7 @@ describe.skipIf(!dbAvailable)('account status and deletion are separate facts (T
         await teardownTestDb();
         restoreEnv('SPFN_AUTH_VERIFICATION_TOKEN_SECRET', previousTokenSecret);
         restoreEnv('SPFN_AUTH_TOKEN_ENCRYPTION_KEYS', previousKeyring);
-        configureDeletion();
+        __resetDeletionForTests();
     });
 
     beforeEach(async () =>
@@ -164,7 +163,7 @@ describe.skipIf(!dbAvailable)('account status and deletion are separate facts (T
         await clearTables(getTestDb());
         resetMemoryRateLimitStore();
         await initializeAuth();
-        configureDeletion();
+        __resetDeletionForTests();
         vi.mocked(sendEmail).mockClear();
         vi.mocked(sendSMS).mockClear();
     });
@@ -504,30 +503,6 @@ describe.skipIf(!dbAvailable)('account status and deletion are separate facts (T
         expect(await stateOf(account)).toEqual({ status: 'active', deletion: null });
         expect(await requestRows(account)).toEqual([]);
         expect(await liveKeys(account)).toEqual([{ isActive: true }]);
-    });
-
-    it('T8 the deletion notice goes by SMS to a phone-only account, and by mail to an e-mail account', async () =>
-    {
-        const phoneOnly = await newAccount();
-        const phoneSession = await signIn(phoneOnly);
-        const phone = `+1555020${String(counter).padStart(4, '0')}`;
-        await getTestDb().update(users).set({ email: null, phone }).where(eq(users.id, phoneOnly.id));
-
-        expect((await requestDeletion(phoneOnly, phoneSession)).status).toBe(200);
-
-        await vi.waitFor(() => expect(sendSMS).toHaveBeenCalledTimes(1));
-        const [sms] = vi.mocked(sendSMS).mock.calls[0]!;
-        expect(sms.to).toBe(phone);
-        expect(sms.message).toMatch(/scheduled for deletion on \d{4}-\d{2}-\d{2}/);
-        expect(sms.message).toMatch(/To cancel, confirm with a verification code/);
-        expect(sendEmail).not.toHaveBeenCalled();
-
-        const mailed = await newAccount();
-        expect((await requestDeletion(mailed, await signIn(mailed))).status).toBe(200);
-
-        await vi.waitFor(() => expect(sendEmail).toHaveBeenCalledTimes(1));
-        expect(vi.mocked(sendEmail).mock.calls[0]![0]).toMatchObject({ to: mailed.email, subject: 'Account deletion requested' });
-        expect(sendSMS).toHaveBeenCalledTimes(1);
     });
 
     it('T9 a verified code outlives its own expiry for its token\'s lifetime: the sweep keeps it, the token cancels; past the token\'s lifetime it is swept', async () =>

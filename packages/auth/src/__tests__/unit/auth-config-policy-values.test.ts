@@ -12,7 +12,7 @@ import { describe, it, expect, afterEach } from 'vitest';
 
 import { configureAuth, getAuthConfig, type AuthConfig } from '@/server/lib/config';
 import { createAuthLifecycle, type AuthLifecycleOptions } from '@/server/lifecycle';
-import { configureDeletion, getDeletionConfig } from '@/server/lib/deletion-config';
+import { __resetDeletionForTests, getDeletionConfig } from '@/server/lib/deletion-config';
 
 /** An option with a value outside its set, and what the refusal must name. */
 const AUTH_CONFIG_REFUSALS: [string, unknown, RegExp][] = [
@@ -28,7 +28,10 @@ const AUTH_CONFIG_REFUSALS: [string, unknown, RegExp][] = [
 const LIFECYCLE_REFUSALS: [string, AuthLifecycleOptions['deletion'], RegExp][] = [
     ['deletion.purgeStrategy', { purgeStrategy: 'hard_delete' as never }, /deletion\.purgeStrategy does not accept "hard_delete"\. Allowed: anonymize, hard-delete/],
     ['deletion.allowSelfImmediate', { allowSelfImmediate: 'false' as never }, /deletion\.allowSelfImmediate does not accept "false"\. Allowed: true, false/],
-    ['deletion.sendNotifications', { sendNotifications: 'false' as never }, /deletion\.sendNotifications does not accept "false"\. Allowed: true, false/],
+    // Removed (#170): an app upgrading with it set must learn at boot that nothing is mailed any more.
+    ['deletion.sendNotifications', { sendNotifications: true } as never, /deletion\.sendNotifications was removed: @spfn\/auth sends no account-deletion notice\..*README, "Account Deletion & Recovery"/],
+    // A misspelt hook would otherwise never be called, and its notice never sent.
+    ['deletion.<unknown key>', { onPurged: async () => undefined } as never, /deletion has no option 'onPurged'\. Allowed: gracePeriodDays, purgeStrategy, allowSelfImmediate, purgeCron, onBeforePurge, onPurge/],
 ];
 
 describe('T5: unknown policy values refuse at configuration', () =>
@@ -36,7 +39,7 @@ describe('T5: unknown policy values refuse at configuration', () =>
     afterEach(() =>
     {
         configureAuth({ csrf: undefined, oauthProviders: undefined, oauthLink: undefined });
-        configureDeletion(undefined);
+        __resetDeletionForTests();
     });
 
     it.each(AUTH_CONFIG_REFUSALS)('configureAuth %s', (_option, config, refusal) =>
