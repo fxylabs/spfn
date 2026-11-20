@@ -231,12 +231,16 @@ like and how to override it.
 
 `spfn build` bundles `src/server` as ESM with esbuild whatever your `package.json` says, and
 esbuild decides each `.js` file by its own syntax. Every other `spfn` command gives your source the
-same formats: the `spfn` bin, which re-runs each command under `tsx`, registers a Node module hook
-(`module.registerHooks`) there, and so does every `tsx` process a command starts — the `spfn dev`
+same formats: the `spfn` bin runs every command in a process with `tsx` and a Node module hook
+(`module.registerHooks`) registered for the directory it was started in — re-running itself to get
+them unless the process already has that hook, whatever else started it (`node --import tsx`,
+`npx tsx`, `NODE_OPTIONS`) — and so does every `tsx` process a command starts: the `spfn dev`
 server and codegen watcher, the `spfn provision` runner. So your entities and `drizzle.config.ts`
 under `spfn db generate`, `db push` and `db tenant`, your `server.config` under `spfn provision`,
 your `env.schemas` files under `spfn env`, and your router under codegen all load as they do under
-`spfn dev`. The hook states the format of every file of yours that `tsx` would otherwise guess
+`spfn dev`. Without `tsx` in the app, the bin runs the command without the hook: `spfn env` stops,
+saying to add `tsx`, and `spfn db` leaves your TypeScript to Node, which stops at the first file it
+cannot load. The hook states the format of every file of yours that `tsx` would otherwise guess
 from `package.json`:
 
 - `.ts` and `.tsx` run as ESM, with or without `"type": "module"`, also when imported with a query

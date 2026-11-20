@@ -11,6 +11,21 @@
  */
 
 /**
+ * The `globalThis` key `register.js` leaves the application root it registered
+ * the hook for under.
+ */
+export const DEV_LOADER_ROOT = Symbol.for('spfn:dev-loader-root');
+
+/**
+ * Whether this process has the hook registered for the application rooted at
+ * `cwd` — what `bin/spfn.js` gives every command, whatever launched it.
+ */
+export function hasDevLoader(cwd: string): boolean
+{
+    return (globalThis as Record<symbol, unknown>)[DEV_LOADER_ROOT] === cwd;
+}
+
+/**
  * The `--import` argument that registers the hook for the application rooted
  * at `cwd`. Resolved from the CLI's location, never from the app's cwd.
  */

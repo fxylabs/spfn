@@ -23,14 +23,18 @@
  * |    |                                                      | a CommonJS copy, so nothing else tells the two apart    |
  * | R4 | `spfn db generate`, an entity importing a second     | the db mark not set: the second copy loads unrefused    |
  * |    | install of @spfn/core/logger                         |                                                         |
+ * | R5 | `spfn env list` started as `node --import tsx`, an   | the bin taking a tsx it did not start for the hook: the |
+ * |    | env schema with top-level `await`                    | schema loads as CommonJS and fails                      |
  *
  * R3 and the provision runner's refusal are in `provision-runner.test.ts`.
  */
 
 import { spawnSync } from 'node:child_process';
 import { copyFileSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { afterEach, beforeEach, expect, it } from 'vitest';
 
 const cliRoot = join(__dirname, '../../..');
@@ -69,8 +73,8 @@ function writeEntity(prelude = ''): void
     write('src/server/entities/config.ts', 'export * from \'./example.entity\';\n');
 }
 
-/** `spfn db generate` through the bin, as a package script starts it. */
-function dbGenerate(): { status: number | null; output: string }
+/** `spfn <args>` through the bin, as a package script starts it, or after `launcher` (Node options). */
+function spfn(args: string[], launcher: string[] = []): { status: number | null; output: string }
 {
     const env: NodeJS.ProcessEnv = {
         ...process.env,
@@ -82,9 +86,14 @@ function dbGenerate(): { status: number | null; output: string }
 
     delete env.SPFN_APP_URL;
 
-    const result = spawnSync(process.execPath, [bin, 'db', 'generate'], { cwd: appDir, env, encoding: 'utf8', timeout: 60_000 });
+    const result = spawnSync(process.execPath, [...launcher, bin, ...args], { cwd: appDir, env, encoding: 'utf8', timeout: 60_000 });
 
     return { status: result.status, output: `${result.stdout}${result.stderr}`.replace(/\x1b\[[0-9;]*m/g, '') };
+}
+
+function dbGenerate(): { status: number | null; output: string }
+{
+    return spfn(['db', 'generate']);
 }
 
 function evaluations(): Record<string, string[]>
@@ -139,4 +148,16 @@ it('R4 spfn db generate refuses a second install of @spfn/core', () =>
 
     expect(status, output).not.toBe(0);
     expect(output).toContain('Refusing a second copy of @spfn/core in this process: @spfn/core/logger was loaded from two installs');
+});
+
+it('R5 spfn env list started under node --import tsx loads an env schema with top-level await', () =>
+{
+    write('spfn.config.js', 'export default { env: { schemas: [\'src/env.schema.ts\'] } };\n');
+    write('src/env.schema.ts', 'await Promise.resolve();\n'
+        + 'export const envSchema = { R5_KEY: { key: \'R5_KEY\', type: \'string\', description: \'r5\' } };\n');
+
+    const { status, output } = spfn(['env', 'list'], ['--import', pathToFileURL(createRequire(bin).resolve('tsx')).href]);
+
+    expect(status, output).toBe(0);
+    expect(output).toContain('R5_KEY');
 });

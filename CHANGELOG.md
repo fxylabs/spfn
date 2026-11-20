@@ -198,13 +198,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `spfn dev` does (#349).** In an app without `"type": "module"`, `spfn db generate`, `db push`,
   `db tenant` and the `spfn provision` runner loaded entity files, `drizzle.config.ts` and
   `server.config` as CommonJS, beside a second copy of every `@spfn/core` entry they reached (5
-  under `db generate` in example 03, 15 under `provision`). The `spfn` bin now registers the CLI's
-  module hook in the process it re-runs every command in, and every `tsx` child a command starts
-  (the `provision` runner, the dev server and watcher) gets the same hook. A CommonJS-only shape in
-  those files — `require`, `__dirname`, a named import of a `module.exports` file — now fails there
-  as it fails under `spfn dev` (table in the CLI README, "Your server source runs as ESM").
-  Top-level `await` in an entity now loads (`db generate` failed on it). `spfn env` loads
-  `env.schemas` files the same way.
+  under `db generate` in example 03, 15 under `provision`). The `spfn` bin now runs every command in
+  a process with the CLI's module hook registered for the app — re-running itself unless the process
+  already has it, also when `tsx` was already there (`node --import tsx`, `npx tsx`,
+  `NODE_OPTIONS`) — and every `tsx` child a command starts (the `provision` runner, the dev server
+  and watcher) gets the same hook. A CommonJS-only shape in those files — `require`, `__dirname`, a
+  named import of a `module.exports` file — now fails there as it fails under `spfn dev` (table in
+  the CLI README, "Your server source runs as ESM"). Top-level `await` in an entity now loads (`db
+  generate` failed on it). `spfn env` loads `env.schemas` files the same way.
 - **BREAKING: spfn, @spfn/core: every `spfn db` command and the `spfn provision` runner refuse a
   second copy of `@spfn/core` (#349)**, with the message a server refuses with: a `.cjs` file that
   requires `@spfn/*` from an entity or `server.config` stops the command, naming the file.
