@@ -298,7 +298,7 @@ async function createProject(projectName: string, options: CreateOptions): Promi
     if (mode === 'full')
     {
         const spfnCommand = pm === 'npm' ? 'npx spfn' : `${pm} spfn`;
-        console.log(`  ${chalk.cyan(`${spfnCommand} db migrate`)}  ${chalk.gray('# Apply auth migrations')}`);
+        console.log(`  ${chalk.cyan(`${spfnCommand} db push`)}  ${chalk.gray("# Apply auth migrations, then create the app's tables")}`);
     }
     console.log(`  ${chalk.cyan(`${getRunCommand(pm)} spfn:dev`)}  ${chalk.gray('# Start dev server')}\n`);
 

@@ -744,6 +744,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     grants no longer stamp `updated_at` from the application clock, and the user-settings upsert
     drops its redundant `updatedAt`. The `setWhere` guards still move the stamp only on a real
     change.
+- **spfn: `spfn db push` output and failures follow the new apply order (#378).** The plan lists each
+  function package's pending migrations first, then the project statements, with one line saying
+  so. A function package migration that fails now means the project schema was not applied
+  (`❌ Failed to apply function package migrations — nothing of the project schema was applied`);
+  it used to mean the project statements were already committed.
+
+### Fixed
+
+- **spfn: `spfn db push` applies function package migrations before the project statements
+  (#378).** On an empty database, a project table with a foreign key to a package table (say
+  `spfn_auth.users`) failed with `schema "spfn_auth" does not exist`: the project statements ran
+  first, rolled back, and the package migrations never ran, so every retry failed the same way,
+  while `--dry-run` showed a clean plan. Both halves are still planned read-only, once, before any
+  write, and destructive project statements are confirmed (or declined) before any write. Then
+  each package's pending migrations apply, one committed transaction per package as `db migrate`
+  does, and then the project statements in one transaction. A failing project statement now exits
+  1 with the server's message (`❌ The project statements were rolled back: …`; it used to be
+  uncaught), and the package migrations it followed stay applied. `spfn create --mode full`'s next
+  steps and the docs now say `db push`, which also creates the starter `examples` table; with
+  `db migrate` alone the app had no project migration, so that table was never created.
 - **@spfn/auth: `mfaLockedEvent`, `passkeyEnrolledEvent` and `passkeyRevokedEvent` are exported from
   `@spfn/auth/server` (#361)**, with `MfaLockedPayload`, `PasskeyEnrolledPayload` and
   `PasskeyRevokedPayload`. The README documented all three and the package emitted them, but an app

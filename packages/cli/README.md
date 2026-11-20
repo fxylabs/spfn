@@ -41,7 +41,7 @@ npx spfn@beta create my-app --mode full
 cd my-app
 docker compose up -d            # Postgres + Redis
 # .env.local & .env.server are generated — keep both gitignored
-pnpm spfn db migrate            # Apply auth migrations
+pnpm spfn db push               # Apply auth migrations, then create the app's tables
 pnpm spfn:dev                   # Next.js :3790 + SPFN API :8790
 
 # Core-only full-stack skeleton
@@ -531,7 +531,7 @@ loaded `.env` chain.
 | Subcommand | Description |
 |------------|-------------|
 | `db generate` (`g`) | Generate migrations from schema changes (timestamp-prefixed) |
-| `db push` | Diff with Drizzle Kit's current PostgreSQL engine and apply the selected DDL atomically. Destructive changes need confirmation; `--force` applies them. `--dry-run` shows the classified statements and each function package's pending migrations by name, then stops. Each plan query runs in its own `BEGIN READ ONLY` transaction, rolled back when the query ends, so it writes nothing and holds no lock between statements. Before the plan runs, `transaction_read_only` is read once, in one such transaction; when PostgreSQL does not report it `on` it exits 1 |
+| `db push` | Diff with Drizzle Kit's current PostgreSQL engine and apply the selected DDL atomically. Destructive changes need confirmation; `--force` applies them. Function package migrations apply first (one transaction per package), then the project statements (one transaction), so a project table may reference a package table on an empty database; the plan lists them in that order. `--dry-run` shows each function package's pending migrations by name and the classified statements, then stops. Each plan query runs in its own `BEGIN READ ONLY` transaction, rolled back when the query ends, so it writes nothing and holds no lock between statements. Before the plan runs, `transaction_read_only` is read once, in one such transaction; when PostgreSQL does not report it `on` it exits 1 |
 | `db migrate` (`m`) | Run pending migrations. `--with-backup` snapshots first |
 | `db status` | Show which migrations are applied and which are pending, for the project and for each installed function package. The project's pending list is drizzle-orm's own (`getMigrationsToRun`, by folder name), so it is what `db migrate` runs; when migrate would refuse the project's bookkeeping, status exits 1 with `bookkeeping does not match local migrations` and the remedy. `--json` prints one machine-readable report instead (one line after the `#spfn-db-status#` marker); when it could not read a status it has `reachable: false` and `reason`: `"not-configured"` (no `DATABASE_URL`), `"unreachable"` (the database did not answer), `"bookkeeping-mismatch"` (it answered, and `db migrate` would refuse the project's bookkeeping; `detail` carries the text) or `"permission-denied"` (it answered and refused the role in `DATABASE_URL` the read, SQLSTATE 42501 — typically no grant on schema `drizzle`; `detail` carries PostgreSQL's message). An unread status always has an empty `pending` list, which never means "nothing pending": check `reachable` first. The human form exits 1 on all of them and, on a permission error, names the grant (the `@spfn/core` db README, "Database roles", has the SQL; no spfn command grants it yet). `spfn dev`/`spfn start` refuse to start on a mismatch before spawning the server, whatever `--allow-pending-migrations` says; on any other read failure they print one line (`Could not check migrations: …`) and start |
 | `db studio` | Open Drizzle Studio. `-p, --port` (auto-finds a free port) |
@@ -685,9 +685,12 @@ legacy table is read, never written or dropped, so the records of a package inst
 updated later stay where they were. The rule lives in `@spfn/core/db`
 (`pendingFunctionMigrations`); `db status`, the boot gate, health, the `db push` preview
 and every apply (`db push`, `db migrate`, `spfn add`) all use it. `db push`
-validates every package's migration folder before applying the project schema, and a
-function-migration failure after a successful schema apply exits 1 with a message
-making clear the project schema was already committed. Before applying anything,
+validates every package's migration folder, plans both halves read-only, asks about
+destructive project statements, then applies each package's pending migrations (one
+transaction per package, as `db migrate`) and then the project statements (one
+transaction). A project table may reference a package table on an empty database. A
+package failure exits 1 with the project schema untouched; a project failure exits 1
+with the package migrations already committed. Before applying anything,
 `db push` lists each package's pending migrations by folder or tag name;
 `db push --dry-run` lists them too and applies neither them nor the project
 statements. What it guarantees, and how: every query of its plan — Drizzle Kit's
@@ -1274,7 +1277,8 @@ The full RPC proxy imports the auth interceptor; it merges no route map, because
 generated one already carries the routes of the packages `.packages()` mounts. Internal auth
 keys are generated with cryptographic randomness in ignored local env files;
 `.env.local.example` and `.env.server.example` contain placeholders only. Add only the provider keys you use, then run
-`pnpm spfn db migrate`.
+`pnpm spfn db push`: it applies the auth migrations, then creates the starter `examples`
+table, which ships with no project migration.
 
 Operating the app is [`spfn ops`](#spfn-ops), not a dashboard: the starter
 `src/server/routes/ops.ts` exposes two read commands, and `spfn ops` discovers them from

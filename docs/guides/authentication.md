@@ -1878,7 +1878,7 @@ mobile). A production enrollment/rotation flow is tracked separately (phase 2).
 
 Auth tables are **not** created by `spfn db push`'s schema diff — package schemas are excluded
 from push on purpose. They are created by the migration files bundled inside `@spfn/auth`,
-which `spfn db migrate` (and the final step of a recent `spfn db push`) applies;
+which `spfn db migrate` and `spfn db push` apply before anything of the project schema;
 `spfn db push --dry-run` lists the pending ones by name and applies nothing:
 
 ```bash

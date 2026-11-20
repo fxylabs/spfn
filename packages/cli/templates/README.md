@@ -70,8 +70,9 @@ in encrypted SOPS files. See the [SPFN CLI docs](https://github.com/spfn/spfn).
 ## Authentication
 
 This project includes `@spfn/auth`. Configure providers and session settings in your
-generated env files, then run `{{pmExec}} spfn db migrate`. The lifecycle, router,
-Next.js interceptor, `/login` starter UI, OAuth callback, and route map are already wired.
+generated env files, then run `{{pmExec}} spfn db push`: it applies the auth migrations,
+then creates the app's tables. The lifecycle, router, Next.js interceptor, `/login` starter
+UI, OAuth callback, and route map are already wired.
 
 ## Internationalization
 
