@@ -18,6 +18,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   watcher takes every change that arrived during a generation into the next one (#353).
 - **@spfn/core: `CodegenOrchestrator.settled()`** resolves once watch mode is idle — no generation
   running, nothing dirty, no input directory event settling (#353).
+- **@spfn/auth: `GET /_auth/channels` (`authApi.getAuthChannels`) — a sign-in page can read which
+  sign-in channels are on (#373).** It answers `{ signup, passwordReset, deviceCode, deviceLink,
+  passkeyLogin }`, one boolean per channel of `createAuthLifecycle({ channels })`, so a page draws no
+  button that would answer 404 `CHANNEL_DISABLED` — a passkey button under `passkeyLogin: false`,
+  say. Public like `GET /_auth/oauth/providers`: no session, no rate limit, no cache headers; not a
+  mobile contract operation. A channel added later appears in the answer with it.
+- **@spfn/auth: the README says what `secondFactor.required` takes (#373).** It means a factor on a
+  new device, not the password on every sign-in: social sign-in, a password reset and a recovery code
+  each get in without the password. A new recipe, "password and passkey on every sign-in", closes all
+  of them — `passkeyLogin: false`, `passwordReset: false`, `recoveryCodes: false`, no social provider
+  enabled for sign-in.
 
 ### Changed
 

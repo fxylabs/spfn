@@ -333,6 +333,7 @@ routes use `.skip(['auth'])`; the rest require `Authorization: Bearer <client-si
 | `sessionRenewVerify` | POST `/_auth/session/renew/verify` | public | verify the assertion; answers exactly as `login` |
 | `changePassword` | PUT `/_auth/password` | yes | change password |
 | `getAuthSession` | GET `/_auth/session` | yes | current session/user, with the role in force (`null` for none) and the permissions `requirePermissions` enforces |
+| `getAuthChannels` | GET `/_auth/channels` | public | which sign-in channels the app offers, one boolean each — see [channels](#which-sign-in-channels-exist-channels) |
 | `issueOneTimeToken` | POST | yes | short-lived token (e.g. SSE handshake) |
 | `checkUsername` / `updateUsername` / `updateLocale` | — | mixed | username availability/update (answers the profile, as `getUserProfile` does); set or clear (`null`) the language choice |
 | `getUserProfile` / `updateUserProfile` | — | yes | profile read/update; `metadata` is checked against `defineProfileFields` when declared |
@@ -408,6 +409,30 @@ is already signed in. There is no key for password sign-in, so no setting leaves
 with no way in; whether a second factor is asked for is the second-factor policy's business, not
 this option's.
 
+**A sign-in page reads which channels are on** from `GET /_auth/channels` (`authApi.getAuthChannels`),
+so it draws no button that would answer 404:
+
+```tsx
+// app/sign-in/page.tsx — a server component
+import { authApi } from '@spfn/auth';
+
+export default async function SignInPage()
+{
+    const channels = await authApi.getAuthChannels.call({});
+    // { signup: true, passwordReset: true, deviceCode: false, deviceLink: false, passkeyLogin: false }
+
+    return <SignInForm passkey={channels.passkeyLogin} signup={channels.signup} reset={channels.passwordReset} />;
+}
+```
+
+One boolean per channel above, and a channel added later appears in it with no change on your side.
+It is public, like `GET /_auth/oauth/providers`, which lists the social buttons: the answer is the
+app's configuration, the same for every caller, needs no session and says nothing about any
+account. Like that route it has no rate limit and sets no cache headers; the answer is fixed while
+the server runs and changes only when it restarts with different `channels`. Through the Next.js proxy it gets
+no rule of its own — a session cookie the browser holds is read and forwarded as on any request, and
+none is needed. Its `ROUTE_CHANNELS` entry is `'always'` and its `ROUTE_ENROLMENT` entry `'none'`.
+
 **A channel turned off answers 404** (`ChannelDisabledError`, code `CHANNEL_DISABLED`,
 `details.channel` naming the channel) on each of its routes, before anything the route itself runs:
 no rate-limit budget is spent, no long poll is held open, no transaction begins and nothing is read
@@ -446,6 +471,8 @@ each operation a closed channel answers `ChannelDisabledError` on with `closedCh
 `auth.deviceLink.redeem` / `auth.deviceLink.poll` (`deviceLink`). `passkeyLogin` marks nothing there:
 the passkey ceremonies need a browser WebAuthn API and are not contract operations, so the contract
 is unchanged. In the browser, `signInWithPasskey` meets the 404 as a rejected call.
+`GET /_auth/channels` is not a contract operation either, as `GET /_auth/oauth/providers` is not: a
+native client learns that a channel is closed from `closedChannel` and the 404.
 
 ### Requiring a second factor (`secondFactor`)
 
@@ -591,7 +618,8 @@ When `'passkey'` is not listed, a passkey sign-in is no longer a second proof: a
 signing in with one on a new device gets the same 202 challenge a password sign-in gets, and the
 proxy handles it the same way. While it is listed, a passkey sign-in with user verification needs no
 second factor at all, so an app that wants a password plus a passkey on every sign-in also closes
-passkey sign-in with `channels: { passkeyLogin: false }` ([channels](#which-sign-in-channels-exist-channels)).
+passkey sign-in with `channels: { passkeyLogin: false }` ([channels](#which-sign-in-channels-exist-channels))
+— and three more doors ([the recipe](#what-required-means--and-password-plus-passkey-on-every-sign-in)).
 
 #### `recoveryCodes: false`
 
@@ -600,6 +628,52 @@ accepted: a recovery code at `mfa/verify` or `mfa/step-up` is a failed proof (a 
 the code is **not** spent). `recovery/regenerate` answers 404 `SECOND_FACTOR_METHOD_DISABLED`
 with `details.method: 'recoveryCodes'`, and `mfa/status` reports `recoveryCodesRemaining: 0`.
 Rows from before are ignored, not deleted.
+
+#### What `required` means — and password plus passkey on every sign-in
+
+`required: true` means **a factor on a new device**: every account holds a listed second factor,
+and a device the account has not seen proves one before its key works
+([step-up on a new device](#step-up-on-a-new-device)). It does **not** mean "the password on every
+sign-in". The first proof is whatever the way in asks for, and with every option at its default
+some ways in ask for no password at all:
+
+| way in | what it takes under `required: true` | closed by |
+|---|---|---|
+| passkey sign-in (`passkeys/login/*`) | the passkey alone, with user verification, while `'passkey'` is listed | `channels: { passkeyLogin: false }` |
+| social sign-in, web and native | the provider's sign-in, then a factor | enabling no provider for sign-in — none configured, or each [link-only](#link-only-providers-and-recent-authentication); there is no channel for it |
+| password reset | the mailed link, then a factor | `channels: { passwordReset: false }` |
+| recovery code | stands in for the factor on every 202 | `secondFactor: { recoveryCodes: false }` |
+| device-code login, device link | — | refused at boot under `required` |
+
+So an app that wants **a password and a passkey on every sign-in** closes all four:
+
+```typescript
+createAuthLifecycle({
+    channels: {
+        passkeyLogin: false,   // a passkey is never the whole credential
+        passwordReset: false,  // or keep it, and accept "email + passkey" as a way in
+        deviceCode: false,     // required by `required: true`
+        deviceLink: false,
+    },
+    secondFactor: {
+        required: true,
+        methods: ['passkey'],
+        recoveryCodes: false,  // nothing stands in for the passkey
+    },
+})
+// …and no social provider enabled for sign-in — none configured, or each link-only with
+// configureAuth({ oauthProviders: { kakao: { signIn: false } } }) — so that
+// GET /_auth/oauth/providers answers `providers: []`.
+```
+
+Then every way in starts with the password, and every sign-in on a device the account has not
+seen — a signed-out browser included — answers 202 until the passkey is proven at `mfa/verify`. A
+sign-in that replaces the key of a session still signed in on the same device (the proxy's
+`replacementProof`) is that device again and is not asked twice. Services the app calls itself
+ignore channels, as they always do. The cost: with no recovery codes and no reset, a person who
+loses the passkey or the password is let back in only by the operator
+(`resetSecondFactorService(userId)`, and a password set by the app). `GET /_auth/channels`
+then answers `passkeyLogin: false` and `passwordReset: false`, so the sign-in page draws neither.
 
 #### Removing the last factor
 

@@ -34,6 +34,7 @@ import {
     revokeAllKeys,
     changePassword,
     getAuthSession,
+    getAuthChannels,
     issueOneTimeToken,
 } from './auth';
 import {
@@ -189,6 +190,8 @@ const authRoutes = {
     consumeRevokeAllLink,
     changePassword,
     getAuthSession,
+    // Which sign-in channels are on, for a sign-in page (#373) — public
+    getAuthChannels,
     // Session binding routes (#97)
     setSessionBinding,
     getSessionBinding,

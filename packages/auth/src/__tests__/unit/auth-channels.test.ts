@@ -8,6 +8,8 @@
  */
 
 import { describe, it, expect, afterEach } from 'vitest';
+import { Hono } from 'hono';
+import { registerRoutes } from '@spfn/core/route';
 
 import { mainAuthRouter } from '@/server/routes';
 import { ROUTE_CHANNELS } from '@/server/routes/channels';
@@ -118,5 +120,23 @@ describe('channels (#308)', () =>
         expect(isChannelEnabled('deviceLink')).toBe(false);
         expect(isChannelEnabled('passwordReset')).toBe(true);
         expect(isChannelEnabled('deviceCode')).toBe(true);
+    });
+
+    it('#373: GET /_auth/channels answers each channel closed, with no session, one key per channel', async () =>
+    {
+        const app = new Hono();
+        registerRoutes(app, mainAuthRouter, [{ name: 'auth', handler: async (c) => c.body(null, 401) }]);
+
+        for (const closed of AUTH_CHANNELS)
+        {
+            __resetChannelsForTests();
+            configureChannels({ [closed]: false });
+
+            const response = await app.request('/_auth/channels');
+
+            expect(response.status, closed).toBe(200);
+            expect(await response.json(), closed)
+                .toEqual(Object.fromEntries(AUTH_CHANNELS.map(name => [name, name !== closed])));
+        }
     });
 });

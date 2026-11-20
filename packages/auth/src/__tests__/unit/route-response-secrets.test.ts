@@ -76,6 +76,8 @@ const ALLOWED_SECRET_KEYS: Record<string, string> = {
     'mfaTotpConfirm:.recoveryCodes': 'recovery codes are shown once, when the second factor is confirmed',
     'mfaRegenerateRecoveryCodes:.recoveryCodes': 'regenerated recovery codes are shown once, to the account that asked',
     'getAuthSession:.hasPassword': 'a boolean: whether the account has a password',
+    'getAuthChannels:.deviceCode': 'a boolean: whether the app offers device-code login',
+    'getAuthChannels:.deviceLink': 'a boolean: whether the app offers device link',
     'oauthStart:.authUrl': 'the provider\'s authorize URL; its state is bound to the caller\'s cookie, not a credential',
     'getGoogleOAuthUrl:.authUrl': 'the provider\'s authorize URL; its state is bound to the caller\'s cookie, not a credential',
     'getProviderOAuthUrl:.authUrl': 'the provider\'s authorize URL; its state is bound to the caller\'s cookie, not a credential',
