@@ -601,11 +601,11 @@ The result is not a Hono `MiddlewareHandler`. Where Hono expects one (`app.use`,
 app.use('/raw/*', requirePermissions('admin:write').handler);
 ```
 
-### `defineMiddlewareFactory` — for 2-arg factories
+### `defineMiddlewareFactory` — for factories of any arity
 
-A factory whose own signature is exactly two args (e.g. `(limit, window) => handler`) would be
-misread as a `(c, next)` handler by `defineMiddleware`. Use `defineMiddlewareFactory` to force
-the factory interpretation:
+`defineMiddleware` never takes a factory: whatever it is given is the handler. A factory — one
+that takes no arguments, one, two like `(limit, window) => handler`, or a rest list — is defined
+with `defineMiddlewareFactory`:
 
 ```typescript
 import { defineMiddlewareFactory } from '@spfn/core/route';
