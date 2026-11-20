@@ -257,6 +257,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   **To migrate:** pass `.handler` where a call result goes to Hono (`app.use`,
   `app.get(path, …)`, `combine`, a hand-written chain), or put it in `.use([...])` directly; a
   `defineMiddleware(name, factory(args))` wrapper becomes `factory(args)`.
+  @spfn/auth at this release needs the core of the same release: it reads `.handler` from factory
+  calls and passes `{ skips }` to `defineMiddlewareFactory`. Core 0.4.0-beta.1 satisfies auth's
+  current peer range and would give it `undefined` handlers (`opsOrUser` answers 500 to every
+  caller its first check admits) and drop the `skips` of `opsOrUser`/`signedTokenAuth`, so the
+  release raises the `@spfn/core` peer floor of @spfn/auth — the only package that calls a core
+  middleware factory — to that core.
 
 - **BREAKING (security-relevant): @spfn/core: a middleware declaring `skips` now removes what it
   names when it is attached to a router (spfn/spfn#165).** It was ignored on `defineRouter(...).use([...])`
