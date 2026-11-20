@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from 'fs';
 import { join } from 'path';
 import fse from 'fs-extra';
 import { logger } from '../../../utils/logger.js';
+import { NPM_PEER_FLAGS } from '../../../utils/package-manager.js';
 import { findTemplatesPath } from '../utils/templates.js';
 
 const { copySync, writeFileSync } = fse;
@@ -14,9 +15,9 @@ const PM_DOCKERFILE_ADAPTATIONS: Record<string, [string, string][]> = {
     npm: [
         ['# Install pnpm\nRUN corepack enable pnpm\n\n', ''],
         ['pnpm-lock.yaml*', 'package-lock.json*'],
-        ['RUN pnpm install --frozen-lockfile --prod=false', 'RUN npm ci --include=dev'],
+        ['RUN pnpm install --frozen-lockfile --prod=false', `RUN npm ci --include=dev ${NPM_PEER_FLAGS.join(' ')}`],
         ['RUN pnpm run spfn:build', 'RUN npm run spfn:build'],
-        ['RUN pnpm prune --prod', 'RUN npm prune --omit=dev'],
+        ['RUN pnpm prune --prod', `RUN npm prune --omit=dev ${NPM_PEER_FLAGS.join(' ')}`],
         ['CMD ["pnpm", "run", "spfn:start"]', 'CMD ["npm", "run", "spfn:start"]'],
     ],
     yarn: [
@@ -29,7 +30,7 @@ const PM_DOCKERFILE_ADAPTATIONS: Record<string, [string, string][]> = {
     ],
     bun: [
         ['# Install pnpm\nRUN corepack enable pnpm', '# Install bun\nRUN npm install -g bun'],
-        ['pnpm-lock.yaml*', 'bun.lockb*'],
+        ['pnpm-lock.yaml*', 'bun.lock*'],
         ['RUN pnpm install --frozen-lockfile --prod=false', 'RUN bun install --frozen-lockfile'],
         ['RUN pnpm run spfn:build', 'RUN bun run spfn:build'],
         ['# Remove dev dependencies (optional, reduces image size)\nRUN pnpm prune --prod\n\n', ''],

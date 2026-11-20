@@ -1,13 +1,14 @@
 import { Command, Option } from 'commander';
 import { existsSync } from 'fs';
-import { join, resolve, dirname } from 'path';
+import { join } from 'path';
 import prompts from 'prompts';
 import ora from 'ora';
 import { execa } from 'execa';
 import chalk from 'chalk';
 
 import { logger } from '../utils/logger.js';
-import { detectPackageManager, getRunCommand } from '../utils/package-manager.js';
+import { detectPackageManager, findWorkspace, getAddArgs, getInstallArgs, getRunCommand } from '../utils/package-manager.js';
+import { confirmInstalled } from './init/steps/package.js';
 import { ENV_FILES_HINT } from '../utils/messages.js';
 import { selectScaffoldMode, type ScaffoldMode } from './init/mode.js';
 
@@ -22,26 +23,35 @@ interface CreateOptions
 }
 
 /**
- * Walk up from startDir looking for pnpm-workspace.yaml.
- * Returns the workspace root path if found, null otherwise.
+ * Install from the root of the pnpm workspace the app is a member of, then
+ * confirm the app's declared packages resolve from the app directory.
  */
-function findPnpmWorkspaceRoot(startDir: string): string | null
+async function installFromWorkspaceRoot(workspaceRoot: string, projectPath: string): Promise<void>
 {
-    let dir = resolve(startDir);
+    const installSpinner = ora('Installing dependencies from workspace root...').start();
 
-    while (true)
+    try
     {
-        if (existsSync(join(dir, 'pnpm-workspace.yaml')))
+        await execa('pnpm', getInstallArgs('pnpm'), {
+            cwd: workspaceRoot,
+            stdio: 'pipe',
+            timeout: 300_000,
+        });
+    }
+    catch (error: any)
+    {
+        installSpinner.fail('Failed to install dependencies');
+        logger.error('Run `pnpm install` from workspace root manually.');
+
+        if (error.stderr)
         {
-            return dir;
+            logger.error(error.stderr);
         }
 
-        const parent = dirname(dir);
-        if (parent === dir) break;
-        dir = parent;
+        return;
     }
 
-    return null;
+    confirmInstalled(installSpinner, projectPath, 'pnpm');
 }
 
 /**
@@ -62,7 +72,7 @@ async function createProject(projectName: string, options: CreateOptions): Promi
     console.log(chalk.blue.bold('\n🚀 Creating Next.js project with SPFN...\n'));
 
     // 2. Determine package manager
-    let pm = options.pm || detectPackageManager(cwd);
+    let pm = options.pm || detectPackageManager(projectPath);
 
     if (!options.yes && !options.pm)
     {
@@ -92,8 +102,11 @@ async function createProject(projectName: string, options: CreateOptions): Promi
     const mode = await selectScaffoldMode(options);
     logger.step(`Using scaffold mode: ${mode}`);
 
-    // 3. Detect pnpm workspace (monorepo)
-    const workspaceRoot = pm === 'pnpm' ? findPnpmWorkspaceRoot(cwd) : null;
+    // 3. Detect the pnpm workspace the new app is a member of (monorepo). A
+    // directory the workspace does not list is its own project and installs
+    // in its own directory.
+    const workspace = pm === 'pnpm' ? findWorkspace(projectPath) : null;
+    const workspaceRoot = workspace?.packageManager === 'pnpm' ? workspace.root : null;
     const isInWorkspace = workspaceRoot !== null;
 
     if (isInWorkspace)
@@ -165,28 +178,7 @@ async function createProject(projectName: string, options: CreateOptions): Promi
     // 5. Install dependencies from workspace root
     if (isInWorkspace && !options.skipInstall)
     {
-        const installSpinner = ora('Installing dependencies from workspace root...').start();
-
-        try
-        {
-            await execa('pnpm', ['install'], {
-                cwd: workspaceRoot!,
-                stdio: 'pipe',
-                timeout: 300_000,
-            });
-
-            installSpinner.succeed('Dependencies installed');
-        }
-        catch (error: any)
-        {
-            installSpinner.fail('Failed to install dependencies');
-            logger.error('Run `pnpm install` from workspace root manually.');
-
-            if (error.stderr)
-            {
-                logger.error(error.stderr);
-            }
-        }
+        await installFromWorkspaceRoot(workspaceRoot!, projectPath);
     }
 
     // 6. Change to project directory
@@ -199,15 +191,7 @@ async function createProject(projectName: string, options: CreateOptions): Promi
     try
     {
         // Install @svgr/webpack
-        const installArgs = pm === 'npm'
-            ? ['install', '--save-dev', '@svgr/webpack']
-            : pm === 'yarn'
-                ? ['add', '-D', '@svgr/webpack']
-                : pm === 'pnpm'
-                    ? ['add', '-D', '@svgr/webpack']
-                    : ['add', '-d', '@svgr/webpack'];
-
-        await execa(pm, installArgs, { cwd: projectPath, timeout: 120_000 });
+        await execa(pm, getAddArgs(pm, ['@svgr/webpack'], { dev: true }), { cwd: projectPath, timeout: 120_000 });
 
         // Run spfn setup icons programmatically
         const { setupIcons } = await import('./setup.js');
@@ -252,9 +236,9 @@ async function createProject(projectName: string, options: CreateOptions): Promi
 
     try
     {
-        // Run spfn init programmatically
+        // Run spfn init programmatically, with the package manager decided here
         const { initializeSpfn } = await import('./init/index.js');
-        await initializeSpfn({ yes: true, overwriteReadme: true, mode });
+        await initializeSpfn({ yes: true, overwriteReadme: true, mode, pm });
 
         initSpinner.succeed('SPFN initialized');
     }

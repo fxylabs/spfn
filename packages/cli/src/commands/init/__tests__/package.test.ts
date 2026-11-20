@@ -1,13 +1,14 @@
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { logger } from '../../../utils/logger.js';
 import { setupPackageJson } from '../steps/package.js';
 import { NODE_ENGINE_RANGE } from '../steps/node-engine.js';
 import type { PackageJson } from '../steps/validate.js';
 
 const mocks = vi.hoisted(() => ({
-    execa: vi.fn().mockResolvedValue(undefined),
+    execa: vi.fn(),
     spinner: {
         start: vi.fn().mockReturnThis(),
         succeed: vi.fn(),
@@ -20,6 +21,27 @@ vi.mock('ora', () => ({ default: () => mocks.spinner }));
 vi.mock('../../../utils/version.js', () => ({ getSpfnTag: () => 'beta' }));
 
 let testDirectory: string | undefined;
+
+/**
+ * What a working install leaves behind: every package the app declares, under
+ * `cwd/node_modules`, except those in `skipped`.
+ */
+async function fakeInstall(cwd: string, skipped: string[] = []): Promise<void>
+{
+    const { dependencies, devDependencies } = JSON.parse(await readFile(join(cwd, 'package.json'), 'utf8')) as PackageJson;
+    const names = [...Object.keys(dependencies ?? {}), ...Object.keys(devDependencies ?? {})];
+
+    for (const name of names.filter(name => !skipped.includes(name)))
+    {
+        await mkdir(join(cwd, 'node_modules', name), { recursive: true });
+        await writeFile(join(cwd, 'node_modules', name, 'package.json'), JSON.stringify({ name }));
+    }
+}
+
+beforeEach(() =>
+{
+    mocks.execa.mockImplementation((_pm: string, _args: string[], { cwd }: { cwd: string }) => fakeInstall(cwd));
+});
 
 afterEach(async () =>
 {
@@ -176,5 +198,83 @@ describe('setupPackageJson', () =>
             await readFile(packageJsonPath, 'utf8'),
         ) as PackageJson;
         expect(generated.engines?.node).toBe('^24.22.1');
+    });
+
+    it('fails naming the declared packages an install that exited 0 left unresolvable', async () =>
+    {
+        // pnpm in a directory its workspace does not list installs the workspace
+        // and exits 0; only looking for the packages tells the two apart.
+        testDirectory = await mkdtemp(join(tmpdir(), 'spfn-init-package-noop-'));
+        const packageJsonPath = join(testDirectory, 'package.json');
+        const exit = vi.spyOn(process, 'exit').mockImplementation(((code?: number) =>
+        {
+            throw new Error(`process.exit(${code})`);
+        }) as never);
+        mocks.execa.mockImplementation((_pm: string, _args: string[], { cwd }: { cwd: string }) =>
+            fakeInstall(cwd, ['@spfn/core', 'tsx']));
+
+        await expect(setupPackageJson(
+            testDirectory,
+            packageJsonPath,
+            { name: 'noop-app', dependencies: {}, devDependencies: {}, scripts: {} },
+            'pnpm',
+            'bare',
+        )).rejects.toThrow('process.exit(1)');
+
+        exit.mockRestore();
+        expect(mocks.spinner.fail).toHaveBeenCalledWith(expect.stringMatching(/do not resolve from .*: @spfn\/core, tsx$/));
+        expect(mocks.spinner.succeed).not.toHaveBeenCalledWith('Dependencies installed');
+    });
+
+    it('fails naming a dependency the app already declared that the install left unresolvable', async () =>
+    {
+        testDirectory = await mkdtemp(join(tmpdir(), 'spfn-init-package-existing-'));
+        const exit = vi.spyOn(process, 'exit').mockImplementation(((code?: number) =>
+        {
+            throw new Error(`process.exit(${code})`);
+        }) as never);
+        mocks.execa.mockImplementation((_pm: string, _args: string[], { cwd }: { cwd: string }) =>
+            fakeInstall(cwd, ['left-pad']));
+
+        await expect(setupPackageJson(
+            testDirectory,
+            join(testDirectory, 'package.json'),
+            { name: 'existing-app', dependencies: { 'left-pad': '^1.3.0' }, devDependencies: {}, scripts: {} },
+            'npm',
+            'bare',
+        )).rejects.toThrow('process.exit(1)');
+
+        exit.mockRestore();
+        expect(mocks.spinner.fail).toHaveBeenCalledWith(expect.stringMatching(/do not resolve from .*: left-pad$/));
+    });
+
+    it('says why when pnpm installed the workspace above a directory it does not list', async () =>
+    {
+        testDirectory = await mkdtemp(join(tmpdir(), 'spfn-init-package-nonmember-'));
+        await writeFile(join(testDirectory, 'pnpm-workspace.yaml'), 'packages:\n  - packages/*\n');
+        await writeFile(join(testDirectory, 'pnpm-lock.yaml'), '');
+        const appDirectory = join(testDirectory, 'scratch/app');
+        await mkdir(appDirectory, { recursive: true });
+        const exit = vi.spyOn(process, 'exit').mockImplementation(((code?: number) =>
+        {
+            throw new Error(`process.exit(${code})`);
+        }) as never);
+        const error = vi.spyOn(logger, 'error').mockImplementation(() => undefined);
+        mocks.execa.mockResolvedValue(undefined);
+
+        await expect(setupPackageJson(
+            appDirectory,
+            join(appDirectory, 'package.json'),
+            { name: 'app', dependencies: {}, devDependencies: {}, scripts: {} },
+            'pnpm',
+            'bare',
+        )).rejects.toThrow('process.exit(1)');
+
+        exit.mockRestore();
+        expect(error).toHaveBeenCalledWith(
+            `${appDirectory} is not in the packages of ${join(testDirectory, 'pnpm-workspace.yaml')}, so pnpm installed that workspace instead.`
+            + ' Add the directory to its packages, or install with the app\'s own manager (--pm npm).',
+        );
+        error.mockRestore();
     });
 });

@@ -12,7 +12,7 @@ import { join } from 'path';
 import { execa } from 'execa';
 import chalk from 'chalk';
 import ora from 'ora';
-import { detectPackageManager } from '../utils/package-manager.js';
+import { detectPackageManager, getAddArgs } from '../utils/package-manager.js';
 import { addVercel } from './add-vercel.js';
 
 /**
@@ -53,7 +53,7 @@ async function addPackage(packageName: string): Promise<void>
 
         try
         {
-            await execa(pm, ['add', packageName]);
+            await execa(pm, getAddArgs(pm, [packageName]));
             installSpinner.succeed('Package installed');
         }
         catch (error)

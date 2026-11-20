@@ -46,8 +46,36 @@ npx spfn@beta create my-api --mode bare
 npx spfn@beta init --mode full
 ```
 
-The package manager is auto-detected (pnpm > yarn > bun > npm) from lockfiles; override
-with `--pm`. In a pnpm workspace, `create` installs from the workspace root.
+The package manager is the app's own, decided in this order:
+
+1. **The app's own lockfile** (`bun.lock`, `bun.lockb`, `pnpm-lock.yaml`, `yarn.lock`,
+   `package-lock.json`). Nothing above the app is read.
+2. **The workspace that lists the app.** Walking up, each directory's lockfile selects its
+   manager, and that manager's declaration decides membership: `pnpm-workspace.yaml`
+   `packages` for pnpm, `package.json` `workspaces` for yarn, npm and bun (`!` negations
+   honoured). A directory with no lockfile is pnpm's if it has a `pnpm-workspace.yaml`,
+   npm's otherwise. The nearest directory that declares a workspace answers; one whose
+   declaration cannot be parsed (after stripping a BOM) or is not the documented shape is
+   someone else's file and declares nothing.
+3. **npm.** A directory inside a pnpm or yarn repository that its workspace does not list
+   is its own npm project.
+
+yarn classic ignores `!` negations in `workspaces`, so a directory such a negation excludes
+is answered npm here while yarn 1 still treats it as a member. Override with `--pm`
+(`create`, `init`); `dev`, `build`, `start`, `add`, `setup` and `provision` have none. When
+`create` makes a member of a pnpm workspace, it installs from the workspace root.
+
+"Dependencies installed" is printed only once every package in the app's `dependencies` and
+`devDependencies` resolves from the app directory (optional and peer dependencies are not
+checked); otherwise the command exits 1 naming the missing ones, and says why when it can
+(pnpm run in a directory its workspace does not list installs that workspace instead).
+Node answers, in a child process started in the app directory without the CLI's
+`NODE_PATH` or `NODE_OPTIONS`, through the app's `.pnp.cjs` under Plug'n'Play; a package
+resolves when Node finds its `package.json`, since an entry point is optional.
+
+npm installs (`init`, `add`, `create`, `setup icons`, and the generated Dockerfile's
+`npm ci` / `npm prune`) pass `--legacy-peer-deps`: drizzle-typebox's peer range on
+drizzle-orm (`>=0.36.0`) admits no prerelease, so npm refuses the `1.0.0-rc.4` SPFN pins.
 
 ---
 
@@ -88,6 +116,7 @@ already exists). See [Scaffold structure](#scaffold-structure) for what lands on
 | Option | Description |
 |--------|-------------|
 | `--mode <mode>` | `bare` (core only) \| `full` (core, auth, i18n, ops) |
+| `--pm <manager>` | Package manager: `npm` \| `pnpm` \| `yarn` \| `bun` (default: detected from the app) |
 | `-y, --yes` | Skip prompts, use defaults |
 
 Generated projects pin `drizzle-orm` and `drizzle-kit` to `1.0.0-rc.4`, matching
@@ -1292,9 +1321,13 @@ committed.
 - **`spfn add` requires a scoped package name** (must contain `/`) and only applies
   migrations when `DATABASE_URL` is set — otherwise it skips with a hint. The single
   exception is `spfn add vercel`, a built-in target rather than a package.
-- **Package manager is auto-detected from lockfiles.** If detection is wrong (e.g. mixed
-  lockfiles), pass `--pm` to `create`. In a pnpm workspace, `create` installs from the
-  workspace root, not the new project dir.
+- **The package manager is the app's own.** Its lockfile decides, then the lockfile and
+  declaration of a workspace that lists the app, then npm (see [Usage](#usage)). An app that
+  relied on the repository's manager while its workspace does not list it now gets npm.
+  To keep the repository's manager, add the app to the workspace's globs, or commit the
+  app's own lockfile; `create` and `init` also take `--pm`, while `dev`, `build`, `start`,
+  `add`, `setup` and `provision` follow the lockfile only. `create` installs a
+  pnpm-workspace member from the workspace root, any other app in its own directory.
 - **Make scaffold mode explicit in automation.** Interactive runs recommend `full`, while
   historical `--yes` calls without `--mode` remain `bare`. Pass `--mode full` or
   `--mode bare` so scripts state their intended architecture.

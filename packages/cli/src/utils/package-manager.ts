@@ -1,99 +1,291 @@
-import { existsSync } from 'fs';
-import { join } from 'path';
+import { spawnSync } from 'child_process';
+import { existsSync, readFileSync } from 'fs';
+import { dirname, join, posix, relative, sep } from 'path';
+import { parse } from 'yaml';
 
 export type PackageManager = 'npm' | 'pnpm' | 'yarn' | 'bun';
 
-export function detectPackageManager(cwd: string): PackageManager
+/** A workspace and the manager its root's lockfile selects. */
+export interface Workspace
 {
-    // Check current directory first
-    if (existsSync(join(cwd, 'bun.lockb')))
-    {
-        return 'bun';
-    }
-
-    if (existsSync(join(cwd, 'pnpm-lock.yaml')))
-    {
-        return 'pnpm';
-    }
-
-    if (existsSync(join(cwd, 'yarn.lock')))
-    {
-        return 'yarn';
-    }
-
-    // Check parent directories for monorepo setup
-    let currentDir = cwd;
-    let depth = 0;
-    const maxDepth = 5;
-
-    while (depth < maxDepth)
-    {
-        const parentDir = join(currentDir, '..');
-
-        if (parentDir === currentDir)
-        {
-            break; // Reached root
-        }
-
-        if (existsSync(join(parentDir, 'pnpm-lock.yaml')))
-        {
-            return 'pnpm';
-        }
-
-        if (existsSync(join(parentDir, 'yarn.lock')))
-        {
-            return 'yarn';
-        }
-
-        if (existsSync(join(parentDir, 'bun.lockb')))
-        {
-            return 'bun';
-        }
-
-        currentDir = parentDir;
-        depth++;
-    }
-
-    return 'npm';
+    root: string;
+    packageManager: PackageManager;
 }
 
-export function getInstallCommand(pm: PackageManager): string
+const LOCKFILES: ReadonlyArray<[string, PackageManager]> = [
+    ['bun.lock', 'bun'],
+    ['bun.lockb', 'bun'],
+    ['pnpm-lock.yaml', 'pnpm'],
+    ['yarn.lock', 'yarn'],
+    ['package-lock.json', 'npm'],
+];
+
+/**
+ * npm refuses the SPFN dependency set without it (`ERESOLVE`), in `install`,
+ * `ci` and `prune` alike: drizzle-typebox's peer range on drizzle-orm
+ * (`>=0.36.0`) admits no prerelease, so not the `1.0.0-rc.4` every SPFN app
+ * pins. Every npm invocation the CLI runs or writes carries it.
+ */
+export const NPM_PEER_FLAGS = ['--legacy-peer-deps'];
+
+/**
+ * The package manager the app in `appDir` uses.
+ *
+ * The app's own lockfile decides, before any ancestor is read. Otherwise the
+ * manager of the workspace `appDir` is a member of (`findWorkspace`) — a
+ * directory merely sitting inside a pnpm or yarn repository is its own project,
+ * and running the repository's manager there installs the repository, not the
+ * app. Otherwise npm.
+ */
+export function detectPackageManager(appDir: string): PackageManager
+{
+    return lockfileManager(appDir) ?? findWorkspace(appDir)?.packageManager ?? 'npm';
+}
+
+/**
+ * The workspace `dir` is a member of, or null. `dir` need not exist yet.
+ *
+ * An ancestor's lockfile selects its manager, and that manager's declaration
+ * alone decides membership: `pnpm-workspace.yaml` `packages` for pnpm,
+ * `package.json` `workspaces` for yarn, npm and bun. An ancestor without a
+ * lockfile is pnpm's when it has a `pnpm-workspace.yaml` (no other manager reads
+ * that file), npm's otherwise. The nearest ancestor that declares a workspace
+ * answers: `dir` belongs to it when its path matches one of the globs and none
+ * of the negated (`!…`) ones. A declaration that cannot be read, or is not the
+ * documented shape, declares no workspace.
+ */
+export function findWorkspace(dir: string): Workspace | null
+{
+    for (const root of ancestorsOf(dirname(dir)))
+    {
+        const packageManager = lockfileManager(root) ?? (existsSync(join(root, 'pnpm-workspace.yaml')) ? 'pnpm' : 'npm');
+        const patterns = readWorkspacePatterns(root, packageManager);
+
+        if (patterns)
+        {
+            return isWorkspaceMember(memberPath(root, dir), patterns)
+                ? { root, packageManager }
+                : null;
+        }
+    }
+
+    return null;
+}
+
+/**
+ * Why pnpm, run in `appDir`, would install something other than the app, or
+ * null: pnpm installs the nearest `pnpm-workspace.yaml`'s workspace whether or
+ * not it lists the directory it runs in.
+ */
+export function pnpmNonMemberReason(appDir: string): string | null
+{
+    const root = ancestorsOf(appDir).find(dir => existsSync(join(dir, 'pnpm-workspace.yaml')));
+    const patterns = root && root !== appDir ? readWorkspacePatterns(root, 'pnpm') : null;
+
+    if (!root || !patterns || isWorkspaceMember(memberPath(root, appDir), patterns))
+    {
+        return null;
+    }
+
+    return `${appDir} is not in the packages of ${join(root, 'pnpm-workspace.yaml')}, so pnpm installed that workspace instead.`
+        + ' Add the directory to its packages, or install with the app\'s own manager (--pm npm).';
+}
+
+/**
+ * The packages the app in `appDir` declares — every name in its `package.json`
+ * `dependencies` and `devDependencies` — that do not resolve from it.
+ *
+ * Optional and peer dependencies are left out: an optional one may fail to
+ * install by design, and a peer is the app's to declare in those two lists.
+ * Node itself answers, in a child process started in `appDir`, so that the
+ * CLI's own resolution (a `NODE_PATH` its package manager set, preload flags)
+ * plays no part: see `RESOLVE_SCRIPT`.
+ */
+export function findUnresolvedPackages(appDir: string): string[]
+{
+    const { dependencies, devDependencies } = JSON.parse(readFileSync(join(appDir, 'package.json'), 'utf-8').replace(/^\uFEFF/, ''));
+    const names = [...Object.keys(dependencies ?? {}), ...Object.keys(devDependencies ?? {})];
+    const pnpRuntime = pnpRuntimeOf(appDir);
+    const { NODE_PATH, NODE_OPTIONS, NODE_PRESERVE_SYMLINKS, ...env } = process.env;
+
+    const child = spawnSync(
+        process.execPath,
+        [...(pnpRuntime ? ['--require', pnpRuntime] : []), '--input-type=module', '--eval', RESOLVE_SCRIPT, JSON.stringify(names)],
+        { cwd: appDir, env, encoding: 'utf-8' },
+    );
+
+    if (child.status !== 0)
+    {
+        throw new Error(`Could not ask Node what resolves from ${appDir}: ${child.stderr || child.error}`);
+    }
+
+    return JSON.parse(child.stdout);
+}
+
+/**
+ * Prints the names in `argv[1]` whose package does not resolve from the
+ * working directory. A package resolves when Node finds its `package.json`:
+ * every package has one and Node's lookup is defined by it, while an entry
+ * point is optional (`@types/node` has none). `ERR_PACKAGE_PATH_NOT_EXPORTED`
+ * counts as found, since Node raises it only after reading the package's
+ * `package.json`, whose `exports` do not list that file. Plain installs go
+ * through the ESM resolver, which ignores `NODE_PATH` and the global folders as
+ * an `import` in the app does; it locates a package by its directory alone, so
+ * the file's existence is checked. Under Plug'n'Play (`process.versions.pnp`,
+ * set by the preloaded `.pnp.cjs`) PnP's `require.resolve` answers.
+ */
+const RESOLVE_SCRIPT = `
+import { existsSync } from 'node:fs';
+import { createRequire } from 'node:module';
+import { fileURLToPath } from 'node:url';
+
+const require = createRequire(process.cwd() + '/package.json');
+const locate = process.versions.pnp ? require.resolve : specifier => fileURLToPath(import.meta.resolve(specifier));
+
+function resolves(name)
+{
+    try
+    {
+        return existsSync(locate(name + '/package.json'));
+    }
+    catch (error)
+    {
+        return error.code === 'ERR_PACKAGE_PATH_NOT_EXPORTED';
+    }
+}
+
+process.stdout.write(JSON.stringify(JSON.parse(process.argv[1]).filter(name => !resolves(name))));
+`;
+
+/**
+ * The Plug'n'Play runtime that resolves the app in `appDir`, or null: the
+ * `.pnp.cjs` of the project the app is — its own — or of the workspace it is a
+ * member of (`findWorkspace`). A `.pnp.cjs` anywhere else above it belongs to a
+ * project the app is not part of: PnP would take the app for that project's
+ * top-level workspace, and Node's plain lookup is what applies to it.
+ */
+function pnpRuntimeOf(appDir: string): string | null
+{
+    const workspace = findWorkspace(appDir);
+
+    return [appDir, ...(workspace ? [workspace.root] : [])]
+        .map(dir => join(dir, '.pnp.cjs'))
+        .find(existsSync) ?? null;
+}
+
+function ancestorsOf(dir: string): string[]
+{
+    return dirname(dir) === dir ? [dir] : [dir, ...ancestorsOf(dirname(dir))];
+}
+
+function lockfileManager(dir: string): PackageManager | null
+{
+    return LOCKFILES.find(([lockfile]) => existsSync(join(dir, lockfile)))?.[1] ?? null;
+}
+
+/**
+ * The workspace globs `packageManager`'s declaration in `dir` lists, or null
+ * when it declares no workspace. A `pnpm-workspace.yaml` without `packages`
+ * declares a workspace of the root alone.
+ */
+function readWorkspacePatterns(dir: string, packageManager: PackageManager): string[] | null
+{
+    if (packageManager === 'pnpm')
+    {
+        const manifest = readManifest(join(dir, 'pnpm-workspace.yaml'), text => parse(text, { logLevel: 'error' }) ?? {});
+
+        return isObject(manifest) ? stringsOrNull(manifest.packages ?? []) : null;
+    }
+
+    const manifest = readManifest(join(dir, 'package.json'), JSON.parse);
+    const workspaces = isObject(manifest) ? manifest.workspaces : undefined;
+
+    return stringsOrNull(workspaces) ?? (isObject(workspaces) ? stringsOrNull(workspaces.packages) : null);
+}
+
+/**
+ * The parsed content of `path`, a byte-order mark stripped as npm, pnpm and yarn
+ * do; undefined when it is missing or does not parse. Someone else's file above
+ * the app is never the app's error.
+ */
+function readManifest(path: string, parseText: (text: string) => unknown): unknown
+{
+    if (!existsSync(path))
+    {
+        return undefined;
+    }
+
+    try
+    {
+        return parseText(readFileSync(path, 'utf-8').replace(/^\uFEFF/, ''));
+    }
+    catch
+    {
+        return undefined;
+    }
+}
+
+function isObject(value: unknown): value is Record<string, unknown>
+{
+    return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function stringsOrNull(value: unknown): string[] | null
+{
+    return Array.isArray(value) && value.every(item => typeof item === 'string') ? value : null;
+}
+
+/** `dir` relative to the workspace `root`, `/`-separated as workspace globs are. */
+function memberPath(root: string, dir: string): string
+{
+    return relative(root, dir).split(sep).join('/');
+}
+
+function isWorkspaceMember(path: string, patterns: string[]): boolean
+{
+    const normalised = patterns.map(pattern => pattern.replace(/^(!?)\.\//, '$1').replace(/\/+$/, ''));
+    const included = normalised.filter(pattern => !pattern.startsWith('!'));
+    const excluded = normalised.filter(pattern => pattern.startsWith('!')).map(pattern => pattern.slice(1));
+
+    return included.some(pattern => posix.matchesGlob(path, pattern))
+        && !excluded.some(pattern => posix.matchesGlob(path, pattern));
+}
+
+/**
+ * Arguments for `<pm> install`: every command that installs the app's
+ * dependencies uses these, so npm accepts the SPFN set the same way everywhere.
+ */
+export function getInstallArgs(pm: PackageManager): string[]
+{
+    return pm === 'npm' ? ['install', ...NPM_PEER_FLAGS] : ['install'];
+}
+
+/**
+ * Arguments for adding `packages` to the app (`dev`: as devDependencies), the
+ * one definition `init`, `create`, `add` and `setup` share.
+ */
+export function getAddArgs(pm: PackageManager, packages: string[], { dev = false } = {}): string[]
 {
     switch (pm)
     {
-        case 'bun':
-            return 'bun install';
-        case 'pnpm':
-            return 'pnpm install';
-        case 'yarn':
-            return 'yarn';
         case 'npm':
+            return ['install', ...NPM_PEER_FLAGS, ...(dev ? ['--save-dev'] : []), ...packages];
+        case 'bun':
+            return ['add', ...(dev ? ['--dev'] : []), ...packages];
         default:
-            return 'npm install';
+            return ['add', ...(dev ? ['-D'] : []), ...packages];
     }
+}
+
+/** The command line `getAddArgs` stands for, for a hint to the user. */
+export function getAddCommand(pm: PackageManager, packages: string[], options: { dev?: boolean } = {}): string
+{
+    return [pm, ...getAddArgs(pm, packages, options)].join(' ');
 }
 
 export function getRunCommand(pm: PackageManager): string
 {
     return pm === 'npm' ? 'npm run' : `${pm} run`;
-}
-
-export function getAddCommand(pm: PackageManager, packages: string[]): string
-{
-    const pkgs = packages.join(' ');
-
-    switch (pm)
-    {
-        case 'bun':
-            return `bun add ${pkgs}`;
-        case 'pnpm':
-            return `pnpm add ${pkgs}`;
-        case 'yarn':
-            return `yarn add ${pkgs}`;
-        case 'npm':
-        default:
-            return `npm install ${pkgs}`;
-    }
 }
 
 /**

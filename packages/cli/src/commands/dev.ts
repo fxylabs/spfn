@@ -178,7 +178,7 @@ function startCodegenWatcher(pm: PackageManager, cwd: string, entry: string, env
 
     if (tsxCli === undefined)
     {
-        logger.error(`[SPFN] Codegen watcher not started: no tsx is installed for the app or for the spfn CLI. Install it in the app: ${getAddCommand(pm, ['-D', 'tsx'])}`);
+        logger.error(`[SPFN] Codegen watcher not started: no tsx is installed for the app or for the spfn CLI. Install it in the app: ${getAddCommand(pm, ['tsx'], { dev: true })}`);
         warnCodegenWatchDisabled();
 
         return null;

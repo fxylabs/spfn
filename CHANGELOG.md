@@ -28,12 +28,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **BREAKING: spfn: the `spfn dev` codegen watcher needs a tsx resolvable from the app or from the
   CLI (#353).** It ran through the package manager, so an npm app with no tsx installed got one
   fetched by `npx tsx`; now the watcher is not started there, and `spfn dev` logs the command that
-  installs tsx in the app (`npm install -D tsx`). The server and Next.js still start.
+  installs tsx in the app (`npm install --legacy-peer-deps --save-dev tsx` in an npm app). The
+  server and Next.js still start.
 - **BREAKING: @spfn/core: `CodegenOrchestrator.generateAll()` and `settled()` reject when called
   while the calling generator's own `generate()`, run by the watch loop, is still running (#353).**
   Awaited there, they could never finish, since each waits for that generation; they reject whether
   or not the call is awaited. Call them after `generate()` has returned (from a timer or a promise
   callback); the loop runs a generator again when a file it read changes.
+- **BREAKING: spfn: inside a pnpm/yarn/bun repository, a directory that is not a workspace member
+  is no longer treated as using the repository's manager (#345).** The manager was taken from any
+  `pnpm-lock.yaml`, `yarn.lock` or `bun.lockb` up to five directories above, and `package-lock.json`
+  was never looked at. Now the app's own lockfile decides (`package-lock.json` and bun's text
+  `bun.lock` included) before anything above it is read; then the workspace that lists the app,
+  where each ancestor's lockfile selects the manager whose declaration decides (`pnpm-workspace.yaml`
+  `packages` for pnpm, `package.json` `workspaces` for yarn, npm and bun; negations honoured; an
+  ancestor declaration that does not parse declares nothing); otherwise npm. So `init`, `add`,
+  `build`, `start`, `dev`, `setup`, `provision` and `create` (without `--pm`), run in such a
+  directory, use the app's own lockfile or npm, and install, add and run scripts there;
+  `create --pm pnpm` there installs in the app directory instead of from the repository root.
+  `spfn init` gains `--pm`. **To keep the repository's manager** for such an app: add its directory
+  to the workspace's globs, or commit the app's own lockfile (`pnpm-lock.yaml`, `yarn.lock`, …);
+  `create` and `init` also take `--pm`, but `dev`, `build`, `start`, `add`, `setup` and
+  `provision` have no `--pm` and follow the lockfile only.
 
 ### Fixed
 
@@ -96,6 +112,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a run of the watch loop and settles when that run has finished.
 - **@spfn/core: watch state is per orchestrator.** The files each router's load reached were kept
   in a module-wide map, so a second orchestrator in the process watched the first app's files.
+- **spfn: `spfn create --pm <manager>` installs with that manager, and an install is reported
+  only when it installed (#345).** `create` chose the manager, then `init` detected one again, so
+  `create --pm npm` in a pnpm repository ran `pnpm install` in a directory the workspace did not
+  list — a no-op for the app that exited 0 — and printed `✔ Dependencies installed` with
+  `@spfn/core`, `spfn` and `drizzle-orm` missing. `create` now hands its manager to `init`, and
+  `init` and `create`'s workspace-root install print `Dependencies installed` only once every
+  package in the app's `dependencies` and `devDependencies` resolves from the app directory, as
+  Node resolves it there (Plug'n'Play included, the CLI's own `NODE_PATH` not); otherwise they exit
+  1 naming the missing packages, and, when pnpm installed the workspace above a directory it does
+  not list, say so and how to fix it.
+- **spfn: `spfn add` in an npm app installs with `--legacy-peer-deps`, as `init` does (#345).** It
+  ran `npm add <package>`, which npm refuses with `ERESOLVE` for every SPFN app (drizzle-typebox's
+  peer range `drizzle-orm >=0.36.0` admits no `1.0.0-rc.4`). `init`, `add`, `create` and
+  `setup icons` now share one set of install arguments per manager, and the generated Dockerfile's
+  `npm ci` and `npm prune`, which failed the same way, carry the flag too; it copies bun's text
+  `bun.lock` as well as `bun.lockb`.
 - **spfn: `spfn db push --dry-run` writes nothing (spfn/spfn#163).** In 0.4.0-beta.1 a dry run
   whose project schema had no pending change applied the function package migrations (and created
   their bookkeeping tables) instead of previewing them; with a pending project change it said

@@ -1,6 +1,6 @@
 import { Command, Option } from 'commander';
 import chalk from 'chalk';
-import { detectPackageManager, getRunCommand } from '../../utils/package-manager.js';
+import { detectPackageManager, getRunCommand, type PackageManager } from '../../utils/package-manager.js';
 import { logger } from '../../utils/logger.js';
 import { ENV_FILES_HINT } from '../../utils/messages.js';
 import { validateProject } from './steps/validate.js';
@@ -20,6 +20,8 @@ interface InitOptions
     // Set by `spfn create` to replace the create-next-app README with the SPFN one.
     overwriteReadme?: boolean;
     mode?: ScaffoldMode;
+    // The app's package manager when the caller knows it (`spfn create`, `--pm`).
+    pm?: PackageManager;
 }
 
 /**
@@ -34,9 +36,9 @@ export async function initializeSpfn(options: InitOptions = {}): Promise<void>
     const mode = await selectScaffoldMode(options);
     const includeAuth = mode === 'full';
 
-    // Step 2: Detect package manager
-    const pm = detectPackageManager(cwd);
-    logger.step(`Detected package manager: ${pm}`);
+    // Step 2: Package manager — the one given, detected only when none was
+    const pm = options.pm ?? detectPackageManager(cwd);
+    logger.step(options.pm ? `Using package manager: ${pm}` : `Detected package manager: ${pm}`);
 
     // Step 3: Setup server structure (templates → src/server, src/lib)
     await setupServerStructure(cwd, mode);
@@ -95,5 +97,7 @@ export const initCommand = new Command('init')
     .description('Initialize SPFN in your Next.js project')
     .addOption(new Option('--mode <mode>', 'Scaffold mode: bare (core) or full (core, auth, i18n, MCP)')
         .choices(['bare', 'full']))
+    .addOption(new Option('--pm <manager>', 'Package manager to use (default: detected from the app)')
+        .choices(['npm', 'pnpm', 'yarn', 'bun']))
     .option('-y, --yes', 'Skip prompts and use defaults')
     .action(initializeSpfn);

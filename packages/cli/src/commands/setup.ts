@@ -9,7 +9,7 @@ import chalk from 'chalk';
 const { ensureDirSync, writeFileSync, readFileSync } = fse;
 
 import { logger } from '../utils/logger.js';
-import { detectPackageManager } from '../utils/package-manager.js';
+import { detectPackageManager, getAddArgs } from '../utils/package-manager.js';
 
 interface PackageJson {
     name?: string;
@@ -65,11 +65,7 @@ export async function setupIcons(): Promise<void>
 
         try
         {
-            await execa(
-                pm,
-                pm === 'npm' ? ['install', '--save-dev', '@svgr/webpack'] : ['add', '-D', '@svgr/webpack'],
-                { cwd },
-            );
+            await execa(pm, getAddArgs(pm, ['@svgr/webpack'], { dev: true }), { cwd });
 
             spinner.succeed('@svgr/webpack installed');
         }
