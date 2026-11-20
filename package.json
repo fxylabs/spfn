@@ -43,8 +43,7 @@
     "pnpm": ">=8.0.0"
   },
   "dependencies": {
-    "@sinclair/typebox": "^0.34.41",
-    "drizzle-typebox": "^0.3.3"
+    "@sinclair/typebox": "^0.34.41"
   },
   "pnpm": {
     "overrides": {

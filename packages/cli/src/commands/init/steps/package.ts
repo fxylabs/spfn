@@ -33,7 +33,6 @@ export async function setupPackageJson(
     // - @spfn/core: Use same tag as CLI (alpha, beta, or latest)
     // - @sinclair/typebox: contract files import Type
     // - drizzle-orm: entity/repository files import from drizzle-orm, drizzle-orm/pg-core
-    // - drizzle-typebox: contract files import createInsertSchema, createSelectSchema
     // - postgres/pg: app must declare the same drivers @spfn/core uses, otherwise pnpm
     //   resolves drizzle-orm to a separate instance (drizzle-orm branches on its postgres/pg
     //   peer) → BaseRepository generics collapse to `unknown` and RPC responses lose types
@@ -44,7 +43,6 @@ export async function setupPackageJson(
         '@spfn/core': spfnTag,
         '@sinclair/typebox': '^0.34.0',
         'drizzle-orm': '1.0.0-rc.4',
-        'drizzle-typebox': '^0.3.3',
         'postgres': '^3.4.0',
         'pg': '^8.16.3',
         'spfn': spfnTag,
@@ -80,13 +78,10 @@ export async function setupPackageJson(
     // - tsx: TypeScript executor for development (spfn dev). 4.22 is the first
     //   that registers with module.registerHooks on Node 26; an older one prints
     //   DEP0205 (module.register() deprecated) at every spfn dev start there.
-    // - tsup: TypeScript bundler for server build with @/ alias support
     const devDependencies: Record<string, string> = {
         '@types/node': '^20.11.0',
         'tsx': '^4.22.4',
-        'tsup': '^9.0.0',
         'drizzle-kit': '1.0.0-rc.4',
-        'dotenv': '^17.2.3',
     };
 
     Object.assign(packageJson.dependencies, dependencies);

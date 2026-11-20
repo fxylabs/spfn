@@ -21,14 +21,6 @@ const LOCKFILES: ReadonlyArray<[string, PackageManager]> = [
 ];
 
 /**
- * npm refuses the SPFN dependency set without it (`ERESOLVE`), in `install`,
- * `ci` and `prune` alike: drizzle-typebox's peer range on drizzle-orm
- * (`>=0.36.0`) admits no prerelease, so not the `1.0.0-rc.4` every SPFN app
- * pins. Every npm invocation the CLI runs or writes carries it.
- */
-export const NPM_PEER_FLAGS = ['--legacy-peer-deps'];
-
-/**
  * The package manager the app in `appDir` uses.
  *
  * The app's own lockfile decides, before any ancestor is read. Otherwise the
@@ -89,6 +81,26 @@ export function pnpmNonMemberReason(appDir: string): string | null
 
     return `${appDir} is not in the packages of ${join(root, 'pnpm-workspace.yaml')}, so pnpm installed that workspace instead.`
         + ' Add the directory to its packages, or install with the app\'s own manager (--pm npm).';
+}
+
+/**
+ * Why `pm` cannot install the app in `appDir`, or null when nothing it declares
+ * is known to stop it. drizzle-typebox's peer range on drizzle-orm (`>=0.36.0`)
+ * admits no prerelease, so npm refuses (`ERESOLVE`) an app that declares it
+ * beside the `1.0.0-rc.4` SPFN pins, as every app an earlier `spfn init`
+ * scaffolded does. pnpm, yarn and bun do not refuse it.
+ */
+export function installRefusalReason(pm: PackageManager, appDir: string): string | null
+{
+    const manifest = readManifest(join(appDir, 'package.json'), JSON.parse);
+    const listsDrizzleTypebox = ['dependencies', 'devDependencies', 'optionalDependencies']
+        .map(field => isObject(manifest) ? manifest[field] : undefined)
+        .some(dependencies => isObject(dependencies) && 'drizzle-typebox' in dependencies);
+
+    return pm === 'npm' && listsDrizzleTypebox
+        ? 'npm refuses this app (ERESOLVE): package.json lists drizzle-typebox, whose peer range drizzle-orm >=0.36.0 excludes the 1.0.0-rc.4 SPFN pins.'
+            + ' Remove drizzle-typebox from package.json, or import drizzle-orm/typebox-legacy instead.'
+        : null;
 }
 
 /**
@@ -253,11 +265,11 @@ function isWorkspaceMember(path: string, patterns: string[]): boolean
 
 /**
  * Arguments for `<pm> install`: every command that installs the app's
- * dependencies uses these, so npm accepts the SPFN set the same way everywhere.
+ * dependencies uses these.
  */
-export function getInstallArgs(pm: PackageManager): string[]
+export function getInstallArgs(_pm: PackageManager): string[]
 {
-    return pm === 'npm' ? ['install', ...NPM_PEER_FLAGS] : ['install'];
+    return ['install'];
 }
 
 /**
@@ -269,7 +281,7 @@ export function getAddArgs(pm: PackageManager, packages: string[], { dev = false
     switch (pm)
     {
         case 'npm':
-            return ['install', ...NPM_PEER_FLAGS, ...(dev ? ['--save-dev'] : []), ...packages];
+            return ['install', ...(dev ? ['--save-dev'] : []), ...packages];
         case 'bun':
             return ['add', ...(dev ? ['--dev'] : []), ...packages];
         default:

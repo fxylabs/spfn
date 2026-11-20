@@ -79,8 +79,11 @@ Node answers, in a child process started in the app directory without the CLI's
 resolves when Node finds its `package.json`, since an entry point is optional.
 
 npm installs (`init`, `add`, `create`, `setup icons`, and the generated Dockerfile's
-`npm ci` / `npm prune`) pass `--legacy-peer-deps`: drizzle-typebox's peer range on
-drizzle-orm (`>=0.36.0`) admits no prerelease, so npm refuses the `1.0.0-rc.4` SPFN pins.
+`npm ci` / `npm prune`) pass no peer flag. In an npm app whose `package.json` still lists
+`drizzle-typebox` (every npm scaffold before it was dropped), `init` and `add` refuse before
+npm runs: its peer range on drizzle-orm (`>=0.36.0`) admits no prerelease, so npm refuses the
+`1.0.0-rc.4` SPFN pins with `ERESOLVE`. Remove it from `package.json`, or import
+`drizzle-orm/typebox-legacy` instead. pnpm, yarn and bun are not refused.
 
 ---
 
@@ -1174,7 +1177,7 @@ src/
     entities/                        # Drizzle tables (example.entity.ts, config.ts)
     repositories/                    # BaseRepository subclasses (example.repository.ts)
     routes/                          # route DSL handlers: root.ts, health.ts, examples.ts
-    tsconfig.json, tsup.config.ts
+    tsconfig.json
 .spfnrc.ts                           # codegen config (route-map generator)
 spfn.config.js                       # deployment config (subdomain/region/domains) — committed
 docker-compose.yml                   # Postgres + Redis (dev)
@@ -1231,7 +1234,8 @@ uncomment `SPFN_AUTH_ADMIN_ACCOUNTS` in `.env.server` and restart before
 
 `init` also patches `package.json` (scripts: `spfn:dev`, `spfn:server`, `spfn:next`,
 `spfn:build`, `spfn:start`, `codegen`; deps: `@spfn/core`, `spfn`, `drizzle-orm`,
-`@sinclair/typebox`, `concurrently`, etc.; full also adds `@spfn/auth`, `@spfn/i18n` and
+`@sinclair/typebox`, `concurrently`, etc.; devDeps: `@types/node`, `tsx`, `drizzle-kit`, no
+`tsup`, since `spfn build` bundles with the CLI's own; full also adds `@spfn/auth`, `@spfn/i18n` and
 auth's `@spfn/notification` peer; both modes set the Node engine to
 `^22.23.4 || ^24.22.1 || >=26.12.1` unless the existing range admits only releases that carry
 the CVE-2026-111497 fix), excludes `src/server` from the root

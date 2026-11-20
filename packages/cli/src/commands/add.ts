@@ -12,7 +12,7 @@ import { join } from 'path';
 import { execa } from 'execa';
 import chalk from 'chalk';
 import ora from 'ora';
-import { detectPackageManager, getAddArgs } from '../utils/package-manager.js';
+import { detectPackageManager, getAddArgs, installRefusalReason } from '../utils/package-manager.js';
 import { addVercel } from './add-vercel.js';
 
 /**
@@ -49,6 +49,14 @@ async function addPackage(packageName: string): Promise<void>
     if (!existsSync(pkgJsonPath))
     {
         const pm = detectPackageManager(process.cwd());
+        const refusal = installRefusalReason(pm, process.cwd());
+
+        if (refusal)
+        {
+            console.error(chalk.red(`❌ ${refusal}`));
+            process.exit(1);
+        }
+
         const installSpinner = ora('Installing package...').start();
 
         try

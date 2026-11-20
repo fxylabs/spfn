@@ -1,6 +1,6 @@
 import { Command, Option } from 'commander';
 import chalk from 'chalk';
-import { detectPackageManager, getRunCommand, type PackageManager } from '../../utils/package-manager.js';
+import { detectPackageManager, getRunCommand, installRefusalReason, type PackageManager } from '../../utils/package-manager.js';
 import { logger } from '../../utils/logger.js';
 import { ENV_FILES_HINT } from '../../utils/messages.js';
 import { validateProject } from './steps/validate.js';
@@ -39,6 +39,7 @@ export async function initializeSpfn(options: InitOptions = {}): Promise<void>
     // Step 2: Package manager — the one given, detected only when none was
     const pm = options.pm ?? detectPackageManager(cwd);
     logger.step(options.pm ? `Using package manager: ${pm}` : `Detected package manager: ${pm}`);
+    refuseUninstallableApp(pm, cwd);
 
     // Step 3: Setup server structure (templates → src/server, src/lib)
     await setupServerStructure(cwd, mode);
@@ -91,6 +92,20 @@ export async function initializeSpfn(options: InitOptions = {}): Promise<void>
     console.log('  • ' + chalk.cyan('spfn env list') + '      - List env vars from the schema');
     console.log('  • ' + chalk.cyan('spfn secret set') + '    - Store a secret (keychain / SOPS)');
     console.log('\n' + chalk.blue('💡 Tip:') + ' Edit ' + chalk.cyan('src/server/config/env.config.ts') + ' to manage environment variables');
+}
+
+/**
+ * Exit before any file is written when `pm` would refuse the app's install.
+ */
+function refuseUninstallableApp(pm: PackageManager, cwd: string): void
+{
+    const refusal = installRefusalReason(pm, cwd);
+
+    if (refusal)
+    {
+        logger.error(refusal);
+        process.exit(1);
+    }
 }
 
 export const initCommand = new Command('init')

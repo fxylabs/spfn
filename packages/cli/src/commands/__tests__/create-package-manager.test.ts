@@ -29,6 +29,9 @@ vi.mock('../init/steps/config-files.js', () => ({ setupConfigFiles: vi.fn() }));
 vi.mock('../init/steps/readme.js', () => ({ setupReadme: vi.fn() }));
 
 import { createCommand } from '../create.js';
+import { initializeSpfn } from '../init/index.js';
+import { setupServerStructure } from '../init/steps/server-structure.js';
+import { logger } from '../../utils/logger.js';
 
 const originalCwd = process.cwd();
 let repository: string;
@@ -109,7 +112,7 @@ describe('spfn create --pm npm under a pnpm workspace', () =>
     {
         const app = await createFrom(join(repository, 'scratch'));
 
-        expect(mocks.execa).toHaveBeenCalledWith('npm', ['install', '--legacy-peer-deps'], { cwd: app });
+        expect(mocks.execa).toHaveBeenCalledWith('npm', ['install'], { cwd: app });
         expect(mocks.execa.mock.calls.filter(([command]) => command === 'pnpm')).toEqual([]);
     });
 
@@ -117,7 +120,7 @@ describe('spfn create --pm npm under a pnpm workspace', () =>
     {
         const app = await createFrom(join(repository, 'packages'));
 
-        expect(mocks.execa).toHaveBeenCalledWith('npm', ['install', '--legacy-peer-deps'], { cwd: app });
+        expect(mocks.execa).toHaveBeenCalledWith('npm', ['install'], { cwd: app });
         expect(mocks.execa.mock.calls.filter(([command]) => command === 'pnpm')).toEqual([]);
     });
 });
@@ -160,5 +163,31 @@ describe('spfn create under a pnpm workspace, the manager detected or pnpm', () 
         expect(createNextAppArgs()).not.toContain('--skip-install');
         expect(mocks.execa.mock.calls.filter(([, , options]) => options?.cwd === repository)).toEqual([]);
         expect(mocks.execa).toHaveBeenCalledWith('pnpm', ['install'], { cwd: app });
+    });
+});
+
+describe('spfn init in an npm app that still lists drizzle-typebox', () =>
+{
+    it('refuses before writing a file or running npm, saying how to fix it', async () =>
+    {
+        const app = join(repository, 'scratch/app');
+        mkdirSync(app, { recursive: true });
+        writeFileSync(join(app, 'package.json'), JSON.stringify({ name: 'app', dependencies: { 'next': '16', 'drizzle-typebox': '^0.3.3' } }));
+        process.chdir(app);
+        const exit = vi.spyOn(process, 'exit').mockImplementation(((code?: number) =>
+        {
+            throw new Error(`process.exit(${code})`);
+        }) as never);
+        const error = vi.spyOn(logger, 'error').mockImplementation(() => undefined);
+
+        await expect(initializeSpfn({ pm: 'npm', mode: 'bare', yes: true })).rejects.toThrow('process.exit(1)');
+
+        expect(setupServerStructure).not.toHaveBeenCalled();
+        expect(mocks.execa).not.toHaveBeenCalled();
+        expect(error).toHaveBeenCalledWith(expect.stringContaining(
+            'Remove drizzle-typebox from package.json, or import drizzle-orm/typebox-legacy instead.',
+        ));
+        exit.mockRestore();
+        error.mockRestore();
     });
 });

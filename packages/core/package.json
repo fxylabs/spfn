@@ -227,7 +227,6 @@
         "chalk": "^5.6.2",
         "chokidar": "^4.0.3",
         "dotenv": "^17.2.3",
-        "drizzle-typebox": "^0.3.3",
         "hono": "^4.13.16",
         "micromatch": "^4.0.8",
         "pg-boss": "^11.1.2",

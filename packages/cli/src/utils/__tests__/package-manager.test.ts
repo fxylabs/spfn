@@ -85,11 +85,11 @@ function makeRepository(files: Record<string, string>): string
 
 describe('getInstallArgs and getAddArgs', () =>
 {
-    it('give `add` the npm arguments `init` installs with, so npm accepts the SPFN set in both', () =>
+    it('give `add` the npm arguments `init` installs with, no flag that would hide a peer conflict', () =>
     {
         const shared = getInstallArgs('npm');
 
-        expect(shared).toEqual(['install', '--legacy-peer-deps']);
+        expect(shared).toEqual(['install']);
         expect(getAddArgs('npm', ['@spfn/i18n'])).toEqual([...shared, '@spfn/i18n']);
         expect(getAddArgs('npm', ['@svgr/webpack'], { dev: true })).toEqual([...shared, '--save-dev', '@svgr/webpack']);
     });

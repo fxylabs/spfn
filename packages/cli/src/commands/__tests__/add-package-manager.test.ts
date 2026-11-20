@@ -16,7 +16,7 @@ vi.mock('execa', () => ({ execa: mocks.execa }));
 vi.mock('ora', () => ({ default: () => mocks.spinner }));
 
 import { addCommand } from '../add.js';
-import { getInstallArgs } from '../../utils/package-manager.js';
+import { getAddArgs, getInstallArgs } from '../../utils/package-manager.js';
 
 const originalCwd = process.cwd();
 let repository: string;
@@ -53,7 +53,7 @@ afterEach(() =>
 
 describe('spfn add in an npm app', () =>
 {
-    it('installs with the npm arguments init installs with, which npm needs to accept the SPFN set', async () =>
+    it('installs with the npm arguments init installs with', async () =>
     {
         process.chdir(join(repository, 'scratch/app'));
 
@@ -61,5 +61,36 @@ describe('spfn add in an npm app', () =>
 
         expect(mocks.execa).toHaveBeenCalledWith('npm', [...getInstallArgs('npm'), '@spfn/i18n']);
         expect(mocks.spinner.succeed).toHaveBeenCalledWith('Package installed');
+    });
+
+    it('refuses before npm runs when the app still lists drizzle-typebox, saying how to fix it', async () =>
+    {
+        process.chdir(join(repository, 'scratch/app'));
+        writeFileSync('package.json', '{"name":"app","dependencies":{"drizzle-typebox":"^0.3.3"}}');
+        const exit = vi.spyOn(process, 'exit').mockImplementation(((code?: number) =>
+        {
+            throw new Error(`process.exit(${code})`);
+        }) as never);
+        const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+        await expect(addCommand.parseAsync(['@spfn/i18n'], { from: 'user' })).rejects.toThrow('process.exit(1)');
+
+        expect(mocks.execa).not.toHaveBeenCalled();
+        expect(error).toHaveBeenCalledWith(expect.stringContaining(
+            'Remove drizzle-typebox from package.json, or import drizzle-orm/typebox-legacy instead.',
+        ));
+        exit.mockRestore();
+    });
+
+    it('installs with pnpm, which does not refuse it, an app that lists drizzle-typebox', async () =>
+    {
+        process.chdir(join(repository, 'scratch/app'));
+        rmSync('package-lock.json');
+        writeFileSync('pnpm-lock.yaml', '');
+        writeFileSync('package.json', '{"name":"app","dependencies":{"drizzle-typebox":"^0.3.3"}}');
+
+        await addCommand.parseAsync(['@spfn/i18n'], { from: 'user' });
+
+        expect(mocks.execa).toHaveBeenCalledWith('pnpm', getAddArgs('pnpm', ['@spfn/i18n']));
     });
 });

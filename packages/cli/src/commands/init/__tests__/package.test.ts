@@ -78,8 +78,12 @@ describe('setupPackageJson', () =>
             await readFile(packageJsonPath, 'utf8'),
         ) as PackageJson;
         expect(generated.dependencies?.['drizzle-orm']).toBe('1.0.0-rc.4');
-        expect(generated.dependencies?.['drizzle-typebox']).toBe('^0.3.3');
+        // drizzle-typebox's peer range admits no drizzle-orm prerelease, so npm
+        // refuses an app that declares it (ERESOLVE); nothing imports it.
+        expect(generated.dependencies?.['drizzle-typebox']).toBeUndefined();
         expect(generated.devDependencies?.['drizzle-kit']).toBe('1.0.0-rc.4');
+        // `spfn build` bundles with the CLI's own tsup; no template configures one.
+        expect(generated.devDependencies?.['tsup']).toBeUndefined();
         expect(mocks.execa).toHaveBeenCalledWith('pnpm', ['install'], {
             cwd: testDirectory,
         });

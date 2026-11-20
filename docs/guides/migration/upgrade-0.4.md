@@ -22,6 +22,8 @@ so upgrade them in one step. The full list of changes is in the
 | `NODE_ENV=development spfn build` (or `test`) | `next build` and the server build now run under `production` too. A build that needs another value runs those steps itself. [CLI README](../../../packages/cli/README.md#spfn-build) |
 | `@spfn/auth` with `secondFactor: { required: true }` | Make `hono` resolve to one install (`pnpm why hono`). A second copy now refuses the boot instead of answering 403. [Below](#auth-refuses-to-start-two-copies-of-hono) |
 | A Kit release whose `spfnCli` range ends `<0.4.0` | The 0.4 beta CLI is not refused, but only because the range check orders `0.4.0-beta.1` below `0.4.0` — the release was made for 0.3, not tested against 0.4. Use a Kit release made for 0.4 when one exists. [Below](#a-kit-release-refuses-the-cli) |
+| An app that imports `drizzle-typebox` without listing it in its own `package.json` | Add it, or import `drizzle-orm/typebox-legacy` — `@spfn/core` no longer brings it. |
+| An npm app whose `package.json` lists `drizzle-typebox` (every npm app `spfn init` 0.4.0-beta.1 or earlier scaffolded) | Remove it, or import `drizzle-orm/typebox-legacy` instead, and drop `--legacy-peer-deps` from your own scripts and Dockerfile. [Below](#npm-refuses-the-app-drizzle-typebox) |
 | None of the above, and every `@spfn/*` package upgraded | Nothing |
 
 What is new and needs nothing from you: a `passkeyLogin` sign-in channel in `@spfn/auth`
@@ -243,6 +245,20 @@ refuse the next line's betas as well as 0.3. The published 0.3 ranges end `<0.4.
 change, and `0.4.0-beta.1` orders below `0.4.0`, so a 0.3 package left beside a 0.4 `@spfn/core`
 installs without a warning. That is why every `@spfn/*` package is upgraded together;
 `pnpm list --depth 0` shows what you still have on 0.3.
+
+### npm refuses the app: `drizzle-typebox`
+
+`spfn add` or `spfn init` in an npm app:
+
+```
+❌ npm refuses this app (ERESOLVE): package.json lists drizzle-typebox, whose peer range drizzle-orm >=0.36.0 excludes the 1.0.0-rc.4 SPFN pins. Remove drizzle-typebox from package.json, or import drizzle-orm/typebox-legacy instead.
+```
+
+`npm install` itself fails with `ERESOLVE` on `drizzle-typebox@0.3.3`. Earlier scaffolds listed
+`drizzle-typebox`, which no template imports, and the CLI passed `--legacy-peer-deps` to every
+npm run so that npm accepted it; the CLI no longer passes the flag. Fix: `npm uninstall
+drizzle-typebox` (if your code imports `createInsertSchema` and the like, import them from
+`drizzle-orm/typebox-legacy`). pnpm, yarn and bun install the app as before.
 
 ### A Kit release refuses the CLI
 

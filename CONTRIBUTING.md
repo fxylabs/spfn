@@ -170,7 +170,7 @@ and no range of ours can exclude it until that third party publishes one that do
 | `@types/react` | One set of React types, for the same reason. | Tooling. |
 | `@types/react-dom` | Same, for react-dom's types. | Tooling. |
 | `drizzle-kit` | Pins drizzle-kit to the same release candidate as drizzle-orm. | Tooling: spfn, the packages' `db:generate`, examples. |
-| `drizzle-orm` | One Drizzle release candidate in the workspace. A prerelease satisfies no plain range, so `drizzle-typebox`'s peer `drizzle-orm >=0.36.0` would otherwise pull a separate 0.x drizzle-orm next to the RC. | Workspace; production code reaches it through core's `drizzle-typebox`. |
+| `drizzle-orm` | One Drizzle release candidate in the workspace, the one every package and example pins (`1.0.0-rc.4`). A prerelease satisfies no plain range, so a dependency whose peer is a plain `drizzle-orm` range would otherwise pull a separate 0.x drizzle-orm next to the RC. | Workspace; production code reaches it through each package's own `drizzle-orm`. |
 | `next` | Every Next.js in the workspace on the floor the packages require (`^16.4.5`), including one pnpm installs to satisfy a peer. | Workspace; an adopter gets the floor from our `next` peer ranges. |
 | `picomatch@2` | GHSA-c2c7-rcm5-vvqj, GHSA-3v7f-55p6-f55p. | Production: core → micromatch 4.0.8 → picomatch `^2.3.1`. No upstream fix: 4.0.8 is micromatch's latest release. |
 | `shell-quote` | GHSA-w7jw-789q-3m8p, GHSA-395f-4hp3-45gv. | Dev: concurrently, in spfn's devDependencies. |
