@@ -277,6 +277,28 @@ describe('resolveEndpointMiddlewares', () =>
 
         expect(resolveEndpointMiddlewares(config).map(mw => mw.name)).toEqual(['auth']);
     });
+
+    it('keeps a factory call\'s result once per object: a repeated object once, distinct calls each, a shared handler or not', () =>
+    {
+        const shared: MiddlewareHandler = async (_c, next) => await next();
+        const cached = defineMiddlewareFactory('cached', () => shared);
+        const scope = defineMiddlewareFactory('scope', (needed: string): MiddlewareHandler => async (c, next) =>
+            c.req.header('X-Scopes') === needed ? await next() : c.json({ refused: needed }, 403));
+        const admin = scope('admin');
+        const first = cached();
+        const second = cached();
+
+        const config = defineServerConfig()
+            .middlewares([admin, first])
+            .routes(defineRouter({ ping }).use([admin, scope('admin'), first, second]))
+            .build();
+
+        const list = resolveEndpointMiddlewares(config);
+        expect(list.map(mw => mw.name)).toEqual(['scope', 'cached', 'scope', 'cached']);
+        expect(list[0]).toBe(admin);
+        expect(list[1]).toBe(first);
+        expect(list[3]).toBe(second);
+    });
 });
 
 // ============================================================================
