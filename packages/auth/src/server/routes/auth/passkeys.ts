@@ -114,10 +114,11 @@ export const passkeyRegisterOptions = route.post('/_auth/passkeys/register/optio
  * `PASSKEY_PROOF_REQUIRED` — and one that does not verify spends its challenge
  * before the refusal (au9-N7).
  *
- * Under a required second factor, a session that may only enrol has the new
- * passkey marked as its second factor in the same transaction, and the answer
- * carries `mfaStatus` (#309). An account that already holds a credential needs
- * a step-up on this device first: 403 `STEP_UP_REQUIRED`.
+ * Under a required second factor with `'passkey'` listed, a registration with
+ * user verification marks the new passkey as a second factor in the same
+ * transaction, and the answer carries `mfaStatus` (#309, #399). A session that
+ * may only enrol and whose account already holds a credential needs a step-up
+ * on this device first: 403 `STEP_UP_REQUIRED`.
  */
 export const passkeyRegisterVerify = route.post('/_auth/passkeys/register/verify')
     .input({
@@ -214,6 +215,11 @@ export const passkeyLoginVerify = route.post('/_auth/passkeys/login/verify')
 
 /**
  * POST /_auth/passkeys/list - The caller's enrolled passkeys
+ *
+ * Each with `secondFactor` and `userVerified` (#399): an app shows which one
+ * is the second factor, and offers `mfa/passkey/mark` only where it can
+ * succeed — the repair for a passkey registered before a required policy
+ * marked spares.
  *
  * POST with the arguments in the body, like the key-management routes and for
  * the same reason: the mobile auth profile signs the request body, and a GET has
