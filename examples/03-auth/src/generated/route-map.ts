@@ -6,7 +6,7 @@
  * The entries under the .packages() line below are not this app's. They belong
  * to the package routers it mounts, copied in as they were when this file was
  * generated:
- *   router.packages[0] — 108 routes under /_auth, /.well-known
+ *   router.packages[0] — 109 routes under /_auth, /.well-known
  *   router.packages[1] — no routes (publishes no route map)
  *
  * A package upgrade reaches them only through a regeneration: `spfn build`
@@ -81,6 +81,7 @@ export const routeMap: Record<string, RouteInfo> = {
     consumeRevokeAllLink: { method: 'POST', path: '/_auth/keys/revoke-all/consume' },
     changePassword: { method: 'PUT', path: '/_auth/password' },
     getAuthSession: { method: 'GET', path: '/_auth/session' },
+    getAuthChannels: { method: 'GET', path: '/_auth/channels' },
     setSessionBinding: { method: 'POST', path: '/_auth/session/binding' },
     getSessionBinding: { method: 'GET', path: '/_auth/session/binding' },
     sessionBindingDisableOptions: { method: 'POST', path: '/_auth/session/binding/disable/options' },

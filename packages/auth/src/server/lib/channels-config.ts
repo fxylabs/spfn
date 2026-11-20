@@ -138,6 +138,16 @@ export function isChannelEnabled(name: AuthChannel): boolean
 }
 
 /**
+ * Every channel and whether the application offers it, one key per entry of
+ * `AUTH_CHANNELS` — what `GET /_auth/channels` answers. A copy: nothing a
+ * caller does with it opens a channel.
+ */
+export function channelStates(): Record<AuthChannel, boolean>
+{
+    return { ...enabled };
+}
+
+/**
  * A `ChannelDisabledError` (404 `CHANNEL_DISABLED`) when the application does
  * not offer this channel.
  *

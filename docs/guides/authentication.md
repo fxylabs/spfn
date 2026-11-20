@@ -156,7 +156,10 @@ an anonymous caller 401. A later `createAuthLifecycle()` without `channels` does
 two that state different channels refuse boot — partial ones such as `{ signup: false }` and
 `{ deviceCode: false }` included, since an omitted key means `true`. `signup: false` also
 refuses the account a first social sign-in would create (`SignupDisabledError`, 403
-`SIGNUP_DISABLED`, `reason=signup_disabled`). Service functions are not affected. See
+`SIGNUP_DISABLED`, `reason=signup_disabled`). Service functions are not affected. A sign-in page
+reads which channels are on from the public `GET /_auth/channels` (`authApi.getAuthChannels`) —
+`{ signup, passwordReset, deviceCode, deviceLink, passkeyLogin }`, one boolean each — and draws no
+button that would answer 404. See
 [Which sign-in channels exist](../../packages/auth/README.md#which-sign-in-channels-exist-channels).
 
 `createAuthLifecycle({ secondFactor })` is the app's second-factor policy: `required` (default
@@ -171,9 +174,15 @@ holds a passkey or a TOTP proves it with `mfa/step-up` first, or its enrolment c
 removing the last listed factor is 409 `SECOND_FACTOR_REQUIRED` (`resetSecondFactorService(userId)` is the
 operator's re-issue path). Boot is refused for `methods: []`, for `required` beside `deviceCode` or
 `deviceLink`, and for two lifecycles stating different policies. A passkey sign-in with user
-verification needs no second factor while `'passkey'` is listed, so an app that wants a password plus a
-passkey on every sign-in also closes `channels.passkeyLogin`. See
-[Requiring a second factor](../../packages/auth/README.md#requiring-a-second-factor-secondfactor).
+verification needs no second factor while `'passkey'` is listed. `required` means a factor on a new
+device, not the password on every sign-in: social sign-in, a password reset and a recovery code each
+get in without the password. An app that wants the password and the passkey whenever a person signs
+in on a device that is not already signed in closes `channels.passkeyLogin` and
+`channels.passwordReset`, sets `recoveryCodes: false` and enables no social provider for sign-in. It
+does not cover a still-signed-in browser signing in again (the password alone), a bound session's
+renewal (the passkey alone), or an account that has not enrolled yet (the password, then enrolment)
+— see
+[the recipe](../../packages/auth/README.md#what-required-means--and-password-plus-passkey-on-a-device-not-signed-in).
 
 `createAuthLifecycle({ signIn: { admit, settled } })` is the app's sign-in guard. `admit(attempt)`
 answers `{ refuse: { code } }` to refuse a sign-in — the client gets 403 `SignInRefusedError` with
@@ -1590,6 +1599,7 @@ full design.
 | `/_auth/session/renew/verify` | POST | Renewing key | Verify the assertion; answers exactly as `/_auth/login` |
 | `/_auth/password` | PUT | Required | Change password |
 | `/_auth/session` | GET | Required | Get session info |
+| `/_auth/channels` | GET | — | Which sign-in channels the app offers: `{ signup, passwordReset, deviceCode, deviceLink, passkeyLogin }` |
 | `/_auth/tokens` | POST | Required | Issue one-time token |
 | `/_auth/device/start` | POST | — | Begin device-code login: park a key, get the codes |
 | `/_auth/device/start/web` | POST | — | `device/start` for a browser behind the Next.js proxy, which supplies the key; shares its rate limit |

@@ -53,6 +53,7 @@ import { rateLimitPolicy } from '@spfn/core/middleware';
 import { byIpAndAccount, byIpAndTarget, byIpAndCaller } from '../../lib/rate-limit-keys';
 import { defineRouter, route } from '@spfn/core/route';
 import { deviceProvenance } from '../../lib/device-provenance';
+import { channelStates } from '../../lib/channels-config';
 import { authenticateForSignOut } from '../../middleware/authenticate-for-sign-out';
 import { deviceAuthLongPoll, DEVICE_AUTH_WAITED_MILLIS } from '../../middleware/device-auth-long-poll';
 import {
@@ -1017,6 +1018,19 @@ export const getAuthSession = route.get('/_auth/session')
 
         return await getAuthSessionService(userId);
     });
+
+/**
+ * GET /_auth/channels - Which sign-in channels this application offers
+ *
+ * One boolean per channel of `createAuthLifecycle({ channels })`, so a sign-in
+ * page draws only the doors that open — no passkey button that would answer
+ * 404 `CHANNEL_DISABLED`. Public, as `GET /_auth/oauth/providers` is: it is
+ * the application's configuration, the same for every caller, and says
+ * nothing about any account.
+ */
+export const getAuthChannels = route.get('/_auth/channels')
+    .skip(['auth'])
+    .handler(async () => channelStates());
 
 /**
  * POST /_auth/tokens - Issue a one-time token
