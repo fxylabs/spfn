@@ -61,6 +61,7 @@ import {
     revokeAllKeysService,
     rotateKeyService,
 } from '../../server/services/key.service';
+import type { PrincipalCredential } from '../../server/services/admission.service';
 
 const FINGERPRINT = 'a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90';
 
@@ -252,13 +253,15 @@ describe('revoking one key', () =>
 
 describe('revoking every key', () =>
 {
+    const CURRENT = { kind: 'deviceKey', keyId: 'current' } as const;
+
     it('spares the calling device by default — "sign out my other devices"', async () =>
     {
         keysRepository.revokeAllActiveByUserIdExcept.mockResolvedValue([row(), row({ keyId: 'key-2' })]);
 
         const result = await revokeAllKeysService({
             userId: 1,
-            currentKeyId: 'current',
+            credential: CURRENT,
             reason: 'Revoked by user',
         });
 
@@ -268,13 +271,45 @@ describe('revoking every key', () =>
         expect(keysRepository.revokeAllActiveByUserId).not.toHaveBeenCalled();
     });
 
+    // The key spared is the one the credential signs with (`signingKeyOf`),
+    // never a key id the request reports: an application profile's verifier
+    // reports one of its own choosing, which a device key can share.
+    it.each([
+        ['a one-time token spares the key that issued it', { kind: 'oneTimeToken', issuedByKeyId: 'issuer' }, 'issuer'],
+        ['an application profile spares no device key, even one with its key id', { kind: 'appProfile', profile: 'app', keyId: 'current' }, null],
+    ] as const)('%s', async (_name, credential, spared) =>
+    {
+        keysRepository.revokeAllActiveByUserIdExcept.mockResolvedValue([]);
+        keysRepository.revokeAllActiveByUserId.mockResolvedValue([row({ keyId: 'current' })]);
+
+        const result = await revokeAllKeysService({ userId: 1, credential: credential as PrincipalCredential, reason: 'Revoked by user' });
+
+        if (spared)
+        {
+            expect(keysRepository.revokeAllActiveByUserIdExcept).toHaveBeenCalledWith(1, spared, 'Revoked by user');
+            expect(keysRepository.revokeAllActiveByUserId).not.toHaveBeenCalled();
+        }
+        else
+        {
+            expect(keysRepository.revokeAllActiveByUserId).toHaveBeenCalledWith(1, 'Revoked by user');
+            expect(keysRepository.revokeAllActiveByUserIdExcept).not.toHaveBeenCalled();
+            expect(result).toEqual({ revokedCount: 1, currentKeyRevoked: false });
+        }
+    });
+
+    it('refuses a caller with neither a credential to spare by nor includeCurrent', async () =>
+    {
+        await expect(revokeAllKeysService({ userId: 1, reason: 'Revoked by user' })).rejects.toThrow(/credential is required/);
+        expect(keysRepository.revokeAllActiveByUserId).not.toHaveBeenCalled();
+    });
+
     it('includes the calling device when asked — the full sign-out', async () =>
     {
         keysRepository.revokeAllActiveByUserId.mockResolvedValue([row(), row(), row()]);
 
         const result = await revokeAllKeysService({
             userId: 1,
-            currentKeyId: 'current',
+            credential: CURRENT,
             includeCurrent: true,
             reason: 'Revoked by user',
         });
@@ -289,7 +324,7 @@ describe('revoking every key', () =>
 
         const result = await revokeAllKeysService({
             userId: 1,
-            currentKeyId: 'current',
+            credential: CURRENT,
             reason: 'Revoked by user',
         });
 
@@ -306,10 +341,10 @@ describe('revoking every key', () =>
         keysRepository.revokeAllActiveByUserIdExcept.mockResolvedValue([]);
         keysRepository.revokeAllActiveByUserId.mockResolvedValue([]);
 
-        await revokeAllKeysService({ userId: 1, currentKeyId: 'current', reason: 'Revoked by user' });
+        await revokeAllKeysService({ userId: 1, credential: CURRENT, reason: 'Revoked by user' });
         await revokeAllKeysService({
             userId: 1,
-            currentKeyId: 'current',
+            credential: CURRENT,
             includeCurrent: true,
             reason: 'Revoked by user',
         });
@@ -335,7 +370,7 @@ describe('revoking every key', () =>
 
         const result = await revokeAllKeysService({
             userId: 1,
-            currentKeyId: 'current',
+            credential: CURRENT,
             reason: 'Revoked by user',
         });
 

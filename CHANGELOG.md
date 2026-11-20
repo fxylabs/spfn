@@ -484,6 +484,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **@spfn/auth: `revoke-all` from an application profile no longer spares a device key that shares
+  the profile's key id (#372).** `POST /_auth/keys/revoke-all` spared whatever key id the request
+  reported (`getAuth(c).keyId`). For an application profile that is the id its verifier reports, and
+  `POST /_auth/login` takes a client-chosen `keyId`, so anyone able to sign in to the account could
+  register a device key under that id, and it survived the owner's "sign out everywhere" from the
+  profile. The key to spare is now the one the credential signs with (`signingKeyOf`), as on
+  `PUT /_auth/password`: a device key spares itself, a one-time token the key that issued it, a
+  profile no device key. `POST /_auth/logout` and `POST /_auth/keys/rotate` read the key the same
+  way, so a profile's logout no longer revokes a device key with its key id, and a profile's rotate
+  is refused (401, as for a key no longer live) instead of retiring that device key.
+  `revokeAllKeysService` takes the key to spare from `credential`: `currentKeyId` is gone, and
+  `credential` is required unless `includeCurrent: true`. `LogoutParams.keyId` and `RotateKeyParams.oldKeyId` accept `null` (revoke
+  nothing / refuse). **Migrate:** a direct `revokeAllKeysService` caller passes `credential`
+  (`getAuth(c).credential`) in place of `currentKeyId`.
 - **@spfn/core: a rolled-back transaction, a failed job and a failed request no longer log the
   failed query's bound values (#382).** drizzle's `Failed query: … params: …` message, its
   `params`, its stack header and the driver's `detail` reached the logs through the runner's

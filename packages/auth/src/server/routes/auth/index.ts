@@ -816,14 +816,16 @@ export const pollDeviceLink = route.post('/_auth/device/link/poll')
  * Revokes current key. Authenticated as any route is, and besides that a bound
  * session's key that has expired but is still inside its renewal grace
  * (`authenticateForSignOut`) — it is revoked like any other, rather than left
- * renewable by whoever holds that browser.
+ * renewable by whoever holds that browser. The key is the one the request
+ * signs with (`signingKeyOf`): an application profile holds none, so its
+ * logout revokes no device key, whatever key id its verifier reported.
  */
 export const logout = route.post('/_auth/logout')
     .use([authenticateForSignOut])
     .handler(async (c) =>
     {
-        const { keyId, userId } = getAuth(c);
-        await logoutService({ userId: Number(userId), keyId });
+        const { userId, credential } = getAuth(c);
+        await logoutService({ userId: Number(userId), keyId: signingKeyOf(credential) });
 
         return c.noContent();
     });
@@ -831,6 +833,11 @@ export const logout = route.post('/_auth/logout')
 /**
  * POST /_auth/keys/rotate - Rotate key
  * Replace current key with new one (requires authentication)
+ *
+ * The current key is the one the request signs with (`signingKeyOf`). An
+ * application profile holds none, so it has nothing to rotate and is refused
+ * as a key no longer live is — never by retiring a device key that carries the
+ * key id its verifier reported.
  */
 export const rotateKey = route.post('/_auth/keys/rotate')
     .interceptor({
@@ -847,11 +854,11 @@ export const rotateKey = route.post('/_auth/keys/rotate')
     .handler(async (c) =>
     {
         const { body } = await c.data();
-        const { keyId: oldKeyId, userId } = getAuth(c);
+        const { userId, credential } = getAuth(c);
 
         return await rotateKeyService({
             userId: Number(userId),
-            oldKeyId,
+            oldKeyId: signingKeyOf(credential),
             newKeyId: body.keyId,
             newPublicKey: body.publicKey,
             fingerprint: body.fingerprint,
@@ -928,7 +935,9 @@ export const revokeKey = route.post('/_auth/keys/revoke')
  *
  * Spares the calling device by default, so this is "sign out my other devices".
  * `includeCurrent: true` is the full sign-out. `PUT /_auth/password` follows
- * the same rule.
+ * the same rule. The calling device is the key the request signs with, never
+ * `getAuth(c).keyId`: an application profile holds no device key and spares
+ * none.
  */
 export const revokeAllKeys = route.post('/_auth/keys/revoke-all')
     .input({
@@ -942,11 +951,10 @@ export const revokeAllKeys = route.post('/_auth/keys/revoke-all')
     .handler(async (c) =>
     {
         const { body } = await c.data();
-        const { userId, keyId, credential } = getAuth(c);
+        const { userId, credential } = getAuth(c);
 
         return await revokeAllKeysService({
             userId: Number(userId),
-            currentKeyId: keyId,
             credential,
             includeCurrent: body.includeCurrent,
             reason: 'Revoked by user',

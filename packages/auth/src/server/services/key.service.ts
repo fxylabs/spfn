@@ -30,7 +30,7 @@ import {
 } from '../repositories';
 import { revokeAllOAuth2GrantsForUser } from './oauth2-grant.service';
 import { emitDeviceRegistered } from './device-registration.service';
-import { accountRefusal, admissionRefusalError, type AdmissionRefusal, type PrincipalCredential } from './admission.service';
+import { accountRefusal, admissionRefusalError, signingKeyOf, type AdmissionRefusal, type PrincipalCredential } from './admission.service';
 import {
     assertStepUp,
     carryStepUpVerification,
@@ -73,9 +73,10 @@ export type KeyReplacementClaim =
      * The request itself was signed by the old key — `keys/rotate`, and a
      * bound session's renewal. An old key no longer live refuses the
      * registration with `refusal` and writes nothing, so a rotation racing a
-     * revocation cannot leave a live key behind.
+     * revocation cannot leave a live key behind. Null — a request signed by
+     * no device key — is refused the same way.
      */
-    | { signedBy: string; reason: string; refusal: Error };
+    | { signedBy: string | null; reason: string; refusal: Error };
 
 export interface RegisterPublicKeyParams
 {
@@ -191,7 +192,11 @@ export function registeredBinding(result: RegisterPublicKeyResult): RegisteredKe
 export interface RotateKeyParams
 {
     userId: number;
-    oldKeyId: string;
+    /**
+     * The key the request signs with (`signingKeyOf`). Null — an application
+     * profile, which holds no device key — is refused as a key no longer live.
+     */
+    oldKeyId: string | null;
     newKeyId: string;
     newPublicKey: string;
     fingerprint: string;
@@ -224,21 +229,16 @@ export interface RevokeAllKeysParams
 {
     userId: number;
     /**
-     * The key the request itself is signed with — spared unless includeCurrent.
+     * The credential the request presented (`getAuth(c).credential`). It names
+     * the key to spare unless includeCurrent (`signingKeyOf`) — an application
+     * profile holds no device key, so it spares none, whatever key id its
+     * verifier reported — and its step-up window is what an enrolled account
+     * is asked for.
      *
-     * Optional because the two branches have different needs and always did: the
-     * sparing branch has to know what to spare, and the `includeCurrent` branch
-     * never reads it. The signed revoke-all link is the caller with no current
-     * key to name — it arrives with no session at all — and requiring a value it
-     * would have to invent is how a claim about a device that made no request
-     * gets into a result.
-     */
-    currentKeyId?: string;
-    /**
-     * The credential the request presented (`getAuth(c).credential`), whose
-     * step-up window an enrolled account is asked for. Absent where no
-     * session makes the call: the signed revoke-all link proved itself by a
-     * mailbox round trip, which is a credential this window cannot measure.
+     * Absent where no session makes the call: the signed revoke-all link
+     * proved itself by a mailbox round trip, which is a credential this window
+     * cannot measure, and has no key of its own to spare — so it passes
+     * `includeCurrent: true`, and without either there is nothing to decide by.
      */
     credential?: PrincipalCredential;
     /** true signs the caller out too. Default false: "my other devices". */
@@ -742,7 +742,8 @@ async function claimReplacement(params: RegisterPublicKeyParams): Promise<UserPu
 
     if ('signedBy' in claim)
     {
-        const replaced = await keysRepository.revokeForReplacement(claim.signedBy, params.userId, claim.reason, params.keyId);
+        const replaced = claim.signedBy
+            && await keysRepository.revokeForReplacement(claim.signedBy, params.userId, claim.reason, params.keyId);
 
         if (!replaced)
         {
@@ -1121,7 +1122,11 @@ export async function listKeysService(params: ListKeysParams): Promise<KeySummar
  * The caller's own key is spared by default, so "sign out my other devices"
  * does not also end the session making the request. Passing
  * `includeCurrent: true` is the full sign-out. A password change follows the
- * same rule (`changePasswordService`).
+ * same rule (`changePasswordService`), and finds the caller's key the same way:
+ * the key its credential signs with (`signingKeyOf`), never a key id the
+ * request reports. An application profile's verifier reports one of its own
+ * choosing, and a device key of the account can carry the same id — the login
+ * body names it — so a profile spares no device key.
  *
  * Live device authorizations are refused as well, in both modes. A device
  * waiting on an approved code has no key yet, so it is never the caller's own
@@ -1137,11 +1142,11 @@ export async function revokeAllKeysService(
     params: RevokeAllKeysParams,
 ): Promise<RevokeAllKeysResult>
 {
-    const { userId, currentKeyId, includeCurrent = false, reason } = params;
+    const { userId, credential, includeCurrent = false, reason } = params;
 
-    if (!includeCurrent && !currentKeyId)
+    if (!includeCurrent && !credential)
     {
-        throw new ValidationError({ message: 'currentKeyId is required unless includeCurrent is set' });
+        throw new ValidationError({ message: 'credential is required unless includeCurrent is set' });
     }
 
     return await runInTransaction(async () =>
@@ -1149,13 +1154,13 @@ export async function revokeAllKeysService(
         await usersRepository.lockAccount(userId);
 
         // Only when a session is making the call (see `credential`).
-        if (params.credential)
+        if (credential)
         {
-            await assertStepUp({ userId, credential: params.credential });
+            await assertStepUp({ userId, credential });
         }
 
         return {
-            revokedCount: await endEverySessionExcept(userId, includeCurrent ? null : currentKeyId ?? null, reason),
+            revokedCount: await endEverySessionExcept(userId, credential && !includeCurrent ? signingKeyOf(credential) : null, reason),
             currentKeyRevoked: includeCurrent,
         };
     }, { context: 'auth:revoke-all-keys' });

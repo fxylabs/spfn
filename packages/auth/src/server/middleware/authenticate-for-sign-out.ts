@@ -48,7 +48,7 @@ import { admitBearerKey, authenticate, authenticateBearer } from './authenticate
  * ```typescript
  * export const logout = route.post('/_auth/logout')
  *   .use([authenticateForSignOut])
- *   .handler(async (c) => logoutService({ userId: Number(getAuth(c).userId), keyId: getAuth(c).keyId }));
+ *   .handler(async (c) => logoutService({ userId: Number(getAuth(c).userId), keyId: signingKeyOf(getAuth(c).credential) }));
  * ```
  */
 export const authenticateForSignOut = defineMiddleware('authForSignOut', async (c, next) =>

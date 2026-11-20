@@ -124,7 +124,8 @@ import { loginBindingFields, type LoginResult } from './login-result';
 export interface LogoutParams
 {
     userId: number;
-    keyId: string;
+    /** The key the request signs with (`signingKeyOf`). Null — an application profile — revokes nothing. */
+    keyId: string | null;
 }
 
 export interface ChangePasswordParams
@@ -536,11 +537,14 @@ export async function logoutService(
 {
     const { userId, keyId } = params;
 
-    await revokeKeyService({
-        userId,
-        keyId,
-        reason: 'Revoked by logout',
-    });
+    if (keyId)
+    {
+        await revokeKeyService({
+            userId,
+            keyId,
+            reason: 'Revoked by logout',
+        });
+    }
 }
 
 /**
