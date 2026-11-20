@@ -503,16 +503,19 @@ function own(file: string, token: string, context: ResolveContext, nextResolve: 
 /**
  * An entry loaded with `require()` — `.spfnrc.ts`, which `loadCodegenConfig`
  * reads synchronously — is handed a stand-in: a module of the hooks' own,
- * named `<file>.spfn-esm` so that Node's handler rather than tsx's runs it,
+ * named `<file>.<token>.spfn-esm` so that Node's handler rather than tsx's runs it,
  * which imports the entry under the entry's own URL and re-exports it. The
  * entry is then an ES module Node imported, and its `import.meta.url`,
- * `filename` and `dirname` are those of the file.
+ * `filename` and `dirname` are those of the file. The token is in the name,
+ * not only in the query: `require()` keys what it loaded by file name, query
+ * dropped, so a stand-in named by the file alone would hand every later load
+ * the config the first one evaluated.
  */
 function requiredEntry(url: string, file: string, token: string): ResolveResult
 {
     const standIn = new URL(url);
 
-    standIn.pathname += REQUIRE_SUFFIX;
+    standIn.pathname += `.${token}${REQUIRE_SUFFIX}`;
     owned.set(standIn.href, { file, token, reexports: url });
 
     return { url: standIn.href, format: 'module', shortCircuit: true };

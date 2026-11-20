@@ -37,8 +37,9 @@
  * |    | one whose `/codegen` throws on import                        | and exit 0: a configured generator silently skipped       |
  * | R32| R23's second copy under `spfn build --server-only`, `spfn     | a codegen entry point that no longer marks its process:   |
  * |    | contract check` and the watcher entry `spfn dev` writes      | the refusal silently a warning there                      |
- * | R33| the watcher entry with a `.spfnrc.ts` that fails to load     | a watcher that exits while the server runs on, saying     |
- * |    |                                                              | nothing of regeneration being off until a restart         |
+ * | R33| the watcher entry with a `.spfnrc.ts` that fails to load,    | a watcher that exits on a broken config while the server  |
+ * |    | then fixed                                                   | runs on (regeneration off until a restart), or one that   |
+ * |    |                                                              | stays up silent, or never loads the fix                   |
  * | R34| the watcher entry with a generator held by a file gate: one   | an entry that exits mid-generation, or that ignores every |
  * |    | signal, then the gate opened; then two signals               | signal while a generation hangs (orphaned by spfn dev)    |
  * | R35| `spfn dev` with the watcher's generator held by a file gate: | a parent that exits before its watcher (orphaned, writing |
@@ -509,26 +510,29 @@ describe.each(TSX)('codegen in CLI processes, tsx $version', (tsx) =>
         }
     }, 60_000);
 
-    it('R33 the watcher entry, given a .spfnrc.ts that fails to load, exits 1 saying to fix it and restart spfn dev', () =>
+    it('R33 the watcher entry, given a .spfnrc.ts that fails to load, stays up saying regeneration is paused, and loads the fix', async () =>
     {
+        const good = readFileSync(join(appDir, '.spfnrc.ts'), 'utf8');
+
         write('.spfnrc.ts', 'export default __dirname;\n');
         write('.spfn/watcher.mjs', watcherEntrySource());
 
-        const loader = pathToFileURL(devLoader);
-        const env: NodeJS.ProcessEnv = { ...process.env, NODE_ENV: 'production' };
+        const watcher = startWatcher(tsx);
 
-        loader.searchParams.set('root', appDir);
-        delete env.SPFN_APP_URL;
-        delete env.NODE_OPTIONS;
+        try
+        {
+            await watcher.until(() => watcher.output().includes('Regeneration is paused; save a fix to retry.'));
+            expect(watcher.output()).toContain('✗ Codegen config failed to load: Failed to load .spfnrc.ts');
 
-        const result = spawnSync(process.execPath, [tsx.cli, '--import', loader.href, join(appDir, '.spfn/watcher.mjs')],
-            { cwd: appDir, env, encoding: 'utf8', timeout: 60_000 });
-        const output = plain(`${result.stdout}${result.stderr}`);
-
-        expect(result.status, output).toBe(1);
-        expect(output).toContain('Codegen watcher could not load the codegen config: Failed to load .spfnrc.ts');
-        expect(output).toContain('Route maps are not regenerated meanwhile: fix the config and restart spfn dev.');
-    });
+            write('.spfnrc.ts', good);
+            await watcher.until(() => routeMapPaths().includes('/probe/one'));
+            expect(watcher.output()).toContain('Codegen config loads again: 2 generator(s); regenerating');
+        }
+        finally
+        {
+            await watcher.stop();
+        }
+    }, 60_000);
 
     it('R15 .spfnrc.ts sees its own file in import.meta.url, filename and dirname', () =>
     {

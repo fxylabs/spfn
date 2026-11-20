@@ -176,6 +176,15 @@ installed for the app or for the spfn CLI. Install it in the app: pnpm add -D ts
 without it, as when the watcher fails to start. It is never run through `pnpm exec`/`npx`,
 which do not let `spfn dev` wait for it.
 
+The watcher loads the codegen config itself and loads it again when `.spfnrc.ts` (or
+`.spfnrc.json`, or the `spfn.codegen` key of `package.json`), a custom generator file, or a
+project file one of them imports changes: no restart is needed after editing the config. A
+config that fails to load — at start or after an edit — does not stop the watcher: it logs
+`✗ Codegen config failed to load: … Regeneration is paused; save a fix to retry.`, generates
+nothing until the config loads again, and regenerates everything once it does. A changed
+generator *package* (under `node_modules`, or a rebuilt workspace package) still needs a restart
+([@spfn/core codegen](../core/src/codegen/README.md#watch-mode)).
+
 On SIGINT or SIGTERM, `spfn dev` sends the server and Next.js SIGTERM, forwards the signal to
 the codegen watcher, and exits once the watcher has: the watcher finishes the generation it is
 running first. A second signal is forwarded too, and the watcher then exits at once, mid-generation

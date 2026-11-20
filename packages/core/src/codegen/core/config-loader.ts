@@ -4,14 +4,14 @@
  * Loads codegen configuration from .spfnrc.ts, .spfnrc.json or package.json
  */
 
-import { existsSync, readFileSync, realpathSync } from 'fs';
+import { existsSync, realpathSync } from 'fs';
 import { join, relative } from 'path';
 import type { Generator } from './generator';
 import { pinNodeEnv } from './node-env';
 import { logger } from '@spfn/core/logger';
 import { projectOrigin } from '../loader/errors';
 import { importPackageModule, importProjectModule, newGeneration, requireProjectModule, resolvePackageModule } from '../loader/register';
-import { reportInputs } from './inputs';
+import { ABSENT, readStamped, reportInputs, type Stamp } from './inputs';
 
 const configLogger = logger.child('@spfn/core:codegen-config');
 
@@ -125,6 +125,8 @@ function configFromRcTs(cwd: string): CodegenConfig | undefined
 
     if (!existsSync(rcTsPath))
     {
+        reportConfigFile(cwd, '.spfnrc.ts', ABSENT);
+
         return undefined;
     }
 
@@ -154,10 +156,12 @@ function configFromJson(cwd: string, name: string, select: (json: any) => unknow
 
     if (!existsSync(path))
     {
+        reportConfigFile(cwd, name, ABSENT);
+
         return undefined;
     }
 
-    const parsed = attempt(() => JSON.parse(readFileSync(path, 'utf-8')));
+    const parsed = attempt(() => parseReported(cwd, name));
 
     if (!parsed.ok)
     {
@@ -174,6 +178,27 @@ function configFromJson(cwd: string, name: string, select: (json: any) => unknow
     configLogger.info(`Loaded config from ${name}`);
 
     return config as CodegenConfig;
+}
+
+/** The JSON file `name` parsed, its read reported as the config's (`reportConfigFile`). */
+function parseReported(cwd: string, name: string): unknown
+{
+    const { source, stamp } = readStamped(join(cwd, name));
+
+    reportConfigFile(cwd, name, stamp);
+
+    return JSON.parse(source);
+}
+
+/**
+ * A config file the load consulted — read, or looked for and absent — reported
+ * to the inputs collector open around it, if any (`./inputs`), as the codegen
+ * loader reports `.spfnrc.ts` and what it imports: a watcher loads the config
+ * again when the file changes, appears or goes.
+ */
+function reportConfigFile(cwd: string, name: string, stamp: Stamp): void
+{
+    reportInputs(new Map([[join(realpathSync(cwd), name), stamp]]));
 }
 
 /**
@@ -193,6 +218,11 @@ function configFromJson(cwd: string, name: string, select: (json: any) => unknow
  * does not compile, a `.spfnrc.json` or `package.json` that is not JSON —
  * throws, naming the file and where it failed. Only when none of the three
  * declares a config is the default (no generators) returned.
+ *
+ * Every file it consulted — the one it read, with what that imports, and each
+ * higher-precedence file it found absent — goes to the inputs collector open
+ * around it, if any (`./inputs`): watch mode loads the config again when one
+ * of them changes (`OrchestratorOptions.loadGenerators`).
  */
 export function loadCodegenConfig(cwd: string): CodegenConfig
 {

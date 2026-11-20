@@ -53,7 +53,8 @@ function writeAgentInstructions(cwd: string, agentFiles: boolean): void
 
 /**
  * The codegen watcher's entry, `.spfn/watcher.mjs`: the generators of the
- * app's codegen config, run by an orchestrator in watch mode. Started under
+ * app's codegen config, run by an orchestrator in watch mode, which loads them
+ * again when the config changes (`loadGenerators`). Started under
  * tsx with the `spfn dev` hook (`devLoader`), as the server is.
  */
 export function watcherEntrySource(): string
@@ -80,20 +81,12 @@ markCodegenProcess();
 
 const cwd = process.cwd();
 
-// A config or generator that fails to load is reported, not read as "no
-// generators"; the dev server keeps running without the watcher, and the
-// watcher does not read the config again, so the message says to restart.
-const generators = await Promise.resolve()
-    .then(() => createGeneratorsFromConfig(loadCodegenConfig(cwd), cwd))
-    .catch((error) =>
-    {
-        console.error('[SPFN] Codegen watcher could not load the codegen config:', error instanceof Error ? error.message : error);
-        console.error('[SPFN] Route maps are not regenerated meanwhile: fix the config and restart spfn dev.');
-        process.exit(1);
-    });
-
+// The orchestrator loads the generators itself, and again whenever the config,
+// a custom generator or a project file they import changes. A config that
+// fails to load, at start or later, pauses regeneration and says so; the
+// watcher stays up and loads it again on the next save.
 const orchestrator = new CodegenOrchestrator({
-    generators,
+    loadGenerators: async () => createGeneratorsFromConfig(loadCodegenConfig(cwd), cwd),
     cwd,
     debug: true
 });

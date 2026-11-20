@@ -26,6 +26,14 @@
  * once they settle, and its outcome is held back at most once in a row
  * (`settleOutcome`).
  *
+ * Given `loadGenerators` rather than `generators`, the loop loads the
+ * generators itself, and what that load read — the codegen config, custom
+ * generator files, the project files they import — is an input too, compared
+ * by the same check. A change to one loads the generators again, in the loop,
+ * as new instances, and a successful load runs them all. A load that fails
+ * pauses regeneration: no generator runs, the old ones included, until a
+ * change to what the failing load read or looked for loads them again.
+ *
  * All of this state is the orchestrator's own: two orchestrators in one
  * process share nothing.
  */
@@ -41,6 +49,7 @@ import { InputWatcher } from './input-watcher';
 import { pinNodeEnv } from './node-env';
 import { logger } from '@spfn/core/logger';
 import { newGeneration } from '../loader/register';
+import { withEnvironment } from '../generators/environment-probe';
 
 const orchestratorLogger = logger.child('@spfn/core:orchestrator');
 
@@ -51,11 +60,39 @@ const orchestratorLogger = logger.child('@spfn/core:orchestrator');
  */
 const CHECK_ONLY_CYCLES = 3;
 
-export interface OrchestratorOptions
-{
-    /** List of generators to orchestrate */
-    generators: Generator[];
+/**
+ * The generators: a list, or how to load them. Watch mode loads them again
+ * when what the load read changes, so `loadGenerators` is what keeps a
+ * watcher in step with an edited codegen config.
+ */
+export type OrchestratorOptions = CommonOrchestratorOptions & (
+    | {
+        /** List of generators to orchestrate */
+        generators: Generator[];
+        loadGenerators?: never;
+    }
+    | {
+        generators?: never;
 
+        /**
+         * Load the generators — `createGeneratorsFromConfig(loadCodegenConfig(cwd), cwd)`
+         * — with every project file the load reads stamped (`./inputs`).
+         * `watch()` calls it before its initial generation, and again, in the
+         * loop, whenever one of those files changes, appears or goes: the
+         * generators are replaced by the new instances (the old ones are never
+         * called again), and all of them run. When it rejects, watch mode
+         * logs the failure and pauses — no generator runs — until a change to
+         * what the failing load read or looked for loads them. Packages are
+         * evaluated once per process and are not watched: a changed package
+         * generator needs a new process. Outside watch mode, `generateAll()`
+         * calls it before `watch()` has, and rejects with its failure.
+         */
+        loadGenerators: () => Promise<Generator[]>;
+    }
+);
+
+interface CommonOrchestratorOptions
+{
     /** Project root directory */
     cwd?: string;
 
@@ -117,13 +154,20 @@ const EVENT_ICONS: Record<ChangedFile['event'], string> = { add: '+', change: '~
 
 export class CodegenOrchestrator
 {
-    private readonly generators: Generator[];
+    private generators: Generator[];
+    private readonly loadGenerators?: () => Promise<Generator[]>;
     private readonly cwd: string;
     private readonly debug: boolean;
     private readonly throwOnError: boolean;
 
     /** What each generator's latest run read, by path relative to the project root. */
-    private readonly inputs = new Map<Generator, Inputs>();
+    private inputs = new Map<Generator, Inputs>();
+
+    /** What the latest `loadGenerators` call read, relative to the project root: a change to one loads the generators again. */
+    private configInputs: Inputs = new Map();
+
+    /** Why the latest `loadGenerators` call failed, while regeneration is paused for it. */
+    private configFailure?: Error;
 
     /** Paths changed since the generation that last read them, relative to the project root. */
     private dirty = new Map<string, Change>();
@@ -178,6 +222,9 @@ export class CodegenOrchestrator
     /** The request whose run the loop has taken from `requests` and not yet settled. */
     private runningRequest?: RunRequest;
     private watcher?: ReturnType<typeof chokidarWatch>;
+
+    /** The directories chokidar watches: the base directories of the generators' `watchPatterns`. */
+    private watchDirs: string[] = [];
     private warnedUnwatchable = false;
     private inputWatcher?: InputWatcher;
 
@@ -196,7 +243,8 @@ export class CodegenOrchestrator
     constructor(options: OrchestratorOptions)
     {
         pinNodeEnv();
-        this.generators = options.generators;
+        this.generators = options.generators ?? [];
+        this.loadGenerators = options.loadGenerators;
         this.cwd = options.cwd ?? process.cwd();
         this.debug = options.debug ?? false;
         this.throwOnError = options.throwOnError ?? false;
@@ -324,6 +372,11 @@ export class CodegenOrchestrator
             throw this.ended.error;
         }
 
+        if (this.loadGenerators !== undefined && this.loop === undefined)
+        {
+            this.generators = await withEnvironment(this.loadGenerators);
+        }
+
         const outcomes = await this.generate(this.startRuns(trigger), this.throwOnError);
         const failed = outcomes.find(outcome => outcome.failure !== undefined);
 
@@ -412,16 +465,18 @@ export class CodegenOrchestrator
     private async run(generator: Generator, options: GeneratorOptions, inLoop: boolean): Promise<Error | undefined>
     {
         const { inputs, failure } = await collectInputs(async () => (inLoop ? this.runInLoop(generator, options) : generator.generate(options)));
+
+        this.inputs.set(generator, this.fromRoot(inputs));
+
+        return failure === undefined ? undefined : asError(failure.error);
+    }
+
+    /** `inputs` by path relative to the project root. */
+    private fromRoot(inputs: Inputs): Inputs
+    {
         const root = this.root || realpathSync(this.cwd);
 
-        this.inputs.set(generator, new Map([...inputs].map(([file, stamp]) => [relative(root, file), stamp])));
-
-        if (failure === undefined)
-        {
-            return undefined;
-        }
-
-        return failure.error instanceof Error ? failure.error : new Error(String(failure.error));
+        return new Map([...inputs].map(([file, stamp]) => [relative(root, file), stamp]));
     }
 
     /** `generator.generate()` as the watch loop's call (`loopCall`): running until it settles. */
@@ -548,8 +603,12 @@ export class CodegenOrchestrator
     }
 
     /**
-     * Start watch mode: once chokidar has scanned the patterns' directories,
-     * the initial generation, then the loop. Resolves when `close()` is called.
+     * Start watch mode: the generators loaded (`loadGenerators`), once chokidar
+     * has scanned the patterns' directories the initial generation, then the
+     * loop. Resolves when `close()` is called. Without `loadGenerators`, and
+     * with no generator that has `watchPatterns`, runs one
+     * `generateAll('watch')` instead; with it, watches whatever the config
+     * names, none included.
      * Rejects when `close()` was called before, or when it watched already —
      * its loop running or ended, by `close()` or by an exception: an
      * orchestrator watches once. A loop that could not start (a `cwd` that
@@ -562,9 +621,7 @@ export class CodegenOrchestrator
             throw this.singleUse();
         }
 
-        const patterns = this.generators.flatMap(g => g.watchPatterns);
-
-        if (patterns.length === 0)
+        if (this.loadGenerators === undefined && this.patterns().length === 0)
         {
             await this.generateAll('watch');
             orchestratorLogger.warn('No watch patterns defined, exiting watch mode');
@@ -573,7 +630,7 @@ export class CodegenOrchestrator
         }
 
         this.busy = true;
-        this.loop = this.watchLoop(patterns);
+        this.loop = this.watchLoop();
         this.loop.then(() => this.endLoop({ reason: 'closed' }), (error: unknown) => this.endLoop({ reason: 'failed', error }));
 
         return this.loop;
@@ -598,17 +655,21 @@ export class CodegenOrchestrator
      * rejects `watch()`. Everything that can fail runs in here — resolving
      * `cwd` too — so a loop that failed to start has ended as any other has.
      */
-    private async watchLoop(patterns: string[]): Promise<void>
+    private async watchLoop(): Promise<void>
     {
         this.root = realpathSync(this.cwd);
+        this.inputWatcher = new InputWatcher(this.root, () => this.requestCheck());
 
-        const watchDirs = this.watchDirectories(patterns);
+        if (this.loadGenerators !== undefined)
+        {
+            await this.loadConfig();
+        }
 
-        await this.startWatching(watchDirs);
+        await this.startWatching();
 
         try
         {
-            await this.runLoop(watchDirs, patterns);
+            await this.runLoop();
         }
         finally
         {
@@ -617,16 +678,16 @@ export class CodegenOrchestrator
     }
 
     /** The initial generation, then a cycle per piece of work until the loop is closed. */
-    private async runLoop(watchDirs: string[], patterns: string[]): Promise<void>
+    private async runLoop(): Promise<void>
     {
         if (!this.closed)
         {
-            await this.watchGeneration(this.startRuns('watch'));
+            await this.watchGeneration(this.configFailure === undefined ? this.startRuns('watch') : []);
         }
 
         if (!this.closed)
         {
-            this.logWatching(watchDirs, patterns);
+            this.logWatching();
         }
 
         while (await this.nextWork())
@@ -647,16 +708,47 @@ export class CodegenOrchestrator
         this.withheld.clear();
     }
 
-    /** One directory per pattern, its part before `**`: "src/**\/*.ts" → "src". */
-    private watchDirectories(patterns: string[]): string[]
+    private patterns(): string[]
     {
-        return [...new Set(patterns.map(pattern => join(this.cwd, pattern.split('**')[0].replace(/\/$/, '') || '.')))];
+        return this.generators.flatMap(generator => generator.watchPatterns);
     }
 
-    /** chokidar on the patterns' directories, and the input watcher; resolves on chokidar's `ready`, or on `close()`. */
-    private startWatching(watchDirs: string[]): Promise<void>
+    /** One directory per pattern, its part before `**`: "src/**\/*.ts" → "src". */
+    private watchDirectories(): string[]
     {
-        this.inputWatcher = new InputWatcher(this.root, () => this.requestCheck());
+        return [...new Set(this.patterns().map(pattern => join(this.cwd, pattern.split('**')[0].replace(/\/$/, '') || '.')))];
+    }
+
+    /**
+     * chokidar on the patterns' directories — started anew when the
+     * generators, loaded again, name other ones — resolving on its `ready`, or
+     * on `close()`. A generation started after it reads every change made
+     * before `ready`; chokidar reports every one made after.
+     */
+    private async startWatching(): Promise<void>
+    {
+        const watchDirs = this.watchDirectories();
+
+        if (this.watcher !== undefined && watchDirs.join('\0') === this.watchDirs.join('\0'))
+        {
+            return;
+        }
+
+        await this.watcher?.close();
+        this.watcher = undefined;
+        this.watchDirs = watchDirs;
+
+        if (this.closed || watchDirs.length === 0)
+        {
+            return;
+        }
+
+        await this.chokidarReady(watchDirs);
+    }
+
+    /** chokidar on `watchDirs`; resolves on its `ready`, or on `close()`. */
+    private chokidarReady(watchDirs: string[]): Promise<void>
+    {
         this.watcher = chokidarWatch(watchDirs, {
             // Ignore dotfiles by path segments relative to cwd — matching the absolute
             // path would ignore everything when the checkout itself lives under a dot
@@ -809,7 +901,93 @@ export class CodegenOrchestrator
         const changes = this.dirty;
 
         this.dirty = new Map();
-        await this.regenerate(changes);
+        this.countCycle(changes);
+
+        if ([...changes.keys()].some(path => this.configInputs.has(path)))
+        {
+            await this.reload(changes);
+        }
+        else if (this.configFailure === undefined)
+        {
+            await this.regenerate(changes);
+        }
+
+        // Paused, a change to no input of the config runs nothing: there is no
+        // generator, and the load a fix starts runs them all.
+    }
+
+    /** Count the consecutive cycles the check alone started (`warnCheckOnly`). */
+    private countCycle(changes: Map<string, Change>): void
+    {
+        const checkOnly = [...changes.values()].every(change => change.foundBy === 'check');
+
+        this.checkOnlyCycles = checkOnly ? this.checkOnlyCycles + 1 : 0;
+        this.warnedCheckOnly &&= checkOnly;
+    }
+
+    /**
+     * An input of the codegen config changed: load the generators again, and
+     * on success watch their patterns and run them all, in one watch
+     * generation. On failure (`loadConfig` says so) no generator runs; the
+     * inputs of the failing load are armed and checked as after a generation.
+     */
+    private async reload(changes: Map<string, Change>): Promise<void>
+    {
+        const paused = this.configFailure !== undefined;
+        const changed = [...changes.keys()].filter(path => this.configInputs.has(path));
+
+        orchestratorLogger.info(`Codegen config changed (${changed.join(', ')}): reloading`);
+
+        if (!(await this.loadConfig()))
+        {
+            this.deferCheck(this.armAndCheck());
+
+            return;
+        }
+
+        const names = this.generators.map(generator => generator.name).join(', ');
+
+        orchestratorLogger.info(paused
+            ? `Codegen config loads again: ${this.generators.length} generator(s); regenerating`
+            : `Reloaded codegen config: ${this.generators.length} generator(s) (${names})`);
+        await this.startWatching();
+
+        if (!this.closed)
+        {
+            await this.watchGeneration(this.startRuns('watch'));
+        }
+    }
+
+    /**
+     * Load the generators (`loadGenerators`), holding the environment as a
+     * router load does, and keep what the load read as the config's inputs,
+     * whether it succeeded or not. They replace the generators — new
+     * instances, with nothing recorded of the old ones — or, when the load
+     * failed, none replace them: regeneration is paused, and said so once.
+     * Returns whether it loaded.
+     */
+    private async loadConfig(): Promise<boolean>
+    {
+        const load = this.loadGenerators!;
+        const loaded: Generator[] = [];
+        const { inputs, failure } = await collectInputs(async () =>
+        {
+            loaded.push(...await withEnvironment(load));
+        });
+
+        this.configInputs = this.fromRoot(inputs);
+        this.configFailure = failure === undefined ? undefined : asError(failure.error);
+        this.generators = loaded;
+        this.inputs = new Map();
+        this.rerun.clear();
+        this.withheld.clear();
+
+        if (this.configFailure !== undefined)
+        {
+            orchestratorLogger.error(`✗ Codegen config failed to load: ${this.configFailure.message} Regeneration is paused; save a fix to retry.`);
+        }
+
+        return this.configFailure === undefined;
     }
 
     /** A `generateAll()` made while watching: its run, as a watch generation, settling its promise. */
@@ -837,10 +1015,6 @@ export class CodegenOrchestrator
      */
     private async regenerate(changes: Map<string, Change>): Promise<void>
     {
-        const checkOnly = [...changes.values()].every(change => change.foundBy === 'check');
-
-        this.checkOnlyCycles = checkOnly ? this.checkOnlyCycles + 1 : 0;
-        this.warnedCheckOnly &&= checkOnly;
         [...changes]
             .filter(([, change]) => change.foundBy === 'event')
             .forEach(([path, { event }]) => orchestratorLogger.info(`File ${EVENT_ICONS[event]} ${path}`));
@@ -896,14 +1070,14 @@ export class CodegenOrchestrator
     }
 
     /**
-     * Watch the directories of the inputs the loop acts on (`actedOn`), then
-     * compare each with its stamp. `ran` are the generators of the generation
+     * Watch the directories of the inputs the loop acts on (`actedOn`) and of
+     * the codegen config's, then compare each with its stamp. `ran` are the generators of the generation
      * just run, if any. Returns every stale input, with how it changed; the
      * caller decides when it is dirty.
      */
     private armAndCheck(ran: Generator[] = []): Map<string, ChangedFile['event']>
     {
-        const compared = this.actedOn(ran);
+        const compared = [...this.actedOn(ran), this.configInputs];
 
         this.checkRequested = false;
         this.lateCheck = false;
@@ -989,7 +1163,9 @@ export class CodegenOrchestrator
 
     private readersOf(path: string): string[]
     {
-        return this.generators.filter(generator => this.inputs.get(generator)?.has(path)).map(generator => generator.name);
+        const readers = this.generators.filter(generator => this.inputs.get(generator)?.has(path)).map(generator => generator.name);
+
+        return this.configInputs.has(path) ? [...readers, 'the codegen config'] : readers;
     }
 
     private isIdle(): boolean
@@ -1005,8 +1181,10 @@ export class CodegenOrchestrator
         }
     }
 
-    private logWatching(watchDirs: string[], patterns: string[]): void
+    private logWatching(): void
     {
+        const watchDirs = this.watchDirs;
+
         orchestratorLogger.info('Watch mode started', {
             watching: watchDirs.length === 1 ? watchDirs[0] : `${watchDirs.length} directories`,
             generators: this.generators.filter(g => this.shouldRun(g, 'watch')).map(g => g.name).join(', '),
@@ -1014,7 +1192,7 @@ export class CodegenOrchestrator
 
         if (this.debug)
         {
-            orchestratorLogger.info('Watch mode details', { patterns, watchDirs, cwd: this.cwd });
+            orchestratorLogger.info('Watch mode details', { patterns: this.patterns(), watchDirs, cwd: this.cwd });
         }
     }
 }
@@ -1028,4 +1206,9 @@ function eventOf(existed: boolean, exists: boolean): ChangedFile['event']
     }
 
     return exists ? 'add' : 'unlink';
+}
+
+function asError(error: unknown): Error
+{
+    return error instanceof Error ? error : new Error(String(error));
 }

@@ -38,7 +38,9 @@ Functions:
 - `defineGenerator<T>(config: T): T` — identity helper that carries a generator config's
   type through to the array (so `name`/options are type-checked).
 - `loadCodegenConfig(cwd: string): CodegenConfig` — reads `.spfnrc.ts` → `.spfnrc.json` →
-  `package.json` (first hit wins). Returns `{ generators: [] }` if none found.
+  `package.json` (first hit wins). Returns `{ generators: [] }` if none found. Every file it
+  consulted — read, or looked for and absent — is an input of the load (see
+  [Watch mode](#watch-mode)); each call evaluates `.spfnrc.ts` and what it imports again.
 - `createGeneratorsFromConfig(config, cwd): Promise<Generator[]>` — resolves each config
   entry into a live `Generator` (imports packages natively and `.ts` files through the
   codegen loader — see [How the router is loaded](#how-the-router-is-loaded)).
@@ -287,8 +289,8 @@ load (`src/codegen/loader/`).
   torn, whether a `generateAll()` ran it while watching or before `watch()` — though they stay
   armed until the check after that run, so one edit there can wake a single check that runs
   nothing and then drops the watch.
-- **Start.** chokidar's first scan (`ready`), then the initial generation, then arm and
-  check. `Watch mode started` is logged once changes are seen from then on.
+- **Start.** The generators loaded (with `loadGenerators`), chokidar's first scan (`ready`),
+  then the initial generation, then arm and check. A reload follows the same order. `Watch mode started` is logged once changes are seen from then on.
 - **`No generators matched this file`** (debug) is logged only when no generator matched a
   cycle's changes. A cycle in which every matched generator failed ends with their `✗` lines.
 - **Repeated late changes.** After 3 consecutive cycles that only the check after a generation
@@ -330,6 +332,30 @@ load (`src/codegen/loader/`).
   pattern directory, `Cannot watch <dir> for <inputs>` for an input's — and never fails a
   generation.
 - **State is per orchestrator.** Two orchestrators in one process share no watch state.
+- **The codegen config is an input too** (`loadGenerators`, as the `spfn dev` watcher runs it).
+  What loading the generators read is stamped like any load: `.spfnrc.ts` and the project files
+  it imports, each custom generator file and what it imports, the `.spfnrc.json` or
+  `package.json` the config was read from, and each higher-precedence config file found absent (a
+  `.spfnrc.ts` created beside a `.spfnrc.json` is a change). The check after every generation
+  compares them with the generators' inputs, and their directories are watched the same way. A
+  change to one loads the generators again, inside the loop, between two generations:
+  `Codegen config changed (.spfnrc.ts): reloading`. The load evaluates the config, the custom
+  generators and their project imports again; packages are evaluated once per process and not
+  watched, so a package generator's factory is called again with the new options, but a changed
+  package — under `node_modules`, or a rebuilt workspace `dist` — needs a restart. The old
+  generator instances are never called again: state kept in a factory closure starts over. A
+  successful load logs `Reloaded codegen config: 2 generator(s) (@spfn/core:route-map,
+  @spfn/core:contract)`, watches the new generators' patterns, and runs them all in one
+  generation; a removed generator's inputs are no longer watched, and its outputs stay on disk.
+- **A config that fails to load pauses regeneration.** At start or on a reload, the error is
+  logged once — `✗ Codegen config failed to load: Failed to load .spfnrc.ts (at .spfnrc.ts:4:1):
+  … Regeneration is paused; save a fix to retry.` — and no generator runs, the previously loaded
+  ones included: their outputs would describe a config that is no longer the one on disk. The
+  watcher stays up, watching what the failing load read and every path it looked for and did not
+  find (so creating a missing import is a fix), and loads again on the next change to one of
+  them: `Codegen config loads again: 2 generator(s); regenerating`. A change to any other file
+  while paused runs nothing; the load that a fix starts runs every generator. `spfn codegen run`
+  and `spfn build` still fail the run on a config that does not load.
 
 **Not watched** — restart `spfn dev` (or save a watched file) after changing:
 
@@ -339,8 +365,8 @@ load (`src/codegen/loader/`).
 - Packages: anything under `node_modules`, and a workspace package's source or rebuilt
   `dist` — packages are evaluated once per process. A tsconfig `extends` target in a package
   is one of them.
-- The codegen config (`.spfnrc.ts`, `.spfnrc.json`, the `spfn.codegen` key of `package.json`)
-  and custom generator files: read once when `spfn dev` starts.
+- A package generator's package (see above): its factory is called again on a reload, its
+  module is not evaluated again.
 
 ## Built-in: `@spfn/core:route-map`
 
@@ -727,6 +753,9 @@ const generators = await createGeneratorsFromConfig(config, cwd);
 
 const orchestrator = new CodegenOrchestrator({ generators, cwd, debug: true });
 
+// Or let it load them, and load them again in watch mode when the config changes:
+// new CodegenOrchestrator({ loadGenerators: async () => createGeneratorsFromConfig(loadCodegenConfig(cwd), cwd), cwd });
+
 // Run once. Trigger defaults to 'manual'; only generators whose runOn includes it execute.
 await orchestrator.generateAll();            // 'manual'
 await orchestrator.generateAll('build');     // what `spfn build` dispatches
@@ -742,14 +771,22 @@ await orchestrator.close();
 ### `OrchestratorOptions`
 
 ```typescript
-interface OrchestratorOptions
-{
-    generators: Generator[];
+type OrchestratorOptions = {
     cwd?: string;          // default: process.cwd()
     debug?: boolean;       // default: false
     throwOnError?: boolean; // default: false
-}
+} & (
+    | { generators: Generator[] }
+    | { loadGenerators: () => Promise<Generator[]> }
+);
 ```
+
+`generators` are run as given, for the orchestrator's whole life. `loadGenerators` is how the
+`spfn dev` watcher builds its orchestrator: `watch()` calls it before the initial generation and
+again whenever what it read changes, and pauses regeneration while it fails (see
+[Watch mode](#watch-mode)); with it, `watch()` watches whatever the config names, no generator
+included. Outside watch mode, `generateAll()` calls it first when `watch()` has not, and rejects
+with its failure. A `generateAll()` while watching with regeneration paused runs no generator.
 
 `throwOnError` decides what a generator failure does. Off — the default — it is logged and the
 run continues, which is what keeps watch mode alive through a half-edited file. `spfn build`
@@ -866,6 +903,11 @@ watcher took several changes into one run — and fall back to full regeneration
 set (the initial watch pass and build/manual passes set neither). A run's changes are the files
 matching the generator's `watchPatterns` and the files its previous run read that changed
 since (see [Watch mode](#watch-mode)).
+
+When the codegen config, a custom generator file or a project file they import changes, the
+`spfn dev` watcher loads the generators again and creates new instances: a factory's closure
+starts over, the old instance is never called again, and the new one's first run has no
+`changedFile` (it is a full regeneration).
 
 ---
 
