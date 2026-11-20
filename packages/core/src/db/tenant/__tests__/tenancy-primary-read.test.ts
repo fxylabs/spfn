@@ -79,6 +79,11 @@ class MemoReader extends BaseRepository
         return (await this._findMany(memos, { ...options, where: { tenantId: 7 } })).length;
     }
 
+    async findManyKeyset(options?: ReadOptions)
+    {
+        return (await this._findManyKeyset(memos, { ...options, cursorColumn: memos.id, limit: 10, where: { tenantId: 7 } })).length;
+    }
+
     count(options?: ReadOptions)
     {
         return this._count(memos, { tenantId: 7 }, options);
@@ -109,6 +114,7 @@ const READS = [
 const BASE_READS = [
     { helper: '_findOne', read: memoReader.findOne.bind(memoReader), rows: 1 },
     { helper: '_findMany', read: memoReader.findMany.bind(memoReader), rows: 2 },
+    { helper: '_findManyKeyset', read: memoReader.findManyKeyset.bind(memoReader), rows: 2 },
     { helper: '_count', read: memoReader.count.bind(memoReader), rows: 2 },
 ];
 

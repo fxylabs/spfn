@@ -18,10 +18,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and a third argument to `_select` / `_selectOfUser` (`(id, fields?, options?)`). A tenancy-table
   read still runs as a short read-only transaction with the tenant set, now on the write
   connection, and the guard's tenant check still applies. `BaseRepository`: `_findOne(table,
-  where, options?)`, `_findMany` and `_count` take it too. Without the option a read outside a
-  transaction still goes to the replica; inside a transaction the option changes nothing. The
-  README's and the multi-tenancy guide's `isMember` (the guard's `authorize`) now read the primary
-  (spfn/spfn#169).
+  where, options?)`, `_findMany`, `_findManyKeyset` and `_count` take it too — every read helper of
+  both classes. Without the option a read outside a transaction still goes to the replica; inside
+  a transaction the option changes nothing. The README's and the multi-tenancy guide's `isMember`
+  (the guard's `authorize`) now read the primary (spfn/spfn#169).
 - **@spfn/core: `describeError(error)` from `@spfn/core/logger`** (and the `ErrorDescription` /
   `DatabaseErrorDescription` types): the one loggable form of a caught error. A database error is
   described by its SQLSTATE, constraint, schema, table, column, routine, the SQL with its `$n`

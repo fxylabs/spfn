@@ -230,11 +230,14 @@ export abstract class BaseRepository<
      *     after: page1.at(-1)?.id,
      *     limit: 20,
      * });
+     *
+     * // Must see a write made a moment ago: the replica can lag
+     * const fresh = await this._findManyKeyset(users, { cursorColumn: users.id, limit: 20, primary: true });
      * ```
      */
     protected async _findManyKeyset<T extends PgTable>(
         table: T,
-        options: {
+        options: ReadOptions & {
             cursorColumn: PgColumn;
             limit: number;
             after?: string | number | bigint | Date;
@@ -261,7 +264,7 @@ export abstract class BaseRepository<
             ? and(baseWhere, cursorPredicate)
             : (cursorPredicate ?? baseWhere);
 
-        let query = this.readDb.select().from(table as any);
+        let query = this.readDatabase(options).select().from(table as any);
 
         if (whereClause)
         {

@@ -258,7 +258,7 @@ inside repository methods.
 |--------|---------|
 | `_findOne(table, where, { primary? })` | `T \| null` |
 | `_findMany(table, { …, primary? })` | `T[]` |
-| `_findManyKeyset(table, { cursorColumn, limit, after?, order?, where? })` | `T[]` |
+| `_findManyKeyset(table, { cursorColumn, limit, after?, order?, where?, primary? })` | `T[]` |
 | `_create(table, data)` | `T` |
 | `_createMany(table, data[])` | `T[]` |
 | `_upsert(table, data, { target, set? })` | `T` |
@@ -285,9 +285,9 @@ instance. Use `readDb` for SELECT, `db` for INSERT/UPDATE/DELETE. The `_`-helper
 this (`_findOne`/`_findMany`/`_findManyKeyset`/`_count` use `readDb`; writes use `db`).
 
 A replica can lag behind the primary. A read that must see a write made a moment ago — by this
-request or another — passes `{ primary: true }` to `_findOne`, `_findMany` or `_count`, or runs
-inside a transaction; a transaction runs on the primary, and inside one the option changes
-nothing.
+request or another — passes `{ primary: true }` to `_findOne`, `_findMany`, `_findManyKeyset` or
+`_count`, or runs inside a transaction; a transaction runs on the primary, and inside one the
+option changes nothing.
 
 ```typescript
 // Just written by another request: the replica may not have it yet
