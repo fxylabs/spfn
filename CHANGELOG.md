@@ -240,6 +240,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   names each row and the folder stamp or hash that would match it: restore that folder, or delete
   the row after confirming its SQL is applied; for the journal layout, run `drizzle-kit up`. Then
   check `spfn db status`. Function package migrations keep #357's rule.
+- **BREAKING: spfn: the Kit's `db-status` gate fails on a migration status it could not read, and
+  `spfn db status --json` answers `"permission-denied"` for a permission error (#405).** The gate
+  passed whenever the status carried no pending names, which an unread status never does: with no
+  `DATABASE_URL` (`not-configured`), an unreachable database, or a role the database refused, it
+  passed without reading anything. It now fails, naming why (`the migration status could not be
+  read: not-configured`). Who meets it: `spfn kit restore` on a checkout with no `DATABASE_URL` — a
+  fresh clone, a CI job — when the release manifest lists `db-status` (`install` and `update`
+  already wait for a database before their gates); configure the database first, or resume once
+  it is. `spfn db status --json` reported a
+  permission error (SQLSTATE 42501, typically the app role without a grant on schema `drizzle`)
+  as `reachable: false, reason: "unreachable"`; it now reports `reason: "permission-denied"` with
+  PostgreSQL's message in `detail`. A reader that branches on `reason` and treated `"unreachable"`
+  as "wait and retry" meets the new value; one that stops on `reachable: false` is unaffected.
 - **BREAKING: @spfn/core: `filterPendingEntries` is no longer exported from `@spfn/core/db`
   (#357).** It was the shared "name OR timestamp" filter; function packages now go through
   `pendingFunctionMigrations`, and the project target's rule (unchanged here, #370) is private to
