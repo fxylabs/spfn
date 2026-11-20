@@ -82,38 +82,66 @@ import { existsSync, readFileSync } from 'node:fs';
 import { constants } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { CodegenOrchestrator, loadCodegenConfig, createGeneratorsFromConfig, markCodegenProcess } from '@spfn/core/codegen';
 
-// The version of the @spfn/core installed for the app, from the package.json
-// above its codegen entry.
+// The @spfn/core installed for the app: the package.json of the
+// node_modules/@spfn/core nearest this entry, where its import resolves.
 const installedCoreVersion = () =>
 {
-    let directory = dirname(fileURLToPath(import.meta.resolve('@spfn/core/codegen')));
+    let directory = dirname(fileURLToPath(import.meta.url));
 
     while (dirname(directory) !== directory)
     {
-        const file = join(directory, 'package.json');
-        const manifest = existsSync(file) ? JSON.parse(readFileSync(file, 'utf8')) : undefined;
+        const file = join(directory, 'node_modules/@spfn/core/package.json');
 
-        if (manifest?.name === '@spfn/core')
+        if (existsSync(file))
         {
-            return manifest.version;
+            return JSON.parse(readFileSync(file, 'utf8')).version;
         }
 
         directory = dirname(directory);
     }
 
-    return 'of unknown version';
+    return undefined;
 };
 
-// A core older than ${CORE_LOADING_GENERATORS} ignores loadGenerators and fails with a
-// TypeError on the generator list it never got: stop, saying which core is
-// installed, instead.
-if (CodegenOrchestrator.loadsGenerators !== true)
+// The error resolving '@spfn/core/codegen' itself, if any.
+const codegenResolutionError = () =>
 {
-    console.error(\`[SPFN] Codegen watcher not started: @spfn/core \${installedCoreVersion()} is installed, and the spfn dev watcher needs @spfn/core ${CORE_LOADING_GENERATORS} or later. Update @spfn/core.\`);
+    try
+    {
+        import.meta.resolve('@spfn/core/codegen');
+        return undefined;
+    }
+    catch (error)
+    {
+        return error;
+    }
+};
+
+// A core that cannot load the generators itself — no './codegen' to resolve,
+// no CodegenOrchestrator, or one without loadsGenerators, which ignores
+// loadGenerators and fails on the generator list it never got — stops the
+// watcher with one message, naming the core installed and the first that loads
+// them (${CORE_LOADING_GENERATORS} or later). Any other failure (no core at all, a core broken in its own code
+// or dependencies) is not an old core and surfaces as its own error.
+const resolutionError = codegenResolutionError();
+const unresolvableCore = ['ERR_PACKAGE_PATH_NOT_EXPORTED', 'ERR_MODULE_NOT_FOUND'].includes(resolutionError?.code)
+    && installedCoreVersion() !== undefined;
+
+if (resolutionError !== undefined && !unresolvableCore)
+{
+    throw resolutionError;
+}
+
+const codegen = unresolvableCore ? {} : await import('@spfn/core/codegen');
+
+if (codegen.CodegenOrchestrator?.loadsGenerators !== true)
+{
+    console.error(\`[SPFN] Codegen watcher not started: @spfn/core \${installedCoreVersion() ?? 'of unknown version'} is installed, and the spfn dev watcher needs @spfn/core ${CORE_LOADING_GENERATORS} or later. Update @spfn/core.\`);
     process.exit(1);
 }
+
+const { CodegenOrchestrator, loadCodegenConfig, createGeneratorsFromConfig, markCodegenProcess } = codegen;
 
 // Started by the spfn CLI to generate code: a second copy of @spfn/core after a
 // router load is refused, not only warned about. In-process, so nothing
