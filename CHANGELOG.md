@@ -308,6 +308,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     error's text when it has none, and carry the error under `context.error`. Database connection creation and provider close keep the error
     as their second argument — the caught value itself, not an Error made from its text.
   - A failed job's `output`: see its entry above.
+- **BREAKING: @spfn/auth: the OAuth error redirect carries a typed error's text, and a fixed
+  sentence for any other error (#382).** A sign-in callback that failed on anything but a
+  `SerializableError` meant for the client (not marked `internal`) put the error's message into the
+  redirect's `error` parameter — for a failed statement its SQL and every bound value, in the
+  browser's address bar and the app's access logs. The parameter is now `OAuth callback failed`
+  (`OAuth link failed` when the link state could not be read); `reason` is unchanged (`failed`), and
+  typed errors keep their text and their reason. A missing role (`Default user role not found…`)
+  is one of those errors: its page now shows the fixed sentence, its text stays in the server log.
+  `oauthFailureUrl(error, fallback)` from `@spfn/auth/server` builds that redirect beside
+  `buildOAuthErrorUrl`.
+- **BREAKING: @spfn/auth: log lines hand the caught error to core's logger (#382).** The context
+  key `reason` (Kakao and Naver user-info lookup, id_token verification) is now `error`, and with
+  the session-info, session and pending-session validation, OAuth provider call, Next.js OAuth
+  callback and admin-account create lines it holds the error's description, not its message. The
+  passkey boot line ("…so boot continues.") moves the error's text from the message to
+  `context.error`. Not changed here: the info-level "API access" line of
+  `@spfn/auth:middleware` logs the account's `email` on every authenticated request
+  (`authenticate.ts`, `auth-profiles.ts`).
+- **BREAKING: @spfn/monitor: groups, events and the Slack message hold the error's description, and
+  the fingerprint is the fault, not the message (#382).** `error_groups.message` stored the error's
+  message and `error_events.stack_trace` its stack, the Slack message sent both, and the group was
+  fingerprinted on the message: a failed statement's SQL and bound values were stored, sent, and
+  split one fault into a group per value. Now:
+  - `generateFingerprint(description, path)` (was `(name, message, path)`) hashes the route path,
+    each link of the cause chain by its name, code, constraint and table, and the top three stack
+    frames without their line and column.
+  - `error_groups.name` is the description's name, `error_groups.message` one line naming the fault
+    (`Name [code=…] [constraint=…] [table=…]: message`, per link of the cause chain, the message only
+    where the description kept one).
+  - `error_events.stack_trace` is the description as indented JSON.
+  - The Slack message carries the group's line and the description's top three frames.
+
+  Existing rows are not migrated. New events of a fault tracked before this release open a new group
+  once (its fingerprint changed); the old group keeps its count and stops growing.
+- **BREAKING: @spfn/workflow: a failed step's `error` is the error's description as JSON text
+  (#382).** `executions.error`, `step_executions.error` and the `error` of the `step.failed` and
+  `failed` events held the error's message — for a failed statement its SQL and bound values. They
+  now hold `JSON.stringify(describeError(error, { stack: false }))`; no schema change. The default
+  logger (`defaultLogger`) is core's logger as `@spfn/workflow`, not the console, which printed the
+  error object whole; the engine hands a caught error to any logger as `{ error }` (was the error as
+  the second argument), and its messages lose their trailing colon.
+- **BREAKING: @spfn/notification: the error Slack message and a failed send guard's row hold the
+  error's description (#382).** `createErrorSlackNotifier`'s default message quoted the error's
+  message and the lines after its stack header; it now quotes the description's safe fields (name,
+  a database error's code, constraint and table, a kept message, per link of the cause chain) and
+  its top frames. A scheduled notification whose send guard throws stores
+  `Send guard <name> failed: <description as JSON>` in `error_message`, not the error's message.
+- **@spfn/auth, @spfn/monitor, @spfn/workflow, @spfn/notification need the `@spfn/core` that
+  exports `describeError` (#382).** Their peer range (`>=0.4.0-beta.1`) still admits 0.4.0-beta.1,
+  which does not; release them together with core.
 - **BREAKING (behaviour, under `secondFactor.required: true` only): @spfn/auth: a user-verified
   passkey registration is marked as a second factor whenever the policy requires one (#399).**
   `passkeys/register/verify` marked only in the enrolment-only state, so a spare passkey added by an
