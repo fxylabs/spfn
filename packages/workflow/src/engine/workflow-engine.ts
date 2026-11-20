@@ -6,6 +6,7 @@
 
 import { eq, and, desc, inArray } from 'drizzle-orm';
 import { Value } from '@sinclair/typebox/value';
+import { describeError } from '@spfn/core/logger';
 import { assertSafeUrl, SsrfBlockedError } from '@spfn/core/security';
 
 /** URL schemes never legitimate for a storage $ref — classic SSRF/LFI vectors. */
@@ -34,6 +35,16 @@ import {
  * Default large output threshold (1MB)
  */
 const DEFAULT_LARGE_OUTPUT_THRESHOLD = 1024 * 1024;
+
+/**
+ * What the `error` columns and the failure events hold for a failed step:
+ * the error's description as JSON text, without its stack frames (#382).
+ * Its message would carry a failed statement's SQL and bound values.
+ */
+function storedError(error: unknown): string
+{
+    return JSON.stringify(describeError(error, { stack: false }));
+}
 
 /**
  * Internal workflow engine implementation
@@ -145,7 +156,7 @@ implements WorkflowEngine<TWorkflows>
         this.executeNextStep(execution.id, workflow, input as Record<string, unknown>)
             .catch((error) =>
             {
-                this.logger.error(`[Workflow:${name}] Execution error:`, error);
+                this.logger.error(`[Workflow:${name}] Execution error`, { error });
             });
 
         return {
@@ -248,7 +259,7 @@ implements WorkflowEngine<TWorkflows>
     /**
      * Execute a single step
      *
-     * Returns the error message if the step failed, or null if successful.
+     * Returns the stored error (`storedError`) if the step failed, or null if successful.
      */
     private async executeStep(
         executionId: string,
@@ -316,7 +327,7 @@ implements WorkflowEngine<TWorkflows>
         }
         catch (error)
         {
-            const errorMessage = error instanceof Error ? error.message : String(error);
+            const errorMessage = storedError(error);
 
             // Update step as failed
             await this.updateStepStatus(stepExecution.id, 'failed', undefined, errorMessage);
@@ -407,8 +418,8 @@ implements WorkflowEngine<TWorkflows>
             {
                 // Log but continue with other compensations
                 this.logger.error(
-                    `[Workflow:${workflow.name}] Compensate error for step ${stepExecution.stepName}:`,
-                    compensateError,
+                    `[Workflow:${workflow.name}] Compensate error for step ${stepExecution.stepName}`,
+                    { error: compensateError },
                 );
             }
         }
@@ -640,7 +651,7 @@ implements WorkflowEngine<TWorkflows>
                 }
                 catch (error)
                 {
-                    this.logger.error('[WorkflowEngine] Subscriber error:', error);
+                    this.logger.error('[WorkflowEngine] Subscriber error', { error });
                 }
             }
 
@@ -655,7 +666,7 @@ implements WorkflowEngine<TWorkflows>
         // Send notifications (async, don't block)
         this.sendNotifications(event).catch((error) =>
         {
-            this.logger.error('[WorkflowEngine] Notification error:', error);
+            this.logger.error('[WorkflowEngine] Notification error', { error });
         });
     }
 
@@ -694,10 +705,7 @@ implements WorkflowEngine<TWorkflows>
                     }
                     catch (error)
                     {
-                        this.logger.error(
-                            `[WorkflowEngine] Notification provider '${provider.name}' error:`,
-                            error,
-                        );
+                        this.logger.error(`[WorkflowEngine] Notification provider '${provider.name}' error`, { error });
                     }
                 }),
             );
@@ -853,7 +861,7 @@ implements WorkflowEngine<TWorkflows>
             )
                 .catch((error) =>
                 {
-                    this.logger.error(`[Workflow:${workflow.name}] Retry error:`, error);
+                    this.logger.error(`[Workflow:${workflow.name}] Retry error`, { error });
                 })
                 .finally(() =>
                 {

@@ -26,7 +26,7 @@ export interface WorkflowRouterConfig
     storage?: OutputStorage;
 
     /**
-     * Custom logger (optional, defaults to console)
+     * Custom logger (optional, defaults to core's logger as `@spfn/workflow`)
      */
     logger?: WorkflowLogger;
 
