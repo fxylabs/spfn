@@ -15,10 +15,10 @@
 
 import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest';
 import { Hono } from 'hono';
-import postgres from 'postgres';
 import { pgTable, serial, text } from 'drizzle-orm/pg-core';
 import { Logger } from '@spfn/core/logger';
 import { createDbTestFixture } from '../../__tests__/helpers/db-fixture';
+import { getWriteClient } from '../../manager/global-state';
 import { describeError } from '../../../logger/error-description';
 import { BOUND_VALUES, captureLoggerClass, expectNoValues } from '../../../logger/__tests__/helpers/leak-probe';
 import { getTransaction } from '../context';
@@ -129,8 +129,9 @@ describe('a rolled-back transaction logs its error without the bound values', ()
         ctx.skip(!dbFixture.isAvailable, 'no database');
         const { lines, output } = captureLoggerClass(Logger);
 
-        // postgres.js unwrapped, as an app that owns its client gets it: Transactional() converts it
-        const client = postgres(process.env.TEST_DATABASE_URL!, { max: 1 });
+        // postgres.js unwrapped, as an app that owns its client gets it: Transactional() converts it.
+        // The fixture's own postgres.js client: the suite's one connection, whatever URL the run was given
+        const client = getWriteClient()!;
         const app = (includeStack: boolean): Hono =>
         {
             const hono = new Hono();
@@ -145,33 +146,35 @@ describe('a rolled-back transaction logs its error without the bound values', ()
             return hono;
         };
 
-        try
+        const production = await (await app(false).request('/x')).text();
+        const development = await (await app(true).request('/x')).text();
+        await new Promise(resolve => setTimeout(resolve, 0));
+
+        expect(JSON.parse(production)).toMatchObject({ __type: 'QueryError', message: 'Internal server error' });
+        expect(JSON.parse(development)).toMatchObject({ __type: 'QueryError', message: 'Invalid input value', details: { code: '22P02' } });
+        expectNoValues(production);
+        expectNoValues(development);
+
+        const handled = lines.filter(line => line.message === 'Error occurred');
+        // Hono calls onError at each middleware frame the error passes: more than one line per request
+        expect(handled.length).toBeGreaterThan(0);
+        expect(handled.every(line => line.level === 'error')).toBe(true);
+        // each request's converted line is the cast's 22P02: the production body hides the code, so a
+        // production request failing otherwise (a refused connection) shows only here. With includeStack
+        // the error is the line's own, without it the context's
+        const converted = handled
+            .map(line => (line.error ?? line.context?.error) as { name: string } | undefined)
+            .filter(error => error?.name === 'QueryError');
+        expect(converted).toHaveLength(2);
+        for (const error of converted)
         {
-            const production = await (await app(false).request('/x')).text();
-            const development = await (await app(true).request('/x')).text();
-            await new Promise(resolve => setTimeout(resolve, 0));
-
-            expect(JSON.parse(production)).toMatchObject({ __type: 'QueryError', message: 'Internal server error' });
-            expect(JSON.parse(development)).toMatchObject({ __type: 'QueryError', message: 'Invalid input value', details: { code: '22P02' } });
-            expectNoValues(production);
-            expectNoValues(development);
-
-            const handled = lines.filter(line => line.message === 'Error occurred');
-            // Hono calls onError at each middleware frame the error passes: more than one line per request
-            expect(handled.length).toBeGreaterThan(0);
-            expect(handled.every(line => line.level === 'error')).toBe(true);
-            const converted = handled.find(line => (line.context!.error as { name: string }).name === 'QueryError')!;
-            expect(converted.context!.error).toMatchObject({
+            expect(error).toMatchObject({
                 name: 'QueryError',
                 message: 'Invalid input value',
                 cause: { kind: 'database', code: '22P02', routine: expect.any(String) },
             });
-            expect(converted.context!.error).not.toHaveProperty('cause.message');
-            expectNoValues(output());
+            expect(error).not.toHaveProperty('cause.message');
         }
-        finally
-        {
-            await client.end();
-        }
+        expectNoValues(output());
     });
 });
