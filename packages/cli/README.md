@@ -118,7 +118,9 @@ and bun, they run through `npx --yes`. create asks yarn with `yarn dlx --help` i
 yarn 1's `yarn run v1.` banner means no `dlx`, exit 0 with the `yarn dlx <command>` usage means
 `dlx`, and no `yarn` on PATH stops `--pm yarn` before anything is downloaded or written, with "yarn
 was not found; install it or choose another --pm". Any other answer (a corepack refusal, a failed
-download) stops create with yarn's output. npx comes with npm, which Node's own installers include;
+download) stops create with yarn's output. The question shares your terminal, so corepack's "about
+to download" notice, and its prompt under `COREPACK_ENABLE_DOWNLOAD_PROMPT=1`, show as they do for
+`yarn dlx` itself. npx comes with npm, which Node's own installers include;
 some distribution packages ship it separately, and without it `create` stops with "npx was not
 found; install npm". create-next-app is told the manager with `--use-<pm>`, and shadcn reads it
 from the lockfile.

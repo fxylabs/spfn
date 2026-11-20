@@ -445,11 +445,15 @@ export async function getOneOffCommandLine(
  * - exit 0 with the usage line `yarn dlx <command>` (yarn 2+): `'dlx'`.
  *
  * Anything else (a corepack refusal, a failed download, a yarn that exits
- * otherwise) rejects with yarn's exit code and output.
+ * otherwise) rejects with yarn's exit code and stdout; its stderr is already
+ * on the terminal. stdin and stderr are the user's, as they are for the real
+ * `yarn dlx`: corepack writes its "about to download" notice and, under
+ * COREPACK_ENABLE_DOWNLOAD_PROMPT=1 with a terminal, its question to stderr
+ * and reads the answer from stdin, so a piped stdin would download unasked.
  */
 export async function probeYarnDlx(cwd: string): Promise<YarnDlx>
 {
-    const result = await execa('yarn', ['dlx', '--help'], { cwd, reject: false });
+    const result = await execa('yarn', ['dlx', '--help'], { cwd, reject: false, stdin: 'inherit', stderr: 'inherit' });
     // A process that could not start carries the spawn error's code and message.
     const { code, originalMessage } = result as { code?: string; originalMessage?: string };
     const stdout = stripVTControlCharacters(result.stdout);
@@ -469,7 +473,7 @@ export async function probeYarnDlx(cwd: string): Promise<YarnDlx>
         return 'dlx';
     }
 
-    throw new Error(`\`yarn dlx --help\` in ${cwd} did not say whether this yarn has dlx (${originalMessage ?? `exit code ${result.exitCode}`}); yarn's output:\n${result.stderr}\n${stdout}`);
+    throw new Error(`\`yarn dlx --help\` in ${cwd} did not say whether this yarn has dlx (${originalMessage ?? `exit code ${result.exitCode}`}); yarn's stderr is above${stdout ? `, its stdout:\n${stdout}` : ''}`);
 }
 
 /** `commandLine` as the user would type it, for a hint. */

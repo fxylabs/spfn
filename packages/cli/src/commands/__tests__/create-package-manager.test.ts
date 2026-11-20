@@ -272,6 +272,19 @@ describe('spfn create launches its one-off packages with yarn dlx where yarn has
         expect(probes.map(([, , options]) => options.cwd)).toEqual([join(repository, 'scratch'), app]);
     });
 
+    it.each([
+        ['yarn', ['Asking yarn whether it has dlx for create-next-app@latest (yarn 1 answers no with an error)...', 'Running create-next-app with npx...']],
+        ['npm', ['Running create-next-app with npx...']],
+    ])('says, for %s, when it asks yarn and what runs create-next-app', async (pm, expected) =>
+    {
+        const step = vi.spyOn(logger, 'step');
+
+        await createFrom(join(repository, 'scratch'), ['--pm', pm as string]);
+
+        expect(step.mock.calls.map(([message]) => message).filter(message => /yarn whether|create-next-app/.test(message))).toEqual(expected);
+        step.mockRestore();
+    });
+
     it('stops --pm yarn with no yarn before anything is downloaded or written', async () =>
     {
         yarnDlx = 'no-yarn';
@@ -295,7 +308,7 @@ describe('spfn create launches its one-off packages with yarn dlx where yarn has
         yarnDlx = 'dlx';
         const app = join(repository, 'scratch', 'app');
         mocks.execa.mockImplementation((command: string, args: string[], options: { cwd: string }) =>
-            (command === 'yarn' && args[0] === 'dlx' && options.cwd === app ? { exitCode: 1, stdout: '', stderr: 'Usage Error: This project is configured to use pnpm' } : fakeProcess(command, args, options)));
+            (command === 'yarn' && args[0] === 'dlx' && options.cwd === app ? { exitCode: 1, stdout: 'Usage Error: This project is configured to use pnpm' } : fakeProcess(command, args, options)));
 
         await createFrom(join(repository, 'scratch'), ['--pm', 'yarn', '--shadcn']);
 

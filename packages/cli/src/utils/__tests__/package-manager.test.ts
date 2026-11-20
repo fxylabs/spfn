@@ -1,4 +1,4 @@
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readlinkSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -484,11 +484,30 @@ describe('probeYarnDlx', () =>
         expect(await probeYarnDlx(tmpdir())).toBe('no-yarn');
     });
 
-    it('rejects with yarn\'s output for a failure that is not yarn 1, such as a corepack refusal', async () =>
+    it('rejects with yarn\'s stdout for a failure that is not yarn 1, such as a corepack refusal', async () =>
     {
-        fakeYarn('', 1, 'Usage Error: This project is configured to use pnpm');
+        fakeYarn('Usage Error: This project is configured to use pnpm', 1);
 
         await expect(probeYarnDlx(tmpdir())).rejects.toThrow(/did not say whether this yarn has dlx \(exit code 1\)[^]*Usage Error: This project is configured to use pnpm/);
+    });
+
+    it.runIf(process.platform === 'linux')('gives yarn the user\'s stdin and stderr, where corepack asks before it downloads', async () =>
+    {
+        bin = mkdtempSync(join(tmpdir(), 'spfn-yarn-'));
+        writeFileSync(join(bin, 'yarn'), `#!/bin/sh\nreadlink /proc/$$/fd/0 /proc/$$/fd/2 > '${bin}/fds'\necho 'yarn run v1.22.22'\n`);
+        chmodSync(join(bin, 'yarn'), 0o755);
+        process.env.PATH = `${bin}:${originalPath}`;
+
+        expect(await probeYarnDlx(tmpdir())).toBe('no-dlx');
+        expect(readFileSync(join(bin, 'fds'), 'utf8').split('\n').slice(0, 2))
+            .toEqual([readlinkSync('/proc/self/fd/0'), readlinkSync('/proc/self/fd/2')]);
+    });
+
+    it('rejects pointing at the terminal when yarn printed nothing on stdout, as for a declined corepack download', async () =>
+    {
+        fakeYarn('', 1, 'Aborted by the user');
+
+        await expect(probeYarnDlx(tmpdir())).rejects.toThrow(/\(exit code 1\); yarn's stderr is above$/);
     });
 
     it('rejects when yarn prints the usage of dlx but exits non-zero', async () =>

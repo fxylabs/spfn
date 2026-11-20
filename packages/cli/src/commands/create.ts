@@ -79,6 +79,20 @@ async function setupSvgr(pm: PackageManager, projectPath: string): Promise<void>
 }
 
 /**
+ * `getOneOffCommandLine`, saying first when it asks yarn: the question shares
+ * the terminal, so yarn 1's "no" arrives there as an error line of its own.
+ */
+async function resolveOneOff(pm: PackageManager, cwd: string, spec: string, args: string[]): Promise<CommandLine>
+{
+    if (pm === 'yarn')
+    {
+        logger.step(`Asking yarn whether it has dlx for ${spec} (yarn 1 answers no with an error)...`);
+    }
+
+    return getOneOffCommandLine(pm, cwd, spec, args);
+}
+
+/**
  * Initialize shadcn/ui in the app. It is optional, so a failure, including
  * yarn not saying how to run it, warns and leaves it for later.
  */
@@ -88,7 +102,7 @@ async function setupShadcn(pm: PackageManager, projectPath: string): Promise<voi
 
     try
     {
-        shadcn = await getOneOffCommandLine(pm, projectPath, 'shadcn@latest', ['init', '--yes', '--defaults']);
+        shadcn = await resolveOneOff(pm, projectPath, 'shadcn@latest', ['init', '--yes', '--defaults']);
     }
     catch (error: any)
     {
@@ -99,7 +113,7 @@ async function setupShadcn(pm: PackageManager, projectPath: string): Promise<voi
 
     try
     {
-        logger.step('Setting up shadcn/ui...');
+        logger.step(`Setting up shadcn/ui with ${shadcn.command}...`);
 
         await execa(shadcn.command, shadcn.args, {
             cwd: projectPath,
@@ -202,9 +216,9 @@ async function createProject(projectName: string, options: CreateOptions): Promi
             createNextAppArgs.push('--skip-git');
         }
 
-        const createNextApp = await getOneOffCommandLine(pm, cwd, 'create-next-app@latest', createNextAppArgs);
+        const createNextApp = await resolveOneOff(pm, cwd, 'create-next-app@latest', createNextAppArgs);
 
-        logger.step('Running create-next-app...');
+        logger.step(`Running create-next-app with ${createNextApp.command}...`);
 
         await execa(createNextApp.command, createNextApp.args, {
             cwd,
