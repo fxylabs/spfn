@@ -185,7 +185,11 @@ async function createProject(projectName: string, options: CreateOptions): Promi
         {
             logger.error(`create-next-app exited with code ${error.exitCode}`);
         }
-        if (error.stderr)
+        if (error.code === 'ENOENT' && error.path === 'npx')
+        {
+            logger.error('npx was not found; install npm');
+        }
+        else if (error.stderr)
         {
             logger.error(error.stderr);
         }

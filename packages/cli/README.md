@@ -114,7 +114,9 @@ Tailwind, import alias `@/*`, no ESLint), sets up SVGR icons, then runs `init`.
 launches — `create-next-app`, and `shadcn` with `--shadcn` — run through `yarn dlx` when `--pm yarn`
 and the yarn that answers in that directory has `dlx` (yarn 2+, which is what corepack gives
 `yarn dlx`, so the app is a Yarn 4 app as before). yarn 1 has no `dlx`, so there, and for npm, pnpm
-and bun, they run through `npx --yes`. npx comes with Node. create-next-app is told the manager with `--use-<pm>`, and shadcn reads it
+and bun, they run through `npx --yes`. npx comes with npm, which Node's own installers include;
+some distribution packages ship it separately, and without it `create` stops with "npx was not
+found; install npm". create-next-app is told the manager with `--use-<pm>`, and shadcn reads it
 from the lockfile.
 
 Choose `full` for the recommended Prototype-to-Production baseline or `bare` for the
