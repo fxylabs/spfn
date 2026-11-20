@@ -162,7 +162,9 @@ const orchestrator = new CodegenOrchestrator({
 // contract) are never left from two different generations, or once the config
 // load running has finished; then exit. Neither a generation nor a config load
 // (a module evaluation) can be cancelled, so a second signal exits at once: it
-// is the only way to stop one that never settles.
+// is the only way to stop one that never settles. Under spfn dev the watcher
+// gets one SIGTERM whatever stopped spfn dev, and a second Ctrl-C makes spfn
+// dev SIGKILL it.
 let stopping = false;
 
 const stop = async (signal) =>

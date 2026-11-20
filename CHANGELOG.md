@@ -363,6 +363,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   release raises the `@spfn/core` peer floor of @spfn/auth — the only package that calls a core
   middleware factory — to that core.
 
+- **BREAKING: spfn: `spfn dev` stops when its children have (#358).**
+  - **It takes as long as the slowest child:** the server's shutdown, up to core's
+    `SHUTDOWN_TIMEOUT` (280 s by default). It used to exit once the codegen watcher had, the
+    server still shutting down. A process manager with a shorter stop timeout SIGKILLs `spfn
+    dev`, which reaches no child: kill the cgroup or each child's group, or allow for core's
+    deadline.
+  - **Only a second Ctrl-C escalates.** A SIGINT once the stop has begun SIGKILLs every child's
+    group, and `spfn dev` exits 130. A repeated SIGTERM or SIGHUP changes nothing; under #353 any
+    second signal ended the watcher at once and left the rest alone.
+  - **Exit status:** 0 after a stop by any signal. After a Ctrl-C, or a `kill` of the bin, the
+    shell used to see the bin killed by the signal (130, 143).
+  - **The server's process** is Node under tsx, not `pnpm exec tsx`/`npx tsx`: it no longer gets
+    what the package manager adds to its environment (`npm_*` variables, its own
+    `node_modules/.bin` on `PATH`) unless the `pnpm dev`/`npx spfn dev` that started `spfn dev`
+    added it already.
+  - **No stdin for any child:** the server, Next.js and the watcher read an empty stdin. In a
+    group of their own they would otherwise be stopped by the terminal (SIGTTIN).
+  - **Without tsx** for the app and for the CLI, `spfn dev` exits 1 with `tsx is not installed
+    in this project, and it is what loads TypeScript. Add it: …` before starting anything. It
+    used to start without the watcher and fail to start the server.
+  - Windows, which has no `execve` and no process groups, keeps the bin's child process and
+    signals each child of `spfn dev` alone.
 - **BREAKING (security-relevant): @spfn/core: a middleware declaring `skips` now removes what it
   names when it is attached to a router (spfn/spfn#165).** It was ignored on `defineRouter(...).use([...])`
   and honoured only in a route's own `.use()`; now it removes the listed names from what that
@@ -868,6 +890,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   existing passkey instead (README, "Enrolling, from a Next.js client component").
 - **@spfn/auth: `PasskeyProofProcedure` (`@spfn/auth/client`) is read off the route's input
   (#400).** The hand-written union had left out `opsTokenIssue`, which the server accepts.
+- **spfn: `spfn dev` delivers each signal to each child once and exits after its children
+  (#358).** Who got a signal depended on where it came from. A terminal's Ctrl-C reached the
+  server, Next.js and the codegen watcher directly *and* through `spfn dev`'s forward, so the
+  watcher saw a "second signal" and abandoned its generation. `kill <pid>` of the bin, as a process
+  manager sends it, killed the bin alone and left the whole tree running. A SIGTERM to `spfn dev`
+  never reached Next.js: `pnpm run` and the `sh -c` it runs `spfn:next` under forward nothing. And
+  `spfn dev` exited before the server had stopped, which then held its port, orphaned. Now:
+  - `bin/spfn.js` re-runs itself under tsx with `process.execve` instead of spawning a child: the
+    pid you start is the CLI's, for every command (a SIGTERM to the bin's pid during `spfn db
+    migrate` used to leave the command running, orphaned).
+  - Each child of `spfn dev` leads a process group of its own and is stopped by one SIGTERM to that
+    group, from `spfn dev`, whatever stopped `spfn dev`: Ctrl-C, or SIGTERM, SIGINT or SIGHUP to the
+    pid. `spfn dev` exits 0 once every group is empty.
+  - The server and the watcher run as `node --import <tsx> --import <spfn's hook> <entry>`: not
+    through `pnpm exec`/`npx` (the server did), which exit before what they run, nor through the
+    `tsx` CLI (the watcher did), which relays a signal its child already got unless the child
+    reports it within 30 ms — a busy child got it twice.
+  - `--watch` waits until nothing is left in the old server's group before starting the new one,
+    instead of sleeping 500 ms.
+  - Next.js exiting with an error stops the server and the watcher before `spfn dev` exits 1;
+    they used to run on.
+  - SIGHUP (a closed terminal) stops `spfn dev` as SIGTERM does; it used to kill `spfn dev` and
+    the watcher mid-generation.
 - **spfn: without tsx, `spfn db` and `spfn provision` say what to install (#349)**, as `spfn env`
   did: `tsx is not installed in this project, and it is what loads TypeScript. Add it: <the app's
   own add command>`, exit 1. `db generate`, `push` and `tenant` stopped on Node's `Cannot find
@@ -967,8 +1012,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the watcher running, writing into the project. The watcher now runs under a tsx CLI started by
   Node directly — the app's, else the one installed beside `spfn` — and never through the package
   manager: with no tsx found, it is not started, and one error says to install tsx in the app.
-  `spfn dev` forwards every signal to it and exits once it has (a second signal makes it exit at
-  once). The server and Next.js are still sent one SIGTERM and not waited for. Every child is
+  `spfn dev` exits once it has; how each signal reaches it, the server and Next.js, and what a
+  second signal does, is #358's (below). Every child is
   started through one place that refuses once a stop has begun: a stop before the server was
   ready no longer starts Next.js when it becomes ready, leaving it running after `spfn dev`
   exited. A SIGKILL of `spfn dev` reaches none of them.

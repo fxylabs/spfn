@@ -203,13 +203,15 @@ Starts the SPFN server + Next.js (and a codegen watcher, which generates under
 (via a `.spfn/server-ready` signal file) before Next.js launches. Runs through `tsx`,
 no pre-build needed.
 
-The codegen watcher is run by Node under a `tsx` CLI found in a `node_modules` directory on
-the way up from the app (the app's own, which wins), else on the way up from where `spfn`
-itself is installed — the one `spfn`'s bin re-spawns under. `NODE_PATH` is not consulted. With
-neither, the watcher is not started: `spfn dev` logs `Codegen watcher not started: no tsx is
-installed for the app or for the spfn CLI. Install it in the app: pnpm add -D tsx` and goes on
-without it, as when the watcher fails to start. It is never run through `pnpm exec`/`npx`,
-which do not let `spfn dev` wait for it.
+The server and the codegen watcher each run in a Node process of their own, started by `spfn dev`
+directly as `node --import <tsx> --import <spfn's module hook> <entry>`, with the `tsx` found in a
+`node_modules` directory on the way up from the app (the app's own, which wins), else on the way
+up from where `spfn` itself is installed — the one `spfn`'s bin runs under. `NODE_PATH` is not
+consulted. With neither, `spfn dev` starts nothing and exits 1 with `tsx is not installed in this
+project, and it is what loads TypeScript. Add it: pnpm add -D tsx` (your package manager's
+command). Neither child runs through `pnpm exec`/`npx`, which exit before what they run, nor
+through the `tsx` CLI, which relays a signal its child already got. Next.js runs through your
+`spfn:next` script (`pnpm run spfn:next --port <port>`). No child gets a stdin.
 
 The watcher loads the codegen config itself and loads it again when `.spfnrc.ts` (or
 `.spfnrc.json`, or the `spfn.codegen` key of `package.json`), a custom generator file, or a
@@ -219,29 +221,6 @@ config that fails to load — at start or after an edit — does not stop the wa
 nothing until the config loads again, and regenerates everything once it does. A changed
 generator *package* (under `node_modules`, or a rebuilt workspace package) still needs a restart
 ([@spfn/core codegen](../core/src/codegen/README.md#watch-mode)).
-
-On SIGINT or SIGTERM, `spfn dev` sends the server and Next.js SIGTERM, forwards the signal to
-the codegen watcher, and exits once the watcher has: the watcher finishes the generation, or the
-codegen config load, it is running first (`Codegen watcher stopping once the running generation or
-codegen config load finishes (signal again to exit now)`). Neither can be cancelled — a config
-load is a module evaluation — so one that never settles (a top-level `await` that never resolves
-in `.spfnrc.ts` or a custom generator) holds the watcher until a second signal. A second signal is
-forwarded too, and the watcher then exits at once, mid-generation or mid-load if one is running: whatever that generation would have reported — a `✓`/`✗` line, a failure held
-back from a run whose inputs changed while it ran — is dropped. Once a
-stop has begun, `spfn dev` starts no child: not Next.js when the server becomes ready during it,
-not a server restart (it logs `Next.js not started: spfn dev is stopping`). A SIGKILL of
-`spfn dev` reaches no child.
-
-So the route map and contract never come from two generations when one SIGTERM or SIGINT is
-sent to the pid of the process that runs `spfn dev`: the tsx child when `bin/spfn.js`
-re-spawned itself under tsx, the bin's own process when it did not. That does not hold for:
-
-- **Ctrl-C in a terminal.** The terminal sends SIGINT to the whole process group, so the
-  watcher gets it twice — from the terminal and from `spfn dev`'s forward — and exits at once,
-  mid-generation if one is running (as before this change).
-- **A signal to the `bin/spfn.js` pid alone**, when the bin re-spawned itself under tsx: that
-  outer process has no signal handler, so it exits and its children run on (read from the
-  source, not run).
 
 | Option | Description | Default |
 |--------|-------------|---------|
@@ -262,6 +241,52 @@ its content actually changed.
 Pending migrations stop the boot — see [Database](#spfn-db) for what the refusal looks
 like and how to override it.
 
+#### Stopping `spfn dev`: signals
+
+`spfn dev` owns its process tree. Each child — the server, Next.js (with the package manager and
+`sh -c` its script runs under), the codegen watcher — is the leader of a process group of its
+own, and `spfn dev` stops it with one SIGTERM to that group, whatever the child runs under. It exits
+only once every group is empty, with no deadline of its own.
+
+| You send | to | Each child gets | `spfn dev` exits |
+|----------|----|-----------------|------------------|
+| Ctrl-C in the terminal | the terminal's foreground group: `spfn dev` alone | one SIGTERM, from `spfn dev` | after the last child, 0 |
+| `kill <pid>` / SIGTERM, SIGINT or SIGHUP from a process manager | the pid you started (`bin/spfn.js`'s) | one SIGTERM, from `spfn dev` | after the last child, 0 |
+| the same signal again, or SIGTERM / SIGHUP after a Ctrl-C | | nothing more | unchanged |
+| a second Ctrl-C (SIGINT once the stop has begun) | `spfn dev` | SIGKILL, to every group left | at once, 130 |
+| SIGKILL | `spfn dev` | nothing | at once |
+
+- **The pid you start is `spfn dev`'s.** `bin/spfn.js` re-runs itself under tsx in its own
+  process (`process.execve`) rather than in a child, so a signal to the pid a terminal, a process
+  manager or `kill` sees reaches `spfn dev` once, and its exit status is `spfn dev`'s. (On Windows,
+  which has neither `execve` nor process groups, the CLI runs as the bin's child, and each child of
+  `spfn dev` is signalled alone.)
+- **A terminal's Ctrl-C reaches each child once.** The children are not in the terminal's
+  foreground group, so the terminal's SIGINT reaches `spfn dev` only, and `spfn dev`'s SIGTERM
+  is the one signal each child gets.
+- **Only a second Ctrl-C escalates.** SIGTERM and SIGHUP always mean "stop", however often they
+  come: `pnpm exec spfn dev` relays a Ctrl-C as a SIGINT and then a SIGTERM, and a closing terminal
+  sends SIGHUP. A SIGINT once the stop has begun — a person pressing Ctrl-C again, or
+  `kill -INT` twice — SIGKILLs every group left: it is the way out of a server shutdown that takes
+  too long (core's deadline is `SHUTDOWN_TIMEOUT`, 280 s by default) or a generation that never
+  settles. Next.js's own processes and the server's are SIGKILLed with the rest.
+- **The watcher finishes what it is running first.** On its SIGTERM it finishes the generation,
+  or the codegen config load, it is running (`Codegen watcher stopping once the running generation
+  or codegen config load finishes (Ctrl-C again to exit now)`), so the route map and contract never
+  come from two generations. Neither can be cancelled — a config load is a module evaluation — so
+  one that never settles (a top-level `await` that never resolves in `.spfnrc.ts` or a custom
+  generator) holds the watcher until a second Ctrl-C, which kills it mid-generation or mid-load:
+  whatever that generation would have reported — a `✓`/`✗` line, a failure held back from a run
+  whose inputs changed while it ran — is dropped.
+- **Once a stop has begun, `spfn dev` starts no child:** not Next.js when the server becomes ready
+  during it, not a server restart (it logs `Next.js not started: spfn dev is stopping`).
+- **`--watch` restarts the server the same way:** one SIGTERM to the server's group, then the new
+  server starts once nothing is left in it — its port is free then.
+- **Next.js exiting with an error** stops the server and the watcher, then `spfn dev`, exit 1.
+- **A SIGKILL of `spfn dev` reaches no child**, nor does anything that kills `spfn dev` before it
+  has stopped them: their groups run on. A process manager that kills by process group must kill
+  each child's group, or the cgroup (systemd's default `KillMode=control-group` does).
+
 #### Your server source runs as ESM, as it does in production
 
 `spfn build` bundles `src/server` as ESM with esbuild whatever your `package.json` says, and
@@ -280,8 +305,8 @@ the command without the hook, and a command that loads your TypeScript — `spfn
 (`push`, `tenant`, and `generate` with the entity registry), `spfn provision` — stops before its
 first import with `tsx is not installed in this project, and it is what loads TypeScript. Add it:
 <your package manager's add command>` and exit code 1. The cost: every `spfn` command in a project
-re-spawns itself once to get the hook, and the hook's resolve takes its own time — ~73 ms of
-self-time over 2,815 resolves on `spfn --version` in example 01 (measured on the dev VM, Node 22,
+re-runs itself once (in its own process) to get the hook, and the hook's resolve takes its own
+time — ~73 ms of self-time over 2,815 resolves on `spfn --version` in example 01 (measured on the dev VM, Node 22,
 hook time minus Node's own resolve). The hook states the format of every file of yours that `tsx`
 would otherwise guess from `package.json`:
 
