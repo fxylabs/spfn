@@ -3,7 +3,8 @@
  *
  * One test per row of the #309 case table — S1–S19, R1–R7, K1–K5 — of the
  * first review round — F1, F2 and P1–P12 — of the second — G1, G2, RV-A,
- * RV-D and the recovery-code generation — and D2 of #329, named for its row. The boot
+ * RV-D and the recovery-code generation — D2 of #329, and SU1–SU3 of #372
+ * (a marking registration records a step-up), named for its row. The boot
  * rows B1–B7 and the classification's own guarantees (F4 among them) are in
  * unit/second-factor-policy.test.ts.
  *
@@ -1500,5 +1501,57 @@ describe.skipIf(!dbAvailable)('second-factor policy (#309 case table)', () =>
 
         expect(answer.mfaStatus).toMatchObject({ enrolled: true, methods: ['passkey'] });
         expect(await liveMarkedPasskeys()).toBe(1);
+    });
+
+    // ========================================================================
+    // #372 — a marking registration records a step-up, and only it
+    // ========================================================================
+
+    it('SU1: a registration without user verification in the enrolment-only state records no step-up', async () =>
+    {
+        usePolicy();
+        const session = await signIn();
+        const authenticator = await FixtureAuthenticator.create();
+        const options = await post('/_auth/passkeys/register/options', {}, session.authorization);
+
+        const registered = await post('/_auth/passkeys/register/verify', {
+            response: authenticator.attest({ challenge: (await options.json()).challenge, origin: ORIGIN, rpId: RP_ID, userVerified: false }),
+        }, session.authorization);
+
+        expect(registered.status).toBe(200);
+        expect((await registered.json()).mfaStatus).toBeUndefined();
+        expect(await getTestDb().select().from(mfaVerifications).where(eq(mfaVerifications.userId, userId))).toEqual([]);
+    });
+
+    it('SU2: a user-verified registration on an enrolled account does not refresh the step-up window', async () =>
+    {
+        const { session } = await passkeyEnrolledAccount();
+        const opened = new Date(Date.now() - 5 * 60_000);
+        await getTestDb().update(mfaVerifications).set({ verifiedAt: opened }).where(eq(mfaVerifications.keyId, session.keyId));
+
+        const { answer } = await registerPasskey(session);
+
+        expect(answer.mfaStatus).toBeUndefined();
+        const [verification] = await verificationsFor(session.keyId);
+        expect(verification!.verifiedAt.getTime()).toBe(opened.getTime());
+    });
+
+    it('SU3: first set-up — a temporary-password session registers its marking passkey and changes the password with no second ceremony', async () =>
+    {
+        await getTestDb().update(users).set({ passwordChangeRequired: true }).where(eq(users.id, userId));
+        usePolicy();
+        const session = await signIn();
+
+        const { answer } = await registerPasskey(session);
+        expect(answer.mfaStatus).toMatchObject({ enrolled: true, methods: ['passkey'] });
+
+        const changed = await request('PUT', '/_auth/password', session.authorization, {
+            currentPassword: PASSWORD,
+            newPassword: 'Changed456!',
+        });
+
+        expect(changed.status, await changed.clone().text()).toBe(204);
+        const [row] = await getTestDb().select().from(users).where(eq(users.id, userId));
+        expect(row!.passwordChangeRequired).toBe(false);
     });
 });
