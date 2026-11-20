@@ -12,7 +12,7 @@ import type { EventRouterDef } from '../event/router';
 import type { SSEHandlerConfig, SSEAuthConfig } from '../event/sse/types';
 import type { WSRouterDef, WSHandlerConfig, WSAuthConfig, WSMessageHandlers } from '../event/ws/types';
 import type { EventDef } from '../event/types';
-import { parseTrustedProxyHops } from '@spfn/core/middleware';
+import { parseRedactPaths, parseTrustedProxyHops } from '@spfn/core/middleware';
 import { mergeJobRouters } from '../job/job-router';
 import { serverLogger } from './logger';
 
@@ -165,6 +165,27 @@ export class ServerConfigBuilder
     trustedProxyHops(hops: number): this
     {
         this.config.trustedProxyHops = parseTrustedProxyHops(hops);
+
+        return this;
+    }
+
+    /**
+     * Declare what core log lines may say about a request. `redactPaths` lists
+     * path prefixes no line names in full: they log as `<prefix>/[redacted]`.
+     * Throws on an entry that is not a literal path prefix, which makes the
+     * config fail to load and the server refuse to start.
+     *
+     * @example
+     * ```typescript
+     * .logging({ redactPaths: ['/api/import'] })
+     * ```
+     */
+    logging(logging: NonNullable<ServerConfig['logging']>): this
+    {
+        this.config.logging = {
+            ...logging,
+            redactPaths: logging.redactPaths === undefined ? undefined : parseRedactPaths(logging.redactPaths),
+        };
 
         return this;
     }

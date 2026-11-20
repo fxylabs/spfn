@@ -353,6 +353,10 @@ stdout/stderr, which the platform collects automatically.
 - **Masked value is `***MASKED***`, not `***`.** Don't assert on `***` in tests/parsers.
 - **Secrets in the message are NOT masked.** Only the context object is scanned. Keep
   sensitive values out of the message string; put them in context.
+- **A request path is not masked either.** Masking reads field names, and a token in a path
+  segment sits under `path`. Name the path with `loggedPath(c)` from `@spfn/core/middleware`,
+  which writes `<prefix>/[redacted]` under a prefix declared with
+  `defineServerConfig().logging({ redactPaths })`.
 - **Context vs error ambiguity.** Only an Error is read as the error; any other object
   is context. Use the 3-arg form `logger.error(msg, error, context)` when you have both.
 - **Bare primitives as 2nd arg are the caught value.** `logger.info('x', 42)` logs `42` as

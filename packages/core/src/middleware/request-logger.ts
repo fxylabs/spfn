@@ -7,6 +7,7 @@ import { randomBytes } from 'crypto';
 import type { Context, Next } from 'hono';
 import { alreadySentToClient, logger } from '@spfn/core/logger';
 import { getClientIp } from './client-ip';
+import { loggedPath } from './logged-path';
 
 /**
  * Options for RequestLogger middleware
@@ -16,7 +17,12 @@ export interface RequestLoggerOptions
     /**
      * Paths to exclude from logging
      *
-     * Supports exact match and prefix match (e.g., '/health' excludes '/health/db').
+     * Supports exact match and prefix match (e.g., '/health' excludes '/health/db'),
+     * against the decoded path the router matches (`/%68ealth` is `/health`).
+     *
+     * A noise filter: an excluded request writes no request lines, but every other
+     * line that names its path still does. To keep a path out of every line, declare
+     * it with `defineServerConfig().logging({ redactPaths })` (see `loggedPath`).
      *
      * `/_core/health` is where the built-in health endpoint always answers, so a
      * readiness probe usually points there rather than at `/health`. Leaving it
@@ -149,17 +155,18 @@ export function RequestLogger(options?: RequestLoggerOptions)
 
     return async (c: Context, next: Next) =>
     {
-        const path = new URL(c.req.url).pathname;
-
-        // Support both exact match and prefix match for excluded paths
+        // Matched against the decoded path the router serves, so a
+        // percent-encoded spelling of an excluded path is excluded too
         const isExcluded = cfg.excludePaths.some(excludePath =>
-            path === excludePath || path.startsWith(excludePath + '/'),
+            c.req.path === excludePath || c.req.path.startsWith(excludePath + '/'),
         );
 
         if (isExcluded)
         {
             return next();
         }
+
+        const path = loggedPath(c);
 
         const requestId = generateRequestId();
         c.set('requestId', requestId);

@@ -11,6 +11,7 @@ import { SerializableError, type SerializedError } from '@spfn/core/errors';
 import { describeError, logger } from '@spfn/core/logger';
 import type { DatabaseErrorDescription, ErrorDescription } from '@spfn/core/logger';
 import { env } from '@spfn/core/config';
+import { loggedPath } from './logged-path';
 
 const errorLogger = logger.child('@spfn/core:error-handler');
 
@@ -239,7 +240,7 @@ function buildOnErrorContext(c: Context, statusCode: number): OnErrorContext
 
     return {
         statusCode,
-        path: c.req.path,
+        path: loggedPath(c),
         method: c.req.method,
         requestId: c.get('requestId') as string | undefined,
         timestamp: new Date().toISOString(),
@@ -409,7 +410,7 @@ export function ErrorHandler(options: ErrorHandlerOptions = {}): (err: Error, c:
 
     return (err: Error, c: Context) =>
     {
-        const path = c.req.path;
+        const path = loggedPath(c);
         const method = c.req.method;
 
         // Handle SerializableError with automatic serialization

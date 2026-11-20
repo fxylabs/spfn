@@ -306,6 +306,7 @@ returns the builder; `.build()` ends the chain.
 | `.healthCheck(opts)` | The health endpoint |
 | `.serverTime(clock)` | The clock behind `GET /_core/time`; normally left at the default |
 | `.middleware(opts)` | The built-in middleware — `ErrorHandler`, `RequestLogger` |
+| `.logging(opts)` | `redactPaths` — path prefixes no log line names in full, for routes whose path holds a token |
 | `.use(handlers)` | Additional global Hono middleware |
 | `.middlewares(named)` | Global middleware under names, so a route can `.skip([...])` it |
 | `.cors(opts)` | CORS |

@@ -22,6 +22,7 @@ import {
     createCacheNonceStore,
     rateLimit,
     getClientIp,
+    loggedPath,
 } from '@spfn/core/middleware';
 
 import type {
@@ -73,6 +74,12 @@ From `@spfn/core/middleware`:
   right; else the TCP peer address; else `'unknown'`. See [Client address](#client-address).
 - `setTrustedProxyHops(n | undefined)` / `parseTrustedProxyHops(value)` → the declaration
   `createServer` publishes from server config, and the rule that validates it.
+- `loggedPath(c)` → the request path as a log line may name it: `c.req.path`, or
+  `<prefix>/[redacted]` when it falls under a prefix declared with
+  `defineServerConfig().logging({ redactPaths })`. Every core line that names the request path
+  reads it here; use it in your own lines too. See [Paths that must not be logged](#paths-that-must-not-be-logged).
+- `setRedactPaths(paths | undefined)` / `parseRedactPaths(value)` → the declaration
+  `createServer` publishes from `logging.redactPaths`, and the rule that validates it.
 
 Types: `ErrorHandlerOptions`, `OnErrorContext`, `RequestLoggerOptions`, `RequestLoggerConfig`,
 `ProxyGuardConfig`, `ProxyGuardMode`, `ClientType`, `NonceStore`, `RateLimitOptions`.
@@ -108,7 +115,7 @@ Toggle / configure them through `config.middleware`:
 ```typescript
 export default defineServerConfig()
     .middleware({
-        logger: true,         // RequestLogger (default: true) — set false to disable
+        logger: true,         // RequestLogger (default: true) — false to disable, or its options
         cors: true,           // CORS (default: true)
         errorHandler: true,   // ErrorHandler (default: true) — set false to disable
         onError: (err, ctx) =>  // forwarded into ErrorHandler({ onError })
@@ -123,9 +130,11 @@ export default defineServerConfig()
 
 Notes (from `create-server.ts`):
 
-- The auto-applied `RequestLogger()` is called with **no options**, so it uses the
-  defaults below (excludes `/_core/health`, `/health`, `/ping`, `/favicon.ico`). To customize excludePaths
-  etc., disable it (`middleware.logger: false`) and add your own via `config.use`.
+- The auto-applied `RequestLogger` takes its options from `middleware.logger` when that is an
+  object — `.middleware({ logger: { excludePaths: ['/metrics'] } })` — and the defaults below
+  otherwise (excludes `/_core/health`, `/health`, `/ping`, `/favicon.ico`). It stays where it
+  is, ahead of CORS and proxy-guard; a `RequestLogger` of your own in `config.use` would run
+  after the guard.
 - `config.middleware.onError` is the **only** `ErrorHandlerOption` exposed through the
   builder; `includeStack` / `enableLogging` fall back to their defaults under auto-config.
 - Order is fixed: `RequestLogger` → CORS → routes → `ErrorHandler` (via `app.onError`).
@@ -262,7 +271,7 @@ calls needs the envelope.
 ```typescript
 interface OnErrorContext {
     statusCode: number;
-    path: string;
+    path: string;         // loggedPath(c): redacted under a declared prefix
     method: string;
     requestId?: string;   // present when RequestLogger ran first
     timestamp: string;    // ISO 8601
@@ -307,8 +316,14 @@ Per-request logging middleware. Register with **`app.use()`**.
 | `sensitiveFields` | `string[]` | `['password', 'token', 'apiKey', 'secret', 'authorization']` |
 | `slowRequestThreshold` | `number` (ms) | `1000` |
 
-`excludePaths` matches **exact or prefix** — `/health` also excludes `/health/db`. Excluded
-paths skip logging entirely (and get **no** request ID).
+`excludePaths` matches **exact or prefix** — `/health` also excludes `/health/db` — against the
+decoded path the router serves, so `/%68ealth` is excluded too. Excluded paths skip the request
+logger entirely (and get **no** request ID). It is a noise filter: the other lines that name a
+request path (proxy-guard, error handler, rate limit, transactions) still write theirs. To keep a
+path out of every line, see [Paths that must not be logged](#paths-that-must-not-be-logged).
+
+`path` in its lines is `loggedPath(c)`: the decoded path, or `<prefix>/[redacted]` under a
+declared prefix.
 
 ```typescript
 app.use('*', RequestLogger({
@@ -350,6 +365,35 @@ const requestId = c.get('requestId'); // string | undefined
 { "level": "error", "module": "api", "msg": "Request failed",
   "method": "POST", "path": "/users", "duration": 23, "error": { ... } }
 ```
+
+---
+
+## Paths that must not be logged
+
+A capability route — `/api/import/:token`, a share link, a one-time download — carries its secret
+in the path. Declare its prefix once in server config:
+
+```typescript
+defineServerConfig().logging({ redactPaths: ['/api/import'] })
+```
+
+Every line this module writes that names the request path then writes `/api/import/[redacted]`,
+at every level: `RequestLogger`, proxy-guard (its tag-mode debug and strict-mode warn), the
+`ErrorHandler` line and `OnErrorContext.path`, `rateLimit`'s cache lines, and the transaction
+context `Transactional()` hands the runner. Matching is on a segment boundary, against the decoded
+path; undeclared paths are written as before. The full rules, and what is not covered, are in the
+server README's [Paths that must not be logged](../server/README.md#paths-that-must-not-be-logged).
+
+Name the path in your own lines the same way:
+
+```typescript
+import { loggedPath } from '@spfn/core/middleware';
+
+importLogger.info('Import redeemed', { path: loggedPath(c) });
+```
+
+On a bare Hono app that does not go through `createServer`, publish the declaration yourself,
+before the first request: `setRedactPaths(['/api/import'])`.
 
 ---
 
@@ -630,8 +674,12 @@ Read these before relying on rate limiting as a security control:
   (or `config.middlewares` / `config.use`) will not catch errors.
 - **Don't double-register under `defineServerConfig`.** The server auto-applies both. Only
   use the raw `app.use(RequestLogger())` / `app.onError(ErrorHandler())` calls on a bare
-  Hono app. To change RequestLogger options under SPFN, set `middleware.logger: false` and
-  add your own via `config.use`.
+  Hono app. To change RequestLogger options under SPFN, pass them as `middleware.logger`.
+- **`excludePaths` does not keep a path out of the log.** It silences the request logger's
+  lines only. A token in a path needs `logging.redactPaths` (see
+  [Paths that must not be logged](#paths-that-must-not-be-logged)).
+- **Don't log `c.req.path` or `c.req.url` yourself.** Use `loggedPath(c)`, which applies the
+  declared prefixes; the URL also carries the query.
 - **`config.middleware.onError` is the only ErrorHandler option the builder forwards.**
   `includeStack` / `enableLogging` are not configurable through `defineServerConfig` — they
   use defaults. Need them tuned? Build the Hono app manually.
@@ -713,7 +761,7 @@ interface OnErrorContext {
 }
 
 interface RequestLoggerOptions {
-    excludePaths?: string[];        // default: ['/_core/health', '/health', '/ping', '/favicon.ico']
+    excludePaths?: string[];        // default: ['/_core/health', '/health', '/ping', '/favicon.ico']; decoded path
     sensitiveFields?: string[];     // default: ['password','token','apiKey','secret','authorization']
     slowRequestThreshold?: number;  // default: 1000 (ms)
 }
@@ -721,6 +769,10 @@ interface RequestLoggerOptions {
 type RequestLoggerConfig = RequestLoggerOptions; // @deprecated
 
 function maskSensitiveData(obj: any, sensitiveFields: string[], seen?: WeakSet<object>): any;
+
+function loggedPath(c: Context): string;               // c.req.path, or '<prefix>/[redacted]'
+function setRedactPaths(paths: string[] | undefined): void;
+function parseRedactPaths(value: unknown): string[];   // throws on an entry that is not a literal prefix
 ```
 
 ## Related

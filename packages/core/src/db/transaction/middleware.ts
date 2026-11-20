@@ -17,6 +17,8 @@
  */
 import { createMiddleware } from 'hono/factory';
 import { SerializableError } from '@spfn/core/errors';
+// Package specifier: the declared prefixes live in the middleware entry's one copy
+import { loggedPath } from '@spfn/core/middleware';
 import { fromPostgresError } from '../postgres-errors';
 import { reportDatabaseError } from '../manager/reconnect-trigger';
 import { isDriverError } from '../../logger/error-description';
@@ -136,7 +138,7 @@ export function Transactional(options: TransactionalOptions = {})
 {
     return createMiddleware(async (c, next) =>
     {
-        const route = `${c.req.method} ${c.req.path}`;
+        const route = `${c.req.method} ${loggedPath(c)}`;
 
         try
         {

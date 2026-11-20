@@ -314,7 +314,6 @@ export function createRpcProxy(config: RpcProxyConfig)
                     routeName,
                     targetMethod,
                     targetPath: resolvedPath,
-                    targetUrl,
                     hasBody: !!inputBody,
                     hasFormData,
                 });
@@ -561,7 +560,6 @@ export function createRpcProxy(config: RpcProxyConfig)
                 {
                     rpcLogger.error('Request timeout', {
                         routeName,
-                        targetUrl,
                         timeout,
                     });
 
@@ -575,7 +573,6 @@ export function createRpcProxy(config: RpcProxyConfig)
                 const fetchErr = error as Error;
                 rpcLogger.error('Fetch error', {
                     routeName,
-                    targetUrl,
                     error,
                 });
 

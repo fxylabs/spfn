@@ -2,7 +2,7 @@ import type { Hono, MiddlewareHandler } from 'hono';
 import { cors } from 'hono/cors';
 import type { serve } from '@hono/node-server';
 import type { Router, NamedMiddleware } from '@spfn/core/route';
-import type { OnErrorContext, ProxyGuardConfig, RateLimitOptions } from '@spfn/core/middleware';
+import type { OnErrorContext, ProxyGuardConfig, RateLimitOptions, RequestLoggerOptions } from '@spfn/core/middleware';
 import type { SafeFetchPolicy } from '@spfn/core/security';
 import type { JobRouter, BossOptions } from '../job';
 import type { EventRouterDef } from '../event/router';
@@ -65,8 +65,12 @@ export interface ServerConfig
     {
         /**
          * Request logger (default: true)
+         *
+         * `false` turns it off; an options object configures it in place, so
+         * `excludePaths` no longer means replacing it with one registered after
+         * proxy-guard.
          */
-        logger?: boolean;
+        logger?: boolean | RequestLoggerOptions;
 
         /**
          * CORS (default: true)
@@ -171,6 +175,29 @@ export interface ServerConfig
      * @env SERVER_TRUSTED_PROXY_HOPS
      */
     trustedProxyHops?: number;
+
+    /**
+     * What core log lines may say about a request.
+     *
+     * `redactPaths` declares path prefixes whose requests no line names in full:
+     * every core line that names the request path — request logger, proxy-guard,
+     * error handler and its `onError` context, rate limit, transaction context —
+     * writes `<prefix>/[redacted]` instead, at every level. For capability routes
+     * whose path segment is the secret (`/api/import/:token`, share links,
+     * one-time downloads). A prefix matches itself and what lies below it on a
+     * segment boundary, against the decoded path the router matches. An entry
+     * that does not start with `/`, ends with `/`, or contains `?`, `#`, `:` or
+     * `*` refuses the boot.
+     *
+     * @example
+     * ```typescript
+     * .logging({ redactPaths: ['/api/import'] })
+     * ```
+     */
+    logging?: {
+        /** @default [] */
+        redactPaths?: string[];
+    };
 
     /**
      * SSRF policy for outbound requests made via `safeFetch` (`@spfn/core/security`).
