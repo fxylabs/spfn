@@ -517,3 +517,102 @@ export async function completeMfaWithPasskey(
 
     return { ok: true, ...verified };
 }
+
+// ============================================================================
+// Step-up on this device (#372, #393)
+// ============================================================================
+
+/** The assertion to send as `{ response }`, to `mfa/step-up` or to the app's own route. */
+export interface StepUpAssertionValue
+{
+    response: AuthenticationResponseJSON;
+}
+
+/**
+ * Run the passkey ceremony of a step-up and hand back the assertion, unspent —
+ * for an app route that takes a second-factor proof itself
+ * (`checkSecondFactorProof(userId, { response }, { kind: 'stepUp', credential })`,
+ * then `spend()`), or for `mfa/step-up` (`stepUpWithPasskey`).
+ *
+ * `mfa/step-up/options` and `navigator.credentials`; nothing is posted after.
+ * The assertion is spent once, by whichever of `mfa/step-up` or the app's
+ * `spend()` runs first; only the session that asked for it can spend it. It is
+ * not tied to an action: what it authorizes is the app's to decide. It proves
+ * the second factor as at `mfa/step-up`: with user verification, from a passkey
+ * marked as a second factor while the policy lists `'passkey'`; anything else
+ * is a wrong proof. In the enrolment-only state any live passkey proves it, but
+ * an app route never meets that state: `authenticate` refuses such a session
+ * 403 `SECOND_FACTOR_ENROLMENT_REQUIRED` before app code runs.
+ *
+ * A dismissed prompt is `no-credential`, as for the other assertions here,
+ * whose `allowCredentials` is empty too. A refusal of the options call is a
+ * rejected promise.
+ *
+ * @example
+ * const proof = await stepUpAssertion(api);
+ * if (proof.ok)
+ * {
+ *     await appApi.exportData.call({ body: { response: proof.response } });   // the app's own route
+ * }
+ */
+export async function stepUpAssertion(api: AuthApi): Promise<PasskeyResult<StepUpAssertionValue>>
+{
+    if (!isPasskeySupported())
+    {
+        return { ok: false, reason: 'unsupported' };
+    }
+
+    const optionsJSON = await api.mfaStepUpOptions.call({
+        body: {},
+    }) as PublicKeyCredentialRequestOptionsJSON;
+
+    try
+    {
+        return { ok: true, response: await startAuthentication({ optionsJSON }) };
+    }
+    catch (error)
+    {
+        return { ok: false, reason: failureReason(error, 'no-credential'), error };
+    }
+}
+
+/**
+ * Prove the second factor again on a signed-in device with a passkey, so the
+ * change that answered 403 `STEP_UP_REQUIRED` can be retried.
+ *
+ * `stepUpAssertion`, then `mfa/step-up` with `{ response }` — and the same
+ * split `completeMfaWithPasskey` makes: a ceremony that did not happen is a
+ * result, the server declining is a rejected promise. A passkey the owner never
+ * marked, or an assertion without user verification, is `MfaVerificationFailedError`
+ * (401, with the body a wrong code gets); too many wrong proofs, 429
+ * `SECOND_FACTOR_LOCKED`.
+ *
+ * A 503 is neither: the account was busy with another change
+ * (`AccountBusyError`), and the assertion's challenge was not spent. It comes
+ * back as `{ ok: false, reason: 'busy' }`, as from `renewSession`; calling
+ * `stepUpWithPasskey` again is the answer. (An app holding the assertion from
+ * `stepUpAssertion` can post that same assertion again instead.)
+ *
+ * @example
+ * const stepUp = await stepUpWithPasskey(api);
+ * if (stepUp.ok)
+ * {
+ *     await api.changePassword.call({ body: { currentPassword, newPassword } });
+ * }
+ */
+export async function stepUpWithPasskey(api: AuthApi): Promise<PasskeyResult<{}>>
+{
+    const proof = await stepUpAssertion(api);
+
+    if (!proof.ok)
+    {
+        return proof;
+    }
+
+    return await api.mfaStepUp.call({ body: { response: proof.response } }).then(
+        (): PasskeyResult<{}> => ({ ok: true }),
+        (error: unknown) => isServiceUnavailable(error)
+            ? { ok: false, reason: 'busy', error }
+            : Promise.reject(error),
+    );
+}

@@ -3,7 +3,9 @@
  *
  * One test per row of the #309 case table — S1–S19, R1–R7, K1–K5 — of the
  * first review round — F1, F2 and P1–P12 — of the second — G1, G2, RV-A,
- * RV-D and the recovery-code generation — and D2 of #329, named for its row. The boot
+ * RV-D and the recovery-code generation — D2 of #329, SU1–SU3 of #372
+ * (a marking registration records a step-up) and SU4–SU5 of #393 (one spend of a
+ * step-up assertion across its two consumers), named for its row. The boot
  * rows B1–B7 and the classification's own guarantees (F4 among them) are in
  * unit/second-factor-policy.test.ts.
  *
@@ -48,7 +50,7 @@ import {
     users,
 } from '@/server/entities';
 import { hashPassword } from '@/server/helpers/password';
-import { mfaEnrolmentRepository } from '@/server/repositories';
+import { mfaEnrolmentRepository, usersRepository } from '@/server/repositories';
 import { generateKeyPair, generateClientToken, type KeyPair } from '@/server/lib/crypto';
 import { decodeBase32, hotp, totpStep } from '@/server/lib/totp';
 import { authLoginEvent, passkeyRevokedEvent } from '@/server/events';
@@ -71,7 +73,8 @@ const { opsTokenAuth, requireOpsScope } = await import('@/server/middleware/ops-
 const { getAuth, getOptionalAuth } = await import('@/server/helpers/context');
 const { initializeAuth } = await import('@/server/services/rbac.service');
 const { getRoleByName } = await import('@/server/services/role.service');
-const { disableMfaService, resetSecondFactorService } = await import('@/server/services/mfa.service');
+const { checkSecondFactorProof, disableMfaService, resetSecondFactorService } = await import('@/server/services/mfa.service');
+const { runInTransaction } = await import('@spfn/core/db');
 const { NotFoundError } = await import('@spfn/core/errors');
 const { issueOpsTokenService } = await import('@/server/services/ops-token.service');
 const { verifyAccessToken } = await import('@/server/services/oauth2-access-token.service');
@@ -1500,5 +1503,151 @@ describe.skipIf(!dbAvailable)('second-factor policy (#309 case table)', () =>
 
         expect(answer.mfaStatus).toMatchObject({ enrolled: true, methods: ['passkey'] });
         expect(await liveMarkedPasskeys()).toBe(1);
+    });
+
+    // ========================================================================
+    // #372 — a marking registration records a step-up, and only it
+    // ========================================================================
+
+    it('SU1: a registration without user verification in the enrolment-only state records no step-up', async () =>
+    {
+        usePolicy();
+        const session = await signIn();
+        const authenticator = await FixtureAuthenticator.create();
+        const options = await post('/_auth/passkeys/register/options', {}, session.authorization);
+
+        const registered = await post('/_auth/passkeys/register/verify', {
+            response: authenticator.attest({ challenge: (await options.json()).challenge, origin: ORIGIN, rpId: RP_ID, userVerified: false }),
+        }, session.authorization);
+
+        expect(registered.status).toBe(200);
+        expect((await registered.json()).mfaStatus).toBeUndefined();
+        expect(await getTestDb().select().from(mfaVerifications).where(eq(mfaVerifications.userId, userId))).toEqual([]);
+    });
+
+    it('SU2: a user-verified registration on an enrolled account does not refresh the step-up window', async () =>
+    {
+        const { session } = await passkeyEnrolledAccount();
+        const opened = new Date(Date.now() - 5 * 60_000);
+        await getTestDb().update(mfaVerifications).set({ verifiedAt: opened }).where(eq(mfaVerifications.keyId, session.keyId));
+
+        const { answer } = await registerPasskey(session);
+
+        expect(answer.mfaStatus).toBeUndefined();
+        const [verification] = await verificationsFor(session.keyId);
+        expect(verification!.verifiedAt.getTime()).toBe(opened.getTime());
+    });
+
+    it('SU3: first set-up — a temporary-password session registers its marking passkey and changes the password with no second ceremony', async () =>
+    {
+        await getTestDb().update(users).set({ passwordChangeRequired: true }).where(eq(users.id, userId));
+        usePolicy();
+        const session = await signIn();
+
+        const { answer } = await registerPasskey(session);
+        expect(answer.mfaStatus).toMatchObject({ enrolled: true, methods: ['passkey'] });
+
+        const changed = await request('PUT', '/_auth/password', session.authorization, {
+            currentPassword: PASSWORD,
+            newPassword: 'Changed456!',
+        });
+
+        expect(changed.status, await changed.clone().text()).toBe(204);
+        const [row] = await getTestDb().select().from(users).where(eq(users.id, userId));
+        expect(row!.passwordChangeRequired).toBe(false);
+    });
+
+    // ========================================================================
+    // #393 — a step-up assertion is spent once, by either consumer
+    // ========================================================================
+
+    /** A step-up assertion for this session, not posted anywhere. */
+    async function stepUpAssertionFor(session: Session, authenticator: FixtureAuthenticator, counter: number)
+    {
+        const options = await post('/_auth/mfa/step-up/options', {}, session.authorization);
+
+        return authenticator.assert({ challenge: (await options.json()).challenge, origin: ORIGIN, rpId: RP_ID, counter });
+    }
+
+    /** The app route's way: `checkSecondFactorProof` outside a transaction, `spend()` under the account lock. */
+    async function spendInApp(session: Session, response: unknown): Promise<boolean>
+    {
+        const proof = await checkSecondFactorProof(
+            userId,
+            { response: response as never },
+            { kind: 'stepUp', credential: { kind: 'deviceKey', keyId: session.keyId } },
+        );
+
+        return await runInTransaction(async () =>
+        {
+            await usersRepository.lockAccount(userId);
+
+            return await proof.spend();
+        });
+    }
+
+    it('SU4: one step-up assertion is spent once — by the app\'s checkSecondFactorProof or by mfa/step-up, whichever runs first', async () =>
+    {
+        // Counter 0 throughout, as synced passkeys report: no counter refuses
+        // the replay, so the spent challenge is all that does.
+        const { session, authenticator } = await passkeyEnrolledAccount();
+
+        const appFirst = await stepUpAssertionFor(session, authenticator, 0);
+        expect(await spendInApp(session, appFirst)).toBe(true);
+        expect((await post('/_auth/mfa/step-up', { response: appFirst }, session.authorization)).status).toBe(401);
+
+        const routeFirst = await stepUpAssertionFor(session, authenticator, 0);
+        expect((await post('/_auth/mfa/step-up', { response: routeFirst }, session.authorization)).status).toBe(204);
+        await expect(spendInApp(session, routeFirst)).rejects.toMatchObject({ name: 'MfaVerificationFailedError' });
+    });
+
+    /**
+     * Run the racers, each held at the account lock until all of them reached
+     * it: every one is past the check before the lock, so only the spend under
+     * the lock can tell them apart.
+     */
+    async function raceAtTheLock<T>(racers: Array<() => Promise<T>>): Promise<T[]>
+    {
+        let allArrived!: () => void;
+        const arrived = new Promise<void>(resolve => allArrived = resolve);
+        let arrivals = 0;
+        const lockAccount = usersRepository.lockAccount.bind(usersRepository);
+        const spy = vi.spyOn(usersRepository, 'lockAccount').mockImplementation(async (id) =>
+        {
+            if (++arrivals === racers.length)
+            {
+                allArrived();
+            }
+
+            await arrived;
+
+            return await lockAccount(id);
+        });
+
+        try
+        {
+            return await Promise.all(racers.map(racer => racer()));
+        }
+        finally
+        {
+            spy.mockRestore();
+        }
+    }
+
+    it('SU5: one step-up assertion raced by the app\'s spend and mfa/step-up — one of each, three of each — is spent once', async () =>
+    {
+        const { session, authenticator } = await passkeyEnrolledAccount();
+
+        for (const each of [1, 3])
+        {
+            const assertion = await stepUpAssertionFor(session, authenticator, 0);
+            const inApp = async () => await spendInApp(session, assertion) ? 'spent' : 'refused';
+            const atRoute = async () => (await post('/_auth/mfa/step-up', { response: assertion }, session.authorization)).status;
+
+            const outcomes = await raceAtTheLock([...Array(each).fill(inApp), ...Array(each).fill(atRoute)]);
+
+            expect(outcomes.filter(outcome => outcome === 'spent' || outcome === 204)).toHaveLength(1);
+            expect(outcomes.filter(outcome => outcome === 'refused' || outcome === 401)).toHaveLength(2 * each - 1);
+        }
     });
 });

@@ -86,9 +86,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   in on a device that is not already signed in. It does not cover a still-signed-in browser signing
   in again (the password alone), a bound session's renewal (the passkey alone), or an account that
   has not enrolled yet (the password, then enrolment).
+- **@spfn/auth: `stepUpAssertion(api)` and `stepUpWithPasskey(api)`** from `@spfn/auth/client`
+  (#372, #393). `stepUpAssertion` asks `mfa/step-up/options`, runs the ceremony and answers the
+  assertion unspent, for an app route that checks it with
+  `checkSecondFactorProof(userId, { response }, { kind: 'stepUp', credential })` and `spend()`s
+  it. `stepUpWithPasskey` posts it to `mfa/step-up`. A ceremony that did not happen is a
+  `PasskeyResult` failure (`no-credential` for a dismissed sheet), a 503 is `busy` (the challenge
+  was not spent), any other server refusal rejects, as `completeMfaWithPasskey` does. The assertion
+  is spent once, by whichever consumer runs first, only by the session that asked for it, and is
+  not tied to an action.
 
 ### Changed
 
+- **@spfn/auth: a passkey registration that marks the account's first passkey factor counts as a
+  step-up (#372).** In the second-factor policy's enrolment-only state, `passkeys/register/verify`
+  with user verification already marked the passkey; it now also opens the step-up window for the
+  credential that registered, in the same transaction, as `totp/confirm` does. So first set-up
+  (temporary password, required passkey) changes the password without a second ceremony.
+  No other registration records one: none without user verification, and adding a passkey to an
+  enrolled account does not refresh the window. `currentPassword` stays required on that password
+  change. Not breaking.
 - **BREAKING (security-relevant): @spfn/core: a middleware declaring `skips` now removes what it
   names when it is attached to a router (spfn/spfn#165).** It was ignored on `defineRouter(...).use([...])`
   and honoured only in a route's own `.use()`; now it removes the listed names from what that

@@ -63,6 +63,7 @@ import type {
 } from '../lib/webauthn';
 import {
     keysRepository,
+    mfaVerificationsRepository,
     passkeysRepository,
     socialAccountsRepository,
     usersRepository,
@@ -485,7 +486,12 @@ export interface FinishPasskeyEnrollmentResult
  * without it is possession alone, is kept unmarked, and the account stays in
  * that state (au7-A4). Every registration records whether it verified the
  * person (`registered_user_verified`), which a later mark requires.
- * Otherwise the session is ordinary on its next request. An account that
+ * Otherwise the session is ordinary on its next request, and the marking
+ * registration also records a step-up for the credential that made it, in the
+ * same transaction: the ceremony proved the factor with user verification, as
+ * `totp/confirm` does, so a sensitive change right after needs no second
+ * ceremony (#372). No other registration records one — on an enrolled account
+ * adding a passkey does not refresh the window. An account that
  * already held a credential reaches this only from a device that proved it
  * (`assertEnrolmentProven`). With no policy, or outside that state, nothing is
  * marked.
@@ -589,7 +595,16 @@ async function keepPasskey(
 
     const enrolled = { passkeyId: String(row.id), label: row.label, createdAt: row.createdAt.toISOString() };
 
-    return marksFactor ? { ...enrolled, mfaStatus: await mfaStatusService(params.userId) } : enrolled;
+    if (!marksFactor)
+    {
+        return enrolled;
+    }
+
+    // This credential just proved the factor it made, with user verification:
+    // a step-up, as `totp/confirm` records one (#372).
+    await mfaVerificationsRepository.record(params.userId, startingCredentialOf(params.credential), 'passkey');
+
+    return { ...enrolled, mfaStatus: await mfaStatusService(params.userId) };
 }
 
 /**
