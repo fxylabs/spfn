@@ -183,11 +183,12 @@ where every sign-in channel writes its key, and at `mfa/verify`; a password sign
 is compared against a dummy hash and refused whatever the password was. `settled(outcome)` is told
 `challenged` at a 202, `succeeded` once a session exists, and `failed` with a closed `reason` for
 every attempt that names an account or a credential, refusals included; a failure is committed in a
-transaction of its own before the 401 or 403. Both run inside the package's
-transaction, holding the account lock — app repositories extending `BaseRepository` join it; keep
-them to fast database work, lock no second account, and expect a second run on an OAuth sign-in that
-lost a race. Renewal and key rotation are never asked. Omitted, nothing changes; two lifecycles
-stating different functions refuse boot. See
+transaction of its own before the 401 or 403. Each runs in a transaction of the package's, holding
+the account lock — except `admit`'s first call on `password`, `deletion-cancel` and `mfa/verify`,
+before the credential is compared, which runs in none — and app repositories extending
+`BaseRepository` join it; keep them to fast database work, lock no second account, and expect a
+second run on an OAuth sign-in that lost a race. Renewal and key rotation are never asked. Omitted,
+nothing changes; two lifecycles stating different functions refuse boot. See
 [The sign-in guard](../../packages/auth/README.md#the-sign-in-guard-signin).
 
 ### 5. Register Router and Middleware in `router.ts`

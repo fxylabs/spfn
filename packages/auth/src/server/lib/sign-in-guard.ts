@@ -107,11 +107,15 @@ export type SignInAdmission = void | undefined | { refuse: { code: string } };
 /**
  * `createAuthLifecycle({ signIn })`. Both optional.
  *
- * Both run inside the package's transaction, holding the account's lock
- * (except `admit`'s first call on `password`, `deletion-cancel` and
- * `mfa/verify`, which runs before any): an app repository extending
- * `BaseRepository` joins it. Database work only, and fast — every other
- * writer of the account waits on it. Never lock a second account.
+ * Every call but one runs in a transaction of the package's, holding the
+ * account's lock, and an app repository extending `BaseRepository` joins it:
+ * `admit` and `succeeded`/`challenged` in the session's transaction, a
+ * failure in one of its own. The exception is `admit`'s first call on
+ * `password`, `deletion-cancel` and `mfa/verify`, before the credential is
+ * compared: outside any transaction, so a write there commits at once.
+ * Database work only, and fast — every other writer of the account waits on
+ * it. Never lock a second account. The README's "Where each call runs" has
+ * the table.
  */
 export interface SignInGuardOptions
 {

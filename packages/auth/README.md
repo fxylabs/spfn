@@ -686,13 +686,21 @@ registration (`register`, `signup-link`, `invitation`) rolls the new account bac
 **`settled(outcome)`** is told `challenged` at a 202 (the key is written inactive), `succeeded`
 once, when the session exists — at `mfa/verify` for a 202 — and `failed` with a `reason`.
 
-Both run **inside the package's transaction**: an app repository extending `BaseRepository` joins it
-through the transaction context, so a write the callback makes commits or rolls back with the
-attempt — no transaction argument to thread.
+**Where each call runs.** An app repository extending `BaseRepository` joins whatever transaction is
+open through the transaction context — no transaction argument to thread — so where a call runs
+decides what becomes of a write it makes:
 
-- **The account's lock is held** (`usersRepository.lockAccount`) while they run, except `admit`'s
-  first call on `password`, `deletion-cancel` and `mfa/verify`, which runs before any. Every other
-  writer of the account waits on it, at most five seconds before it answers `AccountBusyError`:
+| Call | Runs | A write of yours there |
+|---|---|---|
+| `admit`, first call on `password`, `deletion-cancel` and `mfa/verify` (before the credential is compared) | outside any transaction, without the lock | commits at once, statement by statement, whatever the attempt's outcome |
+| `admit`, deciding call — where the key is written; at `mfa/verify`, where it is activated | in the session's transaction, under the account lock | commits with the session; rolls back with a refused or failed one |
+| `admit`, asked again after a wrong credential | in the transaction that records the failure, under the account lock | commits with that record |
+| `settled`, `challenged` or `succeeded` | in the session's transaction, under the account lock | commits with the session; a throw rolls the session back |
+| `settled`, `failed` for a wrong credential checked before any transaction | in a transaction of its own, under the account lock, before the answer | commits before the 401 or 403; a throw answers 500 |
+| `settled`, `failed` for a refusal decided in the session's transaction | in a transaction of its own, under the account lock, after the session's rolled back | commits before the 403; a throw is logged |
+
+- **Under the account's lock** (`usersRepository.lockAccount`; none when `user` is null) every other
+  writer of the account waits on you, at most five seconds before it answers `AccountBusyError`:
   database work only, and fast. No network call.
 - **Never lock a second account** in them — the transaction refuses it with
   `SecondAccountLockError`.

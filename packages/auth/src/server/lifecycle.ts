@@ -427,10 +427,12 @@ export interface AuthLifecycleOptions extends AuthInitOptions
      *   refusal decided inside the session's transaction is told once that
      *   transaction has rolled back.
      *
-     * Both run inside the package's transaction, holding the account's lock: an
-     * app repository extending `BaseRepository` joins it. Database work only,
-     * and fast. Never lock a second account. On OAuth a contended sign-in runs
-     * them twice, the first run rolled back. See the README, "Sign-in guard".
+     * Each runs in a transaction of the package's, holding the account's lock
+     * — except `admit`'s first call on `password`, `deletion-cancel` and
+     * `mfa/verify`, which runs before any — and an app repository extending
+     * `BaseRepository` joins it. Database work only, and fast. Never lock a
+     * second account. On OAuth a contended sign-in runs them twice, the first
+     * run rolled back. See the README, "Sign-in guard".
      *
      * A later `createAuthLifecycle()` that omits it leaves it as it is; one
      * that states other functions refuses boot in `afterInfrastructure`.
