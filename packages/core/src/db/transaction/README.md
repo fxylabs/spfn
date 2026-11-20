@@ -185,7 +185,7 @@ reconnect-trigger in step 1 walks the `cause` chain, so it sees the driver error
 | Option | Type | Default | Notes |
 |--------|------|---------|-------|
 | `slowThreshold` | `number` | `1000` | ms; logs a `warn` if commit/rollback exceeds it |
-| `enableLogging` | `boolean` | `true` | start/commit/rollback debug logs |
+| `enableLogging` | `boolean` | `true` | start/commit/rollback debug logs — see [What a rollback logs](#what-a-rollback-logs) |
 | `timeout` | `number` | `30000` / `env.TRANSACTION_TIMEOUT` | PostgreSQL `statement_timeout` in ms |
 | `idleTimeout` | `number` | `30000` / `env.TRANSACTION_IDLE_TIMEOUT` | PostgreSQL `idle_in_transaction_session_timeout` in ms |
 | `requiresNew` | `boolean` | `false` | when the middleware runs nested, open an independent transaction instead of a SAVEPOINT — see [Nested transactions](#nested-transactions-savepoints) |
@@ -263,6 +263,23 @@ This is a backstop, not a license — see the anti-pattern below.
 `callback` is not a function; `slowThreshold` is negative/non-integer; `timeout` is
 non-integer, negative, or above the max; or the write database is not initialized
 (status 500). Errors thrown by `callback` itself propagate unchanged after rollback.
+
+### What a rollback logs
+
+With `enableLogging` on, a rollback writes one line carrying the error's **description**
+(`describeError` from `@spfn/core/logger`), never the error's message, stack or fields:
+
+- `Transaction rolled back` — at **debug**. The error is rethrown untouched, and its owner
+  logs it at the level it deserves: the error handler at warn for a 4xx and error for a 5xx,
+  a job at error. A unique violation the app handles is not an error-level event of the runner.
+- `Slow transaction rolled back` — at **warn** when the rollback took `slowThreshold` or longer:
+  slowness is the runner's own concern.
+
+For a database error the description holds the SQLSTATE (`code`), `constraint`, `schema`,
+`table`, `column`, `routine`, the SQL text with its `$n` placeholders (truncated to 1000
+characters) and `paramCount` — never the bound values, which drizzle puts in its message
+(`Failed query: … params: …`) and the driver in `detail`. The same holds for a failing
+`onAfterCommit` / `onAfterRollback` / immediate `onBeforeCommit` callback's log line.
 
 ---
 

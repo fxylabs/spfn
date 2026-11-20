@@ -91,7 +91,7 @@ export async function runTenancyBootGate(databases?: TenancyGateDb[]): Promise<T
     {
         const reason = inspected.error instanceof Error ? inspected.error.message : String(inspected.error);
 
-        serverLogger.warn(`Could not check the database role against the tenancy tables: ${reason}. Starting anyway.`);
+        serverLogger.warn('Could not check the database role against the tenancy tables. Starting anyway.', { error: inspected.error });
 
         return { state: 'unavailable', reason };
     }

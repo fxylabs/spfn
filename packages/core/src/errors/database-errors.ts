@@ -23,9 +23,11 @@ export class DatabaseError<TDetails extends Record<string, unknown> = Record<str
         message: string;
         statusCode?: number;
         details?: TDetails;
+        /** The error this one was converted from — the driver error, for `fromPostgresError` */
+        cause?: unknown;
     })
     {
-        super(data.message);
+        super(data.message, data.cause === undefined ? undefined : { cause: data.cause });
         this.name = 'DatabaseError';
         this.statusCode = data.statusCode ?? 500;
         this.details = data.details;
@@ -52,9 +54,9 @@ export class DatabaseError<TDetails extends Record<string, unknown> = Record<str
  */
 export class ConnectionError extends DatabaseError
 {
-    constructor(data: { message: string; details?: Record<string, unknown> })
+    constructor(data: { message: string; details?: Record<string, unknown>; cause?: unknown })
     {
-        super({ message: data.message, statusCode: 503, details: data.details });
+        super({ message: data.message, statusCode: 503, details: data.details, cause: data.cause });
         this.name = 'ConnectionError';
     }
 }
@@ -70,12 +72,14 @@ export class QueryError extends DatabaseError
         message: string;
         statusCode?: number;
         details?: Record<string, unknown>;
+        cause?: unknown;
     })
     {
         super({
             message: data.message,
             statusCode: data.statusCode ?? 500,
             details: data.details,
+            cause: data.cause,
         });
         this.name = 'QueryError';
     }
@@ -118,9 +122,9 @@ export class EntityNotFoundError extends QueryError
  */
 export class ConstraintViolationError extends QueryError
 {
-    constructor(data: { message: string; details?: Record<string, unknown> })
+    constructor(data: { message: string; details?: Record<string, unknown>; cause?: unknown })
     {
-        super({ message: data.message, statusCode: 400, details: data.details });
+        super({ message: data.message, statusCode: 400, details: data.details, cause: data.cause });
         this.name = 'ConstraintViolationError';
     }
 }
@@ -136,12 +140,14 @@ export class TransactionError extends DatabaseError
         message: string;
         statusCode?: number;
         details?: Record<string, unknown>;
+        cause?: unknown;
     })
     {
         super({
             message: data.message,
             statusCode: data.statusCode ?? 500,
             details: data.details,
+            cause: data.cause,
         });
         this.name = 'TransactionError';
     }
@@ -154,9 +160,9 @@ export class TransactionError extends DatabaseError
  */
 export class DeadlockError extends TransactionError
 {
-    constructor(data: { message: string; details?: Record<string, unknown> })
+    constructor(data: { message: string; details?: Record<string, unknown>; cause?: unknown })
     {
-        super({ message: data.message, statusCode: 409, details: data.details });
+        super({ message: data.message, statusCode: 409, details: data.details, cause: data.cause });
         this.name = 'DeadlockError';
     }
 }
@@ -171,7 +177,7 @@ export class DuplicateEntryError extends QueryError
     public readonly field: string;
     public readonly value: string | number;
 
-    constructor(data: { field: string; value: string | number })
+    constructor(data: { field: string; value: string | number; cause?: unknown })
     {
         // The client-facing message/details name the field but NOT the value: echoing
         // the value back (e.g. an email) confirms it exists, an enumeration aid. The
@@ -180,6 +186,7 @@ export class DuplicateEntryError extends QueryError
             message: `${data.field} already exists`,
             statusCode: 409,
             details: { field: data.field },
+            cause: data.cause,
         });
         this.name = 'DuplicateEntryError';
         this.field = data.field;

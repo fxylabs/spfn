@@ -56,11 +56,7 @@ export async function readInboundRequest(): Promise<InboundRequest | null>
     }
     catch (error)
     {
-        const err = error as Error;
-        cookieLogger.warn('Failed to read the inbound request', {
-            message: err.message,
-            name: err.name,
-        });
+        cookieLogger.warn('Failed to read the inbound request', { error });
 
         return null;
     }

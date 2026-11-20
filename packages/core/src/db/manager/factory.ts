@@ -151,7 +151,7 @@ async function createWriteReadClients(
     catch (error)
     {
         const errorObj = error instanceof Error ? error : new Error(String(error));
-        dbLogger.error('Failed to connect to write database', errorObj);
+        dbLogger.error('Failed to connect to write database', { error });
         throw new Error(`Write database connection failed: ${errorObj.message}`, { cause: error });
     }
 
@@ -173,13 +173,11 @@ async function createWriteReadClients(
     }
     catch (error)
     {
-        const errorObj = error instanceof Error ? error : new Error(String(error));
-
         // Log warning but continue with write connection as fallback
         dbLogger.warn(
             'Failed to connect to read database (replica). Falling back to write database for read operations.',
             {
-                error: errorObj.message,
+                error,
                 readUrl: readUrl.replace(/:[^:@]+@/, ':***@'), // Mask password in logs
                 fallbackBehavior: 'Using write connection for both read and write operations',
             },
@@ -293,7 +291,7 @@ export async function createDatabaseFromEnv(options?: DatabaseOptions): Promise<
         const errorObj = error instanceof Error ? error : new Error(String(error));
         dbLogger.error(
             'Failed to create database connection',
-            errorObj,
+            error,
             {
                 stage: 'initialization',
                 hasWriteUrl: process.env.DATABASE_WRITE_URL !== undefined,

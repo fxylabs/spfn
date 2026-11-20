@@ -395,16 +395,12 @@ export function createProxyGuard(config: ProxyGuardConfig = {}): MiddlewareHandl
             {
                 if (nonceFailClosed)
                 {
-                    guardLogger.warn('Nonce store unavailable — rejecting (fail-closed)', {
-                        error: (err as Error).message,
-                    });
+                    guardLogger.warn('Nonce store unavailable — rejecting (fail-closed)', { error: err });
 
                     return reject(c, mode, next, 'nonce-store-unavailable');
                 }
 
-                guardLogger.warn('Nonce store unavailable — falling back to timestamp window', {
-                    error: (err as Error).message,
-                });
+                guardLogger.warn('Nonce store unavailable — falling back to timestamp window', { error: err });
             }
         }
 

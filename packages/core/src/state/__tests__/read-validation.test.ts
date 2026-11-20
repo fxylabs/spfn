@@ -90,7 +90,12 @@ describe('read validation', () =>
         expect(frames).toEqual([]);
         expect(warn).toHaveBeenCalledWith(
             'State "consent" could not be re-read or published on its change signal; no frame was sent',
-            { state: 'consent', error: expect.stringContaining('State "consent" read() returned a result its declaration does not allow: /value') },
+            {
+                state: 'consent',
+                error: expect.objectContaining({
+                    message: expect.stringContaining('State "consent" read() returned a result its declaration does not allow: /value'),
+                }),
+            },
         );
         expect(JSON.stringify(warn.mock.calls)).not.toContain('nope');
     });

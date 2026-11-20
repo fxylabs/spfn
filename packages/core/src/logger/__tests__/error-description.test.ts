@@ -1,0 +1,396 @@
+/**
+ * A logged database error carries no bound value (#382)
+ *
+ * drizzle's query error holds every bound value in `params`, in its message
+ * and in its stack header; the driver error under it adds `detail`. The logger
+ * renders any error it is handed through `describeError`, so each row hands it
+ * the error one way a log site does and asserts the output holds none of them.
+ *
+ * | #   | the error reaches the logger                | goes unnoticed without the row                              |
+ * | --- | ------------------------------------------- | ----------------------------------------------------------- |
+ * | R4  | as the error argument                       | a fix that drops only the stack's first line: line 2 is `params:` |
+ * | R5  | inside the context object                   | the key-masking walk printing `params` and the cause's `detail` |
+ * | R7  | a 22P02 driver error                        | a class-22 message quoting the rejected input               |
+ * | R7b | a kept class from an unknown routine (`RAISE`, PL/Python) | a kept class carrying the app's own text; a pooler's routine-less 08 losing its message |
+ * | R7c | a 40001 or a partition 23514, as PostgreSQL 16.15 raised it | a serialization failure logged without its message      |
+ * | F1  | formatted into a printf-style message (`%s`, `%o`, `%j`, a stray `%c`) | the documented printf form handing the error to `util.format` undescribed |
+ *
+ * What is the caught value is decided by position, never by the value's shape (G2):
+ *
+ * | #   | the caught value reaches the logger         | goes unnoticed without the row                              |
+ * | --- | ------------------------------------------- | ----------------------------------------------------------- |
+ * | A1  | a thrown plain object with `params`, as `{ error }` and as the 2nd of 3 | the object walked as context, its params printed |
+ * | A2  | `undefined`, a string or a plain object, with a context | the context dropped (a transaction id missing from the line) |
+ * | A3  | an app error with `code`, `statusCode`, `details` | a failed job's `output` losing the error's `code`      |
+ * | A4  | as `{ error }`, on the console              | its stack frames printed as one escaped line of JSON        |
+ * | A5  | under an error key below the top level, or in a list under `errors` | a nested thrown object's params printed (H2)  |
+ * | A6  | inside a Map or a Set in the context        | the collection logged as `{}`, hiding its entries; or its entries skipping the key rules |
+ * | A7  | under a body marked `alreadySentToClient`   | the mark disabling the sensitive-name masking or the description of an Error instance |
+ * | A8  | already a description, with `{ stack: false }` | a described error's frames kept, down its cause chain     |
+ *
+ * And describing never throws into the log call that asked for it (G4):
+ *
+ * | #   | the error                                   | goes unnoticed without the row                              |
+ * | --- | ------------------------------------------- | ----------------------------------------------------------- |
+ * | D1  | has getters that throw, or is a Proxy       | `logger.error` throwing, replacing the error being handled  |
+ * | D2  | has a cause chain 20,000 links deep         | a stack overflow out of the log call                        |
+ * | D3  | has a cause chain that loops                | a loop described as if it ended, or not at all              |
+ * | D4  | is not one: a context object with a `stack` | a domain object read as an error, its fields dropped        |
+ */
+
+import { describe, it, expect } from 'vitest';
+import { Logger } from '../logger';
+import { CAUSE_DEPTH_LIMIT, describeError } from '../error-description';
+import { alreadySentToClient, formatConsole } from '../formatters';
+import { BOUND_VALUES, capturingLogger, expectNoValues, failedInsert, FAILED_INSERT } from './helpers/leak-probe';
+
+/** Let the logger's transports, which run on a microtask, finish */
+const settle = (): Promise<void> => new Promise(resolve => setTimeout(resolve, 0));
+
+describe('a logged database error carries no bound value', () =>
+{
+    it('R4: logger.error(message, error) prints the code, constraint, table and SQL, and no value', async () =>
+    {
+        const { logger, output } = capturingLogger(Logger);
+
+        logger.error('Insert failed', failedInsert());
+        await settle();
+
+        expectNoValues(output());
+        expect(output()).toContain('[code=23505]');
+        expect(output()).toContain('[constraint=users_email_key]');
+        expect(output()).toContain('[table=users]');
+        expect(output()).toContain('duplicate key value violates unique constraint "users_email_key"');
+        expect(output()).toContain(FAILED_INSERT);
+    });
+
+    it('R5: an error inside the context is described, not walked', async () =>
+    {
+        const { logger, output } = capturingLogger(Logger);
+
+        logger.error('Insert failed', { op: 'register', error: failedInsert() });
+        await settle();
+
+        expectNoValues(output());
+        expect(output()).toContain('"code":"23505"');
+        expect(output()).toContain('"paramCount":2');
+    });
+
+    it('F1: an error formatted into a printf-style message is its description, also inside an object', async () =>
+    {
+        const { logger, output } = capturingLogger(Logger);
+
+        logger.error('Saving user failed: %s', failedInsert());
+        logger.error('Saving user failed: %o', failedInsert());
+        logger.error('Saving user failed: %O', failedInsert());
+        logger.error('Saving user failed: %j', { e: failedInsert() });
+        logger.error('Saving user failed: %o', { e: failedInsert() });
+        logger.error(`Upload of /files/caf%c3%a9.txt failed`, failedInsert());
+        await settle();
+
+        expectNoValues(output());
+        expect(output()).toContain('[code=23505]');
+        expect(output()).toContain('\\"code\\":\\"23505\\"');
+    });
+
+    it('R7: a class-22 driver message, which quotes the rejected input, is left out', () =>
+    {
+        const invalidInput = Object.assign(new Error('invalid input syntax for type integer: "leak-probe-value"'), {
+            severity: 'ERROR',
+            code: '22P02',
+            routine: 'pg_strtoint32_safe',
+        });
+
+        const description = describeError(invalidInput);
+
+        expect(description).toMatchObject({ kind: 'database', code: '22P02' });
+        expect(JSON.stringify(description)).not.toContain('leak-probe-value');
+    });
+
+    it('R7b: a kept class from an unknown routine keeps no message; one that names no routine keeps it', () =>
+    {
+        const raised = (routine: string): Error => Object.assign(new Error('leak-probe@example.test taken'), {
+            severity: 'ERROR',
+            code: '23505',
+            constraint_name: 'users_email_key',
+            table_name: 'users',
+            routine,
+        });
+        const pooler = Object.assign(new Error('no more connections allowed (max_client_conn)'), { severity: 'FATAL', code: '08P01' });
+
+        for (const routine of ['exec_stmt_raise', 'PLy_elog_impl'])
+        {
+            const description = describeError(raised(routine));
+
+            expect(description).toMatchObject({ kind: 'database', code: '23505', constraint: 'users_email_key', table: 'users', routine });
+            expect(description).not.toHaveProperty('message');
+        }
+
+        expect(describeError(pooler)).toMatchObject({ kind: 'database', code: '08P01', message: 'no more connections allowed (max_client_conn)' });
+    });
+
+    it('R7c: a serialization failure and a partition check keep their identifier-only messages', () =>
+    {
+        // Each read off PostgreSQL 16.15 (two sessions, repeatable read or serializable)
+        const raised: [string, string, string][] = [
+            ['40001', 'ExecLockRows', 'could not serialize access due to concurrent update'],
+            ['40001', 'ExecDelete', 'could not serialize access due to concurrent update'],
+            ['40001', 'OnConflict_CheckForSerializationFailure', 'could not serialize access due to read/write dependencies among transactions'],
+            ['23514', 'ExecPartitionCheckEmitError', 'new row for relation "orders_2026" violates partition constraint'],
+        ];
+
+        for (const [code, routine, message] of raised)
+        {
+            expect(describeError(Object.assign(new Error(message), { severity: 'ERROR', code, routine }))).toMatchObject({ code, routine, message });
+        }
+    });
+});
+
+describe('the caught value is described whatever its shape', () =>
+{
+    /** What a dependency might throw: not an Error, values in an arbitrary field */
+    const thrownObject = (): Record<string, unknown> => ({ code: 'BROKEN', message: 'broken', params: [...BOUND_VALUES], detail: 'Key (email)=(leak-probe@example.test)' });
+
+    it('A1: a thrown plain object logged as { error } or as the second of three arguments keeps no field but name, message and code', async () =>
+    {
+        const { logger, lines, output } = capturingLogger(Logger);
+
+        logger.error('operation failed', { error: thrownObject(), op: 'register' });
+        logger.error('operation failed', thrownObject(), { op: 'register' });
+        logger.error('operation failed', { err: thrownObject(), cause: 'a string', reason: thrownObject() });
+        await settle();
+
+        expectNoValues(output());
+        expect(lines[0].context).toEqual({ error: { kind: 'error', name: 'NonError', message: 'broken', code: 'BROKEN' }, op: 'register' });
+        expect(lines[1].error).toEqual({ kind: 'error', name: 'NonError', message: 'broken', code: 'BROKEN' });
+        expect(lines[1].context).toEqual({ op: 'register' });
+        expect(lines[2].context!.cause).toBe('a string');
+    });
+
+    it('A1b: a primitive under an error key, or in a list under errors, is data and logged as it is', async () =>
+    {
+        const { logger, lines, output } = capturingLogger(Logger);
+
+        logger.warn('Connection refused', { reason: 'authentication_failed', error: null, err: false, cause: 3 });
+        logger.warn('Retry settled', { job: { error: null, reason: 'timeout' }, errors: ['timeout', null, thrownObject()] });
+        await settle();
+
+        expectNoValues(output());
+        expect(lines[0].context).toEqual({ reason: 'authentication_failed', error: null, err: false, cause: 3 });
+        expect(lines[1].context).toEqual({
+            job: { error: null, reason: 'timeout' },
+            errors: ['timeout', null, { kind: 'error', name: 'NonError', message: 'broken', code: 'BROKEN' }],
+        });
+        expect(output()).not.toContain('NonError: authentication_failed');
+    });
+
+    it('A2: with three arguments the context is kept whatever the caught value is', async () =>
+    {
+        const { logger, lines } = capturingLogger(Logger);
+
+        for (const caught of [undefined, 'it broke', { reason: 'plain' }, null])
+        {
+            logger.error('afterCommit callback failed', caught, { txId: 'tx-1' });
+        }
+
+        await settle();
+
+        expect(lines.map(line => line.context)).toEqual(Array(4).fill({ txId: 'tx-1' }));
+        expect(lines.map(line => line.error)).toEqual([
+            { kind: 'error', name: 'NonError', message: 'undefined' },
+            { kind: 'error', name: 'NonError', message: 'it broke' },
+            { kind: 'error', name: 'NonError' },
+            { kind: 'error', name: 'NonError', message: 'null' },
+        ]);
+    });
+
+    it('A4: the console prints a described context error on its own lines, after the message', async () =>
+    {
+        const { logger, lines } = capturingLogger(Logger);
+
+        logger.error('Cleanup failed', { error: new Error('boom'), attempt: 2 });
+        await settle();
+
+        const printed = formatConsole(lines[0], false);
+        expect(printed).toMatch(/\[attempt=2\] \(ERROR\): Cleanup failed\nerror: Error: boom\n {4}at /);
+        expect(printed).not.toContain('[error=');
+    });
+
+    it('A3: an error\'s code and numeric statusCode are kept; its other fields are not', () =>
+    {
+        class AppError extends Error
+        {
+            code = 'E_APP';
+            statusCode = 409;
+            details = { email: BOUND_VALUES[0] };
+        }
+
+        expect(describeError(new AppError('taken'))).toMatchObject({ kind: 'error', name: 'Error', message: 'taken', code: 'E_APP', statusCode: 409 });
+        expect(JSON.stringify(describeError(new AppError('taken')))).not.toContain(BOUND_VALUES[0]);
+    });
+
+    it('A5: below the top level, a value under an error key is described, and so is each element of a list under errors', async () =>
+    {
+        const { logger, lines, output } = capturingLogger(Logger);
+        const described = { kind: 'error', name: 'NonError', message: 'broken', code: 'BROKEN' };
+
+        logger.error('Job failed', { job: { id: 'job-1', error: thrownObject() } });
+        logger.error('Batch failed', { errors: [thrownObject(), failedInsert()] });
+        logger.error('Batch failed', { batch: { errors: new AggregateError([thrownObject()]).errors } });
+        logger.error('Batch failed', { errors: new Set([thrownObject()]), nested: [{ reason: thrownObject() }] });
+        await settle();
+
+        expectNoValues(output());
+        expect(lines[0].context).toEqual({ job: { id: 'job-1', error: described } });
+        expect((lines[1].context!.errors as unknown[])[0]).toEqual(described);
+        expect((lines[1].context!.errors as unknown[])[1]).toMatchObject({ kind: 'database', code: '23505' });
+        expect(lines[2].context).toEqual({ batch: { errors: [described] } });
+        expect(lines[3].context).toEqual({ errors: [described], nested: [{ reason: described }] });
+    });
+
+    it('A6: a Map logs as its [key, value] pairs, a Set as its values, through the same key rules', async () =>
+    {
+        const { logger, lines, output } = capturingLogger(Logger);
+
+        logger.info('Cache state', {
+            byKey: new Map<unknown, unknown>([['user-1', 'cached'], ['error', thrownObject()], ['password', 'p'], [7, failedInsert()]]),
+            tags: new Set(['a', 'b']),
+        });
+        await settle();
+
+        expectNoValues(output());
+        expect(lines[0].context).toEqual({
+            byKey: [
+                ['user-1', 'cached'],
+                ['error', { kind: 'error', name: 'NonError', message: 'broken', code: 'BROKEN' }],
+                ['password', '***MASKED***'],
+                [7, expect.objectContaining({ kind: 'database', code: '23505' })],
+            ],
+            tags: ['a', 'b'],
+        });
+    });
+
+    it('A7: under alreadySentToClient an error key is data; sensitive names are still masked and an Error still described', async () =>
+    {
+        const { logger, lines, output } = capturingLogger(Logger);
+        const body = { error: { code: 'ValidationError', message: 'bad', requestId: 'req-1' }, token: 't', nested: { cause: failedInsert() } };
+
+        logger.warn('Request completed', { response: alreadySentToClient(body), error: thrownObject() });
+        await settle();
+
+        expectNoValues(output());
+        expect(lines[0].context).toEqual({
+            response: {
+                error: { code: 'ValidationError', message: 'bad', requestId: 'req-1' },
+                token: '***MASKED***',
+                nested: { cause: expect.objectContaining({ kind: 'database', code: '23505' }) },
+            },
+            error: { kind: 'error', name: 'NonError', message: 'broken', code: 'BROKEN' },
+        });
+        expect(alreadySentToClient('text')).toBe('text');
+    });
+
+    it('A8: a description described again with { stack: false } drops its frames down the cause chain, and stays a description', () =>
+    {
+        const described = describeError(new Error('outer', { cause: new Error('inner') }));
+        const bare = describeError(described, { stack: false });
+
+        expect(described.stack).toMatch(/^\s+at /);
+        expect(bare).toEqual({ kind: 'error', name: 'Error', message: 'outer', cause: { kind: 'error', name: 'Error', message: 'inner' } });
+        expect(describeError(bare)).toBe(bare);
+    });
+});
+
+/**
+ * A getter or Proxy trap that throws
+ */
+function throwing(what: string): () => never
+{
+    return () =>
+    {
+        throw new Error(what);
+    };
+}
+
+describe('describing an error never throws', () =>
+{
+    /** An Error each of whose fields throws when read, and a Proxy every trap of which throws */
+    const hostileErrors = (): unknown[] =>
+    {
+        const getters = new Error('hostile');
+
+        for (const key of ['message', 'name', 'stack', 'cause', 'code', 'statusCode'])
+        {
+            Object.defineProperty(getters, key, { get: throwing(`reading ${key}`) });
+        }
+
+        const proxy = new Proxy({}, {
+            get: throwing('get trap'),
+            getPrototypeOf: throwing('prototype trap'),
+            ownKeys: throwing('ownKeys trap'),
+        });
+        const revoked = Proxy.revocable([], {});
+        revoked.revoke();
+
+        return [getters, proxy, revoked.proxy];
+    };
+
+    it('D1: a hostile error is described, and logging it — as the error or in the context — does not throw', async () =>
+    {
+        const { logger, output } = capturingLogger(Logger);
+
+        for (const hostile of hostileErrors())
+        {
+            expect(() => describeError(hostile)).not.toThrow();
+            expect(() => logger.error('Job failed', hostile, { jobId: 'job-1' })).not.toThrow();
+            expect(() => logger.error('Job failed', { error: hostile, nested: { hostile } })).not.toThrow();
+        }
+
+        await settle();
+        expect(output()).toContain('Job failed');
+        expect(output()).toContain('jobId');
+    });
+
+    it('D2: a cause chain past the limit ends in a CauseChainTruncated link', () =>
+    {
+        let error = new Error('link 0');
+
+        for (let index = 1; index < 20_000; index++)
+        {
+            error = new Error(`link ${index}`, { cause: error });
+        }
+
+        let link: any = describeError(error);
+
+        for (let depth = 1; depth < CAUSE_DEPTH_LIMIT; depth++)
+        {
+            link = link.cause;
+        }
+
+        expect(link.cause).toMatchObject({ kind: 'error', name: 'CauseChainTruncated' });
+        expect(link.cause.cause).toBeUndefined();
+    });
+
+    it('D3: a cause chain that loops ends in a CircularCause link', () =>
+    {
+        const outer = new Error('outer');
+        const inner = new Error('inner', { cause: outer });
+        Object.defineProperty(outer, 'cause', { value: inner });
+
+        expect(describeError(outer)).toMatchObject({
+            name: 'Error',
+            message: 'outer',
+            cause: { message: 'inner', cause: { kind: 'error', name: 'CircularCause' } },
+        });
+    });
+
+    it('D4: an object with a string stack is data, not an error: its fields are kept', async () =>
+    {
+        const { logger, lines } = capturingLogger(Logger);
+
+        logger.info('Stack built', { item: { stack: 'a,b,c', owner: 'team-a' } });
+        await settle();
+
+        expect(lines[0].context).toEqual({ item: { stack: 'a,b,c', owner: 'team-a' } });
+    });
+});

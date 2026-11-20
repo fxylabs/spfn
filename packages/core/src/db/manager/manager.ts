@@ -132,10 +132,9 @@ async function closeDatabaseClient(client: Sql, type: 'write' | 'read'): Promise
         await client.end({ timeout: DB_CONNECTION_CLOSE_TIMEOUT });
         dbLogger.debug(`${typeName} connection closed`);
     }
-    catch (err: unknown)
+    catch (error: unknown)
     {
-        const error = err instanceof Error ? err : new Error(String(err));
-        dbLogger.error(`Error closing ${type} connection`, error);
+        dbLogger.error(`Error closing ${type} connection`, { error });
     }
 }
 
@@ -204,8 +203,7 @@ async function closeDatabaseProvider(
     }
     catch (error: unknown)
     {
-        const closeError = error instanceof Error ? error : new Error(String(error));
-        dbLogger.error(`Error closing ${provider.kind || 'unknown'} database provider`, closeError, {
+        dbLogger.error(`Error closing ${provider.kind || 'unknown'} database provider`, error, {
             context,
         });
     }
@@ -253,9 +251,7 @@ function getCallerInfo(): string | undefined
     catch (error: unknown)
     {
         // Stack trace parsing failed - log for debugging
-        dbLogger.debug('Failed to extract caller info from stack trace', {
-            error: error instanceof Error ? error.message : String(error),
-        });
+        dbLogger.debug('Failed to extract caller info from stack trace', { error });
     }
 
     return undefined;

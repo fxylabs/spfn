@@ -23,6 +23,11 @@ export type RepositoryDatabase<TDatabase extends DrizzleDatabase> =
 
 /**
  * Enhanced error class that includes repository context
+ *
+ * `withContext` gives it a fixed message, `<Repository>.<method> failed`, and
+ * the caught error as its `cause` — never the caught error's message or stack,
+ * which for a drizzle query error carry every bound value. Read the database
+ * fields through the cause (`describeError` from `@spfn/core/logger` does).
  */
 export class RepositoryError extends Error
 {
@@ -34,14 +39,8 @@ export class RepositoryError extends Error
         public readonly originalError?: Error,
     )
     {
-        super(message);
+        super(message, { cause: originalError });
         this.name = 'RepositoryError';
-
-        // Preserve original stack trace if available
-        if (originalError?.stack)
-        {
-            this.stack = originalError.stack;
-        }
     }
 }
 
@@ -121,12 +120,11 @@ export abstract class RepositoryCore<
     /**
      * Wrap query execution with repository context
      *
-     * Enhances error messages with repository information to make debugging easier.
-     * When an error occurs, it will include:
+     * Wraps a failure in a RepositoryError that names where it happened:
      * - Repository class name
      * - Method name
      * - Table name (if provided)
-     * - Original error details
+     * - The original error, as `cause` (and `originalError`)
      *
      * @param queryFn - Query function to execute
      * @param context - Context information (operation name, table name, etc.)
@@ -160,10 +158,10 @@ export abstract class RepositoryCore<
 
             const err = error instanceof Error ? error : new Error(String(error));
             const repositoryName = this.constructor.name;
+            const where = context.method ? `${repositoryName}.${context.method}` : repositoryName;
 
-            // Create enhanced error with repository context
             throw new RepositoryError(
-                err.message,
+                `${where} failed`,
                 repositoryName,
                 context.method,
                 context.table,

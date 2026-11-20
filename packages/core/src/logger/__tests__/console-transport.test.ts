@@ -4,6 +4,7 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach, type MockInstance } from 'vitest';
 import { ConsoleTransport } from '../transports/console';
+import { describeError } from '../error-description';
 import type { LogMetadata } from '../types';
 
 describe('ConsoleTransport', () =>
@@ -264,7 +265,7 @@ describe('ConsoleTransport', () =>
                 colorize: false,
             });
 
-            const error = new Error('Test error');
+            const error = describeError(new Error('Test error'));
 
             await transport.log({
                 timestamp: new Date(),

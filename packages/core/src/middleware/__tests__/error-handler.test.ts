@@ -2,9 +2,12 @@
  * Error Handler Middleware 테스트
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import { Hono, type Context } from 'hono';
+import { Logger } from '@spfn/core/logger';
 import { ErrorHandler, type OnErrorContext } from '../error-handler';
+import { RequestLogger } from '../request-logger';
+import { captureLoggerClass, expectNoValues, failedInsert } from '../../logger/__tests__/helpers/leak-probe';
 import {
     NotFoundError,
     BadRequestError,
@@ -422,6 +425,105 @@ describe('ErrorHandler Middleware', () =>
             expect(json.message).toBe('Internal Server Error');
             expect(json.cause).toBeUndefined();
             expect(JSON.stringify(json)).not.toContain('secret');
+        });
+    });
+
+    describe('A database error is answered and logged without its bound values (#382)', () =>
+    {
+        afterEach(() =>
+        {
+            vi.restoreAllMocks();
+        });
+
+        /** The error handler and the request logger, which logs every ≥400 body, around a failed insert */
+        const failingApp = (includeStack: boolean) =>
+        {
+            const app = new Hono();
+            app.use(RequestLogger());
+            app.onError(ErrorHandler({ includeStack }));
+            app.post('/register', () =>
+            {
+                throw failedInsert();
+            });
+
+            return app;
+        };
+
+        it('R9: outside production the body is the description; in production it is unchanged; no log or body carries a value', async () =>
+        {
+            const { lines, output } = captureLoggerClass(Logger);
+
+            const staging: any = await (await failingApp(true).request('/register', { method: 'POST' })).json();
+            const production: any = await (await failingApp(false).request('/register', { method: 'POST' })).json();
+            await new Promise(resolve => setTimeout(resolve, 0));
+
+            expect(staging).toMatchObject({
+                __type: 'Error',
+                message: 'Database error',
+                database: { kind: 'database', code: '23505', constraint: 'users_email_key', paramCount: 2 },
+            });
+            expect(staging.cause).toBeUndefined();
+            expect(staging.stack).toBeUndefined();
+            expect(production).toEqual({
+                __type: 'Error',
+                message: 'Internal Server Error',
+                error: { code: 'Error', message: 'Internal Server Error', requestId: expect.any(String) },
+            });
+            expectNoValues(JSON.stringify(staging));
+            expect(output()).toContain('[code=23505]');
+            expect(output()).toContain('"code":"23505"');
+            expectNoValues(output());
+
+            const productionLine = lines.filter(line => line.message === 'Error occurred')[1];
+            expect(productionLine.error).toBeUndefined();
+            expect(productionLine.context!.error).toMatchObject({ kind: 'database', name: 'DrizzleQueryError', constraint: 'users_email_key' });
+            expect(productionLine.context!.error).not.toHaveProperty('stack');
+        });
+
+        it('R9b: in production the log line carries an ordinary error\'s description, without its stack, under context.error', async () =>
+        {
+            const { lines } = captureLoggerClass(Logger);
+            const app = new Hono();
+            app.onError(ErrorHandler({ includeStack: false }));
+            app.get('/x', () =>
+            {
+                throw Object.assign(new Error('boom'), { code: 'E_BOOM' });
+            });
+
+            await app.request('/x');
+            await new Promise(resolve => setTimeout(resolve, 0));
+
+            expect(lines.find(line => line.message === 'Error occurred')!.context!.error).toEqual({ kind: 'error', name: 'Error', message: 'boom', code: 'E_BOOM' });
+        });
+
+        it('F3: the request logger keeps an error body it copies, stack, details and error envelope — it is data, not an error', async () =>
+        {
+            const { lines } = captureLoggerClass(Logger);
+            const app = new Hono();
+            app.use(RequestLogger());
+            app.onError(ErrorHandler({ includeStack: true }));
+            app.get('/x', () =>
+            {
+                throw new ValidationError({ message: 'bad', fields: [{ path: 'email', message: 'required' }], details: { form: 'signup' } });
+            });
+
+            await app.request('/x');
+            await new Promise(resolve => setTimeout(resolve, 0));
+
+            const copy = lines.find(line => line.message === 'Request completed')!.context!.response;
+            expect(copy).toMatchObject({
+                __type: 'ValidationError',
+                fields: [{ path: 'email', message: 'required' }],
+                details: { form: 'signup' },
+                stack: expect.any(String),
+            });
+            // The envelope is the body's own data: under alreadySentToClient its
+            // `error` key is not described as a caught value
+            expect((copy as Record<string, unknown>).error).toEqual({
+                code: 'ValidationError',
+                message: 'bad',
+                requestId: expect.stringMatching(/^req_/),
+            });
         });
     });
 

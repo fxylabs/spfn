@@ -49,9 +49,7 @@ const eventLogger = logger.child('@spfn/core:event');
  */
 function logHandlerError(eventName: string, error: unknown): void
 {
-    eventLogger.error(`Event handler error: ${eventName}`, {
-        error: error instanceof Error ? error.message : String(error),
-    });
+    eventLogger.error(`Event handler error: ${eventName}`, { error });
 }
 
 /**
@@ -59,9 +57,7 @@ function logHandlerError(eventName: string, error: unknown): void
  */
 function logJobQueueError(queueName: string, error: unknown): void
 {
-    eventLogger.error(`Failed to send event to job queue: ${queueName}`, {
-        error: error instanceof Error ? error.message : String(error),
-    });
+    eventLogger.error(`Failed to send event to job queue: ${queueName}`, { error });
 }
 
 /**

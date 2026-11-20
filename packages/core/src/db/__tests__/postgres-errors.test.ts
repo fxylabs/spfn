@@ -7,6 +7,7 @@
 import { describe, it, expect } from 'vitest';
 import { fromPostgresError } from '../postgres-errors';
 import { DuplicateEntryError } from '../../errors/database-errors';
+import { expectNoValues, failedInsert } from '../../logger/__tests__/helpers/leak-probe';
 
 describe('PostgreSQL Error Conversion', () =>
 {
@@ -20,7 +21,8 @@ describe('PostgreSQL Error Conversion', () =>
                 const error = fromPostgresError(pgError);
 
                 expect(error.name).toBe('ConnectionError');
-                expect(error.message).toBe('Connection exception');
+                // Not a driver error (no severity): the class's fixed text, not its message
+                expect(error.message).toBe('Database connection failed');
                 expect(error.details?.code).toBe('08000');
             });
 
@@ -420,7 +422,7 @@ describe('PostgreSQL Error Conversion', () =>
                 const error = fromPostgresError(pgError);
 
                 expect(error.name).toBe('QueryError');
-                expect(error.message).toBe('Error without code');
+                expect(error.message).toBe('Database query failed');
             });
 
             it('should handle missing error message', () =>
@@ -429,7 +431,7 @@ describe('PostgreSQL Error Conversion', () =>
                 const error = fromPostgresError(pgError);
 
                 expect(error.name).toBe('QueryError');
-                expect(error.message).toBe('Database error occurred');
+                expect(error.message).toBe('Invalid query');
             });
 
             it('should handle completely empty error object', () =>
@@ -438,7 +440,7 @@ describe('PostgreSQL Error Conversion', () =>
                 const error = fromPostgresError(pgError);
 
                 expect(error.name).toBe('QueryError');
-                expect(error.message).toBe('Database error occurred');
+                expect(error.message).toBe('Database query failed');
             });
 
             it('should handle null error', () =>
@@ -446,7 +448,7 @@ describe('PostgreSQL Error Conversion', () =>
                 const error = fromPostgresError(null);
 
                 expect(error.name).toBe('QueryError');
-                expect(error.message).toBe('Database error occurred');
+                expect(error.message).toBe('Database query failed');
             });
 
             it('should handle undefined error', () =>
@@ -454,7 +456,53 @@ describe('PostgreSQL Error Conversion', () =>
                 const error = fromPostgresError(undefined);
 
                 expect(error.name).toBe('QueryError');
-                expect(error.message).toBe('Database error occurred');
+                expect(error.message).toBe('Database query failed');
+            });
+        });
+
+        /**
+         * | #  | the driver error                         | goes unnoticed without the row                                  |
+         * | -- | ---------------------------------------- | --------------------------------------------------------------- |
+         * | P1 | a 22P02 quoting the rejected input       | the typed error's message carrying the value to every log line  |
+         * | P2 | a 23502 from ExecConstraints             | a kept message replaced by the fixed text, or the cause dropped |
+         * | P3 | drizzle's query error over it            | the typed error's message being drizzle's `params:` text        |
+         */
+        describe('The typed error keeps the driver error as its cause, and its message only where the description does (#382)', () =>
+        {
+            const driverError = (fields: Record<string, string>): Error =>
+                Object.assign(new Error(fields.message), { severity: 'ERROR', severity_local: 'ERROR', ...fields });
+
+            it('P1: a class-22 error gets the class\'s fixed message', () =>
+            {
+                const invalid = driverError({ code: '22P02', message: 'invalid input syntax for type integer: "leak-probe-value"', routine: 'pg_strtoint32_safe' });
+
+                const error = fromPostgresError(invalid);
+
+                expect(error).toMatchObject({ name: 'QueryError', statusCode: 500, message: 'Invalid input value' });
+                expect(error.cause).toBe(invalid);
+                expect(JSON.stringify(error.toJSON())).not.toContain('leak-probe-value');
+                expect(error.stack).not.toContain('leak-probe-value');
+            });
+
+            it('P2: a kept class from a known routine keeps the driver\'s message', () =>
+            {
+                const notNull = driverError({ code: '23502', message: 'null value in column "email" of relation "users" violates not-null constraint', routine: 'ExecConstraints' });
+
+                const error = fromPostgresError(notNull);
+
+                expect(error).toMatchObject({ name: 'ConstraintViolationError', message: notNull.message });
+                expect(error.cause).toBe(notNull);
+                expect(Object.keys(error.toJSON())).not.toContain('cause');
+            });
+
+            it('P3: drizzle\'s query error is not converted, and its message is the description\'s, not drizzle\'s', () =>
+            {
+                const error = fromPostgresError(failedInsert());
+
+                // Still the fallback QueryError (converting a wrapped error is #383); the
+                // message is the description's — the driver's kept 23505 text
+                expect(error).toMatchObject({ name: 'QueryError', statusCode: 500, message: 'duplicate key value violates unique constraint "users_email_key"' });
+                expectNoValues(error.message);
             });
         });
     });

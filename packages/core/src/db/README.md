@@ -293,7 +293,10 @@ provider outside repository operations when direct driver access is required.
 
 Wrap a raw query to attach repository/method/table context to failures and feed the
 reconnect fast-path (see manager/README). On error it throws a `RepositoryError` carrying
-`{ repository, method, table, originalError }`.
+`{ repository, method, table, originalError }`, with the fixed message `<Repository>.<method>
+failed` and the caught error as its `cause` — never the caught error's message or stack, which
+for a drizzle query error hold every bound value (#382). Read the database fields through the
+cause chain; `describeError` from `@spfn/core/logger` does.
 
 ```typescript
 async findById(id: number)
@@ -952,6 +955,24 @@ Inside `BaseRepository.withContext` and `Transactional` middleware, query errors
 reported to the reconnect fast-path; `fromPostgresError` is for explicit conversion to a
 client-facing typed error.
 
+The typed error keeps the converted error as its `cause` (non-enumerable, so `toJSON()` does not
+answer it), and a log line describes the database error under it. Its own message is the driver's
+only where `describeError` keeps that (see the logger README: a SQLSTATE class whose messages
+name identifiers only, raised by a known server routine); otherwise it is a fixed text for the
+class — a class-22 message quotes the rejected input:
+
+| SQLSTATE class | Message when the driver's is not kept |
+|----------------|---------------------------------------|
+| `08` | `Database connection failed` |
+| `22` | `Invalid input value` |
+| `23` | `Integrity constraint violated` (`DuplicateEntryError` builds its own: `<field> already exists`) |
+| `40` | `Transaction failed` |
+| `42` | `Invalid query` |
+| `53` | `Insufficient database resources` |
+| `57` | `Database operation interrupted` |
+| a postgres.js connection code (`CONNECTION_CLOSED`, …) | `Database connection lost` |
+| anything else, or no code | `Database query failed` |
+
 ---
 
 ## Sub-modules
@@ -1136,6 +1157,8 @@ abstract class BaseRepository<
 
 // RepositoryError fields:
 class RepositoryError extends Error {
+    message: string;            // '<Repository>.<method> failed'
+    cause?: Error;              // the caught error (same as originalError)
     repository: string;
     method?: string;
     table?: string;

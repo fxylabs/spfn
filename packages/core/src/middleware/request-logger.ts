@@ -5,7 +5,7 @@
  */
 import { randomBytes } from 'crypto';
 import type { Context, Next } from 'hono';
-import { logger } from '@spfn/core/logger';
+import { alreadySentToClient, logger } from '@spfn/core/logger';
 import { getClientIp } from './client-ip';
 
 /**
@@ -206,8 +206,10 @@ export function RequestLogger(options?: RequestLoggerOptions)
             {
                 try
                 {
-                    // Clone response to read body without consuming it
-                    logData.response = await c.res.clone().json();
+                    // Clone response to read body without consuming it. The
+                    // error handler built it from a description: its `error`
+                    // envelope is the body's data, not a caught value
+                    logData.response = alreadySentToClient(await c.res.clone().json());
                 }
                 catch
                 {

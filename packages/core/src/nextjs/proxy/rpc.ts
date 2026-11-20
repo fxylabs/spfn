@@ -574,7 +574,7 @@ export function createRpcProxy(config: RpcProxyConfig)
                 rpcLogger.error('Fetch error', {
                     routeName,
                     targetUrl,
-                    error: fetchErr.message,
+                    error,
                 });
 
                 return NextResponse.json(
@@ -589,8 +589,7 @@ export function createRpcProxy(config: RpcProxyConfig)
             const err = error as Error;
 
             rpcLogger.error('RPC proxy error', {
-                error: err.message,
-                stack: err.stack,
+                error,
                 duration: `${duration}ms`,
             });
 

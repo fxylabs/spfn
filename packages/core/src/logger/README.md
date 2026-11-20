@@ -10,7 +10,8 @@ One entry point. Everything public comes from `@spfn/core/logger`.
 
 ```typescript
 import { logger } from '@spfn/core/logger';
-import type { LogLevel, Transport } from '@spfn/core/logger';
+import { describeError } from '@spfn/core/logger';
+import type { LogLevel, Transport, ErrorDescription, DatabaseErrorDescription } from '@spfn/core/logger';
 ```
 
 There is **no** root `.` export for `@spfn/core`, so `import { logger } from '@spfn/core'`
@@ -26,7 +27,9 @@ From `@spfn/core/logger` (`src/logger/index.ts` is the only export surface):
 - `logger` — the singleton `Logger` instance. This is what you use 99% of the time.
 - `Logger` — the class. Exported mainly for typing; you do **not** construct it yourself
   (the singleton is created in `factory.ts`). Use `logger` / `logger.child(...)`.
-- Types: `LogLevel`, `Transport`.
+- `describeError(error)` — the one loggable form of a caught error; see
+  [Errors are described, not dumped](#errors-are-described-not-dumped).
+- Types: `LogLevel`, `Transport`, `ErrorDescription`, `DatabaseErrorDescription`.
 
 Instance methods on `logger` / any child logger:
 
@@ -75,7 +78,7 @@ constructed on first import in `factory.ts`.
 ## Logging: message + (error | context) + context
 
 Each level method (`debug`/`info`/`warn`/`error`/`fatal`) shares the same overloads.
-The second argument is detected at runtime, so argument **order and type matter**:
+What the arguments after the message are is decided by their **position**:
 
 ```typescript
 // 1. message only
@@ -87,26 +90,37 @@ logger.info('Request received', { method: 'POST', path: '/users' });
 // 3. message + Error            → stack trace (and cause chain) printed
 logger.error('Query failed', error);
 
-// 4. message + Error + context  → both
+// 4. message + caught value + context  → both; the 2nd IS the caught value, whatever it is
 logger.error('Query failed', error, { userId: 123, op: 'createUser' });
 
-// 5. printf-style — if message contains a %s/%d/%i/%f/%j/%o/%O/%c token,
+// 5. a caught value of unknown shape, without other context → under the `error` key
+logger.error('Query failed', { error });
+
+// 6. printf-style — if message contains a %s/%d/%i/%f/%j/%o/%O/%c token,
 //    the second arg is substituted via node:util.format (NOT treated as context)
 logger.info('Fetching url: %s', requestUrl);
 ```
 
-How the second argument is classified (see `logWithLevel` in `logger.ts`):
+How the arguments are read (see `logWithLevel` in `logger.ts`):
 - If `message` contains a printf token (`%s %d %i %f %j %o %O %c %%`), the 2nd arg is
-  formatted into the message string — it will **not** appear as context.
-- An `Error` instance → logged as the error (stack + `cause` chain printed).
-- A non-Error object **with** a string `stack` property → treated as an error and wrapped.
-- A plain object **without** a `stack` property → treated as **context**.
-- A `string` / `number` / `boolean` → wrapped into an `Error` (so `{ key: value }`
-  context must be an object, not a bare primitive).
+  formatted into the message string — it will **not** appear as context. It is made printable
+  first: an Error becomes its formatted description, an object goes through the masking walk
+  (so an Error inside it is described too). This holds when the token is there by accident —
+  a templated path with `%c3` in it — though a `%c` then swallows the argument.
+- **Three arguments** `(message, caught, context)`: the 2nd is the caught value whatever its
+  shape — an `Error`, `undefined`, a string, a plain object — and is described; the context
+  is always kept.
+- **Two arguments** `(message, value)`: an `Error` is the caught value; any other object is
+  the **context**, whatever fields it has; a string, number, boolean or `null` is the caught
+  value (so `{ key: value }` context must be an object, not a bare primitive). "An Error" is
+  `instanceof Error`, or an Error from another realm (`Object.prototype.toString` gives
+  `[object Error]`) — never "an object with a `stack`": an error response body or a domain
+  object with a `stack` field is data.
 
-This `stack`-based heuristic means an object you intend as context will be misread as an
-error if it happens to carry a string `stack` field. Prefer the explicit 3-arg form
-`logger.error(msg, error, context)` when you have both.
+A `catch` binding is `unknown`: whatever a dependency threw. Log it as `{ error }` or with the
+three-argument form, never as the lone second argument — a thrown plain object there is read as
+the context and walked, field by field. Core's own catch sites follow this (a scan row keeps them
+to it).
 
 ---
 
@@ -193,10 +207,111 @@ Masked key tokens (a key matches if it contains any of these):
 `session`, `sessionid`, `session_id`, `privatekey`, `private_key`, `creditcard`,
 `credit_card`, `cardnumber`, `card_number`, `cvv`, `ssn`, `pin`.
 
+An `Error` found anywhere in the context is replaced by its description, not walked key by
+key. An object under the keys `error`, `err`, `cause` or `reason` — at any depth of the context —
+is described whatever its shape, Error or not: `logger.error('x', { error })` describes a thrown
+object as `logger.error('x', error, {})` does, and so is `{ job: { error } }`. A primitive there
+is data and logged as it is: `reason: 'timeout'` stays the string, `error: null` stays `null` (a
+thrown string is its own text). Under `errors`, each object in an array or a Set is described
+(`{ errors: aggregate.errors }`) and a primitive kept; any other value there is walked. A `Map` logs as its `[key, value]` pairs, a string key ruling its value as an object key
+does (masked, described or walked); a `Set` as its values. The console prints a described
+context value on its own lines after the message, prefixed with its key (`error: Error: boom` and
+the frames), not inline as `[error=…]`.
+
+A body already sent to a client is not a context that may hold caught values: its `error` key
+is the envelope the client received. `alreadySentToClient(body)` (from `@spfn/core/logger`)
+marks it so: under the mark, keys are still masked by their sensitive names and an `Error`
+instance is still described, but a value under the error keys is kept as data. Core's request
+logger marks its copy of a 4xx/5xx response body, which the error handler built from a
+description. An app may mark a value only when that value, as it is, was sent to the client —
+never a caught value, or an object holding one.
+
 > Masking only applies to the **context** object. It does **not** scan the `message`
 > string. Never interpolate a secret into the message — `logger.info(\`token: ${t}\`)`
 > is logged verbatim, unmasked. Put potentially-sensitive data in the context object so
 > the masker can catch it.
+
+---
+
+## Errors are described, not dumped
+
+Every error the logger is handed — as the error argument or inside the context — reaches a
+transport only as `describeError(error)`. Pass the error object itself; never pre-stringify
+it (`{ error: err.message }`, `String(err)`, `err.stack`), because the logger cannot see where a
+string came from.
+
+The reason is the database error. drizzle's `DrizzleQueryError` carries every bound value in
+`params`, in its message (`Failed query: … params: …`) and in the stack header that repeats the
+message; the driver's `PostgresError` under it adds `detail` (`Key (email)=(…) already exists.`,
+`Failing row contains (…)`), `where` and `hint`. A description keeps none of them:
+
+```typescript
+interface DatabaseErrorDescription
+{
+    kind: 'database';
+    name: string;               // 'DrizzleQueryError' | 'PostgresError' | …
+    code?: string;              // SQLSTATE, or the driver's connection code
+    severity?: string;
+    constraint?: string; schema?: string; table?: string; column?: string; dataType?: string;
+    routine?: string;
+    message?: string;           // the driver's message: classes 08, 23, 40, 53, 57 from a known routine only
+    sql?: string;               // the SQL text with $n placeholders, truncated to 1000 characters
+    paramCount?: number;        // how many values were bound — never the values
+    stack?: string;             // frames only: the header lines are dropped
+}
+
+interface ErrorDescription
+{
+    kind: 'error';
+    name: string;
+    message?: string;
+    code?: string | number;     // the error's `code`, if a string or a number
+    statusCode?: number;        // the error's `statusCode`, if a number (Errors only)
+    stack?: string;             // frames only
+    cause?: ErrorDescription | DatabaseErrorDescription;
+}
+```
+
+`describeError(error, { stack: false })` leaves the stack frames out, down the cause chain.
+
+- A thrown value that is not an Error is described by what it is, never by its fields: a
+  string → `{ kind: 'error', name: 'NonError', message: <the string> }`; an object → `name`
+  (its constructor's name, `NonError` for a plain object), `message` only if it has a string
+  `message`, `code` only if a string or number. **A thrown plain object's other fields are
+  not logged** — a dependency that throws `{ code, params }` logs no params. An Error keeps
+  its `code` and numeric `statusCode` too, never its other fields (`details`, …).
+- The cause chain is walked; the first link that is a drizzle query error or a driver error
+  becomes a database description, with the driver error under drizzle's folded into it.
+- The driver's message is kept only for SQLSTATE classes whose messages name identifiers only:
+  08 (connection), 23 (integrity constraint — the values are in `detail`), 40 (transaction
+  rollback), 53 (insufficient resources), 57 (operator intervention). Class 22 messages quote the
+  rejected input (`invalid input syntax for type integer: "…"`), 42601 quotes a token, P0001 is
+  the app's own text: those, and unknown codes, keep no message.
+- A kept class is not enough: the error must also come from a server routine known to write
+  identifiers only, or name no routine at all (a pooler's own 08/53 errors). A procedural
+  language raises any SQLSTATE with the app's own text — PL/pgSQL `RAISE … USING ERRCODE`
+  reports `exec_stmt_raise`, PL/Python `plpy.error(…, sqlstate=…)` its own routine — and so may
+  an extension; from an unknown routine the message is dropped and the code, constraint and
+  table stay. The known routines, each read off the error PostgreSQL 16.15 raised:
+  `_bt_check_unique`, `comparetup_index_btree` (23505), `check_exclusion_or_unique_constraint`
+  (23P01), `ExecConstraints` (23502, 23514), `ExecPartitionCheckEmitError` (partition 23514),
+  `ri_ReportViolation` (23503), `ExecEvalConstraintCheck`, `ExecEvalConstraintNotNull`,
+  `domain_check_input` (domain 23502, 23514), `DeadLockReport` (40P01), `ExecUpdate`,
+  `ExecDelete`, `ExecLockRows`, `PreCommit_CheckForSerializationFailure`,
+  `OnConflict_CheckForSerializationFailure` (40001), `ProcessInterrupts` (57014, 57P01).
+- Describing never throws: a field whose getter throws is left out, a cause chain longer than
+  10 links ends in a `CauseChainTruncated` link, and one that loops back ends in a
+  `CircularCause` link. Masking the context never throws either: a value whose getter throws
+  is logged as `[Unreadable]`.
+- The SQL text is kept: query-builder SQL holds `$n` placeholders only. A literal reaches it only
+  through `sql.raw(…)` — an app that `sql.raw`s user input logs it, and has an injection bug.
+- There is no option to log parameter values. To see them while debugging locally, use drizzle's
+  `logger` or postgres.js `debug` on a client you own.
+- Outside core's reach: drizzle's OpenTelemetry tracing sets `drizzle.query.params` on its spans.
+
+The same description is what core stores and answers where an error leaves the process: a
+failed job's `output` (see the job README), the non-production response body for a database
+error (see the middleware README) and a `RepositoryError`'s `cause`.
 
 ---
 
@@ -217,8 +332,9 @@ Error: Connection timeout
     at processRequest (/app/src/api.ts:45:11)
 ```
 
-Errors are printed on their own line after the message, including the `Caused by:` cause
-chain. In containers (Docker/K8s), set `NODE_ENV=production` so output is plain text on
+Errors are printed on their own line after the message, as their description: `Name:
+message`, for a database error a `[code=…] [constraint=…] [table=…]` line and the SQL with its
+parameter count, the stack frames, and the `Caused by:` cause chain. In containers (Docker/K8s), set `NODE_ENV=production` so output is plain text on
 stdout/stderr, which the platform collects automatically.
 
 ---
@@ -237,11 +353,11 @@ stdout/stderr, which the platform collects automatically.
 - **Masked value is `***MASKED***`, not `***`.** Don't assert on `***` in tests/parsers.
 - **Secrets in the message are NOT masked.** Only the context object is scanned. Keep
   sensitive values out of the message string; put them in context.
-- **Context vs error ambiguity.** A plain object with a string `stack` property is treated
-  as an error, not context. Use the 3-arg form `logger.error(msg, error, context)` when
-  you have both, and don't put a `stack` key on a context object.
-- **Bare primitives as 2nd arg become errors.** `logger.info('x', 42)` logs `42` as an
-  Error (or printf-substitutes it if the message has a `%` token) — it is not context.
+- **Context vs error ambiguity.** Only an Error is read as the error; any other object
+  is context. Use the 3-arg form `logger.error(msg, error, context)` when you have both.
+- **Bare primitives as 2nd arg are the caught value.** `logger.info('x', 42)` logs `42` as
+  the caught value, `NonError: 42` (or printf-substitutes it if the message has a `%` token)
+  — it is not context.
   Context must be an object: `logger.info('x', { n: 42 })`.
 - **Don't import internals.** `maskSensitiveData`, `formatConsole`, `formatJSON`,
   `extractQueryInfo`, `formatUnhandledRejection`, `Logger` construction, etc. are not the
@@ -304,7 +420,8 @@ interface Transport
 
 `LogMetadata` (the object passed to a `Transport.log`; not exported, shown for
 implementers) carries `timestamp: Date`, `level`, `message`, optional `module`,
-optional `error: Error`, and optional `context` (already masked).
+optional `error: ErrorDescription | DatabaseErrorDescription` (the description, never the
+error object), and optional `context` (already masked).
 
 `logger.level` is a `LogLevel` getter (read-only).
 

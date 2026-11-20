@@ -28,6 +28,7 @@
 import assert from 'node:assert';
 import { randomUUID } from 'node:crypto';
 import type PgBoss from 'pg-boss';
+import { describeError } from '@spfn/core/logger';
 
 const WORKERS_KEY = Symbol.for('spfn:boss-workers');
 
@@ -496,7 +497,9 @@ async function settleBatch(boss: PgBoss, record: BossWorkers, loop: Loop, jobs: 
     }
     catch (error)
     {
-        await (boss.fail as SettleJobs)(loop.queue, ids, error);
+        // pg-boss would serialise the error itself — params, the driver's
+        // `detail` and all — into the job row's `output` column
+        await (boss.fail as SettleJobs)(loop.queue, ids, describeError(error));
     }
 }
 

@@ -26,18 +26,6 @@ describe('extractQueryInfo', () =>
         expect(result?.table).toBe('legacy_cms_files');
     });
 
-    it('should extract params from error message', () =>
-    {
-        const error = new Error(
-            'Failed query: update "users" set "name" = $1\nparams: John,Doe,123',
-        );
-
-        const result = extractQueryInfo(error);
-
-        expect(result).not.toBeNull();
-        expect(result?.params).toEqual(['John', 'Doe', '123']);
-    });
-
     it('should extract table from INSERT query', () =>
     {
         const error = new Error(
@@ -175,6 +163,26 @@ describe('formatUnhandledRejection', () =>
 
         expect(result.context.queryInfo).toBeDefined();
         expect((result.context.queryInfo as any).table).toBe('users');
+    });
+
+    it('R10: the context carries the failed query, never its params line (#382)', () =>
+    {
+        const reason = new Error(
+            'Failed query: insert into "users" ("email", "password_hash") values ($1, $2)\n'
+            + 'params: leak-probe@example.test,$2b$FAKEHASH',
+        );
+
+        const promise = Promise.reject(reason).catch(() =>
+        {}); // Prevent unhandled rejection
+        const { context } = formatUnhandledRejection(reason, promise);
+        const logged = JSON.stringify(context);
+
+        expect(context.queryInfo).toEqual({
+            query: 'insert into "users" ("email", "password_hash") values ($1, $2)',
+            table: 'users',
+        });
+        expect(logged).not.toContain('leak-probe@example.test');
+        expect(logged).not.toContain('FAKEHASH');
     });
 
     it('should include repository info when available', () =>

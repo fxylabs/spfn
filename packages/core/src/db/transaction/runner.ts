@@ -166,11 +166,7 @@ async function runAfterRollbackCallbacks(
             .then(cb)
             .catch((err) => logSafely(() =>
             {
-                txLogger.error('afterRollback callback failed', {
-                    txId,
-                    context,
-                    error: err instanceof Error ? err.message : String(err),
-                });
+                txLogger.error('afterRollback callback failed', err, { txId, context });
             }));
     }
 }
@@ -841,11 +837,7 @@ export async function runInTransaction<T, TDatabase extends DrizzleDatabase = De
             {
                 startAfterCommitCallback(cb, (err) => logSafely(() =>
                 {
-                    txLogger.error('afterCommit callback failed', {
-                        txId,
-                        context,
-                        error: err instanceof Error ? err.message : String(err),
-                    });
+                    txLogger.error('afterCommit callback failed', err, { txId, context });
                 }));
             }
         }
@@ -869,24 +861,24 @@ export async function runInTransaction<T, TDatabase extends DrizzleDatabase = De
             {
                 if (duration >= slowThreshold)
                 {
-                    txLogger.warn('Slow transaction rolled back', {
+                    txLogger.warn('Slow transaction rolled back', error, {
                         txId,
                         context,
                         duration: `${duration}ms`,
                         threshold: `${slowThreshold}ms`,
-                        error: error instanceof Error ? error.message : String(error),
-                        errorType: error instanceof Error ? error.name : 'Unknown',
                         hint: 'If the error is an idle-in-transaction timeout, the transaction held a pooled connection while awaiting non-DB work (external API, etc.). Move that work out of the transaction.',
                     });
                 }
                 else
                 {
-                    txLogger.error('Transaction rolled back', {
+                    // debug: the error is rethrown, and its owner — the error
+                    // handler, the job runner, the caller — logs it at the
+                    // level it deserves. Slowness above is the runner's own
+                    // concern, so that line stays a warning.
+                    txLogger.debug('Transaction rolled back', error, {
                         txId,
                         context,
                         duration: `${duration}ms`,
-                        error: error instanceof Error ? error.message : String(error),
-                        errorType: error instanceof Error ? error.name : 'Unknown',
                     });
                 }
             });

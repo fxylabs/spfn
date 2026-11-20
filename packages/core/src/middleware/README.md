@@ -160,6 +160,12 @@ Converts a thrown error into a JSON HTTP response. Register it with **`app.onErr
 - **Standard `Error`** → falls back to `{ __type: 'Error', message }`, status from a
   `statusCode` property on the error if present, else `500`.
 - **`cause` chain** → the root cause message is extracted and added as `cause`.
+- **Database error, outside production** → a standard error that is, or was caused by, a
+  database error (a drizzle `DrizzleQueryError`, a driver `PostgresError`, a `RepositoryError`
+  over one) is answered with `{ __type: 'Error', message: 'Database error', database }` when
+  `includeStack` is `true` — `database` is its `describeError` description (SQLSTATE,
+  constraint, table, SQL with `$n` placeholders, `paramCount`) — and **no** `cause` or `stack`,
+  which carry the bound values. The production body is unchanged.
 - **Production information disclosure** → when `includeStack` is `false` (the production
   default), the client message is genericized for anything whose text may come from the DB
   driver: standard (uncaught) `Error`s become `"Internal Server Error"` with no `cause`, and
@@ -169,7 +175,9 @@ Converts a thrown error into a JSON HTTP response. Register it with **`app.onErr
   server-side. Errors with a safe, constructed message (`EntityNotFoundError`,
   `DuplicateEntryError`, and all non-DB `SerializableError`s) are returned unchanged.
 - **Logging** (when `enableLogging`): `warn` for 4xx, `error` for 5xx, via the
-  `@spfn/core:error-handler` logger.
+  `@spfn/core:error-handler` logger. The line carries the error's description, never its
+  message or cause as text: with `includeStack` as the error (frames included), without it as
+  an `error` field with no frames.
 - **`onError` callback** → fired non-blocking (`Promise.resolve(...).catch(...)`); never
   delays or fails the response.
 
@@ -212,6 +220,18 @@ Standard error fallback:
   "error": { "code": "Error", "message": "Internal Server Error", "requestId": "9f2c…" } }
 // + "cause": "..."  when the error has a cause
 // + "stack": "..."  only when includeStack is true
+```
+
+A database error when `includeStack` is true (any non-production `NODE_ENV`, staging included):
+
+```json
+{ "__type": "Error", "message": "Database error",
+  "database": { "kind": "database", "name": "DrizzleQueryError", "code": "23505",
+                "constraint": "users_email_key", "table": "users",
+                "message": "duplicate key value violates unique constraint \"users_email_key\"",
+                "sql": "insert into \"users\" (\"email\", \"password_hash\") values ($1, $2)",
+                "paramCount": 2, "stack": "    at ..." },
+  "error": { "code": "Error", "message": "Database error", "requestId": "9f2c…" } }
 ```
 
 > The serialized field is **`__type`**, and the status code is carried by the **HTTP

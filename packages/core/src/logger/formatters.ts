@@ -5,6 +5,8 @@
  */
 
 import type { LogLevel, LogMetadata } from './types';
+import { describeError, isArray, isDescription, isError } from './error-description';
+import type { DatabaseErrorDescription, ErrorDescription } from './error-description';
 
 /**
  * 민감 정보로 간주되는 키 목록
@@ -45,6 +47,32 @@ const SENSITIVE_KEYS = [
 const MASKED_VALUE = '***MASKED***';
 
 /**
+ * A context value whose read threw
+ */
+const UNREADABLE_VALUE = '[Unreadable]';
+
+/**
+ * The keys a caught value conventionally sits under, at any depth of a
+ * context. An object there is described whatever its shape: a thrown
+ * `{ code, params }` is not an Error, and walking it would print its params.
+ * A primitive there is data (`reason: 'timeout'`) and is logged as it is.
+ */
+const ERROR_KEYS: ReadonlySet<string> = new Set(['error', 'err', 'cause', 'reason']);
+
+/**
+ * The key a list of caught values conventionally sits under — an array, or
+ * an `AggregateError`'s `errors`. Each object in an array or a Set there is
+ * described and each primitive kept; any other value there is walked.
+ */
+const ERRORS_KEY = 'errors';
+
+/**
+ * Marks a value `alreadySentToClient` vouches for. `Symbol.for`: a second
+ * copy of this module reads the same mark.
+ */
+const SENT_TO_CLIENT = Symbol.for('@spfn/core:logger.alreadySentToClient');
+
+/**
  * 키가 민감 정보를 포함하는지 확인
  */
 function isSensitiveKey(key: string): boolean
@@ -55,9 +83,117 @@ function isSensitiveKey(key: string): boolean
 }
 
 /**
+ * An object's own enumerable entries, each read on its own: a getter that
+ * throws stands in as `[Unreadable]`, and an object whose keys cannot be
+ * listed (a revoked Proxy) has none. Masking never throws into a log call.
+ */
+function entriesOf(data: object): [string, unknown][]
+{
+    let keys: string[];
+
+    try
+    {
+        keys = Object.keys(data);
+    }
+    catch
+    {
+        return [];
+    }
+
+    return keys.map(key => [key, readEntry(data, key)]);
+}
+
+function readEntry(data: object, key: string): unknown
+{
+    try
+    {
+        return (data as Record<string, unknown>)[key];
+    }
+    catch
+    {
+        return UNREADABLE_VALUE;
+    }
+}
+
+/**
+ * Mark a value as a body already sent to a client, before it goes into a log
+ * context
+ *
+ * Under the mark, keys are still masked by their sensitive names, and an
+ * Error instance is still described; an object under `error`, `err`, `cause`,
+ * `reason` or `errors` is not: there it is the body's own data — the error
+ * envelope a client received — not a caught value. A body that came out of
+ * `JSON.parse` holds no Error, and whatever it carries the client already has.
+ *
+ * Core's request logger applies it to its copy of a 4xx/5xx response body,
+ * which the error handler built from a description. An app may apply it only
+ * to a value that was itself sent, as it is, to the client — never to a
+ * caught value or to an object holding one.
+ *
+ * Returns the value; a primitive or a non-extensible object is returned
+ * unmarked, and so is masked as any other context value.
+ *
+ * @example
+ * ```typescript
+ * logger.warn('Upstream refused', { response: alreadySentToClient(await res.clone().json()) });
+ * ```
+ */
+export function alreadySentToClient<T>(body: T): T
+{
+    if (typeof body === 'object' && body !== null && Object.isExtensible(body))
+    {
+        Object.defineProperty(body, SENT_TO_CLIENT, { value: true });
+    }
+
+    return body;
+}
+
+function isSentToClient(data: object): boolean
+{
+    try
+    {
+        return (data as Record<symbol, unknown>)[SENT_TO_CLIENT] === true;
+    }
+    catch
+    {
+        // A revoked Proxy
+        return false;
+    }
+}
+
+/**
+ * A log line's context, masked by `maskSensitiveData`; a context that is
+ * itself an Error is its description under `error`
+ */
+export function maskContext(context: Record<string, unknown>): Record<string, unknown>
+{
+    if (isError(context))
+    {
+        return { error: describeError(context) };
+    }
+
+    return maskSensitiveData(context) as Record<string, unknown>;
+}
+
+/**
+ * How a walk treats the keys it meets
+ */
+interface Walk
+{
+    seen: WeakSet<object>;
+    /** False under a value marked `alreadySentToClient` */
+    describesErrorKeys: boolean;
+}
+
+/**
  * 민감 정보 마스킹
  * Context 객체에서 민감한 정보(비밀번호, 토큰 등)를 마스킹
  * Circular reference를 안전하게 처리
+ *
+ * At every depth: an Error is described, an object under `ERROR_KEYS` is
+ * described whatever its shape, and so is each object in a list under
+ * `errors`; a primitive there is logged as it is. A Map logs as its `[key, value]` pairs, a string key ruling its
+ * value as an object key does; a Set as its values.
  *
  * @param data - 원본 데이터
  * @param seen - 순환 참조 감지용 WeakSet (내부 사용)
@@ -65,54 +201,121 @@ function isSensitiveKey(key: string): boolean
  */
 export function maskSensitiveData(data: unknown, seen = new WeakSet<object>()): unknown
 {
-    // null, undefined 처리
-    if (data === null || data === undefined)
-    {
-        return data;
-    }
+    return walkValue(data, { seen, describesErrorKeys: true });
+}
 
+function walkValue(data: unknown, walk: Walk): unknown
+{
     // 기본 타입은 그대로 반환
-    if (typeof data !== 'object')
+    if (typeof data !== 'object' || data === null)
     {
         return data;
     }
 
     // Circular reference 감지
-    if (seen.has(data as object))
+    if (walk.seen.has(data))
     {
         return '[Circular]';
     }
-    seen.add(data as object);
+    walk.seen.add(data);
 
-    // 배열 처리
-    if (Array.isArray(data))
+    // An error is described, not walked: its enumerable fields (drizzle's
+    // `params`, the driver's `detail`) hold the values a log must not carry
+    if (isError(data))
     {
-        return data.map(item => maskSensitiveData(item, seen));
+        return describeError(data);
     }
 
-    // 객체 처리
-    const masked: Record<string, unknown> = {};
+    return walkObject(data, isSentToClient(data) ? { ...walk, describesErrorKeys: false } : walk);
+}
 
-    for (const [key, value] of Object.entries(data))
+function walkObject(data: object, walk: Walk): unknown
+{
+    if (isArray(data))
     {
-        if (isSensitiveKey(key))
-        {
-            // 민감 정보 키는 마스킹
-            masked[key] = MASKED_VALUE;
-        }
-        else if (typeof value === 'object' && value !== null)
-        {
-            // 중첩된 객체는 재귀 처리 (seen 전달)
-            masked[key] = maskSensitiveData(value, seen);
-        }
-        else
-        {
-            // 일반 값은 그대로 유지
-            masked[key] = value;
-        }
+        return entriesOf(data).map(([, item]) => walkValue(item, walk));
     }
 
-    return masked;
+    if (isInstance(data, Set))
+    {
+        return membersOf(data).map(item => walkValue(item, walk));
+    }
+
+    if (isInstance(data, Map))
+    {
+        return (membersOf(data) as [unknown, unknown][]).map(([key, value]) =>
+            [walkValue(key, walk), typeof key === 'string' ? maskEntry(key, value, walk) : walkValue(value, walk)]);
+    }
+
+    return Object.fromEntries(entriesOf(data).map(([key, value]) => [key, maskEntry(key, value, walk)]));
+}
+
+/**
+ * `instanceof`, false for a Proxy whose prototype trap throws
+ */
+function isInstance<T>(value: unknown, type: new (...args: never[]) => T): value is T
+{
+    try
+    {
+        return value instanceof type;
+    }
+    catch
+    {
+        return false;
+    }
+}
+
+/**
+ * A Set's values or a Map's entries, none if iterating throws (a Proxy)
+ */
+function membersOf(collection: Set<unknown> | Map<unknown, unknown>): unknown[]
+{
+    try
+    {
+        return [...collection];
+    }
+    catch
+    {
+        return [];
+    }
+}
+
+function itemsOf(list: unknown[] | Set<unknown>): unknown[]
+{
+    return isArray(list) ? entriesOf(list).map(([, item]) => item) : membersOf(list);
+}
+
+/**
+ * One entry of an object: masked if its key is sensitive, described if it is
+ * an object under a key naming a caught value, otherwise walked
+ */
+function maskEntry(key: string, value: unknown, walk: Walk): unknown
+{
+    if (isSensitiveKey(key))
+    {
+        return MASKED_VALUE;
+    }
+
+    if (walk.describesErrorKeys && ERROR_KEYS.has(key) && isObject(value))
+    {
+        return describeError(value);
+    }
+
+    if (walk.describesErrorKeys && key === ERRORS_KEY && (isArray(value) || isInstance(value, Set)))
+    {
+        return itemsOf(value).map(item => isObject(item) ? describeError(item) : item);
+    }
+
+    return walkValue(value, walk);
+}
+
+/**
+ * An object or a function: what a key naming a caught value describes. A
+ * primitive there (`reason: 'timeout'`, `error: null`) is data, logged as it is
+ */
+function isObject(value: unknown): value is object
+{
+    return (typeof value === 'object' && value !== null) || typeof value === 'function';
 }
 
 /**
@@ -170,31 +373,46 @@ export function formatTimestampHuman(date: Date): string
 }
 
 /**
- * 에러 객체를 문자열로 변환 (스택 트레이스 포함)
+ * An error description as text: its header, the database fields, the stack
+ * frames and the cause chain
  */
-export function formatError(error: Error): string
+export function formatError(error: ErrorDescription | DatabaseErrorDescription): string
 {
-    const lines: string[] = [];
-
-    lines.push(`${error.name}: ${error.message}`);
+    const lines = error.kind === 'database'
+        ? formatDatabaseError(error)
+        : [error.message === undefined ? error.name : `${error.name}: ${error.message}`];
 
     if (error.stack)
     {
-        const stackLines = error.stack.split('\n').slice(1);
-        lines.push(...stackLines);
+        lines.push(error.stack);
     }
 
-    // Cause chain — surfaces original PG errors hidden by DrizzleQueryError
-    if (error.cause instanceof Error)
+    if (error.kind === 'error' && error.cause)
     {
         lines.push(`Caused by: ${formatError(error.cause)}`);
     }
-    else if (error.cause !== undefined)
-    {
-        lines.push(`Caused by: ${String(error.cause)}`);
-    }
 
     return lines.join('\n');
+}
+
+function formatDatabaseError(error: DatabaseErrorDescription): string[]
+{
+    const fields = (['code', 'severity', 'constraint', 'schema', 'table', 'column', 'dataType', 'routine'] as const)
+        .filter(key => error[key] !== undefined)
+        .map(key => `[${key}=${error[key]}]`);
+    const lines = [`${error.name}: ${error.message ?? 'database error'}`];
+
+    if (fields.length > 0)
+    {
+        lines.push(`    ${fields.join(' ')}`);
+    }
+
+    if (error.sql !== undefined)
+    {
+        lines.push(`    sql: ${error.sql} (${error.paramCount ?? 0} params)`);
+    }
+
+    return lines;
 }
 
 /**
@@ -254,11 +472,20 @@ export function formatConsole(metadata: LogMetadata, colorize = true): string
         }
     }
 
+    // A described error in the context is printed after the message, like the
+    // line's own error, not as one escaped line of JSON
+    const described = Object.entries(metadata.context ?? {}).filter(([, value]) => isDescription(value));
+
     // Context를 각각 [key=value] 형태로 추가
     if (metadata.context && Object.keys(metadata.context).length > 0)
     {
         Object.entries(metadata.context).forEach(([key, value]) =>
         {
+            if (isDescription(value))
+            {
+                return;
+            }
+
             let valueStr: string;
             if (typeof value === 'string')
             {
@@ -321,30 +548,12 @@ export function formatConsole(metadata: LogMetadata, colorize = true): string
         output += '\n' + formatError(metadata.error);
     }
 
+    for (const [key, description] of described)
+    {
+        output += `\n${key}: ${formatError(description as ErrorDescription | DatabaseErrorDescription)}`;
+    }
+
     return output;
-}
-
-/**
- * Error 객체를 cause 체인까지 포함한 직렬화 가능 객체로 변환
- */
-function formatErrorCauseChain(error: Error): Record<string, unknown>
-{
-    const result: Record<string, unknown> = {
-        name: error.name,
-        message: error.message,
-        stack: error.stack,
-    };
-
-    if (error.cause instanceof Error)
-    {
-        result.cause = formatErrorCauseChain(error.cause);
-    }
-    else if (error.cause !== undefined)
-    {
-        result.cause = String(error.cause);
-    }
-
-    return result;
 }
 
 /**
@@ -370,7 +579,7 @@ export function formatJSON(metadata: LogMetadata): string
 
     if (metadata.error)
     {
-        obj.error = formatErrorCauseChain(metadata.error);
+        obj.error = metadata.error;
     }
 
     return JSON.stringify(obj);
@@ -383,12 +592,14 @@ export function formatJSON(metadata: LogMetadata): string
  * - "Failed query: <QUERY>\nparams: <PARAMS>"
  * - "Query: <QUERY>"
  *
+ * Only the query line is read: the `params:` line holds the bound values,
+ * which a log never carries.
+ *
  * @param error - Error 객체
- * @returns 쿼리 정보 (query, params, table)
+ * @returns 쿼리 정보 (query, table)
  */
 export function extractQueryInfo(error: Error): {
     query?: string;
-    params?: unknown;
     table?: string;
 } | null
 {
@@ -396,44 +607,19 @@ export function extractQueryInfo(error: Error): {
 
     if (!message) return null;
 
-    const result: {
-        query?: string;
-        params?: unknown;
-        table?: string;
-    } = {};
-
     // Extract query from "Failed query: ..." or "Query: ..."
     const queryMatch = message.match(/(?:Failed query:|Query:)\s*([^\n]+)/);
-    if (queryMatch)
-    {
-        result.query = queryMatch[1].trim();
+    if (!queryMatch) return null;
 
-        // Extract table name from query (e.g., UPDATE "table_name" or INSERT INTO "table_name")
-        const tableMatch = result.query.match(/(?:UPDATE|INSERT INTO|DELETE FROM|FROM)\s+"?([a-zA-Z_][a-zA-Z0-9_]*)"?\."?([a-zA-Z_][a-zA-Z0-9_]*)"?|(?:UPDATE|INSERT INTO|DELETE FROM|FROM)\s+"?([a-zA-Z_][a-zA-Z0-9_]*)"?/i);
-        if (tableMatch)
-        {
-            // Schema.Table or just Table
-            result.table = tableMatch[2] || tableMatch[3] || tableMatch[1];
-        }
-    }
+    const query = queryMatch[1].trim();
 
-    // Extract params from "params: ..."
-    const paramsMatch = message.match(/params:\s*(.+?)(?:\n|$)/);
-    if (paramsMatch)
-    {
-        const paramsStr = paramsMatch[1].trim();
-        try
-        {
-            // Try to parse as comma-separated values
-            result.params = paramsStr.split(',').map(p => p.trim());
-        }
-        catch (e)
-        {
-            result.params = paramsStr;
-        }
-    }
+    // Extract table name from query (e.g., UPDATE "table_name" or INSERT INTO "table_name")
+    const tableMatch = query.match(/(?:UPDATE|INSERT INTO|DELETE FROM|FROM)\s+"?([a-zA-Z_][a-zA-Z0-9_]*)"?\."?([a-zA-Z_][a-zA-Z0-9_]*)"?|(?:UPDATE|INSERT INTO|DELETE FROM|FROM)\s+"?([a-zA-Z_][a-zA-Z0-9_]*)"?/i);
 
-    return Object.keys(result).length > 0 ? result : null;
+    // Schema.Table or just Table
+    const table = tableMatch ? tableMatch[2] || tableMatch[3] || tableMatch[1] : undefined;
+
+    return table === undefined ? { query } : { query, table };
 }
 
 /**
@@ -456,11 +642,14 @@ export function extractPromiseContext(error: Error): Record<string, unknown>
 
     const stackLines = error.stack.split('\n');
 
-    // Skip first line (error message) and find first meaningful stack frame
+    // Frames only — the header (the message, which for a drizzle error runs
+    // over two lines and ends in its params) is skipped
     // Ignore node_modules and internal Node.js paths
     for (let i = 1; i < stackLines.length; i++)
     {
         const line = stackLines[i].trim();
+
+        if (!line.startsWith('at ')) continue;
 
         // Skip node_modules and node internals
         if (line.includes('node_modules') || line.includes('node:internal')) continue;

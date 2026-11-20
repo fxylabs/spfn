@@ -13,6 +13,7 @@ import {
     formatJSON,
     maskSensitiveData,
 } from '../formatters';
+import { describeError } from '../error-description';
 import type { LogMetadata } from '../types';
 
 describe('Formatters', () =>
@@ -93,7 +94,7 @@ describe('Formatters', () =>
         it('should format error with name and message', () =>
         {
             const error = new Error('Test error message');
-            const result = formatError(error);
+            const result = formatError(describeError(error));
 
             expect(result).toContain('Error: Test error message');
         });
@@ -101,7 +102,7 @@ describe('Formatters', () =>
         it('should include stack trace', () =>
         {
             const error = new Error('Test error');
-            const result = formatError(error);
+            const result = formatError(describeError(error));
 
             expect(result).toContain('at ');
         });
@@ -118,7 +119,7 @@ describe('Formatters', () =>
             }
 
             const error = new CustomError('Custom error message');
-            const result = formatError(error);
+            const result = formatError(describeError(error));
 
             expect(result).toContain('CustomError: Custom error message');
         });
@@ -207,7 +208,7 @@ describe('Formatters', () =>
                 timestamp: new Date(),
                 level: 'error',
                 message: 'Error occurred',
-                error: new Error('Test error'),
+                error: describeError(new Error('Test error')),
             };
 
             const result = formatConsole(metadata, false);
@@ -293,7 +294,7 @@ describe('Formatters', () =>
 
         it('should include error details if provided', () =>
         {
-            const error = new Error('Test error');
+            const error = describeError(new Error('Test error'));
             const metadata: LogMetadata = {
                 timestamp: new Date(),
                 level: 'error',

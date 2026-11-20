@@ -263,7 +263,8 @@ describe('Transaction Hooks (Integration)', () =>
             // the original error
             expect(logged).toHaveBeenCalledWith(
                 'afterRollback callback failed',
-                expect.objectContaining({ error: 'cleanup failed' }),
+                expect.objectContaining({ message: 'cleanup failed' }),
+                expect.anything(),
             );
             expect(fired).toEqual(['second']);
         });
@@ -701,7 +702,8 @@ describe('Transaction Hooks (Integration)', () =>
 
             expect(logged).toHaveBeenCalledWith(
                 'afterRollback callback failed',
-                expect.objectContaining({ error: 'cleanup failed' }),
+                expect.objectContaining({ message: 'cleanup failed' }),
+                expect.anything(),
             );
             expect(fired).toEqual(['second']);
         });

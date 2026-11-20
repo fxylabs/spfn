@@ -231,7 +231,7 @@ export async function createCacheFromEnv(): Promise<CacheClients>
         {
             cacheLogger.warn(
                 'Failed to create cache client',
-                { error: String(error), mode: 'disabled' },
+                { error, mode: 'disabled' },
             );
         }
 
