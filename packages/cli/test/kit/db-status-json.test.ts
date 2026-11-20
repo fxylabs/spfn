@@ -19,7 +19,7 @@ import {
     migrationStatusReport,
     unreadableStatusReport,
 } from '../../src/commands/db/status.js';
-import { readReport, toStatus } from '../../src/kit/local/database.js';
+import { readReport, statusOf, toStatus } from '../../src/kit/local/database.js';
 import type { RunResult } from '../../src/kit/local/process.js';
 
 const STATUS = {
@@ -132,7 +132,7 @@ describe('reading the report back out of a child process', () =>
     {
         const report = readReport(childOutput(printed(unreadableStatusReport('bookkeeping-mismatch', 'id 1 matches no folder'))));
 
-        expect(toStatus(report)).toEqual({
+        expect(toStatus(report!)).toEqual({
             configured: true,
             reachable: false,
             applied: [],
@@ -142,9 +142,16 @@ describe('reading the report back out of a child process', () =>
         expect(toStatus(unreadableStatusReport('unreachable'))).not.toHaveProperty('bookkeepingMismatch');
     });
 
-    it('turns a child that said nothing usable into "cannot be read"', () =>
+    it('turns a child that said nothing usable into "cannot be read", with its stderr', () =>
     {
-        expect(toStatus(null)).toEqual({ configured: false, reachable: false, applied: [], pending: [] });
+        expect(statusOf({ exitCode: 1, stdout: 'banner', stderr: 'Error: boom', missing: false })).toEqual({
+            configured: false,
+            reachable: false,
+            applied: [],
+            pending: [],
+            reportUnreadable: 'Error: boom',
+        });
+        expect(statusOf(childOutput('', 1)).reportUnreadable).toBe('exit 1, nothing on stderr');
     });
 
     it('hands the port the pending list it branches on, and counts as evidence', () =>

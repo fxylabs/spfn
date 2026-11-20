@@ -363,6 +363,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `spfn dev`/`spfn start` print one line when the pre-start check cannot read the status
     (`Could not check migrations: …`; with the grant on a permission error) and start, where they
     were silent. They still do not block on it.
+  - a `spfn db status --json` child that printed no report (it crashed, or could not load tsx or
+    an import) is no longer taken for a project without a database: the gate summary, the step's
+    re-check and the `KIT_MIGRATION_FAILED` evidence say `report-unreadable (…)` with the tail of
+    the child's stderr, URLs redacted, where they said `not-configured`.
 - **Tests: a database or two-role row that did not run is reported skipped, with the reason, not
   passed (#405).** 23 test files in core and spfn returned early (`if (!available) return;`) when
   PostgreSQL or the second test role was missing, so vitest counted those rows as passed. They

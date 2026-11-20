@@ -18,6 +18,7 @@ import type { MigrationStatus } from '@spfn/core/db';
 
 import type { KitOperationResult } from '../../src/kit/events.js';
 import type { DatabasePort } from '../../src/kit/ports.js';
+import type { RunResult } from '../../src/kit/local/process.js';
 import type { FakeKitWorld as FakeKitWorldType } from './fake-world.js';
 
 vi.mock('@spfn/core/db', async (importOriginal) =>
@@ -100,23 +101,35 @@ async function printedStatus(read: () => Promise<MigrationStatus>): Promise<stri
 }
 
 /** Every way a status goes unread, as the child prints it. */
-async function unreadReports(): Promise<{ reason: string; printed: string }[]>
+async function unreadReports(): Promise<{ reason: string; answer: string | RunResult }[]>
 {
     return [
         {
             reason: 'not-configured',
-            printed: `${DB_STATUS_JSON_MARKER}${JSON.stringify(unreadableStatusReport('not-configured'))}`,
+            answer: `${DB_STATUS_JSON_MARKER}${JSON.stringify(unreadableStatusReport('not-configured'))}`,
         },
-        { reason: 'unreachable', printed: await printedStatus(async () => Promise.reject(connectionError())) },
-        { reason: 'permission denied', printed: await printedStatus(async () => Promise.reject(permissionError())) },
+        { reason: 'unreachable', answer: await printedStatus(async () => Promise.reject(connectionError())) },
+        { reason: 'permission denied', answer: await printedStatus(async () => Promise.reject(permissionError())) },
+        { reason: 'report-unreadable (', answer: CRASHED },
     ];
 }
 
+/** A `db status --json` child that crashed before printing its report (no tsx, an import error). */
+const CRASHED: RunResult = {
+    exitCode: 1,
+    stdout: '',
+    stderr: 'node:internal/modules/run_main:123\n'
+        + 'Error [ERR_MODULE_NOT_FOUND]: Cannot find package \'tsx\' imported from /app/node_modules/spfn/bin/spfn.js\n'
+        + '    while loading postgres://app:hunter2@db.internal:5432/app',
+    missing: false,
+};
+
 /**
  * The Kit's database port, with each `db status --json` child answering the
- * next report, and the last one again once they run out.
+ * next report — printed, or a whole child result — and the last one again once
+ * they run out.
  */
-function portAnswering(reports: string[], calls: string[][] = []): InstanceType<typeof SpfnDatabasePort>
+function portAnswering(reports: (string | RunResult)[], calls: string[][] = []): InstanceType<typeof SpfnDatabasePort>
 {
     return new SpfnDatabasePort({
         command: { file: 'spfn', args: [] },
@@ -124,12 +137,14 @@ function portAnswering(reports: string[], calls: string[][] = []): InstanceType<
         {
             calls.push(request.args);
 
-            return {
-                exitCode: 0,
-                stdout: request.args.includes('status') ? (reports.length > 1 ? reports.shift()! : reports[0]) : 'migrated',
-                stderr: '',
-                missing: false,
-            };
+            if (!request.args.includes('status'))
+            {
+                return { exitCode: 0, stdout: 'migrated', stderr: '', missing: false };
+            }
+
+            const answer = reports.length > 1 ? reports.shift()! : reports[0];
+
+            return typeof answer === 'string' ? { exitCode: 0, stdout: answer, stderr: '', missing: false } : answer;
         },
     });
 }
@@ -244,6 +259,39 @@ describe.each(OPERATIONS)('$name, on a migration status the database refused to 
     });
 });
 
+describe('a status child that printed no report', () =>
+{
+    const crashReason = expect.stringMatching(/^report-unreadable \(.*Cannot find package 'tsx'/);
+
+    it('fails the migration step with that reason and the child\'s stderr, not "not-configured"', async () =>
+    {
+        const pending = await printedStatus(async () => PENDING);
+
+        const result = await install(new FakeKitWorld({ releases: [R0] }), portAnswering([pending, pending, CRASHED]));
+
+        expect(result.code).toBe('KIT_MIGRATION_FAILED');
+        expect(result.evidence).toEqual({ reason: crashReason });
+        expect(JSON.stringify(result)).not.toContain('hunter2');
+    });
+
+    it('does not let a resume take the migration step as done, and says why', async () =>
+    {
+        const world = new FakeKitWorld({ releases: [R0] });
+        const pending = await printedStatus(async () => PENDING);
+        const applied = await printedStatus(async () => APPLIED);
+
+        world.faults.failingGates.add('build');
+        expect((await install(world, portAnswering([pending, pending, applied]))).code).toBe('KIT_GATE_FAILED');
+        world.faults.failingGates.clear();
+
+        const resumed = await resume(world, portAnswering([CRASHED]));
+
+        expect(resumed.code).toBe('KIT_RESUME_MISMATCH');
+        expect(resumed.evidence?.reason).toEqual(expect.stringMatching(/^database-status-unreadable: report-unreadable \(.*tsx/));
+        expect(resumed.evidence?.reason).not.toContain('hunter2');
+    });
+});
+
 describe('restore, on a migration status nobody read', () =>
 {
     /** An installed R0 copied the way `git clone` would carry it. */
@@ -273,13 +321,13 @@ describe('restore, on a migration status nobody read', () =>
 
     it('fails the db-status gate on each reason the status went unread', async () =>
     {
-        for (const { reason, printed } of await unreadReports())
+        for (const { reason, answer } of await unreadReports())
         {
             rmSync(project(), { recursive: true, force: true });
             rmSync(join(root, 'clone'), { recursive: true, force: true });
 
             const world = new FakeKitWorld({ releases: [{ ...R0, gates: ['db-status'] }] });
-            const result = await restore(world, await cleanClone(world), portAnswering([printed]));
+            const result = await restore(world, await cleanClone(world), portAnswering([answer]));
 
             expect(result.code, reason).toBe('KIT_GATE_FAILED');
             expect(String(result.evidence?.detail), reason)

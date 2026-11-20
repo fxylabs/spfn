@@ -235,11 +235,21 @@ export interface DatabaseStatus
      * does not change by waiting — someone has to grant the read.
      */
     permissionDenied?: string;
+    /**
+     * Set when the status child printed no report — it crashed, or could not
+     * load tsx or an import: the tail of its stderr, redacted. Then nothing is
+     * known, not even whether a database is configured.
+     */
+    reportUnreadable?: string;
 }
 
-/** Why a status could not be read, in a word or PostgreSQL's own message. */
+/** Why a status could not be read, in a word, with PostgreSQL's message or the child's stderr where there is one. */
 export function unreadableStatusReason(status: DatabaseStatus): string
 {
+    if (status.reportUnreadable !== undefined)
+    {
+        return `report-unreadable (${status.reportUnreadable})`;
+    }
     if (status.permissionDenied !== undefined)
     {
         return `permission denied (${status.permissionDenied})`;

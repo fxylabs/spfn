@@ -43,7 +43,7 @@ export class SpfnDatabasePort implements DatabasePort
 
     async status(request: { cwd: string }): Promise<DatabaseStatus>
     {
-        return toStatus(await this.report(request.cwd, ['db', 'status', '--json']));
+        return statusOf(await this.run(request.cwd, ['db', 'status', '--json']));
     }
 
     /**
@@ -93,11 +93,6 @@ export class SpfnDatabasePort implements DatabasePort
         };
     }
 
-    private async report(cwd: string, args: string[]): Promise<DbStatusReportV1 | null>
-    {
-        return readReport(await this.run(cwd, args));
-    }
-
     private run(cwd: string, args: string[]): Promise<RunResult>
     {
         const command = this.options.command ?? spfnCommand();
@@ -143,19 +138,35 @@ export function readReport(result: RunResult): DbStatusReportV1 | null
 }
 
 /**
- * The port's answer for a report, including the report that never came.
+ * The port's answer for what a `spfn db status --json` child did.
  *
- * A child that printed nothing readable is reported as configured-unknown and
- * unreachable, which is what stops an install rather than letting it run
- * migrations against a database nobody has confirmed exists.
+ * A child that printed no readable report — it crashed, or could not load tsx
+ * or the app — is said to be that, with its stderr: not "no database", which
+ * sends a person to configure one that is there. Like every unread status it
+ * stops an install rather than letting it run migrations against a database
+ * nobody has confirmed exists.
  */
-export function toStatus(report: DbStatusReportV1 | null): DatabaseStatus
+export function statusOf(run: RunResult): DatabaseStatus
 {
+    const report = readReport(run);
+
     if (report === null)
     {
-        return { configured: false, reachable: false, applied: [], pending: [] };
+        return { configured: false, reachable: false, applied: [], pending: [], reportUnreadable: stderrTail(run) };
     }
 
+    return toStatus(report);
+}
+
+/** The tail of a child's stderr, through the redaction every child summary gets. */
+function stderrTail(run: RunResult): string
+{
+    return summarize({ ...run, stdout: '' }) || `exit ${run.exitCode}, nothing on stderr`;
+}
+
+/** The port's answer for a report the child printed. */
+export function toStatus(report: DbStatusReportV1): DatabaseStatus
+{
     return {
         configured: report.configured,
         reachable: report.reachable,
