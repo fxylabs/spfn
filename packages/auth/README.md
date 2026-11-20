@@ -264,7 +264,9 @@ startup). `envSchema` carries descriptions/defaults. The three URLs `@spfn/core`
 ### Admin seeding
 
 `createAuthLifecycle()` creates admin accounts on startup from env, in priority order. Seeded
-accounts are auto email-verified, `status: 'active'`, `passwordChangeRequired: true`.
+accounts are auto email-verified, `status: 'active'`, `passwordChangeRequired: true`. The flag is
+returned by sign-in and cleared when the password is changed; the package gates nothing on it, so an
+app that wants a seeded admin to change the password first must enforce that itself.
 
 - **JSON (recommended):** `SPFN_AUTH_ADMIN_ACCOUNTS` — array of `{email, password, role?, phone?, passwordChangeRequired?}`. `role` defaults to `user` (`user` | `admin` | `superadmin`).
 - **CSV:** `SPFN_AUTH_ADMIN_EMAILS` + `SPFN_AUTH_ADMIN_PASSWORDS` + `SPFN_AUTH_ADMIN_ROLES`.
@@ -7049,7 +7051,11 @@ authorization.
 
 **Where do my admin accounts come from?**
 The environment, seeded on startup by `createAuthLifecycle()`. Seeded accounts are email
-verified, active, and required to change their password on first login.
+verified, active, and carry `passwordChangeRequired: true`. Sign-in returns the flag and changing
+the password clears it, but the package gates nothing on it: a seeded account can use the app with
+its seeded password. An app that wants the change enforced must do it itself — read the flag from
+the sign-in result and hold the user on a change-password page — until the package has a
+restricted session for it.
 
 **Is `Foo@Example.com` the same account as `foo@example.com`?**
 Yes. Addresses are trimmed and lower-cased on the way in and on the way out, so one person
