@@ -350,7 +350,10 @@ function withoutStack(description: ErrorDescription | DatabaseErrorDescription):
     return mark(rest);
 }
 
-function isDescription(error: unknown): error is ErrorDescription | DatabaseErrorDescription
+/**
+ * Whether a value is a description `describeError` built
+ */
+export function isDescription(error: unknown): error is ErrorDescription | DatabaseErrorDescription
 {
     return typeof error === 'object' && error !== null && read(error, DESCRIBED) === true;
 }

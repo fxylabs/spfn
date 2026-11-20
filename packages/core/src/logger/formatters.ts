@@ -5,7 +5,7 @@
  */
 
 import type { LogLevel, LogMetadata } from './types';
-import { describeError, isArray, isError } from './error-description';
+import { describeError, isArray, isDescription, isError } from './error-description';
 import type { DatabaseErrorDescription, ErrorDescription } from './error-description';
 
 /**
@@ -344,11 +344,20 @@ export function formatConsole(metadata: LogMetadata, colorize = true): string
         }
     }
 
+    // A described error in the context is printed after the message, like the
+    // line's own error, not as one escaped line of JSON
+    const described = Object.entries(metadata.context ?? {}).filter(([, value]) => isDescription(value));
+
     // Context를 각각 [key=value] 형태로 추가
     if (metadata.context && Object.keys(metadata.context).length > 0)
     {
         Object.entries(metadata.context).forEach(([key, value]) =>
         {
+            if (isDescription(value))
+            {
+                return;
+            }
+
             let valueStr: string;
             if (typeof value === 'string')
             {
@@ -409,6 +418,11 @@ export function formatConsole(metadata: LogMetadata, colorize = true): string
     if (metadata.error)
     {
         output += '\n' + formatError(metadata.error);
+    }
+
+    for (const [key, description] of described)
+    {
+        output += `\n${key}: ${formatError(description as ErrorDescription | DatabaseErrorDescription)}`;
     }
 
     return output;

@@ -209,8 +209,10 @@ Masked key tokens (a key matches if it contains any of these):
 
 An `Error` found anywhere in the context is replaced by its description, not walked key by
 key. A value under the keys `error`, `err`, `cause` or `reason` at the **top level** of the
-context is described whatever its shape, Error or not: `logger.error('x', { error })` prints
-what `logger.error('x', error, {})` prints. Deeper down those keys are data (the `error`
+context is described whatever its shape, Error or not: `logger.error('x', { error })`
+describes it as `logger.error('x', error, {})` does. The console prints a described context
+value on its own lines after the message, prefixed with its key (`error: Error: boom` and the
+frames), not inline as `[error=…]`. Deeper down those keys are data (the `error`
 envelope of a response body the request logger copies).
 
 > Masking only applies to the **context** object. It does **not** scan the `message`

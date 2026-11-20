@@ -21,6 +21,7 @@
  * | A1  | a thrown plain object with `params`, as `{ error }` and as the 2nd of 3 | the object walked as context, its params printed |
  * | A2  | `undefined`, a string or a plain object, with a context | the context dropped (a transaction id missing from the line) |
  * | A3  | an app error with `code`, `statusCode`, `details` | a failed job's `output` losing the error's `code`      |
+ * | A4  | as `{ error }`, on the console              | its stack frames printed as one escaped line of JSON        |
  *
  * And describing never throws into the log call that asked for it (G4):
  *
@@ -35,6 +36,7 @@
 import { describe, it, expect } from 'vitest';
 import { Logger } from '../logger';
 import { CAUSE_DEPTH_LIMIT, describeError } from '../error-description';
+import { formatConsole } from '../formatters';
 import { BOUND_VALUES, capturingLogger, expectNoValues, failedInsert, FAILED_INSERT } from './helpers/leak-probe';
 
 /** Let the logger's transports, which run on a microtask, finish */
@@ -162,6 +164,18 @@ describe('the caught value is described whatever its shape', () =>
             { kind: 'error', name: 'NonError' },
             { kind: 'error', name: 'NonError', message: 'null' },
         ]);
+    });
+
+    it('A4: the console prints a described context error on its own lines, after the message', async () =>
+    {
+        const { logger, lines } = capturingLogger(Logger);
+
+        logger.error('Cleanup failed', { error: new Error('boom'), attempt: 2 });
+        await settle();
+
+        const printed = formatConsole(lines[0], false);
+        expect(printed).toMatch(/\[attempt=2\] \(ERROR\): Cleanup failed\nerror: Error: boom\n {4}at /);
+        expect(printed).not.toContain('[error=');
     });
 
     it('A3: an error\'s code and numeric statusCode are kept; its other fields are not', () =>
