@@ -26,6 +26,7 @@
  * | A5  | under an error key below the top level, or in a list under `errors` | a nested thrown object's params printed (H2)  |
  * | A6  | inside a Map or a Set in the context        | the collection logged as `{}`, hiding its entries; or its entries skipping the key rules |
  * | A7  | under a body marked `alreadySentToClient`   | the mark disabling the sensitive-name masking or the description of an Error instance |
+ * | A8  | already a description, with `{ stack: false }` | a described error's frames kept, down its cause chain     |
  *
  * And describing never throws into the log call that asked for it (G4):
  *
@@ -270,6 +271,16 @@ describe('the caught value is described whatever its shape', () =>
             error: { kind: 'error', name: 'NonError', message: 'broken', code: 'BROKEN' },
         });
         expect(alreadySentToClient('text')).toBe('text');
+    });
+
+    it('A8: a description described again with { stack: false } drops its frames down the cause chain, and stays a description', () =>
+    {
+        const described = describeError(new Error('outer', { cause: new Error('inner') }));
+        const bare = describeError(described, { stack: false });
+
+        expect(described.stack).toMatch(/^\s+at /);
+        expect(bare).toEqual({ kind: 'error', name: 'Error', message: 'outer', cause: { kind: 'error', name: 'Error', message: 'inner' } });
+        expect(describeError(bare)).toBe(bare);
     });
 });
 
