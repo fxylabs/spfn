@@ -383,13 +383,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   exception rejects instead of opening watchers nothing closes. When the loop ends by an
   exception, a `generateAll()` queued or in progress rejects with it as the `cause`. A
   chokidar error is warned about once, naming the pattern directories.
-- **spfn: `spfn create` runs create-next-app and shadcn through `npx --yes` for every package
-  manager, so `--pm yarn` works with yarn 1 (#367).** It ran them as `<pm> dlx`: yarn 1 has no `dlx`
-  (it looked for a `dlx` script and failed with "Couldn't find a package.json file"), and corepack
-  gives yarn 1 outside a project, so `--pm yarn` failed out of the box; `--pm bun` ran `bunx dlx`.
-  `--pm` still picks the installer: create-next-app installs with `--use-<pm>`, shadcn reads the
-  manager from the lockfile. The hint `spfn kit install` prints for an older CLI now reads
-  `npx --yes spfn@<version> kit install …` instead of `pnpm dlx …`. Not breaking.
+- **spfn: `spfn create --pm yarn` works with yarn 1; npm, pnpm and bun run the one-off packages
+  through `npx --yes` (#367).** create ran create-next-app and shadcn as `<pm> dlx`. `yarn dlx` does
+  not exist in yarn 1 (it looks for a script named `dlx` and fails with "Couldn't find a
+  package.json file"), so `--pm yarn` failed with a yarn 1 that is not corepack's and under an
+  ancestor pinned to `yarn@1`. With corepack, `yarn dlx` is Yarn 4 and worked, producing a Yarn 4
+  app; it still does. create now asks the yarn that answers in the directory (`yarn dlx --help`)
+  and keeps `yarn dlx` where it exists, using `npx --yes … --use-yarn` only where it does not. For
+  npm, pnpm and bun, create-next-app and shadcn now run through `npx --yes` (they ran through
+  `npx` without `--yes`, `pnpm dlx`, and `bunx dlx`, which was broken); `--pm` still picks the
+  installer (`--use-<pm>`, and shadcn reads the lockfile). A missing npx now says "npx was not
+  found; install npm" instead of `spawn npx ENOENT`. Not breaking.
 - **spfn: `spfn dev` waits for its codegen watcher on SIGINT/SIGTERM (#353).** It sent the watcher
   SIGTERM and exited at once, through `pnpm exec`/`npx`, which do not wait (npx did not even
   forward the signal), and execa SIGKILLed the wrapper 5 s later: a `kill -TERM` of `spfn dev` left
