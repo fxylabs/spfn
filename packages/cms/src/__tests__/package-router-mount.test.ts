@@ -17,11 +17,11 @@ import { cmsAdminRouter, cmsAppRouter } from '../server/routes';
 const SERVER = [{ name: 'auth', handler: authenticate.handler }];
 const skipper = defineMiddleware('skipper', async (_c, next) => next(), { skips: ['auth'] });
 
-/** The named middlewares of each route of `router` mounted as a plain entry under the skipper, by route name. */
+/** The middleware chain of each route of `router` mounted as a plain entry under the skipper, by route name. */
 function chainsUnderSkipper(router: typeof cmsAppRouter | typeof cmsAdminRouter): Record<string, string[]>
 {
     return Object.fromEntries(resolveRouteMiddlewares(defineRouter({ cms: router }).use([skipper]), SERVER)
-        .map(route => [route.name, route.middlewares.filter(mw => mw.name).map(mw => `${mw.source}:${mw.name}`)]));
+        .map(route => [route.name, route.middlewares.map(mw => `${mw.source}:${mw.name}`)]));
 }
 
 describe('the CMS routers under a router-level skipper', () =>
@@ -34,7 +34,7 @@ describe('the CMS routers under a router-level skipper', () =>
 
     it('register as a plain entry under a skipper, and every admin route still runs its own auth', () =>
     {
-        const admin = ['router:skipper', 'route:auth'];
+        const admin = ['router:skipper', 'route:auth', 'route:role'];
 
         expect(chainsUnderSkipper(cmsAdminRouter)).toEqual({
             getSectionLabels: admin,
