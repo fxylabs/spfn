@@ -454,12 +454,13 @@ export function enumText<T extends readonly [string, ...string[]]>(
  * `DROP CONSTRAINT` + `ADD CONSTRAINT`, and the ADD re-checks every row under
  * an ACCESS EXCLUSIVE lock on the table.
  *
- * The values are written as quoted literals with `'` doubled, because the check
- * lands in a migration file, where a bound parameter cannot. A value holding a
- * backslash is refused: under `standard_conforming_strings = off` PostgreSQL
- * reads a backslash in such a literal as an escape, so the check would admit
- * another value or not parse. A NULL passes the check: chain `.notNull()` on
- * the column to refuse it.
+ * The values are a set: written sorted and once each, so reordering them in
+ * source changes nothing in the database. They are written as quoted literals
+ * with `'` doubled, because the check lands in a migration file, where a bound
+ * parameter cannot. A value holding a backslash is refused: under
+ * `standard_conforming_strings = off` PostgreSQL reads a backslash in such a
+ * literal as an escape, so the check would admit another value or not parse.
+ * A NULL passes the check: chain `.notNull()` on the column to refuse it.
  *
  * @param column - The column, as the extra config receives it
  * @param values - The values the column admits; at least one
@@ -493,7 +494,7 @@ export function enumCheck(column: PgColumn, values: readonly [string, ...string[
 
     return check(
         constraintName(getTableName(getColumnTable(column)), `${column.name}_check`),
-        sql`${column} in (${sql.raw(values.map(sqlLiteral).join(', '))})`,
+        sql`${column} in (${sql.raw([...new Set(values)].sort().map(sqlLiteral).join(', '))})`,
     );
 }
 

@@ -241,7 +241,8 @@ CONSTRAINT "posts_status_check" CHECK ("status" in ('draft', 'published'))
   the column's database name (`post_status`, not the property `postStatus`). A name past
   PostgreSQL's 63-byte limit is cut to 54 bytes and suffixed with a hash of the whole
   name, as tenancy constraints are. The name does not depend on the values.
-- **Values** are written as quoted literals with `'` doubled (`'o''clock'`): the check
+- **Values** are a set: written sorted and once each, so reordering them in source
+  generates nothing. They are quoted literals with `'` doubled (`'o''clock'`): the check
   lands in a migration file, where a bound parameter cannot. A value holding a backslash
   is refused: under `standard_conforming_strings = off` PostgreSQL would read it as an
   escape. An empty list throws at definition.
@@ -251,7 +252,7 @@ CONSTRAINT "posts_status_check" CHECK ("status" in ('draft', 'published'))
 Adding a value (`'archived'`) makes `db generate` drop and re-add the constraint:
 
 ```sql
-ALTER TABLE "spfn_blog"."posts" DROP CONSTRAINT "posts_status_check", ADD CONSTRAINT "posts_status_check" CHECK ("status" in ('draft', 'published', 'archived'));
+ALTER TABLE "spfn_blog"."posts" DROP CONSTRAINT "posts_status_check", ADD CONSTRAINT "posts_status_check" CHECK ("status" in ('archived', 'draft', 'published'));
 ```
 
 > **The `ADD` re-checks every row under an ACCESS EXCLUSIVE lock**: reads and writes of

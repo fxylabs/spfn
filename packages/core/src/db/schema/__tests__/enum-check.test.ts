@@ -56,4 +56,9 @@ describe('enumCheck', () =>
             + 'a backslash in a literal reads as an escape under standard_conforming_strings = off',
         );
     });
+
+    it('E4: reordering or repeating the values yields no statement', async () =>
+    {
+        expect(await generateMigration(await snapshot(['b', 'a', 'c']), await snapshot(['c', 'a', 'b', 'a']))).toEqual([]);
+    });
 });

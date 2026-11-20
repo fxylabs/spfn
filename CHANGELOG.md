@@ -98,8 +98,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **@spfn/core: `enumCheck(column, values)`** — a table-level CHECK that refuses a value outside
   `values`, for a column `enumText` only types (spfn/spfn#167). Named `<table>_<column>_check` from
   the SQL names (no schema; the column's database name); past 63 bytes cut and hash-suffixed as the
-  tenancy constraints are. Values are written as literals with `'` doubled; a value holding a
-  backslash is refused (under `standard_conforming_strings = off` it would read as an escape). NULL passes (chain
+  tenancy constraints are. Values are written sorted and once each (reordering them generates
+  nothing), as literals with `'` doubled; a value holding a backslash is refused (under
+  `standard_conforming_strings = off` it would read as an escape). NULL passes (chain
   `.notNull()`); an empty list throws at definition. Adding a value makes `db generate` drop and
   re-add the constraint, and the `ADD` re-checks every row under an ACCESS EXCLUSIVE lock. No package
   column adopts it.
