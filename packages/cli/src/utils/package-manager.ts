@@ -391,8 +391,14 @@ export interface CommandLine
     args: string[];
 }
 
-/** Whether the yarn that answers in `cwd` has `dlx`. */
-export type YarnDlxProbe = (cwd: string) => Promise<boolean>;
+/**
+ * What the yarn that answers in a directory says to `yarn dlx --help`: it has
+ * `dlx` (yarn 2+), it has none (yarn 1), or there is no yarn to answer.
+ */
+export type YarnDlx = 'dlx' | 'no-dlx' | 'no-yarn';
+
+/** Asks the yarn that answers in `cwd` whether it has `dlx`. */
+export type YarnDlxProbe = (cwd: string) => Promise<YarnDlx>;
 
 /**
  * How the CLI runs a package without installing it (create-next-app, shadcn)
@@ -404,36 +410,66 @@ export type YarnDlxProbe = (cwd: string) => Promise<boolean>;
  * Yarn 4 app. yarn 1 has no `dlx` (`yarn dlx` runs a script named `dlx`), so
  * there, and for every other manager, `npx --yes` runs the package. The app's
  * manager still installs: create-next-app takes it as `--use-<pm>`, shadcn
- * reads it from the lockfile.
+ * reads it from the lockfile. With no yarn at all, an app that installs with
+ * yarn cannot be made, so this rejects before anything is downloaded.
  */
 export async function getOneOffCommandLine(
     pm: PackageManager,
     cwd: string,
     spec: string,
     args: string[],
-    yarnHasDlx: YarnDlxProbe = hasYarnDlx,
+    probeYarn: YarnDlxProbe = probeYarnDlx,
 ): Promise<CommandLine>
 {
-    if (pm === 'yarn' && await yarnHasDlx(cwd))
+    const yarnDlx = pm === 'yarn' ? await probeYarn(cwd) : 'no-dlx';
+
+    if (yarnDlx === 'no-yarn')
     {
-        return { command: 'yarn', args: ['dlx', spec, ...args] };
+        throw new Error('yarn was not found; install it or choose another --pm');
     }
 
-    return { command: 'npx', args: ['--yes', spec, ...args] };
+    return yarnDlx === 'dlx'
+        ? { command: 'yarn', args: ['dlx', spec, ...args] }
+        : { command: 'npx', args: ['--yes', spec, ...args] };
 }
 
 /**
  * Asks yarn itself, in `cwd`, through the very `yarn dlx` the CLI would run:
  * the yarn on PATH, corepack's transparent-command rule, an ancestor's
  * `packageManager` pin and a `yarnPath` all decide this call as they decide
- * the real one. Yarn 2+ prints the usage of `dlx` and exits 0; yarn 1 runs a
- * script named `dlx`, which fails, and no yarn at all fails to spawn.
+ * the real one. Three observations answer it:
+ *
+ * - `yarn` fails to spawn with ENOENT: `'no-yarn'`;
+ * - stdout opens with yarn 1's `yarn run v1.` banner, whatever the exit code
+ *   (yarn 1 takes `dlx` for the name of a script): `'no-dlx'`;
+ * - exit 0 with the usage line `yarn dlx <command>` (yarn 2+): `'dlx'`.
+ *
+ * Anything else (a corepack refusal, a failed download, a yarn that exits
+ * otherwise) rejects with yarn's exit code and output.
  */
-export async function hasYarnDlx(cwd: string): Promise<boolean>
+export async function probeYarnDlx(cwd: string): Promise<YarnDlx>
 {
-    const { exitCode, stdout } = await execa('yarn', ['dlx', '--help'], { cwd, reject: false });
+    const result = await execa('yarn', ['dlx', '--help'], { cwd, reject: false });
+    // A process that could not start carries the spawn error's code and message.
+    const { code, originalMessage } = result as { code?: string; originalMessage?: string };
+    const stdout = stripVTControlCharacters(result.stdout);
 
-    return exitCode === 0 && stdout.includes('yarn dlx');
+    if (code === 'ENOENT')
+    {
+        return 'no-yarn';
+    }
+
+    if (stdout.startsWith('yarn run v1.'))
+    {
+        return 'no-dlx';
+    }
+
+    if (result.exitCode === 0 && stdout.includes('yarn dlx <command>'))
+    {
+        return 'dlx';
+    }
+
+    throw new Error(`\`yarn dlx --help\` in ${cwd} did not say whether this yarn has dlx (${originalMessage ?? `exit code ${result.exitCode}`}); yarn's output:\n${result.stderr}\n${stdout}`);
 }
 
 /** `commandLine` as the user would type it, for a hint. */

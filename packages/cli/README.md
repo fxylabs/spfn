@@ -114,7 +114,11 @@ Tailwind, import alias `@/*`, no ESLint), sets up SVGR icons, then runs `init`.
 launches — `create-next-app`, and `shadcn` with `--shadcn` — run through `yarn dlx` when `--pm yarn`
 and the yarn that answers in that directory has `dlx` (yarn 2+, which is what corepack gives
 `yarn dlx`, so the app is a Yarn 4 app as before). yarn 1 has no `dlx`, so there, and for npm, pnpm
-and bun, they run through `npx --yes`. npx comes with npm, which Node's own installers include;
+and bun, they run through `npx --yes`. create asks yarn with `yarn dlx --help` in that directory:
+yarn 1's `yarn run v1.` banner means no `dlx`, exit 0 with the `yarn dlx <command>` usage means
+`dlx`, and no `yarn` on PATH stops `--pm yarn` before anything is downloaded or written, with "yarn
+was not found; install it or choose another --pm". Any other answer (a corepack refusal, a failed
+download) stops create with yarn's output. npx comes with npm, which Node's own installers include;
 some distribution packages ship it separately, and without it `create` stops with "npx was not
 found; install npm". create-next-app is told the manager with `--use-<pm>`, and shadcn reads it
 from the lockfile.

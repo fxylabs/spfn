@@ -7,7 +7,7 @@ import { execa } from 'execa';
 import chalk from 'chalk';
 
 import { logger } from '../utils/logger.js';
-import { detectPackageManager, findWorkspace, formatCommandLine, getAddArgs, getOneOffCommandLine, getRunCommand, runInstall, type PackageManager } from '../utils/package-manager.js';
+import { detectPackageManager, findWorkspace, formatCommandLine, getAddArgs, getOneOffCommandLine, getRunCommand, runInstall, type CommandLine, type PackageManager } from '../utils/package-manager.js';
 import { confirmInstalled } from './init/steps/package.js';
 import { ENV_FILES_HINT } from '../utils/messages.js';
 import { selectScaffoldMode, type ScaffoldMode } from './init/mode.js';
@@ -75,6 +75,43 @@ async function setupSvgr(pm: PackageManager, projectPath: string): Promise<void>
     catch
     {
         iconsSpinner.warn('Failed to setup SVGR (you can run `spfn setup icons` later)');
+    }
+}
+
+/**
+ * Initialize shadcn/ui in the app. It is optional, so a failure, including
+ * yarn not saying how to run it, warns and leaves it for later.
+ */
+async function setupShadcn(pm: PackageManager, projectPath: string): Promise<void>
+{
+    let shadcn: CommandLine;
+
+    try
+    {
+        shadcn = await getOneOffCommandLine(pm, projectPath, 'shadcn@latest', ['init', '--yes', '--defaults']);
+    }
+    catch (error: any)
+    {
+        ora().warn(`Failed to initialize shadcn/ui: ${error.message}`);
+
+        return;
+    }
+
+    try
+    {
+        logger.step('Setting up shadcn/ui...');
+
+        await execa(shadcn.command, shadcn.args, {
+            cwd: projectPath,
+            stdio: 'inherit',
+            timeout: 300_000,
+        });
+
+        ora().succeed('shadcn/ui initialized');
+    }
+    catch
+    {
+        ora().warn(`Failed to initialize shadcn/ui (you can run \`${formatCommandLine(shadcn)}\` later)`);
     }
 }
 
@@ -195,7 +232,7 @@ async function createProject(projectName: string, options: CreateOptions): Promi
         }
         else
         {
-            logger.error(String(error));
+            logger.error(error.message ?? String(error));
         }
         process.exit(1);
     }
@@ -216,24 +253,7 @@ async function createProject(projectName: string, options: CreateOptions): Promi
     // 8. Setup shadcn/ui (optional)
     if (options.shadcn)
     {
-        const shadcn = await getOneOffCommandLine(pm, projectPath, 'shadcn@latest', ['init', '--yes', '--defaults']);
-
-        try
-        {
-            logger.step('Setting up shadcn/ui...');
-
-            await execa(shadcn.command, shadcn.args, {
-                cwd: projectPath,
-                stdio: 'inherit',
-                timeout: 300_000,
-            });
-
-            ora().succeed('shadcn/ui initialized');
-        }
-        catch (error)
-        {
-            ora().warn(`Failed to initialize shadcn/ui (you can run \`${formatCommandLine(shadcn)}\` later)`);
-        }
+        await setupShadcn(pm, projectPath);
     }
 
     // 9. Initialize SPFN
