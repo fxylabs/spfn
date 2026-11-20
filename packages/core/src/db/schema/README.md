@@ -242,8 +242,9 @@ CONSTRAINT "posts_status_check" CHECK ("status" in ('draft', 'published'))
   PostgreSQL's 63-byte limit is cut to 54 bytes and suffixed with a hash of the whole
   name, as tenancy constraints are. The name does not depend on the values.
 - **Values** are written as quoted literals with `'` doubled (`'o''clock'`): the check
-  lands in a migration file, where a bound parameter cannot. An empty list throws at
-  definition.
+  lands in a migration file, where a bound parameter cannot. A value holding a backslash
+  is refused: under `standard_conforming_strings = off` PostgreSQL would read it as an
+  escape. An empty list throws at definition.
 - **NULL passes the check** (SQL's `in` yields unknown, which a CHECK admits). Chain
   `.notNull()` on the column to refuse it.
 

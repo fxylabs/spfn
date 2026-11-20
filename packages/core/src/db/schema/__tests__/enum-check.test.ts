@@ -48,4 +48,12 @@ describe('enumCheck', () =>
             + 'ADD CONSTRAINT "posts_post_status_check" CHECK ("post_status" in (\'a\', \'b\', \'c\'));',
         ]);
     });
+
+    it('E3: a value holding a backslash is refused when the table\'s extras are evaluated', async () =>
+    {
+        await expect(snapshot(['a', 'back\\slash'])).rejects.toThrow(
+            'enumCheck on "post_status" refuses the value "back\\\\slash": '
+            + 'a backslash in a literal reads as an escape under standard_conforming_strings = off',
+        );
+    });
 });

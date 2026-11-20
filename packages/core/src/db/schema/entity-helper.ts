@@ -455,13 +455,16 @@ export function enumText<T extends readonly [string, ...string[]]>(
  * an ACCESS EXCLUSIVE lock on the table.
  *
  * The values are written as quoted literals with `'` doubled, because the check
- * lands in a migration file, where a bound parameter cannot. A NULL passes the
- * check: chain `.notNull()` on the column to refuse it.
+ * lands in a migration file, where a bound parameter cannot. A value holding a
+ * backslash is refused: under `standard_conforming_strings = off` PostgreSQL
+ * reads a backslash in such a literal as an escape, so the check would admit
+ * another value or not parse. A NULL passes the check: chain `.notNull()` on
+ * the column to refuse it.
  *
  * @param column - The column, as the extra config receives it
  * @param values - The values the column admits; at least one
  * @returns A check constraint for the table's extra config
- * @throws {Error} When `values` is empty
+ * @throws {Error} When `values` is empty or a value holds a backslash
  *
  * @example
  * ```typescript
@@ -478,6 +481,14 @@ export function enumCheck(column: PgColumn, values: readonly [string, ...string[
     if (values.length === 0)
     {
         throw new Error(`enumCheck on "${column.name}" needs at least one value`);
+    }
+
+    const backslashed = values.find((value) => value.includes('\\'));
+
+    if (backslashed !== undefined)
+    {
+        throw new Error(`enumCheck on "${column.name}" refuses the value ${JSON.stringify(backslashed)}: `
+            + 'a backslash in a literal reads as an escape under standard_conforming_strings = off');
     }
 
     return check(

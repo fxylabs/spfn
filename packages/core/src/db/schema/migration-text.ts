@@ -30,7 +30,13 @@ export function constraintName(table: string, suffix: string): string
     return `${truncateBytes(full, MAX_IDENTIFIER_BYTES - HASH_LENGTH - 1)}_${hash}`;
 }
 
-/** A string quoted with `'` doubled, a number or a boolean, as SQL text. */
+/**
+ * A string quoted with `'` doubled, a number or a boolean, as SQL text.
+ *
+ * Callers must not pass a string holding a backslash: under
+ * `standard_conforming_strings = off` PostgreSQL reads it as an escape, and the
+ * literal becomes another value or does not parse. `enumCheck` refuses one.
+ */
 export function sqlLiteral(value: string | number | boolean): string
 {
     return typeof value === 'string' ? `'${value.replaceAll('\'', '\'\'')}'` : String(value);
