@@ -93,9 +93,10 @@ export function isRedactedPath(c: Context): boolean
  */
 export function loggedPath(c: Context): string
 {
-    const prefix = redactedPrefixOf(c.req.path);
+    const path = c.req.path;
+    const prefix = redactedPrefixOf(path);
 
-    return prefix === undefined ? c.req.path : `${prefix}/${REDACTED_SEGMENT}`;
+    return prefix === undefined ? path : `${prefix}/${REDACTED_SEGMENT}`;
 }
 
 /**
