@@ -50,14 +50,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **@spfn/core: `GeneratorOptions.trigger.changedFiles`** (and the `ChangedFile` type): every change
   that triggered a watch run. `changedFile` is now set only when exactly one change did; the
   watcher takes every change that arrived during a generation into the next one (#353).
-- **@spfn/core: `OrchestratorOptions.loadGenerators`** — an orchestrator given how to load its
+- **@spfn/core: `LoadingOrchestratorOptions.loadGenerators`** — an orchestrator given how to load its
   generators (instead of `generators`) loads them itself, and in watch mode loads them again when
   the codegen config, a custom generator file or a project file they import changes: the `spfn
   dev` watcher no longer needs a restart after an edit to `.spfnrc.ts` (#353). `close()` waits
   for a config load running as for a generation: neither can be cancelled (a load is a module
   evaluation), so one that never settles keeps `close()` pending, and the watcher's first signal
-  says it waits for "the running generation or codegen config load"; a second exits at once. `OrchestratorOptions`
-  is now a type alias: `generators` or `loadGenerators`, one of the two.
+  says it waits for "the running generation or codegen config load"; a second exits at once.
+  `new CodegenOrchestrator()` takes `OrchestratorOptions` (`generators`; it gains only `loadGenerators?: never`) or the new
+  `LoadingOrchestratorOptions`; given both options, or neither, it now throws a `TypeError`
+  naming them (both: `loadGenerators` was used and `generators` silently ignored; neither: no generator
+  ran, silently).
 - **@spfn/core: `CodegenOrchestrator.settled()`** resolves once watch mode is idle — no generation
   running, nothing dirty, no input directory event settling (#353).
 

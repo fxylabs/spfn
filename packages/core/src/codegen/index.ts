@@ -31,6 +31,7 @@ export type {
 } from './core/generator';
 
 export type {
+    LoadingOrchestratorOptions,
     OrchestratorOptions,
 } from './core/orchestrator';
 

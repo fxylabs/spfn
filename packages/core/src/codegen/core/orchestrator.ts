@@ -61,38 +61,19 @@ const orchestratorLogger = logger.child('@spfn/core:orchestrator');
 const CHECK_ONLY_CYCLES = 3;
 
 /**
- * The generators: a list, or how to load them. Watch mode loads them again
- * when what the load read changes, so `loadGenerators` is what keeps a
- * watcher in step with an edited codegen config.
+ * An orchestrator running the generators it is given, for its whole life.
+ * `LoadingOrchestratorOptions` is the other kind: one that loads them, and
+ * loads them again in watch mode. Pass `generators` or `loadGenerators`, not
+ * both: the constructor throws on both, and on neither.
  */
-export type OrchestratorOptions = CommonOrchestratorOptions & (
-    | {
-        /** List of generators to orchestrate */
-        generators: Generator[];
-        loadGenerators?: never;
-    }
-    | {
-        generators?: never;
-
-        /**
-         * Load the generators — `createGeneratorsFromConfig(loadCodegenConfig(cwd), cwd)`
-         * — with every project file the load reads stamped (`./inputs`).
-         * `watch()` calls it before its initial generation, and again, in the
-         * loop, whenever one of those files changes, appears or goes: the
-         * generators are replaced by the new instances (the old ones are never
-         * called again), and all of them run. When it rejects, watch mode
-         * logs the failure and pauses — no generator runs — until a change to
-         * what the failing load read or looked for loads them. Packages are
-         * evaluated once per process and are not watched: a changed package
-         * generator needs a new process. Outside watch mode, `generateAll()`
-         * calls it before `watch()` has, and rejects with its failure.
-         */
-        loadGenerators: () => Promise<Generator[]>;
-    }
-);
-
-interface CommonOrchestratorOptions
+export interface OrchestratorOptions
 {
+    /** List of generators to orchestrate */
+    generators: Generator[];
+
+    /** Not with `generators`: see `LoadingOrchestratorOptions`. */
+    loadGenerators?: never;
+
     /** Project root directory */
     cwd?: string;
 
@@ -113,6 +94,32 @@ interface CommonOrchestratorOptions
      * first failure.
      */
     throwOnError?: boolean;
+}
+
+/**
+ * An orchestrator that loads its generators: watch mode loads them again when
+ * what the load read changes, so this is what keeps a watcher in step with an
+ * edited codegen config.
+ */
+export interface LoadingOrchestratorOptions extends Omit<OrchestratorOptions, 'generators' | 'loadGenerators'>
+{
+    /** Not with `loadGenerators`: see `OrchestratorOptions`. */
+    generators?: never;
+
+    /**
+     * Load the generators — `createGeneratorsFromConfig(loadCodegenConfig(cwd), cwd)`
+     * — with every project file the load reads stamped (`./inputs`).
+     * `watch()` calls it before its initial generation, and again, in the
+     * loop, whenever one of those files changes, appears or goes: the
+     * generators are replaced by the new instances (the old ones are never
+     * called again), and all of them run. When it rejects, watch mode
+     * logs the failure and pauses — no generator runs — until a change to
+     * what the failing load read or looked for loads them. Packages are
+     * evaluated once per process and are not watched: a changed package
+     * generator needs a new process. Outside watch mode, `generateAll()`
+     * calls it before `watch()` has, and rejects with its failure.
+     */
+    loadGenerators: () => Promise<Generator[]>;
 }
 
 /**
@@ -240,8 +247,9 @@ export class CodegenOrchestrator
      * its generators by hand rather than through `loadCodegenConfig`: every
      * generator of every run then sees the one value.
      */
-    constructor(options: OrchestratorOptions)
+    constructor(options: OrchestratorOptions | LoadingOrchestratorOptions)
     {
+        refuseAmbiguousGenerators(options);
         pinNodeEnv();
         this.generators = options.generators ?? [];
         this.loadGenerators = options.loadGenerators;
@@ -1205,6 +1213,21 @@ export class CodegenOrchestrator
         {
             orchestratorLogger.info('Watch mode details', { patterns: this.patterns(), watchDirs, cwd: this.cwd });
         }
+    }
+}
+
+/**
+ * The generators come from `generators` or from `loadGenerators`, exactly one:
+ * a JavaScript caller, unchecked by the types, would otherwise have one
+ * silently ignored, or run no generator at all.
+ */
+function refuseAmbiguousGenerators(options: OrchestratorOptions | LoadingOrchestratorOptions): void
+{
+    const given = [options.generators, options.loadGenerators].filter(option => option !== undefined).length;
+
+    if (given !== 1)
+    {
+        throw new TypeError(`CodegenOrchestrator takes \`generators\` or \`loadGenerators\`, exactly one; it was given ${given === 0 ? 'neither' : 'both'}.`);
     }
 }
 

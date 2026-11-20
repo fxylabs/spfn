@@ -18,7 +18,7 @@ import {
 import type {
     CodegenConfig, GeneratorConfig,
     Generator, GeneratorOptions, GeneratorTrigger,
-    OrchestratorOptions,
+    LoadingOrchestratorOptions, OrchestratorOptions,
     RouteMapGeneratorConfig,
 } from '@spfn/core/codegen';
 ```
@@ -54,7 +54,7 @@ Types:
 
 - `CodegenConfig`, `GeneratorConfig`
 - `Generator`, `GeneratorOptions`, `GeneratorTrigger`, `ChangedFile`
-- `OrchestratorOptions`
+- `OrchestratorOptions`, `LoadingOrchestratorOptions`
 - `RouteMapGeneratorConfig` (config shape for the built-in route-map generator)
 - `ContractGeneratorConfig` (config shape for the built-in contract generator)
 - `StatesGeneratorConfig` (config shape for the built-in states generator)
@@ -772,18 +772,26 @@ await orchestrator.settled();   // the loop is idle, nothing dirty (see "Watch m
 await orchestrator.close();
 ```
 
-### `OrchestratorOptions`
+### `OrchestratorOptions`, `LoadingOrchestratorOptions`
 
 ```typescript
-type OrchestratorOptions = {
+interface OrchestratorOptions {
+    generators: Generator[];
     cwd?: string;          // default: process.cwd()
     debug?: boolean;       // default: false
     throwOnError?: boolean; // default: false
-} & (
-    | { generators: Generator[] }
-    | { loadGenerators: () => Promise<Generator[]> }
-);
+}
+
+// The same, with loadGenerators in place of generators:
+interface LoadingOrchestratorOptions extends Omit<OrchestratorOptions, 'generators'> {
+    loadGenerators: () => Promise<Generator[]>;
+}
+
+new CodegenOrchestrator(options: OrchestratorOptions | LoadingOrchestratorOptions);
 ```
+
+Each declares the other's option as `never`, so TypeScript refuses both. So does the constructor,
+for a JavaScript caller: given both, or neither, it throws a `TypeError` naming the two options.
 
 `generators` are run as given, for the orchestrator's whole life. `loadGenerators` is how the
 `spfn dev` watcher builds its orchestrator: `watch()` calls it before the initial generation and

@@ -34,6 +34,8 @@
  * |    | config that loads, then with one that does not                        | config never loaded, or its failure swallowed        |
  * | W4f| `close()` while a reload whose load fails is held                    | the failing load's inputs armed after `close()`:     |
  * |    |                                                                       | watches nothing closes, a process that never exits   |
+ * | W4g| `new CodegenOrchestrator()` given both `generators` and           | one option silently ignored, or an orchestrator that |
+ * |    | `loadGenerators`, then neither                                        | runs nothing                                         |
  * | W5 | an input unlinked, recreated inside the unlink's own generation, then | bookkeeping saying "watched" while the watcher has   |
  * |    | edited again; its directory removed and recreated inside a generation,| dropped the file, or a directory watcher that went   |
  * |    | then the input edited again                                           | silent: every later edit lost                        |
@@ -739,6 +741,20 @@ describe('codegen watch loop', () =>
         expect(pauses()).toBe(1);
         expect(watchedPaths.slice(watchedBeforeClose)).toEqual([]);
         expect([...(orchestrator as unknown as { inputWatcher: { watchers: Map<string, unknown> } }).inputWatcher.watchers.keys()]).toEqual([]);
+    });
+
+    it('W4g given both generators and loadGenerators, or neither, the constructor throws naming the two', () =>
+    {
+        // Without it, a JavaScript caller passing both has generators silently
+        // ignored, and one passing neither gets an orchestrator that runs nothing.
+        const message = (given: string): string => `CodegenOrchestrator takes \`generators\` or \`loadGenerators\`, exactly one; it was given ${given}.`;
+        const loadGenerators = async (): Promise<Generator[]> => [];
+        const construct = (options: object) => () => new CodegenOrchestrator(options as ConstructorParameters<typeof CodegenOrchestrator>[0]);
+
+        expect(construct({ generators: [], loadGenerators, cwd: appDir })).toThrow(new TypeError(message('both')));
+        expect(construct({ cwd: appDir })).toThrow(new TypeError(message('neither')));
+        expect(construct({ generators: [], cwd: appDir })).not.toThrow();
+        expect(construct({ loadGenerators, cwd: appDir })).not.toThrow();
     });
 
     it('W5 an input unlinked and recreated inside the unlink\'s generation is still watched: a later edit regenerates', async () =>
