@@ -112,8 +112,9 @@ export const authLoginEvent = defineEvent(
  * Required on `RegisterPublicKeyParams` rather than optional with a default: a
  * new *call site* for key registration must choose one, and a default would let
  * it inherit somebody else's answer silently. `'register'` and `'signup-link'`
- * both arrive at `createVerifiedAccount`, so the two name themselves there;
- * `'invitation'` is the one path that stores a key without the key service.
+ * both arrive at `createVerifiedAccount`, so the two name themselves there.
+ * Every channel, `'invitation'` included, writes its key through the key
+ * service (`registerPublicKeyService`).
  */
 export const DeviceRegistrationChannelSchema = Type.Union([
     Type.Literal('register'),
