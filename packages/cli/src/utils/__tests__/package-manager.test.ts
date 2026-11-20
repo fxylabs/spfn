@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readlinkSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -18,8 +18,11 @@ import {
     findUnresolvedPackages,
     findWorkspace,
     getAddArgs,
+    getOneOffCommandLine,
     getRunScriptArgs,
     pnpmNonMemberReason,
+    probeYarnDlx,
+    type YarnDlx,
 } from '../package-manager.js';
 
 describe('getRunScriptArgs', () =>
@@ -396,5 +399,128 @@ describe('pnpmNonMemberReason', () =>
         const root = makeRepository({ 'app/pnpm-workspace.yaml': 'onlyBuiltDependencies:\n  - sharp\n' });
 
         expect(pnpmNonMemberReason(join(root, 'app'))).toBeNull();
+    });
+});
+
+describe('getOneOffCommandLine', () =>
+{
+    it.each(['npm', 'pnpm', 'bun'] as const)('runs the package with npx --yes for %s, without asking yarn', async pm =>
+    {
+        const probe = vi.fn(async (): Promise<YarnDlx> => 'dlx');
+
+        expect(await getOneOffCommandLine(pm, '/app', 'shadcn@latest', ['init'], probe))
+            .toEqual({ command: 'npx', args: ['--yes', 'shadcn@latest', 'init'] });
+        expect(probe).not.toHaveBeenCalled();
+    });
+
+    it('runs the package with yarn dlx when the yarn in the directory has dlx', async () =>
+    {
+        const probe = vi.fn(async (): Promise<YarnDlx> => 'dlx');
+
+        expect(await getOneOffCommandLine('yarn', '/app', 'shadcn@latest', ['init'], probe))
+            .toEqual({ command: 'yarn', args: ['dlx', 'shadcn@latest', 'init'] });
+        expect(probe).toHaveBeenCalledWith('/app');
+    });
+
+    it('runs the package with npx --yes when the yarn in the directory has no dlx (yarn 1)', async () =>
+    {
+        expect(await getOneOffCommandLine('yarn', '/app', 'shadcn@latest', ['init'], async () => 'no-dlx'))
+            .toEqual({ command: 'npx', args: ['--yes', 'shadcn@latest', 'init'] });
+    });
+
+    it('rejects when there is no yarn: an app that installs with yarn cannot be made', async () =>
+    {
+        await expect(getOneOffCommandLine('yarn', '/app', 'shadcn@latest', ['init'], async () => 'no-yarn'))
+            .rejects.toThrow('yarn was not found; install it or choose another --pm');
+    });
+});
+
+describe('probeYarnDlx', () =>
+{
+    const originalPath = process.env.PATH;
+    let bin: string;
+
+    /** Puts on PATH a `yarn` that prints `stdout` and `stderr` and exits with `code`. */
+    function fakeYarn(stdout: string, code: number, stderr = ''): void
+    {
+        bin = mkdtempSync(join(tmpdir(), 'spfn-yarn-'));
+        writeFileSync(join(bin, 'yarn'), `#!/bin/sh\nprintf '%s\\n' '${stdout}'\nprintf '%s\\n' '${stderr}' >&2\nexit ${code}\n`);
+        chmodSync(join(bin, 'yarn'), 0o755);
+        process.env.PATH = bin;
+    }
+
+    afterEach(() =>
+    {
+        process.env.PATH = originalPath;
+        rmSync(bin, { recursive: true, force: true });
+    });
+
+    it('says dlx for yarn 2+, which prints the usage of dlx and exits 0', async () =>
+    {
+        fakeYarn('Run a package in a temporary environment\n\u001b[1m$ \u001b[22myarn dlx <command> ...', 0);
+
+        expect(await probeYarnDlx(tmpdir())).toBe('dlx');
+    });
+
+    it('says no-dlx for yarn 1, whose `yarn dlx` looks for a dlx script and fails (yarn 1.22.22 output)', async () =>
+    {
+        fakeYarn('yarn run v1.22.22\ninfo Visit https://yarnpkg.com/en/docs/cli/run for documentation about this command.', 1, 'error Command "dlx" not found.');
+
+        expect(await probeYarnDlx(tmpdir())).toBe('no-dlx');
+    });
+
+    it('says no-dlx for yarn 1 running a project\'s own `dlx` script that exits 0', async () =>
+    {
+        fakeYarn('yarn run v1.22.22\n$ echo dlx', 0);
+
+        expect(await probeYarnDlx(tmpdir())).toBe('no-dlx');
+    });
+
+    it('says no-yarn when there is no yarn at all', async () =>
+    {
+        bin = mkdtempSync(join(tmpdir(), 'spfn-yarn-'));
+        process.env.PATH = bin;
+
+        expect(await probeYarnDlx(tmpdir())).toBe('no-yarn');
+    });
+
+    it('rejects with yarn\'s stdout for a failure that is not yarn 1, such as a corepack refusal', async () =>
+    {
+        fakeYarn('Usage Error: This project is configured to use pnpm', 1);
+
+        await expect(probeYarnDlx(tmpdir())).rejects.toThrow(/did not say whether this yarn has dlx \(exit code 1\)[^]*Usage Error: This project is configured to use pnpm/);
+    });
+
+    it.runIf(process.platform === 'linux')('gives yarn the user\'s stdin and stderr, where corepack asks before it downloads', async () =>
+    {
+        bin = mkdtempSync(join(tmpdir(), 'spfn-yarn-'));
+        writeFileSync(join(bin, 'yarn'), `#!/bin/sh\nreadlink /proc/$$/fd/0 /proc/$$/fd/2 > '${bin}/fds'\necho 'yarn run v1.22.22'\n`);
+        chmodSync(join(bin, 'yarn'), 0o755);
+        process.env.PATH = `${bin}:${originalPath}`;
+
+        expect(await probeYarnDlx(tmpdir())).toBe('no-dlx');
+        expect(readFileSync(join(bin, 'fds'), 'utf8').split('\n').slice(0, 2))
+            .toEqual([readlinkSync('/proc/self/fd/0'), readlinkSync('/proc/self/fd/2')]);
+    });
+
+    it('rejects pointing at the terminal when yarn printed nothing on stdout, as for a declined corepack download', async () =>
+    {
+        fakeYarn('', 1, 'Aborted by the user');
+
+        await expect(probeYarnDlx(tmpdir())).rejects.toThrow(/\(exit code 1\); yarn's stderr is above$/);
+    });
+
+    it('rejects when yarn prints the usage of dlx but exits non-zero', async () =>
+    {
+        fakeYarn('$ yarn dlx <command> ...', 1);
+
+        await expect(probeYarnDlx(tmpdir())).rejects.toThrow('did not say whether this yarn has dlx (exit code 1)');
+    });
+
+    it('rejects when yarn exits 0 without the usage of dlx', async () =>
+    {
+        fakeYarn('1.22.22', 0);
+
+        await expect(probeYarnDlx(tmpdir())).rejects.toThrow('did not say whether this yarn has dlx (exit code 0)');
     });
 });

@@ -7,7 +7,7 @@ import { execa } from 'execa';
 import chalk from 'chalk';
 
 import { logger } from '../utils/logger.js';
-import { detectPackageManager, findWorkspace, getAddArgs, getRunCommand, runInstall, type PackageManager } from '../utils/package-manager.js';
+import { detectPackageManager, findWorkspace, formatCommandLine, getAddArgs, getOneOffCommandLine, getRunCommand, runInstall, type CommandLine, type PackageManager } from '../utils/package-manager.js';
 import { confirmInstalled } from './init/steps/package.js';
 import { ENV_FILES_HINT } from '../utils/messages.js';
 import { selectScaffoldMode, type ScaffoldMode } from './init/mode.js';
@@ -79,6 +79,57 @@ async function setupSvgr(pm: PackageManager, projectPath: string): Promise<void>
 }
 
 /**
+ * `getOneOffCommandLine`, saying first when it asks yarn: the question shares
+ * the terminal, so yarn 1's "no" arrives there as an error line of its own.
+ */
+async function resolveOneOff(pm: PackageManager, cwd: string, spec: string, args: string[]): Promise<CommandLine>
+{
+    if (pm === 'yarn')
+    {
+        logger.step(`Asking yarn whether it has dlx for ${spec} (yarn 1 answers no with an error)...`);
+    }
+
+    return getOneOffCommandLine(pm, cwd, spec, args);
+}
+
+/**
+ * Initialize shadcn/ui in the app. It is optional, so a failure, including
+ * yarn not saying how to run it, warns and leaves it for later.
+ */
+async function setupShadcn(pm: PackageManager, projectPath: string): Promise<void>
+{
+    let shadcn: CommandLine;
+
+    try
+    {
+        shadcn = await resolveOneOff(pm, projectPath, 'shadcn@latest', ['init', '--yes', '--defaults']);
+    }
+    catch (error: any)
+    {
+        ora().warn(`Failed to initialize shadcn/ui: ${error.message}`);
+
+        return;
+    }
+
+    try
+    {
+        logger.step(`Setting up shadcn/ui with ${shadcn.command}...`);
+
+        await execa(shadcn.command, shadcn.args, {
+            cwd: projectPath,
+            stdio: 'inherit',
+            timeout: 300_000,
+        });
+
+        ora().succeed('shadcn/ui initialized');
+    }
+    catch
+    {
+        ora().warn(`Failed to initialize shadcn/ui (you can run \`${formatCommandLine(shadcn)}\` later)`);
+    }
+}
+
+/**
  * Create a new Next.js project with SPFN
  */
 async function createProject(projectName: string, options: CreateOptions): Promise<void>
@@ -142,7 +193,6 @@ async function createProject(projectName: string, options: CreateOptions): Promi
     try
     {
         const createNextAppArgs = [
-            'create-next-app@latest',
             projectName,
             '--typescript',
             '--app',
@@ -166,13 +216,11 @@ async function createProject(projectName: string, options: CreateOptions): Promi
             createNextAppArgs.push('--skip-git');
         }
 
-        // Use the selected package manager's dlx command
-        const createCommand = pm === 'npm' ? 'npx' : pm === 'yarn' ? 'yarn' : pm === 'pnpm' ? 'pnpm' : 'bunx';
-        const createArgs = createCommand === 'npx' ? createNextAppArgs : ['dlx', ...createNextAppArgs];
+        const createNextApp = await resolveOneOff(pm, cwd, 'create-next-app@latest', createNextAppArgs);
 
-        logger.step('Running create-next-app...');
+        logger.step(`Running create-next-app with ${createNextApp.command}...`);
 
-        await execa(createCommand, createArgs, {
+        await execa(createNextApp.command, createNextApp.args, {
             cwd,
             stdio: 'inherit',
             timeout: 300_000, // 5 minutes
@@ -188,13 +236,17 @@ async function createProject(projectName: string, options: CreateOptions): Promi
         {
             logger.error(`create-next-app exited with code ${error.exitCode}`);
         }
-        if (error.stderr)
+        if (error.code === 'ENOENT' && error.path === 'npx')
+        {
+            logger.error('npx was not found; install npm');
+        }
+        else if (error.stderr)
         {
             logger.error(error.stderr);
         }
         else
         {
-            logger.error(String(error));
+            logger.error(error.message ?? String(error));
         }
         process.exit(1);
     }
@@ -215,28 +267,7 @@ async function createProject(projectName: string, options: CreateOptions): Promi
     // 8. Setup shadcn/ui (optional)
     if (options.shadcn)
     {
-        try
-        {
-            const shadcnCommand = pm === 'npm' ? 'npx' : pm === 'pnpm' ? 'pnpm' : pm === 'yarn' ? 'yarn' : 'bunx';
-            const shadcnBaseArgs = ['dlx', 'shadcn@latest', 'init', '--yes', '--defaults'];
-            const shadcnArgs = shadcnCommand === 'npx'
-                ? ['shadcn@latest', 'init', '--yes', '--defaults']
-                : shadcnBaseArgs;
-
-            logger.step('Setting up shadcn/ui...');
-
-            await execa(shadcnCommand, shadcnArgs, {
-                cwd: projectPath,
-                stdio: 'inherit',
-                timeout: 300_000,
-            });
-
-            ora().succeed('shadcn/ui initialized');
-        }
-        catch (error)
-        {
-            ora().warn('Failed to initialize shadcn/ui (you can run `npx shadcn@latest init` later)');
-        }
+        await setupShadcn(pm, projectPath);
     }
 
     // 9. Initialize SPFN

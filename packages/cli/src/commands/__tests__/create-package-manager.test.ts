@@ -31,19 +31,34 @@ vi.mock('../init/steps/readme.js', () => ({ setupReadme: vi.fn() }));
 import { createCommand } from '../create.js';
 import { initializeSpfn } from '../init/index.js';
 import { logger } from '../../utils/logger.js';
-import { DRIZZLE_TYPEBOX_REFUSAL } from '../../utils/package-manager.js';
+import { DRIZZLE_TYPEBOX_REFUSAL, type YarnDlx } from '../../utils/package-manager.js';
 import { NPM_ERESOLVE_DRIZZLE_TYPEBOX } from '../../utils/__tests__/fixtures/npm-eresolve.js';
 
 const originalCwd = process.cwd();
 let repository: string;
+/** What the yarn the fake answers for says to `yarn dlx --help`. */
+let yarnDlx: YarnDlx;
+
+/** What execa resolves `yarn dlx --help` with (`reject: false`) for each kind of yarn. */
+const YARN_DLX_HELP: Record<YarnDlx, object> = {
+    'dlx': { exitCode: 0, stdout: '$ yarn dlx <command> ...' },
+    'no-dlx': { exitCode: 1, stdout: 'yarn run v1.22.22' },
+    'no-yarn': { code: 'ENOENT', exitCode: undefined, stdout: '' },
+};
 
 /**
- * Stands in for every process create starts: create-next-app writes the app's
+ * Stands in for every process create starts: yarn answers whether it has
+ * `dlx` as `yarnDlx` says; create-next-app writes the app's
  * package.json; an install puts each package `cwd` declares under
  * `cwd/node_modules`, and at the workspace root those of each member too.
  */
-function fakeProcess(_command: string, args: string[], { cwd }: { cwd: string }): void
+function fakeProcess(command: string, args: string[], { cwd }: { cwd: string }): object | void
 {
+    if (command === 'yarn' && args.join(' ') === 'dlx --help')
+    {
+        return YARN_DLX_HELP[yarnDlx];
+    }
+
     if (args.some(arg => arg.startsWith('create-next-app')))
     {
         mkdirSync(join(cwd, 'app'));
@@ -79,6 +94,7 @@ beforeEach(() =>
     writeFileSync(join(repository, 'pnpm-lock.yaml'), '');
     writeFileSync(join(repository, 'package.json'), '{}');
     mocks.execa.mockImplementation(fakeProcess);
+    yarnDlx = 'no-dlx';
 
     // Commander keeps a parse's option values for the next one: `--pm` included.
     Object.keys(createCommand.opts()).forEach(key => createCommand.setOptionValue(key, undefined));
@@ -207,6 +223,116 @@ describe('an npm install that npm refuses over drizzle-typebox (npm 10.9.9 outpu
 
         expect(mocks.spinner.warn).toHaveBeenCalledWith('Failed to setup SVGR (you can run `spfn setup icons` later)');
         expect(error).toHaveBeenCalledWith(expect.stringContaining(DRIZZLE_TYPEBOX_REFUSAL));
+        error.mockRestore();
+    });
+});
+
+describe('spfn create launches its one-off packages with yarn dlx where yarn has it, else with npx', () =>
+{
+    /** The command and arguments that started the one-off package `spec`. */
+    function oneOffCall(spec: string): [string, string[]]
+    {
+        return mocks.execa.mock.calls.find(([, args]) => args.includes(spec))!.slice(0, 2) as [string, string[]];
+    }
+
+    const runners: [string, YarnDlx, string, string[]][] = [
+        ['npm', 'dlx', 'npx', ['--yes']],
+        ['pnpm', 'dlx', 'npx', ['--yes']],
+        ['bun', 'dlx', 'npx', ['--yes']],
+        ['yarn', 'no-dlx', 'npx', ['--yes']],
+        ['yarn', 'dlx', 'yarn', ['dlx']],
+    ];
+
+    it.each(runners)('runs create-next-app for %s (yarn says %s) with %s %s', async (pm, answer, command, runnerArgs) =>
+    {
+        yarnDlx = answer;
+        await createFrom(join(repository, 'scratch'), ['--pm', pm]);
+
+        const [called, args] = oneOffCall('create-next-app@latest');
+
+        expect(called).toBe(command);
+        expect(args.slice(0, runnerArgs.length + 2)).toEqual([...runnerArgs, 'create-next-app@latest', 'app']);
+        expect(args).toContain(`--use-${pm}`);
+    });
+
+    it.each(runners)('runs shadcn for %s (yarn says %s) with %s %s', async (pm, answer, command, runnerArgs) =>
+    {
+        yarnDlx = answer;
+        await createFrom(join(repository, 'scratch'), ['--pm', pm, '--shadcn']);
+
+        expect(oneOffCall('shadcn@latest')).toEqual([command, [...runnerArgs, 'shadcn@latest', 'init', '--yes', '--defaults']]);
+    });
+
+    it('asks yarn in the directory each one-off package will run in', async () =>
+    {
+        yarnDlx = 'dlx';
+        const app = await createFrom(join(repository, 'scratch'), ['--pm', 'yarn', '--shadcn']);
+        const probes = mocks.execa.mock.calls.filter(([command, args]) => command === 'yarn' && args[0] === 'dlx' && args[1] === '--help');
+
+        expect(probes.map(([, , options]) => options.cwd)).toEqual([join(repository, 'scratch'), app]);
+    });
+
+    it.each([
+        ['yarn', ['Asking yarn whether it has dlx for create-next-app@latest (yarn 1 answers no with an error)...', 'Running create-next-app with npx...']],
+        ['npm', ['Running create-next-app with npx...']],
+    ])('says, for %s, when it asks yarn and what runs create-next-app', async (pm, expected) =>
+    {
+        const step = vi.spyOn(logger, 'step');
+
+        await createFrom(join(repository, 'scratch'), ['--pm', pm as string]);
+
+        expect(step.mock.calls.map(([message]) => message).filter(message => /yarn whether|create-next-app/.test(message))).toEqual(expected);
+        step.mockRestore();
+    });
+
+    it('stops --pm yarn with no yarn before anything is downloaded or written', async () =>
+    {
+        yarnDlx = 'no-yarn';
+        const exit = vi.spyOn(process, 'exit').mockImplementation(((code?: number) =>
+        {
+            throw new Error(`process.exit(${code})`);
+        }) as never);
+        const error = vi.spyOn(logger, 'error').mockImplementation(() => undefined);
+
+        await expect(createFrom(join(repository, 'scratch'), ['--pm', 'yarn'])).rejects.toThrow('process.exit(1)');
+
+        expect(error).toHaveBeenCalledWith('yarn was not found; install it or choose another --pm');
+        expect(mocks.execa.mock.calls.filter(([command]) => command !== 'yarn')).toEqual([]);
+        expect(existsSync(join(repository, 'scratch', 'app'))).toBe(false);
+        exit.mockRestore();
+        error.mockRestore();
+    });
+
+    it('warns and goes on when the yarn in the app does not say whether it has dlx for shadcn', async () =>
+    {
+        yarnDlx = 'dlx';
+        const app = join(repository, 'scratch', 'app');
+        mocks.execa.mockImplementation((command: string, args: string[], options: { cwd: string }) =>
+            (command === 'yarn' && args[0] === 'dlx' && options.cwd === app ? { exitCode: 1, stdout: 'Usage Error: This project is configured to use pnpm' } : fakeProcess(command, args, options)));
+
+        await createFrom(join(repository, 'scratch'), ['--pm', 'yarn', '--shadcn']);
+
+        expect(mocks.spinner.warn).toHaveBeenCalledWith(expect.stringMatching(/^Failed to initialize shadcn\/ui: `yarn dlx --help` in .* did not say whether this yarn has dlx[^]*Usage Error/));
+        expect(mocks.execa.mock.calls.some(([, args]) => args.includes('shadcn@latest'))).toBe(false);
+        expect(mocks.execa).toHaveBeenCalledWith('yarn', ['install'], { cwd: app });
+    });
+
+    it('says "npx was not found; install npm" when npx cannot start', async () =>
+    {
+        mocks.execa.mockImplementation((command: string, args: string[], options: { cwd: string }) =>
+            (command === 'npx'
+                ? Promise.reject(Object.assign(new Error('Command failed with ENOENT: npx --yes create-next-app@latest\nspawn npx ENOENT'), { code: 'ENOENT', path: 'npx' }))
+                : fakeProcess(command, args, options)));
+        const exit = vi.spyOn(process, 'exit').mockImplementation(((code?: number) =>
+        {
+            throw new Error(`process.exit(${code})`);
+        }) as never);
+        const error = vi.spyOn(logger, 'error').mockImplementation(() => undefined);
+
+        await expect(createFrom(join(repository, 'scratch'), ['--pm', 'npm'])).rejects.toThrow('process.exit(1)');
+
+        expect(error).toHaveBeenCalledWith('npx was not found; install npm');
+        exit.mockRestore();
         error.mockRestore();
     });
 });
