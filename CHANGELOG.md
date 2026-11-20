@@ -100,7 +100,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the SQL names (no schema; the column's database name); past 63 bytes cut and hash-suffixed as the
   tenancy constraints are. Values are written sorted and once each (reordering them generates
   nothing), as literals with `'` doubled; a value holding a backslash is refused (under
-  `standard_conforming_strings = off` it would read as an escape). NULL passes (chain
+  `standard_conforming_strings = off` it would read as an escape), and so is one holding a NUL
+  character (PostgreSQL `text` cannot hold it, so the migration would fail). NULL passes (chain
   `.notNull()`); an empty list throws when the table's extras are evaluated (`db generate`, `db
   push`). A `.default()` outside `values` is accepted by the DDL and fails at insert. Adding a value
   makes `db generate` drop and re-add the constraint, and the `ADD` re-checks every row under an

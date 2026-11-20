@@ -57,6 +57,13 @@ describe('enumCheck', () =>
         );
     });
 
+    it('E3b: a value holding a NUL character is refused when the table\'s extras are evaluated', async () =>
+    {
+        await expect(snapshot(['a', 'nul\0byte'])).rejects.toThrow(
+            'enumCheck on "post_status" refuses the value "nul\\u0000byte": PostgreSQL text cannot hold a NUL character',
+        );
+    });
+
     it('E4: reordering or repeating the values yields no statement', async () =>
     {
         expect(await generateMigration(await snapshot(['b', 'a', 'c']), await snapshot(['c', 'a', 'b', 'a']))).toEqual([]);

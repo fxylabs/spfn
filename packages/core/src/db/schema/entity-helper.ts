@@ -441,6 +441,12 @@ export function enumText<T extends readonly [string, ...string[]]>(
     return text(fieldName, { enum: values as T & [string, ...string[]] });
 }
 
+/** Characters `enumCheck` refuses in a value, each with the reason */
+const ENUM_CHECK_REFUSED_CHARACTERS: readonly (readonly [string, string])[] = [
+    ['\\', 'a backslash in a literal reads as an escape under standard_conforming_strings = off'],
+    ['\0', 'PostgreSQL text cannot hold a NUL character'],
+];
+
 /**
  * Database CHECK that refuses a value outside `values` — the constraint
  * `enumText` does not emit
@@ -463,18 +469,20 @@ export function enumText<T extends readonly [string, ...string[]]>(
  * parameter cannot. A value holding a backslash is refused: under
  * `standard_conforming_strings = off` PostgreSQL reads a backslash in such a
  * literal as an escape, so the check would admit another value or not parse.
+ * A value holding a NUL character is refused too: PostgreSQL `text` cannot
+ * hold one, so the migration would fail when it runs.
  * A NULL passes the check: chain `.notNull()` on the column to refuse it. A
  * `.default()` outside `values` is not caught: the DDL accepts it, and an
  * insert that falls back to it fails the check.
  *
  * Like any extra config, this runs when the table's extras are evaluated
  * (`db generate`, `db push`), not where the table is defined: an empty list or
- * a backslash throws there.
+ * a backslash or a NUL throws there.
  *
  * @param column - The column, as the extra config receives it
  * @param values - The values the column admits; at least one
  * @returns A check constraint for the table's extra config
- * @throws {Error} When `values` is empty or a value holds a backslash
+ * @throws {Error} When `values` is empty or a value holds a backslash or a NUL character
  *
  * @example
  * ```typescript
@@ -493,12 +501,14 @@ export function enumCheck(column: PgColumn, values: readonly [string, ...string[
         throw new Error(`enumCheck on "${column.name}" needs at least one value`);
     }
 
-    const backslashed = values.find((value) => value.includes('\\'));
-
-    if (backslashed !== undefined)
+    for (const [character, reason] of ENUM_CHECK_REFUSED_CHARACTERS)
     {
-        throw new Error(`enumCheck on "${column.name}" refuses the value ${JSON.stringify(backslashed)}: `
-            + 'a backslash in a literal reads as an escape under standard_conforming_strings = off');
+        const refused = values.find((value) => value.includes(character));
+
+        if (refused !== undefined)
+        {
+            throw new Error(`enumCheck on "${column.name}" refuses the value ${JSON.stringify(refused)}: ${reason}`);
+        }
     }
 
     return check(
