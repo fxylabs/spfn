@@ -42,7 +42,8 @@ Column helpers (`entity-helper.ts`):
 - `softDelete()` — `deletedAt` (timestamptz, nullable) + `deletedBy` (text)
 - `verificationTimestamp(fieldName)` — single nullable timestamptz, `{fieldName}At`
 - `utcTimestamp(fieldName, mode?)` — single timestamptz column (chainable)
-- `enumText(fieldName, values)` — text column with enum constraint (chainable)
+- `enumText(fieldName, values)` — text column whose TypeScript type is narrowed to the values; the database accepts any string (chainable)
+- `enumCheck(column, values)` — table-level CHECK refusing a value outside `values`, named `<table>_<column>_check`
 - `typedJsonb<T>(fieldName)` — jsonb column typed as `T` (chainable)
 
 Schema namespacing (`schema-helper.ts`):
@@ -205,7 +206,7 @@ processedAt: utcTimestamp('processed_at', 'string'),  // ISO string
 
 ### `enumText(fieldName, values)`
 
-Text column constrained to a const tuple; the value type is inferred. Chainable.
+Narrows the TypeScript type only: the value type is inferred from the const tuple. Chainable.
 
 ```typescript
 export const USER_STATUSES = ['active', 'inactive', 'suspended'] as const;
@@ -214,7 +215,65 @@ export type UserStatus = typeof USER_STATUSES[number];
 status: enumText('status', USER_STATUSES).notNull().default('active'),
 ```
 
-Backing type is plain `text` (no PG enum type), so adding values needs **no migration**.
+`enumText` narrows the TypeScript type only. The column is plain `text` (no PG enum
+type, no CHECK), and the database accepts any string, so adding a value needs **no
+migration**. For the database to refuse other values, add `enumCheck` (below); adding a
+value then needs a migration.
+
+### `enumCheck(column, values)`
+
+A CHECK constraint refusing any value outside `values`. Table-level (drizzle has no
+column-level check), so it goes in the table's extra config:
+
+```typescript
+export const POST_STATUSES = ['draft', 'published'] as const;
+
+export const posts = schema.table('posts', {
+    status: enumText('status', POST_STATUSES).notNull(),
+}, (t) => [enumCheck(t.status, POST_STATUSES)]);
+```
+
+```sql
+CONSTRAINT "posts_status_check" CHECK ("status" in ('draft', 'published'))
+```
+
+- **Name:** `<table>_<column>_check`, from the SQL names — the table without its schema,
+  the column's database name (`post_status`, not the property `postStatus`). A name past
+  PostgreSQL's 63-byte limit is cut to 54 bytes and suffixed with a hash of the whole
+  name, as tenancy constraints are. The name does not depend on the values.
+- **Values** are a set: written sorted and once each, so reordering them in source
+  generates nothing. They are quoted literals with `'` doubled (`'o''clock'`): the check
+  lands in a migration file, where a bound parameter cannot. A value holding a backslash
+  is refused: under `standard_conforming_strings = off` PostgreSQL would read it as an
+  escape. A value holding a NUL character is refused: PostgreSQL `text` cannot hold one,
+  so the migration would fail when it runs. These refusals and an empty list throw when
+  the table's extras are evaluated — by `db generate` or `db push` — not where the table
+  is defined.
+- **A `.default()` outside `values` is not caught**: the DDL accepts it, and the insert
+  that falls back to it fails the check.
+- **NULL passes the check** (SQL's `in` yields unknown, which a CHECK admits). Chain
+  `.notNull()` on the column to refuse it.
+
+Adding a value (`'archived'`) makes `db generate` drop and re-add the constraint:
+
+```sql
+ALTER TABLE "spfn_blog"."posts" DROP CONSTRAINT "posts_status_check", ADD CONSTRAINT "posts_status_check" CHECK ("status" in ('archived', 'draft', 'published'));
+```
+
+> **The `ADD` re-checks every row under an ACCESS EXCLUSIVE lock**: reads and writes of
+> the table wait until it finishes, which on a large table is a long time. drizzle-kit
+> does not emit `NOT VALID`. Removing a value fails the `ADD` while a row still holds it:
+> update those rows first.
+
+> **`db push` does not change an existing check.** drizzle-kit's push creates a check the
+> database lacks, but never alters one whose values changed: after a push, the database
+> still refuses the added value and admits the removed one. `spfn db push` (and `--dry-run`)
+> names each such check — `Check "posts_status_check" on "spfn_blog"."posts" differs from
+> the one in the database: PostgreSQL reads the two expressions differently` — and leaves it.
+> For a check `enumCheck` wrote on both sides this is exact: it is named exactly when the
+> value set changed (the `spfn` README says what the comparison catches for other checks).
+> To change it, run `db generate` + `db migrate`, or drop the constraint (the printed
+> `ALTER TABLE … DROP CONSTRAINT`) and push again.
 
 ### `typedJsonb<T>(fieldName)`
 
@@ -280,8 +339,10 @@ column helpers above work identically inside `schema.table`.
   a snake_case DB column name.** They differ — `verificationTimestamp('emailVerified')`
   yields column `email_verified_at`, but `utcTimestamp('emailVerified')` would create a
   column literally named `emailVerified`.
-- **`enumText` is plain text + CHECK, not a PG enum type.** Adding values requires no
-  migration; renaming/removing the column still does.
+- **`enumText` narrows the TypeScript type only — no CHECK, no PG enum type.** The
+  database accepts any string; adding values requires no migration; renaming/removing the
+  column still does. Add `enumCheck` for the database to refuse other values; adding a
+  value then needs a migration that re-checks every row under a lock.
 - **Exported tables must be reachable by drizzle-kit to land in migrations.** Entity
   files under `src/server/entities/` are found by the folder scan; tables kept elsewhere
   must be re-exported from the registry (`src/server/entities/config.ts → export * from

@@ -54,7 +54,6 @@
  * ```
  */
 
-import { createHash } from 'crypto';
 import type { Context, MiddlewareHandler } from 'hono';
 import { getColumns, getTableName, isTable, sql, type SQL } from 'drizzle-orm';
 import {
@@ -75,6 +74,7 @@ import {
 import { ForbiddenError, ValidationError } from '@spfn/core/errors';
 import { defineMiddlewareFactory } from '../../route/define-middleware';
 import { tenantKey } from '../schema/entity-helper';
+import { constraintName, sqlLiteral } from '../schema/migration-text';
 import { claimTransactionForGuard, TENANT_SETTING, USER_SETTING } from '../transaction/tenant';
 import { isTenantId } from './condition';
 import {
@@ -264,10 +264,6 @@ interface PendingReference extends ReferenceSpec
 {
     readonly key: string;
 }
-
-/** PostgreSQL truncates identifiers to 63 bytes. */
-const MAX_IDENTIFIER_BYTES = 63;
-const HASH_LENGTH = 8;
 
 const ON_DELETE_ACTIONS: readonly TenancyOnDelete[] = ['cascade', 'restrict', 'no action'];
 
@@ -476,12 +472,6 @@ function membershipConditions(name: string, membership: PgTable, where: Record<s
     });
 
     return sql.join(conditions);
-}
-
-/** A string quoted with `'` doubled, a number or a boolean, as SQL text. */
-function sqlLiteral(value: string | number | boolean): string
-{
-    return typeof value === 'string' ? `'${value.replaceAll('\'', '\'\'')}'` : String(value);
 }
 
 function qualifiedName(table: PgTable): SQL
@@ -845,42 +835,6 @@ function assertDistinctNames(table: string, names: string[]): void
     {
         throw new Error(`tenancy.table "${table}" would create two constraints named "${duplicate}"; rename the reference`);
     }
-}
-
-/**
- * `<table>_<suffix>`, or — past 63 bytes, where PostgreSQL would truncate it and
- * two names could become one — its first 54 bytes, `_`, and 8 hex digits of a
- * hash of the whole name.
- */
-export function constraintName(table: string, suffix: string): string
-{
-    const full = `${table}_${suffix}`;
-
-    if (Buffer.byteLength(full) <= MAX_IDENTIFIER_BYTES)
-    {
-        return full;
-    }
-
-    const hash = createHash('sha256').update(full).digest('hex').slice(0, HASH_LENGTH);
-
-    return `${truncateBytes(full, MAX_IDENTIFIER_BYTES - HASH_LENGTH - 1)}_${hash}`;
-}
-
-function truncateBytes(text: string, maxBytes: number): string
-{
-    let result = '';
-
-    for (const char of text)
-    {
-        if (Buffer.byteLength(result + char) > maxBytes)
-        {
-            break;
-        }
-
-        result += char;
-    }
-
-    return result;
 }
 
 function schemaOf(table: PgTable): string | undefined

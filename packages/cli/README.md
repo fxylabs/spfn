@@ -533,6 +533,22 @@ loaded `.env` chain.
 > `db push` is for development. For production, use `db generate` + `db migrate` to keep
 > migration history.
 
+> **`db push` does not change an existing check.** Drizzle Kit's push creates a check the
+> database lacks but never alters one whose expression changed (an `enumCheck` given another
+> value). `db push` and `--dry-run` name each existing check whose declared expression
+> PostgreSQL reads differently from the stored one — `differs from the one in the database:
+> PostgreSQL reads the two expressions differently` — with the remedy (`db generate` + `db
+> migrate`, or drop it and push again), and leave it. The comparison is the planner's print of
+> both expressions (`EXPLAIN (VERBOSE)`, which runs nothing; one statement per existing
+> check), not their meaning: a numeric literal written with another scale (`amount > 1`
+> against a stored `amount > 1.0`) is named on every push although it means the same, and a
+> rewrite the planner folds (`x > 0 AND true` against a stored `x > 0`) is not named, as it
+> means the same. PostgreSQL offers no exact form without a write. For an `enumCheck` whose
+> stored check `enumCheck` also wrote, the comparison is exact: it names the check exactly
+> when the value set changed. A declared check that names a column the table does not have
+> yet (one this push adds) differs, and is named so; one PostgreSQL cannot read against the
+> table for another reason is named as `could not be compared`, with the error.
+
 **One tenant out and back in.** `db tenant export` and `db tenant import` move the rows of
 one tenant across every tenant table — a `tenancy.table` and a `tenantKey()`-only table
 alike — and nothing else: not the tenant list row, not auth data.

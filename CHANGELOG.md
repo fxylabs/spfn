@@ -110,6 +110,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   was not spent), any other server refusal rejects, as `completeMfaWithPasskey` does. The assertion
   is spent once, by whichever consumer runs first, only by the session that asked for it, and is
   not tied to an action.
+- **@spfn/core: `enumCheck(column, values)`** — a table-level CHECK that refuses a value outside
+  `values`, for a column `enumText` only types (spfn/spfn#167). Named `<table>_<column>_check` from
+  the SQL names (no schema; the column's database name); past 63 bytes cut and hash-suffixed as the
+  tenancy constraints are. Values are written sorted and once each (reordering them generates
+  nothing), as literals with `'` doubled; a value holding a backslash is refused (under
+  `standard_conforming_strings = off` it would read as an escape), and so is one holding a NUL
+  character (PostgreSQL `text` cannot hold it, so the migration would fail). NULL passes (chain
+  `.notNull()`); an empty list throws when the table's extras are evaluated (`db generate`, `db
+  push`). A `.default()` outside `values` is accepted by the DDL and fails at insert. Adding a value
+  makes `db generate` drop and re-add the constraint, and the `ADD` re-checks every row under an
+  ACCESS EXCLUSIVE lock. **`db push` does not change the constraint once it exists**: drizzle-kit's
+  push never alters a check, so the database keeps refusing an added value and admitting a removed
+  one; `spfn db push` names the check (below). No package column adopts it.
+- **spfn: `db push` names each check it leaves as it is** (spfn/spfn#167). drizzle-kit's push never
+  alters an existing check whose expression changed. `db push` and `--dry-run` now print, per
+  existing check whose declared expression PostgreSQL reads differently from the stored one,
+  `Check "<name>" on "<schema>"."<table>" differs from the one in the database: PostgreSQL reads
+  the two expressions differently; db push does not change an existing check.`, the remedy (`db
+  generate` + `db migrate`, or drop it and push again) and the `ALTER TABLE … DROP CONSTRAINT`
+  statement, and change nothing about it. The comparison is the planner's print of both
+  expressions (one `EXPLAIN (VERBOSE)` per existing check, which runs nothing), not their meaning:
+  a numeric literal written with another scale is named although it means the same, and a rewrite
+  the planner folds (`x > 0 AND true`) is not; for an `enumCheck` stored by `enumCheck` it is exact
+  over the value set. A declared check naming a column the table does not have yet is named as
+  differing (`it names a column the table does not have yet`); one PostgreSQL cannot read against
+  the table for another reason is named as `could not be compared`, with the error.
 
 ### Changed
 
@@ -759,6 +785,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   …`), and the `spfn dev` watcher reports it and stops, saying route maps are not regenerated
   until the config is fixed and `spfn dev` restarted (the server keeps running). Only an absent
   config, or one naming no generator, means none; `enabled: false` still skips an entry.
+
+### Documentation
+
+- **@spfn/core: `enumText` is documented as what it is** (spfn/spfn#167): it narrows the TypeScript
+  type only; the column is plain `text`, the database accepts any string, and adding a value needs no
+  migration. The schema README called it a column "with enum constraint" and "plain text + CHECK";
+  there never was a CHECK. `enumText` itself is unchanged.
 
 ## [@spfn/core@0.4.0-beta.1, @spfn/auth@0.4.0-beta.1, spfn@0.4.0-beta.1, @spfn/storage@0.4.0-beta.1, @spfn/cms@0.4.0-beta.1, @spfn/mcp@0.4.0-beta.1, @spfn/notification@0.3.0-beta.1, @spfn/monitor@0.3.0-beta.1, @spfn/i18n@0.3.0-beta.1, @spfn/migrate@0.3.0-beta.1, @spfn/pages-next@0.2.0-beta.1, @spfn/pages@0.2.0-beta.1, @spfn/signing@0.2.0-alpha.1, @spfn/workflow@0.3.0-alpha.1] - 2026-11-18
 

@@ -23,7 +23,9 @@ import {
     displayDryRunSummary,
     displayApplySummary,
     displayPendingFunctionMigrations,
+    displayUnchangedChecks,
 } from './utils/push-display.js';
+import { declaredChecks, unchangedChecks, type UnchangedCheck } from './utils/unchanged-checks.js';
 import {
     discoverFunctionMigrations,
     loadFunctionMigrationPlans,
@@ -41,6 +43,8 @@ export interface PushPlan
 {
     statements: string[];
     hints: PushHint[];
+    /** Existing checks PostgreSQL reads differently from the declared ones, or could not compare: pushSchema leaves them as they are */
+    unchangedChecks: UnchangedCheck[];
 }
 
 export async function resolvePushPlan(
@@ -66,6 +70,7 @@ export async function resolvePushPlan(
     return {
         statements: [...hintStatements, ...sqlStatements],
         hints: pushHints,
+        unchangedChecks: await unchangedChecks(db, await declaredChecks(imports, schemaFilter)),
     };
 }
 
@@ -139,6 +144,12 @@ async function resolveSchemaFilesOrExit(config: Parameters<typeof resolveSchemaF
  *
  * Whichever files are read, objects in a schema a function package owns stay out
  * of the diff: the package's own migrations carry them (step 8).
+ *
+ * drizzle-kit's push never alters an existing check whose expression changed
+ * (an `enumCheck` given another value): push warns about each existing check
+ * whose declared expression PostgreSQL reads differently from the stored one,
+ * with the remedy, and changes nothing about it (see unchangedChecks for what
+ * the comparison does and does not catch).
  */
 export async function dbPush(options: { force?: boolean; dryRun?: boolean; schema?: string } = {}): Promise<void>
 {
@@ -193,15 +204,16 @@ export async function dbPush(options: { force?: boolean; dryRun?: boolean; schem
 
     try
     {
-        // 5. Plan, reading only: the project diff via pushSchema, and each
-        //    function package's pending migrations
-        const { statements, hints } = await resolvePushPlan(imports, connection.db, schemaFilter);
+        // 5. Plan, reading only: the project diff via pushSchema, the checks it
+        //    leaves as they are, and each function package's pending migrations
+        const plan = await resolvePushPlan(imports, connection.db, schemaFilter);
+        const { statements } = plan;
         const pending = await pendingFunctionMigrations(connection.db, functionPlans);
         const result = classifyStatements(statements);
 
         // 6. Display. Function package lines only when a package is installed,
         //    as `db migrate` prints its header only then.
-        displayProjectPlan(hints, statements.length === 0 ? undefined : result, options.dryRun);
+        displayProjectPlan(plan, statements.length === 0 ? undefined : result, options.dryRun);
         if (functionPlans.length > 0)
         {
             displayPendingFunctionMigrations(pending);
@@ -248,17 +260,22 @@ async function openPushConnectionOrExit(dryRun?: boolean): Promise<PushConnectio
 }
 
 /**
- * Print pushSchema's hints and the classified project statements, or that the
- * project schema has none.
+ * Print pushSchema's hints, the checks it leaves as they are, and the
+ * classified project statements, or that the project schema has none.
  */
-function displayProjectPlan(hints: PushHint[], result: ClassificationResult | undefined, dryRun?: boolean): void
+function displayProjectPlan(plan: PushPlan, result: ClassificationResult | undefined, dryRun?: boolean): void
 {
-    for (const hint of hints)
+    for (const hint of plan.hints)
     {
         console.log(chalk.yellow(`⚠️  ${hint.hint}`));
     }
+    displayUnchangedChecks(plan.unchangedChecks);
 
-    if (!result)
+    if (!result && plan.unchangedChecks.length > 0)
+    {
+        console.log(chalk.yellow('No statements to apply; the checks above stay as they are\n'));
+    }
+    else if (!result)
     {
         console.log(chalk.green('✅ No changes detected — project schema is up to date\n'));
     }

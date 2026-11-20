@@ -16,11 +16,12 @@
  * ```
  */
 
-import { sql } from 'drizzle-orm';
+import { getColumnTable, getTableName, sql } from 'drizzle-orm';
 import type { Column } from 'drizzle-orm';
 import type { PgColumn } from 'drizzle-orm/pg-core';
-import { bigserial, bigint as pgBigint, timestamp, text, uuid as pgUuid, jsonb } from 'drizzle-orm/pg-core';
+import { bigserial, bigint as pgBigint, check, timestamp, text, uuid as pgUuid, jsonb } from 'drizzle-orm/pg-core';
 import { registerTenantColumn } from '../tenant/registry';
+import { constraintName, sqlLiteral } from './migration-text';
 
 /**
  * Standard auto-incrementing primary key
@@ -399,12 +400,14 @@ export function utcTimestamp(
 /**
  * Type-safe enum text field
  *
- * Creates a text column with enum constraint.
+ * Narrows the column's TypeScript type to the values; nothing more. The column
+ * is plain `text` and the database accepts any string, so adding a value needs
+ * no migration. For the database to refuse other values, add `enumCheck`.
  * Chain with .notNull(), .default(), etc. for additional constraints.
  *
  * @param fieldName - Database column name (e.g., 'status', 'role', 'provider')
- * @param values - Const array of allowed values
- * @returns Text column with enum constraint
+ * @param values - Const array of the values the TypeScript type admits
+ * @returns Text column typed as one of the values
  *
  * @example
  * ```typescript
@@ -436,6 +439,82 @@ export function enumText<T extends readonly [string, ...string[]]>(
 {
     // readonly를 제거하되 타입 정보는 유지
     return text(fieldName, { enum: values as T & [string, ...string[]] });
+}
+
+/** Characters `enumCheck` refuses in a value, each with the reason */
+const ENUM_CHECK_REFUSED_CHARACTERS: readonly (readonly [string, string])[] = [
+    ['\\', 'a backslash in a literal reads as an escape under standard_conforming_strings = off'],
+    ['\0', 'PostgreSQL text cannot hold a NUL character'],
+];
+
+/**
+ * Database CHECK that refuses a value outside `values` — the constraint
+ * `enumText` does not emit
+ *
+ * A table-level check (drizzle has no column-level one), so it goes in the
+ * table's extra config. It is named `<table>_<column>_check` from the SQL names:
+ * the table without its schema, the column's database name, not its property
+ * key. A name past 63 bytes is cut to 54 and suffixed with a hash, so
+ * PostgreSQL never truncates it. The name does not depend on the values, so
+ * adding a value regenerates the same constraint: drizzle-kit writes
+ * `DROP CONSTRAINT` + `ADD CONSTRAINT`, and the ADD re-checks every row under
+ * an ACCESS EXCLUSIVE lock on the table. `db push` does not: drizzle-kit's push
+ * never alters an existing check, so the database keeps the old values.
+ * `spfn db push` names such a check; `db generate` + `db migrate`, or dropping
+ * the constraint and pushing again, changes it.
+ *
+ * The values are a set: written sorted and once each, so reordering them in
+ * source changes nothing in the database. They are written as quoted literals
+ * with `'` doubled, because the check lands in a migration file, where a bound
+ * parameter cannot. A value holding a backslash is refused: under
+ * `standard_conforming_strings = off` PostgreSQL reads a backslash in such a
+ * literal as an escape, so the check would admit another value or not parse.
+ * A value holding a NUL character is refused too: PostgreSQL `text` cannot
+ * hold one, so the migration would fail when it runs.
+ * A NULL passes the check: chain `.notNull()` on the column to refuse it. A
+ * `.default()` outside `values` is not caught: the DDL accepts it, and an
+ * insert that falls back to it fails the check.
+ *
+ * Like any extra config, this runs when the table's extras are evaluated
+ * (`db generate`, `db push`), not where the table is defined: an empty list or
+ * a backslash or a NUL throws there.
+ *
+ * @param column - The column, as the extra config receives it
+ * @param values - The values the column admits; at least one
+ * @returns A check constraint for the table's extra config
+ * @throws {Error} When `values` is empty or a value holds a backslash or a NUL character
+ *
+ * @example
+ * ```typescript
+ * export const POST_STATUSES = ['draft', 'published'] as const;
+ *
+ * export const posts = schema.table('posts', {
+ *     status: enumText('status', POST_STATUSES).notNull(),
+ * }, (t) => [enumCheck(t.status, POST_STATUSES)]);
+ * // CONSTRAINT "posts_status_check" CHECK ("status" in ('draft', 'published'))
+ * ```
+ */
+export function enumCheck(column: PgColumn, values: readonly [string, ...string[]])
+{
+    if (values.length === 0)
+    {
+        throw new Error(`enumCheck on "${column.name}" needs at least one value`);
+    }
+
+    for (const [character, reason] of ENUM_CHECK_REFUSED_CHARACTERS)
+    {
+        const refused = values.find((value) => value.includes(character));
+
+        if (refused !== undefined)
+        {
+            throw new Error(`enumCheck on "${column.name}" refuses the value ${JSON.stringify(refused)}: ${reason}`);
+        }
+    }
+
+    return check(
+        constraintName(getTableName(getColumnTable(column)), `${column.name}_check`),
+        sql`${column} in (${sql.raw([...new Set(values)].sort().map(sqlLiteral).join(', '))})`,
+    );
 }
 
 /**
