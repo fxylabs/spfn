@@ -32,7 +32,7 @@ import {
     executeFunctionMigrations,
     type FunctionMigrationPlan,
 } from '../../utils/function-migrations.js';
-import { describeError, failedStatement } from './tenant/connection.js';
+import { describeFailure } from '../../utils/database-failure.js';
 
 export interface PushHint
 {
@@ -371,20 +371,13 @@ async function applyProjectStatements(
 }
 
 /**
- * Print a failed project statement and exit 1: the error as `describeError`
- * prints it, then the statement's own SQL — the operator's schema, which the
- * plan printed already — since a class-22 or class-42 error has no message
- * naming what failed.
+ * Print a failed project statement and exit 1, as `describeFailure` prints it:
+ * the error, then the statement's own SQL — the operator's schema, which the
+ * plan printed already.
  */
 function exitOnProjectFailure(error: unknown, packageMigrationsApplied: boolean): never
 {
-    const statement = failedStatement(error, env.DATABASE_URL);
-
-    console.error(chalk.red(`\n❌ The project statements were rolled back: ${describeError(error, env.DATABASE_URL)}`));
-    if (statement)
-    {
-        console.error(chalk.red(`   Failed statement: ${statement}`));
-    }
+    console.error(chalk.red(`\n❌ The project statements were rolled back: ${describeFailure(error, env.DATABASE_URL)}`));
     if (packageMigrationsApplied)
     {
         console.error(chalk.yellow('Function package migrations applied above stay applied; fix the schema and run spfn db push again.'));
@@ -472,7 +465,7 @@ async function applyFunctionMigrations(plans: FunctionMigrationPlan[]): Promise<
     catch (error)
     {
         console.error(chalk.red('\n❌ Failed to apply function package migrations — nothing of the project schema was applied'));
-        console.error(chalk.red(describeError(error, env.DATABASE_URL)));
+        console.error(chalk.red(describeFailure(error, env.DATABASE_URL)));
         process.exit(1);
     }
 }

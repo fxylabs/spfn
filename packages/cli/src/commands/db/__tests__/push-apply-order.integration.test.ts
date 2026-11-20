@@ -304,15 +304,17 @@ describe('db push applies function package migrations first', () =>
 
         expect(output()).toMatch(/Destructive changes \(2\):\n\s+DROP TABLE "spfn_i163fix"."things"/);
     });
-    it('T3b a package migration fails on a constraint: the message is the server\'s, read as the project failure\'s is', async () =>
+    it('T3b a package migration fails on a constraint: the server\'s message, then the migration and the statement that failed', async () =>
     {
         writeFixture({ packageSql: DUPLICATE_PACKAGE_SQL });
 
         await expect(push({ force: true })).rejects.toThrow('exit 1');
 
         expect(errors.join('\n')).toContain(
-            'duplicate key value violates unique constraint "things_pkey" (23505, constraint things_pkey, table spfn_i163fix.things)');
-        expect(errors.join('\n')).not.toMatch(/Failed statement|Key \(/);
+            'duplicate key value violates unique constraint "things_pkey" (23505, constraint things_pkey, table spfn_i163fix.things)\n'
+            + `   In: @spfn/i163fix migration ${MIGRATION_NAME}\n`
+            + '   Failed statement: INSERT INTO spfn_i163fix.things (id) VALUES (1), (1)');
+        expect(errors.join('\n')).not.toMatch(/Key \(/);
         expect(await exists('spfn_i163fix.things')).toBe(false);
     });
 

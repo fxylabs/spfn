@@ -653,13 +653,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and no `--force` it now exits 1 before any write, naming `--force`. A project failure says
   package migrations stay applied only when this run applied one.
 - **spfn: a failed `db push` statement and a failed `db tenant export`/`import` print a database
-  error by core's rule (#378, #382).** One line: `databaseErrorMessage` (the server's message only
-  where `@spfn/core`'s `describeError` keeps it, else the SQLSTATE class's fixed text), then the
-  code, constraint, table and column, with the connection URL and any URL's credentials cut out.
-  A class-22 failure used to print the row's value (`invalid input syntax for type integer:
-  "…"`); it now reads `Invalid input value (22P02)`. A failed project statement adds its SQL
-  (`   Failed statement: ALTER TABLE …`), so a class-22 or class-42 failure still says which
-  statement failed. Unique, foreign-key and exclusion failures keep the server's message; a
+  error by core's rule (#378, #382).** First line: `databaseErrorMessage` (the server's message
+  only where `@spfn/core`'s `describeError` keeps it, else the SQLSTATE class's fixed text), then
+  the code, constraint, table and column, with the connection URL and any URL's credentials cut
+  out. A class-22 failure used to print the row's value (`invalid input syntax for type integer:
+  "…"`); it now reads `Invalid input value (22P02)`. Under it, every one of these commands prints
+  the statement that failed (`   Failed statement: ALTER TABLE …` / `COPY (SELECT …) TO STDOUT`),
+  so a class-22 or class-42 failure still says what failed: a tenant export over a column the
+  database lacks used to name it (`column "ghost" does not exist`) and names it in the statement
+  now. A function package migration adds its name (`   In: @spfn/cms migration …`); a tenant
+  import file value a column cannot take adds the file and the COPY line (`   In: tenant file
+  …copy`, `   At: COPY spfn_tenant_import_1, line 3`), never the value. Unique, foreign-key and exclusion failures keep the server's message; a
   not-null or check failure raised while altering a table reads `Integrity constraint violated
   (23502, table …, column …)` / `(23514, constraint …, table …)`. An authentication failure reads
   `Database authentication failed (28P01)` (was `authentication failed (28P01)`). spfn now reads

@@ -1,7 +1,8 @@
 /**
  * `spfn db tenant import` against a real PostgreSQL — rows M1–M18 of the #158
  * part 3 design case table, the M-input rows for a folder that lies,
- * M-file-gone, and C1 of the #159/#160 design (a `restrict` self-reference)
+ * M-file-gone, M-copy-line (#378), and C1 of the #159/#160 design (a `restrict`
+ * self-reference)
  *
  * Each row exports tenant 7 from the seeded source schema as the app role, then
  * recreates the target schema — "migrations only" — in the state the row needs
@@ -468,6 +469,33 @@ describe('spfn db tenant import (integration)', () =>
         await migrateTarget();
 
         await expectRefused(() => importTenant(prepared, { url: TARGET_URL, replace: false }), /ENOENT/);
+    });
+
+    it('M-copy-line a file value the column cannot take (22P02): refused naming the file, the COPY and its line, never the value; nothing written', async () =>
+    {
+        const directory = await exportSource();
+        let line = 0;
+
+        // memos columns: id, tenant_id, body
+        editFile(directory, 'memos', (text) =>
+        {
+            line = text.split('\n').indexOf('2\t7\tb') + 1;
+
+            return text.replace('2\t7\tb', 'm-copy-SECRETVALUE\t7\tb');
+        }, true);
+        await migrateTarget();
+        process.env.DATABASE_URL = TARGET_URL;
+
+        await expectRefused(() => dbTenantImport(directory), /exit 1/);
+
+        const text = output.join('\n');
+
+        expect(line).toBeGreaterThan(0);
+        expect(text).toContain('Tenant import failed, nothing was written: Invalid input value (22P02)');
+        expect(text).toContain(`   In: tenant file ${SCHEMA}.memos.copy`);
+        expect(text).toMatch(/ {3}Failed statement: COPY "spfn_tenant_import_\d+" \("id", "tenant_id", "body"\) FROM STDIN/);
+        expect(text).toMatch(new RegExp(` {3}At: COPY spfn_tenant_import_\\d+, line ${line}$`, 'm'));
+        expect(text).not.toMatch(/SECRETVALUE|column id/);
     });
 
     it('M-input-tenant-id a manifest tenantId "1 OR 1=1" is refused before a connection, through the command too', async () =>

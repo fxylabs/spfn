@@ -1,6 +1,6 @@
 /**
  * `spfn db tenant export` against a real PostgreSQL — rows X1–X3, X5 and X7–X10
- * of the #158 part 3 design case table
+ * of the #158 part 3 design case table, and X13 (#378: what a failure line names)
  *
  * The owner (TEST_DATABASE_URL) creates and seeds the fixture schema; the export
  * runs as the app role, which owns nothing and is neither superuser nor
@@ -14,6 +14,8 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, 
 import { join } from 'path';
 import { Writable } from 'stream';
 import postgres from 'postgres';
+import { bigint, text } from 'drizzle-orm/pg-core';
+import { tenantKey } from '@spfn/core/db';
 import { describe, it, expect, beforeAll, beforeEach, afterEach, afterAll, vi } from 'vitest';
 import { appUrl, OWNER_URL, requireDatabase } from './helpers/test-database';
 import { createSchema, createTenantFixtures, seed } from './helpers/tenant-fixtures';
@@ -352,6 +354,27 @@ describe('spfn db tenant export (integration)', () =>
                 expect(text).not.toContain(secret);
             }
         }
+    });
+
+    it('X13 an entity declares a column the database lacks: the 42703 line names the COPY statement that failed, so the column', async () =>
+    {
+        const memos = fixtures.imports.schema.table('memos', {
+            id: bigint('id', { mode: 'number' }).primaryKey(),
+            tenantId: tenantKey(),
+            body: text('body').notNull(),
+            ghost: text('ghost'),
+        });
+
+        vi.mocked(loadAppSchema).mockResolvedValue({ ...fixtures.imports, memos });
+        process.env.DATABASE_URL = appUrl();
+
+        await expect(dbTenantExport('7')).rejects.toThrow('exit 1');
+
+        const printed = output.join('\n');
+
+        expect(printed).toContain('Tenant export failed: Invalid query (42703)\n   Failed statement: COPY (SELECT ');
+        expect(printed).toMatch(/ {3}Failed statement: COPY \(SELECT [^\n]*"ghost" FROM "spfn_cli_tenant_export"\."memos" WHERE "tenant_id" = 7/);
+        expect(readdirSync(join(workDir, 'backups')).filter((name) => name.startsWith('tenant-'))).toEqual([]);
     });
 
     it('X12 a write error mid-COPY of 100,000 rows rejects the export with that error within 10 s, and leaves no lock or folder behind', async () =>

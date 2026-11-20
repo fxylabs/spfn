@@ -23,6 +23,7 @@ import {
 } from '@spfn/core/db';
 import { env } from '@spfn/core/config';
 import { loadEnv } from '@spfn/core/server';
+import { failingIn } from './database-failure.js';
 
 export { discoverFunctionMigrations, readMigrationEntries };
 export type { FunctionMigrationEntry, FunctionMigrationInfo };
@@ -75,7 +76,8 @@ async function ensureMigrationsTable(db: MigrationQueries, tableName: string): P
 
 /**
  * Apply one package's pending migrations (`pendingFunctionMigrations`) inside
- * a transaction. Writes nothing when none is pending.
+ * a transaction. Writes nothing when none is pending. A failed statement names
+ * its migration (`failingIn`).
  */
 export async function applyFunctionMigrationPlan(
     db: MigrationDb,
@@ -98,7 +100,7 @@ export async function applyFunctionMigrationPlan(
         {
             for (const statement of entry.statements)
             {
-                await tx.query(statement);
+                await failingIn(`${plan.packageName} migration ${entry.name}`, tx.query(statement));
             }
 
             await tx.query(
