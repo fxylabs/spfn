@@ -109,6 +109,23 @@ describe('pending function package migrations on a legacy-recorded database', ()
         expect(applyPending?.entries.map(entry => entry.name)).toEqual([TAGS[2]]);
     });
 
+    it('R4 the package\'s own table wins over a legacy table that records newer entries', async () =>
+    {
+        const entries = readMigrationEntries(join(cwd, 'node_modules', '@spfn', 'r357pkg', 'drizzle'), PACKAGE_NAME);
+        for (const entry of entries)
+        {
+            await owner`INSERT INTO drizzle."__spfn_fn_migrations" (hash, created_at) VALUES (${entry.hash}, 1)`;
+        }
+        await createPackageTable(entries.slice(0, 1));
+
+        const status = await collectMigrationStatus(db, cwd);
+        const [applyPending] = await pendingFunctionMigrations(db, [{ packageName: PACKAGE_NAME, entries }]);
+
+        expect(status.packages.map(target => [target.name, target.pendingTags]))
+            .toEqual([[PACKAGE_NAME, TAGS.slice(1)]]);
+        expect(applyPending?.entries.map(entry => entry.name)).toEqual(TAGS.slice(1));
+    });
+
     it('R5 a package with rows of its own reads status without SELECT on the legacy table', async () =>
     {
         const entries = readMigrationEntries(join(cwd, 'node_modules', '@spfn', 'r357pkg', 'drizzle'), PACKAGE_NAME);
