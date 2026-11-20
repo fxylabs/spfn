@@ -1865,6 +1865,11 @@ To start anyway (a harness that migrates later, a rollout that must proceed), pa
 `spfn dev --allow-pending-migrations`, or set `SPFN_ALLOW_PENDING_MIGRATIONS=true` where
 no flag can be passed. Both log the pending list as a warning instead.
 
+The same refusal names `bookkeeping does not match local migrations` when the project's
+`drizzle.__drizzle_migrations`, written before drizzle-orm 1.0, has a row no folder in
+`src/server/drizzle` matches. `spfn db migrate` refuses that database too; restore the folder
+or correct the row first.
+
 ### "SPFN_AUTH_SESSION_SECRET is required"
 
 `SPFN_AUTH_SESSION_SECRET` must be set in `.env.local` (Next.js side). It must be at least 32 characters.

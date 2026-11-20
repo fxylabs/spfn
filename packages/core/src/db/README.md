@@ -825,6 +825,25 @@ read, and the operator may drop it (`DROP TABLE drizzle."__spfn_fn_migrations"`)
 also removes the limit above. Drop it no earlier: a package without rows of its own
 would then count every migration as pending and replay them over existing objects.
 
+The project's own migrations (`src/server/drizzle`, recorded in `drizzle.__drizzle_migrations`)
+are applied by drizzle-orm's migrator, and their status is decided by drizzle-orm's own code:
+`readMigrationFiles` (`drizzle-orm/migrator`) reads the folder and `getMigrationsToRun`
+(`drizzle-orm/migrator.utils`) picks the pending ones from the table's rows, so `spfn db
+status`, the boot gate and health name exactly what `spfn db migrate` will run. drizzle decides
+by folder name alone: a migration is pending when no row carries its name, whatever its
+timestamp. A migration merged with an older timestamp than one already applied is pending, and
+so is a folder renamed after it was applied (migrate runs it again). A row whose folder is gone
+is ignored, and so is SQL edited after it was applied (the hash is never compared).
+
+A table written by drizzle-orm before 1.0 has no `name` column. `spfn db migrate` names its rows
+first — by `created_at` truncated to the second, then by hash — and refuses to run when a row
+matches no folder, or when the folder still uses the drizzle-kit ≤0.31 layout
+(`meta/_journal.json`; `drizzle-kit up` converts it). Status names the rows the same way without
+writing anything, and in either refusal case it reports an error instead of a count —
+`` bookkeeping does not match local migrations; `spfn db migrate` will refuse `` — which the boot
+gate refuses to start on (`MigrationBookkeepingMismatchError`, exported from `@spfn/core/db`).
+Restore the missing folders, or correct the rows, before migrating.
+
 An app already deployed with the app role as owner moves the tables once (nothing does it
 automatically), as a superuser or the current owner:
 
@@ -951,7 +970,9 @@ These have their own READMEs — do not duplicate their APIs here, link to them:
   implementation behind `spfn db status`, the server's migration boot gate, the detailed
   health payload, the `spfn db push` preview and every function-package apply, so they
   cannot disagree about what "pending" means. A function package's legacy records in the
-  shared `drizzle.__spfn_fn_migrations` table are read, never written or dropped.
+  shared `drizzle.__spfn_fn_migrations` table are read, never written or dropped. The
+  project's own migrations are decided by drizzle-orm's `getMigrationsToRun`, the call
+  `spfn db migrate` makes (see "Database roles" above).
 
 ---
 

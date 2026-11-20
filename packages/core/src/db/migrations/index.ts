@@ -21,6 +21,7 @@ export {
     collectMigrationStatus,
     countPendingMigrations,
     hasMigrationTargets,
+    MigrationBookkeepingMismatchError,
     migrationTargets,
     pendingFunctionMigrations,
     pendingMigrationTargets,

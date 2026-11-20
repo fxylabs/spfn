@@ -14,6 +14,8 @@ import { join } from 'path';
 
 import { sql } from 'drizzle-orm';
 import type { SQL } from 'drizzle-orm';
+import { readMigrationFiles, type MigrationMeta } from 'drizzle-orm/migrator';
+import { getMigrationsToRun } from 'drizzle-orm/migrator.utils';
 
 import {
     discoverFunctionMigrations,
@@ -62,6 +64,27 @@ export type PendingFunctionMigrations = {
     packageName: string;
     entries: FunctionMigrationEntry[];
 };
+
+/**
+ * A row of the project's bookkeeping table, in the shape drizzle's own
+ * `getMigrationsToRun` reads.
+ */
+type ProjectBookkeepingRow = Parameters<typeof getMigrationsToRun>[0]['dbMigrations'][number];
+
+/**
+ * The project's bookkeeping table cannot be matched to `src/server/drizzle` the
+ * way `spfn db migrate` (drizzle-orm's migrator) matches it, so migrate will
+ * refuse to run. Status reports it as an error rather than as a count, and the
+ * boot gate refuses to start on it.
+ */
+export class MigrationBookkeepingMismatchError extends Error
+{
+    constructor(detail: string)
+    {
+        super(`${PROJECT_TARGET_NAME}: bookkeeping does not match local migrations; \`spfn db migrate\` will refuse. ${detail}`);
+        this.name = 'MigrationBookkeepingMismatchError';
+    }
+}
 
 export type MigrationStatus = {
     packages: MigrationTargetStatus[];
@@ -139,13 +162,13 @@ async function tableExists(db: MigrationStatusDb, tableName: string): Promise<bo
 }
 
 /**
- * drizzle-orm 1.0 records a `name` column and treats a migration as applied
- * when its name is present. Only the project's table is read this way.
- * The column is looked up in `pg_catalog` for the same reason as the table.
+ * drizzle-orm 1.0 records a `name` column; a table without one was written by
+ * an earlier drizzle-orm (bookkeeping version 0). The column is looked up in
+ * `pg_catalog` for the same reason as the table.
  */
-async function readAppliedNames(db: MigrationStatusDb, tableName: string): Promise<Set<string>>
+async function hasNameColumn(db: MigrationStatusDb, tableName: string): Promise<boolean>
 {
-    const columnRows = toRows(await db.execute(sql`
+    const rows = toRows(await db.execute(sql`
         SELECT EXISTS (
             SELECT 1 FROM pg_catalog.pg_attribute a
             JOIN pg_catalog.pg_class c ON c.oid = a.attrelid
@@ -154,15 +177,7 @@ async function readAppliedNames(db: MigrationStatusDb, tableName: string): Promi
                 AND a.attname = 'name' AND a.attnum > 0 AND NOT a.attisdropped
         ) AS "exists"`));
 
-    if (columnRows[0]?.exists !== true)
-    {
-        return new Set();
-    }
-
-    const rows = toRows(await db.execute(sql`
-        SELECT name FROM drizzle.${sql.identifier(tableName)} WHERE name IS NOT NULL`));
-
-    return new Set(rows.map(row => String(row.name)));
+    return rows[0]?.exists === true;
 }
 
 /**
@@ -252,8 +267,8 @@ function newestLegacyMillis(entries: FunctionMigrationEntry[], legacyHashes: Set
 
 function toTargetStatus(
     name: string,
-    entries: FunctionMigrationEntry[],
-    pendingEntries: FunctionMigrationEntry[],
+    entries: { name: string }[],
+    pendingEntries: { name: string }[],
 ): MigrationTargetStatus
 {
     return {
@@ -266,34 +281,123 @@ function toTargetStatus(
 }
 
 /**
- * The project's own migrations: an entry counts as applied when its name is
- * recorded (drizzle-orm 1.0) or its timestamp is not newer than the last
- * applied record (drizzle-orm ≤0.45).
+ * The project's own migrations, decided by drizzle-orm's own code: the folder
+ * is read with `readMigrationFiles` and the pending list is `getMigrationsToRun`
+ * over the bookkeeping rows — the same two calls `spfn db migrate` makes, so the
+ * two cannot disagree. drizzle decides by name alone: an older-stamped
+ * migration that was never applied, or a folder renamed after it was applied,
+ * is pending.
+ *
+ * @throws MigrationBookkeepingMismatchError when `spfn db migrate` would refuse
  */
 async function collectProjectStatus(db: MigrationStatusDb, migrationsDir: string): Promise<MigrationTargetStatus>
 {
-    const entries = readMigrationEntries(migrationsDir, PROJECT_TARGET_NAME);
+    const localMigrations = readProjectMigrations(migrationsDir);
+    const pendingMigrations = getMigrationsToRun({
+        localMigrations,
+        dbMigrations: await readProjectBookkeeping(db, localMigrations),
+    });
 
-    let lastApplied = 0;
-    let appliedNames = new Set<string>();
+    return toTargetStatus(PROJECT_TARGET_NAME, localMigrations, pendingMigrations);
+}
 
-    // A fresh database has no bookkeeping table yet — every entry is pending,
-    // which is exactly what a first boot should be told.
-    if (await tableExists(db, PROJECT_MIGRATIONS_TABLE))
+/**
+ * `readMigrationFiles` refuses the drizzle-kit ≤0.31 layout with a plain Error;
+ * checked first so it is reported as the mismatch it is, not as an unreadable
+ * database.
+ */
+function readProjectMigrations(migrationsDir: string): MigrationMeta[]
+{
+    if (existsSync(join(migrationsDir, 'meta', '_journal.json')))
     {
-        const rows = toRows(await db.execute(sql`
-            SELECT created_at FROM drizzle.${sql.identifier(PROJECT_MIGRATIONS_TABLE)}
-            ORDER BY created_at DESC LIMIT 1`));
-
-        lastApplied = rows[0]?.created_at ? Number(rows[0].created_at) : 0;
-        appliedNames = await readAppliedNames(db, PROJECT_MIGRATIONS_TABLE);
+        throw new MigrationBookkeepingMismatchError(
+            'The folder uses the old drizzle-kit layout (meta/_journal.json); run `drizzle-kit up`.',
+        );
     }
 
-    return toTargetStatus(
-        PROJECT_TARGET_NAME,
-        entries,
-        entries.filter(entry => entry.millis > lastApplied && !appliedNames.has(entry.name)),
-    );
+    return readMigrationFiles({ migrationsFolder: migrationsDir });
+}
+
+/**
+ * The bookkeeping rows drizzle would compare against. A fresh database has no
+ * table yet — every migration is pending, which is exactly what a first boot
+ * should be told.
+ */
+async function readProjectBookkeeping(
+    db: MigrationStatusDb,
+    localMigrations: MigrationMeta[],
+): Promise<ProjectBookkeepingRow[]>
+{
+    if (!await tableExists(db, PROJECT_MIGRATIONS_TABLE))
+    {
+        return [];
+    }
+
+    const table = sql`drizzle.${sql.identifier(PROJECT_MIGRATIONS_TABLE)}`;
+
+    if (await hasNameColumn(db, PROJECT_MIGRATIONS_TABLE))
+    {
+        return toRows(await db.execute(sql`SELECT id, hash, created_at, name FROM ${table}`)) as ProjectBookkeepingRow[];
+    }
+
+    const rows = toRows(await db.execute(sql`SELECT id, hash, created_at FROM ${table} ORDER BY id ASC`));
+
+    return nameVersionZeroRows(rows, localMigrations);
+}
+
+/**
+ * Names a version-0 table's rows the way drizzle-orm will before it migrates.
+ * drizzle's `upgradeIfNeeded` (`drizzle-orm/up-migrations/pg.js`) writes the
+ * names it finds, so status cannot call it; this mirrors its matcher without
+ * writing. drizzle throws when any row matches no local migration, so status
+ * does too.
+ */
+function nameVersionZeroRows(rows: Record<string, unknown>[], localMigrations: MigrationMeta[]): ProjectBookkeepingRow[]
+{
+    const match = versionZeroMatcher(localMigrations);
+    const named = rows.map(row => ({ ...row, name: match(row)?.name ?? null }) as ProjectBookkeepingRow);
+    const unmatchedIds = named.filter(row => row.name === null).map(row => row.id);
+
+    if (unmatchedIds.length > 0)
+    {
+        throw new MigrationBookkeepingMismatchError(
+            `drizzle.${PROJECT_MIGRATIONS_TABLE} was written before drizzle-orm 1.0 and its rows `
+            + `(ids: ${unmatchedIds.join(', ')}) match no folder in src/server/drizzle.`,
+        );
+    }
+
+    return named;
+}
+
+/**
+ * drizzle's version-0 matcher: a row's `created_at`, truncated to the second,
+ * selects the local migrations stamped then. One candidate matches outright,
+ * several are told apart by hash, none falls back to the hash alone. Sorted as
+ * drizzle sorts, so a hash two folders share resolves to the same folder.
+ */
+function versionZeroMatcher(localMigrations: MigrationMeta[]): (row: Record<string, unknown>) => MigrationMeta | undefined
+{
+    const sorted = [...localMigrations].sort((a, b) => a.folderMillis !== b.folderMillis
+        ? a.folderMillis - b.folderMillis
+        : a.name.localeCompare(b.name));
+    const byMillis = new Map<number, MigrationMeta[]>();
+
+    sorted.forEach(migration => byMillis.set(migration.folderMillis, [...byMillis.get(migration.folderMillis) ?? [], migration]));
+
+    const byHash = new Map(sorted.map(migration => [migration.hash, migration]));
+
+    return (row) =>
+    {
+        const stamp = String(row.created_at);
+        const candidates = byMillis.get(Number(`${stamp.substring(0, stamp.length - 3)}000`)) ?? [];
+
+        if (candidates.length > 1)
+        {
+            return candidates.find(candidate => candidate.hash === row.hash);
+        }
+
+        return candidates[0] ?? byHash.get(row.hash as string);
+    };
 }
 
 /**
@@ -317,6 +421,9 @@ export function projectMigrationsDir(cwd: string = process.cwd()): string
  * The project's own migrations are included when `src/server/drizzle` exists.
  * A built server image usually does not ship that folder, so the project target
  * is simply absent there — never reported as drift.
+ *
+ * @throws MigrationBookkeepingMismatchError when `spfn db migrate` would refuse
+ * the project's bookkeeping
  */
 export async function collectMigrationStatus(
     db: MigrationStatusDb,

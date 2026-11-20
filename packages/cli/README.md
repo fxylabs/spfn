@@ -460,7 +460,7 @@ loaded `.env` chain.
 | `db generate` (`g`) | Generate migrations from schema changes (timestamp-prefixed) |
 | `db push` | Diff with Drizzle Kit's current PostgreSQL engine and apply the selected DDL atomically. Destructive changes need confirmation; `--force` applies them. `--dry-run` shows the classified statements and each function package's pending migrations by name, then stops. Each plan query runs in its own `BEGIN READ ONLY` transaction, rolled back when the query ends, so it writes nothing and holds no lock between statements. Before the plan runs, `transaction_read_only` is read once, in one such transaction; when PostgreSQL does not report it `on` it exits 1 |
 | `db migrate` (`m`) | Run pending migrations. `--with-backup` snapshots first |
-| `db status` | Show which migrations are applied and which are pending, for the project and for each installed function package. `--json` prints one machine-readable report instead |
+| `db status` | Show which migrations are applied and which are pending, for the project and for each installed function package. The project's pending list is drizzle-orm's own (`getMigrationsToRun`, by folder name), so it is what `db migrate` runs; when migrate would refuse the project's bookkeeping, status exits 1 with `bookkeeping does not match local migrations` (with `--json`: `reachable: false`, `reason: "unreachable"`, which stops a Kit install). `--json` prints one machine-readable report instead |
 | `db studio` | Open Drizzle Studio. `-p, --port` (auto-finds a free port) |
 | `db check` | Verify the database connection |
 | `db drop` | Drop all tables — **destructive**, double-prompts (see [Pitfalls](#pitfalls)) |

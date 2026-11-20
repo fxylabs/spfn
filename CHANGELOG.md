@@ -125,6 +125,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   every package has its own rows; when the legacy read is needed and denied, the boot gate starts
   with "Could not verify migration status" and `db status` exits 1. The legacy table has no package
   column, and when the operator may drop it is in the `@spfn/core/db` README.
+- **BREAKING: @spfn/core: project migration status is decided by drizzle-orm's own rule (#370).**
+  For `src/server/drizzle`, `spfn db status`, the `spfn dev`/`spfn start` pre-flight, the boot gate
+  and detailed health counted a migration as applied when its name was recorded *or* its timestamp
+  was not newer than the last applied row; `spfn db migrate` (drizzle-orm 1.0) goes by name alone.
+  So a migration merged with an older timestamp than one already applied was reported applied and
+  the gate let the server start without its schema, and a folder renamed after it was applied
+  read as applied while migrate ran it again. Status now calls drizzle-orm's `readMigrationFiles`
+  and `getMigrationsToRun`, the calls migrate makes, so it lists exactly what migrate will run. This
+  is the bug being fixed: an app that read "0 pending" may now read "N pending" and the gate
+  refuses to boot it — run `pnpm spfn db migrate`. A bookkeeping table written before drizzle-orm
+  1.0 (no `name` column) is named the way migrate names it, without writing; when a row matches no
+  folder in `src/server/drizzle`, or the folder still has the drizzle-kit ≤0.31 `meta/_journal.json`
+  layout, migrate refuses, and status now reports the error
+  `bookkeeping does not match local migrations` (new `MigrationBookkeepingMismatchError` in
+  `@spfn/core/db`) instead of a clean count: `db status` exits 1, `db status --json` reports
+  `reachable: false`, health reports `status: "unknown"` with the reason, and the boot gate refuses
+  to start (`SPFN_ALLOW_PENDING_MIGRATIONS=true` starts it with a warning). Restore the missing
+  folder or correct the row (or run `drizzle-kit up` for the journal layout), then
+  `pnpm spfn db migrate`. Function package migrations keep #357's rule.
 - **BREAKING: @spfn/core: `filterPendingEntries` is no longer exported from `@spfn/core/db`
   (#357).** It was the shared "name OR timestamp" filter; function packages now go through
   `pendingFunctionMigrations`, and the project target's rule (unchanged here, #370) is private to

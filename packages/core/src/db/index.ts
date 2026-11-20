@@ -52,6 +52,7 @@ export {
     formatPendingMigrations,
     functionMigrationsTable,
     hasMigrationTargets,
+    MigrationBookkeepingMismatchError,
     migrationTargets,
     pendingFunctionMigrations,
     pendingMigrationTargets,

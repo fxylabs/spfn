@@ -677,6 +677,14 @@ situations never produce a refusal:
 | Database configured but unreachable | `initDatabase()` already threw; the gate never runs |
 | The status query itself fails | Logged as "could not verify"; boot proceeds |
 
+One status error does refuse: the project's bookkeeping table does not match
+`src/server/drizzle` the way `spfn db migrate` matches it (a table written before
+drizzle-orm 1.0 with a row no folder matches, or the drizzle-kit ≤0.31 `meta/_journal.json`
+layout). Migrate refuses that database, so the server would never be brought up to date; the
+gate logs `bookkeeping does not match local migrations` and throws `PendingMigrationsError`
+naming the project target. The opt-outs below start it anyway, with a warning. Detailed
+health reports it as `status: "unknown"` with that reason.
+
 Opt out — a harness that migrates after boot, a rollout that must proceed — with any of:
 
 ```typescript

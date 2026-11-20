@@ -574,6 +574,12 @@ sees — a pod that came up before a migration ran, for instance:
 Reporting drift does not change the overall `status` on its own — a probe that should
 hold a drifted pod out of rotation asserts `migrations.pending === 0` itself.
 
+When the project's bookkeeping table no longer matches `src/server/drizzle` (a row written
+before drizzle-orm 1.0 that no folder matches), `spfn db migrate` refuses, and health reports
+`migrations.status: "unknown"` with `reason` naming it and `pending: 0`. A probe that should
+also hold that pod out asserts `migrations.status === "up_to_date"`. The boot gate refuses
+such a server at startup.
+
 ### 3. Logging
 
 Configure logging drivers for production:
