@@ -49,8 +49,10 @@ From `@spfn/core/job`:
   behaviour — `pollingIntervalSeconds` (default 2, at least 0.5), `batchSize`, `includeMetadata`,
   `priority`; one batch at a time per worker; the handler bounded by the batch's largest
   `expireInSeconds` (at least 1s); a single job completed with the handler's result, a batch
-  without one; a throw (or a failed completion) fails the batch with the error, which pg-boss
-  serialises into the output and retries per the job's retry options; a failed poll emitted as the
+  without one; a throw (or a failed completion) fails the batch with the error's description —
+  `describeError` from `@spfn/core/logger`, which keeps a database error's SQLSTATE, constraint,
+  table, SQL text and `paramCount` and never its bound values — which pg-boss stores as the job's
+  `output` and retries per the job's retry options; a failed poll emitted as the
   instance's `error` event with `queue` and `worker`. `stop(options)` and `start()` on that instance
   are core's too, so pg-boss's lifecycle covers those workers: `stop()` is the path `stopBoss()`
   takes — with `graceful` (default) it waits up to `timeout` (default 30000, at least 1000) for a

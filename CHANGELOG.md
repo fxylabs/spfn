@@ -192,6 +192,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   code, device link and one-time-token sign-in keep their answers. The mobile contract does not
   change: its error list is one list for the whole surface, and both codes stay in it for those
   operations.
+- **@spfn/core: `describeError(error)` from `@spfn/core/logger`** (and the `ErrorDescription` /
+  `DatabaseErrorDescription` types): the one loggable form of a caught error. A database error is
+  described by its SQLSTATE, constraint, schema, table, column, routine, the SQL with its `$n`
+  placeholders (truncated to 1000 characters) and `paramCount`; the driver's message only for
+  SQLSTATE classes 08, 23, 40, 53 and 57, and never for a PL/pgSQL `RAISE`. It never copies
+  `params`, `parameters`, `detail`, `hint`, `where`, `internal_query`, drizzle's message or a stack
+  header (#382).
+
+### Changed
+
+- **BREAKING: @spfn/core: a failed job's `output` is the error's description (#382).** Core's
+  fetch loop fails a batch with `describeError(error)` instead of the error, so pg-boss no longer
+  serialises drizzle's `params` or the driver's `detail` into the job row. The `output` of a failed
+  job is `{ kind, name, message, stack, cause }` (`stack` frames only), or for a database error
+  `{ kind: 'database', name, code, constraint, table, …, sql, paramCount, stack }`.
+- **BREAKING: @spfn/core: outside production, a database error's 500 body is
+  `{ __type: 'Error', message: 'Database error', database }` (#382).** `database` is the error's
+  description; the body no longer carries its message, `cause` or `stack`, which hold the bound
+  values. This applies wherever `includeStack` is true (`NODE_ENV !== 'production'`, staging
+  included). The production body is unchanged; so is the request logger's copy of it.
+- **BREAKING: @spfn/core: `RepositoryError.message` is `<Repository>.<method> failed` (#382).** The
+  caught error is its `cause` (still also `originalError`), and its stack is its own: it no longer
+  copies the caught error's message or stack, which for a drizzle error carry every bound value.
+- **BREAKING: @spfn/core: "Transaction rolled back" is logged at debug, not error (#382).** The
+  runner rethrows the error untouched and its owner logs it at the level it deserves (the error
+  handler at warn for a 4xx and error for a 5xx, a job at error). "Slow transaction rolled back"
+  stays at warn. Alerting keyed on an error-level "Transaction rolled back" stops firing.
+- **BREAKING: @spfn/core: `LogMetadata.error` is an `ErrorDescription | DatabaseErrorDescription`,
+  not an `Error` (#382).** The logger describes every error it is handed — as the error argument or
+  anywhere in the context — before a transport sees it; the console and JSON formatters print
+  descriptions. A custom `Transport` reading `metadata.error.stack` gets frames only. The rollback
+  lines' `errorType` field is gone (the description's `name`). Out of core's reach: drizzle's
+  OpenTelemetry tracing still sets `drizzle.query.params` on its spans.
 - **BREAKING: @spfn/core: workers started on `getBoss()` run core's fetch loop, not pg-boss's
   worker, so they no longer appear in pg-boss's `wip` events (#359).** Core needs to know when a
   worker's last fetch has settled, which pg-boss 11 does not expose; the loop runs on pg-boss's
@@ -427,6 +460,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     grants no longer stamp `updated_at` from the application clock, and the user-settings upsert
     drops its redundant `updatedAt`. The `setWhere` guards still move the stamp only on a real
     change.
+- **@spfn/core: a rolled-back transaction, a failed job and a failed request no longer log the
+  failed query's bound values (#382).** drizzle's `Failed query: … params: …` message, its
+  `params`, its stack header and the driver's `detail` reached the logs through the runner's
+  rollback lines, the afterCommit/afterRollback/beforeCommit callback failure lines, the job
+  failure and orphan-schedule lines, the error handler's log data and the unhandled-rejection
+  context (`extractQueryInfo` parsed `params:` out of the message on purpose). Those sites now pass
+  the error object and the logger describes it. A source-scan row keeps a caught error's
+  `.message` / `.stack` / `String(err)` out of every package's logger calls and persisted writes;
+  auth and monitor sites are listed for the follow-up.
 - **@spfn/auth: `mfaLockedEvent`, `passkeyEnrolledEvent` and `passkeyRevokedEvent` are exported from
   `@spfn/auth/server` (#361)**, with `MfaLockedPayload`, `PasskeyEnrolledPayload` and
   `PasskeyRevokedPayload`. The README documented all three and the package emitted them, but an app

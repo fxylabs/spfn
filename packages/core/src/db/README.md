@@ -293,7 +293,10 @@ provider outside repository operations when direct driver access is required.
 
 Wrap a raw query to attach repository/method/table context to failures and feed the
 reconnect fast-path (see manager/README). On error it throws a `RepositoryError` carrying
-`{ repository, method, table, originalError }`.
+`{ repository, method, table, originalError }`, with the fixed message `<Repository>.<method>
+failed` and the caught error as its `cause` — never the caught error's message or stack, which
+for a drizzle query error hold every bound value (#382). Read the database fields through the
+cause chain; `describeError` from `@spfn/core/logger` does.
 
 ```typescript
 async findById(id: number)
@@ -1136,6 +1139,8 @@ abstract class BaseRepository<
 
 // RepositoryError fields:
 class RepositoryError extends Error {
+    message: string;            // '<Repository>.<method> failed'
+    cause?: Error;              // the caught error (same as originalError)
     repository: string;
     method?: string;
     table?: string;
