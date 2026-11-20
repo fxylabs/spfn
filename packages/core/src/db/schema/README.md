@@ -245,7 +245,10 @@ CONSTRAINT "posts_status_check" CHECK ("status" in ('draft', 'published'))
   generates nothing. They are quoted literals with `'` doubled (`'o''clock'`): the check
   lands in a migration file, where a bound parameter cannot. A value holding a backslash
   is refused: under `standard_conforming_strings = off` PostgreSQL would read it as an
-  escape. An empty list throws at definition.
+  escape. An empty list throws when the table's extras are evaluated — by `db generate`
+  or `db push` — not where the table is defined.
+- **A `.default()` outside `values` is not caught**: the DDL accepts it, and the insert
+  that falls back to it fails the check.
 - **NULL passes the check** (SQL's `in` yields unknown, which a CHECK admits). Chain
   `.notNull()` on the column to refuse it.
 

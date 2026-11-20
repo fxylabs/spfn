@@ -61,4 +61,9 @@ describe('enumCheck', () =>
     {
         expect(await generateMigration(await snapshot(['b', 'a', 'c']), await snapshot(['c', 'a', 'b', 'a']))).toEqual([]);
     });
+
+    it('E5: generating again with no change yields no statement', async () =>
+    {
+        expect(await generateMigration(await snapshot(['a', 'b']), await snapshot(['a', 'b']))).toEqual([]);
+    });
 });

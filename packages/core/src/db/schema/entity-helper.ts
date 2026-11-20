@@ -460,7 +460,13 @@ export function enumText<T extends readonly [string, ...string[]]>(
  * parameter cannot. A value holding a backslash is refused: under
  * `standard_conforming_strings = off` PostgreSQL reads a backslash in such a
  * literal as an escape, so the check would admit another value or not parse.
- * A NULL passes the check: chain `.notNull()` on the column to refuse it.
+ * A NULL passes the check: chain `.notNull()` on the column to refuse it. A
+ * `.default()` outside `values` is not caught: the DDL accepts it, and an
+ * insert that falls back to it fails the check.
+ *
+ * Like any extra config, this runs when the table's extras are evaluated
+ * (`db generate`, `db push`), not where the table is defined: an empty list or
+ * a backslash throws there.
  *
  * @param column - The column, as the extra config receives it
  * @param values - The values the column admits; at least one
