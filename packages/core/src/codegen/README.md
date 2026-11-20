@@ -311,12 +311,16 @@ load (`src/codegen/loader/`).
   progress with `generateAll('<trigger>') did not finish: the codegen watch loop failed` (the
   exception is the `cause` of each); a later call rejects with the exception.
 - **`close()`** starts no new generation and resolves once the one running has finished —
-  every generator of it, so the outputs of one cycle never disagree. A generation cannot be
-  cancelled, so a generator that never settles keeps `close()` pending. After a loop that ended
+  every generator of it, so the outputs of one cycle never disagree — or the config load
+  (`loadGenerators`) running has. Neither a generation nor a config load can be cancelled (a
+  load is a module evaluation; abandoned, it would go on and land its generators on a closed
+  orchestrator), so a generator that never settles, or a config or custom generator module whose
+  top-level `await` never does, keeps `close()` pending. After a loop that ended
   by an exception, `close()` still releases the watchers and resolves, however often it is
   called. An orchestrator is single-use: `watch()` rejects after `close()`, while its loop runs,
   and after that loop ended by an exception. The `spfn dev` watcher calls `close()` on the
-  first SIGTERM/SIGINT and exits when it resolves; a second signal exits at once. `spfn dev`
+  first SIGTERM/SIGINT, saying it waits for the running generation or config load, and exits
+  when it resolves; a second signal exits at once. `spfn dev`
   forwards each signal it gets to the watcher and exits after it.
 - **`settled()`** resolves once the loop is idle: nothing running, nothing dirty, no input
   directory event still settling. A chokidar event not delivered yet (it waits 100 ms for

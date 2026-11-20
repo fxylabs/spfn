@@ -254,8 +254,11 @@ export class CodegenOrchestrator
      * Stop watching: no new generation starts, and the promise resolves once
      * the one running, if any, has finished — every generator of it, so the
      * outputs of one cycle never disagree. `watch()` resolves with it. A
-     * generation cannot be cancelled: one that never settles keeps this
-     * pending, and only exiting the process stops it. A loop that ended by an
+     * config load (`loadGenerators`) running is waited for the same way. Neither
+     * a generation nor a load — a module evaluation — can be cancelled: one
+     * that never settles keeps this pending, and only exiting the process stops
+     * it. The load is not raced against `close()`: abandoned, it would go on
+     * evaluating, and land its generators on a closed orchestrator. A loop that ended by an
      * exception rejected `watch()` with it; `close()` still releases the
      * watchers and resolves. Calling it again resolves as the first call does.
      * An orchestrator is single-use: `watch()` after `close()` rejects.

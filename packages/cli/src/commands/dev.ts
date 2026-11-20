@@ -93,9 +93,10 @@ const orchestrator = new CodegenOrchestrator({
 
 // The first signal: close() starts no new generation and resolves once the one
 // running has finished every generator, so the files of one cycle (route map,
-// contract) are never left from two different generations; then exit. A
-// generation cannot be cancelled, so a second signal exits at once: it is the
-// only way to stop one that never settles.
+// contract) are never left from two different generations, or once the config
+// load running has finished; then exit. Neither a generation nor a config load
+// (a module evaluation) can be cancelled, so a second signal exits at once: it
+// is the only way to stop one that never settles.
 let stopping = false;
 
 const stop = async (signal) =>
@@ -106,7 +107,7 @@ const stop = async (signal) =>
     }
 
     stopping = true;
-    console.log('[SPFN] Codegen watcher stopping once the running generation finishes (signal again to exit now)');
+    console.log('[SPFN] Codegen watcher stopping once the running generation or codegen config load finishes (signal again to exit now)');
     await orchestrator.close();
     process.exit(0);
 };

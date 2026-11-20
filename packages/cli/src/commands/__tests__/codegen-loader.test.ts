@@ -42,6 +42,8 @@
  * |    |                                                              | stays up silent, or never loads the fix                   |
  * | R34| the watcher entry with a generator held by a file gate: one   | an entry that exits mid-generation, or that ignores every |
  * |    | signal, then the gate opened; then two signals               | signal while a generation hangs (orphaned by spfn dev)    |
+ * | R34b| the watcher entry reloading a `.spfnrc.ts` whose custom      | a load that never settles taken for a hung watcher: no    |
+ * |    | generator's top-level `await` never settles: two signals     | line naming it, or no way out but SIGKILL                 |
  * | R35| `spfn dev` with the watcher's generator held by a file gate: | a parent that exits before its watcher (orphaned, writing |
  * |    | one SIGTERM to it, then the gate opened; then two SIGTERMs   | into the project after spfn dev stopped), or that does    |
  * |    |                                                              | not forward the second signal                             |
@@ -343,7 +345,7 @@ describe.each(TSX)('codegen in CLI processes, tsx $version', (tsx) =>
         writeGateGenerator();
         write('.spfn/watcher.mjs', watcherEntrySource());
 
-        const stopping = 'Codegen watcher stopping once the running generation finishes';
+        const stopping = 'Codegen watcher stopping once the running generation or codegen config load finishes';
 
         for (const second of [true, false])
         {
@@ -379,6 +381,42 @@ describe.each(TSX)('codegen in CLI processes, tsx $version', (tsx) =>
         }
     });
 
+    it('R34b the watcher entry on a signal during a config load that never settles: says it waits for the load; a second signal exits', async () =>
+    {
+        // Without it, the first signal's line names only a generation while the
+        // watcher sits in a module evaluation nothing can cancel. The load holds
+        // a timer, as a stuck connection would: one holding nothing ends the
+        // process once close() has released the watches (Node's exit 13).
+        writeGateGenerator();
+        write('src/gate/x.ts', '');
+        write('open', '');
+        write('hang-generator.mjs', 'await new Promise(() => setInterval(() => undefined, 1_000));\nexport default function createHang() { return { name: \'hang\', watchPatterns: [], async generate() {} }; }\n');
+        write('.spfn/watcher.mjs', watcherEntrySource());
+
+        const watcher = startWatcher(tsx);
+
+        try
+        {
+            await watcher.until(() => existsSync(join(appDir, 'finished')));
+            await watcher.until(() => watcher.output().includes('Watch mode started'));
+            write('.spfnrc.ts', 'import { defineConfig } from \'@spfn/core/codegen\';\n\n'
+                + 'export default defineConfig({ generators: [{ path: \'./gate-generator.mjs\' }, { path: \'./hang-generator.mjs\' }] });\n');
+            await watcher.until(() => watcher.output().includes('Codegen config changed (.spfnrc.ts): reloading'));
+            watcher.signal('SIGTERM');
+            await watcher.until(() => watcher.output().includes('Codegen watcher stopping once the running generation or codegen config load finishes (signal again to exit now)'));
+            await watcher.until(() => watcher.output().includes('Closing watcher'));
+            expect(watcher.running()).toBe(true);
+            watcher.signal('SIGTERM');
+
+            expect(await watcher.exited, watcher.output()).toBe(143);
+            expect(watcher.output()).not.toMatch(/Reloaded codegen config|Codegen config failed to load/);
+        }
+        finally
+        {
+            await watcher.kill();
+        }
+    }, 60_000);
+
     it('R35 spfn dev on a signal waits for its watcher: forwards the first and the second, and exits after the watcher', async () =>
     {
         // Without it, the parent exits at once and the watcher it started runs on,
@@ -389,7 +427,7 @@ describe.each(TSX)('codegen in CLI processes, tsx $version', (tsx) =>
         writeGateGenerator();
         installTsx(tsx);
 
-        const stopping = 'Codegen watcher stopping once the running generation finishes';
+        const stopping = 'Codegen watcher stopping once the running generation or codegen config load finishes';
 
         for (const second of [false, true])
         {
@@ -458,7 +496,7 @@ describe.each(TSX)('codegen in CLI processes, tsx $version', (tsx) =>
             const watcherPid = Number(readFileSync(join(appDir, 'entered'), 'utf8'));
 
             dev.signal('SIGTERM');
-            await dev.until(() => dev.output().includes('Codegen watcher stopping once the running generation finishes') || !dev.running());
+            await dev.until(() => dev.output().includes('Codegen watcher stopping once the running generation or codegen config load finishes') || !dev.running());
 
             expect({ dev: dev.running(), watcher: alive(watcherPid) }, dev.output()).toEqual({ dev: true, watcher: true });
 
@@ -495,7 +533,7 @@ describe.each(TSX)('codegen in CLI processes, tsx $version', (tsx) =>
             expect(dev.output(), 'the server became ready before the signal').not.toContain('Server ready on port');
 
             dev.signal('SIGTERM');
-            await dev.until(() => dev.output().includes('Codegen watcher stopping once the running generation finishes'));
+            await dev.until(() => dev.output().includes('Codegen watcher stopping once the running generation or codegen config load finishes'));
             write('.spfn/server-ready', '1');
             await dev.until(() => dev.output().includes('Next.js not started') || existsSync(join(appDir, 'next-started')));
             write('open', '');

@@ -186,9 +186,12 @@ generator *package* (under `node_modules`, or a rebuilt workspace package) still
 ([@spfn/core codegen](../core/src/codegen/README.md#watch-mode)).
 
 On SIGINT or SIGTERM, `spfn dev` sends the server and Next.js SIGTERM, forwards the signal to
-the codegen watcher, and exits once the watcher has: the watcher finishes the generation it is
-running first. A second signal is forwarded too, and the watcher then exits at once, mid-generation
-if one is running: whatever that generation would have reported — a `✓`/`✗` line, a failure held
+the codegen watcher, and exits once the watcher has: the watcher finishes the generation, or the
+codegen config load, it is running first (`Codegen watcher stopping once the running generation or
+codegen config load finishes (signal again to exit now)`). Neither can be cancelled — a config
+load is a module evaluation — so one that never settles (a top-level `await` that never resolves
+in `.spfnrc.ts` or a custom generator) holds the watcher until a second signal. A second signal is
+forwarded too, and the watcher then exits at once, mid-generation or mid-load if one is running: whatever that generation would have reported — a `✓`/`✗` line, a failure held
 back from a run whose inputs changed while it ran — is dropped. Once a
 stop has begun, `spfn dev` starts no child: not Next.js when the server becomes ready during it,
 not a server restart (it logs `Next.js not started: spfn dev is stopping`). A SIGKILL of
