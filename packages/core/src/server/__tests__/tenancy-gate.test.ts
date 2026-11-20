@@ -123,9 +123,9 @@ describe('tenancy boot check', () =>
 
         const ownerDb = () => drizzle({ client: tenancyDb.owner }) as unknown as TenancyGateDb;
 
-        it('B1 an app role that owns a tenancy table refuses a production boot, naming the table', async () =>
+        it('B1 an app role that owns a tenancy table refuses a production boot, naming the table', async (context) =>
         {
-            if (!tenancyDb.isAvailable) return;
+            tenancyDb.skipIfUnavailable(context);
 
             process.env.NODE_ENV = 'production';
 
@@ -136,9 +136,9 @@ describe('tenancy boot check', () =>
             expect(error).toHaveBeenCalledTimes(1);
         });
 
-        it('B2 the same role outside production logs one warning line and boot continues', async () =>
+        it('B2 the same role outside production logs one warning line and boot continues', async (context) =>
         {
-            if (!tenancyDb.isAvailable) return;
+            tenancyDb.skipIfUnavailable(context);
 
             process.env.NODE_ENV = 'development';
 
@@ -161,9 +161,9 @@ describe('tenancy boot check', () =>
                 .rejects.toThrow('the app role "ops" has BYPASSRLS');
         });
 
-        it('B4 an app role that owns nothing and is an ordinary role passes without a line', async () =>
+        it('B4 an app role that owns nothing and is an ordinary role passes without a line', async (context) =>
         {
-            if (!tenancyDb.isAvailable) return;
+            tenancyDb.skipIfUnavailable(context);
 
             process.env.NODE_ENV = 'production';
 
@@ -172,9 +172,9 @@ describe('tenancy boot check', () =>
             expect(error).not.toHaveBeenCalled();
         });
 
-        it('O1 an app role that owns the visibleThrough tenant list finds it among the tables', async () =>
+        it('O1 an app role that owns the visibleThrough tenant list finds it among the tables', async (context) =>
         {
-            if (!tenancyDb.isAvailable) return;
+            tenancyDb.skipIfUnavailable(context);
 
             process.env.NODE_ENV = 'development';
 

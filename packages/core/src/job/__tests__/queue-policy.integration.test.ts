@@ -11,7 +11,7 @@
  * Tests self-skip with a warning if the fixture cannot connect.
  */
 
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { Sql } from 'postgres';
 import { job } from '../job-builder';
 import { defineJobRouter } from '../job-router';
@@ -67,6 +67,8 @@ describe('Queue Policy (Integration)', () =>
         }
     });
 
+    beforeEach(({ skip }) => skip(!available, 'PostgreSQL not available'));
+
     afterAll(async () =>
     {
         resetOrphanSweepState();
@@ -84,8 +86,6 @@ describe('Queue Policy (Integration)', () =>
 
     it('row 17: enqueues a runOnce job only once across two registerJobs calls', async () =>
     {
-        if (!available) return;
-
         const initCache = job('init-cache')
             .runOnce()
             .options({ pollingIntervalSeconds: IDLE_POLLING_SECONDS })
@@ -115,8 +115,6 @@ describe('Queue Policy (Integration)', () =>
 
     it('row 18: drops the second send of an exclusive job sharing a singletonKey', async () =>
     {
-        if (!available) return;
-
         const reindex = job('reindex')
             .options({ singletonKey: 'only-one' })
             .handler(async () =>
@@ -133,8 +131,6 @@ describe('Queue Policy (Integration)', () =>
 
     it('row 19: keeps both sends when a send-time key lands on a standard queue', async () =>
     {
-        if (!available) return;
-
         const notify = job('notify')
             .handler(async () =>
             {});

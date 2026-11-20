@@ -121,9 +121,9 @@ describe('tenancy execution rules (app role, integration)', () =>
         await db.teardown();
     });
 
-    it('app connection: owns no test table, is neither superuser nor BYPASSRLS', async () =>
+    it('app connection: owns no test table, is neither superuser nor BYPASSRLS', async (context) =>
     {
-        if (!db.isAvailable) return;
+        db.skipIfUnavailable(context);
 
         const [role] = await getDatabase().execute<{ current_user: string; rolsuper: boolean; rolbypassrls: boolean }>(
             `select current_user, rolsuper, rolbypassrls from pg_roles where rolname = current_user`,
@@ -136,9 +136,9 @@ describe('tenancy execution rules (app role, integration)', () =>
         expect(owned).toHaveLength(0);
     });
 
-    it('O3 the owner migrated the schema and the app role, which owns none of it, runs the L rows', async () =>
+    it('O3 the owner migrated the schema and the app role, which owns none of it, runs the L rows', async (context) =>
     {
-        if (!db.isAvailable) return;
+        db.skipIfUnavailable(context);
 
         const owners = await db.owner`select distinct tableowner from pg_tables where schemaname = ${TENANCY_SCHEMA}`;
         const [{ current_user: ownerRole }] = await db.owner`select current_user`;
@@ -148,9 +148,9 @@ describe('tenancy execution rules (app role, integration)', () =>
         expect(ids(await noteRepository.list(7))).toEqual([1, 2]);
     });
 
-    it('L1 a read outside a transaction runs in a short READ ONLY transaction on the read pool and sees tenant 7 only', async () =>
+    it('L1 a read outside a transaction runs in a short READ ONLY transaction on the read pool and sees tenant 7 only', async (context) =>
     {
-        if (!db.isAvailable) return;
+        db.skipIfUnavailable(context);
 
         const rows = await noteRepository.list(7);
 
@@ -162,9 +162,9 @@ describe('tenancy execution rules (app role, integration)', () =>
         expect(db.writeLog).toEqual([]);
     });
 
-    it('L2 a write outside a transaction runs in a short transaction on the write pool', async () =>
+    it('L2 a write outside a transaction runs in a short transaction on the write pool', async (context) =>
     {
-        if (!db.isAvailable) return;
+        db.skipIfUnavailable(context);
 
         const created = await noteRepository.create(7, { authorId: 1, title: 'new' });
 
@@ -176,9 +176,9 @@ describe('tenancy execution rules (app role, integration)', () =>
         expect(await noteCount()).toBe(4);
     });
 
-    it('L3 inside runInTransaction({ tenant: 7 }) a read runs in that transaction, adding none', async () =>
+    it('L3 inside runInTransaction({ tenant: 7 }) a read runs in that transaction, adding none', async (context) =>
     {
-        if (!db.isAvailable) return;
+        db.skipIfUnavailable(context);
 
         const rows = await runInTransaction(() => noteRepository.list(7), { tenant: 7 });
 
@@ -188,9 +188,9 @@ describe('tenancy execution rules (app role, integration)', () =>
         expect(db.readLog).toEqual([]);
     });
 
-    it('L3b runInTransaction refuses a tenant that is not a positive safe integer before opening', async () =>
+    it('L3b runInTransaction refuses a tenant that is not a positive safe integer before opening', async (context) =>
     {
-        if (!db.isAvailable) return;
+        db.skipIfUnavailable(context);
 
         for (const tenant of [0, -1, 1.5, Number.NaN])
         {
@@ -200,9 +200,9 @@ describe('tenancy execution rules (app role, integration)', () =>
         expect(db.writeLog).toEqual([]);
     });
 
-    it('L4 a call for tenant 9 inside a tenant 7 transaction throws TenantMismatchError and sends nothing', async () =>
+    it('L4 a call for tenant 9 inside a tenant 7 transaction throws TenantMismatchError and sends nothing', async (context) =>
     {
-        if (!db.isAvailable) return;
+        db.skipIfUnavailable(context);
 
         await runInTransaction(async () =>
         {
@@ -213,9 +213,9 @@ describe('tenancy execution rules (app role, integration)', () =>
         }, { tenant: 7 });
     });
 
-    it('L5 the first call inside Transactional() binds the transaction; a direct query after it sees tenant 7 only', async () =>
+    it('L5 the first call inside Transactional() binds the transaction; a direct query after it sees tenant 7 only', async (context) =>
     {
-        if (!db.isAvailable) return;
+        db.skipIfUnavailable(context);
 
         const app = new Hono();
 
@@ -233,25 +233,25 @@ describe('tenancy execution rules (app role, integration)', () =>
         expect(await response.json()).toEqual({ scoped: [1, 2], direct: [1, 2] });
     });
 
-    it('L6 a direct query outside any transaction fails instead of returning rows', async () =>
+    it('L6 a direct query outside any transaction fails instead of returning rows', async (context) =>
     {
-        if (!db.isAvailable) return;
+        db.skipIfUnavailable(context);
 
         expect(await failureOf(noteRepository.directNotes())).toMatch(NO_TENANT);
     });
 
-    it('L7 a direct query naming tenant 9 inside a tenant 7 transaction returns no rows', async () =>
+    it('L7 a direct query naming tenant 9 inside a tenant 7 transaction returns no rows', async (context) =>
     {
-        if (!db.isAvailable) return;
+        db.skipIfUnavailable(context);
 
         const rows = await runInTransaction(() => noteRepository.directNotesOf(9), { tenant: 7 });
 
         expect(rows).toEqual([]);
     });
 
-    it('L8 a direct insert of a tenant 9 row inside a tenant 7 transaction is refused by the policy', async () =>
+    it('L8 a direct insert of a tenant 9 row inside a tenant 7 transaction is refused by the policy', async (context) =>
     {
-        if (!db.isAvailable) return;
+        db.skipIfUnavailable(context);
 
         expect(await failureOf(runInTransaction(
             () => noteRepository.directInsert({ tenantId: 9, authorId: 2, title: 'smuggled' }),
@@ -260,16 +260,16 @@ describe('tenancy execution rules (app role, integration)', () =>
         expect(await noteCount()).toBe(3);
     });
 
-    it('L9 a direct query in a transaction opened without a tenant fails', async () =>
+    it('L9 a direct query in a transaction opened without a tenant fails', async (context) =>
     {
-        if (!db.isAvailable) return;
+        db.skipIfUnavailable(context);
 
         expect(await failureOf(runInTransaction(() => noteRepository.directNotes()))).toMatch(NO_TENANT);
     });
 
-    it('L10 after a tenant 7 transaction ends, its connection has no tenant', async () =>
+    it('L10 after a tenant 7 transaction ends, its connection has no tenant', async (context) =>
     {
-        if (!db.isAvailable) return;
+        db.skipIfUnavailable(context);
 
         const inside = await runInTransaction(() => noteRepository.session(), { tenant: 7 });
         const after = await sessionOn(inside.pid);
@@ -279,9 +279,9 @@ describe('tenancy execution rules (app role, integration)', () =>
         expect(await failureOf(noteRepository.directNotes())).toMatch(NO_TENANT);
     });
 
-    it('L11 a nested runInTransaction({ tenant: 7 }) inside tenant 7 runs as a savepoint', async () =>
+    it('L11 a nested runInTransaction({ tenant: 7 }) inside tenant 7 runs as a savepoint', async (context) =>
     {
-        if (!db.isAvailable) return;
+        db.skipIfUnavailable(context);
 
         const rows = await runInTransaction(
             () => runInTransaction(() => noteRepository.list(7), { tenant: 7 }),
@@ -293,9 +293,9 @@ describe('tenancy execution rules (app role, integration)', () =>
         expect(db.writeLog.filter(isSetConfig)).toHaveLength(1);
     });
 
-    it('L12 a nested runInTransaction({ tenant: 9 }) inside tenant 7 throws; the outer tenant stays 7', async () =>
+    it('L12 a nested runInTransaction({ tenant: 9 }) inside tenant 7 throws; the outer tenant stays 7', async (context) =>
     {
-        if (!db.isAvailable) return;
+        db.skipIfUnavailable(context);
 
         const outer = await runInTransaction(async () =>
         {
@@ -311,9 +311,9 @@ describe('tenancy execution rules (app role, integration)', () =>
         expect(ids(outer.rows)).toEqual([1, 2]);
     });
 
-    it('L11b a tenant first set inside a savepoint that rolls back is set again by the next call', async () =>
+    it('L11b a tenant first set inside a savepoint that rolls back is set again by the next call', async (context) =>
     {
-        if (!db.isAvailable) return;
+        db.skipIfUnavailable(context);
 
         const result = await runInTransaction(async () =>
         {
@@ -333,9 +333,9 @@ describe('tenancy execution rules (app role, integration)', () =>
         expect(result.session.tenant).toBe('9');
     });
 
-    it('L11c a tenant set from the root while a savepoint is open is set again after that savepoint rolls back', async () =>
+    it('L11c a tenant set from the root while a savepoint is open is set again after that savepoint rolls back', async (context) =>
     {
-        if (!db.isAvailable) return;
+        db.skipIfUnavailable(context);
 
         const result = await runInTransaction(async () =>
         {
@@ -354,9 +354,9 @@ describe('tenancy execution rules (app role, integration)', () =>
         expect(db.writeLog.filter(isSetConfig)).toHaveLength(2);
     });
 
-    it('L11d a tenant set from the root while a savepoint is open stands when that savepoint releases', async () =>
+    it('L11d a tenant set from the root while a savepoint is open stands when that savepoint releases', async (context) =>
     {
-        if (!db.isAvailable) return;
+        db.skipIfUnavailable(context);
 
         const rows = await runInTransaction(async () =>
         {
@@ -388,9 +388,9 @@ describe('tenancy execution rules (app role, integration)', () =>
         expect(db.writeLog.slice(sent).filter(isSetConfig)).toHaveLength(1);
     });
 
-    it('L11e a tenant set from the root under two open savepoints follows whichever of them rolls back', async () =>
+    it('L11e a tenant set from the root under two open savepoints follows whichever of them rolls back', async (context) =>
     {
-        if (!db.isAvailable) return;
+        db.skipIfUnavailable(context);
 
         const underTwo = (innerOutcome: 'release' | 'rollback', outerOutcome: 'release' | 'rollback') =>
             runInTransaction(async () =>
@@ -424,9 +424,9 @@ describe('tenancy execution rules (app role, integration)', () =>
         expect(db.writeLog.slice(sent).filter(isSetConfig)).toHaveLength(2);
     });
 
-    it('L13 requiresNew with tenant 9 inside tenant 7 runs on its own connection; the outer tenant stays 7', async () =>
+    it('L13 requiresNew with tenant 9 inside tenant 7 runs on its own connection; the outer tenant stays 7', async (context) =>
     {
-        if (!db.isAvailable) return;
+        db.skipIfUnavailable(context);
 
         const result = await runInTransaction(async () =>
         {
@@ -446,9 +446,9 @@ describe('tenancy execution rules (app role, integration)', () =>
         expect(ids(result.rows)).toEqual([1, 2]);
     });
 
-    it('L14 an awaited _select builder runs like L1, while toSQL() is the part 1 SQL and runs nothing', async () =>
+    it('L14 an awaited _select builder runs like L1, while toSQL() is the part 1 SQL and runs nothing', async (context) =>
     {
-        if (!db.isAvailable) return;
+        db.skipIfUnavailable(context);
 
         const query = noteRepository.titlesWithAuthor(7);
         const expected = getDatabase('read').select({ id: notes.id, title: notes.title, author: authors.name })
@@ -469,9 +469,9 @@ describe('tenancy execution rules (app role, integration)', () =>
         expect(db.writeLog).toEqual([]);
     });
 
-    it('L14 .execute() takes the same path, and .prepare() on a tenancy table is refused', async () =>
+    it('L14 .execute() takes the same path, and .prepare() on a tenancy table is refused', async (context) =>
     {
-        if (!db.isAvailable) return;
+        db.skipIfUnavailable(context);
 
         expect(ids(await noteRepository.titlesWithAuthor(7).execute())).toEqual([1, 2]);
         expect(db.readLog.filter(isSetConfig)).toHaveLength(1);
@@ -480,18 +480,18 @@ describe('tenancy execution rules (app role, integration)', () =>
         await expect(noteRepository.titlesWithAuthor(7).finally(() => undefined)).resolves.toHaveLength(2);
     });
 
-    it('L15 a failing query in a short write transaction rolls back and leaves no row', async () =>
+    it('L15 a failing query in a short write transaction rolls back and leaves no row', async (context) =>
     {
-        if (!db.isAvailable) return;
+        db.skipIfUnavailable(context);
 
         await expect(noteRepository.create(7, { authorId: 999, title: 'orphan' })).rejects.toThrow();
         expect(db.writeLog.at(-1)).toMatch(/^rollback/i);
         expect(await noteCount()).toBe(3);
     });
 
-    it('L16 a tenantKey()-only table is read with one query, no BEGIN and no set_config', async () =>
+    it('L16 a tenantKey()-only table is read with one query, no BEGIN and no set_config', async (context) =>
     {
-        if (!db.isAvailable) return;
+        db.skipIfUnavailable(context);
 
         expect(ids(await memoRepository.list(7))).toEqual([1, 2]);
         expect(db.readLog).toHaveLength(1);
@@ -499,9 +499,9 @@ describe('tenancy execution rules (app role, integration)', () =>
         expect(db.readLog.filter(isSetConfig)).toEqual([]);
     });
 
-    it('L17 a tenantKey()-only table inside a tenant 7 transaction refuses tenant 9', async () =>
+    it('L17 a tenantKey()-only table inside a tenant 7 transaction refuses tenant 9', async (context) =>
     {
-        if (!db.isAvailable) return;
+        db.skipIfUnavailable(context);
 
         await runInTransaction(async () =>
         {
@@ -509,9 +509,9 @@ describe('tenancy execution rules (app role, integration)', () =>
         }, { tenant: 7 });
     });
 
-    it('L18 concurrent reads for tenants 7 and 9 on a one-connection read pool each see their own rows', async () =>
+    it('L18 concurrent reads for tenants 7 and 9 on a one-connection read pool each see their own rows', async (context) =>
     {
-        if (!db.isAvailable) return;
+        db.skipIfUnavailable(context);
 
         const results = await Promise.all(Array.from({ length: 10 }, (_, index) =>
         {
@@ -530,55 +530,55 @@ describe('tenancy execution rules (app role, integration)', () =>
     // M — the visibleTo and tenant list policies, on hand-written SQL
     // ------------------------------------------------------------------------
 
-    it('M1 bound to tenant 7, members shows workspace 7\'s two rows', async () =>
+    it('M1 bound to tenant 7, members shows workspace 7\'s two rows', async (context) =>
     {
-        if (!db.isAvailable) return;
+        db.skipIfUnavailable(context);
 
         expect(ids(await runBound(`select id from ${TENANCY_SCHEMA}.members order by id`, { tenant: 7 }))).toEqual([1, 3]);
     });
 
-    it('M2 bound to user 3, members shows user 3\'s three rows in workspaces 7, 9 and 11', async () =>
+    it('M2 bound to user 3, members shows user 3\'s three rows in workspaces 7, 9 and 11', async (context) =>
     {
-        if (!db.isAvailable) return;
+        db.skipIfUnavailable(context);
 
         const rows = await runBound(`select id, tenant_id from ${TENANCY_SCHEMA}.members order by id`, { user: 3 });
 
         expect(rows.map((row) => `${row.id}:${row.tenant_id}`)).toEqual(['1:7', '2:9', '4:11']);
     });
 
-    it('M3 bound to neither, a read of members fails on app.tenant_id', async () =>
+    it('M3 bound to neither, a read of members fails on app.tenant_id', async (context) =>
     {
-        if (!db.isAvailable) return;
+        db.skipIfUnavailable(context);
 
         expect(await failureOf(runBound(`select id from ${TENANCY_SCHEMA}.members`, {}))).toMatch(NO_TENANT);
     });
 
-    it('M4 bound to tenant 7 and user 3, members shows the union of the two', async () =>
+    it('M4 bound to tenant 7 and user 3, members shows the union of the two', async (context) =>
     {
-        if (!db.isAvailable) return;
+        db.skipIfUnavailable(context);
 
         expect(ids(await runBound(`select id from ${TENANCY_SCHEMA}.members order by id`, { tenant: 7, user: 3 }))).toEqual([1, 2, 3, 4]);
     });
 
-    it('M5 bound to user 3 only, an update of user 3\'s memberships fails and changes nothing', async () =>
+    it('M5 bound to user 3 only, an update of user 3\'s memberships fails and changes nothing', async (context) =>
     {
-        if (!db.isAvailable) return;
+        db.skipIfUnavailable(context);
 
         expect(await failureOf(runBound(`update ${TENANCY_SCHEMA}.members set role = 'owner' where user_id = 3`, { user: 3 }))).toMatch(NO_TENANT);
         expect(await memberRoles()).toEqual(SEEDED_ROLES);
     });
 
-    it('M6 bound to user 3 only, a delete of user 3\'s memberships fails and deletes nothing', async () =>
+    it('M6 bound to user 3 only, a delete of user 3\'s memberships fails and deletes nothing', async (context) =>
     {
-        if (!db.isAvailable) return;
+        db.skipIfUnavailable(context);
 
         expect(await failureOf(runBound(`delete from ${TENANCY_SCHEMA}.members where user_id = 3`, { user: 3 }))).toMatch(NO_TENANT);
         expect(await memberRoles()).toEqual(SEEDED_ROLES);
     });
 
-    it('M7 bound to user 3 only, an insert of a membership fails', async () =>
+    it('M7 bound to user 3 only, an insert of a membership fails', async (context) =>
     {
-        if (!db.isAvailable) return;
+        db.skipIfUnavailable(context);
 
         expect(await failureOf(runBound(
             `insert into ${TENANCY_SCHEMA}.members (tenant_id, user_id, role, status) values (9, 3, 'owner', 'active')`,
@@ -587,9 +587,9 @@ describe('tenancy execution rules (app role, integration)', () =>
         expect(await memberRoles()).toEqual(SEEDED_ROLES);
     });
 
-    it('M8 bound to tenant 7 and user 3, an update of user 3\'s memberships changes workspace 7\'s row only', async () =>
+    it('M8 bound to tenant 7 and user 3, an update of user 3\'s memberships changes workspace 7\'s row only', async (context) =>
     {
-        if (!db.isAvailable) return;
+        db.skipIfUnavailable(context);
 
         const updated = await runBound(`update ${TENANCY_SCHEMA}.members set role = 'owner' where user_id = 3 returning id`, { tenant: 7, user: 3 });
 
@@ -597,63 +597,63 @@ describe('tenancy execution rules (app role, integration)', () =>
         expect(await memberRoles()).toEqual(['1:owner', '2:member', '3:member', '4:member']);
     });
 
-    it('M9 bound to user 3, workspaces shows 7 and 9 — 11 is an invited membership', async () =>
+    it('M9 bound to user 3, workspaces shows 7 and 9 — 11 is an invited membership', async (context) =>
     {
-        if (!db.isAvailable) return;
+        db.skipIfUnavailable(context);
 
         expect(ids(await runBound(`select id from ${TENANCY_SCHEMA}.workspaces order by id`, { user: 3 }))).toEqual([7, 9]);
     });
 
-    it('M10 bound to tenant 7, workspaces shows 7 only', async () =>
+    it('M10 bound to tenant 7, workspaces shows 7 only', async (context) =>
     {
-        if (!db.isAvailable) return;
+        db.skipIfUnavailable(context);
 
         expect(ids(await runBound(`select id from ${TENANCY_SCHEMA}.workspaces order by id`, { tenant: 7 }))).toEqual([7]);
     });
 
-    it('M11 bound to neither, a read of workspaces fails', async () =>
+    it('M11 bound to neither, a read of workspaces fails', async (context) =>
     {
-        if (!db.isAvailable) return;
+        db.skipIfUnavailable(context);
 
         expect(await failureOf(runBound(`select id from ${TENANCY_SCHEMA}.workspaces`, {}))).toMatch(NO_TENANT);
     });
 
-    it('M12 bound to neither, an insert into workspaces is stored', async () =>
+    it('M12 bound to neither, an insert into workspaces is stored', async (context) =>
     {
-        if (!db.isAvailable) return;
+        db.skipIfUnavailable(context);
 
         await runBound(`insert into ${TENANCY_SCHEMA}.workspaces (name) values ('new')`, {});
 
         expect(await workspaceNames()).toEqual([...SEEDED_NAMES, '101:new']);
     });
 
-    it('M13 bound to user 3 only, renaming workspace 7 fails and the name stays', async () =>
+    it('M13 bound to user 3 only, renaming workspace 7 fails and the name stays', async (context) =>
     {
-        if (!db.isAvailable) return;
+        db.skipIfUnavailable(context);
 
         expect(await failureOf(runBound(`update ${TENANCY_SCHEMA}.workspaces set name = 'x' where id = 7`, { user: 3 }))).toMatch(NO_TENANT);
         expect(await workspaceNames()).toEqual(SEEDED_NAMES);
     });
 
-    it('M14 bound to tenant 7, renaming workspace 7 works and 9 keeps its name', async () =>
+    it('M14 bound to tenant 7, renaming workspace 7 works and 9 keeps its name', async (context) =>
     {
-        if (!db.isAvailable) return;
+        db.skipIfUnavailable(context);
 
         await runBound(`update ${TENANCY_SCHEMA}.workspaces set name = 'x' where id = 7`, { tenant: 7 });
 
         expect(await workspaceNames()).toEqual(['7:x', '9:nine', '11:eleven']);
     });
 
-    it('M15 bound to user 3, a table without visibleTo still fails as before', async () =>
+    it('M15 bound to user 3, a table without visibleTo still fails as before', async (context) =>
     {
-        if (!db.isAvailable) return;
+        db.skipIfUnavailable(context);
 
         expect(await failureOf(runBound(`select id from ${TENANCY_SCHEMA}.notes`, { user: 3 }))).toMatch(NO_TENANT);
     });
 
-    it('M16 after a user 3 transaction ends, its connection has no user and a members read fails again', async () =>
+    it('M16 after a user 3 transaction ends, its connection has no user and a members read fails again', async (context) =>
     {
-        if (!db.isAvailable) return;
+        db.skipIfUnavailable(context);
 
         const inside = await runInTransaction(() => noteRepository.session(), { user: 3 });
         const after = await sessionOn(inside.pid);
@@ -667,9 +667,9 @@ describe('tenancy execution rules (app role, integration)', () =>
     // U — runInTransaction({ user }) and TenantRepository._selectOfUser
     // ------------------------------------------------------------------------
 
-    it('U1 _selectOfUser outside a transaction: BEGIN, READ ONLY, app.user_id, the query, COMMIT on the read pool', async () =>
+    it('U1 _selectOfUser outside a transaction: BEGIN, READ ONLY, app.user_id, the query, COMMIT on the read pool', async (context) =>
     {
-        if (!db.isAvailable) return;
+        db.skipIfUnavailable(context);
 
         const rows = await memberRepository.membershipsOf(3);
 
@@ -684,9 +684,9 @@ describe('tenancy execution rules (app role, integration)', () =>
         expect(db.writeLog).toEqual([]);
     });
 
-    it('U2 inside runInTransaction({ user: 3 }) it runs in that transaction and sets nothing more', async () =>
+    it('U2 inside runInTransaction({ user: 3 }) it runs in that transaction and sets nothing more', async (context) =>
     {
-        if (!db.isAvailable) return;
+        db.skipIfUnavailable(context);
 
         const rows = await runInTransaction(() => memberRepository.membershipsOf(3), { user: 3 });
 
@@ -696,9 +696,9 @@ describe('tenancy execution rules (app role, integration)', () =>
         expect(db.readLog).toEqual([]);
     });
 
-    it('U3 _selectOfUser(5) inside runInTransaction({ user: 3 }) throws TenantMismatchError with key user and sends nothing', async () =>
+    it('U3 _selectOfUser(5) inside runInTransaction({ user: 3 }) throws TenantMismatchError with key user and sends nothing', async (context) =>
     {
-        if (!db.isAvailable) return;
+        db.skipIfUnavailable(context);
 
         await runInTransaction(async () =>
         {
@@ -713,9 +713,9 @@ describe('tenancy execution rules (app role, integration)', () =>
         }, { user: 3 });
     });
 
-    it('U4 the first _selectOfUser in a transaction binds it to user 3; a direct query after it sees user 3\'s rows', async () =>
+    it('U4 the first _selectOfUser in a transaction binds it to user 3; a direct query after it sees user 3\'s rows', async (context) =>
     {
-        if (!db.isAvailable) return;
+        db.skipIfUnavailable(context);
 
         const result = await runInTransaction(async () =>
         {
@@ -729,9 +729,9 @@ describe('tenancy execution rules (app role, integration)', () =>
         expect(result.session.tenant ?? '').toBe('');
     });
 
-    it('U5 _selectOfUser(3) inside runInTransaction({ tenant: 7 }) binds both; a direct query sees the union', async () =>
+    it('U5 _selectOfUser(3) inside runInTransaction({ tenant: 7 }) binds both; a direct query sees the union', async (context) =>
     {
-        if (!db.isAvailable) return;
+        db.skipIfUnavailable(context);
 
         const result = await runInTransaction(async () =>
         {
@@ -745,9 +745,9 @@ describe('tenancy execution rules (app role, integration)', () =>
         expect(result.session).toMatchObject({ tenant: '7', user: '3' });
     });
 
-    it('U6 runInTransaction refuses a user that is not a positive safe integer before opening', async () =>
+    it('U6 runInTransaction refuses a user that is not a positive safe integer before opening', async (context) =>
     {
-        if (!db.isAvailable) return;
+        db.skipIfUnavailable(context);
 
         for (const user of [0, -1, 1.5, Number.NaN, '3' as unknown as number])
         {
@@ -757,9 +757,9 @@ describe('tenancy execution rules (app role, integration)', () =>
         expect(db.writeLog).toEqual([]);
     });
 
-    it('U7 a nested runInTransaction({ user: 5 }) inside user 3 throws before the SAVEPOINT; the outer user stays 3', async () =>
+    it('U7 a nested runInTransaction({ user: 5 }) inside user 3 throws before the SAVEPOINT; the outer user stays 3', async (context) =>
     {
-        if (!db.isAvailable) return;
+        db.skipIfUnavailable(context);
 
         const outer = await runInTransaction(async () =>
         {
@@ -776,9 +776,9 @@ describe('tenancy execution rules (app role, integration)', () =>
         expect(userSettings()).toHaveLength(1);
     });
 
-    it('U8 requiresNew with user 5 inside user 3 runs on its own connection; the outer user stays 3', async () =>
+    it('U8 requiresNew with user 5 inside user 3 runs on its own connection; the outer user stays 3', async (context) =>
     {
-        if (!db.isAvailable) return;
+        db.skipIfUnavailable(context);
 
         const result = await runInTransaction(async () =>
         {
@@ -797,9 +797,9 @@ describe('tenancy execution rules (app role, integration)', () =>
         expect(result.after.user).toBe('3');
     });
 
-    it('U9 a user first set inside a savepoint that rolls back is set again by the next call', async () =>
+    it('U9 a user first set inside a savepoint that rolls back is set again by the next call', async (context) =>
     {
-        if (!db.isAvailable) return;
+        db.skipIfUnavailable(context);
 
         const result = await runInTransaction(async () =>
         {
@@ -842,9 +842,9 @@ describe('tenancy execution rules (app role, integration)', () =>
             .toThrow('Table "memos" has a tenant column but no visibleTo user column');
     });
 
-    it('U13 an ordinary table joins without a condition; the tenant list policy leaves out the invited workspace', async () =>
+    it('U13 an ordinary table joins without a condition; the tenant list policy leaves out the invited workspace', async (context) =>
     {
-        if (!db.isAvailable) return;
+        db.skipIfUnavailable(context);
 
         const query = memberRepository.workspacesOf(3);
 
@@ -852,9 +852,9 @@ describe('tenancy execution rules (app role, integration)', () =>
         expect(await query).toEqual([{ id: 7, name: 'seven' }, { id: 9, name: 'nine' }]);
     });
 
-    it('U14 a left-joined visibleTo alias gets user = 3 in its ON clause', async () =>
+    it('U14 a left-joined visibleTo alias gets user = 3 in its ON clause', async (context) =>
     {
-        if (!db.isAvailable) return;
+        db.skipIfUnavailable(context);
 
         const peers = alias(members, 'peers');
         const query = memberRepository.ofUser(3).from(members)
@@ -888,9 +888,9 @@ describe('tenancy execution rules (app role, integration)', () =>
         }
     });
 
-    it('U17 _select(7).from(members) is scoped by tenant as before, with no user condition', async () =>
+    it('U17 _select(7).from(members) is scoped by tenant as before, with no user condition', async (context) =>
     {
-        if (!db.isAvailable) return;
+        db.skipIfUnavailable(context);
 
         const query = memberRepository.ofTenant(7);
 
@@ -900,9 +900,9 @@ describe('tenancy execution rules (app role, integration)', () =>
         expect(db.settingLog).toEqual([{ pool: 'read', setting: 'app.tenant_id', value: '7' }]);
     });
 
-    it('U18 inside a request guarded for tenant 7, _selectOfUser(3) is allowed', async () =>
+    it('U18 inside a request guarded for tenant 7, _selectOfUser(3) is allowed', async (context) =>
     {
-        if (!db.isAvailable) return;
+        db.skipIfUnavailable(context);
 
         const app = new Hono();
 
@@ -914,9 +914,9 @@ describe('tenancy execution rules (app role, integration)', () =>
         expect(await response.json()).toEqual([1, 2, 4]);
     });
 
-    it('U19 concurrent reads for users 3 and 5 on a one-connection read pool each see their own rows', async () =>
+    it('U19 concurrent reads for users 3 and 5 on a one-connection read pool each see their own rows', async (context) =>
     {
-        if (!db.isAvailable) return;
+        db.skipIfUnavailable(context);
 
         const results = await Promise.all(Array.from({ length: 10 }, (_, index) =>
         {
@@ -931,9 +931,9 @@ describe('tenancy execution rules (app role, integration)', () =>
         }
     });
 
-    it('U20 _selectOfUser and then _findOne(7, members) in one transaction bind both', async () =>
+    it('U20 _selectOfUser and then _findOne(7, members) in one transaction bind both', async (context) =>
     {
-        if (!db.isAvailable) return;
+        db.skipIfUnavailable(context);
 
         const result = await runInTransaction(async () =>
         {

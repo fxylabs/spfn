@@ -5,7 +5,7 @@
  * sort direction, and clamps the page size. Skips when no test DB is available.
  */
 
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 import { pgTable, integer, text } from 'drizzle-orm/pg-core';
 import { createDbTestFixture } from './helpers/db-fixture';
 import { BaseRepository } from '../repository';
@@ -43,6 +43,8 @@ describe('BaseRepository._findManyKeyset (integration)', () =>
         );
     });
 
+    beforeEach((context) => dbFixture.skipIfUnavailable(context));
+
     afterAll(async () =>
     {
         if (dbFixture.isAvailable)
@@ -54,8 +56,6 @@ describe('BaseRepository._findManyKeyset (integration)', () =>
 
     it('pages forward without overlap or gaps', async () =>
     {
-        if (!dbFixture.isAvailable) return;
-
         const repo = new KeysetRepo();
 
         const page1 = await repo.page({ limit: 2 });
@@ -70,8 +70,6 @@ describe('BaseRepository._findManyKeyset (integration)', () =>
 
     it('pages in descending order', async () =>
     {
-        if (!dbFixture.isAvailable) return;
-
         const repo = new KeysetRepo();
 
         const page1 = await repo.page({ limit: 2, order: 'desc' });

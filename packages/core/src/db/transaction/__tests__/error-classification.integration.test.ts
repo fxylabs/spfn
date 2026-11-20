@@ -175,6 +175,8 @@ describe('Transactional() error classification', () =>
         }
     });
 
+    beforeEach((context) => dbFixture.skipIfUnavailable(context));
+
     afterAll(async () =>
     {
         await dbFixture.execute('DROP TABLE IF EXISTS test_users CASCADE');
@@ -191,8 +193,6 @@ describe('Transactional() error classification', () =>
     {
         it('passes an SPFN HTTP error that carries no code', async () =>
         {
-            if (!dbFixture.isAvailable) return;
-
             const thrown = new ForbiddenError({ message: 'nope' });
             const captured = await captureThrough(async () =>
             {
@@ -205,8 +205,6 @@ describe('Transactional() error classification', () =>
 
         it('passes an application error extending the framework family WITH a string code', async () =>
         {
-            if (!dbFixture.isAvailable) return;
-
             const thrown = new PolicyRefusedError({
                 message: 'tenant is suspended',
                 code: 'TENANT_SUSPENDED',
@@ -234,8 +232,6 @@ describe('Transactional() error classification', () =>
 
         it('passes a Stripe-shaped error with code "resource_missing"', async () =>
         {
-            if (!dbFixture.isAvailable) return;
-
             const thrown = Object.assign(new Error('No such charge: ch_1'), {
                 code: 'resource_missing',
                 type: 'invalid_request_error',
@@ -253,8 +249,6 @@ describe('Transactional() error classification', () =>
 
         it('passes a JWT-shaped error with code "ERR_JOSE_..."', async () =>
         {
-            if (!dbFixture.isAvailable) return;
-
             const thrown = Object.assign(new Error('signature verification failed'), {
                 code: 'ERR_JWS_SIGNATURE_VERIFICATION_FAILED',
             });
@@ -270,8 +264,6 @@ describe('Transactional() error classification', () =>
 
         it('passes a plain object (not an Error) that carries a code', async () =>
         {
-            if (!dbFixture.isAvailable) return;
-
             const thrown = { code: 'resource_missing', message: 'no such customer' };
             const captured = await captureThrough(async () =>
             {
@@ -290,8 +282,6 @@ describe('Transactional() error classification', () =>
     {
         it('passes a DatabaseError instance unchanged', async () =>
         {
-            if (!dbFixture.isAvailable) return;
-
             const thrown = new DatabaseError({ message: 'already classified' });
             const captured = await captureThrough(async () =>
             {
@@ -303,8 +293,6 @@ describe('Transactional() error classification', () =>
 
         it('passes a TransactionError instance unchanged', async () =>
         {
-            if (!dbFixture.isAvailable) return;
-
             const thrown = new TransactionError({ message: 'already classified' });
             const captured = await captureThrough(async () =>
             {
@@ -316,8 +304,6 @@ describe('Transactional() error classification', () =>
 
         it('passes a DatabaseError even when it carries a SQLSTATE-shaped code', async () =>
         {
-            if (!dbFixture.isAvailable) return;
-
             // The early family gate has to win over the conversion gate:
             // re-converting an already-classified error would flatten, say, a
             // 409 DuplicateEntryError into a fresh one built from a raw message.
@@ -339,8 +325,6 @@ describe('Transactional() error classification', () =>
     {
         it('converts a driver-shaped unique violation (23505) to DuplicateEntryError', async () =>
         {
-            if (!dbFixture.isAvailable) return;
-
             // Shaped exactly as postgres.js builds a PostgresError: the server's
             // ErrorResponse fields copied onto the error (see `errorFields` in
             // postgres/src/connection.js).
@@ -381,8 +365,6 @@ describe('Transactional() error classification', () =>
 
         it('converts a driver error that carries only severity_local (PostgreSQL < 9.6)', async () =>
         {
-            if (!dbFixture.isAvailable) return;
-
             // `V` (severity) arrived in 9.6; `S` (severity_local) has always
             // been sent. The gate must accept either.
             const thrown = Object.assign(new Error('deadlock detected'), {
@@ -402,8 +384,6 @@ describe('Transactional() error classification', () =>
 
         it('converts a pooler-shaped connection error (08006) AND reports it to the reconnect trigger', async () =>
         {
-            if (!dbFixture.isAvailable) return;
-
             // A pooler-synthesized ErrorResponse: severity, code and message,
             // none of the source-location fields. This is why the gate asks for
             // severity rather than `routine`.
@@ -428,8 +408,6 @@ describe('Transactional() error classification', () =>
 
         it('converts a connection error the driver raised itself (CONNECTION_CLOSED)', async () =>
         {
-            if (!dbFixture.isAvailable) return;
-
             // postgres.js builds this one, not the server: `Errors.connection`
             // sets a code of the driver's own invention plus errno/address, and
             // no severity — so the SQLSTATE-plus-severity half of the gate can
@@ -464,8 +442,6 @@ describe('Transactional() error classification', () =>
 
         it('leaves the error a real unique violation produces exactly as it was before the gate narrowed', async () =>
         {
-            if (!dbFixture.isAvailable) return;
-
             // A real insert, not a hand-built error. Drizzle wraps the driver's
             // PostgresError in a DrizzleQueryError which carries no `code` of
             // its own, so this error did not match the OLD gate either and is
@@ -492,8 +468,6 @@ describe('Transactional() error classification', () =>
     {
         it('passes a hostile object with code "23505" but no driver fields', async () =>
         {
-            if (!dbFixture.isAvailable) return;
-
             // The documented trade: a SQLSTATE-shaped code alone no longer
             // triggers conversion. A caller who hand-rolls a pg error loses the
             // conversion; in exchange no application error is ever mangled.
@@ -510,8 +484,6 @@ describe('Transactional() error classification', () =>
 
         it('passes a severity-carrying error whose code is neither SQLSTATE nor a driver code', async () =>
         {
-            if (!dbFixture.isAvailable) return;
-
             // A severity alone proves nothing — the code still has to name a
             // driver, either by SQLSTATE shape or by being one of postgres.js's
             // own connection codes. `ThrottlingException` is neither.
@@ -531,8 +503,6 @@ describe('Transactional() error classification', () =>
 
         it('passes an error with a non-string code', async () =>
         {
-            if (!dbFixture.isAvailable) return;
-
             const thrown = Object.assign(new Error('errno-style'), { code: 23505, severity: 'ERROR' });
 
             const captured = await captureThrough(async () =>

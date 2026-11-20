@@ -11,7 +11,7 @@
  * Tests self-skip with a warning if the fixture cannot connect.
  */
 
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { Sql } from 'postgres';
 import { job } from '../job-builder';
 import { defineJobRouter } from '../job-router';
@@ -65,6 +65,8 @@ describe('Retry delay (Integration)', () =>
         }
     });
 
+    beforeEach(({ skip }) => skip(!available, 'PostgreSQL not available'));
+
     afterAll(async () =>
     {
         resetOrphanSweepState();
@@ -81,8 +83,6 @@ describe('Retry delay (Integration)', () =>
 
     it('send stores retryDelay in seconds', async () =>
     {
-        if (!available) return;
-
         const receipt = job('retry-send')
             .options({ retryLimit: 4, retryDelay: 5000, retryBackoff: false })
             .handler(async () =>
@@ -98,8 +98,6 @@ describe('Retry delay (Integration)', () =>
 
     it('sendBatch stores retryDelay in seconds', async () =>
     {
-        if (!available) return;
-
         const bulk = job('retry-batch')
             .options({ retryDelay: 5000 })
             .handler(async () =>
@@ -113,8 +111,6 @@ describe('Retry delay (Integration)', () =>
 
     it('send without options applies the documented defaults (1s, 3 retries, backoff)', async () =>
     {
-        if (!available) return;
-
         const plain = job('retry-defaults')
             .handler(async () =>
             {});
@@ -129,8 +125,6 @@ describe('Retry delay (Integration)', () =>
 
     it('a delay under one second rounds up to one second, not to an immediate retry', async () =>
     {
-        if (!available) return;
-
         const quick = job('retry-sub-second')
             .options({ retryDelay: 200 })
             .handler(async () =>
@@ -144,8 +138,6 @@ describe('Retry delay (Integration)', () =>
 
     it('a failed job is retried seconds later, not thousands of seconds later', async () =>
     {
-        if (!available) return;
-
         let attempts = 0;
         const flaky = job('retry-flaky')
             .options({ retryLimit: 1, retryDelay: 5000, retryBackoff: false, pollingIntervalSeconds: 0.5 })

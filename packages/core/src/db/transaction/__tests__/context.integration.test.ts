@@ -81,9 +81,9 @@ describe('Transaction Context (Integration)', () =>
             expect(txId).toBeNull();
         });
 
-        it('should provide transaction context within runWithTransaction', async () =>
+        it('should provide transaction context within runWithTransaction', async (context) =>
         {
-            if (!dbFixture.isAvailable) return;
+            dbFixture.skipIfUnavailable(context);
 
             await dbFixture.db.transaction(async (tx) =>
             {
@@ -103,9 +103,9 @@ describe('Transaction Context (Integration)', () =>
             });
         });
 
-        it('should propagate transaction across async operations', async () =>
+        it('should propagate transaction across async operations', async (context) =>
         {
-            if (!dbFixture.isAvailable) return;
+            dbFixture.skipIfUnavailable(context);
 
             await dbFixture.db.transaction(async (tx) =>
             {
@@ -126,9 +126,9 @@ describe('Transaction Context (Integration)', () =>
             });
         });
 
-        it('should isolate transaction context between concurrent transactions', async () =>
+        it('should isolate transaction context between concurrent transactions', async (context) =>
         {
-            if (!dbFixture.isAvailable) return;
+            dbFixture.skipIfUnavailable(context);
 
             const results: string[] = [];
 
@@ -159,9 +159,9 @@ describe('Transaction Context (Integration)', () =>
             expect(results).toContain('concurrent-tx-2');
         });
 
-        it('should clear context after transaction completes', async () =>
+        it('should clear context after transaction completes', async (context) =>
         {
-            if (!dbFixture.isAvailable) return;
+            dbFixture.skipIfUnavailable(context);
 
             await dbFixture.db.transaction(async (tx) =>
             {
@@ -178,9 +178,9 @@ describe('Transaction Context (Integration)', () =>
 
     describe('Nested Transactions', () =>
     {
-        it('should detect nested transactions', async () =>
+        it('should detect nested transactions', async (context) =>
         {
-            if (!dbFixture.isAvailable) return;
+            dbFixture.skipIfUnavailable(context);
 
             await dbFixture.db.transaction(async (tx1) =>
             {
@@ -209,9 +209,9 @@ describe('Transaction Context (Integration)', () =>
             });
         });
 
-        it('should track multiple levels of nesting', async () =>
+        it('should track multiple levels of nesting', async (context) =>
         {
-            if (!dbFixture.isAvailable) return;
+            dbFixture.skipIfUnavailable(context);
 
             const levels: number[] = [];
 
@@ -245,9 +245,9 @@ describe('Transaction Context (Integration)', () =>
 
     describe('Transaction Operations', () =>
     {
-        it('should execute queries using transaction context', async () =>
+        it('should execute queries using transaction context', async (context) =>
         {
-            if (!dbFixture.isAvailable) return;
+            dbFixture.skipIfUnavailable(context);
 
             await dbFixture.db.transaction(async (tx) =>
             {
@@ -275,9 +275,9 @@ describe('Transaction Context (Integration)', () =>
             await dbFixture.db.delete(testUsers);
         });
 
-        it('should rollback on error', async () =>
+        it('should rollback on error', async (context) =>
         {
-            if (!dbFixture.isAvailable) return;
+            dbFixture.skipIfUnavailable(context);
 
             try
             {
@@ -308,9 +308,9 @@ describe('Transaction Context (Integration)', () =>
             expect(users).toHaveLength(0);
         });
 
-        it('should commit on success', async () =>
+        it('should commit on success', async (context) =>
         {
-            if (!dbFixture.isAvailable) return;
+            dbFixture.skipIfUnavailable(context);
 
             let userId: number | undefined;
 

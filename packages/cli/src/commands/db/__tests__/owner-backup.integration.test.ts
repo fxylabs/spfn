@@ -13,7 +13,7 @@ import { execFileSync } from 'child_process';
 import { mkdirSync, mkdtempSync, rmSync } from 'fs';
 import { join } from 'path';
 import postgres from 'postgres';
-import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
 import { appUrl, OWNER_URL } from './helpers/test-database';
 
 vi.mock('@spfn/core/server', () => ({ loadEnv: vi.fn() }));
@@ -77,6 +77,8 @@ describe('backup and restore through the owner connection (integration)', () =>
         process.env.DATABASE_URL = appUrl();
     });
 
+    beforeEach(({ skip }) => skip(!available, 'PostgreSQL or its client tools (pg_dump, psql) not available'));
+
     afterAll(async () =>
     {
         process.chdir(originalCwd);
@@ -95,8 +97,6 @@ describe('backup and restore through the owner connection (integration)', () =>
 
     it('O4 a policy table backed up through the owner URL restores into an emptied schema with the same rows', async () =>
     {
-        if (!available) return;
-
         const exit = vi.spyOn(process, 'exit').mockImplementation(((code?: number) =>
         {
             throw new Error(`exit ${code}`);

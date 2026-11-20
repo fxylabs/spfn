@@ -6,6 +6,7 @@
  */
 
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js';
+import type { TestContext } from 'vitest';
 import { initDatabase, getDatabase, closeDatabase } from '../../manager';
 
 /**
@@ -30,6 +31,13 @@ export interface DbTestFixture
      * Whether the database is available for testing
      */
     readonly isAvailable: boolean;
+
+    /**
+     * Skip the row, with the reason, when the database is not available — so
+     * the reporter counts it skipped, never passed. Call it from `beforeEach`
+     * or first thing in a row.
+     */
+    skipIfUnavailable(context: TestContext): void;
 
     /**
      * Initialize database connection
@@ -65,9 +73,12 @@ export interface DbTestFixture
  *
  *     beforeAll(() => dbFixture.setup());
  *     afterAll(() => dbFixture.teardown());
+ *     beforeEach((context) => dbFixture.skipIfUnavailable(context));
  *     beforeEach(() => dbFixture.cleanTable('test_users'));
  *
- *     it.skipIf(!dbFixture.isAvailable)('should work', async () => {
+ *     // Not `it.skipIf(!dbFixture.isAvailable)`: that is read while the file
+ *     // is collected, before `setup()` has run, so it would skip every row.
+ *     it('should work', async () => {
  *         // No need for ! or null checks
  *         const users = await dbFixture.db.select().from(testUsers);
  *     });
@@ -95,6 +106,11 @@ export function createDbTestFixture(): DbTestFixture
         get isAvailable()
         {
             return _isAvailable;
+        },
+
+        skipIfUnavailable(context)
+        {
+            context.skip(!_isAvailable, 'PostgreSQL not available at TEST_DATABASE_URL');
         },
 
         async setup()

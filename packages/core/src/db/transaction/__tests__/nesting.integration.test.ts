@@ -100,9 +100,9 @@ describe('Nested transactions (Integration)', () =>
 
     describe('ambient: yes | requiresNew: no | nested success', () =>
     {
-        it('runs on the outer transaction\'s connection, sees its uncommitted writes, and commits with it', async () =>
+        it('runs on the outer transaction\'s connection, sees its uncommitted writes, and commits with it', async (context) =>
         {
-            if (!dbFixture.isAvailable) return;
+            dbFixture.skipIfUnavailable(context);
 
             let rootPid = 0;
             let nestedPid = -1;
@@ -137,9 +137,9 @@ describe('Nested transactions (Integration)', () =>
             expect(await storedLabels()).toEqual(['root-before', 'nested', 'root-after']);
         });
 
-        it('inherits the outer transaction\'s statement_timeout and ignores its own', async () =>
+        it('inherits the outer transaction\'s statement_timeout and ignores its own', async (context) =>
         {
-            if (!dbFixture.isAvailable) return;
+            dbFixture.skipIfUnavailable(context);
 
             const warn = vi.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
             let nestedTimeout = '';
@@ -167,9 +167,9 @@ describe('Nested transactions (Integration)', () =>
             );
         });
 
-        it('stays quiet about the timeout when the caller never passed one', async () =>
+        it('stays quiet about the timeout when the caller never passed one', async (context) =>
         {
-            if (!dbFixture.isAvailable) return;
+            dbFixture.skipIfUnavailable(context);
 
             // The default timeout is 30s, so warning whenever one is in force
             // meant warning on every nested call — noise an operator cannot act
@@ -190,9 +190,9 @@ describe('Nested transactions (Integration)', () =>
 
     describe('ambient: yes | requiresNew: no | nested throws, caller catches', () =>
     {
-        it('rolls back to the savepoint, keeps prior outer writes, commits the root, and fires only the nested afterRollback', async () =>
+        it('rolls back to the savepoint, keeps prior outer writes, commits the root, and fires only the nested afterRollback', async (context) =>
         {
-            if (!dbFixture.isAvailable) return;
+            dbFixture.skipIfUnavailable(context);
 
             const fired: string[] = [];
             let rootPid = 0;
@@ -237,9 +237,9 @@ describe('Nested transactions (Integration)', () =>
             expect(fired).toEqual(['nested afterRollback', 'afterCommit']);
         });
 
-        it('leaves the root able to issue statements after a failed STATEMENT inside the savepoint (25P02)', async () =>
+        it('leaves the root able to issue statements after a failed STATEMENT inside the savepoint (25P02)', async (context) =>
         {
-            if (!dbFixture.isAvailable) return;
+            dbFixture.skipIfUnavailable(context);
 
             let rootPid = 0;
             let nestedPid = -1;
@@ -276,9 +276,9 @@ describe('Nested transactions (Integration)', () =>
 
     describe('ambient: yes | requiresNew: no | nested throws, propagates', () =>
     {
-        it('rolls the root back and fires afterRollback exactly once', async () =>
+        it('rolls the root back and fires afterRollback exactly once', async (context) =>
         {
-            if (!dbFixture.isAvailable) return;
+            dbFixture.skipIfUnavailable(context);
 
             const fired: string[] = [];
             const nestedError = new Error('nested failed');
@@ -318,9 +318,9 @@ describe('Nested transactions (Integration)', () =>
 
     describe('ambient: yes | requiresNew: no | hooks registered inside nested', () =>
     {
-        it('runs a nested beforeCommit inside the transaction at the ROOT commit', async () =>
+        it('runs a nested beforeCommit inside the transaction at the ROOT commit', async (context) =>
         {
-            if (!dbFixture.isAvailable) return;
+            dbFixture.skipIfUnavailable(context);
 
             const fired: string[] = [];
             let pidInsideBeforeCommit = -1;
@@ -363,9 +363,9 @@ describe('Nested transactions (Integration)', () =>
             expect(await storedLabels()).toEqual(['root', 'from-beforeCommit']);
         });
 
-        it('fires a nested afterRollback when the ROOT fails after the nested call succeeded', async () =>
+        it('fires a nested afterRollback when the ROOT fails after the nested call succeeded', async (context) =>
         {
-            if (!dbFixture.isAvailable) return;
+            dbFixture.skipIfUnavailable(context);
 
             const fired: string[] = [];
             const rootError = new Error('root failed');
@@ -397,9 +397,9 @@ describe('Nested transactions (Integration)', () =>
         // the nested call — broken only by statement_timeout. On one connection
         // there is nothing to wait for. The short timeout turns a regression into
         // a fast failure instead of a hung suite.
-        it('updates a row the outer transaction already locked without deadlocking', async () =>
+        it('updates a row the outer transaction already locked without deadlocking', async (context) =>
         {
-            if (!dbFixture.isAvailable) return;
+            dbFixture.skipIfUnavailable(context);
 
             await dbFixture.db.execute(sql`INSERT INTO test_nested_rows (label) VALUES ('original')`);
 
@@ -426,9 +426,9 @@ describe('Nested transactions (Integration)', () =>
         /** Yields the event loop for real, the way non-DB work inside a callback does */
         const pause = (ms: number): Promise<void> => new Promise(resolve => setTimeout(resolve, ms));
 
-        it('serializes sibling frames, so one sibling\'s rollback cannot take the other\'s writes', async () =>
+        it('serializes sibling frames, so one sibling\'s rollback cannot take the other\'s writes', async (context) =>
         {
-            if (!dbFixture.isAvailable) return;
+            dbFixture.skipIfUnavailable(context);
 
             // The reviewer's scenario. Concurrently, A's second write lands
             // AFTER B took its savepoint, so B's ROLLBACK TO — which unwinds the
@@ -489,9 +489,9 @@ describe('Nested transactions (Integration)', () =>
             );
         });
 
-        it('keeps running the frames queued behind one that failed', async () =>
+        it('keeps running the frames queued behind one that failed', async (context) =>
         {
-            if (!dbFixture.isAvailable) return;
+            dbFixture.skipIfUnavailable(context);
 
             // The queue swallows a frame's rejection for the frames behind it and
             // nowhere else: B must still open, and A's error must still reach A's
@@ -549,9 +549,9 @@ describe('Nested transactions (Integration)', () =>
             expect(outcome).toBe('hung');
         });
 
-        it('does not serialize requiresNew siblings against each other', async () =>
+        it('does not serialize requiresNew siblings against each other', async (context) =>
         {
-            if (!dbFixture.isAvailable) return;
+            dbFixture.skipIfUnavailable(context);
 
             const order: string[] = [];
             const pids: number[] = [];
@@ -589,9 +589,9 @@ describe('Nested transactions (Integration)', () =>
             expect((await storedLabels()).sort()).toEqual(['A', 'B']);
         });
 
-        it('does not make a requiresNew frame wait for a concurrent savepoint frame', async () =>
+        it('does not make a requiresNew frame wait for a concurrent savepoint frame', async (context) =>
         {
-            if (!dbFixture.isAvailable) return;
+            dbFixture.skipIfUnavailable(context);
 
             const order: string[] = [];
 
@@ -625,9 +625,9 @@ describe('Nested transactions (Integration)', () =>
 
     describe('ambient: yes | requiresNew: yes | independent success, root later fails', () =>
     {
-        it('keeps its writes when the root rolls back, on its own connection, with its own hook queues', async () =>
+        it('keeps its writes when the root rolls back, on its own connection, with its own hook queues', async (context) =>
         {
-            if (!dbFixture.isAvailable) return;
+            dbFixture.skipIfUnavailable(context);
 
             const fired: string[] = [];
             const rootError = new Error('root failed');
@@ -681,9 +681,9 @@ describe('Nested transactions (Integration)', () =>
 
     describe('ambient: yes | requiresNew: yes | requiresNew fails, caught', () =>
     {
-        it('leaves the root unaffected', async () =>
+        it('leaves the root unaffected', async (context) =>
         {
-            if (!dbFixture.isAvailable) return;
+            dbFixture.skipIfUnavailable(context);
 
             const fired: string[] = [];
 
@@ -714,9 +714,9 @@ describe('Nested transactions (Integration)', () =>
 
     describe('depth 3 | mixed', () =>
     {
-        it('nests a savepoint inside a savepoint on one connection, promoting resolved hooks to the root', async () =>
+        it('nests a savepoint inside a savepoint on one connection, promoting resolved hooks to the root', async (context) =>
         {
-            if (!dbFixture.isAvailable) return;
+            dbFixture.skipIfUnavailable(context);
 
             const pids: number[] = [];
             const levels: number[] = [];
@@ -767,9 +767,9 @@ describe('Nested transactions (Integration)', () =>
             expect(await storedLabels()).toEqual(['level-1', 'level-2', 'level-3']);
         });
 
-        it('rolls the innermost savepoint back without disturbing the two levels above it', async () =>
+        it('rolls the innermost savepoint back without disturbing the two levels above it', async (context) =>
         {
-            if (!dbFixture.isAvailable) return;
+            dbFixture.skipIfUnavailable(context);
 
             const pids: number[] = [];
 
@@ -805,9 +805,9 @@ describe('Nested transactions (Integration)', () =>
             expect(await storedLabels()).toEqual(['level-1', 'level-2', 'level-2-after']);
         });
 
-        it('mixes a requiresNew transaction into the middle of the savepoint chain', async () =>
+        it('mixes a requiresNew transaction into the middle of the savepoint chain', async (context) =>
         {
-            if (!dbFixture.isAvailable) return;
+            dbFixture.skipIfUnavailable(context);
 
             const pids: number[] = [];
             let independentPid = 0;
@@ -841,9 +841,9 @@ describe('Nested transactions (Integration)', () =>
             expect(await storedLabels()).toEqual(['independent']);
         });
 
-        it('savepoints a nested call onto the requiresNew transaction, not the root', async () =>
+        it('savepoints a nested call onto the requiresNew transaction, not the root', async (context) =>
         {
-            if (!dbFixture.isAvailable) return;
+            dbFixture.skipIfUnavailable(context);
 
             // The other ordering: requiresNew OUTSIDE the savepoint. The inner
             // call has to nest onto the transaction that is actually ambient —
@@ -912,9 +912,9 @@ describe('Nested transactions (Integration)', () =>
             return app;
         };
 
-        it('defaults a nested middleware run to a SAVEPOINT on the outer connection', async () =>
+        it('defaults a nested middleware run to a SAVEPOINT on the outer connection', async (context) =>
         {
-            if (!dbFixture.isAvailable) return;
+            dbFixture.skipIfUnavailable(context);
 
             const rootError = new Error('root failed');
             let rootPid = 0;
@@ -936,9 +936,9 @@ describe('Nested transactions (Integration)', () =>
             expect(await storedLabels()).toEqual([]);
         });
 
-        it('gives a nested middleware run its own transaction under requiresNew', async () =>
+        it('gives a nested middleware run its own transaction under requiresNew', async (context) =>
         {
-            if (!dbFixture.isAvailable) return;
+            dbFixture.skipIfUnavailable(context);
 
             const rootError = new Error('root failed');
             let rootPid = 0;

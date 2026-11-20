@@ -77,9 +77,9 @@ describe('Transaction Middleware (Integration)', () =>
             expect(response.status).toBe(200);
         });
 
-        it('should auto-commit on successful request', async () =>
+        it('should auto-commit on successful request', async (context) =>
         {
-            if (!dbFixture.isAvailable) return;
+            dbFixture.skipIfUnavailable(context);
 
             const app = new Hono();
 
@@ -106,9 +106,9 @@ describe('Transaction Middleware (Integration)', () =>
             expect(users[0].email).toBe('autocommit@example.com');
         });
 
-        it('should auto-rollback on error', async () =>
+        it('should auto-rollback on error', async (context) =>
         {
-            if (!dbFixture.isAvailable) return;
+            dbFixture.skipIfUnavailable(context);
 
             const app = new Hono();
 
@@ -136,9 +136,9 @@ describe('Transaction Middleware (Integration)', () =>
             expect(users).toHaveLength(0);
         });
 
-        it('should rollback on validation error', async () =>
+        it('should rollback on validation error', async (context) =>
         {
-            if (!dbFixture.isAvailable) return;
+            dbFixture.skipIfUnavailable(context);
 
             const app = new Hono();
 
@@ -175,9 +175,9 @@ describe('Transaction Middleware (Integration)', () =>
 
     describe('Transaction Hooks', () =>
     {
-        it('fires only afterRollback when a handler throws under the middleware', async () =>
+        it('fires only afterRollback when a handler throws under the middleware', async (context) =>
         {
-            if (!dbFixture.isAvailable) return;
+            dbFixture.skipIfUnavailable(context);
 
             const fired: string[] = [];
             const app = new Hono();
@@ -217,9 +217,9 @@ describe('Transaction Middleware (Integration)', () =>
 
     describe('Transaction Options', () =>
     {
-        it('should support custom slow threshold', async () =>
+        it('should support custom slow threshold', async (context) =>
         {
-            if (!dbFixture.isAvailable) return;
+            dbFixture.skipIfUnavailable(context);
 
             const app = new Hono();
 
@@ -238,9 +238,9 @@ describe('Transaction Middleware (Integration)', () =>
             // Slow transaction warning should be logged (check logs manually)
         });
 
-        it('should support disabling logging', async () =>
+        it('should support disabling logging', async (context) =>
         {
-            if (!dbFixture.isAvailable) return;
+            dbFixture.skipIfUnavailable(context);
 
             const app = new Hono();
 
@@ -256,9 +256,9 @@ describe('Transaction Middleware (Integration)', () =>
             // No logs should be emitted
         });
 
-        it('should enforce transaction timeout', async () =>
+        it('should enforce transaction timeout', async (context) =>
         {
-            if (!dbFixture.isAvailable) return;
+            dbFixture.skipIfUnavailable(context);
 
             const app = new Hono();
 
@@ -294,9 +294,9 @@ describe('Transaction Middleware (Integration)', () =>
             expect(body.error.length).toBeGreaterThan(0);
         }, 10000); // Test timeout 10s
 
-        it('should allow disabling timeout', async () =>
+        it('should allow disabling timeout', async (context) =>
         {
-            if (!dbFixture.isAvailable) return;
+            dbFixture.skipIfUnavailable(context);
 
             const app = new Hono();
 
@@ -317,9 +317,9 @@ describe('Transaction Middleware (Integration)', () =>
 
     describe('Complex Scenarios', () =>
     {
-        it('should handle multiple database operations', async () =>
+        it('should handle multiple database operations', async (context) =>
         {
-            if (!dbFixture.isAvailable) return;
+            dbFixture.skipIfUnavailable(context);
 
             const app = new Hono();
 
@@ -357,9 +357,9 @@ describe('Transaction Middleware (Integration)', () =>
             expect(users.find(u => u.email === 'user1@example.com')?.name).toBe('Updated User 1');
         });
 
-        it('should handle conditional operations', async () =>
+        it('should handle conditional operations', async (context) =>
         {
-            if (!dbFixture.isAvailable) return;
+            dbFixture.skipIfUnavailable(context);
 
             const app = new Hono();
 
@@ -407,9 +407,9 @@ describe('Transaction Middleware (Integration)', () =>
             expect(users[0].email).toBe('good@example.com');
         });
 
-        it('should isolate transactions between concurrent requests', async () =>
+        it('should isolate transactions between concurrent requests', async (context) =>
         {
-            if (!dbFixture.isAvailable) return;
+            dbFixture.skipIfUnavailable(context);
 
             const app = new Hono();
 

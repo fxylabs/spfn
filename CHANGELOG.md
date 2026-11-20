@@ -345,6 +345,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **spfn: a migration status that could not be read is no longer "nothing pending" (#405).**
+  `spfn kit install`/`update` used to report `migration-applied` when the status read after
+  `spfn db migrate` failed: an unread status carries an empty `pending` list, and the Kit took it
+  for "all applied" (the step, its re-check on resume, and the `db-status` gate). Now:
+  - `spfn db status --json` reports a permission error (SQLSTATE 42501, typically the app role
+    without a grant on schema `drizzle`) as the new `reason: "permission-denied"`, with
+    PostgreSQL's message in `detail`, instead of `"unreachable"`; the human form names the grant.
+  - the Kit's migration step refuses on it before or after migrating —
+    `CLI_MIGRATION_STATUS_UNREADABLE`, exit 4, `evidence.reason: "permission-denied"` — instead of
+    waiting forever on `KIT_WAITING_DATABASE` ("needs a database connection") or reporting
+    success. The remedy is still the hand SQL in the `@spfn/core` db README, "Database roles": no
+    spfn command grants anything yet.
+  - an after-migrate read failing for another reason is `KIT_MIGRATION_FAILED` (resumable); the
+    step's re-check and the `db-status` gate fail on any unread status with the reason
+    (`not-configured` included, which the gate used to pass).
+  - `spfn dev`/`spfn start` print one line when the pre-start check cannot read the status
+    (`Could not check migrations: …`; with the grant on a permission error) and start, where they
+    were silent. They still do not block on it.
+- **Tests: a database or two-role row that did not run is reported skipped, with the reason, not
+  passed (#405).** 23 test files in core and spfn returned early (`if (!available) return;`) when
+  PostgreSQL or the second test role was missing, so vitest counted those rows as passed. They
+  now skip through the test context; the two-role harness (`tenancy-db.ts`,
+  `migration-gate-roles.test.ts`) also checks that the app role connects, and fails instead of
+  skipping under `CI`, whose PostgreSQL has both roles.
+
 - **spfn: without tsx, `spfn db` and `spfn provision` say what to install (#349)**, as `spfn env`
   did: `tsx is not installed in this project, and it is what loads TypeScript. Add it: <the app's
   own add command>`, exit 1. `db generate`, `push` and `tenant` stopped on Node's `Cannot find
