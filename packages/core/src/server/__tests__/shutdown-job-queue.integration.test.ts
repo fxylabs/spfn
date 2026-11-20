@@ -484,7 +484,7 @@ describe.skipIf(!available)('the job queue during shutdown', () =>
         {});
         getShutdownManager().beginShutdown();
 
-        const instance = await startWith({ noop });
+        const instance = await startWith({ noop }, { shutdown: { timeout: 14000 } });
 
         expect(getShutdownManager().isShuttingDown()).toBe(false);
         await instance.close();

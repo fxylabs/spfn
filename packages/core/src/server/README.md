@@ -419,9 +419,10 @@ Phase 2  stopFetching(wait)        (if jobs) every worker on getBoss() stops fet
 Phase 3  ShutdownManager.drain()   wait for tracked operations and after-commit callbacks
 Phase 3.5 ShutdownManager.runHooks() onShutdown hooks, in order   ┐ one hooks' budget
 Phase 4  lifecycle.beforeShutdown()                               ┘
-Phase 5  stopBoss(wait)            (if jobs) wait for running job handlers, fail the jobs of
-                                   those still running, then stop pg-boss; sending stops here
-                                   (≤31s)
+Phase 5  stopBoss(wait)            (if jobs) wait for running job handlers — and, within the
+                                   same wait, for a fetch Phase 2 left in flight and the
+                                   handlers its jobs start — fail the jobs of those still
+                                   running, then stop pg-boss; sending stops here (≤31s)
 Phase 6  closeDatabase, closeEventTransport, closeCache  (≤5s, ≤2s, ≤5s)
          process.exit(0)
 ```
