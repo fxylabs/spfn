@@ -9,7 +9,7 @@
  * Requires the local test services (./scripts/test-services.sh start).
  */
 
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import postgres from 'postgres';
 import type { Sql } from 'postgres';
 
@@ -21,15 +21,15 @@ import { TEST_DATABASE_URL } from '../../db/__tests__/helpers/db-fixture';
 const TEST_SCHEMA = 'spfn_boss_stop_test';
 const QUEUE = 'boss-stop';
 
+/** A graceful stop's timeout no row reaches: only vitest's row timeout bounds the wait */
+const BEYOND_ROW_TIMEOUT = 60000;
+
 describe('pg-boss\'s stop() on the getBoss() instance', () =>
 {
     let sql: Sql;
 
-    let timersBefore = 0;
-
     beforeEach(async () =>
     {
-        timersBefore = timers();
         await initBoss({ connectionString: TEST_DATABASE_URL, schema: TEST_SCHEMA });
         await getBoss()!.createQueue(QUEUE, { retryLimit: 2 });
         sql = postgres(TEST_DATABASE_URL, { max: 1, onnotice: () => undefined });
@@ -50,7 +50,7 @@ describe('pg-boss\'s stop() on the getBoss() instance', () =>
         const id = await boss.send(QUEUE, {});
         await started.running;
 
-        await boss.stop({ graceful: true, timeout: 5000 });
+        await boss.stop({ graceful: true, timeout: BEYOND_ROW_TIMEOUT });
 
         expect(await jobState(id)).toBe('completed');
     }, 15000);
@@ -109,12 +109,17 @@ describe('pg-boss\'s stop() on the getBoss() instance', () =>
         await boss.send(QUEUE, {});
         await started.running;
         const restore = breakFailStatement(boss);
+        const order: string[] = [];
+        boss.on('stopped', () => order.push('pg-boss stopped'));
 
-        await expect(boss.stop({ graceful: false })).rejects.toThrow('connection terminated (injected)');
+        const stopping = boss.stop({ graceful: false });
+        stopping.catch(() => order.push('stop rejected'));
+
+        await expect(stopping).rejects.toThrow('connection terminated (injected)');
         restore();
         release();
 
-        await vi.waitFor(() => expect(timers()).toBeLessThanOrEqual(timersBefore), { timeout: 2000, interval: 50 });
+        expect(order).toEqual(['pg-boss stopped', 'stop rejected']);
         await expect(boss.stop({ graceful: false })).resolves.toBeUndefined();
         await boss.start();
         await expect(boss.work(QUEUE, async () => undefined)).resolves.toEqual(expect.any(String));
@@ -179,12 +184,6 @@ function breakFailStatement(boss: PgBoss): () => void
     {
         db.executeSql = executeSql;
     };
-}
-
-/** Timers alive in this process — pg-boss's intervals and the pool's among them */
-function timers(): number
-{
-    return process.getActiveResourcesInfo().filter((kind) => kind === 'Timeout').length;
 }
 
 function sleep(ms: number): Promise<void>
