@@ -98,3 +98,5 @@ the obvious metadata/loopback injection) rather than fully closing SSRF. Prefer
 - `isPrivateOrReservedIp(ip)` — the IP classifier, exported for reuse/testing.
 - `proxy-signature` — HMAC signing/verification for the proxy→backend trust path
   (see `@spfn/core/middleware` proxy-guard).
+- `forwarded-client` — the assertion a server-side `createApi` call makes to the app's own
+  proxy of the browser's address, keyed with the proxy key (see the Next.js README).

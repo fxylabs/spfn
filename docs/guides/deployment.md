@@ -633,9 +633,12 @@ spoof any IP.
 To make verified client IPs work in production, set two environment variables:
 
 - **`SPFN_PROXY_SECRET`** — the same value on the Next.js app and the API backend. The proxy
-  HMAC-signs each forwarded request; the backend's proxy-guard verifies the signature and then
-  trusts `x-spfn-proxy-client-ip`. Without it, requests are unsigned, the backend won't trust
-  the header, and the visitor IP falls back to the TCP peer address or `'unknown'`.
+  HMAC-signs each forwarded request, the client address included; the backend's proxy-guard
+  verifies the signature and then believes `x-spfn-proxy-client-ip`. The same key lets a
+  server component's or server action's call assert the browser's address to the proxy, so a
+  sign-in made there records the visitor rather than the Next.js server. Without it, requests
+  are unsigned, the backend won't believe the header, and the visitor IP falls back to the TCP
+  peer address or `'unknown'`.
 - **`TRUSTED_PROXY_HOPS`** — how many trusted proxies sit in front of the app (e.g. load
   balancer + nginx = `2`; default `1`). This tells the proxy how many rightmost
   `X-Forwarded-For` entries are your own infra so it picks the correct client entry.

@@ -52,8 +52,12 @@ From `@spfn/core/middleware`:
   — register with `app.use(...)`.
 - `maskSensitiveData(obj, sensitiveFields, seen?)` → deep-masked copy of `obj`.
 - `createProxyGuard(config?: ProxyGuardConfig)` → Hono middleware. Verifies the proxy→backend
-  HMAC signature (rotating key set, keyed by `keyId`) over `method+path+query+body`, plus an
-  optional origin allowlist, then sets `c.get('clientType')` (`'web'` | `'untrusted'`). Modes:
+  HMAC signature (rotating key set, keyed by `keyId`) over `method+path+query+body` and the
+  client address (`x-spfn-proxy-client-ip`, signature version 2), plus an optional origin
+  allowlist, then sets `c.get('clientType')` (`'web'` | `'untrusted'`) and, under a version-2
+  signature, `c.get('proxyClientIp')`. A version-1 signature (no
+  `x-spfn-proxy-signature-version` header, an older proxy) is still verified through 0.4.x, but
+  its address is ignored; 0.5.0 refuses it. Modes:
   `off` (default) / `tag` / `strict` — every gate is evaluated in BOTH modes, only enforcement
   differs (strict rejects 403/413, tag tags `untrusted` and continues). `maxBodyBytes` caps the
   hashed body (stream-measured). Usually enabled via `defineServerConfig().proxyGuard({...})`,
@@ -63,8 +67,8 @@ From `@spfn/core/middleware`:
 - `rateLimit(options: RateLimitOptions)` → Hono middleware. Redis-backed fixed-window limiter,
   registered under the named `'rateLimit'` slot so routes can `.skip(['rateLimit'])`. Attach
   with `.use([rateLimit({...})])`. See [rateLimit](#ratelimit).
-- `getClientIp(c)` → the client address: the proxy-attested address on a request proxy-guard
-  verified; else, when trusted proxies are declared (`SERVER_TRUSTED_PROXY_HOPS` /
+- `getClientIp(c)` → the client address: the address the proxy signed, on a request
+  proxy-guard verified (`c.get('proxyClientIp')`); else, when trusted proxies are declared (`SERVER_TRUSTED_PROXY_HOPS` /
   `defineServerConfig().trustedProxyHops(n)`), the `X-Forwarded-For` entry n hops from the
   right; else the TCP peer address; else `'unknown'`. See [Client address](#client-address).
 - `setTrustedProxyHops(n | undefined)` / `parseTrustedProxyHops(value)` → the declaration
@@ -461,15 +465,23 @@ by source IP.
 request log and `@spfn/auth` (device provenance, access logs) all read it. In order:
 
 1. A request proxy-guard verified as the Next.js proxy's: the address the proxy resolved and
-   sent signed (`x-spfn-proxy-client-ip`). Unchanged. Only when proxy-guard runs — its mode is
-   `'tag'` or `'strict'`; with the default `'off'` nothing is verified and this step never
-   applies (see *Browser traffic through the Next.js proxy* below).
+   signed (`x-spfn-proxy-client-ip`, covered by a version-2 signature — #363). Only when
+   proxy-guard runs — its mode is `'tag'` or `'strict'`; with the default `'off'` nothing is
+   verified and this step never applies (see *Browser traffic through the Next.js proxy*
+   below). A `clientType` set by anything else (`'mobile'` from client proof) does not make the
+   header believed, and neither does a version-1 signature, which does not cover it.
 2. When the operator declared trusted proxies: the `X-Forwarded-For` entry that many hops
    **from the right** — the one the outermost trusted proxy appended. Entries to its left are
    the caller's own and are skipped, so a forged left-most value changes nothing. A chain with
    fewer entries than the declared hops did not come through the declared proxies and names no
    client: the request falls through to the TCP peer.
 3. The TCP peer address (Node adapter), else `'unknown'`.
+
+A declaration trusts whoever reaches the backend to have come through the declared proxies. A
+caller that reaches it directly, bypassing the load balancer, writes its own `X-Forwarded-For`
+entries and so chooses its address for every per-IP limit. Keep the backend unreachable but
+through the balancer, or run proxy-guard in `'strict'` mode, which refuses any request the
+Next.js proxy did not sign.
 
 With no declaration neither `X-Forwarded-For` nor `X-Real-IP` is read: a direct caller that
 sent a new `X-Forwarded-For` value per request used to be a new caller per request to every
@@ -504,7 +516,9 @@ visitor behind it. For per-client limits on browser traffic:
 
 - turn proxy-guard on — `defineServerConfig().proxyGuard({ mode: 'tag' })` (or `'strict'`)
   with the same `SPFN_PROXY_SECRET` on the proxy and the backend — so the signed client
-  address is read; or
+  address is read. That key is also what lets a server component's or server action's call
+  carry the browser's address rather than the Next.js server's (see the Next.js README,
+  *A server-side call carries the browser's address*); or
 - when your Next.js server's request to the backend carries an `X-Forwarded-For` naming the
   client (a forwarder of your own — the spfn Next.js proxy does not forward that header), declare
   the hops with `SERVER_TRUSTED_PROXY_HOPS` / `trustedProxyHops(n)`.

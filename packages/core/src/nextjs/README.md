@@ -362,19 +362,43 @@ the rightmost `TRUSTED_PROXY_HOPS` (default `1`) entries as your own trusted inf
 re-emits that single address under a dedicated header, `x-spfn-proxy-client-ip`. This avoids
 passing a client-controllable header straight through to the backend.
 
-The backend only **trusts** that header on requests it can prove came through this proxy. Set
-the same **`SPFN_PROXY_SECRET`** on the proxy (or `proxySecret` in config) and on the backend:
-the proxy then HMAC-signs each forwarded request and the backend's proxy-guard marks it
-verified (`clientType ≠ 'untrusted'`), so `getClientIp(c)` returns the real visitor IP from
-`x-spfn-proxy-client-ip`. See [@spfn/core/middleware](../middleware/README.md) proxy-guard +
-`getClientIp`.
+The backend only **believes** that address when the proxy signed it. Set the same
+**`SPFN_PROXY_SECRET`** on the proxy (or `proxySecret` in config) and on the backend: the proxy
+then HMAC-signs each forwarded request — the address included (signature version 2,
+`x-spfn-proxy-signature-version: 2`) — and the backend's proxy-guard, once it verified the
+signature, hands the address to `getClientIp(c)`. An address changed after signing fails
+verification. See [@spfn/core/middleware](../middleware/README.md) proxy-guard + `getClientIp`.
 
-Without a shared secret the request is unsigned, the backend won't trust that header, and
-`getClientIp` falls back to the raw `X-Forwarded-For` first hop — which the proxy didn't
-forward, so the client IP collapses to the TCP peer or `'unknown'`. If your visitor IP is
-missing in production, set `SPFN_PROXY_SECRET` on both sides (and match `TRUSTED_PROXY_HOPS`
-to your LB/nginx depth) rather than widening the header allowlist — forwarding raw
-`X-Forwarded-For` reintroduces a spoofable IP.
+Without a shared secret the request is unsigned, the backend won't believe that header, and
+`getClientIp` reads only what the backend's own declaration allows
+(`SERVER_TRUSTED_PROXY_HOPS`) — the proxy forwards no `X-Forwarded-For`, so the client IP
+collapses to the TCP peer or `'unknown'`. If your visitor IP is missing in production, set
+`SPFN_PROXY_SECRET` on both sides (and match `TRUSTED_PROXY_HOPS` to your LB/nginx depth) rather
+than widening the header allowlist — forwarding raw `X-Forwarded-For` reintroduces a spoofable IP.
+
+### A server-side call carries the browser's address
+
+A server component, server action or route handler calls through `createApi` too, but its call
+is a new request from the Next.js server to the app's own proxy: its `X-Forwarded-For` names
+the server, not the browser. So, server-side, `createApi` reads the browser's address off the
+request it runs for (`next/headers`) — with the very rule the proxy uses, `TRUSTED_PROXY_HOPS`
+entries from the right of `X-Forwarded-For` — and **asserts** it to the proxy in
+`x-spfn-forwarded-client: <ip>;<timestamp>;<nonce>;<hmac>`. The HMAC is keyed with
+`SPFN_PROXY_SECRET` and covers a fixed label, the call's method and path, the address, the
+timestamp and the nonce.
+
+The proxy believes an assertion it can verify with its own key, for that method and path,
+within 30 seconds; it then forwards (and signs) the asserted address. Anything else — absent, a
+browser's forgery, one replayed on another route or too late — is ignored, and the address is
+read off `X-Forwarded-For` as for any request. The signing code is server-only: the client
+loads it from `@spfn/core/nextjs/server-call` by dynamic import, only where `next/headers`
+answers, and a browser build resolves that subpath to an empty stub (its `browser` export
+condition).
+
+**Only with `SPFN_PROXY_SECRET` set** does a server-side call carry the browser's address.
+Without it nothing is asserted, and the backend sees the call as it always did: from the
+Next.js server. The client signs with `SPFN_PROXY_SECRET` itself, so a proxy given a different
+`proxySecret` in its config ignores the assertion.
 
 ### Full config example
 
@@ -678,8 +702,8 @@ export async function createUser(formData: FormData) {
 - **`createApi` needs no codegen; the *proxy* does.** The client is metadata-free. The
   `routeMap` the proxy consumes is the generated artifact.
 - **Raw `X-Forwarded-For` is not forwarded — don't widen the allowlist to "fix" client IP.**
-  The proxy re-emits the resolved client IP as `x-spfn-proxy-client-ip`, trusted only on
-  HMAC-signed requests. Missing visitor IP in production means `SPFN_PROXY_SECRET` isn't set on
+  The proxy re-emits the resolved client IP as `x-spfn-proxy-client-ip`, believed only under
+  a signature that covers it. Missing visitor IP in production means `SPFN_PROXY_SECRET` isn't set on
   both sides (and/or `TRUSTED_PROXY_HOPS` is wrong), not that the header allowlist needs
   `x-forwarded-for` — adding it back makes the IP spoofable. See *Header forwarding & client IP*.
 - **Each `.headers()/.cookies()/.fetchOptions()/.timeout()/.onRequest()/.onResponse()` returns a new
