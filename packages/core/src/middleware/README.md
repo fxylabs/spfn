@@ -440,6 +440,13 @@ by source IP.
 - **On exceed**: throws `TooManyRequestsError` (429) and sets a `Retry-After` header derived
   from the key's remaining TTL.
 - **Storage**: keys are `ratelimit:{scope}:{dimension}` in the shared cache.
+- **One counter per scope, not per limiter**: limiters on one route that share a `scope` count
+  a request once **each** against the same key. A router's `rateLimit({ limit: 3, … })` and an
+  equal one on its route refuse the 2nd request, not the 4th — as the global default and a
+  route's `rateLimit(...)` without a `scope` already did. To replace the inherited limit on a
+  route, `.skip(['rateLimit'])` it and `.use([rateLimit(...)])` the route's own; to layer two
+  limits, give one its own `scope`, or tag the route with a
+  [`rateLimitPolicy`](#named-policies--ratelimitpolicyname-fallback), whose scope is its name.
 
 > **IP trust**: the IP dimension is `getClientIp(c)`, which reads `X-Forwarded-For` only as far
 > as you declared proxies in front of the server — see [Client address](#client-address). An

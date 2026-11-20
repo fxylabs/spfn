@@ -6,6 +6,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { Hono } from 'hono';
 
 const evalMock = vi.fn();
 let cacheClient: { eval: typeof evalMock } | undefined = { eval: evalMock };
@@ -22,6 +23,7 @@ import {
 } from '../rate-limit';
 import { getClientIp } from '../client-ip';
 import { TooManyRequestsError } from '../../errors';
+import { defineRouter, registerRoutes, route } from '../../route';
 
 function makeCtx(headers: Record<string, string> = {})
 {
@@ -235,6 +237,50 @@ describe('rateLimitPolicy named policies', () =>
 
         setRateLimitPolicies(undefined);
         expect(getRateLimitPolicy('p')).toBeUndefined();
+    });
+});
+
+describe('rateLimit stacked on one route', () =>
+{
+    beforeEach(() =>
+    {
+        cacheClient = undefined;
+        resetMemoryRateLimitStore();
+    });
+
+    /** The statuses of four requests to `/x` of `router`, which stacks limiters on it. */
+    async function statuses(router: ReturnType<typeof defineRouter>): Promise<number[]>
+    {
+        const app = new Hono();
+        app.onError((error, c) => c.json({}, error instanceof TooManyRequestsError ? 429 : 500));
+        registerRoutes(app, router, []);
+        const result: number[] = [];
+        for (let i = 0; i < 4; i++)
+        {
+            result.push((await app.request('/x')).status);
+        }
+
+        return result;
+    }
+
+    const limit = () => rateLimit({ limit: 3, windowMs: 60_000 });
+    const ok = async () => ({ ok: true });
+
+    it('counts a request once per limiter sharing a scope, as the README states', async () =>
+    {
+        expect(await statuses(defineRouter({ x: route.get('/x').use([limit()]).handler(ok) }).use([limit()])))
+            .toEqual([200, 429, 429, 429]);
+    });
+
+    it('counts it once when the route skips the inherited limiter for its own, or scopes its own apart', async () =>
+    {
+        expect(await statuses(defineRouter({ x: route.get('/x').skip(['rateLimit']).use([limit()]).handler(ok) }).use([limit()])))
+            .toEqual([200, 200, 200, 429]);
+
+        resetMemoryRateLimitStore();
+        const own = rateLimit({ limit: 3, windowMs: 60_000, scope: 'x-own' });
+        expect(await statuses(defineRouter({ x: route.get('/x').use([own]).handler(ok) }).use([limit()])))
+            .toEqual([200, 200, 200, 429]);
     });
 });
 

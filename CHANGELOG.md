@@ -250,7 +250,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   route's `opsOrUser({ opsScopes: ['write'], … })` — before, only the router's check ran and a
   read-only ops token passed the write route. `tenancy.guard(...)` is typed as returning
   `NamedMiddleware<'tenancyGuard'>`. `rateLimitPolicy(...)` is unchanged (one counter per policy name
-  stays intended). **To migrate:** pass `.handler` where a call result goes to Hono (`app.use`,
+  stays intended). A `rateLimit(...)` call can now sit on a router; limiters that share a
+  scope count against one key, so an equal `rateLimit(...)` on a route below counts each request
+  twice — as the global default and a route-level `rateLimit(...)` already did. Replace the
+  inherited one with `.skip(['rateLimit'])`, or give one its own `scope`, or use `rateLimitPolicy`.
+  **To migrate:** pass `.handler` where a call result goes to Hono (`app.use`,
   `app.get(path, …)`, `combine`, a hand-written chain), or put it in `.use([...])` directly; a
   `defineMiddleware(name, factory(args))` wrapper becomes `factory(args)`.
 
