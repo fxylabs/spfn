@@ -34,8 +34,8 @@ Values:
 - `route` — builder entry. Methods: `route.get/post/put/patch/delete(path)`. **No `head`/`options`.**
 - `defineRouter(routes)` — build a `Router`. Returned router is chainable: `.packages([...])`, `.use([...])`.
 - `registerRoutes(app, router, namedMiddlewares?, collectedRoutes?)` — mount onto Hono, returns `RegisteredRoute[]`.
-- `defineMiddleware(name, handler | factory, options?)` — named middleware (param-count auto-detects handler vs factory).
-- `defineMiddlewareFactory(name, factory, options?)` — explicit factory form (use when the factory itself takes exactly 2 args).
+- `defineMiddleware(name, handler, options?)` — named middleware; `handler` is the Hono handler, whatever its parameter count.
+- `defineMiddlewareFactory(name, factory, options?)` — named middleware factory: `factory(...args)` returns the handler.
   A call returns a named middleware `{ name, _name, handler, skips?, instance: true }` — not a Hono handler.
 - `Nullable(schema)` → `T | null`; `OptionalNullable(schema)` → `T | null | undefined`.
 - `isHttpMethod(value)` — type guard for `'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE'`.
@@ -542,13 +542,14 @@ route.post('/posts')
 ### Named middleware (`defineMiddleware`)
 
 A named middleware can be **skipped by name** at the route level and is **deduplicated** if
-present both globally and route-level. `defineMiddleware` auto-detects form by parameter count:
-a 2-arg function is a `(c, next)` handler; anything else is a factory.
+present both globally and route-level. `defineMiddleware` takes the handler itself — a
+one-parameter `async (c) => c.json(...)` is a handler too. A middleware that takes arguments is
+defined with `defineMiddlewareFactory`.
 
 ```typescript
 import { defineMiddleware } from '@spfn/core/route';
 
-// Regular handler — exactly (c, next)
+// Handler
 export const authMiddleware = defineMiddleware('auth', async (c, next) =>
 {
     if (!c.req.header('authorization')) return c.json({ error: 'Unauthorized' }, 401);
@@ -556,8 +557,8 @@ export const authMiddleware = defineMiddleware('auth', async (c, next) =>
     await next();
 });
 
-// Factory — any arg count other than 2
-export const requirePermissions = defineMiddleware('permission',
+// Factory
+export const requirePermissions = defineMiddlewareFactory('permission',
     (...perms: string[]) => async (c, next) =>
     {
         if (!hasPermissions(c.get('user'), perms)) return c.json({ error: 'Forbidden' }, 403);

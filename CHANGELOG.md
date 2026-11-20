@@ -230,11 +230,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   change. Not breaking.
 - **BREAKING: @spfn/core, @spfn/auth: a middleware factory call returns a named middleware; calls
   are never merged by name (spfn/spfn#168).** A call of a factory made by
-  `defineMiddlewareFactory(name, factory, options?)` — or by `defineMiddleware(name, factory, options?)`,
-  which still detects a factory and now delegates — returns `{ name, _name, handler, skips?, instance: true }`
+  `defineMiddlewareFactory(name, factory, options?)` returns `{ name, _name, handler, skips?, instance: true }`
   instead of the inner Hono handler. `defineMiddlewareFactory` takes the same `options` as
-  `defineMiddleware`, and `skips` declared on either factory apply to every call (they were dropped
-  before). Every call carries the factory's name: `.skip(['permission'])` and another middleware's
+  `defineMiddleware`, and `skips` declared on the factory apply to every call (they were dropped
+  before). `defineMiddleware(name, fn, options?)` no longer guesses from `fn`'s parameter count
+  whether `fn` is a factory: `fn` is always the handler, so a one-parameter
+  `async (c) => c.json(…)` answers its response. **Rename** every `defineMiddleware(name, (...args) =>
+  handler)` to `defineMiddlewareFactory(name, (...args) => handler)` — the old call is now a type
+  error (the factory returns a handler, not a response). Every call carries the factory's name: `.skip(['permission'])` and another middleware's
   `skips: ['permission']` remove every `requirePermissions(...)` a route inherits — which also means
   **a route can now `.skip([...])` an authorization guard by its factory name** (`'permission'`,
   `'anyPermission'`, `'role'`, `'roleGuard'`, `'opsScope'`, `'machineScope'`, `'opsOrUser'`,

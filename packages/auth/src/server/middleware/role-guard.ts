@@ -5,7 +5,7 @@
  */
 
 import type { Context, Next } from 'hono';
-import { defineMiddleware } from '@spfn/core/route';
+import { defineMiddlewareFactory } from '@spfn/core/route';
 import { getAuth, authLogger } from '@spfn/auth/server';
 import { ForbiddenError } from '@spfn/core/errors';
 import { InsufficientRoleError } from '@spfn/auth/errors';
@@ -57,7 +57,7 @@ export interface RoleGuardOptions
  *   .handler(async (c) => { ... });
  * ```
  */
-export const roleGuard = defineMiddleware('roleGuard',
+export const roleGuard = defineMiddlewareFactory('roleGuard',
     (options: RoleGuardOptions) => async (c: Context, next: Next) =>
     {
         const { allow, deny } = options;

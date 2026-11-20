@@ -11,7 +11,7 @@ import { Type } from '@sinclair/typebox';
 import { Hono, type Context, type MiddlewareHandler, type Next } from 'hono';
 import { describe, expect, it } from 'vitest';
 
-import { defineMiddleware } from '../../route/define-middleware';
+import { defineMiddleware, defineMiddlewareFactory } from '../../route/define-middleware';
 import { registerRoutes } from '../../route/register-routes';
 import { route, type RouteDef } from '../../route/route-builder';
 import { defineRouter, type Router } from '../../route/router';
@@ -383,7 +383,7 @@ describe('5 — the same refusal on /_ops', () =>
 
     it('does not refuse requireOpsScope\'s real shape — a factory call, never merged by name — and runs both checks', async () =>
     {
-        const scopeFactory = defineMiddleware('opsScope', (...scopes: string[]) => async (c: Context, next: Next) =>
+        const scopeFactory = defineMiddlewareFactory('opsScope', (...scopes: string[]) => async (c: Context, next: Next) =>
         {
             const granted = new Set((c.req.header('X-Scopes') ?? '').split(','));
             const missing = scopes.filter(scope => !granted.has(scope));

@@ -37,7 +37,7 @@
 import type { Context, Next } from 'hono';
 import { decodeProtectedHeader } from 'jose';
 
-import { defineMiddleware } from '@spfn/core/route';
+import { defineMiddleware, defineMiddlewareFactory } from '@spfn/core/route';
 import { ForbiddenError, UnauthorizedError } from '@spfn/core/errors';
 
 import { clientProofRefusalResponse } from '../client-proof/refusal-response';
@@ -452,7 +452,7 @@ function copyPrincipal(resolved: MachinePrincipal | null | undefined, scheme: st
  *     .handler(async () => { ... });
  * ```
  */
-export const requireMachineScope = defineMiddleware('machineScope',
+export const requireMachineScope = defineMiddlewareFactory('machineScope',
     (...scopes: string[]) => async (c: Context, next: Next) =>
     {
         const principal = getMachinePrincipal(c);

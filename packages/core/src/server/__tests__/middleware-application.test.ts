@@ -24,7 +24,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { Hono, type Context, type MiddlewareHandler, type Next } from 'hono';
+import { Hono, type Context, type MiddlewareHandler } from 'hono';
 import { route, defineRouter, defineMiddleware, defineMiddlewareFactory, registerRoutes, resolveRouteMiddlewares } from '@spfn/core/route';
 import type { NamedMiddleware } from '@spfn/core/route';
 import { defineServerConfig } from '../config-builder';
@@ -744,16 +744,12 @@ describe('factory calls (#168)', () =>
         );
     });
 
-    it('F5: a factory made by defineMiddleware(name, factory, { skips }) gives each call its skips', async () =>
+    it('F5: defineMiddleware takes a one-parameter function for the handler, not for a factory', async () =>
     {
         const { serve } = guards();
-        const door = defineMiddleware('door', (name: string) => async (c: Context, next: Next) =>
-        {
-            c.header('X-Door', name);
-            await next();
-        }, { skips: ['auth'] });
-        const request = serve(defineRouter({ door: route.get('/door').use([door('north')]).handler(async () => ({ ok: true })) }));
+        const teapot = defineMiddleware('teapot', async (c: Context) => c.json({ from: 'teapot' }, 418));
+        const request = serve(defineRouter({ pot: route.get('/pot').use([teapot]).handler(async () => ({ ok: true })) }));
 
-        expect(await request('/door', { Authorization: '' })).toEqual({ status: 200, ran: [] });
+        expect(await request('/pot')).toEqual({ status: 418, ran: ['auth'] });
     });
 });

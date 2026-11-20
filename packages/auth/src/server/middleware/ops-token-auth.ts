@@ -26,7 +26,7 @@
  */
 
 import type { Context, Next } from 'hono';
-import { defineMiddleware } from '@spfn/core/route';
+import { defineMiddleware, defineMiddlewareFactory } from '@spfn/core/route';
 import { ForbiddenError, UnauthorizedError } from '@spfn/core/errors';
 import { verifyOpsTokenService, type VerifiedOpsToken } from '../services/ops-token.service';
 
@@ -70,7 +70,7 @@ export const opsTokenAuth = defineMiddleware('opsTokenAuth', async (c, next) =>
  *     .handler(async () => { ... });
  * ```
  */
-export const requireOpsScope = defineMiddleware('opsScope',
+export const requireOpsScope = defineMiddlewareFactory('opsScope',
     (...scopes: string[]) => async (c: Context, next: Next) =>
     {
         const token = getOpsToken(c);
