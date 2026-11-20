@@ -589,6 +589,15 @@ unmarked and the account stays in the enrolment-only state — and its answer ca
 ordinary from its next request without a second call. With no policy, or outside that state, it
 marks nothing and its answer has no `mfaStatus`, as before.
 
+**The marking registration is also a step-up.** In the same transaction it opens
+[the step-up window](#the-step-up-window) for the credential that registered — the device key, or
+the application profile with its key id — with method `passkey`, exactly as `totp/confirm` does for
+a TOTP: the ceremony just proved the factor the account now holds, with user verification. So the
+sensitive change that usually follows first set-up, a password change, needs no second ceremony.
+Only that registration records one: a registration without user verification records nothing, and
+on an account that is already enrolled adding a passkey does not refresh the window — it needed an
+open window to start, and registering more credentials must not keep it open.
+
 The client flow, by what the account holds (`secondFactorEnrolmentRequired: true` on the sign-in):
 
 | the account holds | flow |
@@ -599,6 +608,24 @@ The client flow, by what the account holds (`secondFactorEnrolmentRequired: true
 
 A 403 `STEP_UP_REQUIRED` on any enrolment call means "step up first", exactly as on an enrolled
 account's sensitive change.
+
+##### First set-up: a temporary password and a required passkey
+
+An account an operator created with a temporary password (`passwordChangeRequired: true`), under
+`methods: ['passkey']`, holding nothing yet:
+
+1. **Sign in** with the temporary password → a session with `secondFactorEnrolmentRequired: true`.
+2. **Register a passkey** with user verification (`enrollPasskey`) → it is marked, the session is
+   ordinary, and this device's step-up window is open.
+3. **`PUT /_auth/password`** with `currentPassword` and `newPassword` → 204, no step-up ceremony in
+   between. `currentPassword` (the temporary one) stays required here: with the window just opened,
+   a session taken in those minutes could otherwise set a password it never knew.
+4. The change still signs out every session, this one included, so the person **signs in again**
+   with the new password and their passkey (the 202 and `mfa/verify`). Keeping the session that made
+   the change is the second part of #372, not yet released.
+
+Before this release step 3 answered 403 `STEP_UP_REQUIRED` and needed an `mfa/step-up` ceremony with
+the passkey registered seconds earlier — three passkey ceremonies in all; it is two now.
 
 When the owner has lost what the account holds, the operator resets it:
 `resetSecondFactorService(userId)` (from `@spfn/auth/server`), in one transaction, revokes every
@@ -3581,6 +3608,28 @@ code, a recovery code, or an assertion with user verification from a marked pass
 `POST /_auth/mfa/step-up/options`) — and retries. 403 rather than 401 on purpose, and for the
 reason `RECENT_AUTH_REQUIRED` is: a 401 on an authenticated route is what a web client reads
 as "the session is gone", so it would sign the user out instead of asking for a code.
+
+From a browser, `stepUpWithPasskey(api)` from `@spfn/auth/client` runs the passkey step-up —
+options, the ceremony, `mfa/step-up` — and answers the discriminated union the other passkey helpers
+do: a ceremony that did not happen is `{ ok: false, reason }` (`unsupported`; `no-credential` when
+the person dismissed the sheet or had nothing to offer; `error`), and the server declining rejects the promise, as `completeMfaWithPasskey`
+does — 401 `MfaVerificationFailedError` for an unmarked passkey or one used without user
+verification, 429 `SECOND_FACTOR_LOCKED`.
+
+```typescript
+import { stepUpWithPasskey } from '@spfn/auth/client';
+
+const stepUp = await stepUpWithPasskey(authApi);
+
+if (stepUp.ok)
+{
+    await authApi.revokeAllKeys.call({ body: {} });   // the change that answered STEP_UP_REQUIRED
+}
+```
+
+Besides `mfa/verify`, `mfa/step-up` and `totp/confirm`, one more proof opens the window: a passkey
+registration that marks the account's first passkey factor in the policy's enrolment-only state
+([above](#enrolling-when-the-account-already-holds-a-credential)). No other registration does.
 
 A key **replacement carries the window across** — `rotateKey`, a renewal, or a sign-in whose
 `replacementProof` the old key signed — because each is proof of the same device; otherwise the web

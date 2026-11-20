@@ -168,7 +168,9 @@ nothing changes. With `required: true` an account with no listed factor signs in
 can only enrol one — its `LoginResult` carries `secondFactorEnrolmentRequired: true`, and every
 other route, the app's included, answers 403 `SECOND_FACTOR_ENROLMENT_REQUIRED` until it enrols, on
 the same session — the principal of any auth profile included. An account that holds nothing enrols
-on first use (a passkey registered in that state is marked as the factor at once); one that already
+on first use (a passkey registered in that state with user verification is marked as the factor at
+once, and opens the device's step-up window, so a password change right after needs no
+`mfa/step-up`); one that already
 holds a passkey or a TOTP proves it with `mfa/step-up` first, or its enrolment calls answer 403
 `STEP_UP_REQUIRED`. An unlisted method's routes answer 404 `SECOND_FACTOR_METHOD_DISABLED`, and
 removing the last listed factor is 409 `SECOND_FACTOR_REQUIRED` (`resetSecondFactorService(userId)` is the
@@ -1144,8 +1146,11 @@ attempt that is mid-step-up.
 Separately from sign-in, an enrolled account has to have proved its second factor on the
 calling device within `SPFN_AUTH_MFA_STEP_UP_MINUTES` (default 10) before changing its
 password, signing every device out, or changing the second factor itself. Otherwise the answer
-is **403 `STEP_UP_REQUIRED`** and the remedy is `POST /_auth/mfa/step-up` followed by a retry.
-An account with nothing enrolled never sees it.
+is **403 `STEP_UP_REQUIRED`** and the remedy is `POST /_auth/mfa/step-up` followed by a retry —
+from a browser with a passkey, `stepUpWithPasskey(api)` from `@spfn/auth/client`, which answers a
+`PasskeyResult` and rejects on a server refusal as `completeMfaWithPasskey` does. An account with
+nothing enrolled never sees it. Registering the first passkey factor under a required policy opens
+the window as well; no other registration does.
 
 ### Wrong codes
 
