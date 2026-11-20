@@ -72,6 +72,19 @@ export class SpfnDatabasePort implements DatabasePort
 
         const after = await this.status({ cwd: request.cwd });
 
+        // An empty pending list from a status nobody could read is not "all
+        // applied": the migration may have done anything.
+        if (!after.reachable)
+        {
+            return {
+                ok: false,
+                applied: before.applied,
+                pending: before.pending,
+                failure: 'status-unreadable-after-migrate',
+                unreadableAfter: after,
+            };
+        }
+
         return {
             ok: after.pending.length === 0,
             applied: after.applied,
@@ -148,6 +161,9 @@ export function toStatus(report: DbStatusReportV1 | null): DatabaseStatus
         reachable: report.reachable,
         ...(report.reason === 'bookkeeping-mismatch'
             ? { bookkeepingMismatch: report.detail ?? 'bookkeeping does not match local migrations' }
+            : {}),
+        ...(report.reason === 'permission-denied'
+            ? { permissionDenied: report.detail ?? 'permission denied' }
             : {}),
         // Counts rather than names: the status contract has no field for how
         // many of a target are done, and the names of applied migrations are

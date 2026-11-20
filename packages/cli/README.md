@@ -518,7 +518,7 @@ loaded `.env` chain.
 | `db generate` (`g`) | Generate migrations from schema changes (timestamp-prefixed) |
 | `db push` | Diff with Drizzle Kit's current PostgreSQL engine and apply the selected DDL atomically. Destructive changes need confirmation; `--force` applies them. `--dry-run` shows the classified statements and each function package's pending migrations by name, then stops. Each plan query runs in its own `BEGIN READ ONLY` transaction, rolled back when the query ends, so it writes nothing and holds no lock between statements. Before the plan runs, `transaction_read_only` is read once, in one such transaction; when PostgreSQL does not report it `on` it exits 1 |
 | `db migrate` (`m`) | Run pending migrations. `--with-backup` snapshots first |
-| `db status` | Show which migrations are applied and which are pending, for the project and for each installed function package. The project's pending list is drizzle-orm's own (`getMigrationsToRun`, by folder name), so it is what `db migrate` runs; when migrate would refuse the project's bookkeeping, status exits 1 with `bookkeeping does not match local migrations` and the remedy. `--json` prints one machine-readable report instead (one line after the `#spfn-db-status#` marker); when it could not read a status it has `reachable: false` and `reason`: `"not-configured"` (no `DATABASE_URL`), `"unreachable"` (the database did not answer) or `"bookkeeping-mismatch"` (it answered, and `db migrate` would refuse the project's bookkeeping; `detail` carries the text). `spfn dev`/`spfn start` refuse to start on a mismatch before spawning the server, whatever `--allow-pending-migrations` says |
+| `db status` | Show which migrations are applied and which are pending, for the project and for each installed function package. The project's pending list is drizzle-orm's own (`getMigrationsToRun`, by folder name), so it is what `db migrate` runs; when migrate would refuse the project's bookkeeping, status exits 1 with `bookkeeping does not match local migrations` and the remedy. `--json` prints one machine-readable report instead (one line after the `#spfn-db-status#` marker); when it could not read a status it has `reachable: false` and `reason`: `"not-configured"` (no `DATABASE_URL`), `"unreachable"` (the database did not answer), `"bookkeeping-mismatch"` (it answered, and `db migrate` would refuse the project's bookkeeping; `detail` carries the text) or `"permission-denied"` (it answered and refused the role in `DATABASE_URL` the read, SQLSTATE 42501 — typically no grant on schema `drizzle`; `detail` carries PostgreSQL's message). An unread status always has an empty `pending` list, which never means "nothing pending": check `reachable` first. The human form exits 1 on all of them and, on a permission error, names the grant (the `@spfn/core` db README, "Database roles", has the SQL; no spfn command grants it yet). `spfn dev`/`spfn start` refuse to start on a mismatch before spawning the server, whatever `--allow-pending-migrations` says; on any other read failure they print one line (`Could not check migrations: …`) and start |
 | `db studio` | Open Drizzle Studio. `-p, --port` (auto-finds a free port) |
 | `db check` | Verify the database connection |
 | `db drop` | Drop all tables — **destructive**, double-prompts (see [Pitfalls](#pitfalls)) |
@@ -1135,6 +1135,14 @@ The migration step waits (`KIT_WAITING_DATABASE`) only while no database is conf
 reachable. When `spfn db status --json` reports `reason: "bookkeeping-mismatch"`, the step is
 refused instead — `CLI_MIGRATION_BOOKKEEPING_MISMATCH`, exit 4, with the mismatch's text as
 `evidence.detail` — because waiting changes nothing until the bookkeeping is fixed by hand.
+When it reports `reason: "permission-denied"` — before migrating or in the read after — the
+step is refused with `CLI_MIGRATION_STATUS_UNREADABLE`, exit 4, `evidence.reason:
+"permission-denied"` and PostgreSQL's message as `evidence.detail`: the app role cannot read
+schema `drizzle`, and until spfn grants it (it does not yet) the remedy is the hand SQL in the
+`@spfn/core` db README, "Database roles", run as the owner; then `spfn kit resume`. A status
+that cannot be read after migrating for any other reason is `KIT_MIGRATION_FAILED` (resumable),
+never success, and the step's re-check on resume and the `db-status` gate fail on an unread
+status with the reason instead of reading its empty `pending` list as "nothing pending".
 
 What still stops a real install is the trust root. The list of keys this CLI will accept a
 signed release from is **empty in this build**, because the release signing key is not

@@ -441,7 +441,8 @@ describe('what every local port shares', () =>
 
     it('builds all four ports, with the gate port sharing the database port', async () =>
     {
-        const ports = createKitLocalPorts({ database: { run: recording([ok(marked(unreadableStatusReport('not-configured')))]) } });
+        const nothingPending = marked(migrationStatusReport({ packages: [], project: null }));
+        const ports = createKitLocalPorts({ database: { run: recording([ok(nothingPending)]) } });
 
         expect(await ports.gates.run('db-status', { cwd: root })).toEqual({ ok: true });
         expect(typeof ports.loadProjectModule).toBe('function');

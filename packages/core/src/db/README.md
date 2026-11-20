@@ -807,7 +807,10 @@ ALTER DEFAULT PRIVILEGES FOR ROLE app_owner IN SCHEMA drizzle
 ```
 
 Without it the check cannot read them: it logs one warning (`permission denied for schema
-drizzle`) and the server starts unchecked.
+drizzle`) and the server starts unchecked. `spfn dev` and `spfn start` print one line saying so
+before they spawn it; `spfn db status --json` reports `reason: "permission-denied"`, and
+`spfn kit install`/`update` refuse their migration step on it
+(`CLI_MIGRATION_STATUS_UNREADABLE`).
 
 A database migrated by an earlier CLI may also hold `drizzle.__spfn_fn_migrations`: one
 shared table where those versions recorded every function package's applied migrations by

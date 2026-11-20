@@ -77,12 +77,15 @@ describe('a project bookkeeping mismatch', () =>
         expect(logged.join('\n')).toContain('does not apply');
     });
 
-    it('does not block the pre-start check when the status could not be read at all', async () =>
+    it('does not block the pre-start check when the status could not be read at all, and says so in one line', async () =>
     {
         vi.mocked(collectMigrationStatus).mockRejectedValue(new Error('connection refused'));
+        const warned = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
 
         const check = await checkPendingMigrationsBeforeStart(process.cwd(), DATABASE_URL, false);
 
         expect(check).toEqual({ block: false, allowPending: true });
+        expect(warned).toHaveBeenCalledTimes(1);
+        expect(String(warned.mock.calls[0][0])).toContain('Could not check migrations: connection refused');
     });
 });

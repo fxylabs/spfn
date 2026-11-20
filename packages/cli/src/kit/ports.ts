@@ -229,6 +229,27 @@ export interface DatabaseStatus
      * `spfn db migrate` refuses: what does not match, and the remedy.
      */
     bookkeepingMismatch?: string;
+    /**
+     * Set when the database refused the app role the read (SQLSTATE 42501):
+     * PostgreSQL's message, which names what was refused. Like a mismatch it
+     * does not change by waiting — someone has to grant the read.
+     */
+    permissionDenied?: string;
+}
+
+/** Why a status could not be read, in a word or PostgreSQL's own message. */
+export function unreadableStatusReason(status: DatabaseStatus): string
+{
+    if (status.permissionDenied !== undefined)
+    {
+        return `permission denied (${status.permissionDenied})`;
+    }
+    if (status.bookkeepingMismatch !== undefined)
+    {
+        return 'bookkeeping-mismatch';
+    }
+
+    return status.configured ? 'unreachable' : 'not-configured';
 }
 
 export interface MigrationResult
@@ -238,6 +259,11 @@ export interface MigrationResult
     pending: string[];
     backupId?: string;
     failure?: string;
+    /**
+     * The status read after migrating, when it could not be read. Then nothing
+     * confirms what the migration did, and `ok` is false.
+     */
+    unreadableAfter?: DatabaseStatus;
 }
 
 export interface DatabasePort

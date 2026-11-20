@@ -35,7 +35,9 @@ import { lockFromManifest, readLicenseFile, requireInstalledLock, writeInstalled
 import { executeOperation, type OperationStep, type StepOutcome } from './../runner.js';
 import type { KitAdapters } from './../ports.js';
 import {
-    assertBookkeepingMatches,
+    assertMigrationFinished,
+    assertStatusReadable,
+    verifyNothingPending,
     assertCommittedStateTracked,
     installFrozenGraph,
     materializeTargets,
@@ -463,7 +465,7 @@ function updateSteps(options: UpdateStepOptions): OperationStep[]
             {
                 const status = await adapters.database.status({ cwd: projectDir });
 
-                assertBookkeepingMatches(status, context.journal.operationId);
+                assertStatusReadable(status, context.journal.operationId);
 
                 if (!status.configured || !status.reachable)
                 {
@@ -486,16 +488,7 @@ function updateSteps(options: UpdateStepOptions): OperationStep[]
 
                 const result = await adapters.database.migrate({ cwd: projectDir, withBackup: true });
 
-                if (!result.ok || result.pending.length > 0)
-                {
-                    throw new KitError('KIT_MIGRATION_FAILED', 'A package migration did not finish.', {
-                        evidence: { pending: result.pending.length, detail: result.failure ?? null },
-                        next: {
-                            command: `spfn kit resume ${context.journal.operationId} --json`,
-                            requiresHumanApproval: false,
-                        },
-                    });
-                }
+                assertMigrationFinished(result, context.journal.operationId);
 
                 return {
                     kind: 'done',
@@ -505,11 +498,7 @@ function updateSteps(options: UpdateStepOptions): OperationStep[]
             },
             async verify()
             {
-                const status = await adapters.database.status({ cwd: projectDir });
-
-                return status.pending.length === 0
-                    ? { ok: true, evidence: { applied: status.applied, pending: 0 } }
-                    : { ok: false, reason: 'database-has-pending-migrations' };
+                return verifyNothingPending(await adapters.database.status({ cwd: projectDir }));
             },
         },
         {
