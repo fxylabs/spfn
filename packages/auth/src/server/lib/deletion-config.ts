@@ -50,7 +50,9 @@ export interface AuthDeletionConfig
      * transaction opens and without the account lock. Throw to skip that user
      * for this sweep (they stay `pending`, retried on the next tick). A cancel
      * may still win after it returns, so it can run for a purge that never
-     * happens, and it runs again on every retry.
+     * happens, and it runs again on every retry. The sweep logs what it threw by
+     * class name and SQLSTATE only; an app that needs the error itself handles
+     * it inside the hook.
      */
     onBeforePurge?: (user: AccountDeletionPurgeUser) => Promise<void>;
 

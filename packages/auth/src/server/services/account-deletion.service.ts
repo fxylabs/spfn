@@ -835,9 +835,10 @@ async function purgePendingRequest(request: AccountDeletionRequest): Promise<Pur
         }
         catch (error)
         {
+            // It was handed the email and phone: what it threw is named, never quoted.
             authLogger.service.warn('[account-deletion] onBeforePurge threw — skipping this sweep, will retry', {
                 userId: precheckUser.id,
-                error: error instanceof Error ? error.message : String(error),
+                ...identifyHookError(error),
             });
 
             return { outcome: 'skipped' };

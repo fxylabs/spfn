@@ -89,8 +89,6 @@ const PENDING_OUTSIDE_CORE = new Map<string, number>([
     ['auth/src/server/lib/oauth/kakao-provider.ts err.message', 1],
     ['auth/src/server/lib/oauth/naver-provider.ts err.message', 1],
     ['auth/src/server/lib/session.ts err.message', 1],
-    ['auth/src/server/services/account-deletion.service.ts error.message', 2],
-    ['auth/src/server/services/account-deletion.service.ts String(error)', 2],
     ['auth/src/server/services/oauth.service.ts cause.message', 1],
     ['auth/src/server/services/oauth.service.ts String(cause)', 1],
     // cms — an Error made from a thrown non-Error's text, then logged

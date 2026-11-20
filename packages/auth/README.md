@@ -7567,7 +7567,9 @@ purge. With the default configuration nothing is sent.
   `pending`. It is for the app's own I/O outside the database (files in object storage, an
   external system). A throw skips that account for this sweep; nothing is rolled back, because
   nothing has been written. A cancel can still win after it returns, so it can run for a purge that
-  never happens, and it runs again on every retry. Never send the notice from it.
+  never happens, and it runs again on every retry. Never send the notice from it. It is handed the
+  email and phone too, so the sweep's warning names what it threw by class name and SQLSTATE only;
+  an app that needs the error itself handles it inside the hook.
 
 **Recipe.** Three templates with locales, two subscribers, and an outbox the hook fills and a job
 empties. Every part is `@spfn/notification`'s or the app's own:

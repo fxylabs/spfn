@@ -380,7 +380,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     statement, the SQLSTATE (`hookErrorCode`). It keeps no reference to the hook's error — no
     `cause`, no field — because the hook was handed the account's email and phone and its error
     may quote them; no log line at any level (the rollback line included), stored job failure or
-    response body carries them. An app that needs its own error handles it inside the hook.
+    response body carries them. A throwing `onBeforePurge`, handed them too, is logged the same
+    way and no longer by its message. An app that needs its own error handles it inside the hook.
 
   **Migrate from `sendNotifications: true`:** remove the option, then follow the README recipe
   ("Account Deletion & Recovery" → "Telling the person"): `registerTemplate` three templates with

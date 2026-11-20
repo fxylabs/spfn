@@ -25,6 +25,8 @@
  * | L3  | the purge job: its run resolves, so pg-boss stores no failure, and  | the address in a job's stored `output`            |
  * |     | pg-boss's serializer on a rejection an app's own job would store    |                                                   |
  * |     | has no address                                                      |                                                   |
+ * | L4  | an `onBeforePurge` throwing an Error naming the address: no line    | the address at `warn` on every sweep              |
+ * |     | has it; the warning names the class                                 |                                                   |
  *
  * The logger's level is fixed when it is imported, so this file sets it to
  * `debug` before anything loads: core's transaction runner logs a rollback,
@@ -278,5 +280,20 @@ describe.skipIf(!dbAvailable)('account deletion - a failing hook and the log', (
         expect(stored).toContain(`deletion request ${requestId}: Error (SQLSTATE 23505)`);
         expect(quotesContact(stored)).toBe(false);
         expect((await logLines()).filter(quotesContact)).toEqual([]);
+    });
+
+    it('L4: an onBeforePurge throwing an Error naming the address leaves it in no line; the warning names the class', async () =>
+    {
+        configureDeletion({ onBeforePurge: namesAddress });
+        const { userId } = await dueAccount();
+        written.length = 0;
+
+        expect(await sweepDuePurges()).toEqual({ processed: 1, purged: 0, skipped: 1 });
+
+        const lines = await logLines();
+        expect(lines.filter(quotesContact)).toEqual([]);
+        const warning = lines.find(line => line.includes('onBeforePurge threw'));
+        expect(warning).toContain(`[userId=${userId}]`);
+        expect(warning).toContain('[hookErrorClass=Error]');
     });
 });
