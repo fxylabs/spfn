@@ -13,8 +13,8 @@
  * package's private `imports`) instead.
  *
  * Reading text covers browser entries, which Node cannot import. The check refuses to pass
- * on output that lost its markers: none at all in a package of more than one file, or a
- * module a file's source map names without its marker.
+ * on output that lost its markers: a file that holds code but no marker (minified output),
+ * or a module a file's source map names without its marker.
  *
  * When the package has `scripts/check-bundle.mjs`, it is run afterwards: identity
  * probes that import the built entries and compare what a caller would compare.
@@ -23,6 +23,8 @@
 import { spawnSync } from 'node:child_process';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { dirname, join, relative, resolve } from 'node:path';
+
+import ts from 'typescript';
 
 // A plugin's virtual module is marked `// <namespace>:<path>` (core's `spfn-entry-point:src/…`,
 // one per entry); it is generated for its file, not shared, and is not compared. The query is
@@ -58,6 +60,33 @@ function collectModules(files)
         }
     }
     return modules;
+}
+
+/**
+ * A statement esbuild writes around modules rather than from one: an import, a re-export, a
+ * directive (`'use client'`), or a runtime helper (`var __export = …`; esbuild keeps the `__`
+ * prefix for them). A file made only of these, such as an entry that re-exports chunks, holds no
+ * module and has no marker to read.
+ */
+function isBundlerGlue(statement)
+{
+    return ts.isImportDeclaration(statement)
+        || ts.isExportDeclaration(statement)
+        || (ts.isExpressionStatement(statement) && ts.isStringLiteral(statement.expression))
+        || (ts.isVariableStatement(statement) && statement.declarationList.declarations
+            .every(declaration => ts.isIdentifier(declaration.name) && declaration.name.text.startsWith('__')));
+}
+
+/** Files that hold module code but no marker of any module, virtual ones included. */
+function filesWithoutMarkers(files)
+{
+    return files.filter(file =>
+    {
+        const text = readFileSync(file, 'utf-8');
+        return text.match(MARKER) === null
+            && !ts.createSourceFile(file, text, ts.ScriptTarget.Latest, false, ts.ScriptKind.JS)
+                .statements.every(isBundlerGlue);
+    });
 }
 
 function fail(lines)
@@ -107,9 +136,13 @@ function filesWithStrippedMarkers(files)
 const files = listOutputFiles('dist');
 const modules = collectModules(files);
 
-if (modules.size === 0 && files.length > 1)
+const markerless = filesWithoutMarkers(files);
+if (markerless.length > 0)
 {
-    fail([`no module markers found in ${files.length} output files; the check cannot tell duplicates apart`]);
+    fail([
+        ...markerless.map(file => `${relative(process.cwd(), file)}: no module markers found, but it holds code`),
+        'the check cannot tell which modules those files contain (minified output drops the markers)',
+    ]);
 }
 
 const unmarked = filesWithStrippedMarkers(files);
