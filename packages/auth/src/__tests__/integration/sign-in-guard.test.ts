@@ -22,6 +22,9 @@
  *     a passkey assertion that fails for a known credential, and at
  *     `mfa/verify`'s completion a budget locked mid-attempt — the moment an
  *     attack is under way — or a challenge another request spent first
+ * 12. a refusal told for a sign-in that was not refused: one a caller's
+ *     transaction caught and committed past (OAuth's contended retry, whose
+ *     second run succeeds)
  *
  * The app's side is what the README tells an app to write: a repository
  * extending `BaseRepository` whose writes join the package's transaction.
@@ -1321,6 +1324,51 @@ describe.skipIf(!dbAvailable)('the sign-in guard (#361)', () =>
             { user_id: owner.id, channel: 'password', stage: 'second-factor', result: 'failed', reason: 'secondFactor', key_id: keyId },
         ]);
         expect(await committedHistory()).toHaveLength(2);
+    });
+
+    // ========================================================================
+    // Row 12 — told only once the refusal is the answer
+    // ========================================================================
+
+    it('row 12 — a refusal a caller\'s transaction catches: nothing told when it commits, told once when it rolls back', async () =>
+    {
+        const { runInTransaction } = await import('@spfn/core/db');
+        registerOAuthProvider({
+            id: 'superself',
+            isEnabled: () => true,
+            pkce: 'S256',
+            getAuthUrl: (state: string) => `https://mock.example.com/auth?state=${state}`,
+            exchangeCodeForTokens: async () => ({ accessToken: 'a', refreshToken: 'r', expiresIn: 3600 }),
+            getUserInfo: async () => ({ providerUserId: 'oauth-caught-1', email: 'caught@test.com', emailVerified: true }),
+        });
+        const callback = async () =>
+        {
+            const key = generateKeyPair('ES256');
+            const nonce = generateOAuthNonce();
+            const state = await createOAuthState({
+                provider: 'superself', returnUrl: '/', publicKey: key.publicKey, keyId: key.keyId,
+                fingerprint: key.fingerprint, algorithm: 'ES256', nonce,
+            });
+
+            return await oauthCallbackService({ provider: 'superself', code: 'c', state, expectedNonce: [nonce], ip: clientIp });
+        };
+        await callback();
+        await getTestDb().execute(sql`truncate sign_in_guard_test.history`);
+        refuseEveryone();
+
+        await runInTransaction(async () =>
+        {
+            await expectRefusedService(callback());
+        });
+        expect(await committedHistory()).toEqual([]);
+
+        await runInTransaction(async () =>
+        {
+            await expectRefusedService(callback());
+            throw new Error('the caller fails for its own reason');
+        }).catch(() => null);
+        expect(await committedHistory()).toMatchObject([{ channel: 'oauth', result: 'failed', reason: 'refused' }]);
+        expect(await committedHistory()).toHaveLength(1);
     });
 
     // ========================================================================
