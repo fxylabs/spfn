@@ -411,7 +411,11 @@ Phase 1.5 WS cleanup               (if websockets; ≤5s)
 Phase 2  stopFetching(wait)        (if jobs) every worker on getBoss() stops fetching, and the
                                    fetches in flight are waited for (≤5s, within the half of
                                    the work share HTTP leaves); running handlers continue,
-                                   send() keeps working
+                                   send() keeps working. The wait may take up to 5s the drain
+                                   would otherwise get, never the drain's guaranteed half; when
+                                   the closes used their whole half it is 0ms, Phase 2 reports
+                                   the fetch in flight, and a job it takes starts on the
+                                   stopping instance — the warning is the record
 Phase 3  ShutdownManager.drain()   wait for tracked operations and after-commit callbacks
 Phase 3.5 ShutdownManager.runHooks() onShutdown hooks, in order   ┐ one hooks' budget
 Phase 4  lifecycle.beforeShutdown()                               ┘
@@ -437,7 +441,9 @@ after-commit callback, an `onShutdown` hook or `beforeShutdown` that enqueues as
 puts its job in the queue. pg-boss's own timekeeping also runs until Phase 5 — a cron tick only
 inserts the job row, which a running instance fetches; the stopping instance never runs it.
 The wait for fetches in flight shares the first half of the work share with the HTTP and
-WebSocket closes and is capped at 5s; it reserves nothing, so it cannot shorten the drain. A
+WebSocket closes and is capped at 5s; it reserves nothing, so it cannot cut into the drain's
+guaranteed half — but what the closes leave of their half, which the drain would otherwise get,
+it may take, up to 5s (at the default timeout the drain is at least 195000ms, not 200000ms). A
 fetch is one statement, so it normally settles at once; if one is still in flight when the wait
 ends — a hung pool — Phase 2 logs `Job fetch not stopped: N fetch(es) still in flight …` (a
 warning) instead of `Stopped job fetch`, because a job such a fetch takes still starts on this
@@ -496,8 +502,11 @@ The budgets when every phase takes its whole budget, all infrastructure on (prin
 | 280000 (default) | 15000 | 195000 | 56000 | 2000 | 5000 | 2000 | 5000 |
 
 An HTTP close that ends at once leaves its part to the fetch wait (up to 5s) and what that does
-not use to the drain (at 10000: a drain of about 5000ms). Only when the closes before it take the
-whole half does the fetch wait get 0; Phase 2 then reports a fetch still in flight as such.
+not use to the drain (at 10000: a drain of about 5000ms). So a hung fetch takes up to 5s from the
+drain — the "drain (at least)" column already counts it (at the default, 195000 rather than
+200000) — but never the drain's guaranteed half of the work share. When the HTTP and WebSocket
+closes take their whole half, the fetch wait gets 0ms: Phase 2 reports a fetch still in flight as
+such, and a job that fetch takes starts on the stopping instance — the warning is the record.
 
 **Do not set `shutdown.timeout` below about 47s with every piece of infrastructure on** (below
 about 17s with only the database): under `Σ caps / 0.3` the closes get less than their caps — the

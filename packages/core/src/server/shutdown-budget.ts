@@ -20,7 +20,9 @@
  * take at most half of the share: the other half is the drain's, so a slow
  * HTTP close or a hung fetch cannot starve it. The fetch wait reserves
  * nothing: a fetch is one statement, and one still unsettled after what the
- * HTTP close left is reported as such, not waited for at the drain's cost.
+ * HTTP close left is reported as such. It may take up to 5 s the drain would
+ * otherwise get, never the drain's guaranteed half; when the closes used their
+ * whole half it gets 0, and a job such a fetch takes starts on this instance.
  *
  * A reserve is time an earlier phase cannot spend. A phase starting now gets
  *

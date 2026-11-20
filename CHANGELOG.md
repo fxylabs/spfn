@@ -39,7 +39,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the two. A cron tick during the wait may still insert a job row, which stays for a live instance.
 - **@spfn/core: the shutdown budget has a `jobFetch` phase (#359):** Phase 2's wait for fetches in
   flight, capped at 5s and reserving nothing, inside the half of the work share the HTTP and
-  WebSocket closes use, so it cannot shorten the drain.
+  WebSocket closes use. It cannot cut into the drain's guaranteed half, but it may take up to 5s
+  the drain would otherwise get (at the default 280000ms, a drain of at least 195000ms rather than
+  200000ms). When the closes use their whole half, the fetch wait is 0ms: Phase 2 warns that a
+  fetch is still in flight, and a job it takes starts on the stopping instance.
 - **BREAKING: @spfn/core: watch mode's generations, the initial one included, log and do not
   reject under `throwOnError: true` (#353).** `watch()` ran its initial generation as `generateAll('watch')`,
   so under `throwOnError` a failing generator rejected `watch()` before any watching began; now
