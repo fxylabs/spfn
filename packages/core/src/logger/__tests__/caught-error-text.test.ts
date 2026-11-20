@@ -11,17 +11,21 @@
  * parameter of a `.catch()` callback and the second of `.then()`, and any
  * function parameter named like one (`e`, `err`, `error`, `reason`, `cause`,
  * `failure`) — hooks and event handlers receive their errors that way.
- * Its text is `x.message`, `x.stack`, `String(x)` or `${x}`.
+ * Its text is `x.message`, `x.stack`, `String(x)`, `${x}`, `x.toString()` or
+ * `JSON.stringify(x)`.
  *
- * Where it may not go: the arguments of a logger call (`<…logger…>.debug|info|
- * warn|error|fatal|log`, `console.*`), or a persisted write — pg-boss's
- * `fail`, a repository's `create|insert|update|upsert`, drizzle's
+ * Where it may not go: the arguments of a logger call — `<receiver>.debug|info|
+ * warn|error|fatal|log(…)` or `<receiver>[level](…)`, where the receiver is
+ * named like a logger, is `log` or is `console` — or a persisted write —
+ * pg-boss's `fail`, a repository's `create|insert|update|upsert`, drizzle's
  * `insert(…).values` / `update(…).set`.
  *
  * Not seen, by design (each would flag legitimate code to catch): text copied
  * into a local first (`const message = err.message`, then logged), an error
- * received under another name, and a raw error object handed to a sink that
- * serialises it (pg-boss `fail(…, error)` — boss-workers row R8 pins that one).
+ * received under another name, a receiver named otherwise (`this.output.
+ * error(…)` — matching every `.error(…)` call would flag result objects and
+ * event emitters), and a raw error object handed to a sink that serialises it
+ * (pg-boss `fail(…, error)` — boss-workers row R8 pins that one).
  *
  * R13b: in core, a caught value never reaches a logger as the lone second
  * argument. `logger.error(message, value)` reads an object that is not an
@@ -36,7 +40,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import ts from 'typescript';
@@ -55,26 +59,27 @@ const OPERATOR_TERMINALS = ['cli/src/', 'pages-next/src/cli.ts'];
 
 /**
  * Known sites outside core, fixed by #382's second PR, which empties this
- * list. `<file> <expression>`: an entry admits that expression anywhere in
- * the file.
+ * list. `<file> <expression>` → how many times the file has that expression
+ * in a sink. The list is exact: an entry whose count differs from the file's
+ * — a site fixed, or one added — or whose file does not exist fails the row.
  */
-const PENDING_OUTSIDE_CORE = new Set([
+const PENDING_OUTSIDE_CORE = new Map<string, number>([
     // auth — log lines
-    'auth/src/nextjs/oauth-handlers.ts error.message',
-    'auth/src/nextjs/session-helpers.ts error.message',
-    'auth/src/nextjs/session-helpers.ts String(error)',
-    'auth/src/server/lib/config.ts (error as Error).message',
-    'auth/src/server/lib/oauth/jwks-verify.ts err.message',
-    'auth/src/server/lib/oauth/kakao-provider.ts err.message',
-    'auth/src/server/lib/oauth/naver-provider.ts err.message',
-    'auth/src/server/lib/session.ts err.message',
-    'auth/src/server/services/account-deletion.service.ts error.message',
-    'auth/src/server/services/account-deletion.service.ts String(error)',
-    'auth/src/server/services/oauth.service.ts cause.message',
-    'auth/src/server/services/oauth.service.ts String(cause)',
+    ['auth/src/nextjs/oauth-handlers.ts error.message', 1],
+    ['auth/src/nextjs/session-helpers.ts error.message', 2],
+    ['auth/src/nextjs/session-helpers.ts String(error)', 2],
+    ['auth/src/server/lib/config.ts (error as Error).message', 1],
+    ['auth/src/server/lib/oauth/jwks-verify.ts err.message', 1],
+    ['auth/src/server/lib/oauth/kakao-provider.ts err.message', 1],
+    ['auth/src/server/lib/oauth/naver-provider.ts err.message', 1],
+    ['auth/src/server/lib/session.ts err.message', 1],
+    ['auth/src/server/services/account-deletion.service.ts error.message', 2],
+    ['auth/src/server/services/account-deletion.service.ts String(error)', 2],
+    ['auth/src/server/services/oauth.service.ts cause.message', 1],
+    ['auth/src/server/services/oauth.service.ts String(cause)', 1],
     // monitor — error_groups.message, error_events.stack_trace
-    'monitor/src/server/services/error-tracking.service.ts err.message',
-    'monitor/src/server/services/error-tracking.service.ts err.stack',
+    ['monitor/src/server/services/error-tracking.service.ts err.message', 1],
+    ['monitor/src/server/services/error-tracking.service.ts err.stack', 1],
 ]);
 
 interface Offence
@@ -192,6 +197,18 @@ function errorText(node: ts.Node, names: ReadonlySet<string>): string | undefine
         return `\${${unwrap(node.expression).getText()}}`;
     }
 
+    if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression) && node.arguments.length === 0
+        && node.expression.name.text === 'toString' && isCaught(node.expression.expression))
+    {
+        return node.getText();
+    }
+
+    if (ts.isCallExpression(node) && node.expression.getText() === 'JSON.stringify'
+        && node.arguments.length > 0 && isCaught(node.arguments[0]))
+    {
+        return node.getText();
+    }
+
     return undefined;
 }
 
@@ -214,14 +231,31 @@ function enclosingSink(node: ts.Node): string | undefined
     return undefined;
 }
 
-function isLogCall(callee: ts.Expression): boolean
+/**
+ * A call on a logger — `<receiver>.<level>(…)` or `<receiver>[level](…)` —
+ * whose receiver is named like one, or is `log`; `console` too when asked
+ */
+function isLogCall(callee: ts.Expression, withConsole = false): boolean
 {
+    const isLogger = (receiver: string): boolean =>
+        /logger/i.test(receiver) || receiver === 'log' || (withConsole && receiver === 'console');
+
+    if (ts.isElementAccessExpression(callee))
+    {
+        return isLogger(callee.expression.getText());
+    }
+
     return ts.isPropertyAccessExpression(callee) && LOG_METHODS.has(callee.name.text)
-        && /logger/i.test(callee.expression.getText());
+        && isLogger(callee.expression.getText());
 }
 
 function isSink(callee: ts.Expression): boolean
 {
+    if (isLogCall(callee, true))
+    {
+        return true;
+    }
+
     if (!ts.isPropertyAccessExpression(callee))
     {
         return false;
@@ -229,11 +263,6 @@ function isSink(callee: ts.Expression): boolean
 
     const method = callee.name.text;
     const receiver = callee.expression.getText();
-
-    if (LOG_METHODS.has(method))
-    {
-        return /logger/i.test(receiver) || receiver === 'console';
-    }
 
     if (REPOSITORY_WRITES.has(method))
     {
@@ -304,12 +333,24 @@ describe('caught error text', () =>
 {
     it('R13: no production source logs or persists a caught error\'s message, stack or string form (#382)', () =>
     {
-        const offences = productionSources()
-            .flatMap(offencesIn)
+        const offences = productionSources().flatMap(offencesIn);
+        const counts = new Map<string, number>();
+
+        for (const offence of offences)
+        {
+            const key = `${offence.file} ${offence.text}`;
+            counts.set(key, (counts.get(key) ?? 0) + 1);
+        }
+
+        const unlisted = offences
             .filter(offence => !PENDING_OUTSIDE_CORE.has(`${offence.file} ${offence.text}`))
             .map(offence => `${offence.file}:${offence.line} ${offence.text} in ${offence.sink}(…)`);
+        const inexact = [...PENDING_OUTSIDE_CORE]
+            .filter(([key, listed]) => counts.get(key) !== listed || !existsSync(join(packagesRoot, key.split(' ')[0])))
+            .map(([key, listed]) => `${key}: listed ${listed}, found ${counts.get(key) ?? 0}`);
 
-        expect(offences, 'pass the error object itself: the logger describes it (describeError)').toEqual([]);
+        expect(unlisted, 'pass the error object itself: the logger describes it (describeError)').toEqual([]);
+        expect(inexact, 'the allowlist names each pending site exactly: drop fixed ones, count each expression').toEqual([]);
     });
 
     it('R13b: no core catch site hands its caught value to a logger as the lone second argument', () =>

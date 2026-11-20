@@ -207,7 +207,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **BREAKING: @spfn/core: a failed job's `output` is the error's description (#382).** Core's
   fetch loop fails a batch with `describeError(error)` instead of the error, so pg-boss no longer
   serialises drizzle's `params` or the driver's `detail` into the job row. The `output` of a failed
-  job is `{ kind, name, message, stack, cause }` (`stack` frames only), or for a database error
+  job is `{ kind, name, message, code, statusCode, stack, cause }` (`stack` frames only; `code` a
+  string or number, `statusCode` a number, each only when the error has one; no other field of the
+  error, so an app error's `details` are gone), or for a database error
   `{ kind: 'database', name, code, constraint, table, …, sql, paramCount, stack }`.
 - **BREAKING: @spfn/core: outside production, a database error's 500 body is
   `{ __type: 'Error', message: 'Database error', database }` (#382).** `database` is the error's
@@ -240,6 +242,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   descriptions. A custom `Transport` reading `metadata.error.stack` gets frames only. The rollback
   lines' `errorType` field is gone (the description's `name`). Out of core's reach: drizzle's
   OpenTelemetry tracing still sets `drizzle.query.params` on its spans.
+- **BREAKING: @spfn/core: which logger argument is the caught value is decided by position, not by
+  its shape (#382).** `logger.error(message, caught, context)`: the second argument is the caught
+  value whatever it is (`undefined`, a string, a plain object), and the context is always kept —
+  it used to be dropped when the value was not an Error. `logger.error(message, value)`: an Error
+  (or a primitive) is the caught value, any other object the context. An object with a string
+  `stack` is no longer read as an error, as the argument or inside the context. A value under
+  `error`, `err`, `cause` or `reason` at the context's top level is described whatever its shape.
+- **BREAKING: @spfn/core: log line shapes (#382).** Each change, against the last release:
+  - JSON `error`: `{ kind: 'error' | 'database', name, … }` with `stack` frames only, not
+    `{ name, message, stack }`.
+  - An Error's string `cause`: an object `{ kind: 'error', name: 'NonError', message }`
+    (`Caused by: NonError: …`), not the bare string.
+  - An Error inside the context: its description, not `{}`.
+  - A thrown string or number logged as the error: `{ kind: 'error', name: 'NonError', message }`
+    with no stack, not an Error wrapped at the log site with that site's stack.
+  - A thrown non-Error object: its class name (`NonError` for a plain one), string `message` and
+    `code` only, not the whole object JSON-stringified into the message.
+  - The error handler's production line: the error is `context.error`, its description without
+    stack frames, not `message` and a `cause` text in the context.
+  - 11 core lines that put `error: err.message` / `String(err)` (or `errorName` / `errorMessage`)
+    into the context and 20 that passed a caught Error as the second argument (cache close,
+    WebSocket handlers, pg-boss error and stop, server hooks and shutdown, uncaught exception,
+    cleanup, the error handler's failed `onError` callback) carry the description under `context.error`; 7 more already kept it under
+    `context.error` as a description instead of a string (cache factory, cache transport, rate
+    limit, state event, client debug logs). The console prints a described context value on its
+    own lines after the message.
+  - A failed job's `output`: see its entry above.
 - **BREAKING: @spfn/core: workers started on `getBoss()` run core's fetch loop, not pg-boss's
   worker, so they no longer appear in pg-boss's `wip` events (#359).** Core needs to know when a
   worker's last fetch has settled, which pg-boss 11 does not expose; the loop runs on pg-boss's
@@ -481,9 +510,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rollback lines, the afterCommit/afterRollback/beforeCommit callback failure lines, the job
   failure and orphan-schedule lines, the error handler's log data and the unhandled-rejection
   context (`extractQueryInfo` parsed `params:` out of the message on purpose). Those sites now pass
-  the error object and the logger describes it. A source-scan row keeps a caught error's
-  `.message` / `.stack` / `String(err)` out of every package's logger calls and persisted writes;
-  auth and monitor sites are listed for the follow-up.
+  the error object and the logger describes it — also when the message is printf-style
+  (`logger.error('… %s', err)` formatted the raw error). Describing never throws: a throwing getter
+  is left out, a cause chain ends after 10 links (`CauseChainTruncated`) or at a loop
+  (`CircularCause`). A source-scan row keeps a caught error's `.message` / `.stack` /
+  `String(err)` / `.toString()` / `JSON.stringify(err)` out of every package's logger calls
+  (including `log.…` and `logger[level](…)`) and persisted writes, with an exact, counted list of
+  the auth and monitor sites left for the follow-up.
 - **@spfn/auth: `mfaLockedEvent`, `passkeyEnrolledEvent` and `passkeyRevokedEvent` are exported from
   `@spfn/auth/server` (#361)**, with `MfaLockedPayload`, `PasskeyEnrolledPayload` and
   `PasskeyRevokedPayload`. The README documented all three and the package emitted them, but an app
