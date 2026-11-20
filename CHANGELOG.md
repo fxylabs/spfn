@@ -67,13 +67,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sibling in the same `.use()` is never removed; a skipper's `skips` count only while the skipper
   itself runs on the route, so a route that `.skip()`s it gets the skipped middleware back;
   `.skip('*')` still drops everything inherited; an inner router or route may `.use()` the removed
-  middleware again. Registration now **throws** when a router whose `.use()` holds a middleware
-  declaring `skips` sits anywhere above a package router: one mounted with `.packages([...])`, or
-  one its package defined with the new `defineRouter(routes, { packageName })` — so
-  `defineRouter({ auth: authRouter }).use([optionalAuth])` is refused too, as is any depth of
-  nesting. Package routes have no authenticator of their own; every router the SPFN packages
-  export now states `packageName`, and a third-party package whose routes rely on the app's
-  authenticator should too. **To boot again**, move the skipper onto a nested router that holds
+  middleware again. Registration now **throws** when a middleware declaring `skips` sits at or
+  above a package router — in the package router's own `.use()` or in that of any router above
+  it — a package router being one mounted with `.packages([...])`, or one its package defined
+  with the new `defineRouter(routes, { packageName })`. So
+  `defineRouter({ auth: authRouter }).use([optionalAuth])` is refused too, as is
+  `authRouter.use([optionalAuth])` however it is mounted, and any depth of nesting. Package
+  routes have no authenticator of their own; every router the SPFN packages export now states
+  `packageName`, and a third-party package whose routes rely on the app's authenticator should
+  too — and puts a replacement authenticator for some of its routes on those routes or on a
+  nested router inside its package router, never in the package router's own `.use()`. **To boot again**, move the skipper onto a nested router that holds
   no package router (`defineRouter({ machine: defineRouter({ ... }).use([machineAuth]) })
   .packages([authRouter])`), or onto the routes themselves (`route.get(...).use([optionalAuth])`).
   New: `resolveRouteMiddlewares(router, serverMiddlewares?)` (the

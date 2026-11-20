@@ -57,6 +57,30 @@ describe('authRouter under a router-level skipper', () =>
         expect((await app.request('/_auth/session')).status).toBe(404);
     });
 
+    /**
+     * i165f2: the app's `.use()` on `authRouter` itself is part of the app's
+     * tree, and removes `auth` from every auth route as one above it does.
+     */
+    it.each([
+        ['optionalAuth', optionalAuth],
+        ['machineAuth', machineAuth],
+    ])('H1: refuses %s in authRouter\'s own .use(), through .packages() and as a plain entry, registering nothing', async (name, skipper) =>
+    {
+        const refusal = (label: string) => `Package router "${label}" (defined by @spfn/auth) .use()s "${name}", a middleware declaring skips: ['auth'].`;
+
+        for (const [label, tree] of [
+            ['packages[0]', defineRouter({}).packages([authRouter.use([skipper])])],
+            ['auth', defineRouter({ auth: authRouter.use([skipper]) })],
+        ] as const)
+        {
+            const app = new Hono();
+
+            expect(() => registerRoutes(app, tree, SERVER)).toThrow(refusal(label));
+            expect((await app.request('/_auth/session')).status).toBe(404);
+        }
+        expect(authRouter._globalMiddlewares).toEqual([]);
+    });
+
     it('keeps auth on GET /_auth/session as a plain entry under no skipper', () =>
     {
         expect(sessionChain(defineRouter({ auth: authRouter }))).toContain('auth');

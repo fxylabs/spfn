@@ -102,7 +102,8 @@ export interface Router<TRoutes extends Record<string, RouteDef<any, any, any> |
      * declares its name in `skips`. A middleware here that declares `skips`
      * removes those names from what this router inherits (the server list and
      * every enclosing router's `.use()`) for every route below; registration
-     * refuses one on any router above a package router — one mounted with
+     * refuses one at or above a package router — on the package router itself
+     * or any router enclosing it, a package router being one mounted with
      * `.packages()`, or one its package defined with `packageName`.
      *
      * @example

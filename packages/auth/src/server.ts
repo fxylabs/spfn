@@ -28,8 +28,9 @@ import '@spfn/auth/config';
  * served at the same paths, but its routes become the app's own to `AppRouter`
  * and the generated route map. It is defined with `packageName: '@spfn/auth'`,
  * so registration refuses a middleware declaring `skips` (`optionalAuth`,
- * `machineAuth`, …) on any router above it, however it is mounted: its
- * signed-in routes rely on the app's `authenticate`.
+ * `machineAuth`, …) at or above it — `authRouter.use([...])` included —
+ * however it is mounted: its signed-in routes rely on the app's
+ * `authenticate`.
  *
  * @example
  * ```typescript

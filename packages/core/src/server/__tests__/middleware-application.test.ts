@@ -561,6 +561,50 @@ describe('router-level skips (#165)', () =>
         expect(pkgRoute.count()).toBe(0);
     });
 
+    /**
+     * i165f2: a skipper in the package router's own `.use()` removes the
+     * inherited `auth` from every package route just as one above it does, and
+     * an app's `.use()` on the package router is indistinguishable from the
+     * package's own — so "at or above", not "strictly above".
+     */
+    it('R19: refuses a skipper in a package router\'s own .use(), through .packages() and as a plain entry, attaching nothing', async () =>
+    {
+        const { middleware } = chainRecorder();
+        const pkgRoute = counting('/pkg/session');
+        const pkg = defineRouter({ pkgSession: pkgRoute.route }, { packageName: '@acme/pkg' }).use([middleware('optionalAuth', ['auth'])]);
+        const refusal = (label: string) =>
+            `Package router "${label}" (defined by @acme/pkg) .use()s "optionalAuth", a middleware declaring skips: ['auth']. `
+            + 'Package routes have no authenticator of their own, so "optionalAuth" would remove the auth they inherit from every one of them. '
+            + 'Put "optionalAuth" on the routes that need it, or on a nested router inside the package router that holds no package router.';
+
+        for (const [label, tree] of [['packages[0]', defineRouter({ ping }).packages([pkg])], ['pkg', defineRouter({ ping, pkg })]] as const)
+        {
+            const app = new Hono();
+
+            expect(() => registerRoutes(app, tree, [middleware('auth')])).toThrow(refusal(label));
+            expect((await app.request('/pkg/session')).status).toBe(404);
+            expect((await app.request('/ping')).status).toBe(404);
+        }
+        expect(pkgRoute.count()).toBe(0);
+    });
+
+    it('R20: refuses a skipper in the own .use() of an unmarked router mounted with .packages(), and admits one on a nested router inside a package router', () =>
+    {
+        const { middleware } = chainRecorder();
+        const optionalAuth = middleware('optionalAuth', ['auth']);
+        const server = [middleware('auth')];
+
+        expect(() => resolveRouteMiddlewares(defineRouter({ ping }).packages([defineRouter({ pkgRoute: get('/pkg') }).use([optionalAuth])]), server))
+            .toThrow('Package router "packages[0]" (mounted with .packages()) .use()s "optionalAuth"');
+
+        const pkg = defineRouter({ session: get('/pkg/session'), feed: defineRouter({ feedRoute: get('/pkg/feed') }).use([optionalAuth]) }, { packageName: '@acme/pkg' });
+        expect(resolveRouteMiddlewares(defineRouter({ ping }).packages([pkg]), server).map(r => [r.path, r.middlewares.map(mw => mw.name)])).toEqual([
+            ['/ping', ['auth']],
+            ['/pkg/session', ['auth']],
+            ['/pkg/feed', ['optionalAuth']],
+        ]);
+    });
+
     it('R18: a marked router under no skipper keeps the inherited auth on every route', () =>
     {
         const { middleware } = chainRecorder();

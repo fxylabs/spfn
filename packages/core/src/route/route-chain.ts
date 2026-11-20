@@ -95,9 +95,10 @@ interface Walk
  * Routes come back in registration order: a router's own routes (nested
  * routers in place) before its package routers.
  *
- * Throws when a router-level middleware declaring `skips` sits on any router
- * above a package router: one its package defined with `packageName`, wherever
- * it is mounted, or one mounted with `.packages()`. A package route has no
+ * Throws when a router-level middleware declaring `skips` sits at or above a
+ * package router — in its own `.use()` or in any enclosing router's — where a
+ * package router is one its package defined with `packageName`, wherever it is
+ * mounted, or one mounted with `.packages()`. A package route has no
  * authenticator of its own; it relies on what it inherits, and the skip would
  * remove that from every one of them.
  *
@@ -139,17 +140,20 @@ function inheritedFrom(mw: ServerMiddleware | NamedMiddleware<string>, source: M
  */
 function walkRouter(router: Router<any>, walk: Walk, mountedAsPackage: boolean): void
 {
+    const label = routerLabel(walk.path);
+    const own = router._globalMiddlewares ?? [];
+    const skippers = [...walk.skippers, ...own.filter(mw => mw.skips?.length).map(mw => ({ router: label, middleware: mw }))];
+
     if (router._packageName || mountedAsPackage)
     {
-        assertNoSkipperAbovePackage(walk.skippers, routerLabel(walk.path), router._packageName);
+        assertNoSkipperAtOrAbovePackage(skippers, label, router._packageName);
     }
 
-    const own = router._globalMiddlewares ?? [];
     const inner: Walk = {
         ...walk,
         inherited: [...walk.inherited, ...own.map(mw => inheritedFrom(mw, 'router', walk.depth))],
         depth: walk.depth + 1,
-        skippers: [...walk.skippers, ...own.filter(mw => mw.skips?.length).map(mw => ({ router: routerLabel(walk.path), middleware: mw }))],
+        skippers,
     };
 
     for (const [name, entry] of Object.entries(router.routes))
@@ -193,11 +197,12 @@ function walkEntry(name: string, entry: unknown, walk: Walk): void
 
 /**
  * Package routes have no authenticator of their own: `getAuth(c)` in a
- * package's signed-in route reads what the inherited `auth` left. A skipper on
- * any router above a package router would remove that `auth` from each of its
- * routes, since a router inherits the `.use()` of every router enclosing it.
+ * package's signed-in route reads what the inherited `auth` left. A skipper in
+ * the package router's own `.use()`, or in that of any router enclosing it,
+ * would remove that `auth` from each of its routes. Core cannot tell an app's
+ * `.use()` on the package router from the package's own, so both are refused.
  */
-function assertNoSkipperAbovePackage(skippers: readonly RouterSkipper[], label: string, packageName: string | null): void
+function assertNoSkipperAtOrAbovePackage(skippers: readonly RouterSkipper[], label: string, packageName: string | null): void
 {
     const skipper = skippers[0];
     if (!skipper)
@@ -207,11 +212,20 @@ function assertNoSkipperAbovePackage(skippers: readonly RouterSkipper[], label: 
 
     const { name, skips } = skipper.middleware;
     const statement = packageName ? `defined by ${packageName}` : 'mounted with .packages()';
+    const declared = `"${name}", a middleware declaring skips: [${skips!.map(skip => `'${skip}'`).join(', ')}]`;
+    const consequence = `Package routes have no authenticator of their own, `
+        + `so "${name}" would remove the ${skips!.join(', ')} they inherit from every one of them.`;
+
+    if (skipper.router === label)
+    {
+        throw new Error(
+            `Package router "${label}" (${statement}) .use()s ${declared}. ${consequence} `
+            + `Put "${name}" on the routes that need it, or on a nested router inside the package router that holds no package router.`,
+        );
+    }
 
     throw new Error(
-        `Router "${skipper.router}" .use()s "${name}", a middleware declaring skips: [${skips!.map(skip => `'${skip}'`).join(', ')}], `
-        + `and the package router "${label}" (${statement}) sits below it. Package routes have no authenticator of their own, `
-        + `so "${name}" would remove the ${skips!.join(', ')} they inherit from every one of them. `
+        `Router "${skipper.router}" .use()s ${declared}, and the package router "${label}" (${statement}) sits below it. ${consequence} `
         + `Put "${name}" on a nested router that holds no package router, or on the routes themselves.`,
     );
 }

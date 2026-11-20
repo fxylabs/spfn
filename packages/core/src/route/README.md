@@ -497,8 +497,13 @@ itself unmapped, or those names land in nobody's map and resolve nowhere.
 **A package names itself on the router it ships:** `defineRouter(routes, { packageName: '@acme/pkg' })`
 (or `defineUnmappedRouter(routes, { packageName })`). It is required of a package whose routes
 rely on the app's authenticator — a signed-in route that reads `getAuth(c)` and carries no
-`auth` of its own. Registration refuses a router-level skipper (below) above such a router
-wherever the app put it: under `.packages()`, as a plain entry, or nested deeper. Every router
+`auth` of its own. Registration refuses a router-level skipper (below) at or above such a
+router wherever the app put it — in the package router's own `.use()` or in any enclosing
+router's, under `.packages()`, as a plain entry, or nested deeper. An app's `.use()` on the
+package router (`authRouter.use([optionalAuth])`) is refused like one above it: core cannot tell
+it from the package's own. A package that wants a replacement authenticator for some of its own
+routes puts it on those routes, or on a nested router inside its package router that states no
+`packageName`. Every router
 the SPFN packages export carries it (`@spfn/auth`, `@spfn/cms`, `@spfn/monitor`,
 `@spfn/notification`, `@spfn/mcp`). Mounting with `.packages()` says the same of a router that
 does not; mount a package's router there, not as a plain entry — a plain entry registers and
@@ -624,12 +629,12 @@ The rules, all resolved per route by `resolveRouteMiddlewares` (below):
 - **The same skipper at two levels runs once**, at its outermost surviving place; each
   declaration's `skips` still applies at its own depth.
 - **Server-level `skips` do nothing:** nothing is outside the server list.
-- **Refused above a package router.** Registration throws when a router whose `.use()` holds a
-  middleware declaring `skips` sits anywhere above a package router — one mounted with
-  `.packages([...])`, or one its package defined with `packageName`, mounted any way at any
-  depth: a package route has no authenticator of its own and relies on what it inherits, which
-  the skipper would remove from every one of them. Put the skipper on a nested router that holds
-  no package router, or on the routes.
+- **Refused at or above a package router.** Registration throws when a middleware declaring
+  `skips` sits in the `.use()` of a package router itself or of any router above one — a package
+  router being one mounted with `.packages([...])`, or one its package defined with
+  `packageName`, mounted any way at any depth: a package route has no authenticator of its own
+  and relies on what it inherits, which the skipper would remove from every one of them. Put the
+  skipper on a nested router that holds no package router, or on the routes.
 
 A router-level skipper widens access the way a route-level one does: router-level `optionalAuth`
 under a global `auth` admits anonymous callers to the whole subtree.

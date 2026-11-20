@@ -219,7 +219,7 @@ export const appRouter = defineRouter({
 export type AppRouter = typeof appRouter;
 ```
 
-> **Mount `authRouter` with `.packages()`.** As a plain entry (`defineRouter({ auth: authRouter })`) it registers and serves the same `/_auth/*` paths, but its routes become the app's own to `AppRouter` and the generated route map. Either way, registration refuses a middleware declaring `skips` on any router above it — see "One Router per Kind of Caller" below.
+> **Mount `authRouter` with `.packages()`.** As a plain entry (`defineRouter({ auth: authRouter })`) it registers and serves the same `/_auth/*` paths, but its routes become the app's own to `AppRouter` and the generated route map. Either way, registration refuses a middleware declaring `skips` at or above it — `authRouter.use([...])` included — see "One Router per Kind of Caller" below.
 
 #### Skipping Auth for Public Routes
 
@@ -279,7 +279,7 @@ export const appRouter = defineRouter({
 
 - A route under `machineRouter` that `.skip(['machineAuth'])`s gets the inherited `auth` back.
 - **`optionalAuth` on a router makes every route in that subtree accept anonymous callers.**
-- Registration refuses a middleware declaring `skips` on any router above `authRouter` — the one that mounts it with `.packages([...])`, one enclosing that, or one holding it as a plain entry (`defineRouter({ auth: authRouter }).use([optionalAuth])`): the `/_auth/*` routes rely on the inherited `auth`. Keep `.packages([authRouter])` on a router with no skipper, as above.
+- Registration refuses a middleware declaring `skips` at or above `authRouter` — in `authRouter.use([...])` itself, on the router that mounts it with `.packages([...])`, one enclosing that, or one holding it as a plain entry (`defineRouter({ auth: authRouter }).use([optionalAuth])`): the `/_auth/*` routes rely on the inherited `auth`. Keep `.packages([authRouter])` on a router with no skipper, as above.
 
 ### 6. Configure Next.js Interceptor
 
