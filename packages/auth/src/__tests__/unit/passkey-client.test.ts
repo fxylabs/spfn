@@ -292,6 +292,7 @@ describe('browser passkey helpers', () =>
 
             await expect(enrollPasskey(api)).rejects.toBe(again);
             expect(verify).toHaveBeenCalledTimes(2);
+            expect(enrollPasskeyRetryOf(again)).toEqual({ body: verifyBodies(api)[0], mayProve: true });
         });
 
         it('E5: an app-supplied passkeyResponse is sent as given — the binding is not read and no proof prompt is shown', async () =>
@@ -391,6 +392,17 @@ describe('browser passkey helpers', () =>
             expect(create).toHaveBeenCalledTimes(1);
         });
 
+        it('E12: passkey-proof/options refused after create() — rejects as that refusal, carrying retry', async () =>
+        {
+            const limited = Object.assign(new Error('Too many requests'), { statusCode: 429, code: 'TOO_MANY_REQUESTS' });
+            const api = boundSinceRead({ passkeyProofOptions: { call: vi.fn().mockRejectedValue(limited) } });
+
+            await expect(enrollPasskey(api)).rejects.toBe(limited);
+            expect(enrollPasskeyRetryOf(limited)).toEqual({ body: verifyBodies(api)[0], mayProve: true });
+            expect(get).not.toHaveBeenCalled();
+            expect(create).toHaveBeenCalledTimes(1);
+        });
+
         it('E13: a network error at the verify — rejects as itself, carrying retry, which posts the same attestation', async () =>
         {
             const offline = new TypeError('fetch failed');
@@ -407,6 +419,17 @@ describe('browser passkey helpers', () =>
             expect(order).toEqual(['register/verify']);
             expect(create).toHaveBeenCalledTimes(1);
             expect(get).toHaveBeenCalledTimes(1);
+        });
+
+        it('E14: a network error at the resend after the proof — the retry is the first post, which asks the proof again', async () =>
+        {
+            const offline = new TypeError('fetch failed');
+            const api = boundSinceRead();
+            (api.passkeyRegisterVerify.call as ReturnType<typeof vi.fn>).mockRejectedValueOnce(offline);
+
+            await expect(enrollPasskey(api)).rejects.toBe(offline);
+            expect(enrollPasskeyRetryOf(offline)).toEqual({ body: verifyBodies(api)[0], mayProve: true });
+            expect(verifyBodies(api)[0].passkeyResponse).toBeUndefined();
         });
 
         it('E10 (R10): an app-supplied proof the verify refuses is thrown — no proof prompt of the helper\'s', async () =>

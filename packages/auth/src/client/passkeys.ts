@@ -261,12 +261,13 @@ async function verifyEnrolment(api: AuthApi, retry: EnrollPasskeyRetry): Promise
 
 /**
  * The proof `register/verify` asked for, and the attestation sent again with
- * it. A proof that did not happen hands back the first post: re-posted, it
- * is asked the proof again.
+ * it. A proof that did not happen, or a rejection of either call, hands back
+ * the first post: re-posted, it is asked the proof again, which a refused
+ * proof needs.
  */
 async function proveAndResend(api: AuthApi, retry: EnrollPasskeyRetry): Promise<EnrollPasskeyResult>
 {
-    const proof = await provePasskey(api, 'passkeyAdd');
+    const proof = await provePasskey(api, 'passkeyAdd').catch(rejectCarrying(retry));
 
     if (!proof.ok)
     {
@@ -276,7 +277,7 @@ async function proveAndResend(api: AuthApi, retry: EnrollPasskeyRetry): Promise<
     return await verifyEnrolment(api, {
         body: { ...retry.body, passkeyResponse: proof.passkeyResponse },
         mayProve: false,
-    });
+    }).catch(rejectCarrying(retry));
 }
 
 /**

@@ -290,6 +290,29 @@ describe.skipIf(!dbAvailable)('enrollPasskey against the router (#400)', () =>
         expect({ registrations: browser.registrations, stored: await storedPasskeys() }).toEqual({ registrations: 1, stored: 2 });
     });
 
+    it('P2: passkey-proof/options refused (429) after create() — rejects as that refusal with retry, which stores', async () =>
+    {
+        const { session, authenticator } = await ownerWithPasskey();
+        holding(authenticator, await FixtureAuthenticator.create());
+        before.registerVerify = [() => turnBindingOn(session, authenticator)];
+        before.proofOptions = [async () =>
+        {
+            for (let call = 0; call < 10; call++)
+            {
+                await send('POST', '/_auth/session/passkey-proof/options', { procedure: 'passkeyAdd' }, session);
+            }
+        }];
+
+        const refused = await enrollPasskey(apiOver(session)).then(() => undefined, (error: unknown) => error);
+
+        expect(refused).toMatchObject({ statusCode: 429 });
+        expect(await storedPasskeys()).toBe(1);
+        resetMemoryRateLimitStore();
+
+        expect(await enrollPasskey(apiOver(session), { retry: enrollPasskeyRetryOf(refused) })).toMatchObject({ ok: true });
+        expect({ registrations: browser.registrations, stored: await storedPasskeys() }).toEqual({ registrations: 1, stored: 2 });
+    });
+
     it('PH: a network error at the verify after create() — rejects as the TypeError with retry, which stores', async () =>
     {
         const { session, authenticator } = await boundOwner();
