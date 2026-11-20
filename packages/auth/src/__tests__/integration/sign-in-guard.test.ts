@@ -1001,6 +1001,24 @@ describe.skipIf(!dbAvailable)('the sign-in guard (#361)', () =>
         expect(logins.seen).toHaveLength(1);
     });
 
+    it('row 7c — admit refuses only under the lock at mfa/verify: the deciding call refuses, the key stays inactive, the challenge unspent, the refusal told', async () =>
+    {
+        const owner = await seedUser('decide2@test.com');
+        const { secret } = await enrolTotp('decide2@test.com');
+        const { challenge, keyId } = await openChallenge('decide2@test.com');
+        await getTestDb().execute(sql`truncate sign_in_guard_test.history`);
+        policy.admit = async attempt => attempt.stage === 'second-factor' && getTransactionContext() ? LOCKED : undefined;
+
+        await expectRefused(await post('/_auth/mfa/verify', { challenge, code: codeFor(secret) }));
+
+        expect((await keyRow(keyId))!.isActive).toBe(false);
+        expect((await challengeRow(keyId))!.verifiedAt).toBeNull();
+        expect(await committedHistory()).toMatchObject([
+            { user_id: owner.id, channel: 'password', stage: 'second-factor', result: 'failed', reason: 'refused', key_id: keyId },
+        ]);
+        expect(await committedHistory()).toHaveLength(1);
+    });
+
     it('row 7b — challenged at the 202, succeeded once at verification; a wrong verify proof is reported, a wrong step-up proof is not', async () =>
     {
         await seedUser('second@test.com');
