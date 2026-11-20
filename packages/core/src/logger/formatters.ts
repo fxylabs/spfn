@@ -53,15 +53,16 @@ const UNREADABLE_VALUE = '[Unreadable]';
 
 /**
  * The keys a caught value conventionally sits under, at any depth of a
- * context. A value there is described whatever its shape: a thrown
+ * context. An object there is described whatever its shape: a thrown
  * `{ code, params }` is not an Error, and walking it would print its params.
+ * A primitive there is data (`reason: 'timeout'`) and is logged as it is.
  */
 const ERROR_KEYS: ReadonlySet<string> = new Set(['error', 'err', 'cause', 'reason']);
 
 /**
  * The key a list of caught values conventionally sits under — an array, or
- * an `AggregateError`'s `errors`. Each element of an array or a Set there is
- * described; any other value there is walked.
+ * an `AggregateError`'s `errors`. Each object in an array or a Set there is
+ * described and each primitive kept; any other value there is walked.
  */
 const ERRORS_KEY = 'errors';
 
@@ -119,7 +120,7 @@ function readEntry(data: object, key: string): unknown
  * context
  *
  * Under the mark, keys are still masked by their sensitive names, and an
- * Error instance is still described; a value under `error`, `err`, `cause`,
+ * Error instance is still described; an object under `error`, `err`, `cause`,
  * `reason` or `errors` is not: there it is the body's own data — the error
  * envelope a client received — not a caught value. A body that came out of
  * `JSON.parse` holds no Error, and whatever it carries the client already has.
@@ -189,9 +190,9 @@ interface Walk
  * Context 객체에서 민감한 정보(비밀번호, 토큰 등)를 마스킹
  * Circular reference를 안전하게 처리
  *
- * At every depth: an Error is described, a value under `ERROR_KEYS` is
- * described whatever its shape, each element of a list under `errors` is
- * described. A Map logs as its `[key, value]` pairs, a string key ruling its
+ * At every depth: an Error is described, an object under `ERROR_KEYS` is
+ * described whatever its shape, and so is each object in a list under
+ * `errors`; a primitive there is logged as it is. A Map logs as its `[key, value]` pairs, a string key ruling its
  * value as an object key does; a Set as its values.
  *
  * @param data - 원본 데이터
@@ -285,8 +286,8 @@ function itemsOf(list: unknown[] | Set<unknown>): unknown[]
 }
 
 /**
- * One entry of an object: masked if its key is sensitive, described if its
- * key names a caught value, otherwise walked
+ * One entry of an object: masked if its key is sensitive, described if it is
+ * an object under a key naming a caught value, otherwise walked
  */
 function maskEntry(key: string, value: unknown, walk: Walk): unknown
 {
@@ -295,17 +296,26 @@ function maskEntry(key: string, value: unknown, walk: Walk): unknown
         return MASKED_VALUE;
     }
 
-    if (walk.describesErrorKeys && ERROR_KEYS.has(key) && value !== undefined)
+    if (walk.describesErrorKeys && ERROR_KEYS.has(key) && isObject(value))
     {
         return describeError(value);
     }
 
     if (walk.describesErrorKeys && key === ERRORS_KEY && (isArray(value) || isInstance(value, Set)))
     {
-        return itemsOf(value).map(item => describeError(item));
+        return itemsOf(value).map(item => isObject(item) ? describeError(item) : item);
     }
 
     return walkValue(value, walk);
+}
+
+/**
+ * An object or a function: what a key naming a caught value describes. A
+ * primitive there (`reason: 'timeout'`, `error: null`) is data, logged as it is
+ */
+function isObject(value: unknown): value is object
+{
+    return (typeof value === 'object' && value !== null) || typeof value === 'function';
 }
 
 /**

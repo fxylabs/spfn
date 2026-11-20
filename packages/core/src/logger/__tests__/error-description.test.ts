@@ -164,7 +164,24 @@ describe('the caught value is described whatever its shape', () =>
         expect(lines[0].context).toEqual({ error: { kind: 'error', name: 'NonError', message: 'broken', code: 'BROKEN' }, op: 'register' });
         expect(lines[1].error).toEqual({ kind: 'error', name: 'NonError', message: 'broken', code: 'BROKEN' });
         expect(lines[1].context).toEqual({ op: 'register' });
-        expect(lines[2].context!.cause).toEqual({ kind: 'error', name: 'NonError', message: 'a string' });
+        expect(lines[2].context!.cause).toBe('a string');
+    });
+
+    it('A1b: a primitive under an error key, or in a list under errors, is data and logged as it is', async () =>
+    {
+        const { logger, lines, output } = capturingLogger(Logger);
+
+        logger.warn('Connection refused', { reason: 'authentication_failed', error: null, err: false, cause: 3 });
+        logger.warn('Retry settled', { job: { error: null, reason: 'timeout' }, errors: ['timeout', null, thrownObject()] });
+        await settle();
+
+        expectNoValues(output());
+        expect(lines[0].context).toEqual({ reason: 'authentication_failed', error: null, err: false, cause: 3 });
+        expect(lines[1].context).toEqual({
+            job: { error: null, reason: 'timeout' },
+            errors: ['timeout', null, { kind: 'error', name: 'NonError', message: 'broken', code: 'BROKEN' }],
+        });
+        expect(output()).not.toContain('NonError: authentication_failed');
     });
 
     it('A2: with three arguments the context is kept whatever the caught value is', async () =>

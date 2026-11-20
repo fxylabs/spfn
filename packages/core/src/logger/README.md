@@ -208,11 +208,12 @@ Masked key tokens (a key matches if it contains any of these):
 `credit_card`, `cardnumber`, `card_number`, `cvv`, `ssn`, `pin`.
 
 An `Error` found anywhere in the context is replaced by its description, not walked key by
-key. A value under the keys `error`, `err`, `cause` or `reason` — at any depth of the context —
-is described whatever its shape, Error or not: `logger.error('x', { error })` describes it as
-`logger.error('x', error, {})` does, and so is `{ job: { error } }`. Under `errors`, each element
-of an array or a Set is described (`{ errors: aggregate.errors }`); any other value there is
-walked. A `Map` logs as its `[key, value]` pairs, a string key ruling its value as an object key
+key. An object under the keys `error`, `err`, `cause` or `reason` — at any depth of the context —
+is described whatever its shape, Error or not: `logger.error('x', { error })` describes a thrown
+object as `logger.error('x', error, {})` does, and so is `{ job: { error } }`. A primitive there
+is data and logged as it is: `reason: 'timeout'` stays the string, `error: null` stays `null` (a
+thrown string is its own text). Under `errors`, each object in an array or a Set is described
+(`{ errors: aggregate.errors }`) and a primitive kept; any other value there is walked. A `Map` logs as its `[key, value]` pairs, a string key ruling its value as an object key
 does (masked, described or walked); a `Set` as its values. The console prints a described
 context value on its own lines after the message, prefixed with its key (`error: Error: boom` and
 the frames), not inline as `[error=…]`.

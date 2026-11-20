@@ -95,6 +95,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   was not spent), any other server refusal rejects, as `completeMfaWithPasskey` does. The assertion
   is spent once, by whichever consumer runs first, only by the session that asked for it, and is
   not tied to an action.
+- **@spfn/core: `describeError(error)` from `@spfn/core/logger`** (and the `ErrorDescription` /
+  `DatabaseErrorDescription` types): the one loggable form of a caught error. A database error is
+  described by its SQLSTATE, constraint, schema, table, column, routine, the SQL with its `$n`
+  placeholders (truncated to 1000 characters) and `paramCount`; the driver's message only for
+  SQLSTATE classes 08, 23, 40, 53 and 57 raised by a known server routine (or by a pooler, which
+  names none) — a PL/pgSQL `RAISE`, a PL/Python `plpy.error` or an extension reporting a kept
+  class keeps no message. It never copies
+  `params`, `parameters`, `detail`, `hint`, `where`, `internal_query`, drizzle's message or a stack
+  header (#382).
+- **@spfn/core: `alreadySentToClient(body)` from `@spfn/core/logger`** marks a body that was sent,
+  as it is, to a client before it goes into a log context: under the mark, a value under `error`,
+  `err`, `cause`, `reason` or `errors` is the body's own data — its `error` key the envelope the
+  client received — kept as data, not described as a caught value; sensitive names are still
+  masked and an `Error` instance is still described. Core's request logger marks its copy of a
+  4xx/5xx response body with it (#382).
 
 ### Changed
 
@@ -251,10 +266,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   value whatever it is (`undefined`, a string, a plain object), and the context is always kept —
   it used to be dropped when the value was not an Error. `logger.error(message, value)`: an Error
   (or a primitive) is the caught value, any other object the context. An object with a string
-  `stack` is no longer read as an error, as the argument or inside the context. A value under
+  `stack` is no longer read as an error, as the argument or inside the context. An object under
   `error`, `err`, `cause` or `reason`, at any depth of the context, is described whatever its
-  shape, and so is each element of an array or a Set under `errors` — except under a body marked
-  `alreadySentToClient` (see its entry above).
+  shape, and so is each object in an array or a Set under `errors` — except under a body marked
+  `alreadySentToClient` (see its entry above). A primitive there is data and logged as it is
+  (`reason: 'timeout'` stays the string, `error: null` stays `null`).
 - **BREAKING: @spfn/core: log line shapes (#382).** Each change, against the last release:
   - JSON `error`: `{ kind: 'error' | 'database', name, … }` with `stack` frames only, not
     `{ name, message, stack }`.
