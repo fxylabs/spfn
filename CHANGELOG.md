@@ -212,6 +212,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   description; the body no longer carries its message, `cause` or `stack`, which hold the bound
   values. This applies wherever `includeStack` is true (`NODE_ENV !== 'production'`, staging
   included). The production body is unchanged; so is the request logger's copy of it.
+- **BREAKING: @spfn/core: `fromPostgresError` (and so `Transactional()`) gives a typed error the
+  driver's message only where the description keeps it, and the driver error as its `cause`
+  (#382).** A class-22 message quotes the rejected input (`invalid input syntax for type uuid:
+  "…"`) and reached the production error-level "Error occurred" line. Now the message is the
+  driver's for SQLSTATE classes 08, 23, 40, 53 and 57 raised by a known server routine, and
+  otherwise: `ConnectionError` — `Database connection failed` (08), `Insufficient database
+  resources` (53), `Database operation interrupted` (57); `ConstraintViolationError` —
+  `Integrity constraint violated`; `TransactionError` / `DeadlockError` — `Transaction failed`;
+  `QueryError` 400 — `Invalid query` (42); `QueryError` 500 — `Invalid input value` (22),
+  `Database connection lost` (a postgres.js connection code), `Database query failed` (anything
+  else, including a wrapped drizzle error whose cause keeps no message). `DuplicateEntryError`'s
+  message is unchanged. Which typed error each code maps to is unchanged. The `DatabaseError`
+  family's constructors take an optional `cause`.
 - **BREAKING: @spfn/core: `RepositoryError.message` is `<Repository>.<method> failed` (#382).** The
   caught error is its `cause` (still also `originalError`), and its stack is its own: it no longer
   copies the caught error's message or stack, which for a drizzle error carry every bound value.

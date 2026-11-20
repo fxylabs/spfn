@@ -10,9 +10,12 @@
  * | R14 | describeError of the real 23505            | a drizzle or postgres.js upgrade changing the shape the description reads |
  * | R1  | the runner's rollback line                 | the reported leak returning, or the line going back to error |
  * | R2  | the runner's slow-rollback line            | the slow branch, a warning, losing its level or leaking |
+ * | R7c | a real 22P02 (`select $1::integer`) converted by `Transactional()`, answered by the error handler with and without `includeStack` | `fromPostgresError` copying the class-22 message, which quotes the value, into the typed error that every log line and the non-production body carry |
  */
 
 import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest';
+import { Hono } from 'hono';
+import postgres from 'postgres';
 import { pgTable, serial, text } from 'drizzle-orm/pg-core';
 import { Logger } from '@spfn/core/logger';
 import { createDbTestFixture } from '../../__tests__/helpers/db-fixture';
@@ -20,6 +23,8 @@ import { describeError } from '../../../logger/error-description';
 import { BOUND_VALUES, captureLoggerClass, expectNoValues } from '../../../logger/__tests__/helpers/leak-probe';
 import { getTransaction } from '../context';
 import { runInTransaction } from '../runner';
+import { Transactional } from '../middleware';
+import { ErrorHandler } from '../../../middleware/error-handler';
 
 const probeUsers = pgTable('test_leak_probe_users', {
     id: serial('id').primaryKey(),
@@ -117,5 +122,56 @@ describe('a rolled-back transaction logs its error without the bound values', ()
         expect(rollbacks.map(line => [line.level, line.message])).toEqual([['warn', 'Slow transaction rolled back']]);
         expect(rollbacks[0].error).toMatchObject({ kind: 'database', code: '23505' });
         expectNoValues(output());
+    });
+
+    it('R7c: a class-22 driver error converted by Transactional() reaches no log and no body with its value', async (ctx) =>
+    {
+        ctx.skip(!dbFixture.isAvailable, 'no database');
+        const { lines, output } = captureLoggerClass(Logger);
+
+        // postgres.js unwrapped, as an app that owns its client gets it: Transactional() converts it
+        const client = postgres(process.env.TEST_DATABASE_URL!, { max: 1 });
+        const app = (includeStack: boolean): Hono =>
+        {
+            const hono = new Hono();
+            hono.onError(ErrorHandler({ includeStack }));
+            hono.get('/x', Transactional({ enableLogging: false }), async () =>
+            {
+                await client`select ${BOUND_VALUES[0]}::integer`;
+
+                throw new Error('unreachable');
+            });
+
+            return hono;
+        };
+
+        try
+        {
+            const production = await (await app(false).request('/x')).text();
+            const development = await (await app(true).request('/x')).text();
+            await new Promise(resolve => setTimeout(resolve, 0));
+
+            expect(JSON.parse(production)).toMatchObject({ __type: 'QueryError', message: 'Internal server error' });
+            expect(JSON.parse(development)).toMatchObject({ __type: 'QueryError', message: 'Invalid input value', details: { code: '22P02' } });
+            expectNoValues(production);
+            expectNoValues(development);
+
+            const handled = lines.filter(line => line.message === 'Error occurred');
+            // Hono calls onError at each middleware frame the error passes: more than one line per request
+            expect(handled.length).toBeGreaterThan(0);
+            expect(handled.every(line => line.level === 'error')).toBe(true);
+            const converted = handled.find(line => (line.context!.error as { name: string }).name === 'QueryError')!;
+            expect(converted.context!.error).toMatchObject({
+                name: 'QueryError',
+                message: 'Invalid input value',
+                cause: { kind: 'database', code: '22P02', routine: expect.any(String) },
+            });
+            expect(converted.context!.error).not.toHaveProperty('cause.message');
+            expectNoValues(output());
+        }
+        finally
+        {
+            await client.end();
+        }
     });
 });

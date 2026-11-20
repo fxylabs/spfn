@@ -14,6 +14,49 @@ import {
     QueryError,
     TransactionError,
 } from '@spfn/core/errors';
+import { describeError, POSTGRES_JS_CONNECTION_CODES } from '../logger/error-description';
+
+/**
+ * A typed error's message when the driver's is not kept, by SQLSTATE class
+ */
+const CLASS_MESSAGES: Readonly<Record<string, string>> = {
+    '08': 'Database connection failed',
+    '22': 'Invalid input value',
+    '23': 'Integrity constraint violated',
+    '40': 'Transaction failed',
+    '42': 'Invalid query',
+    '53': 'Insufficient database resources',
+    '57': 'Database operation interrupted',
+};
+
+/**
+ * The typed error's message: the driver's only where `describeError` keeps
+ * it — a SQLSTATE class whose messages name identifiers only, raised by a
+ * known server routine — and otherwise a fixed text for the class. A class-22
+ * message quotes the rejected input, and the typed error's message reaches
+ * every log line and, outside production, the response body.
+ */
+function messageOf(error: unknown, code: unknown): string
+{
+    const description = describeError(error);
+
+    if (description.kind === 'database' && description.message !== undefined)
+    {
+        return description.message;
+    }
+
+    if (typeof code !== 'string')
+    {
+        return 'Database query failed';
+    }
+
+    if (POSTGRES_JS_CONNECTION_CODES.has(code))
+    {
+        return 'Database connection lost';
+    }
+
+    return CLASS_MESSAGES[code.slice(0, 2)] ?? 'Database query failed';
+}
 
 /**
  * Extract field and value from PostgreSQL unique violation message
@@ -54,7 +97,11 @@ function parseUniqueViolation(message: string): { field: string; value: string }
 /**
  * Convert PostgreSQL error to custom DatabaseError
  *
- * Maps PostgreSQL error codes to appropriate error classes with correct status codes
+ * Maps PostgreSQL error codes to appropriate error classes with correct status codes.
+ * The typed error keeps the driver error as its `cause`, so a log line describes
+ * the database error under it; its own message is the driver's only where the
+ * description keeps that, and otherwise a fixed text for the SQLSTATE class
+ * (`Invalid input value`, `Database query failed`, …).
  *
  * @param error - PostgreSQL error object (from pg driver or Drizzle)
  * @returns Custom DatabaseError instance
@@ -73,7 +120,8 @@ function parseUniqueViolation(message: string): { field: string; value: string }
 export function fromPostgresError(error: any): DatabaseError
 {
     const code = error?.code;
-    const message = error?.message || 'Database error occurred';
+    const message = messageOf(error, code);
+    const cause = error;
 
     switch (code)
     {
@@ -85,40 +133,40 @@ export function fromPostgresError(error: any): DatabaseError
         case '08006': // connection_failure
         case '08007': // transaction_resolution_unknown
         case '08P01': // protocol_violation
-            return new ConnectionError({ message, details: { code } });
+            return new ConnectionError({ message, details: { code }, cause });
 
         // Class 23 — Integrity Constraint Violation
         case '23000': // integrity_constraint_violation
         case '23001': // restrict_violation
-            return new ConstraintViolationError({ message, details: { code, constraint: 'integrity' } });
+            return new ConstraintViolationError({ message, details: { code, constraint: 'integrity' }, cause });
 
         case '23502': // not_null_violation
-            return new ConstraintViolationError({ message, details: { code, constraint: 'not_null' } });
+            return new ConstraintViolationError({ message, details: { code, constraint: 'not_null' }, cause });
 
         case '23503': // foreign_key_violation
-            return new ConstraintViolationError({ message, details: { code, constraint: 'foreign_key' } });
+            return new ConstraintViolationError({ message, details: { code, constraint: 'foreign_key' }, cause });
 
         case '23505': // unique_violation
-            const parsed = parseUniqueViolation(message);
+            const parsed = parseUniqueViolation(typeof error?.message === 'string' ? error.message : '');
             if (parsed)
             {
-                return new DuplicateEntryError({ field: parsed.field, value: parsed.value });
+                return new DuplicateEntryError({ field: parsed.field, value: parsed.value, cause });
             }
 
-            return new DuplicateEntryError({ field: 'field', value: 'value' });
+            return new DuplicateEntryError({ field: 'field', value: 'value', cause });
 
         case '23514': // check_violation
-            return new ConstraintViolationError({ message, details: { code, constraint: 'check' } });
+            return new ConstraintViolationError({ message, details: { code, constraint: 'check' }, cause });
 
         // Class 40 — Transaction Rollback
         case '40000': // transaction_rollback
         case '40001': // serialization_failure
         case '40002': // transaction_integrity_constraint_violation
         case '40003': // statement_completion_unknown
-            return new TransactionError({ message, statusCode: 500, details: { code } });
+            return new TransactionError({ message, statusCode: 500, details: { code }, cause });
 
         case '40P01': // deadlock_detected
-            return new DeadlockError({ message, details: { code } });
+            return new DeadlockError({ message, details: { code }, cause });
 
         // Class 42 — Syntax Error or Access Rule Violation
         case '42000': // syntax_error_or_access_rule_violation
@@ -132,14 +180,14 @@ export function fromPostgresError(error: any): DatabaseError
         case '42704': // undefined_object
         case '42P01': // undefined_table
         case '42P02': // undefined_parameter
-            return new QueryError({ message, statusCode: 400, details: { code } });
+            return new QueryError({ message, statusCode: 400, details: { code }, cause });
 
         // Class 53 — Insufficient Resources
         case '53000': // insufficient_resources
         case '53100': // disk_full
         case '53200': // out_of_memory
         case '53300': // too_many_connections
-            return new ConnectionError({ message, details: { code } });
+            return new ConnectionError({ message, details: { code }, cause });
 
         // Class 57 — Operator Intervention
         case '57000': // operator_intervention
@@ -147,10 +195,10 @@ export function fromPostgresError(error: any): DatabaseError
         case '57P01': // admin_shutdown
         case '57P02': // crash_shutdown
         case '57P03': // cannot_connect_now
-            return new ConnectionError({ message, details: { code } });
+            return new ConnectionError({ message, details: { code }, cause });
 
         // Default: Unknown error
         default:
-            return new QueryError({ message, statusCode: 500, details: { code } });
+            return new QueryError({ message, statusCode: 500, details: { code }, cause });
     }
 }
