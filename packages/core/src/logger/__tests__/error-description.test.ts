@@ -192,6 +192,17 @@ describe('the caught value is described whatever its shape', () =>
     });
 });
 
+/**
+ * A getter or Proxy trap that throws
+ */
+function throwing(what: string): () => never
+{
+    return () =>
+    {
+        throw new Error(what);
+    };
+}
+
 describe('describing an error never throws', () =>
 {
     /** An Error each of whose fields throws when read, and a Proxy every trap of which throws */
@@ -201,13 +212,13 @@ describe('describing an error never throws', () =>
 
         for (const key of ['message', 'name', 'stack', 'cause', 'code', 'statusCode'])
         {
-            Object.defineProperty(getters, key, { get: () => { throw new Error(`reading ${key}`); } });
+            Object.defineProperty(getters, key, { get: throwing(`reading ${key}`) });
         }
 
         const proxy = new Proxy({}, {
-            get: () => { throw new Error('get trap'); },
-            getPrototypeOf: () => { throw new Error('prototype trap'); },
-            ownKeys: () => { throw new Error('ownKeys trap'); },
+            get: throwing('get trap'),
+            getPrototypeOf: throwing('prototype trap'),
+            ownKeys: throwing('ownKeys trap'),
         });
         const revoked = Proxy.revocable([], {});
         revoked.revoke();
