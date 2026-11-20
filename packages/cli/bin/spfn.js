@@ -71,12 +71,16 @@ async function tryRelaunchWithTsx()
 
     const { devLoaderImport } = await import('../dist/dev-loader-import.js');
 
+    const args = [TSX_FLAG, tsxUrl, TSX_FLAG, devLoaderImport(process.cwd()), ...process.execArgv, process.argv[1], ...process.argv.slice(2)];
+    const env = { ...process.env, [RELAUNCHED]: process.cwd() };
+
+    if (process.platform !== 'win32' && typeof process.execve === 'function')
+    {
+        process.execve(process.execPath, [process.execPath, ...args], env);
+    }
+
     const { spawn } = await import('child_process');
-    const child = spawn(
-        process.execPath,
-        [TSX_FLAG, tsxUrl, TSX_FLAG, devLoaderImport(process.cwd()), ...process.execArgv, process.argv[1], ...process.argv.slice(2)],
-        { stdio: 'inherit', env: { ...process.env, [RELAUNCHED]: process.cwd() } },
-    );
+    const child = spawn(process.execPath, args, { stdio: 'inherit', env });
 
     child.on('close', (code) => process.exit(code ?? 0));
     child.on('error', () =>
