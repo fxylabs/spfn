@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { Hono } from 'hono';
-import { registerRoutes } from '@spfn/core/route';
+import { defineMiddleware, defineRouter, registerRoutes } from '@spfn/core/route';
 import type { RouteDef } from '@spfn/core/route';
 import { createMcpRoute } from '../server';
 import type { McpRouteConfig } from '../index';
@@ -11,9 +11,9 @@ type TestAuth = {
     userId: number;
 };
 
-function createApp(overrides: Partial<McpRouteConfig<TestAuth, { userId: number }>> = {}): Hono
+function createConfig(overrides: Partial<McpRouteConfig<TestAuth, { userId: number }>> = {}): McpRouteConfig<TestAuth, { userId: number }>
 {
-    const config: McpRouteConfig<TestAuth, { userId: number }> = {
+    return {
         appUrl: 'https://example.com',
         serverInfo: { name: 'test-server', version: '1.0.0' },
         validateToken: async token =>
@@ -38,8 +38,12 @@ function createApp(overrides: Partial<McpRouteConfig<TestAuth, { userId: number 
         }],
         ...overrides,
     };
+}
+
+function createApp(overrides: Partial<McpRouteConfig<TestAuth, { userId: number }>> = {}): Hono
+{
     const app = new Hono();
-    registerRoutes(app, createMcpRoute(config));
+    registerRoutes(app, createMcpRoute(createConfig(overrides)));
 
     return app;
 }
@@ -230,6 +234,36 @@ describe('createMcpRoute', () =>
 
         expect(response.status).toBe(403);
         expect(validated).toBe(false);
+    });
+});
+
+/**
+ * spfn/spfn#165: every MCP route `.skip('*')`s and validates its own token, so
+ * the router states no `packageName` — a skipper above it removes nothing the
+ * routes rely on, and an app may mount it as a plain entry under one.
+ */
+describe('createMcpRoute under a router-level skipper', () =>
+{
+    const skipper = defineMiddleware('skipper', async (_c, next) => next(), { skips: ['auth'] });
+    const refuseAll = defineMiddleware('auth', async c => c.json({ refusedBy: 'inherited auth' }, 401));
+
+    it('states no package name', () =>
+    {
+        expect(createMcpRoute(createConfig())._packageName).toBeNull();
+    });
+
+    it('registers as a plain entry under a skipper and still challenges a request without a token', async () =>
+    {
+        const app = new Hono();
+        registerRoutes(app, defineRouter({ mcp: createMcpRoute(createConfig()) }).use([skipper]), [refuseAll]);
+
+        const response = await app.request('/mcp', { method: 'POST' });
+
+        expect(response.status).toBe(401);
+        expect(response.headers.get('www-authenticate')).toBe(
+            'Bearer resource_metadata='
+            + '"https://example.com/.well-known/oauth-protected-resource/mcp"',
+        );
     });
 });
 

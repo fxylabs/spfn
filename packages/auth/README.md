@@ -117,6 +117,21 @@ export const appRouter = defineRouter({
 export type AppRouter = typeof appRouter;
 ```
 
+A replacement authenticator may sit on a **nested router** instead of on each route. Every
+middleware of this package that stands in for `authenticate` declares `skips: ['auth']`
+(`optionalAuth`, `machineAuth`, `signedTokenAuth(...)`, `opsTokenAuth`, `opsOrUser(...)`,
+`oneTimeTokenAuth`, `oauthFinalizeAuth`, `authenticateForSignOut`, `authenticateForRenewal`), and core honours
+that on a router's `.use()` too: the router's routes run it in place of the inherited `auth`.
+So `defineRouter({ ... }).use([machineAuth])` nested under the router above is a machine-only
+subtree, and **router-level `optionalAuth` makes the whole subtree optional — anonymous callers
+reach every route in it.** A route that `.skip(['machineAuth'])`s gets `auth` back. Registration
+refuses such a middleware at or above `authRouter` — in `authRouter.use([...])` itself, on the
+router that mounts `.packages([authRouter])`, one enclosing it, or one holding `authRouter` as a
+plain entry (`authRouter` is defined with `packageName: '@spfn/auth'`): `/_auth/*` routes rely on
+the inherited `auth`. Mount it with `.packages()`; as a plain entry it is served at the same paths,
+but its routes become the app's own to `AppRouter` and the route map. See core's route README,
+"Skipping & auto-skip".
+
 ### 3. Next.js interceptor — RPC proxy route
 
 The interceptor handles session cookies, JWT signing, and key management automatically.

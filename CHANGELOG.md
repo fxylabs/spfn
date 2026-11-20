@@ -89,6 +89,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **BREAKING (security-relevant): @spfn/core: a middleware declaring `skips` now removes what it
+  names when it is attached to a router (spfn/spfn#165).** It was ignored on `defineRouter(...).use([...])`
+  and honoured only in a route's own `.use()`; now it removes the listed names from what that
+  router inherits — the server-level list and every enclosing router's `.use()` — for every route
+  below it. **This can widen access:** router-level `optionalAuth` under a global `auth` changed
+  from "sign-in required" (both ran, `auth` refused anonymous callers first) to **"anonymous
+  admitted"** for the whole subtree. A router-level replacement authenticator (`machineAuth`,
+  `signedTokenAuth(...)`, `opsTokenAuth`, …) used to require a session *and* its own credential;
+  it now admits on its own credential alone. Order is unchanged (server, outer, inner, route); a
+  sibling in the same `.use()` is never removed; a skipper's `skips` count only while the skipper
+  itself runs on the route, so a route that `.skip()`s it gets the skipped middleware back;
+  `.skip('*')` still drops everything inherited; an inner router or route may `.use()` the removed
+  middleware again. Registration now **throws** when a middleware declaring `skips` sits at or
+  above a package router — in the package router's own `.use()` or in that of any router above
+  it — a package router being one mounted with `.packages([...])`, or one its package defined
+  with the new `defineRouter(routes, { packageName })`. So
+  `defineRouter({ auth: authRouter }).use([optionalAuth])` is refused too, as is
+  `authRouter.use([optionalAuth])` however it is mounted, and any depth of nesting. Package
+  routes have no authenticator of their own; `@spfn/auth`'s `authRouter` now states
+  `packageName`, and a third-party package whose routes rely on the app's authenticator should
+  too (a package whose every route authenticates itself states none: `@spfn/cms`,
+  `@spfn/monitor`, `@spfn/mcp` and `@spfn/notification` do not, and stay mountable under a
+  skipper as a plain entry) — and puts a replacement authenticator for some of its routes on those routes or on a
+  nested router inside its package router, never in the package router's own `.use()`. **To boot again**, move the skipper onto a nested router that holds
+  no package router (`defineRouter({ machine: defineRouter({ ... }).use([machineAuth]) })
+  .packages([authRouter])`), or onto the routes themselves (`route.get(...).use([optionalAuth])`).
+  The refusal for a package router mounted as a plain entry needs the package and core from the
+  same release — an older package's router carries no `packageName` (mounting through
+  `.packages()` is refused with any version) — so the release raises each package's `@spfn/core`
+  peer floor to the core that reads it.
+  New: `resolveRouteMiddlewares(router, serverMiddlewares?)` (the
+  chain `registerRoutes` registers, per route) and `RegisteredRoute.middlewares`. The SSE/WS token
+  endpoints (`resolveEndpointMiddlewares`) are unchanged.
+  **To find affected routers**, look for a router-level `.use([` naming a middleware that declares
+  `skips` — those `@spfn/auth/server` exports: `optionalAuth`, `machineAuth`, `signedTokenAuth`,
+  `opsTokenAuth`, `opsOrUser`, `oneTimeTokenAuth`, `authenticateForRenewal` — plus any of your own
+  `defineMiddleware(..., { skips })`:
+  `grep -rnE -A4 "\.use\(\[" src/ | grep -E "optionalAuth|machineAuth|signedTokenAuth|opsTokenAuth|opsOrUser|oneTimeTokenAuth|authenticateForRenewal"`
+  and check which hits follow a `defineRouter(...)` rather than a `route.*(...)`.
 - **BREAKING: @spfn/core: workers started on `getBoss()` run core's fetch loop, not pg-boss's
   worker, so they no longer appear in pg-boss's `wip` events (#359).** Core needs to know when a
   worker's last fetch has settled, which pg-boss 11 does not expose; the loop runs on pg-boss's

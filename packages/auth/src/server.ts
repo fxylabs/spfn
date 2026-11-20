@@ -22,17 +22,26 @@
 import '@spfn/auth/config';
 
 /**
- * Auth router for explicit registration
+ * Auth router, serving `/_auth/*`
+ *
+ * Mount it with `.packages()`. As a plain entry (`auth: authRouter`) it is
+ * served at the same paths, but its routes become the app's own to `AppRouter`
+ * and the generated route map. It is defined with `packageName: '@spfn/auth'`,
+ * so registration refuses a middleware declaring `skips` (`optionalAuth`,
+ * `machineAuth`, …) at or above it — `authRouter.use([...])` included —
+ * however it is mounted: its signed-in routes rely on the app's
+ * `authenticate`.
  *
  * @example
  * ```typescript
- * import { authRouter } from '@spfn/auth';
+ * import { authRouter, authenticate } from '@spfn/auth/server';
  * import { defineRouter } from '@spfn/core/route';
  *
  * export const appRouter = defineRouter({
- *   auth: authRouter,  // Mounted at /_auth/*
- *   // ... other routes
- * });
+ *   // ... app routes
+ * })
+ * .packages([authRouter])
+ * .use([authenticate]);
  * ```
  */
 export { mainAuthRouter as authRouter } from './server/routes/index.js';

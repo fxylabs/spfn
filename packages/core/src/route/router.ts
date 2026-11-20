@@ -39,6 +39,19 @@ export interface Router<TRoutes extends Record<string, RouteDef<any, any, any> |
     _publishesRouteMap: boolean;
 
     /**
+     * The package whose routes these are, or null for the app's own.
+     *
+     * Set by the package at definition (`defineRouter(routes, { packageName })`).
+     * A package route carries no authenticator of its own — `getAuth(c)` in a
+     * signed-in package route reads what the app's inherited `auth` left — so
+     * registration refuses a router-level middleware declaring `skips` on any
+     * router above this one, wherever this one sits: under `.packages()`, as a
+     * plain entry, or nested deeper. Mounting with `.packages()` says the same
+     * of a router that does not carry it.
+     */
+    _packageName: string | null;
+
+    /**
      * The namespace of the command surface that built this router, absent on
      * any other. Set by `defineSurface` (and so by `createOpsRouter`) as a
      * non-enumerable property, so `.packages()` can refuse two surfaces on one
@@ -84,7 +97,14 @@ export interface Router<TRoutes extends Record<string, RouteDef<any, any, any> |
     /**
      * Register global middlewares
      *
-     * Applied to all routes unless explicitly skipped via .skip()
+     * Applied to every route below this router — nested and package routers
+     * included — unless a route skips it via .skip() or a middleware below
+     * declares its name in `skips`. A middleware here that declares `skips`
+     * removes those names from what this router inherits (the server list and
+     * every enclosing router's `.use()`) for every route below; registration
+     * refuses one at or above a package router — on the package router itself
+     * or any router enclosing it, a package router being one mounted with
+     * `.packages()`, or one its package defined with `packageName`.
      *
      * @example
      * ```ts
@@ -138,6 +158,20 @@ interface RouterState<TRoutes extends Record<string, RouteDef<any, any, any> | R
     globalMiddlewares: NamedMiddleware<string>[];
     contractVersion: string | null;
     publishesRouteMap: boolean;
+    packageName: string | null;
+}
+
+/** What a package states about the router it defines. */
+export interface RouterOptions
+{
+    /**
+     * The defining package's name (`'@spfn/auth'`). Required of a package whose
+     * routes rely on the app's authenticator: it is what makes registration
+     * refuse a skipper above them however the app mounts the router. A package
+     * whose every route authenticates itself (its own `auth`, or a skip of the
+     * inherited one and a credential it checks) leaves it out.
+     */
+    packageName?: string;
 }
 
 /**
@@ -154,6 +188,7 @@ function createRouterInstance<TRoutes extends Record<string, RouteDef<any, any, 
         _globalMiddlewares: state.globalMiddlewares,
         _contractVersion: state.contractVersion,
         _publishesRouteMap: state.publishesRouteMap,
+        _packageName: state.packageName,
 
         packages(routers: Router<any>[]): Router<TRoutes>
         {
@@ -308,6 +343,7 @@ function assertDistinctSurfaces(packageRouters: readonly Router<any>[]): void
  */
 export function defineRouter<TRoutes extends Record<string, RouteDef<any, any, any> | Router<any>>>(
     routes: TRoutes,
+    options?: RouterOptions,
 ): Router<TRoutes>
 {
     return createRouterInstance({
@@ -316,6 +352,7 @@ export function defineRouter<TRoutes extends Record<string, RouteDef<any, any, a
         globalMiddlewares: [],
         contractVersion: null,
         publishesRouteMap: true,
+        packageName: options?.packageName ?? null,
     });
 }
 
@@ -340,6 +377,7 @@ export function defineRouter<TRoutes extends Record<string, RouteDef<any, any, a
  */
 export function defineUnmappedRouter<TRoutes extends Record<string, RouteDef<any, any, any> | Router<any>>>(
     routes: TRoutes,
+    options?: RouterOptions,
 ): Router<TRoutes>
 {
     return createRouterInstance({
@@ -348,5 +386,6 @@ export function defineUnmappedRouter<TRoutes extends Record<string, RouteDef<any
         globalMiddlewares: [],
         contractVersion: null,
         publishesRouteMap: false,
+        packageName: options?.packageName ?? null,
     });
 }

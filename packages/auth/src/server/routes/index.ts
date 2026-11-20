@@ -292,6 +292,7 @@ export const mainAuthRouter = defineRouter(
         gateSecondFactorMethods(markEnrolmentRoutes(authRoutes, ROUTE_ENROLMENT), ROUTE_SECOND_FACTOR_METHODS),
         ROUTE_CHANNELS,
     ),
+    { packageName: '@spfn/auth' },
 );
 
 // For backward compatibility

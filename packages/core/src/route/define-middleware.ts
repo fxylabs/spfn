@@ -27,7 +27,7 @@ export type NamedMiddleware<TName extends string = string> = {
     name: TName;
     handler: MiddlewareHandler;
     _name: TName;  // Type inference helper
-    skips?: string[];  // Server-level middlewares to auto-skip when this middleware is used
+    skips?: string[];  // Inherited middlewares to auto-skip where this middleware is used (route or router .use)
 };
 
 /**
@@ -110,7 +110,25 @@ export type NamedMiddlewareFactory<TName extends string = string, TArgs extends 
 export interface DefineMiddlewareOptions
 {
     /**
-     * Server-level middleware names to auto-skip when this middleware is used at route level.
+     * Inherited middleware names to remove wherever this middleware is used.
+     *
+     * In a route's `.use()`, the names are removed from everything the route
+     * inherits: the server-level list and every enclosing router's `.use()`.
+     * In a router's `.use()`, they are removed from what that router inherits —
+     * the server-level list and every enclosing router — for every route below
+     * it; a sibling in the same `.use()` and anything a deeper router or the
+     * route adds are untouched. The removal holds only while this middleware
+     * itself runs on the route: a route that `.skip()`s it gets the skipped
+     * middleware back. On the server-level list `skips` remove nothing.
+     *
+     * A middleware declaring `skips` stands in for what it skips, so declaring
+     * it can widen access: router-level `optionalAuth` admits anonymous callers
+     * to the whole subtree. Registration refuses one on a router that mounts
+     * `.packages()`, or encloses such a mount.
+     *
+     * Only a middleware handler keeps `skips`; a factory made by
+     * `defineMiddleware(name, factory, { skips })` returns plain handlers, which
+     * carry none.
      *
      * @example
      * ```ts
@@ -120,6 +138,7 @@ export interface DefineMiddlewareOptions
      * });
      *
      * // Usage: .use([optionalAuth]) — no need for .skip(['auth'])
+     * // On a router: defineRouter({ ... }).use([machineAuth]) — its routes skip 'auth'
      * ```
      */
     skips?: string[];

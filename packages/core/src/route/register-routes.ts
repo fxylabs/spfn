@@ -7,11 +7,11 @@
 import type { Context, Hono, MiddlewareHandler } from 'hono';
 import type { ContentfulStatusCode, RedirectStatusCode } from 'hono/utils/http-status';
 import { logger } from '@spfn/core/logger';
-import type { NamedMiddleware } from './define-middleware';
 import type { RouteInput } from './route-input';
 import type { RouteBuilderContext } from './context';
 import type { RouteDef } from './route-builder';
 import type { Router } from './router';
+import { resolveRouteMiddlewares, type ResolvedRoute } from './route-chain';
 import type { HttpMethod } from './types';
 import {
     validateField,
@@ -31,49 +31,23 @@ export interface RegisteredRoute
     method: HttpMethod;
     path: string;
     name: string;
-}
-
-/**
- * Type guard to check if value is a Router
- */
-function isRouter(value: unknown): value is Router<any>
-{
-    return value !== null &&
-        typeof value === 'object' &&
-        'routes' in value &&
-        '_routes' in value;
-}
-
-/**
- * Type guard to check if value is a RouteDef
- */
-function isRouteDef(value: unknown): value is RouteDef<any>
-{
-    return value !== null &&
-        typeof value === 'object' &&
-        'handler' in value;
-}
-
-/**
- * Type guard to check if value is a NamedMiddleware
- */
-function isNamedMiddleware(value: unknown): value is NamedMiddleware<any>
-{
-    return value !== null &&
-        typeof value === 'object' &&
-        'name' in value &&
-        'handler' in value &&
-        '_name' in value;
+    /** The names of the middleware the route runs, in order; empty for a plain handler. */
+    middlewares: string[];
 }
 
 /**
  * Register routes from defineRouter() to Hono app
  *
+ * Each route is registered with the chain `resolveRouteMiddlewares` resolves
+ * for it: the server-level list and every enclosing router's `.use()`, minus
+ * what the route skips and what a middleware below declares in `skips`, then
+ * the route's own `.use()`.
+ *
  * @param app - Hono app instance
  * @param router - Router definition
  * @param namedMiddlewares - Optional server-level named middlewares
+ * @param collectedRoutes - An array to append the registered routes to
  *
- * @param collectedRoutes
  * @example
  * ```ts
  * const appRouter = defineRouter({
@@ -96,73 +70,23 @@ export function registerRoutes<TRoutes extends Record<string, RouteDef<any> | Ro
     collectedRoutes?: RegisteredRoute[],
 ): RegisteredRoute[]
 {
-    // Use provided array or create new one (top-level call)
     const routes = collectedRoutes ?? [];
 
-    // Merge router's global middlewares with provided named middlewares
-    const allNamedMiddlewares = [
-        ...(namedMiddlewares ?? []),
-        ...router._globalMiddlewares.map(mw => ({ name: mw.name, handler: mw.handler })),
-    ];
-
-    // 1. Register routes from router.routes
-    for (const [name, routeOrRouter] of Object.entries(router.routes))
+    for (const resolved of resolveRouteMiddlewares(router, namedMiddlewares))
     {
-        if (isRouter(routeOrRouter))
-        {
-            // Nested router - recursively register
-            registerRoutes(app, routeOrRouter, allNamedMiddlewares, routes);
-        }
-        else if (isRouteDef(routeOrRouter))
-        {
-            // Single route - register
-            const registered = registerRoute(app, name, routeOrRouter, allNamedMiddlewares);
-            if (registered)
-            {
-                routes.push(registered);
-            }
-        }
-        else
-        {
-            logger.warn(`Unknown route type for "${name}" - skipping`, {
-                type: typeof routeOrRouter,
-            });
-        }
-    }
-
-    // 2. Register routes from package routers (_packageRouters)
-    if (router._packageRouters && router._packageRouters.length > 0)
-    {
-        for (const pkgRouter of router._packageRouters)
-        {
-            registerRoutes(app, pkgRouter, allNamedMiddlewares, routes);
-        }
+        routes.push(registerRoute(app, resolved));
     }
 
     return routes;
 }
 
 /**
- * Register a single route
+ * Register a single route with its resolved middleware chain
  */
-function registerRoute(
-    app: Hono,
-    name: string,
-    routeDef: RouteDef<any>,
-    namedMiddlewares?: ReadonlyArray<{ name: string; handler: MiddlewareHandler }>,
-): RegisteredRoute | null
+function registerRoute(app: Hono, resolved: ResolvedRoute): RegisteredRoute
 {
-    const { method, path, input, interceptor, middlewares = [], skipMiddlewares, handler } = routeDef;
-
-    if (!method || !path)
-    {
-        logger.warn(`Route "${name}" is missing method or path - skipping`, {
-            method,
-            path,
-        });
-
-        return null;
-    }
+    const { name, method, path, middlewares, route } = resolved;
+    const { input, interceptor, handler } = route;
 
     // Create wrapped handler with validation
     const wrappedHandler = async (c: Context) =>
@@ -196,105 +120,16 @@ function registerRoute(
         return c.json(result, responseMeta.status);
     };
 
-    // Collect all middlewares: server-level (filtered) + route-level
-    const allMiddlewares: MiddlewareHandler[] = [];
-
-    // Track registered middlewares for deduplication
-    const registeredNames = new Set<string>();
-    const registeredHandlers = new Set<MiddlewareHandler>();
-
-    // Check if skipping all middlewares
-    const skipAll = skipMiddlewares === '*';
-
-    // Collect auto-skips from route-level middlewares (e.g., optionalAuth skips 'auth')
-    const autoSkips = new Set<string>();
-    for (const mw of middlewares)
-    {
-        if (isNamedMiddleware(mw) && mw.skips)
-        {
-            for (const skipName of mw.skips)
-            {
-                autoSkips.add(skipName);
-            }
-        }
-    }
-
-    // Add server-level named middlewares (skip those in skipMiddlewares, autoSkips, or if '*')
-    if (namedMiddlewares && namedMiddlewares.length > 0)
-    {
-        if (skipAll)
-        {
-            logger.debug(`⏭️  Skipping all middlewares (*) for route: ${method} ${path}`, { name });
-        }
-        else
-        {
-            const skipSet = new Set(Array.isArray(skipMiddlewares) ? skipMiddlewares : []);
-            for (const middleware of namedMiddlewares)
-            {
-                if (skipSet.has(middleware.name))
-                {
-                    logger.debug(`⏭️  Skipping middleware '${middleware.name}' for route: ${method} ${path}`, { name });
-                }
-                else if (autoSkips.has(middleware.name))
-                {
-                    logger.debug(`⏭️  Auto-skipping middleware '${middleware.name}' for route: ${method} ${path}`, { name });
-                }
-                else if (middleware.name && registeredNames.has(middleware.name))
-                {
-                    // A named middleware runs at most once per route. Two entries under
-                    // one name are the same middleware reached by two paths (server
-                    // config and router-level .use), and running it twice breaks any
-                    // middleware holding one-shot state. An entry with no name is never
-                    // collapsed — unrelated anonymous handlers share the empty name.
-                    logger.debug(`🔄 Skipping duplicate middleware '${middleware.name}' for route: ${method} ${path}`, { name });
-                }
-                else
-                {
-                    allMiddlewares.push(middleware.handler);
-                    registeredNames.add(middleware.name);
-                    registeredHandlers.add(middleware.handler);
-                }
-            }
-        }
-    }
-
-    // Add route-level middlewares (with deduplication by name or handler reference)
-    for (const mw of middlewares)
-    {
-        if (isNamedMiddleware(mw))
-        {
-            // Named middleware: deduplicate by name
-            if (registeredNames.has(mw.name))
-            {
-                logger.debug(`🔄 Skipping duplicate middleware '${mw.name}' for route: ${method} ${path}`, { name });
-                continue;
-            }
-            registeredNames.add(mw.name);
-            allMiddlewares.push(mw.handler);
-        }
-        else
-        {
-            // Regular middleware: deduplicate by handler reference
-            if (registeredHandlers.has(mw))
-            {
-                logger.debug(`🔄 Skipping duplicate middleware handler for route: ${method} ${path}`, { name });
-                continue;
-            }
-            registeredHandlers.add(mw);
-            allMiddlewares.push(mw);
-        }
-    }
-
     // Register to Hono with correct HTTP method
     const methodLower = method.toLowerCase() as Lowercase<HttpMethod>;
 
     // hono 4.12+ overload resolution fails with spread middleware arrays
-    const handlers: MiddlewareHandler[] = [...allMiddlewares, wrappedHandler as unknown as MiddlewareHandler];
+    const handlers: MiddlewareHandler[] = [...middlewares.map(mw => mw.handler), wrappedHandler as unknown as MiddlewareHandler];
     app.on([methodLower], [path], ...handlers);
 
     logger.debug(`Registered route: ${method} ${path}`, { name });
 
-    return { method, path, name };
+    return { method, path, name, middlewares: middlewares.map(mw => mw.name) };
 }
 
 /**

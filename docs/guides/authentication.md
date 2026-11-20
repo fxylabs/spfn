@@ -228,7 +228,7 @@ export const appRouter = defineRouter({
 export type AppRouter = typeof appRouter;
 ```
 
-> **Common mistake:** Using `auth: authRouter` in defineRouter. Auth routes use a fixed `/_auth` namespace and must be registered via `.packages()`.
+> **Mount `authRouter` with `.packages()`.** As a plain entry (`defineRouter({ auth: authRouter })`) it registers and serves the same `/_auth/*` paths, but its routes become the app's own to `AppRouter` and the generated route map. Either way, registration refuses a middleware declaring `skips` at or above it — `authRouter.use([...])` included — see "One Router per Kind of Caller" below.
 
 #### Skipping Auth for Public Routes
 
@@ -266,6 +266,29 @@ export const createOrder = route.post('/orders')
         // ...
     });
 ```
+
+#### One Router per Kind of Caller
+
+A route inherits the server-level middleware and the `.use()` of every router it sits in, outer to inner. A middleware that stands in for `authenticate` declares `skips: ['auth']` (`optionalAuth`, `machineAuth`, `signedTokenAuth(...)`, `oneTimeTokenAuth`, …), and that declaration works on a nested router's `.use()` as it does on a route's: every route below the router runs the replacement instead of the inherited `auth`, and no route writes a skip.
+
+```typescript
+import { machineAuth } from '@spfn/auth/server';
+
+const machineRouter = defineRouter({ ingest, report })
+    .use([machineAuth]);   // ← these routes authenticate a machine token, not a session
+
+export const appRouter = defineRouter({
+    machine: machineRouter,
+    getStatus,
+    createOrder,
+})
+.packages([authRouter])
+.use([authenticate]);      // ← every other route still requires sign-in
+```
+
+- A route under `machineRouter` that `.skip(['machineAuth'])`s gets the inherited `auth` back.
+- **`optionalAuth` on a router makes every route in that subtree accept anonymous callers.**
+- Registration refuses a middleware declaring `skips` at or above `authRouter` — in `authRouter.use([...])` itself, on the router that mounts it with `.packages([...])`, one enclosing that, or one holding it as a plain entry (`defineRouter({ auth: authRouter }).use([optionalAuth])`): the `/_auth/*` routes rely on the inherited `auth`. Keep `.packages([authRouter])` on a router with no skipper, as above.
 
 ### 6. Configure Next.js Interceptor
 
@@ -1899,16 +1922,16 @@ export const getStatus = route.get('/status')
 
 ### Auth routes not found (404 on `/_auth/*`)
 
-`authRouter` is not registered. Make sure you use `.packages()`:
+`authRouter` is not registered. Mount it with `.packages()`:
 
 ```typescript
 // ✅ Correct
 export const appRouter = defineRouter({ ... })
     .packages([authRouter]);
 
-// ❌ Wrong — auth routes won't be accessible
+// ❌ Not the supported mount — the routes are served, but typed and mapped as the app's own
 export const appRouter = defineRouter({
-    auth: authRouter,  // This doesn't work for package routers
+    auth: authRouter,
 });
 ```
 

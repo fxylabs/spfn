@@ -17,11 +17,13 @@ export type { RouteContract, RouteAuthProfile } from './contract';
 
 // Router
 export { defineRouter, defineUnmappedRouter } from './router';
-export type { Router } from './router';
+export type { Router, RouterOptions } from './router';
 
 // Route registration
 export { registerRoutes } from './register-routes';
 export type { RegisteredRoute } from './register-routes';
+export { resolveRouteMiddlewares } from './route-chain';
+export type { ResolvedRoute, ChainMiddleware, RemovedMiddleware, MiddlewareSource } from './route-chain';
 
 // Middleware
 export { defineMiddleware, defineMiddlewareFactory } from './define-middleware';
