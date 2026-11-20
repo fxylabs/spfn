@@ -357,6 +357,38 @@ describe('browser passkey helpers', () =>
             expect(create).not.toHaveBeenCalled();
         });
 
+        /** An unbound read, and a verify that asks the proof first: binding turned on in between. */
+        function boundSinceRead(overrides: Record<string, unknown> = {})
+        {
+            return apiStub({
+                passkeyProofOptions: { call: logged('passkey-proof/options', async () => AUTHENTICATION_OPTIONS) },
+                passkeyRegisterVerify: {
+                    call: logged('register/verify', async () => ENROLLED)
+                        .mockRejectedValueOnce(new PasskeyProofRequiredError({ details: { procedure: 'passkeyAdd' } })),
+                },
+                ...overrides,
+            });
+        }
+
+        it('E11: the proof asked after create() and its prompt dismissed — no-credential with retry, which proves and stores', async () =>
+        {
+            get.mockRejectedValueOnce(notAllowed());
+            const api = boundSinceRead();
+            (api.passkeyRegisterVerify.call as ReturnType<typeof vi.fn>)
+                .mockRejectedValueOnce(new PasskeyProofRequiredError({ details: { procedure: 'passkeyAdd' } }));
+
+            const dismissed = await enrollPasskey(api, { label: 'Laptop' });
+
+            expect(dismissed).toMatchObject({ ok: false, reason: 'no-credential', retry: { mayProve: true } });
+            expect(dismissed.ok === false && dismissed.retry?.body).toBe(verifyBodies(api)[0]);
+            expect(await enrollPasskey(api, { retry: dismissed.ok ? undefined : dismissed.retry })).toEqual({ ok: true, ...ENROLLED });
+            const [first, reposted, resent] = verifyBodies(api);
+            expect(reposted).toEqual(first);
+            expect(resent.response).toBe(first.response);
+            expect(resent).toMatchObject({ label: 'Laptop', passkeyResponse: { id: 'Y3JlZA' } });
+            expect(create).toHaveBeenCalledTimes(1);
+        });
+
         it('E10 (R10): an app-supplied proof the verify refuses is thrown — no proof prompt of the helper\'s', async () =>
         {
             const refused = new PasskeyProofRequiredError({ details: { procedure: 'passkeyAdd' } });

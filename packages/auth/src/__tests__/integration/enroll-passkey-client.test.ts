@@ -70,6 +70,8 @@ describe.skipIf(!dbAvailable)('enrollPasskey against the router (#400)', () =>
     let app: Hono;
     /** Every call the stand-in client made, and each refusal as `name:status:code`. */
     const log: string[] = [];
+    /** Run before a call goes out, one per call, by the call's name in `log`. */
+    const before: Record<string, (() => Promise<void>)[]> = {};
 
     beforeAll(async () =>
     {
@@ -104,6 +106,10 @@ describe.skipIf(!dbAvailable)('enrollPasskey against the router (#400)', () =>
         browser.registrations = 0;
         browser.assertions = 0;
         log.length = 0;
+        for (const name of Object.keys(before))
+        {
+            delete before[name];
+        }
         await getTestDb().insert(users).values({
             email: 'owner@test.com',
             passwordHash: await hashPassword(PASSWORD),
@@ -137,8 +143,8 @@ describe.skipIf(!dbAvailable)('enrollPasskey against the router (#400)', () =>
         return { authorization: `Bearer ${generateClientToken({ keyId: keyPair.keyId }, keyPair.privateKey, 'ES256', { expiresIn: '5m' })}` };
     }
 
-    /** An account with one passkey and session binding on, and the session that did it. */
-    async function boundOwner(): Promise<{ session: Session; authenticator: FixtureAuthenticator }>
+    /** An account with one passkey, and the session that registered it. */
+    async function ownerWithPasskey(): Promise<{ session: Session; authenticator: FixtureAuthenticator }>
     {
         const session = await signIn();
         const authenticator = await FixtureAuthenticator.create();
@@ -147,9 +153,22 @@ describe.skipIf(!dbAvailable)('enrollPasskey against the router (#400)', () =>
             response: authenticator.attest({ challenge: (await options.json()).challenge, ...CEREMONY }),
         }, session);
         expect(registered.status).toBe(200);
-        expect((await enableBinding((path, body) => send('POST', path, body, session), authenticator, CEREMONY)).status).toBe(200);
 
         return { session, authenticator };
+    }
+
+    async function turnBindingOn(session: Session, authenticator: FixtureAuthenticator): Promise<void>
+    {
+        expect((await enableBinding((path, body) => send('POST', path, body, session), authenticator, CEREMONY)).status).toBe(200);
+    }
+
+    /** An account with one passkey and session binding on, and the session that did it. */
+    async function boundOwner(): Promise<{ session: Session; authenticator: FixtureAuthenticator }>
+    {
+        const owner = await ownerWithPasskey();
+        await turnBindingOn(owner.session, owner.authenticator);
+
+        return owner;
     }
 
     /** The browser a person holds: `authenticator` answers proofs, `another` makes the new passkey. */
@@ -166,6 +185,7 @@ describe.skipIf(!dbAvailable)('enrollPasskey against the router (#400)', () =>
             call: async (input?: { body?: unknown }) =>
             {
                 log.push(name);
+                await before[name]?.shift()?.();
                 const response = await send(method, path, input?.body, session);
                 const json = await response.json();
 
@@ -248,5 +268,25 @@ describe.skipIf(!dbAvailable)('enrollPasskey against the router (#400)', () =>
         expect(log).toEqual(['registerOptions', 'registerVerify', 'registerVerify:403:PASSKEY_PROOF_REQUIRED']);
         expect(browser.assertions).toBe(0);
         expect(await storedPasskeys()).toBe(2);
+    });
+
+    it('PD: binding turned on between the read and the verify, the proof prompt dismissed — no-credential with retry, which stores', async () =>
+    {
+        const { session, authenticator } = await ownerWithPasskey();
+        holding(authenticator, await FixtureAuthenticator.create());
+        const proofPrompt = browser.authenticate!;
+        browser.authenticate = () => Promise.reject(Object.assign(new Error('dismissed'), { name: 'NotAllowedError' }));
+        before.registerVerify = [() => turnBindingOn(session, authenticator)];
+
+        const dismissed = await enrollPasskey(apiOver(session));
+
+        expect(dismissed).toMatchObject({ ok: false, reason: 'no-credential', retry: { mayProve: true } });
+        expect(await storedPasskeys()).toBe(1);
+        browser.authenticate = proofPrompt;
+        log.length = 0;
+
+        expect(await enrollPasskey(apiOver(session), { retry: dismissed.ok ? undefined : dismissed.retry })).toMatchObject({ ok: true });
+        expect(log).toEqual(['registerVerify', 'registerVerify:403:PASSKEY_PROOF_REQUIRED', 'proofOptions', 'registerVerify']);
+        expect({ registrations: browser.registrations, stored: await storedPasskeys() }).toEqual({ registrations: 1, stored: 2 });
     });
 });
