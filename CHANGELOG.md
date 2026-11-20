@@ -109,13 +109,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   push never alters a check, so the database keeps refusing an added value and admitting a removed
   one; `spfn db push` names the check (below). No package column adopts it.
 - **spfn: `db push` names each check it leaves as it is** (spfn/spfn#167). drizzle-kit's push never
-  alters an existing check whose expression changed. `db push` and `--dry-run` now print, per such
-  check, `Check "<name>" on "<schema>"."<table>" differs from the one in the database; db push does
-  not change an existing check.`, the remedy (`db generate` + `db migrate`, or drop it and push
-  again) and the `ALTER TABLE … DROP CONSTRAINT` statement, and change nothing about it. PostgreSQL
-  parses and prints both expressions for the comparison (`EXPLAIN (VERBOSE)`, which runs nothing),
-  so a normalised stored check and the declared text compare exactly; a declared expression it
-  cannot parse against the table is named as `could not be compared`, with the error.
+  alters an existing check whose expression changed. `db push` and `--dry-run` now print, per
+  existing check whose declared expression PostgreSQL reads differently from the stored one,
+  `Check "<name>" on "<schema>"."<table>" differs from the one in the database: PostgreSQL reads
+  the two expressions differently; db push does not change an existing check.`, the remedy (`db
+  generate` + `db migrate`, or drop it and push again) and the `ALTER TABLE … DROP CONSTRAINT`
+  statement, and change nothing about it. The comparison is the planner's print of both
+  expressions (one `EXPLAIN (VERBOSE)` per existing check, which runs nothing), not their meaning:
+  a numeric literal written with another scale is named although it means the same, and a rewrite
+  the planner folds (`x > 0 AND true`) is not; for an `enumCheck` stored by `enumCheck` it is exact
+  over the value set. A declared check naming a column the table does not have yet is named as
+  differing (`it names a column the table does not have yet`); one PostgreSQL cannot read against
+  the table for another reason is named as `could not be compared`, with the error.
 
 ### Changed
 

@@ -43,7 +43,7 @@ export interface PushPlan
 {
     statements: string[];
     hints: PushHint[];
-    /** Checks whose expression changed: pushSchema leaves them as they are */
+    /** Existing checks PostgreSQL reads differently from the declared ones, or could not compare: pushSchema leaves them as they are */
     unchangedChecks: UnchangedCheck[];
 }
 
@@ -146,8 +146,10 @@ async function resolveSchemaFilesOrExit(config: Parameters<typeof resolveSchemaF
  * of the diff: the package's own migrations carry them (step 8).
  *
  * drizzle-kit's push never alters an existing check whose expression changed
- * (an `enumCheck` given another value): push warns about each such check, with
- * the remedy, and changes nothing about it (see unchangedChecks).
+ * (an `enumCheck` given another value): push warns about each existing check
+ * whose declared expression PostgreSQL reads differently from the stored one,
+ * with the remedy, and changes nothing about it (see unchangedChecks for what
+ * the comparison does and does not catch).
  */
 export async function dbPush(options: { force?: boolean; dryRun?: boolean; schema?: string } = {}): Promise<void>
 {

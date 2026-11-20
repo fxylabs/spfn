@@ -8,11 +8,28 @@
  *
  * PostgreSQL stores a check normalised (`"s" in ('a', 'b')` comes back as
  * `(s = ANY (ARRAY['a'::text, 'b'::text]))`), so the declared text and the
- * stored one never match as strings. Both are handed to PostgreSQL's own
- * parser and deparser instead: `EXPLAIN (VERBOSE, COSTS OFF) SELECT (<expr>)
- * FROM ONLY <table>` plans without running and prints the expression as one
- * normalised tree. Equal prints are the same expression; the plan around it is
- * the same for both, as only the selected expression differs.
+ * stored one never match as strings. Both are handed to PostgreSQL instead, in
+ * one statement per check: `EXPLAIN (VERBOSE, COSTS OFF, FORMAT JSON) SELECT
+ * (<declared>), (<stored>) FROM ONLY <table>` plans without running and prints
+ * each expression as the planner holds it. A check is named when the two
+ * prints differ: PostgreSQL reads the two expressions differently.
+ *
+ * That is the planner's reading, not the meaning. A numeric literal written
+ * with another scale (`amount > 1` against a stored `amount > 1.0`) prints
+ * differently although it means the same, and is named on every push; a
+ * rewrite the planner folds (`x > 0 AND true` against a stored `x > 0`) prints
+ * the same, and is not named, which is right as it means the same. No exact
+ * normal form is to be had without a write: PostgreSQL deparses the stored
+ * expression from its catalog node tree (`pg_get_expr`), and a declared one
+ * gets a node tree only by creating an object (a view, a constraint), which a
+ * read-only dry run refuses; `pg_node_tree` accepts no input. Nor would one
+ * help the literal: `1` and `1.0` are different constants in the tree.
+ *
+ * For an `enumCheck` whose stored check enumCheck also wrote, the comparison
+ * is exact: both sides print as the column against one text-array constant of
+ * the values, sorted and once each, so the prints differ exactly when the
+ * value sets do. A stored check listing the same values in another order is
+ * named.
  */
 
 import { sql, type SQL } from 'drizzle-orm';
@@ -29,12 +46,17 @@ export interface DeclaredCheck
     value: string;
 }
 
-/** A declared check the database holds under its name with another expression, or one that could not be compared */
+/** A declared check the database holds under its name with an expression PostgreSQL reads differently, or one that could not be compared */
 export interface UnchangedCheck extends DeclaredCheck
 {
-    /** PostgreSQL's error when the declared expression could not be compared; absent when it differs */
+    /** PostgreSQL's error when the declared expression names a column the table does not have (yet): it differs */
+    absentColumn?: string;
+    /** PostgreSQL's error when the declared expression could not be compared for another reason */
     error?: string;
 }
+
+/** SQLSTATE undefined_column */
+const UNDEFINED_COLUMN = '42703';
 
 type Db = PushConnection['db'];
 
@@ -71,8 +93,11 @@ export async function declaredChecks(imports: Record<string, unknown>, schemaFil
 
 /**
  * The declared checks the database holds, on the same table under the same
- * name, with another expression — the ones push leaves as they are. A check the
- * database lacks is not among them: push creates it.
+ * name, with an expression PostgreSQL reads differently — the ones push leaves
+ * as they are — and those it could not compare. A check the database lacks is
+ * not among them: push creates it. One statement lists the stored checks, then
+ * one per stored check compares it, so a check that cannot be compared hides
+ * no other.
  */
 export async function unchangedChecks(db: Db, declared: DeclaredCheck[]): Promise<UnchangedCheck[]>
 {
@@ -104,29 +129,37 @@ function checkKey(check: Pick<DeclaredCheck, 'schema' | 'table' | 'name'>): stri
     return JSON.stringify([check.schema, check.table, check.name]);
 }
 
-/** `check` as an unchanged check when its expression and `storedValue` differ or cannot be compared */
+type PgError = Error & { code?: string };
+
+/** The planner's print of each selected expression, from `EXPLAIN (FORMAT JSON)`'s one row */
+type ExplainJson = [{ Plan: { Output: string[] } }];
+
+/**
+ * `check` as an unchanged check when PostgreSQL reads its expression and
+ * `storedValue` differently, or cannot read the declared one against the table
+ */
 async function compare(db: Db, check: DeclaredCheck, storedValue: string): Promise<UnchangedCheck | undefined>
 {
-    const declared = await normalised(db, check, check.value);
-    const stored = await normalised(db, check, storedValue);
-    const error = declared.error ?? stored.error;
+    return rows(db, sql.raw(`EXPLAIN (VERBOSE, COSTS OFF, FORMAT JSON) SELECT (${check.value}), (${storedValue}) `
+        + `FROM ONLY ${qualifiedName({ schema: check.schema, name: check.table })}`)).then(
+        ([row]) =>
+        {
+            const [declared, stored] = (Object.values(row)[0] as ExplainJson)[0].Plan.Output;
 
-    if (error !== undefined)
-    {
-        return { ...check, error };
-    }
-
-    return declared.text === stored.text ? undefined : check;
+            return declared === stored ? undefined : check;
+        },
+        (error: PgError & { cause?: PgError }) => uncompared(check, error.cause ?? error),
+    );
 }
 
-/** `expression` as PostgreSQL prints it once parsed against `check`'s table, or the error it raised */
-async function normalised(db: Db, check: DeclaredCheck, expression: string): Promise<{ text?: string; error?: string }>
+/**
+ * `check` with the error PostgreSQL raised on the declared expression (the
+ * stored one is read back from this table). A column the table does not have
+ * means the two differ: the stored expression cannot name it.
+ */
+function uncompared(check: DeclaredCheck, error: PgError): UnchangedCheck
 {
-    const table = qualifiedName({ schema: check.schema, name: check.table });
-
-    return rows(db, sql.raw(`EXPLAIN (VERBOSE, COSTS OFF) SELECT (${expression}) FROM ONLY ${table}`))
-        .then(
-            lines => ({ text: lines.map(line => String(Object.values(line)[0])).join('\n') }),
-            (error: Error & { cause?: Error }) => ({ error: (error.cause ?? error).message }),
-        );
+    return error.code === UNDEFINED_COLUMN
+        ? { ...check, absentColumn: error.message }
+        : { ...check, error: error.message };
 }

@@ -269,8 +269,11 @@ ALTER TABLE "spfn_blog"."posts" DROP CONSTRAINT "posts_status_check", ADD CONSTR
 > database lacks, but never alters one whose values changed: after a push, the database
 > still refuses the added value and admits the removed one. `spfn db push` (and `--dry-run`)
 > names each such check — `Check "posts_status_check" on "spfn_blog"."posts" differs from
-> the one in the database` — and leaves it. To change it, run `db generate` + `db migrate`,
-> or drop the constraint (the printed `ALTER TABLE … DROP CONSTRAINT`) and push again.
+> the one in the database: PostgreSQL reads the two expressions differently` — and leaves it.
+> For a check `enumCheck` wrote on both sides this is exact: it is named exactly when the
+> value set changed (the `spfn` README says what the comparison catches for other checks).
+> To change it, run `db generate` + `db migrate`, or drop the constraint (the printed
+> `ALTER TABLE … DROP CONSTRAINT`) and push again.
 
 ### `typedJsonb<T>(fieldName)`
 

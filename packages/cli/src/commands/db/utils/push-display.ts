@@ -113,6 +113,22 @@ export function displayApplySummary(applied: number, skipped: number): void
 }
 
 /**
+ * How a check push leaves as it is stands against the stored one: what the
+ * comparison found, not more (see unchangedChecks)
+ */
+function unchangedState(check: UnchangedCheck): string
+{
+    if (check.absentColumn !== undefined)
+    {
+        return `differs from the one in the database: it names a column the table does not have yet (${check.absentColumn})`;
+    }
+
+    return check.error === undefined
+        ? 'differs from the one in the database: PostgreSQL reads the two expressions differently'
+        : `could not be compared with the one in the database (${check.error})`;
+}
+
+/**
  * Warn about each check push leaves as it is (see unchangedChecks), with the
  * two ways to change it
  */
@@ -121,11 +137,8 @@ export function displayUnchangedChecks(checks: UnchangedCheck[]): void
     for (const check of checks)
     {
         const table = qualifiedName({ schema: check.schema, name: check.table });
-        const state = check.error === undefined
-            ? 'differs from the one in the database'
-            : `could not be compared with the one in the database (${check.error})`;
 
-        console.log(chalk.yellow(`⚠️  Check "${check.name}" on ${table} ${state}; db push does not change an existing check.`));
+        console.log(chalk.yellow(`⚠️  Check "${check.name}" on ${table} ${unchangedState(check)}; db push does not change an existing check.`));
         console.log(chalk.dim('   Run spfn db generate and spfn db migrate, or drop it and push again:'));
         console.log(chalk.dim(`   ALTER TABLE ${table} DROP CONSTRAINT ${quoteIdent(check.name)};`));
     }

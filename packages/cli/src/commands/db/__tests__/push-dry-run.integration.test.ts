@@ -298,8 +298,8 @@ describe('db push --dry-run', () =>
         await db.unsafe(`CREATE SCHEMA i163_app; CREATE TABLE i163_app.checked (state text NOT NULL,
             CONSTRAINT checked_state_check CHECK (state in ('a', 'b')))`);
         const before = await snapshot();
-        const notice = 'Check "checked_state_check" on "i163_app"."checked" differs from the one in the database; '
-            + 'db push does not change an existing check.\n'
+        const notice = 'Check "checked_state_check" on "i163_app"."checked" differs from the one in the database: '
+            + 'PostgreSQL reads the two expressions differently; db push does not change an existing check.\n'
             + '   Run spfn db generate and spfn db migrate, or drop it and push again:\n'
             + '   ALTER TABLE "i163_app"."checked" DROP CONSTRAINT "checked_state_check";';
 
